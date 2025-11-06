@@ -1,0 +1,11 @@
+{
+    "account_balance": "auto",
+    "risk_percent": 1,
+    "rr_ratio": 2,
+    "order_type": "limit",
+    "entry_price": 9.85,
+    "symbol": "AVAAIUSDT",
+    "stop_loss_ticks": 95,
+    "direction": "short",
+    "trade_mode": "linear"
+}

@@ -1,0 +1,942 @@
+2025-05-17 17:50:40 [ERROR] Unexpected error
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 276, in <module>
+    main()
+    ~~~~^^
+  File "C:\Users\User\Downloads\3\vid.py", line 261, in main
+    download_videos_from_page(alb, videos_dir)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\Downloads\3\vid.py", line 217, in download_videos_from_page
+    sel      = select_preferred(all_urls)
+  File "C:\Users\User\Downloads\3\vid.py", line 174, in select_preferred
+    lst_sorted = sorted(
+        lst,
+        key=lambda u: next((PREFERRED.index(os.path.splitext(u)[1].lower()), len(PREFERRED)))
+    )
+  File "C:\Users\User\Downloads\3\vid.py", line 176, in <lambda>
+    key=lambda u: next((PREFERRED.index(os.path.splitext(u)[1].lower()), len(PREFERRED)))
+                  ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: 'tuple' object is not an iterator
+2025-05-17 18:05:02 [ERROR] Failed saving: C:\Users\User\Downloads\3\videos\gia-rosse3.mp4
+Traceback (most recent call last):
+  File "C:\Users\User\AppData\Local\Programs\Python\Python313\Lib\site-packages\urllib3\response.py", line 754, in _error_catcher
+    yield
+  File "C:\Users\User\AppData\Local\Programs\Python\Python313\Lib\site-packages\urllib3\response.py", line 879, in _raw_read
+    data = self._fp_read(amt, read1=read1) if not fp_closed else b""
+           ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\AppData\Local\Programs\Python\Python313\Lib\site-packages\urllib3\response.py", line 862, in _fp_read
+    return self._fp.read(amt) if amt is not None else self._fp.read()
+           ~~~~~~~~~~~~~^^^^^
+  File "C:\Users\User\AppData\Local\Programs\Python\Python313\Lib\http\client.py", line 479, in read
+    s = self.fp.read(amt)
+  File "C:\Users\User\AppData\Local\Programs\Python\Python313\Lib\socket.py", line 719, in readinto
+    return self._sock.recv_into(b)
+           ~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\Users\User\AppData\Local\Programs\Python\Python313\Lib\ssl.py", line 1304, in recv_into
+    return self.read(nbytes, buffer)
+           ~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "C:\Users\User\AppData\Local\Programs\Python\Python313\Lib\ssl.py", line 1138, in read
+    return self._sslobj.read(len, buffer)
+           ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^
+ConnectionResetError: [WinError 10054] An existing connection was forcibly closed by the remote host
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "C:\Users\User\AppData\Local\Programs\Python\Python313\Lib\site-packages\requests\models.py", line 820, in generate
+    yield from self.raw.stream(chunk_size, decode_content=True)
+  File "C:\Users\User\AppData\Local\Programs\Python\Python313\Lib\site-packages\urllib3\response.py", line 1066, in stream
+    data = self.read(amt=amt, decode_content=decode_content)
+  File "C:\Users\User\AppData\Local\Programs\Python\Python313\Lib\site-packages\urllib3\response.py", line 955, in read
+    data = self._raw_read(amt)
+  File "C:\Users\User\AppData\Local\Programs\Python\Python313\Lib\site-packages\urllib3\response.py", line 878, in _raw_read
+    with self._error_catcher():
+         ~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\AppData\Local\Programs\Python\Python313\Lib\contextlib.py", line 162, in __exit__
+    self.gen.throw(value)
+    ~~~~~~~~~~~~~~^^^^^^^
+  File "C:\Users\User\AppData\Local\Programs\Python\Python313\Lib\site-packages\urllib3\response.py", line 781, in _error_catcher
+    raise ProtocolError(f"Connection broken: {e!r}", e) from e
+urllib3.exceptions.ProtocolError: ("Connection broken: ConnectionResetError(10054, 'An existing connection was forcibly closed by the remote host', None, 10054, None)", ConnectionResetError(10054, 'An existing connection was forcibly closed by the remote host', None, 10054, None))
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 222, in download_video
+    for chunk in r.iter_content(64_000):
+                 ~~~~~~~~~~~~~~^^^^^^^^
+  File "C:\Users\User\AppData\Local\Programs\Python\Python313\Lib\site-packages\requests\models.py", line 822, in generate
+    raise ChunkedEncodingError(e)
+requests.exceptions.ChunkedEncodingError: ("Connection broken: ConnectionResetError(10054, 'An existing connection was forcibly closed by the remote host', None, 10054, None)", ConnectionResetError(10054, 'An existing connection was forcibly closed by the remote host', None, 10054, None))
+2025-08-17 02:59:46 [ERROR] Cannot fetch page: http://get.adobe.com/flashplayer/
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 403 Client Error: Forbidden for url: http://get.adobe.com/flashplayer/
+2025-08-17 03:09:40 [ERROR] Failed to download: https://video5.xhcdn.com/key=lWru6TRbyTiqNcsJgWuFew,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/014/534/381/480p.h264.mp4
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 214, in download_video
+    r.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 403 Client Error: Forbidden for url: https://video5.xhcdn.com/key=lWru6TRbyTiqNcsJgWuFew,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/014/534/381/480p.h264.mp4
+2025-08-17 03:09:41 [ERROR] Failed to download: https://video5.xhcdn.com/key=FUYdcIMf9JqYaDK5ACIZxg,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/014/016/422/480p.h264.mp4
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 214, in download_video
+    r.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 403 Client Error: Forbidden for url: https://video5.xhcdn.com/key=FUYdcIMf9JqYaDK5ACIZxg,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/014/016/422/480p.h264.mp4
+2025-08-17 03:09:43 [ERROR] Failed to download: https://video5.xhcdn.com/key=TO8Kz+vRMMY0LOgxCqEqQw,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/014/326/274/480p.h264.mp4
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 214, in download_video
+    r.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 403 Client Error: Forbidden for url: https://video5.xhcdn.com/key=TO8Kz+vRMMY0LOgxCqEqQw,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/014/326/274/480p.h264.mp4
+2025-08-17 03:09:44 [ERROR] Failed to download: https://video5.xhcdn.com/key=RZu2GvMJngB3fmO8D-KKyA,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/004/547/137/240p.h264.mp4
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 214, in download_video
+    r.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 403 Client Error: Forbidden for url: https://video5.xhcdn.com/key=RZu2GvMJngB3fmO8D-KKyA,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/004/547/137/240p.h264.mp4
+2025-08-17 03:09:46 [ERROR] Failed to download: https://video5.xhcdn.com/key=sEQFmqLPJqQdXBPz6Y2U+Q,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/004/835/895/480p.h264.mp4
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 214, in download_video
+    r.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 403 Client Error: Forbidden for url: https://video5.xhcdn.com/key=sEQFmqLPJqQdXBPz6Y2U+Q,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/004/835/895/480p.h264.mp4
+2025-08-17 03:09:47 [ERROR] Failed to download: https://video5.xhcdn.com/key=Axz3Y1nVMUmhAbj2ttQqhA,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/012/399/945/480p.h264.mp4
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 214, in download_video
+    r.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 403 Client Error: Forbidden for url: https://video5.xhcdn.com/key=Axz3Y1nVMUmhAbj2ttQqhA,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/012/399/945/480p.h264.mp4
+2025-08-17 03:09:49 [ERROR] Failed to download: https://video5.xhcdn.com/key=AeUxXx-Q6oRrKI0h1PFCVg,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/011/854/276/480p.h264.mp4
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 214, in download_video
+    r.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 403 Client Error: Forbidden for url: https://video5.xhcdn.com/key=AeUxXx-Q6oRrKI0h1PFCVg,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/011/854/276/480p.h264.mp4
+2025-08-17 03:09:51 [ERROR] Failed to download: https://video5.xhcdn.com/key=JNm1iYAKZfNeifLL2yTSnA,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/011/629/632/480p.h264.mp4
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 214, in download_video
+    r.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 403 Client Error: Forbidden for url: https://video5.xhcdn.com/key=JNm1iYAKZfNeifLL2yTSnA,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/011/629/632/480p.h264.mp4
+2025-08-17 03:09:53 [ERROR] Failed to download: https://video5.xhcdn.com/key=npUb2S6qEuzH7490P1hbVA,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/018/676/182/480p.h264.mp4
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 214, in download_video
+    r.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 403 Client Error: Forbidden for url: https://video5.xhcdn.com/key=npUb2S6qEuzH7490P1hbVA,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/018/676/182/480p.h264.mp4
+2025-08-17 03:09:55 [ERROR] Failed to download: https://video5.xhcdn.com/key=5UPXosCvNekcQ4bE23Kffg,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/012/386/583/480p.h264.mp4
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 214, in download_video
+    r.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 403 Client Error: Forbidden for url: https://video5.xhcdn.com/key=5UPXosCvNekcQ4bE23Kffg,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/012/386/583/480p.h264.mp4
+2025-08-17 03:09:56 [ERROR] Failed to download: https://video5.xhcdn.com/key=0WuwqbQl-KkAmNCHTlnNdg,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/014/103/300/480p.h264.mp4
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 214, in download_video
+    r.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 403 Client Error: Forbidden for url: https://video5.xhcdn.com/key=0WuwqbQl-KkAmNCHTlnNdg,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/014/103/300/480p.h264.mp4
+2025-08-17 03:09:57 [ERROR] Failed to download: https://video5.xhcdn.com/key=gKxKQ0xqVq8JjmVZAGeqUQ,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/013/675/018/480p.h264.mp4
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 214, in download_video
+    r.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 403 Client Error: Forbidden for url: https://video5.xhcdn.com/key=gKxKQ0xqVq8JjmVZAGeqUQ,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/013/675/018/480p.h264.mp4
+2025-08-17 03:09:58 [ERROR] Failed to download: https://video5.xhcdn.com/key=NH7vfJTH35qUVUcq4IMAug,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/011/846/405/480p.h264.mp4
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 214, in download_video
+    r.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 403 Client Error: Forbidden for url: https://video5.xhcdn.com/key=NH7vfJTH35qUVUcq4IMAug,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/011/846/405/480p.h264.mp4
+2025-08-17 03:09:59 [ERROR] Failed to download: https://video5.xhcdn.com/key=mo-lXxroNR9+ioZeul91Yg,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/014/147/869/480p.h264.mp4
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 214, in download_video
+    r.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 403 Client Error: Forbidden for url: https://video5.xhcdn.com/key=mo-lXxroNR9+ioZeul91Yg,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/014/147/869/480p.h264.mp4
+2025-08-17 03:10:01 [ERROR] Failed to download: https://video5.xhcdn.com/key=edoqH5HrBmAkjKXDZgYy9g,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/004/893/083/480p.h264.mp4
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 214, in download_video
+    r.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 403 Client Error: Forbidden for url: https://video5.xhcdn.com/key=edoqH5HrBmAkjKXDZgYy9g,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/004/893/083/480p.h264.mp4
+2025-08-17 03:10:31 [ERROR] Failed to download: https://video5.xhcdn.com/key=wg539DxHQf6TzZw-FxXkNw,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/012/288/008/480p.h264.mp4
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 214, in download_video
+    r.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 403 Client Error: Forbidden for url: https://video5.xhcdn.com/key=wg539DxHQf6TzZw-FxXkNw,end=1755378000,limit=3/data=2403:5817:5596:0:1ac0:4dff:fe32:c739-dvp/referer=force,.xhcdn.com,.xhamster2.com/speed=0/012/288/008/480p.h264.mp4
+2025-08-17 03:30:10 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=39
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=39
+2025-08-17 03:30:10 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=40
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=40
+2025-08-17 03:30:11 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=41
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=41
+2025-08-17 03:30:12 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=42
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=42
+2025-08-17 03:30:13 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=43
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=43
+2025-08-17 03:30:14 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=44
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=44
+2025-08-17 03:30:14 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=45
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=45
+2025-08-17 03:30:15 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=46
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=46
+2025-08-17 03:30:16 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=47
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=47
+2025-08-17 03:30:17 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=48
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=48
+2025-08-17 03:30:18 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=49
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=49
+2025-08-17 03:30:19 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=50
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=50
+2025-08-17 03:30:20 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=51
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=51
+2025-08-17 03:30:30 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=62
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=62
+2025-08-17 03:30:31 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=63
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=63
+2025-08-17 03:30:32 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=64
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=64
+2025-08-17 03:30:33 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=65
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=65
+2025-08-17 03:30:34 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=66
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=66
+2025-08-17 03:30:34 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=67
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=67
+2025-08-17 03:30:45 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=78
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=78
+2025-08-17 03:30:46 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=79
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=79
+2025-08-17 03:30:47 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=80
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=80
+2025-08-17 03:30:48 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=81
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=81
+2025-08-17 03:30:49 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=82
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=82
+2025-08-17 03:30:49 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=83
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=83
+2025-08-17 03:30:50 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=84
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=84
+2025-08-17 03:30:51 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=85
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=85
+2025-08-17 03:30:52 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=86
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=86
+2025-08-17 03:30:53 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=87
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=87
+2025-08-17 03:30:53 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=88
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=88
+2025-08-17 03:30:54 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=89
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=89
+2025-08-17 03:30:55 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=90
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=90
+2025-08-17 03:31:10 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=106
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=106
+2025-08-17 03:31:11 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=107
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=107
+2025-08-17 03:31:12 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=108
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=108
+2025-08-17 03:31:13 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=109
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=109
+2025-08-17 03:31:31 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=128
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=128
+2025-08-17 03:31:32 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=129
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=129
+2025-08-17 03:31:33 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=130
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=130
+2025-08-17 03:31:34 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=131
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=131
+2025-08-17 03:31:35 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=132
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=132
+2025-08-17 03:31:36 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=133
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=133
+2025-08-17 03:31:37 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=134
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=134
+2025-08-17 03:31:37 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=135
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=135
+2025-08-17 03:31:38 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=136
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=136
+2025-08-17 03:31:39 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=137
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=137
+2025-08-17 03:31:40 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=138
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=138
+2025-08-17 03:31:41 [ERROR] Failed to fetch https://www.xvideos.com/?k=ftvgirls&p=139
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 110, in extract_album_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=139
+2025-08-17 03:31:55 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=102
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=102
+2025-08-17 03:32:13 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=123
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=123
+2025-08-17 03:32:14 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=124
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=124
+2025-08-17 03:32:15 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=125
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=125
+2025-08-17 03:32:15 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=126
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=126
+2025-08-17 03:32:16 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=127
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=127
+2025-08-17 03:32:17 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=13
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=13
+2025-08-17 03:32:18 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=14
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=14
+2025-08-17 03:32:19 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=140
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=140
+2025-08-17 03:32:20 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=141
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=141
+2025-08-17 03:32:21 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=142
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=142
+2025-08-17 03:32:21 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=143
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=143
+2025-08-17 03:32:22 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=144
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=144
+2025-08-17 03:32:23 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=145
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=145
+2025-08-17 03:32:34 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=21
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=21
+2025-08-17 03:32:35 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=22
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=22
+2025-08-17 03:32:35 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=23
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=23
+2025-08-17 03:32:36 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=24
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=24
+2025-08-17 03:32:37 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=25
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=25
+2025-08-17 03:32:38 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=26
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=26
+2025-08-17 03:32:39 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=27
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=27
+2025-08-17 03:32:40 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=28
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=28
+2025-08-17 03:32:40 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=29
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=29
+2025-08-17 03:32:41 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=30
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=30
+2025-08-17 03:32:42 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=31
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=31
+2025-08-17 03:32:43 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=32
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=32
+2025-08-17 03:32:44 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=33
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=33
+2025-08-17 03:32:54 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=58
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=58
+2025-08-17 03:32:55 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=59
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=59
+2025-08-17 03:32:56 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=60
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=60
+2025-08-17 03:32:57 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=61
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=61
+2025-08-17 03:32:57 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=68
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=68
+2025-08-17 03:32:58 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=69
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=69
+2025-08-17 03:32:59 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=70
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=70
+2025-08-17 03:33:00 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=71
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=71
+2025-08-17 03:33:01 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=72
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=72
+2025-08-17 03:33:02 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=73
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=73
+2025-08-17 03:33:02 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=74
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=74
+2025-08-17 03:33:03 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=75
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=75
+2025-08-17 03:33:04 [ERROR] Cannot fetch page: https://www.xvideos.com/?k=ftvgirls&p=76
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 143, in get_all_video_urls
+    resp.raise_for_status()
+    ~~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\models.py", line 1024, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 429 Client Error: Too Many Requests for url: https://www.xvideos.com/?k=ftvgirls&p=76
+2025-09-01 19:03:30 [ERROR] Cannot fetch page: javascript:;
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 142, in get_all_video_urls
+    resp = requests.get(page_url, timeout=15)
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\api.py", line 73, in get
+    return request("get", url, params=params, **kwargs)
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\api.py", line 59, in request
+    return session.request(method=method, url=url, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\sessions.py", line 589, in request
+    resp = self.send(prep, **send_kwargs)
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\sessions.py", line 697, in send
+    adapter = self.get_adapter(url=request.url)
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\sessions.py", line 792, in get_adapter
+    raise InvalidSchema(f"No connection adapters were found for {url!r}")
+requests.exceptions.InvalidSchema: No connection adapters were found for 'javascript:;'
+2025-09-01 19:07:57 [ERROR] Cannot fetch page: javascript:;
+Traceback (most recent call last):
+  File "C:\Users\User\Downloads\3\vid.py", line 142, in get_all_video_urls
+    resp = requests.get(page_url, timeout=15)
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\api.py", line 73, in get
+    return request("get", url, params=params, **kwargs)
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\api.py", line 59, in request
+    return session.request(method=method, url=url, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\sessions.py", line 589, in request
+    resp = self.send(prep, **send_kwargs)
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\sessions.py", line 697, in send
+    adapter = self.get_adapter(url=request.url)
+  File "C:\Users\User\miniconda3\Lib\site-packages\requests\sessions.py", line 792, in get_adapter
+    raise InvalidSchema(f"No connection adapters were found for {url!r}")
+requests.exceptions.InvalidSchema: No connection adapters were found for 'javascript:;'

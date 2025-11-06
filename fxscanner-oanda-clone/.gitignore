@@ -1,0 +1,3 @@
+output/
+*.xlsx
+__pycache__/

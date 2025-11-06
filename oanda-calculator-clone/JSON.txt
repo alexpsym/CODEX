@@ -1,0 +1,7 @@
+{
+ "symbol": "NAS100_USD",
+ "action": "buy",
+ "quantity": 0.17,
+ "take_profit_price": "{{close}} + 80.000",
+ "stop_loss_price": "{{close}} - 40.000"
+}

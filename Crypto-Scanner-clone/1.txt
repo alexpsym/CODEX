@@ -1,0 +1,2020 @@
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '[2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '[1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '\2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '\1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference ']2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference ']1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '^2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '^1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '_2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '_1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '`2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '`1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'a2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'a1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'b2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'b1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'c2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'c1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'd2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'd1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'e2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'e1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'f2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'f1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'g2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'g1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'h2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'h1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'i2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'i1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'j2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'j1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'k2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'k1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'l2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'l1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'm2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'm1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'n2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'n1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'o2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'o1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'p2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'p1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'q2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'q1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'r2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'r1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 's2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 's1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 't2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 't1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'u2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'u1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'v2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'v1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'w2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'w1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'x2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'x1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'y2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'y1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'z2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'z1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '{2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '{1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '|2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '|1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '}2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '}1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '~2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '~1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference ' 2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference ' 1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¡2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¡1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¢2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¢1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '£2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '£1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¤2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¤1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¥2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¥1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¦2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¦1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '§2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '§1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¨2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¨1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '©2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '©1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ª2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ª1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '«2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '«1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¬2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¬1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '­2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '­1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '®2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '®1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¯2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¯1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '°2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '°1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '±2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '±1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '²2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '²1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '³2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '³1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '´2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '´1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'µ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'µ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¶2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¶1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '·2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '·1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¸2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¸1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¹2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¹1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'º2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'º1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '»2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '»1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¼2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¼1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '½2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '½1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¾2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¾1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¿2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '¿1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'À2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'À1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Á2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Á1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Â2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Â1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ã2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ã1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ä2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ä1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Å2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Å1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Æ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Æ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ç2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ç1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'È2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'È1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'É2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'É1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ê2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ê1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ë2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ë1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ì2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ì1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Í2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Í1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Î2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Î1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ï2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ï1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ð2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ð1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ñ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ñ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ò2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ò1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ó2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ó1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ô2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ô1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Õ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Õ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ö2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ö1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '×2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '×1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ø2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ø1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ù2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ù1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ú2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ú1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Û2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Û1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ü2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ü1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ý2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ý1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Þ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Þ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ß2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ß1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'à2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'à1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'á2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'á1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'â2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'â1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ã2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ã1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ä2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ä1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'å2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'å1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'æ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'æ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ç2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ç1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'è2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'è1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'é2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'é1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ê2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ê1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ë2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ë1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ì2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ì1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'í2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'í1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'î2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'î1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ï2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ï1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ð2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ð1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ñ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ñ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ò2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ò1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ó2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ó1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ô2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ô1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'õ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'õ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ö2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ö1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '÷2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference '÷1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ø2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ø1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ù2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ù1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ú2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ú1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'û2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'û1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ü2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ü1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ý2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ý1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'þ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'þ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ÿ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ÿ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ā2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ā1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ā2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ā1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ă2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ă1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ă2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ă1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ą2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ą1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ą2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ą1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ć2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ć1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ć2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ć1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ĉ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ĉ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ĉ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ĉ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ċ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ċ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ċ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ċ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Č2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Č1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'č2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'č1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ď2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ď1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ď2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ď1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Đ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Đ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'đ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'đ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ē2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ē1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ē2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ē1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ĕ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ĕ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ĕ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ĕ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ė2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ė1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ė2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ė1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ę2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ę1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ę2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ę1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ě2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ě1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ě2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ě1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ĝ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ĝ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ĝ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ĝ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ğ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ğ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ğ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ğ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ġ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ġ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ġ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ġ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ģ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ģ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ģ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ģ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ĥ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ĥ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ĥ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ĥ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ħ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ħ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ħ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ħ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ĩ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ĩ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ĩ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ĩ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ī2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ī1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ī2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ī1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ĭ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ĭ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ĭ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ĭ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Į2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Į1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'į2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'į1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'İ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'İ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ı2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ı1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ĳ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ĳ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ĳ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ĳ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ĵ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ĵ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ĵ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ĵ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ķ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ķ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ķ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ķ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ĸ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ĸ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ĺ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ĺ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ĺ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ĺ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ļ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ļ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ļ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ļ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ľ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ľ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ľ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ľ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ŀ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ŀ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ŀ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ŀ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ł2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ł1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ł2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ł1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ń2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ń1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ń2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ń1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ņ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ņ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ņ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ņ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ň2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ň1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ň2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ň1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ŉ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ŉ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ŋ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ŋ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ŋ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ŋ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ō2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ō1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ō2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ō1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ŏ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ŏ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ŏ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ŏ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ő2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ő1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ő2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ő1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Œ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Œ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'œ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'œ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ŕ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ŕ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ŕ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ŕ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ŗ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ŗ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ŗ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ŗ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ř2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ř1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ř2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ř1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ś2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ś1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ś2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ś1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ŝ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ŝ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ŝ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ŝ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ş2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ş1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ş2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ş1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Š2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Š1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'š2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'š1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ţ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ţ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ţ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ţ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ť2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ť1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ť2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ť1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ŧ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ŧ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ŧ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ŧ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ũ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ũ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ũ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ũ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ū2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ū1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ū2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ū1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ŭ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ŭ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ŭ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ŭ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ů2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ů1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ů2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ů1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ű2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ű1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ű2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ű1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ų2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ų1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ų2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ų1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ŵ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ŵ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ŵ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ŵ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ŷ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ŷ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ŷ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ŷ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ÿ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ÿ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ź2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ź1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ź2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ź1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ż2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ż1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ż2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ż1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ž2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ž1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ž2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ž1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ſ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ſ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƀ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƀ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɓ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɓ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƃ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƃ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƃ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƃ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƅ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƅ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƅ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƅ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɔ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɔ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƈ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƈ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƈ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƈ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɖ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɖ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɗ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɗ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƌ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƌ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƌ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƌ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƍ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƍ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǝ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǝ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ə2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ə1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɛ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɛ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƒ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƒ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƒ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƒ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɠ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɠ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɣ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɣ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƕ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƕ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɩ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɩ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɨ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɨ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƙ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƙ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƙ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƙ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƚ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƚ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƛ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƛ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɯ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɯ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɲ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɲ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƞ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƞ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɵ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɵ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ơ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ơ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ơ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ơ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƣ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƣ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƣ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƣ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƥ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƥ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƥ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƥ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ʀ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ʀ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƨ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƨ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƨ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƨ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ʃ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ʃ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƪ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƪ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƫ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƫ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƭ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƭ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƭ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƭ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ʈ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ʈ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ư2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ư1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ư2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ư1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ʊ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ʊ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ʋ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ʋ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƴ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƴ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƴ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƴ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƶ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƶ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƶ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƶ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ʒ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ʒ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƹ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƹ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƹ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƹ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƺ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƺ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƻ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƻ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƽ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƽ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƽ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƽ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƾ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƾ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƿ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ƿ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǀ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǀ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǁ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǁ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǂ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǂ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǃ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǃ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǆ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǆ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǅ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǅ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǆ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǆ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǉ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǉ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǈ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǈ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǉ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǉ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǌ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǌ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǋ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǋ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǌ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǌ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǎ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǎ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǎ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǎ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǐ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǐ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǐ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǐ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǒ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǒ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǒ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǒ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǔ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǔ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǔ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǔ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǖ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǖ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǖ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǖ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǘ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǘ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǘ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǘ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǚ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǚ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǚ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǚ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǜ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǜ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǜ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǜ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǝ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǝ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǟ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǟ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǟ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǟ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǡ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǡ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǡ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǡ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǣ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǣ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǣ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǣ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǥ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǥ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǥ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǥ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǧ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǧ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǧ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǧ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǩ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǩ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǩ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǩ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǫ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǫ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǫ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǫ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǭ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǭ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǭ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǭ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǯ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǯ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǯ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǯ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǰ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǰ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǳ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǳ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǲ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǲ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǳ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǳ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǵ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǵ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǵ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǵ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƕ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƕ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƿ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƿ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǹ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǹ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǹ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǹ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǻ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǻ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǻ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǻ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǽ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǽ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǽ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǽ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǿ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ǿ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǿ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ǿ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȁ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȁ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȁ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȁ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȃ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȃ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȃ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȃ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȅ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȅ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȅ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȅ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȇ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȇ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȇ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȇ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȉ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȉ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȉ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȉ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȋ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȋ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȋ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȋ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȍ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȍ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȍ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȍ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȏ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȏ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȏ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȏ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȑ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȑ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȑ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȑ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȓ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȓ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȓ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȓ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȕ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȕ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȕ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȕ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȗ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȗ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȗ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȗ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ș2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ș1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ș2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ș1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ț2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ț1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ț2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ț1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȝ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȝ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȝ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȝ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȟ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȟ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȟ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȟ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƞ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƞ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȡ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȡ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȣ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȣ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȣ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȣ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȥ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȥ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȥ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȥ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȧ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȧ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȧ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȧ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȩ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȩ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȩ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȩ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȫ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȫ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȫ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȫ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȭ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȭ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȭ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȭ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȯ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȯ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȯ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȯ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȱ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȱ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȱ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȱ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȳ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȳ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȳ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȳ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȴ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȴ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȵ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȵ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȶ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȶ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȷ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȷ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȸ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȸ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȹ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȹ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ⱥ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ⱥ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȼ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ȼ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȼ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȼ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƚ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƚ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ⱦ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ⱦ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȿ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ȿ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ɀ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ɀ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɂ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɂ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ɂ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ɂ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƀ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ƀ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ʉ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ʉ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ʌ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ʌ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɇ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɇ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ɇ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ɇ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɉ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɉ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ɉ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ɉ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɋ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɋ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ɋ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ɋ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɍ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɍ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ɍ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ɍ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɏ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'Ɏ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ɏ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ɏ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ɐ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ɐ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ɑ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ɑ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ɒ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ɒ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ɓ2'
+  warn(f"Invalid cell reference '{cell_str}'")
+C:\Users\User\miniconda3\Lib\site-packages\xlsxwriter\utility.py:248: UserWarning: Invalid cell reference 'ɓ1048576'
+  warn(f"Invalid cell reference '{cell_str}'")

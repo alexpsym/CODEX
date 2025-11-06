@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+logs/
+Crypto_Volume.xlsx
+backup/
+fix.patch
