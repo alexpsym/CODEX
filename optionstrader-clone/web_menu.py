@@ -58,6 +58,20 @@ def _open_edge(url: str) -> None:
     webbrowser.open(url)
 
 
+def _serve_wsgi(app: Flask, host: str = "127.0.0.1", port: int = 5000) -> None:
+    """Serve *app* with a production-grade WSGI HTTP server."""
+
+    try:
+        from waitress import serve
+    except ModuleNotFoundError as exc:  # pragma: no cover - dependency error path
+        raise RuntimeError(
+            "Running web_menu.py now requires the 'waitress' package. "
+            "Install it with 'pip install waitress'."
+        ) from exc
+
+    serve(app, host=host, port=port)
+
+
 @app.route("/")
 def index():
     return _page(
@@ -258,12 +272,19 @@ def reduce():
     return _page("<pre>" + buf.getvalue() + "</pre><a href='/'>Back</a>")
 
 
-def start():
+def start(host: str = "127.0.0.1", port: int = 5000):
     """Start the web menu and open it in Microsoft Edge."""
-    threading.Thread(target=lambda: app.run(port=5000, use_reloader=False), daemon=True).start()
+
+    threading.Thread(
+        target=_serve_wsgi,
+        args=(app,),
+        kwargs={"host": host, "port": port},
+        daemon=True,
+    ).start()
     time.sleep(1)
-    _open_edge("http://127.0.0.1:5000/")
-    print("Web menu running on http://127.0.0.1:5000/")
+    url = f"http://{host}:{port}/"
+    _open_edge(url)
+    print(f"Web menu running on {url}")
     try:
         while True:
             time.sleep(1)
