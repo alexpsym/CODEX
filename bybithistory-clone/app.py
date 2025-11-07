@@ -241,7 +241,23 @@ def export_balance_csv(start_date: str, end_date: str, freq: str) -> str:
     return fname
 
 
+def _serve_wsgi(app: Flask, host: str = "127.0.0.1", port: int = 5000) -> None:
+    """Serve *app* with a production-grade WSGI HTTP server."""
+
+    try:
+        from waitress import serve
+    except ModuleNotFoundError as exc:  # pragma: no cover - dependency error path
+        raise RuntimeError(
+            "Running app.py now requires the 'waitress' package. "
+            "Install it with 'pip install waitress'."
+        ) from exc
+
+    serve(app, host=host, port=port)
+
+
 if __name__ == "__main__":
-    URL = "http://127.0.0.1:5000"
-    open_browser(URL)
-    app.run()
+    host = "127.0.0.1"
+    port = 5000
+    url = f"http://{host}:{port}"
+    open_browser(url)
+    _serve_wsgi(app, host=host, port=port)

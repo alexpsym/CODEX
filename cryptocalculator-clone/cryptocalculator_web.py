@@ -221,11 +221,27 @@ def open_in_edge(url: str) -> bool:
     return False
 
 
+def _serve_wsgi(app: Flask, host: str = "127.0.0.1", port: int = 5000) -> None:
+    """Serve *app* using a production-ready WSGI HTTP server."""
+
+    try:
+        from waitress import serve
+    except ModuleNotFoundError as exc:  # pragma: no cover - dependency error path
+        raise RuntimeError(
+            "Running cryptocalculator_web.py now requires the 'waitress' package. "
+            "Install it with 'pip install waitress'."
+        ) from exc
+
+    serve(app, host=host, port=port)
+
+
 if __name__ == "__main__":
-    url = "http://localhost:5000/"
+    host = "127.0.0.1"
+    port = 5000
+    url = f"http://{host}:{port}/"
     if not open_in_edge(url):
         print(
-            "Microsoft Edge was not found. Open http://localhost:5000/ manually in Edge.",
+            f"Microsoft Edge was not found. Open {url} manually in Edge.",
             flush=True,
         )
-    app.run(port=5000)
+    _serve_wsgi(app, host=host, port=port)
