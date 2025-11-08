@@ -9,7 +9,8 @@ for %%f in ("%SCRIPT_DIR%*.pdf") do (
 )
 
 echo No payslip PDF found alongside %~nx0.
-exit /b 1
+pause
+endlocal & exit /b 1
 
 :found_payslip
 set "TIMESHEETS="
@@ -21,8 +22,24 @@ for %%f in ("%SCRIPT_DIR%*.jpg" "%SCRIPT_DIR%*.jpeg" "%SCRIPT_DIR%*.png") do (
 
 if not defined TIMESHEETS (
     echo No timesheet images (.jpg, .jpeg, .png) found in %SCRIPT_DIR%.
-    exit /b 1
+    pause
+    endlocal & exit /b 1
 )
 
-python "%SCRIPT_DIR%payslip_timesheet_audit.py" --payslip "%PAYSLIP%" --timesheet!TIMESHEETS! --output "%SCRIPT_DIR%audit_report.pdf"
-endlocal
+echo Running audit with:
+echo   Payslip   : %PAYSLIP%
+echo   Timesheets: %TIMESHEETS%
+echo.
+
+python "%SCRIPT_DIR%payslip_timesheet_audit.py" --payslip "%PAYSLIP%" --timesheet !TIMESHEETS! --output "%SCRIPT_DIR%audit_report.pdf"
+set "EXIT_CODE=%ERRORLEVEL%"
+
+echo.
+if %EXIT_CODE% equ 0 (
+    echo Audit completed successfully.
+) else (
+    echo Audit failed with exit code %EXIT_CODE%.
+)
+
+pause
+endlocal & exit /b %EXIT_CODE%
