@@ -99,7 +99,7 @@ def parse_hours(value: Optional[str]) -> Decimal:
     text = text.replace("hrs", "h").replace("hr", "h").replace("hours", "h")
     text = text.replace("minutes", "m").replace("mins", "m")
 
-    match = re.fullmatch(r"(?P<h>\d+):(?P<m>\d{2})", text)
+    match = re.search(r"(?<!\d)(?P<h>\d+):(?P<m>\d{2})(?!\d)", text)
     if match:
         return Decimal(match.group("h")) + Decimal(match.group("m")) / Decimal(60)
 
@@ -563,7 +563,11 @@ def compare_dates(payslip_totals: Dict[Union[date, str], Dict[str, object]], tim
         return
 
     payslip_dates = {dt for dt in payslip_totals if isinstance(dt, date)}
-    timesheet_dates = {dt for dt in timesheet_totals if isinstance(dt, date)}
+    timesheet_dates = {
+        dt
+        for dt, totals in timesheet_totals.items()
+        if isinstance(dt, date) and not totals["hours"].is_zero()
+    }
 
     missing_payslip = sorted(timesheet_dates - payslip_dates)
     if missing_payslip:
