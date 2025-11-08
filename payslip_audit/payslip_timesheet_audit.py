@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import pdfplumber
 import pytesseract
@@ -40,6 +40,10 @@ DATE_FORMATS = [
     "%a %d %b %Y",
     "%a %d %b %y",
 ]
+
+# File discovery patterns
+PAYSLIP_GLOB = "*.pdf"
+TIMESHEET_GLOBS = ("*.jpg", "*.jpeg", "*.png")
 
 
 @dataclass
@@ -429,6 +433,63 @@ def parse_timesheets(paths: Iterable[Path], pay_period: Tuple[date, date]) -> Di
     return entries
 
 
+def discover_files(
+    working_dir: Path,
+    payslip_arg: Optional[Path],
+    timesheet_args: Optional[List[Path]],
+) -> Tuple[Path, List[Path]]:
+    """Resolve payslip and timesheet paths.
+
+    When arguments are provided, validate them; otherwise, look for a single PDF
+    and one or more timesheet images in ``working_dir``.
+    """
+
+    if payslip_arg is not None:
+        payslip_path = payslip_arg.expanduser().resolve()
+        if not payslip_path.exists():
+            raise SystemExit(f"Payslip PDF not found: {payslip_path}")
+    else:
+        candidates = sorted(working_dir.glob(PAYSLIP_GLOB))
+        if not candidates:
+            raise SystemExit(
+                "No payslip PDF supplied and none found in the current directory. "
+                "Add a single .pdf file or use --payslip to specify one explicitly."
+            )
+        if len(candidates) > 1:
+            names = ", ".join(str(path.name) for path in candidates)
+            raise SystemExit(
+                "Multiple PDF files detected in the current directory. "
+                "Use --payslip to choose one explicitly. Found: " + names
+            )
+        payslip_path = candidates[0].resolve()
+
+    if timesheet_args:
+        timesheet_paths = []
+        for path in timesheet_args:
+            resolved = path.expanduser().resolve()
+            if not resolved.exists():
+                raise SystemExit(f"Timesheet image not found: {resolved}")
+            timesheet_paths.append(resolved)
+    else:
+        discovered: List[Path] = []
+        seen: Set[Path] = set()
+        for pattern in TIMESHEET_GLOBS:
+            for path in sorted(working_dir.glob(pattern)):
+                resolved = path.resolve()
+                if resolved not in seen:
+                    seen.add(resolved)
+                    discovered.append(resolved)
+        timesheet_paths = discovered
+
+    if not timesheet_paths:
+        raise SystemExit(
+            "No timesheet images supplied and none found in the current directory. "
+            "Add JPG or PNG screenshots or use --timesheet to list them."
+        )
+
+    return payslip_path, timesheet_paths
+
+
 # ---------------------------------------------------------------------------
 # Summaries and comparison
 # ---------------------------------------------------------------------------
@@ -727,13 +788,18 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser = argparse.ArgumentParser(
         description="Compare a payslip PDF against timesheet screenshots and produce an audit report.",
     )
-    parser.add_argument("--payslip", required=True, type=Path, help="Payslip PDF path.")
+    parser.add_argument(
+        "--payslip",
+        type=Path,
+        help="Payslip PDF path. Defaults to the only .pdf in the current directory if omitted.",
+    )
     parser.add_argument(
         "--timesheet",
-        required=True,
-        nargs="+",
+        nargs="*",
         type=Path,
-        help="One or more timesheet screenshots (JPG/PNG).",
+        help=(
+            "Timesheet screenshots (JPG/PNG). Defaults to all matching images in the current directory when not supplied."
+        ),
     )
     parser.add_argument(
         "--output",
@@ -743,10 +809,17 @@ def main(argv: Optional[List[str]] = None) -> None:
     )
     args = parser.parse_args(argv)
 
-    payslip = parse_payslip(args.payslip)
+    working_dir = Path.cwd()
+    payslip_path, timesheet_paths = discover_files(working_dir, args.payslip, args.timesheet)
+
+    output_path = args.output
+    if not output_path.is_absolute():
+        output_path = (working_dir / output_path).resolve()
+
+    payslip = parse_payslip(payslip_path)
     pay_period = (payslip.start, payslip.end)
 
-    timesheet_entries = parse_timesheets(args.timesheet, pay_period)
+    timesheet_entries = parse_timesheets(timesheet_paths, pay_period)
     payslip_totals, aggregated_label = summarise_payslip(payslip.items, pay_period)
     timesheet_totals = summarise_timesheet(timesheet_entries, aggregated_label)
 
@@ -771,8 +844,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     undated = collect_undated(payslip.items)
 
     print_console(payslip, rows_console, totals, status, undated, aggregated_label)
-    make_pdf(args.output, payslip, rows_pdf, totals, status, undated, aggregated_label)
-    print(f"\nAudit PDF saved to: {args.output.resolve()}")
+    make_pdf(output_path, payslip, rows_pdf, totals, status, undated, aggregated_label)
+    print(f"\nAudit PDF saved to: {output_path}")
 
 
 if __name__ == "__main__":
@@ -781,3 +854,4 @@ if __name__ == "__main__":
     except Exception as exc:  # noqa: BLE001 - surface clear errors to CLI
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
+
