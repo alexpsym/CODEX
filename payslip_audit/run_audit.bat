@@ -50,32 +50,25 @@ if !TIMESHEET_COUNT! LSS 2 (
     goto :pause_exit
 )
 
-set "TIMESHEET_LIST="
-for /l %%i in (1,1,!TIMESHEET_COUNT!) do (
-    set "CURRENT=!TIMESHEET_FILE%%i!"
-    if defined TIMESHEET_LIST (
-        set "TIMESHEET_LIST=!TIMESHEET_LIST! \"!CURRENT!\""
-    ) else (
-        set "TIMESHEET_LIST=\"!CURRENT!\""
-    )
-)
-
 echo Running audit with:
 echo   Payslip   : %PAYSLIP%
 echo   Timesheets:
 for /l %%i in (1,1,!TIMESHEET_COUNT!) do (
     echo       %%i: !TIMESHEET_FILE%%i!
 )
+
+echo.
+echo Launching Python audit...
 echo.
 
-call python "%SCRIPT_DIR%payslip_timesheet_audit.py" --payslip "%PAYSLIP%" --timesheet !TIMESHEET_LIST! --output "%SCRIPT_DIR%audit_report.pdf"
-set "EXIT_CODE=%ERRORLEVEL%"
+call python "!SCRIPT_DIR!payslip_timesheet_audit.py" --payslip "!PAYSLIP!" --output "!SCRIPT_DIR!audit_report.pdf"
+set "EXIT_CODE=!ERRORLEVEL!"
 echo.
 
-if "%EXIT_CODE%"=="0" (
+if "!EXIT_CODE!"=="0" (
     echo Audit completed successfully.
 ) else (
-    echo Audit failed with exit code %EXIT_CODE%.
+    echo Audit failed with exit code !EXIT_CODE!.
 )
 
 :pause_exit
@@ -83,4 +76,5 @@ if "%DID_PUSHD%"=="1" popd >nul 2>&1
 echo.
 echo Press any key to close this window...
 pause >nul
-endlocal & exit /b %EXIT_CODE%
+set "FINAL_EXIT_CODE=%EXIT_CODE%"
+endlocal & exit /b %FINAL_EXIT_CODE%
