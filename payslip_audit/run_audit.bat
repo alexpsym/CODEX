@@ -31,33 +31,44 @@ if not defined PAYSLIP (
 )
 
 set "TIMESHEET_COUNT=0"
-for /f "delims=" %%f in ('dir /b /a:-d *.jpg *.jpeg *.png 2^>nul') do (
-    set /a TIMESHEET_COUNT+=1 >nul
-    if !TIMESHEET_COUNT! GTR 4 (
-        echo Found more than 4 timesheet images in %CD%.
-        echo Leave only the 2-4 screenshots that belong to this payslip.
-        set "EXIT_CODE=1"
-        goto :pause_exit
+for %%f in (*.jpg *.jpeg *.png) do (
+    if exist "%%f" (
+        set /a TIMESHEET_COUNT+=1 >nul
+        if !TIMESHEET_COUNT! GTR 4 (
+            echo Found more than 4 timesheet images in %CD%.
+            echo Leave only the 2-4 screenshots that belong to this payslip.
+            set "EXIT_CODE=1"
+            goto :pause_exit
+        )
+        set "TIMESHEET_FILE!TIMESHEET_COUNT!=%%~ff"
     )
 )
 
-if %TIMESHEET_COUNT% LSS 2 (
-    echo Expected between 2 and 4 timesheet images (.jpg/.jpeg/.png) but found %TIMESHEET_COUNT%.
+if !TIMESHEET_COUNT! LSS 2 (
+    echo Expected between 2 and 4 timesheet images (.jpg/.jpeg/.png) but found !TIMESHEET_COUNT!.
     set "EXIT_CODE=1"
     goto :pause_exit
+)
+
+set "TIMESHEET_LIST="
+for /l %%i in (1,1,!TIMESHEET_COUNT!) do (
+    set "CURRENT=!TIMESHEET_FILE%%i!"
+    if defined TIMESHEET_LIST (
+        set "TIMESHEET_LIST=!TIMESHEET_LIST! \"!CURRENT!\""
+    ) else (
+        set "TIMESHEET_LIST=\"!CURRENT!\""
+    )
 )
 
 echo Running audit with:
 echo   Payslip   : %PAYSLIP%
 echo   Timesheets:
-set "TIMESHEET_INDEX=0"
-for /f "delims=" %%f in ('dir /b /a:-d *.jpg *.jpeg *.png 2^>nul') do (
-    set /a TIMESHEET_INDEX+=1 >nul
-    echo       !TIMESHEET_INDEX!: %CD%\%%f
+for /l %%i in (1,1,!TIMESHEET_COUNT!) do (
+    echo       %%i: !TIMESHEET_FILE%%i!
 )
 echo.
 
-python "%SCRIPT_DIR%payslip_timesheet_audit.py" --output "%SCRIPT_DIR%audit_report.pdf"
+call python "%SCRIPT_DIR%payslip_timesheet_audit.py" --payslip "%PAYSLIP%" --timesheet !TIMESHEET_LIST! --output "%SCRIPT_DIR%audit_report.pdf"
 set "EXIT_CODE=%ERRORLEVEL%"
 echo.
 
