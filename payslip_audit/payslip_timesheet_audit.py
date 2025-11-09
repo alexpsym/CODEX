@@ -63,6 +63,8 @@ DATE_FORMATS = [
 PAYSLIP_GLOB = "*.pdf"
 TIMESHEET_GLOBS = ("*.jpg", "*.jpeg", "*.png")
 
+SHIFT_BREAK_THRESHOLD = Decimal("0.75")
+
 
 @dataclass
 class PayslipItem:
@@ -482,7 +484,9 @@ def extract_timesheet_entries(
 ) -> None:
     lines = [clean(line) for line in text.splitlines() if clean(line)]
     current: Optional[date] = None
-    pending: Optional[str] = None
+    pending_label: Optional[str] = None
+    pending_force_counts: Optional[bool] = None
+    pending_shift_hold = False
     recorded_counts: Dict[date, bool] = {}
 
     for line in lines:
@@ -491,12 +495,16 @@ def extract_timesheet_entries(
             current = dt
             entries.setdefault(dt, [])
             recorded_counts.setdefault(dt, False)
-            pending = None
+            pending_label = None
+            pending_force_counts = None
+            pending_shift_hold = False
             continue
 
         if any(pattern.match(line) for pattern in TIMESHEET_DATE_PATTERNS):
             current = None
-            pending = None
+            pending_label = None
+            pending_force_counts = None
+            pending_shift_hold = False
             continue
 
         if current is None:
@@ -504,38 +512,78 @@ def extract_timesheet_entries(
 
         low = line.lower()
         if low.startswith("lunch break") or low.startswith("unpaid break"):
-            pending = None
+            pending_label = None
+            pending_force_counts = None
+            pending_shift_hold = False
             continue
 
         if SHIFT_TOTAL_RE.search(line):
             hours = parse_hours(line)
             if hours > 0:
+                label_text = "Shift Total"
+                raw_text = line
+                counts = hours >= SHIFT_BREAK_THRESHOLD
                 entries[current].append(
-                    TimesheetEntry(hours=hours, label="Shift Total", counts=True, raw=line)
+                    TimesheetEntry(hours=hours, label=label_text, counts=counts, raw=raw_text)
                 )
-                recorded_counts[current] = True
-                pending = None
+                if counts:
+                    recorded_counts[current] = True
+                    pending_label = None
+                    pending_force_counts = None
+                    pending_shift_hold = False
+                else:
+                    pending_label = "Shift Total"
+                    pending_force_counts = True
+                    pending_shift_hold = True
             else:
-                pending = "Shift Total"
+                pending_label = "Shift Total"
+                pending_force_counts = True
+                pending_shift_hold = True
             continue
 
         hours = parse_hours(line)
         if hours > 0:
-            label = pending or line
-            pending = None
+            label = pending_label or line
             keyword_match = TIMESHEET_KEYWORD_RE.search(label) or TIMESHEET_KEYWORD_RE.search(line)
             counts = bool(keyword_match) or not recorded_counts.get(current, False)
-            raw_text = f"{label} {line}" if label != line else line
+
+            if pending_force_counts is not None:
+                counts = pending_force_counts
+
+            raw_prefix = pending_label if pending_label else label
+            raw_text = f"{raw_prefix}: {line}" if pending_label else line
+
+            if (
+                pending_shift_hold
+                and label.lower().startswith("shift total")
+                and counts
+                and hours < SHIFT_BREAK_THRESHOLD
+            ):
+                counts = False
+
             entries[current].append(
                 TimesheetEntry(hours=hours, label=label, counts=counts, raw=raw_text)
             )
             if counts:
                 recorded_counts[current] = True
+
+            if pending_shift_hold and not counts:
+                pending_force_counts = True
+                pending_label = "Shift Total"
+                pending_shift_hold = True
+            else:
+                pending_label = None
+                pending_force_counts = None
+                pending_shift_hold = False
         else:
             if TIMESHEET_KEYWORD_RE.search(line):
-                pending = line
+                pending_label = line
+                pending_force_counts = None
+                pending_shift_hold = False
             else:
-                pending = None
+                pending_label = None
+                pending_force_counts = None
+                pending_shift_hold = False
 
     if current is not None:
         entries.setdefault(current, [])
@@ -644,6 +692,15 @@ def summarise_payslip(items: List[PayslipItem], pay_period: Tuple[date, date]) -
 
 
 def summarise_timesheet(entries: Dict[date, List[TimesheetEntry]], aggregated_label: Optional[str]) -> Dict[Union[date, str], Dict[str, object]]:
+    def _format_detail(prefix: str, entry: TimesheetEntry, include_date: bool = False) -> str:
+        base = entry.raw.strip() if entry.raw else entry.label
+        hours_token = fmt_hours(entry.hours)
+        if hours_token not in base and f"{hours_token}h" not in base:
+            base = f"{base} {hours_token}h"
+        if include_date:
+            base = f"{prefix}: {base}" if prefix else base
+        return base
+
     if aggregated_label:
         total = Decimal("0")
         details: List[str] = []
@@ -651,13 +708,12 @@ def summarise_timesheet(entries: Dict[date, List[TimesheetEntry]], aggregated_la
             logs = entries[dt]
             daily_total = Decimal("0")
             for entry in logs:
+                formatted = _format_detail(dt.strftime("%Y-%m-%d"), entry, include_date=True)
                 if entry.counts:
                     daily_total += entry.hours
-                    details.append(f"{dt.strftime('%Y-%m-%d')}: {entry.label} {fmt_hours(entry.hours)}h")
+                    details.append(formatted)
                 else:
-                    details.append(
-                        f"{dt.strftime('%Y-%m-%d')}: {entry.label} {fmt_hours(entry.hours)}h (ignored)"
-                    )
+                    details.append(f"{formatted} (ignored)")
             total += daily_total
         return {aggregated_label: {"hours": total, "details": details}}
 
@@ -666,11 +722,12 @@ def summarise_timesheet(entries: Dict[date, List[TimesheetEntry]], aggregated_la
         total = Decimal("0")
         details: List[str] = []
         for entry in logs:
+            formatted = _format_detail("", entry)
             if entry.counts:
                 total += entry.hours
-                details.append(f"{entry.label}: {fmt_hours(entry.hours)}h")
+                details.append(formatted)
             else:
-                details.append(f"{entry.label}: {fmt_hours(entry.hours)}h (ignored)")
+                details.append(f"{formatted} (ignored)")
         totals[dt] = {"hours": total, "details": details}
     return totals
 
