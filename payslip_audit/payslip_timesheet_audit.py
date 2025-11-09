@@ -24,6 +24,7 @@ SPACE_RE = re.compile(r"\s+")
 DATE_SUFFIX_RE = re.compile(r"(\d+)(st|nd|rd|th)", re.IGNORECASE)
 TIMESHEET_DATE_RE = re.compile(r"^(?P<dow>[A-Za-z]{3}),?\s+(?P<month>[A-Za-z]{3,9})\s+(?P<day>\d{1,2})", re.IGNORECASE)
 SHIFT_TOTAL_RE = re.compile(r"Shift\s+Total", re.IGNORECASE)
+DATE_TOKEN_RE = re.compile(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}")
 DATE_FORMATS = [
     "%d %b %Y",
     "%d %B %Y",
@@ -182,7 +183,12 @@ def fmt_signed_currency(value: Decimal) -> str:
 
 def normalize_period_token(token: str) -> str:
     cleaned = clean(token)
-    cleaned = re.sub(r"^(?:pay\s+period\s+)?(?:from|to|period\s+start|period\s+(?:end|finish)|start|end)[:\s-]*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"^(?:pay\s*period\s*)?(?:from|to|period\s*start|period\s*(?:end|finish)|start|end)\b[:\s-]*",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
     return cleaned
 
 
@@ -191,13 +197,14 @@ def normalize_period_token(token: str) -> str:
 # ---------------------------------------------------------------------------
 
 def find_pay_period(text: str) -> Tuple[date, date]:
+    sanitized_text = text.replace("\xa0", " ")
     patterns = [
         r"Pay\s*Period\s*(?:From\s*)?[:\-]?\s*(?P<start>.+?)\s*(?:to|-|through)\s*(?P<end>.+)",
         r"Period\s*Start\s*[:\-]?\s*(?P<start>\d{1,2}[/-]\d{1,2}[/-]\d{2,4}).*?Period\s*(?:End|Finish)\s*[:\-]?\s*(?P<end>\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
         r"From\s*(?P<start>\d{1,2}[/-]\d{1,2}[/-]\d{2,4}).*?To\s*(?P<end>\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
     ]
     for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        match = re.search(pattern, sanitized_text, re.IGNORECASE | re.DOTALL)
         if not match:
             continue
         start = parse_date(normalize_period_token(match.group("start")))
@@ -205,13 +212,42 @@ def find_pay_period(text: str) -> Tuple[date, date]:
         if start and end:
             return start, end
 
-    start_match = re.search(r"Period\s*Start\s*[:\-]?\s*(?P<value>\d{1,2}[/-]\d{1,2}[/-]\d{2,4})", text, re.IGNORECASE)
-    end_match = re.search(r"Period\s*(?:End|Finish)\s*[:\-]?\s*(?P<value>\d{1,2}[/-]\d{1,2}[/-]\d{2,4})", text, re.IGNORECASE)
+    start_match = re.search(
+        r"Period\s*Start\s*[:\-]?\s*(?P<value>\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+        sanitized_text,
+        re.IGNORECASE,
+    )
+    end_match = re.search(
+        r"Period\s*(?:End|Finish)\s*[:\-]?\s*(?P<value>\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+        sanitized_text,
+        re.IGNORECASE,
+    )
     if start_match and end_match:
         start = parse_date(normalize_period_token(start_match.group("value")))
         end = parse_date(normalize_period_token(end_match.group("value")))
         if start and end:
             return start, end
+
+    for match in re.finditer(r"pay\s*period", sanitized_text, re.IGNORECASE):
+        window = sanitized_text[match.end() : match.end() + 200]
+        tokens = DATE_TOKEN_RE.findall(window)
+        if len(tokens) >= 2:
+            start = parse_date(tokens[0])
+            end = parse_date(tokens[1])
+            if start and end:
+                return start, end
+
+    lines = sanitized_text.splitlines()
+    for idx, line in enumerate(lines):
+        if not re.search(r"pay\s*period", line, re.IGNORECASE):
+            continue
+        snippet = " ".join(lines[idx : idx + 3])
+        tokens = DATE_TOKEN_RE.findall(snippet)
+        if len(tokens) >= 2:
+            start = parse_date(tokens[0])
+            end = parse_date(tokens[1])
+            if start and end:
+                return start, end
 
     raise ValueError("Pay period could not be found on the payslip.")
 
