@@ -23,7 +23,20 @@ from reportlab.platypus import LongTable, Paragraph, SimpleDocTemplate, Spacer, 
 CURRENCY_RE = re.compile(r"[^\d\-.]")
 SPACE_RE = re.compile(r"\s+")
 DATE_SUFFIX_RE = re.compile(r"(\d+)(st|nd|rd|th)", re.IGNORECASE)
-TIMESHEET_DATE_RE = re.compile(r"^(?P<dow>[A-Za-z]{3}),?\s+(?P<month>[A-Za-z]{3,9})\s+(?P<day>\d{1,2})", re.IGNORECASE)
+TIMESHEET_DATE_PATTERNS = [
+    re.compile(
+        r"^(?P<dow>[A-Za-z]{3}),?\s+(?P<day>\d{1,2})\s+(?P<month>[A-Za-z]{3,9})(?:\s+(?P<year>\d{2,4}))?",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?P<dow>[A-Za-z]{3}),?\s+(?P<month>[A-Za-z]{3,9})\s+(?P<day>\d{1,2})(?:\s+(?P<year>\d{2,4}))?",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?P<dow>[A-Za-z]{3}),?\s+(?P<day>\d{1,2})[/-](?P<month>\d{1,2})(?:[/-](?P<year>\d{2,4}))?",
+        re.IGNORECASE,
+    ),
+]
 SHIFT_TOTAL_RE = re.compile(r"Shift\s+Total", re.IGNORECASE)
 TIMESHEET_KEYWORD_RE = re.compile(
     r"(total|hours|worked|shift|ordinary|overtime|penalty|allowance)", re.IGNORECASE
@@ -155,6 +168,18 @@ def resolve_partial_date(day: int, month_text: str, pay_period: Tuple[date, date
     return None
 
 
+def resolve_partial_numeric_date(day: int, month: int, pay_period: Tuple[date, date]) -> Optional[date]:
+    start, end = pay_period
+    for year in {start.year, end.year, start.year - 1, end.year + 1}:
+        try:
+            candidate = date(year, month, day)
+        except ValueError:
+            continue
+        if start <= candidate <= end:
+            return candidate
+    return None
+
+
 def resolve_inline_date(text: str, pay_period: Tuple[date, date]) -> Optional[date]:
     parsed = parse_date(text)
     if parsed:
@@ -162,6 +187,44 @@ def resolve_inline_date(text: str, pay_period: Tuple[date, date]) -> Optional[da
     match = re.search(r"(?P<day>\d{1,2})\s+(?P<month>[A-Za-z]{3,9})", text)
     if match:
         return resolve_partial_date(int(match.group("day")), match.group("month"), pay_period)
+    return None
+
+
+def parse_timesheet_date(line: str, pay_period: Tuple[date, date]) -> Optional[date]:
+    cleaned = clean(line)
+    for pattern in TIMESHEET_DATE_PATTERNS:
+        match = pattern.match(cleaned)
+        if not match:
+            continue
+
+        year_text = match.group("year")
+        day_text = match.group("day")
+        month_text = match.group("month")
+        if not day_text or not month_text:
+            continue
+
+        if month_text.isdigit():
+            day_val = int(day_text)
+            month_val = int(month_text)
+            if year_text:
+                candidate = parse_date(f"{day_val}/{month_val}/{year_text}")
+            else:
+                candidate = resolve_partial_numeric_date(day_val, month_val, pay_period)
+        else:
+            if year_text:
+                candidate = parse_date(f"{day_text} {month_text} {year_text}")
+            else:
+                candidate = resolve_partial_date(int(day_text), month_text, pay_period)
+
+        if candidate and pay_period[0] <= candidate <= pay_period[1]:
+            return candidate
+
+    token_match = DATE_TOKEN_RE.search(cleaned)
+    if token_match:
+        candidate = parse_date(token_match.group(0))
+        if candidate and pay_period[0] <= candidate <= pay_period[1]:
+            return candidate
+
     return None
 
 
@@ -423,13 +486,16 @@ def extract_timesheet_entries(
     recorded_counts: Dict[date, bool] = {}
 
     for line in lines:
-        date_match = TIMESHEET_DATE_RE.match(line)
-        if date_match:
-            dt = resolve_partial_date(int(date_match.group("day")), date_match.group("month"), pay_period)
+        dt = parse_timesheet_date(line, pay_period)
+        if dt is not None:
             current = dt
-            if dt:
-                entries.setdefault(dt, [])
-                recorded_counts.setdefault(dt, False)
+            entries.setdefault(dt, [])
+            recorded_counts.setdefault(dt, False)
+            pending = None
+            continue
+
+        if any(pattern.match(line) for pattern in TIMESHEET_DATE_PATTERNS):
+            current = None
             pending = None
             continue
 
