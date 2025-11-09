@@ -14,8 +14,10 @@ if errorlevel 1 (
 set "DID_PUSHD=1"
 
 set "PAYSLIP="
+set "PAYSLIP_COUNT=0"
 for /f "delims=" %%f in ('dir /b /a:-d *.pdf 2^>nul') do (
-    if defined PAYSLIP (
+    set /a PAYSLIP_COUNT+=1 >nul
+    if !PAYSLIP_COUNT! GTR 1 (
         echo More than one payslip PDF was found in %CD%.
         echo Please leave only the single payslip PDF you wish to audit.
         set "EXIT_CODE=1"
@@ -31,17 +33,21 @@ if not defined PAYSLIP (
 )
 
 set "TIMESHEET_COUNT=0"
-for %%f in (*.jpg *.jpeg *.png) do (
-    if exist "%%f" (
-        set /a TIMESHEET_COUNT+=1 >nul
-        if !TIMESHEET_COUNT! GTR 4 (
-            echo Found more than 4 timesheet images in %CD%.
-            echo Leave only the 2-4 screenshots that belong to this payslip.
-            set "EXIT_CODE=1"
-            goto :pause_exit
-        )
-        set "TIMESHEET_FILE!TIMESHEET_COUNT!=%%~ff"
+set "TIMESHEET_ARGS="
+for /f "delims=" %%f in ('dir /b /a:-d *.jpg *.jpeg *.png 2^>nul') do (
+    set /a TIMESHEET_COUNT+=1 >nul
+    if !TIMESHEET_COUNT! GTR 4 (
+        echo Found more than 4 timesheet images in %CD%.
+        echo Leave only the 2-4 screenshots that belong to this payslip.
+        set "EXIT_CODE=1"
+        goto :pause_exit
     )
+    if not defined TIMESHEET_ARGS (
+        set "TIMESHEET_ARGS="%%~ff""
+    ) else (
+        set "TIMESHEET_ARGS=!TIMESHEET_ARGS! "%%~ff""
+    )
+    set "TIMESHEET_FILE!TIMESHEET_COUNT!=%%~ff"
 )
 
 if !TIMESHEET_COUNT! LSS 2 (
@@ -61,7 +67,11 @@ echo.
 echo Launching Python audit...
 echo.
 
-call python "!SCRIPT_DIR!payslip_timesheet_audit.py" --payslip "!PAYSLIP!" --output "!SCRIPT_DIR!audit_report.pdf"
+if defined TIMESHEET_ARGS (
+    call python "!SCRIPT_DIR!payslip_timesheet_audit.py" --payslip "!PAYSLIP!" --timesheet !TIMESHEET_ARGS! --output "!SCRIPT_DIR!audit_report.pdf"
+) else (
+    call python "!SCRIPT_DIR!payslip_timesheet_audit.py" --payslip "!PAYSLIP!" --output "!SCRIPT_DIR!audit_report.pdf"
+)
 set "EXIT_CODE=!ERRORLEVEL!"
 echo.
 
