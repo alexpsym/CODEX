@@ -10,20 +10,24 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
+from xml.sax.saxutils import escape
 
 import pdfplumber
 import pytesseract
 from PIL import Image
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.platypus import LongTable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 CURRENCY_RE = re.compile(r"[^\d\-.]")
 SPACE_RE = re.compile(r"\s+")
 DATE_SUFFIX_RE = re.compile(r"(\d+)(st|nd|rd|th)", re.IGNORECASE)
 TIMESHEET_DATE_RE = re.compile(r"^(?P<dow>[A-Za-z]{3}),?\s+(?P<month>[A-Za-z]{3,9})\s+(?P<day>\d{1,2})", re.IGNORECASE)
 SHIFT_TOTAL_RE = re.compile(r"Shift\s+Total", re.IGNORECASE)
+TIMESHEET_KEYWORD_RE = re.compile(
+    r"(total|hours|worked|shift|ordinary|overtime|penalty|allowance)", re.IGNORECASE
+)
 DATE_TOKEN_RE = re.compile(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}")
 DATE_FORMATS = [
     "%d %b %Y",
@@ -410,10 +414,13 @@ def parse_payslip(path: Path) -> PayslipData:
 # Timesheet parsing
 # ---------------------------------------------------------------------------
 
-def extract_timesheet_entries(text: str, pay_period: Tuple[date, date], entries: Dict[date, List[TimesheetEntry]]) -> None:
+def extract_timesheet_entries(
+    text: str, pay_period: Tuple[date, date], entries: Dict[date, List[TimesheetEntry]]
+) -> None:
     lines = [clean(line) for line in text.splitlines() if clean(line)]
     current: Optional[date] = None
     pending: Optional[str] = None
+    recorded_counts: Dict[date, bool] = {}
 
     for line in lines:
         date_match = TIMESHEET_DATE_RE.match(line)
@@ -422,6 +429,7 @@ def extract_timesheet_entries(text: str, pay_period: Tuple[date, date], entries:
             current = dt
             if dt:
                 entries.setdefault(dt, [])
+                recorded_counts.setdefault(dt, False)
             pending = None
             continue
 
@@ -436,7 +444,10 @@ def extract_timesheet_entries(text: str, pay_period: Tuple[date, date], entries:
         if SHIFT_TOTAL_RE.search(line):
             hours = parse_hours(line)
             if hours > 0:
-                entries[current].append(TimesheetEntry(hours=hours, label="Shift Total", counts=True, raw=line))
+                entries[current].append(
+                    TimesheetEntry(hours=hours, label="Shift Total", counts=True, raw=line)
+                )
+                recorded_counts[current] = True
                 pending = None
             else:
                 pending = "Shift Total"
@@ -444,17 +455,21 @@ def extract_timesheet_entries(text: str, pay_period: Tuple[date, date], entries:
 
         hours = parse_hours(line)
         if hours > 0:
-            if pending:
-                entries[current].append(
-                    TimesheetEntry(hours=hours, label=pending, counts=True, raw=f"{pending} {line}")
-                )
-                pending = None
-            else:
-                entries[current].append(
-                    TimesheetEntry(hours=hours, label="Timesheet Daily Total", counts=False, raw=line)
-                )
-        else:
+            label = pending or line
             pending = None
+            keyword_match = TIMESHEET_KEYWORD_RE.search(label) or TIMESHEET_KEYWORD_RE.search(line)
+            counts = bool(keyword_match) or not recorded_counts.get(current, False)
+            raw_text = f"{label} {line}" if label != line else line
+            entries[current].append(
+                TimesheetEntry(hours=hours, label=label, counts=counts, raw=raw_text)
+            )
+            if counts:
+                recorded_counts[current] = True
+        else:
+            if TIMESHEET_KEYWORD_RE.search(line):
+                pending = line
+            else:
+                pending = None
 
     if current is not None:
         entries.setdefault(current, [])
@@ -751,6 +766,33 @@ def make_pdf(
         bottomMargin=36,
     )
     styles = getSampleStyleSheet()
+    table_header_style = ParagraphStyle(
+        "AuditTableHeader",
+        parent=styles["Heading5"],
+        fontSize=9,
+        leading=11,
+        alignment=1,
+    )
+    table_body_style = ParagraphStyle(
+        "AuditTableBody",
+        parent=styles["BodyText"],
+        fontSize=8.5,
+        leading=11,
+    )
+    totals_label_style = ParagraphStyle(
+        "AuditTotalsLabel",
+        parent=styles["BodyText"],
+        fontSize=9,
+        leading=11,
+    )
+    totals_value_style = ParagraphStyle(
+        "AuditTotalsValue",
+        parent=styles["BodyText"],
+        fontSize=9,
+        leading=11,
+        alignment=2,
+    )
+
     elements = [
         Paragraph("Timesheet vs Payslip Audit", styles["Title"]),
         Paragraph(
@@ -769,10 +811,28 @@ def make_pdf(
         "Hours Δ",
         "AUD Δ",
     ]
-    table_data = [table_headers]
-    table_data.extend(rows_pdf)
+    table_data: List[List[Paragraph]] = []
+    for idx, row in enumerate([table_headers] + rows_pdf):
+        paragraph_row: List[Paragraph] = []
+        for cell in row:
+            raw_text = cell if isinstance(cell, str) else str(cell)
+            text = escape(raw_text).replace("\n", "<br/>")
+            style = table_header_style if idx == 0 else table_body_style
+            paragraph_row.append(Paragraph(text, style))
+        table_data.append(paragraph_row)
 
-    table = Table(table_data, repeatRows=1)
+    available_width = doc.width
+    col_widths = [
+        available_width * 0.16,
+        available_width * 0.09,
+        available_width * 0.24,
+        available_width * 0.09,
+        available_width * 0.24,
+        available_width * 0.08,
+        available_width * 0.10,
+    ]
+
+    table = LongTable(table_data, repeatRows=1, colWidths=col_widths)
     table.setStyle(
         TableStyle(
             [
@@ -780,29 +840,61 @@ def make_pdf(
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
                 ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("ALIGN", (1, 1), (1, -1), "RIGHT"),
+                ("ALIGN", (3, 1), (3, -1), "RIGHT"),
+                ("ALIGN", (5, 1), (-1, -1), "RIGHT"),
                 ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#fafafa")]),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
             ]
         )
     )
+    table.hAlign = "LEFT"
     elements.append(table)
 
     elements.append(Spacer(1, 12))
-    elements.append(Paragraph(f"Payslip total hours: {totals['payslip_hours']}", styles["Normal"]))
-    elements.append(Paragraph(f"Timesheet total hours: {totals['timesheet_hours']}", styles["Normal"]))
-    elements.append(Paragraph(f"Difference in hours: {totals['hours_diff']}", styles["Normal"]))
-    elements.append(Paragraph(f"Hourly rate: {totals['hourly_rate']}", styles["Normal"]))
-    elements.append(Paragraph(f"Difference in AUD: {totals['aud_diff']}", styles["Normal"]))
+    totals_table_data: List[List[Paragraph]] = []
+    for label, key in (
+        ("Payslip total hours", "payslip_hours"),
+        ("Timesheet total hours", "timesheet_hours"),
+        ("Difference in hours", "hours_diff"),
+        ("Hourly rate", "hourly_rate"),
+        ("Difference in AUD", "aud_diff"),
+    ):
+        totals_table_data.append(
+            [
+                Paragraph(escape(label), totals_label_style),
+                Paragraph(escape(totals[key]), totals_value_style),
+            ]
+        )
+
+    totals_table = Table(totals_table_data, colWidths=[available_width * 0.5, available_width * 0.5])
+    totals_table.setStyle(
+        TableStyle(
+            [
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#fcfcfc")),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]
+        )
+    )
+    totals_table.hAlign = "LEFT"
+    elements.append(totals_table)
 
     if undated:
         elements.append(Spacer(1, 12))
         elements.append(Paragraph("Undated payslip items included in totals:", styles["Normal"]))
         for line in undated:
-            elements.append(Paragraph(line, styles["Bullet"]))
+            elements.append(Paragraph(escape(line), styles["Bullet"]))
 
     elements.append(Spacer(1, 12))
-    elements.append(Paragraph(f"Discrepancy status: {status}", styles["Heading2"]))
+    elements.append(Paragraph(escape(f"Discrepancy status: {status}"), styles["Heading2"]))
 
     doc.build(elements)
 
