@@ -598,12 +598,11 @@ def calculate_trade(
     market_price = price_adapter.fetch_current_price(
         config["symbol"], config["trade_mode"]
     )
-    tick_size = price_adapter.fetch_tick_size(config["symbol"], config["trade_mode"])
     funding_rate = price_adapter.fetch_funding_rate(
         config["symbol"], config["trade_mode"]
     )
 
-    trade_mode, market_price, tick_size, funding_rate = get_price_source_info(
+    trade_mode, market_price, _, funding_rate = get_price_source_info(
         price_source, config["symbol"]
     )
     config["trade_mode"] = trade_mode
@@ -615,16 +614,8 @@ def calculate_trade(
         else market_price
     )
 
-    min_qty, qty_step, fee_rate = get_execution_requirements(
-        execution_exchange, config["symbol"], trade_mode
-    )
     config["execution_exchange"] = execution_exchange
 
-    risk_amount = config["account_balance"] * (config["risk_percent"] / 100)
-    stop_distance = config["stop_loss_ticks"] * tick_size
-    risk_amount = config["account_balance"] * (config["risk_percent"] / 100)
-    stop_distance = config["stop_loss_ticks"] * tick_size
-    fee_rate = adapter.get_fee_rate(config["trade_mode"])
     lot_info = execution_adapter.fetch_lot_size(config["symbol"], config["trade_mode"])
     min_qty = lot_info.min_qty
     qty_step = lot_info.qty_step
@@ -632,6 +623,10 @@ def calculate_trade(
         raise ValueError("Quantity step must be greater than zero")
     if min_qty <= 0:
         min_qty = qty_step
+
+    tick_size = execution_adapter.fetch_tick_size(
+        config["symbol"], config["trade_mode"]
+    )
 
     risk_amount = config["account_balance"] * (config["risk_percent"] / 100)
     stop_distance = config["stop_loss_ticks"] * tick_size
