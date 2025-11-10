@@ -327,7 +327,9 @@ def calculate_trade(config: Dict[str, Any]) -> Dict[str, Any]:
     market_price = price_adapter.fetch_current_price(
         config["symbol"], config["trade_mode"]
     )
-    tick_size = price_adapter.fetch_tick_size(config["symbol"], config["trade_mode"])
+    tick_size = execution_adapter.fetch_tick_size(
+        config["symbol"], config["trade_mode"]
+    )
     funding_rate = price_adapter.fetch_funding_rate(
         config["symbol"], config["trade_mode"]
     )
