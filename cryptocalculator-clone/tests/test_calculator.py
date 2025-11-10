@@ -67,6 +67,75 @@ def test_calculate_trade(monkeypatch):
     assert trade["funding_rate"] == 0.0001
 
 
+def test_web_form_includes_exchange_fields():
+    import cryptocalculator_web as web_app
+
+    client = web_app.app.test_client()
+    resp = client.get("/")
+    html = resp.get_data(as_text=True)
+    assert 'name="execution_exchange"' in html
+    assert 'value="bybit"' in html
+    assert 'name="price_source"' in html
+    assert 'value="bybit_linear"' in html
+    assert 'value="bybit_spot"' in html
+    assert 'id="price_mode_note"' in html
+
+
+def test_web_post_uses_exchange_and_price_source(monkeypatch):
+    import cryptocalculator_web as web_app
+
+    client = web_app.app.test_client()
+    captured_config = {}
+
+    def fake_calculate_trade(config):
+        captured_config.clear()
+        captured_config.update(config)
+        return {
+            "entry_price": 100.0,
+            "stop_price": 95.0,
+            "target_price": 110.0,
+            "actual_risk": 5.0,
+            "stop_distance": 5.0,
+        }
+
+    monkeypatch.setattr(web_app, "calculate_trade", fake_calculate_trade)
+    monkeypatch.setattr(web_app, "format_trade", lambda trade: "summary text")
+    monkeypatch.setattr(web_app, "build_webhook_payload", lambda trade: {"ok": True})
+
+    balance_calls = []
+
+    def fake_balance():
+        balance_calls.append(True)
+        return 555.0
+
+    monkeypatch.setitem(web_app.BALANCE_ADAPTERS, "bybit", fake_balance)
+
+    resp = client.post(
+        "/",
+        data={
+            "symbol": "TESTUSDT",
+            "direction": "long",
+            "order_type": "market",
+            "stop_loss_ticks": "10",
+            "risk_percent": "1",
+            "rr_ratio": "2",
+            "execution_exchange": "bybit",
+            "price_source": "bybit_spot",
+        },
+    )
+
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert "Execution Settings" in html
+    assert "Bybit Spot" in html
+    assert "Spot" in html
+    assert balance_calls == [True]
+    assert captured_config["execution_exchange"] == "bybit"
+    assert captured_config["price_source"] == "bybit_spot"
+    assert captured_config["trade_mode"] == "spot"
+    assert captured_config["account_balance"] == 555.0
+
+
 def read_webhook_json() -> dict:
     """Helper to read the webhook JSON portion from trade_webhook.txt."""
     with open("trade_webhook.txt", "r", encoding="utf-8") as f:
