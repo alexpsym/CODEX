@@ -1,5 +1,8 @@
 {
+    "exchange": "bybit",
     "account_balance": "auto",
+    "account_coin": "USDT",
+    "account_type": "UNIFIED",
     "risk_percent": 1,
     "rr_ratio": 2,
     "order_type": "limit",
@@ -10,4 +13,6 @@
     "trade_mode": "linear",
     "execution_exchange": "bybit",
     "price_source": "bybit_linear"
+    "price_source": "bybit",
+    "execution_exchange": "bybit"
 }

@@ -1,12 +1,48 @@
 import json
+import math
 import os
 import sys
-import types
 
 import pytest
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 import cryptocalculator as calc
+from exchange_adapters import COINSPOT_SPOT_FEE_RATE, InstrumentInfo
+
+
+class DummyAdapter:
+    """Simple stub that exposes the exchange adapter interface."""
+
+    def __init__(self, *, price=100.0, fee_rate=0.0006, funding=0.0001, balance=100.0):
+        self.price = price
+        self.fee_rate = fee_rate
+        self.funding = funding
+        self.balance = balance
+        self.instrument = InstrumentInfo(tick_size=0.5, min_qty=0.1, qty_step=0.1)
+
+    def get_current_price(self, symbol, trade_mode, config=None):  # pragma: no cover - simple stub
+        return self.price
+
+    def get_instrument_info(self, symbol, trade_mode, config=None):  # pragma: no cover - simple stub
+        return self.instrument
+
+    def get_fee_rate(self, trade_mode):  # pragma: no cover - simple stub
+        return self.fee_rate
+
+    def get_funding_rate(self, symbol, trade_mode, config=None):  # pragma: no cover - simple stub
+        return self.funding if trade_mode == "linear" else None
+
+    def get_account_balance(self, config):  # pragma: no cover - simple stub
+        return self.balance
+
+
+def read_webhook_json() -> dict:
+    """Helper to read the webhook JSON portion from trade_webhook.txt."""
+
+    with open("trade_webhook.txt", "r", encoding="utf-8") as f:
+        content = f.read()
+    json_part = content.split("\n\nWEBHOOK FUTURES:")[0].strip()
+    return json.loads(json_part)
 
 class MockResponse:
     def __init__(self, data):
@@ -76,8 +112,11 @@ def mock_get(url, params=None, timeout=10):
     raise ValueError("Unexpected URL: " + url)
 
 def test_calculate_trade(monkeypatch):
-    monkeypatch.setattr(calc.requests, "get", mock_get)
+    adapter = DummyAdapter()
+    monkeypatch.setattr(calc, "get_exchange_adapter", lambda name: adapter)
+
     config = {
+        "exchange": "bybit",
         "account_balance": 100,
         "risk_percent": 1,
         "rr_ratio": 2,
@@ -86,6 +125,8 @@ def test_calculate_trade(monkeypatch):
         "stop_loss_ticks": 10,
         "direction": "long",
         "trade_mode": "linear",
+        "price_source": "bybit",
+        "execution_exchange": "bybit",
     }
     trade = calc.calculate_trade(config)
     assert trade["quantity"] == 0.2
@@ -203,9 +244,11 @@ def read_webhook_json() -> dict:
 
 
 def test_save_webhook_json_buy(monkeypatch):
-    monkeypatch.setattr(calc.requests, "get", mock_get)
+    adapter = DummyAdapter()
+    monkeypatch.setattr(calc, "get_exchange_adapter", lambda name: adapter)
 
     config = {
+        "exchange": "bybit",
         "account_balance": 100,
         "risk_percent": 1,
         "rr_ratio": 2,
@@ -214,6 +257,8 @@ def test_save_webhook_json_buy(monkeypatch):
         "stop_loss_ticks": 10,
         "direction": "long",
         "trade_mode": "linear",
+        "price_source": "bybit",
+        "execution_exchange": "bybit",
     }
 
     trade = calc.calculate_trade(config)
@@ -229,9 +274,11 @@ def test_save_webhook_json_buy(monkeypatch):
 
 
 def test_save_webhook_json_sell(monkeypatch):
-    monkeypatch.setattr(calc.requests, "get", mock_get)
+    adapter = DummyAdapter()
+    monkeypatch.setattr(calc, "get_exchange_adapter", lambda name: adapter)
 
     config = {
+        "exchange": "bybit",
         "account_balance": 100,
         "risk_percent": 1,
         "rr_ratio": 2,
@@ -240,6 +287,8 @@ def test_save_webhook_json_sell(monkeypatch):
         "stop_loss_ticks": 10,
         "direction": "short",
         "trade_mode": "linear",
+        "price_source": "bybit",
+        "execution_exchange": "bybit",
     }
 
     trade = calc.calculate_trade(config)
@@ -255,30 +304,116 @@ def test_save_webhook_json_sell(monkeypatch):
 
 
 def test_load_config_fetch_balance(monkeypatch, tmp_path):
-    monkeypatch.setenv("BYBIT_API_KEY", "k")
-    monkeypatch.setenv("BYBIT_API_SECRET", "s")
-    monkeypatch.setattr(calc.requests, "get", lambda *a, **k: MockResponse({
-        "result": {
-            "list": [{"coin": [{"coin": "USDT", "availableToTrade": "150"}]}]
-        }
-    }))
+    adapter = DummyAdapter(balance=150.0)
+    monkeypatch.setattr(calc, "get_exchange_adapter", lambda name: adapter)
 
     cfg_file = tmp_path / "c.json"
-    cfg_file.write_text(json.dumps({
-        "account_balance": "auto",
+    cfg_file.write_text(
+        json.dumps(
+            {
+                "exchange": "bybit",
+                "account_balance": "auto",
+                "risk_percent": 1,
+                "rr_ratio": 2,
+                "order_type": "market",
+                "symbol": "TESTUSDT",
+                "stop_loss_ticks": 10,
+                "direction": "long",
+                "trade_mode": "linear",
+            }
+        )
+    )
+
+    cfg = calc.load_config(cfg_file)
+    assert cfg["account_balance"] == 150.0
+
+
+def test_coinspot_fee_rate(monkeypatch):
+    adapter = DummyAdapter(fee_rate=COINSPOT_SPOT_FEE_RATE, funding=None)
+    monkeypatch.setattr(calc, "get_exchange_adapter", lambda name: adapter)
+
+    config = {
+        "exchange": "coinspot",
+        "account_balance": 200,
+        "risk_percent": 1,
+        "rr_ratio": 2,
+        "order_type": "market",
+        "symbol": "BTCAUD",
+        "stop_loss_ticks": 10,
+        "direction": "long",
+        "trade_mode": "spot",
+        "base_asset": "BTC",
+        "quote_asset": "AUD",
+        "tick_size": 0.5,
+        "qty_step": 0.1,
+        "min_qty": 0.1,
+    }
+
+    trade = calc.calculate_trade(config)
+    expected_fee_rate = COINSPOT_SPOT_FEE_RATE
+    entry_fee = trade["position_usdt"] * expected_fee_rate
+    exit_fee = trade["target_price"] * trade["quantity"] * expected_fee_rate
+    assert abs(trade["fees"] - (entry_fee + exit_fee)) < 1e-9
+    assert trade["funding_rate"] is None
+    cfg = calc.load_config(cfg_file)
+    assert cfg["account_balance"] == 150.0
+    assert cfg["execution_exchange"] == "bybit"
+    assert cfg["price_source"] == "bybit_linear"
+    assert cfg["price_source"] == "bybit"
+    assert cfg["execution_exchange"] == "bybit"
+
+
+def test_calculate_trade_cross_exchange(monkeypatch):
+    monkeypatch.setattr(calc.requests, "get", mock_get)
+
+    class DummyCoinspot(calc.ExchangeAdapter):
+        name = "coinspot"
+
+        def fetch_current_price(self, symbol, trade_mode):  # pragma: no cover - safety
+            raise AssertionError("Coinspot price source should not be used in this test")
+
+        def fetch_tick_size(self, symbol, trade_mode):  # pragma: no cover
+            return 0.01
+
+        def fetch_lot_size(self, symbol, trade_mode):
+            return calc.LotSizeInfo(min_qty=0.05, qty_step=0.05)
+
+        def fetch_fee_rate(self, trade_mode):
+            return 0.0025
+
+        def fetch_account_balance(self, coin="USDT", **_):  # pragma: no cover
+            return 999.0
+
+    dummy = DummyCoinspot()
+    monkeypatch.setitem(calc.EXCHANGE_ADAPTERS, "coinspot", dummy)
+
+    config = {
+        "account_balance": 100,
         "risk_percent": 1,
         "rr_ratio": 2,
         "order_type": "market",
         "symbol": "TESTUSDT",
         "stop_loss_ticks": 10,
         "direction": "long",
-        "trade_mode": "linear"
-    }))
+        "trade_mode": "linear",
+        "price_source": "bybit",
+        "execution_exchange": "coinspot",
+    }
 
-    cfg = calc.load_config(cfg_file)
-    assert cfg["account_balance"] == 150.0
-    assert cfg["execution_exchange"] == "bybit"
-    assert cfg["price_source"] == "bybit_linear"
+    trade = calc.calculate_trade(config)
+
+    assert trade["price_source"] == "bybit"
+    assert trade["execution_exchange"] == "coinspot"
+    assert trade["entry_price"] == 100
+    assert trade["quantity_step"] == 0.05
+
+    fee_rate = 0.0025
+    expected_fees = (
+        trade["entry_price"] * trade["quantity"] * fee_rate
+        + trade["target_price"] * trade["quantity"] * fee_rate
+    )
+    assert math.isclose(trade["fees"], expected_fees, rel_tol=1e-9)
+    assert trade["funding_rate"] == 0.0001
 
 
 def test_open_in_edge_uses_registered_browser(monkeypatch):
@@ -310,7 +445,11 @@ def test_open_in_edge_falls_back_to_executable(monkeypatch):
 
     monkeypatch.setattr(web_app.webbrowser, "get", always_fail)
 
-    monkeypatch.setattr(web_app.shutil, "which", lambda name: "/usr/bin/msedge" if name == "microsoft-edge" else None)
+    monkeypatch.setattr(
+        web_app.shutil,
+        "which",
+        lambda name: "/usr/bin/msedge" if name == "microsoft-edge" else None,
+    )
 
     opened = []
 
@@ -322,7 +461,9 @@ def test_open_in_edge_falls_back_to_executable(monkeypatch):
             opened.append((self.path, url))
             return True
 
-    monkeypatch.setattr(web_app.webbrowser, "BackgroundBrowser", lambda path: DummyBrowser(path))
+    monkeypatch.setattr(
+        web_app.webbrowser, "BackgroundBrowser", lambda path: DummyBrowser(path)
+    )
 
     assert web_app.open_in_edge("http://example.com") is True
     assert opened == [("/usr/bin/msedge", "http://example.com")]
@@ -335,8 +476,6 @@ def test_open_in_edge_returns_false_when_edge_missing(monkeypatch):
         raise web_app.webbrowser.Error()
 
     monkeypatch.setattr(web_app.webbrowser, "get", always_fail)
-    monkeypatch.setattr(web_app.shutil, "which", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(web_app, "EDGE_FALLBACK_PATHS", tuple())
-    monkeypatch.setattr(web_app, "sys", types.SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(web_app.shutil, "which", lambda _name: None)
 
     assert web_app.open_in_edge("http://example.com") is False
