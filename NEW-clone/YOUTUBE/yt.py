@@ -7,8 +7,28 @@ def ask_bookmark_path():
     default = Path.home() / r"AppData\Local\BraveSoftware\Brave-Browser\User Data\Default\Bookmarks"
     print("Enter the full path to your Brave 'Bookmarks' file.")
     print(f"Press Enter to use the default: {default}")
-    path = input("> ").strip()
-    return Path(path) if path else default
+
+    while True:
+        path = input("> ").strip()
+        bookmark_path = Path(path) if path else default
+
+        if bookmark_path.is_dir():
+            candidate = bookmark_path / "Bookmarks"
+            if candidate.exists():
+                bookmark_path = candidate
+            else:
+                print("The provided path is a directory. Please provide the full path to the 'Bookmarks' file.")
+                continue
+
+        if not bookmark_path.exists():
+            print("Could not find the file. Check the path and try again.")
+            continue
+
+        if not bookmark_path.is_file():
+            print("The provided path is not a file. Please try again.")
+            continue
+
+        return bookmark_path
 
 def find_youtube_urls(node, results):
     """Search the bookmark data for YouTube video links."""
@@ -25,10 +45,6 @@ def find_youtube_urls(node, results):
 
 def main():
     bookmark_file = ask_bookmark_path()
-
-    if not bookmark_file.exists():
-        print("Could not find the file. Check the path and try again.")
-        return
 
     with open(bookmark_file, "r", encoding="utf-8") as f:
         data = json.load(f)
