@@ -7,21 +7,29 @@ import sys
 import webbrowser
 
 from cryptocalculator import (
+    DEFAULT_EXECUTION_EXCHANGE,
+    DEFAULT_PRICE_SOURCE,
+    EXECUTION_EXCHANGES,
+    PRICE_SOURCES,
+    TRADE_MODE_LABELS,
+    build_webhook_payload,
     calculate_trade,
     format_trade,
-    build_webhook_payload,
-    fetch_account_balance,
+    get_balance_fetcher,
 )
 
-EXECUTION_EXCHANGES = {"bybit": "Bybit"}
-PRICE_SOURCES = {
-    "bybit_linear": {"label": "Bybit Linear Perpetual", "trade_mode": "linear"},
-    "bybit_spot": {"label": "Bybit Spot", "trade_mode": "spot"},
+BALANCE_ADAPTERS = {
+    name: get_balance_fetcher(name) for name in EXECUTION_EXCHANGES.keys()
 }
-TRADE_MODE_LABELS = {"linear": "Linear Perpetual", "spot": "Spot"}
-DEFAULT_EXECUTION_EXCHANGE = "bybit"
-DEFAULT_PRICE_SOURCE = "bybit_linear"
-BALANCE_ADAPTERS = {"bybit": fetch_account_balance}
+
+PRICE_MODE_NOTES = {
+    key: (
+        "Spot mode uses spot pricing and fees with no funding component."
+        if meta["trade_mode"] == "spot"
+        else "Linear mode uses perpetual contract pricing, funding and fee settings."
+    )
+    for key, meta in PRICE_SOURCES.items()
+}
 
 app = Flask(__name__)
 
@@ -79,12 +87,9 @@ function toggleEntry(){
 function updatePriceMode(){
   const priceSource = document.getElementById('price_source');
   const note = document.getElementById('price_mode_note');
+  const notes = {{ price_mode_notes|tojson }};
   if(!priceSource || !note){return;}
-  if(priceSource.value === 'bybit_spot'){
-    note.innerText = 'Spot mode uses spot pricing and fees with no funding component.';
-  } else {
-    note.innerText = 'Linear mode uses perpetual contract pricing, funding and fee settings.';
-  }
+  note.innerText = notes[priceSource.value] || '';
 }
 document.addEventListener('DOMContentLoaded', function(){
   const ot = document.getElementById('order_type');
@@ -108,13 +113,16 @@ document.addEventListener('DOMContentLoaded', function(){
   <label>Symbol: <input name="symbol" required></label><br>
   <label>Execution Exchange:
     <select name="execution_exchange" id="execution_exchange">
-      <option value="bybit" {{ 'selected' if execution_exchange == 'bybit' else '' }}>Bybit</option>
+      {% for key, meta in execution_options %}
+      <option value="{{ key }}" {{ 'selected' if execution_exchange == key else '' }}>{{ meta['label'] }}</option>
+      {% endfor %}
     </select>
   </label><br>
   <label>Price Source:
     <select name="price_source" id="price_source">
-      <option value="bybit_linear" {{ 'selected' if price_source == 'bybit_linear' else '' }}>Bybit Linear</option>
-      <option value="bybit_spot" {{ 'selected' if price_source == 'bybit_spot' else '' }}>Bybit Spot</option>
+      {% for key, meta in price_source_options %}
+      <option value="{{ key }}" {{ 'selected' if price_source == key else '' }}>{{ meta['label'] }}</option>
+      {% endfor %}
     </select>
   </label><br>
   <p id="price_mode_note"></p>
@@ -235,13 +243,15 @@ def index():
             trade = calculate_trade(config)
             summary = format_trade(trade)
             risk_info = {k.replace("_", " ").title(): v for k, v in trade.items()}
-            risk_info["Execution Exchange"] = EXECUTION_EXCHANGES[execution_exchange]
+            risk_info["Execution Exchange"] = EXECUTION_EXCHANGES[execution_exchange][
+                "label"
+            ]
             risk_info["Price Source"] = PRICE_SOURCES[price_source]["label"]
             payload = build_webhook_payload(trade)
             payload_json = json.dumps(payload, indent=2)
         except Exception as exc:  # pylint: disable=broad-except
             error = str(exc)
-    execution_exchange_label = EXECUTION_EXCHANGES[execution_exchange]
+    execution_exchange_label = EXECUTION_EXCHANGES[execution_exchange]["label"]
     price_source_label = PRICE_SOURCES[price_source]["label"]
     trade_mode_label = TRADE_MODE_LABELS[trade_mode]
     return render_template_string(
@@ -256,6 +266,9 @@ def index():
         price_source_label=price_source_label,
         trade_mode_label=trade_mode_label,
         show_selection=show_selection,
+        execution_options=sorted(EXECUTION_EXCHANGES.items()),
+        price_source_options=sorted(PRICE_SOURCES.items()),
+        price_mode_notes=PRICE_MODE_NOTES,
     )
 
 
