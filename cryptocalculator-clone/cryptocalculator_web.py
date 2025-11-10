@@ -7,6 +7,8 @@ import sys
 import webbrowser
 
 from cryptocalculator import (
+    EXCHANGE_ADAPTERS,
+    DEFAULT_PRICE_SOURCE,
     calculate_trade,
     format_trade,
     build_webhook_payload,
@@ -81,6 +83,20 @@ document.addEventListener('DOMContentLoaded', function(){
 <div class="form">
 <form method="post">
   <label>Symbol: <input name="symbol" required></label><br>
+  <label>Price Source:
+    <select name="price_source">
+      {% for value, label in price_sources %}
+      <option value="{{ value }}" {% if value == selected_price_source %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label><br>
+  <label>Execution Exchange:
+    <select name="execution_exchange">
+      {% for value, label in execution_exchanges %}
+      <option value="{{ value }}" {% if value == selected_execution_exchange %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label><br>
   <label>Direction:
     <select name="direction">
       <option value="long">Long</option>
@@ -137,6 +153,13 @@ def index():
     error = None
     risk_info = None
     payload_json = None
+    exchange_options = sorted(
+        (name, name.replace("_", " ").title()) for name in EXCHANGE_ADAPTERS
+    )
+    selected_price_source = request.form.get("price_source", DEFAULT_PRICE_SOURCE)
+    selected_execution_exchange = request.form.get(
+        "execution_exchange", selected_price_source
+    )
     if request.method == "POST":
         try:
             symbol = request.form["symbol"]
@@ -146,6 +169,10 @@ def index():
             stop_loss_ticks = float(request.form["stop_loss_ticks"])
             risk_percent = float(request.form["risk_percent"])
             rr_ratio = float(request.form["rr_ratio"])
+            price_source = request.form.get("price_source", DEFAULT_PRICE_SOURCE).lower()
+            execution_exchange = request.form.get(
+                "execution_exchange", price_source
+            ).lower()
 
             config = {
                 "account_balance": "auto",
@@ -156,12 +183,16 @@ def index():
                 "stop_loss_ticks": stop_loss_ticks,
                 "direction": direction,
                 "trade_mode": "linear",
+                "price_source": price_source,
+                "execution_exchange": execution_exchange,
             }
             if order_type == "limit" and entry_price:
                 config["entry_price"] = float(entry_price)
 
             if str(config["account_balance"]).lower() == "auto":
-                config["account_balance"] = fetch_account_balance()
+                config["account_balance"] = fetch_account_balance(
+                    execution_exchange=execution_exchange
+                )
 
             trade = calculate_trade(config)
             summary = format_trade(trade)
@@ -176,6 +207,10 @@ def index():
         error=error,
         risk_info=risk_info,
         payload_json=payload_json,
+        price_sources=exchange_options,
+        execution_exchanges=exchange_options,
+        selected_price_source=selected_price_source,
+        selected_execution_exchange=selected_execution_exchange,
     )
 
 
