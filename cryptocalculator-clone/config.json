@@ -7,5 +7,7 @@
     "symbol": "AVAAIUSDT",
     "stop_loss_ticks": 95,
     "direction": "short",
-    "trade_mode": "linear"
+    "trade_mode": "linear",
+    "price_source": "bybit",
+    "execution_exchange": "bybit"
 }

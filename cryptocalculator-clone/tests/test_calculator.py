@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import sys
 import types
@@ -54,6 +55,8 @@ def test_calculate_trade(monkeypatch):
         "stop_loss_ticks": 10,
         "direction": "long",
         "trade_mode": "linear",
+        "price_source": "bybit",
+        "execution_exchange": "bybit",
     }
     trade = calc.calculate_trade(config)
     assert trade["quantity"] == 0.2
@@ -153,6 +156,8 @@ def test_save_webhook_json_buy(monkeypatch):
         "stop_loss_ticks": 10,
         "direction": "long",
         "trade_mode": "linear",
+        "price_source": "bybit",
+        "execution_exchange": "bybit",
     }
 
     trade = calc.calculate_trade(config)
@@ -179,6 +184,8 @@ def test_save_webhook_json_sell(monkeypatch):
         "stop_loss_ticks": 10,
         "direction": "short",
         "trade_mode": "linear",
+        "price_source": "bybit",
+        "execution_exchange": "bybit",
     }
 
     trade = calc.calculate_trade(config)
@@ -216,6 +223,61 @@ def test_load_config_fetch_balance(monkeypatch, tmp_path):
 
     cfg = calc.load_config(cfg_file)
     assert cfg["account_balance"] == 150.0
+    assert cfg["price_source"] == "bybit"
+    assert cfg["execution_exchange"] == "bybit"
+
+
+def test_calculate_trade_cross_exchange(monkeypatch):
+    monkeypatch.setattr(calc.requests, "get", mock_get)
+
+    class DummyCoinspot(calc.ExchangeAdapter):
+        name = "coinspot"
+
+        def fetch_current_price(self, symbol, trade_mode):  # pragma: no cover - safety
+            raise AssertionError("Coinspot price source should not be used in this test")
+
+        def fetch_tick_size(self, symbol, trade_mode):  # pragma: no cover
+            return 0.01
+
+        def fetch_lot_size(self, symbol, trade_mode):
+            return calc.LotSizeInfo(min_qty=0.05, qty_step=0.05)
+
+        def fetch_fee_rate(self, trade_mode):
+            return 0.0025
+
+        def fetch_account_balance(self, coin="USDT", **_):  # pragma: no cover
+            return 999.0
+
+    dummy = DummyCoinspot()
+    monkeypatch.setitem(calc.EXCHANGE_ADAPTERS, "coinspot", dummy)
+
+    config = {
+        "account_balance": 100,
+        "risk_percent": 1,
+        "rr_ratio": 2,
+        "order_type": "market",
+        "symbol": "TESTUSDT",
+        "stop_loss_ticks": 10,
+        "direction": "long",
+        "trade_mode": "linear",
+        "price_source": "bybit",
+        "execution_exchange": "coinspot",
+    }
+
+    trade = calc.calculate_trade(config)
+
+    assert trade["price_source"] == "bybit"
+    assert trade["execution_exchange"] == "coinspot"
+    assert trade["entry_price"] == 100
+    assert trade["quantity_step"] == 0.05
+
+    fee_rate = 0.0025
+    expected_fees = (
+        trade["entry_price"] * trade["quantity"] * fee_rate
+        + trade["target_price"] * trade["quantity"] * fee_rate
+    )
+    assert math.isclose(trade["fees"], expected_fees, rel_tol=1e-9)
+    assert trade["funding_rate"] == 0.0001
 
 
 def test_open_in_edge_uses_registered_browser(monkeypatch):
