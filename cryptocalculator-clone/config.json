@@ -11,6 +11,8 @@
     "stop_loss_ticks": 95,
     "direction": "short",
     "trade_mode": "linear",
+    "execution_exchange": "bybit",
+    "price_source": "bybit_linear"
     "price_source": "bybit",
     "execution_exchange": "bybit"
 }

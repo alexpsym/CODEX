@@ -3,6 +3,8 @@ import math
 import os
 import sys
 
+import pytest
+
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 import cryptocalculator as calc
 from exchange_adapters import COINSPOT_SPOT_FEE_RATE, InstrumentInfo
@@ -42,6 +44,72 @@ def read_webhook_json() -> dict:
     json_part = content.split("\n\nWEBHOOK FUTURES:")[0].strip()
     return json.loads(json_part)
 
+class MockResponse:
+    def __init__(self, data):
+        self._data = data
+    def json(self):
+        return self._data
+    def raise_for_status(self):
+        pass
+
+def mock_get(url, params=None, timeout=10):
+    if url == calc.BYBIT_LINEAR_URL:
+        return MockResponse(
+            {
+                "result": {
+                    "list": [
+                        {
+                            "symbol": "TESTUSDT",
+                            "lastPrice": "100",
+                            "fundingRate": "0.0001",
+                        }
+                    ]
+                }
+            }
+        )
+    if url == calc.BYBIT_INSTRUMENT_INFO_LINEAR:
+        return MockResponse({
+            "result": {
+                "list": [
+                    {
+                        "symbol": "TESTUSDT",
+                        "priceFilter": {"tickSize": "0.5"},
+                        "lotSizeFilter": {"minTrdQty": "0.1", "qtyStep": "0.1"},
+                    }
+                ]
+            }
+        })
+    if url == calc.BYBIT_SPOT_URL:
+        return MockResponse(
+            {
+                "result": {
+                    "list": [
+                        {
+                            "symbol": "TESTUSDT",
+                            "lastPrice": "100",
+                        }
+                    ]
+                }
+            }
+        )
+    if url == calc.BYBIT_INSTRUMENT_INFO_SPOT:
+        return MockResponse(
+            {
+                "result": {
+                    "list": [
+                        {
+                            "symbol": "TESTUSDT",
+                            "priceFilter": {"tickSize": "0.25"},
+                            "lotSizeFilter": {
+                                "minTrdQty": "0.01",
+                                "qtyStep": "0.01",
+                            },
+                        }
+                    ]
+                }
+            }
+        )
+    raise ValueError("Unexpected URL: " + url)
 
 def test_calculate_trade(monkeypatch):
     adapter = DummyAdapter()
@@ -69,6 +137,33 @@ def test_calculate_trade(monkeypatch):
     assert trade["funding_rate"] == 0.0001
 
 
+def test_calculate_trade_coinspot_execution(monkeypatch):
+    monkeypatch.setattr(calc.requests, "get", mock_get)
+    monkeypatch.setattr(calc, "fetch_coinspot_lot_info", lambda symbol: (0.1, 0.1))
+
+    config = {
+        "account_balance": 100,
+        "risk_percent": 1,
+        "rr_ratio": 2,
+        "order_type": "market",
+        "symbol": "TESTUSDT",
+        "stop_loss_ticks": 10,
+        "direction": "long",
+        "trade_mode": "linear",
+        "execution_exchange": "coinspot",
+        "price_source": "bybit_linear",
+    }
+
+    trade = calc.calculate_trade(config)
+
+    assert trade["execution_exchange"] == "coinspot"
+    assert trade["price_source"] == "bybit_linear"
+    expected_fees = trade["quantity"] * (
+        trade["entry_price"] + trade["target_price"]
+    ) * calc.COINSPOT_MARKET_FEE_RATE
+    assert trade["fees"] == pytest.approx(expected_fees)
+
+
 def test_web_form_includes_exchange_fields():
     import cryptocalculator_web as web_app
 
@@ -77,9 +172,11 @@ def test_web_form_includes_exchange_fields():
     html = resp.get_data(as_text=True)
     assert 'name="execution_exchange"' in html
     assert 'value="bybit"' in html
+    assert 'value="coinspot"' in html
     assert 'name="price_source"' in html
     assert 'value="bybit_linear"' in html
     assert 'value="bybit_spot"' in html
+    assert 'value="coinspot_spot"' in html
     assert 'id="price_mode_note"' in html
 
 
@@ -260,6 +357,8 @@ def test_coinspot_fee_rate(monkeypatch):
     assert trade["funding_rate"] is None
     cfg = calc.load_config(cfg_file)
     assert cfg["account_balance"] == 150.0
+    assert cfg["execution_exchange"] == "bybit"
+    assert cfg["price_source"] == "bybit_linear"
     assert cfg["price_source"] == "bybit"
     assert cfg["execution_exchange"] == "bybit"
 
