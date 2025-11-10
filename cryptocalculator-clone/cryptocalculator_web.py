@@ -148,6 +148,7 @@ def index():
             rr_ratio = float(request.form["rr_ratio"])
 
             config = {
+                "exchange": "bybit",
                 "account_balance": "auto",
                 "risk_percent": risk_percent,
                 "rr_ratio": rr_ratio,
