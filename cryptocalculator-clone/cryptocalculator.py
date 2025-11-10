@@ -1,18 +1,10 @@
-
-"""Simple crypto trade calculator.
-
-This script fetches prices from the Bybit API and calculates position
-sizes, stop prices and potential profit for a trade.  It also writes a
-human readable summary and a small webhook payload to disk.
-"""
-
+"""Simple crypto trade calculator with exchange adapters."""
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import math
 import os
+from typing import Any, Dict, Optional
 import time
 from dataclasses import dataclass
 from typing import Any, Dict
@@ -20,22 +12,27 @@ from urllib.parse import urlencode
 
 import requests
 
-# === BYBIT API URLs ===
-BYBIT_SPOT_URL = "https://api.bybit.com/v5/market/tickers?category=spot"
-BYBIT_LINEAR_URL = "https://api.bybit.com/v5/market/tickers?category=linear"
-BYBIT_INSTRUMENT_INFO_SPOT = (
-    "https://api.bybit.com/v5/market/instruments-info?category=spot"
-)
-BYBIT_INSTRUMENT_INFO_LINEAR = (
-    "https://api.bybit.com/v5/market/instruments-info?category=linear"
+from exchange_adapters import (
+    ExchangeAdapter,
+    InstrumentInfo,
+    get_exchange_adapter,
 )
 
-BYBIT_BALANCE_URL = "https://api.bybit.com/v5/account/wallet-balance"
 
-# === FEES & INTEREST SETTINGS ===
-SPOT_TRADING_FEE_RATE = 0.001
-LINEAR_TRADING_FEE_RATE = 0.0006
-SPOT_INTEREST_RATE_PER_HOUR = 0.000084
+def fetch_account_balance(
+    coin: str = "USDT",
+    account_type: str = "UNIFIED",
+    exchange: str = "bybit",
+) -> float:
+    """Return the spendable balance using the configured exchange adapter."""
+
+    adapter = get_exchange_adapter(exchange)
+    config = {
+        "account_coin": coin,
+        "account_type": account_type,
+        "exchange": exchange,
+    }
+    return adapter.get_account_balance(config)
 
 DEFAULT_PRICE_SOURCE = "bybit"
 
@@ -300,6 +297,11 @@ def load_config(filename: str) -> Dict[str, Any]:
     with open(filename, "r", encoding="utf-8") as f:
         config = json.load(f)
 
+    config.setdefault("exchange", "bybit")
+
+    if str(config.get("account_balance", "")).lower() == "auto":
+        adapter = get_exchange_adapter(config["exchange"])
+        config["account_balance"] = adapter.get_account_balance(config)
     config = _normalise_config(config)
 
     if str(config.get("account_balance", "")).lower() == "auto":
@@ -311,7 +313,10 @@ def load_config(filename: str) -> Dict[str, Any]:
 
     return config
 
-def calculate_trade(config: Dict[str, Any]) -> Dict[str, Any]:
+
+def calculate_trade(
+    config: Dict[str, Any], adapter: Optional[ExchangeAdapter] = None
+) -> Dict[str, Any]:
     """Calculate trade parameters based on ``config``.
 
     The target price is adjusted so that the expected net profit is at least
@@ -319,6 +324,20 @@ def calculate_trade(config: Dict[str, Any]) -> Dict[str, Any]:
     """
     # pylint: disable=too-many-locals
 
+    exchange_name = config.get("exchange", "bybit")
+    adapter = adapter or get_exchange_adapter(exchange_name)
+
+    market_price = adapter.get_current_price(
+        config["symbol"], config["trade_mode"], config
+    )
+    instrument: InstrumentInfo = adapter.get_instrument_info(
+        config["symbol"], config["trade_mode"], config
+    )
+    tick_size = instrument.tick_size
+    min_qty = instrument.min_qty
+    qty_step = instrument.qty_step
+    funding_rate = adapter.get_funding_rate(
+        config["symbol"], config["trade_mode"], config
     config = _normalise_config(config)
 
     price_adapter = get_exchange_adapter(config["price_source"])
@@ -337,6 +356,9 @@ def calculate_trade(config: Dict[str, Any]) -> Dict[str, Any]:
         else market_price
     )
 
+    risk_amount = config["account_balance"] * (config["risk_percent"] / 100)
+    stop_distance = config["stop_loss_ticks"] * tick_size
+    fee_rate = adapter.get_fee_rate(config["trade_mode"])
     lot_info = execution_adapter.fetch_lot_size(config["symbol"], config["trade_mode"])
     min_qty = lot_info.min_qty
     qty_step = lot_info.qty_step
@@ -428,7 +450,9 @@ def calculate_trade(config: Dict[str, Any]) -> Dict[str, Any]:
         "actual_risk": actual_risk,
         "rr_ratio": config["rr_ratio"],
         "achieved_rr": net_profit / actual_risk if actual_risk else 0.0,
+        "per_unit_risk": per_unit_risk,
     }
+
 
 def format_trade(trade: Dict[str, Any]) -> str:
     """Return a formatted multi-line summary for ``trade``."""
@@ -476,12 +500,14 @@ def format_trade(trade: Dict[str, Any]) -> str:
         lines.append(f"Funding Rate:    {trade['funding_rate'] * 100:.4f}%")
     return "\n".join(lines)
 
+
 def display_trade(trade: Dict[str, Any]) -> str:
     """Print ``trade`` summary to the console and return it."""
 
     text = format_trade(trade)
     print(text)
     return text
+
 
 def build_webhook_payload(trade: Dict[str, Any]) -> Dict[str, Any]:
     """Return the SignalStack webhook payload for ``trade``."""
@@ -501,6 +527,7 @@ def build_webhook_payload(trade: Dict[str, Any]) -> Dict[str, Any]:
         "stop_loss_price": f"{{{{close}}}} {sl_op} {stop_dist:.6f}",
     }
 
+
 def save_summary(text: str) -> None:
     """Write ``text`` to ``trade_summary.txt``."""
 
@@ -508,6 +535,7 @@ def save_summary(text: str) -> None:
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
     print(f"\n✅ Summary saved as '{path}'")
+
 
 def save_webhook_json(trade: Dict[str, Any]) -> None:
     """Write a small webhook payload for ``trade``."""
@@ -521,6 +549,7 @@ def save_webhook_json(trade: Dict[str, Any]) -> None:
         )
     print("\n✅ Webhook JSON saved as 'trade_webhook.txt'")
 
+
 def main() -> None:
     """Entry point for the script."""
 
@@ -529,6 +558,7 @@ def main() -> None:
     summary = display_trade(trade)
     save_summary(summary)
     save_webhook_json(trade)
+
 
 if __name__ == "__main__":
     main()

@@ -1,5 +1,8 @@
 {
+    "exchange": "bybit",
     "account_balance": "auto",
+    "account_coin": "USDT",
+    "account_type": "UNIFIED",
     "risk_percent": 1,
     "rr_ratio": 2,
     "order_type": "limit",

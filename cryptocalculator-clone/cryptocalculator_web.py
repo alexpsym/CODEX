@@ -237,6 +237,7 @@ def index():
             show_selection = True
 
             config = {
+                "exchange": "bybit",
                 "account_balance": "auto",
                 "risk_percent": risk_percent,
                 "rr_ratio": rr_ratio,
