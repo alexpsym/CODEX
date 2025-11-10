@@ -7,11 +7,23 @@ import sys
 import webbrowser
 
 from cryptocalculator import (
+    EXCHANGE_ADAPTERS,
+    DEFAULT_PRICE_SOURCE,
     calculate_trade,
     format_trade,
     build_webhook_payload,
     fetch_account_balance,
 )
+
+EXECUTION_EXCHANGES = {"bybit": "Bybit"}
+PRICE_SOURCES = {
+    "bybit_linear": {"label": "Bybit Linear Perpetual", "trade_mode": "linear"},
+    "bybit_spot": {"label": "Bybit Spot", "trade_mode": "spot"},
+}
+TRADE_MODE_LABELS = {"linear": "Linear Perpetual", "spot": "Spot"}
+DEFAULT_EXECUTION_EXCHANGE = "bybit"
+DEFAULT_PRICE_SOURCE = "bybit_linear"
+BALANCE_ADAPTERS = {"bybit": fetch_account_balance}
 
 app = Flask(__name__)
 
@@ -66,11 +78,26 @@ function toggleEntry(){
   if(!orderType || !entryLabel){return;}
   entryLabel.style.display = orderType.value === 'market' ? 'none' : 'block';
 }
+function updatePriceMode(){
+  const priceSource = document.getElementById('price_source');
+  const note = document.getElementById('price_mode_note');
+  if(!priceSource || !note){return;}
+  if(priceSource.value === 'bybit_spot'){
+    note.innerText = 'Spot mode uses spot pricing and fees with no funding component.';
+  } else {
+    note.innerText = 'Linear mode uses perpetual contract pricing, funding and fee settings.';
+  }
+}
 document.addEventListener('DOMContentLoaded', function(){
   const ot = document.getElementById('order_type');
   if(ot){
     ot.addEventListener('change', toggleEntry);
     toggleEntry();
+  }
+  const ps = document.getElementById('price_source');
+  if(ps){
+    ps.addEventListener('change', updatePriceMode);
+    updatePriceMode();
   }
 });
 </script>
@@ -81,6 +108,32 @@ document.addEventListener('DOMContentLoaded', function(){
 <div class="form">
 <form method="post">
   <label>Symbol: <input name="symbol" required></label><br>
+  <label>Price Source:
+    <select name="price_source">
+      {% for value, label in price_sources %}
+      <option value="{{ value }}" {% if value == selected_price_source %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label><br>
+  <label>Execution Exchange:
+    <select name="execution_exchange">
+      {% for value, label in execution_exchanges %}
+      <option value="{{ value }}" {% if value == selected_execution_exchange %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label><br>
+  <label>Execution Exchange:
+    <select name="execution_exchange" id="execution_exchange">
+      <option value="bybit" {{ 'selected' if execution_exchange == 'bybit' else '' }}>Bybit</option>
+    </select>
+  </label><br>
+  <label>Price Source:
+    <select name="price_source" id="price_source">
+      <option value="bybit_linear" {{ 'selected' if price_source == 'bybit_linear' else '' }}>Bybit Linear</option>
+      <option value="bybit_spot" {{ 'selected' if price_source == 'bybit_spot' else '' }}>Bybit Spot</option>
+    </select>
+  </label><br>
+  <p id="price_mode_note"></p>
   <label>Direction:
     <select name="direction">
       <option value="long">Long</option>
@@ -111,6 +164,14 @@ document.addEventListener('DOMContentLoaded', function(){
 <div class="result">
 {% if error %}<p style="color: red;">{{ error }}</p>{% endif %}
 {% if payload_json %}<h2>Result</h2><pre id="alert_json">{{ payload_json }}</pre>{% endif %}
+{% if show_selection %}
+<h2>Execution Settings</h2>
+<table border="1">
+  <tr><th>Execution Exchange</th><td>{{ execution_exchange_label }}</td></tr>
+  <tr><th>Price Source</th><td>{{ price_source_label }}</td></tr>
+  <tr><th>Trade Mode</th><td>{{ trade_mode_label }}</td></tr>
+</table>
+{% endif %}
 {% if summary %}
 <h2>Summary</h2>
 <pre id="summary_text">{{ summary }}</pre>
@@ -137,6 +198,17 @@ def index():
     error = None
     risk_info = None
     payload_json = None
+    exchange_options = sorted(
+        (name, name.replace("_", " ").title()) for name in EXCHANGE_ADAPTERS
+    )
+    selected_price_source = request.form.get("price_source", DEFAULT_PRICE_SOURCE)
+    selected_execution_exchange = request.form.get(
+        "execution_exchange", selected_price_source
+    )
+    execution_exchange = DEFAULT_EXECUTION_EXCHANGE
+    price_source = DEFAULT_PRICE_SOURCE
+    trade_mode = PRICE_SOURCES[price_source]["trade_mode"]
+    show_selection = False
     if request.method == "POST":
         try:
             symbol = request.form["symbol"]
@@ -146,6 +218,23 @@ def index():
             stop_loss_ticks = float(request.form["stop_loss_ticks"])
             risk_percent = float(request.form["risk_percent"])
             rr_ratio = float(request.form["rr_ratio"])
+            price_source = request.form.get("price_source", DEFAULT_PRICE_SOURCE).lower()
+            execution_exchange = request.form.get(
+                "execution_exchange", price_source
+            ).lower()
+
+            execution_exchange = request.form.get(
+                "execution_exchange", DEFAULT_EXECUTION_EXCHANGE
+            )
+            if execution_exchange not in EXECUTION_EXCHANGES:
+                execution_exchange = DEFAULT_EXECUTION_EXCHANGE
+
+            price_source = request.form.get("price_source", DEFAULT_PRICE_SOURCE)
+            if price_source not in PRICE_SOURCES:
+                price_source = DEFAULT_PRICE_SOURCE
+
+            trade_mode = PRICE_SOURCES[price_source]["trade_mode"]
+            show_selection = True
 
             config = {
                 "exchange": "bybit",
@@ -157,26 +246,54 @@ def index():
                 "stop_loss_ticks": stop_loss_ticks,
                 "direction": direction,
                 "trade_mode": "linear",
+                "price_source": price_source,
+                "execution_exchange": execution_exchange,
+                "trade_mode": trade_mode,
+                "execution_exchange": execution_exchange,
+                "price_source": price_source,
             }
             if order_type == "limit" and entry_price:
                 config["entry_price"] = float(entry_price)
 
             if str(config["account_balance"]).lower() == "auto":
-                config["account_balance"] = fetch_account_balance()
+                config["account_balance"] = fetch_account_balance(
+                    execution_exchange=execution_exchange
+                )
+                balance_adapter = BALANCE_ADAPTERS.get(execution_exchange)
+                if balance_adapter is None:
+                    raise ValueError(
+                        f"Execution exchange '{execution_exchange}' is not supported."
+                    )
+                config["account_balance"] = balance_adapter()
 
             trade = calculate_trade(config)
             summary = format_trade(trade)
             risk_info = {k.replace("_", " ").title(): v for k, v in trade.items()}
+            risk_info["Execution Exchange"] = EXECUTION_EXCHANGES[execution_exchange]
+            risk_info["Price Source"] = PRICE_SOURCES[price_source]["label"]
             payload = build_webhook_payload(trade)
             payload_json = json.dumps(payload, indent=2)
         except Exception as exc:  # pylint: disable=broad-except
             error = str(exc)
+    execution_exchange_label = EXECUTION_EXCHANGES[execution_exchange]
+    price_source_label = PRICE_SOURCES[price_source]["label"]
+    trade_mode_label = TRADE_MODE_LABELS[trade_mode]
     return render_template_string(
         FORM_HTML,
         summary=summary,
         error=error,
         risk_info=risk_info,
         payload_json=payload_json,
+        price_sources=exchange_options,
+        execution_exchanges=exchange_options,
+        selected_price_source=selected_price_source,
+        selected_execution_exchange=selected_execution_exchange,
+        execution_exchange=execution_exchange,
+        price_source=price_source,
+        execution_exchange_label=execution_exchange_label,
+        price_source_label=price_source_label,
+        trade_mode_label=trade_mode_label,
+        show_selection=show_selection,
     )
 
 
