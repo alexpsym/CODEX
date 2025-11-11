@@ -268,6 +268,16 @@ def _split_symbol(symbol: str) -> Tuple[str, str]:
     raise ValueError(f"Unable to determine base/quote for symbol '{symbol}'.")
 
 
+def _infer_quote_currency(symbol: str) -> Optional[str]:
+    """Best-effort inference of the quote currency for ``symbol``."""
+
+    try:
+        _base, quote = _split_symbol(symbol)
+    except ValueError:
+        return None
+    return quote
+
+
 def format_coinspot_symbol(symbol: str) -> str:
     """Return a CoinSpot compatible market string (``btc_usdt``)."""
 
@@ -388,6 +398,30 @@ def _normalise_config(config: Dict[str, Any]) -> Dict[str, Any]:
     data["risk_percent"] = float(data.get("risk_percent", 1.0))
     data["rr_ratio"] = float(data.get("rr_ratio", 2.0))
     data["stop_loss_ticks"] = float(data.get("stop_loss_ticks", 0.0))
+
+    inferred_quote = _infer_quote_currency(data["symbol"])
+
+    price_quote_asset = data.get("price_quote_asset")
+    if price_quote_asset:
+        data["price_quote_asset"] = str(price_quote_asset).upper()
+    else:
+        data["price_quote_asset"] = inferred_quote
+
+    execution_exchange = str(
+        data.get("execution_exchange", DEFAULT_EXECUTION_EXCHANGE)
+    ).lower()
+
+    execution_quote_asset = data.get("execution_quote_asset")
+    if execution_quote_asset:
+        data["execution_quote_asset"] = str(execution_quote_asset).upper()
+    else:
+        if execution_exchange == "coinspot":
+            data["execution_quote_asset"] = "AUD"
+        else:
+            data["execution_quote_asset"] = data.get("price_quote_asset") or inferred_quote
+
+    if data.get("price_to_execution_rate") is not None:
+        data["price_to_execution_rate"] = float(data["price_to_execution_rate"])
 
     balance = data.get("account_balance", 0.0)
     if isinstance(balance, str) and balance.lower() == "auto":
@@ -557,6 +591,29 @@ def calculate_trade(
         execution_exchange, cfg["symbol"], trade_mode, cfg
     )
 
+    price_quote_asset = cfg.get("price_quote_asset") or _infer_quote_currency(
+        cfg["symbol"]
+    )
+    execution_quote_asset = cfg.get("execution_quote_asset") or price_quote_asset
+
+    if execution_quote_asset and price_quote_asset:
+        if execution_quote_asset.upper() == price_quote_asset.upper():
+            conversion_rate = 1.0
+        else:
+            rate = cfg.get("price_to_execution_rate")
+            if rate is None:
+                raise ValueError(
+                    "A price_to_execution_rate value is required when the price quote "
+                    "currency differs from the execution currency."
+                )
+            conversion_rate = float(rate)
+            if conversion_rate <= 0:
+                raise ValueError("price_to_execution_rate must be greater than zero.")
+    else:
+        conversion_rate = float(cfg.get("price_to_execution_rate") or 1.0)
+        if conversion_rate <= 0:
+            raise ValueError("price_to_execution_rate must be greater than zero.")
+
     account_balance = cfg.get("account_balance", 0.0)
     if isinstance(account_balance, str) and account_balance.lower() == "auto":
         balance_fetcher = get_balance_fetcher(execution_exchange)
@@ -586,21 +643,32 @@ def calculate_trade(
     else:
         stop_price = entry_price + stop_distance
 
-    net_per_unit_loss = stop_distance + fee_rate * (entry_price + stop_price)
-    if net_per_unit_loss <= 0:
+    entry_price_execution = entry_price * conversion_rate
+    stop_price_execution = stop_price * conversion_rate
+    stop_distance_execution = stop_distance * conversion_rate
+
+    net_per_unit_loss_execution = stop_distance_execution + fee_rate * (
+        entry_price_execution + stop_price_execution
+    )
+    if net_per_unit_loss_execution <= 0:
         raise ValueError("Net per unit loss must be greater than zero")
 
-    raw_qty = risk_amount / net_per_unit_loss
+    raw_qty = risk_amount / net_per_unit_loss_execution
     steps = max(1, round(raw_qty / qty_step))
     quantity = steps * qty_step
     if quantity < min_qty:
         raise ValueError(f"Quantity {quantity:.6f} below minimum {min_qty}")
 
-    actual_usdt = quantity * entry_price
+    position_notional_quote = quantity * entry_price
+    position_notional_execution = position_notional_quote * conversion_rate
 
-    entry_fee_stop = entry_price * quantity * fee_rate
-    exit_fee_stop = stop_price * quantity * fee_rate
-    actual_risk = quantity * stop_distance + entry_fee_stop + exit_fee_stop
+    entry_fee_stop_execution = entry_price_execution * quantity * fee_rate
+    exit_fee_stop_execution = stop_price_execution * quantity * fee_rate
+    actual_risk_execution = (
+        quantity * stop_distance_execution
+        + entry_fee_stop_execution
+        + exit_fee_stop_execution
+    )
 
     if cfg["direction"] == "long":
         target_base = entry_price + (stop_distance * cfg["rr_ratio"])
@@ -609,21 +677,30 @@ def calculate_trade(
 
     interest = 0.0
 
-    min_profit = actual_risk * cfg["rr_ratio"]
-    diff_required = (
-        min_profit + (2 * actual_usdt * fee_rate) + interest
+    min_profit_execution = actual_risk_execution * cfg["rr_ratio"]
+    diff_required_execution = (
+        min_profit_execution + (2 * position_notional_execution * fee_rate) + interest
     ) / (quantity * (1 - fee_rate))
+    diff_required = diff_required_execution / conversion_rate
     ticks = math.ceil(diff_required / tick_size)
     if cfg["direction"] == "long":
         target_price = entry_price + ticks * tick_size
     else:
         target_price = entry_price - ticks * tick_size
 
-    gross = abs(target_price - entry_price) * quantity
-    entry_fee = actual_usdt * fee_rate
-    exit_fee = abs(target_price) * quantity * fee_rate
+    target_price_execution = target_price * conversion_rate
+
+    gross_execution = abs(target_price_execution - entry_price_execution) * quantity
+    entry_fee = position_notional_execution * fee_rate
+    exit_fee = abs(target_price_execution) * quantity * fee_rate
     fees = entry_fee + exit_fee
-    net_profit = gross - fees - interest
+    net_profit = gross_execution - fees - interest
+
+    gross_quote = gross_execution / conversion_rate if conversion_rate else gross_execution
+    fees_quote = fees / conversion_rate if conversion_rate else fees
+    net_profit_quote = (
+        net_profit / conversion_rate if conversion_rate else net_profit
+    )
 
     _validate_tick_multiple(target_price - entry_price, tick_size, "Target distance")
 
@@ -641,24 +718,47 @@ def calculate_trade(
         "risk_percent": cfg["risk_percent"],
         "risk_amount": risk_amount,
         "entry_price": entry_price,
-        "position_usdt": actual_usdt,
+        "entry_price_execution": entry_price_execution,
+        "position_usdt": position_notional_quote,
+        "position_execution": position_notional_execution,
         "quantity": quantity,
         "quantity_step": qty_step,
         "min_quantity": min_qty,
         "stop_loss_ticks": cfg["stop_loss_ticks"],
         "stop_distance": stop_distance,
+        "stop_distance_execution": stop_distance_execution,
         "stop_price": stop_price,
+        "stop_price_execution": stop_price_execution,
         "target_price": target_price,
-        "gross_reward": gross,
+        "target_price_execution": target_price_execution,
+        "gross_reward": gross_execution,
+        "gross_reward_quote": gross_quote,
         "net_profit": net_profit,
+        "net_profit_quote": net_profit_quote,
         "fees": fees,
+        "fees_quote": fees_quote,
         "interest_cost": interest,
         "funding_rate": funding_rate,
-        "actual_risk": actual_risk,
+        "actual_risk": actual_risk_execution,
+        "actual_risk_quote": (
+            actual_risk_execution / conversion_rate
+            if conversion_rate
+            else actual_risk_execution
+        ),
         "rr_ratio": cfg["rr_ratio"],
-        "achieved_rr": net_profit / actual_risk if actual_risk else 0.0,
+        "achieved_rr": (
+            net_profit / actual_risk_execution if actual_risk_execution else 0.0
+        ),
         "trade_mode": trade_mode,
-        "per_unit_risk": net_per_unit_loss,
+        "per_unit_risk": net_per_unit_loss_execution,
+        "per_unit_risk_quote": (
+            net_per_unit_loss_execution / conversion_rate
+            if conversion_rate
+            else net_per_unit_loss_execution
+        ),
+        "price_quote_asset": price_quote_asset,
+        "execution_quote_asset": execution_quote_asset,
+        "price_to_execution_rate": conversion_rate,
     }
 
 
@@ -680,6 +780,19 @@ def format_trade(trade: Dict[str, Any]) -> str:
         trade.get("trade_mode", ""), trade.get("trade_mode", "")
     )
 
+    account_currency = trade.get("execution_quote_asset") or "USDT"
+    price_currency = trade.get("price_quote_asset") or account_currency
+    conversion_rate = trade.get("price_to_execution_rate", 1.0) or 1.0
+    entry_price_execution = trade.get("entry_price_execution")
+    stop_price_execution = trade.get("stop_price_execution")
+    target_price_execution = trade.get("target_price_execution")
+    stop_distance_execution = trade.get("stop_distance_execution")
+
+    try:
+        base_asset, _quote = _split_symbol(trade["symbol"])
+    except Exception:  # pragma: no cover - fallback for unexpected symbols
+        base_asset = trade["symbol"]
+
     lines = ["=" * 50]
     lines.append("              CRYPTO TRADE CALCULATOR")
     lines.append("=" * 50)
@@ -692,34 +805,111 @@ def format_trade(trade: Dict[str, Any]) -> str:
     lines.append(f"Execution:        {execution_label}")
     lines.append(f"Price Source:     {price_label}")
     lines.append(f"Price Mode:       {trade_mode_label}")
-    lines.append(f"Account Balance:  {trade['account_balance']:.2f} USDT")
+    lines.append(
+        f"Account Balance:  {trade['account_balance']:.2f} {account_currency}"
+    )
     lines.append(f"Risk Percent:     {trade['risk_percent']}%")
-    lines.append(f"Risk Amount:      {trade['risk_amount']:.6f} USDT")
-    lines.append(f"Entry Price:      {trade['entry_price']:.6f} USDT")
+    lines.append(
+        f"Risk Amount:      {trade['risk_amount']:.6f} {account_currency}"
+    )
+    lines.append(
+        f"Entry Price:      {trade['entry_price']:.6f} {price_currency}"
+    )
+    if (
+        entry_price_execution is not None
+        and (price_currency != account_currency or not math.isclose(conversion_rate, 1.0))
+    ):
+        lines.append(
+            f"Entry Price (exec): {entry_price_execution:.6f} {account_currency}"
+        )
     lines.append("")
     lines.append("                 POSITION DETAILS")
     lines.append("-" * 50)
-    lines.append(f"Position Size:     {trade['position_usdt']:.2f} USDT")
-    base_asset = trade['symbol'].replace('USDT', '')
+    position_exec = trade.get(
+        "position_execution",
+        trade["position_usdt"] * conversion_rate,
+    )
+    lines.append(
+        f"Position Size:     {position_exec:.2f} {account_currency}"
+    )
     lines.append(f"Quantity:          {trade['quantity']:.3f} {base_asset}")
     lines.append(f"Stop Loss Ticks:   {trade['stop_loss_ticks']}")
     target_distance = trade['target_price'] - trade['entry_price']
-    lines.append(f"Stop Distance:     {trade['stop_distance']:.6f} USDT")
-    lines.append(f"Target Distance:   {target_distance:.6f} USDT")
-    lines.append(f"Stop Price:        {trade['stop_price']:.6f} USDT")
-    lines.append(f"Target Price:      {trade['target_price']:.6f} USDT")
+    lines.append(
+        f"Stop Distance:     {trade['stop_distance']:.6f} {price_currency}"
+    )
+    if stop_distance_execution is not None and (
+        price_currency != account_currency or not math.isclose(conversion_rate, 1.0)
+    ):
+        lines.append(
+            f"Stop Distance (exec): {stop_distance_execution:.6f} {account_currency}"
+        )
+    lines.append(
+        f"Target Distance:   {target_distance:.6f} {price_currency}"
+    )
+    if price_currency != account_currency or not math.isclose(conversion_rate, 1.0):
+        target_distance_exec = target_distance * conversion_rate
+        lines.append(
+            f"Target Distance (exec): {target_distance_exec:.6f} {account_currency}"
+        )
+    lines.append(f"Stop Price:        {trade['stop_price']:.6f} {price_currency}")
+    if stop_price_execution is not None and (
+        price_currency != account_currency or not math.isclose(conversion_rate, 1.0)
+    ):
+        lines.append(
+            f"Stop Price (exec): {stop_price_execution:.6f} {account_currency}"
+        )
+    lines.append(f"Target Price:      {trade['target_price']:.6f} {price_currency}")
+    if target_price_execution is not None and (
+        price_currency != account_currency or not math.isclose(conversion_rate, 1.0)
+    ):
+        lines.append(
+            f"Target Price (exec): {target_price_execution:.6f} {account_currency}"
+        )
     lines.append("")
     lines.append("                 RISK/REWARD")
     lines.append("-" * 50)
-    lines.append(f"Gross Reward:     {trade['gross_reward']:.6f} USDT")
-    lines.append(f"Net Profit:       {trade['net_profit']:.6f} USDT")
-    lines.append(f"Actual Risk:      {trade['actual_risk']:.6f} USDT")
+    lines.append(
+        f"Gross Reward:     {trade['gross_reward']:.6f} {account_currency}"
+    )
+    if trade.get("gross_reward_quote") is not None and (
+        price_currency != account_currency or not math.isclose(conversion_rate, 1.0)
+    ):
+        lines.append(
+            f"Gross Reward (price): {trade['gross_reward_quote']:.6f} {price_currency}"
+        )
+    lines.append(
+        f"Net Profit:       {trade['net_profit']:.6f} {account_currency}"
+    )
+    if trade.get("net_profit_quote") is not None and (
+        price_currency != account_currency or not math.isclose(conversion_rate, 1.0)
+    ):
+        lines.append(
+            f"Net Profit (price): {trade['net_profit_quote']:.6f} {price_currency}"
+        )
+    lines.append(
+        f"Actual Risk:      {trade['actual_risk']:.6f} {account_currency}"
+    )
+    if trade.get("actual_risk_quote") is not None and (
+        price_currency != account_currency or not math.isclose(conversion_rate, 1.0)
+    ):
+        lines.append(
+            f"Actual Risk (price): {trade['actual_risk_quote']:.6f} {price_currency}"
+        )
     lines.append(f"Achieved RR:      {trade['achieved_rr']:.2f}x")
     lines.append("")
     lines.append("                 COST BREAKDOWN")
     lines.append("-" * 50)
-    lines.append(f"Fees:             {trade['fees']:.6f} USDT")
-    lines.append(f"Interest Cost:    {trade['interest_cost']:.6f} USDT")
+    lines.append(f"Fees:             {trade['fees']:.6f} {account_currency}")
+    if trade.get("fees_quote") is not None and (
+        price_currency != account_currency or not math.isclose(conversion_rate, 1.0)
+    ):
+        lines.append(
+            f"Fees (price):     {trade['fees_quote']:.6f} {price_currency}"
+        )
+    lines.append(
+        f"Interest Cost:    {trade['interest_cost']:.6f} {account_currency}"
+    )
     if trade.get("funding_rate") is not None:
         lines.append(f"Funding Rate:     {trade['funding_rate'] * 100:.4f}%")
     return "\n".join(lines)
