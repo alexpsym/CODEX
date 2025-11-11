@@ -152,16 +152,49 @@ def test_calculate_trade_coinspot_execution(monkeypatch):
         "trade_mode": "linear",
         "execution_exchange": "coinspot",
         "price_source": "bybit_linear",
+        "price_to_execution_rate": 1.5,
     }
 
     trade = calc.calculate_trade(config)
 
     assert trade["execution_exchange"] == "coinspot"
     assert trade["price_source"] == "bybit_linear"
+    assert trade["price_quote_asset"] == "USDT"
+    assert trade["execution_quote_asset"] == "AUD"
+    assert trade["entry_price_execution"] == pytest.approx(
+        trade["entry_price"] * config["price_to_execution_rate"]
+    )
     expected_fees = trade["quantity"] * (
-        trade["entry_price"] + trade["target_price"]
+        trade["entry_price_execution"] + trade["target_price_execution"]
     ) * calc.COINSPOT_MARKET_FEE_RATE
     assert trade["fees"] == pytest.approx(expected_fees)
+    assert trade["gross_reward_quote"] == pytest.approx(
+        trade["gross_reward"] / config["price_to_execution_rate"]
+    )
+    assert trade["actual_risk_quote"] == pytest.approx(
+        trade["actual_risk"] / config["price_to_execution_rate"]
+    )
+
+
+def test_coinspot_requires_conversion_rate(monkeypatch):
+    monkeypatch.setattr(calc.requests, "get", mock_get)
+    monkeypatch.setattr(calc, "fetch_coinspot_lot_info", lambda symbol: (0.1, 0.1))
+
+    config = {
+        "account_balance": 100,
+        "risk_percent": 1,
+        "rr_ratio": 2,
+        "order_type": "market",
+        "symbol": "TESTUSDT",
+        "stop_loss_ticks": 10,
+        "direction": "long",
+        "trade_mode": "linear",
+        "execution_exchange": "coinspot",
+        "price_source": "bybit_linear",
+    }
+
+    with pytest.raises(ValueError):
+        calc.calculate_trade(config)
 
 
 def test_web_form_includes_exchange_fields():
@@ -398,6 +431,7 @@ def test_calculate_trade_cross_exchange(monkeypatch):
         "trade_mode": "linear",
         "price_source": "bybit",
         "execution_exchange": "coinspot",
+        "price_to_execution_rate": 1.4,
     }
 
     trade = calc.calculate_trade(config)
@@ -409,11 +443,16 @@ def test_calculate_trade_cross_exchange(monkeypatch):
 
     fee_rate = 0.0025
     expected_fees = (
-        trade["entry_price"] * trade["quantity"] * fee_rate
-        + trade["target_price"] * trade["quantity"] * fee_rate
+        trade["entry_price_execution"] * trade["quantity"] * fee_rate
+        + trade["target_price_execution"] * trade["quantity"] * fee_rate
     )
     assert math.isclose(trade["fees"], expected_fees, rel_tol=1e-9)
     assert trade["funding_rate"] == 0.0001
+    assert math.isclose(
+        trade["net_profit"],
+        trade["net_profit_quote"] * config["price_to_execution_rate"],
+        rel_tol=1e-9,
+    )
 
 
 def test_open_in_edge_uses_registered_browser(monkeypatch):
