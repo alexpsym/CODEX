@@ -211,6 +211,7 @@ def test_web_form_includes_exchange_fields():
     assert 'value="bybit_spot"' in html
     assert 'value="coinspot_spot"' in html
     assert 'id="price_mode_note"' in html
+    assert 'name="price_to_execution_rate"' in html
 
 
 def test_web_post_uses_exchange_and_price_source(monkeypatch):
@@ -304,6 +305,58 @@ def test_save_webhook_json_buy(monkeypatch):
 
     assert payload["take_profit_price"] == expected_tp
     assert payload["stop_loss_price"] == expected_sl
+
+
+def test_web_coinspot_passes_conversion_rate(monkeypatch):
+    import cryptocalculator_web as web_app
+
+    client = web_app.app.test_client()
+    captured_config = {}
+
+    def fake_calculate_trade(config):
+        captured_config.clear()
+        captured_config.update(config)
+        return {
+            "entry_price": 100.0,
+            "stop_price": 95.0,
+            "target_price": 110.0,
+            "actual_risk": 5.0,
+            "stop_distance": 5.0,
+            "price_source": "bybit_linear",
+            "execution_exchange": "coinspot",
+            "trade_mode": "linear",
+        }
+
+    monkeypatch.setattr(web_app, "calculate_trade", fake_calculate_trade)
+    monkeypatch.setattr(web_app, "format_trade", lambda trade: "summary text")
+    monkeypatch.setattr(web_app, "build_webhook_payload", lambda trade: {"ok": True})
+
+    def fake_balance():
+        return 999.0
+
+    monkeypatch.setitem(web_app.BALANCE_ADAPTERS, "coinspot", fake_balance)
+
+    resp = client.post(
+        "/",
+        data={
+            "symbol": "BTCUSDT",
+            "direction": "long",
+            "order_type": "market",
+            "stop_loss_ticks": "10",
+            "risk_percent": "1",
+            "rr_ratio": "2",
+            "execution_exchange": "coinspot",
+            "price_source": "bybit_linear",
+            "price_to_execution_rate": "1.55",
+        },
+    )
+
+    assert resp.status_code == 200
+    assert captured_config["execution_exchange"] == "coinspot"
+    assert captured_config["price_source"] == "bybit_linear"
+    assert captured_config["account_balance"] == 999.0
+    assert captured_config["account_asset"] == "AUD"
+    assert captured_config["price_to_execution_rate"] == pytest.approx(1.55)
 
 
 def test_save_webhook_json_sell(monkeypatch):

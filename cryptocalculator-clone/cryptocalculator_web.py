@@ -115,6 +115,10 @@ FORM_HTML = """
         <label>Stop loss ticks: <input name="stop_loss_ticks" type="number" step="1" required></label><br>
         <label>Risk %: <input name="risk_percent" type="number" step="0.01" required></label><br>
         <label>Risk–reward ratio: <input name="rr_ratio" type="number" step="0.1" value="2" required></label><br>
+        <label>Price → Execution rate:
+          <input name="price_to_execution_rate" id="price_to_execution_rate" type="number" step="0.0001" min="0" value="{{ price_to_execution_rate }}" placeholder="e.g. 1.55">
+        </label><br>
+        <small>Use this when your price source is quoted in a different currency than your execution exchange.</small><br>
         <button type="submit">Calculate</button>
       </form>
     </div>
@@ -170,6 +174,7 @@ def index():
         price_source = DEFAULT_PRICE_SOURCE
 
     trade_mode = PRICE_SOURCES[price_source]["trade_mode"]
+    price_to_execution_rate = request.form.get("price_to_execution_rate", "").strip()
 
     if request.method == "POST":
         try:
@@ -193,6 +198,8 @@ def index():
                 "account_balance": "auto",
             }
             config["trade_mode"] = trade_mode
+            if price_to_execution_rate:
+                config["price_to_execution_rate"] = float(price_to_execution_rate)
             if order_type == "limit" and entry_price_raw:
                 config["entry_price"] = float(entry_price_raw)
 
@@ -202,6 +209,8 @@ def index():
                     f"Execution exchange '{execution_exchange}' is not supported."
                 )
             config["account_balance"] = balance_fetcher()
+            if execution_exchange == "coinspot":
+                config.setdefault("account_asset", "AUD")
 
             trade = calculate_trade(config)
             summary = format_trade(trade)
@@ -232,6 +241,7 @@ def index():
         execution_exchange=execution_exchange,
         price_source=price_source,
         trade_mode=trade_mode,
+        price_to_execution_rate=price_to_execution_rate,
         execution_options=sorted(EXECUTION_EXCHANGES.items()),
         price_source_options=sorted(PRICE_SOURCES.items()),
         price_mode_notes=PRICE_MODE_NOTES,

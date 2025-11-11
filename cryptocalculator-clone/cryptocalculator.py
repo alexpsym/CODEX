@@ -420,6 +420,15 @@ def _normalise_config(config: Dict[str, Any]) -> Dict[str, Any]:
         else:
             data["execution_quote_asset"] = data.get("price_quote_asset") or inferred_quote
 
+    account_asset = data.get("account_asset")
+    if account_asset:
+        data["account_asset"] = str(account_asset).upper()
+    else:
+        if execution_exchange == "coinspot":
+            data["account_asset"] = "AUD"
+        else:
+            data["account_asset"] = data["execution_quote_asset"] or "USDT"
+
     if data.get("price_to_execution_rate") is not None:
         data["price_to_execution_rate"] = float(data["price_to_execution_rate"])
 
@@ -486,7 +495,8 @@ def get_balance_fetcher(execution_exchange: str):
     """Return a callable used to fetch account balances for *execution_exchange*."""
 
     if execution_exchange == "coinspot":
-        def _fetch(asset: str = "USDT", **_kwargs: Any) -> float:
+
+        def _fetch(asset: str = "AUD", **_kwargs: Any) -> float:
             return fetch_coinspot_account_balance(asset)
 
         return _fetch
