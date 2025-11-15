@@ -125,9 +125,22 @@ def trade():
             "auto_trade": bool(form.get("auto_trade")),
         }
         buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            optionstrader.execute_trade_from_cfg(cfg)
-        return _page("<pre>" + buf.getvalue() + "</pre><a href='/'>Back</a>")
+        error = None
+        try:
+            with contextlib.redirect_stdout(buf):
+                optionstrader.execute_trade_from_cfg(cfg)
+        except Exception as exc:  # pragma: no cover - interactive error handling
+            error = exc
+            app.logger.exception("Trade execution failed")
+        output = buf.getvalue()
+        if error:
+            output += (
+                "\n\nERROR: "
+                + str(error)
+                + "\nProvide BYBIT_API_KEY/BYBIT_API_SECRET env vars or add "
+                "api_key/api_secret to the form's config fields."
+            )
+        return _page("<pre>" + output + "</pre><a href='/'>Back</a>")
     # GET request: load defaults and show form
     # Load the stored demo balance as the default displayed balance
     balance = optionstrader.DEMO_BALANCE
