@@ -606,23 +606,30 @@ def calculate_trade(
     )
     execution_quote_asset = cfg.get("execution_quote_asset") or price_quote_asset
 
-    if execution_quote_asset and price_quote_asset:
-        if execution_quote_asset.upper() == price_quote_asset.upper():
+    conversion_rate: Optional[float]
+    requires_conversion = False
+    if execution_quote_asset:
+        if price_quote_asset and execution_quote_asset.upper() == price_quote_asset.upper():
             conversion_rate = 1.0
         else:
-            rate = cfg.get("price_to_execution_rate")
-            if rate is None:
-                raise ValueError(
-                    "A price_to_execution_rate value is required when the price quote "
-                    "currency differs from the execution currency."
-                )
-            conversion_rate = float(rate)
-            if conversion_rate <= 0:
-                raise ValueError("price_to_execution_rate must be greater than zero.")
+            requires_conversion = True
     else:
         conversion_rate = float(cfg.get("price_to_execution_rate") or 1.0)
-        if conversion_rate <= 0:
-            raise ValueError("price_to_execution_rate must be greater than zero.")
+
+    if requires_conversion:
+        rate = cfg.get("price_to_execution_rate")
+        if rate is None:
+            raise ValueError(
+                "A price_to_execution_rate value is required when the execution currency "
+                "is known and differs from or cannot be matched to the price quote currency."
+            )
+        conversion_rate = float(rate)
+
+    if conversion_rate is None:
+        conversion_rate = 1.0
+
+    if conversion_rate <= 0:
+        raise ValueError("price_to_execution_rate must be greater than zero.")
 
     account_balance = cfg.get("account_balance", 0.0)
     if isinstance(account_balance, str) and account_balance.lower() == "auto":
