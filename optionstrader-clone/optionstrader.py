@@ -18,6 +18,7 @@ import traceback
 import uuid
 from datetime import datetime, timezone
 from datetime import timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 from urllib.parse import urlencode
 import hmac
@@ -28,23 +29,17 @@ from tabulate import tabulate
 import csv
 from decimal import Decimal, ROUND_HALF_UP
 
-# === Configuration ===
-API_KEY = os.getenv("BYBIT_API_KEY", "")
-API_SECRET = os.getenv("BYBIT_API_SECRET", "")
-BASE_URL = "https://api-demo.bybit.com"
-RECV_WINDOW = "5000"
-SUB_ACCOUNT_NAME = ""
-MIN_BALANCE_THRESHOLD = 10.0
-DEMO_BALANCE = float(os.getenv("DEMO_BALANCE", 0.0))
+from env_loader import load_optionstrader_env
 
 # === File setup ===
-script_dir = os.path.dirname(os.path.abspath(__file__))
+script_dir_path = Path(__file__).resolve().parent
+script_dir = str(script_dir_path)
 # Location for per-trade log files requested by the user
 TRADE_LOG_DIR = os.path.expanduser(r"C:\Users\User\Downloads")
 # Log runtime details to a clear, descriptive file name
-log_file = os.path.join(script_dir, 'optionstrader.log')
+log_file = script_dir_path / 'optionstrader.log'
 # Store trade-specific information separately
-output_file = os.path.join(script_dir, 'trade_output.txt')
+output_file = script_dir_path / 'trade_output.txt'
 
 # === Logging configuration ===
 logger = logging.getLogger('main')
@@ -58,6 +53,18 @@ logger.addHandler(fh)
 logger.addHandler(ch)
 logger.propagate = False
 logger.info("Starting optionstrader.py; logs to %s, output to %s", log_file, output_file)
+
+# Load secrets from removable-drive .env files before reading them
+LOADED_ENV_FILES = load_optionstrader_env(script_dir_path, logger)
+
+# === Configuration ===
+API_KEY = os.getenv("BYBIT_API_KEY", "")
+API_SECRET = os.getenv("BYBIT_API_SECRET", "")
+BASE_URL = "https://api-demo.bybit.com"
+RECV_WINDOW = "5000"
+SUB_ACCOUNT_NAME = ""
+MIN_BALANCE_THRESHOLD = 10.0
+DEMO_BALANCE = float(os.getenv("DEMO_BALANCE", 0.0))
 
 def print_and_write(lines):
     """Print to console and write to output file."""

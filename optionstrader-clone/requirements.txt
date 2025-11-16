@@ -3,3 +3,4 @@ requests
 tabulate
 waitress
 openpyxl
+python-dotenv
