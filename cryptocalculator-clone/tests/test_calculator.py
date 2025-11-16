@@ -197,6 +197,27 @@ def test_coinspot_requires_conversion_rate(monkeypatch):
         calc.calculate_trade(config)
 
 
+def test_coinspot_requires_rate_when_quote_unknown(monkeypatch):
+    monkeypatch.setattr(calc.requests, "get", mock_get)
+    monkeypatch.setattr(calc, "fetch_coinspot_lot_info", lambda symbol: (0.1, 0.1))
+
+    config = {
+        "account_balance": 100,
+        "risk_percent": 1,
+        "rr_ratio": 2,
+        "order_type": "market",
+        "symbol": "BTCUSDC",
+        "stop_loss_ticks": 10,
+        "direction": "long",
+        "trade_mode": "linear",
+        "execution_exchange": "coinspot",
+        "price_source": "bybit_linear",
+    }
+
+    with pytest.raises(ValueError):
+        calc.calculate_trade(config)
+
+
 def test_web_form_includes_exchange_fields():
     import cryptocalculator_web as web_app
 
