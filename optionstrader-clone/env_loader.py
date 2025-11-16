@@ -54,7 +54,9 @@ def load_optionstrader_env(script_dir: Path, logger: Optional[object] = None) ->
             continue
         seen.add(key)
         if candidate.exists():
-            if load_dotenv(candidate, override=True):
+            # ``override=False`` so earlier, higher-priority files keep their values
+            # even if later files are also loaded.
+            if load_dotenv(candidate, override=False):
                 loaded.append(str(candidate))
                 if logger:
                     logger.info("Loaded environment variables from %s", candidate)
