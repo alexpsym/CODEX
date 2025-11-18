@@ -8,14 +8,52 @@ requiring the command line script.
 from __future__ import annotations
 
 import os
+
+from dotenv import load_dotenv
+from pathlib import Path
+
+# Load environment variables from a dedicated OANDA env file so the calculator
+# picks up credentials without requiring them to be exported in the shell. The
+# path can be overridden with the OANDA_ENV_FILE environment variable—for
+# example ``OANDA_ENV_FILE=E:\\ENV\\oanda.env`` on Windows.
+ENV_PATH = Path(os.getenv("OANDA_ENV_FILE", "oanda.env"))
+# Always override any previously-exported placeholders so the values from
+# the selected env file (for example, ``E:\\ENV\\oanda.env``) take
+# precedence when the web app is reloaded.
+load_dotenv(ENV_PATH, override=True)
 from typing import Any, Dict
 import requests
 
-# Allow overriding the OANDA API base URL via an environment variable.
-BASE_URL = os.getenv("OANDA_BASE_URL", "https://api-fxtrade.oanda.com/v3")
-# Support a legacy variable name for backwards compatibility.
-API_KEY = os.getenv("OANDA_API_KEY") or os.getenv("OANDA_TOKEN")
-ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID")
+
+def _base_url() -> str:
+    """Return the configured API base URL with a sensible default."""
+
+    return os.getenv("OANDA_BASE_URL", "https://api-fxtrade.oanda.com/v3")
+
+
+def _api_key() -> str:
+    """Return the API token or raise an informative error."""
+
+    value = os.getenv("OANDA_API_KEY") or os.getenv("OANDA_TOKEN")
+    if not value or value.strip().upper() in {"YOUR_OANDA_API_KEY", "YOUR_OANDA_TOKEN"}:
+        raise OandaAPIError(
+            "OANDA_API_KEY is missing. Add it to "
+            f"{ENV_PATH.resolve()} or export it in your shell."
+        )
+    return value.strip()
+
+
+def _account_id() -> str:
+    """Return the account ID or raise an informative error."""
+
+    value = os.getenv("OANDA_ACCOUNT_ID")
+    if not value or value.strip().upper() == "YOUR_OANDA_ACCOUNT_ID":
+        raise OandaAPIError(
+            "OANDA_ACCOUNT_ID is missing or still set to the placeholder. "
+            "Update your oanda.env file (or the path in OANDA_ENV_FILE) with the "
+            "live or practice account number shown in your OANDA dashboard."
+        )
+    return value.strip()
 
 
 class OandaAPIError(Exception):
@@ -24,10 +62,9 @@ class OandaAPIError(Exception):
 
 def _request(method: str, endpoint: str, **kwargs: Any) -> Dict[str, Any]:
     """Send an HTTP request to the OANDA API and return the parsed JSON."""
-    if not API_KEY:
-        raise OandaAPIError("OANDA_API_KEY environment variable not set")
-    url = f"{BASE_URL}{endpoint}"
-    headers = {"Authorization": f"Bearer {API_KEY}"}
+    api_key = _api_key()
+    url = f"{_base_url()}{endpoint}"
+    headers = {"Authorization": f"Bearer {api_key}"}
     resp = requests.request(method, url, headers=headers, **kwargs)
     if not resp.ok:
         raise OandaAPIError(
@@ -38,14 +75,16 @@ def _request(method: str, endpoint: str, **kwargs: Any) -> Dict[str, Any]:
 
 def get_account_details() -> Dict[str, Any]:
     """Return details for the configured account."""
-    return _request("GET", f"/accounts/{ACCOUNT_ID}")
+    account_id = _account_id()
+    return _request("GET", f"/accounts/{account_id}")
 
 
 def get_instrument_details(instrument: str) -> Dict[str, Any]:
     """Return metadata for a trading instrument."""
+    account_id = _account_id()
     data = _request(
         "GET",
-        f"/accounts/{ACCOUNT_ID}/instruments?instruments={instrument}",
+        f"/accounts/{account_id}/instruments?instruments={instrument}",
     )
     instruments = data.get("instruments", [])
     if not instruments:
@@ -55,14 +94,16 @@ def get_instrument_details(instrument: str) -> Dict[str, Any]:
 
 def get_available_instruments() -> set[str]:
     """Return the set of tradable instruments for the account."""
-    data = _request("GET", f"/accounts/{ACCOUNT_ID}/instruments")
+    account_id = _account_id()
+    data = _request("GET", f"/accounts/{account_id}/instruments")
     return {inst["name"] for inst in data.get("instruments", [])}
 
 
 def get_price(instrument: str) -> float:
     """Return the current midpoint price for ``instrument``."""
+    account_id = _account_id()
     data = _request(
-        "GET", f"/accounts/{ACCOUNT_ID}/pricing?instruments={instrument}"
+        "GET", f"/accounts/{account_id}/pricing?instruments={instrument}"
     )
     prices = data.get("prices", [])
     if not prices:
