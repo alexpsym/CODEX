@@ -8,6 +8,12 @@ requiring the command line script.
 from __future__ import annotations
 
 import os
+
+from dotenv import load_dotenv
+
+# Load environment variables from a local .env file so the calculator picks up
+# credentials without requiring them to be exported in the shell.
+load_dotenv()
 from typing import Any, Dict
 import requests
 
