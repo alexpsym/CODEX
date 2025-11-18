@@ -9,15 +9,20 @@ from __future__ import annotations
 
 import os
 
-from dotenv import load_dotenv
 from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - optional dependency
+    load_dotenv = None
 
 # Load environment variables from a dedicated OANDA env file so the calculator
 # picks up credentials without requiring them to be exported in the shell. The
 # path can be overridden with the OANDA_ENV_FILE environment variable—for
 # example ``OANDA_ENV_FILE=E:\\ENV\\oanda.env`` on Windows.
 ENV_PATH = Path(os.getenv("OANDA_ENV_FILE", "oanda.env"))
-load_dotenv(ENV_PATH)
+if load_dotenv:
+    load_dotenv(ENV_PATH)
 from typing import Any, Dict
 import requests
 
