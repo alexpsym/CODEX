@@ -36,6 +36,15 @@ loads it and reads `OANDA_API_KEY`, `OANDA_ACCOUNT_ID`, and optional
 Windows). You can still export the variables in your shell instead if you
 prefer.
 
+### Where to place your account ID
+
+Set your account number in `OANDA_ACCOUNT_ID` inside `oanda.env` (or in the
+file pointed to by `OANDA_ENV_FILE`). OANDA shows this number—typically in the
+format `001-001-1234567-001`—in the trading dashboard under **Account Summary**.
+If the calculator cannot find a real account ID (for example, if the placeholder
+value is left untouched), it raises a clear error instead of making an API call
+that fails with `invalid value specified for 'accountID'`.
+
 The launcher requires Microsoft Edge to be installed and available to Python's
 `webbrowser` module; it raises an error if Edge cannot be started. When you run
 `oanda_calculator_web.py`, the app is served by the Waitress WSGI server on
