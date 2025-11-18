@@ -33,8 +33,9 @@ loads it and reads `OANDA_API_KEY`, `OANDA_ACCOUNT_ID`, and optional
 `OANDA_BASE_URL` values (for example, switching to the practice API at
 `https://api-fxpractice.oanda.com/v3`). To store the env file elsewhere, set
 `OANDA_ENV_FILE` to its full path (e.g. `OANDA_ENV_FILE=E:\ENV\oanda.env` on
-Windows). You can still export the variables in your shell instead if you
-prefer.
+Windows). Values from this env file override any previously exported
+`OANDA_*` variables so stale placeholders do not mask your real credentials.
+You can still export the variables in your shell instead if you prefer.
 
 ### Where to place your account ID
 

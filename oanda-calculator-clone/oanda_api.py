@@ -17,7 +17,10 @@ from pathlib import Path
 # path can be overridden with the OANDA_ENV_FILE environment variable—for
 # example ``OANDA_ENV_FILE=E:\\ENV\\oanda.env`` on Windows.
 ENV_PATH = Path(os.getenv("OANDA_ENV_FILE", "oanda.env"))
-load_dotenv(ENV_PATH)
+# Always override any previously-exported placeholders so the values from
+# the selected env file (for example, ``E:\\ENV\\oanda.env``) take
+# precedence when the web app is reloaded.
+load_dotenv(ENV_PATH, override=True)
 from typing import Any, Dict
 import requests
 
