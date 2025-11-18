@@ -8,16 +8,24 @@ requiring the command line script.
 from __future__ import annotations
 
 import os
-
-from dotenv import load_dotenv
 from pathlib import Path
+from typing import Any, Dict
+
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:
+    load_dotenv = None
+
+ENV_PATH = Path(os.getenv("OANDA_ENV_FILE", "oanda.env"))
 
 # Load environment variables from a dedicated OANDA env file so the calculator
 # picks up credentials without requiring them to be exported in the shell. The
 # path can be overridden with the OANDA_ENV_FILE environment variable—for
-# example ``OANDA_ENV_FILE=E:\\ENV\\oanda.env`` on Windows.
-load_dotenv(Path(os.getenv("OANDA_ENV_FILE", "oanda.env")))
-from typing import Any, Dict
+# example ``OANDA_ENV_FILE=E:\\ENV\\oanda.env`` on Windows. If python-dotenv
+# is unavailable, skip loading so the package remains usable when env vars are
+# already set in the environment.
+if load_dotenv:
+    load_dotenv(ENV_PATH)
 import requests
 
 # Allow overriding the OANDA API base URL via an environment variable.
