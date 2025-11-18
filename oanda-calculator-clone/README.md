@@ -6,7 +6,7 @@ This repository contains a small command line tool for calculating the number of
 - Python 3
 - The `requests` package (`pip install requests`)
 - The `python-dotenv` package if you want credentials loaded automatically
-  from a local `.env` file (`pip install python-dotenv`)
+  from a local `oanda.env` file (`pip install python-dotenv`)
 - Environment variables `OANDA_API_KEY` and `OANDA_ACCOUNT_ID` set to your API token and account ID.
 - Optionally, `OANDA_BASE_URL` can override the API base URL (defaults to the live trading endpoint).
 
@@ -28,11 +28,13 @@ pip install flask requests waitress
 python oanda_calculator_web.py
 ```
 
-If a `.env` file exists in the same directory, the app automatically loads it
-and reads `OANDA_API_KEY`, `OANDA_ACCOUNT_ID`, and optional `OANDA_BASE_URL`
-values (for example, switching to the practice API at
-`https://api-fxpractice.oanda.com/v3`). You can still export the variables in
-your shell instead if you prefer.
+If an `oanda.env` file exists in the same directory, the app automatically
+loads it and reads `OANDA_API_KEY`, `OANDA_ACCOUNT_ID`, and optional
+`OANDA_BASE_URL` values (for example, switching to the practice API at
+`https://api-fxpractice.oanda.com/v3`). To store the env file elsewhere, set
+`OANDA_ENV_FILE` to its full path (e.g. `OANDA_ENV_FILE=E:\ENV\oanda.env` on
+Windows). You can still export the variables in your shell instead if you
+prefer.
 
 The launcher requires Microsoft Edge to be installed and available to Python's
 `webbrowser` module; it raises an error if Edge cannot be started. When you run
