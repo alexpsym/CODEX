@@ -21,10 +21,17 @@ from pathlib import Path
 # behaviour when launching the web app from elsewhere in the repository.
 MODULE_PATH = Path(__file__).resolve()
 MODULE_DIR = MODULE_PATH.parent
-# The project's ``oanda.env`` file now lives in ``E:\\ENV\\oanda.env``. Use
-# that as the default so Windows users launching the calculator from anywhere
-# still load the credentials without relying on the repo layout.
-DEFAULT_ENV_PATH = Path("E:/ENV/oanda.env")
+# The project's ``oanda.env`` file now lives in ``E:\\ENV\\oanda.env`` for the
+# Windows deployment, but macOS/Linux environments (including automated tests)
+# still expect to fall back to the repo's bundled ``oanda.env``. Prefer the
+# Windows path when running on Windows and the file exists; otherwise use the
+# module-relative file so local development and CI work out of the box.
+WINDOWS_ENV_PATH = Path("E:/ENV/oanda.env")
+MODULE_ENV_PATH = MODULE_DIR / "oanda.env"
+if os.name == "nt" and WINDOWS_ENV_PATH.exists():
+    DEFAULT_ENV_PATH = WINDOWS_ENV_PATH
+else:
+    DEFAULT_ENV_PATH = MODULE_ENV_PATH
 
 custom_env = os.getenv("OANDA_ENV_FILE")
 if custom_env:
