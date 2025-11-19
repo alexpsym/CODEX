@@ -21,7 +21,10 @@ from pathlib import Path
 # behaviour when launching the web app from elsewhere in the repository.
 MODULE_PATH = Path(__file__).resolve()
 MODULE_DIR = MODULE_PATH.parent
-DEFAULT_ENV_PATH = MODULE_PATH.with_name("oanda.env")
+# The project's ``oanda.env`` file now lives in ``E:\\ENV\\oanda.env``. Use
+# that as the default so Windows users launching the calculator from anywhere
+# still load the credentials without relying on the repo layout.
+DEFAULT_ENV_PATH = Path("E:/ENV/oanda.env")
 
 custom_env = os.getenv("OANDA_ENV_FILE")
 if custom_env:
