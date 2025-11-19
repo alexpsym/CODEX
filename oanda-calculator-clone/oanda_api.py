@@ -41,10 +41,28 @@ if custom_env:
     ENV_PATH = resolved_env
 else:
     ENV_PATH = DEFAULT_ENV_PATH
-# Always override any previously-exported placeholders so the values from
-# the selected env file (for example, ``E:\\ENV\\oanda.env``) take
-# precedence when the web app is reloaded.
-load_dotenv(ENV_PATH, override=True)
+
+
+def _is_placeholder(value: str | None, placeholders: set[str]) -> bool:
+    """Return True when ``value`` matches a known placeholder token."""
+
+    return bool(value) and value.strip().upper() in {p.upper() for p in placeholders}
+
+
+# Only override pre-existing environment variables when they are placeholders
+# (e.g., left over from a previous load) or when the caller explicitly points to
+# a custom env file. This prevents the default ``oanda.env`` with placeholder
+# credentials from clobbering real values already exported in the shell.
+should_override = bool(custom_env)
+existing_api_token = os.getenv("OANDA_API_KEY") or os.getenv("OANDA_TOKEN")
+existing_account_id = os.getenv("OANDA_ACCOUNT_ID")
+
+if _is_placeholder(existing_api_token, {"YOUR_OANDA_API_KEY", "YOUR_OANDA_TOKEN"}):
+    should_override = True
+if _is_placeholder(existing_account_id, {"YOUR_OANDA_ACCOUNT_ID"}):
+    should_override = True
+
+load_dotenv(ENV_PATH, override=should_override)
 from typing import Any, Dict
 import requests
 
