@@ -488,7 +488,7 @@ def extract_timesheet_entries(
     pending_force_counts: Optional[bool] = None
     pending_shift_hold = False
     recorded_counts: Dict[date, bool] = {}
-    seen_entries: Dict[date, Set[Tuple[str, Decimal]]] = {}
+    seen_entries: Dict[date, Set[Tuple[str, Decimal, str]]] = {}
 
     for line in lines:
         dt = parse_timesheet_date(line, pay_period)
@@ -530,6 +530,7 @@ def extract_timesheet_entries(
 
             raw_prefix = pending_label if pending_label else label
             raw_text = f"{raw_prefix}: {line}" if pending_label else line
+            raw_key = clean(raw_text).lower()
 
             if (
                 pending_shift_hold
@@ -539,7 +540,7 @@ def extract_timesheet_entries(
             ):
                 counts = False
 
-            key = (label.lower(), hours)
+            key = (label.lower(), hours, raw_key)
             if key not in seen_entries[current]:
                 entries[current].append(
                     TimesheetEntry(hours=hours, label=label, counts=counts, raw=raw_text)
