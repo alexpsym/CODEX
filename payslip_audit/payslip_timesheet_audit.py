@@ -38,6 +38,7 @@ TIMESHEET_DATE_PATTERNS = [
     ),
 ]
 SHIFT_TOTAL_RE = re.compile(r"Shift\s+Total", re.IGNORECASE)
+DURATION_ONLY_RE = re.compile(r"^[;:.,\-\s]*\d+\s*h\s*\d+\s*m\b", re.IGNORECASE)
 TIMESHEET_KEYWORD_RE = re.compile(
     r"(total|hours|worked|shift|ordinary|overtime|penalty|allowance)", re.IGNORECASE
 )
@@ -62,9 +63,6 @@ DATE_FORMATS = [
 # File discovery patterns
 PAYSLIP_GLOB = "*.pdf"
 TIMESHEET_GLOBS = ("*.jpg", "*.jpeg", "*.png")
-
-SHIFT_BREAK_THRESHOLD = Decimal("0.75")
-
 
 @dataclass
 class PayslipItem:
@@ -480,31 +478,23 @@ def parse_payslip(path: Path) -> PayslipData:
 # ---------------------------------------------------------------------------
 
 def extract_timesheet_entries(
-    text: str, pay_period: Tuple[date, date], entries: Dict[date, List[TimesheetEntry]]
+    text: str,
+    pay_period: Tuple[date, date],
+    best_totals: Dict[date, Tuple[Tuple[bool, Decimal], TimesheetEntry]],
+    seen_totals: Dict[date, Set[str]],
 ) -> None:
     lines = [clean(line) for line in text.splitlines() if clean(line)]
     current: Optional[date] = None
-    pending_label: Optional[str] = None
-    pending_force_counts: Optional[bool] = None
-    pending_shift_hold = False
-    recorded_counts: Dict[date, bool] = {}
 
     for line in lines:
         dt = parse_timesheet_date(line, pay_period)
         if dt is not None:
             current = dt
-            entries.setdefault(dt, [])
-            recorded_counts.setdefault(dt, False)
-            pending_label = None
-            pending_force_counts = None
-            pending_shift_hold = False
+            seen_totals.setdefault(dt, set())
             continue
 
         if any(pattern.match(line) for pattern in TIMESHEET_DATE_PATTERNS):
             current = None
-            pending_label = None
-            pending_force_counts = None
-            pending_shift_hold = False
             continue
 
         if current is None:
@@ -512,89 +502,42 @@ def extract_timesheet_entries(
 
         low = line.lower()
         if low.startswith("lunch break") or low.startswith("unpaid break"):
-            pending_label = None
-            pending_force_counts = None
-            pending_shift_hold = False
             continue
 
         if SHIFT_TOTAL_RE.search(line):
-            hours = parse_hours(line)
-            if hours > 0:
-                label_text = "Shift Total"
-                raw_text = line
-                counts = hours >= SHIFT_BREAK_THRESHOLD
-                entries[current].append(
-                    TimesheetEntry(hours=hours, label=label_text, counts=counts, raw=raw_text)
-                )
-                if counts:
-                    recorded_counts[current] = True
-                    pending_label = None
-                    pending_force_counts = None
-                    pending_shift_hold = False
-                else:
-                    pending_label = "Shift Total"
-                    pending_force_counts = True
-                    pending_shift_hold = True
-            else:
-                pending_label = "Shift Total"
-                pending_force_counts = True
-                pending_shift_hold = True
             continue
 
         hours = parse_hours(line)
-        if hours > 0:
-            label = pending_label or line
-            keyword_match = TIMESHEET_KEYWORD_RE.search(label) or TIMESHEET_KEYWORD_RE.search(line)
-            counts = bool(keyword_match) or not recorded_counts.get(current, False)
+        if hours <= 0:
+            continue
 
-            if pending_force_counts is not None:
-                counts = pending_force_counts
+        normalized = SPACE_RE.sub(" ", line.lower()).strip()
+        key = f"{fmt_hours(hours)}|{normalized}"
+        if key in seen_totals[current]:
+            continue
 
-            raw_prefix = pending_label if pending_label else label
-            raw_text = f"{raw_prefix}: {line}" if pending_label else line
+        has_total_keyword = bool(re.search(r"\btotal\b", line, re.IGNORECASE))
+        score = (has_total_keyword, hours)
 
-            if (
-                pending_shift_hold
-                and label.lower().startswith("shift total")
-                and counts
-                and hours < SHIFT_BREAK_THRESHOLD
-            ):
-                counts = False
+        entry = TimesheetEntry(hours=hours, label="Day Total", counts=True, raw=line)
+        existing = best_totals.get(current)
+        if existing is None or score > existing[0]:
+            best_totals[current] = (score, entry)
 
-            entries[current].append(
-                TimesheetEntry(hours=hours, label=label, counts=counts, raw=raw_text)
-            )
-            if counts:
-                recorded_counts[current] = True
-
-            if pending_shift_hold and not counts:
-                pending_force_counts = True
-                pending_label = "Shift Total"
-                pending_shift_hold = True
-            else:
-                pending_label = None
-                pending_force_counts = None
-                pending_shift_hold = False
-        else:
-            if TIMESHEET_KEYWORD_RE.search(line):
-                pending_label = line
-                pending_force_counts = None
-                pending_shift_hold = False
-            else:
-                pending_label = None
-                pending_force_counts = None
-                pending_shift_hold = False
-
-    if current is not None:
-        entries.setdefault(current, [])
+        seen_totals[current].add(key)
 
 
 def parse_timesheets(paths: Iterable[Path], pay_period: Tuple[date, date]) -> Dict[date, List[TimesheetEntry]]:
-    entries: Dict[date, List[TimesheetEntry]] = {}
+    best_totals: Dict[date, Tuple[Tuple[bool, Decimal], TimesheetEntry]] = {}
+    seen_totals: Dict[date, Set[str]] = {}
     for path in paths:
         image = Image.open(path).convert("L")
         text = pytesseract.image_to_string(image, lang="eng", config="--psm 6")
-        extract_timesheet_entries(text, pay_period, entries)
+        extract_timesheet_entries(text, pay_period, best_totals, seen_totals)
+
+    entries: Dict[date, List[TimesheetEntry]] = {}
+    for dt, (_, entry) in best_totals.items():
+        entries[dt] = [entry]
     return entries
 
 
@@ -708,12 +651,11 @@ def summarise_timesheet(entries: Dict[date, List[TimesheetEntry]], aggregated_la
             logs = entries[dt]
             daily_total = Decimal("0")
             for entry in logs:
+                if not entry.counts:
+                    continue
                 formatted = _format_detail(dt.strftime("%Y-%m-%d"), entry, include_date=True)
-                if entry.counts:
-                    daily_total += entry.hours
-                    details.append(formatted)
-                else:
-                    details.append(f"{formatted} (ignored)")
+                daily_total += entry.hours
+                details.append(formatted)
             total += daily_total
         return {aggregated_label: {"hours": total, "details": details}}
 
@@ -722,12 +664,11 @@ def summarise_timesheet(entries: Dict[date, List[TimesheetEntry]], aggregated_la
         total = Decimal("0")
         details: List[str] = []
         for entry in logs:
+            if not entry.counts:
+                continue
             formatted = _format_detail("", entry)
-            if entry.counts:
-                total += entry.hours
-                details.append(formatted)
-            else:
-                details.append(f"{formatted} (ignored)")
+            total += entry.hours
+            details.append(formatted)
         totals[dt] = {"hours": total, "details": details}
     return totals
 
