@@ -532,6 +532,7 @@ def extract_timesheet_entries(
 
             raw_prefix = pending_label if pending_label else label
             raw_text = f"{raw_prefix}: {line}" if pending_label else line
+            raw_key = clean(raw_text).lower()
 
             normalized_raw = SPACE_RE.sub(" ", raw_text.lower()).strip()
 
