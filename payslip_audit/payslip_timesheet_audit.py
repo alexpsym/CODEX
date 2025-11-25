@@ -480,14 +480,17 @@ def parse_payslip(path: Path) -> PayslipData:
 # ---------------------------------------------------------------------------
 
 def extract_timesheet_entries(
-    text: str, pay_period: Tuple[date, date], entries: Dict[date, List[TimesheetEntry]]
+    text: str,
+    pay_period: Tuple[date, date],
+    entries: Dict[date, List[TimesheetEntry]],
+    seen_entries: Dict[date, Set[str]],
+    recorded_counts: Dict[date, bool],
 ) -> None:
     lines = [clean(line) for line in text.splitlines() if clean(line)]
     current: Optional[date] = None
     pending_label: Optional[str] = None
     pending_force_counts: Optional[bool] = None
     pending_shift_hold = False
-    recorded_counts: Dict[date, bool] = {}
 
     for line in lines:
         dt = parse_timesheet_date(line, pay_period)
@@ -495,6 +498,7 @@ def extract_timesheet_entries(
             current = dt
             entries.setdefault(dt, [])
             recorded_counts.setdefault(dt, False)
+            seen_entries.setdefault(dt, set())
             pending_label = None
             pending_force_counts = None
             pending_shift_hold = False
@@ -517,33 +521,9 @@ def extract_timesheet_entries(
             pending_shift_hold = False
             continue
 
-        if SHIFT_TOTAL_RE.search(line):
-            hours = parse_hours(line)
-            if hours > 0:
-                label_text = "Shift Total"
-                raw_text = line
-                counts = hours >= SHIFT_BREAK_THRESHOLD
-                entries[current].append(
-                    TimesheetEntry(hours=hours, label=label_text, counts=counts, raw=raw_text)
-                )
-                if counts:
-                    recorded_counts[current] = True
-                    pending_label = None
-                    pending_force_counts = None
-                    pending_shift_hold = False
-                else:
-                    pending_label = "Shift Total"
-                    pending_force_counts = True
-                    pending_shift_hold = True
-            else:
-                pending_label = "Shift Total"
-                pending_force_counts = True
-                pending_shift_hold = True
-            continue
-
         hours = parse_hours(line)
         if hours > 0:
-            label = pending_label or line
+            label = "Shift Total" if SHIFT_TOTAL_RE.search(line) else (pending_label or line)
             keyword_match = TIMESHEET_KEYWORD_RE.search(label) or TIMESHEET_KEYWORD_RE.search(line)
             counts = bool(keyword_match) or not recorded_counts.get(current, False)
 
@@ -553,6 +533,14 @@ def extract_timesheet_entries(
             raw_prefix = pending_label if pending_label else label
             raw_text = f"{raw_prefix}: {line}" if pending_label else line
 
+            normalized_raw = SPACE_RE.sub(" ", raw_text.lower()).strip()
+
+            if label.lower().startswith("shift total") and hours < SHIFT_BREAK_THRESHOLD:
+                pending_label = None
+                pending_force_counts = None
+                pending_shift_hold = False
+                continue
+
             if (
                 pending_shift_hold
                 and label.lower().startswith("shift total")
@@ -561,9 +549,12 @@ def extract_timesheet_entries(
             ):
                 counts = False
 
-            entries[current].append(
-                TimesheetEntry(hours=hours, label=label, counts=counts, raw=raw_text)
-            )
+            key = f"{label.lower()}|{fmt_hours(hours)}|{normalized_raw}"
+            if key not in seen_entries[current]:
+                entries[current].append(
+                    TimesheetEntry(hours=hours, label=label, counts=counts, raw=raw_text)
+                )
+                seen_entries[current].add(key)
             if counts:
                 recorded_counts[current] = True
 
@@ -591,10 +582,12 @@ def extract_timesheet_entries(
 
 def parse_timesheets(paths: Iterable[Path], pay_period: Tuple[date, date]) -> Dict[date, List[TimesheetEntry]]:
     entries: Dict[date, List[TimesheetEntry]] = {}
+    seen_entries: Dict[date, Set[str]] = {}
+    recorded_counts: Dict[date, bool] = {}
     for path in paths:
         image = Image.open(path).convert("L")
         text = pytesseract.image_to_string(image, lang="eng", config="--psm 6")
-        extract_timesheet_entries(text, pay_period, entries)
+        extract_timesheet_entries(text, pay_period, entries, seen_entries, recorded_counts)
     return entries
 
 
@@ -708,12 +701,11 @@ def summarise_timesheet(entries: Dict[date, List[TimesheetEntry]], aggregated_la
             logs = entries[dt]
             daily_total = Decimal("0")
             for entry in logs:
+                if not entry.counts:
+                    continue
                 formatted = _format_detail(dt.strftime("%Y-%m-%d"), entry, include_date=True)
-                if entry.counts:
-                    daily_total += entry.hours
-                    details.append(formatted)
-                else:
-                    details.append(f"{formatted} (ignored)")
+                daily_total += entry.hours
+                details.append(formatted)
             total += daily_total
         return {aggregated_label: {"hours": total, "details": details}}
 
@@ -722,12 +714,11 @@ def summarise_timesheet(entries: Dict[date, List[TimesheetEntry]], aggregated_la
         total = Decimal("0")
         details: List[str] = []
         for entry in logs:
+            if not entry.counts:
+                continue
             formatted = _format_detail("", entry)
-            if entry.counts:
-                total += entry.hours
-                details.append(formatted)
-            else:
-                details.append(f"{formatted} (ignored)")
+            total += entry.hours
+            details.append(formatted)
         totals[dt] = {"hours": total, "details": details}
     return totals
 
