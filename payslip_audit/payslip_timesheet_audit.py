@@ -488,6 +488,7 @@ def extract_timesheet_entries(
     pending_force_counts: Optional[bool] = None
     pending_shift_hold = False
     recorded_counts: Dict[date, bool] = {}
+    seen_entries: Dict[date, Set[Tuple[str, Decimal]]] = {}
 
     for line in lines:
         dt = parse_timesheet_date(line, pay_period)
@@ -495,6 +496,7 @@ def extract_timesheet_entries(
             current = dt
             entries.setdefault(dt, [])
             recorded_counts.setdefault(dt, False)
+            seen_entries.setdefault(dt, set())
             pending_label = None
             pending_force_counts = None
             pending_shift_hold = False
@@ -517,33 +519,9 @@ def extract_timesheet_entries(
             pending_shift_hold = False
             continue
 
-        if SHIFT_TOTAL_RE.search(line):
-            hours = parse_hours(line)
-            if hours > 0:
-                label_text = "Shift Total"
-                raw_text = line
-                counts = hours >= SHIFT_BREAK_THRESHOLD
-                entries[current].append(
-                    TimesheetEntry(hours=hours, label=label_text, counts=counts, raw=raw_text)
-                )
-                if counts:
-                    recorded_counts[current] = True
-                    pending_label = None
-                    pending_force_counts = None
-                    pending_shift_hold = False
-                else:
-                    pending_label = "Shift Total"
-                    pending_force_counts = True
-                    pending_shift_hold = True
-            else:
-                pending_label = "Shift Total"
-                pending_force_counts = True
-                pending_shift_hold = True
-            continue
-
         hours = parse_hours(line)
         if hours > 0:
-            label = pending_label or line
+            label = "Shift Total" if SHIFT_TOTAL_RE.search(line) else (pending_label or line)
             keyword_match = TIMESHEET_KEYWORD_RE.search(label) or TIMESHEET_KEYWORD_RE.search(line)
             counts = bool(keyword_match) or not recorded_counts.get(current, False)
 
@@ -561,9 +539,12 @@ def extract_timesheet_entries(
             ):
                 counts = False
 
-            entries[current].append(
-                TimesheetEntry(hours=hours, label=label, counts=counts, raw=raw_text)
-            )
+            key = (label.lower(), hours)
+            if key not in seen_entries[current]:
+                entries[current].append(
+                    TimesheetEntry(hours=hours, label=label, counts=counts, raw=raw_text)
+                )
+                seen_entries[current].add(key)
             if counts:
                 recorded_counts[current] = True
 
@@ -708,12 +689,11 @@ def summarise_timesheet(entries: Dict[date, List[TimesheetEntry]], aggregated_la
             logs = entries[dt]
             daily_total = Decimal("0")
             for entry in logs:
+                if not entry.counts:
+                    continue
                 formatted = _format_detail(dt.strftime("%Y-%m-%d"), entry, include_date=True)
-                if entry.counts:
-                    daily_total += entry.hours
-                    details.append(formatted)
-                else:
-                    details.append(f"{formatted} (ignored)")
+                daily_total += entry.hours
+                details.append(formatted)
             total += daily_total
         return {aggregated_label: {"hours": total, "details": details}}
 
@@ -722,12 +702,11 @@ def summarise_timesheet(entries: Dict[date, List[TimesheetEntry]], aggregated_la
         total = Decimal("0")
         details: List[str] = []
         for entry in logs:
+            if not entry.counts:
+                continue
             formatted = _format_detail("", entry)
-            if entry.counts:
-                total += entry.hours
-                details.append(formatted)
-            else:
-                details.append(f"{formatted} (ignored)")
+            total += entry.hours
+            details.append(formatted)
         totals[dt] = {"hours": total, "details": details}
     return totals
 
