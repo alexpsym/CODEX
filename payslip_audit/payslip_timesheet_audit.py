@@ -483,15 +483,14 @@ def extract_timesheet_entries(
     text: str,
     pay_period: Tuple[date, date],
     entries: Dict[date, List[TimesheetEntry]],
-    seen_entries: Dict[date, Set[Tuple[str, Decimal]]],
+    seen_entries: Dict[date, Set[str]],
+    recorded_counts: Dict[date, bool],
 ) -> None:
     lines = [clean(line) for line in text.splitlines() if clean(line)]
     current: Optional[date] = None
     pending_label: Optional[str] = None
     pending_force_counts: Optional[bool] = None
     pending_shift_hold = False
-    recorded_counts: Dict[date, bool] = {}
-    seen_entries: Dict[date, Set[Tuple[str, Decimal, str]]] = {}
 
     for line in lines:
         dt = parse_timesheet_date(line, pay_period)
@@ -535,6 +534,14 @@ def extract_timesheet_entries(
             raw_text = f"{raw_prefix}: {line}" if pending_label else line
             raw_key = clean(raw_text).lower()
 
+            normalized_raw = SPACE_RE.sub(" ", raw_text.lower()).strip()
+
+            if label.lower().startswith("shift total") and hours < SHIFT_BREAK_THRESHOLD:
+                pending_label = None
+                pending_force_counts = None
+                pending_shift_hold = False
+                continue
+
             if (
                 pending_shift_hold
                 and label.lower().startswith("shift total")
@@ -543,7 +550,7 @@ def extract_timesheet_entries(
             ):
                 counts = False
 
-            key = (label.lower(), hours, raw_key)
+            key = f"{label.lower()}|{fmt_hours(hours)}|{normalized_raw}"
             if key not in seen_entries[current]:
                 entries[current].append(
                     TimesheetEntry(hours=hours, label=label, counts=counts, raw=raw_text)
@@ -576,11 +583,12 @@ def extract_timesheet_entries(
 
 def parse_timesheets(paths: Iterable[Path], pay_period: Tuple[date, date]) -> Dict[date, List[TimesheetEntry]]:
     entries: Dict[date, List[TimesheetEntry]] = {}
-    seen_entries: Dict[date, Set[Tuple[str, Decimal]]] = {}
+    seen_entries: Dict[date, Set[str]] = {}
+    recorded_counts: Dict[date, bool] = {}
     for path in paths:
         image = Image.open(path).convert("L")
         text = pytesseract.image_to_string(image, lang="eng", config="--psm 6")
-        extract_timesheet_entries(text, pay_period, entries, seen_entries)
+        extract_timesheet_entries(text, pay_period, entries, seen_entries, recorded_counts)
     return entries
 
 
