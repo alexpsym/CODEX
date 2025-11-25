@@ -480,7 +480,7 @@ def parse_payslip(path: Path) -> PayslipData:
 def extract_timesheet_entries(
     text: str,
     pay_period: Tuple[date, date],
-    best_totals: Dict[date, Tuple[Tuple[bool, Decimal], TimesheetEntry]],
+    best_totals: Dict[date, Tuple[Tuple[Decimal, bool], TimesheetEntry]],
     seen_totals: Dict[date, Set[str]],
 ) -> None:
     lines = [clean(line) for line in text.splitlines() if clean(line)]
@@ -517,7 +517,7 @@ def extract_timesheet_entries(
             continue
 
         has_total_keyword = bool(re.search(r"\btotal\b", line, re.IGNORECASE))
-        score = (has_total_keyword, hours)
+        score = (hours, has_total_keyword)
 
         entry = TimesheetEntry(hours=hours, label="Day Total", counts=True, raw=line)
         existing = best_totals.get(current)
@@ -528,7 +528,7 @@ def extract_timesheet_entries(
 
 
 def parse_timesheets(paths: Iterable[Path], pay_period: Tuple[date, date]) -> Dict[date, List[TimesheetEntry]]:
-    best_totals: Dict[date, Tuple[Tuple[bool, Decimal], TimesheetEntry]] = {}
+    best_totals: Dict[date, Tuple[Tuple[Decimal, bool], TimesheetEntry]] = {}
     seen_totals: Dict[date, Set[str]] = {}
     for path in paths:
         image = Image.open(path).convert("L")
