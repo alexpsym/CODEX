@@ -484,7 +484,7 @@ def extract_timesheet_entries(
     pay_period: Tuple[date, date],
     entries: Dict[date, List[TimesheetEntry]],
     seen_entries: Dict[date, Set[str]],
-    recorded_counts: Dict[date, bool],
+    recorded_counts: Dict[date, Set[str]],
 ) -> None:
     lines = [clean(line) for line in text.splitlines() if clean(line)]
     current: Optional[date] = None
@@ -497,7 +497,7 @@ def extract_timesheet_entries(
         if dt is not None:
             current = dt
             entries.setdefault(dt, [])
-            recorded_counts.setdefault(dt, False)
+            recorded_counts.setdefault(dt, set())
             seen_entries.setdefault(dt, set())
             pending_label = None
             pending_force_counts = None
@@ -525,16 +525,16 @@ def extract_timesheet_entries(
         if hours > 0:
             label = "Shift Total" if SHIFT_TOTAL_RE.search(line) else (pending_label or line)
             keyword_match = TIMESHEET_KEYWORD_RE.search(label) or TIMESHEET_KEYWORD_RE.search(line)
-            counts = bool(keyword_match) or not recorded_counts.get(current, False)
-
-            if pending_force_counts is not None:
-                counts = pending_force_counts
-
             raw_prefix = pending_label if pending_label else label
             raw_text = f"{raw_prefix}: {line}" if pending_label else line
             raw_key = clean(raw_text).lower()
 
             normalized_raw = SPACE_RE.sub(" ", raw_text.lower()).strip()
+
+            counts = bool(keyword_match) or normalized_raw not in recorded_counts[current]
+
+            if pending_force_counts is not None:
+                counts = pending_force_counts
 
             if label.lower().startswith("shift total") and hours < SHIFT_BREAK_THRESHOLD:
                 pending_label = None
@@ -557,7 +557,7 @@ def extract_timesheet_entries(
                 )
                 seen_entries[current].add(key)
             if counts:
-                recorded_counts[current] = True
+                recorded_counts[current].add(normalized_raw)
 
             if pending_shift_hold and not counts:
                 pending_force_counts = True
@@ -584,7 +584,7 @@ def extract_timesheet_entries(
 def parse_timesheets(paths: Iterable[Path], pay_period: Tuple[date, date]) -> Dict[date, List[TimesheetEntry]]:
     entries: Dict[date, List[TimesheetEntry]] = {}
     seen_entries: Dict[date, Set[str]] = {}
-    recorded_counts: Dict[date, bool] = {}
+    recorded_counts: Dict[date, Set[str]] = {}
     for path in paths:
         image = Image.open(path).convert("L")
         text = pytesseract.image_to_string(image, lang="eng", config="--psm 6")
