@@ -480,7 +480,10 @@ def parse_payslip(path: Path) -> PayslipData:
 # ---------------------------------------------------------------------------
 
 def extract_timesheet_entries(
-    text: str, pay_period: Tuple[date, date], entries: Dict[date, List[TimesheetEntry]]
+    text: str,
+    pay_period: Tuple[date, date],
+    entries: Dict[date, List[TimesheetEntry]],
+    seen_entries: Dict[date, Set[Tuple[str, Decimal]]],
 ) -> None:
     lines = [clean(line) for line in text.splitlines() if clean(line)]
     current: Optional[date] = None
@@ -573,10 +576,11 @@ def extract_timesheet_entries(
 
 def parse_timesheets(paths: Iterable[Path], pay_period: Tuple[date, date]) -> Dict[date, List[TimesheetEntry]]:
     entries: Dict[date, List[TimesheetEntry]] = {}
+    seen_entries: Dict[date, Set[Tuple[str, Decimal]]] = {}
     for path in paths:
         image = Image.open(path).convert("L")
         text = pytesseract.image_to_string(image, lang="eng", config="--psm 6")
-        extract_timesheet_entries(text, pay_period, entries)
+        extract_timesheet_entries(text, pay_period, entries, seen_entries)
     return entries
 
 
