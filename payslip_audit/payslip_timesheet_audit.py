@@ -615,7 +615,7 @@ def discover_files(
 # ---------------------------------------------------------------------------
 
 def counts_as_hours(category: str) -> bool:
-    return not re.search(r"\ballowance\b", category, re.IGNORECASE)
+    return not re.search(r"\ballowances?\b", category, re.IGNORECASE)
 
 
 def summarise_payslip(items: List[PayslipItem], pay_period: Tuple[date, date]) -> Tuple[Dict[Union[date, str], Dict[str, object]], Optional[str]]:
