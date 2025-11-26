@@ -614,9 +614,12 @@ def discover_files(
 # Summaries and comparison
 # ---------------------------------------------------------------------------
 
+
+def counts_as_hours(category: str) -> bool:
+    return not re.search(r"\ballowances?\b", category, re.IGNORECASE)
+
+
 def summarise_payslip(items: List[PayslipItem], pay_period: Tuple[date, date]) -> Tuple[Dict[Union[date, str], Dict[str, object]], Optional[str]]:
-    def _counts_as_hours(category: str) -> bool:
-        return not re.search(r"\ballowance\b", category, re.IGNORECASE)
 
     totals: Dict[Union[date, str], Dict[str, object]] = {}
     has_dated_entries = False
@@ -624,7 +627,7 @@ def summarise_payslip(items: List[PayslipItem], pay_period: Tuple[date, date]) -
     aggregated_hours = Decimal("0")
 
     for item in items:
-        counts_hours = _counts_as_hours(item.category)
+        counts_hours = counts_as_hours(item.category)
         counted_hours = item.hours if counts_hours else Decimal("0")
 
         detail = f"{item.category} ({fmt_hours(item.hours)}h"
@@ -991,7 +994,10 @@ def build_totals(
     payslip: PayslipData,
     timesheet_totals: Dict[Union[date, str], Dict[str, object]],
 ) -> Tuple[Decimal, Decimal]:
-    payslip_total_hours = sum((item.hours for item in payslip.items), Decimal("0"))
+    payslip_total_hours = sum(
+        (item.hours for item in payslip.items if counts_as_hours(item.category)),
+        Decimal("0"),
+    )
     timesheet_total_hours = sum((info["hours"] for info in timesheet_totals.values()), Decimal("0"))
     return payslip_total_hours, timesheet_total_hours
 
