@@ -615,27 +615,35 @@ def discover_files(
 # ---------------------------------------------------------------------------
 
 def summarise_payslip(items: List[PayslipItem], pay_period: Tuple[date, date]) -> Tuple[Dict[Union[date, str], Dict[str, object]], Optional[str]]:
+    def _counts_as_hours(category: str) -> bool:
+        return not re.search(r"\ballowance\b", category, re.IGNORECASE)
+
     totals: Dict[Union[date, str], Dict[str, object]] = {}
     has_dated_entries = False
     aggregated_details: List[str] = []
     aggregated_hours = Decimal("0")
 
     for item in items:
+        counts_hours = _counts_as_hours(item.category)
+        counted_hours = item.hours if counts_hours else Decimal("0")
+
         detail = f"{item.category} ({fmt_hours(item.hours)}h"
         if item.rate is not None:
             detail += f" @ {fmt_currency(item.rate)}"
         if item.amount is not None:
             detail += f", {fmt_currency(item.amount)}"
         detail += ")"
+        if not counts_hours:
+            detail += " [ignored for hour totals]"
         aggregated_details.append(detail)
-        aggregated_hours += item.hours
+        aggregated_hours += counted_hours
 
         if item.date is None:
             continue
 
         has_dated_entries = True
         entry = totals.setdefault(item.date, {"hours": Decimal("0"), "categories": []})
-        entry["hours"] += item.hours
+        entry["hours"] += counted_hours
         entry["categories"].append(detail)
 
     if has_dated_entries:
