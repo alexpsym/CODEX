@@ -498,7 +498,8 @@ def extract_timesheet_entries(
                 key = f"{fmt_hours(inline_hours)}|{normalized}"
                 if key not in seen_totals[current]:
                     entry = TimesheetEntry(hours=inline_hours, label="Day Total", counts=True, raw=line)
-                    score = (True, inline_hours)
+                    has_total_keyword = bool(re.search(r"\btotal\b", line, re.IGNORECASE))
+                    score = (has_total_keyword, inline_hours)
                     existing = best_totals.get(current)
                     if existing is None or score > existing[0]:
                         best_totals[current] = (score, entry)
