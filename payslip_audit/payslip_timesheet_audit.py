@@ -491,6 +491,18 @@ def extract_timesheet_entries(
         if dt is not None:
             current = dt
             seen_totals.setdefault(dt, set())
+
+            inline_hours = parse_hours(line)
+            if inline_hours > 0:
+                normalized = SPACE_RE.sub(" ", line.lower()).strip()
+                key = f"{fmt_hours(inline_hours)}|{normalized}"
+                if key not in seen_totals[current]:
+                    entry = TimesheetEntry(hours=inline_hours, label="Day Total", counts=True, raw=line)
+                    score = (True, inline_hours)
+                    existing = best_totals.get(current)
+                    if existing is None or score > existing[0]:
+                        best_totals[current] = (score, entry)
+                    seen_totals[current].add(key)
             continue
 
         if any(pattern.match(line) for pattern in TIMESHEET_DATE_PATTERNS):
@@ -602,28 +614,38 @@ def discover_files(
 # Summaries and comparison
 # ---------------------------------------------------------------------------
 
+def counts_as_hours(category: str) -> bool:
+    return not re.search(r"\ballowance\b", category, re.IGNORECASE)
+
+
 def summarise_payslip(items: List[PayslipItem], pay_period: Tuple[date, date]) -> Tuple[Dict[Union[date, str], Dict[str, object]], Optional[str]]:
+
     totals: Dict[Union[date, str], Dict[str, object]] = {}
     has_dated_entries = False
     aggregated_details: List[str] = []
     aggregated_hours = Decimal("0")
 
     for item in items:
+        counts_hours = counts_as_hours(item.category)
+        counted_hours = item.hours if counts_hours else Decimal("0")
+
         detail = f"{item.category} ({fmt_hours(item.hours)}h"
         if item.rate is not None:
             detail += f" @ {fmt_currency(item.rate)}"
         if item.amount is not None:
             detail += f", {fmt_currency(item.amount)}"
         detail += ")"
+        if not counts_hours:
+            detail += " [ignored for hour totals]"
         aggregated_details.append(detail)
-        aggregated_hours += item.hours
+        aggregated_hours += counted_hours
 
         if item.date is None:
             continue
 
         has_dated_entries = True
         entry = totals.setdefault(item.date, {"hours": Decimal("0"), "categories": []})
-        entry["hours"] += item.hours
+        entry["hours"] += counted_hours
         entry["categories"].append(detail)
 
     if has_dated_entries:
@@ -971,7 +993,7 @@ def build_totals(
     payslip: PayslipData,
     timesheet_totals: Dict[Union[date, str], Dict[str, object]],
 ) -> Tuple[Decimal, Decimal]:
-    payslip_total_hours = sum((item.hours for item in payslip.items), Decimal("0"))
+    payslip_total_hours = sum((item.hours for item in payslip.items if counts_as_hours(item.category)), Decimal("0"))
     timesheet_total_hours = sum((info["hours"] for info in timesheet_totals.values()), Decimal("0"))
     return payslip_total_hours, timesheet_total_hours
 
