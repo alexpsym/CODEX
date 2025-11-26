@@ -491,6 +491,18 @@ def extract_timesheet_entries(
         if dt is not None:
             current = dt
             seen_totals.setdefault(dt, set())
+
+            inline_hours = parse_hours(line)
+            if inline_hours > 0:
+                normalized = SPACE_RE.sub(" ", line.lower()).strip()
+                key = f"{fmt_hours(inline_hours)}|{normalized}"
+                if key not in seen_totals[current]:
+                    entry = TimesheetEntry(hours=inline_hours, label="Day Total", counts=True, raw=line)
+                    score = (True, inline_hours)
+                    existing = best_totals.get(current)
+                    if existing is None or score > existing[0]:
+                        best_totals[current] = (score, entry)
+                    seen_totals[current].add(key)
             continue
 
         if any(pattern.match(line) for pattern in TIMESHEET_DATE_PATTERNS):
