@@ -100,18 +100,19 @@ def ask_bookmark_path():
             if validated:
                 return validated
 
-def find_youtube_urls(node, results):
+def find_youtube_urls(node, results, seen):
     """Search the bookmark data for YouTube video links."""
     if isinstance(node, dict):
         if node.get("type") == "url":
             url = node.get("url", "")
-            if "youtube.com/watch" in url:
+            if "youtube.com/watch" in url and url not in seen:
                 results.append(url)
+                seen.add(url)
         for value in node.values():
-            find_youtube_urls(value, results)
+            find_youtube_urls(value, results, seen)
     elif isinstance(node, list):
         for item in node:
-            find_youtube_urls(item, results)
+            find_youtube_urls(item, results, seen)
 
 def main():
     bookmark_file = ask_bookmark_path()
@@ -120,15 +121,32 @@ def main():
         data = json.load(f)
 
     youtube_links = []
-    find_youtube_urls(data, youtube_links)
+    find_youtube_urls(data, youtube_links, set())
 
     if not youtube_links:
         print("No YouTube bookmarks found.")
         return
 
+    if not shutil.which("yt-dlp"):
+        print("Error: yt-dlp is not installed or not on your PATH.")
+        return
+
     for url in youtube_links:
         print(f"Downloading: {url}")
-        subprocess.run(["yt-dlp", url])
+        try:
+            result = subprocess.run(
+                ["yt-dlp", url], capture_output=True, text=True
+            )
+        except FileNotFoundError:
+            print("Error: yt-dlp executable not found. Aborting remaining downloads.")
+            return
+
+        if result.returncode == 0:
+            print(f"  Success: {url}")
+        else:
+            print(f"  Failed: {url} (exit code {result.returncode})")
+            if result.stderr:
+                print(result.stderr.strip())
 
 if __name__ == "__main__":
     main()
