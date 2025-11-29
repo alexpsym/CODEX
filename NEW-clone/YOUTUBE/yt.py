@@ -30,18 +30,19 @@ def ask_bookmark_path():
 
         return bookmark_path
 
-def find_youtube_urls(node, results):
+def find_youtube_urls(node, results, seen):
     """Search the bookmark data for YouTube video links."""
     if isinstance(node, dict):
         if node.get("type") == "url":
             url = node.get("url", "")
-            if "youtube.com/watch" in url:
+            if "youtube.com/watch" in url and url not in seen:
                 results.append(url)
+                seen.add(url)
         for value in node.values():
-            find_youtube_urls(value, results)
+            find_youtube_urls(value, results, seen)
     elif isinstance(node, list):
         for item in node:
-            find_youtube_urls(item, results)
+            find_youtube_urls(item, results, seen)
 
 def main():
     bookmark_file = ask_bookmark_path()
@@ -50,7 +51,7 @@ def main():
         data = json.load(f)
 
     youtube_links = []
-    find_youtube_urls(data, youtube_links)
+    find_youtube_urls(data, youtube_links, set())
 
     if not youtube_links:
         print("No YouTube bookmarks found.")
