@@ -149,18 +149,33 @@ def download_links(urls: Iterable[str]) -> None:
         print("Error: yt-dlp is not installed or not on your PATH.")
         return
 
+    common_args = ["-f", "bv*+ba/b", "--extractor-args", "youtube:player_client=web"]
+    fallback_args = [
+        "-f",
+        "bv*+ba/b",
+        "--extractor-args",
+        "youtube:player_client=android,player_skip=webpage",
+    ]
+
     for url in urls:
         print(f"Downloading: {url}")
-        try:
-            result = subprocess.run(["yt-dlp", url])
-        except FileNotFoundError:
-            print("yt-dlp executable not found. Aborting remaining downloads.")
-            return
+        for args in (common_args, fallback_args):
+            try:
+                result = subprocess.run(["yt-dlp", *args, url])
+            except FileNotFoundError:
+                print("yt-dlp executable not found. Aborting remaining downloads.")
+                return
 
-        if result.returncode != 0:
-            print(f"Download failed (exit code {result.returncode}): {url}")
+            if result.returncode == 0:
+                print(f"Downloaded successfully: {url}")
+                break
+
+            print(
+                "Download failed with this client selection. "
+                "Retrying with an alternate player client..."
+            )
         else:
-            print(f"Downloaded successfully: {url}")
+            print(f"Download failed (exit code {result.returncode}): {url}")
 
 
 # ─── LOGGING ───────────────────────────────────────────────────────────────────
