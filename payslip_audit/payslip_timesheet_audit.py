@@ -482,6 +482,7 @@ def extract_timesheet_entries(
     pay_period: Tuple[date, date],
     best_totals: Dict[date, Tuple[Tuple[bool, Decimal], TimesheetEntry]],
     seen_totals: Dict[date, Set[str]],
+    shift_sums: Dict[date, Decimal],
 ) -> None:
     lines = [clean(line) for line in text.splitlines() if clean(line)]
     current: Optional[date] = None
@@ -517,6 +518,17 @@ def extract_timesheet_entries(
             continue
 
         if SHIFT_TOTAL_RE.search(line):
+            hours = parse_hours(line)
+            if hours <= 0:
+                continue
+
+            normalized = SPACE_RE.sub(" ", line.lower()).strip()
+            key = f"{fmt_hours(hours)}|{normalized}"
+            if key in seen_totals[current]:
+                continue
+
+            shift_sums[current] = shift_sums.get(current, Decimal("0")) + hours
+            seen_totals[current].add(key)
             continue
 
         hours = parse_hours(line)
@@ -542,10 +554,18 @@ def extract_timesheet_entries(
 def parse_timesheets(paths: Iterable[Path], pay_period: Tuple[date, date]) -> Dict[date, List[TimesheetEntry]]:
     best_totals: Dict[date, Tuple[Tuple[bool, Decimal], TimesheetEntry]] = {}
     seen_totals: Dict[date, Set[str]] = {}
+    shift_sums: Dict[date, Decimal] = {}
     for path in paths:
         image = Image.open(path).convert("L")
         text = pytesseract.image_to_string(image, lang="eng", config="--psm 6")
-        extract_timesheet_entries(text, pay_period, best_totals, seen_totals)
+        extract_timesheet_entries(text, pay_period, best_totals, seen_totals, shift_sums)
+
+    for dt, hours in shift_sums.items():
+        entry = TimesheetEntry(hours=hours, label="Sum of shift totals", counts=True, raw="Aggregated shift totals")
+        score = (True, hours)
+        existing = best_totals.get(dt)
+        if existing is None or score > existing[0]:
+            best_totals[dt] = (score, entry)
 
     entries: Dict[date, List[TimesheetEntry]] = {}
     for dt, (_, entry) in best_totals.items():
