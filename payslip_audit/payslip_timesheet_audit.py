@@ -14,7 +14,7 @@ from xml.sax.saxutils import escape
 
 import pdfplumber
 import pytesseract
-from PIL import Image
+from PIL import Image, ImageOps
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -330,9 +330,12 @@ def extract_from_tables(tables: List[List[List[str]]], pay_period: Tuple[date, d
             if not any(cells):
                 continue
             normalized = [re.sub(r"[^a-z]", "", cell.lower()) for cell in cells]
-            if header_keys is None and any("date" in token for token in normalized) and any(
-                any(key in token for key in ("unit", "hour", "qty")) for token in normalized
-            ):
+            has_hour_like = any(any(key in token for key in ("unit", "hour", "qty")) for token in normalized)
+            has_description_like = any(
+                any(key in token for key in ("desc", "earning", "type", "category", "item")) for token in normalized
+            )
+            has_date_like = any("date" in token for token in normalized)
+            if header_keys is None and has_hour_like and (has_date_like or has_description_like):
                 header_keys = normalized
                 continue
             if header_keys is None:
@@ -557,7 +560,9 @@ def parse_timesheets(paths: Iterable[Path], pay_period: Tuple[date, date]) -> Di
     shift_sums: Dict[date, Decimal] = {}
     for path in paths:
         image = Image.open(path).convert("L")
-        text = pytesseract.image_to_string(image, lang="eng", config="--psm 6")
+        inverted = ImageOps.invert(image)
+        processed = ImageOps.autocontrast(inverted).point(lambda p: 255 if p > 180 else 0)
+        text = pytesseract.image_to_string(processed, lang="eng", config="--psm 6")
         extract_timesheet_entries(text, pay_period, best_totals, seen_totals, shift_sums)
 
     for dt, hours in shift_sums.items():
