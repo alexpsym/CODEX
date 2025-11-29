@@ -1,5 +1,6 @@
 import json
 import subprocess
+import shutil
 from pathlib import Path
 
 def ask_bookmark_path():
@@ -57,9 +58,26 @@ def main():
         print("No YouTube bookmarks found.")
         return
 
+    if not shutil.which("yt-dlp"):
+        print("Error: yt-dlp is not installed or not on your PATH.")
+        return
+
     for url in youtube_links:
         print(f"Downloading: {url}")
-        subprocess.run(["yt-dlp", url])
+        try:
+            result = subprocess.run(
+                ["yt-dlp", url], capture_output=True, text=True
+            )
+        except FileNotFoundError:
+            print("Error: yt-dlp executable not found. Aborting remaining downloads.")
+            return
+
+        if result.returncode == 0:
+            print(f"  Success: {url}")
+        else:
+            print(f"  Failed: {url} (exit code {result.returncode})")
+            if result.stderr:
+                print(result.stderr.strip())
 
 if __name__ == "__main__":
     main()
