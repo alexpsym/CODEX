@@ -8,6 +8,7 @@ import tempfile
 import traceback
 from getpass import getpass
 from typing import List, Tuple
+from urllib.error import HTTPError
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 
@@ -21,10 +22,6 @@ except ImportError:  # pragma: no cover - fallback installation
 
 GITHUB_API_BASE = "https://api.github.com/"
 TOKEN_FILENAME = ".github_token"
-# This token was explicitly supplied for embedding so the script can run without
-# depending on external files or environment variables. Keep it in sync with the
-# credentials you want the automation to use.
-HARDCODED_TOKEN: str = "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"
 
 
 def _token_file_path() -> str:
@@ -60,11 +57,6 @@ def prompt_for_token() -> str:
         tqdm.write("Using GitHub token from environment variable GITHUB_TOKEN.")
         return env_token.strip()
 
-    hardcoded_token = HARDCODED_TOKEN.strip()
-    if hardcoded_token:
-        tqdm.write("Using hardcoded GitHub token embedded in script.")
-        return hardcoded_token
-
     token_path = _token_file_path()
     cached_token = _read_token_file(token_path)
     if cached_token:
@@ -86,12 +78,22 @@ def prompt_for_token() -> str:
 def github_request(url: str, token: str):
     headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
     request = Request(url, headers=headers)
-    with urlopen(request) as response:
-        payload = response.read().decode("utf-8")
-        remaining = response.headers.get("X-RateLimit-Remaining")
-        if remaining is not None:
-            print(f"GitHub API remaining requests: {remaining}")
-        return json.loads(payload)
+    try:
+        with urlopen(request) as response:
+            payload = response.read().decode("utf-8")
+            remaining = response.headers.get("X-RateLimit-Remaining")
+            if remaining is not None:
+                print(f"GitHub API remaining requests: {remaining}")
+            return json.loads(payload)
+    except HTTPError as exc:
+        if exc.code == 401:
+            token_path = _token_file_path()
+            raise RuntimeError(
+                "GitHub API returned 401 Unauthorized. Provide a valid token via the "
+                "GITHUB_TOKEN environment variable or update the cached token at "
+                f"{token_path}."
+            ) from exc
+        raise
 
 
 def fetch_repositories(token: str) -> List[dict]:
