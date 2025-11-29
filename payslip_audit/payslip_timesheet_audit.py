@@ -14,7 +14,7 @@ from xml.sax.saxutils import escape
 
 import pdfplumber
 import pytesseract
-from PIL import Image
+from PIL import Image, ImageOps
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -330,9 +330,12 @@ def extract_from_tables(tables: List[List[List[str]]], pay_period: Tuple[date, d
             if not any(cells):
                 continue
             normalized = [re.sub(r"[^a-z]", "", cell.lower()) for cell in cells]
-            if header_keys is None and any("date" in token for token in normalized) and any(
-                any(key in token for key in ("unit", "hour", "qty")) for token in normalized
-            ):
+            has_hour_like = any(any(key in token for key in ("unit", "hour", "qty")) for token in normalized)
+            has_description_like = any(
+                any(key in token for key in ("desc", "earning", "type", "category", "item")) for token in normalized
+            )
+            has_date_like = any("date" in token for token in normalized)
+            if header_keys is None and has_hour_like and (has_date_like or has_description_like):
                 header_keys = normalized
                 continue
             if header_keys is None:
@@ -482,6 +485,7 @@ def extract_timesheet_entries(
     pay_period: Tuple[date, date],
     best_totals: Dict[date, Tuple[Tuple[bool, Decimal], TimesheetEntry]],
     seen_totals: Dict[date, Set[str]],
+    shift_sums: Dict[date, Decimal],
 ) -> None:
     lines = [clean(line) for line in text.splitlines() if clean(line)]
     current: Optional[date] = None
@@ -517,6 +521,17 @@ def extract_timesheet_entries(
             continue
 
         if SHIFT_TOTAL_RE.search(line):
+            hours = parse_hours(line)
+            if hours <= 0:
+                continue
+
+            normalized = SPACE_RE.sub(" ", line.lower()).strip()
+            key = f"{fmt_hours(hours)}|{normalized}"
+            if key in seen_totals[current]:
+                continue
+
+            shift_sums[current] = shift_sums.get(current, Decimal("0")) + hours
+            seen_totals[current].add(key)
             continue
 
         hours = parse_hours(line)
@@ -542,10 +557,20 @@ def extract_timesheet_entries(
 def parse_timesheets(paths: Iterable[Path], pay_period: Tuple[date, date]) -> Dict[date, List[TimesheetEntry]]:
     best_totals: Dict[date, Tuple[Tuple[bool, Decimal], TimesheetEntry]] = {}
     seen_totals: Dict[date, Set[str]] = {}
+    shift_sums: Dict[date, Decimal] = {}
     for path in paths:
         image = Image.open(path).convert("L")
-        text = pytesseract.image_to_string(image, lang="eng", config="--psm 6")
-        extract_timesheet_entries(text, pay_period, best_totals, seen_totals)
+        inverted = ImageOps.invert(image)
+        processed = ImageOps.autocontrast(inverted).point(lambda p: 255 if p > 180 else 0)
+        text = pytesseract.image_to_string(processed, lang="eng", config="--psm 6")
+        extract_timesheet_entries(text, pay_period, best_totals, seen_totals, shift_sums)
+
+    for dt, hours in shift_sums.items():
+        entry = TimesheetEntry(hours=hours, label="Sum of shift totals", counts=True, raw="Aggregated shift totals")
+        score = (True, hours)
+        existing = best_totals.get(dt)
+        if existing is None or score > existing[0]:
+            best_totals[dt] = (score, entry)
 
     entries: Dict[date, List[TimesheetEntry]] = {}
     for dt, (_, entry) in best_totals.items():
