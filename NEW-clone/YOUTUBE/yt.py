@@ -1,8 +1,11 @@
 import json
 import subprocess
 import sys
+import traceback
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
+import shutil
 
 def _platform_default_base():
     """Return the platform-specific base directory for Brave profiles."""
@@ -114,8 +117,23 @@ def find_youtube_urls(node, results, seen):
         for item in node:
             find_youtube_urls(item, results, seen)
 
+
+def _log_startup_error(exc: BaseException) -> Path:
+    """Write startup errors to a log file next to this script."""
+    log_path = Path(__file__).resolve().parent / "yt_error_log.txt"
+    log_entry = (
+        f"\n---\n{datetime.now().isoformat()} - Unhandled exception during startup\n"
+        f"{traceback.format_exc()}"
+    )
+    log_path.write_text(log_path.read_text() + log_entry if log_path.exists() else log_entry)
+    return log_path
+
 def main():
     bookmark_file = ask_bookmark_path()
+
+    if not bookmark_file:
+        print("No bookmark file selected.")
+        return
 
     with open(bookmark_file, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -149,4 +167,9 @@ def main():
                 print(result.stderr.strip())
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BaseException as exc:  # noqa: BLE001
+        log_path = _log_startup_error(exc)
+        print(f"An error occurred. Details have been logged to: {log_path}")
+        sys.exit(1)
