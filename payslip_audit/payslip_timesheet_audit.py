@@ -433,6 +433,25 @@ def determine_rate(text: str, items: List[PayslipItem]) -> Decimal:
     if match:
         return Decimal(match.group(1))
 
+    per_hour_match = re.search(r"[$€£]?\s*(\d+\.\d{2})\s*(?:/\s*(?:hr|hour)\b|per\s+hour)", text, re.IGNORECASE)
+    if per_hour_match:
+        return Decimal(per_hour_match.group(1))
+
+    keyword_rates: List[Decimal] = []
+    for line in text.splitlines():
+        cleaned = clean(line)
+        if not cleaned:
+            continue
+        if not re.search(r"(hour|rate|pay|wage)", cleaned, re.IGNORECASE):
+            continue
+        for currency_match in re.finditer(r"[$€£]?\s*(\d+\.\d{2})", cleaned):
+            value = parse_decimal(currency_match.group(1))
+            if value is not None:
+                keyword_rates.append(value)
+
+    if keyword_rates:
+        return keyword_rates[0]
+
     for item in items:
         if item.rate and item.category.lower().startswith("base"):
             return item.rate
