@@ -1,13 +1,28 @@
+#!/usr/bin/env python3
+"""
+Download YouTube links stored in the Brave bookmarks toolbar's MUSIC folder.
+
+Features
+- Platform-aware discovery of Brave profiles with interactive selection.
+- Validates custom bookmark paths and logs startup errors.
+- Restricts traversal to the MUSIC folder on the bookmarks bar.
+- Deduplicates YouTube links before downloading and checks for yt-dlp early.
+- Provides per-download success/failure feedback.
+"""
+
 import json
+import shutil
 import subprocess
 import sys
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
-import shutil
+from typing import Any, Dict, Iterable, Optional, Set
 
-def _platform_default_base():
+
+# ─── BOOKMARK DISCOVERY ─────────────────────────────────────────────────────────
+
+def _platform_default_base() -> Optional[Path]:
     """Return the platform-specific base directory for Brave profiles."""
     home = Path.home()
 
@@ -21,7 +36,7 @@ def _platform_default_base():
     return None
 
 
-def _discover_bookmark_files():
+def _discover_bookmark_files() -> Iterable[Path]:
     """Return available Brave bookmark files, prioritizing the default profile."""
     base = _platform_default_base()
     if not base or not base.exists():
@@ -64,14 +79,11 @@ def _validate_bookmark_path(raw_path: str, fallback: Path) -> Optional[Path]:
     return bookmark_path
 
 
-def ask_bookmark_path():
+def ask_bookmark_path() -> Optional[Path]:
     """Ask for Brave's bookmarks file path or use a platform-aware default."""
-    detected = _discover_bookmark_files()
+    detected = list(_discover_bookmark_files())
     fallback = _platform_default_base()
-    if fallback:
-        fallback = fallback / "Default" / "Bookmarks"
-    else:
-        fallback = Path.home()
+    fallback = fallback / "Default" / "Bookmarks" if fallback else Path.home()
 
     if detected:
         print("Detected Brave bookmark files:")
@@ -103,20 +115,55 @@ def ask_bookmark_path():
             if validated:
                 return validated
 
-def find_youtube_urls(node, results, seen):
-    """Search the bookmark data for YouTube video links."""
+    return None
+
+
+def find_music_folder(bookmark_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return the MUSIC folder node from the bookmarks toolbar if present."""
+    bar = bookmark_data.get("roots", {}).get("bookmark_bar", {})
+    for child in bar.get("children", []):
+        if child.get("type") == "folder" and child.get("name") == "MUSIC":
+            return child
+    return None
+
+
+def collect_youtube_urls(node: Any, results: Set[str]) -> None:
+    """Search the bookmark data for YouTube video links inside the MUSIC folder."""
     if isinstance(node, dict):
         if node.get("type") == "url":
             url = node.get("url", "")
-            if "youtube.com/watch" in url and url not in seen:
-                results.append(url)
-                seen.add(url)
+            if "youtube.com/watch" in url:
+                results.add(url)
         for value in node.values():
-            find_youtube_urls(value, results, seen)
+            collect_youtube_urls(value, results)
     elif isinstance(node, list):
         for item in node:
-            find_youtube_urls(item, results, seen)
+            collect_youtube_urls(item, results)
 
+
+# ─── DOWNLOADS ──────────────────────────────────────────────────────────────────
+
+def download_links(urls: Iterable[str]) -> None:
+    """Download each URL with yt-dlp, reporting per-link success/failure."""
+    if not shutil.which("yt-dlp"):
+        print("Error: yt-dlp is not installed or not on your PATH.")
+        return
+
+    for url in urls:
+        print(f"Downloading: {url}")
+        try:
+            result = subprocess.run(["yt-dlp", url])
+        except FileNotFoundError:
+            print("yt-dlp executable not found. Aborting remaining downloads.")
+            return
+
+        if result.returncode != 0:
+            print(f"Download failed (exit code {result.returncode}): {url}")
+        else:
+            print(f"Downloaded successfully: {url}")
+
+
+# ─── LOGGING ───────────────────────────────────────────────────────────────────
 
 def _log_startup_error(exc: BaseException) -> Path:
     """Write startup errors to a log file next to this script."""
@@ -128,7 +175,10 @@ def _log_startup_error(exc: BaseException) -> Path:
     log_path.write_text(log_path.read_text() + log_entry if log_path.exists() else log_entry)
     return log_path
 
-def main():
+
+# ─── MAIN ─────────────────────────────────────────────────────────────────────
+
+def main() -> None:
     bookmark_file = ask_bookmark_path()
 
     if not bookmark_file:
@@ -138,33 +188,20 @@ def main():
     with open(bookmark_file, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    youtube_links = []
-    find_youtube_urls(data, youtube_links, set())
+    music_folder = find_music_folder(data)
+    if not music_folder:
+        print("No 'MUSIC' folder found on the bookmarks toolbar.")
+        return
+
+    youtube_links: Set[str] = set()
+    collect_youtube_urls(music_folder, youtube_links)
 
     if not youtube_links:
-        print("No YouTube bookmarks found.")
+        print("No YouTube bookmarks found inside the 'MUSIC' folder.")
         return
 
-    if not shutil.which("yt-dlp"):
-        print("Error: yt-dlp is not installed or not on your PATH.")
-        return
+    download_links(sorted(youtube_links))
 
-    for url in youtube_links:
-        print(f"Downloading: {url}")
-        try:
-            result = subprocess.run(
-                ["yt-dlp", url], capture_output=True, text=True
-            )
-        except FileNotFoundError:
-            print("Error: yt-dlp executable not found. Aborting remaining downloads.")
-            return
-
-        if result.returncode == 0:
-            print(f"  Success: {url}")
-        else:
-            print(f"  Failed: {url} (exit code {result.returncode})")
-            if result.stderr:
-                print(result.stderr.strip())
 
 if __name__ == "__main__":
     try:
