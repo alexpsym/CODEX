@@ -37,6 +37,14 @@ TIMESHEET_DATE_PATTERNS = [
         r"^(?P<dow>[A-Za-z]{3}),?\s+(?P<day>\d{1,2})[/-](?P<month>\d{1,2})(?:[/-](?P<year>\d{2,4}))?",
         re.IGNORECASE,
     ),
+    re.compile(
+        r"^(?P<month>[A-Za-z]{3,9})\s+(?P<day>\d{1,2})(?:\s+(?P<year>\d{2,4}))?",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?P<day>\d{1,2})\s+(?P<month>[A-Za-z]{3,9})(?:\s+(?P<year>\d{2,4}))?",
+        re.IGNORECASE,
+    ),
 ]
 SHIFT_TOTAL_RE = re.compile(r"Shift\s+Total", re.IGNORECASE)
 DURATION_ONLY_RE = re.compile(r"^[;:.,\-\s]*\d+\s*h\s*\d+\s*m\b", re.IGNORECASE)
@@ -191,8 +199,16 @@ def resolve_inline_date(text: str, pay_period: Tuple[date, date]) -> Optional[da
     return None
 
 
+def normalize_timesheet_date_text(text: str) -> str:
+    normalized = clean(text)
+    normalized = re.sub(r"[^A-Za-z0-9/\-\s]+", " ", normalized)
+    normalized = re.sub(r"([A-Za-z]{3,9})(\d{1,2})", r"\1 \2", normalized)
+    normalized = re.sub(r"(\d{1,2})([A-Za-z]{3,9})", r"\1 \2", normalized)
+    return SPACE_RE.sub(" ", normalized).strip()
+
+
 def parse_timesheet_date(line: str, pay_period: Tuple[date, date]) -> Optional[date]:
-    cleaned = clean(line)
+    cleaned = normalize_timesheet_date_text(line)
     for pattern in TIMESHEET_DATE_PATTERNS:
         match = pattern.match(cleaned)
         if not match:
@@ -519,12 +535,15 @@ def extract_timesheet_entries(
 ) -> None:
     lines = [clean(line) for line in text.splitlines() if clean(line)]
     current: Optional[date] = None
+    date_positions: Dict[int, date] = {}
+    pending_shift_totals: List[Tuple[int, Decimal, str]] = []
 
-    for line in lines:
+    for idx, line in enumerate(lines):
         dt = parse_timesheet_date(line, pay_period)
         if dt is not None:
             current = dt
             seen_totals.setdefault(dt, set())
+            date_positions[idx] = dt
 
             inline_hours = parse_hours(line)
             if inline_hours > 0:
@@ -539,11 +558,16 @@ def extract_timesheet_entries(
                     seen_totals[current].add(key)
             continue
 
-        if any(pattern.match(line) for pattern in TIMESHEET_DATE_PATTERNS):
+        if any(pattern.match(normalize_timesheet_date_text(line)) for pattern in TIMESHEET_DATE_PATTERNS):
             current = None
             continue
 
         if current is None:
+            if SHIFT_TOTAL_RE.search(line):
+                hours = parse_hours(line)
+                if hours > 0:
+                    normalized = SPACE_RE.sub(" ", line.lower()).strip()
+                    pending_shift_totals.append((idx, hours, normalized))
             continue
 
         low = line.lower()
@@ -583,6 +607,19 @@ def extract_timesheet_entries(
 
         seen_totals[current].add(key)
 
+    if pending_shift_totals and date_positions:
+        indexed_dates = sorted(date_positions.items())
+        for idx, hours, normalized in pending_shift_totals:
+            nearest_idx, nearest_dt = min(
+                indexed_dates, key=lambda pair: (abs(pair[0] - idx), pair[0])
+            )
+            seen_totals.setdefault(nearest_dt, set())
+            key = f"{fmt_hours(hours)}|{normalized}"
+            if key in seen_totals[nearest_dt]:
+                continue
+            shift_sums[nearest_dt] = shift_sums.get(nearest_dt, Decimal("0")) + hours
+            seen_totals[nearest_dt].add(key)
+
 
 def parse_timesheets(paths: Iterable[Path], pay_period: Tuple[date, date]) -> Dict[date, List[TimesheetEntry]]:
     best_totals: Dict[date, Tuple[Tuple[bool, Decimal], TimesheetEntry]] = {}
@@ -598,7 +635,12 @@ def parse_timesheets(paths: Iterable[Path], pay_period: Tuple[date, date]) -> Di
                 image = Image.open(path).convert("L")
                 inverted = ImageOps.invert(image)
                 processed = ImageOps.autocontrast(inverted).point(lambda p: 255 if p > 180 else 0)
-                text = pytesseract.image_to_string(processed, lang="eng", config="--psm 6")
+
+                text_passes = [
+                    pytesseract.image_to_string(image, lang="eng", config="--psm 6"),
+                    pytesseract.image_to_string(processed, lang="eng", config="--psm 6"),
+                ]
+                text = "\n".join(text_passes)
 
                 temp_path = Path(tmpdir) / f"{path.stem}.txt"
                 temp_path.write_text(text, encoding="utf-8")
