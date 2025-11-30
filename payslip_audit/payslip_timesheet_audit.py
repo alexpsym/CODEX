@@ -500,7 +500,7 @@ def parse_payslip(path: Path) -> PayslipData:
             texts: List[str] = []
             tables = []
             for page in pdf.pages:
-                page_text = page.extract_text() or ""
+                page_text = (page.extract_text() or "").strip()
                 page_tables = page.extract_tables() or []
 
                 if not page_text and not page_tables:
