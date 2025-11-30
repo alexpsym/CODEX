@@ -203,6 +203,8 @@ def resolve_inline_date(text: str, pay_period: Tuple[date, date]) -> Optional[da
 def normalize_timesheet_date_text(text: str) -> str:
     normalized = clean(text)
     normalized = re.sub(r"[^A-Za-z0-9/\-\s]+", " ", normalized)
+    normalized = re.sub(r"(?<=\d)[|Il](?=\d)", "1", normalized)
+    normalized = re.sub(r"(?<=\d)[Oo](?=\d)", "0", normalized)
     normalized = DATE_SUFFIX_RE.sub(r"\1", normalized)
     normalized = re.sub(r"[\s,:;|]+$", "", normalized)
     normalized = re.sub(r"^[\s,:;|]+", "", normalized)
@@ -210,6 +212,9 @@ def normalize_timesheet_date_text(text: str) -> str:
     normalized = re.sub(r"(\d{1,2})[-_,.:]+([A-Za-z]{3,9})", r"\1 \2", normalized)
     normalized = re.sub(r"([A-Za-z]{3,9})(\d{1,2})", r"\1 \2", normalized)
     normalized = re.sub(r"(\d{1,2})([A-Za-z]{3,9})", r"\1 \2", normalized)
+    normalized = re.sub(r"\b0ct\b", "Oct", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\bn0v\b", "Nov", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\bdecernber\b", "December", normalized, flags=re.IGNORECASE)
     return SPACE_RE.sub(" ", normalized).strip()
 
 
@@ -631,6 +636,7 @@ def extract_timesheet_entries(
                 resolved_markers.append((marker_idx, fallback_dt))
         resolved_markers.sort()
 
+    unassigned_shift_totals: List[Tuple[int, Decimal, str]] = []
     if pending_shift_totals and resolved_markers:
         indexed_dates = resolved_markers
         for idx, hours, normalized in pending_shift_totals:
@@ -643,6 +649,24 @@ def extract_timesheet_entries(
                 continue
             shift_sums[nearest_dt] = shift_sums.get(nearest_dt, Decimal("0")) + hours
             seen_totals[nearest_dt].add(key)
+    else:
+        unassigned_shift_totals = pending_shift_totals
+
+    if unassigned_shift_totals:
+        fallback_hours = sum(hours for _, hours, _ in unassigned_shift_totals)
+        if fallback_hours > 0:
+            fallback_dt = pay_period[0]
+            entry = TimesheetEntry(
+                hours=fallback_hours,
+                label="Unassigned shift totals",
+                counts=True,
+                raw="Shift Total hours without detected date",
+            )
+            score = (False, fallback_hours)
+            existing = best_totals.get(fallback_dt)
+            if existing is None or score > existing[0]:
+                best_totals[fallback_dt] = (score, entry)
+            shift_sums[fallback_dt] = shift_sums.get(fallback_dt, Decimal("0")) + fallback_hours
 
 
 def parse_timesheets(paths: Iterable[Path], pay_period: Tuple[date, date]) -> Dict[date, List[TimesheetEntry]]:
@@ -660,14 +684,17 @@ def parse_timesheets(paths: Iterable[Path], pay_period: Tuple[date, date]) -> Di
                 image = Image.open(path).convert("L")
                 inverted = ImageOps.invert(image)
                 contrasted = ImageOps.autocontrast(image)
+                thresholded = contrasted.point(lambda p: 255 if p > 180 else 0)
                 processed = ImageOps.autocontrast(inverted).point(lambda p: 255 if p > 180 else 0)
 
                 text_passes = [
                     pytesseract.image_to_string(image, lang="eng", config="--psm 6"),
+                    pytesseract.image_to_string(inverted, lang="eng", config="--psm 6"),
                     pytesseract.image_to_string(contrasted, lang="eng", config="--psm 6"),
+                    pytesseract.image_to_string(thresholded, lang="eng", config="--psm 6"),
                     pytesseract.image_to_string(processed, lang="eng", config="--psm 6"),
                 ]
-                text = "\n".join(text_passes)
+                text = "\n".join(pass_text for pass_text in text_passes if pass_text)
 
                 if tmpdir is None:
                     tmpdir = Path(stack.enter_context(TemporaryDirectory(prefix="timesheet_text_")))
