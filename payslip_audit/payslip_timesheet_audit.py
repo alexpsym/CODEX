@@ -411,23 +411,76 @@ def extract_from_tables(tables: List[List[List[str]]], pay_period: Tuple[date, d
 
 def extract_from_text(text: str, pay_period: Tuple[date, date]) -> List[PayslipItem]:
     items: List[PayslipItem] = []
-    line_pattern = re.compile(
-        r"(?P<date>\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|[A-Za-z]{3,9}\s+\d{1,2}(?:\s+\d{2,4})?)\s+"
-        r"(?P<category>[A-Za-z0-9 #()/&+,\-]+?)\s+"
-        r"(?P<hours>\d+(?::\d{2})?|\d+\.\d+|\d+\s*h\s*\d+\s*m)\s+"
-        r"(?P<rate>\$?\d+\.\d{2})?"
-        r"(?:\s+(?P<amount>\$?\d+\.\d{2}))?"
+
+    if PAYSLIP_TABLE_MARKER in text:
+        text = text.split(PAYSLIP_TABLE_MARKER, 1)[0].strip()
+
+    # Some text exports break the tabular rows across multiple lines. Look for the
+    # DESCRIPTION/HOURS/RATE header and then buffer following lines until we can
+    # parse a complete row with category, optional hours, rate, and amount.
+    lines = [clean(line) for line in text.splitlines()]
+    header_idx = None
+    for idx, line in enumerate(lines):
+        normalized = line.lower()
+        if "description" in normalized and "hour" in normalized and "amount" in normalized:
+            header_idx = idx
+            break
+
+    row_with_hours_pattern = re.compile(
+        r"(?P<category>[A-Za-z][A-Za-z0-9 #()/&+,\-]*?)\s+"
+        r"(?P<hours>-?\d+(?::\d{2})?|\d+\.\d+|\d+\s*h\s*\d+\s*m)\s+"
+        r"(?P<rate>[-+]?\s*[$€£]?\s*-?\d{1,3}(?:,\d{3})*\.\d{2})\s+"
+        r"(?P<amount>[-+]?\s*[$€£]?\s*-?\d{1,3}(?:,\d{3})*\.\d{2})"
+        r"(?:\s+[-+]?\s*[$€£]?\s*-?\d{1,3}(?:,\d{3})*\.\d{2})?"  # optional YTD column
+        r"(?:\s+[A-Za-z].*)?"  # trailing type/notes columns
     )
-    for match in line_pattern.finditer(text):
-        items.append(
-            PayslipItem(
-                date=resolve_inline_date(match.group("date"), pay_period),
-                category=clean(match.group("category")) or "Uncategorised",
-                hours=parse_hours(match.group("hours")),
-                rate=parse_decimal(match.group("rate")),
-                amount=parse_decimal(match.group("amount")),
+
+    row_without_hours_pattern = re.compile(
+        r"(?P<category>[A-Za-z][A-Za-z0-9 #()/&+,\-]*?)\s+"
+        r"(?P<rate>[-+]?\s*[$€£]?\s*-?\d{1,3}(?:,\d{3})*\.\d{2})\s+"
+        r"(?P<amount>[-+]?\s*[$€£]?\s*-?\d{1,3}(?:,\d{3})*\.\d{2})"
+        r"(?:\s+[-+]?\s*[$€£]?\s*-?\d{1,3}(?:,\d{3})*\.\d{2})?"  # optional YTD column
+        r"(?:\s+[A-Za-z].*)?"  # trailing type/notes columns
+    )
+
+    if header_idx is not None:
+        buffer = ""
+        for line in lines[header_idx + 1 :]:
+            if not line:
+                continue
+            if re.fullmatch(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}", line):
+                buffer = ""
+                continue
+            buffer = f"{buffer} {line}".strip()
+            match = row_with_hours_pattern.search(buffer)
+            matched_without_hours = False
+            if not match:
+                match = row_without_hours_pattern.search(buffer)
+                matched_without_hours = bool(match)
+
+            if not match:
+                # Keep buffering until we can parse a row
+                if len(buffer) > 200:
+                    buffer = ""
+                continue
+
+            category = clean(match.group("category"))
+            if category.lower().startswith("total"):
+                buffer = ""
+                continue
+
+            hours_text = match.group("hours") if not matched_without_hours else None
+
+            items.append(
+                PayslipItem(
+                    date=None,
+                    category=category or "Uncategorised",
+                    hours=parse_hours(hours_text),
+                    rate=parse_decimal(match.group("rate")),
+                    amount=parse_decimal(match.group("amount")),
+                )
             )
-        )
+            buffer = ""
 
     if items:
         return items
@@ -435,8 +488,10 @@ def extract_from_text(text: str, pay_period: Tuple[date, date]) -> List[PayslipI
     fallback_pattern = re.compile(
         r"(?P<category>[A-Za-z0-9 #()/&+,\-]+?)\s+"
         r"(?P<hours>\d+(?::\d{2})?|\d+\.\d+|\d+\s*h\s*\d+\s*m)\s+"
-        r"(?P<rate>\$?\d+\.\d{2})\s+"
-        r"(?P<amount>\$?\d+\.\d{2})"
+        r"(?P<rate>[$€£]?\s*-?\d{1,3}(?:,\d{3})*\.\d{2})\s+"
+        r"(?P<amount>[$€£]?\s*-?\d{1,3}(?:,\d{3})*\.\d{2})"
+        r"(?:\s+[$€£]?\s*-?\d{1,3}(?:,\d{3})*\.\d{2})?"  # optional YTD column
+        r"(?:\s+[A-Za-z].*)?"  # trailing type/notes columns
     )
     for match in fallback_pattern.finditer(text):
         category = clean(match.group("category"))
@@ -526,11 +581,13 @@ def extract_payslip_text_and_tables(path: Path) -> Tuple[str, List[List[List[str
 
 
 def write_payslip_sidecar(sidecar: Path, text: str, tables: List[List[List[str]]]) -> None:
+    # Persist only the readable payslip text. Table data stays in memory for
+    # parsing but is not written to the sidecar so the generated payslip.txt
+    # mirrors the trimmed text the user expects.
+    if PAYSLIP_TABLE_MARKER in text:
+        text = text.split(PAYSLIP_TABLE_MARKER, 1)[0]
+
     lines: List[str] = [PAYSLIP_TEXT_MARKER, text.strip()]
-    for idx, table in enumerate(tables, start=1):
-        lines.append(f"{PAYSLIP_TABLE_MARKER} {idx}")
-        for row in table:
-            lines.append("\t".join(cell or "" for cell in row))
     sidecar.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
 
 
@@ -540,14 +597,13 @@ def read_payslip_sidecar(sidecar: Path) -> Tuple[str, List[List[List[str]]]]:
         return content.strip(), []
 
     text_lines: List[str] = []
+    # Tables are intentionally discarded to keep the sidecar minimal and avoid
+    # malformed rows interfering with parsing.
     tables: List[List[List[str]]] = []
     current_table: Optional[List[List[str]]] = None
     for line in content.splitlines():
         if line.startswith(PAYSLIP_TABLE_MARKER):
-            if current_table is not None:
-                tables.append(current_table)
-            current_table = []
-            continue
+            break
         if line.startswith(PAYSLIP_TEXT_MARKER):
             if current_table is not None:
                 tables.append(current_table)
@@ -556,11 +612,6 @@ def read_payslip_sidecar(sidecar: Path) -> Tuple[str, List[List[List[str]]]]:
 
         if current_table is None:
             text_lines.append(line)
-        else:
-            current_table.append(line.split("\t"))
-
-    if current_table is not None:
-        tables.append(current_table)
 
     text = "\n".join(text_lines).strip()
     return text, tables
@@ -568,17 +619,25 @@ def read_payslip_sidecar(sidecar: Path) -> Tuple[str, List[List[List[str]]]]:
 
 def parse_payslip(path: Path) -> PayslipData:
     sidecar = path.with_suffix(".txt")
+    tables: List[List[List[str]]]
     if sidecar.exists():
         text, tables = read_payslip_sidecar(sidecar)
+        if not tables:
+            # Extract fresh tables for parsing without writing them to disk.
+            _, tables = extract_payslip_text_and_tables(path)
     else:
-        text, tables = extract_payslip_text_and_tables(path)
-        write_payslip_sidecar(sidecar, text, tables)
+        text, extracted_tables = extract_payslip_text_and_tables(path)
+        write_payslip_sidecar(sidecar, text, extracted_tables)
         text, tables = read_payslip_sidecar(sidecar)
+        if not tables:
+            tables = extracted_tables
     pay_period = find_pay_period(text)
 
-    items = extract_from_tables(tables, pay_period) if tables else []
-    if not items:
-        items = extract_from_text(text, pay_period)
+    # Prefer the text body for hours extraction so multi-line exports that split
+    # rows are handled consistently. Table parsing remains as a fallback.
+    items = extract_from_text(text, pay_period)
+    if not items and tables:
+        items = extract_from_tables(tables, pay_period)
     if not items:
         raise ValueError("No payslip work entries were detected.")
 
