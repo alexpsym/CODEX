@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
 from xml.sax.saxutils import escape
 
@@ -474,15 +475,19 @@ def determine_rate(text: str, items: List[PayslipItem]) -> Decimal:
 
 
 def parse_payslip(path: Path) -> PayslipData:
-    with pdfplumber.open(str(path)) as pdf:
-        texts: List[str] = []
+    sidecar = path.with_suffix(".txt")
+    if sidecar.exists():
+        text = sidecar.read_text(encoding="utf-8", errors="ignore")
         tables: List[List[List[str]]] = []
-        for page in pdf.pages:
-            texts.append(page.extract_text() or "")
-            page_tables = page.extract_tables() or []
-            tables.extend(page_tables)
-
-    text = "\n".join(texts)
+    else:
+        with pdfplumber.open(str(path)) as pdf:
+            texts: List[str] = []
+            tables = []
+            for page in pdf.pages:
+                texts.append(page.extract_text() or "")
+                page_tables = page.extract_tables() or []
+                tables.extend(page_tables)
+        text = "\n".join(texts)
     pay_period = find_pay_period(text)
 
     items = extract_from_tables(tables, pay_period)
@@ -577,12 +582,22 @@ def parse_timesheets(paths: Iterable[Path], pay_period: Tuple[date, date]) -> Di
     best_totals: Dict[date, Tuple[Tuple[bool, Decimal], TimesheetEntry]] = {}
     seen_totals: Dict[date, Set[str]] = {}
     shift_sums: Dict[date, Decimal] = {}
-    for path in paths:
-        image = Image.open(path).convert("L")
-        inverted = ImageOps.invert(image)
-        processed = ImageOps.autocontrast(inverted).point(lambda p: 255 if p > 180 else 0)
-        text = pytesseract.image_to_string(processed, lang="eng", config="--psm 6")
-        extract_timesheet_entries(text, pay_period, best_totals, seen_totals, shift_sums)
+
+    with TemporaryDirectory(prefix="timesheet_text_") as tmpdir:
+        for path in paths:
+            sidecar = path.with_suffix(".txt")
+            if sidecar.exists():
+                text = sidecar.read_text(encoding="utf-8", errors="ignore")
+            else:
+                image = Image.open(path).convert("L")
+                inverted = ImageOps.invert(image)
+                processed = ImageOps.autocontrast(inverted).point(lambda p: 255 if p > 180 else 0)
+                text = pytesseract.image_to_string(processed, lang="eng", config="--psm 6")
+
+                temp_path = Path(tmpdir) / f"{path.stem}.txt"
+                temp_path.write_text(text, encoding="utf-8")
+
+            extract_timesheet_entries(text, pay_period, best_totals, seen_totals, shift_sums)
 
     for dt, hours in shift_sums.items():
         entry = TimesheetEntry(hours=hours, label="Sum of shift totals", counts=True, raw="Aggregated shift totals")
