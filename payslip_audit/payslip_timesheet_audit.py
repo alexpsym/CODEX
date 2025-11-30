@@ -435,8 +435,10 @@ def extract_from_text(text: str, pay_period: Tuple[date, date]) -> List[PayslipI
     fallback_pattern = re.compile(
         r"(?P<category>[A-Za-z0-9 #()/&+,\-]+?)\s+"
         r"(?P<hours>\d+(?::\d{2})?|\d+\.\d+|\d+\s*h\s*\d+\s*m)\s+"
-        r"(?P<rate>\$?\d+\.\d{2})\s+"
-        r"(?P<amount>\$?\d+\.\d{2})"
+        r"(?P<rate>[$€£]?\s*-?\d{1,3}(?:,\d{3})*\.\d{2})\s+"
+        r"(?P<amount>[$€£]?\s*-?\d{1,3}(?:,\d{3})*\.\d{2})"
+        r"(?:\s+[$€£]?\s*-?\d{1,3}(?:,\d{3})*\.\d{2})?"  # optional YTD column
+        r"(?:\s+[A-Za-z].*)?"  # trailing type/notes columns
     )
     for match in fallback_pattern.finditer(text):
         category = clean(match.group("category"))
