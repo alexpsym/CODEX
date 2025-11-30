@@ -509,13 +509,17 @@ def parse_payslip(path: Path) -> PayslipData:
                 page_text = (page.extract_text() or "").strip()
                 page_tables = page.extract_tables() or []
 
-                if not page_text and not page_tables:
-                    image = page.to_image(resolution=300).original.convert("RGB")
-                    page_text = pytesseract.image_to_string(image) or ""
-
                 texts.append(page_text)
                 tables.extend(page_tables)
-        text = "\n".join(texts)
+
+            text = "\n".join(texts).strip()
+
+            if not text:
+                ocr_texts: List[str] = []
+                for page in pdf.pages:
+                    image = page.to_image(resolution=300).original.convert("RGB")
+                    ocr_texts.append(pytesseract.image_to_string(image) or "")
+                text = "\n".join(ocr_texts)
     pay_period = find_pay_period(text)
 
     items = extract_from_tables(tables, pay_period)
