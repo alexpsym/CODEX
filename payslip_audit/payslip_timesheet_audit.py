@@ -411,23 +411,58 @@ def extract_from_tables(tables: List[List[List[str]]], pay_period: Tuple[date, d
 
 def extract_from_text(text: str, pay_period: Tuple[date, date]) -> List[PayslipItem]:
     items: List[PayslipItem] = []
-    line_pattern = re.compile(
-        r"(?P<date>\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|[A-Za-z]{3,9}\s+\d{1,2}(?:\s+\d{2,4})?)\s+"
-        r"(?P<category>[A-Za-z0-9 #()/&+,\-]+?)\s+"
-        r"(?P<hours>\d+(?::\d{2})?|\d+\.\d+|\d+\s*h\s*\d+\s*m)\s+"
-        r"(?P<rate>\$?\d+\.\d{2})?"
-        r"(?:\s+(?P<amount>\$?\d+\.\d{2}))?"
+
+    # Some text exports break the tabular rows across multiple lines. Look for the
+    # DESCRIPTION/HOURS/RATE header and then buffer following lines until we can
+    # parse a complete row with category, optional hours, rate, and amount.
+    lines = [clean(line) for line in text.splitlines()]
+    header_idx = None
+    for idx, line in enumerate(lines):
+        normalized = line.lower()
+        if "description" in normalized and "hour" in normalized and "amount" in normalized:
+            header_idx = idx
+            break
+
+    row_pattern = re.compile(
+        r"(?P<category>[A-Za-z][A-Za-z0-9 #()/&+,\-]*)\s+"
+        r"(?:(?P<hours>-?\d+(?::\d{2})?|\d+\.\d+|\d+\s*h\s*\d+\s*m)\s+)?"
+        r"(?P<rate>[-+]?\s*[$€£]?\s*-?\d{1,3}(?:,\d{3})*\.\d{2})\s+"
+        r"(?P<amount>[-+]?\s*[$€£]?\s*-?\d{1,3}(?:,\d{3})*\.\d{2})"
+        r"(?:\s+[-+]?\s*[$€£]?\s*-?\d{1,3}(?:,\d{3})*\.\d{2})?"  # optional YTD column
+        r"(?:\s+[A-Za-z].*)?"  # trailing type/notes columns
     )
-    for match in line_pattern.finditer(text):
-        items.append(
-            PayslipItem(
-                date=resolve_inline_date(match.group("date"), pay_period),
-                category=clean(match.group("category")) or "Uncategorised",
-                hours=parse_hours(match.group("hours")),
-                rate=parse_decimal(match.group("rate")),
-                amount=parse_decimal(match.group("amount")),
+
+    if header_idx is not None:
+        buffer = ""
+        for line in lines[header_idx + 1 :]:
+            if not line:
+                continue
+            if re.fullmatch(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}", line):
+                buffer = ""
+                continue
+            buffer = f"{buffer} {line}".strip()
+            match = row_pattern.search(buffer)
+            if not match:
+                # Keep buffering until we can parse a row
+                if len(buffer) > 200:
+                    buffer = ""
+                continue
+
+            category = clean(match.group("category"))
+            if category.lower().startswith("total"):
+                buffer = ""
+                continue
+
+            items.append(
+                PayslipItem(
+                    date=None,
+                    category=category or "Uncategorised",
+                    hours=parse_hours(match.group("hours")),
+                    rate=parse_decimal(match.group("rate")),
+                    amount=parse_decimal(match.group("amount")),
+                )
             )
-        )
+            buffer = ""
 
     if items:
         return items
