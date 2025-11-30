@@ -412,6 +412,9 @@ def extract_from_tables(tables: List[List[List[str]]], pay_period: Tuple[date, d
 def extract_from_text(text: str, pay_period: Tuple[date, date]) -> List[PayslipItem]:
     items: List[PayslipItem] = []
 
+    if PAYSLIP_TABLE_MARKER in text:
+        text = text.split(PAYSLIP_TABLE_MARKER, 1)[0].strip()
+
     # Some text exports break the tabular rows across multiple lines. Look for the
     # DESCRIPTION/HOURS/RATE header and then buffer following lines until we can
     # parse a complete row with category, optional hours, rate, and amount.
@@ -578,11 +581,13 @@ def extract_payslip_text_and_tables(path: Path) -> Tuple[str, List[List[List[str
 
 
 def write_payslip_sidecar(sidecar: Path, text: str, tables: List[List[List[str]]]) -> None:
+    # Persist only the readable payslip text. Table data stays in memory for
+    # parsing but is not written to the sidecar so the generated payslip.txt
+    # mirrors the trimmed text the user expects.
+    if PAYSLIP_TABLE_MARKER in text:
+        text = text.split(PAYSLIP_TABLE_MARKER, 1)[0]
+
     lines: List[str] = [PAYSLIP_TEXT_MARKER, text.strip()]
-    for idx, table in enumerate(tables, start=1):
-        lines.append(f"{PAYSLIP_TABLE_MARKER} {idx}")
-        for row in table:
-            lines.append("\t".join(cell or "" for cell in row))
     sidecar.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
 
 
@@ -592,14 +597,13 @@ def read_payslip_sidecar(sidecar: Path) -> Tuple[str, List[List[List[str]]]]:
         return content.strip(), []
 
     text_lines: List[str] = []
+    # Tables are intentionally discarded to keep the sidecar minimal and avoid
+    # malformed rows interfering with parsing.
     tables: List[List[List[str]]] = []
     current_table: Optional[List[List[str]]] = None
     for line in content.splitlines():
         if line.startswith(PAYSLIP_TABLE_MARKER):
-            if current_table is not None:
-                tables.append(current_table)
-            current_table = []
-            continue
+            break
         if line.startswith(PAYSLIP_TEXT_MARKER):
             if current_table is not None:
                 tables.append(current_table)
@@ -608,11 +612,6 @@ def read_payslip_sidecar(sidecar: Path) -> Tuple[str, List[List[List[str]]]]:
 
         if current_table is None:
             text_lines.append(line)
-        else:
-            current_table.append(line.split("\t"))
-
-    if current_table is not None:
-        tables.append(current_table)
 
     text = "\n".join(text_lines).strip()
     return text, tables
@@ -620,17 +619,25 @@ def read_payslip_sidecar(sidecar: Path) -> Tuple[str, List[List[List[str]]]]:
 
 def parse_payslip(path: Path) -> PayslipData:
     sidecar = path.with_suffix(".txt")
+    tables: List[List[List[str]]]
     if sidecar.exists():
         text, tables = read_payslip_sidecar(sidecar)
+        if not tables:
+            # Extract fresh tables for parsing without writing them to disk.
+            _, tables = extract_payslip_text_and_tables(path)
     else:
-        text, tables = extract_payslip_text_and_tables(path)
-        write_payslip_sidecar(sidecar, text, tables)
+        text, extracted_tables = extract_payslip_text_and_tables(path)
+        write_payslip_sidecar(sidecar, text, extracted_tables)
         text, tables = read_payslip_sidecar(sidecar)
+        if not tables:
+            tables = extracted_tables
     pay_period = find_pay_period(text)
 
-    items = extract_from_tables(tables, pay_period) if tables else []
-    if not items:
-        items = extract_from_text(text, pay_period)
+    # Prefer the text body for hours extraction so multi-line exports that split
+    # rows are handled consistently. Table parsing remains as a fallback.
+    items = extract_from_text(text, pay_period)
+    if not items and tables:
+        items = extract_from_tables(tables, pay_period)
     if not items:
         raise ValueError("No payslip work entries were detected.")
 
