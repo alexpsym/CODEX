@@ -25,23 +25,23 @@ SPACE_RE = re.compile(r"\s+")
 DATE_SUFFIX_RE = re.compile(r"(\d+)(st|nd|rd|th)", re.IGNORECASE)
 TIMESHEET_DATE_PATTERNS = [
     re.compile(
-        r"^(?P<dow>[A-Za-z]{3}),?\s+(?P<day>\d{1,2})\s+(?P<month>[A-Za-z]{3,9})(?:\s+(?P<year>\d{2,4}))?",
+        r"^(?P<dow>[A-Za-z]{3}),?\s+(?P<day>\d{1,2})\s+(?P<month>[A-Za-z]{3,9})(?:\s+(?P<year>\d{2,4})(?!\s*[A-Za-z]))?",
         re.IGNORECASE,
     ),
     re.compile(
-        r"^(?P<dow>[A-Za-z]{3}),?\s+(?P<month>[A-Za-z]{3,9})\s+(?P<day>\d{1,2})(?:\s+(?P<year>\d{2,4}))?",
+        r"^(?P<dow>[A-Za-z]{3}),?\s+(?P<month>[A-Za-z]{3,9})\s+(?P<day>\d{1,2})(?:\s+(?P<year>\d{2,4})(?!\s*[A-Za-z]))?",
         re.IGNORECASE,
     ),
     re.compile(
-        r"^(?P<dow>[A-Za-z]{3}),?\s+(?P<day>\d{1,2})[/-](?P<month>\d{1,2})(?:[/-](?P<year>\d{2,4}))?",
+        r"^(?P<dow>[A-Za-z]{3}),?\s+(?P<day>\d{1,2})[/-](?P<month>\d{1,2})(?:[/-](?P<year>\d{2,4})(?!\s*[A-Za-z]))?",
         re.IGNORECASE,
     ),
     re.compile(
-        r"^(?P<month>[A-Za-z]{3,9})\s+(?P<day>\d{1,2})(?:\s+(?P<year>\d{2,4}))?",
+        r"^(?P<month>[A-Za-z]{3,9})\s+(?P<day>\d{1,2})(?:\s+(?P<year>\d{2,4})(?!\s*[A-Za-z]))?",
         re.IGNORECASE,
     ),
     re.compile(
-        r"^(?P<day>\d{1,2})\s+(?P<month>[A-Za-z]{3,9})(?:\s+(?P<year>\d{2,4}))?",
+        r"^(?P<day>\d{1,2})\s+(?P<month>[A-Za-z]{3,9})(?:\s+(?P<year>\d{2,4})(?!\s*[A-Za-z]))?",
         re.IGNORECASE,
     ),
 ]
