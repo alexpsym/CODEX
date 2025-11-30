@@ -143,18 +143,43 @@ def collect_youtube_urls(node: Any, results: Set[str]) -> None:
 
 # ─── DOWNLOADS ──────────────────────────────────────────────────────────────────
 
+def _ffmpeg_installed() -> bool:
+    """Return True when ffmpeg is available for audio extraction."""
+    return shutil.which("ffmpeg") is not None
+
+
 def download_links(urls: Iterable[str]) -> None:
     """Download each URL with yt-dlp, reporting per-link success/failure."""
     if not shutil.which("yt-dlp"):
         print("Error: yt-dlp is not installed or not on your PATH.")
         return
 
-    common_args = ["-f", "bv*+ba/b", "--extractor-args", "youtube:player_client=web"]
+    if not _ffmpeg_installed():
+        print("Error: ffmpeg is required to convert downloads to mp3.")
+        print("Install ffmpeg and try again.")
+        return
+
+    common_args = [
+        "-f",
+        "bestaudio/bv*+ba/b",
+        "--extractor-args",
+        "youtube:player_client=web",
+        "-x",
+        "--audio-format",
+        "mp3",
+        "--audio-quality",
+        "0",
+    ]
     fallback_args = [
         "-f",
-        "bv*+ba/b",
+        "bestaudio/bv*+ba/b",
         "--extractor-args",
         "youtube:player_client=android,player_skip=webpage",
+        "-x",
+        "--audio-format",
+        "mp3",
+        "--audio-quality",
+        "0",
     ]
 
     for url in urls:
