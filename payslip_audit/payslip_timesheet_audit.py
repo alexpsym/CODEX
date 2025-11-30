@@ -484,8 +484,14 @@ def parse_payslip(path: Path) -> PayslipData:
             texts: List[str] = []
             tables = []
             for page in pdf.pages:
-                texts.append(page.extract_text() or "")
+                page_text = page.extract_text() or ""
                 page_tables = page.extract_tables() or []
+
+                if not page_text and not page_tables:
+                    image = page.to_image(resolution=300).original.convert("RGB")
+                    page_text = pytesseract.image_to_string(image) or ""
+
+                texts.append(page_text)
                 tables.extend(page_tables)
         text = "\n".join(texts)
     pay_period = find_pay_period(text)
