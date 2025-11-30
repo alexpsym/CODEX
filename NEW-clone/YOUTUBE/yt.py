@@ -143,18 +143,59 @@ def collect_youtube_urls(node: Any, results: Set[str]) -> None:
 
 # ─── DOWNLOADS ──────────────────────────────────────────────────────────────────
 
+def _ffmpeg_installed() -> Optional[str]:
+    """Return the ffmpeg executable path when available for audio extraction."""
+
+    return shutil.which("ffmpeg")
+
+
+def _print_ffmpeg_help() -> None:
+    """Provide platform-specific guidance for installing ffmpeg binaries."""
+
+    print("Error: ffmpeg is required to convert downloads to mp3.")
+    print(
+        "Install a system ffmpeg binary (pip packages alone are not enough). "
+        "Examples:"
+    )
+    print("  Windows: `choco install ffmpeg` or download from https://www.gyan.dev/ffmpeg/builds/")
+    print("  macOS:   `brew install ffmpeg`")
+    print("  Linux:   `sudo apt-get install ffmpeg` or use your distro's package manager")
+
+
 def download_links(urls: Iterable[str]) -> None:
     """Download each URL with yt-dlp, reporting per-link success/failure."""
     if not shutil.which("yt-dlp"):
         print("Error: yt-dlp is not installed or not on your PATH.")
         return
 
-    common_args = ["-f", "bv*+ba/b", "--extractor-args", "youtube:player_client=web"]
+    ffmpeg_path = _ffmpeg_installed()
+    if not ffmpeg_path:
+        _print_ffmpeg_help()
+        return
+
+    print(f"Using ffmpeg at: {ffmpeg_path}")
+
+    common_args = [
+        "-f",
+        "bestaudio/bv*+ba/b",
+        "--extractor-args",
+        "youtube:player_client=web",
+        "-x",
+        "--audio-format",
+        "mp3",
+        "--audio-quality",
+        "0",
+    ]
     fallback_args = [
         "-f",
-        "bv*+ba/b",
+        "bestaudio/bv*+ba/b",
         "--extractor-args",
         "youtube:player_client=android,player_skip=webpage",
+        "-x",
+        "--audio-format",
+        "mp3",
+        "--audio-quality",
+        "0",
     ]
 
     for url in urls:
