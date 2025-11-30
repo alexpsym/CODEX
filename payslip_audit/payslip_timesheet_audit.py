@@ -5,12 +5,10 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
 from xml.sax.saxutils import escape
 
@@ -501,33 +499,84 @@ def determine_rate(text: str, items: List[PayslipItem]) -> Decimal:
     raise ValueError("Unable to determine hourly rate from the payslip.")
 
 
+PAYSLIP_TEXT_MARKER = "---PAYSLIP TEXT---"
+PAYSLIP_TABLE_MARKER = "---TABLE"
+
+
+def extract_payslip_text_and_tables(path: Path) -> Tuple[str, List[List[List[str]]]]:
+    with pdfplumber.open(str(path)) as pdf:
+        texts: List[str] = []
+        tables: List[List[List[str]]] = []
+        for page in pdf.pages:
+            page_text = (page.extract_text() or "").strip()
+            page_tables = page.extract_tables() or []
+
+            texts.append(page_text)
+            tables.extend(page_tables)
+
+        text = "\n".join(texts).strip()
+
+        if not text:
+            ocr_texts: List[str] = []
+            for page in pdf.pages:
+                image = page.to_image(resolution=300).original.convert("RGB")
+                ocr_texts.append(pytesseract.image_to_string(image) or "")
+            text = "\n".join(ocr_texts)
+    return text, tables
+
+
+def write_payslip_sidecar(sidecar: Path, text: str, tables: List[List[List[str]]]) -> None:
+    lines: List[str] = [PAYSLIP_TEXT_MARKER, text.strip()]
+    for idx, table in enumerate(tables, start=1):
+        lines.append(f"{PAYSLIP_TABLE_MARKER} {idx}")
+        for row in table:
+            lines.append("\t".join(cell or "" for cell in row))
+    sidecar.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+
+
+def read_payslip_sidecar(sidecar: Path) -> Tuple[str, List[List[List[str]]]]:
+    content = sidecar.read_text(encoding="utf-8", errors="ignore")
+    if PAYSLIP_TEXT_MARKER not in content and PAYSLIP_TABLE_MARKER not in content:
+        return content.strip(), []
+
+    text_lines: List[str] = []
+    tables: List[List[List[str]]] = []
+    current_table: Optional[List[List[str]]] = None
+    for line in content.splitlines():
+        if line.startswith(PAYSLIP_TABLE_MARKER):
+            if current_table is not None:
+                tables.append(current_table)
+            current_table = []
+            continue
+        if line.startswith(PAYSLIP_TEXT_MARKER):
+            if current_table is not None:
+                tables.append(current_table)
+            current_table = None
+            continue
+
+        if current_table is None:
+            text_lines.append(line)
+        else:
+            current_table.append(line.split("\t"))
+
+    if current_table is not None:
+        tables.append(current_table)
+
+    text = "\n".join(text_lines).strip()
+    return text, tables
+
+
 def parse_payslip(path: Path) -> PayslipData:
     sidecar = path.with_suffix(".txt")
     if sidecar.exists():
-        text = sidecar.read_text(encoding="utf-8", errors="ignore")
-        tables: List[List[List[str]]] = []
+        text, tables = read_payslip_sidecar(sidecar)
     else:
-        with pdfplumber.open(str(path)) as pdf:
-            texts: List[str] = []
-            tables = []
-            for page in pdf.pages:
-                page_text = (page.extract_text() or "").strip()
-                page_tables = page.extract_tables() or []
-
-                texts.append(page_text)
-                tables.extend(page_tables)
-
-            text = "\n".join(texts).strip()
-
-            if not text:
-                ocr_texts: List[str] = []
-                for page in pdf.pages:
-                    image = page.to_image(resolution=300).original.convert("RGB")
-                    ocr_texts.append(pytesseract.image_to_string(image) or "")
-                text = "\n".join(ocr_texts)
+        text, tables = extract_payslip_text_and_tables(path)
+        write_payslip_sidecar(sidecar, text, tables)
+        text, tables = read_payslip_sidecar(sidecar)
     pay_period = find_pay_period(text)
 
-    items = extract_from_tables(tables, pay_period)
+    items = extract_from_tables(tables, pay_period) if tables else []
     if not items:
         items = extract_from_text(text, pay_period)
     if not items:
@@ -674,34 +723,29 @@ def parse_timesheets(paths: Iterable[Path], pay_period: Tuple[date, date]) -> Di
     seen_totals: Dict[date, Set[str]] = {}
     shift_sums: Dict[date, Decimal] = {}
 
-    with ExitStack() as stack:
-        tmpdir: Optional[Path] = None
-        for path in paths:
-            sidecar = path.with_suffix(".txt")
-            if sidecar.exists():
-                text = sidecar.read_text(encoding="utf-8", errors="ignore")
-            else:
-                image = Image.open(path).convert("L")
-                inverted = ImageOps.invert(image)
-                contrasted = ImageOps.autocontrast(image)
-                thresholded = contrasted.point(lambda p: 255 if p > 180 else 0)
-                processed = ImageOps.autocontrast(inverted).point(lambda p: 255 if p > 180 else 0)
+    for path in paths:
+        sidecar = path.with_suffix(".txt")
+        if sidecar.exists():
+            text = sidecar.read_text(encoding="utf-8", errors="ignore")
+        else:
+            image = Image.open(path).convert("L")
+            inverted = ImageOps.invert(image)
+            contrasted = ImageOps.autocontrast(image)
+            thresholded = contrasted.point(lambda p: 255 if p > 180 else 0)
+            processed = ImageOps.autocontrast(inverted).point(lambda p: 255 if p > 180 else 0)
 
-                text_passes = [
-                    pytesseract.image_to_string(image, lang="eng", config="--psm 6"),
-                    pytesseract.image_to_string(inverted, lang="eng", config="--psm 6"),
-                    pytesseract.image_to_string(contrasted, lang="eng", config="--psm 6"),
-                    pytesseract.image_to_string(thresholded, lang="eng", config="--psm 6"),
-                    pytesseract.image_to_string(processed, lang="eng", config="--psm 6"),
-                ]
-                text = "\n".join(pass_text for pass_text in text_passes if pass_text)
+            text_passes = [
+                pytesseract.image_to_string(image, lang="eng", config="--psm 6"),
+                pytesseract.image_to_string(inverted, lang="eng", config="--psm 6"),
+                pytesseract.image_to_string(contrasted, lang="eng", config="--psm 6"),
+                pytesseract.image_to_string(thresholded, lang="eng", config="--psm 6"),
+                pytesseract.image_to_string(processed, lang="eng", config="--psm 6"),
+            ]
+            text = "\n".join(pass_text for pass_text in text_passes if pass_text)
 
-                if tmpdir is None:
-                    tmpdir = Path(stack.enter_context(TemporaryDirectory(prefix="timesheet_text_")))
-                temp_path = tmpdir / f"{path.stem}.txt"
-                temp_path.write_text(text, encoding="utf-8")
+            sidecar.write_text(text, encoding="utf-8")
 
-            extract_timesheet_entries(text, pay_period, best_totals, seen_totals, shift_sums)
+        extract_timesheet_entries(text, pay_period, best_totals, seen_totals, shift_sums)
 
     for dt, hours in shift_sums.items():
         entry = TimesheetEntry(hours=hours, label="Sum of shift totals", counts=True, raw="Aggregated shift totals")
