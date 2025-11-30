@@ -423,9 +423,17 @@ def extract_from_text(text: str, pay_period: Tuple[date, date]) -> List[PayslipI
             header_idx = idx
             break
 
-    row_pattern = re.compile(
-        r"(?P<category>[A-Za-z][A-Za-z0-9 #()/&+,\-]*)\s+"
-        r"(?:(?P<hours>-?\d+(?::\d{2})?|\d+\.\d+|\d+\s*h\s*\d+\s*m)\s+)?"
+    row_with_hours_pattern = re.compile(
+        r"(?P<category>[A-Za-z][A-Za-z0-9 #()/&+,\-]*?)\s+"
+        r"(?P<hours>-?\d+(?::\d{2})?|\d+\.\d+|\d+\s*h\s*\d+\s*m)\s+"
+        r"(?P<rate>[-+]?\s*[$€£]?\s*-?\d{1,3}(?:,\d{3})*\.\d{2})\s+"
+        r"(?P<amount>[-+]?\s*[$€£]?\s*-?\d{1,3}(?:,\d{3})*\.\d{2})"
+        r"(?:\s+[-+]?\s*[$€£]?\s*-?\d{1,3}(?:,\d{3})*\.\d{2})?"  # optional YTD column
+        r"(?:\s+[A-Za-z].*)?"  # trailing type/notes columns
+    )
+
+    row_without_hours_pattern = re.compile(
+        r"(?P<category>[A-Za-z][A-Za-z0-9 #()/&+,\-]*?)\s+"
         r"(?P<rate>[-+]?\s*[$€£]?\s*-?\d{1,3}(?:,\d{3})*\.\d{2})\s+"
         r"(?P<amount>[-+]?\s*[$€£]?\s*-?\d{1,3}(?:,\d{3})*\.\d{2})"
         r"(?:\s+[-+]?\s*[$€£]?\s*-?\d{1,3}(?:,\d{3})*\.\d{2})?"  # optional YTD column
@@ -441,7 +449,12 @@ def extract_from_text(text: str, pay_period: Tuple[date, date]) -> List[PayslipI
                 buffer = ""
                 continue
             buffer = f"{buffer} {line}".strip()
-            match = row_pattern.search(buffer)
+            match = row_with_hours_pattern.search(buffer)
+            matched_without_hours = False
+            if not match:
+                match = row_without_hours_pattern.search(buffer)
+                matched_without_hours = bool(match)
+
             if not match:
                 # Keep buffering until we can parse a row
                 if len(buffer) > 200:
@@ -453,11 +466,13 @@ def extract_from_text(text: str, pay_period: Tuple[date, date]) -> List[PayslipI
                 buffer = ""
                 continue
 
+            hours_text = match.group("hours") if not matched_without_hours else None
+
             items.append(
                 PayslipItem(
                     date=None,
                     category=category or "Uncategorised",
-                    hours=parse_hours(match.group("hours")),
+                    hours=parse_hours(hours_text),
                     rate=parse_decimal(match.group("rate")),
                     amount=parse_decimal(match.group("amount")),
                 )
