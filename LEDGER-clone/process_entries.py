@@ -14,19 +14,22 @@ import xlwings as xw
 def resolve_data_dir() -> Path:
     """Return the folder that stores Excel workbooks.
 
-    By default this points to ``../LEDGER`` relative to the repository layout
-    (e.g. ``C:\\Users\\User\\Documents\\LEDGER`` when the scripts live in
-    ``...\\GPT\\CODEX\\LEDGER-clone``).  Set ``LEDGER_DATA_DIR`` to override
-    this location.
+    By default this points to ``C:\\Users\\User\\Documents\\LEDGER`` (or the
+    current user's ``~/Documents/LEDGER`` on other platforms). Set
+    ``LEDGER_DATA_DIR`` to override this location.
     """
 
     env_path = os.environ.get("LEDGER_DATA_DIR")
     if env_path:
         return Path(env_path).expanduser()
 
-    default_path = Path(__file__).resolve().parents[2] / "LEDGER"
-    if default_path.exists():
-        return default_path
+    documents_path = Path.home() / "Documents" / "LEDGER"
+    if documents_path.exists():
+        return documents_path
+
+    fallback_path = Path(__file__).resolve().parents[2] / "LEDGER"
+    if fallback_path.exists():
+        return fallback_path
 
     return Path(__file__).resolve().parent
 

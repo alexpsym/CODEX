@@ -17,25 +17,31 @@ except ImportError:  # xlwings is missing
     xw = None  # type: ignore[assignment]
 
 
-def resolve_entry_file() -> str:
-    """Return the full path to ENTRIES.xlsx.
+def resolve_data_dir() -> Path:
+    """Return the folder that stores Excel workbooks.
 
-    Defaults to ``../LEDGER/ENTRIES.xlsx`` relative to the repository layout
-    but can be overridden via the ``LEDGER_DATA_DIR`` environment variable.
+    By default this points to ``C:\\Users\\User\\Documents\\LEDGER`` (or the
+    current user's ``~/Documents/LEDGER`` on other platforms). Set
+    ``LEDGER_DATA_DIR`` to override this location.
     """
 
     env_path = os.environ.get("LEDGER_DATA_DIR")
     if env_path:
-        return str((Path(env_path) / "ENTRIES.xlsx").expanduser())
+        return Path(env_path).expanduser()
 
-    default_path = Path(__file__).resolve().parents[2] / "LEDGER" / "ENTRIES.xlsx"
-    if default_path.exists():
-        return str(default_path)
+    documents_path = Path.home() / "Documents" / "LEDGER"
+    if documents_path.exists():
+        return documents_path
 
-    return "ENTRIES.xlsx"
+    fallback_path = Path(__file__).resolve().parents[2] / "LEDGER"
+    if fallback_path.exists():
+        return fallback_path
+
+    return Path(__file__).resolve().parent
 
 
-ENTRY_FILE = resolve_entry_file()
+BASE_DIR = resolve_data_dir()
+ENTRY_FILE = BASE_DIR / "ENTRIES.xlsx"
 
 
 def parse_range(text: str) -> tuple[pd.Timestamp, pd.Timestamp]:
@@ -94,7 +100,7 @@ def main() -> None:
 
     with app:
         print(f"Opening workbook {ENTRY_FILE}")
-        wb = app.books.open(ENTRY_FILE)
+        wb = app.books.open(str(ENTRY_FILE))
         ws_master = wb.sheets["MASTER"]
         print("Reading transactions...")
         raw = ws_master.used_range.value
