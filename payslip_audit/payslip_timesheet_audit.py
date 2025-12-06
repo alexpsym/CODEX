@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -69,6 +70,8 @@ DATE_FORMATS = [
 ]
 
 # File discovery patterns
+DEFAULT_DOWNLOADS_DIR = Path(r"C:\Users\User\Downloads")
+DEFAULT_MEDIPORT_DIR = Path(r"C:\Users\User\Documents\MEDIPORT")
 PAYSLIP_GLOB = "*.pdf"
 TIMESHEET_GLOBS = ("*.jpg", "*.jpeg", "*.png")
 
@@ -617,9 +620,10 @@ def read_payslip_sidecar(sidecar: Path) -> Tuple[str, List[List[List[str]]]]:
     return text, tables
 
 
-def parse_payslip(path: Path) -> PayslipData:
+def parse_payslip(path: Path, generated_sidecars: Optional[List[Path]] = None) -> PayslipData:
     sidecar = path.with_suffix(".txt")
     tables: List[List[List[str]]]
+    created_sidecar = False
     if sidecar.exists():
         text, tables = read_payslip_sidecar(sidecar)
         if not tables:
@@ -628,9 +632,13 @@ def parse_payslip(path: Path) -> PayslipData:
     else:
         text, extracted_tables = extract_payslip_text_and_tables(path)
         write_payslip_sidecar(sidecar, text, extracted_tables)
+        created_sidecar = True
         text, tables = read_payslip_sidecar(sidecar)
         if not tables:
             tables = extracted_tables
+
+    if created_sidecar and generated_sidecars is not None:
+        generated_sidecars.append(sidecar)
     pay_period = find_pay_period(text)
 
     # Prefer the text body for hours extraction so multi-line exports that split
@@ -777,13 +785,18 @@ def extract_timesheet_entries(
             shift_sums[fallback_dt] = shift_sums.get(fallback_dt, Decimal("0")) + fallback_hours
 
 
-def parse_timesheets(paths: Iterable[Path], pay_period: Tuple[date, date]) -> Dict[date, List[TimesheetEntry]]:
+def parse_timesheets(
+    paths: Iterable[Path],
+    pay_period: Tuple[date, date],
+    generated_sidecars: Optional[List[Path]] = None,
+) -> Dict[date, List[TimesheetEntry]]:
     best_totals: Dict[date, Tuple[Tuple[bool, Decimal], TimesheetEntry]] = {}
     seen_totals: Dict[date, Set[str]] = {}
     shift_sums: Dict[date, Decimal] = {}
 
     for path in paths:
         sidecar = path.with_suffix(".txt")
+        created_sidecar = False
         if sidecar.exists():
             text = sidecar.read_text(encoding="utf-8", errors="ignore")
         else:
@@ -803,8 +816,12 @@ def parse_timesheets(paths: Iterable[Path], pay_period: Tuple[date, date]) -> Di
             text = "\n".join(pass_text for pass_text in text_passes if pass_text)
 
             sidecar.write_text(text, encoding="utf-8")
+            created_sidecar = True
 
         extract_timesheet_entries(text, pay_period, best_totals, seen_totals, shift_sums)
+
+        if created_sidecar and generated_sidecars is not None:
+            generated_sidecars.append(sidecar)
 
     for dt, hours in shift_sums.items():
         entry = TimesheetEntry(hours=hours, label="Sum of shift totals", counts=True, raw="Aggregated shift totals")
@@ -826,25 +843,34 @@ def discover_files(
 ) -> Tuple[Path, List[Path]]:
     """Resolve payslip and timesheet paths.
 
-    When arguments are provided, validate them; otherwise, look for a single PDF
-    and one or more timesheet images in ``working_dir``.
+    When arguments are provided, validate them; otherwise, look in the default
+    Downloads folder for a PDF named with "PaySlipPdf" and timesheet screenshots
+    whose filenames include "Workforce".
     """
 
+    search_dir = DEFAULT_DOWNLOADS_DIR
     if payslip_arg is not None:
         payslip_path = payslip_arg.expanduser().resolve()
         if not payslip_path.exists():
             raise SystemExit(f"Payslip PDF not found: {payslip_path}")
     else:
-        candidates = sorted(working_dir.glob(PAYSLIP_GLOB))
+        if not search_dir.exists():
+            raise SystemExit(
+                f"No payslip PDF supplied and the Downloads directory does not exist: {search_dir}"
+            )
+
+        candidates = [
+            path for path in sorted(search_dir.glob(PAYSLIP_GLOB)) if "payslippdf" in path.stem.lower()
+        ]
         if not candidates:
             raise SystemExit(
-                "No payslip PDF supplied and none found in the current directory. "
-                "Add a single .pdf file or use --payslip to specify one explicitly."
+                "No payslip PDF supplied and none found in the Downloads directory with 'PaySlipPdf' in the name. "
+                "Place the payslip PDF in Downloads or use --payslip to specify it explicitly."
             )
         if len(candidates) > 1:
             names = ", ".join(str(path.name) for path in candidates)
             raise SystemExit(
-                "Multiple PDF files detected in the current directory. "
+                "Multiple PaySlipPdf PDF files detected in the Downloads directory. "
                 "Use --payslip to choose one explicitly. Found: " + names
             )
         payslip_path = candidates[0].resolve()
@@ -857,10 +883,17 @@ def discover_files(
                 raise SystemExit(f"Timesheet image not found: {resolved}")
             timesheet_paths.append(resolved)
     else:
+        if not search_dir.exists():
+            raise SystemExit(
+                f"No timesheet images supplied and the Downloads directory does not exist: {search_dir}"
+            )
+
         discovered: List[Path] = []
         seen: Set[Path] = set()
         for pattern in TIMESHEET_GLOBS:
-            for path in sorted(working_dir.glob(pattern)):
+            for path in sorted(search_dir.glob(pattern)):
+                if "workforce" not in path.name.lower():
+                    continue
                 resolved = path.resolve()
                 if resolved not in seen:
                     seen.add(resolved)
@@ -869,8 +902,8 @@ def discover_files(
 
     if not timesheet_paths:
         raise SystemExit(
-            "No timesheet images supplied and none found in the current directory. "
-            "Add JPG or PNG screenshots or use --timesheet to list them."
+            "No timesheet images supplied and none found in the Downloads directory with 'Workforce' in the filename. "
+            "Add JPG or PNG Workforce screenshots or use --timesheet to list them."
         )
 
     return payslip_path, timesheet_paths
@@ -1264,6 +1297,45 @@ def build_totals(
     return payslip_total_hours, timesheet_total_hours
 
 
+def cleanup_sidecars(sidecars: Iterable[Path]) -> None:
+    for sidecar in {path.resolve() for path in sidecars}:
+        try:
+            sidecar.unlink(missing_ok=True)
+        except Exception as exc:  # noqa: BLE001 - warn but do not halt
+            print(f"Warning: failed to delete {sidecar}: {exc}", file=sys.stderr)
+
+
+def move_file_to_directory(source: Path, destination_dir: Path, label: str) -> Optional[Path]:
+    try:
+        destination_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:  # noqa: BLE001 - warn but do not halt
+        print(f"Warning: failed to ensure destination directory {destination_dir}: {exc}", file=sys.stderr)
+        return None
+
+    try:
+        destination = destination_dir / source.name
+        if source.resolve() == destination.resolve():
+            return destination
+
+        destination.unlink(missing_ok=True)
+        shutil.move(str(source), destination)
+        return destination
+    except Exception as exc:  # noqa: BLE001 - warn but do not halt
+        print(f"Warning: failed to move {label} from {source} to {destination_dir}: {exc}", file=sys.stderr)
+        return None
+
+
+def delete_timesheet_screenshots(timesheets: Iterable[Path], downloads_dir: Path) -> None:
+    downloads_resolved = downloads_dir.resolve()
+    for timesheet in {path.resolve() for path in timesheets}:
+        if timesheet.parent != downloads_resolved:
+            continue
+        try:
+            timesheet.unlink(missing_ok=True)
+        except Exception as exc:  # noqa: BLE001 - warn but do not halt
+            print(f"Warning: failed to delete timesheet screenshot {timesheet}: {exc}", file=sys.stderr)
+
+
 def main(argv: Optional[List[str]] = None) -> None:
     parser = argparse.ArgumentParser(
         description="Compare a payslip PDF against timesheet screenshots and produce an audit report.",
@@ -1271,14 +1343,14 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument(
         "--payslip",
         type=Path,
-        help="Payslip PDF path. Defaults to the only .pdf in the current directory if omitted.",
+        help="Payslip PDF path. Defaults to the PaySlipPdf PDF in the Downloads directory if omitted.",
     )
     parser.add_argument(
         "--timesheet",
         nargs="*",
         type=Path,
         help=(
-            "Timesheet screenshots (JPG/PNG). Defaults to all matching images in the current directory when not supplied."
+            "Timesheet screenshots (JPG/PNG). Defaults to Workforce screenshots in the Downloads directory when not supplied."
         ),
     )
     parser.add_argument(
@@ -1296,10 +1368,12 @@ def main(argv: Optional[List[str]] = None) -> None:
     if not output_path.is_absolute():
         output_path = (working_dir / output_path).resolve()
 
-    payslip = parse_payslip(payslip_path)
+    generated_sidecars: List[Path] = []
+
+    payslip = parse_payslip(payslip_path, generated_sidecars)
     pay_period = (payslip.start, payslip.end)
 
-    timesheet_entries = parse_timesheets(timesheet_paths, pay_period)
+    timesheet_entries = parse_timesheets(timesheet_paths, pay_period, generated_sidecars)
     payslip_totals, aggregated_label = summarise_payslip(payslip.items, pay_period)
     timesheet_totals = summarise_timesheet(timesheet_entries, aggregated_label)
 
@@ -1326,6 +1400,17 @@ def main(argv: Optional[List[str]] = None) -> None:
     print_console(payslip, rows_console, totals, status, undated, aggregated_label)
     make_pdf(output_path, payslip, rows_pdf, totals, status, undated, aggregated_label)
     print(f"\nAudit PDF saved to: {output_path}")
+
+    cleanup_sidecars(generated_sidecars)
+
+    moved_payslip = move_file_to_directory(payslip_path, DEFAULT_MEDIPORT_DIR, "payslip PDF")
+    moved_report = move_file_to_directory(output_path, DEFAULT_MEDIPORT_DIR, "audit report")
+    delete_timesheet_screenshots(timesheet_paths, DEFAULT_DOWNLOADS_DIR)
+
+    if moved_payslip:
+        print(f"Payslip moved to: {moved_payslip}")
+    if moved_report:
+        print(f"Audit report moved to: {moved_report}")
 
 
 if __name__ == "__main__":
