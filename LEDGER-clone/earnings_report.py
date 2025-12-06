@@ -5,6 +5,8 @@ Run with ``python earnings_report.py``.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -14,7 +16,26 @@ try:  # xlwings lets Python control Excel
 except ImportError:  # xlwings is missing
     xw = None  # type: ignore[assignment]
 
-ENTRY_FILE = "ENTRIES.xlsx"
+
+def resolve_entry_file() -> str:
+    """Return the full path to ENTRIES.xlsx.
+
+    Defaults to ``../LEDGER/ENTRIES.xlsx`` relative to the repository layout
+    but can be overridden via the ``LEDGER_DATA_DIR`` environment variable.
+    """
+
+    env_path = os.environ.get("LEDGER_DATA_DIR")
+    if env_path:
+        return str((Path(env_path) / "ENTRIES.xlsx").expanduser())
+
+    default_path = Path(__file__).resolve().parents[2] / "LEDGER" / "ENTRIES.xlsx"
+    if default_path.exists():
+        return str(default_path)
+
+    return "ENTRIES.xlsx"
+
+
+ENTRY_FILE = resolve_entry_file()
 
 
 def parse_range(text: str) -> tuple[pd.Timestamp, pd.Timestamp]:

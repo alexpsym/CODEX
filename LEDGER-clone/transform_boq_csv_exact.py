@@ -1,12 +1,33 @@
 
 import argparse
 import glob
+import os
+from pathlib import Path
 import sys
 import pandas as pd
 
 
+def resolve_data_dir() -> Path:
+    """Return the folder that stores CSV inputs/outputs.
+
+    Defaults to ``../LEDGER`` relative to the repository layout, but can be
+    overridden with ``LEDGER_DATA_DIR``.
+    """
+
+    env_path = os.environ.get("LEDGER_DATA_DIR")
+    if env_path:
+        return Path(env_path).expanduser()
+
+    default_path = Path(__file__).resolve().parents[2] / "LEDGER"
+    if default_path.exists():
+        return default_path
+
+    return Path.cwd()
+
+
 def main() -> None:
     print("Starting BOQ CSV transformation...")
+    data_dir = resolve_data_dir()
     parser = argparse.ArgumentParser(description="Transform a BOQ CSV export")
     parser.add_argument(
         "input_path",
@@ -16,24 +37,28 @@ def main() -> None:
     parser.add_argument(
         "-o",
         "--output",
-        default="boq_may2025_transformed.csv",
+        default=str(data_dir / "boq_may2025_transformed.csv"),
         help="where to write the transformed CSV",
     )
     args = parser.parse_args()
 
     # Decide which CSV file to read
     if args.input_path:
-        input_path = args.input_path
+        input_path = Path(args.input_path)
+        if not input_path.is_absolute():
+            input_path = data_dir / input_path
     else:
-        csv_files = glob.glob("*.csv")
+        csv_files = glob.glob(str(data_dir / "*.csv"))
         if len(csv_files) == 1:
-            input_path = csv_files[0]
+            input_path = Path(csv_files[0])
             print(f"🔍 Found input file: {input_path}")
         else:
             print("❌ Please place exactly one CSV file in this folder or specify the file name.")
             sys.exit(1)
 
-    output_path = args.output
+    output_path = Path(args.output)
+    if not output_path.is_absolute():
+        output_path = data_dir / output_path
 
     print(f"Reading {input_path}")
     df = pd.read_csv(input_path)

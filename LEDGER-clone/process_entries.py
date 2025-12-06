@@ -5,12 +5,33 @@ Run with ``python process_entries.py``.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pandas as pd
 import xlwings as xw
 
-BASE_DIR = Path(__file__).resolve().parent
+def resolve_data_dir() -> Path:
+    """Return the folder that stores Excel workbooks.
+
+    By default this points to ``../LEDGER`` relative to the repository layout
+    (e.g. ``C:\\Users\\User\\Documents\\LEDGER`` when the scripts live in
+    ``...\\GPT\\CODEX\\LEDGER-clone``).  Set ``LEDGER_DATA_DIR`` to override
+    this location.
+    """
+
+    env_path = os.environ.get("LEDGER_DATA_DIR")
+    if env_path:
+        return Path(env_path).expanduser()
+
+    default_path = Path(__file__).resolve().parents[2] / "LEDGER"
+    if default_path.exists():
+        return default_path
+
+    return Path(__file__).resolve().parent
+
+
+BASE_DIR = resolve_data_dir()
 ENTRY_FILE = BASE_DIR / "ENTRIES.xlsx"
 # Map column B values to the workbook that stores that type of account
 TYPE_TO_BOOK = {

@@ -5,6 +5,7 @@ The script does not rely on CORRECT.xlsx and will work after that file is remove
 Run with ``python populate_monthly_profit_loss.py``.
 """
 
+import os
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -13,7 +14,25 @@ from typing import Dict, Iterable, List, Mapping, MutableMapping, Set, Tuple
 import xlwings as xw
 from tqdm import tqdm
 
-BASE_DIR = Path(__file__).resolve().parent
+def resolve_data_dir() -> Path:
+    """Return the folder that stores ENTRIES.xlsx.
+
+    Defaults to ``../LEDGER`` relative to the repository layout. Set
+    ``LEDGER_DATA_DIR`` to override.
+    """
+
+    env_path = os.environ.get("LEDGER_DATA_DIR")
+    if env_path:
+        return Path(env_path).expanduser()
+
+    default_path = Path(__file__).resolve().parents[2] / "LEDGER"
+    if default_path.exists():
+        return default_path
+
+    return Path(__file__).resolve().parent
+
+
+BASE_DIR = resolve_data_dir()
 ENTRY_FILE = BASE_DIR / "ENTRIES.xlsx"
 
 CURRENCY_FORMAT = "_-\"$\"* #,##0.00_-;\\-\"$\"* #,##0.00_-;_-\"$\"* \"-\"??_-;_-@_-"
