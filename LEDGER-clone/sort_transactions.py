@@ -3,7 +3,8 @@
 The script scans every ``.xlsx`` workbook in the LEDGER data directory and
 sorts each sheet's transaction rows (starting at row 4) from oldest to newest
 based on the dates in column A. Header rows (1-2) remain untouched, and row 3 is
-left blank.
+left blank. In the ENTRIES workbook, the "MONTHLY PROFIT LOSS" and "TRIAL
+BALANCE" sheets are intentionally skipped.
 
 Run with ``python sort_transactions.py``.
 """
@@ -84,14 +85,22 @@ def sort_sheet_transactions(sheet: xw.Sheet) -> bool:
 
 
 def sort_workbook_transactions(app: xw.App, workbook_path: Path) -> None:
-    """Open ``workbook_path`` and sort transactions in all sheets."""
+    """Open ``workbook_path`` and sort transactions in all eligible sheets."""
 
     print(f"Opening workbook: {workbook_path.name}")
     wb = app.books.open(str(workbook_path), update_links=False)
     processed_any = False
 
+    skip_sheets = set()
+    if workbook_path.name.lower() == "entries.xlsx":
+        skip_sheets = {"monthly profit loss", "trial balance"}
+
     try:
         for sheet in wb.sheets:
+            if sheet.name.lower() in skip_sheets:
+                print(f"  Skipped sheet (no sorting): {sheet.name}")
+                continue
+
             processed = sort_sheet_transactions(sheet)
             processed_any = processed_any or processed
             if processed:
