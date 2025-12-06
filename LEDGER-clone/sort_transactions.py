@@ -4,7 +4,8 @@ The script scans every ``.xlsx`` workbook in the LEDGER data directory and
 sorts each sheet's transaction rows (starting at row 4) from oldest to newest
 based on the dates in column A. Header rows (1-2) remain untouched, and row 3 is
 left blank. In the ENTRIES workbook, the "MONTHLY PROFIT LOSS" and "TRIAL
-BALANCE" sheets are intentionally skipped.
+BALANCE" sheets are intentionally skipped. The "CHECKLIST" workbook is skipped
+entirely.
 
 Run with ``python sort_transactions.py``.
 """
@@ -59,7 +60,8 @@ def sort_sheet_transactions(sheet: xw.Sheet) -> bool:
 
     data_range = sheet.range((DATA_START_ROW, 1), (last_row, last_col))
     data = data_range.options(pd.DataFrame, header=False, index=False).value
-    if data.empty:
+    non_empty_rows = data.dropna(how="all")
+    if data.empty or non_empty_rows.empty:
         return False
 
     sort_dates = pd.to_datetime(data.iloc[:, 0], dayfirst=True, errors="coerce")
@@ -127,6 +129,9 @@ def main() -> None:
 
     try:
         for workbook in workbooks:
+            if workbook.stem.lower() == "checklist":
+                print(f"Skipping workbook: {workbook.name}")
+                continue
             sort_workbook_transactions(app, workbook)
     finally:
         app.quit()
