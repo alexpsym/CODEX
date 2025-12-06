@@ -7,10 +7,13 @@ from abc import ABC, abstractmethod
 import hashlib
 import hmac
 import os
+from pathlib import Path
 import time
 from urllib.parse import urlencode
 
 import requests
+
+BYBIT_LIVE_ENV_PATH = Path(r"E:/ENV/bybit-live.env")
 
 BYBIT_SPOT_URL = "https://api.bybit.com/v5/market/tickers?category=spot"
 BYBIT_LINEAR_URL = "https://api.bybit.com/v5/market/tickers?category=linear"
@@ -27,6 +30,35 @@ LINEAR_TRADING_FEE_RATE = 0.0006
 SPOT_INTEREST_RATE_PER_HOUR = 0.000084
 
 COINSPOT_SPOT_FEE_RATE = 0.001  # 0.1% maker/taker fee for market orders
+
+
+def _load_bybit_live_env() -> bool:
+    """Load Bybit API credentials from the shared live .env file."""
+
+    try:
+        from dotenv import load_dotenv
+    except ModuleNotFoundError:  # pragma: no cover - optional dependency
+        load_dotenv = None  # type: ignore
+
+    if not BYBIT_LIVE_ENV_PATH.exists():
+        return False
+
+    if load_dotenv is not None:
+        return bool(load_dotenv(BYBIT_LIVE_ENV_PATH, override=True))
+
+    loaded = False
+    for line in BYBIT_LIVE_ENV_PATH.read_text(encoding="utf-8").splitlines():
+        if not line or line.lstrip().startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ[key.strip()] = value.strip()
+        loaded = True
+    return loaded
+
+
+_load_bybit_live_env()
 
 
 @dataclass

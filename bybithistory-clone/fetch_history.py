@@ -6,7 +6,11 @@ import os
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Generator, List, Tuple
 
+from env_helpers import load_bybit_live_env
+
 BRISBANE_TZ = timezone(timedelta(hours=10))
+
+load_bybit_live_env()
 
 try:
     from openpyxl import Workbook  # pylint: disable=import-error
