@@ -396,8 +396,14 @@ def download_history(
     end_date: str | None = None,
     symbol: str | None = None,
     template: bool | None = True,
-) -> None:
-    """Download execution history from Bybit and save as CSV."""
+) -> str | None:
+    """Download execution history from Bybit and save as CSV.
+
+    Returns
+    -------
+    str | None
+        CSV filename when rows are present; otherwise ``None``.
+    """
     # pylint: disable=too-many-locals,too-many-branches
     api_key = os.environ.get("BYBIT_API_KEY")
     api_secret = os.environ.get("BYBIT_API_SECRET")
@@ -444,6 +450,10 @@ def download_history(
 
     if template:
         rows = _apply_template(rows)
+
+    if not rows:
+        print("No transactions found for the specified date range. No CSV created.")
+        return None
 
     start_epoch = int(start_ms // 1000) if start_ms is not None else 0
     end_epoch = int(end_ms // 1000) if end_ms is not None else 0
