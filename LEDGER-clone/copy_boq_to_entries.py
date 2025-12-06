@@ -8,21 +8,39 @@ on the machine where the script runs.
 from __future__ import annotations
 
 import csv
+import os
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from sys import exit
-from datetime import datetime
 
 import xlwings as xw
 
-# All files live in the same directory as this script.
-SCRIPT_DIR = Path(__file__).resolve().parent
-ENTRY_FILE = SCRIPT_DIR / "ENTRIES.xlsx"
+def resolve_data_dir() -> Path:
+    """Return the folder that stores ENTRIES.xlsx and CSVs.
+
+    Defaults to ``../LEDGER`` relative to the repository layout, but can be
+    overridden via the ``LEDGER_DATA_DIR`` environment variable.
+    """
+
+    env_path = os.environ.get("LEDGER_DATA_DIR")
+    if env_path:
+        return Path(env_path).expanduser()
+
+    default_path = Path(__file__).resolve().parents[2] / "LEDGER"
+    if default_path.exists():
+        return default_path
+
+    return Path(__file__).resolve().parent
+
+
+DATA_DIR = resolve_data_dir()
+ENTRY_FILE = DATA_DIR / "ENTRIES.xlsx"
 
 
 def find_csv() -> Path:
     """Return the CSV file containing "transformed" in its name."""
-    csv_files = list(SCRIPT_DIR.glob("*transformed*.csv"))
+    csv_files = list(DATA_DIR.glob("*transformed*.csv"))
     if not csv_files:
         print("No CSV file with 'transformed' in the name was found.")
         exit(1)
