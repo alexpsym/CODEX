@@ -10,17 +10,22 @@ import pandas as pd
 def resolve_data_dir() -> Path:
     """Return the folder that stores CSV inputs/outputs.
 
-    Defaults to ``../LEDGER`` relative to the repository layout, but can be
-    overridden with ``LEDGER_DATA_DIR``.
+    Defaults to ``C:\\Users\\User\\Documents\\LEDGER`` (or the current
+    user's ``~/Documents/LEDGER``), but can be overridden with
+    ``LEDGER_DATA_DIR``.
     """
 
     env_path = os.environ.get("LEDGER_DATA_DIR")
     if env_path:
         return Path(env_path).expanduser()
 
-    default_path = Path(__file__).resolve().parents[2] / "LEDGER"
-    if default_path.exists():
-        return default_path
+    documents_path = Path.home() / "Documents" / "LEDGER"
+    if documents_path.exists():
+        return documents_path
+
+    fallback_path = Path(__file__).resolve().parents[2] / "LEDGER"
+    if fallback_path.exists():
+        return fallback_path
 
     return Path.cwd()
 
