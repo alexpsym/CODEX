@@ -37,7 +37,10 @@ def test_download_history_calls_api(monkeypatch):
     mock_session = MagicMock()
     monkeypatch.setattr(fetch_history, "HTTP", MagicMock(return_value=mock_session))
 
-    with patch.object(fetch_history, "_fetch_pages", return_value=[[]]) as mock_pages:
+    with (
+        patch.object(fetch_history, "_fetch_pages", return_value=[[]]) as mock_pages,
+        patch.object(fetch_history, "_write_csv") as mock_write,
+    ):
         name = fetch_history.download_history("linear", "2023-01-01", "2023-01-02", "BTCUSDT")
 
     assert mock_pages.called
@@ -45,7 +48,25 @@ def test_download_history_calls_api(monkeypatch):
     assert params["category"] == "linear"
     assert params["symbol"] == "BTCUSDT"
     assert "startTime" in params and "endTime" in params
-    assert name.endswith(".csv")
+    assert name is None
+    mock_write.assert_not_called()
+
+
+def test_download_history_reports_empty(monkeypatch, capsys):
+    """A friendly message is shown when no transactions are returned."""
+    monkeypatch.setenv("BYBIT_API_KEY", "k")
+    monkeypatch.setenv("BYBIT_API_SECRET", "s")
+    monkeypatch.setattr(fetch_history, "HTTP", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(fetch_history, "_fetch_pages", lambda *args, **kwargs: [[]])
+    mock_write = MagicMock()
+    monkeypatch.setattr(fetch_history, "_write_csv", mock_write)
+
+    name = fetch_history.download_history("linear", "2023-01-01", "2023-01-02")
+
+    captured = capsys.readouterr()
+    assert "No transactions found" in captured.out
+    assert name is None
+    mock_write.assert_not_called()
 
 
 def test_download_history_chunking(monkeypatch):
@@ -187,7 +208,11 @@ def test_filename_format(monkeypatch):
             return fixed_now
 
     monkeypatch.setattr(fetch_history, "datetime", FixedDateTime)
-    monkeypatch.setattr(fetch_history, "_fetch_pages", lambda *args, **_: [[]])
+    monkeypatch.setattr(
+        fetch_history,
+        "_fetch_pages",
+        lambda *args, **_: [[{"execTime": 0}]],
+    )
 
     captured: dict[str, str] = {}
 

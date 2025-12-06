@@ -78,6 +78,26 @@ def test_trade_prefers_manual_dates(monkeypatch):
     assert captured["args"][1:3] == ("2024-01-01", "2024-01-10")
 
 
+def test_trade_handles_empty_history(monkeypatch):
+    """A friendly message is returned when there are no trades."""
+    app = _load_app(monkeypatch)
+
+    class FakeForm(dict):
+        def get(self, key, default=None):
+            return super().get(key, default)
+
+    app.request = type(
+        "R",
+        (),
+        {"form": FakeForm({"start_date": "2024-01-01", "end_date": "2024-01-10"})},
+    )
+
+    monkeypatch.setattr(app.fetch_history, "download_history", lambda *args: None)
+
+    result = app.trade()
+    assert result == "No transactions found for the selected date range."
+
+
 def test_balance_prefers_manual_dates(monkeypatch):
     """Manual dates override quick range for balance downloads."""
     app = _load_app(monkeypatch)

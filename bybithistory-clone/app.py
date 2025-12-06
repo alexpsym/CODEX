@@ -118,6 +118,8 @@ def trade() -> object:
         period = request.form.get("period", "week")
         start, end = _range_from_period(period)
     filename = fetch_history.download_history("linear", start, end, None, True)
+    if filename is None:
+        return "No transactions found for the selected date range."
     return send_file(filename, as_attachment=True)
 
 
