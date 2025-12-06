@@ -12,6 +12,7 @@ except ModuleNotFoundError:  # pragma: no cover - handled gracefully at runtime
 
 DEFAULT_ENV_FILENAME = "optionstrader.env"
 DEFAULT_WINDOWS_ENV_DIR = Path("E:/ENV")
+BYBIT_LIVE_ENV_PATH = Path("E:/ENV/bybit-live.env")
 
 
 def _candidate_paths(script_dir: Path) -> Iterable[Path]:
@@ -65,3 +66,29 @@ def load_optionstrader_env(script_dir: Path, logger: Optional[object] = None) ->
             DEFAULT_WINDOWS_ENV_DIR / DEFAULT_ENV_FILENAME,
         )
     return loaded
+
+
+def load_bybit_live_env(logger: Optional[object] = None) -> List[str]:
+    """Load Bybit live credentials from the shared .env file."""
+
+    if not BYBIT_LIVE_ENV_PATH.exists():
+        if logger:
+            logger.info("Bybit live .env file not found at %s", BYBIT_LIVE_ENV_PATH)
+        return []
+
+    loaded = False
+    if load_dotenv is not None:
+        loaded = load_dotenv(BYBIT_LIVE_ENV_PATH, override=True)
+    else:  # pragma: no cover - fallback when python-dotenv is missing
+        for line in BYBIT_LIVE_ENV_PATH.read_text(encoding="utf-8").splitlines():
+            if not line or line.lstrip().startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            os.environ[key.strip()] = value.strip()
+            loaded = True
+
+    if loaded and logger:
+        logger.info("Loaded Bybit live environment from %s", BYBIT_LIVE_ENV_PATH)
+    return [str(BYBIT_LIVE_ENV_PATH)] if loaded else []

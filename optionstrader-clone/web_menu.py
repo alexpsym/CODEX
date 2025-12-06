@@ -39,7 +39,7 @@ def _get_trader():
         secret = os.getenv("BYBIT_API_SECRET", "")
         if key and secret:
             trader = optionstrader.BybitOptionsTrader(
-                key, secret, optionstrader.BASE_URL
+                key, secret, optionstrader.get_base_url()
             )
     return trader
 
@@ -288,6 +288,7 @@ def reduce():
 def start(host: str = "127.0.0.1", port: int = 5000):
     """Start the web menu and open it in Microsoft Edge."""
 
+    optionstrader.configure_trading_environment(interactive=True)
     threading.Thread(
         target=_serve_wsgi,
         args=(app,),

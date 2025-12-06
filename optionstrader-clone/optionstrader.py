@@ -29,7 +29,7 @@ from tabulate import tabulate
 import csv
 from decimal import Decimal, ROUND_HALF_UP
 
-from env_loader import load_optionstrader_env
+from env_loader import load_bybit_live_env, load_optionstrader_env
 
 # === File setup ===
 script_dir_path = Path(__file__).resolve().parent
@@ -55,12 +55,67 @@ logger.propagate = False
 logger.info("Starting optionstrader.py; logs to %s, output to %s", log_file, output_file)
 
 # Load secrets from removable-drive .env files before reading them
-LOADED_ENV_FILES = load_optionstrader_env(script_dir_path, logger)
+DEMO_BASE_URL = "https://api-demo.bybit.com"
+LIVE_BASE_URL = "https://api.bybit.com"
+TRADING_ENV = "live"
+BASE_URL = LIVE_BASE_URL
+LOADED_ENV_FILES: list[str] = []
+
+
+def _normalize_env_choice(choice: str) -> str:
+    cleaned = (choice or "").strip().lower()
+    return "demo" if cleaned == "demo" else "live"
+
+
+def choose_trading_environment(interactive: bool = False) -> str:
+    """Return the requested trading environment, prompting if needed."""
+
+    env_choice = os.getenv("OPTIONSTRADER_ENV")
+    if env_choice:
+        return _normalize_env_choice(env_choice)
+
+    if interactive and sys.stdin.isatty():
+        while True:
+            choice = input("Trade on demo or live? [demo/live]: ").strip().lower()
+            if choice in {"demo", "live"}:
+                return choice
+            print("Please enter 'demo' or 'live'.")
+
+    return "live"
+
+
+def configure_trading_environment(interactive: bool = False) -> None:
+    """Configure API base URL and load .env files for the chosen mode."""
+
+    global BASE_URL, TRADING_ENV, LOADED_ENV_FILES
+
+    TRADING_ENV = choose_trading_environment(interactive)
+    if TRADING_ENV == "demo":
+        BASE_URL = DEMO_BASE_URL
+        LOADED_ENV_FILES = load_optionstrader_env(script_dir_path, logger)
+        if logger:
+            logger.info(
+                "Using demo environment; loaded optionstrader.env files: %s",
+                LOADED_ENV_FILES,
+            )
+    else:
+        BASE_URL = LIVE_BASE_URL
+        LOADED_ENV_FILES = load_bybit_live_env(logger)
+        if logger:
+            logger.info(
+                "Using live environment; loaded Bybit credentials: %s", LOADED_ENV_FILES
+            )
+
+
+def get_base_url() -> str:
+    """Return the API base URL for the active environment."""
+
+    return DEMO_BASE_URL if TRADING_ENV == "demo" else LIVE_BASE_URL
+
+
+configure_trading_environment(interactive=False)
 
 # === Configuration ===
-API_KEY = os.getenv("BYBIT_API_KEY", "")
-API_SECRET = os.getenv("BYBIT_API_SECRET", "")
-BASE_URL = "https://api-demo.bybit.com"
 RECV_WINDOW = "5000"
 SUB_ACCOUNT_NAME = ""
 MIN_BALANCE_THRESHOLD = 10.0
@@ -124,8 +179,10 @@ def send_telegram_document(path, token, chat_id, caption=None):
         logger.error("Failed to send Telegram document: %s", exc)
 
 # === Greek fetching via public market endpoint ===
-def fetch_option_ticker(symbol, base_url=BASE_URL):
+def fetch_option_ticker(symbol, base_url: str | None = None):
     """Return ticker data for a given option symbol."""
+
+    base_url = base_url or get_base_url()
     endpoint = "/v5/market/tickers"
     params = {"category": "option", "symbol": symbol}
     qs = urlencode(params)
@@ -142,8 +199,12 @@ def fetch_option_ticker(symbol, base_url=BASE_URL):
         raise RuntimeError(f"No ticker data for symbol: {symbol}")
     return lst[0]
 
-def fetch_option_instruments(base_coin="BTC", expiry=None, option_type=None, base_url=BASE_URL):
+def fetch_option_instruments(
+    base_coin="BTC", expiry=None, option_type=None, base_url: str | None = None
+):
     """Return a list of option symbols for the given filters."""
+
+    base_url = base_url or get_base_url()
     endpoint = "/v5/market/instruments-info"
     params = {"category": "option", "baseCoin": base_coin}
     if expiry:
@@ -182,8 +243,10 @@ def fetch_option_instruments(base_coin="BTC", expiry=None, option_type=None, bas
 _tick_size_cache = {}
 
 
-def get_tick_size(symbol, base_url=BASE_URL):
+def get_tick_size(symbol, base_url: str | None = None):
     """Return the minimum price increment for ``symbol``."""
+
+    base_url = base_url or get_base_url()
     if symbol in _tick_size_cache:
         return _tick_size_cache[symbol]
     endpoint = "/v5/market/instruments-info"
@@ -278,8 +341,10 @@ def compute_order_qty(risk_usd, price, min_qty=MIN_ORDER_QTY):
     qty = steps * min_qty
     return round(qty, 2)
 
-def choose_symbol_by_risk(base_symbol, risk_usd, qty, base_url=BASE_URL):
+def choose_symbol_by_risk(base_symbol, risk_usd, qty, base_url: str | None = None):
     """Return the option symbol from the earliest expiry whose mark price is closest to risk/qty."""
+
+    base_url = base_url or get_base_url()
     if not risk_usd or not qty:
         return base_symbol, 0.0
     parts = base_symbol.split('-')
@@ -638,7 +703,7 @@ def execute_trade_from_cfg(cfg):
             "API credentials not provided. Set BYBIT_API_KEY and BYBIT_API_SECRET "
             "environment variables or include api_key/api_secret in the config." 
         )
-    trader = BybitOptionsTrader(key, secret, BASE_URL)
+    trader = BybitOptionsTrader(key, secret, get_base_url())
     balance = trader.get_wallet_balance()
     lines = [f"Timestamp: {ts}", f"Balance: {balance:.4f} USDT"]
     if balance < MIN_BALANCE_THRESHOLD:
@@ -873,7 +938,7 @@ def interactive_menu(cfg_path):
     """Show an interactive menu for common actions."""
     cfg = load_trade_config(cfg_path)
     key, secret = get_api_credentials(cfg)
-    trader = BybitOptionsTrader(key, secret, BASE_URL)
+    trader = BybitOptionsTrader(key, secret, get_base_url())
     while True:
         print("\nSelect an option:")
         print("1. Place configured trade")
@@ -919,6 +984,7 @@ def main():
         help="Execute trade immediately without showing the menu",
     )
     args = parser.parse_args()
+    configure_trading_environment(interactive=True)
     if args.no_menu:
         if not args.order_file:
             raise SystemExit("order_file required with --no-menu")

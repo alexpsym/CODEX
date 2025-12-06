@@ -8,9 +8,12 @@ from zoneinfo import ZoneInfo
 
 from flask import Flask, render_template_string, request, send_file
 
+from env_helpers import load_bybit_live_env
 import fetch_history
 
 BRISBANE_TZ = ZoneInfo("Australia/Brisbane")
+
+load_bybit_live_env()
 
 app = Flask(__name__)
 
