@@ -20,6 +20,29 @@ SKIP_DIRS = {"render", "mt5-clone", ".venv", "venv", "__pycache__", ".git", "env
 SKIP_FILES = {"__init__.py"}
 MAX_LOG_LINES = 400
 
+ENTRY_OVERRIDES = {
+    "Crypto-Scanner-clone": ["continuous_scan.py", "scan.py"],
+    "LEDGER-clone": ["process_entries.py"],
+    "PUSH": ["PUSH.py"],
+    "YOUTUBE": ["yt.py"],
+    "bybit-alert-clone": ["bybit_altcoin_monitor.py"],
+    "bybit_monitor": ["bybit_altcoin_monitor.py"],
+    "bybithistory-clone": ["app.py"],
+    "coinspot-clone": ["coinspot_history.py"],
+    "cryptocalculator-clone": ["cryptocalculator_web.py", "cryptocalculator.py"],
+    "download_video": ["download_video.py"],
+    "ema-bounce-clone": ["ema-bounce.py"],
+    "extractor": ["extract_all_files.py"],
+    "fxscanner-oanda-clone": ["forex_scanner.py"],
+    "fxweekend-clone": ["liquidate.py"],
+    "ivindicator-clone": ["ivapp.py", "ivindicator.py"],
+    "oanda-calculator-clone": ["oanda_calculator_web.py", "oanda_api.py"],
+    "oanda_history-clone": ["oanda_history.py"],
+    "optionstrader-clone": ["optionstrader.py", "alert_server.py"],
+    "payslip_audit": ["payslip_timesheet_audit.py"],
+    "viddl-clone": ["master.py", "vid.py"],
+}
+
 
 @dataclass
 class ManagedScript:
@@ -96,26 +119,58 @@ class ManagedScript:
             await self.process.wait()
 
 
+def candidate_entrypoints(app_dir: Path) -> List[Path]:
+    app_name = app_dir.name
+    candidates: List[str] = []
+
+    if app_name in ENTRY_OVERRIDES:
+        candidates.extend(ENTRY_OVERRIDES[app_name])
+
+    candidates.extend(
+        [
+            "main.py",
+            "app.py",
+            "run.py",
+            "server.py",
+            f"{app_name}.py",
+            "wsgi.py",
+        ]
+    )
+
+    seen: set[str] = set()
+    ordered: List[Path] = []
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        ordered.append(app_dir / candidate)
+    return ordered
+
+
 def discover_scripts() -> List[ManagedScript]:
-    """
-    Recursively find Python scripts under the repo root, skipping the render folder,
-    mt5-clone, and common virtualenv/cache directories. Returns ManagedScript objects
-    keyed by their repo-relative paths using forward slashes (e.g. "foo/bar.py").
-    """
+    """Return one ManagedScript per app folder using a chosen entrypoint."""
 
     scripts: List[ManagedScript] = []
 
-    for path in BASE_DIR.rglob("*.py"):
-        parts = path.relative_to(BASE_DIR).parts
-
-        if any(part in SKIP_DIRS for part in parts):
+    for app_dir in sorted(BASE_DIR.iterdir()):
+        if not app_dir.is_dir():
+            continue
+        if app_dir.name in SKIP_DIRS or app_dir.name.startswith("."):
             continue
 
-        if path.name in SKIP_FILES or path.name.startswith("test_") or path.name == "test.py":
-            continue
+        entry_path: Optional[Path] = None
+        for candidate in candidate_entrypoints(app_dir):
+            if candidate.exists() and candidate.is_file():
+                entry_path = candidate
+                break
 
-        key = "/".join(parts)
-        scripts.append(ManagedScript(name=key, path=path))
+        if entry_path is None:
+            py_files = sorted(p for p in app_dir.glob("*.py") if p.name not in SKIP_FILES and not p.name.startswith("test_"))
+            if py_files:
+                entry_path = py_files[0]
+
+        if entry_path is not None:
+            scripts.append(ManagedScript(name=app_dir.name, path=entry_path))
 
     return scripts
 
@@ -204,24 +259,24 @@ async def list_scripts() -> JSONResponse:
     return JSONResponse(script_manager.list_scripts())
 
 
-@app.post("/scripts/{script_name}/start")
+@app.post("/scripts/{script_name:path}/start")
 async def start_script(script_name: str) -> JSONResponse:
     summary = await script_manager.start(script_name)
     return JSONResponse(summary)
 
 
-@app.post("/scripts/{script_name}/stop")
+@app.post("/scripts/{script_name:path}/stop")
 async def stop_script(script_name: str) -> JSONResponse:
     summary = await script_manager.stop(script_name)
     return JSONResponse(summary)
 
 
-@app.get("/logs/{script_name}")
+@app.get("/logs/{script_name:path}")
 async def read_logs(script_name: str) -> JSONResponse:
     return JSONResponse(script_manager.logs(script_name))
 
 
-@app.post("/webhook/{script_name}")
+@app.post("/webhook/{script_name:path}")
 async def webhook(script_name: str, request: Request) -> JSONResponse:
     payload = await request.body()
     script = script_manager.get(script_name)
