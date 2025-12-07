@@ -24,7 +24,7 @@ def resolve_data_dir() -> Path:
     if env_path:
         return Path(env_path).expanduser()
 
-    default_path = Path(__file__).resolve().parents[2] / "LEDGER"
+    default_path = Path(__file__).resolve().parent.parent / "LEDGER"
     if default_path.exists():
         return default_path
 
