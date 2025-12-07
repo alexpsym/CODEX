@@ -247,24 +247,24 @@ async def list_scripts() -> JSONResponse:
     return JSONResponse(script_manager.list_scripts())
 
 
-@app.post("/scripts/{script_name}/start")
+@app.post("/scripts/{script_name:path}/start")
 async def start_script(script_name: str) -> JSONResponse:
     summary = await script_manager.start(script_name)
     return JSONResponse(summary)
 
 
-@app.post("/scripts/{script_name}/stop")
+@app.post("/scripts/{script_name:path}/stop")
 async def stop_script(script_name: str) -> JSONResponse:
     summary = await script_manager.stop(script_name)
     return JSONResponse(summary)
 
 
-@app.get("/logs/{script_name}")
+@app.get("/logs/{script_name:path}")
 async def read_logs(script_name: str) -> JSONResponse:
     return JSONResponse(script_manager.logs(script_name))
 
 
-@app.post("/webhook/{script_name}")
+@app.post("/webhook/{script_name:path}")
 async def webhook(script_name: str, request: Request) -> JSONResponse:
     payload = await request.body()
     script = script_manager.get(script_name)
