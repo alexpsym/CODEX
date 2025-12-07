@@ -976,7 +976,7 @@ def save_webhook_json(trade: Dict[str, Any]) -> None:
         json.dump(payload, handle, indent=2)
         handle.write(
             "\n\nWEBHOOK FUTURES:\n"
-            "https://app.signalstack.com/hook/6vSSkN1tYQLj3C1H3YQqpz\n"
+            "https://codex-juan.onrender.com/webhook/cryptocalculator-clone\n"
         )
     print("\n✅ Webhook JSON saved as 'trade_webhook.txt'")
 
