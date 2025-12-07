@@ -50,7 +50,14 @@
         }
     };
 
-    const renderScripts = (scripts) => {
+    const renderScriptsForCategory = (category) => {
+        selectedCategory = category;
+        refreshBtn.textContent = 'Back to categories';
+
+        const scripts = scriptsCache.filter((s) => s.category === category);
+        const label = scripts.length === 1 ? 'script' : 'scripts';
+        setStatus(`${category}: ${scripts.length} ${label}`);
+
         grid.innerHTML = '';
         scripts.forEach((script) => {
             const card = document.createElement('div');
@@ -91,42 +98,15 @@
         });
     };
 
-    const renderCategories = (scripts) => {
-        const categories = Array.from(new Set(scripts.map((s) => s.category || 'Other'))).sort();
-        grid.innerHTML = '';
-        categories.forEach((category) => {
-            const card = document.createElement('div');
-            card.className = 'card';
+    const renderCategories = () => {
+        selectedCategory = null;
+        refreshBtn.textContent = 'Refresh';
+        setStatus('Select a category to manage scripts');
 
-            const header = document.createElement('div');
-            header.className = 'row';
-            const title = document.createElement('div');
-            title.innerHTML = `<strong>${category}</strong><div class="path">${scripts.filter((s) => s.category === category).length} scripts</div>`;
-            header.appendChild(title);
-            card.appendChild(header);
-
-            const actions = document.createElement('div');
-            actions.className = 'actions';
-            const openBtn = document.createElement('button');
-            openBtn.className = 'start';
-            openBtn.textContent = 'Open';
-            openBtn.onclick = () => {
-                selectedCategory = category;
-                renderScripts(scriptsCache.filter((s) => s.category === category));
-                const label = category === 'Other' ? 'scripts' : `${category} scripts`;
-                setStatus(`${label}: ${scriptsCache.filter((s) => s.category === category).length}`);
-            };
-            actions.appendChild(openBtn);
-            card.appendChild(actions);
-
-            grid.appendChild(card);
-        });
-    };
-
-    const renderCategories = (scripts) => {
         grid.innerHTML = '';
         CATEGORIES.forEach((category) => {
-            const matching = scripts.filter((s) => s.category === category);
+            const matching = scriptsCache.filter((s) => s.category === category);
+
             const card = document.createElement('div');
             card.className = 'card';
 
@@ -142,79 +122,7 @@
             const openBtn = document.createElement('button');
             openBtn.className = 'start';
             openBtn.textContent = 'Open';
-            openBtn.onclick = () => {
-                selectedCategory = category;
-                refreshBtn.textContent = 'Back to categories';
-                renderScripts(matching);
-                const label = matching.length === 1 ? 'script' : 'scripts';
-                setStatus(`${category}: ${matching.length} ${label}`);
-            };
-            actions.appendChild(openBtn);
-            card.appendChild(actions);
-
-            grid.appendChild(card);
-        });
-    };
-
-    const renderCategories = (scripts) => {
-        grid.innerHTML = '';
-        CATEGORIES.forEach((category) => {
-            const matching = scripts.filter((s) => s.category === category);
-            const card = document.createElement('div');
-            card.className = 'card';
-
-            const header = document.createElement('div');
-            header.className = 'row';
-            const title = document.createElement('div');
-            title.innerHTML = `<strong>${category}</strong><div class="path">${matching.length} scripts</div>`;
-            header.appendChild(title);
-            card.appendChild(header);
-
-            const actions = document.createElement('div');
-            actions.className = 'actions';
-            const openBtn = document.createElement('button');
-            openBtn.className = 'start';
-            openBtn.textContent = 'Open';
-            openBtn.onclick = () => {
-                selectedCategory = category;
-                refreshBtn.textContent = 'Back to categories';
-                renderScripts(matching);
-                const label = matching.length === 1 ? 'script' : 'scripts';
-                setStatus(`${category}: ${matching.length} ${label}`);
-            };
-            actions.appendChild(openBtn);
-            card.appendChild(actions);
-
-            grid.appendChild(card);
-        });
-    };
-
-    const renderCategoryCards = (scripts) => {
-        grid.innerHTML = '';
-        CATEGORIES.forEach((category) => {
-            const matching = scripts.filter((s) => s.category === category);
-            const card = document.createElement('div');
-            card.className = 'card';
-
-            const header = document.createElement('div');
-            header.className = 'row';
-            const title = document.createElement('div');
-            title.innerHTML = `<strong>${category}</strong><div class="path">${matching.length} scripts</div>`;
-            header.appendChild(title);
-            card.appendChild(header);
-
-            const actions = document.createElement('div');
-            actions.className = 'actions';
-            const openBtn = document.createElement('button');
-            openBtn.className = 'start';
-            openBtn.textContent = 'Open';
-            openBtn.onclick = () => {
-                selectedCategory = category;
-                refreshBtn.textContent = 'Back to categories';
-                renderScripts(matching);
-                const label = matching.length === 1 ? 'script' : 'scripts';
-                setStatus(`${category}: ${matching.length} ${label}`);
-            };
+            openBtn.onclick = () => renderScriptsForCategory(category);
             actions.appendChild(openBtn);
             card.appendChild(actions);
 
@@ -223,28 +131,23 @@
     };
 
     const refresh = async () => {
-        if (refreshInFlight) {
-            return refreshInFlight;
-        }
+        if (refreshInFlight) return refreshInFlight;
 
         setStatus('Loading scripts...');
         refreshInFlight = (async () => {
             try {
                 scriptsCache = await fetchJson('/scripts');
                 if (selectedCategory) {
-                    const filtered = scriptsCache.filter((s) => s.category === selectedCategory);
-                    renderScripts(filtered);
-                    const label = filtered.length === 1 ? 'script' : 'scripts';
-                    setStatus(`${selectedCategory}: ${filtered.length} ${label}`);
+                    renderScriptsForCategory(selectedCategory);
                 } else {
-                    renderCategoryCards(scriptsCache);
-                    refreshBtn.textContent = 'Refresh';
-                    setStatus('Select a category to manage scripts');
+                    renderCategories();
                 }
             } catch (err) {
                 console.error(err);
-                renderCategoryCards(scriptsCache);
-                setStatus('Failed to load scripts. Showing cached categories.', true);
+                setStatus('Failed to load scripts.', true);
+                if (!grid.children.length) {
+                    renderCategories();
+                }
             } finally {
                 refreshInFlight = null;
             }
@@ -255,10 +158,7 @@
 
     refreshBtn?.addEventListener('click', () => {
         if (selectedCategory) {
-            selectedCategory = null;
-            renderCategoryCards(scriptsCache);
-            refreshBtn.textContent = 'Refresh';
-            setStatus('Select a category to manage scripts');
+            renderCategories();
         } else {
             refresh();
         }
