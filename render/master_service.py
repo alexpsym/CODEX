@@ -97,8 +97,8 @@ class ManagedScript:
             await self.process.wait()
 
 
-def discover_scripts(base_dir: Path) -> Dict[str, ManagedScript]:
-    scripts: Dict[str, ManagedScript] = {}
+def discover_scripts(base_dir: Path) -> List[ManagedScript]:
+    scripts: List[ManagedScript] = []
     for path in base_dir.rglob("*.py"):
         if any(part in IGNORE_DIRS for part in path.parts):
             continue
@@ -106,7 +106,7 @@ def discover_scripts(base_dir: Path) -> Dict[str, ManagedScript]:
             continue
         relative = path.relative_to(base_dir)
         name = str(relative)
-        scripts[name] = ManagedScript(name=name, path=path)
+        scripts.append(ManagedScript(name=name, path=path))
     return scripts
 
 
