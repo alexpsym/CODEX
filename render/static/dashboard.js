@@ -28,14 +28,9 @@
         return pill;
     };
 
-    const loadLogs = async (name, box) => {
-        try {
-            const lines = await fetchJson(`/logs/${encodeURIComponent(name)}`);
-            box.textContent = lines.length ? lines.join('\n') : 'No logs yet.';
-        } catch (err) {
-            console.error(err);
-            box.textContent = 'Failed to load logs.';
-        }
+    const openLogTab = (name) => {
+        const url = `/log-view/${encodeURIComponent(name)}`;
+        window.open(url, '_blank', 'noopener');
     };
 
     const modify = async (name, action, button) => {
@@ -43,6 +38,9 @@
         try {
             await fetchJson(`/scripts/${encodeURIComponent(name)}/${action}`, { method: 'POST' });
             await refresh();
+            if (action === 'start') {
+                openLogTab(name);
+            }
         } catch (err) {
             console.error(err);
             alert(`Failed to ${action} ${name}: ${err.message}`);
@@ -79,12 +77,48 @@
             actions.appendChild(stopBtn);
             card.appendChild(actions);
 
-            const logBox = document.createElement('pre');
-            logBox.textContent = 'Loading logs...';
-            card.appendChild(logBox);
+            const logControls = document.createElement('div');
+            logControls.className = 'actions';
+            const openLogBtn = document.createElement('button');
+            openLogBtn.className = 'refresh';
+            openLogBtn.textContent = 'Open Logs';
+            openLogBtn.onclick = () => openLogTab(script.name);
+            logControls.appendChild(openLogBtn);
+            card.appendChild(logControls);
 
             grid.appendChild(card);
-            loadLogs(script.name, logBox);
+        });
+    };
+
+    const renderCategories = (scripts) => {
+        const categories = Array.from(new Set(scripts.map((s) => s.category || 'Other'))).sort();
+        grid.innerHTML = '';
+        categories.forEach((category) => {
+            const card = document.createElement('div');
+            card.className = 'card';
+
+            const header = document.createElement('div');
+            header.className = 'row';
+            const title = document.createElement('div');
+            title.innerHTML = `<strong>${category}</strong><div class="path">${scripts.filter((s) => s.category === category).length} scripts</div>`;
+            header.appendChild(title);
+            card.appendChild(header);
+
+            const actions = document.createElement('div');
+            actions.className = 'actions';
+            const openBtn = document.createElement('button');
+            openBtn.className = 'start';
+            openBtn.textContent = 'Open';
+            openBtn.onclick = () => {
+                selectedCategory = category;
+                renderScripts(scriptsCache.filter((s) => s.category === category));
+                const label = category === 'Other' ? 'scripts' : `${category} scripts`;
+                setStatus(`${label}: ${scriptsCache.filter((s) => s.category === category).length}`);
+            };
+            actions.appendChild(openBtn);
+            card.appendChild(actions);
+
+            grid.appendChild(card);
         });
     };
 
