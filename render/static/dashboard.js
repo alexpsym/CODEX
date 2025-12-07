@@ -155,6 +155,39 @@
         });
     };
 
+    const renderCategories = (scripts) => {
+        grid.innerHTML = '';
+        CATEGORIES.forEach((category) => {
+            const matching = scripts.filter((s) => s.category === category);
+            const card = document.createElement('div');
+            card.className = 'card';
+
+            const header = document.createElement('div');
+            header.className = 'row';
+            const title = document.createElement('div');
+            title.innerHTML = `<strong>${category}</strong><div class="path">${matching.length} scripts</div>`;
+            header.appendChild(title);
+            card.appendChild(header);
+
+            const actions = document.createElement('div');
+            actions.className = 'actions';
+            const openBtn = document.createElement('button');
+            openBtn.className = 'start';
+            openBtn.textContent = 'Open';
+            openBtn.onclick = () => {
+                selectedCategory = category;
+                refreshBtn.textContent = 'Back to categories';
+                renderScripts(matching);
+                const label = matching.length === 1 ? 'script' : 'scripts';
+                setStatus(`${category}: ${matching.length} ${label}`);
+            };
+            actions.appendChild(openBtn);
+            card.appendChild(actions);
+
+            grid.appendChild(card);
+        });
+    };
+
     let refreshInFlight = null;
 
     const refresh = async () => {
@@ -178,8 +211,8 @@
                 }
             } catch (err) {
                 console.error(err);
-                grid.innerHTML = '';
-                setStatus('Failed to load scripts. See console for details.', true);
+                renderCategories(scriptsCache);
+                setStatus('Failed to load scripts. Showing cached categories.', true);
             } finally {
                 refreshInFlight = null;
             }
