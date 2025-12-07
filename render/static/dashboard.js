@@ -7,6 +7,7 @@
 
     let scriptsCache = [];
     let selectedCategory = null;
+    let refreshInFlight = null;
 
     const setStatus = (message, isError = false) => {
         status.textContent = message;
@@ -188,7 +189,38 @@
         });
     };
 
-    let refreshInFlight = null;
+    const renderCategoryCards = (scripts) => {
+        grid.innerHTML = '';
+        CATEGORIES.forEach((category) => {
+            const matching = scripts.filter((s) => s.category === category);
+            const card = document.createElement('div');
+            card.className = 'card';
+
+            const header = document.createElement('div');
+            header.className = 'row';
+            const title = document.createElement('div');
+            title.innerHTML = `<strong>${category}</strong><div class="path">${matching.length} scripts</div>`;
+            header.appendChild(title);
+            card.appendChild(header);
+
+            const actions = document.createElement('div');
+            actions.className = 'actions';
+            const openBtn = document.createElement('button');
+            openBtn.className = 'start';
+            openBtn.textContent = 'Open';
+            openBtn.onclick = () => {
+                selectedCategory = category;
+                refreshBtn.textContent = 'Back to categories';
+                renderScripts(matching);
+                const label = matching.length === 1 ? 'script' : 'scripts';
+                setStatus(`${category}: ${matching.length} ${label}`);
+            };
+            actions.appendChild(openBtn);
+            card.appendChild(actions);
+
+            grid.appendChild(card);
+        });
+    };
 
     const refresh = async () => {
         if (refreshInFlight) {
@@ -205,13 +237,13 @@
                     const label = filtered.length === 1 ? 'script' : 'scripts';
                     setStatus(`${selectedCategory}: ${filtered.length} ${label}`);
                 } else {
-                    renderCategories(scriptsCache);
+                    renderCategoryCards(scriptsCache);
                     refreshBtn.textContent = 'Refresh';
                     setStatus('Select a category to manage scripts');
                 }
             } catch (err) {
                 console.error(err);
-                renderCategories(scriptsCache);
+                renderCategoryCards(scriptsCache);
                 setStatus('Failed to load scripts. Showing cached categories.', true);
             } finally {
                 refreshInFlight = null;
@@ -224,7 +256,7 @@
     refreshBtn?.addEventListener('click', () => {
         if (selectedCategory) {
             selectedCategory = null;
-            renderCategories(scriptsCache);
+            renderCategoryCards(scriptsCache);
             refreshBtn.textContent = 'Refresh';
             setStatus('Select a category to manage scripts');
         } else {
@@ -236,5 +268,6 @@
         refresh();
     }, 5000);
 
+    renderCategoryCards(scriptsCache);
     refresh();
 })();
