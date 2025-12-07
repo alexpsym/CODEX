@@ -48,6 +48,9 @@
         try {
             await fetchJson(`/scripts/${buildScriptPath(name)}/${action}`, { method: 'POST' });
             await refresh();
+            if (action === 'start') {
+                openLogTab(name);
+            }
         } catch (err) {
             console.error(err);
             alert(`Failed to ${action} ${name}: ${err.message}`);
@@ -91,12 +94,16 @@
             actions.appendChild(stopBtn);
             card.appendChild(actions);
 
-            const logBox = document.createElement('pre');
-            logBox.textContent = 'Loading logs...';
-            card.appendChild(logBox);
+            const logControls = document.createElement('div');
+            logControls.className = 'actions';
+            const openLogBtn = document.createElement('button');
+            openLogBtn.className = 'refresh';
+            openLogBtn.textContent = 'Open Logs';
+            openLogBtn.onclick = () => openLogTab(script.name);
+            logControls.appendChild(openLogBtn);
+            card.appendChild(logControls);
 
             grid.appendChild(card);
-            loadLogs(script.name, logBox);
         });
     };
 
@@ -178,5 +185,6 @@
         refresh();
     }, 5000);
 
+    renderCategoryCards(scriptsCache);
     refresh();
 })();
