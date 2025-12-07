@@ -83,17 +83,30 @@
         });
     };
 
+    let refreshInFlight = null;
+
     const refresh = async () => {
-        setStatus('Loading scripts...');
-        try {
-            const scripts = await fetchJson('/scripts');
-            renderScripts(scripts);
-            setStatus(`${scripts.length} scripts available`);
-        } catch (err) {
-            console.error(err);
-            grid.innerHTML = '';
-            setStatus('Failed to load scripts. See console for details.', true);
+        if (refreshInFlight) {
+            return refreshInFlight;
         }
+
+        setStatus('Loading scripts...');
+        refreshInFlight = (async () => {
+            try {
+                const scripts = await fetchJson('/scripts');
+                renderScripts(scripts);
+                const label = scripts.length === 1 ? 'script available' : 'scripts available';
+                setStatus(`${scripts.length} ${label}`);
+            } catch (err) {
+                console.error(err);
+                grid.innerHTML = '';
+                setStatus('Failed to load scripts. See console for details.', true);
+            } finally {
+                refreshInFlight = null;
+            }
+        })();
+
+        return refreshInFlight;
     };
 
     refreshBtn?.addEventListener('click', () => {
