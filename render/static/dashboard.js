@@ -3,6 +3,12 @@
     const status = document.getElementById('status');
     const refreshBtn = document.getElementById('refresh-btn');
 
+    const CATEGORIES = ['Excel', 'Forex', 'Crypto', 'Other'];
+
+    let scriptsCache = [];
+    let selectedCategory = null;
+    let refreshInFlight = null;
+
     const setStatus = (message, isError = false) => {
         status.textContent = message;
         status.style.color = isError ? '#fca5a5' : '#94a3b8';
@@ -46,7 +52,14 @@
         }
     };
 
-    const renderScripts = (scripts) => {
+    const renderScriptsForCategory = (category) => {
+        selectedCategory = category;
+        refreshBtn.textContent = 'Back to categories';
+
+        const scripts = scriptsCache.filter((s) => s.category === category);
+        const label = scripts.length === 1 ? 'script' : 'scripts';
+        setStatus(`${category}: ${scripts.length} ${label}`);
+
         grid.innerHTML = '';
         scripts.forEach((script) => {
             const card = document.createElement('div');
@@ -83,24 +96,56 @@
         });
     };
 
-    let refreshInFlight = null;
+    const renderCategories = () => {
+        selectedCategory = null;
+        refreshBtn.textContent = 'Refresh';
+        setStatus('Select a category to manage scripts');
+
+        grid.innerHTML = '';
+        CATEGORIES.forEach((category) => {
+            const matching = scriptsCache.filter((s) => s.category === category);
+
+            const card = document.createElement('div');
+            card.className = 'card';
+
+            const header = document.createElement('div');
+            header.className = 'row';
+            const title = document.createElement('div');
+            title.innerHTML = `<strong>${category}</strong><div class="path">${matching.length} scripts</div>`;
+            header.appendChild(title);
+            card.appendChild(header);
+
+            const actions = document.createElement('div');
+            actions.className = 'actions';
+            const openBtn = document.createElement('button');
+            openBtn.className = 'start';
+            openBtn.textContent = 'Open';
+            openBtn.onclick = () => renderScriptsForCategory(category);
+            actions.appendChild(openBtn);
+            card.appendChild(actions);
+
+            grid.appendChild(card);
+        });
+    };
 
     const refresh = async () => {
-        if (refreshInFlight) {
-            return refreshInFlight;
-        }
+        if (refreshInFlight) return refreshInFlight;
 
         setStatus('Loading scripts...');
         refreshInFlight = (async () => {
             try {
-                const scripts = await fetchJson('/scripts');
-                renderScripts(scripts);
-                const label = scripts.length === 1 ? 'script available' : 'scripts available';
-                setStatus(`${scripts.length} ${label}`);
+                scriptsCache = await fetchJson('/scripts');
+                if (selectedCategory) {
+                    renderScriptsForCategory(selectedCategory);
+                } else {
+                    renderCategories();
+                }
             } catch (err) {
                 console.error(err);
-                grid.innerHTML = '';
-                setStatus('Failed to load scripts. See console for details.', true);
+                setStatus('Failed to load scripts.', true);
+                if (!grid.children.length) {
+                    renderCategories();
+                }
             } finally {
                 refreshInFlight = null;
             }
@@ -110,7 +155,11 @@
     };
 
     refreshBtn?.addEventListener('click', () => {
-        refresh();
+        if (selectedCategory) {
+            renderCategories();
+        } else {
+            refresh();
+        }
     });
 
     setInterval(() => {
