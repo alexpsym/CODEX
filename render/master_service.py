@@ -50,6 +50,7 @@ class ManagedScript:
 
     name: str
     path: Path
+    category: str = "Other"
     process: Optional[asyncio.subprocess.Process] = None
     _log_lines: List[str] = field(default_factory=list)
 
@@ -61,6 +62,7 @@ class ManagedScript:
         return {
             "name": self.name,
             "path": str(self.path),
+            "category": self.category,
             "running": self.is_running,
             "return_code": None if self.process is None else self.process.returncode,
         }
@@ -147,6 +149,45 @@ def candidate_entrypoints(app_dir: Path) -> List[Path]:
     return ordered
 
 
+def categorize_script(script_path: Path) -> str:
+    """Return a high-level category name for ``script_path``."""
+
+    folder = script_path.parent.name.lower()
+    filename = script_path.name.lower()
+    full = f"{folder}/{filename}"
+
+    other_explicit = {
+        "download_video",
+        "extractor",
+        "viddl-clone",
+        "payslip_audit",
+        "push",
+        "youtube",
+    }
+
+    if "ledger-clone" in full:
+        return "Excel"
+
+    if any(keyword in folder for keyword in ("fx", "oanda", "forex")):
+        return "Forex"
+
+    crypto_keywords = (
+        "crypto",
+        "bybit",
+        "coinspot",
+        "optionstrader",
+        "ema-bounce",
+        "ivin",
+    )
+    if any(keyword in folder or keyword in filename for keyword in crypto_keywords):
+        return "Crypto"
+
+    if folder in other_explicit:
+        return "Other"
+
+    return "Other"
+
+
 def discover_scripts() -> List[ManagedScript]:
     """Return one ManagedScript per app folder using a chosen entrypoint."""
 
@@ -158,6 +199,22 @@ def discover_scripts() -> List[ManagedScript]:
         if app_dir.name in SKIP_DIRS or app_dir.name.startswith("."):
             continue
 
+        # Special-case LEDGER: every .py is treated as its own managed script.
+        if app_dir.name == "LEDGER-clone":
+            for py_file in sorted(
+                p
+                for p in app_dir.glob("*.py")
+                if p.name not in SKIP_FILES and not p.name.startswith("test_")
+            ):
+                scripts.append(
+                    ManagedScript(
+                        name=f"{app_dir.name}/{py_file.name}",
+                        path=py_file,
+                        category=categorize_script(py_file),
+                    )
+                )
+            continue
+
         entry_path: Optional[Path] = None
         for candidate in candidate_entrypoints(app_dir):
             if candidate.exists() and candidate.is_file():
@@ -165,12 +222,22 @@ def discover_scripts() -> List[ManagedScript]:
                 break
 
         if entry_path is None:
-            py_files = sorted(p for p in app_dir.glob("*.py") if p.name not in SKIP_FILES and not p.name.startswith("test_"))
+            py_files = sorted(
+                p
+                for p in app_dir.glob("*.py")
+                if p.name not in SKIP_FILES and not p.name.startswith("test_")
+            )
             if py_files:
                 entry_path = py_files[0]
 
         if entry_path is not None:
-            scripts.append(ManagedScript(name=app_dir.name, path=entry_path))
+            scripts.append(
+                ManagedScript(
+                    name=app_dir.name,
+                    path=entry_path,
+                    category=categorize_script(entry_path),
+                )
+            )
 
     return scripts
 
