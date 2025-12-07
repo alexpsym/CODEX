@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -158,99 +157,153 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"en\">
 <head>
     <meta charset=\"UTF-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
     <title>Render Master Control</title>
     <style>
-        :root {{ color-scheme: light dark; }}
-        body {{ font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0f172a; color: #e2e8f0; }}
-        h1 {{ margin-top: 0; }}
-        .card {{ background: #1e293b; border-radius: 12px; padding: 1.25rem; margin-bottom: 1rem; box-shadow: 0 12px 30px rgba(0,0,0,0.25); }}
-        .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1rem; }}
-        button {{ padding: 0.55rem 0.9rem; border-radius: 10px; border: none; cursor: pointer; font-weight: 600; }}
-        .start {{ background: #22c55e; color: #052e16; }}
-        .stop {{ background: #ef4444; color: #fff7ed; }}
-        .pill {{ display: inline-block; padding: 0.3rem 0.65rem; border-radius: 999px; font-weight: 700; font-size: 0.9rem; }}
-        .running {{ background: #22c55e22; color: #86efac; }}
-        .stopped {{ background: #ef444422; color: #fecdd3; }}
-        pre {{ background: #0b1220; color: #e5e7eb; border-radius: 8px; padding: 0.75rem; overflow: auto; max-height: 320px; white-space: pre-wrap; }}
-        .actions {{ display: flex; gap: 0.5rem; margin-top: 0.5rem; }}
+        :root { color-scheme: light dark; }
+        body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
+        h1 { margin-top: 0; }
+        .meta { color: #94a3b8; margin-bottom: 1.5rem; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1rem; }
+        .card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 1.25rem; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
+        .row { display: flex; justify-content: space-between; gap: 1rem; align-items: center; }
+        .path { color: #94a3b8; font-size: 0.9rem; word-break: break-all; }
+        .pill { display: inline-block; padding: 0.3rem 0.65rem; border-radius: 999px; font-weight: 700; font-size: 0.9rem; }
+        .running { background: #22c55e22; color: #86efac; }
+        .stopped { background: #ef444422; color: #fecdd3; }
+        .actions { display: flex; gap: 0.5rem; margin: 0.75rem 0; }
+        button { padding: 0.55rem 0.9rem; border-radius: 10px; border: none; cursor: pointer; font-weight: 700; }
+        .start { background: #22c55e; color: #052e16; }
+        .stop { background: #ef4444; color: #fff7ed; }
+        pre { background: #0a0f1b; color: #e5e7eb; border-radius: 8px; padding: 0.75rem; overflow: auto; max-height: 260px; white-space: pre-wrap; margin: 0; }
+        .toolbar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; }
+        .refresh { background: #3b82f6; color: #eaf2ff; }
     </style>
 </head>
 <body>
     <h1>Render Master Control</h1>
-    <p>Start, stop, and monitor any Python script in this repository (trading bots, Excel utilities, everything except the mt5-clone folder). Webhooks can be sent to <code>/webhook/&lt;script-name&gt;</code>.</p>
+    <p class=\"meta\">Start, stop, and monitor any Python script in this repository (everything except the mt5-clone folder). Webhooks can be sent to <code>/webhook/&lt;script-name&gt;</code>.</p>
+    <div class=\"toolbar\">
+        <button class=\"refresh\" id=\"refresh-btn\">Refresh</button>
+        <span id=\"status\" class=\"meta\">Loading scripts...</span>
+    </div>
     <div id=\"grid\" class=\"grid\"></div>
-<script>
-const scripts = __SCRIPTS__;
-const grid = document.getElementById('grid');
 
-function statusPill(script) {
-    const pill = document.createElement('span');
-    pill.className = 'pill ' + (script.running ? 'running' : 'stopped');
-    pill.textContent = script.running ? 'Running' : 'Stopped';
-    return pill;
-}
+    <script>
+    const grid = document.getElementById('grid');
+    const status = document.getElementById('status');
+    const refreshBtn = document.getElementById('refresh-btn');
 
-async function refresh() {
-    const response = await fetch('/scripts');
-    const data = await response.json();
-    grid.innerHTML = '';
-    data.forEach(script => {
-        const card = document.createElement('div');
-        card.className = 'card';
-        const header = document.createElement('div');
-        header.style.display = 'flex';
-        header.style.justifyContent = 'space-between';
-        const title = document.createElement('div');
-        title.innerHTML = `<strong>${script.name}</strong><br/><small>${script.path}</small>`;
-        header.appendChild(title);
-        header.appendChild(statusPill(script));
-        card.appendChild(header);
-        const actions = document.createElement('div');
-        actions.className = 'actions';
-        const startBtn = document.createElement('button');
-        startBtn.className = 'start';
-        startBtn.textContent = 'Start';
-        startBtn.onclick = () => modify(script.name, 'start');
-        const stopBtn = document.createElement('button');
-        stopBtn.className = 'stop';
-        stopBtn.textContent = 'Stop';
-        stopBtn.onclick = () => modify(script.name, 'stop');
-        actions.appendChild(startBtn);
-        actions.appendChild(stopBtn);
-        card.appendChild(actions);
-        const logBox = document.createElement('pre');
-        logBox.id = `log-${script.name}`;
-        logBox.textContent = 'Loading logs...';
-        card.appendChild(logBox);
-        grid.appendChild(card);
-        loadLogs(script.name);
+    const setStatus = (message, isError = false) => {
+        status.textContent = message;
+        status.style.color = isError ? '#fca5a5' : '#94a3b8';
+    };
+
+    const fetchJson = async (url, options = {}) => {
+        const response = await fetch(url, options);
+        if (!response.ok) {
+            throw new Error(`${options.method || 'GET'} ${url} failed with ${response.status}`);
+        }
+        return response.json();
+    };
+
+    const statusPill = (script) => {
+        const pill = document.createElement('span');
+        pill.className = 'pill ' + (script.running ? 'running' : 'stopped');
+        pill.textContent = script.running ? 'Running' : 'Stopped';
+        return pill;
+    };
+
+    const loadLogs = async (name, box) => {
+        try {
+            const lines = await fetchJson(`/logs/${encodeURIComponent(name)}`);
+            box.textContent = lines.length ? lines.join('\n') : 'No logs yet.';
+        } catch (err) {
+            console.error(err);
+            box.textContent = 'Failed to load logs.';
+        }
+    };
+
+    const modify = async (name, action, button) => {
+        if (button) button.disabled = true;
+        try {
+            await fetchJson(`/scripts/${encodeURIComponent(name)}/${action}`, { method: 'POST' });
+            await refresh();
+        } catch (err) {
+            console.error(err);
+            alert(`Failed to ${action} ${name}: ${err.message}`);
+        } finally {
+            if (button) button.disabled = false;
+        }
+    };
+
+    const renderScripts = (scripts) => {
+        grid.innerHTML = '';
+        scripts.forEach((script) => {
+            const card = document.createElement('div');
+            card.className = 'card';
+
+            const header = document.createElement('div');
+            header.className = 'row';
+            const title = document.createElement('div');
+            title.innerHTML = `<strong>${script.name}</strong><div class=\"path\">${script.path}</div>`;
+            header.appendChild(title);
+            header.appendChild(statusPill(script));
+            card.appendChild(header);
+
+            const actions = document.createElement('div');
+            actions.className = 'actions';
+            const startBtn = document.createElement('button');
+            startBtn.className = 'start';
+            startBtn.textContent = 'Start';
+            startBtn.onclick = () => modify(script.name, 'start', startBtn);
+            const stopBtn = document.createElement('button');
+            stopBtn.className = 'stop';
+            stopBtn.textContent = 'Stop';
+            stopBtn.onclick = () => modify(script.name, 'stop', stopBtn);
+            actions.appendChild(startBtn);
+            actions.appendChild(stopBtn);
+            card.appendChild(actions);
+
+            const logBox = document.createElement('pre');
+            logBox.textContent = 'Loading logs...';
+            card.appendChild(logBox);
+
+            grid.appendChild(card);
+            loadLogs(script.name, logBox);
+        });
+    };
+
+    const refresh = async () => {
+        setStatus('Loading scripts...');
+        try {
+            const scripts = await fetchJson('/scripts');
+            renderScripts(scripts);
+            setStatus(`${scripts.length} scripts available`);
+        } catch (err) {
+            console.error(err);
+            grid.innerHTML = '';
+            setStatus('Failed to load scripts. See console for details.', true);
+        }
+    };
+
+    refreshBtn.addEventListener('click', () => {
+        refresh();
     });
-}
 
-async function modify(name, action) {
-    await fetch(`/scripts/${encodeURIComponent(name)}/${action}`, { method: 'POST' });
-    setTimeout(refresh, 500);
-}
+    setInterval(() => {
+        refresh();
+    }, 5000);
 
-async function loadLogs(name) {
-    const box = document.getElementById(`log-${name}`);
-    if (!box) return;
-    const res = await fetch(`/logs/${encodeURIComponent(name)}`);
-    const lines = await res.json();
-    box.textContent = lines.join('\n');
-}
-
-setInterval(() => { refresh(); }, 5000);
-refresh();
-</script>
+    refresh();
+    </script>
 </body>
 </html>"""
 
 
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
-    scripts_json = json.dumps(script_manager.list_scripts())
-    return HTML_TEMPLATE.replace("__SCRIPTS__", scripts_json)
+    return HTML_TEMPLATE
 
 
 @app.get("/scripts")
