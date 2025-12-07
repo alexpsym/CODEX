@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import html
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -318,6 +320,45 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div id=\"grid\" class=\"grid\"></div>
 
     <script src=\"/static/dashboard.js\"></script>
+</body>
+</html>"""
+
+
+LOG_VIEWER_TEMPLATE = """<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+    <meta charset=\"UTF-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <title>Logs - {script_name}</title>
+    <style>
+        :root { color-scheme: light dark; }
+        body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 1.5rem; background: #0b1220; color: #e2e8f0; }
+        h1 { margin-top: 0; }
+        .meta { color: #94a3b8; margin-bottom: 0.75rem; }
+        .controls { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 1rem; }
+        button { padding: 0.6rem 1rem; border-radius: 10px; border: none; cursor: pointer; font-weight: 700; }
+        #refresh-btn { background: #3b82f6; color: #eaf2ff; }
+        #save-log-btn { background: #22c55e; color: #052e16; }
+        #log-box { background: #0a0f1b; color: #e5e7eb; border-radius: 8px; padding: 0.75rem; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 320px; border: 1px solid #1f2937; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
+        .badge { display: inline-block; padding: 0.35rem 0.7rem; border-radius: 999px; background: #1f2937; color: #cbd5e1; font-weight: 700; }
+    </style>
+</head>
+<body data-script-name=\"{script_name}\">
+    <h1>Logs for {script_name}</h1>
+    <p class=\"meta\">Live output is streamed here so you can keep the main control panel clean.</p>
+    <div class=\"controls\">
+        <span class=\"badge\" id=\"line-count\">0 lines</span>
+        <button id=\"refresh-btn\">Refresh</button>
+        <button id=\"save-log-btn\">Save log</button>
+    </div>
+    <pre id=\"log-box\">Loading logs...</pre>
+
+    <script>
+        window.RENDER_LOG_VIEW = {{
+            scriptName: {script_name_json}
+        }};
+    </script>
+    <script src=\"/static/log_viewer.js\"></script>
 </body>
 </html>"""
 
