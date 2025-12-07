@@ -182,7 +182,7 @@ function toggleRisk(v){
   </div>
   <label>Risk–reward ratio: <input name="rr_ratio" type="number" step="0.1" value="2" required></label><br>
   <button type="submit">Calculate</button><br>
-  <button type="button" onclick="copy('https://app.signalstack.com/hook/uBEEmUjb4fFdkMHF2ipCUz')">Copy Webhook</button><br>
+  <button type="button" onclick="copy('https://codex-juan.onrender.com/webhook/oanda-calculator-clone')">Copy Webhook</button><br>
   {% if alert_json %}
     <button type="button" onclick="copyFromId('alert_json')">Copy JSON</button>
   {% else %}
