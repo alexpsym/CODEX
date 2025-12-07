@@ -17,7 +17,9 @@
     const fetchJson = async (url, options = {}) => {
         const response = await fetch(url, options);
         if (!response.ok) {
-            throw new Error(`${options.method || 'GET'} ${url} failed with ${response.status}`);
+            const body = await response.text();
+            const detail = body || response.statusText;
+            throw new Error(`${options.method || 'GET'} ${url} failed with ${response.status}: ${detail}`);
         }
         return response.json();
     };
@@ -129,6 +131,14 @@
             grid.appendChild(card);
         });
     };
+
+    // Backwards compatibility for any cached script bundle that still references the older
+    // renderCategoryCards global helper. By assigning it here, we avoid ReferenceError crashes
+    // that prevent the dashboard from initializing.
+    const renderCategoryCards = () => renderCategories();
+    // Expose both helpers on window so any inline handlers from a cached page still work.
+    window.renderCategoryCards = renderCategoryCards;
+    window.renderScriptsForCategory = (category) => renderScriptsForCategory(category);
 
     const refresh = async () => {
         if (refreshInFlight) return refreshInFlight;

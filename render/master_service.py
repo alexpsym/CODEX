@@ -411,16 +411,6 @@ async def read_logs(script_name: str) -> JSONResponse:
         raise HTTPException(status_code=500, detail=detail) from exc
 
 
-@app.get("/log-view/{script_name:path}", response_class=HTMLResponse)
-async def view_logs(script_name: str) -> HTMLResponse:
-    script = script_manager.get(script_name)
-    return HTMLResponse(
-        LOG_VIEWER_TEMPLATE.format(
-            script_name=html.escape(script.name), script_name_json=json.dumps(script.name)
-        )
-    )
-
-
 @app.post("/webhook/{script_name:path}")
 async def webhook(script_name: str, request: Request) -> JSONResponse:
     payload = await request.body()
