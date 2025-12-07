@@ -306,7 +306,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
     <h1>Render Master Control</h1>
-    <p class=\"meta\">Start, stop, and monitor any Python script in this repository (everything except the mt5-clone folder). Webhooks can be sent to <code>/webhook/&lt;script-name&gt;</code>.</p>
+    <p class=\"meta\">Pick a category to see its scripts. From there you can start, stop, and monitor anything in this repository (everything except the mt5-clone folder). Webhooks can be sent to <code>/webhook/&lt;script-name&gt;</code>.</p>
     <div class=\"toolbar\">
         <button class=\"refresh\" id=\"refresh-btn\">Refresh</button>
         <span id=\"status\" class=\"meta\">Loading scripts...</span>
