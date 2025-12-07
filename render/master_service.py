@@ -17,8 +17,8 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env")
 
-IGNORE_DIRS = {"render", ".git", "__pycache__", "mt5-clone", ".venv", "env", "venv"}
-IGNORE_FILES = {"__init__.py"}
+SKIP_DIRS = {"render", "mt5-clone", ".venv", "venv", "__pycache__", ".git", "env"}
+SKIP_FILES = {"__init__.py"}
 MAX_LOG_LINES = 400
 
 
@@ -97,16 +97,27 @@ class ManagedScript:
             await self.process.wait()
 
 
-def discover_scripts(base_dir: Path) -> List[ManagedScript]:
+def discover_scripts() -> List[ManagedScript]:
+    """
+    Recursively find Python scripts under the repo root, skipping the render folder,
+    mt5-clone, and common virtualenv/cache directories. Returns ManagedScript objects
+    keyed by their repo-relative paths using forward slashes (e.g. "foo/bar.py").
+    """
+
     scripts: List[ManagedScript] = []
-    for path in base_dir.rglob("*.py"):
-        if any(part in IGNORE_DIRS for part in path.parts):
+
+    for path in BASE_DIR.rglob("*.py"):
+        parts = path.relative_to(BASE_DIR).parts
+
+        if any(part in SKIP_DIRS for part in parts):
             continue
-        if path.name in IGNORE_FILES:
+
+        if path.name in SKIP_FILES or path.name.startswith("test_") or path.name == "test.py":
             continue
-        relative = path.relative_to(base_dir)
-        name = str(relative)
-        scripts.append(ManagedScript(name=name, path=path))
+
+        key = "/".join(parts)
+        scripts.append(ManagedScript(name=key, path=path))
+
     return scripts
 
 
@@ -139,7 +150,7 @@ class ScriptManager:
         return self.get(name).logs()
 
 
-script_manager = ScriptManager(discover_scripts(BASE_DIR))
+script_manager = ScriptManager(discover_scripts())
 app = FastAPI(title="Render Master Script", version="1.0")
 
 
