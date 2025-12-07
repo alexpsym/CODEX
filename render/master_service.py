@@ -166,7 +166,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
     <h1>Render Master Control</h1>
-    <p>Start, stop, and monitor any Python script in this repository. Webhooks can be sent to <code>/webhook/&lt;script-name&gt;</code>.</p>
+    <p>Start, stop, and monitor any Python script in this repository (trading bots, Excel utilities, everything except the mt5-clone folder). Webhooks can be sent to <code>/webhook/&lt;script-name&gt;</code>.</p>
     <div id=\"grid\" class=\"grid\"></div>
 <script>
 const scripts = __SCRIPTS__;

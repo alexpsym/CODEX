@@ -1,6 +1,6 @@
 # Render deployment guide for the unified trading runner
 
-This folder contains a lightweight FastAPI app (`render/master_service.py`) that discovers every Python script in this repository (excluding the `mt5-clone` folder) and lets you run them concurrently from a single Render starter instance. The app exposes:
+This folder contains a lightweight FastAPI app (`render/master_service.py`) that discovers every Python script in this repository—trading bots, Excel utilities, and anything else except the `mt5-clone` folder—and lets you run them concurrently from a single Render starter instance. The app exposes:
 
 - A web UI at `/` for starting/stopping scripts and tailing their logs.
 - Webhook endpoints at `/webhook/<script-name>` so TradingView alerts can kick off a specific strategy.
