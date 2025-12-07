@@ -87,14 +87,20 @@ class ManagedScript:
 
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
-        self.process = await asyncio.create_subprocess_exec(
-            os.getenv("PYTHON", "python"),
-            str(self.path),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=str(self.path.parent),
-            env=env,
-        )
+
+        try:
+            self.process = await asyncio.create_subprocess_exec(
+                os.getenv("PYTHON", "python"),
+                str(self.path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=str(self.path.parent),
+                env=env,
+            )
+        except Exception as exc:
+            self.add_log(f"Failed to start: {exc}")
+            raise
+
         asyncio.create_task(self._capture_output())
 
     async def _capture_output(self) -> None:
@@ -369,19 +375,40 @@ async def list_scripts() -> JSONResponse:
 
 @app.post("/scripts/{script_name:path}/start")
 async def start_script(script_name: str) -> JSONResponse:
-    summary = await script_manager.start(script_name)
-    return JSONResponse(summary)
+    try:
+        summary = await script_manager.start(script_name)
+        return JSONResponse(summary)
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - runtime protection
+        detail = f"Failed to start {script_name}: {exc}"
+        print(detail)
+        raise HTTPException(status_code=500, detail=detail) from exc
 
 
 @app.post("/scripts/{script_name:path}/stop")
 async def stop_script(script_name: str) -> JSONResponse:
-    summary = await script_manager.stop(script_name)
-    return JSONResponse(summary)
+    try:
+        summary = await script_manager.stop(script_name)
+        return JSONResponse(summary)
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - runtime protection
+        detail = f"Failed to stop {script_name}: {exc}"
+        print(detail)
+        raise HTTPException(status_code=500, detail=detail) from exc
 
 
 @app.get("/logs/{script_name:path}")
 async def read_logs(script_name: str) -> JSONResponse:
-    return JSONResponse(script_manager.logs(script_name))
+    try:
+        return JSONResponse(script_manager.logs(script_name))
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - runtime protection
+        detail = f"Failed to read logs for {script_name}: {exc}"
+        print(detail)
+        raise HTTPException(status_code=500, detail=detail) from exc
 
 
 @app.get("/log-view/{script_name:path}", response_class=HTMLResponse)
