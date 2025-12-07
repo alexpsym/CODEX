@@ -26,14 +26,9 @@
         return pill;
     };
 
-    const loadLogs = async (name, box) => {
-        try {
-            const lines = await fetchJson(`/logs/${encodeURIComponent(name)}`);
-            box.textContent = lines.length ? lines.join('\n') : 'No logs yet.';
-        } catch (err) {
-            console.error(err);
-            box.textContent = 'Failed to load logs.';
-        }
+    const openLogTab = (name) => {
+        const url = `/log-view/${encodeURIComponent(name)}`;
+        window.open(url, '_blank', 'noopener');
     };
 
     const modify = async (name, action, button) => {
@@ -41,6 +36,9 @@
         try {
             await fetchJson(`/scripts/${encodeURIComponent(name)}/${action}`, { method: 'POST' });
             await refresh();
+            if (action === 'start') {
+                openLogTab(name);
+            }
         } catch (err) {
             console.error(err);
             alert(`Failed to ${action} ${name}: ${err.message}`);
@@ -77,12 +75,16 @@
             actions.appendChild(stopBtn);
             card.appendChild(actions);
 
-            const logBox = document.createElement('pre');
-            logBox.textContent = 'Loading logs...';
-            card.appendChild(logBox);
+            const logControls = document.createElement('div');
+            logControls.className = 'actions';
+            const openLogBtn = document.createElement('button');
+            openLogBtn.className = 'refresh';
+            openLogBtn.textContent = 'Open Logs';
+            openLogBtn.onclick = () => openLogTab(script.name);
+            logControls.appendChild(openLogBtn);
+            card.appendChild(logControls);
 
             grid.appendChild(card);
-            loadLogs(script.name, logBox);
         });
     };
 
