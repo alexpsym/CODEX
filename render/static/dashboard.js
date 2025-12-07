@@ -33,6 +33,14 @@
 
     const buildScriptPath = (name) => encodeURIComponent(name).replace(/%2F/g, '/');
 
+    // Some older cached HTML still wires log buttons to this helper. Keep it
+    // available globally so those buttons work instead of throwing a
+    // ReferenceError when clicked.
+    const openLogTab = (name) => {
+        window.open(`/logs/${buildScriptPath(name)}`, '_blank');
+    };
+    window.openLogTab = openLogTab;
+
     const loadLogs = async (name, box) => {
         try {
             const lines = await fetchJson(`/logs/${buildScriptPath(name)}`);
