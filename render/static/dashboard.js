@@ -31,15 +31,22 @@
         return pill;
     };
 
-    const openLogTab = (name) => {
-        const url = `/log-view/${encodeURIComponent(name)}`;
-        window.open(url, '_blank', 'noopener');
+    const buildScriptPath = (name) => encodeURIComponent(name).replace(/%2F/g, '/');
+
+    const loadLogs = async (name, box) => {
+        try {
+            const lines = await fetchJson(`/logs/${buildScriptPath(name)}`);
+            box.textContent = lines.length ? lines.join('\n') : 'No logs yet.';
+        } catch (err) {
+            console.error(err);
+            box.textContent = 'Failed to load logs.';
+        }
     };
 
     const modify = async (name, action, button) => {
         if (button) button.disabled = true;
         try {
-            await fetchJson(`/scripts/${encodeURIComponent(name)}/${action}`, { method: 'POST' });
+            await fetchJson(`/scripts/${buildScriptPath(name)}/${action}`, { method: 'POST' });
             await refresh();
             if (action === 'start') {
                 openLogTab(name);
