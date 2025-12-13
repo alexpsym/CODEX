@@ -16,8 +16,6 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Set
-import tkinter as tk
-from tkinter import messagebox
 
 
 # ─── DOWNLOADS ──────────────────────────────────────────────────────────────────
@@ -118,9 +116,32 @@ def _log_startup_error(exc: BaseException) -> Path:
     return log_path
 
 
+def _cli_prompt_and_download() -> None:
+    """Fallback console prompt when Tkinter is unavailable."""
+
+    print("Tkinter GUI unavailable; running in console mode.")
+    raw = input("Enter one or more YouTube URLs (comma or space separated): ").strip()
+    urls = _parse_urls(raw)
+
+    if not urls:
+        print("No URLs provided. Exiting.")
+        return
+
+    download_links(sorted(urls))
+
+
 # ─── GUI ──────────────────────────────────────────────────────────────────────
 
 def _build_gui_and_run() -> None:
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+    except ModuleNotFoundError as exc:  # noqa: PERF203
+        raise RuntimeError(
+            "Tkinter is not available in this Python installation. "
+            "Reinstall Python with Tk support or use the CLI fallback."
+        ) from exc
+
     root = tk.Tk()
     root.title("YouTube Downloader")
     root.geometry("620x380")
@@ -196,7 +217,17 @@ def _build_gui_and_run() -> None:
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    _build_gui_and_run()
+    try:
+        _build_gui_and_run()
+    except RuntimeError as exc:
+        log_path = _log_startup_error(exc)
+        print(
+            "Tkinter is missing in this Python environment. "
+            "Switching to CLI mode...",
+            file=sys.stderr,
+        )
+        print(f"Details logged to: {log_path}", file=sys.stderr)
+        _cli_prompt_and_download()
 
 
 if __name__ == "__main__":
