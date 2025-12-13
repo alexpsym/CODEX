@@ -11,6 +11,9 @@ This folder contains a lightweight FastAPI app (`render/master_service.py`) that
    ```bash
    pip install -r render/requirements.txt
    ```
+   The requirements file now bundles the shared dependencies used across the repo's
+   scripts (Flask, pandas, bs4, pybit, etc.) so running anything from the master
+   control UI won't fail due to missing modules.
 2. Add your secrets to a local `.env` file in the repository root (see **Environment variables** below).
 3. Start the service locally:
    ```bash

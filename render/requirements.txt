@@ -1,3 +1,31 @@
+# Core dependencies for the Render master control service
 fastapi==0.110.0
 uvicorn[standard]==0.27.1
 python-dotenv==1.0.1
+
+# Shared dependencies for managed scripts across the repository
+beautifulsoup4
+bs4
+coinspot
+flask
+httpx
+matplotlib
+openpyxl
+pandas
+pdfplumber
+Pillow
+plyer
+pybit
+pylint
+pytesseract
+pytest
+pytz
+reportlab
+requests
+selenium
+tabulate
+tqdm
+waitress
+websockets
+xlwings
+xlsxwriter
