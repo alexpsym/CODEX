@@ -142,7 +142,13 @@ def _build_gui_and_run() -> None:
             "Reinstall Python with Tk support or use the CLI fallback."
         ) from exc
 
-    root = tk.Tk()
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:  # noqa: PERF203
+        raise RuntimeError(
+            "Tkinter is installed but failed to initialize. "
+            "Ensure a display is available or use the CLI fallback."
+        ) from exc
     root.title("YouTube Downloader")
     root.geometry("620x380")
     root.resizable(False, False)
