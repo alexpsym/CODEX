@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Download YouTube links stored in the Brave bookmarks toolbar's MUSIC folder.
+Download YouTube links stored in the Brave bookmarks toolbar's MUSIC folder,
+or download specific URLs that you paste at runtime.
 
 Features
 - Platform-aware discovery of Brave profiles with interactive selection.
@@ -162,6 +163,20 @@ def _print_ffmpeg_help() -> None:
     print("  Linux:   `sudo apt-get install ffmpeg` or use your distro's package manager")
 
 
+def _prompt_manual_urls() -> Set[str]:
+    """Return user-pasted URLs when provided, otherwise an empty set."""
+
+    print("Paste the YouTube URLs to download (space/comma separated).")
+    print("Press Enter without typing anything to use Brave bookmarks instead.")
+
+    raw = input("> ").strip()
+    if not raw:
+        return set()
+
+    cleaned = raw.replace(",", " ").replace("\n", " ")
+    return {token for token in cleaned.split() if token}
+
+
 def download_links(urls: Iterable[str]) -> None:
     """Download each URL with yt-dlp, reporting per-link success/failure."""
     if not shutil.which("yt-dlp"):
@@ -235,6 +250,13 @@ def _log_startup_error(exc: BaseException) -> Path:
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    pasted_urls = _prompt_manual_urls()
+
+    if pasted_urls:
+        print("Using provided URLs; Brave bookmarks will not be read.")
+        download_links(sorted(pasted_urls))
+        return
+
     bookmark_file = ask_bookmark_path()
 
     if not bookmark_file:
