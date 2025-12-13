@@ -13,6 +13,7 @@ import subprocess
 import sys
 import threading
 import traceback
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Set
@@ -159,6 +160,15 @@ def _build_gui_and_run() -> None:
     status_label = tk.Label(root, textvariable=status_var, anchor="w")
     status_label.pack(fill="x", padx=12, pady=(6, 0))
 
+    log_path = Path(__file__).resolve().parent / "yt_error_log.txt"
+
+    def open_log_file() -> None:
+        try:
+            log_path.touch(exist_ok=True)
+            webbrowser.open_new_tab(log_path.resolve().as_uri())
+        except BaseException as exc:  # noqa: BLE001
+            append_output(f"Unable to open log file: {exc}")
+
     output = tk.Text(root, height=12, state="disabled", wrap="word")
     output.pack(fill="both", expand=True, padx=12, pady=(6, 12))
 
@@ -208,8 +218,14 @@ def _build_gui_and_run() -> None:
         download_thread = threading.Thread(target=run_downloads, args=(urls,), daemon=True)
         download_thread.start()
 
-    download_button = tk.Button(root, text="Download", command=on_download_clicked)
-    download_button.pack(pady=(0, 8))
+    controls = tk.Frame(root)
+    controls.pack(fill="x", padx=12, pady=(0, 8))
+
+    download_button = tk.Button(controls, text="Download", command=on_download_clicked)
+    download_button.pack(side="left")
+
+    open_log_button = tk.Button(controls, text="Open Error Log", command=open_log_file)
+    open_log_button.pack(side="left", padx=(8, 0))
 
     root.mainloop()
 
