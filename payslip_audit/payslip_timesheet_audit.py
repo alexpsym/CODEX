@@ -20,6 +20,8 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import LongTable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+from payslip_audit.tesseract import TESSERACT_MISSING_MESSAGE, is_tesseract_available
+
 CURRENCY_RE = re.compile(r"[^\d\-.]")
 SPACE_RE = re.compile(r"\s+")
 DATE_SUFFIX_RE = re.compile(r"(\d+)(st|nd|rd|th)", re.IGNORECASE)
@@ -104,6 +106,13 @@ class TimesheetEntry:
 
 def clean(value: Optional[str]) -> str:
     return SPACE_RE.sub(" ", value.strip()) if value else ""
+
+
+def ensure_tesseract_available() -> None:
+    """Abort early with a clear error if the Tesseract binary is missing."""
+
+    if not is_tesseract_available():
+        raise SystemExit(TESSERACT_MISSING_MESSAGE)
 
 
 def parse_decimal(value: Optional[str]) -> Optional[Decimal]:
@@ -1285,6 +1294,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     args = parser.parse_args(argv)
 
     working_dir = Path.cwd()
+    ensure_tesseract_available()
     payslip_path, timesheet_paths = discover_files(args.payslip, args.timesheet)
 
     output_path = args.output
