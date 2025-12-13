@@ -499,6 +499,16 @@ async def view_logs(script_name: str) -> str:
     return _render_log_view(script_name)
 
 
+async def _background_start(script: ManagedScript) -> None:
+    """Start a script without tying its output or failures to the HTTP response."""
+
+    try:
+        await script.start()
+    except Exception as exc:  # pragma: no cover - runtime protection
+        # Capture failures in the per-script log instead of surfacing them to the caller.
+        script.add_log(f"Failed to start: {exc}")
+
+
 @app.post("/scripts/{script_name:path}/start")
 async def start_script(script_name: str) -> JSONResponse:
     # Never launch the payslip audit script directly; force users to the upload flow
@@ -511,15 +521,15 @@ async def start_script(script_name: str) -> JSONResponse:
             }
         )
 
-    try:
-        summary = await script_manager.start(script_name)
-        return JSONResponse(summary)
-    except HTTPException:
-        raise
-    except Exception as exc:  # pragma: no cover - runtime protection
-        detail = f"Failed to start {script_name}: {exc}"
-        print(detail)
-        raise HTTPException(status_code=500, detail=detail) from exc
+    script = script_manager.get(script_name)
+
+    if script.is_running:
+        return JSONResponse({"status": "already_running", **script.to_summary()})
+
+    asyncio.create_task(_background_start(script))
+
+    # Respond immediately so no script output can leak into the HTTP response cycle.
+    return JSONResponse({"status": "starting", **script.to_summary()}, status_code=202)
 
 
 @app.post("/scripts/{script_name:path}/stop")
