@@ -29,6 +29,7 @@ This folder contains a lightweight FastAPI app (`render/master_service.py`) that
    - **Build Command**: `pip install -r render/requirements.txt`
    - **Start Command**: `uvicorn render.master_service:app --host 0.0.0.0 --port ${PORT:-10000}`
    - **Instance type**: Starter ($7/mo). This keeps one always-on worker.
+   - **System packages**: Render will install any `apt.txt` listed at the repo root. Keep `tesseract-ocr` and `libtesseract-dev` here (not in `requirements.txt`) because the OCR engine is a system dependency, not a Python package that pip can provide.
 4. Add environment variables in the Render dashboard (or create an **Environment Group** and attach it). These are injected into every managed script, so your TradingView credentials, Bybit keys, and OANDA keys are available without committing them to Git.
 5. Click **Create Web Service**. Once live, Render will expose a public URL like `https://your-app.onrender.com`. Point your TradingView webhooks to `https://your-app.onrender.com/webhook/<script-name>`.
 

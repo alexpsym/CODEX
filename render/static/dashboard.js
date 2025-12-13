@@ -33,24 +33,6 @@
 
     const buildScriptPath = (name) => encodeURIComponent(name).replace(/%2F/g, '/');
 
-    // Some older cached HTML still wires log buttons to this helper. Keep it
-    // available globally so those buttons work instead of throwing a
-    // ReferenceError when clicked.
-    const openLogTab = (name) => {
-        window.open(`/logs/${buildScriptPath(name)}`, '_blank');
-    };
-    window.openLogTab = openLogTab;
-
-    const loadLogs = async (name, box) => {
-        try {
-            const lines = await fetchJson(`/logs/${buildScriptPath(name)}`);
-            box.textContent = lines.length ? lines.join('\n') : 'No logs yet.';
-        } catch (err) {
-            console.error(err);
-            box.textContent = 'Failed to load logs.';
-        }
-    };
-
     const modify = async (name, action, button) => {
         if (button) button.disabled = true;
         try {
@@ -123,16 +105,6 @@
             }
 
             card.appendChild(actions);
-
-            const logControls = document.createElement('div');
-            logControls.className = 'actions';
-            const openLogBtn = document.createElement('button');
-            openLogBtn.className = 'refresh';
-            openLogBtn.textContent = 'Open Logs';
-            openLogBtn.onclick = () => openLogTab(script.name);
-            logControls.appendChild(openLogBtn);
-
-            card.appendChild(logControls);
 
             grid.appendChild(card);
         });
