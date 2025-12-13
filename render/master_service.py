@@ -17,6 +17,8 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import RedirectResponse
 from dotenv import load_dotenv
 
+from payslip_audit.tesseract import TESSERACT_MISSING_MESSAGE, is_tesseract_available
+
 BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env")
 
@@ -221,8 +223,21 @@ def _payslip_session_dir(session_id: str) -> Path:
     return PAYSLIP_UPLOAD_ROOT / session_id
 
 
+TESSERACT_MISSING_DETAIL = TESSERACT_MISSING_MESSAGE
+
+
+def ensure_tesseract_available() -> None:
+    """Raise an HTTP 500 with clear guidance when Tesseract is absent."""
+
+    if not is_tesseract_available():
+        raise HTTPException(status_code=500, detail=TESSERACT_MISSING_DETAIL)
+
+
 async def _execute_payslip_audit(payslip: Path, timesheets: List[Path], output_path: Path) -> str:
     script_path = BASE_DIR / "payslip_audit" / "payslip_timesheet_audit.py"
+
+    ensure_tesseract_available()
+
     command = [
         os.getenv("PYTHON", "python"),
         str(script_path),
@@ -579,6 +594,8 @@ async def read_logs(script_name: str) -> JSONResponse:
 async def upload_and_run_payslip_audit(files: List[UploadFile] = File(...)) -> JSONResponse:
     if not files:
         raise HTTPException(status_code=400, detail="Please upload a payslip PDF and at least one timesheet image.")
+
+    ensure_tesseract_available()
 
     session_id = uuid4().hex
     session_dir = _payslip_session_dir(session_id)
