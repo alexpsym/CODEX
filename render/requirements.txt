@@ -25,7 +25,6 @@ reportlab
 requests
 selenium
 tabulate
-tkinter
 tqdm
 waitress
 websockets
