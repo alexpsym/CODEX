@@ -5,6 +5,7 @@ import asyncio
 import html
 import json
 import os
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
