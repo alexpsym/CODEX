@@ -1,145 +1,20 @@
 #!/usr/bin/env python3
 """
-Download YouTube links stored in the Brave bookmarks toolbar's MUSIC folder,
-or download specific URLs that you paste at runtime.
+Download pasted YouTube URLs as mp3 files.
 
 Features
-- Platform-aware discovery of Brave profiles with interactive selection.
-- Validates custom bookmark paths and logs startup errors.
-- Restricts traversal to the MUSIC folder on the bookmarks bar.
-- Deduplicates YouTube links before downloading and checks for yt-dlp early.
+- Validates pasted URLs and checks for yt-dlp early.
 - Provides per-download success/failure feedback.
+- Logs startup errors next to the script for troubleshooting.
 """
 
-import json
 import shutil
 import subprocess
 import sys
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Set
-
-
-# ─── BOOKMARK DISCOVERY ─────────────────────────────────────────────────────────
-
-def _platform_default_base() -> Optional[Path]:
-    """Return the platform-specific base directory for Brave profiles."""
-    home = Path.home()
-
-    if sys.platform.startswith("darwin"):
-        return home / "Library" / "Application Support" / "BraveSoftware" / "Brave-Browser"
-    if sys.platform.startswith("linux"):
-        return home / ".config" / "BraveSoftware" / "Brave-Browser"
-    if sys.platform.startswith("win"):
-        return home / "AppData" / "Local" / "BraveSoftware" / "Brave-Browser" / "User Data"
-
-    return None
-
-
-def _discover_bookmark_files() -> Iterable[Path]:
-    """Return available Brave bookmark files, prioritizing the default profile."""
-    base = _platform_default_base()
-    if not base or not base.exists():
-        return []
-
-    bookmark_files = []
-    default_bookmarks = base / "Default" / "Bookmarks"
-    if default_bookmarks.exists():
-        bookmark_files.append(default_bookmarks)
-
-    for child in sorted(base.iterdir()):
-        if child.is_dir() and child.name != "Default":
-            candidate = child / "Bookmarks"
-            if candidate.exists():
-                bookmark_files.append(candidate)
-
-    return bookmark_files
-
-
-def _validate_bookmark_path(raw_path: str, fallback: Path) -> Optional[Path]:
-    """Validate user input and convert directories to bookmark files when possible."""
-    bookmark_path = Path(raw_path) if raw_path else fallback
-
-    if bookmark_path.is_dir():
-        candidate = bookmark_path / "Bookmarks"
-        if candidate.exists():
-            bookmark_path = candidate
-        else:
-            print("The provided path is a directory. Please provide the full path to the 'Bookmarks' file.")
-            return None
-
-    if not bookmark_path.exists():
-        print("Could not find the file. Check the path and try again.")
-        return None
-
-    if not bookmark_path.is_file():
-        print("The provided path is not a file. Please try again.")
-        return None
-
-    return bookmark_path
-
-
-def ask_bookmark_path() -> Optional[Path]:
-    """Ask for Brave's bookmarks file path or use a platform-aware default."""
-    detected = list(_discover_bookmark_files())
-    fallback = _platform_default_base()
-    fallback = fallback / "Default" / "Bookmarks" if fallback else Path.home()
-
-    if detected:
-        print("Detected Brave bookmark files:")
-        for idx, path in enumerate(detected, start=1):
-            print(f"  {idx}. {path}")
-        print("Enter the number of the profile to use, or provide a custom path.")
-        print(f"Press Enter to use the default selection: {detected[0]}")
-
-        while True:
-            choice = input("> ").strip()
-
-            if choice.isdigit():
-                selection = int(choice)
-                if 1 <= selection <= len(detected):
-                    return detected[selection - 1]
-                print("Invalid selection. Please choose a listed number.")
-                continue
-
-            validated = _validate_bookmark_path(choice, detected[0])
-            if validated:
-                return validated
-    else:
-        print("Enter the full path to your Brave 'Bookmarks' file.")
-        print(f"Press Enter to use the default: {fallback}")
-
-        while True:
-            choice = input("> ").strip()
-            validated = _validate_bookmark_path(choice, fallback)
-            if validated:
-                return validated
-
-    return None
-
-
-def find_music_folder(bookmark_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Return the MUSIC folder node from the bookmarks toolbar if present."""
-    bar = bookmark_data.get("roots", {}).get("bookmark_bar", {})
-    for child in bar.get("children", []):
-        if child.get("type") == "folder" and child.get("name") == "MUSIC":
-            return child
-    return None
-
-
-def collect_youtube_urls(node: Any, results: Set[str]) -> None:
-    """Search the bookmark data for YouTube video links inside the MUSIC folder."""
-    if isinstance(node, dict):
-        if node.get("type") == "url":
-            url = node.get("url", "")
-            if "youtube.com/watch" in url:
-                results.add(url)
-        for value in node.values():
-            collect_youtube_urls(value, results)
-    elif isinstance(node, list):
-        for item in node:
-            collect_youtube_urls(item, results)
+from typing import Iterable, Optional, Set
 
 
 # ─── DOWNLOADS ──────────────────────────────────────────────────────────────────
@@ -164,17 +39,20 @@ def _print_ffmpeg_help() -> None:
 
 
 def _prompt_manual_urls() -> Set[str]:
-    """Return user-pasted URLs when provided, otherwise an empty set."""
+    """Prompt the user to paste YouTube URLs and return the parsed set."""
 
-    print("Paste the YouTube URLs to download (space/comma separated).")
-    print("Press Enter without typing anything to use Brave bookmarks instead.")
+    while True:
+        print("Paste the YouTube URLs to download (space/comma separated).")
+        print("Press Enter after pasting to start the downloads.")
 
-    raw = input("> ").strip()
-    if not raw:
-        return set()
+        raw = input("> ").strip()
+        cleaned = raw.replace(",", " ").replace("\n", " ")
+        parsed = {token for token in cleaned.split() if token}
 
-    cleaned = raw.replace(",", " ").replace("\n", " ")
-    return {token for token in cleaned.split() if token}
+        if parsed:
+            return parsed
+
+        print("No URLs detected. Please paste at least one YouTube link.\n")
 
 
 def download_links(urls: Iterable[str]) -> None:
@@ -252,33 +130,7 @@ def _log_startup_error(exc: BaseException) -> Path:
 def main() -> None:
     pasted_urls = _prompt_manual_urls()
 
-    if pasted_urls:
-        print("Using provided URLs; Brave bookmarks will not be read.")
-        download_links(sorted(pasted_urls))
-        return
-
-    bookmark_file = ask_bookmark_path()
-
-    if not bookmark_file:
-        print("No bookmark file selected.")
-        return
-
-    with open(bookmark_file, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    music_folder = find_music_folder(data)
-    if not music_folder:
-        print("No 'MUSIC' folder found on the bookmarks toolbar.")
-        return
-
-    youtube_links: Set[str] = set()
-    collect_youtube_urls(music_folder, youtube_links)
-
-    if not youtube_links:
-        print("No YouTube bookmarks found inside the 'MUSIC' folder.")
-        return
-
-    download_links(sorted(youtube_links))
+    download_links(sorted(pasted_urls))
 
 
 if __name__ == "__main__":
