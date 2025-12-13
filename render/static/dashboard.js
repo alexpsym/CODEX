@@ -109,6 +109,16 @@
             openLogBtn.textContent = 'Open Logs';
             openLogBtn.onclick = () => openLogTab(script.name);
             logControls.appendChild(openLogBtn);
+
+            if (script.name === 'payslip_audit') {
+                const uploadBtn = document.createElement('button');
+                uploadBtn.className = 'start';
+                uploadBtn.textContent = 'Upload Files & Run Audit';
+                uploadBtn.onclick = () => {
+                    window.open('/payslip-audit', '_blank');
+                };
+                logControls.appendChild(uploadBtn);
+            }
             card.appendChild(logControls);
 
             grid.appendChild(card);
