@@ -1,4 +1,0 @@
-# System packages required for Render deployments when the root directory is set to `render`
-# Keep these in sync with the top-level apt.txt so tesseract-based flows (e.g., payslip_audit) work in all setups.
-libtesseract-dev
-tesseract-ocr
