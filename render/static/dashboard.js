@@ -69,9 +69,6 @@
             }
 
             await refresh();
-            if (action === 'start') {
-                openLogTab(name);
-            }
         } catch (err) {
             console.error(err);
             alert(`Failed to ${action} ${name}: ${err.message}`);
