@@ -2,6 +2,8 @@ import os
 import sys
 import threading
 import tkinter as tk
+from queue import Empty, Queue
+from typing import Callable
 from tkinter import messagebox
 from urllib.parse import urljoin, urlparse
 
@@ -68,8 +70,22 @@ def start_download(entry: tk.Entry, download_button: tk.Button, status_label: tk
     download_button.config(state=tk.DISABLED)
     status_label.config(text="Downloading...")
 
+    task_queue: Queue[tuple[Callable, tuple, dict]] = Queue()
+    download_thread: threading.Thread | None = None
+
     def run_on_main(callback, *args, **kwargs) -> None:
-        status_label.after(0, lambda: callback(*args, **kwargs))
+        task_queue.put((callback, args, kwargs))
+
+    def process_queue() -> None:
+        while True:
+            try:
+                callback, args, kwargs = task_queue.get_nowait()
+            except Empty:
+                break
+            callback(*args, **kwargs)
+
+        if download_thread and (download_thread.is_alive() or not task_queue.empty()):
+            status_label.after(50, process_queue)
 
     def show_error(message: str) -> None:
         messagebox.showerror("Download Failed", message)
@@ -93,7 +109,9 @@ def start_download(entry: tk.Entry, download_button: tk.Button, status_label: tk
         finally:
             run_on_main(enable_button)
 
-    threading.Thread(target=run_download, daemon=True).start()
+    download_thread = threading.Thread(target=run_download, daemon=True)
+    download_thread.start()
+    process_queue()
 
 
 def launch_gui() -> None:
