@@ -68,18 +68,30 @@ def start_download(entry: tk.Entry, download_button: tk.Button, status_label: tk
     download_button.config(state=tk.DISABLED)
     status_label.config(text="Downloading...")
 
+    def run_on_main(callback, *args, **kwargs) -> None:
+        status_label.after(0, lambda: callback(*args, **kwargs))
+
+    def show_error(message: str) -> None:
+        messagebox.showerror("Download Failed", message)
+        status_label.config(text="Download failed")
+
+    def show_success(filename: str) -> None:
+        messagebox.showinfo("Download Complete", f"Saved as: {filename}")
+        status_label.config(text=f"Saved as: {filename}")
+
+    def enable_button() -> None:
+        download_button.config(state=tk.NORMAL)
+
     def run_download() -> None:
         try:
             filename = download_video(url)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Failed to download video")
-            messagebox.showerror("Download Failed", str(exc))
-            status_label.config(text="Download failed")
+            run_on_main(show_error, str(exc))
         else:
-            messagebox.showinfo("Download Complete", f"Saved as: {filename}")
-            status_label.config(text=f"Saved as: {filename}")
+            run_on_main(show_success, filename)
         finally:
-            download_button.config(state=tk.NORMAL)
+            run_on_main(enable_button)
 
     threading.Thread(target=run_download, daemon=True).start()
 
