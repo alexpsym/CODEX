@@ -8,9 +8,11 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
+from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import RedirectResponse
 from dotenv import load_dotenv
@@ -21,6 +23,9 @@ load_dotenv(BASE_DIR / ".env")
 SKIP_DIRS = {"render", "mt5-clone", ".venv", "venv", "__pycache__", ".git", "env"}
 SKIP_FILES = {"__init__.py"}
 MAX_LOG_LINES = 400
+PAYSLIP_REPORT_NAME = "audit_report.pdf"
+PAYSLIP_UPLOAD_ROOT = BASE_DIR / "render" / "uploads" / "payslip"
+PAYSLIP_ALLOWED_IMAGES = {".jpg", ".jpeg", ".png"}
 
 ENTRY_OVERRIDES = {
     "Crypto-Scanner-clone": ["continuous_scan.py", "scan.py"],
@@ -44,6 +49,8 @@ ENTRY_OVERRIDES = {
     "payslip_audit": ["payslip_timesheet_audit.py"],
     "viddl-clone": ["master.py", "vid.py"],
 }
+
+PAYSLIP_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 @dataclass
@@ -194,6 +201,41 @@ def categorize_script(script_path: Path) -> str:
         return "Other"
 
     return "Other"
+
+
+def _payslip_session_dir(session_id: str) -> Path:
+    return PAYSLIP_UPLOAD_ROOT / session_id
+
+
+async def _execute_payslip_audit(payslip: Path, timesheets: List[Path], output_path: Path) -> str:
+    script_path = BASE_DIR / "payslip_audit" / "payslip_timesheet_audit.py"
+    command = [
+        os.getenv("PYTHON", "python"),
+        str(script_path),
+        "--payslip",
+        str(payslip),
+        "--timesheet",
+    ] + [str(path) for path in timesheets] + ["--output", str(output_path)]
+
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        cwd=str(script_path.parent),
+    )
+    stdout, _ = await process.communicate()
+    log_output = stdout.decode("utf-8", errors="replace") if stdout else ""
+
+    if process.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Audit failed with exit code {process.returncode}.\n{log_output}",
+        )
+
+    if not output_path.exists():
+        raise HTTPException(status_code=500, detail="Audit completed but no report was produced.")
+
+    return log_output
 
 
 def discover_scripts() -> List[ManagedScript]:
@@ -362,10 +404,77 @@ LOG_VIEWER_TEMPLATE = """<!DOCTYPE html>
 </body>
 </html>"""
 
+PAYSLIP_AUDIT_TEMPLATE = """<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+    <meta charset=\"UTF-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <title>Payslip Audit Upload</title>
+    <style>
+        :root { color-scheme: light dark; }
+        body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
+        h1 { margin-top: 0; }
+        .card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; padding: 1.5rem; max-width: 960px; margin: 0 auto; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
+        .meta { color: #94a3b8; margin-bottom: 0.75rem; line-height: 1.5; }
+        .drop-zone { border: 2px dashed #334155; border-radius: 14px; padding: 2rem; text-align: center; background: #0a0f1b; transition: border-color 0.2s ease, background 0.2s ease; }
+        .drop-zone.dragover { border-color: #38bdf8; background: #0b1930; }
+        .actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1rem; }
+        button { padding: 0.7rem 1.2rem; border-radius: 12px; border: none; cursor: pointer; font-weight: 700; }
+        .primary { background: #22c55e; color: #052e16; }
+        .secondary { background: #334155; color: #e2e8f0; }
+        .status { margin-top: 1rem; color: #cbd5e1; white-space: pre-wrap; word-break: break-word; }
+        ul { margin: 0.5rem 0 0; padding-left: 1.25rem; color: #cbd5e1; }
+        .badge { display: inline-block; padding: 0.35rem 0.65rem; border-radius: 999px; background: #1f2937; color: #cbd5e1; font-weight: 700; font-size: 0.9rem; }
+        .log { background: #0a0f1b; border: 1px solid #1f2937; border-radius: 10px; padding: 0.75rem; margin-top: 1rem; white-space: pre-wrap; color: #e5e7eb; min-height: 120px; }
+    </style>
+</head>
+<body>
+    <div class=\"card\">
+        <h1>Payslip Audit Upload</h1>
+        <p class=\"meta\">Upload the payslip PDF plus all related timesheet screenshots. Drag and drop the files into the window below or use the file picker. The audit will begin automatically once the uploads are validated.</p>
+        <div class=\"badge\">Step 1</div>
+        <h3>Upload payslip and timesheets</h3>
+        <div id=\"drop-zone\" class=\"drop-zone\">
+            <p><strong>Drag &amp; drop your payslip PDF and timesheet images here</strong></p>
+            <p class=\"meta\">Accepted formats: PDF, JPG, JPEG, PNG. The payslip file is required along with at least one timesheet image.</p>
+            <input id=\"file-input\" type=\"file\" multiple accept=\".pdf,.jpg,.jpeg,.png\" style=\"display:none\" />
+            <div class=\"actions\">
+                <button id=\"pick-btn\" class=\"secondary\">Choose files</button>
+                <button id=\"clear-btn\" class=\"secondary\">Clear selection</button>
+            </div>
+            <ul id=\"file-list\"></ul>
+        </div>
+
+        <div class=\"badge\" style=\"margin-top:1.5rem\">Step 2</div>
+        <h3>Run audit</h3>
+        <p class=\"meta\">When you are ready, start the upload. The report will download automatically after the audit finishes.</p>
+        <div class=\"actions\">
+            <button id=\"upload-btn\" class=\"primary\">Upload &amp; Start Audit</button>
+            <a href=\"/\" class=\"secondary\" style=\"text-decoration:none; display:inline-flex; align-items:center;\">Back to dashboard</a>
+        </div>
+        <div id=\"status\" class=\"status\">Select your payslip PDF and timesheet screenshots to begin.</div>
+        <div id=\"log\" class=\"log\">Awaiting upload...</div>
+    </div>
+
+    <script>
+        window.PAYSLIP_AUDIT_CONFIG = {
+            uploadEndpoint: '/api/payslip-audit/run',
+            reportBase: '/api/payslip-audit/report/',
+        };
+    </script>
+    <script src=\"/static/payslip_audit.js\"></script>
+</body>
+</html>"""
+
 
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
     return HTML_TEMPLATE
+
+
+@app.get("/payslip-audit", response_class=HTMLResponse)
+async def payslip_audit_page() -> str:
+    return PAYSLIP_AUDIT_TEMPLATE
 
 
 @app.get("/scripts")
@@ -409,6 +518,50 @@ async def read_logs(script_name: str) -> JSONResponse:
         detail = f"Failed to read logs for {script_name}: {exc}"
         print(detail)
         raise HTTPException(status_code=500, detail=detail) from exc
+
+
+@app.post("/api/payslip-audit/run")
+async def upload_and_run_payslip_audit(files: List[UploadFile] = File(...)) -> JSONResponse:
+    if not files:
+        raise HTTPException(status_code=400, detail="Please upload a payslip PDF and at least one timesheet image.")
+
+    session_id = uuid4().hex
+    session_dir = _payslip_session_dir(session_id)
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    saved_files: List[Path] = []
+    for upload in files:
+        filename = Path(upload.filename or "upload").name
+        destination = session_dir / filename
+        destination.write_bytes(await upload.read())
+        saved_files.append(destination)
+
+    payslips = [path for path in saved_files if path.suffix.lower() == ".pdf"]
+    timesheets = [path for path in saved_files if path.suffix.lower() in PAYSLIP_ALLOWED_IMAGES]
+
+    if not payslips:
+        raise HTTPException(status_code=400, detail="A payslip PDF is required.")
+    if not timesheets:
+        raise HTTPException(status_code=400, detail="At least one timesheet image (JPG/PNG) is required.")
+
+    output_path = session_dir / PAYSLIP_REPORT_NAME
+    log_output = await _execute_payslip_audit(payslips[0], sorted(timesheets), output_path)
+
+    return JSONResponse(
+        {
+            "session_id": session_id,
+            "download_url": f"/api/payslip-audit/report/{session_id}",
+            "log": log_output,
+        }
+    )
+
+
+@app.get("/api/payslip-audit/report/{session_id}")
+async def download_payslip_report(session_id: str) -> FileResponse:
+    report_path = _payslip_session_dir(session_id) / PAYSLIP_REPORT_NAME
+    if not report_path.exists():
+        raise HTTPException(status_code=404, detail="Report not found. Please rerun the audit.")
+    return FileResponse(report_path, filename=PAYSLIP_REPORT_NAME, media_type="application/pdf")
 
 
 @app.post("/webhook/{script_name:path}")
