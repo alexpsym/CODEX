@@ -90,16 +90,28 @@
 
             const actions = document.createElement('div');
             actions.className = 'actions';
-            const startBtn = document.createElement('button');
-            startBtn.className = 'start';
-            startBtn.textContent = 'Start';
-            startBtn.onclick = () => modify(script.name, 'start', startBtn);
-            const stopBtn = document.createElement('button');
-            stopBtn.className = 'stop';
-            stopBtn.textContent = 'Stop';
-            stopBtn.onclick = () => modify(script.name, 'stop', stopBtn);
-            actions.appendChild(startBtn);
-            actions.appendChild(stopBtn);
+
+            if (script.name === 'payslip_audit') {
+                const uploadBtn = document.createElement('button');
+                uploadBtn.className = 'start';
+                uploadBtn.textContent = 'Open Upload Page';
+                uploadBtn.onclick = () => {
+                    window.open('/payslip-audit', '_blank');
+                };
+                actions.appendChild(uploadBtn);
+            } else {
+                const startBtn = document.createElement('button');
+                startBtn.className = 'start';
+                startBtn.textContent = 'Start';
+                startBtn.onclick = () => modify(script.name, 'start', startBtn);
+                const stopBtn = document.createElement('button');
+                stopBtn.className = 'stop';
+                stopBtn.textContent = 'Stop';
+                stopBtn.onclick = () => modify(script.name, 'stop', stopBtn);
+                actions.appendChild(startBtn);
+                actions.appendChild(stopBtn);
+            }
+
             card.appendChild(actions);
 
             const logControls = document.createElement('div');
@@ -110,15 +122,6 @@
             openLogBtn.onclick = () => openLogTab(script.name);
             logControls.appendChild(openLogBtn);
 
-            if (script.name === 'payslip_audit') {
-                const uploadBtn = document.createElement('button');
-                uploadBtn.className = 'start';
-                uploadBtn.textContent = 'Upload Files & Run Audit';
-                uploadBtn.onclick = () => {
-                    window.open('/payslip-audit', '_blank');
-                };
-                logControls.appendChild(uploadBtn);
-            }
             card.appendChild(logControls);
 
             grid.appendChild(card);
