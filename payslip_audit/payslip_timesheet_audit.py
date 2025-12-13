@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -104,6 +105,15 @@ class TimesheetEntry:
 
 def clean(value: Optional[str]) -> str:
     return SPACE_RE.sub(" ", value.strip()) if value else ""
+
+
+def ensure_tesseract_available() -> None:
+    """Abort early with a clear error if the Tesseract binary is missing."""
+
+    if shutil.which("tesseract") is None:
+        raise SystemExit(
+            "Tesseract OCR is required to process timesheet images. Install the tesseract-ocr system package or add 'tesseract' to your PATH.",
+        )
 
 
 def parse_decimal(value: Optional[str]) -> Optional[Decimal]:
@@ -1285,6 +1295,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     args = parser.parse_args(argv)
 
     working_dir = Path.cwd()
+    ensure_tesseract_available()
     payslip_path, timesheet_paths = discover_files(args.payslip, args.timesheet)
 
     output_path = args.output
