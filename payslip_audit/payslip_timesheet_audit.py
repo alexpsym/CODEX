@@ -21,6 +21,8 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import LongTable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+from payslip_audit.tesseract import TESSERACT_MISSING_MESSAGE, is_tesseract_available
+
 CURRENCY_RE = re.compile(r"[^\d\-.]")
 SPACE_RE = re.compile(r"\s+")
 DATE_SUFFIX_RE = re.compile(r"(\d+)(st|nd|rd|th)", re.IGNORECASE)
@@ -110,10 +112,8 @@ def clean(value: Optional[str]) -> str:
 def ensure_tesseract_available() -> None:
     """Abort early with a clear error if the Tesseract binary is missing."""
 
-    if shutil.which("tesseract") is None:
-        raise SystemExit(
-            "Tesseract OCR is required to process timesheet images. Install the tesseract-ocr system package or add 'tesseract' to your PATH.",
-        )
+    if not is_tesseract_available():
+        raise SystemExit(TESSERACT_MISSING_MESSAGE)
 
 
 def parse_decimal(value: Optional[str]) -> Optional[Decimal]:
