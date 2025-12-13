@@ -341,6 +341,8 @@ script_manager = ScriptManager(discover_scripts())
 app = FastAPI(title="Render Master Script", version="1.0")
 
 
+ASSET_VERSION = "v3"
+
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"en\">
 <head>
@@ -377,7 +379,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
     <div id=\"grid\" class=\"grid\"></div>
 
-    <script src=\"/static/dashboard.js\"></script>
+    <script src=\"/static/dashboard.js?ver={asset_version}\"></script>
 </body>
 </html>"""
 
@@ -485,7 +487,7 @@ PAYSLIP_AUDIT_TEMPLATE = """<!DOCTYPE html>
 
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
-    return HTML_TEMPLATE
+    return HTML_TEMPLATE.format(asset_version=ASSET_VERSION)
 
 
 @app.get("/payslip-audit", response_class=HTMLResponse)
