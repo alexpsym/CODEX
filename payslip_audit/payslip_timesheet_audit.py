@@ -21,7 +21,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import LongTable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-from payslip_audit.tesseract import TESSERACT_MISSING_MESSAGE, is_tesseract_available
+from tesseract import TESSERACT_MISSING_MESSAGE, is_tesseract_available
 
 CURRENCY_RE = re.compile(r"[^\d\-.]")
 SPACE_RE = re.compile(r"\s+")
