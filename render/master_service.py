@@ -5,6 +5,7 @@ import asyncio
 import html
 import json
 import os
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
@@ -223,6 +224,16 @@ def _payslip_session_dir(session_id: str) -> Path:
 
 async def _execute_payslip_audit(payslip: Path, timesheets: List[Path], output_path: Path) -> str:
     script_path = BASE_DIR / "payslip_audit" / "payslip_timesheet_audit.py"
+
+    if shutil.which("tesseract") is None:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Tesseract OCR is required to parse timesheet screenshots. "
+                "Install the 'tesseract-ocr' system package (see apt.txt) or add 'tesseract' to your PATH."
+            ),
+        )
+
     command = [
         os.getenv("PYTHON", "python"),
         str(script_path),
