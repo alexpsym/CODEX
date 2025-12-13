@@ -37,7 +37,7 @@
     // available globally so those buttons work instead of throwing a
     // ReferenceError when clicked.
     const openLogTab = (name) => {
-        window.open(`/logs/${buildScriptPath(name)}`, '_blank');
+        window.open(`/logs/view/${buildScriptPath(name)}`, '_blank');
     };
     window.openLogTab = openLogTab;
 

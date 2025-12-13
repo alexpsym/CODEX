@@ -482,6 +482,23 @@ async def list_scripts() -> JSONResponse:
     return JSONResponse(script_manager.list_scripts())
 
 
+def _render_log_view(script_name: str) -> str:
+    """Return the HTML log viewer for a known script."""
+
+    safe_name = html.escape(script_name)
+    return LOG_VIEWER_TEMPLATE.format(
+        script_name=safe_name,
+        script_name_json=json.dumps(script_name),
+    )
+
+
+@app.get("/logs/view/{script_name:path}", response_class=HTMLResponse)
+async def view_logs(script_name: str) -> str:
+    # Ensure the script exists so we don't render a viewer for an unknown path.
+    script_manager.get(script_name)
+    return _render_log_view(script_name)
+
+
 @app.post("/scripts/{script_name:path}/start")
 async def start_script(script_name: str) -> JSONResponse:
     # Never launch the payslip audit script directly; force users to the upload flow
