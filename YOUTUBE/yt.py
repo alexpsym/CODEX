@@ -11,10 +11,11 @@ Features
 import shutil
 import subprocess
 import sys
+import threading
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, Optional, Set
+from typing import Callable, Iterable, Optional, Set
 
 
 # ─── DOWNLOADS ──────────────────────────────────────────────────────────────────
@@ -25,48 +26,38 @@ def _ffmpeg_installed() -> Optional[str]:
     return shutil.which("ffmpeg")
 
 
-def _print_ffmpeg_help() -> None:
+def _print_ffmpeg_help(log: Callable[[str], None]) -> None:
     """Provide platform-specific guidance for installing ffmpeg binaries."""
 
-    print("Error: ffmpeg is required to convert downloads to mp3.")
-    print(
+    log("Error: ffmpeg is required to convert downloads to mp3.")
+    log(
         "Install a system ffmpeg binary (pip packages alone are not enough). "
         "Examples:"
     )
-    print("  Windows: `choco install ffmpeg` or download from https://www.gyan.dev/ffmpeg/builds/")
-    print("  macOS:   `brew install ffmpeg`")
-    print("  Linux:   `sudo apt-get install ffmpeg` or use your distro's package manager")
+    log("  Windows: `choco install ffmpeg` or download from https://www.gyan.dev/ffmpeg/builds/")
+    log("  macOS:   `brew install ffmpeg`")
+    log("  Linux:   `sudo apt-get install ffmpeg` or use your distro's package manager")
 
 
-def _prompt_manual_urls() -> Set[str]:
-    """Prompt the user to paste YouTube URLs and return the parsed set."""
+def _parse_urls(raw: str) -> Set[str]:
+    """Parse whitespace/comma separated URLs from the raw text entry."""
 
-    while True:
-        print("Paste the YouTube URLs to download (space/comma separated).")
-        print("Press Enter after pasting to start the downloads.")
-
-        raw = input("> ").strip()
-        cleaned = raw.replace(",", " ").replace("\n", " ")
-        parsed = {token for token in cleaned.split() if token}
-
-        if parsed:
-            return parsed
-
-        print("No URLs detected. Please paste at least one YouTube link.\n")
+    cleaned = raw.replace(",", " ").replace("\n", " ")
+    return {token for token in cleaned.split() if token}
 
 
-def download_links(urls: Iterable[str]) -> None:
+def download_links(urls: Iterable[str], log: Callable[[str], None] = print) -> None:
     """Download each URL with yt-dlp, reporting per-link success/failure."""
     if not shutil.which("yt-dlp"):
-        print("Error: yt-dlp is not installed or not on your PATH.")
+        log("Error: yt-dlp is not installed or not on your PATH.")
         return
 
     ffmpeg_path = _ffmpeg_installed()
     if not ffmpeg_path:
-        _print_ffmpeg_help()
+        _print_ffmpeg_help(log)
         return
 
-    print(f"Using ffmpeg at: {ffmpeg_path}")
+    log(f"Using ffmpeg at: {ffmpeg_path}")
 
     common_args = [
         "-f",
@@ -92,24 +83,24 @@ def download_links(urls: Iterable[str]) -> None:
     ]
 
     for url in urls:
-        print(f"Downloading: {url}")
+        log(f"Downloading: {url}")
         for args in (common_args, fallback_args):
             try:
                 result = subprocess.run(["yt-dlp", *args, url])
             except FileNotFoundError:
-                print("yt-dlp executable not found. Aborting remaining downloads.")
+                log("yt-dlp executable not found. Aborting remaining downloads.")
                 return
 
             if result.returncode == 0:
-                print(f"Downloaded successfully: {url}")
+                log(f"Downloaded successfully: {url}")
                 break
 
-            print(
+            log(
                 "Download failed with this client selection. "
                 "Retrying with an alternate player client..."
             )
         else:
-            print(f"Download failed (exit code {result.returncode}): {url}")
+            log(f"Download failed (exit code {result.returncode}): {url}")
 
 
 # ─── LOGGING ───────────────────────────────────────────────────────────────────
@@ -125,12 +116,118 @@ def _log_startup_error(exc: BaseException) -> Path:
     return log_path
 
 
+def _cli_prompt_and_download() -> None:
+    """Fallback console prompt when Tkinter is unavailable."""
+
+    print("Tkinter GUI unavailable; running in console mode.")
+    raw = input("Enter one or more YouTube URLs (comma or space separated): ").strip()
+    urls = _parse_urls(raw)
+
+    if not urls:
+        print("No URLs provided. Exiting.")
+        return
+
+    download_links(sorted(urls))
+
+
+# ─── GUI ──────────────────────────────────────────────────────────────────────
+
+def _build_gui_and_run() -> None:
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+    except ModuleNotFoundError as exc:  # noqa: PERF203
+        raise RuntimeError(
+            "Tkinter is not available in this Python installation. "
+            "Reinstall Python with Tk support or use the CLI fallback."
+        ) from exc
+
+    root = tk.Tk()
+    root.title("YouTube Downloader")
+    root.geometry("620x380")
+    root.resizable(False, False)
+
+    url_label = tk.Label(root, text="Paste the YouTube URL(s):")
+    url_label.pack(anchor="w", padx=12, pady=(12, 4))
+
+    url_var = tk.StringVar()
+    url_entry = tk.Entry(root, textvariable=url_var, width=70)
+    url_entry.pack(fill="x", padx=12)
+    url_entry.focus_set()
+
+    status_var = tk.StringVar(value="Ready")
+    status_label = tk.Label(root, textvariable=status_var, anchor="w")
+    status_label.pack(fill="x", padx=12, pady=(6, 0))
+
+    output = tk.Text(root, height=12, state="disabled", wrap="word")
+    output.pack(fill="both", expand=True, padx=12, pady=(6, 12))
+
+    download_thread: Optional[threading.Thread] = None
+
+    def append_output(message: str) -> None:
+        def _append() -> None:
+            output.configure(state="normal")
+            output.insert("end", message + "\n")
+            output.see("end")
+            output.configure(state="disabled")
+
+        root.after(0, _append)
+
+    def update_status(message: str) -> None:
+        root.after(0, lambda: status_var.set(message))
+
+    def log(message: str) -> None:
+        print(message)
+        append_output(message)
+
+    def run_downloads(urls: Set[str]) -> None:
+        update_status("Downloading...")
+        try:
+            download_links(sorted(urls), log=log)
+            update_status("Finished downloads.")
+        except BaseException as exc:  # noqa: BLE001
+            append_output(f"Error: {exc}")
+            update_status("An error occurred. Check the log above.")
+        finally:
+            root.after(0, lambda: download_button.configure(state="normal"))
+
+    def on_download_clicked() -> None:
+        nonlocal download_thread
+
+        urls = _parse_urls(url_var.get())
+        if not urls:
+            messagebox.showerror("No URLs", "Please enter at least one YouTube URL.")
+            return
+
+        if download_thread and download_thread.is_alive():
+            messagebox.showinfo("Download in progress", "Please wait for the current download to finish.")
+            return
+
+        download_button.configure(state="disabled")
+        append_output("Starting download...")
+        download_thread = threading.Thread(target=run_downloads, args=(urls,), daemon=True)
+        download_thread.start()
+
+    download_button = tk.Button(root, text="Download", command=on_download_clicked)
+    download_button.pack(pady=(0, 8))
+
+    root.mainloop()
+
+
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    pasted_urls = _prompt_manual_urls()
-
-    download_links(sorted(pasted_urls))
+    try:
+        _build_gui_and_run()
+    except RuntimeError as exc:
+        log_path = _log_startup_error(exc)
+        print(
+            "Tkinter is missing in this Python environment. "
+            "Switching to CLI mode...",
+            file=sys.stderr,
+        )
+        print(f"Details logged to: {log_path}", file=sys.stderr)
+        _cli_prompt_and_download()
 
 
 if __name__ == "__main__":
