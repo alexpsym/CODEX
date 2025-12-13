@@ -43,6 +43,7 @@ Place these in your Render dashboard or a local `.env` file at the repo root. Ad
 - Clicking **Start** launches the chosen script as a background subprocess with unbuffered stdout; logs stream into the UI. Multiple scripts can run concurrently.
 - Clicking **Stop** sends a graceful terminate signal, escalating to a kill if the script does not exit within 10 seconds.
 - The webhook endpoint records the payload to the script log and starts the script if it is not already running.
+- Common helpers like `pandas` and `xlwings` are bundled in `requirements.txt` so Excel utilities (for example `LEDGER-clone/earnings_report.py`) can start without missing-module errors.
 
 ## 5) TradingView webhook routing
 Use the script path shown in the UI (for example `bybit-alert-clone/bybit_altcoin_monitor.py`) as the `<script-name>` in your TradingView webhook URL:
