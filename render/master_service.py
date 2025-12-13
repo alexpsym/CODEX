@@ -50,6 +50,10 @@ ENTRY_OVERRIDES = {
     "viddl-clone": ["master.py", "vid.py"],
 }
 
+LOG_FILE_OVERRIDES: Dict[str, Path] = {
+    "YOUTUBE": BASE_DIR / "YOUTUBE" / "yt_error_log.txt",
+}
+
 PAYSLIP_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 
 
@@ -60,6 +64,7 @@ class ManagedScript:
     name: str
     path: Path
     category: str = "Other"
+    log_file: Optional[Path] = None
     process: Optional[asyncio.subprocess.Process] = None
     _log_lines: List[str] = field(default_factory=list)
 
@@ -84,6 +89,15 @@ class ManagedScript:
                 self._log_lines = self._log_lines[-MAX_LOG_LINES :]
 
     def logs(self) -> List[str]:
+        if self.log_file is not None:
+            try:
+                if self.log_file.exists():
+                    content = self.log_file.read_text(encoding="utf-8", errors="replace")
+                    lines = content.splitlines()
+                    return lines[-MAX_LOG_LINES :]
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                return [f"Unable to read log file {self.log_file}: {exc}"]
+
         return list(self._log_lines)
 
     async def start(self) -> None:
@@ -261,6 +275,7 @@ def discover_scripts() -> List[ManagedScript]:
                         name=f"{app_dir.name}/{py_file.name}",
                         path=py_file,
                         category=categorize_script(py_file),
+                        log_file=LOG_FILE_OVERRIDES.get(app_dir.name),
                     )
                 )
             continue
@@ -286,6 +301,7 @@ def discover_scripts() -> List[ManagedScript]:
                     name=app_dir.name,
                     path=entry_path,
                     category=categorize_script(entry_path),
+                    log_file=LOG_FILE_OVERRIDES.get(app_dir.name),
                 )
             )
 
