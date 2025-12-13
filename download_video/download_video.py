@@ -6,6 +6,7 @@ from tkinter import messagebox
 from urllib.parse import urljoin, urlparse
 
 import logging
+from typing import Callable
 import requests
 from bs4 import BeautifulSoup
 from tqdm import tqdm
@@ -68,18 +69,25 @@ def start_download(entry: tk.Entry, download_button: tk.Button, status_label: tk
     download_button.config(state=tk.DISABLED)
     status_label.config(text="Downloading...")
 
+    def run_on_main_thread(action: Callable[[], None]) -> None:
+        """Schedule a callable to run on Tk's main thread."""
+
+        status_label.after(0, action)
+
     def run_download() -> None:
         try:
             filename = download_video(url)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Failed to download video")
-            messagebox.showerror("Download Failed", str(exc))
-            status_label.config(text="Download failed")
+            run_on_main_thread(lambda: messagebox.showerror("Download Failed", str(exc)))
+            run_on_main_thread(lambda: status_label.config(text="Download failed"))
         else:
-            messagebox.showinfo("Download Complete", f"Saved as: {filename}")
-            status_label.config(text=f"Saved as: {filename}")
+            run_on_main_thread(
+                lambda: messagebox.showinfo("Download Complete", f"Saved as: {filename}")
+            )
+            run_on_main_thread(lambda: status_label.config(text=f"Saved as: {filename}"))
         finally:
-            download_button.config(state=tk.NORMAL)
+            run_on_main_thread(lambda: download_button.config(state=tk.NORMAL))
 
     threading.Thread(target=run_download, daemon=True).start()
 
