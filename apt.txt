@@ -1,0 +1,4 @@
+# System packages required for runtime scripts
+# Ensure pytesseract can invoke the OCR engine in Render
+libtesseract-dev
+tesseract-ocr
