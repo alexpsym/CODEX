@@ -29,7 +29,7 @@ This folder contains a lightweight FastAPI app (`render/master_service.py`) that
    - **Build Command**: `pip install -r render/requirements.txt`
    - **Start Command**: `uvicorn render.master_service:app --host 0.0.0.0 --port ${PORT:-10000}`
    - **Instance type**: Starter ($7/mo). This keeps one always-on worker.
-   - **System packages**: Render installs any `apt.txt` in the configured root directory. If your service root is the repository root, keep `apt.txt` there; if you set the root to `render/`, include an identical `apt.txt` inside `render/` (as provided) so `tesseract-ocr` and `libtesseract-dev` are installed either way.
+   - **System packages**: Render installs any `apt.txt` in the configured root directory. If your service root is the repository root, keep `apt.txt` there; if you set the root to `render/`, include an identical `apt.txt` inside `render/` (as provided) so `tesseract-ocr` and `libtesseract-dev` are installed either way. When you change `apt.txt`, push a new commit or trigger a full redeploy so Render rebuilds the image and actually installs the packages—a restart alone will not pick them up.
 4. Add environment variables in the Render dashboard (or create an **Environment Group** and attach it). These are injected into every managed script, so your TradingView credentials, Bybit keys, and OANDA keys are available without committing them to Git.
 5. Click **Create Web Service**. Once live, Render will expose a public URL like `https://your-app.onrender.com`. Point your TradingView webhooks to `https://your-app.onrender.com/webhook/<script-name>`.
 
@@ -48,6 +48,8 @@ Place these in your Render dashboard or a local `.env` file at the repo root. Ad
 - Clicking **Stop** sends a graceful terminate signal, escalating to a kill if the script does not exit within 10 seconds.
 - The webhook endpoint records the payload to the script log and starts the script if it is not already running.
 - Common helpers like `pandas` and `xlwings` are bundled in `requirements.txt` so Excel utilities (for example `LEDGER-clone/earnings_report.py`) can start without missing-module errors.
+  
+For the payslip audit flow, Tesseract must be present at build time (via `apt.txt`). After deployment you can confirm readiness by running `which tesseract` in the Render shell; the UI error about missing OCR is raised before uploads run if the binary is absent.
 
 ## 5) TradingView webhook routing
 Use the script path shown in the UI (for example `bybit-alert-clone/bybit_altcoin_monitor.py`) as the `<script-name>` in your TradingView webhook URL:
