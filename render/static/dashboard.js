@@ -54,7 +54,20 @@
     const modify = async (name, action, button) => {
         if (button) button.disabled = true;
         try {
-            await fetchJson(`/scripts/${buildScriptPath(name)}/${action}`, { method: 'POST' });
+            const response = await fetch(`/scripts/${buildScriptPath(name)}/${action}`, { method: 'POST' });
+            const payload = await response.json();
+
+            if (!response.ok) {
+                const detail = payload?.detail || response.statusText;
+                throw new Error(detail);
+            }
+
+            // If the backend tells us to use another page (e.g., payslip upload), honor it.
+            if (payload.redirect) {
+                window.open(payload.redirect, '_blank');
+                return;
+            }
+
             await refresh();
             if (action === 'start') {
                 openLogTab(name);

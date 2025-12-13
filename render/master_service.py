@@ -484,6 +484,16 @@ async def list_scripts() -> JSONResponse:
 
 @app.post("/scripts/{script_name:path}/start")
 async def start_script(script_name: str) -> JSONResponse:
+    # Never launch the payslip audit script directly; force users to the upload flow
+    # so the required files can be provided first.
+    if script_name == "payslip_audit":
+        return JSONResponse(
+            {
+                "redirect": "/payslip-audit",
+                "detail": "Upload your payslip PDF and timesheets to begin the audit.",
+            }
+        )
+
     try:
         summary = await script_manager.start(script_name)
         return JSONResponse(summary)
@@ -569,6 +579,16 @@ async def webhook(script_name: str, request: Request) -> JSONResponse:
     payload = await request.body()
     script = script_manager.get(script_name)
     script.add_log(f"Webhook received: {payload.decode('utf-8', errors='replace')}")
+
+    if script.name == "payslip_audit":
+        script.add_log("Webhook ignored: upload flow required via /payslip-audit")
+        return JSONResponse(
+            {
+                "status": "payslip_audit requires upload flow",
+                "redirect": "/payslip-audit",
+            }
+        )
+
     if not script.is_running:
         await script.start()
     return JSONResponse({"status": "ok", "script": script_name})
