@@ -50,6 +50,10 @@ ENTRY_OVERRIDES = {
     "viddl-clone": ["master.py", "vid.py"],
 }
 
+LOG_FILE_OVERRIDES: Dict[str, Path] = {
+    "YOUTUBE": BASE_DIR / "YOUTUBE" / "yt_error_log.txt",
+}
+
 PAYSLIP_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 
 
@@ -60,6 +64,7 @@ class ManagedScript:
     name: str
     path: Path
     category: str = "Other"
+    log_file: Optional[Path] = None
     process: Optional[asyncio.subprocess.Process] = None
     _log_lines: List[str] = field(default_factory=list)
 
@@ -84,6 +89,15 @@ class ManagedScript:
                 self._log_lines = self._log_lines[-MAX_LOG_LINES :]
 
     def logs(self) -> List[str]:
+        if self.log_file is not None:
+            try:
+                if self.log_file.exists():
+                    content = self.log_file.read_text(encoding="utf-8", errors="replace")
+                    lines = content.splitlines()
+                    return lines[-MAX_LOG_LINES :]
+            except Exception as exc:  # pragma: no cover - defensive fallback
+                return [f"Unable to read log file {self.log_file}: {exc}"]
+
         return list(self._log_lines)
 
     async def start(self) -> None:
@@ -261,6 +275,7 @@ def discover_scripts() -> List[ManagedScript]:
                         name=f"{app_dir.name}/{py_file.name}",
                         path=py_file,
                         category=categorize_script(py_file),
+                        log_file=LOG_FILE_OVERRIDES.get(app_dir.name),
                     )
                 )
             continue
@@ -286,6 +301,7 @@ def discover_scripts() -> List[ManagedScript]:
                     name=app_dir.name,
                     path=entry_path,
                     category=categorize_script(entry_path),
+                    log_file=LOG_FILE_OVERRIDES.get(app_dir.name),
                 )
             )
 
@@ -325,6 +341,8 @@ script_manager = ScriptManager(discover_scripts())
 app = FastAPI(title="Render Master Script", version="1.0")
 
 
+ASSET_VERSION = "v3"
+
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"en\">
 <head>
@@ -361,7 +379,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
     <div id=\"grid\" class=\"grid\"></div>
 
-    <script src=\"/static/dashboard.js\"></script>
+    <script src=\"/static/dashboard.js?ver={asset_version}\"></script>
 </body>
 </html>"""
 
@@ -469,7 +487,7 @@ PAYSLIP_AUDIT_TEMPLATE = """<!DOCTYPE html>
 
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
-    return HTML_TEMPLATE
+    return HTML_TEMPLATE.replace("{asset_version}", ASSET_VERSION)
 
 
 @app.get("/payslip-audit", response_class=HTMLResponse)
@@ -480,6 +498,33 @@ async def payslip_audit_page() -> str:
 @app.get("/scripts")
 async def list_scripts() -> JSONResponse:
     return JSONResponse(script_manager.list_scripts())
+
+
+def _render_log_view(script_name: str) -> str:
+    """Return the HTML log viewer for a known script."""
+
+    safe_name = html.escape(script_name)
+    return (
+        LOG_VIEWER_TEMPLATE.replace("{script_name}", safe_name)
+        .replace("{script_name_json}", json.dumps(script_name))
+    )
+
+
+@app.get("/logs/view/{script_name:path}", response_class=HTMLResponse)
+async def view_logs(script_name: str) -> str:
+    # Ensure the script exists so we don't render a viewer for an unknown path.
+    script_manager.get(script_name)
+    return _render_log_view(script_name)
+
+
+async def _background_start(script: ManagedScript) -> None:
+    """Start a script without tying its output or failures to the HTTP response."""
+
+    try:
+        await script.start()
+    except Exception as exc:  # pragma: no cover - runtime protection
+        # Capture failures in the per-script log instead of surfacing them to the caller.
+        script.add_log(f"Failed to start: {exc}")
 
 
 @app.post("/scripts/{script_name:path}/start")
@@ -494,15 +539,15 @@ async def start_script(script_name: str) -> JSONResponse:
             }
         )
 
-    try:
-        summary = await script_manager.start(script_name)
-        return JSONResponse(summary)
-    except HTTPException:
-        raise
-    except Exception as exc:  # pragma: no cover - runtime protection
-        detail = f"Failed to start {script_name}: {exc}"
-        print(detail)
-        raise HTTPException(status_code=500, detail=detail) from exc
+    script = script_manager.get(script_name)
+
+    if script.is_running:
+        return JSONResponse({"status": "already_running", **script.to_summary()})
+
+    asyncio.create_task(_background_start(script))
+
+    # Respond immediately so no script output can leak into the HTTP response cycle.
+    return JSONResponse({"status": "starting", **script.to_summary()}, status_code=202)
 
 
 @app.post("/scripts/{script_name:path}/stop")
