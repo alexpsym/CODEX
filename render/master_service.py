@@ -18,7 +18,11 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import RedirectResponse
 from dotenv import load_dotenv
 
-from payslip_audit.tesseract import TESSERACT_MISSING_MESSAGE, is_tesseract_available
+from payslip_audit.tesseract import (
+    TESSERACT_MISSING_MESSAGE,
+    _resolve_tesseract_binary,
+    is_tesseract_available,
+)
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env")
@@ -660,6 +664,20 @@ async def webhook(script_name: str, request: Request) -> JSONResponse:
 @app.get("/health")
 async def healthcheck() -> PlainTextResponse:
     return PlainTextResponse("ok")
+
+
+@app.get("/debug/tesseract")
+def debug_tesseract() -> JSONResponse:
+    import shutil
+
+    return JSONResponse(
+        {
+            "PATH": os.environ.get("PATH"),
+            "which_tesseract": shutil.which("tesseract"),
+            "resolved": _resolve_tesseract_binary(),
+            "available": is_tesseract_available(),
+        }
+    )
 
 
 @app.get("/favicon.ico")
