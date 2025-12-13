@@ -487,7 +487,7 @@ PAYSLIP_AUDIT_TEMPLATE = """<!DOCTYPE html>
 
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
-    return HTML_TEMPLATE.format(asset_version=ASSET_VERSION)
+    return HTML_TEMPLATE.replace("{asset_version}", ASSET_VERSION)
 
 
 @app.get("/payslip-audit", response_class=HTMLResponse)
@@ -504,9 +504,9 @@ def _render_log_view(script_name: str) -> str:
     """Return the HTML log viewer for a known script."""
 
     safe_name = html.escape(script_name)
-    return LOG_VIEWER_TEMPLATE.format(
-        script_name=safe_name,
-        script_name_json=json.dumps(script_name),
+    return (
+        LOG_VIEWER_TEMPLATE.replace("{script_name}", safe_name)
+        .replace("{script_name_json}", json.dumps(script_name))
     )
 
 
