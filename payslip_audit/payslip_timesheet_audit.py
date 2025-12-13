@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import re
-import shutil
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -70,8 +69,6 @@ DATE_FORMATS = [
 ]
 
 # File discovery patterns
-DEFAULT_DOWNLOADS_DIR = Path(r"C:\Users\User\Downloads")
-DEFAULT_MEDIPORT_DIR = Path(r"C:\Users\User\Documents\MEDIPORT")
 PAYSLIP_GLOB = "*.pdf"
 TIMESHEET_GLOBS = ("*.jpg", "*.jpeg", "*.png")
 
@@ -837,74 +834,32 @@ def parse_timesheets(
 
 
 def discover_files(
-    working_dir: Path,
     payslip_arg: Optional[Path],
     timesheet_args: Optional[List[Path]],
 ) -> Tuple[Path, List[Path]]:
-    """Resolve payslip and timesheet paths.
+    """Resolve payslip and timesheet paths from explicit inputs.
 
-    When arguments are provided, validate them; otherwise, look in the default
-    Downloads folder for a PDF named with "PaySlipPdf" and timesheet screenshots
-    whose filenames include "Workforce".
+    The audit now runs in a controlled environment with uploaded files, so a
+    payslip PDF and at least one timesheet image must be provided directly via
+    command-line arguments or API uploads.
     """
 
-    search_dir = DEFAULT_DOWNLOADS_DIR
-    if payslip_arg is not None:
-        payslip_path = payslip_arg.expanduser().resolve()
-        if not payslip_path.exists():
-            raise SystemExit(f"Payslip PDF not found: {payslip_path}")
-    else:
-        if not search_dir.exists():
-            raise SystemExit(
-                f"No payslip PDF supplied and the Downloads directory does not exist: {search_dir}"
-            )
+    if payslip_arg is None:
+        raise SystemExit("Payslip PDF is required. Provide --payslip or upload a PDF.")
 
-        candidates = [
-            path for path in sorted(search_dir.glob(PAYSLIP_GLOB)) if "payslippdf" in path.stem.lower()
-        ]
-        if not candidates:
-            raise SystemExit(
-                "No payslip PDF supplied and none found in the Downloads directory with 'PaySlipPdf' in the name. "
-                "Place the payslip PDF in Downloads or use --payslip to specify it explicitly."
-            )
-        if len(candidates) > 1:
-            names = ", ".join(str(path.name) for path in candidates)
-            raise SystemExit(
-                "Multiple PaySlipPdf PDF files detected in the Downloads directory. "
-                "Use --payslip to choose one explicitly. Found: " + names
-            )
-        payslip_path = candidates[0].resolve()
+    payslip_path = payslip_arg.expanduser().resolve()
+    if not payslip_path.exists():
+        raise SystemExit(f"Payslip PDF not found: {payslip_path}")
 
-    if timesheet_args:
-        timesheet_paths = []
-        for path in timesheet_args:
-            resolved = path.expanduser().resolve()
-            if not resolved.exists():
-                raise SystemExit(f"Timesheet image not found: {resolved}")
-            timesheet_paths.append(resolved)
-    else:
-        if not search_dir.exists():
-            raise SystemExit(
-                f"No timesheet images supplied and the Downloads directory does not exist: {search_dir}"
-            )
+    if not timesheet_args:
+        raise SystemExit("At least one timesheet image (JPG/PNG) is required via --timesheet or upload.")
 
-        discovered: List[Path] = []
-        seen: Set[Path] = set()
-        for pattern in TIMESHEET_GLOBS:
-            for path in sorted(search_dir.glob(pattern)):
-                if "workforce" not in path.name.lower():
-                    continue
-                resolved = path.resolve()
-                if resolved not in seen:
-                    seen.add(resolved)
-                    discovered.append(resolved)
-        timesheet_paths = discovered
-
-    if not timesheet_paths:
-        raise SystemExit(
-            "No timesheet images supplied and none found in the Downloads directory with 'Workforce' in the filename. "
-            "Add JPG or PNG Workforce screenshots or use --timesheet to list them."
-        )
+    timesheet_paths: List[Path] = []
+    for path in timesheet_args:
+        resolved = path.expanduser().resolve()
+        if not resolved.exists():
+            raise SystemExit(f"Timesheet image not found: {resolved}")
+        timesheet_paths.append(resolved)
 
     return payslip_path, timesheet_paths
 
@@ -1305,37 +1260,6 @@ def cleanup_sidecars(sidecars: Iterable[Path]) -> None:
             print(f"Warning: failed to delete {sidecar}: {exc}", file=sys.stderr)
 
 
-def move_file_to_directory(source: Path, destination_dir: Path, label: str) -> Optional[Path]:
-    try:
-        destination_dir.mkdir(parents=True, exist_ok=True)
-    except Exception as exc:  # noqa: BLE001 - warn but do not halt
-        print(f"Warning: failed to ensure destination directory {destination_dir}: {exc}", file=sys.stderr)
-        return None
-
-    try:
-        destination = destination_dir / source.name
-        if source.resolve() == destination.resolve():
-            return destination
-
-        destination.unlink(missing_ok=True)
-        shutil.move(str(source), destination)
-        return destination
-    except Exception as exc:  # noqa: BLE001 - warn but do not halt
-        print(f"Warning: failed to move {label} from {source} to {destination_dir}: {exc}", file=sys.stderr)
-        return None
-
-
-def delete_timesheet_screenshots(timesheets: Iterable[Path], downloads_dir: Path) -> None:
-    downloads_resolved = downloads_dir.resolve()
-    for timesheet in {path.resolve() for path in timesheets}:
-        if timesheet.parent != downloads_resolved:
-            continue
-        try:
-            timesheet.unlink(missing_ok=True)
-        except Exception as exc:  # noqa: BLE001 - warn but do not halt
-            print(f"Warning: failed to delete timesheet screenshot {timesheet}: {exc}", file=sys.stderr)
-
-
 def main(argv: Optional[List[str]] = None) -> None:
     parser = argparse.ArgumentParser(
         description="Compare a payslip PDF against timesheet screenshots and produce an audit report.",
@@ -1343,15 +1267,14 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument(
         "--payslip",
         type=Path,
-        help="Payslip PDF path. Defaults to the PaySlipPdf PDF in the Downloads directory if omitted.",
+        required=False,
+        help="Payslip PDF path (required unless provided by the upload API).",
     )
     parser.add_argument(
         "--timesheet",
         nargs="*",
         type=Path,
-        help=(
-            "Timesheet screenshots (JPG/PNG). Defaults to Workforce screenshots in the Downloads directory when not supplied."
-        ),
+        help="Timesheet screenshots (JPG/PNG). At least one is required unless provided by the upload API.",
     )
     parser.add_argument(
         "--output",
@@ -1362,7 +1285,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     args = parser.parse_args(argv)
 
     working_dir = Path.cwd()
-    payslip_path, timesheet_paths = discover_files(working_dir, args.payslip, args.timesheet)
+    payslip_path, timesheet_paths = discover_files(args.payslip, args.timesheet)
 
     output_path = args.output
     if not output_path.is_absolute():
@@ -1402,15 +1325,6 @@ def main(argv: Optional[List[str]] = None) -> None:
     print(f"\nAudit PDF saved to: {output_path}")
 
     cleanup_sidecars(generated_sidecars)
-
-    moved_payslip = move_file_to_directory(payslip_path, DEFAULT_MEDIPORT_DIR, "payslip PDF")
-    moved_report = move_file_to_directory(output_path, DEFAULT_MEDIPORT_DIR, "audit report")
-    delete_timesheet_screenshots(timesheet_paths, DEFAULT_DOWNLOADS_DIR)
-
-    if moved_payslip:
-        print(f"Payslip moved to: {moved_payslip}")
-    if moved_report:
-        print(f"Audit report moved to: {moved_report}")
 
 
 if __name__ == "__main__":
