@@ -53,6 +53,8 @@
                 throw new Error(detail);
             }
 
+            const targetUrl = payload?.open_url || script.open_url || `/logs/view/${buildScriptPath(name)}`;
+
             // If the backend tells us to use another page (e.g., payslip upload), honor it.
             if (payload?.redirect) {
                 if (openTab) {
@@ -136,6 +138,12 @@
 
             const actions = document.createElement('div');
             actions.className = 'actions';
+
+            const openBtn = document.createElement('button');
+            openBtn.className = 'start';
+            openBtn.textContent = 'Open';
+            openBtn.onclick = () => openScript(script);
+            actions.appendChild(openBtn);
 
             if (script.name === 'payslip_audit') {
                 const uploadBtn = document.createElement('button');
