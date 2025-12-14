@@ -27,7 +27,7 @@ This folder contains a lightweight FastAPI app (`render/master_service.py`) that
 3. Use these settings (Docker deploy recommended):
    - **Runtime**: Docker. Render will build from the root `Dockerfile`, which installs `tesseract-ocr`, `libtesseract-dev`, and `ffmpeg` so the payslip OCR flow and the YouTube mp3 conversion both work. Leave the Build/Start command fields blank so Render honors the Dockerfile (it already runs `uvicorn render.master_service:app --host 0.0.0.0 --port ${PORT:-10000}`).
    - **Instance type**: Starter ($7/mo). This keeps one always-on worker.
-   - **Binary checks**: After a deploy, open the Render shell and run `which tesseract` and `which ffmpeg` to confirm both are on `PATH`; the YouTube downloader page will error if `ffmpeg` is missing.
+   - **Binary checks**: After a deploy, open the Render shell and run `which tesseract` to confirm it is on `PATH`.
 4. Add environment variables in the Render dashboard (or create an **Environment Group** and attach it). These are injected into every managed script, so your TradingView credentials, Bybit keys, and OANDA keys are available without committing them to Git.
 5. Click **Create Web Service**. Once live, Render will expose a public URL like `https://your-app.onrender.com`. Point your TradingView webhooks to `https://your-app.onrender.com/webhook/<script-name>`.
 
@@ -39,14 +39,6 @@ Place these in your Render dashboard or a local `.env` file at the repo root. Ad
 - Any Telegram/Discord/API tokens needed by alerting code.
 - `PORT` (Render sets this automatically; only override for local testing).
 - Any other variables referenced by the individual scripts. Because the manager runs each script in its own subprocess with the shared environment, they will read the same `.env`/dashboard values.
-
-### YouTube downloader cookies (avoiding bot checks)
-- `YTDLP_COOKIES_B64` (recommended): base64-encode a `cookies.txt` exported from a signed-in YouTube session and store the encoded string as a secret. The service will decode it on boot and pass it to yt-dlp for authenticated downloads.
-- `YTDLP_COOKIES_PATH` (optional): absolute path to a `cookies.txt` already on disk. If set, it overrides an uploaded file but is itself overridden by `YTDLP_COOKIES_B64`.
-- Alternatively, upload a `cookies.txt` from the YouTube downloader UI at `/youtube`; the file is stored privately on disk and never logged.
-- Successful downloads are written to `render/uploads/youtube/downloads` as `.mp3` files (or to the path set by `YOUTUBE_DOWNLOAD_DIR`) and exposed through download links in the `/youtube` page (backed by `/api/youtube/files/<filename>`).
-- Set `YOUTUBE_STORAGE_ROOT` to point at a mounted persistent disk if you need downloads to survive redeploys. By default the service writes to the app filesystem, which is ephemeral.
-- Use `YOUTUBE_MIN_FREE_BYTES` (default: `3000000000` bytes) to enforce a minimum free-space check before large downloads begin; increase it for multi-GB jobs.
 
 ## 4) How the master service works
 - On startup it scans the repository for `*.py` files (skipping `mt5-clone`, virtualenv folders, and the `render` folder itself) and exposes each one in the UI.

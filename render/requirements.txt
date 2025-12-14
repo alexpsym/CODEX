@@ -30,4 +30,3 @@ waitress
 websockets
 xlwings
 xlsxwriter
-yt-dlp
