@@ -66,6 +66,7 @@ LOG_FILE_OVERRIDES: Dict[str, Path] = {
 }
 
 YOUTUBE_COOKIES_DIR = BASE_DIR / "render" / "uploads" / "youtube"
+YOUTUBE_DOWNLOAD_DIR = YOUTUBE_COOKIES_DIR / "downloads"
 YOUTUBE_COOKIES_UPLOAD = YOUTUBE_COOKIES_DIR / "cookies.txt"
 YOUTUBE_COOKIES_ENV = YOUTUBE_COOKIES_DIR / "cookies.from_env.txt"
 
@@ -125,6 +126,7 @@ def youtube_cookies_status() -> Dict[str, Optional[str]]:
 
 PAYSLIP_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 YOUTUBE_COOKIES_DIR.mkdir(parents=True, exist_ok=True)
+YOUTUBE_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 _initialize_youtube_cookies_from_env()
 
 
@@ -295,22 +297,27 @@ def _payslip_session_dir(session_id: str) -> Path:
 TESSERACT_MISSING_DETAIL = TESSERACT_MISSING_MESSAGE
 
 
-def _run_youtube_download(urls: List[str]) -> List[str]:
+def _run_youtube_download(urls: List[str]) -> Dict[str, object]:
     """Execute yt-dlp downloads for the given URLs and capture logs."""
 
     log_lines: List[str] = []
+    downloaded: List[str] = []
 
     def _log(message: str) -> None:
         log_lines.append(message)
 
     try:
-        youtube_downloader.download_links(
-            urls, log=_log, cookies_path=youtube_cookies_path()
+        downloaded_paths = youtube_downloader.download_links(
+            urls,
+            log=_log,
+            cookies_path=youtube_cookies_path(),
+            output_dir=YOUTUBE_DOWNLOAD_DIR,
         )
+        downloaded = [str(path) for path in downloaded_paths]
     except Exception:  # noqa: BLE001 - surface details to the UI log
         log_lines.append("Unexpected error while running yt-dlp:")
         log_lines.extend(traceback.format_exc().splitlines())
-    return log_lines
+    return {"log": log_lines, "files": downloaded}
 
 
 def ensure_tesseract_available() -> None:
@@ -443,7 +450,7 @@ script_manager = ScriptManager(discover_scripts())
 app = FastAPI(title="Render Master Script", version="1.0")
 
 
-ASSET_VERSION = "v5"
+ASSET_VERSION = "v6"
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"en\">
@@ -607,6 +614,10 @@ YOUTUBE_TEMPLATE = """<!DOCTYPE html>
         .status { margin-top: 1rem; color: #cbd5e1; white-space: pre-wrap; word-break: break-word; }
         .badge { display: inline-block; padding: 0.35rem 0.7rem; border-radius: 999px; background: #1f2937; color: #cbd5e1; font-weight: 700; font-size: 0.95rem; }
         .log { background: #0a0f1b; border: 1px solid #1f2937; border-radius: 10px; padding: 0.75rem; margin-top: 1rem; white-space: pre-wrap; color: #e5e7eb; min-height: 140px; }
+        .downloads { margin-top: 1rem; display: flex; flex-direction: column; gap: 0.4rem; }
+        .download-row { display: flex; gap: 0.5rem; align-items: center; color: #cbd5e1; }
+        .download-row a { color: #bef264; text-decoration: none; font-weight: 700; }
+        .download-row code { background: #0b1220; padding: 0.15rem 0.4rem; border-radius: 8px; border: 1px solid #1f2937; color: #e2e8f0; }
     </style>
 </head>
 <body>
@@ -627,6 +638,9 @@ YOUTUBE_TEMPLATE = """<!DOCTYPE html>
         </div>
         <div id=\"status\" class=\"status\">Ready to download.</div>
         <div id=\"log\" class=\"log\">Logs will appear here.</div>
+        <div class=\"badge\">Downloads</div>
+        <p class=\"meta\">Completed mp3 files are saved on the server and exposed below for download.</p>
+        <div id=\"downloads\" class=\"downloads\"></div>
     </div>
 
     <script src=\"/static/youtube.js?ver={asset_version}\"></script>
@@ -664,8 +678,25 @@ async def youtube_download(payload: Dict[str, str] = Body(...)) -> JSONResponse:
     if not urls:
         raise HTTPException(status_code=400, detail="No valid URLs found in the request.")
 
-    log_lines = await asyncio.to_thread(_run_youtube_download, urls)
-    return JSONResponse({"log": log_lines})
+    result = await asyncio.to_thread(_run_youtube_download, urls)
+
+    downloads: List[Dict[str, str]] = []
+    for path_str in result.get("files", []):
+        path = Path(path_str)
+        if not path.is_file():
+            continue
+
+        if path.parent != YOUTUBE_DOWNLOAD_DIR:
+            continue
+
+        downloads.append(
+            {
+                "filename": path.name,
+                "url": f"/api/youtube/files/{path.name}",
+            }
+        )
+
+    return JSONResponse({"log": result.get("log", []), "downloads": downloads})
 
 
 @app.post("/api/youtube/cookies")
@@ -696,6 +727,21 @@ async def youtube_cookies_status_api() -> JSONResponse:
     status = youtube_cookies_status()
     status.update({"configured": bool(status.get("path"))})
     return JSONResponse(status)
+
+
+@app.get("/api/youtube/files/{filename}")
+async def youtube_download_file(filename: str) -> FileResponse:
+    safe_name = Path(filename).name
+    target = YOUTUBE_DOWNLOAD_DIR / safe_name
+
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Requested file not found.")
+
+    return FileResponse(
+        target,
+        media_type="audio/mpeg",
+        filename=safe_name,
+    )
 
 
 def _render_log_view(script_name: str) -> str:

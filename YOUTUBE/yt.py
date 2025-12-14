@@ -113,16 +113,20 @@ def download_links(
     urls: Iterable[str],
     log: Callable[[str], None] = print,
     cookies_path: Optional[str] = None,
-) -> None:
+    output_dir: Optional[Path] = None,
+) -> list[Path]:
     """Download each URL with yt-dlp, reporting per-link success/failure."""
     if not shutil.which("yt-dlp"):
         log("Error: yt-dlp is not installed or not on your PATH.")
-        return
+        return []
+
+    output_root = (output_dir or Path.cwd() / "youtube_downloads").resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
 
     ffmpeg_path = _ffmpeg_installed()
     if not ffmpeg_path:
         _print_ffmpeg_help(log)
-        return
+        return []
 
     log(f"Using ffmpeg at: {ffmpeg_path}")
 
@@ -154,18 +158,29 @@ def download_links(
         "mp3",
         "--audio-quality",
         "0",
+        "--paths",
+        str(output_root),
+        "-o",
+        "%(title).200B.%(ext)s",
+        "--print",
+        "after_move:filepath",
     ]
 
     base_args.extend(_cookies_args(cookies_path, log))
 
     fallback_args = base_args.copy()
-    fallback_args[6] = "youtube:player_client=all,player_skip=configs"
+    extractor_args_index = fallback_args.index("--extractor-args") + 1
+    fallback_args[extractor_args_index] = "youtube:player_client=all,player_skip=configs"
+
+    downloaded: list[Path] = []
 
     for raw_url in urls:
         url = _normalize_url(raw_url)
         log(f"Downloading: {url}")
 
         for args in (base_args, fallback_args):
+            file_candidates: list[Path] = []
+
             try:
                 result = subprocess.run(
                     [*args, url],
@@ -176,7 +191,24 @@ def download_links(
                 )
             except FileNotFoundError:
                 log("yt-dlp executable not found. Aborting remaining downloads.")
-                return
+                return downloaded
+
+            if result.stdout:
+                for line in result.stdout.splitlines():
+                    log(line)
+                    candidate = line.strip()
+                    if candidate:
+                        try:
+                            resolved = Path(candidate).resolve()
+                        except Exception:  # noqa: BLE001 - defensive parsing only
+                            continue
+
+                        if (
+                            resolved.suffix
+                            and output_root in resolved.parents
+                            and resolved not in file_candidates
+                        ):
+                            file_candidates.append(resolved)
 
             if result.stdout:
                 for line in result.stdout.splitlines():
@@ -184,6 +216,9 @@ def download_links(
 
             if result.returncode == 0:
                 log(f"Downloaded successfully: {url}")
+                if file_candidates:
+                    downloaded.append(file_candidates[-1])
+                    log(f"Saved to: {file_candidates[-1]}")
                 break
 
             log(
@@ -192,6 +227,8 @@ def download_links(
             )
         else:
             log(f"Download failed (exit code {result.returncode}): {url}")
+
+    return downloaded
 
 
 # ─── LOGGING ───────────────────────────────────────────────────────────────────

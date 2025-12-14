@@ -6,6 +6,7 @@
     const cookiesStatus = document.getElementById('cookie-status');
     const cookiesFileInput = document.getElementById('cookies-file');
     const uploadCookiesBtn = document.getElementById('upload-cookies-btn');
+    const downloadsEl = document.getElementById('downloads');
 
     const setStatus = (message, isError = false) => {
         statusEl.textContent = message;
@@ -14,6 +15,37 @@
 
     const appendLog = (lines) => {
         logEl.textContent = lines.length ? lines.join('\n') : 'No output yet.';
+    };
+
+    const renderDownloads = (items = []) => {
+        if (!downloadsEl) return;
+
+        downloadsEl.innerHTML = '';
+
+        if (!items.length) {
+            downloadsEl.textContent = 'No downloads yet.';
+            return;
+        }
+
+        items.forEach((item) => {
+            const row = document.createElement('div');
+            row.className = 'download-row';
+
+            const link = document.createElement('a');
+            link.href = item.url;
+            link.textContent = item.filename || 'Download mp3';
+            link.setAttribute('download', item.filename || 'audio.mp3');
+
+            const meta = document.createElement('code');
+            meta.textContent = item.filename || '';
+
+            row.appendChild(link);
+            if (item.filename) {
+                row.appendChild(meta);
+            }
+
+            downloadsEl.appendChild(row);
+        });
     };
 
     const refreshCookieStatus = async () => {
@@ -93,6 +125,10 @@
         downloadBtn.disabled = true;
         setStatus('Starting download...');
         appendLog([]);
+        renderDownloads([]);
+        if (downloadsEl) {
+            downloadsEl.textContent = 'Awaiting download...';
+        }
 
         try {
             const response = await fetch('/api/youtube/download', {
@@ -108,6 +144,7 @@
             }
 
             appendLog(payload.log || []);
+            renderDownloads(payload.downloads || []);
             setStatus('Finished. Check the log for details.');
         } catch (err) {
             console.error(err);
@@ -123,4 +160,5 @@
     cookiesFileInput?.addEventListener('change', () => uploadCookies(cookiesFileInput.files[0]));
 
     refreshCookieStatus();
+    renderDownloads();
 })();
