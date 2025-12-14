@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 from uuid import uuid4
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -23,6 +23,7 @@ from payslip_audit.tesseract import (
     _resolve_tesseract_binary,
     is_tesseract_available,
 )
+from YOUTUBE import yt as youtube_downloader
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env")
@@ -231,6 +232,18 @@ def _payslip_session_dir(session_id: str) -> Path:
 TESSERACT_MISSING_DETAIL = TESSERACT_MISSING_MESSAGE
 
 
+def _run_youtube_download(urls: List[str]) -> List[str]:
+    """Execute yt-dlp downloads for the given URLs and capture logs."""
+
+    log_lines: List[str] = []
+
+    def _log(message: str) -> None:
+        log_lines.append(message)
+
+    youtube_downloader.download_links(urls, log=_log)
+    return log_lines
+
+
 def ensure_tesseract_available() -> None:
     """Raise an HTTP 500 with clear guidance when Tesseract is absent."""
 
@@ -361,7 +374,7 @@ script_manager = ScriptManager(discover_scripts())
 app = FastAPI(title="Render Master Script", version="1.0")
 
 
-ASSET_VERSION = "v3"
+ASSET_VERSION = "v4"
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"en\">
@@ -505,9 +518,53 @@ PAYSLIP_AUDIT_TEMPLATE = """<!DOCTYPE html>
 </html>"""
 
 
+YOUTUBE_TEMPLATE = """<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+    <meta charset=\"UTF-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <title>YouTube Downloader</title>
+    <style>
+        :root { color-scheme: light dark; }
+        body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
+        h1 { margin-top: 0; }
+        .card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; padding: 1.5rem; max-width: 960px; margin: 0 auto; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
+        .meta { color: #94a3b8; margin-bottom: 0.75rem; line-height: 1.5; }
+        .input { width: 100%; min-height: 120px; border-radius: 10px; border: 1px solid #1f2937; background: #0a0f1b; color: #e2e8f0; padding: 0.75rem; font-size: 1rem; }
+        .actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1rem; align-items: center; }
+        button { padding: 0.7rem 1.2rem; border-radius: 12px; border: none; cursor: pointer; font-weight: 700; }
+        .primary { background: #22c55e; color: #052e16; }
+        .secondary { background: #334155; color: #e2e8f0; text-decoration: none; display: inline-flex; align-items: center; }
+        .status { margin-top: 1rem; color: #cbd5e1; white-space: pre-wrap; word-break: break-word; }
+        .log { background: #0a0f1b; border: 1px solid #1f2937; border-radius: 10px; padding: 0.75rem; margin-top: 1rem; white-space: pre-wrap; color: #e5e7eb; min-height: 140px; }
+    </style>
+</head>
+<body>
+    <div class=\"card\">
+        <h1>YouTube Downloader</h1>
+        <p class=\"meta\">Paste one or more media URLs (YouTube, etc.). The downloader will fetch best audio and convert to mp3 using yt-dlp.</p>
+        <textarea id=\"url-input\" class=\"input\" placeholder=\"Enter one or more URLs, separated by spaces or commas\"></textarea>
+        <div class=\"actions\">
+            <button id=\"download-btn\" class=\"primary\">Start Download</button>
+            <a href=\"/\" class=\"secondary\">Back to dashboard</a>
+        </div>
+        <div id=\"status\" class=\"status\">Ready to download.</div>
+        <div id=\"log\" class=\"log\">Logs will appear here.</div>
+    </div>
+
+    <script src=\"/static/youtube.js?ver={asset_version}\"></script>
+</body>
+</html>"""
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
     return HTML_TEMPLATE.replace("{asset_version}", ASSET_VERSION)
+
+
+@app.get("/youtube", response_class=HTMLResponse)
+async def youtube_page() -> str:
+    return YOUTUBE_TEMPLATE.replace("{asset_version}", ASSET_VERSION)
 
 
 @app.get("/payslip-audit", response_class=HTMLResponse)
@@ -518,6 +575,20 @@ async def payslip_audit_page() -> str:
 @app.get("/scripts")
 async def list_scripts() -> JSONResponse:
     return JSONResponse(script_manager.list_scripts())
+
+
+@app.post("/api/youtube/download")
+async def youtube_download(payload: Dict[str, str] = Body(...)) -> JSONResponse:
+    raw_urls = str(payload.get("urls", "")).strip()
+    if not raw_urls:
+        raise HTTPException(status_code=400, detail="Please provide at least one URL to download.")
+
+    urls = sorted(youtube_downloader._parse_urls(raw_urls))  # noqa: SLF001 - reuse existing parser
+    if not urls:
+        raise HTTPException(status_code=400, detail="No valid URLs found in the request.")
+
+    log_lines = await asyncio.to_thread(_run_youtube_download, urls)
+    return JSONResponse({"log": log_lines})
 
 
 def _render_log_view(script_name: str) -> str:
@@ -556,6 +627,14 @@ async def start_script(script_name: str) -> JSONResponse:
             {
                 "redirect": "/payslip-audit",
                 "detail": "Upload your payslip PDF and timesheets to begin the audit.",
+            }
+        )
+
+    if script_name == "YOUTUBE":
+        return JSONResponse(
+            {
+                "redirect": "/youtube",
+                "detail": "Open the YouTube downloader UI to submit URLs.",
             }
         )
 
