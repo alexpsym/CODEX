@@ -280,6 +280,8 @@ def download_links(
 
     return downloaded
 
+    return downloaded
+
 
 # ─── LOGGING ───────────────────────────────────────────────────────────────────
 
