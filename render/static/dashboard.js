@@ -33,11 +33,20 @@
 
     const buildScriptPath = (name) => encodeURIComponent(name).replace(/%2F/g, '/');
 
-    const modify = async (name, action, button) => {
+    const modify = async (script, action, button, { openTab = true } = {}) => {
+        const name = script.name;
+        const destination = script?.open_url || `/logs/view/${buildScriptPath(name)}`;
+        const popup = action === 'start' && openTab ? window.open('about:blank', '_blank', 'noopener,noreferrer') : null;
+
         if (button) button.disabled = true;
         try {
             const response = await fetch(`/scripts/${buildScriptPath(name)}/${action}`, { method: 'POST' });
-            const payload = await response.json();
+            let payload = null;
+            try {
+                payload = await response.json();
+            } catch (err) {
+                console.warn('Non-JSON response from script action', err);
+            }
 
             if (!response.ok) {
                 const detail = payload?.detail || response.statusText;
@@ -45,14 +54,31 @@
             }
 
             // If the backend tells us to use another page (e.g., payslip upload), honor it.
-            if (payload.redirect) {
-                window.open(payload.redirect, '_blank');
+            if (payload?.redirect) {
+                if (openTab) {
+                    if (popup) {
+                        popup.location.href = payload.redirect;
+                    } else {
+                        setStatus('Popup blocked? Opening in this tab.', true);
+                        window.location.href = payload.redirect;
+                    }
+                }
                 return;
+            }
+
+            if (action === 'start' && openTab) {
+                if (popup) {
+                    popup.location.href = destination;
+                } else {
+                    setStatus('Popup blocked? Opening in this tab.', true);
+                    window.location.href = destination;
+                }
             }
 
             await refresh();
         } catch (err) {
             console.error(err);
+            if (popup && !popup.closed) popup.close();
             alert(`Failed to ${action} ${name}: ${err.message}`);
         } finally {
             if (button) button.disabled = false;
@@ -68,6 +94,34 @@
         setStatus(`${category}: ${scripts.length} ${label}`);
 
         grid.innerHTML = '';
+
+        const controlCard = document.createElement('div');
+        controlCard.className = 'card';
+        const controlHeader = document.createElement('div');
+        controlHeader.className = 'row';
+        controlHeader.innerHTML = `<strong>${category} controls</strong><div class="path">Start all scripts without opening tabs</div>`;
+        controlCard.appendChild(controlHeader);
+        const controlActions = document.createElement('div');
+        controlActions.className = 'actions';
+        const startAllBtn = document.createElement('button');
+        startAllBtn.className = 'start';
+        startAllBtn.textContent = 'Start all';
+        startAllBtn.onclick = async () => {
+            startAllBtn.disabled = true;
+            try {
+                await Promise.all(scripts.map((script) => modify(script, 'start', null, { openTab: false })));
+                await refresh();
+            } catch (err) {
+                console.error(err);
+                alert(`Failed to start all scripts: ${err.message}`);
+            } finally {
+                startAllBtn.disabled = false;
+            }
+        };
+        controlActions.appendChild(startAllBtn);
+        controlCard.appendChild(controlActions);
+        grid.appendChild(controlCard);
+
         scripts.forEach((script) => {
             const card = document.createElement('div');
             card.className = 'card';
@@ -95,16 +149,26 @@
                 const startBtn = document.createElement('button');
                 startBtn.className = 'start';
                 startBtn.textContent = 'Start';
-                startBtn.onclick = () => modify(script.name, 'start', startBtn);
+                startBtn.onclick = () => modify(script, 'start', startBtn);
                 const stopBtn = document.createElement('button');
                 stopBtn.className = 'stop';
                 stopBtn.textContent = 'Stop';
-                stopBtn.onclick = () => modify(script.name, 'stop', stopBtn);
+                stopBtn.onclick = () => modify(script, 'stop', stopBtn);
                 actions.appendChild(startBtn);
                 actions.appendChild(stopBtn);
             }
 
             card.appendChild(actions);
+
+            const lastOutput = document.createElement('div');
+            lastOutput.className = 'path';
+            const secondsAgo = script.last_output_at
+                ? Math.max(0, Math.floor(Date.now() / 1000 - script.last_output_at))
+                : null;
+            lastOutput.textContent = secondsAgo === null
+                ? 'last output: no log lines yet'
+                : `last output: ${secondsAgo}s ago`;
+            card.appendChild(lastOutput);
 
             grid.appendChild(card);
         });

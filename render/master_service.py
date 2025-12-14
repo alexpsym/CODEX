@@ -9,14 +9,14 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
+from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.responses import RedirectResponse
 from dotenv import load_dotenv
+from starlette.responses import RedirectResponse
 
 from payslip_audit.tesseract import (
     TESSERACT_MISSING_MESSAGE,
@@ -72,6 +72,7 @@ class ManagedScript:
     log_file: Optional[Path] = None
     process: Optional[asyncio.subprocess.Process] = None
     _log_lines: List[str] = field(default_factory=list)
+    last_output_at: Optional[float] = None
 
     @property
     def is_running(self) -> bool:
@@ -79,11 +80,15 @@ class ManagedScript:
 
     def to_summary(self) -> Dict[str, object]:
         return {
+            "id": self.name,
             "name": self.name,
             "path": str(self.path),
             "category": self.category,
             "running": self.is_running,
             "return_code": None if self.process is None else self.process.returncode,
+            "open_url": script_open_url(self.name),
+            "logs_url": script_logs_url(self.name),
+            "last_output_at": self.last_output_at,
         }
 
     def add_log(self, line: str) -> None:
@@ -92,18 +97,33 @@ class ManagedScript:
             self._log_lines.append(cleaned)
             if len(self._log_lines) > MAX_LOG_LINES:
                 self._log_lines = self._log_lines[-MAX_LOG_LINES :]
+            self.last_output_at = time.time()
 
     def logs(self) -> List[str]:
         if self.log_file is not None:
             try:
                 if self.log_file.exists():
+                    stat = self.log_file.stat()
                     content = self.log_file.read_text(encoding="utf-8", errors="replace")
                     lines = content.splitlines()
+                    if lines:
+                        self.last_output_at = stat.st_mtime
                     return lines[-MAX_LOG_LINES :]
             except Exception as exc:  # pragma: no cover - defensive fallback
                 return [f"Unable to read log file {self.log_file}: {exc}"]
 
         return list(self._log_lines)
+
+    def log_snapshot(self, cursor: int = 0) -> Dict[str, object]:
+        lines = self.logs()
+        safe_cursor = max(0, min(cursor, len(lines)))
+        new_lines = lines[safe_cursor:]
+        return {
+            "lines": new_lines,
+            "cursor": safe_cursor + len(new_lines),
+            "total": len(lines),
+            "last_output_at": self.last_output_at,
+        }
 
     async def start(self) -> None:
         if self.is_running:
@@ -219,6 +239,24 @@ def categorize_script(script_path: Path) -> str:
         return "Other"
 
     return "Other"
+
+
+def _encoded_script_name(script_name: str) -> str:
+    """Encode a script name for safe URL usage while keeping slashes intact."""
+
+    return quote(script_name, safe="/")
+
+
+def script_open_url(script_name: str) -> str:
+    """Return the preferred UI URL for a script."""
+
+    return f"/logs/view/{_encoded_script_name(script_name)}"
+
+
+def script_logs_url(script_name: str) -> str:
+    """Return the JSON logs API endpoint for a script."""
+
+    return f"/logs/{_encoded_script_name(script_name)}"
 
 
 def _payslip_session_dir(session_id: str) -> Path:
@@ -353,12 +391,15 @@ class ScriptManager:
     def logs(self, name: str) -> List[str]:
         return self.get(name).logs()
 
+    def log_snapshot(self, name: str, cursor: int = 0) -> Dict[str, object]:
+        return self.get(name).log_snapshot(cursor)
+
 
 script_manager = ScriptManager(discover_scripts())
 app = FastAPI(title="Render Master Script", version="1.0")
 
 
-ASSET_VERSION = "v7"
+ASSET_VERSION = "v9"
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"en\">
@@ -584,6 +625,24 @@ async def stop_script(script_name: str) -> JSONResponse:
         raise
     except Exception as exc:  # pragma: no cover - runtime protection
         detail = f"Failed to stop {script_name}: {exc}"
+        print(detail)
+        raise HTTPException(status_code=500, detail=detail) from exc
+
+
+@app.get("/logs/", include_in_schema=False)
+async def logs_index() -> RedirectResponse:
+    return RedirectResponse("/")
+
+
+@app.get("/api/logs/{script_name:path}")
+async def api_logs(script_name: str, cursor: int = 0) -> JSONResponse:
+    try:
+        snapshot = script_manager.log_snapshot(script_name, cursor)
+        return JSONResponse(snapshot)
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - runtime protection
+        detail = f"Failed to read logs for {script_name}: {exc}"
         print(detail)
         raise HTTPException(status_code=500, detail=detail) from exc
 

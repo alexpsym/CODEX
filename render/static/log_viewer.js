@@ -7,20 +7,39 @@
 
     let cachedLines = [];
     let refreshTimer = null;
+    let cursor = 0;
+
+    const buildScriptPath = (name) => encodeURIComponent(name).replace(/%2F/g, '/');
 
     const setLineCount = () => {
         const count = cachedLines.length;
         lineCount.textContent = `${count} ${count === 1 ? 'line' : 'lines'}`;
     };
 
-    const fetchLogs = async () => {
+    const fetchLogs = async ({ reset = false } = {}) => {
         try {
-            const response = await fetch(`/logs/${encodeURIComponent(scriptName)}`);
+            const path = buildScriptPath(scriptName);
+            const url = new URL(`/api/logs/${path}`, window.location.origin);
+            url.searchParams.set('cursor', reset ? 0 : cursor);
+
+            const response = await fetch(url.toString());
             if (!response.ok) {
                 throw new Error(`Failed to load logs (${response.status})`);
             }
-            cachedLines = await response.json();
-            logBox.textContent = cachedLines.length ? cachedLines.join('\n') : 'No logs yet. Start the script to see output.';
+
+            const payload = await response.json();
+            const newLines = Array.isArray(payload?.lines) ? payload.lines : [];
+            if (reset) {
+                cachedLines = newLines;
+            } else {
+                cachedLines.push(...newLines);
+            }
+
+            cursor = typeof payload.cursor === 'number' ? payload.cursor : cachedLines.length;
+
+            logBox.textContent = cachedLines.length
+                ? cachedLines.join('\n')
+                : 'No logs yet. Start the script to see output.';
             setLineCount();
         } catch (err) {
             console.error(err);
@@ -51,10 +70,10 @@
     };
 
     saveBtn?.addEventListener('click', downloadLog);
-    refreshBtn?.addEventListener('click', fetchLogs);
+    refreshBtn?.addEventListener('click', () => fetchLogs({ reset: true }));
 
     refreshTimer = setInterval(fetchLogs, 3000);
-    fetchLogs();
+    fetchLogs({ reset: true });
 
     window.addEventListener('beforeunload', () => {
         if (refreshTimer) {
