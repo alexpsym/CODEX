@@ -24,12 +24,10 @@ This folder contains a lightweight FastAPI app (`render/master_service.py`) that
 ## 2) Deploying to Render (single $7/month starter instance)
 1. Push this repository to GitHub or GitLab so Render can import it.
 2. In the Render dashboard, create a **Web Service** and point it to your repo.
-3. Use these settings:
-   - **Environment**: Python 3.10 or newer.
-   - **Build Command**: `pip install -r render/requirements.txt`
-   - **Start Command**: `uvicorn render.master_service:app --host 0.0.0.0 --port ${PORT:-10000}`
+3. Use these settings (Docker deploy recommended):
+   - **Runtime**: Docker. Render will build from the root `Dockerfile`, which installs `tesseract-ocr`, `libtesseract-dev`, and `ffmpeg` so the payslip OCR flow and the YouTube mp3 conversion both work. Leave the Build/Start command fields blank so Render honors the Dockerfile (it already runs `uvicorn render.master_service:app --host 0.0.0.0 --port ${PORT:-10000}`).
    - **Instance type**: Starter ($7/mo). This keeps one always-on worker.
-   - **System packages**: Keep `apt.txt` at the repository root and configure the Render **Root Directory** to the repo root so the build installs `tesseract-ocr` and `libtesseract-dev`. When you change `apt.txt`, push a new commit or trigger a full redeploy so Render rebuilds the image and actually installs the packages—a restart alone will not pick them up. After the rebuild completes, open `/debug/tesseract` on the service to confirm the binary is present; the `available` field must be `true`.
+   - **Binary checks**: After a deploy, open the Render shell and run `which tesseract` and `which ffmpeg` to confirm both are on `PATH`; the YouTube downloader page will error if `ffmpeg` is missing.
 4. Add environment variables in the Render dashboard (or create an **Environment Group** and attach it). These are injected into every managed script, so your TradingView credentials, Bybit keys, and OANDA keys are available without committing them to Git.
 5. Click **Create Web Service**. Once live, Render will expose a public URL like `https://your-app.onrender.com`. Point your TradingView webhooks to `https://your-app.onrender.com/webhook/<script-name>`.
 
@@ -42,6 +40,12 @@ Place these in your Render dashboard or a local `.env` file at the repo root. Ad
 - `PORT` (Render sets this automatically; only override for local testing).
 - Any other variables referenced by the individual scripts. Because the manager runs each script in its own subprocess with the shared environment, they will read the same `.env`/dashboard values.
 
+### YouTube downloader cookies (avoiding bot checks)
+- `YTDLP_COOKIES_B64` (recommended): base64-encode a `cookies.txt` exported from a signed-in YouTube session and store the encoded string as a secret. The service will decode it on boot and pass it to yt-dlp for authenticated downloads.
+- `YTDLP_COOKIES_PATH` (optional): absolute path to a `cookies.txt` already on disk. If set, it overrides an uploaded file but is itself overridden by `YTDLP_COOKIES_B64`.
+- Alternatively, upload a `cookies.txt` from the YouTube downloader UI at `/youtube`; the file is stored privately on disk and never logged.
+- Successful downloads are written to `render/uploads/youtube/downloads` as `.mp3` files and exposed through download links in the `/youtube` page (backed by `/api/youtube/files/<filename>`).
+
 ## 4) How the master service works
 - On startup it scans the repository for `*.py` files (skipping `mt5-clone`, virtualenv folders, and the `render` folder itself) and exposes each one in the UI.
 - Clicking **Start** launches the chosen script as a background subprocess with unbuffered stdout; logs stream into the UI. Multiple scripts can run concurrently.
@@ -49,7 +53,7 @@ Place these in your Render dashboard or a local `.env` file at the repo root. Ad
 - The webhook endpoint records the payload to the script log and starts the script if it is not already running.
 - Common helpers like `pandas` and `xlwings` are bundled in `requirements.txt` so Excel utilities (for example `LEDGER-clone/earnings_report.py`) can start without missing-module errors.
   
-For the payslip audit flow, Tesseract must be present at build time (via `apt.txt`). After deployment you can confirm readiness by running `which tesseract` in the Render shell; the UI error about missing OCR is raised before uploads run if the binary is absent.
+For the payslip audit flow, Tesseract must be present at build time. The Dockerfile installs it alongside `ffmpeg`; after deployment you can confirm readiness by running `which tesseract` in the Render shell (the UI error about missing OCR is raised before uploads run if the binary is absent).
 
 ## 5) TradingView webhook routing
 Use the script path shown in the UI (for example `bybit-alert-clone/bybit_altcoin_monitor.py`) as the `<script-name>` in your TradingView webhook URL:

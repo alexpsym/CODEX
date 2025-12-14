@@ -6,12 +6,15 @@ import html
 import json
 import os
 import shutil
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 from uuid import uuid4
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+import base64
+
+from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -23,6 +26,7 @@ from payslip_audit.tesseract import (
     _resolve_tesseract_binary,
     is_tesseract_available,
 )
+from YOUTUBE import yt as youtube_downloader
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env")
@@ -61,7 +65,69 @@ LOG_FILE_OVERRIDES: Dict[str, Path] = {
     "YOUTUBE": BASE_DIR / "YOUTUBE" / "yt_error_log.txt",
 }
 
+YOUTUBE_COOKIES_DIR = BASE_DIR / "render" / "uploads" / "youtube"
+YOUTUBE_DOWNLOAD_DIR = YOUTUBE_COOKIES_DIR / "downloads"
+YOUTUBE_COOKIES_UPLOAD = YOUTUBE_COOKIES_DIR / "cookies.txt"
+YOUTUBE_COOKIES_ENV = YOUTUBE_COOKIES_DIR / "cookies.from_env.txt"
+
+_YOUTUBE_COOKIE_STATE: Dict[str, Optional[str]] = {"path": None, "source": None, "error": None}
+
+
+def _chmod_quiet(path: Path) -> None:
+    try:
+        path.chmod(0o600)
+    except PermissionError:
+        return
+
+
+def _set_cookie_state(path: Optional[Path], source: Optional[str], error: Optional[str]) -> None:
+    _YOUTUBE_COOKIE_STATE["path"] = str(path) if path else None
+    _YOUTUBE_COOKIE_STATE["source"] = source
+    _YOUTUBE_COOKIE_STATE["error"] = error
+
+
+def _initialize_youtube_cookies_from_env() -> None:
+    """Load cookies from env or existing upload without leaking contents."""
+
+    env_b64 = os.getenv("YTDLP_COOKIES_B64", "")
+    env_path = os.getenv("YTDLP_COOKIES_PATH", "")
+
+    if env_b64:
+        try:
+            decoded = base64.b64decode(env_b64, validate=True)
+            YOUTUBE_COOKIES_ENV.write_bytes(decoded)
+            _chmod_quiet(YOUTUBE_COOKIES_ENV)
+            _set_cookie_state(YOUTUBE_COOKIES_ENV, "env_b64", None)
+            return
+        except Exception as exc:  # noqa: BLE001 - safe status only
+            _set_cookie_state(None, None, f"Failed to load YTDLP_COOKIES_B64: {exc}")
+
+    if env_path:
+        path = Path(env_path)
+        if path.exists():
+            _set_cookie_state(path, "env_path", None)
+            return
+        _set_cookie_state(None, None, f"YTDLP_COOKIES_PATH does not exist: {path}")
+
+    if YOUTUBE_COOKIES_UPLOAD.exists():
+        _set_cookie_state(YOUTUBE_COOKIES_UPLOAD, "upload", None)
+    else:
+        _set_cookie_state(None, None, None)
+
+
+def youtube_cookies_path() -> Optional[str]:
+    """Return the active cookies file path, preferring env-sourced secrets."""
+
+    return _YOUTUBE_COOKIE_STATE.get("path")
+
+
+def youtube_cookies_status() -> Dict[str, Optional[str]]:
+    return dict(_YOUTUBE_COOKIE_STATE)
+
 PAYSLIP_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+YOUTUBE_COOKIES_DIR.mkdir(parents=True, exist_ok=True)
+YOUTUBE_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+_initialize_youtube_cookies_from_env()
 
 
 @dataclass
@@ -231,6 +297,29 @@ def _payslip_session_dir(session_id: str) -> Path:
 TESSERACT_MISSING_DETAIL = TESSERACT_MISSING_MESSAGE
 
 
+def _run_youtube_download(urls: List[str]) -> Dict[str, object]:
+    """Execute yt-dlp downloads for the given URLs and capture logs."""
+
+    log_lines: List[str] = []
+    downloaded: List[str] = []
+
+    def _log(message: str) -> None:
+        log_lines.append(message)
+
+    try:
+        downloaded_paths = youtube_downloader.download_links(
+            urls,
+            log=_log,
+            cookies_path=youtube_cookies_path(),
+            output_dir=YOUTUBE_DOWNLOAD_DIR,
+        )
+        downloaded = [str(path) for path in downloaded_paths]
+    except Exception:  # noqa: BLE001 - surface details to the UI log
+        log_lines.append("Unexpected error while running yt-dlp:")
+        log_lines.extend(traceback.format_exc().splitlines())
+    return {"log": log_lines, "files": downloaded}
+
+
 def ensure_tesseract_available() -> None:
     """Raise an HTTP 500 with clear guidance when Tesseract is absent."""
 
@@ -361,7 +450,7 @@ script_manager = ScriptManager(discover_scripts())
 app = FastAPI(title="Render Master Script", version="1.0")
 
 
-ASSET_VERSION = "v3"
+ASSET_VERSION = "v6"
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"en\">
@@ -505,9 +594,68 @@ PAYSLIP_AUDIT_TEMPLATE = """<!DOCTYPE html>
 </html>"""
 
 
+YOUTUBE_TEMPLATE = """<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+    <meta charset=\"UTF-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <title>YouTube Downloader</title>
+    <style>
+        :root { color-scheme: light dark; }
+        body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
+        h1 { margin-top: 0; }
+        .card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; padding: 1.5rem; max-width: 960px; margin: 0 auto; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
+        .meta { color: #94a3b8; margin-bottom: 0.75rem; line-height: 1.5; }
+        .input { width: 100%; min-height: 120px; border-radius: 10px; border: 1px solid #1f2937; background: #0a0f1b; color: #e2e8f0; padding: 0.75rem; font-size: 1rem; }
+        .actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1rem; align-items: center; }
+        button { padding: 0.7rem 1.2rem; border-radius: 12px; border: none; cursor: pointer; font-weight: 700; }
+        .primary { background: #22c55e; color: #052e16; }
+        .secondary { background: #334155; color: #e2e8f0; text-decoration: none; display: inline-flex; align-items: center; }
+        .status { margin-top: 1rem; color: #cbd5e1; white-space: pre-wrap; word-break: break-word; }
+        .badge { display: inline-block; padding: 0.35rem 0.7rem; border-radius: 999px; background: #1f2937; color: #cbd5e1; font-weight: 700; font-size: 0.95rem; }
+        .log { background: #0a0f1b; border: 1px solid #1f2937; border-radius: 10px; padding: 0.75rem; margin-top: 1rem; white-space: pre-wrap; color: #e5e7eb; min-height: 140px; }
+        .downloads { margin-top: 1rem; display: flex; flex-direction: column; gap: 0.4rem; }
+        .download-row { display: flex; gap: 0.5rem; align-items: center; color: #cbd5e1; }
+        .download-row a { color: #bef264; text-decoration: none; font-weight: 700; }
+        .download-row code { background: #0b1220; padding: 0.15rem 0.4rem; border-radius: 8px; border: 1px solid #1f2937; color: #e2e8f0; }
+    </style>
+</head>
+<body>
+    <div class=\"card\">
+        <h1>YouTube Downloader</h1>
+        <p class=\"meta\">Paste one or more media URLs (YouTube, etc.). The downloader will fetch best audio and convert to mp3 using yt-dlp.</p>
+        <textarea id=\"url-input\" class=\"input\" placeholder=\"Enter one or more URLs, separated by spaces or commas\"></textarea>
+        <div class=\"actions\">
+            <button id=\"download-btn\" class=\"primary\">Start Download</button>
+            <a href=\"/\" class=\"secondary\">Back to dashboard</a>
+        </div>
+        <div class=\"badge\">Authentication</div>
+        <p class=\"meta\">Some videos require a signed-in session. Upload a <code>cookies.txt</code> exported from your YouTube account or set the <code>YTDLP_COOKIES_B64</code> env var (base64 of the file). The server stores the file privately and never logs its contents.</p>
+        <div class=\"actions\">
+            <input id=\"cookies-file\" type=\"file\" accept=\".txt\" style=\"display:none\" />
+            <button id=\"upload-cookies-btn\" class=\"secondary\">Upload cookies.txt</button>
+            <span id=\"cookie-status\" class=\"meta\">Checking cookies status...</span>
+        </div>
+        <div id=\"status\" class=\"status\">Ready to download.</div>
+        <div id=\"log\" class=\"log\">Logs will appear here.</div>
+        <div class=\"badge\">Downloads</div>
+        <p class=\"meta\">Completed mp3 files are saved on the server and exposed below for download.</p>
+        <div id=\"downloads\" class=\"downloads\"></div>
+    </div>
+
+    <script src=\"/static/youtube.js?ver={asset_version}\"></script>
+</body>
+</html>"""
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
     return HTML_TEMPLATE.replace("{asset_version}", ASSET_VERSION)
+
+
+@app.get("/youtube", response_class=HTMLResponse)
+async def youtube_page() -> str:
+    return YOUTUBE_TEMPLATE.replace("{asset_version}", ASSET_VERSION)
 
 
 @app.get("/payslip-audit", response_class=HTMLResponse)
@@ -518,6 +666,82 @@ async def payslip_audit_page() -> str:
 @app.get("/scripts")
 async def list_scripts() -> JSONResponse:
     return JSONResponse(script_manager.list_scripts())
+
+
+@app.post("/api/youtube/download")
+async def youtube_download(payload: Dict[str, str] = Body(...)) -> JSONResponse:
+    raw_urls = str(payload.get("urls", "")).strip()
+    if not raw_urls:
+        raise HTTPException(status_code=400, detail="Please provide at least one URL to download.")
+
+    urls = sorted(youtube_downloader._parse_urls(raw_urls))  # noqa: SLF001 - reuse existing parser
+    if not urls:
+        raise HTTPException(status_code=400, detail="No valid URLs found in the request.")
+
+    result = await asyncio.to_thread(_run_youtube_download, urls)
+
+    downloads: List[Dict[str, str]] = []
+    for path_str in result.get("files", []):
+        path = Path(path_str)
+        if not path.is_file():
+            continue
+
+        if path.parent != YOUTUBE_DOWNLOAD_DIR:
+            continue
+
+        downloads.append(
+            {
+                "filename": path.name,
+                "url": f"/api/youtube/files/{path.name}",
+            }
+        )
+
+    return JSONResponse({"log": result.get("log", []), "downloads": downloads})
+
+
+@app.post("/api/youtube/cookies")
+async def upload_youtube_cookies(file: UploadFile = File(...)) -> JSONResponse:
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Uploaded cookies file is empty.")
+
+    if len(data) > 1_000_000:
+        raise HTTPException(status_code=413, detail="Cookies file is too large.")
+
+    YOUTUBE_COOKIES_DIR.mkdir(parents=True, exist_ok=True)
+    YOUTUBE_COOKIES_UPLOAD.write_bytes(data)
+    _chmod_quiet(YOUTUBE_COOKIES_UPLOAD)
+    _set_cookie_state(YOUTUBE_COOKIES_UPLOAD, "upload", None)
+
+    return JSONResponse(
+        {
+            "detail": "Cookies uploaded. Future downloads will use this file.",
+            "source": "upload",
+            "path": str(YOUTUBE_COOKIES_UPLOAD),
+        }
+    )
+
+
+@app.get("/api/youtube/cookies/status")
+async def youtube_cookies_status_api() -> JSONResponse:
+    status = youtube_cookies_status()
+    status.update({"configured": bool(status.get("path"))})
+    return JSONResponse(status)
+
+
+@app.get("/api/youtube/files/{filename}")
+async def youtube_download_file(filename: str) -> FileResponse:
+    safe_name = Path(filename).name
+    target = YOUTUBE_DOWNLOAD_DIR / safe_name
+
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Requested file not found.")
+
+    return FileResponse(
+        target,
+        media_type="audio/mpeg",
+        filename=safe_name,
+    )
 
 
 def _render_log_view(script_name: str) -> str:
@@ -556,6 +780,14 @@ async def start_script(script_name: str) -> JSONResponse:
             {
                 "redirect": "/payslip-audit",
                 "detail": "Upload your payslip PDF and timesheets to begin the audit.",
+            }
+        )
+
+    if script_name == "YOUTUBE":
+        return JSONResponse(
+            {
+                "redirect": "/youtube",
+                "detail": "Open the YouTube downloader UI to submit URLs.",
             }
         )
 
