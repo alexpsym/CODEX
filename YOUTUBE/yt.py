@@ -109,11 +109,87 @@ def _cookies_args(cookies_path: Optional[str], log: Callable[[str], None]) -> li
     return ["--cookies", str(path)]
 
 
+def _parse_progress_line(line: str) -> Optional[dict]:
+    """Parse a progress template line into structured fields.
+
+    Expected format: ``progress:<percent>|<downloaded>|<total>|<speed>|<eta>``
+    """
+
+    if not line.startswith("progress:"):
+        return None
+
+    payload = line.split("progress:", 1)[1]
+    parts = payload.split("|")
+    if len(parts) != 5:
+        return None
+
+    percent_raw, downloaded_raw, total_raw, speed_raw, eta_raw = parts
+    try:
+        percent = float(percent_raw.strip().rstrip("%"))
+    except ValueError:
+        percent = None
+
+    def _int_or_none(value: str) -> Optional[int]:
+        try:
+            return int(value)
+        except ValueError:
+            return None
+
+    return {
+        "percent": percent,
+        "downloaded_bytes": _int_or_none(downloaded_raw.strip()),
+        "total_bytes": _int_or_none(total_raw.strip()),
+        "speed": speed_raw.strip() or None,
+        "eta": eta_raw.strip() or None,
+    }
+
+
+def _run_yt_dlp(args: list[str], url: str, log: Callable[[str], None], progress_cb: Optional[Callable[[dict], None]], output_root: Path) -> tuple[int, list[Path]]:
+    """Run yt-dlp once, streaming stdout lines to ``log`` and parsing progress."""
+
+    file_candidates: list[Path] = []
+
+    try:
+        proc = subprocess.Popen(
+            [*args, url],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+    except FileNotFoundError:
+        log("yt-dlp executable not found. Aborting remaining downloads.")
+        return 127, file_candidates
+
+    assert proc.stdout is not None
+    for raw_line in proc.stdout:
+        line = raw_line.rstrip("\n")
+        progress = _parse_progress_line(line)
+        if progress and progress_cb:
+            progress_cb(progress)
+            continue
+
+        log(line)
+        candidate = line.strip()
+        if candidate:
+            try:
+                resolved = Path(candidate).resolve()
+            except Exception:  # noqa: BLE001 - defensive parsing only
+                continue
+
+            if resolved.suffix and output_root in resolved.parents and resolved not in file_candidates:
+                file_candidates.append(resolved)
+
+    proc.wait()
+    return proc.returncode, file_candidates
+
+
 def download_links(
     urls: Iterable[str],
     log: Callable[[str], None] = print,
     cookies_path: Optional[str] = None,
     output_dir: Optional[Path] = None,
+    progress_cb: Optional[Callable[[dict], None]] = None,
 ) -> list[Path]:
     """Download each URL with yt-dlp, reporting per-link success/failure."""
     if not shutil.which("yt-dlp"):
@@ -146,8 +222,9 @@ def download_links(
 
     base_args = [
         "yt-dlp",
-        "--no-progress",
         "--newline",
+        "--progress-template",
+        "progress:%(progress._percent_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress._speed_str)s|%(progress._eta_str)s",
         "-f",
         "bestaudio/best",
         "--extractor-args",
@@ -179,38 +256,15 @@ def download_links(
         log(f"Downloading: {url}")
 
         for args in (base_args, fallback_args):
-            file_candidates: list[Path] = []
+            return_code, file_candidates = _run_yt_dlp(
+                args=args,
+                url=url,
+                log=log,
+                progress_cb=progress_cb,
+                output_root=output_root,
+            )
 
-            try:
-                result = subprocess.run(
-                    [*args, url],
-                    check=False,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                )
-            except FileNotFoundError:
-                log("yt-dlp executable not found. Aborting remaining downloads.")
-                return downloaded
-
-            if result.stdout:
-                for line in result.stdout.splitlines():
-                    log(line)
-                    candidate = line.strip()
-                    if candidate:
-                        try:
-                            resolved = Path(candidate).resolve()
-                        except Exception:  # noqa: BLE001 - defensive parsing only
-                            continue
-
-                        if (
-                            resolved.suffix
-                            and output_root in resolved.parents
-                            and resolved not in file_candidates
-                        ):
-                            file_candidates.append(resolved)
-
-            if result.returncode == 0:
+            if return_code == 0:
                 log(f"Downloaded successfully: {url}")
                 if file_candidates:
                     downloaded.append(file_candidates[-1])
@@ -222,7 +276,9 @@ def download_links(
                 "Retrying with an alternate player client..."
             )
         else:
-            log(f"Download failed (exit code {result.returncode}): {url}")
+            log(f"Download failed (exit code {return_code}): {url}")
+
+    return downloaded
 
     return downloaded
 

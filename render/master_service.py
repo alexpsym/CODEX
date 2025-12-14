@@ -4,8 +4,10 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import contextlib
 import os
 import shutil
+import time
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,6 +19,7 @@ import base64
 from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import RedirectResponse
 from dotenv import load_dotenv
@@ -148,6 +151,89 @@ PAYSLIP_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 YOUTUBE_COOKIES_DIR.mkdir(parents=True, exist_ok=True)
 YOUTUBE_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 _initialize_youtube_cookies_from_env()
+YOUTUBE_JOBS: Dict[str, YouTubeJob] = {}
+
+
+@dataclass
+class YouTubeJob:
+    job_id: str
+    urls: List[str]
+    status: str = "pending"
+    phase: str = "pending"
+    logs: List[str] = field(default_factory=list)
+    downloads: List[Dict[str, str]] = field(default_factory=list)
+    progress: Dict[str, Optional[object]] = field(
+        default_factory=lambda: {
+            "percent": None,
+            "downloaded_bytes": None,
+            "total_bytes": None,
+            "speed": None,
+            "eta": None,
+        }
+    )
+    last_update: float = field(default_factory=lambda: time.time())
+    subscribers: List[asyncio.Queue] = field(default_factory=list)
+
+    def add_log(self, line: str) -> None:
+        cleaned = line.rstrip("\n")
+        if not cleaned:
+            return
+        self.logs.append(cleaned)
+        if len(self.logs) > MAX_LOG_LINES:
+            self.logs = self.logs[-MAX_LOG_LINES :]
+        self.last_update = time.time()
+        self._publish("log", {"line": cleaned, "timestamp": self.last_update})
+
+    def set_status(self, status: str, phase: Optional[str] = None) -> None:
+        self.status = status
+        if phase:
+            self.phase = phase
+        self.last_update = time.time()
+        self._publish("state", self.snapshot())
+
+    def finish(self, status: str, phase: Optional[str] = None) -> None:
+        self.set_status(status, phase)
+        self._publish("finished", self.snapshot())
+
+    def set_phase(self, phase: str) -> None:
+        self.phase = phase
+        self.last_update = time.time()
+        self._publish("state", self.snapshot())
+
+    def set_progress(self, update: Dict[str, object]) -> None:
+        self.progress.update(update)
+        self.last_update = time.time()
+        self._publish("progress", {**self.progress, "timestamp": self.last_update})
+
+    def add_download(self, filename: str) -> None:
+        self.downloads.append({"filename": filename, "url": f"/api/youtube/files/{filename}"})
+        self.last_update = time.time()
+        self._publish("downloads", self.downloads)
+
+    def snapshot(self) -> Dict[str, object]:
+        return {
+            "job_id": self.job_id,
+            "urls": self.urls,
+            "status": self.status,
+            "phase": self.phase,
+            "logs": self.logs,
+            "downloads": self.downloads,
+            "progress": self.progress,
+            "last_update": self.last_update,
+        }
+
+    def subscribe(self) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue()
+        self.subscribers.append(q)
+        return q
+
+    def unsubscribe(self, queue: asyncio.Queue) -> None:
+        if queue in self.subscribers:
+            self.subscribers.remove(queue)
+
+    def _publish(self, event: str, payload: Dict[str, object]) -> None:
+        for queue in list(self.subscribers):
+            queue.put_nowait((event, payload))
 
 
 @dataclass
@@ -317,30 +403,63 @@ def _payslip_session_dir(session_id: str) -> Path:
 TESSERACT_MISSING_DETAIL = TESSERACT_MISSING_MESSAGE
 
 
-def _run_youtube_download(urls: List[str]) -> Dict[str, object]:
-    """Execute yt-dlp downloads for the given URLs and capture logs."""
+def _find_youtube_job(job_id: str) -> YouTubeJob:
+    try:
+        return YOUTUBE_JOBS[job_id]
+    except KeyError as exc:  # pragma: no cover - runtime path
+        raise HTTPException(status_code=404, detail="Job not found") from exc
 
-    log_lines: List[str] = []
-    downloaded: List[str] = []
+
+async def _heartbeat(job: YouTubeJob) -> None:
+    while job.status == "running":
+        job._publish("heartbeat", {"timestamp": time.time(), "phase": job.phase})
+        await asyncio.sleep(2)
+
+
+async def _run_youtube_job(job: YouTubeJob) -> None:
+    job.set_status("running", phase="starting")
+    heartbeat_task = asyncio.create_task(_heartbeat(job))
+
+    loop = asyncio.get_running_loop()
 
     def _log(message: str) -> None:
-        log_lines.append(message)
+        loop.call_soon_threadsafe(job.add_log, message)
+
+    def _progress(update: Dict[str, object]) -> None:
+        loop.call_soon_threadsafe(job.set_progress, update)
 
     try:
         if not _log_disk_capacity(YOUTUBE_DOWNLOAD_DIR, YOUTUBE_MIN_FREE_BYTES, _log):
-            return {"log": log_lines, "files": downloaded}
+            job.finish("error", phase="insufficient_disk")
+            return
 
-        downloaded_paths = youtube_downloader.download_links(
-            urls,
-            log=_log,
-            cookies_path=youtube_cookies_path(),
-            output_dir=YOUTUBE_DOWNLOAD_DIR,
+        downloaded_paths = await asyncio.to_thread(
+            youtube_downloader.download_links,
+            job.urls,
+            _log,
+            youtube_cookies_path(),
+            YOUTUBE_DOWNLOAD_DIR,
+            _progress,
         )
-        downloaded = [str(path) for path in downloaded_paths]
-    except Exception:  # noqa: BLE001 - surface details to the UI log
-        log_lines.append("Unexpected error while running yt-dlp:")
-        log_lines.extend(traceback.format_exc().splitlines())
-    return {"log": log_lines, "files": downloaded}
+
+        for path in downloaded_paths:
+            path = Path(path)
+            if path.parent == YOUTUBE_DOWNLOAD_DIR and path.is_file():
+                job.add_download(path.name)
+
+        if downloaded_paths:
+            job.finish("completed", phase="finished")
+        else:
+            job.finish("error", phase="failed")
+
+    except Exception:  # noqa: BLE001 - surface full stack to log
+        _log("Unexpected error while running yt-dlp:")
+        _log(traceback.format_exc())
+        job.finish("error", phase="exception")
+    finally:
+        heartbeat_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat_task
 
 
 def ensure_tesseract_available() -> None:
@@ -473,7 +592,7 @@ script_manager = ScriptManager(discover_scripts())
 app = FastAPI(title="Render Master Script", version="1.0")
 
 
-ASSET_VERSION = "v6"
+ASSET_VERSION = "v7"
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"en\">
@@ -641,6 +760,13 @@ YOUTUBE_TEMPLATE = """<!DOCTYPE html>
         .download-row { display: flex; gap: 0.5rem; align-items: center; color: #cbd5e1; }
         .download-row a { color: #bef264; text-decoration: none; font-weight: 700; }
         .download-row code { background: #0b1220; padding: 0.15rem 0.4rem; border-radius: 8px; border: 1px solid #1f2937; color: #e2e8f0; }
+        .progress-row { display: flex; gap: 0.75rem; align-items: center; margin: 0.5rem 0 1rem; }
+        .spinner { width: 28px; height: 28px; border: 3px solid #1f2937; border-top-color: #3b82f6; border-radius: 50%; animation: spin 1s linear infinite; }
+        .progress-shell { flex: 1; }
+        .progress-track { background: #0b1220; border: 1px solid #1f2937; border-radius: 10px; height: 12px; overflow: hidden; }
+        .progress-bar { height: 100%; background: linear-gradient(90deg, #3b82f6, #22c55e); width: 0%; transition: width 0.3s ease; }
+        .meta-row { display: flex; gap: 1rem; flex-wrap: wrap; color: #cbd5e1; font-size: 0.9rem; }
+        @keyframes spin { to { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
@@ -660,6 +786,19 @@ YOUTUBE_TEMPLATE = """<!DOCTYPE html>
             <span id=\"cookie-status\" class=\"meta\">Checking cookies status...</span>
         </div>
         <div id=\"status\" class=\"status\">Ready to download.</div>
+        <div id=\"progress-row\" class=\"progress-row\" style=\"display:none\"> 
+            <div class=\"spinner\" id=\"spinner\"></div>
+            <div class=\"progress-shell\">
+                <div class=\"meta\" id=\"phase\">Awaiting start...</div>
+                <div class=\"progress-track\">
+                    <div class=\"progress-bar\" id=\"progress-bar\"></div>
+                </div>
+                <div class=\"meta-row\">
+                    <span id=\"progress-text\">0% — pending</span>
+                    <span id=\"last-update\"></span>
+                </div>
+            </div>
+        </div>
         <div id=\"log\" class=\"log\">Logs will appear here.</div>
         <div class=\"badge\">Downloads</div>
         <p class=\"meta\">Completed mp3 files are saved on the server and exposed below for download.</p>
@@ -701,25 +840,16 @@ async def youtube_download(payload: Dict[str, str] = Body(...)) -> JSONResponse:
     if not urls:
         raise HTTPException(status_code=400, detail="No valid URLs found in the request.")
 
-    result = await asyncio.to_thread(_run_youtube_download, urls)
+    job_id = str(uuid4())
+    job = YouTubeJob(job_id=job_id, urls=urls, status="queued", phase="queued")
+    YOUTUBE_JOBS[job_id] = job
 
-    downloads: List[Dict[str, str]] = []
-    for path_str in result.get("files", []):
-        path = Path(path_str)
-        if not path.is_file():
-            continue
+    job.add_log(f"Queued {len(urls)} URL(s) for download.")
+    job.add_log(f"Using cookies file: {youtube_cookies_path() or 'none'}")
 
-        if path.parent != YOUTUBE_DOWNLOAD_DIR:
-            continue
+    asyncio.create_task(_run_youtube_job(job))
 
-        downloads.append(
-            {
-                "filename": path.name,
-                "url": f"/api/youtube/files/{path.name}",
-            }
-        )
-
-    return JSONResponse({"log": result.get("log", []), "downloads": downloads})
+    return JSONResponse({"job_id": job_id, "status": job.status})
 
 
 @app.post("/api/youtube/cookies")
@@ -782,6 +912,35 @@ async def view_logs(script_name: str) -> str:
     # Ensure the script exists so we don't render a viewer for an unknown path.
     script_manager.get(script_name)
     return _render_log_view(script_name)
+
+
+def _sse_event(event: str, data: Dict[str, object]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+@app.get("/api/youtube/jobs/{job_id}")
+async def youtube_job_status(job_id: str) -> JSONResponse:
+    job = _find_youtube_job(job_id)
+    return JSONResponse(job.snapshot())
+
+
+@app.get("/api/youtube/jobs/{job_id}/events")
+async def youtube_job_events(job_id: str) -> StreamingResponse:
+    job = _find_youtube_job(job_id)
+    queue = job.subscribe()
+
+    async def event_stream():
+        try:
+            yield _sse_event("state", job.snapshot())
+            while True:
+                event, payload = await queue.get()
+                yield _sse_event(event, payload)
+                if event in {"finished", "error"}:
+                    break
+        finally:
+            job.unsubscribe(queue)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 async def _background_start(script: ManagedScript) -> None:
