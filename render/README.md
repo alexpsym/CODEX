@@ -40,6 +40,11 @@ Place these in your Render dashboard or a local `.env` file at the repo root. Ad
 - `PORT` (Render sets this automatically; only override for local testing).
 - Any other variables referenced by the individual scripts. Because the manager runs each script in its own subprocess with the shared environment, they will read the same `.env`/dashboard values.
 
+### YouTube downloader cookies (avoiding bot checks)
+- `YTDLP_COOKIES_B64` (recommended): base64-encode a `cookies.txt` exported from a signed-in YouTube session and store the encoded string as a secret. The service will decode it on boot and pass it to yt-dlp for authenticated downloads.
+- `YTDLP_COOKIES_PATH` (optional): absolute path to a `cookies.txt` already on disk. If set, it overrides an uploaded file but is itself overridden by `YTDLP_COOKIES_B64`.
+- Alternatively, upload a `cookies.txt` from the YouTube downloader UI at `/youtube`; the file is stored privately on disk and never logged.
+
 ## 4) How the master service works
 - On startup it scans the repository for `*.py` files (skipping `mt5-clone`, virtualenv folders, and the `render` folder itself) and exposes each one in the UI.
 - Clicking **Start** launches the chosen script as a background subprocess with unbuffered stdout; logs stream into the UI. Multiple scripts can run concurrently.

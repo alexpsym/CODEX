@@ -90,7 +90,30 @@ def _normalize_url(raw_url: str) -> str:
     return url
 
 
-def download_links(urls: Iterable[str], log: Callable[[str], None] = print) -> None:
+def _cookies_args(cookies_path: Optional[str], log: Callable[[str], None]) -> list[str]:
+    """Return yt-dlp cookie arguments when a file is available."""
+
+    if not cookies_path:
+        log(
+            "No cookies configured. If YouTube requests sign-in, set YTDLP_COOKIES_B64 "
+            "(base64 cookies.txt) or upload cookies via the downloader UI."
+        )
+        return []
+
+    path = Path(cookies_path)
+    if not path.exists():
+        log(f"Cookies file not found at: {path}. Proceeding without cookies.")
+        return []
+
+    log(f"Using cookies file at: {path}")
+    return ["--cookies", str(path)]
+
+
+def download_links(
+    urls: Iterable[str],
+    log: Callable[[str], None] = print,
+    cookies_path: Optional[str] = None,
+) -> None:
     """Download each URL with yt-dlp, reporting per-link success/failure."""
     if not shutil.which("yt-dlp"):
         log("Error: yt-dlp is not installed or not on your PATH.")
@@ -132,6 +155,8 @@ def download_links(urls: Iterable[str], log: Callable[[str], None] = print) -> N
         "--audio-quality",
         "0",
     ]
+
+    base_args.extend(_cookies_args(cookies_path, log))
 
     fallback_args = base_args.copy()
     fallback_args[6] = "youtube:player_client=all,player_skip=configs"
