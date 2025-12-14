@@ -9,7 +9,7 @@ import shutil
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Callable, Dict, Iterable, List, Optional
 from uuid import uuid4
 
 import base64
@@ -65,10 +65,12 @@ LOG_FILE_OVERRIDES: Dict[str, Path] = {
     "YOUTUBE": BASE_DIR / "YOUTUBE" / "yt_error_log.txt",
 }
 
-YOUTUBE_COOKIES_DIR = BASE_DIR / "render" / "uploads" / "youtube"
-YOUTUBE_DOWNLOAD_DIR = YOUTUBE_COOKIES_DIR / "downloads"
+YOUTUBE_STORAGE_ROOT = Path(os.getenv("YOUTUBE_STORAGE_ROOT", BASE_DIR / "render" / "uploads" / "youtube"))
+YOUTUBE_COOKIES_DIR = YOUTUBE_STORAGE_ROOT
+YOUTUBE_DOWNLOAD_DIR = Path(os.getenv("YOUTUBE_DOWNLOAD_DIR", YOUTUBE_STORAGE_ROOT / "downloads"))
 YOUTUBE_COOKIES_UPLOAD = YOUTUBE_COOKIES_DIR / "cookies.txt"
 YOUTUBE_COOKIES_ENV = YOUTUBE_COOKIES_DIR / "cookies.from_env.txt"
+YOUTUBE_MIN_FREE_BYTES = int(os.getenv("YOUTUBE_MIN_FREE_BYTES", "3000000000"))
 
 _YOUTUBE_COOKIE_STATE: Dict[str, Optional[str]] = {"path": None, "source": None, "error": None}
 
@@ -113,6 +115,24 @@ def _initialize_youtube_cookies_from_env() -> None:
         _set_cookie_state(YOUTUBE_COOKIES_UPLOAD, "upload", None)
     else:
         _set_cookie_state(None, None, None)
+
+
+def _log_disk_capacity(path: Path, min_free_bytes: int, log: Callable[[str], None]) -> bool:
+    """Record disk free space around ``path`` and return True when above the threshold."""
+
+    usage = shutil.disk_usage(path)
+    free_gib = usage.free / (1024**3)
+    required_gib = min_free_bytes / (1024**3)
+    log(
+        f"Disk free at {path}: {free_gib:.2f} GiB available; "
+        f"require at least {required_gib:.2f} GiB before starting."
+    )
+
+    if usage.free < min_free_bytes:
+        log("Insufficient disk space; aborting download request to avoid partial files.")
+        return False
+
+    return True
 
 
 def youtube_cookies_path() -> Optional[str]:
@@ -307,6 +327,9 @@ def _run_youtube_download(urls: List[str]) -> Dict[str, object]:
         log_lines.append(message)
 
     try:
+        if not _log_disk_capacity(YOUTUBE_DOWNLOAD_DIR, YOUTUBE_MIN_FREE_BYTES, _log):
+            return {"log": log_lines, "files": downloaded}
+
         downloaded_paths = youtube_downloader.download_links(
             urls,
             log=_log,
