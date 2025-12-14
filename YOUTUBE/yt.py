@@ -210,6 +210,10 @@ def download_links(
                         ):
                             file_candidates.append(resolved)
 
+            if result.stdout:
+                for line in result.stdout.splitlines():
+                    log(line)
+
             if result.returncode == 0:
                 log(f"Downloaded successfully: {url}")
                 if file_candidates:
