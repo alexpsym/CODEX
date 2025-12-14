@@ -9,14 +9,14 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
+from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.responses import RedirectResponse
 from dotenv import load_dotenv
+from starlette.responses import RedirectResponse
 
 from payslip_audit.tesseract import (
     TESSERACT_MISSING_MESSAGE,
@@ -79,11 +79,14 @@ class ManagedScript:
 
     def to_summary(self) -> Dict[str, object]:
         return {
+            "id": self.name,
             "name": self.name,
             "path": str(self.path),
             "category": self.category,
             "running": self.is_running,
             "return_code": None if self.process is None else self.process.returncode,
+            "open_url": script_open_url(self.name),
+            "logs_url": script_logs_url(self.name),
         }
 
     def add_log(self, line: str) -> None:
@@ -219,6 +222,24 @@ def categorize_script(script_path: Path) -> str:
         return "Other"
 
     return "Other"
+
+
+def _encoded_script_name(script_name: str) -> str:
+    """Encode a script name for safe URL usage while keeping slashes intact."""
+
+    return quote(script_name, safe="/")
+
+
+def script_open_url(script_name: str) -> str:
+    """Return the preferred UI URL for a script."""
+
+    return f"/logs/view/{_encoded_script_name(script_name)}"
+
+
+def script_logs_url(script_name: str) -> str:
+    """Return the JSON logs API endpoint for a script."""
+
+    return f"/logs/{_encoded_script_name(script_name)}"
 
 
 def _payslip_session_dir(session_id: str) -> Path:
@@ -358,7 +379,7 @@ script_manager = ScriptManager(discover_scripts())
 app = FastAPI(title="Render Master Script", version="1.0")
 
 
-ASSET_VERSION = "v7"
+ASSET_VERSION = "v8"
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"en\">
