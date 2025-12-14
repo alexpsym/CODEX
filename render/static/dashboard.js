@@ -33,13 +33,9 @@
 
     const buildScriptPath = (name) => encodeURIComponent(name).replace(/%2F/g, '/');
 
-    const openScript = (script) => {
-        const target = script?.open_url || `/logs/view/${buildScriptPath(script.name)}`;
-        window.open(target, '_blank', 'noopener,noreferrer');
-    };
-
     const modify = async (script, action, button, { openTab = true } = {}) => {
         const name = script.name;
+        const destination = script?.open_url || `/logs/view/${buildScriptPath(name)}`;
         const popup = action === 'start' && openTab ? window.open('about:blank', '_blank', 'noopener,noreferrer') : null;
 
         if (button) button.disabled = true;
@@ -65,7 +61,8 @@
                     if (popup) {
                         popup.location.href = payload.redirect;
                     } else {
-                        window.open(payload.redirect, '_blank', 'noopener,noreferrer');
+                        setStatus('Popup blocked? Opening in this tab.', true);
+                        window.location.href = payload.redirect;
                     }
                 }
                 return;
@@ -73,9 +70,10 @@
 
             if (action === 'start' && openTab) {
                 if (popup) {
-                    popup.location.href = targetUrl;
+                    popup.location.href = destination;
                 } else {
-                    window.open(targetUrl, '_blank', 'noopener,noreferrer');
+                    setStatus('Popup blocked? Opening in this tab.', true);
+                    window.location.href = destination;
                 }
             }
 
@@ -169,6 +167,16 @@
             }
 
             card.appendChild(actions);
+
+            const lastOutput = document.createElement('div');
+            lastOutput.className = 'path';
+            const secondsAgo = script.last_output_at
+                ? Math.max(0, Math.floor(Date.now() / 1000 - script.last_output_at))
+                : null;
+            lastOutput.textContent = secondsAgo === null
+                ? 'last output: no log lines yet'
+                : `last output: ${secondsAgo}s ago`;
+            card.appendChild(lastOutput);
 
             grid.appendChild(card);
         });
