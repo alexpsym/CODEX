@@ -6,6 +6,7 @@ import html
 import json
 import os
 import shutil
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
@@ -240,7 +241,11 @@ def _run_youtube_download(urls: List[str]) -> List[str]:
     def _log(message: str) -> None:
         log_lines.append(message)
 
-    youtube_downloader.download_links(urls, log=_log)
+    try:
+        youtube_downloader.download_links(urls, log=_log)
+    except Exception:  # noqa: BLE001 - surface details to the UI log
+        log_lines.append("Unexpected error while running yt-dlp:")
+        log_lines.extend(traceback.format_exc().splitlines())
     return log_lines
 
 
