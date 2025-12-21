@@ -659,6 +659,7 @@ async def logs_index() -> RedirectResponse:
 
 
 @app.get("/api/logs/", include_in_schema=False)
+@app.get("/api/logs", include_in_schema=False)
 async def api_logs_root(
     request: Request,
     cursor: int = 0,
@@ -690,7 +691,11 @@ async def api_logs_root(
     try:
         snapshot = script_manager.log_snapshot(script_name, cursor)
         return JSONResponse(snapshot)
-    except HTTPException:
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            return JSONResponse(
+                {"lines": [], "cursor": 0, "detail": exc.detail}, status_code=200
+            )
         raise
     except Exception as exc:  # pragma: no cover - runtime protection
         detail = f"Failed to read logs for {script_name}: {exc}"
