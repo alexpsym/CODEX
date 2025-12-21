@@ -137,6 +137,7 @@ class ManagedScript:
         try:
             self.process = await asyncio.create_subprocess_exec(
                 os.getenv("PYTHON", "python"),
+                "-u",
                 str(self.path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
@@ -368,15 +369,38 @@ class ScriptManager:
 
     def __init__(self, scripts: Iterable[ManagedScript]):
         self._scripts: Dict[str, ManagedScript] = {script.name: script for script in scripts}
+        self._aliases: Dict[str, str] = {}
+
+        for script in scripts:
+            self._register_aliases(script.name)
+            self._register_aliases(script.path.name, canonical=script.name)
+            self._register_aliases(script.path.stem, canonical=script.name)
+
+    def _normalize(self, name: str) -> str:
+        trimmed = name.strip().strip("/")
+        return trimmed.replace("-", "_").casefold()
+
+    def _register_aliases(self, alias: str, canonical: Optional[str] = None) -> None:
+        target = alias if canonical is None else canonical
+        normalized = self._normalize(alias)
+        self._aliases.setdefault(normalized, target)
+
+    def _resolve_name(self, name: str) -> str:
+        if name in self._scripts:
+            return name
+
+        normalized = self._normalize(name)
+        if normalized in self._aliases:
+            return self._aliases[normalized]
+
+        raise HTTPException(status_code=404, detail=f"Script not found: {name}")
 
     def list_scripts(self) -> List[Dict[str, object]]:
         return sorted((script.to_summary() for script in self._scripts.values()), key=lambda s: s["name"])
 
     def get(self, name: str) -> ManagedScript:
-        try:
-            return self._scripts[name]
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="Script not found") from exc
+        resolved = self._resolve_name(name)
+        return self._scripts[resolved]
 
     async def start(self, name: str) -> Dict[str, object]:
         script = self.get(name)
@@ -399,7 +423,7 @@ script_manager = ScriptManager(discover_scripts())
 app = FastAPI(title="Render Master Script", version="1.0")
 
 
-ASSET_VERSION = "v9"
+ASSET_VERSION = "v10"
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"en\">
