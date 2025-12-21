@@ -21,6 +21,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 API_BASE = os.getenv("BYBIT_API_BASE", "https://api.bybit.com")
+API_FALLBACK_BASE = os.getenv("BYBIT_API_FALLBACK_BASE") or "https://api.bytick.com"
 API_PATH = "/v5/market/tickers"
 WAIT_SECONDS = 300  # 5 minutes
 ERROR_WAIT_SECONDS = 60
@@ -69,16 +70,15 @@ def _log_request_target(url: str, headers: Dict[str, str]) -> None:
 
     host_suffix = ""
 
+    try:
+        hostname = requests.utils.urlparse(url).hostname or "<unknown>"
+        ip_address = socket.gethostbyname(hostname)
+        host_suffix = f"; resolved host: {hostname} ({ip_address})"
+    except Exception:
+        host_suffix = "; resolved host: <unavailable>"
+
     if not _target_logged:
-        try:
-            hostname = requests.utils.urlparse(url).hostname or "<unknown>"
-            ip_address = socket.gethostbyname(hostname)
-            host_suffix = f"; resolved host: {hostname} ({ip_address})"
-        except Exception:
-            host_suffix = "; resolved host: <unavailable>"
-
         _target_logged = True
-
     log(f"Preparing Bybit request -> URL: {url}; headers: {headers}{host_suffix}")
 
 
@@ -91,67 +91,99 @@ def extract_base_symbol(symbol: str) -> str:
     return uppercase_symbol
 
 
-def fetch_altcoin_prices() -> Dict[str, float]:
-    """Ask Bybit for all linear perpetual futures prices and keep altcoins only."""
-    url = f"{API_BASE.rstrip('/')}{API_PATH}"
-    params = {"category": "linear"}
-    headers = {
-        "User-Agent": "BybitAltcoinMonitor/1.1 (+https://api.bybit.com)",
-        "Accept": "application/json",
+def _iter_api_bases() -> list[str]:
+    bases = [API_BASE.rstrip("/")]
+
+    # Use a documented fallback host so we can switch regions when the primary is blocked.
+    if API_FALLBACK_BASE:
+        fallback = API_FALLBACK_BASE.rstrip("/")
+        if fallback not in bases:
+            bases.append(fallback)
+
+    return bases
+
+
+def _build_headers() -> Dict[str, str]:
+    return {
+        "User-Agent": os.getenv(
+            "BYBIT_API_USER_AGENT",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        ),
+        "Accept": os.getenv("BYBIT_API_ACCEPT", "application/json"),
     }
 
+
+def fetch_altcoin_prices() -> Dict[str, float]:
+    """Ask Bybit for all linear perpetual futures prices and keep altcoins only."""
+
+    params = {"category": "linear"}
+    headers = _build_headers()
     session = _get_session()
-    prepared = session.prepare_request(requests.Request("GET", url, headers=headers, params=params))
-    _log_request_target(prepared.url or url, headers)
+    errors: list[str] = []
 
-    try:
-        response = session.send(prepared, timeout=20)
-    except requests.RequestException as exc:  # pragma: no cover - network dependent
-        raise RuntimeError(f"Connection error while contacting Bybit: {exc}") from exc
-
-    body_snippet = response.text[:200]
-
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"Bybit replied with unexpected status {response.status_code}. "
-            f"Body preview: {body_snippet}"
+    for api_base in _iter_api_bases():
+        url = f"{api_base}{API_PATH}"
+        prepared = session.prepare_request(
+            requests.Request("GET", url, headers=headers, params=params)
         )
-
-    content_type = response.headers.get("Content-Type", "")
-    if "json" not in content_type:
-        log(f"Warning: unexpected content type from Bybit: {content_type}")
-
-    try:
-        payload = response.json()
-    except json.JSONDecodeError as decode_error:
-        raise RuntimeError("Could not decode Bybit's response as JSON.") from decode_error
-
-    if payload.get("retCode") != 0:
-        raise RuntimeError(
-            f"Bybit returned retCode {payload.get('retCode')} with message: {payload.get('retMsg')}"
-        )
-
-    tickers = payload.get("result", {}).get("list", [])
-    prices: Dict[str, float] = {}
-
-    for entry in tickers:
-        symbol = entry.get("symbol")
-        last_price = entry.get("lastPrice")
-        if not symbol or last_price in (None, "", "0"):
-            continue
-
-        base_symbol = extract_base_symbol(symbol)
-        if base_symbol in PRIMARY_COINS:
-            continue  # skip BTC and ETH because the focus is on altcoins
+        _log_request_target(prepared.url or url, headers)
 
         try:
-            price = float(last_price)
-        except (TypeError, ValueError):
+            response = session.send(prepared, timeout=20)
+        except requests.RequestException as exc:  # pragma: no cover - network dependent
+            errors.append(f"{api_base} connection error: {exc}")
             continue
 
-        prices[symbol.upper()] = price
+        body_snippet = response.text[:200]
+        content_type = response.headers.get("Content-Type", "")
 
-    return prices
+        if response.status_code != 200:
+            errors.append(
+                f"{api_base} status {response.status_code}; content-type: {content_type}; body: {body_snippet}"
+            )
+            continue
+
+        if "json" not in content_type:
+            log(f"Warning: unexpected content type from Bybit ({api_base}): {content_type}")
+
+        try:
+            payload = response.json()
+        except json.JSONDecodeError as decode_error:
+            errors.append(f"{api_base} JSON decode error: {decode_error}")
+            continue
+
+        if payload.get("retCode") != 0:
+            errors.append(
+                f"{api_base} retCode {payload.get('retCode')}: {payload.get('retMsg')} (trace {payload.get('traceId')})"
+            )
+            continue
+
+        tickers = payload.get("result", {}).get("list", [])
+        prices: Dict[str, float] = {}
+
+        for entry in tickers:
+            symbol = entry.get("symbol")
+            last_price = entry.get("lastPrice")
+            if not symbol or last_price in (None, "", "0"):
+                continue
+
+            base_symbol = extract_base_symbol(symbol)
+            if base_symbol in PRIMARY_COINS:
+                continue  # skip BTC and ETH because the focus is on altcoins
+
+            try:
+                price = float(last_price)
+            except (TypeError, ValueError):
+                continue
+
+            prices[symbol.upper()] = price
+
+        return prices
+
+    # All endpoints failed; raise a detailed summary to surface the block reason.
+    detail = "; ".join(errors) if errors else "All Bybit endpoints failed with unknown errors."
+    raise RuntimeError(detail)
 
 
 def send_notification(title: str, message: str) -> None:
@@ -236,9 +268,13 @@ def run_monitor() -> None:
     previous_prices: Dict[str, float] = {}
     iteration = 0
 
+    fallback_note = ""
+    if API_FALLBACK_BASE and API_FALLBACK_BASE.rstrip("/") != API_BASE.rstrip("/"):
+        fallback_note = f"; fallback {API_FALLBACK_BASE.rstrip('/')}{API_PATH}"
+
     log(
         "Using Bybit endpoint "
-        f"{API_BASE.rstrip('/')}{API_PATH}?category=linear (override with BYBIT_API_BASE)"
+        f"{API_BASE.rstrip('/')}{API_PATH}?category=linear (override with BYBIT_API_BASE){fallback_note}"
     )
 
     while True:
