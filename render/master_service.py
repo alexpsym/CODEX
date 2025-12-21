@@ -497,6 +497,13 @@ LOG_VIEWER_TEMPLATE = """<!DOCTYPE html>
         #save-log-btn { background: #22c55e; color: #052e16; }
         #log-box { background: #0a0f1b; color: #e5e7eb; border-radius: 8px; padding: 0.75rem; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 320px; border: 1px solid #1f2937; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
         .badge { display: inline-block; padding: 0.35rem 0.7rem; border-radius: 999px; background: #1f2937; color: #cbd5e1; font-weight: 700; }
+        .settings-card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 1rem; margin: 1rem 0; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
+        .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; margin-top: 0.5rem; }
+        .settings-grid label { display: flex; flex-direction: column; gap: 0.35rem; font-weight: 700; color: #cbd5e1; }
+        .settings-grid input { padding: 0.55rem 0.75rem; border-radius: 10px; border: 1px solid #1f2937; background: #0a0f1b; color: #e5e7eb; }
+        .secondary { background: #1f2937; color: #cbd5e1; }
+        .settings-header { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+        .settings-header .meta { margin: 0; }
     </style>
 </head>
 <body data-script-name=\"{script_name}\">
@@ -506,6 +513,27 @@ LOG_VIEWER_TEMPLATE = """<!DOCTYPE html>
         <span class=\"badge\" id=\"line-count\">0 lines</span>
         <button id=\"refresh-btn\">Refresh</button>
         <button id=\"save-log-btn\">Save log</button>
+    </div>
+    <div class=\"settings-card\" id=\"bybit-settings\" style=\"display:none;\">
+        <div class=\"settings-header\">
+            <div>
+                <strong>Bybit monitor settings</strong>
+                <p class=\"meta\">Adjust scan interval and alert threshold without restarting.</p>
+            </div>
+            <span class=\"badge\" id=\"bybit-settings-status\">&nbsp;</span>
+        </div>
+        <div class=\"settings-grid\">
+            <label>Wait between scans (seconds)
+                <input type=\"number\" min=\"1\" step=\"1\" id=\"bybit-wait-seconds\" />
+            </label>
+            <label>Alert threshold (% change)
+                <input type=\"number\" min=\"0.1\" step=\"0.1\" id=\"bybit-threshold\" />
+            </label>
+        </div>
+        <div class=\"controls\">
+            <button id=\"bybit-save-settings\">Save settings</button>
+            <button class=\"secondary\" id=\"bybit-reload-settings\">Reset</button>
+        </div>
     </div>
     <pre id=\"log-box\">Loading logs...</pre>
 
