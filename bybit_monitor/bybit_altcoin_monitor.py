@@ -22,12 +22,20 @@ from urllib3.util.retry import Retry
 
 API_BASE = os.getenv("BYBIT_API_BASE", "https://api.bybit.com")
 API_FALLBACK_BASE = os.getenv("BYBIT_API_FALLBACK_BASE") or "https://api.bytick.com"
+API_BASES = [
+    base.strip()
+    for base in os.getenv("BYBIT_API_BASES", "").split(",")
+    if base.strip()
+]
 API_PATH = "/v5/market/tickers"
 WAIT_SECONDS = 300  # 5 minutes
 ERROR_WAIT_SECONDS = 60
 PERCENT_THRESHOLD = 5.0
 STABLECOIN_SUFFIXES = ("USDT", "USDC", "USDD", "USD")
 PRIMARY_COINS = {"BTC", "ETH"}
+
+_session: requests.Session | None = None
+_target_logged = False
 
 _session: requests.Session | None = None
 _target_logged = False
@@ -92,7 +100,16 @@ def extract_base_symbol(symbol: str) -> str:
 
 
 def _iter_api_bases() -> list[str]:
-    bases = [API_BASE.rstrip("/")]
+    bases: list[str] = []
+
+    for base in API_BASES:
+        normalized = base.rstrip("/")
+        if normalized and normalized not in bases:
+            bases.append(normalized)
+
+    primary = API_BASE.rstrip("/")
+    if primary not in bases:
+        bases.append(primary)
 
     # Use a documented fallback host so we can switch regions when the primary is blocked.
     if API_FALLBACK_BASE:
@@ -111,6 +128,8 @@ def _build_headers() -> Dict[str, str]:
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         ),
         "Accept": os.getenv("BYBIT_API_ACCEPT", "application/json"),
+        "Accept-Language": os.getenv("BYBIT_API_ACCEPT_LANGUAGE", "en-US,en;q=0.9"),
+        "Connection": "keep-alive",
     }
 
 
@@ -121,6 +140,7 @@ def fetch_altcoin_prices() -> Dict[str, float]:
     headers = _build_headers()
     session = _get_session()
     errors: list[str] = []
+    timeout = float(os.getenv("BYBIT_API_TIMEOUT", "20"))
 
     for api_base in _iter_api_bases():
         url = f"{api_base}{API_PATH}"
@@ -130,7 +150,7 @@ def fetch_altcoin_prices() -> Dict[str, float]:
         _log_request_target(prepared.url or url, headers)
 
         try:
-            response = session.send(prepared, timeout=20)
+            response = session.send(prepared, timeout=timeout)
         except requests.RequestException as exc:  # pragma: no cover - network dependent
             errors.append(f"{api_base} connection error: {exc}")
             continue
@@ -139,6 +159,11 @@ def fetch_altcoin_prices() -> Dict[str, float]:
         content_type = response.headers.get("Content-Type", "")
 
         if response.status_code != 200:
+            log(
+                "Bybit request failed; "
+                f"endpoint={api_base}, status={response.status_code}, "
+                f"content-type={content_type}, body preview: {body_snippet}"
+            )
             errors.append(
                 f"{api_base} status {response.status_code}; content-type: {content_type}; body: {body_snippet}"
             )
@@ -183,6 +208,7 @@ def fetch_altcoin_prices() -> Dict[str, float]:
 
     # All endpoints failed; raise a detailed summary to surface the block reason.
     detail = "; ".join(errors) if errors else "All Bybit endpoints failed with unknown errors."
+    log(f"All configured Bybit endpoints failed. Details: {detail}")
     raise RuntimeError(detail)
 
 
@@ -268,13 +294,10 @@ def run_monitor() -> None:
     previous_prices: Dict[str, float] = {}
     iteration = 0
 
-    fallback_note = ""
-    if API_FALLBACK_BASE and API_FALLBACK_BASE.rstrip("/") != API_BASE.rstrip("/"):
-        fallback_note = f"; fallback {API_FALLBACK_BASE.rstrip('/')}{API_PATH}"
-
+    api_targets = ", ".join(f"{base}{API_PATH}" for base in _iter_api_bases())
     log(
-        "Using Bybit endpoint "
-        f"{API_BASE.rstrip('/')}{API_PATH}?category=linear (override with BYBIT_API_BASE){fallback_note}"
+        "Using Bybit endpoint sequence "
+        f"[{api_targets}]?category=linear (override with BYBIT_API_BASE/BYBIT_API_BASES)"
     )
 
     while True:
