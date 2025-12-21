@@ -7,6 +7,7 @@ import random
 import logging
 import hashlib
 from datetime import datetime, timezone
+from bybit_credentials import resolve_bybit_credentials
 
 import asyncio
 import requests
@@ -71,7 +72,7 @@ def get_debug_logger() -> logging.Logger:
 
 def get_auth_headers() -> dict:
     """Return request headers with API key or a generic user agent."""
-    api_key = os.getenv("BYBIT_API_KEY")
+    _mode, api_key, _secret, _base_url, _key_source = resolve_bybit_credentials()
     if api_key:
         return {"X-BYBIT-API-KEY": api_key}
     return {"User-Agent": "VolumeScannerBot/1.0"}

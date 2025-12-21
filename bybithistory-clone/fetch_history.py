@@ -7,6 +7,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Generator, List, Tuple
 
 from env_helpers import load_bybit_live_env
+from bybit_credentials import resolve_bybit_credentials
 
 BRISBANE_TZ = timezone(timedelta(hours=10))
 
@@ -311,10 +312,12 @@ def export_balance_history(months: int = 12) -> str:
         Name of the saved XLSX file.
     """
     # pylint: disable=too-many-locals,too-many-branches
-    api_key = os.environ.get("BYBIT_API_KEY")
-    api_secret = os.environ.get("BYBIT_API_SECRET")
+    _mode, api_key, api_secret, _base_url, _key_source = resolve_bybit_credentials()
     if not api_key or not api_secret:
-        raise EnvironmentError("BYBIT_API_KEY and BYBIT_API_SECRET must be set")
+        raise EnvironmentError(
+            "Bybit API credentials are missing. Provide BYBIT_API_KEY1/BYBIT_API_SECRET1 "
+            "(or KEY2 for demo) or legacy BYBIT_API_KEY/BYBIT_API_SECRET."
+        )
 
     if HTTP is None or Workbook is None:  # pragma: no cover - optional deps
         raise ImportError("pybit and openpyxl modules are required")
@@ -405,10 +408,12 @@ def download_history(
         CSV filename when rows are present; otherwise ``None``.
     """
     # pylint: disable=too-many-locals,too-many-branches
-    api_key = os.environ.get("BYBIT_API_KEY")
-    api_secret = os.environ.get("BYBIT_API_SECRET")
+    _mode, api_key, api_secret, _base_url, _key_source = resolve_bybit_credentials()
     if not api_key or not api_secret:
-        raise EnvironmentError("BYBIT_API_KEY and BYBIT_API_SECRET must be set")
+        raise EnvironmentError(
+            "Bybit API credentials are missing. Provide BYBIT_API_KEY1/BYBIT_API_SECRET1 "
+            "(or KEY2 for demo) or legacy BYBIT_API_KEY/BYBIT_API_SECRET."
+        )
 
     if HTTP is None:
         raise ImportError("pybit module is required to download history")
