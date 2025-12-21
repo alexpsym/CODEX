@@ -9,19 +9,27 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import os
+import socket
 import sys
 import time
 import traceback
-import urllib.error
-import urllib.request
 from typing import Dict
 
-API_URL = "https://api.bybit.com/v5/market/tickers?category=linear"
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+API_BASE = os.getenv("BYBIT_API_BASE", "https://api.bybit.com")
+API_PATH = "/v5/market/tickers"
 WAIT_SECONDS = 300  # 5 minutes
 ERROR_WAIT_SECONDS = 60
 PERCENT_THRESHOLD = 5.0
 STABLECOIN_SUFFIXES = ("USDT", "USDC", "USDD", "USD")
 PRIMARY_COINS = {"BTC", "ETH"}
+
+_session: requests.Session | None = None
+_target_logged = False
 
 try:  # Optional helper for desktop notifications
     from plyer import notification as _plyer_notification
@@ -37,6 +45,43 @@ def log(message: str) -> None:
     print(f"[{now}] {message}", flush=True)
 
 
+def _get_session() -> requests.Session:
+    global _session
+
+    if _session is None:
+        retries = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=("GET",),
+        )
+        adapter = HTTPAdapter(max_retries=retries)
+        session = requests.Session()
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        _session = session
+
+    return _session
+
+
+def _log_request_target(url: str, headers: Dict[str, str]) -> None:
+    global _target_logged
+
+    host_suffix = ""
+
+    if not _target_logged:
+        try:
+            hostname = requests.utils.urlparse(url).hostname or "<unknown>"
+            ip_address = socket.gethostbyname(hostname)
+            host_suffix = f"; resolved host: {hostname} ({ip_address})"
+        except Exception:
+            host_suffix = "; resolved host: <unavailable>"
+
+        _target_logged = True
+
+    log(f"Preparing Bybit request -> URL: {url}; headers: {headers}{host_suffix}")
+
+
 def extract_base_symbol(symbol: str) -> str:
     """Return the base asset name by stripping common quote currency suffixes."""
     uppercase_symbol = symbol.upper()
@@ -48,37 +93,36 @@ def extract_base_symbol(symbol: str) -> str:
 
 def fetch_altcoin_prices() -> Dict[str, float]:
     """Ask Bybit for all linear perpetual futures prices and keep altcoins only."""
-    request = urllib.request.Request(
-        API_URL,
-        headers={
-            "User-Agent": "Mozilla/5.0 (compatible; BybitAltcoinMonitor/1.0)",
-            "Accept": "application/json",
-        },
-    )
+    url = f"{API_BASE.rstrip('/')}{API_PATH}"
+    params = {"category": "linear"}
+    headers = {
+        "User-Agent": "BybitAltcoinMonitor/1.1 (+https://api.bybit.com)",
+        "Accept": "application/json",
+    }
+
+    session = _get_session()
+    prepared = session.prepare_request(requests.Request("GET", url, headers=headers, params=params))
+    _log_request_target(prepared.url or url, headers)
 
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            status_code = response.getcode()
-            raw_payload = response.read()
-    except urllib.error.HTTPError as http_error:  # pragma: no cover - depends on network
-        detail = ""
-        try:
-            detail = http_error.read().decode("utf-8", "ignore")
-        except Exception:  # pragma: no cover - very specific
-            detail = "<no additional error body provided>"
+        response = session.send(prepared, timeout=20)
+    except requests.RequestException as exc:  # pragma: no cover - network dependent
+        raise RuntimeError(f"Connection error while contacting Bybit: {exc}") from exc
+
+    body_snippet = response.text[:200]
+
+    if response.status_code != 200:
         raise RuntimeError(
-            f"HTTP error {http_error.code} - {http_error.reason}. Response snippet: {detail[:200]}"
-        ) from http_error
-    except urllib.error.URLError as url_error:  # pragma: no cover - depends on network
-        raise RuntimeError(f"Connection error: {url_error.reason}") from url_error
-    except Exception as exc:  # pragma: no cover - unexpected edge cases
-        raise RuntimeError(f"Unexpected problem while contacting Bybit: {exc}") from exc
+            f"Bybit replied with unexpected status {response.status_code}. "
+            f"Body preview: {body_snippet}"
+        )
 
-    if status_code != 200:
-        raise RuntimeError(f"Bybit replied with unexpected status code {status_code}.")
+    content_type = response.headers.get("Content-Type", "")
+    if "json" not in content_type:
+        log(f"Warning: unexpected content type from Bybit: {content_type}")
 
     try:
-        payload = json.loads(raw_payload.decode("utf-8"))
+        payload = response.json()
     except json.JSONDecodeError as decode_error:
         raise RuntimeError("Could not decode Bybit's response as JSON.") from decode_error
 
@@ -191,6 +235,11 @@ def run_monitor() -> None:
     """Continuous monitoring loop."""
     previous_prices: Dict[str, float] = {}
     iteration = 0
+
+    log(
+        "Using Bybit endpoint "
+        f"{API_BASE.rstrip('/')}{API_PATH}?category=linear (override with BYBIT_API_BASE)"
+    )
 
     while True:
         iteration += 1
