@@ -39,7 +39,7 @@ PRIMARY_COINS = {"BTC", "ETH"}
 
 _session: requests.Session | None = None
 _target_logged = False
-_block_logged = False
+_logged_classifications: set[str] = set()
 
 try:  # Optional helper for desktop notifications
     from plyer import notification as _plyer_notification
@@ -55,13 +55,42 @@ def log(message: str) -> None:
     print(f"[{now}] {message}", flush=True)
 
 
+def _log_classification_once(kind: str, detail: str, hint: str | None = None) -> None:
+    """Log classification-specific details once per attempt window."""
+
+    if kind not in _logged_classifications:
+        _logged_classifications.add(kind)
+        log(detail)
+        if hint:
+            log(hint)
+
+
 class BybitBlockedError(RuntimeError):
     """Raised when Bybit returns a blocked response (e.g., 403 HTML)."""
 
-    def __init__(self, message: str, *, status: int | None = None, wait_hint: int | None = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        wait_hint: int | None = None,
+        classification: str | None = None,
+        hint: str | None = None,
+    ):
         super().__init__(message)
         self.status = status
         self.wait_hint = wait_hint
+        self.classification = classification or "BLOCKED_WAF"
+        self.hint = hint
+
+
+class AccessIssueError(RuntimeError):
+    """Raised when a fallback market source is restricted or unavailable."""
+
+    def __init__(self, classification: str, detail: str, hint: str | None = None):
+        super().__init__(detail)
+        self.classification = classification
+        self.hint = hint
 
 
 def _get_session() -> requests.Session:
@@ -198,10 +227,36 @@ def _fetch_fallback_prices() -> Dict[str, float]:
     }
 
     response = session.get(url, timeout=timeout, headers=headers)
-    if response.status_code != 200:
-        raise RuntimeError(
-            f"Fallback source failed; status={response.status_code}; body={response.text[:200]}"
+    content_type = response.headers.get("Content-Type", "")
+    body_preview = response.text[:200]
+
+    if response.status_code == 451 or "restricted location" in body_preview.lower():
+        detail = (
+            "ACCESS RESTRICTED (Binance 451) — restricted location / eligibility. "
+            f"Status={response.status_code}; content-type={content_type}; body: {body_preview}"
         )
+        hint = "Binance access restricted from this location; fallback source must be non-restricted."
+        _log_classification_once("GEO_RESTRICTED", detail, hint)
+        raise AccessIssueError("GEO_RESTRICTED", detail, hint)
+
+    if response.status_code == 403 and "html" in content_type.lower():
+        detail = (
+            "ACCESS BLOCKED (Binance 403 HTML) — likely egress or WAF restriction. "
+            f"Status={response.status_code}; content-type={content_type}; body: {body_preview}"
+        )
+        hint = (
+            "This host is blocked when reaching Binance; try a different egress or non-restricted source."
+        )
+        _log_classification_once("BLOCKED_WAF", detail, hint)
+        raise AccessIssueError("BLOCKED_WAF", detail, hint)
+
+    if response.status_code != 200:
+        detail = (
+            f"Fallback source failed; status={response.status_code}; "
+            f"content-type={content_type}; body={body_preview}"
+        )
+        _log_classification_once("DOWN", detail, None)
+        raise AccessIssueError("DOWN", detail)
 
     try:
         payload = response.json()
@@ -278,19 +333,23 @@ def fetch_altcoin_prices() -> Dict[str, float]:
             content_type = response.headers.get("Content-Type", "")
 
             if response.status_code == 403 and "html" in content_type.lower():
-                global _block_logged
                 blocked_detail = (
                     f"endpoint={api_base}, auth={'yes' if with_auth else 'no'}, "
                     f"status={response.status_code}, content-type={content_type}, "
                     f"body preview: {body_snippet}"
                 )
                 blocked_errors.append(blocked_detail)
-                if not _block_logged:
-                    _block_logged = True
-                    log(
-                        "Bybit returned 403 HTML (likely blocked). "
+                _log_classification_once(
+                    "BLOCKED_WAF",
+                    (
+                        "ACCESS BLOCKED (Bybit 403 HTML) — likely WAF/egress restriction. "
                         f"Details: {blocked_detail}"
-                    )
+                    ),
+                    hint=(
+                        "This host is being blocked from Render egress; try a different region/provider, "
+                        "or proxy the request through allowed egress, or use authenticated + official SDK endpoints."
+                    ),
+                )
                 if not with_auth and have_auth:
                     log("Unauthenticated request blocked; retrying once with API credentials...")
                     continue
@@ -328,14 +387,21 @@ def fetch_altcoin_prices() -> Dict[str, float]:
             if not prices:
                 errors.append(f"{api_base} returned no usable prices.")
                 continue
-            _block_logged = False  # success clears one-time block log suppression
             return prices
 
         if blocked_for_base:
             continue
 
     if blocked_errors:
-        raise BybitBlockedError("All Bybit endpoints appear blocked.", status=403)
+        raise BybitBlockedError(
+            "All Bybit endpoints appear blocked.",
+            status=403,
+            classification="BLOCKED_WAF",
+            hint=(
+                "This host is being blocked from Render egress; consider alternate egress, "
+                "region, or authenticated official SDK usage."
+            ),
+        )
 
     # All endpoints failed; raise a detailed summary to surface the block reason.
     detail = "; ".join(errors) if errors else "All Bybit endpoints failed with unknown errors."
@@ -433,8 +499,8 @@ def run_monitor() -> None:
     )
 
     while True:
-        global _block_logged
-        _block_logged = False  # allow one detailed block log per attempt window
+        global _logged_classifications
+        _logged_classifications = set()
         iteration += 1
         log(f"Starting price check #{iteration}...")
 
@@ -445,18 +511,33 @@ def run_monitor() -> None:
         except BybitBlockedError as exc:
             blocked_streak += 1
             wait_seconds = BLOCK_BACKOFFS[min(blocked_streak - 1, len(BLOCK_BACKOFFS) - 1)]
-            log(
-                f"Bybit appears blocked (status {exc.status or 403}). "
-                "Trying fallback market data before backing off."
+            _log_classification_once(
+                exc.classification,
+                (
+                    f"ACCESS BLOCKED (status {exc.status or 403}) — likely WAF/egress restriction. "
+                    "Trying fallback market data before backing off."
+                ),
+                hint=exc.hint,
             )
             try:
                 prices = _fetch_fallback_prices()
                 source_label = "Fallback futures"
                 blocked_streak = 0  # success via fallback should reset aggressive backoff
+            except AccessIssueError as fallback_exc:
+                detail = (
+                    f"Fallback market data unavailable ({fallback_exc.classification}): {fallback_exc}"
+                )
+                _log_classification_once(fallback_exc.classification, detail, fallback_exc.hint)
+                log(
+                    "Unable to reach Bybit or fallback due to access restrictions. "
+                    f"Waiting {wait_seconds} seconds before retrying."
+                )
+                progress_bar(wait_seconds, "Block backoff")
+                continue
             except Exception as fallback_exc:
                 log(f"Fallback market data unavailable: {fallback_exc}")
                 log(
-                    "DATA SOURCE DOWN/BLOCKED: Unable to reach Bybit or fallback. "
+                    "Access to configured data sources is blocked or restricted. "
                     f"Waiting {wait_seconds} seconds before retrying."
                 )
                 progress_bar(wait_seconds, "Block backoff")
