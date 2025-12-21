@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlparse
 from uuid import uuid4
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
@@ -656,6 +656,46 @@ async def stop_script(script_name: str) -> JSONResponse:
 @app.get("/logs/", include_in_schema=False)
 async def logs_index() -> RedirectResponse:
     return RedirectResponse("/")
+
+
+@app.get("/api/logs/", include_in_schema=False)
+async def api_logs_root(
+    request: Request,
+    cursor: int = 0,
+    script: Optional[str] = None,
+    name: Optional[str] = None,
+) -> JSONResponse:
+    """Compatibility endpoint for fetching logs without embedding the script in the path.
+
+    The log viewer historically called `/api/logs/` with only a `cursor` query param. Try to
+    resolve the script name from explicit `script`/`name` params or, as a last resort, from
+    the referer header that points back to `/logs/view/<script>`.
+    """
+
+    script_name = script or name
+
+    if not script_name:
+        referer = request.headers.get("referer") or request.headers.get("referrer")
+        if referer:
+            parsed = urlparse(referer)
+            path = parsed.path.rstrip("/")
+            if path.startswith("/logs/view/"):
+                script_name = unquote(path.split("/logs/view/", 1)[1])
+
+    if not script_name:
+        # Keep the shape consistent with the standard log endpoint while remaining a 200
+        # response so the UI can render gracefully.
+        return JSONResponse({"lines": [], "cursor": 0, "detail": "No script specified"})
+
+    try:
+        snapshot = script_manager.log_snapshot(script_name, cursor)
+        return JSONResponse(snapshot)
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - runtime protection
+        detail = f"Failed to read logs for {script_name}: {exc}"
+        print(detail)
+        raise HTTPException(status_code=500, detail=detail) from exc
 
 
 @app.get("/api/logs/{script_name:path}")
