@@ -8,6 +8,7 @@
     let scriptsCache = [];
     let selectedCategory = null;
     let refreshInFlight = null;
+    let bybitSettingsEditing = false;
 
     const setStatus = (message, isError = false) => {
         status.textContent = message;
@@ -197,11 +198,19 @@
                     settingsBadge.className = 'badge ' + (isError ? 'badge-error' : '');
                 };
 
+                const markEditing = () => {
+                    bybitSettingsEditing = true;
+                    setSettingsStatus('Editing');
+                };
+
                 loadSettings = async () => {
                     try {
                         const data = await fetchJson('/api/bybit-monitor/settings');
-                        waitInput.value = data.wait_seconds ?? '';
-                        thresholdInput.value = data.percent_threshold ?? '';
+                        if (!bybitSettingsEditing) {
+                            waitInput.value = data.wait_seconds ?? '';
+                            thresholdInput.value = data.percent_threshold ?? '';
+                        }
+                        bybitSettingsEditing = false;
                         setSettingsStatus('Ready');
                     } catch (err) {
                         console.error(err);
@@ -234,6 +243,7 @@
                         const data = await resp.json();
                         waitInput.value = data.wait_seconds ?? '';
                         thresholdInput.value = data.percent_threshold ?? '';
+                        bybitSettingsEditing = false;
                         setSettingsStatus('Saved');
                         return true;
                     } catch (err) {
@@ -254,8 +264,12 @@
 
                 resetBtn.onclick = (event) => {
                     event.preventDefault();
+                    bybitSettingsEditing = false;
                     loadSettings();
                 };
+
+                waitInput.addEventListener('input', markEditing);
+                thresholdInput.addEventListener('input', markEditing);
 
                 persistBybitSettings = () => saveSettings({ silent: true });
 
@@ -319,6 +333,10 @@
 
     const refresh = async () => {
         if (refreshInFlight) return refreshInFlight;
+        if (bybitSettingsEditing) {
+            setStatus('Editing Bybit monitor settings (auto-refresh paused)');
+            return Promise.resolve();
+        }
 
         setStatus('Loading scripts...');
         refreshInFlight = (async () => {
