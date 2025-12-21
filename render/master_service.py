@@ -430,7 +430,7 @@ script_manager = ScriptManager(discover_scripts())
 app = FastAPI(title="Render Master Script", version="1.0")
 
 
-ASSET_VERSION = "v11"
+ASSET_VERSION = "v12"
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"en\">
@@ -454,6 +454,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         button { padding: 0.55rem 0.9rem; border-radius: 10px; border: none; cursor: pointer; font-weight: 700; }
         .start { background: #22c55e; color: #052e16; }
         .stop { background: #ef4444; color: #fff7ed; }
+        .secondary { background: #1f2937; color: #cbd5e1; }
+        .settings-card { margin-top: 0.5rem; padding: 0.75rem; border: 1px solid #1f2937; border-radius: 10px; background: #0d1728; display: flex; flex-direction: column; gap: 0.75rem; }
+        .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.5rem; }
+        .settings-card label { display: flex; flex-direction: column; gap: 0.25rem; font-weight: 700; color: #cbd5e1; font-size: 0.95rem; }
+        .settings-card input { padding: 0.55rem 0.75rem; border-radius: 10px; border: 1px solid #1f2937; background: #0a0f1b; color: #e5e7eb; }
+        .badge { display: inline-block; padding: 0.35rem 0.7rem; border-radius: 999px; background: #1f2937; color: #cbd5e1; font-weight: 700; }
+        .badge-error { background: #7f1d1d; color: #fecdd3; }
         pre { background: #0a0f1b; color: #e5e7eb; border-radius: 8px; padding: 0.75rem; overflow: auto; max-height: 260px; white-space: pre-wrap; margin: 0; }
         .toolbar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; }
         .refresh { background: #3b82f6; color: #eaf2ff; }
