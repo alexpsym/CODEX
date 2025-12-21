@@ -4,6 +4,14 @@
     const refreshBtn = document.getElementById('refresh-btn');
     const lineCount = document.getElementById('line-count');
     const scriptName = (window.RENDER_LOG_VIEW && window.RENDER_LOG_VIEW.scriptName) || '';
+    const settingsCard = document.getElementById('bybit-settings');
+    const waitInput = document.getElementById('bybit-wait-seconds');
+    const thresholdInput = document.getElementById('bybit-threshold');
+    const saveSettingsBtn = document.getElementById('bybit-save-settings');
+    const reloadSettingsBtn = document.getElementById('bybit-reload-settings');
+    const settingsStatus = document.getElementById('bybit-settings-status');
+
+    const isBybitMonitor = scriptName.replace(/-/g, '_') === 'bybit_monitor';
 
     let cachedLines = [];
     let refreshTimer = null;
@@ -72,8 +80,81 @@
     saveBtn?.addEventListener('click', downloadLog);
     refreshBtn?.addEventListener('click', () => fetchLogs({ reset: true }));
 
+    const setSettingsBadge = (text, isError = false) => {
+        if (!settingsStatus) return;
+        settingsStatus.textContent = text;
+        settingsStatus.style.background = isError ? '#7f1d1d' : '#1f2937';
+        settingsStatus.style.color = isError ? '#fecdd3' : '#cbd5e1';
+    };
+
+    const loadSettings = async () => {
+        if (!isBybitMonitor || !settingsCard) return;
+        try {
+            const resp = await fetch('/api/bybit-monitor/settings');
+            if (!resp.ok) {
+                throw new Error(`Failed to load settings (${resp.status})`);
+            }
+            const data = await resp.json();
+            if (waitInput) waitInput.value = data.wait_seconds ?? '';
+            if (thresholdInput) thresholdInput.value = data.percent_threshold ?? '';
+            settingsCard.style.display = 'block';
+            setSettingsBadge('Ready');
+        } catch (err) {
+            console.error(err);
+            setSettingsBadge('Load failed', true);
+        }
+    };
+
+    const saveSettings = async () => {
+        if (!isBybitMonitor || !settingsCard) return;
+        const body = {
+            wait_seconds: Number(waitInput?.value || 0),
+            percent_threshold: Number(thresholdInput?.value || 0),
+        };
+
+        if (saveSettingsBtn) saveSettingsBtn.disabled = true;
+        if (reloadSettingsBtn) reloadSettingsBtn.disabled = true;
+        setSettingsBadge('Saving...');
+
+        try {
+            const resp = await fetch('/api/bybit-monitor/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || `Save failed (${resp.status})`);
+            }
+
+            const data = await resp.json();
+            if (waitInput) waitInput.value = data.wait_seconds ?? '';
+            if (thresholdInput) thresholdInput.value = data.percent_threshold ?? '';
+            setSettingsBadge('Saved');
+        } catch (err) {
+            console.error(err);
+            setSettingsBadge('Save failed', true);
+            alert(err.message || 'Unable to save settings');
+        } finally {
+            if (saveSettingsBtn) saveSettingsBtn.disabled = false;
+            if (reloadSettingsBtn) reloadSettingsBtn.disabled = false;
+        }
+    };
+
+    saveSettingsBtn?.addEventListener('click', (event) => {
+        event.preventDefault();
+        saveSettings();
+    });
+
+    reloadSettingsBtn?.addEventListener('click', (event) => {
+        event.preventDefault();
+        loadSettings();
+    });
+
     refreshTimer = setInterval(fetchLogs, 3000);
     fetchLogs({ reset: true });
+    loadSettings();
 
     window.addEventListener('beforeunload', () => {
         if (refreshTimer) {
