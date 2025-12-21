@@ -189,8 +189,13 @@
                 resetBtn.textContent = 'Reset';
                 resetBtn.className = 'secondary';
 
+                const pushTestBtn = document.createElement('button');
+                pushTestBtn.textContent = 'Send test push';
+                pushTestBtn.className = 'secondary';
+
                 settingsActions.appendChild(saveBtn);
                 settingsActions.appendChild(resetBtn);
+                settingsActions.appendChild(pushTestBtn);
                 settingsCard.appendChild(settingsActions);
 
                 setSettingsStatus = (text, isError = false) => {
@@ -266,6 +271,29 @@
                     event.preventDefault();
                     bybitSettingsEditing = false;
                     loadSettings();
+                };
+
+                pushTestBtn.onclick = async (event) => {
+                    event.preventDefault();
+                    const buttons = [saveBtn, resetBtn, pushTestBtn];
+                    buttons.forEach((btn) => (btn.disabled = true));
+                    setSettingsStatus('Sending test push...');
+                    try {
+                        const resp = await fetch('/api/bybit-monitor/push-test', { method: 'POST' });
+                        const data = await resp.json().catch(() => ({}));
+                        if (!resp.ok) {
+                            const detail = data?.detail || resp.statusText;
+                            throw new Error(detail || 'Push test failed');
+                        }
+                        const detail = data?.detail || 'Test push sent';
+                        setSettingsStatus(detail);
+                    } catch (err) {
+                        console.error(err);
+                        setSettingsStatus('Push test failed', true);
+                        alert(err.message || 'Unable to send test push notification');
+                    } finally {
+                        buttons.forEach((btn) => (btn.disabled = false));
+                    }
                 };
 
                 waitInput.addEventListener('input', markEditing);

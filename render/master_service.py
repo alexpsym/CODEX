@@ -679,6 +679,15 @@ async def update_bybit_monitor_settings(payload: Dict[str, object]) -> JSONRespo
 
 
 
+@app.post("/api/bybit-monitor/push-test")
+async def bybit_monitor_push_test() -> JSONResponse:
+    try:
+        result = bybit_monitor.send_push_test()
+        status_code = 200 if result.get("sent") else 400
+        return JSONResponse(result, status_code=status_code)
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=500, detail=f"Failed to send test push: {exc}") from exc
+
 
 async def _background_start(script: ManagedScript) -> None:
     """Start a script without tying its output or failures to the HTTP response."""

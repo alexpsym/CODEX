@@ -57,6 +57,15 @@ _logged_classifications: set[str] = set()
 _auth_notice_logged = False
 _settings_cache: Dict[str, float] | None = None
 _settings_mtime: float | None = None
+_push_warning_given = False
+_push_success_logged = False
+_push_failure_logged = False
+_push_config_logged = False
+
+PUSHOVER_TOKEN = os.getenv("PUSHOVER_TOKEN") or os.getenv("PUSHOVER_API_TOKEN")
+PUSHOVER_USER = os.getenv("PUSHOVER_USER") or os.getenv("PUSHOVER_USER_KEY")
+PUSHOVER_DEVICE = os.getenv("PUSHOVER_DEVICE")
+PUSHOVER_PRIORITY = os.getenv("PUSHOVER_PRIORITY")
 
 try:  # Optional helper for desktop notifications
     from plyer import notification as _plyer_notification
@@ -136,6 +145,24 @@ def log(message: str) -> None:
     print(f"[{now}] {message}", flush=True)
 
 
+def log_push_state() -> None:
+    """Log the push notification configuration state (without secrets)."""
+
+    if PUSHOVER_TOKEN and PUSHOVER_USER:
+        device_note = f" device={PUSHOVER_DEVICE}" if PUSHOVER_DEVICE else ""
+        priority_note = (
+            f" priority={PUSHOVER_PRIORITY}" if PUSHOVER_PRIORITY is not None and str(PUSHOVER_PRIORITY).strip() else ""
+        )
+        log(
+            "Push notifications ready via Pushover: token/user set;"
+            f" key_source=Pushover{device_note}{priority_note}"
+        )
+    else:
+        log(
+            "Push notifications disabled: set PUSHOVER_TOKEN and PUSHOVER_USER(_KEY) env vars to enable remote alerts."
+        )
+
+
 def _log_classification_once(kind: str, detail: str, hint: str | None = None) -> None:
     """Log classification-specific details once per attempt window."""
 
@@ -144,6 +171,66 @@ def _log_classification_once(kind: str, detail: str, hint: str | None = None) ->
         log(detail)
         if hint:
             log(hint)
+
+
+def send_push_notification(title: str, message: str) -> bool:
+    """Send a push notification via Pushover when configured."""
+
+    global _push_warning_given, _push_success_logged, _push_failure_logged, _push_config_logged
+
+    if not PUSHOVER_TOKEN or not PUSHOVER_USER:
+        if not _push_warning_given:
+            _push_warning_given = True
+            log(
+                "Push notifications are disabled: provide PUSHOVER_TOKEN and PUSHOVER_USER(_KEY) env vars "
+                "to enable them."
+            )
+        return False
+
+    if not _push_config_logged:
+        _push_config_logged = True
+        log(
+            "Push notifications enabled via Pushover; device-specific targeting will be used if provided."
+        )
+
+    payload = {
+        "token": PUSHOVER_TOKEN,
+        "user": PUSHOVER_USER,
+        "title": title,
+        "message": message,
+    }
+
+    if PUSHOVER_DEVICE:
+        payload["device"] = PUSHOVER_DEVICE
+    if PUSHOVER_PRIORITY is not None and str(PUSHOVER_PRIORITY).strip():
+        payload["priority"] = str(PUSHOVER_PRIORITY).strip()
+
+    try:
+        response = _get_session().post("https://api.pushover.net/1/messages.json", data=payload, timeout=10)
+        response.raise_for_status()
+        if not _push_success_logged:
+            _push_success_logged = True
+            _push_failure_logged = False
+            log("Push notification sent successfully via Pushover.")
+        return True
+    except Exception as exc:
+        if not _push_failure_logged:
+            _push_failure_logged = True
+            log(f"Pushover notification attempt failed: {exc}")
+        return False
+
+
+def send_push_test() -> Dict[str, object]:
+    """Trigger a push notification test and report the outcome."""
+
+    success = send_push_notification(
+        "Bybit monitor push test",
+        "If you received this, Pushover alerts are working for bybit_monitor.",
+    )
+    detail = (
+        "Test push sent successfully via Pushover." if success else "Push notifications are disabled or failed to send."
+    )
+    return {"sent": success, "detail": detail}
 
 
 class BybitBlockedError(RuntimeError):
@@ -495,10 +582,16 @@ def fetch_altcoin_prices() -> Dict[str, float]:
 
 
 def send_notification(title: str, message: str) -> None:
-    """Try to show a desktop notification. Fall back to a console alert."""
+    """Send push + desktop notifications, falling back to console beeps."""
+
     global _notification_warning_given
     notification_sent = False
 
+    # Push notification (Pushover)
+    push_sent = send_push_notification(title, message)
+    notification_sent = notification_sent or push_sent
+
+    # Desktop notification where supported
     if _plyer_notification is not None:
         try:
             _plyer_notification.notify(
@@ -516,8 +609,8 @@ def send_notification(title: str, message: str) -> None:
         if not _notification_warning_given:
             _notification_warning_given = True
             log(
-                "Desktop notifications are unavailable. Install them by running 'pip install plyer' "
-                "and then restart this script."
+                "Desktop/push notifications unavailable. Install 'plyer' for desktop and set Pushover "
+                "env vars for push alerts, then restart this script."
             )
         # Audible fallback if possible
         try:  # pragma: no cover - OS specific
@@ -721,6 +814,7 @@ def main() -> None:
         f"{BYBIT_MODE} base_url={PRIMARY_API_BASE} auth={'yes' if auth_enabled else 'no'} "
         f"key_source={BYBIT_KEY_SOURCE}"
     )
+    log_push_state()
     if not auth_enabled:
         global _auth_notice_logged
         _auth_notice_logged = True
