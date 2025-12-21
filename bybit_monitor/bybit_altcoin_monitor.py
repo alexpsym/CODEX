@@ -16,13 +16,41 @@ import sys
 import time
 import traceback
 from hashlib import sha256
-from typing import Dict, Iterable
+from typing import Dict, Iterable, Tuple
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-API_BASE = os.getenv("BYBIT_API_BASE", "https://api.bybit.com")
+# Credential + endpoint resolution -------------------------------------------------
+
+
+def get_bybit_creds() -> Tuple[str, str, str, str, str]:
+    """Resolve Bybit credentials and base URL using existing Render env vars."""
+
+    mode = os.getenv("BYBIT_ENV", "live").strip().lower() or "live"
+
+    if mode in {"demo", "testnet", "paper"}:
+        key = os.getenv("BYBIT_API_KEY2", "")
+        secret = os.getenv("BYBIT_API_SECRET2", "")
+        base_url = os.getenv(
+            "BYBIT_BASE_URL_TESTNET",
+            os.getenv("BYBIT_API_BASE_TESTNET", "https://api-testnet.bybit.com"),
+        )
+        key_source = "KEY2"
+    else:
+        key = os.getenv("BYBIT_API_KEY1", "")
+        secret = os.getenv("BYBIT_API_SECRET1", "")
+        base_url = os.getenv(
+            "BYBIT_BASE_URL",
+            os.getenv("BYBIT_API_BASE", "https://api.bybit.com"),
+        )
+        key_source = "KEY1"
+
+    return mode, key, secret, base_url.rstrip("/"), key_source
+
+
+BYBIT_MODE, BYBIT_API_KEY, BYBIT_API_SECRET, PRIMARY_API_BASE, BYBIT_KEY_SOURCE = get_bybit_creds()
 API_FALLBACK_BASE = os.getenv("BYBIT_API_FALLBACK_BASE") or "https://api.bytick.com"
 API_BASES = [
     base.strip()
@@ -40,6 +68,7 @@ PRIMARY_COINS = {"BTC", "ETH"}
 _session: requests.Session | None = None
 _target_logged = False
 _logged_classifications: set[str] = set()
+_auth_notice_logged = False
 
 try:  # Optional helper for desktop notifications
     from plyer import notification as _plyer_notification
@@ -146,8 +175,8 @@ def _iter_api_bases() -> list[str]:
         if normalized and normalized not in bases:
             bases.append(normalized)
 
-    primary = API_BASE.rstrip("/")
-    if primary not in bases:
+    primary = PRIMARY_API_BASE.rstrip("/")
+    if primary and primary not in bases:
         bases.append(primary)
 
     # Use a documented fallback host so we can switch regions when the primary is blocked.
@@ -173,8 +202,8 @@ def _build_headers() -> Dict[str, str]:
 
 
 def _auth_headers(params: Dict[str, str]) -> Dict[str, str]:
-    api_key = os.getenv("BYBIT_API_KEY")
-    api_secret = os.getenv("BYBIT_API_SECRET")
+    api_key = BYBIT_API_KEY
+    api_secret = BYBIT_API_SECRET
     if not api_key or not api_secret:
         return {}
 
@@ -305,7 +334,11 @@ def fetch_altcoin_prices() -> Dict[str, float]:
     errors: list[str] = []
     blocked_errors: list[str] = []
     timeout = float(os.getenv("BYBIT_API_TIMEOUT", "20"))
-    have_auth = bool(os.getenv("BYBIT_API_KEY") and os.getenv("BYBIT_API_SECRET"))
+    global _auth_notice_logged
+    have_auth = bool(BYBIT_API_KEY and BYBIT_API_SECRET)
+    if not have_auth and not _auth_notice_logged:
+        _auth_notice_logged = True
+        log(f"Bybit auth disabled: missing KEY/SECRET for selected mode={BYBIT_MODE}.")
 
     for api_base in _iter_api_bases():
         url = f"{api_base}{API_PATH}"
@@ -495,7 +528,7 @@ def run_monitor() -> None:
     api_targets = ", ".join(f"{base}{API_PATH}" for base in _iter_api_bases())
     log(
         "Using Bybit endpoint sequence "
-        f"[{api_targets}]?category=linear (override with BYBIT_API_BASE/BYBIT_API_BASES)"
+        f"[{api_targets}]?category=linear (primary from {PRIMARY_API_BASE}; override with BYBIT_BASE_URL/BYBIT_API_BASE/BYBIT_API_BASES)"
     )
 
     while True:
@@ -616,6 +649,16 @@ def main() -> None:
         f"price moves +/-{PERCENT_THRESHOLD:.1f}% compared to the previous reading."
     )
     log("Press Ctrl+C at any time to stop the script safely.")
+    auth_enabled = bool(BYBIT_API_KEY and BYBIT_API_SECRET)
+    log(
+        "BYBIT mode="
+        f"{BYBIT_MODE} base_url={PRIMARY_API_BASE} auth={'yes' if auth_enabled else 'no'} "
+        f"key_source={BYBIT_KEY_SOURCE}"
+    )
+    if not auth_enabled:
+        global _auth_notice_logged
+        _auth_notice_logged = True
+        log(f"Bybit auth disabled: missing KEY/SECRET for selected mode={BYBIT_MODE}.")
     if _plyer_notification is None:
         log("Desktop alerts need the 'plyer' package. Install it with: pip install plyer")
     run_monitor()
