@@ -12,6 +12,7 @@ import time
 from urllib.parse import urlencode
 
 import requests
+from bybit_credentials import resolve_bybit_credentials
 
 BYBIT_LIVE_ENV_PATH = Path(r"E:/ENV/bybit-live.env")
 
@@ -154,10 +155,12 @@ class BybitAdapter(ExchangeAdapter):
         coin = config.get("account_coin", "USDT")
         account_type = config.get("account_type", "UNIFIED")
 
-        api_key = os.environ.get("BYBIT_API_KEY")
-        api_secret = os.environ.get("BYBIT_API_SECRET")
+        _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials()
         if not api_key or not api_secret:
-            raise EnvironmentError("BYBIT_API_KEY and BYBIT_API_SECRET must be set")
+            raise EnvironmentError(
+                "Bybit API credentials are missing. Provide BYBIT_API_KEY1/BYBIT_API_SECRET1 "
+                "(or KEY2 for demo) or legacy BYBIT_API_KEY/BYBIT_API_SECRET."
+            )
 
         params = {"accountType": account_type, "coin": coin}
         query = urlencode(params)
@@ -173,7 +176,7 @@ class BybitAdapter(ExchangeAdapter):
             "X-BAPI-RECV-WINDOW": recv_window,
         }
 
-        url = f"{BYBIT_BALANCE_URL}?{query}"
+        url = f"{base_url.rstrip('/') + '/v5/account/wallet-balance'}?{query}"
         resp = requests.get(url, headers=headers, timeout=10)
         resp.raise_for_status()
 

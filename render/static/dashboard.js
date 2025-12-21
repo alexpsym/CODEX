@@ -8,6 +8,7 @@
     let scriptsCache = [];
     let selectedCategory = null;
     let refreshInFlight = null;
+    let bybitSettingsEditing = false;
 
     const setStatus = (message, isError = false) => {
         status.textContent = message;
@@ -33,10 +34,8 @@
 
     const buildScriptPath = (name) => encodeURIComponent(name).replace(/%2F/g, '/');
 
-    const modify = async (script, action, button, { openTab = true } = {}) => {
+    const modify = async (script, action, button) => {
         const name = script.name;
-        const destination = script?.open_url || `/logs/view/${buildScriptPath(name)}`;
-        const popup = action === 'start' && openTab ? window.open('about:blank', '_blank', 'noopener,noreferrer') : null;
 
         if (button) button.disabled = true;
         try {
@@ -57,30 +56,18 @@
 
             // If the backend tells us to use another page (e.g., payslip upload), honor it.
             if (payload?.redirect) {
-                if (openTab) {
-                    if (popup) {
-                        popup.location.href = payload.redirect;
-                    } else {
-                        setStatus('Popup blocked? Opening in this tab.', true);
-                        window.location.href = payload.redirect;
-                    }
-                }
+                window.location.href = payload.redirect;
                 return;
             }
 
-            if (action === 'start' && openTab) {
-                if (popup) {
-                    popup.location.href = destination;
-                } else {
-                    setStatus('Popup blocked? Opening in this tab.', true);
-                    window.location.href = destination;
-                }
+            if (action === 'start') {
+                window.location.href = targetUrl;
+                return;
             }
 
             await refresh();
         } catch (err) {
             console.error(err);
-            if (popup && !popup.closed) popup.close();
             alert(`Failed to ${action} ${name}: ${err.message}`);
         } finally {
             if (button) button.disabled = false;
@@ -97,33 +84,6 @@
 
         grid.innerHTML = '';
 
-        const controlCard = document.createElement('div');
-        controlCard.className = 'card';
-        const controlHeader = document.createElement('div');
-        controlHeader.className = 'row';
-        controlHeader.innerHTML = `<strong>${category} controls</strong><div class="path">Start all scripts without opening tabs</div>`;
-        controlCard.appendChild(controlHeader);
-        const controlActions = document.createElement('div');
-        controlActions.className = 'actions';
-        const startAllBtn = document.createElement('button');
-        startAllBtn.className = 'start';
-        startAllBtn.textContent = 'Start all';
-        startAllBtn.onclick = async () => {
-            startAllBtn.disabled = true;
-            try {
-                await Promise.all(scripts.map((script) => modify(script, 'start', null, { openTab: false })));
-                await refresh();
-            } catch (err) {
-                console.error(err);
-                alert(`Failed to start all scripts: ${err.message}`);
-            } finally {
-                startAllBtn.disabled = false;
-            }
-        };
-        controlActions.appendChild(startAllBtn);
-        controlCard.appendChild(controlActions);
-        grid.appendChild(controlCard);
-
         scripts.forEach((script) => {
             const card = document.createElement('div');
             card.className = 'card';
@@ -139,11 +99,9 @@
             const actions = document.createElement('div');
             actions.className = 'actions';
 
-            const openBtn = document.createElement('button');
-            openBtn.className = 'start';
-            openBtn.textContent = 'Open';
-            openBtn.onclick = () => openScript(script);
-            actions.appendChild(openBtn);
+            let persistBybitSettings = null;
+            let setSettingsStatus = null;
+            let loadSettings = null;
 
             if (script.name === 'payslip_audit') {
                 const uploadBtn = document.createElement('button');
@@ -157,7 +115,16 @@
                 const startBtn = document.createElement('button');
                 startBtn.className = 'start';
                 startBtn.textContent = 'Start';
-                startBtn.onclick = () => modify(script, 'start', startBtn);
+                startBtn.onclick = async () => {
+                    if (persistBybitSettings) {
+                        const ok = await persistBybitSettings();
+                        if (!ok) {
+                            alert('Please fix Bybit monitor settings before starting.');
+                            return;
+                        }
+                    }
+                    await modify(script, 'start', startBtn);
+                };
                 const stopBtn = document.createElement('button');
                 stopBtn.className = 'stop';
                 stopBtn.textContent = 'Stop';
@@ -167,6 +134,187 @@
             }
 
             card.appendChild(actions);
+
+            const showSettings = script.name.replace(/-/g, '_') === 'bybit_monitor';
+
+            if (showSettings) {
+                const settingsCard = document.createElement('div');
+                settingsCard.className = 'settings-card';
+
+                const settingsHeader = document.createElement('div');
+                settingsHeader.className = 'row settings-header';
+
+                const settingsTitle = document.createElement('div');
+                settingsTitle.innerHTML = '<strong>Bybit monitor settings</strong><div class="path">Adjust before starting</div>';
+
+                const settingsBadge = document.createElement('span');
+                settingsBadge.className = 'badge';
+                settingsBadge.textContent = 'Loading...';
+
+                settingsHeader.appendChild(settingsTitle);
+                settingsHeader.appendChild(settingsBadge);
+                settingsCard.appendChild(settingsHeader);
+
+                const settingsGrid = document.createElement('div');
+                settingsGrid.className = 'settings-grid';
+
+                const waitLabel = document.createElement('label');
+                waitLabel.textContent = 'Wait between scans (seconds)';
+                const waitInput = document.createElement('input');
+                waitInput.type = 'number';
+                waitInput.min = '1';
+                waitInput.step = '1';
+                waitLabel.appendChild(waitInput);
+
+                const thresholdLabel = document.createElement('label');
+                thresholdLabel.textContent = 'Alert threshold (% change)';
+                const thresholdInput = document.createElement('input');
+                thresholdInput.type = 'number';
+                thresholdInput.min = '0.1';
+                thresholdInput.step = '0.1';
+                thresholdLabel.appendChild(thresholdInput);
+
+                settingsGrid.appendChild(waitLabel);
+                settingsGrid.appendChild(thresholdLabel);
+                settingsCard.appendChild(settingsGrid);
+
+                const settingsActions = document.createElement('div');
+                settingsActions.className = 'actions';
+
+                const saveBtn = document.createElement('button');
+                saveBtn.textContent = 'Save settings';
+                saveBtn.className = 'start';
+
+                const resetBtn = document.createElement('button');
+                resetBtn.textContent = 'Reset';
+                resetBtn.className = 'secondary';
+
+                const pushTestBtn = document.createElement('button');
+                pushTestBtn.textContent = 'Send test push';
+                pushTestBtn.className = 'secondary';
+
+                settingsActions.appendChild(saveBtn);
+                settingsActions.appendChild(resetBtn);
+                settingsActions.appendChild(pushTestBtn);
+                settingsCard.appendChild(settingsActions);
+
+                setSettingsStatus = (text, isError = false) => {
+                    settingsBadge.textContent = text;
+                    settingsBadge.className = 'badge ' + (isError ? 'badge-error' : '');
+                };
+
+                const markEditing = () => {
+                    bybitSettingsEditing = true;
+                    setSettingsStatus('Editing');
+                };
+
+                loadSettings = async () => {
+                    try {
+                        const data = await fetchJson('/api/bybit-monitor/settings');
+                        if (!bybitSettingsEditing) {
+                            waitInput.value = data.wait_seconds ?? '';
+                            thresholdInput.value = data.percent_threshold ?? '';
+                        }
+                        pushTestBtn.disabled = data.push_ready === false;
+                        bybitSettingsEditing = false;
+                        setSettingsStatus(data.push_ready === false ? 'Telegram alerts not configured' : 'Ready');
+                    } catch (err) {
+                        console.error(err);
+                        setSettingsStatus('Load failed', true);
+                    }
+                };
+
+                const saveSettings = async (opts = {}) => {
+                    const body = {
+                        wait_seconds: Number(waitInput.value || 0),
+                        percent_threshold: Number(thresholdInput.value || 0),
+                    };
+
+                    saveBtn.disabled = true;
+                    resetBtn.disabled = true;
+                    setSettingsStatus('Saving...');
+
+                    try {
+                        const resp = await fetch('/api/bybit-monitor/settings', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(body),
+                        });
+
+                        if (!resp.ok) {
+                            const detail = await resp.text();
+                            throw new Error(detail || `Save failed (${resp.status})`);
+                        }
+
+                        const data = await resp.json();
+                        waitInput.value = data.wait_seconds ?? '';
+                        thresholdInput.value = data.percent_threshold ?? '';
+                        pushTestBtn.disabled = data.push_ready === false;
+                        bybitSettingsEditing = false;
+                        setSettingsStatus(data.push_ready === false ? 'Saved (telegram not configured)' : 'Saved');
+                        return true;
+                    } catch (err) {
+                        console.error(err);
+                        setSettingsStatus('Save failed', true);
+                        if (!opts.silent) alert(err.message || 'Unable to save settings');
+                        return false;
+                    } finally {
+                        saveBtn.disabled = false;
+                        resetBtn.disabled = false;
+                    }
+                };
+
+                saveBtn.onclick = (event) => {
+                    event.preventDefault();
+                    saveSettings();
+                };
+
+                resetBtn.onclick = (event) => {
+                    event.preventDefault();
+                    bybitSettingsEditing = false;
+                    loadSettings();
+                };
+
+                pushTestBtn.onclick = async (event) => {
+                    event.preventDefault();
+                    if (pushTestBtn.disabled) {
+                        setSettingsStatus('Telegram alerts not configured', true);
+                        return;
+                    }
+                    const buttons = [saveBtn, resetBtn, pushTestBtn];
+                    buttons.forEach((btn) => (btn.disabled = true));
+                    setSettingsStatus('Sending test push...');
+                    try {
+                        const resp = await fetch('/api/bybit-monitor/push-test', { method: 'POST' });
+                        const data = await resp.json().catch(() => ({}));
+                        if (data && data.configured === false) {
+                            setSettingsStatus(data.detail || 'Telegram alerts not configured');
+                            pushTestBtn.disabled = true;
+                            return;
+                        }
+                        if (!resp.ok) {
+                            const detail = data?.detail || resp.statusText;
+                            throw new Error(detail || 'Push test failed');
+                        }
+                        const detail = data?.detail || 'Test push sent';
+                        setSettingsStatus(detail);
+                    } catch (err) {
+                        console.error(err);
+                        setSettingsStatus('Push test failed', true);
+                        alert(err.message || 'Unable to send test push notification');
+                    } finally {
+                        buttons.forEach((btn) => (btn.disabled = false));
+                    }
+                };
+
+                waitInput.addEventListener('input', markEditing);
+                thresholdInput.addEventListener('input', markEditing);
+
+                persistBybitSettings = () => saveSettings({ silent: true });
+
+                card.appendChild(settingsCard);
+                loadSettings();
+            }
 
             const lastOutput = document.createElement('div');
             lastOutput.className = 'path';
@@ -205,7 +353,7 @@
             actions.className = 'actions';
             const openBtn = document.createElement('button');
             openBtn.className = 'start';
-            openBtn.textContent = 'Open';
+            openBtn.textContent = 'View scripts';
             openBtn.onclick = () => renderScriptsForCategory(category);
             actions.appendChild(openBtn);
             card.appendChild(actions);
@@ -224,6 +372,10 @@
 
     const refresh = async () => {
         if (refreshInFlight) return refreshInFlight;
+        if (bybitSettingsEditing) {
+            setStatus('Editing Bybit monitor settings (auto-refresh paused)');
+            return Promise.resolve();
+        }
 
         setStatus('Loading scripts...');
         refreshInFlight = (async () => {
