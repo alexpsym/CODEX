@@ -37,6 +37,9 @@ PRIMARY_COINS = {"BTC", "ETH"}
 _session: requests.Session | None = None
 _target_logged = False
 
+_session: requests.Session | None = None
+_target_logged = False
+
 try:  # Optional helper for desktop notifications
     from plyer import notification as _plyer_notification
 except Exception:  # pragma: no cover - very environment specific
