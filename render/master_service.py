@@ -630,7 +630,9 @@ async def list_scripts() -> JSONResponse:
 
 def _read_bybit_settings() -> Dict[str, float]:
     try:
-        return bybit_monitor.get_runtime_settings(force=True)
+        settings = bybit_monitor.get_runtime_settings(force=True)
+        settings["push_ready"] = bybit_monitor.push_notifications_ready()
+        return settings
     except Exception as exc:  # pragma: no cover - defensive
         raise HTTPException(status_code=500, detail=f"Failed to load settings: {exc}") from exc
 
@@ -683,7 +685,8 @@ async def update_bybit_monitor_settings(payload: Dict[str, object]) -> JSONRespo
 async def bybit_monitor_push_test() -> JSONResponse:
     try:
         result = bybit_monitor.send_push_test()
-        status_code = 200 if result.get("sent") else 400
+        configured = bool(result.get("configured"))
+        status_code = 200 if (result.get("sent") or not configured) else 400
         return JSONResponse(result, status_code=status_code)
     except Exception as exc:  # pragma: no cover - defensive
         raise HTTPException(status_code=500, detail=f"Failed to send test push: {exc}") from exc

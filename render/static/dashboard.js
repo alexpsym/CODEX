@@ -215,8 +215,9 @@
                             waitInput.value = data.wait_seconds ?? '';
                             thresholdInput.value = data.percent_threshold ?? '';
                         }
+                        pushTestBtn.disabled = data.push_ready === false;
                         bybitSettingsEditing = false;
-                        setSettingsStatus('Ready');
+                        setSettingsStatus(data.push_ready === false ? 'Telegram alerts not configured' : 'Ready');
                     } catch (err) {
                         console.error(err);
                         setSettingsStatus('Load failed', true);
@@ -248,8 +249,9 @@
                         const data = await resp.json();
                         waitInput.value = data.wait_seconds ?? '';
                         thresholdInput.value = data.percent_threshold ?? '';
+                        pushTestBtn.disabled = data.push_ready === false;
                         bybitSettingsEditing = false;
-                        setSettingsStatus('Saved');
+                        setSettingsStatus(data.push_ready === false ? 'Saved (telegram not configured)' : 'Saved');
                         return true;
                     } catch (err) {
                         console.error(err);
@@ -275,12 +277,21 @@
 
                 pushTestBtn.onclick = async (event) => {
                     event.preventDefault();
+                    if (pushTestBtn.disabled) {
+                        setSettingsStatus('Telegram alerts not configured', true);
+                        return;
+                    }
                     const buttons = [saveBtn, resetBtn, pushTestBtn];
                     buttons.forEach((btn) => (btn.disabled = true));
                     setSettingsStatus('Sending test push...');
                     try {
                         const resp = await fetch('/api/bybit-monitor/push-test', { method: 'POST' });
                         const data = await resp.json().catch(() => ({}));
+                        if (data && data.configured === false) {
+                            setSettingsStatus(data.detail || 'Telegram alerts not configured');
+                            pushTestBtn.disabled = true;
+                            return;
+                        }
                         if (!resp.ok) {
                             const detail = data?.detail || resp.statusText;
                             throw new Error(detail || 'Push test failed');

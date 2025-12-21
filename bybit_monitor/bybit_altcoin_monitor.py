@@ -62,10 +62,8 @@ _push_success_logged = False
 _push_failure_logged = False
 _push_config_logged = False
 
-PUSHOVER_TOKEN = os.getenv("PUSHOVER_TOKEN") or os.getenv("PUSHOVER_API_TOKEN")
-PUSHOVER_USER = os.getenv("PUSHOVER_USER") or os.getenv("PUSHOVER_USER_KEY")
-PUSHOVER_DEVICE = os.getenv("PUSHOVER_DEVICE")
-PUSHOVER_PRIORITY = os.getenv("PUSHOVER_PRIORITY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 try:  # Optional helper for desktop notifications
     from plyer import notification as _plyer_notification
@@ -146,20 +144,14 @@ def log(message: str) -> None:
 
 
 def log_push_state() -> None:
-    """Log the push notification configuration state (without secrets)."""
+    """Log the Telegram notification configuration state (without secrets)."""
 
-    if PUSHOVER_TOKEN and PUSHOVER_USER:
-        device_note = f" device={PUSHOVER_DEVICE}" if PUSHOVER_DEVICE else ""
-        priority_note = (
-            f" priority={PUSHOVER_PRIORITY}" if PUSHOVER_PRIORITY is not None and str(PUSHOVER_PRIORITY).strip() else ""
-        )
-        log(
-            "Push notifications ready via Pushover: token/user set;"
-            f" key_source=Pushover{device_note}{priority_note}"
-        )
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        chat_note = f" chat_id={TELEGRAM_CHAT_ID}" if TELEGRAM_CHAT_ID else ""
+        log(f"Push notifications ready via Telegram bot.{chat_note}")
     else:
         log(
-            "Push notifications disabled: set PUSHOVER_TOKEN and PUSHOVER_USER(_KEY) env vars to enable remote alerts."
+            "Push notifications disabled: set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID env vars to enable remote alerts."
         )
 
 
@@ -173,64 +165,68 @@ def _log_classification_once(kind: str, detail: str, hint: str | None = None) ->
             log(hint)
 
 
+def _push_configured() -> bool:
+    return bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
+
+
+def push_notifications_ready() -> bool:
+    """Public helper for consumers that need to check configuration state."""
+
+    return _push_configured()
+
+
 def send_push_notification(title: str, message: str) -> bool:
-    """Send a push notification via Pushover when configured."""
+    """Send a push notification via Telegram when configured."""
 
     global _push_warning_given, _push_success_logged, _push_failure_logged, _push_config_logged
 
-    if not PUSHOVER_TOKEN or not PUSHOVER_USER:
+    if not _push_configured():
         if not _push_warning_given:
             _push_warning_given = True
             log(
-                "Push notifications are disabled: provide PUSHOVER_TOKEN and PUSHOVER_USER(_KEY) env vars "
+                "Push notifications are disabled: provide TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID env vars "
                 "to enable them."
             )
         return False
 
     if not _push_config_logged:
         _push_config_logged = True
-        log(
-            "Push notifications enabled via Pushover; device-specific targeting will be used if provided."
-        )
-
-    payload = {
-        "token": PUSHOVER_TOKEN,
-        "user": PUSHOVER_USER,
-        "title": title,
-        "message": message,
-    }
-
-    if PUSHOVER_DEVICE:
-        payload["device"] = PUSHOVER_DEVICE
-    if PUSHOVER_PRIORITY is not None and str(PUSHOVER_PRIORITY).strip():
-        payload["priority"] = str(PUSHOVER_PRIORITY).strip()
+        log("Push notifications enabled via Telegram bot chat.")
 
     try:
-        response = _get_session().post("https://api.pushover.net/1/messages.json", data=payload, timeout=10)
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"{title}\n{message}"}
+        response = _get_session().post(url, json=payload, timeout=10)
         response.raise_for_status()
         if not _push_success_logged:
             _push_success_logged = True
             _push_failure_logged = False
-            log("Push notification sent successfully via Pushover.")
+            log("Push notification sent successfully via Telegram.")
         return True
     except Exception as exc:
         if not _push_failure_logged:
             _push_failure_logged = True
-            log(f"Pushover notification attempt failed: {exc}")
+            log(f"Telegram notification attempt failed: {exc}")
         return False
 
 
 def send_push_test() -> Dict[str, object]:
     """Trigger a push notification test and report the outcome."""
 
-    success = send_push_notification(
-        "Bybit monitor push test",
-        "If you received this, Pushover alerts are working for bybit_monitor.",
-    )
+    configured = _push_configured()
+    success = False
+
+    if configured:
+        success = send_push_notification(
+            "Bybit monitor push test",
+            "If you received this, Telegram alerts are working for bybit_monitor.",
+        )
     detail = (
-        "Test push sent successfully via Pushover." if success else "Push notifications are disabled or failed to send."
+        "Push notifications are not configured (set TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID)."
+        if not configured
+        else "Test push sent successfully via Telegram." if success else "Push notification send attempt failed."
     )
-    return {"sent": success, "detail": detail}
+    return {"sent": success, "detail": detail, "configured": configured}
 
 
 class BybitBlockedError(RuntimeError):
@@ -587,7 +583,7 @@ def send_notification(title: str, message: str) -> None:
     global _notification_warning_given
     notification_sent = False
 
-    # Push notification (Pushover)
+    # Push notification (Telegram)
     push_sent = send_push_notification(title, message)
     notification_sent = notification_sent or push_sent
 
@@ -609,8 +605,7 @@ def send_notification(title: str, message: str) -> None:
         if not _notification_warning_given:
             _notification_warning_given = True
             log(
-                "Desktop/push notifications unavailable. Install 'plyer' for desktop and set Pushover "
-                "env vars for push alerts, then restart this script."
+                "Desktop/push notifications unavailable. Install 'plyer' for desktop and set TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID env vars for push alerts, then restart this script."
             )
         # Audible fallback if possible
         try:  # pragma: no cover - OS specific
