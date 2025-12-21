@@ -15,6 +15,7 @@ import socket
 import sys
 import time
 import traceback
+from pathlib import Path
 from hashlib import sha256
 from typing import Dict, Iterable, Tuple
 
@@ -22,32 +23,16 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from bybit_credentials import resolve_bybit_credentials
+
 # Credential + endpoint resolution -------------------------------------------------
 
 
 def get_bybit_creds() -> Tuple[str, str, str, str, str]:
     """Resolve Bybit credentials and base URL using existing Render env vars."""
 
-    mode = os.getenv("BYBIT_ENV", "live").strip().lower() or "live"
-
-    if mode in {"demo", "testnet", "paper"}:
-        key = os.getenv("BYBIT_API_KEY2", "")
-        secret = os.getenv("BYBIT_API_SECRET2", "")
-        base_url = os.getenv(
-            "BYBIT_BASE_URL_TESTNET",
-            os.getenv("BYBIT_API_BASE_TESTNET", "https://api-testnet.bybit.com"),
-        )
-        key_source = "KEY2"
-    else:
-        key = os.getenv("BYBIT_API_KEY1", "")
-        secret = os.getenv("BYBIT_API_SECRET1", "")
-        base_url = os.getenv(
-            "BYBIT_BASE_URL",
-            os.getenv("BYBIT_API_BASE", "https://api.bybit.com"),
-        )
-        key_source = "KEY1"
-
-    return mode, key, secret, base_url.rstrip("/"), key_source
+    mode, key, secret, base_url, key_source = resolve_bybit_credentials()
+    return mode, key, secret, base_url, key_source
 
 
 BYBIT_MODE, BYBIT_API_KEY, BYBIT_API_SECRET, PRIMARY_API_BASE, BYBIT_KEY_SOURCE = get_bybit_creds()
@@ -58,17 +43,20 @@ API_BASES = [
     if base.strip()
 ]
 API_PATH = "/v5/market/tickers"
-WAIT_SECONDS = 300  # 5 minutes
+DEFAULT_WAIT_SECONDS = int(os.getenv("BYBIT_WAIT_SECONDS", "300"))
 ERROR_WAIT_SECONDS = 60
 BLOCK_BACKOFFS = [60, 120, 300, 900, 1800]  # 1m, 2m, 5m, 15m, 30m
-PERCENT_THRESHOLD = 5.0
+DEFAULT_PERCENT_THRESHOLD = float(os.getenv("BYBIT_PERCENT_THRESHOLD", "5.0"))
 STABLECOIN_SUFFIXES = ("USDT", "USDC", "USDD", "USD")
 PRIMARY_COINS = {"BTC", "ETH"}
+SETTINGS_PATH = Path(__file__).with_name("settings.json")
 
 _session: requests.Session | None = None
 _target_logged = False
 _logged_classifications: set[str] = set()
 _auth_notice_logged = False
+_settings_cache: Dict[str, float] | None = None
+_settings_mtime: float | None = None
 
 try:  # Optional helper for desktop notifications
     from plyer import notification as _plyer_notification
@@ -76,6 +64,70 @@ except Exception:  # pragma: no cover - very environment specific
     _plyer_notification = None
 
 _notification_warning_given = False
+
+
+def _coerce_settings(data: Dict[str, float]) -> Dict[str, float]:
+    wait_seconds = int(float(data.get("wait_seconds", DEFAULT_WAIT_SECONDS)))
+    pct_threshold = float(data.get("percent_threshold", DEFAULT_PERCENT_THRESHOLD))
+
+    if wait_seconds <= 0:
+        raise ValueError("wait_seconds must be greater than zero")
+    if pct_threshold <= 0:
+        raise ValueError("percent_threshold must be greater than zero")
+
+    return {
+        "wait_seconds": wait_seconds,
+        "percent_threshold": pct_threshold,
+    }
+
+
+def get_runtime_settings(force: bool = False) -> Dict[str, float]:
+    """Return the active settings, reloading from disk when changed."""
+
+    global _settings_cache, _settings_mtime
+
+    try:
+        mtime = SETTINGS_PATH.stat().st_mtime
+    except FileNotFoundError:
+        mtime = None
+
+    if force or _settings_cache is None or mtime != _settings_mtime:
+        settings = {
+            "wait_seconds": DEFAULT_WAIT_SECONDS,
+            "percent_threshold": DEFAULT_PERCENT_THRESHOLD,
+        }
+
+        if mtime is not None:
+            try:
+                loaded = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+                settings.update(_coerce_settings(loaded))
+            except Exception:
+                # Keep defaults if the settings file is malformed.
+                settings.update(_coerce_settings(settings))
+
+        _settings_cache = settings
+        _settings_mtime = mtime
+
+    return dict(_settings_cache)
+
+
+def update_runtime_settings(
+    *, wait_seconds: int | None = None, percent_threshold: float | None = None
+) -> Dict[str, float]:
+    """Update the persisted settings file and return the sanitized values."""
+
+    current = get_runtime_settings(force=True)
+
+    if wait_seconds is not None:
+        current["wait_seconds"] = wait_seconds
+    if percent_threshold is not None:
+        current["percent_threshold"] = percent_threshold
+
+    sanitized = _coerce_settings(current)
+    SETTINGS_PATH.write_text(json.dumps(sanitized, indent=2), encoding="utf-8")
+
+    # Refresh the cache immediately so the running loop picks up changes on the next check.
+    return get_runtime_settings(force=True)
 
 
 def log(message: str) -> None:
@@ -524,6 +576,8 @@ def run_monitor() -> None:
     previous_prices: Dict[str, float] = {}
     iteration = 0
     blocked_streak = 0
+    settings = get_runtime_settings(force=True)
+    last_logged_settings = None
 
     api_targets = ", ".join(f"{base}{API_PATH}" for base in _iter_api_bases())
     log(
@@ -535,6 +589,14 @@ def run_monitor() -> None:
         global _logged_classifications
         _logged_classifications = set()
         iteration += 1
+        settings = get_runtime_settings()
+        if settings != last_logged_settings:
+            log(
+                "Monitor settings: "
+                f"wait_seconds={settings['wait_seconds']}s, "
+                f"percent_threshold={settings['percent_threshold']:.2f}%"
+            )
+            last_logged_settings = dict(settings)
         log(f"Starting price check #{iteration}...")
 
         try:
@@ -617,7 +679,7 @@ def run_monitor() -> None:
                     continue
 
                 change_pct = ((current_price - previous_price) / previous_price) * 100
-                if abs(change_pct) >= PERCENT_THRESHOLD:
+                if abs(change_pct) >= settings["percent_threshold"]:
                     direction = "up" if change_pct > 0 else "down"
                     message = (
                         f"{symbol} moved {direction} by {change_pct:+.2f}% "
@@ -629,24 +691,28 @@ def run_monitor() -> None:
 
             if not triggered_any:
                 log(
-                    f"No price jumps reached the {PERCENT_THRESHOLD:.1f}% threshold during this cycle."
+                    "No price jumps reached the "
+                    f"{settings['percent_threshold']:.1f}% threshold during this cycle."
                 )
         else:
             log("Baseline prices recorded. Alerts will begin after the next update.")
 
         previous_prices = prices
         log(
-            f"Waiting {WAIT_SECONDS // 60} minute(s) ({WAIT_SECONDS} seconds) before the next price check."
+            "Waiting "
+            f"{settings['wait_seconds'] // 60} minute(s) ({settings['wait_seconds']} seconds) "
+            "before the next price check."
         )
-        progress_bar(WAIT_SECONDS, "Waiting for the next check")
+        progress_bar(settings["wait_seconds"], "Waiting for the next check")
 
 
 def main() -> None:
     """Entry point for the monitor."""
     log("Bybit altcoin monitor started.")
+    settings = get_runtime_settings(force=True)
     log(
         "The script asks Bybit for every linear perpetual altcoin price and raises alerts when the "
-        f"price moves +/-{PERCENT_THRESHOLD:.1f}% compared to the previous reading."
+        f"price moves +/-{settings['percent_threshold']:.1f}% compared to the previous reading."
     )
     log("Press Ctrl+C at any time to stop the script safely.")
     auth_enabled = bool(BYBIT_API_KEY and BYBIT_API_SECRET)

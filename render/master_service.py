@@ -23,6 +23,7 @@ from payslip_audit.tesseract import (
     _resolve_tesseract_binary,
     is_tesseract_available,
 )
+from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env")
@@ -58,6 +59,8 @@ ENTRY_OVERRIDES = {
 }
 
 LOG_FILE_OVERRIDES: Dict[str, Path] = {}
+
+BYBIT_SETTINGS_PATH = bybit_monitor.SETTINGS_PATH
 
 PAYSLIP_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -133,6 +136,10 @@ class ManagedScript:
 
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
+        current_pythonpath = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            f"{BASE_DIR}:{current_pythonpath}" if current_pythonpath else str(BASE_DIR)
+        )
 
         try:
             self.process = await asyncio.create_subprocess_exec(
@@ -423,7 +430,7 @@ script_manager = ScriptManager(discover_scripts())
 app = FastAPI(title="Render Master Script", version="1.0")
 
 
-ASSET_VERSION = "v10"
+ASSET_VERSION = "v11"
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"en\">
@@ -483,6 +490,13 @@ LOG_VIEWER_TEMPLATE = """<!DOCTYPE html>
         #save-log-btn { background: #22c55e; color: #052e16; }
         #log-box { background: #0a0f1b; color: #e5e7eb; border-radius: 8px; padding: 0.75rem; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 320px; border: 1px solid #1f2937; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
         .badge { display: inline-block; padding: 0.35rem 0.7rem; border-radius: 999px; background: #1f2937; color: #cbd5e1; font-weight: 700; }
+        .settings-card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 1rem; margin: 1rem 0; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
+        .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; margin-top: 0.5rem; }
+        .settings-grid label { display: flex; flex-direction: column; gap: 0.35rem; font-weight: 700; color: #cbd5e1; }
+        .settings-grid input { padding: 0.55rem 0.75rem; border-radius: 10px; border: 1px solid #1f2937; background: #0a0f1b; color: #e5e7eb; }
+        .secondary { background: #1f2937; color: #cbd5e1; }
+        .settings-header { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+        .settings-header .meta { margin: 0; }
     </style>
 </head>
 <body data-script-name=\"{script_name}\">
@@ -492,6 +506,27 @@ LOG_VIEWER_TEMPLATE = """<!DOCTYPE html>
         <span class=\"badge\" id=\"line-count\">0 lines</span>
         <button id=\"refresh-btn\">Refresh</button>
         <button id=\"save-log-btn\">Save log</button>
+    </div>
+    <div class=\"settings-card\" id=\"bybit-settings\" style=\"display:none;\">
+        <div class=\"settings-header\">
+            <div>
+                <strong>Bybit monitor settings</strong>
+                <p class=\"meta\">Adjust scan interval and alert threshold without restarting.</p>
+            </div>
+            <span class=\"badge\" id=\"bybit-settings-status\">&nbsp;</span>
+        </div>
+        <div class=\"settings-grid\">
+            <label>Wait between scans (seconds)
+                <input type=\"number\" min=\"1\" step=\"1\" id=\"bybit-wait-seconds\" />
+            </label>
+            <label>Alert threshold (% change)
+                <input type=\"number\" min=\"0.1\" step=\"0.1\" id=\"bybit-threshold\" />
+            </label>
+        </div>
+        <div class=\"controls\">
+            <button id=\"bybit-save-settings\">Save settings</button>
+            <button class=\"secondary\" id=\"bybit-reload-settings\">Reset</button>
+        </div>
     </div>
     <pre id=\"log-box\">Loading logs...</pre>
 
@@ -586,6 +621,27 @@ async def list_scripts() -> JSONResponse:
     return JSONResponse(script_manager.list_scripts())
 
 
+def _read_bybit_settings() -> Dict[str, float]:
+    try:
+        return bybit_monitor.get_runtime_settings(force=True)
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=500, detail=f"Failed to load settings: {exc}") from exc
+
+
+def _update_bybit_settings(payload: Dict[str, object]) -> Dict[str, float]:
+    try:
+        wait_seconds = payload.get("wait_seconds") if isinstance(payload, dict) else None
+        percent_threshold = payload.get("percent_threshold") if isinstance(payload, dict) else None
+        return bybit_monitor.update_runtime_settings(
+            wait_seconds=int(wait_seconds) if wait_seconds is not None else None,
+            percent_threshold=float(percent_threshold) if percent_threshold is not None else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=500, detail=f"Failed to save settings: {exc}") from exc
+
+
 
 
 def _render_log_view(script_name: str) -> str:
@@ -603,6 +659,16 @@ async def view_logs(script_name: str) -> str:
     # Ensure the script exists so we don't render a viewer for an unknown path.
     script_manager.get(script_name)
     return _render_log_view(script_name)
+
+
+@app.get("/api/bybit-monitor/settings")
+async def bybit_monitor_settings() -> JSONResponse:
+    return JSONResponse(_read_bybit_settings())
+
+
+@app.post("/api/bybit-monitor/settings")
+async def update_bybit_monitor_settings(payload: Dict[str, object]) -> JSONResponse:
+    return JSONResponse(_update_bybit_settings(payload))
 
 
 

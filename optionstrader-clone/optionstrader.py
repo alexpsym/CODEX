@@ -30,6 +30,7 @@ import csv
 from decimal import Decimal, ROUND_HALF_UP
 
 from env_loader import load_bybit_live_env, load_optionstrader_env
+from bybit_credentials import resolve_bybit_credentials
 
 # === File setup ===
 script_dir_path = Path(__file__).resolve().parent
@@ -153,8 +154,9 @@ def load_trade_config(path):
 
 def get_api_credentials(cfg):
     """Return API credentials from environment variables or config."""
-    key = os.getenv("BYBIT_API_KEY") or cfg.get("api_key", "")
-    secret = os.getenv("BYBIT_API_SECRET") or cfg.get("api_secret", "")
+    mode, key, secret, _base_url, _key_source = resolve_bybit_credentials()
+    key = cfg.get("api_key", "") or key
+    secret = cfg.get("api_secret", "") or secret
     return key, secret
 
 def get_telegram_credentials(cfg):
