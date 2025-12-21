@@ -8,20 +8,38 @@ run continuously until the user stops it manually.
 from __future__ import annotations
 
 import datetime as _dt
+import hmac
 import json
+import os
+import socket
 import sys
 import time
 import traceback
-import urllib.error
-import urllib.request
-from typing import Dict
+from hashlib import sha256
+from typing import Dict, Iterable
 
-API_URL = "https://api.bybit.com/v5/market/tickers?category=linear"
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+API_BASE = os.getenv("BYBIT_API_BASE", "https://api.bybit.com")
+API_FALLBACK_BASE = os.getenv("BYBIT_API_FALLBACK_BASE") or "https://api.bytick.com"
+API_BASES = [
+    base.strip()
+    for base in os.getenv("BYBIT_API_BASES", "").split(",")
+    if base.strip()
+]
+API_PATH = "/v5/market/tickers"
 WAIT_SECONDS = 300  # 5 minutes
 ERROR_WAIT_SECONDS = 60
+BLOCK_BACKOFFS = [60, 120, 300, 900, 1800]  # 1m, 2m, 5m, 15m, 30m
 PERCENT_THRESHOLD = 5.0
 STABLECOIN_SUFFIXES = ("USDT", "USDC", "USDD", "USD")
 PRIMARY_COINS = {"BTC", "ETH"}
+
+_session: requests.Session | None = None
+_target_logged = False
+_logged_classifications: set[str] = set()
 
 try:  # Optional helper for desktop notifications
     from plyer import notification as _plyer_notification
@@ -37,6 +55,80 @@ def log(message: str) -> None:
     print(f"[{now}] {message}", flush=True)
 
 
+def _log_classification_once(kind: str, detail: str, hint: str | None = None) -> None:
+    """Log classification-specific details once per attempt window."""
+
+    if kind not in _logged_classifications:
+        _logged_classifications.add(kind)
+        log(detail)
+        if hint:
+            log(hint)
+
+
+class BybitBlockedError(RuntimeError):
+    """Raised when Bybit returns a blocked response (e.g., 403 HTML)."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        wait_hint: int | None = None,
+        classification: str | None = None,
+        hint: str | None = None,
+    ):
+        super().__init__(message)
+        self.status = status
+        self.wait_hint = wait_hint
+        self.classification = classification or "BLOCKED_WAF"
+        self.hint = hint
+
+
+class AccessIssueError(RuntimeError):
+    """Raised when a fallback market source is restricted or unavailable."""
+
+    def __init__(self, classification: str, detail: str, hint: str | None = None):
+        super().__init__(detail)
+        self.classification = classification
+        self.hint = hint
+
+
+def _get_session() -> requests.Session:
+    global _session
+
+    if _session is None:
+        retries = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=("GET",),
+        )
+        adapter = HTTPAdapter(max_retries=retries)
+        session = requests.Session()
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        _session = session
+
+    return _session
+
+
+def _log_request_target(url: str, headers: Dict[str, str]) -> None:
+    global _target_logged
+
+    host_suffix = ""
+
+    try:
+        hostname = requests.utils.urlparse(url).hostname or "<unknown>"
+        ip_address = socket.gethostbyname(hostname)
+        host_suffix = f"; resolved host: {hostname} ({ip_address})"
+    except Exception:
+        host_suffix = "; resolved host: <unavailable>"
+
+    if not _target_logged:
+        _target_logged = True
+    log(f"Preparing Bybit request -> URL: {url}; headers: {headers}{host_suffix}")
+
+
 def extract_base_symbol(symbol: str) -> str:
     """Return the base asset name by stripping common quote currency suffixes."""
     uppercase_symbol = symbol.upper()
@@ -46,68 +138,275 @@ def extract_base_symbol(symbol: str) -> str:
     return uppercase_symbol
 
 
-def fetch_altcoin_prices() -> Dict[str, float]:
-    """Ask Bybit for all linear perpetual futures prices and keep altcoins only."""
-    request = urllib.request.Request(
-        API_URL,
-        headers={
-            "User-Agent": "Mozilla/5.0 (compatible; BybitAltcoinMonitor/1.0)",
-            "Accept": "application/json",
-        },
-    )
+def _iter_api_bases() -> list[str]:
+    bases: list[str] = []
 
-    try:
-        with urllib.request.urlopen(request, timeout=20) as response:
-            status_code = response.getcode()
-            raw_payload = response.read()
-    except urllib.error.HTTPError as http_error:  # pragma: no cover - depends on network
-        detail = ""
-        try:
-            detail = http_error.read().decode("utf-8", "ignore")
-        except Exception:  # pragma: no cover - very specific
-            detail = "<no additional error body provided>"
-        raise RuntimeError(
-            f"HTTP error {http_error.code} - {http_error.reason}. Response snippet: {detail[:200]}"
-        ) from http_error
-    except urllib.error.URLError as url_error:  # pragma: no cover - depends on network
-        raise RuntimeError(f"Connection error: {url_error.reason}") from url_error
-    except Exception as exc:  # pragma: no cover - unexpected edge cases
-        raise RuntimeError(f"Unexpected problem while contacting Bybit: {exc}") from exc
+    for base in API_BASES:
+        normalized = base.rstrip("/")
+        if normalized and normalized not in bases:
+            bases.append(normalized)
 
-    if status_code != 200:
-        raise RuntimeError(f"Bybit replied with unexpected status code {status_code}.")
+    primary = API_BASE.rstrip("/")
+    if primary not in bases:
+        bases.append(primary)
 
-    try:
-        payload = json.loads(raw_payload.decode("utf-8"))
-    except json.JSONDecodeError as decode_error:
-        raise RuntimeError("Could not decode Bybit's response as JSON.") from decode_error
+    # Use a documented fallback host so we can switch regions when the primary is blocked.
+    if API_FALLBACK_BASE:
+        fallback = API_FALLBACK_BASE.rstrip("/")
+        if fallback not in bases:
+            bases.append(fallback)
 
-    if payload.get("retCode") != 0:
-        raise RuntimeError(
-            f"Bybit returned retCode {payload.get('retCode')} with message: {payload.get('retMsg')}"
-        )
+    return bases
 
-    tickers = payload.get("result", {}).get("list", [])
+
+def _build_headers() -> Dict[str, str]:
+    return {
+        "User-Agent": os.getenv(
+            "BYBIT_API_USER_AGENT",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        ),
+        "Accept": os.getenv("BYBIT_API_ACCEPT", "application/json"),
+        "Accept-Language": os.getenv("BYBIT_API_ACCEPT_LANGUAGE", "en-US,en;q=0.9"),
+        "Connection": "keep-alive",
+    }
+
+
+def _auth_headers(params: Dict[str, str]) -> Dict[str, str]:
+    api_key = os.getenv("BYBIT_API_KEY")
+    api_secret = os.getenv("BYBIT_API_SECRET")
+    if not api_key or not api_secret:
+        return {}
+
+    timestamp_ms = str(int(time.time() * 1000))
+    recv_window = os.getenv("BYBIT_RECV_WINDOW", "5000")
+    # For public GET, sign timestamp + api_key + recv_window + query_string (sorted)
+    sorted_params = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+    payload = f"{timestamp_ms}{api_key}{recv_window}{sorted_params}"
+    signature = hmac.new(api_secret.encode("utf-8"), payload.encode("utf-8"), sha256).hexdigest()
+
+    return {
+        "X-BAPI-SIGN": signature,
+        "X-BAPI-API-KEY": api_key,
+        "X-BAPI-TIMESTAMP": timestamp_ms,
+        "X-BAPI-RECV-WINDOW": recv_window,
+        "X-BAPI-SIGN-TYPE": "2",
+    }
+
+
+def _coalesce_prices(tickers: Iterable[Dict[str, object]]) -> Dict[str, float]:
     prices: Dict[str, float] = {}
-
     for entry in tickers:
         symbol = entry.get("symbol")
         last_price = entry.get("lastPrice")
         if not symbol or last_price in (None, "", "0"):
             continue
 
-        base_symbol = extract_base_symbol(symbol)
+        base_symbol = extract_base_symbol(str(symbol))
         if base_symbol in PRIMARY_COINS:
             continue  # skip BTC and ETH because the focus is on altcoins
 
         try:
-            price = float(last_price)
+            price = float(last_price)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             continue
 
-        prices[symbol.upper()] = price
-
+        prices[str(symbol).upper()] = price
     return prices
+
+
+def _fetch_fallback_prices() -> Dict[str, float]:
+    """Retrieve altcoin prices from a fallback market-data source (Binance futures)."""
+
+    session = _get_session()
+    url = os.getenv("FALLBACK_MARKET_URL", "https://fapi.binance.com/fapi/v1/ticker/price")
+    timeout = float(os.getenv("FALLBACK_MARKET_TIMEOUT", "15"))
+    headers = {
+        "User-Agent": "BybitAltcoinMonitor/1.1 (fallback-binance)",
+        "Accept": "application/json",
+    }
+
+    response = session.get(url, timeout=timeout, headers=headers)
+    content_type = response.headers.get("Content-Type", "")
+    body_preview = response.text[:200]
+
+    if response.status_code == 451 or "restricted location" in body_preview.lower():
+        detail = (
+            "ACCESS RESTRICTED (Binance 451) — restricted location / eligibility. "
+            f"Status={response.status_code}; content-type={content_type}; body: {body_preview}"
+        )
+        hint = "Binance access restricted from this location; fallback source must be non-restricted."
+        _log_classification_once("GEO_RESTRICTED", detail, hint)
+        raise AccessIssueError("GEO_RESTRICTED", detail, hint)
+
+    if response.status_code == 403 and "html" in content_type.lower():
+        detail = (
+            "ACCESS BLOCKED (Binance 403 HTML) — likely egress or WAF restriction. "
+            f"Status={response.status_code}; content-type={content_type}; body: {body_preview}"
+        )
+        hint = (
+            "This host is blocked when reaching Binance; try a different egress or non-restricted source."
+        )
+        _log_classification_once("BLOCKED_WAF", detail, hint)
+        raise AccessIssueError("BLOCKED_WAF", detail, hint)
+
+    if response.status_code != 200:
+        detail = (
+            f"Fallback source failed; status={response.status_code}; "
+            f"content-type={content_type}; body={body_preview}"
+        )
+        _log_classification_once("DOWN", detail, None)
+        raise AccessIssueError("DOWN", detail)
+
+    try:
+        payload = response.json()
+    except json.JSONDecodeError as exc:  # pragma: no cover - defensive
+        raise RuntimeError(f"Fallback JSON parse error: {exc}") from exc
+
+    if not isinstance(payload, list):
+        raise RuntimeError("Fallback source returned unexpected payload shape.")
+
+    prices: Dict[str, float] = {}
+    for entry in payload:
+        symbol = entry.get("symbol")
+        price_val = entry.get("price") or entry.get("lastPrice")
+        if not symbol or price_val in (None, "", "0"):
+            continue
+
+        # Keep only USDT/USDC perps to mirror linear contracts.
+        symbol_str = str(symbol).upper()
+        if not symbol_str.endswith(("USDT", "USDC")):
+            continue
+
+        base_symbol = extract_base_symbol(symbol_str)
+        if base_symbol in PRIMARY_COINS:
+            continue
+
+        try:
+            price = float(price_val)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
+
+        prices[symbol_str] = price
+
+    if not prices:
+        raise RuntimeError("Fallback source returned no usable prices.")
+
+    log(f"Using fallback futures market data (Binance) with {len(prices)} symbols.")
+    return prices
+
+
+def fetch_altcoin_prices() -> Dict[str, float]:
+    """Ask Bybit for all linear perpetual futures prices and keep altcoins only."""
+
+    params = {"category": "linear"}
+    headers = _build_headers()
+    session = _get_session()
+    errors: list[str] = []
+    blocked_errors: list[str] = []
+    timeout = float(os.getenv("BYBIT_API_TIMEOUT", "20"))
+    have_auth = bool(os.getenv("BYBIT_API_KEY") and os.getenv("BYBIT_API_SECRET"))
+
+    for api_base in _iter_api_bases():
+        url = f"{api_base}{API_PATH}"
+        blocked_for_base = False
+        for with_auth in (False, True):
+            if with_auth and not have_auth:
+                continue
+
+            req_headers = headers.copy()
+            if with_auth:
+                req_headers.update(_auth_headers(params))
+
+            prepared = session.prepare_request(
+                requests.Request("GET", url, headers=req_headers, params=params)
+            )
+            _log_request_target(prepared.url or url, req_headers)
+
+            try:
+                response = session.send(prepared, timeout=timeout)
+            except requests.RequestException as exc:  # pragma: no cover - network dependent
+                errors.append(f"{api_base} connection error: {exc}")
+                continue
+
+            body_snippet = response.text[:200]
+            content_type = response.headers.get("Content-Type", "")
+
+            if response.status_code == 403 and "html" in content_type.lower():
+                blocked_detail = (
+                    f"endpoint={api_base}, auth={'yes' if with_auth else 'no'}, "
+                    f"status={response.status_code}, content-type={content_type}, "
+                    f"body preview: {body_snippet}"
+                )
+                blocked_errors.append(blocked_detail)
+                _log_classification_once(
+                    "BLOCKED_WAF",
+                    (
+                        "ACCESS BLOCKED (Bybit 403 HTML) — likely WAF/egress restriction. "
+                        f"Details: {blocked_detail}"
+                    ),
+                    hint=(
+                        "This host is being blocked from Render egress; try a different region/provider, "
+                        "or proxy the request through allowed egress, or use authenticated + official SDK endpoints."
+                    ),
+                )
+                if not with_auth and have_auth:
+                    log("Unauthenticated request blocked; retrying once with API credentials...")
+                    continue
+                blocked_for_base = True
+                break
+
+            if response.status_code != 200:
+                log(
+                    "Bybit request failed; "
+                    f"endpoint={api_base}, status={response.status_code}, "
+                    f"content-type={content_type}, body preview: {body_snippet}"
+                )
+                errors.append(
+                    f"{api_base} status {response.status_code}; content-type: {content_type}; body: {body_snippet}"
+                )
+                continue
+
+            if "json" not in content_type:
+                log(f"Warning: unexpected content type from Bybit ({api_base}): {content_type}")
+
+            try:
+                payload = response.json()
+            except json.JSONDecodeError as decode_error:
+                errors.append(f"{api_base} JSON decode error: {decode_error}")
+                continue
+
+            if payload.get("retCode") != 0:
+                errors.append(
+                    f"{api_base} retCode {payload.get('retCode')}: {payload.get('retMsg')} (trace {payload.get('traceId')})"
+                )
+                continue
+
+            tickers = payload.get("result", {}).get("list", [])
+            prices = _coalesce_prices(tickers)
+            if not prices:
+                errors.append(f"{api_base} returned no usable prices.")
+                continue
+            return prices
+
+        if blocked_for_base:
+            continue
+
+    if blocked_errors:
+        raise BybitBlockedError(
+            "All Bybit endpoints appear blocked.",
+            status=403,
+            classification="BLOCKED_WAF",
+            hint=(
+                "This host is being blocked from Render egress; consider alternate egress, "
+                "region, or authenticated official SDK usage."
+            ),
+        )
+
+    # All endpoints failed; raise a detailed summary to surface the block reason.
+    detail = "; ".join(errors) if errors else "All Bybit endpoints failed with unknown errors."
+    log(f"All configured Bybit endpoints failed. Details: {detail}")
+    raise RuntimeError(detail)
 
 
 def send_notification(title: str, message: str) -> None:
@@ -191,13 +490,58 @@ def run_monitor() -> None:
     """Continuous monitoring loop."""
     previous_prices: Dict[str, float] = {}
     iteration = 0
+    blocked_streak = 0
+
+    api_targets = ", ".join(f"{base}{API_PATH}" for base in _iter_api_bases())
+    log(
+        "Using Bybit endpoint sequence "
+        f"[{api_targets}]?category=linear (override with BYBIT_API_BASE/BYBIT_API_BASES)"
+    )
 
     while True:
+        global _logged_classifications
+        _logged_classifications = set()
         iteration += 1
         log(f"Starting price check #{iteration}...")
 
         try:
             prices = fetch_altcoin_prices()
+            blocked_streak = 0
+            source_label = "Bybit"
+        except BybitBlockedError as exc:
+            blocked_streak += 1
+            wait_seconds = BLOCK_BACKOFFS[min(blocked_streak - 1, len(BLOCK_BACKOFFS) - 1)]
+            _log_classification_once(
+                exc.classification,
+                (
+                    f"ACCESS BLOCKED (status {exc.status or 403}) — likely WAF/egress restriction. "
+                    "Trying fallback market data before backing off."
+                ),
+                hint=exc.hint,
+            )
+            try:
+                prices = _fetch_fallback_prices()
+                source_label = "Fallback futures"
+                blocked_streak = 0  # success via fallback should reset aggressive backoff
+            except AccessIssueError as fallback_exc:
+                detail = (
+                    f"Fallback market data unavailable ({fallback_exc.classification}): {fallback_exc}"
+                )
+                _log_classification_once(fallback_exc.classification, detail, fallback_exc.hint)
+                log(
+                    "Unable to reach Bybit or fallback due to access restrictions. "
+                    f"Waiting {wait_seconds} seconds before retrying."
+                )
+                progress_bar(wait_seconds, "Block backoff")
+                continue
+            except Exception as fallback_exc:
+                log(f"Fallback market data unavailable: {fallback_exc}")
+                log(
+                    "Access to configured data sources is blocked or restricted. "
+                    f"Waiting {wait_seconds} seconds before retrying."
+                )
+                progress_bar(wait_seconds, "Block backoff")
+                continue
         except Exception as exc:
             log("⚠️ Could not retrieve data from Bybit during this attempt.")
             print("-" * 80)
@@ -212,11 +556,11 @@ def run_monitor() -> None:
             progress_bar(ERROR_WAIT_SECONDS, "Retry delay")
             continue
 
-        log(f"Received {len(prices)} altcoin perpetual prices from Bybit.")
+        log(f"Received {len(prices)} altcoin perpetual prices from {source_label}.")
 
         if not prices:
             log(
-                "Bybit returned an empty list of altcoins. This is unusual, so we will simply wait "
+                "Price source returned an empty list of altcoins. This is unusual, so we will simply wait "
                 "and try again."
             )
         elif previous_prices:
