@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlparse
 from uuid import uuid4
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
@@ -23,6 +23,7 @@ from payslip_audit.tesseract import (
     _resolve_tesseract_binary,
     is_tesseract_available,
 )
+from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env")
@@ -58,6 +59,8 @@ ENTRY_OVERRIDES = {
 }
 
 LOG_FILE_OVERRIDES: Dict[str, Path] = {}
+
+BYBIT_SETTINGS_PATH = bybit_monitor.SETTINGS_PATH
 
 PAYSLIP_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -133,10 +136,15 @@ class ManagedScript:
 
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
+        current_pythonpath = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            f"{BASE_DIR}:{current_pythonpath}" if current_pythonpath else str(BASE_DIR)
+        )
 
         try:
             self.process = await asyncio.create_subprocess_exec(
                 os.getenv("PYTHON", "python"),
+                "-u",
                 str(self.path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
@@ -368,15 +376,38 @@ class ScriptManager:
 
     def __init__(self, scripts: Iterable[ManagedScript]):
         self._scripts: Dict[str, ManagedScript] = {script.name: script for script in scripts}
+        self._aliases: Dict[str, str] = {}
+
+        for script in scripts:
+            self._register_aliases(script.name)
+            self._register_aliases(script.path.name, canonical=script.name)
+            self._register_aliases(script.path.stem, canonical=script.name)
+
+    def _normalize(self, name: str) -> str:
+        trimmed = name.strip().strip("/")
+        return trimmed.replace("-", "_").casefold()
+
+    def _register_aliases(self, alias: str, canonical: Optional[str] = None) -> None:
+        target = alias if canonical is None else canonical
+        normalized = self._normalize(alias)
+        self._aliases.setdefault(normalized, target)
+
+    def _resolve_name(self, name: str) -> str:
+        if name in self._scripts:
+            return name
+
+        normalized = self._normalize(name)
+        if normalized in self._aliases:
+            return self._aliases[normalized]
+
+        raise HTTPException(status_code=404, detail=f"Script not found: {name}")
 
     def list_scripts(self) -> List[Dict[str, object]]:
         return sorted((script.to_summary() for script in self._scripts.values()), key=lambda s: s["name"])
 
     def get(self, name: str) -> ManagedScript:
-        try:
-            return self._scripts[name]
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="Script not found") from exc
+        resolved = self._resolve_name(name)
+        return self._scripts[resolved]
 
     async def start(self, name: str) -> Dict[str, object]:
         script = self.get(name)
@@ -399,7 +430,7 @@ script_manager = ScriptManager(discover_scripts())
 app = FastAPI(title="Render Master Script", version="1.0")
 
 
-ASSET_VERSION = "v9"
+ASSET_VERSION = "v12"
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"en\">
@@ -423,6 +454,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         button { padding: 0.55rem 0.9rem; border-radius: 10px; border: none; cursor: pointer; font-weight: 700; }
         .start { background: #22c55e; color: #052e16; }
         .stop { background: #ef4444; color: #fff7ed; }
+        .secondary { background: #1f2937; color: #cbd5e1; }
+        .settings-card { margin-top: 0.5rem; padding: 0.75rem; border: 1px solid #1f2937; border-radius: 10px; background: #0d1728; display: flex; flex-direction: column; gap: 0.75rem; }
+        .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.5rem; }
+        .settings-card label { display: flex; flex-direction: column; gap: 0.25rem; font-weight: 700; color: #cbd5e1; font-size: 0.95rem; }
+        .settings-card input { padding: 0.55rem 0.75rem; border-radius: 10px; border: 1px solid #1f2937; background: #0a0f1b; color: #e5e7eb; }
+        .badge { display: inline-block; padding: 0.35rem 0.7rem; border-radius: 999px; background: #1f2937; color: #cbd5e1; font-weight: 700; }
+        .badge-error { background: #7f1d1d; color: #fecdd3; }
         pre { background: #0a0f1b; color: #e5e7eb; border-radius: 8px; padding: 0.75rem; overflow: auto; max-height: 260px; white-space: pre-wrap; margin: 0; }
         .toolbar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; }
         .refresh { background: #3b82f6; color: #eaf2ff; }
@@ -562,6 +600,27 @@ async def list_scripts() -> JSONResponse:
     return JSONResponse(script_manager.list_scripts())
 
 
+def _read_bybit_settings() -> Dict[str, float]:
+    try:
+        return bybit_monitor.get_runtime_settings(force=True)
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=500, detail=f"Failed to load settings: {exc}") from exc
+
+
+def _update_bybit_settings(payload: Dict[str, object]) -> Dict[str, float]:
+    try:
+        wait_seconds = payload.get("wait_seconds") if isinstance(payload, dict) else None
+        percent_threshold = payload.get("percent_threshold") if isinstance(payload, dict) else None
+        return bybit_monitor.update_runtime_settings(
+            wait_seconds=int(wait_seconds) if wait_seconds is not None else None,
+            percent_threshold=float(percent_threshold) if percent_threshold is not None else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=500, detail=f"Failed to save settings: {exc}") from exc
+
+
 
 
 def _render_log_view(script_name: str) -> str:
@@ -581,6 +640,25 @@ async def view_logs(script_name: str) -> str:
     return _render_log_view(script_name)
 
 
+@app.get("/api/bybit-monitor/settings")
+async def bybit_monitor_settings() -> JSONResponse:
+    return JSONResponse(_read_bybit_settings())
+
+
+@app.post("/api/bybit-monitor/settings")
+async def update_bybit_monitor_settings(payload: Dict[str, object]) -> JSONResponse:
+    return JSONResponse(_update_bybit_settings(payload))
+
+
+
+@app.post("/api/bybit-monitor/push-test")
+async def bybit_monitor_push_test() -> JSONResponse:
+    try:
+        result = bybit_monitor.send_push_test()
+        status_code = 200 if result.get("sent") else 400
+        return JSONResponse(result, status_code=status_code)
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=500, detail=f"Failed to send test push: {exc}") from exc
 
 
 async def _background_start(script: ManagedScript) -> None:
@@ -632,6 +710,51 @@ async def stop_script(script_name: str) -> JSONResponse:
 @app.get("/logs/", include_in_schema=False)
 async def logs_index() -> RedirectResponse:
     return RedirectResponse("/")
+
+
+@app.get("/api/logs/", include_in_schema=False)
+@app.get("/api/logs", include_in_schema=False)
+async def api_logs_root(
+    request: Request,
+    cursor: int = 0,
+    script: Optional[str] = None,
+    name: Optional[str] = None,
+) -> JSONResponse:
+    """Compatibility endpoint for fetching logs without embedding the script in the path.
+
+    The log viewer historically called `/api/logs/` with only a `cursor` query param. Try to
+    resolve the script name from explicit `script`/`name` params or, as a last resort, from
+    the referer header that points back to `/logs/view/<script>`.
+    """
+
+    script_name = script or name
+
+    if not script_name:
+        referer = request.headers.get("referer") or request.headers.get("referrer")
+        if referer:
+            parsed = urlparse(referer)
+            path = parsed.path.rstrip("/")
+            if path.startswith("/logs/view/"):
+                script_name = unquote(path.split("/logs/view/", 1)[1])
+
+    if not script_name:
+        # Keep the shape consistent with the standard log endpoint while remaining a 200
+        # response so the UI can render gracefully.
+        return JSONResponse({"lines": [], "cursor": 0, "detail": "No script specified"})
+
+    try:
+        snapshot = script_manager.log_snapshot(script_name, cursor)
+        return JSONResponse(snapshot)
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            return JSONResponse(
+                {"lines": [], "cursor": 0, "detail": exc.detail}, status_code=200
+            )
+        raise
+    except Exception as exc:  # pragma: no cover - runtime protection
+        detail = f"Failed to read logs for {script_name}: {exc}"
+        print(detail)
+        raise HTTPException(status_code=500, detail=detail) from exc
 
 
 @app.get("/api/logs/{script_name:path}")
