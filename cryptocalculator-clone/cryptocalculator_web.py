@@ -332,7 +332,8 @@ def _pick_free_port(host: str) -> int:
 if __name__ == "__main__":
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("CRYPTOCALCULATOR_PORT") or os.getenv("PORT", "5000"))
-    if not _is_port_available(host, port):
+    is_render = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID"))
+    if not is_render and not _is_port_available(host, port):
         fallback_port = _pick_free_port(host)
         print(
             f"Port {port} is already in use; using {fallback_port} instead.",
