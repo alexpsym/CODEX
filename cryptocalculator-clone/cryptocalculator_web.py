@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import sys
 import webbrowser
 from typing import Dict, Optional
@@ -311,9 +312,34 @@ def _serve_wsgi(app: Flask, host: str = "127.0.0.1", port: int = 5000) -> None:
     serve(app, host=host, port=port)
 
 
+def _is_port_available(host: str, port: int) -> bool:
+    if port == 0:
+        return True
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind((host, port))
+        except OSError:
+            return False
+    return True
+
+
+def _pick_free_port(host: str) -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((host, 0))
+        return sock.getsockname()[1]
+
+
 if __name__ == "__main__":
     host = os.getenv("HOST", "0.0.0.0")
-    port = int(os.getenv("PORT", "5000"))
+    port = int(os.getenv("CRYPTOCALCULATOR_PORT") or os.getenv("PORT", "5000"))
+    is_render = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID"))
+    if not is_render and not _is_port_available(host, port):
+        fallback_port = _pick_free_port(host)
+        print(
+            f"Port {port} is already in use; using {fallback_port} instead.",
+            flush=True,
+        )
+        port = fallback_port
     url = f"http://{host}:{port}/"
     if sys.stdout.isatty() and not (os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID")):
         if not open_in_edge(url):
