@@ -5,6 +5,7 @@ import asyncio
 import html
 import json
 import os
+import socket
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,10 +13,11 @@ from typing import Dict, Iterable, List, Optional
 from urllib.parse import quote, unquote, urlparse
 from uuid import uuid4
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
+import httpx
 from starlette.responses import RedirectResponse
 
 from payslip_audit.tesseract import (
@@ -35,6 +37,7 @@ MAX_LOG_LINES = 400
 PAYSLIP_REPORT_NAME = "audit_report.pdf"
 PAYSLIP_UPLOAD_ROOT = BASE_DIR / "render" / "uploads" / "payslip"
 PAYSLIP_ALLOWED_IMAGES = {".jpg", ".jpeg", ".png"}
+WEB_APPS = {"cryptocalculator-clone"}
 
 ENTRY_OVERRIDES = {
     "Crypto-Scanner-clone": ["continuous_scan.py", "scan.py"],
@@ -74,6 +77,7 @@ class ManagedScript:
     category: str = "Other"
     log_file: Optional[Path] = None
     process: Optional[asyncio.subprocess.Process] = None
+    port: Optional[int] = None
     _log_lines: List[str] = field(default_factory=list)
     last_output_at: Optional[float] = None
 
@@ -89,7 +93,7 @@ class ManagedScript:
             "category": self.category,
             "running": self.is_running,
             "return_code": None if self.process is None else self.process.returncode,
-            "open_url": script_open_url(self.name),
+            "open_url": script_open_url(self),
             "logs_url": script_logs_url(self.name),
             "last_output_at": self.last_output_at,
         }
@@ -140,6 +144,11 @@ class ManagedScript:
         env["PYTHONPATH"] = (
             f"{BASE_DIR}:{current_pythonpath}" if current_pythonpath else str(BASE_DIR)
         )
+        if self.name in WEB_APPS:
+            if self.port is None:
+                self.port = _allocate_port()
+            env["PORT"] = str(self.port)
+            env["HOST"] = "127.0.0.1"
 
         try:
             self.process = await asyncio.create_subprocess_exec(
@@ -170,6 +179,7 @@ class ManagedScript:
                 self.add_log(line.decode("utf-8", errors="replace"))
         finally:
             await self.process.wait()
+            self.port = None
 
     async def stop(self) -> None:
         if not self.is_running:
@@ -255,10 +265,10 @@ def _encoded_script_name(script_name: str) -> str:
     return quote(script_name, safe="/")
 
 
-def script_open_url(script_name: str) -> str:
+def script_open_url(script: ManagedScript) -> str:
     """Return the preferred UI URL for a script."""
 
-    return f"/logs/view/{_encoded_script_name(script_name)}"
+    return f"/scripts/view/{_encoded_script_name(script.name)}"
 
 
 def script_logs_url(script_name: str) -> str:
@@ -269,6 +279,12 @@ def script_logs_url(script_name: str) -> str:
 
 def _payslip_session_dir(session_id: str) -> Path:
     return PAYSLIP_UPLOAD_ROOT / session_id
+
+
+def _allocate_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
 
 
 TESSERACT_MISSING_DETAIL = TESSERACT_MISSING_MESSAGE
@@ -446,6 +462,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1rem; }
         .card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 1.25rem; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
         .row { display: flex; justify-content: space-between; gap: 1rem; align-items: center; }
+        .nav-bar { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
         .path { color: #94a3b8; font-size: 0.9rem; word-break: break-all; }
         .pill { display: inline-block; padding: 0.3rem 0.65rem; border-radius: 999px; font-weight: 700; font-size: 0.9rem; }
         .running { background: #22c55e22; color: #86efac; }
@@ -467,6 +484,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </style>
 </head>
 <body>
+    <div class=\"nav-bar\">
+        <button class=\"secondary\" id=\"nav-back\">Back</button>
+        <button class=\"secondary\" id=\"nav-forward\">Forward</button>
+    </div>
     <h1>Render Master Control</h1>
     <p class=\"meta\">Pick a category to see its scripts. From there you can start, stop, and monitor anything in this repository (everything except the mt5-clone folder). Webhooks can be sent to <code>/webhook/&lt;script-name&gt;</code>.</p>
     <div class=\"toolbar\">
@@ -476,6 +497,84 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div id=\"grid\" class=\"grid\"></div>
 
     <script src=\"/static/dashboard.js\"></script>
+</body>
+</html>"""
+
+
+CATEGORY_TEMPLATE = """<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+    <meta charset=\"UTF-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <title>Scripts - {category}</title>
+    <style>
+        :root { color-scheme: light dark; }
+        body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
+        h1 { margin-top: 0; }
+        .meta { color: #94a3b8; margin-bottom: 1.5rem; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; }
+        .card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 1rem; display: flex; align-items: center; justify-content: center; text-align: center; min-height: 84px; }
+        .script-btn { width: 100%; padding: 0.8rem 1rem; border-radius: 10px; border: none; font-weight: 700; background: #1f2937; color: #e2e8f0; cursor: pointer; }
+        .nav-bar { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+        button { padding: 0.55rem 0.9rem; border-radius: 10px; border: none; cursor: pointer; font-weight: 700; }
+        .secondary { background: #1f2937; color: #cbd5e1; }
+    </style>
+</head>
+<body data-category=\"{category}\">
+    <div class=\"nav-bar\">
+        <button class=\"secondary\" id=\"nav-back\">Back</button>
+        <button class=\"secondary\" id=\"nav-forward\">Forward</button>
+    </div>
+    <h1>{category} scripts</h1>
+    <p class=\"meta\">Select a script to view its page.</p>
+    <div id=\"grid\" class=\"grid\"></div>
+    <script src=\"/static/category_page.js\"></script>
+</body>
+</html>"""
+
+
+SCRIPT_PAGE_TEMPLATE = """<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+    <meta charset=\"UTF-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <title>Script - {script_name}</title>
+    <style>
+        :root { color-scheme: light dark; }
+        body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
+        h1 { margin-top: 0; }
+        .meta { color: #94a3b8; }
+        .nav-bar { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+        .actions { display: flex; gap: 0.5rem; margin: 1rem 0; }
+        button { padding: 0.55rem 0.9rem; border-radius: 10px; border: none; cursor: pointer; font-weight: 700; }
+        .start { background: #22c55e; color: #052e16; }
+        .stop { background: #ef4444; color: #fff7ed; }
+        .secondary { background: #1f2937; color: #cbd5e1; }
+        .panel { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 1rem; margin-bottom: 1rem; }
+        .log-box { background: #0a0f1b; color: #e5e7eb; border-radius: 8px; padding: 0.75rem; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 220px; max-height: 360px; overflow: auto; border: 1px solid #1f2937; }
+        iframe { width: 100%; height: 520px; border: 1px solid #1f2937; border-radius: 12px; background: #0a0f1b; }
+    </style>
+</head>
+<body data-script-name=\"{script_name}\" data-has-ui=\"{has_ui}\">
+    <div class=\"nav-bar\">
+        <button class=\"secondary\" id=\"nav-back\">Back</button>
+        <button class=\"secondary\" id=\"nav-forward\">Forward</button>
+    </div>
+    <h1>{script_name}</h1>
+    <p class=\"meta\" id=\"script-status\">Loading status...</p>
+    <div class=\"actions\">
+        <button class=\"start\" id=\"start-btn\">Start</button>
+        <button class=\"stop\" id=\"stop-btn\">Stop</button>
+    </div>
+    <div class=\"panel\">
+        <strong>Logs</strong>
+        <div class=\"log-box\" id=\"log-box\">Waiting for output...</div>
+    </div>
+    <div class=\"panel\" id=\"app-panel\" style=\"display:none;\">
+        <strong>App UI</strong>
+        <iframe id=\"app-frame\" title=\"Script UI\"></iframe>
+    </div>
+    <script src=\"/static/script_page.js\"></script>
 </body>
 </html>"""
 
@@ -545,6 +644,20 @@ LOG_VIEWER_TEMPLATE = """<!DOCTYPE html>
     <script src=\"/static/log_viewer.js\"></script>
 </body>
 </html>"""
+
+
+PROXY_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
+PROXY_HOP_HEADERS = {
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "transfer-encoding",
+    "upgrade",
+}
+PROXY_STRIP_HEADERS = {"content-encoding", "content-length"}
 
 PAYSLIP_AUDIT_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"en\">
@@ -616,6 +729,22 @@ async def index() -> str:
     return HTML_TEMPLATE.replace("{asset_version}", ASSET_VERSION)
 
 
+@app.get("/category/{category}", response_class=HTMLResponse)
+async def category_page(category: str) -> str:
+    safe_category = html.escape(category)
+    return CATEGORY_TEMPLATE.replace("{category}", safe_category)
+
+
+@app.get("/scripts/view/{script_name:path}", response_class=HTMLResponse)
+async def script_page(script_name: str) -> str:
+    script = script_manager.get(script_name)
+    safe_name = html.escape(script.name)
+    has_ui = "true" if script.name in WEB_APPS else "false"
+    return (
+        SCRIPT_PAGE_TEMPLATE.replace("{script_name}", safe_name).replace("{has_ui}", has_ui)
+    )
+
+
 
 
 @app.get("/payslip-audit", response_class=HTMLResponse)
@@ -670,6 +799,40 @@ async def view_logs(script_name: str) -> str:
     return _render_log_view(script_name)
 
 
+@app.api_route("/apps/{script_name:path}", methods=PROXY_METHODS)
+@app.api_route("/apps/{script_name:path}/{path:path}", methods=PROXY_METHODS)
+async def proxy_app(script_name: str, request: Request, path: str = "") -> Response:
+    script = script_manager.get(script_name)
+    if not script.is_running or not script.port:
+        raise HTTPException(status_code=404, detail=f"{script_name} is not running.")
+
+    target = f"http://127.0.0.1:{script.port}/{path}"
+    if request.url.query:
+        target = f"{target}?{request.url.query}"
+
+    headers = {k: v for k, v in request.headers.items() if k.lower() != "host"}
+    body = await request.body()
+
+    async with httpx.AsyncClient(follow_redirects=False) as client:
+        resp = await client.request(
+            request.method,
+            target,
+            content=body,
+            headers=headers,
+        )
+
+    filtered_headers = {
+        k: v
+        for k, v in resp.headers.items()
+        if k.lower() not in PROXY_HOP_HEADERS | PROXY_STRIP_HEADERS
+    }
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        headers=filtered_headers,
+    )
+
+
 @app.get("/api/bybit-monitor/settings")
 async def bybit_monitor_settings() -> JSONResponse:
     return JSONResponse(_read_bybit_settings())
@@ -720,6 +883,9 @@ async def start_script(script_name: str) -> JSONResponse:
 
     if script.is_running:
         return JSONResponse({"status": "already_running", **script.to_summary()})
+
+    if script.name in WEB_APPS and script.port is None:
+        script.port = _allocate_port()
 
     asyncio.create_task(_background_start(script))
 
