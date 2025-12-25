@@ -312,9 +312,11 @@ def _serve_wsgi(app: Flask, host: str = "127.0.0.1", port: int = 5000) -> None:
 
 
 if __name__ == "__main__":
-    host = "127.0.0.1"
-    port = 5000
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "5000"))
     url = f"http://{host}:{port}/"
-    if not open_in_edge(url):
-        print(f"Microsoft Edge was not found. Open {url} manually in Edge.", flush=True)
+    if sys.stdout.isatty() and not (os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID")):
+        if not open_in_edge(url):
+            print(f"Open {url} in your browser to view the calculator.", flush=True)
+    print(f"Serving cryptocalculator on {url}", flush=True)
     _serve_wsgi(app, host=host, port=port)

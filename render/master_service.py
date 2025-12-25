@@ -689,7 +689,9 @@ async def bybit_monitor_push_test() -> JSONResponse:
         status_code = 200 if (result.get("sent") or not configured) else 400
         return JSONResponse(result, status_code=status_code)
     except Exception as exc:  # pragma: no cover - defensive
-        raise HTTPException(status_code=500, detail=f"Failed to send test push: {exc}") from exc
+        raise HTTPException(
+            status_code=500, detail=f"Failed to send Telegram alert test: {exc}"
+        ) from exc
 
 
 async def _background_start(script: ManagedScript) -> None:

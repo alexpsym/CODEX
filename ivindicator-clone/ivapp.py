@@ -5,9 +5,14 @@ from datetime import datetime, timezone
 import os
 import re
 import threading
+import time
+import sys
 
 import matplotlib
-matplotlib.use('TkAgg')  # pylint: disable=wrong-import-position
+NON_INTERACTIVE = (not sys.stdin.isatty()) or bool(
+    os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID")
+)
+matplotlib.use("Agg" if NON_INTERACTIVE else "TkAgg")  # pylint: disable=wrong-import-position
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.animation import FuncAnimation
@@ -157,7 +162,9 @@ def symbol_input_listener():
     """Listen for symbol or expiry changes on stdin."""
     global current_symbol, current_expiry
     while True:
-        raw_input = input("Enter symbol (BTCUSDT/ETHUSDT/SOLUSDT) or expiry (yy-mm-dd) or 'log': ").strip()
+        raw_input = input(
+            "Enter symbol (BTCUSDT/ETHUSDT/SOLUSDT) or expiry (yy-mm-dd) or 'log': "
+        ).strip()
         if raw_input.lower() == "log":
             save_metrics()
             continue
@@ -215,6 +222,27 @@ def init_plot():
 
 def main():
     """Start the interactive plot loop."""
+    if NON_INTERACTIVE:
+        logger.info("Non-interactive environment detected; running headless updates.")
+        init_plot()
+        try:
+            while True:
+                update(None)
+                if current_metrics:
+                    logger.info(
+                        "IV snapshot: symbol=%s timeframe=%s iv=%.2f%% spot=%.2f move=%.2f expiry=%s",
+                        current_symbol,
+                        current_timeframe,
+                        current_metrics.get("IV", 0.0),
+                        current_metrics.get("Spot", 0.0),
+                        current_metrics.get("Move", 0.0),
+                        current_metrics.get("Expiry", "n/a"),
+                    )
+                time.sleep(4)
+        except KeyboardInterrupt:
+            logger.info("Exiting headless loop.")
+        return
+
     threading.Thread(target=symbol_input_listener, daemon=True).start()
     try:
         while True:
