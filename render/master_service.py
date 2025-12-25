@@ -657,6 +657,7 @@ PROXY_HOP_HEADERS = {
     "transfer-encoding",
     "upgrade",
 }
+PROXY_STRIP_HEADERS = {"content-encoding", "content-length"}
 
 PAYSLIP_AUDIT_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"en\">
@@ -821,7 +822,9 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
         )
 
     filtered_headers = {
-        k: v for k, v in resp.headers.items() if k.lower() not in PROXY_HOP_HEADERS
+        k: v
+        for k, v in resp.headers.items()
+        if k.lower() not in PROXY_HOP_HEADERS | PROXY_STRIP_HEADERS
     }
     return Response(
         content=resp.content,
