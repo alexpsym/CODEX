@@ -148,10 +148,10 @@ def log_push_state() -> None:
 
     if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
         chat_note = f" chat_id={TELEGRAM_CHAT_ID}" if TELEGRAM_CHAT_ID else ""
-        log(f"Push notifications ready via Telegram bot.{chat_note}")
+        log(f"Telegram alerts ready.{chat_note}")
     else:
         log(
-            "Push notifications disabled: set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID env vars to enable remote alerts."
+            "Telegram alerts disabled: set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID env vars to enable them."
         )
 
 
@@ -184,14 +184,14 @@ def send_push_notification(title: str, message: str) -> bool:
         if not _push_warning_given:
             _push_warning_given = True
             log(
-                "Push notifications are disabled: provide TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID env vars "
+                "Telegram alerts are disabled: provide TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID env vars "
                 "to enable them."
             )
         return False
 
     if not _push_config_logged:
         _push_config_logged = True
-        log("Push notifications enabled via Telegram bot chat.")
+        log("Telegram alerts enabled via Telegram bot chat.")
 
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -201,7 +201,7 @@ def send_push_notification(title: str, message: str) -> bool:
         if not _push_success_logged:
             _push_success_logged = True
             _push_failure_logged = False
-            log("Push notification sent successfully via Telegram.")
+            log("Telegram alert sent successfully.")
         return True
     except Exception as exc:
         if not _push_failure_logged:
@@ -211,20 +211,20 @@ def send_push_notification(title: str, message: str) -> bool:
 
 
 def send_push_test() -> Dict[str, object]:
-    """Trigger a push notification test and report the outcome."""
+    """Trigger a Telegram alert test and report the outcome."""
 
     configured = _push_configured()
     success = False
 
     if configured:
         success = send_push_notification(
-            "Bybit monitor push test",
+            "Bybit monitor Telegram test",
             "If you received this, Telegram alerts are working for bybit_monitor.",
         )
     detail = (
-        "Push notifications are not configured (set TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID)."
+        "Telegram alerts are not configured (set TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID)."
         if not configured
-        else "Test push sent successfully via Telegram." if success else "Push notification send attempt failed."
+        else "Test Telegram alert sent successfully." if success else "Telegram alert send attempt failed."
     )
     return {"sent": success, "detail": detail, "configured": configured}
 
@@ -578,7 +578,7 @@ def fetch_altcoin_prices() -> Dict[str, float]:
 
 
 def send_notification(title: str, message: str) -> None:
-    """Send push + desktop notifications, falling back to console beeps."""
+    """Send Telegram + desktop notifications, falling back to console beeps."""
 
     global _notification_warning_given
     notification_sent = False
@@ -605,7 +605,7 @@ def send_notification(title: str, message: str) -> None:
         if not _notification_warning_given:
             _notification_warning_given = True
             log(
-                "Desktop/push notifications unavailable. Install 'plyer' for desktop and set TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID env vars for push alerts, then restart this script."
+                "Desktop/Telegram notifications unavailable. Install 'plyer' for desktop and set TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID env vars for Telegram alerts, then restart this script."
             )
         # Audible fallback if possible
         try:  # pragma: no cover - OS specific
@@ -621,42 +621,13 @@ def send_notification(title: str, message: str) -> None:
         log("ALERT: " + message)
 
 
-def progress_bar(total_seconds: int, label: str) -> None:
-    """Show a simple progress bar that updates every second."""
+def wait_with_log(total_seconds: int, label: str) -> None:
+    """Wait for the given duration with a single log line."""
     total_seconds = max(0, int(total_seconds))
-    bar_length = 40
-    start_time = time.time()
-
-    while True:
-        elapsed = time.time() - start_time
-        if elapsed >= total_seconds:
-            percent = 1.0 if total_seconds else 0.0
-            filled_length = bar_length if total_seconds else 0
-            remaining_seconds = 0
-        else:
-            percent = elapsed / total_seconds if total_seconds else 0.0
-            filled_length = int(bar_length * percent)
-            remaining_seconds = int(round(total_seconds - elapsed))
-
-        bar = "#" * filled_length + "-" * (bar_length - filled_length)
-        minutes, seconds = divmod(max(0, remaining_seconds), 60)
-        sys.stdout.write(
-            f"\r{label}: [{bar}] {percent * 100:6.2f}% | Time left: {minutes:02d}:{seconds:02d}"
-        )
-        sys.stdout.flush()
-
-        if elapsed >= total_seconds:
-            break
-
-        try:
-            time.sleep(1)
-        except KeyboardInterrupt:  # allow the main loop to catch this
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-            raise
-
-    sys.stdout.write("\n")
-    sys.stdout.flush()
+    if total_seconds == 0:
+        return
+    log(f"{label}: sleeping for {total_seconds} seconds.")
+    time.sleep(total_seconds)
 
 
 def run_monitor() -> None:
@@ -715,7 +686,7 @@ def run_monitor() -> None:
                     "Unable to reach Bybit or fallback due to access restrictions. "
                     f"Waiting {wait_seconds} seconds before retrying."
                 )
-                progress_bar(wait_seconds, "Block backoff")
+                wait_with_log(wait_seconds, "Block backoff")
                 continue
             except Exception as fallback_exc:
                 log(f"Fallback market data unavailable: {fallback_exc}")
@@ -723,7 +694,7 @@ def run_monitor() -> None:
                     "Access to configured data sources is blocked or restricted. "
                     f"Waiting {wait_seconds} seconds before retrying."
                 )
-                progress_bar(wait_seconds, "Block backoff")
+                wait_with_log(wait_seconds, "Block backoff")
                 continue
         except Exception as exc:
             log("⚠️ Could not retrieve data from Bybit during this attempt.")
@@ -736,7 +707,7 @@ def run_monitor() -> None:
                 "reachable from your location, and retry after checking firewall or VPN settings."
             )
             log(f"Waiting {ERROR_WAIT_SECONDS} seconds before trying again...")
-            progress_bar(ERROR_WAIT_SECONDS, "Retry delay")
+            wait_with_log(ERROR_WAIT_SECONDS, "Retry delay")
             continue
 
         log(f"Received {len(prices)} altcoin perpetual prices from {source_label}.")
@@ -791,7 +762,7 @@ def run_monitor() -> None:
             f"{settings['wait_seconds'] // 60} minute(s) ({settings['wait_seconds']} seconds) "
             "before the next price check."
         )
-        progress_bar(settings["wait_seconds"], "Waiting for the next check")
+        wait_with_log(settings["wait_seconds"], "Waiting for the next check")
 
 
 def main() -> None:

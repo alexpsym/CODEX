@@ -11,7 +11,6 @@ import asyncio
 from typing import Callable
 
 import pandas as pd
-from tqdm import tqdm
 from xlsxwriter.utility import xl_col_to_name
 
 import core
@@ -346,8 +345,7 @@ def scan_and_collect_results(symbols: list[str],
     failed: list[str] = []
     with ThreadPoolExecutor(max_workers=16) as executor:
         futures = submit_symbol_futures(symbols, executor, logger, func)
-        for future in tqdm(as_completed(futures), total=len(futures),
-                           desc="Scanning"):
+        for future in as_completed(futures):
             symbol = futures[future]
             result = future.result()
             if result:

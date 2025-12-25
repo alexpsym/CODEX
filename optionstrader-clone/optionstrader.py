@@ -29,14 +29,13 @@ from tabulate import tabulate
 import csv
 from decimal import Decimal, ROUND_HALF_UP
 
-from env_loader import load_bybit_live_env, load_optionstrader_env
 from bybit_credentials import resolve_bybit_credentials
 
 # === File setup ===
 script_dir_path = Path(__file__).resolve().parent
 script_dir = str(script_dir_path)
 # Location for per-trade log files requested by the user
-TRADE_LOG_DIR = os.path.expanduser(r"C:\Users\User\Downloads")
+TRADE_LOG_DIR = os.getenv("OPTIONSTRADER_LOG_DIR") or str(script_dir_path / "trade_logs")
 # Log runtime details to a clear, descriptive file name
 log_file = script_dir_path / 'optionstrader.log'
 # Store trade-specific information separately
@@ -56,10 +55,8 @@ logger.propagate = False
 logger.info("Starting optionstrader.py; logs to %s, output to %s", log_file, output_file)
 
 # Load secrets from removable-drive .env files before reading them
-DEMO_BASE_URL = "https://api-demo.bybit.com"
-LIVE_BASE_URL = "https://api.bybit.com"
 TRADING_ENV = "live"
-BASE_URL = LIVE_BASE_URL
+BASE_URL = "https://api.bybit.com"
 LOADED_ENV_FILES: list[str] = []
 
 
@@ -69,49 +66,40 @@ def _normalize_env_choice(choice: str) -> str:
 
 
 def choose_trading_environment(interactive: bool = False) -> str:
-    """Return the requested trading environment, prompting if needed."""
+    """Return the requested trading environment without prompting."""
 
     env_choice = os.getenv("OPTIONSTRADER_ENV")
     if env_choice:
         return _normalize_env_choice(env_choice)
 
-    if interactive and sys.stdin.isatty():
-        while True:
-            choice = input("Trade on demo or live? [demo/live]: ").strip().lower()
-            if choice in {"demo", "live"}:
-                return choice
-            print("Please enter 'demo' or 'live'.")
+    bybit_env = os.getenv("BYBIT_ENV")
+    if bybit_env:
+        return "demo" if bybit_env.strip().lower() in {"demo", "testnet", "paper"} else "live"
 
     return "live"
 
 
 def configure_trading_environment(interactive: bool = False) -> None:
-    """Configure API base URL and load .env files for the chosen mode."""
+    """Configure API base URL and env-based credentials for the chosen mode."""
 
     global BASE_URL, TRADING_ENV, LOADED_ENV_FILES
 
     TRADING_ENV = choose_trading_environment(interactive)
-    if TRADING_ENV == "demo":
-        BASE_URL = DEMO_BASE_URL
-        LOADED_ENV_FILES = load_optionstrader_env(script_dir_path, logger)
-        if logger:
-            logger.info(
-                "Using demo environment; loaded optionstrader.env files: %s",
-                LOADED_ENV_FILES,
-            )
-    else:
-        BASE_URL = LIVE_BASE_URL
-        LOADED_ENV_FILES = load_bybit_live_env(logger)
-        if logger:
-            logger.info(
-                "Using live environment; loaded Bybit credentials: %s", LOADED_ENV_FILES
-            )
+    mode, _key, _secret, base_url, key_source = resolve_bybit_credentials()
+    BASE_URL = base_url
+    LOADED_ENV_FILES = []
+    logger.info(
+        "Using %s environment; credentials from env (source=%s, mode=%s).",
+        TRADING_ENV,
+        key_source,
+        mode,
+    )
 
 
 def get_base_url() -> str:
     """Return the API base URL for the active environment."""
 
-    return DEMO_BASE_URL if TRADING_ENV == "demo" else LIVE_BASE_URL
+    return BASE_URL
 
 
 configure_trading_environment(interactive=False)

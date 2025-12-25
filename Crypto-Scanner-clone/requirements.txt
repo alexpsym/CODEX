@@ -1,7 +1,6 @@
 pandas
 requests
 httpx
-tqdm
 xlsxwriter
 pytest
 pylint
