@@ -11,44 +11,11 @@ from bybit_credentials import resolve_bybit_credentials
 
 import asyncio
 import requests
-from tqdm import tqdm
 import httpx
 import correlation_math
 import percentile_math
-from pathlib import Path
-
-BYBIT_LIVE_ENV_PATH = Path(r"E:/ENV/bybit-live.env")
 
 MAX_DUPLICATE_RETRIES = 3
-
-
-def _load_bybit_live_env() -> bool:
-    """Load Bybit API credentials from the shared live env file."""
-
-    try:
-        from dotenv import load_dotenv
-    except ModuleNotFoundError:  # pragma: no cover - optional dependency
-        load_dotenv = None  # type: ignore
-
-    if not BYBIT_LIVE_ENV_PATH.exists():
-        return False
-
-    if load_dotenv is not None:
-        return bool(load_dotenv(BYBIT_LIVE_ENV_PATH, override=True))
-
-    loaded = False
-    for line in BYBIT_LIVE_ENV_PATH.read_text(encoding="utf-8").splitlines():
-        if not line or line.lstrip().startswith("#"):
-            continue
-        if "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        os.environ[key.strip()] = value.strip()
-        loaded = True
-    return loaded
-
-
-_load_bybit_live_env()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_DIR = os.path.join(BASE_DIR, "logs")
@@ -82,10 +49,8 @@ def get_tradeable_symbols_sorted_by_volume() -> list:
     """Return USDT symbols sorted by 24h turnover descending."""
     url = "https://api.bybit.com/v5/market/tickers?category=linear"
     try:
-        with tqdm(total=1, desc="Fetching symbols") as pbar:
-            response = requests.get(url, headers=get_auth_headers(), timeout=10)
-            response.raise_for_status()
-            pbar.update(1)
+        response = requests.get(url, headers=get_auth_headers(), timeout=10)
+        response.raise_for_status()
         tickers = response.json().get("result", {}).get("list", [])
         filtered = [
             (item["symbol"], float(item.get("turnover24h", 0)))

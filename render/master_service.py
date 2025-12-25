@@ -430,7 +430,7 @@ script_manager = ScriptManager(discover_scripts())
 app = FastAPI(title="Render Master Script", version="1.0")
 
 
-ASSET_VERSION = "v12"
+ASSET_VERSION = ""
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"en\">
@@ -475,7 +475,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
     <div id=\"grid\" class=\"grid\"></div>
 
-    <script src=\"/static/dashboard.js?ver={asset_version}\"></script>
+    <script src=\"/static/dashboard.js\"></script>
 </body>
 </html>"""
 
@@ -689,7 +689,9 @@ async def bybit_monitor_push_test() -> JSONResponse:
         status_code = 200 if (result.get("sent") or not configured) else 400
         return JSONResponse(result, status_code=status_code)
     except Exception as exc:  # pragma: no cover - defensive
-        raise HTTPException(status_code=500, detail=f"Failed to send test push: {exc}") from exc
+        raise HTTPException(
+            status_code=500, detail=f"Failed to send Telegram alert test: {exc}"
+        ) from exc
 
 
 async def _background_start(script: ManagedScript) -> None:

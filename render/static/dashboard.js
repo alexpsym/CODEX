@@ -190,7 +190,7 @@
                 resetBtn.className = 'secondary';
 
                 const pushTestBtn = document.createElement('button');
-                pushTestBtn.textContent = 'Send test push';
+                pushTestBtn.textContent = 'Test Telegram Alert';
                 pushTestBtn.className = 'secondary';
 
                 settingsActions.appendChild(saveBtn);
@@ -283,7 +283,7 @@
                     }
                     const buttons = [saveBtn, resetBtn, pushTestBtn];
                     buttons.forEach((btn) => (btn.disabled = true));
-                    setSettingsStatus('Sending test push...');
+                    setSettingsStatus('Sending Telegram alert...');
                     try {
                         const resp = await fetch('/api/bybit-monitor/push-test', { method: 'POST' });
                         const data = await resp.json().catch(() => ({}));
@@ -294,14 +294,14 @@
                         }
                         if (!resp.ok) {
                             const detail = data?.detail || resp.statusText;
-                            throw new Error(detail || 'Push test failed');
+                            throw new Error(detail || 'Telegram alert test failed');
                         }
-                        const detail = data?.detail || 'Test push sent';
+                        const detail = data?.detail || 'Telegram alert sent';
                         setSettingsStatus(detail);
                     } catch (err) {
                         console.error(err);
-                        setSettingsStatus('Push test failed', true);
-                        alert(err.message || 'Unable to send test push notification');
+                        setSettingsStatus('Telegram alert test failed', true);
+                        alert(err.message || 'Unable to send Telegram alert test');
                     } finally {
                         buttons.forEach((btn) => (btn.disabled = false));
                     }

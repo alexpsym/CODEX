@@ -1,11 +1,10 @@
-"""Run pylint and pytest with tqdm progress bars and write logs."""
+"""Run pylint and pytest and write logs."""
 import os
 import subprocess
 import sys
 from pathlib import Path
 from contextlib import redirect_stdout
 
-from tqdm import tqdm
 import pytest
 import core
 
@@ -22,7 +21,7 @@ PY_FILES = [
 
 
 def run_pylint() -> None:
-    """Run pylint on all target files with a progress bar and log output."""
+    """Run pylint on all target files and log output."""
     for path in PY_FILES:
         if not Path(path).is_file():
             raise FileNotFoundError(f"Missing required file: {path}")
@@ -31,40 +30,25 @@ def run_pylint() -> None:
     log_path = os.path.join(LOG_DIR, "pylint.log")
 
     with open(log_path, "w", encoding="utf-8") as log_file:
-        with tqdm(total=len(PY_FILES), desc="pylint") as pbar:
-            for path in PY_FILES:
-                result = subprocess.run([
+        for path in PY_FILES:
+            result = subprocess.run(
+                [
                     "pylint",
                     path,
-                ], text=True, capture_output=True)
-                sys.stdout.write(result.stdout)
-                log_file.write(result.stdout)
-                sys.stdout.flush()
-                log_file.flush()
-                if result.returncode != 0:
-                    raise SystemExit(f"pylint failed for {path}")
-                pbar.update(1)
+                ],
+                text=True,
+                capture_output=True,
+            )
+            sys.stdout.write(result.stdout)
+            log_file.write(result.stdout)
+            sys.stdout.flush()
+            log_file.flush()
+            if result.returncode != 0:
+                raise SystemExit(f"pylint failed for {path}")
 
 
 def run_pytest() -> None:
-    """Run pytest with a tqdm progress bar for tests and log output."""
-
-    class TqdmPlugin:  # pylint: disable=too-few-public-methods
-        """pytest plugin showing progress with tqdm."""
-
-        def __init__(self) -> None:
-            self.pbar = None
-
-        def pytest_collection_modifyitems(self, session, config, items):  # noqa: ARG002
-            self.pbar = tqdm(total=len(items), desc="pytest")
-
-        def pytest_runtest_logreport(self, report):
-            if report.when == "call" and self.pbar:
-                self.pbar.update(1)
-
-        def pytest_sessionfinish(self, session, exitstatus):  # noqa: ARG002
-            if self.pbar:
-                self.pbar.close()
+    """Run pytest for tests and log output."""
 
     os.makedirs(LOG_DIR, exist_ok=True)
     log_path = os.path.join(LOG_DIR, "pytest.log")
@@ -89,13 +73,13 @@ def run_pytest() -> None:
     with open(log_path, "w", encoding="utf-8") as log_file:
         tee = Tee(sys.stdout, log_file)
         with redirect_stdout(tee):
-            errno = pytest.main(["test.py"], plugins=[TqdmPlugin()])
+            errno = pytest.main(["test.py"])
     if errno != 0:
         raise SystemExit(errno)
 
 
 def main() -> None:
-    """Execute pylint and pytest with progress bars."""
+    """Execute pylint and pytest."""
     run_pylint()
     run_pytest()
 
