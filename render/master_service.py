@@ -430,7 +430,7 @@ script_manager = ScriptManager(discover_scripts())
 app = FastAPI(title="Render Master Script", version="1.0")
 
 
-ASSET_VERSION = "v12"
+ASSET_VERSION = ""
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"en\">
@@ -475,7 +475,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
     <div id=\"grid\" class=\"grid\"></div>
 
-    <script src=\"/static/dashboard.js?ver={asset_version}\"></script>
+    <script src=\"/static/dashboard.js\"></script>
 </body>
 </html>"""
 

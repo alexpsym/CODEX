@@ -62,8 +62,11 @@ _push_success_logged = False
 _push_failure_logged = False
 _push_config_logged = False
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+def _get_telegram_credentials() -> tuple[str, str]:
+    """Return Telegram credentials from environment variables."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN") or ""
+    chat_id = os.getenv("TELEGRAM_CHAT_ID") or ""
+    return token, chat_id
 
 try:  # Optional helper for desktop notifications
     from plyer import notification as _plyer_notification
@@ -146,12 +149,14 @@ def log(message: str) -> None:
 def log_push_state() -> None:
     """Log the Telegram notification configuration state (without secrets)."""
 
-    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-        chat_note = f" chat_id={TELEGRAM_CHAT_ID}" if TELEGRAM_CHAT_ID else ""
+    token, chat_id = _get_telegram_credentials()
+    if token and chat_id:
+        chat_note = f" chat_id={chat_id}" if chat_id else ""
         log(f"Telegram alerts ready.{chat_note}")
     else:
         log(
-            "Telegram alerts disabled: set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID env vars to enable them."
+            "Telegram alerts disabled: set TELEGRAM_BOT_TOKEN (or TELEGRAM_TOKEN) "
+            "and TELEGRAM_CHAT_ID env vars to enable them."
         )
 
 
@@ -166,7 +171,8 @@ def _log_classification_once(kind: str, detail: str, hint: str | None = None) ->
 
 
 def _push_configured() -> bool:
-    return bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
+    token, chat_id = _get_telegram_credentials()
+    return bool(token and chat_id)
 
 
 def push_notifications_ready() -> bool:
@@ -180,12 +186,13 @@ def send_push_notification(title: str, message: str) -> bool:
 
     global _push_warning_given, _push_success_logged, _push_failure_logged, _push_config_logged
 
-    if not _push_configured():
+    token, chat_id = _get_telegram_credentials()
+    if not (token and chat_id):
         if not _push_warning_given:
             _push_warning_given = True
             log(
-                "Telegram alerts are disabled: provide TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID env vars "
-                "to enable them."
+                "Telegram alerts are disabled: provide TELEGRAM_BOT_TOKEN (or TELEGRAM_TOKEN) and "
+                "TELEGRAM_CHAT_ID env vars to enable them."
             )
         return False
 
@@ -194,8 +201,8 @@ def send_push_notification(title: str, message: str) -> bool:
         log("Telegram alerts enabled via Telegram bot chat.")
 
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"{title}\n{message}"}
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = {"chat_id": chat_id, "text": f"{title}\n{message}"}
         response = _get_session().post(url, json=payload, timeout=10)
         response.raise_for_status()
         if not _push_success_logged:
@@ -222,7 +229,7 @@ def send_push_test() -> Dict[str, object]:
             "If you received this, Telegram alerts are working for bybit_monitor.",
         )
     detail = (
-        "Telegram alerts are not configured (set TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID)."
+        "Telegram alerts are not configured (set TELEGRAM_BOT_TOKEN/TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)."
         if not configured
         else "Test Telegram alert sent successfully." if success else "Telegram alert send attempt failed."
     )
