@@ -1159,6 +1159,17 @@ async def webhook(script_name: str, request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "script": script_name})
 
 
+@app.post("/webhook")
+async def default_webhook(request: Request) -> JSONResponse:
+    payload = await request.body()
+    script_name = "cryptocalculator-clone"
+    script = script_manager.get(script_name)
+    script.add_log(f"Webhook received: {payload.decode('utf-8', errors='replace')}")
+    if not script.is_running:
+        await script.start()
+    return JSONResponse({"status": "ok", "script": script_name})
+
+
 @app.get("/health")
 async def healthcheck() -> PlainTextResponse:
     return PlainTextResponse("ok")

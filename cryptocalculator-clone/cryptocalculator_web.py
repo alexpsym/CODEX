@@ -12,7 +12,8 @@ import time
 import webbrowser
 from typing import Dict, Optional
 
-from flask import Flask, render_template_string, request
+from flask import Flask, jsonify, render_template_string, request
+import requests
 
 from cryptocalculator import (
     DEFAULT_EXECUTION_EXCHANGE,
@@ -24,6 +25,8 @@ from cryptocalculator import (
     calculate_trade,
     format_trade,
     get_balance_fetcher,
+    BYBIT_LINEAR_URL,
+    BYBIT_SPOT_URL,
 )
 
 app = Flask(__name__)
@@ -38,6 +41,8 @@ PRICE_MODE_NOTES = {
 }
 
 BALANCE_ADAPTERS = {name: get_balance_fetcher(name) for name in EXECUTION_EXCHANGES}
+SYMBOL_CACHE: Dict[str, Dict[str, object]] = {}
+SYMBOL_CACHE_TTL = 300
 
 FORM_HTML = """
 <!doctype html>
@@ -54,6 +59,8 @@ FORM_HTML = """
     .copy-row button {cursor:pointer;}
     .copy-status {font-size:12px; color:#9ca3af;}
     .copy-box {background:#111827; border:1px solid #1f2937; padding:8px; border-radius:6px; color:#e5e7eb; max-width:520px; white-space:pre-wrap;}
+    .symbol-wrap {position:relative;}
+    datalist {max-height:220px;}
   </style>
   <script>
     function copyText(text, statusId){
@@ -75,7 +82,7 @@ FORM_HTML = """
       copyText(el.innerText, statusId);
     }
     function exportResult(){
-      const payload = document.getElementById('alert_json');
+      const payload = document.getElementById('export_json');
       if(!payload || !payload.innerText.trim()){
         alert('Calculate a trade first to export the result.');
         return;
@@ -104,6 +111,39 @@ FORM_HTML = """
       if(!priceSource || !note){return;}
       note.innerText = notes[priceSource.value] || '';
     }
+    async function loadSymbols(){
+      const priceSource = document.getElementById('price_source');
+      const symbolInput = document.getElementById('symbol');
+      const symbolOptions = document.getElementById('symbol_options');
+      if(!priceSource || !symbolInput || !symbolOptions){return;}
+      try{
+        const response = await fetch(`/symbols?price_source=${encodeURIComponent(priceSource.value)}`);
+        if(!response.ok){throw new Error('Failed to load symbols');}
+        const data = await response.json();
+        window.__symbolList = Array.isArray(data.symbols) ? data.symbols : [];
+        updateSymbolSuggestions(symbolInput.value);
+      } catch(err){
+        console.warn(err);
+      }
+    }
+    function updateSymbolSuggestions(value){
+      const symbolOptions = document.getElementById('symbol_options');
+      const symbols = Array.isArray(window.__symbolList) ? window.__symbolList : [];
+      if(!symbolOptions){return;}
+      symbolOptions.innerHTML = '';
+      const query = (value || '').trim().toUpperCase();
+      if(!query){return;}
+      const starts = symbols.filter((symbol) => symbol.startsWith(query));
+      const contains = symbols.filter(
+        (symbol) => !symbol.startsWith(query) && symbol.includes(query)
+      );
+      const matches = starts.concat(contains).slice(0, 20);
+      matches.forEach((symbol) => {
+        const option = document.createElement('option');
+        option.value = symbol;
+        symbolOptions.appendChild(option);
+      });
+    }
     document.addEventListener('DOMContentLoaded', function(){
       const ot = document.getElementById('order_type');
       if(ot){
@@ -113,8 +153,14 @@ FORM_HTML = """
       const ps = document.getElementById('price_source');
       if(ps){
         ps.addEventListener('change', updatePriceMode);
+        ps.addEventListener('change', loadSymbols);
         updatePriceMode();
       }
+      const symbolInput = document.getElementById('symbol');
+      if(symbolInput){
+        symbolInput.addEventListener('input', (event) => updateSymbolSuggestions(event.target.value));
+      }
+      loadSymbols();
     });
   </script>
 </head>
@@ -123,7 +169,12 @@ FORM_HTML = """
   <div class="container">
     <div class="form">
       <form method="post">
-        <label>Symbol: <input name="symbol" required></label><br>
+        <label>Symbol:
+          <span class="symbol-wrap">
+            <input name="symbol" id="symbol" list="symbol_options" required>
+            <datalist id="symbol_options"></datalist>
+          </span>
+        </label><br>
         <label>Price Source:
           <select name="price_source" id="price_source">
             {% for key, meta in price_source_options %}
@@ -175,6 +226,9 @@ FORM_HTML = """
       {% if payload_json %}
         <h2>Result</h2>
         <pre id="alert_json">{{ payload_json }}</pre>
+        {% if export_json %}
+        <pre id="export_json" style="display:none;">{{ export_json }}</pre>
+        {% endif %}
         <div class="copy-row">
           <button type="button" onclick="copyFromElement('alert_json','payload_status')">Copy TradingView Message</button>
           <span class="copy-status" id="payload_status"></span>
@@ -217,6 +271,8 @@ def index():
     error = None
     risk_info = None
     payload_json = None
+    export_json = None
+    trade = None
 
     execution_exchange = request.form.get(
         "execution_exchange", DEFAULT_EXECUTION_EXCHANGE
@@ -279,12 +335,20 @@ def index():
             error = str(exc)
 
     selection_info: Optional[Dict[str, str]] = None
-    if request.method == "POST" and not error:
+    if request.method == "POST" and not error and trade:
         selection_info = {
             "execution_label": EXECUTION_EXCHANGES[execution_exchange]["label"],
             "price_label": PRICE_SOURCES[price_source]["label"],
             "trade_mode_label": TRADE_MODE_LABELS[trade_mode],
         }
+        export_payload = {
+            "summary": summary,
+            "execution_settings": selection_info,
+            "position_details": risk_info,
+            "webhook_message": json.loads(payload_json) if payload_json else None,
+            "trade": trade,
+        }
+        export_json = json.dumps(export_payload, indent=2)
 
     return render_template_string(
         FORM_HTML,
@@ -301,6 +365,7 @@ def index():
         price_source_options=sorted(PRICE_SOURCES.items()),
         price_mode_notes=PRICE_MODE_NOTES,
         webhook_url=f"{request.host_url.rstrip('/')}/webhook/cryptocalculator-clone",
+        export_json=export_json,
     )
 
 
@@ -382,6 +447,70 @@ def _pick_free_port(host: str) -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind((host, 0))
         return sock.getsockname()[1]
+
+
+def _fetch_bybit_symbols(trade_mode: str) -> list[str]:
+    url = BYBIT_SPOT_URL if trade_mode == "spot" else BYBIT_LINEAR_URL
+    resp = requests.get(url, timeout=10)
+    resp.raise_for_status()
+    symbols = [
+        item.get("symbol", "").upper()
+        for item in resp.json().get("result", {}).get("list", [])
+        if item.get("symbol")
+    ]
+    return sorted(set(symbols))
+
+
+def _fetch_coinspot_symbols() -> list[str]:
+    url = "https://www.coinspot.com.au/pubapi/v2/latest"
+    resp = requests.get(url, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+    prices = data.get("prices", {})
+    if isinstance(prices, dict):
+        symbols = [key.upper() for key in prices.keys() if key]
+    else:
+        symbols = []
+    return sorted(set(symbols))
+
+
+def _get_cached_symbols(cache_key: str) -> Optional[list[str]]:
+    cached = SYMBOL_CACHE.get(cache_key)
+    if not cached:
+        return None
+    if time.time() - cached["timestamp"] > SYMBOL_CACHE_TTL:
+        return None
+    return cached["symbols"]  # type: ignore[return-value]
+
+
+def _set_cached_symbols(cache_key: str, symbols: list[str]) -> None:
+    SYMBOL_CACHE[cache_key] = {"timestamp": time.time(), "symbols": symbols}
+
+
+@app.get("/symbols")
+def symbol_lookup():
+    price_source = request.args.get("price_source", DEFAULT_PRICE_SOURCE).lower()
+    if price_source not in PRICE_SOURCES:
+        price_source = DEFAULT_PRICE_SOURCE
+    exchange = PRICE_SOURCES[price_source]["exchange"]
+    trade_mode = PRICE_SOURCES[price_source]["trade_mode"]
+    cache_key = f"{exchange}:{trade_mode}"
+    cached = _get_cached_symbols(cache_key)
+    if cached is not None:
+        return jsonify({"symbols": cached})
+
+    try:
+        if exchange == "bybit":
+            symbols = _fetch_bybit_symbols(trade_mode)
+        elif exchange == "coinspot":
+            symbols = _fetch_coinspot_symbols()
+        else:
+            symbols = []
+    except Exception as exc:  # pragma: no cover - network fallback
+        return jsonify({"symbols": [], "error": str(exc)})
+
+    _set_cached_symbols(cache_key, symbols)
+    return jsonify({"symbols": symbols})
 
 
 def _wait_for_server(host: str, port: int, timeout: float = 10.0) -> bool:
