@@ -172,7 +172,9 @@ class BybitAdapter(ExchangeAdapter):
             flush=True,
         )
 
-        params = {"accountType": account_type, "coin": coin}
+        params = {"accountType": account_type}
+        if account_mode != "demo":
+            params["coin"] = coin
         query = urlencode(params)
         timestamp = str(int(time.time() * 1000))
         recv_window = "5000"
@@ -190,13 +192,22 @@ class BybitAdapter(ExchangeAdapter):
         resp = requests.get(url, headers=headers, timeout=10)
         resp.raise_for_status()
 
-        for item in resp.json().get("result", {}).get("list", []):
+        results = resp.json().get("result", {}).get("list", [])
+        for item in results:
             for bal in item.get("coin", []):
                 if bal.get("coin") == coin:
                     return float(
                         bal.get("availableToTrade", bal.get("walletBalance", 0))
                     )
-        raise ValueError(f"Balance for {coin} not found.")
+        if results:
+            fallback = results[0].get("totalEquity")
+            if fallback is not None:
+                return float(fallback)
+        print(
+            f"Balance for {coin} not found in account_mode={account_mode}.",
+            flush=True,
+        )
+        return 0.0
 
 
 class CoinSpotAdapter(ExchangeAdapter):
