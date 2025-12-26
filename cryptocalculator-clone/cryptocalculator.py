@@ -503,6 +503,7 @@ def get_balance_fetcher(execution_exchange: str):
             "exchange": execution_exchange,
             "account_coin": asset,
             "account_type": kwargs.get("account_type", "UNIFIED"),
+            "account_mode": kwargs.get("account_mode", "live"),
         }
         return adapter.get_account_balance(config)
 
@@ -546,7 +547,10 @@ def load_config(filename: str) -> Dict[str, Any]:
         balance_fetcher = get_balance_fetcher(execution_exchange)
         asset = normalised.get("account_asset", "USDT")
         account_type = normalised.get("account_type", "UNIFIED")
-        normalised["account_balance"] = balance_fetcher(asset, account_type=account_type)
+        account_mode = normalised.get("account_mode", "live")
+        normalised["account_balance"] = balance_fetcher(
+            asset, account_type=account_type, account_mode=account_mode
+        )
 
     source_key = str(normalised.get("price_source", "")).lower()
     aliases = PRICE_SOURCE_ALIASES.get(source_key)
@@ -634,7 +638,10 @@ def calculate_trade(
         balance_fetcher = get_balance_fetcher(execution_exchange)
         account_type = cfg.get("account_type", "UNIFIED")
         account_asset = cfg.get("account_asset", "USDT")
-        account_balance = balance_fetcher(account_asset, account_type=account_type)
+        account_mode = cfg.get("account_mode", "live")
+        account_balance = balance_fetcher(
+            account_asset, account_type=account_type, account_mode=account_mode
+        )
     account_balance = float(account_balance)
 
     risk_amount = account_balance * (cfg["risk_percent"] / 100)

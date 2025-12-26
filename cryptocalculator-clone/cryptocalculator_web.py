@@ -337,7 +337,10 @@ def index():
                 raise ValueError(
                     f"Execution exchange '{execution_exchange}' is not supported."
                 )
-            config["account_balance"] = balance_fetcher()
+            account_asset = "AUD" if execution_exchange == "coinspot" else "USDT"
+            config["account_balance"] = balance_fetcher(
+                account_asset, account_type="UNIFIED", account_mode=account_mode
+            )
             if execution_exchange == "coinspot":
                 config.setdefault("account_asset", "AUD")
 

@@ -154,8 +154,13 @@ class BybitAdapter(ExchangeAdapter):
     def get_account_balance(self, config: Dict[str, Any]) -> float:
         coin = config.get("account_coin", "USDT")
         account_type = config.get("account_type", "UNIFIED")
+        account_mode = str(config.get("account_mode", "live")).lower()
+        if account_mode not in {"live", "demo"}:
+            account_mode = "live"
 
-        _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for("live")
+        _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for(
+            "demo" if account_mode == "demo" else "live"
+        )
         if not api_key or not api_secret:
             raise EnvironmentError(
                 "Bybit API credentials are missing. Provide BYBIT_API_KEY1/BYBIT_API_SECRET1 "
