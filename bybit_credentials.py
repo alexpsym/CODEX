@@ -45,24 +45,31 @@ def resolve_bybit_credentials_for(mode: str) -> Tuple[str, str, str, str, str]:
     if normalized in {"demo", "testnet", "paper"}:
         key = os.getenv("BYBIT_API_KEY2") or os.getenv("BYBIT_API_KEY") or ""
         secret = os.getenv("BYBIT_API_SECRET2") or os.getenv("BYBIT_API_SECRET") or ""
-        base_url = (
-            os.getenv("BYBIT_DEMO_BASE_URL")
-            or os.getenv("BYBIT_BASE_URL")
-            or os.getenv("BYBIT_API_BASE")
-            or os.getenv("BYBIT_BASE_URL_TESTNET")
-            or os.getenv("BYBIT_API_BASE_TESTNET")
-            or "https://api.bybit.com"
-        )
+        if normalized == "testnet":
+            base_url = (
+                os.getenv("BYBIT_BASE_URL_TESTNET")
+                or os.getenv("BYBIT_API_BASE_TESTNET")
+                or "https://api-testnet.bybit.com"
+            )
+            env_label = "testnet"
+        else:
+            base_url = os.getenv("BYBIT_BASE_URL_DEMO") or "https://api-demo.bybit.com"
+            env_label = "demo"
         key_source = (
             "KEY2"
             if os.getenv("BYBIT_API_KEY2") or os.getenv("BYBIT_API_SECRET2")
             else "LEGACY"
         )
-        return "demo", key, secret, base_url.rstrip("/"), key_source
+        return env_label, key, secret, base_url.rstrip("/"), key_source
 
     key = os.getenv("BYBIT_API_KEY1") or os.getenv("BYBIT_API_KEY") or ""
     secret = os.getenv("BYBIT_API_SECRET1") or os.getenv("BYBIT_API_SECRET") or ""
-    base_url = os.getenv("BYBIT_BASE_URL") or os.getenv("BYBIT_API_BASE") or "https://api.bybit.com"
+    base_url = (
+        os.getenv("BYBIT_BASE_URL_LIVE")
+        or os.getenv("BYBIT_BASE_URL")
+        or os.getenv("BYBIT_API_BASE")
+        or "https://api.bybit.com"
+    )
     key_source = (
         "KEY1"
         if os.getenv("BYBIT_API_KEY1") or os.getenv("BYBIT_API_SECRET1")

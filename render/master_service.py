@@ -906,8 +906,9 @@ async def fetch_bybit_balance(
 
     url = f"{base_url}{path}?{query}"
     BALANCE_LOGGER.info(
-        "BALANCE_DIAG request mode=%s base_url=%s path=%s query=%s key_source=%s",
+        "BALANCE_DIAG request mode=%s env=%s base_url=%s path=%s query=%s key_source=%s",
         account_mode,
+        _mode,
         base_url,
         path,
         query,
