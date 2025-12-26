@@ -883,7 +883,10 @@ async def fetch_bybit_balance(
         "demo" if account_mode == "demo" else "live"
     )
     if not api_key or not api_secret:
-        raise HTTPException(status_code=500, detail="Bybit credentials missing.")
+        raise HTTPException(
+            status_code=500,
+            detail="Missing BYBIT_API_KEY2/BYBIT_API_SECRET2 (or legacy BYBIT_API_KEY/BYBIT_API_SECRET).",
+        )
 
     params: Dict[str, str] = {"accountType": account_type}
     if account_mode != "demo":
@@ -898,6 +901,7 @@ async def fetch_bybit_balance(
         "X-BAPI-SIGN": signature,
         "X-BAPI-TIMESTAMP": timestamp,
         "X-BAPI-RECV-WINDOW": BYBIT_RECV_WINDOW,
+        "X-BAPI-SIGN-TYPE": "2",
     }
 
     url = f"{base_url}{path}?{query}"
@@ -946,6 +950,11 @@ async def fetch_bybit_balance(
         sorted(set(equity_fields)),
     )
 
+    if ret_code not in (0, "0"):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Bybit error retCode={ret_code} retMsg={ret_msg}",
+        )
     if balance_value is None:
         raise HTTPException(status_code=500, detail=f"Balance for {coin} not found.")
 
