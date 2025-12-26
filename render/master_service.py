@@ -767,6 +767,14 @@ BALANCE_LOGGER = logging.getLogger("uvicorn.error")
 BYBIT_LOGGER = logging.getLogger("uvicorn.error")
 
 
+def _log_webhook_event(request_id: str, stage: str, details: Dict[str, object]) -> None:
+    BYBIT_LOGGER.info(
+        "WEBHOOK_TPSL %s %s",
+        request_id,
+        json.dumps({"stage": stage, **details}, sort_keys=True, default=str),
+    )
+
+
 def _bybit_sign_request(timestamp: str, api_key: str, api_secret: str, body: str) -> str:
     payload = f"{timestamp}{api_key}{BYBIT_RECV_WINDOW}{body}"
     return hmac.new(api_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
@@ -832,6 +840,7 @@ async def _fetch_bybit_positions(
     api_secret: str,
     category: str,
     symbol: str,
+    request_id: str,
 ) -> List[Dict[str, object]]:
     params = {"category": category, "symbol": symbol}
     query = "&".join(f"{k}={v}" for k, v in params.items())
@@ -850,6 +859,15 @@ async def _fetch_bybit_positions(
         resp = await client.get(url, headers=headers)
     resp.raise_for_status()
     payload = resp.json()
+    _log_webhook_event(
+        request_id,
+        "position_list_response",
+        {
+            "retCode": payload.get("retCode"),
+            "retMsg": payload.get("retMsg"),
+            "result_count": len(payload.get("result", {}).get("list", [])),
+        },
+    )
     if payload.get("retCode") != 0:
         raise ValueError(f"Bybit position lookup failed: {payload.get('retMsg')}")
     return payload.get("result", {}).get("list", [])
@@ -862,6 +880,7 @@ async def _wait_for_position_entry(
     api_secret: str,
     category: str,
     symbol: str,
+    request_id: str,
     attempts: int = 6,
     delay_seconds: float = 0.6,
 ) -> Optional[Dict[str, object]]:
@@ -872,6 +891,7 @@ async def _wait_for_position_entry(
             api_secret=api_secret,
             category=category,
             symbol=symbol,
+            request_id=request_id,
         )
         for position in positions:
             size = _parse_offset_value(position.get("size"))
@@ -895,6 +915,7 @@ async def _set_bybit_trading_stop(
     take_profit: Optional[float],
     stop_loss: Optional[float],
     position_idx: Optional[int],
+    request_id: str,
 ) -> Dict[str, object]:
     body: Dict[str, object] = {
         "category": category,
@@ -907,6 +928,7 @@ async def _set_bybit_trading_stop(
         body["takeProfit"] = str(take_profit)
     if stop_loss is not None:
         body["stopLoss"] = str(stop_loss)
+    _log_webhook_event(request_id, "trading_stop_request", {"payload": body})
     body_json = json.dumps(body, separators=(",", ":"))
     timestamp = str(int(time.time() * 1000))
     signature = _bybit_sign_request(timestamp, api_key, api_secret, body_json)
@@ -924,17 +946,44 @@ async def _set_bybit_trading_stop(
         )
     resp.raise_for_status()
     payload = resp.json()
+    _log_webhook_event(
+        request_id,
+        "trading_stop_response",
+        {
+            "retCode": payload.get("retCode"),
+            "retMsg": payload.get("retMsg"),
+            "result": payload.get("result", {}),
+        },
+    )
     if payload.get("retCode") != 0:
         raise ValueError(f"Bybit trading-stop failed: {payload.get('retMsg')}")
     return payload.get("result", {})
 
 
-async def _place_bybit_order(payload: Dict[str, object]) -> Dict[str, object]:
+async def _place_bybit_order(
+    payload: Dict[str, object], *, request_id: str
+) -> Dict[str, object]:
     symbol = str(payload.get("symbol", "")).upper()
     action = str(payload.get("action", "")).lower()
     qty = payload.get("quantity")
     account = str(payload.get("account", "live")).lower()
     trade_mode = str(payload.get("trade_mode", "linear")).lower()
+    _log_webhook_event(
+        request_id,
+        "payload_parsed",
+        {
+            "symbol": symbol,
+            "action": action,
+            "quantity": qty,
+            "account": account,
+            "trade_mode": trade_mode,
+            "take_profit_offset": payload.get("take_profit_offset")
+            or payload.get("tp_offset"),
+            "stop_loss_offset": payload.get("stop_loss_offset") or payload.get("sl_offset"),
+            "take_profit_price": payload.get("take_profit_price"),
+            "stop_loss_price": payload.get("stop_loss_price"),
+        },
+    )
 
     if action not in {"buy", "sell"}:
         raise ValueError("Webhook payload must include action=buy|sell.")
@@ -962,6 +1011,16 @@ async def _place_bybit_order(payload: Dict[str, object]) -> Dict[str, object]:
     )
     if not api_key or not api_secret:
         raise ValueError("Bybit credentials are missing for the selected account.")
+    _log_webhook_event(
+        request_id,
+        "account_context",
+        {
+            "account": account,
+            "category": category,
+            "base_url": base_url,
+            "key_source": key_source,
+        },
+    )
 
     body: Dict[str, object] = {
         "category": category,
@@ -973,10 +1032,14 @@ async def _place_bybit_order(payload: Dict[str, object]) -> Dict[str, object]:
         "orderLinkId": uuid4().hex,
     }
 
-    take_profit_offset = _parse_offset_value(payload.get("take_profit_offset"))
+    take_profit_offset = _parse_offset_value(
+        payload.get("take_profit_offset") or payload.get("tp_offset")
+    )
     if take_profit_offset is None:
         take_profit_offset = _parse_trigger_offset(payload.get("take_profit_price"))
-    stop_loss_offset = _parse_offset_value(payload.get("stop_loss_offset"))
+    stop_loss_offset = _parse_offset_value(
+        payload.get("stop_loss_offset") or payload.get("sl_offset")
+    )
     if stop_loss_offset is None:
         stop_loss_offset = _parse_trigger_offset(payload.get("stop_loss_price"))
 
@@ -994,6 +1057,7 @@ async def _place_bybit_order(payload: Dict[str, object]) -> Dict[str, object]:
         body["takeProfit"] = str(take_profit)
     if stop_loss is not None:
         body["stopLoss"] = str(stop_loss)
+    _log_webhook_event(request_id, "order_request", {"payload": body})
 
     body_json = json.dumps(body, separators=(",", ":"))
     timestamp = str(int(time.time() * 1000))
@@ -1013,6 +1077,15 @@ async def _place_bybit_order(payload: Dict[str, object]) -> Dict[str, object]:
         )
     response.raise_for_status()
     data = response.json()
+    _log_webhook_event(
+        request_id,
+        "order_response",
+        {
+            "retCode": data.get("retCode"),
+            "retMsg": data.get("retMsg"),
+            "result": data.get("result", {}),
+        },
+    )
     if data.get("retCode") != 0:
         raise ValueError(f"Bybit order failed: {data.get('retMsg')}")
 
@@ -1029,6 +1102,7 @@ async def _place_bybit_order(payload: Dict[str, object]) -> Dict[str, object]:
                 api_secret=api_secret,
                 category=category,
                 symbol=symbol,
+                request_id=request_id,
             )
             if position is None:
                 raise ValueError("Position entry price not available yet.")
@@ -1043,6 +1117,20 @@ async def _place_bybit_order(payload: Dict[str, object]) -> Dict[str, object]:
                     position_idx = int(position_idx)
                 except (TypeError, ValueError):
                     position_idx = None
+            _log_webhook_event(
+                request_id,
+                "position_context",
+                {
+                    "positionIdx": position_idx,
+                    "position": {
+                        "size": position.get("size"),
+                        "avgPrice": position.get("avgPrice"),
+                        "entryPrice": position.get("entryPrice"),
+                        "positionIdx": position.get("positionIdx"),
+                        "side": position.get("side"),
+                    },
+                },
+            )
             tp_target = (
                 entry_price + take_profit_offset
                 if take_profit_offset is not None
@@ -1053,6 +1141,17 @@ async def _place_bybit_order(payload: Dict[str, object]) -> Dict[str, object]:
                 if stop_loss_offset is not None
                 else stop_loss
             )
+            _log_webhook_event(
+                request_id,
+                "tpsl_computed",
+                {
+                    "entry_price": entry_price,
+                    "take_profit_offset": take_profit_offset,
+                    "stop_loss_offset": stop_loss_offset,
+                    "take_profit": tp_target,
+                    "stop_loss": sl_target,
+                },
+            )
             tpsl_result = await _set_bybit_trading_stop(
                 base_url=base_url,
                 api_key=api_key,
@@ -1062,11 +1161,16 @@ async def _place_bybit_order(payload: Dict[str, object]) -> Dict[str, object]:
                 take_profit=tp_target,
                 stop_loss=sl_target,
                 position_idx=position_idx,
+                request_id=request_id,
             )
         except Exception as exc:
             tpsl_error = str(exc)
-            BYBIT_LOGGER.error(
-                "TP/SL update failed for %s (%s): %s", symbol, account, exc
+            BYBIT_LOGGER.exception(
+                "WEBHOOK_TPSL %s tpsl_failed symbol=%s account=%s error=%s",
+                request_id,
+                symbol,
+                account,
+                exc,
             )
 
     return {
@@ -1581,6 +1685,12 @@ async def webhook(script_name: str, request: Request) -> JSONResponse:
     payload_text = payload_bytes.decode("utf-8", errors="replace")
     script = script_manager.get(script_name)
     script.add_log(f"Webhook received: {payload_text}")
+    request_id = uuid4().hex
+    _log_webhook_event(
+        request_id,
+        "webhook_received",
+        {"script_name": script_name, "path": "/webhook/{script_name}"},
+    )
 
     if script.name == "payslip_audit":
         script.add_log("Webhook ignored: upload flow required via /payslip-audit")
@@ -1601,11 +1711,19 @@ async def webhook(script_name: str, request: Request) -> JSONResponse:
         raise HTTPException(status_code=400, detail="Webhook payload must be JSON.") from exc
 
     try:
-        result = await _place_bybit_order(payload)
+        result = await _place_bybit_order(payload, request_id=request_id)
         script.add_log(f"Order request sent: {result}")
-        return JSONResponse({"status": "ok", "script": script_name, "order": result})
+        return JSONResponse(
+            {"status": "ok", "script": script_name, "request_id": request_id, "order": result}
+        )
     except Exception as exc:
         script.add_log(f"Order placement failed: {exc}")
+        BYBIT_LOGGER.exception(
+            "WEBHOOK_TPSL %s webhook_failed script=%s error=%s",
+            request_id,
+            script_name,
+            exc,
+        )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
@@ -1616,6 +1734,12 @@ async def default_webhook(request: Request) -> JSONResponse:
     script_name = "cryptocalculator-clone"
     script = script_manager.get(script_name)
     script.add_log(f"Webhook received: {payload_text}")
+    request_id = uuid4().hex
+    _log_webhook_event(
+        request_id,
+        "webhook_received",
+        {"script_name": script_name, "path": "/webhook"},
+    )
     try:
         payload = json.loads(payload_text)
     except json.JSONDecodeError as exc:
@@ -1623,11 +1747,19 @@ async def default_webhook(request: Request) -> JSONResponse:
         raise HTTPException(status_code=400, detail="Webhook payload must be JSON.") from exc
 
     try:
-        result = await _place_bybit_order(payload)
+        result = await _place_bybit_order(payload, request_id=request_id)
         script.add_log(f"Order request sent: {result}")
-        return JSONResponse({"status": "ok", "script": script_name, "order": result})
+        return JSONResponse(
+            {"status": "ok", "script": script_name, "request_id": request_id, "order": result}
+        )
     except Exception as exc:
         script.add_log(f"Order placement failed: {exc}")
+        BYBIT_LOGGER.exception(
+            "WEBHOOK_TPSL %s webhook_failed script=%s error=%s",
+            request_id,
+            script_name,
+            exc,
+        )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
