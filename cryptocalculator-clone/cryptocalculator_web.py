@@ -160,6 +160,7 @@ FORM_HTML = """
       const ps = document.getElementById('price_source');
       if(ps){
         ps.addEventListener('change', updatePriceMode);
+        ps.addEventListener('change', loadSymbols);
         updatePriceMode();
       }
       const symbolInput = document.getElementById('symbol');
