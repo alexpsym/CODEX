@@ -41,9 +41,9 @@ PRICE_MODE_NOTES = {
 }
 
 BALANCE_ADAPTERS = {name: get_balance_fetcher(name) for name in EXECUTION_EXCHANGES}
-SYMBOL_CACHE: Dict[str, Dict[str, object]] = {}
-SYMBOL_CACHE_TTL = 300
-PUBLIC_WEBHOOK_URL = os.getenv("PUBLIC_WEBHOOK_URL", "https://codex-rdqh.onrender.com/webhook")
+PUBLIC_WEBHOOK_URL = os.getenv(
+    "PUBLIC_WEBHOOK_URL", "https://codex-rdqh.onrender.com/webhook"
+)
 
 FORM_HTML = """
 <!doctype html>
@@ -60,10 +60,6 @@ FORM_HTML = """
     .copy-row button {cursor:pointer;}
     .copy-status {font-size:12px; color:#9ca3af;}
     .copy-box {background:#111827; border:1px solid #1f2937; padding:8px; border-radius:6px; color:#e5e7eb; max-width:520px; white-space:pre-wrap;}
-    .symbol-wrap {position:relative; display:block;}
-    .symbol-list {position:absolute; z-index:10; left:0; right:0; max-height:220px; overflow-y:auto; background:#111827; border:1px solid #1f2937; border-radius:6px; padding:4px 0; display:none;}
-    .symbol-item {padding:6px 10px; cursor:pointer;}
-    .symbol-item:hover {background:#1f2937;}
   </style>
   <script>
     function copyText(text, statusId){
@@ -185,12 +181,7 @@ FORM_HTML = """
   <div class="container">
     <div class="form">
       <form method="post">
-        <label>Symbol:
-          <span class="symbol-wrap">
-            <input name="symbol" id="symbol" autocomplete="off" required>
-            <div id="symbol_list" class="symbol-list"></div>
-          </span>
-        </label><br>
+        <label>Symbol: <input name="symbol" id="symbol" required></label><br>
         <label>Price Source:
           <select name="price_source" id="price_source">
             {% for key, meta in price_source_options %}
@@ -305,7 +296,7 @@ def index():
 
     if request.method == "POST":
         try:
-            symbol = request.form["symbol"].strip()
+            symbol = request.form["symbol"].strip().upper()
             direction = request.form.get("direction", "long")
             order_type = request.form.get("order_type", "market")
             entry_price_raw = request.form.get("entry_price")
@@ -463,89 +454,6 @@ def _pick_free_port(host: str) -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind((host, 0))
         return sock.getsockname()[1]
-
-
-def _fetch_bybit_symbols(trade_mode: str) -> list[str]:
-    url = BYBIT_SPOT_URL if trade_mode == "spot" else BYBIT_LINEAR_URL
-    resp = requests.get(url, timeout=10)
-    resp.raise_for_status()
-    symbols = [
-        item.get("symbol", "").upper()
-        for item in resp.json().get("result", {}).get("list", [])
-        if item.get("symbol")
-    ]
-    return sorted(set(symbols))
-
-
-def _fetch_bybit_all_symbols() -> list[str]:
-    symbols = _fetch_bybit_symbols("spot") + _fetch_bybit_symbols("linear")
-    return sorted(set(symbols))
-
-
-def _fetch_coinspot_symbols() -> list[str]:
-    url = "https://www.coinspot.com.au/pubapi/v2/latest"
-    resp = requests.get(url, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
-    prices = data.get("prices", {})
-    if isinstance(prices, dict):
-        symbols = [key.upper() for key in prices.keys() if key]
-    else:
-        symbols = []
-    return sorted(set(symbols))
-
-
-def _get_cached_symbols(cache_key: str) -> Optional[list[str]]:
-    cached = SYMBOL_CACHE.get(cache_key)
-    if not cached:
-        return None
-    if time.time() - cached["timestamp"] > SYMBOL_CACHE_TTL:
-        return None
-    return cached["symbols"]  # type: ignore[return-value]
-
-
-def _set_cached_symbols(cache_key: str, symbols: list[str]) -> None:
-    SYMBOL_CACHE[cache_key] = {"timestamp": time.time(), "symbols": symbols}
-
-
-@app.get("/symbols/bybit")
-def bybit_symbol_lookup():
-    cache_key = "bybit:all"
-    cached = _get_cached_symbols(cache_key)
-    if cached is not None:
-        return jsonify({"symbols": cached})
-    try:
-        symbols = _fetch_bybit_all_symbols()
-    except Exception as exc:  # pragma: no cover - network fallback
-        return jsonify({"symbols": [], "error": str(exc)})
-    _set_cached_symbols(cache_key, symbols)
-    return jsonify({"symbols": symbols})
-
-
-@app.get("/symbols")
-def symbol_lookup():
-    price_source = request.args.get("price_source", DEFAULT_PRICE_SOURCE).lower()
-    if price_source not in PRICE_SOURCES:
-        price_source = DEFAULT_PRICE_SOURCE
-    exchange = PRICE_SOURCES[price_source]["exchange"]
-    trade_mode = PRICE_SOURCES[price_source]["trade_mode"]
-    cache_key = f"{exchange}:{trade_mode}"
-    cached = _get_cached_symbols(cache_key)
-    if cached is not None:
-        return jsonify({"symbols": cached})
-
-    try:
-        if exchange == "bybit":
-            symbols = _fetch_bybit_symbols(trade_mode)
-        elif exchange == "coinspot":
-            symbols = _fetch_coinspot_symbols()
-        else:
-            symbols = []
-    except Exception as exc:  # pragma: no cover - network fallback
-        return jsonify({"symbols": [], "error": str(exc)})
-
-    _set_cached_symbols(cache_key, symbols)
-    return jsonify({"symbols": symbols})
 
 
 def _wait_for_server(host: str, port: int, timeout: float = 10.0) -> bool:
