@@ -12,7 +12,7 @@ import time
 from urllib.parse import urlencode
 
 import requests
-from bybit_credentials import resolve_bybit_credentials
+from bybit_credentials import resolve_bybit_credentials_for
 
 BYBIT_LIVE_ENV_PATH = Path(r"E:/ENV/bybit-live.env")
 
@@ -154,15 +154,27 @@ class BybitAdapter(ExchangeAdapter):
     def get_account_balance(self, config: Dict[str, Any]) -> float:
         coin = config.get("account_coin", "USDT")
         account_type = config.get("account_type", "UNIFIED")
+        account_mode = str(config.get("account_mode", "live")).lower()
+        if account_mode not in {"live", "demo"}:
+            account_mode = "live"
 
-        _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials()
+        _mode, api_key, api_secret, base_url, key_source = resolve_bybit_credentials_for(
+            "demo" if account_mode == "demo" else "live"
+        )
         if not api_key or not api_secret:
             raise EnvironmentError(
                 "Bybit API credentials are missing. Provide BYBIT_API_KEY1/BYBIT_API_SECRET1 "
                 "(or KEY2 for demo) or legacy BYBIT_API_KEY/BYBIT_API_SECRET."
             )
+        print(
+            f"Bybit balance request using account_mode={account_mode} "
+            f"base_url={base_url} key_source={key_source}",
+            flush=True,
+        )
 
-        params = {"accountType": account_type, "coin": coin}
+        params = {"accountType": account_type}
+        if account_mode != "demo":
+            params["coin"] = coin
         query = urlencode(params)
         timestamp = str(int(time.time() * 1000))
         recv_window = "5000"
@@ -180,13 +192,22 @@ class BybitAdapter(ExchangeAdapter):
         resp = requests.get(url, headers=headers, timeout=10)
         resp.raise_for_status()
 
-        for item in resp.json().get("result", {}).get("list", []):
+        results = resp.json().get("result", {}).get("list", [])
+        for item in results:
             for bal in item.get("coin", []):
                 if bal.get("coin") == coin:
                     return float(
                         bal.get("availableToTrade", bal.get("walletBalance", 0))
                     )
-        raise ValueError(f"Balance for {coin} not found.")
+        if results:
+            fallback = results[0].get("totalEquity")
+            if fallback is not None:
+                return float(fallback)
+        print(
+            f"Balance for {coin} not found in account_mode={account_mode}.",
+            flush=True,
+        )
+        return 0.0
 
 
 class CoinSpotAdapter(ExchangeAdapter):
