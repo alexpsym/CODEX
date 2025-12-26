@@ -189,25 +189,37 @@ class BybitAdapter(ExchangeAdapter):
         }
 
         url = f"{base_url.rstrip('/') + '/v5/account/wallet-balance'}?{query}"
+        print(
+            f"Bybit balance request account_mode={account_mode} base_url={base_url} "
+            f"path=/v5/account/wallet-balance params={params} key_source={key_source}",
+            flush=True,
+        )
         resp = requests.get(url, headers=headers, timeout=10)
         resp.raise_for_status()
 
-        results = resp.json().get("result", {}).get("list", [])
+        payload = resp.json()
+        results = payload.get("result", {}).get("list", [])
+        coin_entries: list[str] = []
         for item in results:
             for bal in item.get("coin", []):
-                if bal.get("coin") == coin:
+                symbol = bal.get("coin")
+                if symbol:
+                    coin_entries.append(str(symbol))
+                if symbol == coin:
                     return float(
                         bal.get("availableToTrade", bal.get("walletBalance", 0))
                     )
+        print(
+            "Bybit balance response parsed.",
+            f"result_list_count={len(results)}",
+            f"coin_entries={coin_entries[:20]}",
+            flush=True,
+        )
         if results:
             fallback = results[0].get("totalEquity")
             if fallback is not None:
                 return float(fallback)
-        print(
-            f"Balance for {coin} not found in account_mode={account_mode}.",
-            flush=True,
-        )
-        return 0.0
+        raise ValueError(f"Balance for {coin} not found.")
 
 
 class CoinSpotAdapter(ExchangeAdapter):
