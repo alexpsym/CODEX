@@ -39,11 +39,6 @@ PRICE_SOURCES: Dict[str, Dict[str, str]] = {
         "trade_mode": "linear",
         "exchange": "bybit",
     },
-    "bybit": {
-        "label": "Bybit Linear Perpetual",
-        "trade_mode": "linear",
-        "exchange": "bybit",
-    },
     "bybit_spot": {
         "label": "Bybit Spot",
         "trade_mode": "spot",
