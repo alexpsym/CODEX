@@ -38,6 +38,46 @@ def resolve_bybit_credentials() -> Tuple[str, str, str, str]:
     return mode, key, secret, base_url.rstrip("/"), key_source
 
 
+def resolve_bybit_credentials_for(mode: str) -> Tuple[str, str, str, str, str]:
+    """Return credentials for an explicit mode without relying on BYBIT_ENV."""
+
+    normalized = (mode or "live").strip().lower()
+    if normalized in {"demo", "testnet", "paper"}:
+        key = os.getenv("BYBIT_API_KEY2") or os.getenv("BYBIT_API_KEY") or ""
+        secret = os.getenv("BYBIT_API_SECRET2") or os.getenv("BYBIT_API_SECRET") or ""
+        if normalized == "testnet":
+            base_url = (
+                os.getenv("BYBIT_BASE_URL_TESTNET")
+                or os.getenv("BYBIT_API_BASE_TESTNET")
+                or "https://api-testnet.bybit.com"
+            )
+            env_label = "testnet"
+        else:
+            base_url = os.getenv("BYBIT_BASE_URL_DEMO") or "https://api-demo.bybit.com"
+            env_label = "demo"
+        key_source = (
+            "KEY2"
+            if os.getenv("BYBIT_API_KEY2") or os.getenv("BYBIT_API_SECRET2")
+            else "LEGACY"
+        )
+        return env_label, key, secret, base_url.rstrip("/"), key_source
+
+    key = os.getenv("BYBIT_API_KEY1") or os.getenv("BYBIT_API_KEY") or ""
+    secret = os.getenv("BYBIT_API_SECRET1") or os.getenv("BYBIT_API_SECRET") or ""
+    base_url = (
+        os.getenv("BYBIT_BASE_URL_LIVE")
+        or os.getenv("BYBIT_BASE_URL")
+        or os.getenv("BYBIT_API_BASE")
+        or "https://api.bybit.com"
+    )
+    key_source = (
+        "KEY1"
+        if os.getenv("BYBIT_API_KEY1") or os.getenv("BYBIT_API_SECRET1")
+        else "LEGACY"
+    )
+    return "live", key, secret, base_url.rstrip("/"), key_source
+
+
 def summarize_bybit_auth() -> Dict[str, str]:
     """Return a summary payload without exposing secrets."""
 
