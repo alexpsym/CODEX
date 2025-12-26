@@ -10,9 +10,13 @@
     const appFrame = document.getElementById('app-frame');
 
     const buildScriptPath = (name) => encodeURIComponent(name).replace(/%2F/g, '/');
+    const appUrl = `/apps/${buildScriptPath(scriptName)}`;
 
     let logCursor = 0;
     let pollTimer = null;
+    let appLoadTimer = null;
+    let appFrameLoaded = false;
+    let autoStartInFlight = false;
 
     const fetchJson = async (url, options = {}) => {
         const response = await fetch(url, options);
@@ -52,28 +56,64 @@
         if (hasUi) {
             if (running) {
                 appPanel.style.display = 'block';
-                if (!appFrame.src) {
-                    appFrame.src = `/apps/${buildScriptPath(scriptName)}`;
-                }
             } else {
                 appPanel.style.display = 'none';
                 appFrame.src = '';
+                appFrameLoaded = false;
             }
         }
+    };
+
+    const scheduleAppLoad = () => {
+        if (!hasUi || appFrameLoaded || appLoadTimer) {
+            return;
+        }
+        let attempts = 0;
+        const maxAttempts = 20;
+        const attempt = async () => {
+            attempts += 1;
+            try {
+                const response = await fetch(appUrl, { cache: 'no-store' });
+                if (response.ok) {
+                    appFrame.src = `${appUrl}?ts=${Date.now()}`;
+                    appFrameLoaded = true;
+                    appLoadTimer = null;
+                    return;
+                }
+            } catch (err) {
+                console.warn('Waiting for app UI...', err);
+            }
+            if (attempts < maxAttempts) {
+                appLoadTimer = setTimeout(attempt, 500);
+            } else {
+                appLoadTimer = null;
+            }
+        };
+        appLoadTimer = setTimeout(attempt, 200);
     };
 
     const refreshStatus = async () => {
         try {
             const scripts = await fetchJson('/scripts');
             const script = scripts.find((item) => item.name === scriptName);
-            setRunningState(Boolean(script && script.running));
+            const running = Boolean(script && script.running);
+            setRunningState(running);
+            if (running) {
+                scheduleAppLoad();
+            }
+            return running;
         } catch (err) {
             console.error(err);
             statusEl.textContent = 'Unable to load status.';
         }
+        return false;
     };
 
-    const startScript = async () => {
+    const startScript = async (isAuto = false) => {
+        if (autoStartInFlight && isAuto) {
+            return;
+        }
+        autoStartInFlight = isAuto;
         startBtn.disabled = true;
         logBox.textContent = 'Starting script...\n';
         try {
@@ -82,7 +122,13 @@
                 window.location.href = payload.redirect;
                 return;
             }
-            await refreshStatus();
+            let running = await refreshStatus();
+            let attempts = 0;
+            while (!running && attempts < 10) {
+                await new Promise((resolve) => setTimeout(resolve, 500));
+                running = await refreshStatus();
+                attempts += 1;
+            }
             if (!pollTimer) {
                 pollTimer = setInterval(pollLogs, 2000);
             }
@@ -90,6 +136,8 @@
             console.error(err);
             alert(err.message || 'Failed to start script');
             startBtn.disabled = false;
+        } finally {
+            autoStartInFlight = false;
         }
     };
 
@@ -114,7 +162,14 @@
     startBtn?.addEventListener('click', startScript);
     stopBtn?.addEventListener('click', stopScript);
 
-    refreshStatus();
-    pollLogs();
-    pollTimer = setInterval(pollLogs, 2000);
+    const init = async () => {
+        const running = await refreshStatus();
+        if (!running && hasUi) {
+            await startScript(true);
+        }
+        pollLogs();
+        pollTimer = setInterval(pollLogs, 2000);
+    };
+
+    init();
 })();
