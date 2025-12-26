@@ -322,7 +322,7 @@ def test_save_webhook_json_buy(monkeypatch):
 
     target_dist = abs(trade["target_price"] - trade["entry_price"])
     assert payload["tp_offset"] == round(target_dist, 6)
-    assert payload["sl_offset"] == round(trade["stop_distance"], 6)
+    assert payload["sl_offset"] == round(-trade["stop_distance"], 6)
 
 
 def test_web_coinspot_passes_conversion_rate(monkeypatch):
@@ -400,7 +400,7 @@ def test_save_webhook_json_sell(monkeypatch):
     payload = read_webhook_json()
 
     target_dist = abs(trade["target_price"] - trade["entry_price"])
-    assert payload["tp_offset"] == round(target_dist, 6)
+    assert payload["tp_offset"] == round(-target_dist, 6)
     assert payload["sl_offset"] == round(trade["stop_distance"], 6)
 
 
