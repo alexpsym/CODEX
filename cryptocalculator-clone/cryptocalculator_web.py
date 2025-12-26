@@ -7,6 +7,8 @@ from pathlib import Path
 import shutil
 import socket
 import sys
+import threading
+import time
 import webbrowser
 from typing import Dict, Optional
 
@@ -36,6 +38,9 @@ PRICE_MODE_NOTES = {
 }
 
 BALANCE_ADAPTERS = {name: get_balance_fetcher(name) for name in EXECUTION_EXCHANGES}
+PUBLIC_WEBHOOK_URL = os.getenv(
+    "PUBLIC_WEBHOOK_URL", "https://codex-rdqh.onrender.com/webhook"
+)
 
 FORM_HTML = """
 <!doctype html>
@@ -48,8 +53,47 @@ FORM_HTML = """
     .container {display:flex; align-items:flex-start;}
     .form {margin-right:20px;}
     .result {margin-left:20px;}
+    .copy-row {display:flex; gap:8px; align-items:center; margin:6px 0;}
+    .copy-row button {cursor:pointer;}
+    .copy-status {font-size:12px; color:#9ca3af;}
+    .copy-box {background:#111827; border:1px solid #1f2937; padding:8px; border-radius:6px; color:#e5e7eb; max-width:520px; white-space:pre-wrap;}
   </style>
   <script>
+    function copyText(text, statusId){
+      const status = document.getElementById(statusId);
+      const done = () => { if(status){ status.innerText = 'Copied!'; setTimeout(() => status.innerText = '', 2000);} };
+      if(navigator.clipboard && navigator.clipboard.writeText){
+        navigator.clipboard.writeText(text).then(done).catch(() => {});
+      } else {
+        const temp = document.createElement('textarea');
+        temp.value = text;
+        document.body.appendChild(temp);
+        temp.select();
+        try { document.execCommand('copy'); done(); } finally { document.body.removeChild(temp); }
+      }
+    }
+    function copyFromElement(elementId, statusId){
+      const el = document.getElementById(elementId);
+      if(!el){return;}
+      copyText(el.innerText, statusId);
+    }
+    function exportResult(){
+      const payload = document.getElementById('export_json');
+      if(!payload || !payload.innerText.trim()){
+        alert('Calculate a trade first to export the result.');
+        return;
+      }
+      const blob = new Blob([payload.innerText], {type: 'application/json'});
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      link.href = url;
+      link.download = `crypto-trade-${timestamp}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    }
     function toggleEntry(){
       const orderType = document.getElementById('order_type');
       const entryField = document.getElementById('entry_price_row');
@@ -82,7 +126,7 @@ FORM_HTML = """
   <div class="container">
     <div class="form">
       <form method="post">
-        <label>Symbol: <input name="symbol" required></label><br>
+        <label>Symbol: <input name="symbol" id="symbol" required></label><br>
         <label>Price Source:
           <select name="price_source" id="price_source">
             {% for key, meta in price_source_options %}
@@ -98,6 +142,12 @@ FORM_HTML = """
           </select>
         </label><br>
         <p id="price_mode_note"></p>
+        <label>Account:
+          <select name="account_mode" id="account_mode">
+            <option value="live" {{ 'selected' if account_mode == 'live' else '' }}>Live</option>
+            <option value="demo" {{ 'selected' if account_mode == 'demo' else '' }}>Demo</option>
+          </select>
+        </label><br>
         <label>Direction:
           <select name="direction">
             <option value="long">Long</option>
@@ -122,12 +172,28 @@ FORM_HTML = """
         <small>Use this when your price source is quoted in a different currency than your execution exchange.</small><br>
         <button type="submit">Calculate</button>
       </form>
+      <h3>TradingView Webhook</h3>
+      <div class="copy-row">
+        <button type="button" onclick="copyText('{{ webhook_url }}','webhook_status')">Copy Webhook URL</button>
+        <span class="copy-status" id="webhook_status"></span>
+      </div>
+      <div class="copy-box" id="webhook_url">{{ webhook_url }}</div>
     </div>
     <div class="result">
       {% if error %}<p style="color: red;">{{ error }}</p>{% endif %}
       {% if payload_json %}
         <h2>Result</h2>
         <pre id="alert_json">{{ payload_json }}</pre>
+        {% if export_json %}
+        <pre id="export_json" style="display:none;">{{ export_json }}</pre>
+        {% endif %}
+        <div class="copy-row">
+          <button type="button" onclick="copyFromElement('alert_json','payload_status')">Copy TradingView Message</button>
+          <span class="copy-status" id="payload_status"></span>
+        </div>
+        <div class="copy-row">
+          <button type="button" onclick="exportResult()">Export Result</button>
+        </div>
       {% endif %}
       {% if summary %}
         <h2>Summary</h2>
@@ -139,6 +205,7 @@ FORM_HTML = """
           <tr><th>Execution Exchange</th><td>{{ selection_info.execution_label }}</td></tr>
           <tr><th>Price Source</th><td>{{ selection_info.price_label }}</td></tr>
           <tr><th>Trade Mode</th><td>{{ selection_info.trade_mode_label }}</td></tr>
+          <tr><th>Account</th><td>{{ selection_info.account_mode|capitalize }}</td></tr>
         </table>
       {% endif %}
       {% if risk_info %}
@@ -163,6 +230,8 @@ def index():
     error = None
     risk_info = None
     payload_json = None
+    export_json = None
+    trade = None
 
     execution_exchange = request.form.get(
         "execution_exchange", DEFAULT_EXECUTION_EXCHANGE
@@ -175,11 +244,14 @@ def index():
         price_source = DEFAULT_PRICE_SOURCE
 
     trade_mode = PRICE_SOURCES[price_source]["trade_mode"]
+    account_mode = request.form.get("account_mode", "live").strip().lower()
+    if account_mode not in {"live", "demo"}:
+        account_mode = "live"
     price_to_execution_rate = request.form.get("price_to_execution_rate", "").strip()
 
     if request.method == "POST":
         try:
-            symbol = request.form["symbol"].strip()
+            symbol = request.form["symbol"].strip().upper()
             direction = request.form.get("direction", "long")
             order_type = request.form.get("order_type", "market")
             entry_price_raw = request.form.get("entry_price")
@@ -197,6 +269,7 @@ def index():
                 "price_source": price_source,
                 "execution_exchange": execution_exchange,
                 "account_balance": "auto",
+                "account_mode": account_mode,
             }
             config["trade_mode"] = trade_mode
             if price_to_execution_rate:
@@ -209,7 +282,10 @@ def index():
                 raise ValueError(
                     f"Execution exchange '{execution_exchange}' is not supported."
                 )
-            config["account_balance"] = balance_fetcher()
+            account_asset = "AUD" if execution_exchange == "coinspot" else "USDT"
+            config["account_balance"] = balance_fetcher(
+                account_asset, account_type="UNIFIED", account_mode=account_mode
+            )
             if execution_exchange == "coinspot":
                 config.setdefault("account_asset", "AUD")
 
@@ -225,12 +301,21 @@ def index():
             error = str(exc)
 
     selection_info: Optional[Dict[str, str]] = None
-    if request.method == "POST" and not error:
+    if request.method == "POST" and not error and trade:
         selection_info = {
             "execution_label": EXECUTION_EXCHANGES[execution_exchange]["label"],
             "price_label": PRICE_SOURCES[price_source]["label"],
             "trade_mode_label": TRADE_MODE_LABELS[trade_mode],
+            "account_mode": account_mode,
         }
+        export_payload = {
+            "summary": summary,
+            "execution_settings": selection_info,
+            "position_details": risk_info,
+            "webhook_message": json.loads(payload_json) if payload_json else None,
+            "trade": trade,
+        }
+        export_json = json.dumps(export_payload, indent=2)
 
     return render_template_string(
         FORM_HTML,
@@ -242,10 +327,13 @@ def index():
         execution_exchange=execution_exchange,
         price_source=price_source,
         trade_mode=trade_mode,
+        account_mode=account_mode,
         price_to_execution_rate=price_to_execution_rate,
         execution_options=sorted(EXECUTION_EXCHANGES.items()),
         price_source_options=sorted(PRICE_SOURCES.items()),
         price_mode_notes=PRICE_MODE_NOTES,
+        webhook_url=PUBLIC_WEBHOOK_URL,
+        export_json=export_json,
     )
 
 
@@ -329,6 +417,23 @@ def _pick_free_port(host: str) -> int:
         return sock.getsockname()[1]
 
 
+def _wait_for_server(host: str, port: int, timeout: float = 10.0) -> bool:
+    connect_host = host
+    if host in {"0.0.0.0", "::"}:
+        connect_host = "127.0.0.1"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.5)
+            try:
+                sock.connect((connect_host, port))
+            except OSError:
+                time.sleep(0.05)
+                continue
+            return True
+    return False
+
+
 if __name__ == "__main__":
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("CRYPTOCALCULATOR_PORT") or os.getenv("PORT", "5000"))
@@ -341,8 +446,13 @@ if __name__ == "__main__":
         )
         port = fallback_port
     url = f"http://{host}:{port}/"
-    if sys.stdout.isatty() and not (os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID")):
+    server_thread = threading.Thread(
+        target=_serve_wsgi, args=(app, host, port), daemon=True
+    )
+    server_thread.start()
+    _wait_for_server(host, port)
+    if sys.stdout.isatty() and not is_render:
         if not open_in_edge(url):
             print(f"Open {url} in your browser to view the calculator.", flush=True)
     print(f"Serving cryptocalculator on {url}", flush=True)
-    _serve_wsgi(app, host=host, port=port)
+    server_thread.join()
