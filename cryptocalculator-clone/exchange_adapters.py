@@ -12,7 +12,7 @@ import time
 from urllib.parse import urlencode
 
 import requests
-from bybit_credentials import resolve_bybit_credentials
+from bybit_credentials import resolve_bybit_credentials_for
 
 BYBIT_LIVE_ENV_PATH = Path(r"E:/ENV/bybit-live.env")
 
@@ -155,7 +155,7 @@ class BybitAdapter(ExchangeAdapter):
         coin = config.get("account_coin", "USDT")
         account_type = config.get("account_type", "UNIFIED")
 
-        _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials()
+        _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for("live")
         if not api_key or not api_secret:
             raise EnvironmentError(
                 "Bybit API credentials are missing. Provide BYBIT_API_KEY1/BYBIT_API_SECRET1 "

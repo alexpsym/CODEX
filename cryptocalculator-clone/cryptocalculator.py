@@ -39,11 +39,6 @@ PRICE_SOURCES: Dict[str, Dict[str, str]] = {
         "trade_mode": "linear",
         "exchange": "bybit",
     },
-    "bybit": {
-        "label": "Bybit Linear Perpetual",
-        "trade_mode": "linear",
-        "exchange": "bybit",
-    },
     "bybit_spot": {
         "label": "Bybit Spot",
         "trade_mode": "spot",
@@ -582,6 +577,9 @@ def calculate_trade(
     """Calculate trade parameters based on ``config``."""
 
     cfg = _normalise_config(config)
+    account_mode = str(cfg.get("account_mode", "live")).lower()
+    if account_mode not in {"live", "demo"}:
+        raise ValueError("account_mode must be 'live' or 'demo'")
 
     execution_exchange = cfg.get("execution_exchange", DEFAULT_EXECUTION_EXCHANGE)
     if execution_exchange not in EXECUTION_EXCHANGES:
@@ -776,6 +774,7 @@ def calculate_trade(
         "price_quote_asset": price_quote_asset,
         "execution_quote_asset": execution_quote_asset,
         "price_to_execution_rate": conversion_rate,
+        "account_mode": account_mode,
     }
 
 
@@ -956,6 +955,8 @@ def build_webhook_payload(trade: Dict[str, Any]) -> Dict[str, Any]:
         "quantity": round(trade["quantity"], 3),
         "take_profit_price": f"{{{{close}}}} {tp_op} {target_dist:.6f}",
         "stop_loss_price": f"{{{{close}}}} {sl_op} {stop_dist:.6f}",
+        "account": trade.get("account_mode", "live"),
+        "trade_mode": trade.get("trade_mode", "linear"),
     }
 
 
