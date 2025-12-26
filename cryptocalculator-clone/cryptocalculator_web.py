@@ -59,8 +59,10 @@ FORM_HTML = """
     .copy-row button {cursor:pointer;}
     .copy-status {font-size:12px; color:#9ca3af;}
     .copy-box {background:#111827; border:1px solid #1f2937; padding:8px; border-radius:6px; color:#e5e7eb; max-width:520px; white-space:pre-wrap;}
-    .symbol-wrap {position:relative;}
-    datalist {max-height:220px;}
+    .symbol-wrap {position:relative; display:block;}
+    .symbol-list {position:absolute; z-index:10; left:0; right:0; max-height:220px; overflow-y:auto; background:#111827; border:1px solid #1f2937; border-radius:6px; padding:4px 0; display:none;}
+    .symbol-item {padding:6px 10px; cursor:pointer;}
+    .symbol-item:hover {background:#1f2937;}
   </style>
   <script>
     function copyText(text, statusId){
@@ -112,37 +114,41 @@ FORM_HTML = """
       note.innerText = notes[priceSource.value] || '';
     }
     async function loadSymbols(){
-      const priceSource = document.getElementById('price_source');
       const symbolInput = document.getElementById('symbol');
-      const symbolOptions = document.getElementById('symbol_options');
-      if(!priceSource || !symbolInput || !symbolOptions){return;}
+      if(!symbolInput){return;}
       try{
-        const response = await fetch(`/symbols?price_source=${encodeURIComponent(priceSource.value)}`);
+        const response = await fetch('/symbols/bybit');
         if(!response.ok){throw new Error('Failed to load symbols');}
         const data = await response.json();
         window.__symbolList = Array.isArray(data.symbols) ? data.symbols : [];
-        updateSymbolSuggestions(symbolInput.value);
+        updateSymbolSuggestions(symbolInput.value, true);
       } catch(err){
         console.warn(err);
       }
     }
-    function updateSymbolSuggestions(value){
-      const symbolOptions = document.getElementById('symbol_options');
+    function updateSymbolSuggestions(value, forceShow){
+      const symbolList = document.getElementById('symbol_list');
       const symbols = Array.isArray(window.__symbolList) ? window.__symbolList : [];
-      if(!symbolOptions){return;}
-      symbolOptions.innerHTML = '';
+      if(!symbolList){return;}
+      symbolList.innerHTML = '';
       const query = (value || '').trim().toUpperCase();
-      if(!query){return;}
-      const starts = symbols.filter((symbol) => symbol.startsWith(query));
-      const contains = symbols.filter(
-        (symbol) => !symbol.startsWith(query) && symbol.includes(query)
-      );
-      const matches = starts.concat(contains).slice(0, 20);
+      const matches = query
+        ? symbols.filter((symbol) => symbol.includes(query))
+        : symbols.slice();
       matches.forEach((symbol) => {
-        const option = document.createElement('option');
-        option.value = symbol;
-        symbolOptions.appendChild(option);
+        const item = document.createElement('div');
+        item.className = 'symbol-item';
+        item.textContent = symbol;
+        item.addEventListener('click', () => {
+          const input = document.getElementById('symbol');
+          if(input){
+            input.value = symbol;
+          }
+          symbolList.style.display = 'none';
+        });
+        symbolList.appendChild(item);
       });
+      symbolList.style.display = (forceShow || query) && matches.length ? 'block' : 'none';
     }
     document.addEventListener('DOMContentLoaded', function(){
       const ot = document.getElementById('order_type');
@@ -159,7 +165,16 @@ FORM_HTML = """
       const symbolInput = document.getElementById('symbol');
       if(symbolInput){
         symbolInput.addEventListener('input', (event) => updateSymbolSuggestions(event.target.value));
+        symbolInput.addEventListener('focus', (event) => updateSymbolSuggestions(event.target.value, true));
       }
+      document.addEventListener('click', (event) => {
+        const symbolList = document.getElementById('symbol_list');
+        const symbolInputEl = document.getElementById('symbol');
+        if(!symbolList || !symbolInputEl){return;}
+        if(event.target !== symbolInputEl && !symbolList.contains(event.target)){
+          symbolList.style.display = 'none';
+        }
+      });
       loadSymbols();
     });
   </script>
@@ -171,8 +186,8 @@ FORM_HTML = """
       <form method="post">
         <label>Symbol:
           <span class="symbol-wrap">
-            <input name="symbol" id="symbol" list="symbol_options" required>
-            <datalist id="symbol_options"></datalist>
+            <input name="symbol" id="symbol" autocomplete="off" required>
+            <div id="symbol_list" class="symbol-list"></div>
           </span>
         </label><br>
         <label>Price Source:
@@ -461,6 +476,11 @@ def _fetch_bybit_symbols(trade_mode: str) -> list[str]:
     return sorted(set(symbols))
 
 
+def _fetch_bybit_all_symbols() -> list[str]:
+    symbols = _fetch_bybit_symbols("spot") + _fetch_bybit_symbols("linear")
+    return sorted(set(symbols))
+
+
 def _fetch_coinspot_symbols() -> list[str]:
     url = "https://www.coinspot.com.au/pubapi/v2/latest"
     resp = requests.get(url, timeout=10)
@@ -485,6 +505,20 @@ def _get_cached_symbols(cache_key: str) -> Optional[list[str]]:
 
 def _set_cached_symbols(cache_key: str, symbols: list[str]) -> None:
     SYMBOL_CACHE[cache_key] = {"timestamp": time.time(), "symbols": symbols}
+
+
+@app.get("/symbols/bybit")
+def bybit_symbol_lookup():
+    cache_key = "bybit:all"
+    cached = _get_cached_symbols(cache_key)
+    if cached is not None:
+        return jsonify({"symbols": cached})
+    try:
+        symbols = _fetch_bybit_all_symbols()
+    except Exception as exc:  # pragma: no cover - network fallback
+        return jsonify({"symbols": [], "error": str(exc)})
+    _set_cached_symbols(cache_key, symbols)
+    return jsonify({"symbols": symbols})
 
 
 @app.get("/symbols")
