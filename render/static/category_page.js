@@ -32,10 +32,26 @@
             button.className = 'script-btn';
             button.textContent = script.name;
             button.onclick = () => {
-                window.location.href = `/scripts/view/${buildScriptPath(script.name)}`;
+                const target = `/scripts/view/${buildScriptPath(script.name)}`;
+                if (script.standalone) {
+                    window.open(target, '_blank', 'noopener');
+                    return;
+                }
+                window.location.href = target;
             };
+            if (script.running) {
+                button.classList.add('running');
+            }
+
+            const status = document.createElement('span');
+            status.className = 'status-pill';
+            status.textContent = script.running ? 'Running' : 'Stopped';
+            if (script.running) {
+                status.classList.add('running');
+            }
 
             card.appendChild(button);
+            card.appendChild(status);
             grid.appendChild(card);
         });
     };
@@ -57,4 +73,5 @@
     forwardBtn?.addEventListener('click', () => window.history.forward());
 
     load();
+    setInterval(load, 5000);
 })();
