@@ -62,7 +62,6 @@ ENTRY_OVERRIDES = {
     "Crypto-Scanner-clone": ["continuous_scan.py", "scan.py"],
     "LEDGER-clone": ["process_entries.py"],
     "PUSH": ["PUSH.py"],
-    "bybit-alert-clone": ["bybit_altcoin_monitor.py"],
     "bybit_monitor": ["bybit_altcoin_monitor.py"],
     "bybithistory-clone": ["app.py"],
     "coinspot-clone": ["coinspot_history.py"],
