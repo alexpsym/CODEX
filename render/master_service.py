@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import html
 import json
+import logging
 import os
 import socket
 import time
@@ -762,6 +763,7 @@ PROXY_HOP_HEADERS = {
 }
 PROXY_STRIP_HEADERS = {"content-encoding", "content-length"}
 BYBIT_RECV_WINDOW = "5000"
+BALANCE_LOGGER = logging.getLogger("uvicorn.error")
 
 
 def _bybit_sign_request(timestamp: str, api_key: str, api_secret: str, body: str) -> str:
@@ -864,6 +866,98 @@ async def _place_bybit_order(payload: Dict[str, object]) -> Dict[str, object]:
         "key_source": key_source,
         "order": data.get("result", {}),
     }
+
+
+@app.get("/api/bybit/balance")
+async def fetch_bybit_balance(
+    account: str = "live",
+    coin: str = "USDT",
+    account_type: str = "UNIFIED",
+) -> JSONResponse:
+    account_mode = account.strip().lower()
+    if account_mode not in {"live", "demo"}:
+        account_mode = "live"
+    coin = coin.strip().upper()
+
+    _mode, api_key, api_secret, base_url, key_source = resolve_bybit_credentials_for(
+        "demo" if account_mode == "demo" else "live"
+    )
+    if not api_key or not api_secret:
+        raise HTTPException(status_code=500, detail="Bybit credentials missing.")
+
+    params: Dict[str, str] = {"accountType": account_type}
+    if account_mode != "demo":
+        params["coin"] = coin
+    query = "&".join(f"{k}={v}" for k, v in params.items())
+    path = "/v5/account/wallet-balance"
+
+    timestamp = str(int(time.time() * 1000))
+    signature = _bybit_sign_request(timestamp, api_key, api_secret, query)
+    headers = {
+        "X-BAPI-API-KEY": api_key,
+        "X-BAPI-SIGN": signature,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": BYBIT_RECV_WINDOW,
+    }
+
+    url = f"{base_url}{path}?{query}"
+    BALANCE_LOGGER.info(
+        "BALANCE_DIAG request mode=%s base_url=%s path=%s query=%s key_source=%s",
+        account_mode,
+        base_url,
+        path,
+        query,
+        key_source,
+    )
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(url, headers=headers)
+    payload = resp.json()
+    ret_code = payload.get("retCode")
+    ret_msg = payload.get("retMsg")
+    results = payload.get("result", {}).get("list", [])
+    coin_entries = []
+    equity_fields = []
+    balance_value = None
+    for item in results:
+        for field in ("totalEquity", "totalWalletBalance", "totalAvailableBalance"):
+            if item.get(field) is not None:
+                equity_fields.append(field)
+        for bal in item.get("coin", []):
+            symbol = bal.get("coin")
+            if symbol:
+                coin_entries.append(str(symbol))
+            if symbol == coin:
+                balance_value = float(
+                    bal.get("availableToTrade", bal.get("walletBalance", 0))
+                )
+
+    if balance_value is None and results:
+        fallback = results[0].get("totalEquity")
+        if fallback is not None:
+            balance_value = float(fallback)
+
+    BALANCE_LOGGER.info(
+        "BALANCE_DIAG response http_status=%s retCode=%s retMsg=%s coins=%s equity_fields=%s",
+        resp.status_code,
+        ret_code,
+        ret_msg,
+        coin_entries,
+        sorted(set(equity_fields)),
+    )
+
+    if balance_value is None:
+        raise HTTPException(status_code=500, detail=f"Balance for {coin} not found.")
+
+    return JSONResponse(
+        {
+            "balance": balance_value,
+            "coin": coin,
+            "account": account_mode,
+            "retCode": ret_code,
+            "retMsg": ret_msg,
+        }
+    )
 
 PAYSLIP_AUDIT_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"en\">

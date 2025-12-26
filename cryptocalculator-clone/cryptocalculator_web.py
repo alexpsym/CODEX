@@ -12,6 +12,7 @@ import time
 import webbrowser
 from typing import Dict, Optional
 
+import requests
 from flask import Flask, jsonify, render_template_string, request
 
 from cryptocalculator import (
@@ -48,6 +49,20 @@ BALANCE_ADAPTERS = {name: get_balance_fetcher(name) for name in EXECUTION_EXCHAN
 PUBLIC_WEBHOOK_URL = os.getenv(
     "PUBLIC_WEBHOOK_URL", "https://codex-rdqh.onrender.com/webhook"
 )
+
+
+def _fetch_master_balance(
+    host_url: str, account_mode: str, coin: str = "USDT", account_type: str = "UNIFIED"
+) -> float:
+    url = f"{host_url.rstrip('/')}/api/bybit/balance"
+    resp = requests.get(
+        url,
+        params={"account": account_mode, "coin": coin, "account_type": account_type},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    payload = resp.json()
+    return float(payload["balance"])
 
 FORM_HTML = """
 <!doctype html>
@@ -342,9 +357,14 @@ def index():
                     f"Execution exchange '{execution_exchange}' is not supported."
                 )
             account_asset = "AUD" if execution_exchange == "coinspot" else "USDT"
-            config["account_balance"] = balance_fetcher(
-                account_asset, account_type="UNIFIED", account_mode=account_mode
-            )
+            if execution_exchange == "bybit":
+                config["account_balance"] = _fetch_master_balance(
+                    request.host_url, account_mode, coin=account_asset, account_type="UNIFIED"
+                )
+            else:
+                config["account_balance"] = balance_fetcher(
+                    account_asset, account_type="UNIFIED", account_mode=account_mode
+                )
             if execution_exchange == "coinspot":
                 config.setdefault("account_asset", "AUD")
 
