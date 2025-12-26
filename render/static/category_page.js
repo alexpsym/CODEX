@@ -32,11 +32,12 @@
             button.className = 'script-btn';
             button.textContent = script.name;
             button.onclick = () => {
-                if (script.name === 'cryptocalculator-clone') {
-                    window.open(`/scripts/view/${buildScriptPath(script.name)}`, '_blank', 'noopener');
+                const target = `/scripts/view/${buildScriptPath(script.name)}`;
+                if (script.standalone) {
+                    window.open(target, '_blank', 'noopener');
                     return;
                 }
-                window.location.href = `/scripts/view/${buildScriptPath(script.name)}`;
+                window.location.href = target;
             };
             if (script.running) {
                 button.classList.add('running');

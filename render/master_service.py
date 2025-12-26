@@ -37,7 +37,26 @@ MAX_LOG_LINES = 400
 PAYSLIP_REPORT_NAME = "audit_report.pdf"
 PAYSLIP_UPLOAD_ROOT = BASE_DIR / "render" / "uploads" / "payslip"
 PAYSLIP_ALLOWED_IMAGES = {".jpg", ".jpeg", ".png"}
-WEB_APPS = {"cryptocalculator-clone"}
+WEB_APPS = {
+    "bybithistory-clone",
+    "cryptocalculator-clone",
+    "oanda-calculator-clone",
+}
+STANDALONE_SCRIPTS = {
+    "Crypto-Scanner-clone",
+    "bybit-alert-clone",
+    "bybit_monitor",
+    "bybithistory-clone",
+    "coinspot-clone",
+    "cryptocalculator-clone",
+    "ema-bounce-clone",
+    "ivindicator-clone",
+    "optionstrader-clone",
+    "fxscanner-oanda-clone",
+    "fxweekend-clone",
+    "oanda-calculator-clone",
+    "oanda_history-clone",
+}
 
 ENTRY_OVERRIDES = {
     "Crypto-Scanner-clone": ["continuous_scan.py", "scan.py"],
@@ -95,6 +114,7 @@ class ManagedScript:
             "open_url": script_open_url(self),
             "logs_url": script_logs_url(self.name),
             "last_output_at": self.last_output_at,
+            "standalone": self.name in STANDALONE_SCRIPTS,
         }
 
     def add_log(self, line: str) -> None:
@@ -596,16 +616,17 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html>
         a { color: #38bdf8; }
     </style>
 </head>
-<body data-script-name=\"{script_name}\" data-app-url=\"{app_url}\">
+<body data-script-name=\"{script_name}\" data-target-url=\"{target_url}\" data-has-ui=\"{has_ui}\">
     <div class=\"card\">
         <h1>Launching {script_name}</h1>
-        <p class=\"meta\" id=\"status\">Starting the calculator...</p>
+        <p class=\"meta\" id=\"status\">Starting the script...</p>
         <div class=\"spinner\"></div>
-        <p class=\"meta\">If you are not redirected, <a id=\"open-link\" href=\"{app_url}\">open the calculator</a>.</p>
+        <p class=\"meta\">If you are not redirected, <a id=\"open-link\" href=\"{target_url}\">open the script</a>.</p>
     </div>
     <script>
         const scriptName = document.body.dataset.scriptName;
-        const appUrl = document.body.dataset.appUrl;
+        const targetUrl = document.body.dataset.targetUrl;
+        const hasUi = document.body.dataset.hasUi === 'true';
 
         const fetchJson = async (url, options = {}) => {
             const response = await fetch(url, options);
@@ -624,9 +645,10 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html>
             while (attempts < 30) {
                 attempts += 1;
                 try {
-                    const response = await fetch(appUrl, { cache: 'no-store' });
+                    const response = await fetch(targetUrl, { cache: 'no-store' });
                     if (response.ok) {
-                        window.location.replace(`${appUrl}?ts=${Date.now()}`);
+                        const nextUrl = hasUi ? `${targetUrl}?ts=${Date.now()}` : targetUrl;
+                        window.location.replace(nextUrl);
                         return;
                     }
                 } catch (err) {
@@ -634,17 +656,21 @@ LAUNCHER_TEMPLATE = """<!DOCTYPE html>
                 }
                 await new Promise((resolve) => setTimeout(resolve, 500));
             }
-            statusEl.textContent = 'Still warming up. Please use the link below to open the calculator.';
+            statusEl.textContent = 'Still warming up. Please use the link below to open the script.';
         };
 
         const launch = async () => {
             try {
                 await fetchJson(`/scripts/${encodeURIComponent(scriptName)}/start`, { method: 'POST' });
-                statusEl.textContent = 'Waiting for the calculator to respond...';
+                statusEl.textContent = 'Waiting for the script to respond...';
             } catch (err) {
-                statusEl.textContent = 'Unable to start the calculator automatically.';
+                statusEl.textContent = 'Unable to start the script automatically.';
             }
-            await waitForApp();
+            if (hasUi) {
+                await waitForApp();
+            } else {
+                window.location.replace(targetUrl);
+            }
         };
 
         launch();
@@ -812,11 +838,17 @@ async def category_page(category: str) -> str:
 @app.get("/scripts/view/{script_name:path}", response_class=HTMLResponse)
 async def script_page(script_name: str) -> str:
     script = script_manager.get(script_name)
-    if script.name == "cryptocalculator-clone":
-        app_url = f"/apps/{_encoded_script_name(script.name)}"
+    if script.name in STANDALONE_SCRIPTS:
+        has_ui = script.name in WEB_APPS
+        target_url = (
+            f"/apps/{_encoded_script_name(script.name)}"
+            if has_ui
+            else f"/logs/view/{_encoded_script_name(script.name)}"
+        )
         return (
             LAUNCHER_TEMPLATE.replace("{script_name}", html.escape(script.name))
-            .replace("{app_url}", app_url)
+            .replace("{target_url}", target_url)
+            .replace("{has_ui}", "true" if has_ui else "false")
         )
     safe_name = html.escape(script.name)
     has_ui = "true" if script.name in WEB_APPS else "false"
