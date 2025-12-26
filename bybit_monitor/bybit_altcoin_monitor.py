@@ -1,6 +1,6 @@
-"""Simple Bybit altcoin perpetual futures price monitor.
+"""Simple Bybit perpetual futures price monitor.
 
-This script fetches linear perpetual futures prices for altcoins from Bybit's
+This script fetches linear perpetual futures prices (including BTC and ETH)
 public API. It watches for price jumps of at least +/-5% compared to the
 previous fetch and notifies the user when that happens. The script is meant to
 run continuously until the user stops it manually.
@@ -48,7 +48,6 @@ ERROR_WAIT_SECONDS = 60
 BLOCK_BACKOFFS = [60, 120, 300, 900, 1800]  # 1m, 2m, 5m, 15m, 30m
 DEFAULT_PERCENT_THRESHOLD = float(os.getenv("BYBIT_PERCENT_THRESHOLD", "5.0"))
 STABLECOIN_SUFFIXES = ("USDT", "USDC", "USDD", "USD")
-PRIMARY_COINS = {"BTC", "ETH"}
 SETTINGS_PATH = Path(__file__).with_name("settings.json")
 
 _session: requests.Session | None = None
@@ -374,8 +373,6 @@ def _coalesce_prices(tickers: Iterable[Dict[str, object]]) -> Dict[str, float]:
             continue
 
         base_symbol = extract_base_symbol(str(symbol))
-        if base_symbol in PRIMARY_COINS:
-            continue  # skip BTC and ETH because the focus is on altcoins
 
         try:
             price = float(last_price)  # type: ignore[arg-type]
@@ -387,7 +384,7 @@ def _coalesce_prices(tickers: Iterable[Dict[str, object]]) -> Dict[str, float]:
 
 
 def _fetch_fallback_prices() -> Dict[str, float]:
-    """Retrieve altcoin prices from a fallback market-data source (Binance futures)."""
+    """Retrieve perpetual futures prices from a fallback market-data source (Binance futures)."""
 
     session = _get_session()
     url = os.getenv("FALLBACK_MARKET_URL", "https://fapi.binance.com/fapi/v1/ticker/price")
@@ -450,8 +447,6 @@ def _fetch_fallback_prices() -> Dict[str, float]:
             continue
 
         base_symbol = extract_base_symbol(symbol_str)
-        if base_symbol in PRIMARY_COINS:
-            continue
 
         try:
             price = float(price_val)  # type: ignore[arg-type]
@@ -468,7 +463,7 @@ def _fetch_fallback_prices() -> Dict[str, float]:
 
 
 def fetch_altcoin_prices() -> Dict[str, float]:
-    """Ask Bybit for all linear perpetual futures prices and keep altcoins only."""
+    """Ask Bybit for all linear perpetual futures prices and keep non-stablecoins only."""
 
     params = {"category": "linear"}
     headers = _build_headers()
@@ -717,11 +712,11 @@ def run_monitor() -> None:
             wait_with_log(ERROR_WAIT_SECONDS, "Retry delay")
             continue
 
-        log(f"Received {len(prices)} altcoin perpetual prices from {source_label}.")
+        log(f"Received {len(prices)} perpetual prices from {source_label}.")
 
         if not prices:
             log(
-                "Price source returned an empty list of altcoins. This is unusual, so we will simply wait "
+                "Price source returned an empty list of symbols. This is unusual, so we will simply wait "
                 "and try again."
             )
         elif previous_prices:
@@ -734,7 +729,7 @@ def run_monitor() -> None:
             missing_symbols = sorted(previous_symbols - current_symbols)
 
             for symbol in new_symbols:
-                log(f"New altcoin detected: {symbol}. It will be tracked from now on.")
+                log(f"New symbol detected: {symbol}. It will be tracked from now on.")
             for symbol in missing_symbols:
                 log(f"Altcoin missing this round: {symbol}. It may have been delisted or is temporarily unavailable.")
 
@@ -774,10 +769,10 @@ def run_monitor() -> None:
 
 def main() -> None:
     """Entry point for the monitor."""
-    log("Bybit altcoin monitor started.")
+    log("Bybit perpetual futures monitor started.")
     settings = get_runtime_settings(force=True)
     log(
-        "The script asks Bybit for every linear perpetual altcoin price and raises alerts when the "
+        "The script asks Bybit for every linear perpetual price and raises alerts when the "
         f"price moves +/-{settings['percent_threshold']:.1f}% compared to the previous reading."
     )
     log("Press Ctrl+C at any time to stop the script safely.")
