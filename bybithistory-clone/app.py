@@ -1,8 +1,9 @@
 """Simple web UI for Bybit history downloads."""
 
-import os
-import webbrowser
 import csv
+import os
+import sys
+import webbrowser
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -264,8 +265,14 @@ def _serve_wsgi(app: Flask, host: str = "127.0.0.1", port: int = 5000) -> None:
 
 
 if __name__ == "__main__":
-    host = "127.0.0.1"
-    port = 5000
+    host = os.getenv("HOST", "127.0.0.1")
+    port_value = os.getenv("PORT", "5000")
+    try:
+        port = int(port_value)
+    except ValueError:
+        port = 5000
     url = f"http://{host}:{port}"
-    open_browser(url)
+    is_render = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID"))
+    if sys.stdout.isatty() and not is_render:
+        open_browser(url)
     _serve_wsgi(app, host=host, port=port)
