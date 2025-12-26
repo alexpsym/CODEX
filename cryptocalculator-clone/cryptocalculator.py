@@ -953,15 +953,12 @@ def build_webhook_payload(trade: Dict[str, Any]) -> Dict[str, Any]:
     stop_dist = trade["stop_distance"]
     target_dist = abs(trade["target_price"] - trade["entry_price"])
 
-    tp_op = "+" if action == "buy" else "-"
-    sl_op = "-" if action == "buy" else "+"
-
     return {
         "symbol": trade["symbol"],
         "action": action,
         "quantity": round(trade["quantity"], 3),
-        "take_profit_price": f"{{{{close}}}} {tp_op} {target_dist:.6f}",
-        "stop_loss_price": f"{{{{close}}}} {sl_op} {stop_dist:.6f}",
+        "tp_offset": round(target_dist, 6),
+        "sl_offset": round(stop_dist, 6),
         "account": trade.get("account_mode", "live"),
         "trade_mode": trade.get("trade_mode", "linear"),
     }
