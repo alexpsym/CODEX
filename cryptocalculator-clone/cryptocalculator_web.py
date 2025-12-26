@@ -7,6 +7,8 @@ from pathlib import Path
 import shutil
 import socket
 import sys
+import threading
+import time
 import webbrowser
 from typing import Dict, Optional
 
@@ -329,6 +331,23 @@ def _pick_free_port(host: str) -> int:
         return sock.getsockname()[1]
 
 
+def _wait_for_server(host: str, port: int, timeout: float = 10.0) -> bool:
+    connect_host = host
+    if host in {"0.0.0.0", "::"}:
+        connect_host = "127.0.0.1"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.5)
+            try:
+                sock.connect((connect_host, port))
+            except OSError:
+                time.sleep(0.05)
+                continue
+            return True
+    return False
+
+
 if __name__ == "__main__":
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("CRYPTOCALCULATOR_PORT") or os.getenv("PORT", "5000"))
@@ -341,8 +360,13 @@ if __name__ == "__main__":
         )
         port = fallback_port
     url = f"http://{host}:{port}/"
-    if sys.stdout.isatty() and not (os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID")):
+    server_thread = threading.Thread(
+        target=_serve_wsgi, args=(app, host, port), daemon=True
+    )
+    server_thread.start()
+    _wait_for_server(host, port)
+    if sys.stdout.isatty() and not is_render:
         if not open_in_edge(url):
             print(f"Open {url} in your browser to view the calculator.", flush=True)
     print(f"Serving cryptocalculator on {url}", flush=True)
-    _serve_wsgi(app, host=host, port=port)
+    server_thread.join()
