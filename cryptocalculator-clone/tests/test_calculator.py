@@ -321,11 +321,8 @@ def test_save_webhook_json_buy(monkeypatch):
     payload = read_webhook_json()
 
     target_dist = abs(trade["target_price"] - trade["entry_price"])
-    expected_tp = f"{{close}} + {target_dist:.6f}".replace("{close}", "{{close}}")
-    expected_sl = f"{{close}} - {trade['stop_distance']:.6f}".replace("{close}", "{{close}}")
-
-    assert payload["take_profit_price"] == expected_tp
-    assert payload["stop_loss_price"] == expected_sl
+    assert payload["tp_offset"] == round(target_dist, 6)
+    assert payload["sl_offset"] == round(-trade["stop_distance"], 6)
 
 
 def test_web_coinspot_passes_conversion_rate(monkeypatch):
@@ -403,11 +400,8 @@ def test_save_webhook_json_sell(monkeypatch):
     payload = read_webhook_json()
 
     target_dist = abs(trade["target_price"] - trade["entry_price"])
-    expected_tp = f"{{close}} - {target_dist:.6f}".replace("{close}", "{{close}}")
-    expected_sl = f"{{close}} + {trade['stop_distance']:.6f}".replace("{close}", "{{close}}")
-
-    assert payload["take_profit_price"] == expected_tp
-    assert payload["stop_loss_price"] == expected_sl
+    assert payload["tp_offset"] == round(-target_dist, 6)
+    assert payload["sl_offset"] == round(trade["stop_distance"], 6)
 
 
 def test_load_config_fetch_balance(monkeypatch, tmp_path):

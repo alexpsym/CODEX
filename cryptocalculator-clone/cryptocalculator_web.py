@@ -253,6 +253,11 @@ FORM_HTML = """
         <span class="copy-status" id="webhook_status"></span>
       </div>
       <div class="copy-box" id="webhook_url">{{ webhook_url }}</div>
+      <p><strong>How offsets work:</strong></p>
+      <ul>
+        <li><strong>Buy/Long:</strong> TP = entry + tp_offset, SL = entry - sl_offset.</li>
+        <li><strong>Sell/Short:</strong> TP = entry - tp_offset, SL = entry + sl_offset.</li>
+      </ul>
     </div>
     <div class="result">
       {% if error %}<p style="color: red;">{{ error }}</p>{% endif %}
