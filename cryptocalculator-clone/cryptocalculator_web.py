@@ -7,6 +7,8 @@ from pathlib import Path
 import shutil
 import socket
 import sys
+import threading
+import time
 import webbrowser
 from typing import Dict, Optional
 
@@ -48,8 +50,47 @@ FORM_HTML = """
     .container {display:flex; align-items:flex-start;}
     .form {margin-right:20px;}
     .result {margin-left:20px;}
+    .copy-row {display:flex; gap:8px; align-items:center; margin:6px 0;}
+    .copy-row button {cursor:pointer;}
+    .copy-status {font-size:12px; color:#9ca3af;}
+    .copy-box {background:#111827; border:1px solid #1f2937; padding:8px; border-radius:6px; color:#e5e7eb; max-width:520px; white-space:pre-wrap;}
   </style>
   <script>
+    function copyText(text, statusId){
+      const status = document.getElementById(statusId);
+      const done = () => { if(status){ status.innerText = 'Copied!'; setTimeout(() => status.innerText = '', 2000);} };
+      if(navigator.clipboard && navigator.clipboard.writeText){
+        navigator.clipboard.writeText(text).then(done).catch(() => {});
+      } else {
+        const temp = document.createElement('textarea');
+        temp.value = text;
+        document.body.appendChild(temp);
+        temp.select();
+        try { document.execCommand('copy'); done(); } finally { document.body.removeChild(temp); }
+      }
+    }
+    function copyFromElement(elementId, statusId){
+      const el = document.getElementById(elementId);
+      if(!el){return;}
+      copyText(el.innerText, statusId);
+    }
+    function exportResult(){
+      const payload = document.getElementById('alert_json');
+      if(!payload || !payload.innerText.trim()){
+        alert('Calculate a trade first to export the result.');
+        return;
+      }
+      const blob = new Blob([payload.innerText], {type: 'application/json'});
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      link.href = url;
+      link.download = `crypto-trade-${timestamp}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    }
     function toggleEntry(){
       const orderType = document.getElementById('order_type');
       const entryField = document.getElementById('entry_price_row');
@@ -122,12 +163,25 @@ FORM_HTML = """
         <small>Use this when your price source is quoted in a different currency than your execution exchange.</small><br>
         <button type="submit">Calculate</button>
       </form>
+      <h3>TradingView Webhook</h3>
+      <div class="copy-row">
+        <button type="button" onclick="copyText('{{ webhook_url }}','webhook_status')">Copy Webhook URL</button>
+        <span class="copy-status" id="webhook_status"></span>
+      </div>
+      <div class="copy-box" id="webhook_url">{{ webhook_url }}</div>
     </div>
     <div class="result">
       {% if error %}<p style="color: red;">{{ error }}</p>{% endif %}
       {% if payload_json %}
         <h2>Result</h2>
         <pre id="alert_json">{{ payload_json }}</pre>
+        <div class="copy-row">
+          <button type="button" onclick="copyFromElement('alert_json','payload_status')">Copy TradingView Message</button>
+          <span class="copy-status" id="payload_status"></span>
+        </div>
+        <div class="copy-row">
+          <button type="button" onclick="exportResult()">Export Result</button>
+        </div>
       {% endif %}
       {% if summary %}
         <h2>Summary</h2>
@@ -246,6 +300,7 @@ def index():
         execution_options=sorted(EXECUTION_EXCHANGES.items()),
         price_source_options=sorted(PRICE_SOURCES.items()),
         price_mode_notes=PRICE_MODE_NOTES,
+        webhook_url=f"{request.host_url.rstrip('/')}/webhook/cryptocalculator-clone",
     )
 
 
@@ -329,6 +384,23 @@ def _pick_free_port(host: str) -> int:
         return sock.getsockname()[1]
 
 
+def _wait_for_server(host: str, port: int, timeout: float = 10.0) -> bool:
+    connect_host = host
+    if host in {"0.0.0.0", "::"}:
+        connect_host = "127.0.0.1"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.5)
+            try:
+                sock.connect((connect_host, port))
+            except OSError:
+                time.sleep(0.05)
+                continue
+            return True
+    return False
+
+
 if __name__ == "__main__":
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("CRYPTOCALCULATOR_PORT") or os.getenv("PORT", "5000"))
@@ -341,8 +413,13 @@ if __name__ == "__main__":
         )
         port = fallback_port
     url = f"http://{host}:{port}/"
-    if sys.stdout.isatty() and not (os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID")):
+    server_thread = threading.Thread(
+        target=_serve_wsgi, args=(app, host, port), daemon=True
+    )
+    server_thread.start()
+    _wait_for_server(host, port)
+    if sys.stdout.isatty() and not is_render:
         if not open_in_edge(url):
             print(f"Open {url} in your browser to view the calculator.", flush=True)
     print(f"Serving cryptocalculator on {url}", flush=True)
-    _serve_wsgi(app, host=host, port=port)
+    server_thread.join()
