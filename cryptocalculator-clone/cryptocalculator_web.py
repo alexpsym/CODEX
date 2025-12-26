@@ -7,10 +7,13 @@ from pathlib import Path
 import shutil
 import socket
 import sys
+import threading
+import time
 import webbrowser
 from typing import Dict, Optional
 
-from flask import Flask, render_template_string, request
+from flask import Flask, jsonify, render_template_string, request
+import requests
 
 from cryptocalculator import (
     DEFAULT_EXECUTION_EXCHANGE,
@@ -22,6 +25,8 @@ from cryptocalculator import (
     calculate_trade,
     format_trade,
     get_balance_fetcher,
+    BYBIT_LINEAR_URL,
+    BYBIT_SPOT_URL,
 )
 
 app = Flask(__name__)
@@ -36,6 +41,9 @@ PRICE_MODE_NOTES = {
 }
 
 BALANCE_ADAPTERS = {name: get_balance_fetcher(name) for name in EXECUTION_EXCHANGES}
+SYMBOL_CACHE: Dict[str, Dict[str, object]] = {}
+SYMBOL_CACHE_TTL = 300
+PUBLIC_WEBHOOK_URL = os.getenv("PUBLIC_WEBHOOK_URL", "https://codex-rdqh.onrender.com/webhook")
 
 FORM_HTML = """
 <!doctype html>
@@ -48,8 +56,51 @@ FORM_HTML = """
     .container {display:flex; align-items:flex-start;}
     .form {margin-right:20px;}
     .result {margin-left:20px;}
+    .copy-row {display:flex; gap:8px; align-items:center; margin:6px 0;}
+    .copy-row button {cursor:pointer;}
+    .copy-status {font-size:12px; color:#9ca3af;}
+    .copy-box {background:#111827; border:1px solid #1f2937; padding:8px; border-radius:6px; color:#e5e7eb; max-width:520px; white-space:pre-wrap;}
+    .symbol-wrap {position:relative; display:block;}
+    .symbol-list {position:absolute; z-index:10; left:0; right:0; max-height:220px; overflow-y:auto; background:#111827; border:1px solid #1f2937; border-radius:6px; padding:4px 0; display:none;}
+    .symbol-item {padding:6px 10px; cursor:pointer;}
+    .symbol-item:hover {background:#1f2937;}
   </style>
   <script>
+    function copyText(text, statusId){
+      const status = document.getElementById(statusId);
+      const done = () => { if(status){ status.innerText = 'Copied!'; setTimeout(() => status.innerText = '', 2000);} };
+      if(navigator.clipboard && navigator.clipboard.writeText){
+        navigator.clipboard.writeText(text).then(done).catch(() => {});
+      } else {
+        const temp = document.createElement('textarea');
+        temp.value = text;
+        document.body.appendChild(temp);
+        temp.select();
+        try { document.execCommand('copy'); done(); } finally { document.body.removeChild(temp); }
+      }
+    }
+    function copyFromElement(elementId, statusId){
+      const el = document.getElementById(elementId);
+      if(!el){return;}
+      copyText(el.innerText, statusId);
+    }
+    function exportResult(){
+      const payload = document.getElementById('export_json');
+      if(!payload || !payload.innerText.trim()){
+        alert('Calculate a trade first to export the result.');
+        return;
+      }
+      const blob = new Blob([payload.innerText], {type: 'application/json'});
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      link.href = url;
+      link.download = `crypto-trade-${timestamp}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    }
     function toggleEntry(){
       const orderType = document.getElementById('order_type');
       const entryField = document.getElementById('entry_price_row');
@@ -63,6 +114,43 @@ FORM_HTML = """
       if(!priceSource || !note){return;}
       note.innerText = notes[priceSource.value] || '';
     }
+    async function loadSymbols(){
+      const symbolInput = document.getElementById('symbol');
+      if(!symbolInput){return;}
+      try{
+        const response = await fetch('/symbols/bybit');
+        if(!response.ok){throw new Error('Failed to load symbols');}
+        const data = await response.json();
+        window.__symbolList = Array.isArray(data.symbols) ? data.symbols : [];
+        updateSymbolSuggestions(symbolInput.value, true);
+      } catch(err){
+        console.warn(err);
+      }
+    }
+    function updateSymbolSuggestions(value, forceShow){
+      const symbolList = document.getElementById('symbol_list');
+      const symbols = Array.isArray(window.__symbolList) ? window.__symbolList : [];
+      if(!symbolList){return;}
+      symbolList.innerHTML = '';
+      const query = (value || '').trim().toUpperCase();
+      const matches = query
+        ? symbols.filter((symbol) => symbol.startsWith(query))
+        : symbols.slice();
+      matches.forEach((symbol) => {
+        const item = document.createElement('div');
+        item.className = 'symbol-item';
+        item.textContent = symbol;
+        item.addEventListener('click', () => {
+          const input = document.getElementById('symbol');
+          if(input){
+            input.value = symbol;
+          }
+          symbolList.style.display = 'none';
+        });
+        symbolList.appendChild(item);
+      });
+      symbolList.style.display = (forceShow || query) && matches.length ? 'block' : 'none';
+    }
     document.addEventListener('DOMContentLoaded', function(){
       const ot = document.getElementById('order_type');
       if(ot){
@@ -74,6 +162,20 @@ FORM_HTML = """
         ps.addEventListener('change', updatePriceMode);
         updatePriceMode();
       }
+      const symbolInput = document.getElementById('symbol');
+      if(symbolInput){
+        symbolInput.addEventListener('input', (event) => updateSymbolSuggestions(event.target.value));
+        symbolInput.addEventListener('focus', (event) => updateSymbolSuggestions(event.target.value, true));
+      }
+      document.addEventListener('click', (event) => {
+        const symbolList = document.getElementById('symbol_list');
+        const symbolInputEl = document.getElementById('symbol');
+        if(!symbolList || !symbolInputEl){return;}
+        if(event.target !== symbolInputEl && !symbolList.contains(event.target)){
+          symbolList.style.display = 'none';
+        }
+      });
+      loadSymbols();
     });
   </script>
 </head>
@@ -82,7 +184,12 @@ FORM_HTML = """
   <div class="container">
     <div class="form">
       <form method="post">
-        <label>Symbol: <input name="symbol" required></label><br>
+        <label>Symbol:
+          <span class="symbol-wrap">
+            <input name="symbol" id="symbol" autocomplete="off" required>
+            <div id="symbol_list" class="symbol-list"></div>
+          </span>
+        </label><br>
         <label>Price Source:
           <select name="price_source" id="price_source">
             {% for key, meta in price_source_options %}
@@ -122,12 +229,28 @@ FORM_HTML = """
         <small>Use this when your price source is quoted in a different currency than your execution exchange.</small><br>
         <button type="submit">Calculate</button>
       </form>
+      <h3>TradingView Webhook</h3>
+      <div class="copy-row">
+        <button type="button" onclick="copyText('{{ webhook_url }}','webhook_status')">Copy Webhook URL</button>
+        <span class="copy-status" id="webhook_status"></span>
+      </div>
+      <div class="copy-box" id="webhook_url">{{ webhook_url }}</div>
     </div>
     <div class="result">
       {% if error %}<p style="color: red;">{{ error }}</p>{% endif %}
       {% if payload_json %}
         <h2>Result</h2>
         <pre id="alert_json">{{ payload_json }}</pre>
+        {% if export_json %}
+        <pre id="export_json" style="display:none;">{{ export_json }}</pre>
+        {% endif %}
+        <div class="copy-row">
+          <button type="button" onclick="copyFromElement('alert_json','payload_status')">Copy TradingView Message</button>
+          <span class="copy-status" id="payload_status"></span>
+        </div>
+        <div class="copy-row">
+          <button type="button" onclick="exportResult()">Export Result</button>
+        </div>
       {% endif %}
       {% if summary %}
         <h2>Summary</h2>
@@ -163,6 +286,8 @@ def index():
     error = None
     risk_info = None
     payload_json = None
+    export_json = None
+    trade = None
 
     execution_exchange = request.form.get(
         "execution_exchange", DEFAULT_EXECUTION_EXCHANGE
@@ -225,12 +350,20 @@ def index():
             error = str(exc)
 
     selection_info: Optional[Dict[str, str]] = None
-    if request.method == "POST" and not error:
+    if request.method == "POST" and not error and trade:
         selection_info = {
             "execution_label": EXECUTION_EXCHANGES[execution_exchange]["label"],
             "price_label": PRICE_SOURCES[price_source]["label"],
             "trade_mode_label": TRADE_MODE_LABELS[trade_mode],
         }
+        export_payload = {
+            "summary": summary,
+            "execution_settings": selection_info,
+            "position_details": risk_info,
+            "webhook_message": json.loads(payload_json) if payload_json else None,
+            "trade": trade,
+        }
+        export_json = json.dumps(export_payload, indent=2)
 
     return render_template_string(
         FORM_HTML,
@@ -246,6 +379,8 @@ def index():
         execution_options=sorted(EXECUTION_EXCHANGES.items()),
         price_source_options=sorted(PRICE_SOURCES.items()),
         price_mode_notes=PRICE_MODE_NOTES,
+        webhook_url=PUBLIC_WEBHOOK_URL,
+        export_json=export_json,
     )
 
 
@@ -329,6 +464,106 @@ def _pick_free_port(host: str) -> int:
         return sock.getsockname()[1]
 
 
+def _fetch_bybit_symbols(trade_mode: str) -> list[str]:
+    url = BYBIT_SPOT_URL if trade_mode == "spot" else BYBIT_LINEAR_URL
+    resp = requests.get(url, timeout=10)
+    resp.raise_for_status()
+    symbols = [
+        item.get("symbol", "").upper()
+        for item in resp.json().get("result", {}).get("list", [])
+        if item.get("symbol")
+    ]
+    return sorted(set(symbols))
+
+
+def _fetch_bybit_all_symbols() -> list[str]:
+    symbols = _fetch_bybit_symbols("spot") + _fetch_bybit_symbols("linear")
+    return sorted(set(symbols))
+
+
+def _fetch_coinspot_symbols() -> list[str]:
+    url = "https://www.coinspot.com.au/pubapi/v2/latest"
+    resp = requests.get(url, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+    prices = data.get("prices", {})
+    if isinstance(prices, dict):
+        symbols = [key.upper() for key in prices.keys() if key]
+    else:
+        symbols = []
+    return sorted(set(symbols))
+
+
+def _get_cached_symbols(cache_key: str) -> Optional[list[str]]:
+    cached = SYMBOL_CACHE.get(cache_key)
+    if not cached:
+        return None
+    if time.time() - cached["timestamp"] > SYMBOL_CACHE_TTL:
+        return None
+    return cached["symbols"]  # type: ignore[return-value]
+
+
+def _set_cached_symbols(cache_key: str, symbols: list[str]) -> None:
+    SYMBOL_CACHE[cache_key] = {"timestamp": time.time(), "symbols": symbols}
+
+
+@app.get("/symbols/bybit")
+def bybit_symbol_lookup():
+    cache_key = "bybit:all"
+    cached = _get_cached_symbols(cache_key)
+    if cached is not None:
+        return jsonify({"symbols": cached})
+    try:
+        symbols = _fetch_bybit_all_symbols()
+    except Exception as exc:  # pragma: no cover - network fallback
+        return jsonify({"symbols": [], "error": str(exc)})
+    _set_cached_symbols(cache_key, symbols)
+    return jsonify({"symbols": symbols})
+
+
+@app.get("/symbols")
+def symbol_lookup():
+    price_source = request.args.get("price_source", DEFAULT_PRICE_SOURCE).lower()
+    if price_source not in PRICE_SOURCES:
+        price_source = DEFAULT_PRICE_SOURCE
+    exchange = PRICE_SOURCES[price_source]["exchange"]
+    trade_mode = PRICE_SOURCES[price_source]["trade_mode"]
+    cache_key = f"{exchange}:{trade_mode}"
+    cached = _get_cached_symbols(cache_key)
+    if cached is not None:
+        return jsonify({"symbols": cached})
+
+    try:
+        if exchange == "bybit":
+            symbols = _fetch_bybit_symbols(trade_mode)
+        elif exchange == "coinspot":
+            symbols = _fetch_coinspot_symbols()
+        else:
+            symbols = []
+    except Exception as exc:  # pragma: no cover - network fallback
+        return jsonify({"symbols": [], "error": str(exc)})
+
+    _set_cached_symbols(cache_key, symbols)
+    return jsonify({"symbols": symbols})
+
+
+def _wait_for_server(host: str, port: int, timeout: float = 10.0) -> bool:
+    connect_host = host
+    if host in {"0.0.0.0", "::"}:
+        connect_host = "127.0.0.1"
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.5)
+            try:
+                sock.connect((connect_host, port))
+            except OSError:
+                time.sleep(0.05)
+                continue
+            return True
+    return False
+
+
 if __name__ == "__main__":
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("CRYPTOCALCULATOR_PORT") or os.getenv("PORT", "5000"))
@@ -341,8 +576,13 @@ if __name__ == "__main__":
         )
         port = fallback_port
     url = f"http://{host}:{port}/"
-    if sys.stdout.isatty() and not (os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID")):
+    server_thread = threading.Thread(
+        target=_serve_wsgi, args=(app, host, port), daemon=True
+    )
+    server_thread.start()
+    _wait_for_server(host, port)
+    if sys.stdout.isatty() and not is_render:
         if not open_in_edge(url):
             print(f"Open {url} in your browser to view the calculator.", flush=True)
     print(f"Serving cryptocalculator on {url}", flush=True)
-    _serve_wsgi(app, host=host, port=port)
+    server_thread.join()
