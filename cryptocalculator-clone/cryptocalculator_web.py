@@ -43,6 +43,7 @@ PRICE_MODE_NOTES = {
 BALANCE_ADAPTERS = {name: get_balance_fetcher(name) for name in EXECUTION_EXCHANGES}
 SYMBOL_CACHE: Dict[str, Dict[str, object]] = {}
 SYMBOL_CACHE_TTL = 300
+PUBLIC_WEBHOOK_URL = os.getenv("PUBLIC_WEBHOOK_URL", "https://codex-rdqh.onrender.com/webhook")
 
 FORM_HTML = """
 <!doctype html>
@@ -133,7 +134,7 @@ FORM_HTML = """
       symbolList.innerHTML = '';
       const query = (value || '').trim().toUpperCase();
       const matches = query
-        ? symbols.filter((symbol) => symbol.includes(query))
+        ? symbols.filter((symbol) => symbol.startsWith(query))
         : symbols.slice();
       matches.forEach((symbol) => {
         const item = document.createElement('div');
@@ -379,7 +380,7 @@ def index():
         execution_options=sorted(EXECUTION_EXCHANGES.items()),
         price_source_options=sorted(PRICE_SOURCES.items()),
         price_mode_notes=PRICE_MODE_NOTES,
-        webhook_url=f"{request.host_url.rstrip('/')}/webhook/cryptocalculator-clone",
+        webhook_url=PUBLIC_WEBHOOK_URL,
         export_json=export_json,
     )
 
