@@ -513,8 +513,11 @@ CATEGORY_TEMPLATE = """<!DOCTYPE html>
         h1 { margin-top: 0; }
         .meta { color: #94a3b8; margin-bottom: 1.5rem; }
         .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; }
-        .card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 1rem; display: flex; align-items: center; justify-content: center; text-align: center; min-height: 84px; }
+        .card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 1rem; display: flex; flex-direction: column; gap: 0.75rem; text-align: center; min-height: 96px; }
         .script-btn { width: 100%; padding: 0.8rem 1rem; border-radius: 10px; border: none; font-weight: 700; background: #1f2937; color: #e2e8f0; cursor: pointer; }
+        .script-btn.running { background: #22c55e22; color: #86efac; border: 1px solid #22c55e55; }
+        .status-pill { display: inline-flex; align-items: center; justify-content: center; padding: 0.25rem 0.65rem; border-radius: 999px; font-size: 0.85rem; font-weight: 700; background: #1f2937; color: #cbd5e1; }
+        .status-pill.running { background: #14532d; color: #bbf7d0; }
         .nav-bar { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
         button { padding: 0.55rem 0.9rem; border-radius: 10px; border: none; cursor: pointer; font-weight: 700; }
         .secondary { background: #1f2937; color: #cbd5e1; }
@@ -575,6 +578,78 @@ SCRIPT_PAGE_TEMPLATE = """<!DOCTYPE html>
         <iframe id=\"app-frame\" title=\"Script UI\"></iframe>
     </div>
     <script src=\"/static/script_page.js\"></script>
+</body>
+</html>"""
+
+LAUNCHER_TEMPLATE = """<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+    <meta charset=\"UTF-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <title>Launching {script_name}</title>
+    <style>
+        :root { color-scheme: light dark; }
+        body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+        .card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; padding: 2rem; max-width: 520px; text-align: center; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
+        .meta { color: #94a3b8; margin-top: 0.5rem; }
+        .spinner { width: 36px; height: 36px; border: 3px solid #1f2937; border-top-color: #38bdf8; border-radius: 50%; margin: 1rem auto 0; animation: spin 1s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        a { color: #38bdf8; }
+    </style>
+</head>
+<body data-script-name=\"{script_name}\" data-app-url=\"{app_url}\">
+    <div class=\"card\">
+        <h1>Launching {script_name}</h1>
+        <p class=\"meta\" id=\"status\">Starting the calculator...</p>
+        <div class=\"spinner\"></div>
+        <p class=\"meta\">If you are not redirected, <a id=\"open-link\" href=\"{app_url}\">open the calculator</a>.</p>
+    </div>
+    <script>
+        const scriptName = document.body.dataset.scriptName;
+        const appUrl = document.body.dataset.appUrl;
+
+        const fetchJson = async (url, options = {}) => {
+            const response = await fetch(url, options);
+            if (!response.ok) {
+                const body = await response.text();
+                const detail = body || response.statusText;
+                throw new Error(`${options.method || 'GET'} ${url} failed with ${response.status}: ${detail}`);
+            }
+            return response.json();
+        };
+
+        const statusEl = document.getElementById('status');
+
+        const waitForApp = async () => {
+            let attempts = 0;
+            while (attempts < 30) {
+                attempts += 1;
+                try {
+                    const response = await fetch(appUrl, { cache: 'no-store' });
+                    if (response.ok) {
+                        window.location.replace(`${appUrl}?ts=${Date.now()}`);
+                        return;
+                    }
+                } catch (err) {
+                    // keep trying
+                }
+                await new Promise((resolve) => setTimeout(resolve, 500));
+            }
+            statusEl.textContent = 'Still warming up. Please use the link below to open the calculator.';
+        };
+
+        const launch = async () => {
+            try {
+                await fetchJson(`/scripts/${encodeURIComponent(scriptName)}/start`, { method: 'POST' });
+                statusEl.textContent = 'Waiting for the calculator to respond...';
+            } catch (err) {
+                statusEl.textContent = 'Unable to start the calculator automatically.';
+            }
+            await waitForApp();
+        };
+
+        launch();
+    </script>
 </body>
 </html>"""
 
@@ -738,6 +813,12 @@ async def category_page(category: str) -> str:
 @app.get("/scripts/view/{script_name:path}", response_class=HTMLResponse)
 async def script_page(script_name: str) -> str:
     script = script_manager.get(script_name)
+    if script.name == "cryptocalculator-clone":
+        app_url = f"/apps/{_encoded_script_name(script.name)}"
+        return (
+            LAUNCHER_TEMPLATE.replace("{script_name}", html.escape(script.name))
+            .replace("{app_url}", app_url)
+        )
     safe_name = html.escape(script.name)
     has_ui = "true" if script.name in WEB_APPS else "false"
     return (
