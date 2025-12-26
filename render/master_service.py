@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import html
 import json
+import logging
 import os
 import socket
 import time
@@ -20,6 +23,7 @@ from dotenv import load_dotenv
 import httpx
 from starlette.responses import RedirectResponse
 
+from bybit_credentials import resolve_bybit_credentials_for
 from payslip_audit.tesseract import (
     TESSERACT_MISSING_MESSAGE,
     _resolve_tesseract_binary,
@@ -37,7 +41,26 @@ MAX_LOG_LINES = 400
 PAYSLIP_REPORT_NAME = "audit_report.pdf"
 PAYSLIP_UPLOAD_ROOT = BASE_DIR / "render" / "uploads" / "payslip"
 PAYSLIP_ALLOWED_IMAGES = {".jpg", ".jpeg", ".png"}
-WEB_APPS = {"cryptocalculator-clone"}
+WEB_APPS = {
+    "bybithistory-clone",
+    "cryptocalculator-clone",
+    "oanda-calculator-clone",
+}
+STANDALONE_SCRIPTS = {
+    "Crypto-Scanner-clone",
+    "bybit-alert-clone",
+    "bybit_monitor",
+    "bybithistory-clone",
+    "coinspot-clone",
+    "cryptocalculator-clone",
+    "ema-bounce-clone",
+    "ivindicator-clone",
+    "optionstrader-clone",
+    "fxscanner-oanda-clone",
+    "fxweekend-clone",
+    "oanda-calculator-clone",
+    "oanda_history-clone",
+}
 
 ENTRY_OVERRIDES = {
     "Crypto-Scanner-clone": ["continuous_scan.py", "scan.py"],
@@ -96,6 +119,7 @@ class ManagedScript:
             "open_url": script_open_url(self),
             "logs_url": script_logs_url(self.name),
             "last_output_at": self.last_output_at,
+            "standalone": self.name in STANDALONE_SCRIPTS,
         }
 
     def add_log(self, line: str) -> None:
@@ -513,8 +537,11 @@ CATEGORY_TEMPLATE = """<!DOCTYPE html>
         h1 { margin-top: 0; }
         .meta { color: #94a3b8; margin-bottom: 1.5rem; }
         .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; }
-        .card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 1rem; display: flex; align-items: center; justify-content: center; text-align: center; min-height: 84px; }
+        .card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 1rem; display: flex; flex-direction: column; gap: 0.75rem; text-align: center; min-height: 96px; }
         .script-btn { width: 100%; padding: 0.8rem 1rem; border-radius: 10px; border: none; font-weight: 700; background: #1f2937; color: #e2e8f0; cursor: pointer; }
+        .script-btn.running { background: #22c55e22; color: #86efac; border: 1px solid #22c55e55; }
+        .status-pill { display: inline-flex; align-items: center; justify-content: center; padding: 0.25rem 0.65rem; border-radius: 999px; font-size: 0.85rem; font-weight: 700; background: #1f2937; color: #cbd5e1; }
+        .status-pill.running { background: #14532d; color: #bbf7d0; }
         .nav-bar { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
         button { padding: 0.55rem 0.9rem; border-radius: 10px; border: none; cursor: pointer; font-weight: 700; }
         .secondary { background: #1f2937; color: #cbd5e1; }
@@ -575,6 +602,84 @@ SCRIPT_PAGE_TEMPLATE = """<!DOCTYPE html>
         <iframe id=\"app-frame\" title=\"Script UI\"></iframe>
     </div>
     <script src=\"/static/script_page.js\"></script>
+</body>
+</html>"""
+
+LAUNCHER_TEMPLATE = """<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+    <meta charset=\"UTF-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <title>Launching {script_name}</title>
+    <style>
+        :root { color-scheme: light dark; }
+        body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+        .card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; padding: 2rem; max-width: 520px; text-align: center; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
+        .meta { color: #94a3b8; margin-top: 0.5rem; }
+        .spinner { width: 36px; height: 36px; border: 3px solid #1f2937; border-top-color: #38bdf8; border-radius: 50%; margin: 1rem auto 0; animation: spin 1s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        a { color: #38bdf8; }
+    </style>
+</head>
+<body data-script-name=\"{script_name}\" data-target-url=\"{target_url}\" data-has-ui=\"{has_ui}\">
+    <div class=\"card\">
+        <h1>Launching {script_name}</h1>
+        <p class=\"meta\" id=\"status\">Starting the script...</p>
+        <div class=\"spinner\"></div>
+        <p class=\"meta\">If you are not redirected, <a id=\"open-link\" href=\"{target_url}\">open the script</a>.</p>
+    </div>
+    <script>
+        const scriptName = document.body.dataset.scriptName;
+        const targetUrl = document.body.dataset.targetUrl;
+        const hasUi = document.body.dataset.hasUi === 'true';
+
+        const fetchJson = async (url, options = {}) => {
+            const response = await fetch(url, options);
+            if (!response.ok) {
+                const body = await response.text();
+                const detail = body || response.statusText;
+                throw new Error(`${options.method || 'GET'} ${url} failed with ${response.status}: ${detail}`);
+            }
+            return response.json();
+        };
+
+        const statusEl = document.getElementById('status');
+
+        const waitForApp = async () => {
+            let attempts = 0;
+            while (attempts < 30) {
+                attempts += 1;
+                try {
+                    const response = await fetch(targetUrl, { cache: 'no-store' });
+                    if (response.ok) {
+                        const nextUrl = hasUi ? `${targetUrl}?ts=${Date.now()}` : targetUrl;
+                        window.location.replace(nextUrl);
+                        return;
+                    }
+                } catch (err) {
+                    // keep trying
+                }
+                await new Promise((resolve) => setTimeout(resolve, 500));
+            }
+            statusEl.textContent = 'Still warming up. Please use the link below to open the script.';
+        };
+
+        const launch = async () => {
+            try {
+                await fetchJson(`/scripts/${encodeURIComponent(scriptName)}/start`, { method: 'POST' });
+                statusEl.textContent = 'Waiting for the script to respond...';
+            } catch (err) {
+                statusEl.textContent = 'Unable to start the script automatically.';
+            }
+            if (hasUi) {
+                await waitForApp();
+            } else {
+                window.location.replace(targetUrl);
+            }
+        };
+
+        launch();
+    </script>
 </body>
 </html>"""
 
@@ -658,6 +763,202 @@ PROXY_HOP_HEADERS = {
     "upgrade",
 }
 PROXY_STRIP_HEADERS = {"content-encoding", "content-length"}
+BYBIT_RECV_WINDOW = "5000"
+BALANCE_LOGGER = logging.getLogger("uvicorn.error")
+
+
+def _bybit_sign_request(timestamp: str, api_key: str, api_secret: str, body: str) -> str:
+    payload = f"{timestamp}{api_key}{BYBIT_RECV_WINDOW}{body}"
+    return hmac.new(api_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+
+
+def _parse_trigger_price(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text or "{{close}}" in text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+async def _place_bybit_order(payload: Dict[str, object]) -> Dict[str, object]:
+    symbol = str(payload.get("symbol", "")).upper()
+    action = str(payload.get("action", "")).lower()
+    qty = payload.get("quantity")
+    account = str(payload.get("account", "live")).lower()
+    trade_mode = str(payload.get("trade_mode", "linear")).lower()
+
+    if action not in {"buy", "sell"}:
+        raise ValueError("Webhook payload must include action=buy|sell.")
+    if not symbol:
+        raise ValueError("Webhook payload must include a symbol.")
+    if qty is None:
+        raise ValueError("Webhook payload must include quantity.")
+
+    try:
+        qty_val = float(qty)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Webhook payload quantity must be numeric.") from exc
+
+    if qty_val <= 0:
+        raise ValueError("Webhook payload quantity must be greater than zero.")
+
+    if account not in {"live", "demo"}:
+        raise ValueError("Webhook payload account must be live or demo.")
+
+    category = "spot" if trade_mode == "spot" else "linear"
+    side = "Buy" if action == "buy" else "Sell"
+
+    _mode, api_key, api_secret, base_url, key_source = resolve_bybit_credentials_for(
+        "demo" if account == "demo" else "live"
+    )
+    if not api_key or not api_secret:
+        raise ValueError("Bybit credentials are missing for the selected account.")
+
+    body: Dict[str, object] = {
+        "category": category,
+        "symbol": symbol,
+        "side": side,
+        "orderType": "Market",
+        "qty": str(qty_val),
+        "timeInForce": "GTC",
+        "orderLinkId": uuid4().hex,
+    }
+
+    take_profit = _parse_trigger_price(payload.get("take_profit_price"))
+    stop_loss = _parse_trigger_price(payload.get("stop_loss_price"))
+    if take_profit is not None:
+        body["takeProfit"] = str(take_profit)
+    if stop_loss is not None:
+        body["stopLoss"] = str(stop_loss)
+
+    body_json = json.dumps(body, separators=(",", ":"))
+    timestamp = str(int(time.time() * 1000))
+    signature = _bybit_sign_request(timestamp, api_key, api_secret, body_json)
+    headers = {
+        "Content-Type": "application/json",
+        "X-BAPI-API-KEY": api_key,
+        "X-BAPI-SIGN": signature,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": BYBIT_RECV_WINDOW,
+        "X-BAPI-SIGN-TYPE": "2",
+    }
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.post(
+            f"{base_url}/v5/order/create", headers=headers, content=body_json
+        )
+    response.raise_for_status()
+    data = response.json()
+    if data.get("retCode") != 0:
+        raise ValueError(f"Bybit order failed: {data.get('retMsg')}")
+
+    return {
+        "account": account,
+        "category": category,
+        "symbol": symbol,
+        "side": side,
+        "quantity": qty_val,
+        "key_source": key_source,
+        "order": data.get("result", {}),
+    }
+
+
+@app.get("/api/bybit/balance")
+async def fetch_bybit_balance(
+    account: str = "live",
+    coin: str = "USDT",
+    account_type: str = "UNIFIED",
+) -> JSONResponse:
+    account_mode = account.strip().lower()
+    if account_mode not in {"live", "demo"}:
+        account_mode = "live"
+    coin = coin.strip().upper()
+
+    _mode, api_key, api_secret, base_url, key_source = resolve_bybit_credentials_for(
+        "demo" if account_mode == "demo" else "live"
+    )
+    if not api_key or not api_secret:
+        raise HTTPException(status_code=500, detail="Bybit credentials missing.")
+
+    params: Dict[str, str] = {"accountType": account_type}
+    if account_mode != "demo":
+        params["coin"] = coin
+    query = "&".join(f"{k}={v}" for k, v in params.items())
+    path = "/v5/account/wallet-balance"
+
+    timestamp = str(int(time.time() * 1000))
+    signature = _bybit_sign_request(timestamp, api_key, api_secret, query)
+    headers = {
+        "X-BAPI-API-KEY": api_key,
+        "X-BAPI-SIGN": signature,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": BYBIT_RECV_WINDOW,
+    }
+
+    url = f"{base_url}{path}?{query}"
+    BALANCE_LOGGER.info(
+        "BALANCE_DIAG request mode=%s base_url=%s path=%s query=%s key_source=%s",
+        account_mode,
+        base_url,
+        path,
+        query,
+        key_source,
+    )
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(url, headers=headers)
+    payload = resp.json()
+    ret_code = payload.get("retCode")
+    ret_msg = payload.get("retMsg")
+    results = payload.get("result", {}).get("list", [])
+    coin_entries = []
+    equity_fields = []
+    balance_value = None
+    for item in results:
+        for field in ("totalEquity", "totalWalletBalance", "totalAvailableBalance"):
+            if item.get(field) is not None:
+                equity_fields.append(field)
+        for bal in item.get("coin", []):
+            symbol = bal.get("coin")
+            if symbol:
+                coin_entries.append(str(symbol))
+            if symbol == coin:
+                balance_value = float(
+                    bal.get("availableToTrade", bal.get("walletBalance", 0))
+                )
+
+    if balance_value is None and results:
+        fallback = results[0].get("totalEquity")
+        if fallback is not None:
+            balance_value = float(fallback)
+
+    BALANCE_LOGGER.info(
+        "BALANCE_DIAG response http_status=%s retCode=%s retMsg=%s coins=%s equity_fields=%s",
+        resp.status_code,
+        ret_code,
+        ret_msg,
+        coin_entries,
+        sorted(set(equity_fields)),
+    )
+
+    if balance_value is None:
+        raise HTTPException(status_code=500, detail=f"Balance for {coin} not found.")
+
+    return JSONResponse(
+        {
+            "balance": balance_value,
+            "coin": coin,
+            "account": account_mode,
+            "retCode": ret_code,
+            "retMsg": ret_msg,
+        }
+    )
 
 PAYSLIP_AUDIT_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"en\">
@@ -738,6 +1039,18 @@ async def category_page(category: str) -> str:
 @app.get("/scripts/view/{script_name:path}", response_class=HTMLResponse)
 async def script_page(script_name: str) -> str:
     script = script_manager.get(script_name)
+    if script.name in STANDALONE_SCRIPTS:
+        has_ui = script.name in WEB_APPS
+        target_url = (
+            f"/apps/{_encoded_script_name(script.name)}"
+            if has_ui
+            else f"/logs/view/{_encoded_script_name(script.name)}"
+        )
+        return (
+            LAUNCHER_TEMPLATE.replace("{script_name}", html.escape(script.name))
+            .replace("{target_url}", target_url)
+            .replace("{has_ui}", "true" if has_ui else "false")
+        )
     safe_name = html.escape(script.name)
     has_ui = "true" if script.name in WEB_APPS else "false"
     return (
@@ -814,13 +1127,25 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
     body = await request.body()
 
     async with httpx.AsyncClient(follow_redirects=False) as client:
-        resp = await client.request(
-            request.method,
-            target,
-            content=body,
-            headers=headers,
-        )
+        resp = None
+        for attempt in range(3):
+            try:
+                resp = await client.request(
+                    request.method,
+                    target,
+                    content=body,
+                    headers=headers,
+                )
+                break
+            except httpx.ConnectError:
+                if attempt == 2:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"Unable to connect to {script_name} on port {script.port}.",
+                    )
+                await asyncio.sleep(0.2)
 
+    assert resp is not None
     filtered_headers = {
         k: v
         for k, v in resp.headers.items()
@@ -1029,9 +1354,10 @@ async def download_payslip_report(session_id: str) -> FileResponse:
 
 @app.post("/webhook/{script_name:path}")
 async def webhook(script_name: str, request: Request) -> JSONResponse:
-    payload = await request.body()
+    payload_bytes = await request.body()
+    payload_text = payload_bytes.decode("utf-8", errors="replace")
     script = script_manager.get(script_name)
-    script.add_log(f"Webhook received: {payload.decode('utf-8', errors='replace')}")
+    script.add_log(f"Webhook received: {payload_text}")
 
     if script.name == "payslip_audit":
         script.add_log("Webhook ignored: upload flow required via /payslip-audit")
@@ -1042,9 +1368,44 @@ async def webhook(script_name: str, request: Request) -> JSONResponse:
             }
         )
 
-    if not script.is_running:
-        await script.start()
-    return JSONResponse({"status": "ok", "script": script_name})
+    if script.name != "cryptocalculator-clone":
+        return JSONResponse({"status": "ok", "script": script_name})
+
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError as exc:
+        script.add_log(f"Webhook payload invalid JSON: {exc}")
+        raise HTTPException(status_code=400, detail="Webhook payload must be JSON.") from exc
+
+    try:
+        result = await _place_bybit_order(payload)
+        script.add_log(f"Order request sent: {result}")
+        return JSONResponse({"status": "ok", "script": script_name, "order": result})
+    except Exception as exc:
+        script.add_log(f"Order placement failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/webhook")
+async def default_webhook(request: Request) -> JSONResponse:
+    payload_bytes = await request.body()
+    payload_text = payload_bytes.decode("utf-8", errors="replace")
+    script_name = "cryptocalculator-clone"
+    script = script_manager.get(script_name)
+    script.add_log(f"Webhook received: {payload_text}")
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError as exc:
+        script.add_log(f"Webhook payload invalid JSON: {exc}")
+        raise HTTPException(status_code=400, detail="Webhook payload must be JSON.") from exc
+
+    try:
+        result = await _place_bybit_order(payload)
+        script.add_log(f"Order request sent: {result}")
+        return JSONResponse({"status": "ok", "script": script_name, "order": result})
+    except Exception as exc:
+        script.add_log(f"Order placement failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/health")

@@ -39,11 +39,6 @@ PRICE_SOURCES: Dict[str, Dict[str, str]] = {
         "trade_mode": "linear",
         "exchange": "bybit",
     },
-    "bybit": {
-        "label": "Bybit Linear Perpetual",
-        "trade_mode": "linear",
-        "exchange": "bybit",
-    },
     "bybit_spot": {
         "label": "Bybit Spot",
         "trade_mode": "spot",
@@ -508,6 +503,7 @@ def get_balance_fetcher(execution_exchange: str):
             "exchange": execution_exchange,
             "account_coin": asset,
             "account_type": kwargs.get("account_type", "UNIFIED"),
+            "account_mode": kwargs.get("account_mode", "live"),
         }
         return adapter.get_account_balance(config)
 
@@ -551,7 +547,10 @@ def load_config(filename: str) -> Dict[str, Any]:
         balance_fetcher = get_balance_fetcher(execution_exchange)
         asset = normalised.get("account_asset", "USDT")
         account_type = normalised.get("account_type", "UNIFIED")
-        normalised["account_balance"] = balance_fetcher(asset, account_type=account_type)
+        account_mode = normalised.get("account_mode", "live")
+        normalised["account_balance"] = balance_fetcher(
+            asset, account_type=account_type, account_mode=account_mode
+        )
 
     source_key = str(normalised.get("price_source", "")).lower()
     aliases = PRICE_SOURCE_ALIASES.get(source_key)
@@ -582,6 +581,9 @@ def calculate_trade(
     """Calculate trade parameters based on ``config``."""
 
     cfg = _normalise_config(config)
+    account_mode = str(cfg.get("account_mode", "live")).lower()
+    if account_mode not in {"live", "demo"}:
+        raise ValueError("account_mode must be 'live' or 'demo'")
 
     execution_exchange = cfg.get("execution_exchange", DEFAULT_EXECUTION_EXCHANGE)
     if execution_exchange not in EXECUTION_EXCHANGES:
@@ -636,7 +638,10 @@ def calculate_trade(
         balance_fetcher = get_balance_fetcher(execution_exchange)
         account_type = cfg.get("account_type", "UNIFIED")
         account_asset = cfg.get("account_asset", "USDT")
-        account_balance = balance_fetcher(account_asset, account_type=account_type)
+        account_mode = cfg.get("account_mode", "live")
+        account_balance = balance_fetcher(
+            account_asset, account_type=account_type, account_mode=account_mode
+        )
     account_balance = float(account_balance)
 
     risk_amount = account_balance * (cfg["risk_percent"] / 100)
@@ -776,6 +781,7 @@ def calculate_trade(
         "price_quote_asset": price_quote_asset,
         "execution_quote_asset": execution_quote_asset,
         "price_to_execution_rate": conversion_rate,
+        "account_mode": account_mode,
     }
 
 
@@ -956,6 +962,8 @@ def build_webhook_payload(trade: Dict[str, Any]) -> Dict[str, Any]:
         "quantity": round(trade["quantity"], 3),
         "take_profit_price": f"{{{{close}}}} {tp_op} {target_dist:.6f}",
         "stop_loss_price": f"{{{{close}}}} {sl_op} {stop_dist:.6f}",
+        "account": trade.get("account_mode", "live"),
+        "trade_mode": trade.get("trade_mode", "linear"),
     }
 
 
