@@ -50,9 +50,9 @@ Place these in your Render dashboard or a local `.env` file at the repo root. Ad
 For the payslip audit flow, Tesseract must be present at build time. The Dockerfile installs it alongside `ffmpeg`; after deployment you can confirm readiness by running `which tesseract` in the Render shell (the UI error about missing OCR is raised before uploads run if the binary is absent).
 
 ## 5) TradingView webhook routing
-Use the script path shown in the UI (for example `bybit-alert-clone/bybit_altcoin_monitor.py`) as the `<script-name>` in your TradingView webhook URL:
+Use the script path shown in the UI (for example `bybit_monitor/bybit_altcoin_monitor.py`) as the `<script-name>` in your TradingView webhook URL:
 ```
-https://your-app.onrender.com/webhook/bybit-alert-clone/bybit_altcoin_monitor.py
+https://your-app.onrender.com/webhook/bybit_monitor/bybit_altcoin_monitor.py
 ```
 Include any JSON payload your strategy expects. The manager does not modify the payload; it simply logs it and ensures the script is running.
 
