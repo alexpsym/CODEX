@@ -24,6 +24,8 @@ from cryptocalculator import (
     calculate_trade,
     format_trade,
     get_balance_fetcher,
+    BYBIT_LINEAR_URL,
+    BYBIT_SPOT_URL,
 )
 
 app = Flask(__name__)
@@ -112,6 +114,43 @@ FORM_HTML = """
       if(!priceSource || !note){return;}
       note.innerText = notes[priceSource.value] || '';
     }
+    async function loadSymbols(){
+      const symbolInput = document.getElementById('symbol');
+      if(!symbolInput){return;}
+      try{
+        const response = await fetch('/symbols/bybit');
+        if(!response.ok){throw new Error('Failed to load symbols');}
+        const data = await response.json();
+        window.__symbolList = Array.isArray(data.symbols) ? data.symbols : [];
+        updateSymbolSuggestions(symbolInput.value, true);
+      } catch(err){
+        console.warn(err);
+      }
+    }
+    function updateSymbolSuggestions(value, forceShow){
+      const symbolList = document.getElementById('symbol_list');
+      const symbols = Array.isArray(window.__symbolList) ? window.__symbolList : [];
+      if(!symbolList){return;}
+      symbolList.innerHTML = '';
+      const query = (value || '').trim().toUpperCase();
+      const matches = query
+        ? symbols.filter((symbol) => symbol.startsWith(query))
+        : symbols.slice();
+      matches.forEach((symbol) => {
+        const item = document.createElement('div');
+        item.className = 'symbol-item';
+        item.textContent = symbol;
+        item.addEventListener('click', () => {
+          const input = document.getElementById('symbol');
+          if(input){
+            input.value = symbol;
+          }
+          symbolList.style.display = 'none';
+        });
+        symbolList.appendChild(item);
+      });
+      symbolList.style.display = (forceShow || query) && matches.length ? 'block' : 'none';
+    }
     document.addEventListener('DOMContentLoaded', function(){
       const ot = document.getElementById('order_type');
       if(ot){
@@ -121,8 +160,23 @@ FORM_HTML = """
       const ps = document.getElementById('price_source');
       if(ps){
         ps.addEventListener('change', updatePriceMode);
+        ps.addEventListener('change', loadSymbols);
         updatePriceMode();
       }
+      const symbolInput = document.getElementById('symbol');
+      if(symbolInput){
+        symbolInput.addEventListener('input', (event) => updateSymbolSuggestions(event.target.value));
+        symbolInput.addEventListener('focus', (event) => updateSymbolSuggestions(event.target.value, true));
+      }
+      document.addEventListener('click', (event) => {
+        const symbolList = document.getElementById('symbol_list');
+        const symbolInputEl = document.getElementById('symbol');
+        if(!symbolList || !symbolInputEl){return;}
+        if(event.target !== symbolInputEl && !symbolList.contains(event.target)){
+          symbolList.style.display = 'none';
+        }
+      });
+      loadSymbols();
     });
   </script>
 </head>
