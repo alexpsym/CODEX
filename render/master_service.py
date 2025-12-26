@@ -1032,13 +1032,25 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
     body = await request.body()
 
     async with httpx.AsyncClient(follow_redirects=False) as client:
-        resp = await client.request(
-            request.method,
-            target,
-            content=body,
-            headers=headers,
-        )
+        resp = None
+        for attempt in range(3):
+            try:
+                resp = await client.request(
+                    request.method,
+                    target,
+                    content=body,
+                    headers=headers,
+                )
+                break
+            except httpx.ConnectError:
+                if attempt == 2:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"Unable to connect to {script_name} on port {script.port}.",
+                    )
+                await asyncio.sleep(0.2)
 
+    assert resp is not None
     filtered_headers = {
         k: v
         for k, v in resp.headers.items()

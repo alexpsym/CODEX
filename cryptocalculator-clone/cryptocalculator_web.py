@@ -13,7 +13,6 @@ import webbrowser
 from typing import Dict, Optional
 
 from flask import Flask, jsonify, render_template_string, request
-import requests
 
 from cryptocalculator import (
     DEFAULT_EXECUTION_EXCHANGE,
@@ -30,6 +29,11 @@ from cryptocalculator import (
 )
 
 app = Flask(__name__)
+
+
+@app.get("/symbols/bybit")
+def bybit_symbols_placeholder():
+    return jsonify({"symbols": [], "detail": "Symbol lookup is disabled."})
 
 PRICE_MODE_NOTES = {
     key: (

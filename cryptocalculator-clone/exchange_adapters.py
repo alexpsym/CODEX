@@ -189,18 +189,29 @@ class BybitAdapter(ExchangeAdapter):
         }
 
         url = f"{base_url.rstrip('/') + '/v5/account/wallet-balance'}?{query}"
+        path = "/v5/account/wallet-balance"
         print(
-            f"Bybit balance request account_mode={account_mode} base_url={base_url} "
-            f"path=/v5/account/wallet-balance params={params} key_source={key_source}",
+            "Bybit balance request",
+            f"mode={account_mode}",
+            f"base_url={base_url}",
+            f"path={path}",
+            f"params={params}",
+            f"key_source={key_source}",
             flush=True,
         )
         resp = requests.get(url, headers=headers, timeout=10)
         resp.raise_for_status()
 
         payload = resp.json()
+        ret_code = payload.get("retCode")
+        ret_msg = payload.get("retMsg")
         results = payload.get("result", {}).get("list", [])
         coin_entries: list[str] = []
+        equity_fields: list[str] = []
         for item in results:
+            for field in ("totalEquity", "totalWalletBalance", "totalAvailableBalance"):
+                if item.get(field) is not None:
+                    equity_fields.append(field)
             for bal in item.get("coin", []):
                 symbol = bal.get("coin")
                 if symbol:
@@ -210,9 +221,13 @@ class BybitAdapter(ExchangeAdapter):
                         bal.get("availableToTrade", bal.get("walletBalance", 0))
                     )
         print(
-            "Bybit balance response parsed.",
+            "Bybit balance response summary",
+            f"http_status={resp.status_code}",
+            f"retCode={ret_code}",
+            f"retMsg={ret_msg}",
             f"result_list_count={len(results)}",
             f"coin_entries={coin_entries[:20]}",
+            f"equity_fields={sorted(set(equity_fields))}",
             flush=True,
         )
         if results:
