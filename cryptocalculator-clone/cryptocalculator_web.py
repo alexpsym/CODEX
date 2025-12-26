@@ -197,6 +197,12 @@ FORM_HTML = """
           </select>
         </label><br>
         <p id="price_mode_note"></p>
+        <label>Account:
+          <select name="account_mode" id="account_mode">
+            <option value="live" {{ 'selected' if account_mode == 'live' else '' }}>Live</option>
+            <option value="demo" {{ 'selected' if account_mode == 'demo' else '' }}>Demo</option>
+          </select>
+        </label><br>
         <label>Direction:
           <select name="direction">
             <option value="long">Long</option>
@@ -254,6 +260,7 @@ FORM_HTML = """
           <tr><th>Execution Exchange</th><td>{{ selection_info.execution_label }}</td></tr>
           <tr><th>Price Source</th><td>{{ selection_info.price_label }}</td></tr>
           <tr><th>Trade Mode</th><td>{{ selection_info.trade_mode_label }}</td></tr>
+          <tr><th>Account</th><td>{{ selection_info.account_mode|capitalize }}</td></tr>
         </table>
       {% endif %}
       {% if risk_info %}
@@ -292,6 +299,9 @@ def index():
         price_source = DEFAULT_PRICE_SOURCE
 
     trade_mode = PRICE_SOURCES[price_source]["trade_mode"]
+    account_mode = request.form.get("account_mode", "live").strip().lower()
+    if account_mode not in {"live", "demo"}:
+        account_mode = "live"
     price_to_execution_rate = request.form.get("price_to_execution_rate", "").strip()
 
     if request.method == "POST":
@@ -314,6 +324,7 @@ def index():
                 "price_source": price_source,
                 "execution_exchange": execution_exchange,
                 "account_balance": "auto",
+                "account_mode": account_mode,
             }
             config["trade_mode"] = trade_mode
             if price_to_execution_rate:
@@ -347,6 +358,7 @@ def index():
             "execution_label": EXECUTION_EXCHANGES[execution_exchange]["label"],
             "price_label": PRICE_SOURCES[price_source]["label"],
             "trade_mode_label": TRADE_MODE_LABELS[trade_mode],
+            "account_mode": account_mode,
         }
         export_payload = {
             "summary": summary,
@@ -367,6 +379,7 @@ def index():
         execution_exchange=execution_exchange,
         price_source=price_source,
         trade_mode=trade_mode,
+        account_mode=account_mode,
         price_to_execution_rate=price_to_execution_rate,
         execution_options=sorted(EXECUTION_EXCHANGES.items()),
         price_source_options=sorted(PRICE_SOURCES.items()),

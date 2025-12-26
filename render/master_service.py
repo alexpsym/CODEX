@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import html
 import json
 import os
@@ -20,6 +22,7 @@ from dotenv import load_dotenv
 import httpx
 from starlette.responses import RedirectResponse
 
+from bybit_credentials import resolve_bybit_credentials_for
 from payslip_audit.tesseract import (
     TESSERACT_MISSING_MESSAGE,
     _resolve_tesseract_binary,
@@ -758,6 +761,109 @@ PROXY_HOP_HEADERS = {
     "upgrade",
 }
 PROXY_STRIP_HEADERS = {"content-encoding", "content-length"}
+BYBIT_RECV_WINDOW = "5000"
+
+
+def _bybit_sign_request(timestamp: str, api_key: str, api_secret: str, body: str) -> str:
+    payload = f"{timestamp}{api_key}{BYBIT_RECV_WINDOW}{body}"
+    return hmac.new(api_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+
+
+def _parse_trigger_price(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text or "{{close}}" in text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+async def _place_bybit_order(payload: Dict[str, object]) -> Dict[str, object]:
+    symbol = str(payload.get("symbol", "")).upper()
+    action = str(payload.get("action", "")).lower()
+    qty = payload.get("quantity")
+    account = str(payload.get("account", "live")).lower()
+    trade_mode = str(payload.get("trade_mode", "linear")).lower()
+
+    if action not in {"buy", "sell"}:
+        raise ValueError("Webhook payload must include action=buy|sell.")
+    if not symbol:
+        raise ValueError("Webhook payload must include a symbol.")
+    if qty is None:
+        raise ValueError("Webhook payload must include quantity.")
+
+    try:
+        qty_val = float(qty)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Webhook payload quantity must be numeric.") from exc
+
+    if qty_val <= 0:
+        raise ValueError("Webhook payload quantity must be greater than zero.")
+
+    if account not in {"live", "demo"}:
+        raise ValueError("Webhook payload account must be live or demo.")
+
+    category = "spot" if trade_mode == "spot" else "linear"
+    side = "Buy" if action == "buy" else "Sell"
+
+    _mode, api_key, api_secret, base_url, key_source = resolve_bybit_credentials_for(
+        "demo" if account == "demo" else "live"
+    )
+    if not api_key or not api_secret:
+        raise ValueError("Bybit credentials are missing for the selected account.")
+
+    body: Dict[str, object] = {
+        "category": category,
+        "symbol": symbol,
+        "side": side,
+        "orderType": "Market",
+        "qty": str(qty_val),
+        "timeInForce": "GTC",
+        "orderLinkId": uuid4().hex,
+    }
+
+    take_profit = _parse_trigger_price(payload.get("take_profit_price"))
+    stop_loss = _parse_trigger_price(payload.get("stop_loss_price"))
+    if take_profit is not None:
+        body["takeProfit"] = str(take_profit)
+    if stop_loss is not None:
+        body["stopLoss"] = str(stop_loss)
+
+    body_json = json.dumps(body, separators=(",", ":"))
+    timestamp = str(int(time.time() * 1000))
+    signature = _bybit_sign_request(timestamp, api_key, api_secret, body_json)
+    headers = {
+        "Content-Type": "application/json",
+        "X-BAPI-API-KEY": api_key,
+        "X-BAPI-SIGN": signature,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": BYBIT_RECV_WINDOW,
+        "X-BAPI-SIGN-TYPE": "2",
+    }
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.post(
+            f"{base_url}/v5/order/create", headers=headers, content=body_json
+        )
+    response.raise_for_status()
+    data = response.json()
+    if data.get("retCode") != 0:
+        raise ValueError(f"Bybit order failed: {data.get('retMsg')}")
+
+    return {
+        "account": account,
+        "category": category,
+        "symbol": symbol,
+        "side": side,
+        "quantity": qty_val,
+        "key_source": key_source,
+        "order": data.get("result", {}),
+    }
 
 PAYSLIP_AUDIT_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"en\">
@@ -1141,9 +1247,10 @@ async def download_payslip_report(session_id: str) -> FileResponse:
 
 @app.post("/webhook/{script_name:path}")
 async def webhook(script_name: str, request: Request) -> JSONResponse:
-    payload = await request.body()
+    payload_bytes = await request.body()
+    payload_text = payload_bytes.decode("utf-8", errors="replace")
     script = script_manager.get(script_name)
-    script.add_log(f"Webhook received: {payload.decode('utf-8', errors='replace')}")
+    script.add_log(f"Webhook received: {payload_text}")
 
     if script.name == "payslip_audit":
         script.add_log("Webhook ignored: upload flow required via /payslip-audit")
@@ -1154,27 +1261,44 @@ async def webhook(script_name: str, request: Request) -> JSONResponse:
             }
         )
 
-    return JSONResponse({"status": "ok", "script": script_name})
+    if script.name != "cryptocalculator-clone":
+        return JSONResponse({"status": "ok", "script": script_name})
+
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError as exc:
+        script.add_log(f"Webhook payload invalid JSON: {exc}")
+        raise HTTPException(status_code=400, detail="Webhook payload must be JSON.") from exc
+
+    try:
+        result = await _place_bybit_order(payload)
+        script.add_log(f"Order request sent: {result}")
+        return JSONResponse({"status": "ok", "script": script_name, "order": result})
+    except Exception as exc:
+        script.add_log(f"Order placement failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/webhook")
 async def default_webhook(request: Request) -> JSONResponse:
-    payload = await request.body()
+    payload_bytes = await request.body()
+    payload_text = payload_bytes.decode("utf-8", errors="replace")
     script_name = "cryptocalculator-clone"
     script = script_manager.get(script_name)
-    script.add_log(f"Webhook received: {payload.decode('utf-8', errors='replace')}")
-    return JSONResponse({"status": "ok", "script": script_name})
+    script.add_log(f"Webhook received: {payload_text}")
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError as exc:
+        script.add_log(f"Webhook payload invalid JSON: {exc}")
+        raise HTTPException(status_code=400, detail="Webhook payload must be JSON.") from exc
 
-
-@app.post("/webhook")
-async def default_webhook(request: Request) -> JSONResponse:
-    payload = await request.body()
-    script_name = "cryptocalculator-clone"
-    script = script_manager.get(script_name)
-    script.add_log(f"Webhook received: {payload.decode('utf-8', errors='replace')}")
-    if not script.is_running:
-        await script.start()
-    return JSONResponse({"status": "ok", "script": script_name})
+    try:
+        result = await _place_bybit_order(payload)
+        script.add_log(f"Order request sent: {result}")
+        return JSONResponse({"status": "ok", "script": script_name, "order": result})
+    except Exception as exc:
+        script.add_log(f"Order placement failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/health")
