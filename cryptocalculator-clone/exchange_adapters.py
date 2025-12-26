@@ -158,7 +158,7 @@ class BybitAdapter(ExchangeAdapter):
         if account_mode not in {"live", "demo"}:
             account_mode = "live"
 
-        _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for(
+        _mode, api_key, api_secret, base_url, key_source = resolve_bybit_credentials_for(
             "demo" if account_mode == "demo" else "live"
         )
         if not api_key or not api_secret:
@@ -166,6 +166,11 @@ class BybitAdapter(ExchangeAdapter):
                 "Bybit API credentials are missing. Provide BYBIT_API_KEY1/BYBIT_API_SECRET1 "
                 "(or KEY2 for demo) or legacy BYBIT_API_KEY/BYBIT_API_SECRET."
             )
+        print(
+            f"Bybit balance request using account_mode={account_mode} "
+            f"base_url={base_url} key_source={key_source}",
+            flush=True,
+        )
 
         params = {"accountType": account_type, "coin": coin}
         query = urlencode(params)

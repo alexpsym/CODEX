@@ -46,9 +46,12 @@ def resolve_bybit_credentials_for(mode: str) -> Tuple[str, str, str, str, str]:
         key = os.getenv("BYBIT_API_KEY2") or os.getenv("BYBIT_API_KEY") or ""
         secret = os.getenv("BYBIT_API_SECRET2") or os.getenv("BYBIT_API_SECRET") or ""
         base_url = (
-            os.getenv("BYBIT_BASE_URL_TESTNET")
+            os.getenv("BYBIT_DEMO_BASE_URL")
+            or os.getenv("BYBIT_BASE_URL")
+            or os.getenv("BYBIT_API_BASE")
+            or os.getenv("BYBIT_BASE_URL_TESTNET")
             or os.getenv("BYBIT_API_BASE_TESTNET")
-            or "https://api-testnet.bybit.com"
+            or "https://api.bybit.com"
         )
         key_source = (
             "KEY2"
