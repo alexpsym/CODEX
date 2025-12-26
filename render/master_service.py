@@ -764,6 +764,7 @@ PROXY_HOP_HEADERS = {
 PROXY_STRIP_HEADERS = {"content-encoding", "content-length"}
 BYBIT_RECV_WINDOW = "5000"
 BALANCE_LOGGER = logging.getLogger("uvicorn.error")
+BYBIT_LOGGER = logging.getLogger("uvicorn.error")
 
 
 def _bybit_sign_request(timestamp: str, api_key: str, api_secret: str, body: str) -> str:
@@ -783,6 +784,149 @@ def _parse_trigger_price(value: object) -> Optional[float]:
         return float(text)
     except ValueError:
         return None
+
+
+def _parse_offset_value(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _parse_trigger_offset(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or "{{close}}" not in text:
+        return None
+    normalized = text.replace("{{close}}", "").strip()
+    if not normalized:
+        return None
+    for op in ("+", "-"):
+        if op in normalized:
+            parts = normalized.split(op, 1)
+            if len(parts) != 2:
+                continue
+            offset_text = parts[1].strip()
+            if not offset_text:
+                continue
+            try:
+                offset = float(offset_text)
+            except ValueError:
+                return None
+            return offset if op == "+" else -offset
+    return None
+
+
+async def _fetch_bybit_positions(
+    *,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+    category: str,
+    symbol: str,
+) -> List[Dict[str, object]]:
+    params = {"category": category, "symbol": symbol}
+    query = "&".join(f"{k}={v}" for k, v in params.items())
+    path = "/v5/position/list"
+    timestamp = str(int(time.time() * 1000))
+    signature = _bybit_sign_request(timestamp, api_key, api_secret, query)
+    headers = {
+        "X-BAPI-API-KEY": api_key,
+        "X-BAPI-SIGN": signature,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": BYBIT_RECV_WINDOW,
+        "X-BAPI-SIGN-TYPE": "2",
+    }
+    url = f"{base_url}{path}?{query}"
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(url, headers=headers)
+    resp.raise_for_status()
+    payload = resp.json()
+    if payload.get("retCode") != 0:
+        raise ValueError(f"Bybit position lookup failed: {payload.get('retMsg')}")
+    return payload.get("result", {}).get("list", [])
+
+
+async def _wait_for_position_entry(
+    *,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+    category: str,
+    symbol: str,
+    attempts: int = 6,
+    delay_seconds: float = 0.6,
+) -> Optional[Dict[str, object]]:
+    for _ in range(attempts):
+        positions = await _fetch_bybit_positions(
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            category=category,
+            symbol=symbol,
+        )
+        for position in positions:
+            size = _parse_offset_value(position.get("size"))
+            if size and size > 0:
+                avg_price = _parse_offset_value(
+                    position.get("avgPrice") or position.get("entryPrice")
+                )
+                if avg_price and avg_price > 0:
+                    return position
+        await asyncio.sleep(delay_seconds)
+    return None
+
+
+async def _set_bybit_trading_stop(
+    *,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+    category: str,
+    symbol: str,
+    take_profit: Optional[float],
+    stop_loss: Optional[float],
+    position_idx: Optional[int],
+) -> Dict[str, object]:
+    body: Dict[str, object] = {
+        "category": category,
+        "symbol": symbol,
+        "tpslMode": "Full",
+    }
+    if position_idx is not None:
+        body["positionIdx"] = position_idx
+    if take_profit is not None:
+        body["takeProfit"] = str(take_profit)
+    if stop_loss is not None:
+        body["stopLoss"] = str(stop_loss)
+    body_json = json.dumps(body, separators=(",", ":"))
+    timestamp = str(int(time.time() * 1000))
+    signature = _bybit_sign_request(timestamp, api_key, api_secret, body_json)
+    headers = {
+        "Content-Type": "application/json",
+        "X-BAPI-API-KEY": api_key,
+        "X-BAPI-SIGN": signature,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": BYBIT_RECV_WINDOW,
+        "X-BAPI-SIGN-TYPE": "2",
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(
+            f"{base_url}/v5/position/trading-stop", headers=headers, content=body_json
+        )
+    resp.raise_for_status()
+    payload = resp.json()
+    if payload.get("retCode") != 0:
+        raise ValueError(f"Bybit trading-stop failed: {payload.get('retMsg')}")
+    return payload.get("result", {})
 
 
 async def _place_bybit_order(payload: Dict[str, object]) -> Dict[str, object]:
@@ -829,8 +973,23 @@ async def _place_bybit_order(payload: Dict[str, object]) -> Dict[str, object]:
         "orderLinkId": uuid4().hex,
     }
 
-    take_profit = _parse_trigger_price(payload.get("take_profit_price"))
-    stop_loss = _parse_trigger_price(payload.get("stop_loss_price"))
+    take_profit_offset = _parse_offset_value(payload.get("take_profit_offset"))
+    if take_profit_offset is None:
+        take_profit_offset = _parse_trigger_offset(payload.get("take_profit_price"))
+    stop_loss_offset = _parse_offset_value(payload.get("stop_loss_offset"))
+    if stop_loss_offset is None:
+        stop_loss_offset = _parse_trigger_offset(payload.get("stop_loss_price"))
+
+    take_profit = (
+        None
+        if take_profit_offset is not None
+        else _parse_trigger_price(payload.get("take_profit_price"))
+    )
+    stop_loss = (
+        None
+        if stop_loss_offset is not None
+        else _parse_trigger_price(payload.get("stop_loss_price"))
+    )
     if take_profit is not None:
         body["takeProfit"] = str(take_profit)
     if stop_loss is not None:
@@ -857,6 +1016,59 @@ async def _place_bybit_order(payload: Dict[str, object]) -> Dict[str, object]:
     if data.get("retCode") != 0:
         raise ValueError(f"Bybit order failed: {data.get('retMsg')}")
 
+    tpsl_result: Optional[Dict[str, object]] = None
+    tpsl_error: Optional[str] = None
+    if category == "linear" and any(
+        item is not None
+        for item in (take_profit_offset, stop_loss_offset, take_profit, stop_loss)
+    ):
+        try:
+            position = await _wait_for_position_entry(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                category=category,
+                symbol=symbol,
+            )
+            if position is None:
+                raise ValueError("Position entry price not available yet.")
+            entry_price = _parse_offset_value(
+                position.get("avgPrice") or position.get("entryPrice")
+            )
+            if entry_price is None:
+                raise ValueError("Position entry price could not be parsed.")
+            position_idx = position.get("positionIdx")
+            if position_idx is not None:
+                try:
+                    position_idx = int(position_idx)
+                except (TypeError, ValueError):
+                    position_idx = None
+            tp_target = (
+                entry_price + take_profit_offset
+                if take_profit_offset is not None
+                else take_profit
+            )
+            sl_target = (
+                entry_price + stop_loss_offset
+                if stop_loss_offset is not None
+                else stop_loss
+            )
+            tpsl_result = await _set_bybit_trading_stop(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                category=category,
+                symbol=symbol,
+                take_profit=tp_target,
+                stop_loss=sl_target,
+                position_idx=position_idx,
+            )
+        except Exception as exc:
+            tpsl_error = str(exc)
+            BYBIT_LOGGER.error(
+                "TP/SL update failed for %s (%s): %s", symbol, account, exc
+            )
+
     return {
         "account": account,
         "category": category,
@@ -865,6 +1077,8 @@ async def _place_bybit_order(payload: Dict[str, object]) -> Dict[str, object]:
         "quantity": qty_val,
         "key_source": key_source,
         "order": data.get("result", {}),
+        "tpsl": tpsl_result,
+        "tpsl_error": tpsl_error,
     }
 
 
