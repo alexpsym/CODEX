@@ -39,7 +39,7 @@ select, input[type="date"] { width: 100%; padding: 5px; margin-top: 5px; backgro
 <div class="container">
   <div class="box">
     <h2>Trade History</h2>
-    <form action="/trade" method="post">
+    <form action="trade" method="post">
       <label for="trade-start">Start date</label>
       <input id="trade-start" type="date" name="start_date" />
       <label for="trade-end">End date</label>
@@ -56,7 +56,7 @@ select, input[type="date"] { width: 100%; padding: 5px; margin-top: 5px; backgro
   </div>
   <div class="box">
     <h2>USDT Balance History</h2>
-    <form action="/balance" method="post">
+    <form action="balance" method="post">
       <label for="balance-start">Start date</label>
       <input id="balance-start" type="date" name="start_date" />
       <label for="balance-end">End date</label>
