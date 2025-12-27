@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import subprocess
@@ -786,7 +787,7 @@ def index():
             except Exception:  # pylint: disable=broad-except
                 options_qty_step = options_trader.MIN_ORDER_QTY
 
-    return render_template_string(
+    rendered_html = render_template_string(
         FORM_HTML,
         summary=summary,
         error=error,
@@ -817,6 +818,25 @@ def index():
         build_sha=BUILD_SHA,
         build_timestamp=BUILD_TIMESTAMP,
     )
+    rendered_html = re.sub(r"<p>\\s*Build[^<]*</p>", "", rendered_html)
+    return rendered_html
+
+
+@app.post("/execute_now")
+def execute_now():
+    payload = request.get_json(silent=True)
+    if not payload:
+        return jsonify({"status": "error", "detail": "Missing JSON payload."}), 400
+    try:
+        response = requests.post(PUBLIC_WEBHOOK_URL, json=payload, timeout=15)
+        response.raise_for_status()
+        try:
+            data = response.json()
+        except ValueError:
+            data = {"raw": response.text}
+        return jsonify({"status": "ok", "response": data})
+    except Exception as exc:  # pylint: disable=broad-except
+        return jsonify({"status": "error", "detail": str(exc)}), 400
 
 
 @app.post("/execute_now")
