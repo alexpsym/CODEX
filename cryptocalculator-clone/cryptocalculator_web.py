@@ -16,7 +16,7 @@ import webbrowser
 from typing import Dict, Optional
 
 import requests
-from flask import Flask, jsonify, render_template_string, request, redirect, url_for
+from flask import Flask, jsonify, render_template_string, request, Response
 
 from bybit_credentials import resolve_bybit_credentials_for
 from cryptocalculator import (
@@ -418,6 +418,7 @@ FORM_HTML = """
           <label>TP Multiplier: <input name="options_tp_multiplier" value="3"></label><br>
           <div class="copy-row">
             <button type="submit" name="options_action" value="journal">Journal last 30 days</button>
+            <button type="submit" name="options_action" value="journal_csv">Download journal CSV</button>
             <button type="submit" name="options_action" value="open_orders">Show open orders</button>
             <button type="submit" name="options_action" value="open_positions">Show open positions</button>
           </div>
@@ -595,19 +596,33 @@ def index():
                         request.form.get("options_expiry", ""),
                         "USDT",
                     )
-                if options_action in {"journal", "open_orders", "open_positions"}:
+                if options_action in {
+                    "journal",
+                    "journal_csv",
+                    "open_orders",
+                    "open_positions",
+                }:
                     if trader is None:
                         raise ValueError("Options credentials are not configured.")
                     if options_action == "journal":
                         options_output = options_trader.build_journal_report(
                             trader, days=30
                         )
+                    elif options_action == "journal_csv":
+                        csv_data = options_trader.build_journal_csv(trader, days=30)
+                        return Response(
+                            csv_data,
+                            mimetype="text/csv",
+                            headers={
+                                "Content-Disposition": "attachment; filename=options_journal.csv"
+                            },
+                        )
                     elif options_action == "open_orders":
                         orders = trader.get_open_orders(symbol_filter)
-                        options_output = json.dumps(orders, indent=2)
+                        options_output = options_trader.format_open_orders(orders)
                     elif options_action == "open_positions":
                         positions = trader.get_positions(symbol_filter)
-                        options_output = json.dumps(positions, indent=2)
+                        options_output = options_trader.format_open_positions(positions)
                 else:
                     balance = options_trader.DEMO_BALANCE
                     if trader is not None:

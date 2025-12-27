@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import hmac
 import hashlib
 import json
@@ -56,7 +57,7 @@ SUB_ACCOUNT_NAME = ""
 MIN_BALANCE_THRESHOLD = 10.0
 DEMO_BALANCE = float(os.getenv("DEMO_BALANCE", 0.0))
 MIN_ORDER_QTY = 0.01
-DEFAULT_OPTION_BASES = ["BTC", "ETH", "SOL"]
+DEFAULT_OPTION_BASES = ["BTC", "ETH", "SOL", "XRP", "MNT", "DOGE"]
 
 
 def _normalize_env_choice(choice: str) -> str:
@@ -301,24 +302,105 @@ def get_supported_option_bases(base_url: str | None = None) -> list[str]:
     params = {"category": "option"}
     instruments = []
     cursor = None
-    while True:
-        qs = urlencode({k: v for k, v in params.items() if v is not None})
-        if cursor:
-            qs += f"&cursor={cursor}"
-        url = f"{base_url}{endpoint}?{qs}"
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("retCode") != 0:
-            break
-        instruments.extend(data.get("result", {}).get("list", []))
-        cursor = data.get("result", {}).get("nextPageCursor")
-        if not cursor:
-            break
+    try:
+        while True:
+            qs = urlencode({k: v for k, v in params.items() if v is not None})
+            if cursor:
+                qs += f"&cursor={cursor}"
+            url = f"{base_url}{endpoint}?{qs}"
+            resp = requests.get(url, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("retCode") != 0:
+                break
+            instruments.extend(data.get("result", {}).get("list", []))
+            cursor = data.get("result", {}).get("nextPageCursor")
+            if not cursor:
+                break
+    except requests.RequestException:
+        return DEFAULT_OPTION_BASES
     bases = sorted(
         {inst.get("baseCoin", "").upper() for inst in instruments if inst.get("baseCoin")}
     )
-    return bases or DEFAULT_OPTION_BASES
+    if not bases:
+        return DEFAULT_OPTION_BASES
+    return sorted(set(bases) | set(DEFAULT_OPTION_BASES))
+
+
+def build_journal_csv(trader: BybitOptionsTrader, days: int = 30) -> str:
+    """Return a CSV report for recent option trades and deliveries."""
+
+    end = int(datetime.now(timezone.utc).timestamp() * 1000)
+    start = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
+    trades = trader.list_trade_history(start, end)
+    deliveries = trader.list_delivery_history(start, end)
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(
+        ["record_type", "symbol", "side", "price", "qty", "timestamp", "order_id"]
+    )
+    for trade in sorted(trades, key=lambda x: int(x.get("execTime", 0))):
+        writer.writerow(
+            [
+                "trade",
+                trade.get("symbol", ""),
+                trade.get("side", ""),
+                trade.get("execPrice", ""),
+                trade.get("execQty", ""),
+                trade.get("execTime", ""),
+                trade.get("orderId", ""),
+            ]
+        )
+    for delivery in sorted(
+        deliveries, key=lambda x: int(x.get("deliveryTime", 0))
+    ):
+        writer.writerow(
+            [
+                "delivery",
+                delivery.get("symbol", ""),
+                delivery.get("side", ""),
+                delivery.get("deliveryPrice", ""),
+                delivery.get("deliveryQty", ""),
+                delivery.get("deliveryTime", ""),
+                "",
+            ]
+        )
+    return output.getvalue()
+
+
+def format_open_orders(orders: list[dict]) -> str:
+    """Return a readable table for open orders."""
+
+    if not orders:
+        return "No open orders found."
+    headers = ["symbol", "side", "orderStatus", "price", "qty", "orderId", "createdTime"]
+    rows = [
+        [o.get(h, "") for h in headers]
+        for o in sorted(orders, key=lambda x: x.get("createdTime", ""))
+    ]
+    return "\n".join(tabulate(rows, headers=headers, tablefmt="plain").splitlines())
+
+
+def format_open_positions(positions: list[dict]) -> str:
+    """Return a readable table for open positions."""
+
+    if not positions:
+        return "No open positions found."
+    headers = [
+        "symbol",
+        "side",
+        "size",
+        "avgPrice",
+        "markPrice",
+        "unrealisedPnl",
+        "positionValue",
+    ]
+    rows = [
+        [p.get(h, "") for h in headers]
+        for p in sorted(positions, key=lambda x: x.get("symbol", ""))
+    ]
+    return "\n".join(tabulate(rows, headers=headers, tablefmt="plain").splitlines())
 
 
 def round_to_tick(price: float, symbol: str) -> float:

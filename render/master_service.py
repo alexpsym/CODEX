@@ -765,6 +765,60 @@ BALANCE_LOGGER = logging.getLogger("uvicorn.error")
 BYBIT_LOGGER = logging.getLogger("uvicorn.error")
 
 
+def _get_telegram_credentials() -> tuple[str, str]:
+    token = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN") or ""
+    chat_id = os.getenv("TELEGRAM_CHAT_ID") or ""
+    return token, chat_id
+
+
+async def _send_telegram_alert(message: str) -> None:
+    token, chat_id = _get_telegram_credentials()
+    if not token or not chat_id:
+        BYBIT_LOGGER.info("Telegram alerts not configured; skipping alert.")
+        return
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": message}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(url, json=payload)
+    except Exception as exc:  # pragma: no cover - network failure
+        BYBIT_LOGGER.error("Telegram alert failed: %s", exc)
+
+
+def _format_trade_alert(
+    payload: Dict[str, object],
+    result: Optional[Dict[str, object]] = None,
+    error: Optional[str] = None,
+) -> str:
+    symbol = str(payload.get("symbol", ""))
+    action = str(payload.get("action", ""))
+    qty = payload.get("quantity")
+    account = str(payload.get("account", "live"))
+    trade_mode = str(payload.get("trade_mode", "linear"))
+    status = "FAILED" if error else "OK"
+    lines = [
+        f"Trade {status}",
+        f"Account: {account}",
+        f"Trade mode: {trade_mode}",
+        f"Symbol: {symbol}",
+        f"Side: {action}",
+        f"Qty: {qty}",
+    ]
+    if result:
+        order = result.get("order", {})
+        if order:
+            lines.append(f"Order ID: {order.get('orderId', '')}")
+        tp_order = result.get("tp_order")
+        tp_error = result.get("tp_error")
+        if tp_order:
+            lines.append(f"TP order: {tp_order.get('orderId', '')}")
+        if tp_error:
+            lines.append(f"TP error: {tp_error}")
+    if error:
+        lines.append(f"Error: {error}")
+    return "\n".join(lines)
+
+
 def _log_webhook_event(request_id: str, stage: str, details: Dict[str, object]) -> None:
     BYBIT_LOGGER.info(
         "WEBHOOK_TPSL %s %s",
@@ -1867,11 +1921,15 @@ async def webhook(script_name: str, request: Request) -> JSONResponse:
     try:
         result = await _place_bybit_order(payload, request_id=request_id)
         script.add_log(f"Order request sent: {result}")
+        await _send_telegram_alert(_format_trade_alert(payload, result=result))
         return JSONResponse(
             {"status": "ok", "script": script_name, "request_id": request_id, "order": result}
         )
     except Exception as exc:
         script.add_log(f"Order placement failed: {exc}")
+        await _send_telegram_alert(
+            _format_trade_alert(payload, error=str(exc))
+        )
         BYBIT_LOGGER.exception(
             "WEBHOOK_TPSL %s webhook_failed script=%s error=%s",
             request_id,
@@ -1897,9 +1955,13 @@ async def execute_now(request: Request) -> JSONResponse:
     try:
         result = await _place_bybit_order(payload, request_id=request_id)
         script.add_log(f"Execute-now order sent: {result}")
+        await _send_telegram_alert(_format_trade_alert(payload, result=result))
         return JSONResponse({"status": "ok", "request_id": request_id, "order": result})
     except Exception as exc:
         script.add_log(f"Execute-now order failed: {exc}")
+        await _send_telegram_alert(
+            _format_trade_alert(payload, error=str(exc))
+        )
         BYBIT_LOGGER.exception(
             "WEBHOOK_TPSL %s execute_now_failed script=%s error=%s",
             request_id,
@@ -1931,11 +1993,15 @@ async def default_webhook(request: Request) -> JSONResponse:
     try:
         result = await _place_bybit_order(payload, request_id=request_id)
         script.add_log(f"Order request sent: {result}")
+        await _send_telegram_alert(_format_trade_alert(payload, result=result))
         return JSONResponse(
             {"status": "ok", "script": script_name, "request_id": request_id, "order": result}
         )
     except Exception as exc:
         script.add_log(f"Order placement failed: {exc}")
+        await _send_telegram_alert(
+            _format_trade_alert(payload, error=str(exc))
+        )
         BYBIT_LOGGER.exception(
             "WEBHOOK_TPSL %s webhook_failed script=%s error=%s",
             request_id,
