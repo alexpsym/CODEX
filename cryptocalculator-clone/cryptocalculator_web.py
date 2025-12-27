@@ -873,6 +873,23 @@ def execute_now():
         return jsonify({"status": "error", "detail": str(exc)}), 400
 
 
+@app.post("/execute_now")
+def execute_now():
+    payload = request.get_json(silent=True)
+    if not payload:
+        return jsonify({"status": "error", "detail": "Missing JSON payload."}), 400
+    try:
+        response = requests.post(PUBLIC_WEBHOOK_URL, json=payload, timeout=15)
+        response.raise_for_status()
+        try:
+            data = response.json()
+        except ValueError:
+            data = {"raw": response.text}
+        return jsonify({"status": "ok", "response": data})
+    except Exception as exc:  # pylint: disable=broad-except
+        return jsonify({"status": "error", "detail": str(exc)}), 400
+
+
 EDGE_CONTROLLER_NAMES = ("microsoft-edge", "msedge")
 EDGE_EXECUTABLE_NAMES = (
     "microsoft-edge",
@@ -927,11 +944,9 @@ def _serve_wsgi(app: Flask, host: str = "127.0.0.1", port: int = 5000) -> None:
 
     try:
         from waitress import serve
-    except ModuleNotFoundError as exc:  # pragma: no cover - dependency error path
-        raise RuntimeError(
-            "Running cryptocalculator_web.py requires the 'waitress' package. "
-            "Install it with 'pip install waitress'."
-        ) from exc
+    except ModuleNotFoundError:  # pragma: no cover - dependency error path
+        app.run(host=host, port=port)
+        return
 
     serve(app, host=host, port=port)
 
