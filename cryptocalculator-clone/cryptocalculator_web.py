@@ -143,6 +143,16 @@ FORM_HTML = """
       const isOptions = selector.value === 'options';
       optionsSection.classList.toggle('hidden', !isOptions);
       cryptoSection.classList.toggle('hidden', isOptions);
+      const cryptoRequired = ['symbol', 'stop_loss_ticks', 'risk_percent', 'rr_ratio'];
+      cryptoRequired.forEach((fieldId) => {
+        const el = document.getElementById(fieldId);
+        if(!el){return;}
+        if(isOptions){
+          el.removeAttribute('required');
+        } else {
+          el.setAttribute('required', 'required');
+        }
+      });
     }
     async function loadSymbols(){
       const symbolInput = document.getElementById('symbol');
@@ -266,9 +276,9 @@ FORM_HTML = """
           <div id="entry_price_row">
             <label>Entry Price: <input name="entry_price" type="number" step="0.0001"></label><br>
           </div>
-          <label>Stop loss ticks: <input name="stop_loss_ticks" type="number" step="1"></label><br>
-          <label>Risk %: <input name="risk_percent" type="number" step="0.01"></label><br>
-          <label>Risk–reward ratio: <input name="rr_ratio" type="number" step="0.1" value="2"></label><br>
+          <label>Stop loss ticks: <input name="stop_loss_ticks" id="stop_loss_ticks" type="number" step="1"></label><br>
+          <label>Risk %: <input name="risk_percent" id="risk_percent" type="number" step="0.01"></label><br>
+          <label>Risk–reward ratio: <input name="rr_ratio" id="rr_ratio" type="number" step="0.1" value="2"></label><br>
           <label>Price → Execution rate:
             <input name="price_to_execution_rate" id="price_to_execution_rate" type="number" step="0.0001" min="0" value="{{ price_to_execution_rate }}" placeholder="e.g. 1.55">
           </label><br>
@@ -285,9 +295,14 @@ FORM_HTML = """
           <label>Quantity: <input name="options_quantity" value="0"></label><br>
           <label>Limit Price: <input name="options_limit_price"></label><br>
           <label>Risk %: <input name="options_risk_percent" value="0"></label><br>
-          <label>Auto Trade: <input type="checkbox" name="options_auto_trade"></label><br>
+          <label>TP Multiplier: <input name="options_tp_multiplier" value="3"></label><br>
+          <div class="copy-row">
+            <button type="submit" name="options_action" value="journal">Journal last 30 days</button>
+            <button type="submit" name="options_action" value="open_orders">Show open orders</button>
+            <button type="submit" name="options_action" value="open_positions">Show open positions</button>
+          </div>
         </div>
-        <button type="submit">Calculate</button>
+        <button type="submit" name="options_action" value="calculate">Calculate</button>
       </form>
       <h3>TradingView Webhook</h3>
       <div class="copy-row">
@@ -397,44 +412,81 @@ def index():
     if request.method == "POST":
         try:
             if trade_type == "options":
+                options_action = request.form.get("options_action", "calculate")
                 trader = _get_options_trader()
-                balance = options_trader.DEMO_BALANCE
-                if trader is not None:
-                    api_bal = trader.get_wallet_balance()
-                    if api_bal > 0:
-                        balance = api_bal
-                risk_percent = float(
-                    request.form.get("options_risk_percent", 0) or 0
-                )
-                risk_usd = balance * risk_percent / 100
-                qty = float(request.form.get("options_quantity", 0) or 0)
-                symbol = request.form.get("options_symbol", "").strip().upper()
-                if not symbol:
-                    symbol = options_trader.build_option_symbol(
-                        request.form.get("options_base", ""),
-                        request.form.get("options_strike", ""),
-                        request.form.get("options_type", ""),
-                        request.form.get("options_expiry", ""),
-                        request.form.get("options_quote", "USDT"),
+                if options_action in {"journal", "open_orders", "open_positions"}:
+                    if trader is None:
+                        raise ValueError("Options credentials are not configured.")
+                    if options_action == "journal":
+                        options_output = options_trader.build_journal_report(
+                            trader, days=30
+                        )
+                    elif options_action == "open_orders":
+                        orders = trader.get_open_orders()
+                        options_output = json.dumps(orders, indent=2)
+                    elif options_action == "open_positions":
+                        positions = trader.get_positions()
+                        options_output = json.dumps(positions, indent=2)
+                else:
+                    balance = options_trader.DEMO_BALANCE
+                    if trader is not None:
+                        api_bal = trader.get_wallet_balance()
+                        if api_bal > 0:
+                            balance = api_bal
+                    risk_percent = float(
+                        request.form.get("options_risk_percent", 0) or 0
                     )
-                if qty <= 0 and risk_usd > 0:
+                    risk_usd = balance * risk_percent / 100
+                    qty = float(request.form.get("options_quantity", 0) or 0)
+                    symbol = request.form.get("options_symbol", "").strip().upper()
+                    if not symbol:
+                        symbol = options_trader.build_option_symbol(
+                            request.form.get("options_base", ""),
+                            request.form.get("options_strike", ""),
+                            request.form.get("options_type", ""),
+                            request.form.get("options_expiry", ""),
+                            request.form.get("options_quote", "USDT"),
+                        )
                     tick = options_trader.fetch_option_ticker(symbol)
-                    price = float(tick.get("markPrice", 0) or 0)
-                    qty = options_trader.compute_order_qty(risk_usd, price)
-                cfg = {
-                    "symbol": symbol,
-                    "side": request.form.get("options_side", "Buy"),
-                    "quantity": qty,
-                    "limit_price": float(request.form["options_limit_price"])
-                    if request.form.get("options_limit_price")
-                    else None,
-                    "risk_usd": risk_usd,
-                    "auto_trade": bool(request.form.get("options_auto_trade")),
-                }
-                buf = io.StringIO()
-                with contextlib.redirect_stdout(buf):
-                    options_trader.execute_trade_from_cfg(cfg)
-                options_output = buf.getvalue()
+                    mark_price = float(tick.get("markPrice", 0) or 0)
+                    if qty <= 0 and risk_usd > 0:
+                        qty = options_trader.compute_order_qty(risk_usd, mark_price)
+                    limit_price = (
+                        float(request.form["options_limit_price"])
+                        if request.form.get("options_limit_price")
+                        else None
+                    )
+                    entry_price = limit_price or mark_price
+                    tp_multiplier = float(
+                        request.form.get("options_tp_multiplier", 3) or 3
+                    )
+                    tp_offset = None
+                    if entry_price and tp_multiplier and tp_multiplier > 0:
+                        tp_offset = entry_price * (tp_multiplier - 1)
+                    side = request.form.get("options_side", "Buy")
+                    action = "buy" if side.lower() == "buy" else "sell"
+                    if tp_offset is not None and action == "sell":
+                        tp_offset = -tp_offset
+                    payload = {
+                        "symbol": symbol,
+                        "action": action,
+                        "quantity": round(qty, 3),
+                        "account": account_mode,
+                        "trade_mode": "options",
+                        "tp_offset": round(tp_offset, 6) if tp_offset is not None else None,
+                        "tp_multiplier": tp_multiplier,
+                    }
+                    payload_json = json.dumps(payload, indent=2)
+                    options_output = "\n".join(
+                        [
+                            f"Symbol: {symbol}",
+                            f"Side: {side}",
+                            f"Quantity: {qty}",
+                            f"Mark price: {mark_price}",
+                            f"Entry price: {entry_price}",
+                            f"TP multiplier: {tp_multiplier}",
+                        ]
+                    )
             else:
                 symbol = request.form.get("symbol", "").strip().upper()
                 if not symbol:
@@ -442,9 +494,14 @@ def index():
                 direction = request.form.get("direction", "long")
                 order_type = request.form.get("order_type", "market")
                 entry_price_raw = request.form.get("entry_price")
-                stop_loss_ticks = float(request.form["stop_loss_ticks"])
-                risk_percent = float(request.form["risk_percent"])
-                rr_ratio = float(request.form.get("rr_ratio", 2.0))
+                stop_loss_ticks_raw = request.form.get("stop_loss_ticks", "").strip()
+                risk_percent_raw = request.form.get("risk_percent", "").strip()
+                rr_ratio_raw = request.form.get("rr_ratio", "").strip()
+                if not stop_loss_ticks_raw or not risk_percent_raw or not rr_ratio_raw:
+                    raise ValueError("Stop loss ticks, risk %, and RR ratio are required.")
+                stop_loss_ticks = float(stop_loss_ticks_raw)
+                risk_percent = float(risk_percent_raw)
+                rr_ratio = float(rr_ratio_raw)
 
                 config: Dict[str, object] = {
                     "symbol": symbol,

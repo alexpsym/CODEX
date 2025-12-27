@@ -669,29 +669,24 @@ def execute_trade_from_cfg(cfg: dict) -> None:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     symbol, side, qty = cfg["symbol"], cfg["side"], cfg["quantity"]
     entry_price = cfg.get("limit_price")
-    auto_trade = bool(cfg.get("auto_trade"))
     lines = [f"Timestamp: {ts}"]
-
-    if auto_trade:
-        key, secret = get_api_credentials(cfg)
-        if not key or not secret:
-            raise RuntimeError(
-                "API credentials not provided. Set BYBIT_API_KEY and BYBIT_API_SECRET "
-                "environment variables or include api_key/api_secret in the config."
-            )
-        trader = BybitOptionsTrader(key, secret, get_base_url())
-        balance = trader.get_wallet_balance()
-        lines.append(f"Balance: {balance:.4f} USDT")
-        if balance < MIN_BALANCE_THRESHOLD:
-            lines.append("⚠️ Insufficient balance => abort")
-            print_and_write(lines)
-            return
-        order_desc = "Market" if not entry_price else entry_price
-        lines.append(f"Placing {side} {qty} {symbol} @ {order_desc}")
-        _trades, trade_log = trader.place_and_log(symbol, side, qty, entry_price, "GTC")
-        lines.append(f"Trade log: {trade_log}")
-    else:
-        lines.append("Auto trade disabled; no orders will be placed.")
+    key, secret = get_api_credentials(cfg)
+    if not key or not secret:
+        raise RuntimeError(
+            "API credentials not provided. Set BYBIT_API_KEY and BYBIT_API_SECRET "
+            "environment variables or include api_key/api_secret in the config."
+        )
+    trader = BybitOptionsTrader(key, secret, get_base_url())
+    balance = trader.get_wallet_balance()
+    lines.append(f"Balance: {balance:.4f} USDT")
+    if balance < MIN_BALANCE_THRESHOLD:
+        lines.append("⚠️ Insufficient balance => abort")
+        print_and_write(lines)
+        return
+    order_desc = "Market" if not entry_price else entry_price
+    lines.append(f"Placing {side} {qty} {symbol} @ {order_desc}")
+    _trades, trade_log = trader.place_and_log(symbol, side, qty, entry_price, "GTC")
+    lines.append(f"Trade log: {trade_log}")
 
     tick = fetch_option_ticker(symbol)
     lines.append("\nTicker Data:")
@@ -700,9 +695,8 @@ def execute_trade_from_cfg(cfg: dict) -> None:
     _append_greeks(lines, tick, qty, side)
 
     print_and_write(lines)
-    if auto_trade:
-        token, chat_id = get_telegram_credentials(cfg)
-        send_telegram_document(str(output_file), token, chat_id, caption=f"{side} {qty} {symbol}")
+    token, chat_id = get_telegram_credentials(cfg)
+    send_telegram_document(str(output_file), token, chat_id, caption=f"{side} {qty} {symbol}")
 
 
 def execute_trade(order_file: str) -> None:
@@ -903,6 +897,42 @@ def set_profit_targets(trader: BybitOptionsTrader, multiplier: int = 2) -> None:
                 f"Warning: failed to place reduce-only Sell {qty} {symbol} @ {target}: {exc}"
             )
             continue
+
+
+def build_journal_report(trader: BybitOptionsTrader, days: int = 30) -> str:
+    """Return a text report for recent option trades and deliveries."""
+
+    end = int(datetime.now(timezone.utc).timestamp() * 1000)
+    start = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
+    trades = trader.list_trade_history(start, end)
+    deliveries = trader.list_delivery_history(start, end)
+
+    lines = [f"Options activity journal (last {days} days)"]
+    lines.append("")
+    if trades:
+        lines.append("Trade History:")
+        headers = ["symbol", "side", "execPrice", "execQty", "execTime", "orderId"]
+        rows = [
+            [t.get(h, "") for h in headers]
+            for t in sorted(trades, key=lambda x: int(x.get("execTime", 0)))
+        ]
+        lines.extend(tabulate(rows, headers=headers, tablefmt="plain").splitlines())
+    else:
+        lines.append("No trades found.")
+
+    lines.append("")
+    if deliveries:
+        lines.append("Delivery History:")
+        headers = ["symbol", "side", "deliveryPrice", "deliveryQty", "deliveryTime"]
+        rows = [
+            [d.get(h, "") for h in headers]
+            for d in sorted(deliveries, key=lambda x: int(x.get("deliveryTime", 0)))
+        ]
+        lines.extend(tabulate(rows, headers=headers, tablefmt="plain").splitlines())
+    else:
+        lines.append("No deliveries found.")
+
+    return "\n".join(lines)
 
 
 def main() -> None:
