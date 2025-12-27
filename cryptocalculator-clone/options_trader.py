@@ -957,7 +957,7 @@ def main() -> None:
             raise SystemExit("order_file required with --no-menu")
         execute_trade(args.order_file)
     else:
-        raise SystemExit("Interactive menu is available via cryptocalculator_web.py /options")
+        raise SystemExit("Interactive menu is available via cryptocalculator_web.py")
 
 
 if __name__ == "__main__":

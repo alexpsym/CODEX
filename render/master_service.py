@@ -1843,6 +1843,34 @@ async def webhook(script_name: str, request: Request) -> JSONResponse:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.post("/execute_now")
+async def execute_now(request: Request) -> JSONResponse:
+    script_name = "cryptocalculator-clone"
+    script = script_manager.get(script_name)
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be a JSON object.")
+    request_id = uuid4().hex
+    _log_webhook_event(
+        request_id,
+        "execute_now_received",
+        {"script_name": script_name, "path": "/execute_now"},
+    )
+    try:
+        result = await _place_bybit_order(payload, request_id=request_id)
+        script.add_log(f"Execute-now order sent: {result}")
+        return JSONResponse({"status": "ok", "request_id": request_id, "order": result})
+    except Exception as exc:
+        script.add_log(f"Execute-now order failed: {exc}")
+        BYBIT_LOGGER.exception(
+            "WEBHOOK_TPSL %s execute_now_failed script=%s error=%s",
+            request_id,
+            script_name,
+            exc,
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.post("/webhook")
 async def default_webhook(request: Request) -> JSONResponse:
     payload_bytes = await request.body()
