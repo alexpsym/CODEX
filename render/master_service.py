@@ -55,7 +55,6 @@ STANDALONE_SCRIPTS = {
     "cryptocalculator-clone",
     "ema-bounce-clone",
     "ivindicator-clone",
-    "optionstrader-clone",
     "fxscanner-oanda-clone",
     "fxweekend-clone",
     "oanda-calculator-clone",
@@ -78,7 +77,6 @@ ENTRY_OVERRIDES = {
     "ivindicator-clone": ["ivapp.py", "ivindicator.py"],
     "oanda-calculator-clone": ["oanda_calculator_web.py", "oanda_api.py"],
     "oanda_history-clone": ["oanda_history.py"],
-    "optionstrader-clone": ["optionstrader.py", "alert_server.py"],
     "payslip_audit": ["payslip_timesheet_audit.py"],
     "viddl-clone": ["master.py", "vid.py"],
 }
@@ -270,7 +268,6 @@ def categorize_script(script_path: Path) -> str:
         "crypto",
         "bybit",
         "coinspot",
-        "optionstrader",
         "ema-bounce",
         "ivin",
     )
