@@ -1,6 +1,9 @@
 """Flask web front-end for the crypto trade calculator."""
 from __future__ import annotations
 
+import contextlib
+import html
+import io
 import json
 import os
 from pathlib import Path
@@ -28,6 +31,7 @@ from cryptocalculator import (
     BYBIT_LINEAR_URL,
     BYBIT_SPOT_URL,
 )
+import options_trader
 
 app = Flask(__name__)
 
@@ -198,6 +202,7 @@ FORM_HTML = """
 </head>
 <body>
   <h1>Crypto Position Size Calculator</h1>
+  <p><a href="/options">Open Options Position Calculator</a></p>
   <div class="container">
     <div class="form">
       <form method="post">
@@ -302,6 +307,36 @@ FORM_HTML = """
 </body>
 </html>
 """
+
+OPTIONS_STYLE = """
+<style>
+  body { background-color: #121212; color: #fff; font-family: Arial, sans-serif; }
+  button { display: block; margin: 10px 0; background-color: #333; color: #fff;
+           padding: 8px 12px; border: 1px solid #555; cursor: pointer; }
+  input { background-color: #222; color: #fff; border: 1px solid #555; }
+  table td { padding: 4px; }
+  a { color: #80b3ff; }
+</style>
+"""
+
+
+def _options_page(content: str) -> str:
+    return f"<!doctype html><html><head>{OPTIONS_STYLE}</head><body>{content}</body></html>"
+
+
+_options_trader_instance: Optional[options_trader.BybitOptionsTrader] = None
+
+
+def _get_options_trader() -> Optional[options_trader.BybitOptionsTrader]:
+    global _options_trader_instance
+    options_trader.configure_trading_environment(interactive=False)
+    if _options_trader_instance is None:
+        key, secret = options_trader.get_api_credentials({})
+        if key and secret:
+            _options_trader_instance = options_trader.BybitOptionsTrader(
+                key, secret, options_trader.get_base_url()
+            )
+    return _options_trader_instance
 
 
 @app.route("/", methods=["GET", "POST"])
@@ -419,6 +454,248 @@ def index():
         price_mode_notes=PRICE_MODE_NOTES,
         webhook_url=PUBLIC_WEBHOOK_URL,
         export_json=export_json,
+    )
+
+
+@app.route("/options")
+def options_index():
+    return _options_page(
+        """
+        <h1>Options Position Calculator</h1>
+        <button onclick=\"location.href='/options/trade'\">Create Trade</button>
+        <button onclick=\"location.href='/options/show'\">Show Open Orders/Positions</button>
+        <button onclick=\"location.href='/options/cancel'\">Cancel All Orders/Positions</button>
+        <button onclick=\"location.href='/options/edit'\">Edit Open Order</button>
+        <button onclick=\"location.href='/options/export_recent'\">Export Trade History (7 days)</button>
+        <button onclick=\"location.href='/options/export_all'\">Export All Trade History</button>
+        <button onclick=\"location.href='/options/delivery_recent'\">Export Delivery History (7 days)</button>
+        <button onclick=\"location.href='/options/delivery_all'\">Export All Delivery History</button>
+        <button onclick=\"location.href='/options/reduce'\">Place Reduce-Only Exits</button>
+        <p><a href='/'>Back to Crypto Calculator</a></p>
+        """
+    )
+
+
+@app.route("/options/trade", methods=["GET", "POST"])
+def options_trade():
+    if request.method == "POST":
+        form = request.form
+        trader = _get_options_trader()
+        balance = options_trader.DEMO_BALANCE
+        if trader is not None:
+            api_bal = trader.get_wallet_balance()
+            if api_bal > 0:
+                balance = api_bal
+        risk_percent = float(form.get("risk_percent", 0) or 0)
+        risk_usd = balance * risk_percent / 100
+        qty = float(form.get("quantity", 0) or 0)
+        symbol = form.get("symbol", "").strip().upper()
+        if not symbol:
+            symbol = options_trader.build_option_symbol(
+                form.get("base", ""),
+                form.get("strike", ""),
+                form.get("option_type", ""),
+                form.get("expiry", ""),
+                form.get("quote", "USDT"),
+            )
+        if qty <= 0 and risk_usd > 0:
+            tick = options_trader.fetch_option_ticker(symbol)
+            price = float(tick.get("markPrice", 0) or 0)
+            qty = options_trader.compute_order_qty(risk_usd, price)
+        cfg = {
+            "symbol": symbol,
+            "side": form.get("side", "Buy"),
+            "quantity": qty,
+            "limit_price": float(form["limit_price"]) if form.get("limit_price") else None,
+            "risk_usd": risk_usd,
+            "auto_trade": bool(form.get("auto_trade")),
+        }
+        buf = io.StringIO()
+        error = None
+        try:
+            with contextlib.redirect_stdout(buf):
+                options_trader.execute_trade_from_cfg(cfg)
+        except Exception as exc:  # pragma: no cover - interactive error handling
+            error = exc
+            app.logger.exception("Options trade execution failed")
+        output = buf.getvalue()
+        if error:
+            output += (
+                "\n\nERROR: "
+                + str(error)
+                + "\nProvide BYBIT_API_KEY/BYBIT_API_SECRET env vars or add "
+                "api_key/api_secret to the form's config fields."
+            )
+        return _options_page(
+            "<pre>"
+            + html.escape(output)
+            + "</pre><a href='/options'>Back</a>"
+        )
+
+    balance = options_trader.DEMO_BALANCE
+    trader = _get_options_trader()
+    if trader is not None:
+        api_bal = trader.get_wallet_balance()
+        if api_bal > 0:
+            balance = api_bal
+    html_body = render_template_string(
+        """
+        <h2>Create Trade</h2>
+        <p>Current Balance: {{balance}} USDT</p>
+        <form method='post'>
+        <table>
+        <tr><td>Symbol (optional)</td><td><input name='symbol'></td></tr>
+        <tr><td>Base</td><td><input name='base'></td></tr>
+        <tr><td>Strike</td><td><input name='strike'></td></tr>
+        <tr><td>Call/Put</td><td><input name='option_type'></td></tr>
+        <tr><td>Expiry (D/M/YY)</td><td><input name='expiry'></td></tr>
+        <tr><td>Quote</td><td><input name='quote' value='USDT'></td></tr>
+        <tr><td>Side</td><td><input name='side' value='Buy'></td></tr>
+        <tr><td>Quantity</td><td><input name='quantity' value='0'></td></tr>
+        <tr><td>Limit Price</td><td><input name='limit_price'></td></tr>
+        <tr><td>Risk %</td><td><input name='risk_percent' value='0'></td></tr>
+        <tr><td>Auto Trade</td><td><input type='checkbox' name='auto_trade'></td></tr>
+        </table>
+        <button type='submit'>Submit Trade</button>
+        </form>
+        <a href='/options'>Back</a>
+        """,
+        balance=balance,
+    )
+    return _options_page(html_body)
+
+
+def _options_requires_trader() -> Optional[options_trader.BybitOptionsTrader]:
+    trader = _get_options_trader()
+    if trader is None:
+        return None
+    return trader
+
+
+@app.route("/options/show")
+def options_show():
+    trader = _options_requires_trader()
+    if trader is None:
+        return _options_page("No trader available. Configure API keys.<br><a href='/options'>Back</a>")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        options_trader.show_open(trader)
+    return _options_page(
+        "<pre>" + html.escape(buf.getvalue()) + "</pre><a href='/options'>Back</a>"
+    )
+
+
+@app.route("/options/cancel")
+def options_cancel():
+    trader = _options_requires_trader()
+    if trader is None:
+        return _options_page("No trader available. Configure API keys.<br><a href='/options'>Back</a>")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        options_trader.cancel_all(trader)
+    return _options_page(
+        "<pre>" + html.escape(buf.getvalue()) + "</pre><a href='/options'>Back</a>"
+    )
+
+
+@app.route("/options/edit", methods=["GET", "POST"])
+def options_edit():
+    trader = _options_requires_trader()
+    if trader is None:
+        return _options_page("No trader available. Configure API keys.<br><a href='/options'>Back</a>")
+    if request.method == "POST":
+        oid = request.form.get("order_id", "")
+        price = request.form.get("price")
+        qty = request.form.get("qty")
+        price_val = float(price) if price else None
+        qty_val = float(qty) if qty else None
+        trader.amend_order(oid, price_val, qty_val)
+        return _options_page("Order amended.<br><a href='/options'>Back</a>")
+    html_body = render_template_string(
+        """
+        <h2>Edit Open Order</h2>
+        <form method='post'>
+        Order ID: <input name='order_id'><br>
+        New Price: <input name='price'><br>
+        New Qty: <input name='qty'><br>
+        <button type='submit'>Submit</button>
+        </form>
+        <a href='/options'>Back</a>
+        """
+    )
+    return _options_page(html_body)
+
+
+@app.route("/options/export_recent")
+def options_export_recent():
+    trader = _options_requires_trader()
+    if trader is None:
+        return _options_page("No trader available. Configure API keys.<br><a href='/options'>Back</a>")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        options_trader.export_recent_trade_history(trader)
+    return _options_page(
+        "<pre>" + html.escape(buf.getvalue()) + "</pre><a href='/options'>Back</a>"
+    )
+
+
+@app.route("/options/export_all")
+def options_export_all():
+    trader = _options_requires_trader()
+    if trader is None:
+        return _options_page("No trader available. Configure API keys.<br><a href='/options'>Back</a>")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        options_trader.export_all_trade_history(trader)
+    return _options_page(
+        "<pre>" + html.escape(buf.getvalue()) + "</pre><a href='/options'>Back</a>"
+    )
+
+
+@app.route("/options/delivery_recent")
+def options_delivery_recent():
+    trader = _options_requires_trader()
+    if trader is None:
+        return _options_page("No trader available. Configure API keys.<br><a href='/options'>Back</a>")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        options_trader.export_recent_delivery_history(trader)
+    return _options_page(
+        "<pre>" + html.escape(buf.getvalue()) + "</pre><a href='/options'>Back</a>"
+    )
+
+
+@app.route("/options/delivery_all")
+def options_delivery_all():
+    trader = _options_requires_trader()
+    if trader is None:
+        return _options_page("No trader available. Configure API keys.<br><a href='/options'>Back</a>")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        options_trader.export_all_delivery_history(trader)
+    return _options_page(
+        "<pre>" + html.escape(buf.getvalue()) + "</pre><a href='/options'>Back</a>"
+    )
+
+
+@app.route("/options/reduce")
+def options_reduce():
+    trader = _options_requires_trader()
+    if trader is None:
+        return _options_page("No trader available. Configure API keys.<br><a href='/options'>Back</a>")
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            options_trader.set_profit_targets(trader)
+    except Exception as exc:  # pragma: no cover - just in case
+        app.logger.exception("Failed to set profit targets")
+        return _options_page(
+            "<pre>Failed to set profit targets: "
+            + html.escape(str(exc))
+            + "</pre><a href='/options'>Back</a>"
+        )
+    return _options_page(
+        "<pre>" + html.escape(buf.getvalue()) + "</pre><a href='/options'>Back</a>"
     )
 
 
