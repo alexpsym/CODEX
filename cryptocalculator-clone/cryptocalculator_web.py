@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -28,6 +29,7 @@ from cryptocalculator import (
     BYBIT_LINEAR_URL,
     BYBIT_SPOT_URL,
 )
+import options_trader
 
 app = Flask(__name__)
 
@@ -50,6 +52,28 @@ PUBLIC_WEBHOOK_URL = os.getenv(
     "PUBLIC_WEBHOOK_URL", "https://codex-rdqh.onrender.com/webhook"
 )
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL") or PUBLIC_WEBHOOK_URL.rsplit("/", 1)[0]
+BUILD_TIMESTAMP = os.getenv("DEPLOY_TIMESTAMP") or time.strftime(
+    "%Y-%m-%d %H:%M:%S %Z"
+)
+
+
+def _get_git_sha() -> str:
+    env_sha = os.getenv("GIT_SHA") or os.getenv("RENDER_GIT_COMMIT")
+    if env_sha:
+        return env_sha[:7]
+    try:
+        repo_root = Path(__file__).resolve().parent.parent
+        output = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=repo_root,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    return output.decode("utf-8").strip() or "unknown"
+
+
+BUILD_SHA = _get_git_sha()
 
 
 def _fetch_master_balance(
@@ -80,6 +104,13 @@ FORM_HTML = """
     .copy-row button {cursor:pointer;}
     .copy-status {font-size:12px; color:#9ca3af;}
     .copy-box {background:#111827; border:1px solid #1f2937; padding:8px; border-radius:6px; color:#e5e7eb; max-width:520px; white-space:pre-wrap;}
+    .trade-section {padding:10px; border:1px solid #1f2937; margin-bottom:12px;}
+    .hidden {display:none;}
+    .button-group {display:flex; flex-wrap:wrap; gap:8px; margin:6px 0;}
+    .button-group button {background:#1f2937; color:#e2e8f0; border:1px solid #334155; border-radius:8px; padding:6px 12px; font-weight:700;}
+    .button-group button.active {background:#2563eb; color:#fff; border-color:#60a5fa;}
+    .danger-button {background:#b91c1c; color:#fff; border:1px solid #ef4444; font-weight:800;}
+    .danger-note {color:#fca5a5; font-size:12px;}
   </style>
   <script>
     function copyText(text, statusId){
@@ -117,11 +148,42 @@ FORM_HTML = """
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
     }
+    function setButtonGroupValue(inputId, value, dispatchChange=true){
+      const input = document.getElementById(inputId);
+      if(!input){return;}
+      input.value = value;
+      const group = document.querySelector(`[data-input="${inputId}"]`);
+      if(group){
+        group.querySelectorAll('button[data-value]').forEach((btn) => {
+          btn.classList.toggle('active', btn.dataset.value === value);
+        });
+      }
+      if(dispatchChange){
+        input.dispatchEvent(new Event('change'));
+      }
+    }
+    function bindButtonGroup(inputId){
+      const group = document.querySelector(`[data-input="${inputId}"]`);
+      if(!group){return;}
+      group.querySelectorAll('button[data-value]').forEach((btn) => {
+        btn.addEventListener('click', () => setButtonGroupValue(inputId, btn.dataset.value));
+      });
+      const input = document.getElementById(inputId);
+      if(input){
+        setButtonGroupValue(inputId, input.value, false);
+      }
+    }
     function toggleEntry(){
       const orderType = document.getElementById('order_type');
       const entryField = document.getElementById('entry_price_row');
       if(!orderType || !entryField){return;}
       entryField.style.display = orderType.value === 'market' ? 'none' : 'block';
+    }
+    function toggleOptionsEntry(){
+      const orderType = document.getElementById('options_order_type');
+      const entryField = document.getElementById('options_limit_price_row');
+      if(!orderType || !entryField){return;}
+      entryField.style.display = orderType.value === 'limit' ? 'block' : 'none';
     }
     function updatePriceMode(){
       const priceSource = document.getElementById('price_source');
@@ -129,6 +191,61 @@ FORM_HTML = """
       const notes = {{ price_mode_notes|tojson }};
       if(!priceSource || !note){return;}
       note.innerText = notes[priceSource.value] || '';
+    }
+    function updateTradeType(){
+      const selector = document.getElementById('trade_type');
+      const optionsSection = document.getElementById('options_section');
+      const cryptoSection = document.getElementById('crypto_section');
+      if(!selector || !optionsSection || !cryptoSection){return;}
+      const isOptions = selector.value === 'options';
+      optionsSection.classList.toggle('hidden', !isOptions);
+      cryptoSection.classList.toggle('hidden', isOptions);
+      const cryptoRequired = ['symbol', 'stop_loss_ticks', 'risk_percent', 'rr_ratio'];
+      cryptoRequired.forEach((fieldId) => {
+        const el = document.getElementById(fieldId);
+        if(!el){return;}
+        if(isOptions){
+          el.removeAttribute('required');
+        } else {
+          el.setAttribute('required', 'required');
+        }
+      });
+    }
+    async function enterNow(){
+      const payloadEl = document.getElementById('alert_json');
+      if(!payloadEl || !payloadEl.innerText.trim()){
+        alert('Calculate a trade first to enable immediate entry.');
+        return;
+      }
+      const ok = confirm('Place a live market order immediately? This cannot be undone.');
+      if(!ok){return;}
+      let payload = null;
+      try{
+        payload = JSON.parse(payloadEl.innerText);
+      } catch (err) {
+        alert('Could not parse the current payload. Recalculate and try again.');
+        return;
+      }
+      const resultBox = document.getElementById('execute_result');
+      if(resultBox){
+        resultBox.classList.remove('hidden');
+        resultBox.innerText = 'Submitting market order...';
+      }
+      try{
+        const resp = await fetch('/execute_now', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload),
+        });
+        const data = await resp.json();
+        if(resultBox){
+          resultBox.innerText = JSON.stringify(data, null, 2);
+        }
+      } catch (err) {
+        if(resultBox){
+          resultBox.innerText = `Error: ${err}`;
+        }
+      }
     }
     async function loadSymbols(){
       const symbolInput = document.getElementById('symbol');
@@ -173,6 +290,11 @@ FORM_HTML = """
         ot.addEventListener('change', toggleEntry);
         toggleEntry();
       }
+      const oot = document.getElementById('options_order_type');
+      if(oot){
+        oot.addEventListener('change', toggleOptionsEntry);
+        toggleOptionsEntry();
+      }
       const ps = document.getElementById('price_source');
       if(ps){
         ps.addEventListener('change', updatePriceMode);
@@ -193,59 +315,110 @@ FORM_HTML = """
         }
       });
       loadSymbols();
+      const tradeType = document.getElementById('trade_type');
+      if(tradeType){
+        tradeType.addEventListener('change', updateTradeType);
+      }
+      updateTradeType();
+      ['trade_type', 'account_mode', 'direction', 'order_type', 'options_order_type', 'options_type', 'options_side'].forEach(bindButtonGroup);
     });
   </script>
 </head>
 <body>
   <h1>Crypto Position Size Calculator</h1>
+  <p>Build {{ build_sha }} &middot; {{ build_timestamp }}</p>
   <div class="container">
     <div class="form">
       <form method="post">
-        <label>Symbol: <input name="symbol" id="symbol" required></label><br>
-        <label>Price Source:
-          <select name="price_source" id="price_source">
-            {% for key, meta in price_source_options %}
-            <option value="{{ key }}" {{ 'selected' if key == price_source else '' }}>{{ meta['label'] }}</option>
-            {% endfor %}
-          </select>
-        </label><br>
-        <label>Execution Exchange:
-          <select name="execution_exchange" id="execution_exchange">
-            {% for key, meta in execution_options %}
-            <option value="{{ key }}" {{ 'selected' if key == execution_exchange else '' }}>{{ meta['label'] }}</option>
-            {% endfor %}
-          </select>
-        </label><br>
-        <p id="price_mode_note"></p>
-        <label>Account:
-          <select name="account_mode" id="account_mode">
-            <option value="live" {{ 'selected' if account_mode == 'live' else '' }}>Live</option>
-            <option value="demo" {{ 'selected' if account_mode == 'demo' else '' }}>Demo</option>
-          </select>
-        </label><br>
-        <label>Direction:
-          <select name="direction">
-            <option value="long">Long</option>
-            <option value="short">Short</option>
-          </select>
-        </label><br>
-        <label>Order Type:
-          <select name="order_type" id="order_type">
-            <option value="market">Market</option>
-            <option value="limit">Limit</option>
-          </select>
-        </label><br>
-        <div id="entry_price_row">
-          <label>Entry Price: <input name="entry_price" type="number" step="0.0001"></label><br>
+        <label>Trade Type:</label>
+        <div class="button-group" data-input="trade_type">
+          <button type="button" data-value="perpetual">Perpetual Futures</button>
+          <button type="button" data-value="spot">Spot</button>
+          <button type="button" data-value="options">Options</button>
         </div>
-        <label>Stop loss ticks: <input name="stop_loss_ticks" type="number" step="1" required></label><br>
-        <label>Risk %: <input name="risk_percent" type="number" step="0.01" required></label><br>
-        <label>Risk–reward ratio: <input name="rr_ratio" type="number" step="0.1" value="2" required></label><br>
-        <label>Price → Execution rate:
-          <input name="price_to_execution_rate" id="price_to_execution_rate" type="number" step="0.0001" min="0" value="{{ price_to_execution_rate }}" placeholder="e.g. 1.55">
-        </label><br>
-        <small>Use this when your price source is quoted in a different currency than your execution exchange.</small><br>
-        <button type="submit">Calculate</button>
+        <input type="hidden" name="trade_type" id="trade_type" value="{{ trade_type }}">
+        <label>Account:</label>
+        <div class="button-group" data-input="account_mode">
+          <button type="button" data-value="live">Live</button>
+          <button type="button" data-value="demo">Demo</button>
+        </div>
+        <input type="hidden" name="account_mode" id="account_mode" value="{{ account_mode }}">
+        <div id="crypto_section" class="trade-section">
+          <label>Symbol: <input name="symbol" id="symbol"></label><br>
+          <label>Price Source:
+            <select name="price_source" id="price_source">
+              {% for key, meta in price_source_options %}
+              <option value="{{ key }}" {{ 'selected' if key == price_source else '' }}>{{ meta['label'] }}</option>
+              {% endfor %}
+            </select>
+          </label><br>
+          <label>Execution Exchange:
+            <select name="execution_exchange" id="execution_exchange">
+              {% for key, meta in execution_options %}
+              <option value="{{ key }}" {{ 'selected' if key == execution_exchange else '' }}>{{ meta['label'] }}</option>
+              {% endfor %}
+            </select>
+          </label><br>
+          <p id="price_mode_note"></p>
+          <label>Direction:</label>
+          <div class="button-group" data-input="direction">
+            <button type="button" data-value="long">Long</button>
+            <button type="button" data-value="short">Short</button>
+          </div>
+          <input type="hidden" name="direction" id="direction" value="{{ direction }}">
+          <label>Order Type:</label>
+          <div class="button-group" data-input="order_type">
+            <button type="button" data-value="market">Market</button>
+            <button type="button" data-value="limit">Limit</button>
+          </div>
+          <input type="hidden" name="order_type" id="order_type" value="{{ order_type }}">
+          <div id="entry_price_row">
+            <label>Entry Price: <input name="entry_price" type="number" step="0.0001"></label><br>
+          </div>
+          <label>Stop loss ticks: <input name="stop_loss_ticks" id="stop_loss_ticks" type="number" step="1"></label><br>
+          <label>Risk %: <input name="risk_percent" id="risk_percent" type="number" step="0.01"></label><br>
+          <label>Risk–reward ratio: <input name="rr_ratio" id="rr_ratio" type="number" step="0.1" value="2"></label><br>
+          <label>Price → Execution rate:
+            <input name="price_to_execution_rate" id="price_to_execution_rate" type="number" step="0.0001" min="0" value="{{ price_to_execution_rate }}" placeholder="e.g. 1.55">
+          </label><br>
+          <small>Use this when your price source is quoted in a different currency than your execution exchange.</small><br>
+        </div>
+        <div id="options_section" class="trade-section hidden">
+          <label>Order Type:</label>
+          <div class="button-group" data-input="options_order_type">
+            <button type="button" data-value="market">Market</button>
+            <button type="button" data-value="limit">Limit</button>
+          </div>
+          <input type="hidden" name="options_order_type" id="options_order_type" value="{{ options_order_type }}">
+          <label>Base: <input name="options_base"></label><br>
+          <label>Strike: <input name="options_strike"></label><br>
+          <label>Call/Put:</label>
+          <div class="button-group" data-input="options_type">
+            <button type="button" data-value="Call">Call</button>
+            <button type="button" data-value="Put">Put</button>
+          </div>
+          <input type="hidden" name="options_type" id="options_type" value="{{ options_type }}">
+          <label>Expiry (D/M/YY): <input name="options_expiry"></label><br>
+          <label>Quote: <input name="options_quote" value="USDT"></label><br>
+          <label>Side:</label>
+          <div class="button-group" data-input="options_side">
+            <button type="button" data-value="Buy">Buy</button>
+            <button type="button" data-value="Sell">Sell</button>
+          </div>
+          <input type="hidden" name="options_side" id="options_side" value="{{ options_side }}">
+          <label>Quantity: <input name="options_quantity" value="0"></label><br>
+          <div id="options_limit_price_row">
+            <label>Limit Price: <input name="options_limit_price"></label><br>
+          </div>
+          <label>Risk %: <input name="options_risk_percent" value="0"></label><br>
+          <label>TP Multiplier: <input name="options_tp_multiplier" value="3"></label><br>
+          <div class="copy-row">
+            <button type="submit" name="options_action" value="journal">Journal last 30 days</button>
+            <button type="submit" name="options_action" value="open_orders">Show open orders</button>
+            <button type="submit" name="options_action" value="open_positions">Show open positions</button>
+          </div>
+        </div>
+        <button type="submit" name="options_action" value="calculate">Calculate</button>
       </form>
       <h3>TradingView Webhook</h3>
       <div class="copy-row">
@@ -253,11 +426,6 @@ FORM_HTML = """
         <span class="copy-status" id="webhook_status"></span>
       </div>
       <div class="copy-box" id="webhook_url">{{ webhook_url }}</div>
-      <p><strong>How offsets work:</strong></p>
-      <ul>
-        <li><strong>Buy/Long:</strong> TP = entry + tp_offset, SL = entry - sl_offset.</li>
-        <li><strong>Sell/Short:</strong> TP = entry - tp_offset, SL = entry + sl_offset.</li>
-      </ul>
     </div>
     <div class="result">
       {% if error %}<p style="color: red;">{{ error }}</p>{% endif %}
@@ -274,6 +442,15 @@ FORM_HTML = """
         <div class="copy-row">
           <button type="button" onclick="exportResult()">Export Result</button>
         </div>
+        <div class="copy-row">
+          <button type="button" class="danger-button" onclick="enterNow()">Enter now via market order</button>
+        </div>
+        <p class="danger-note">This immediately submits a live market order. Use with extreme caution.</p>
+        <pre id="execute_result" class="copy-box hidden"></pre>
+      {% endif %}
+      {% if options_output %}
+        <h2>Options Output</h2>
+        <pre id="options_output">{{ options_output }}</pre>
       {% endif %}
       {% if summary %}
         <h2>Summary</h2>
@@ -299,9 +476,26 @@ FORM_HTML = """
       {% endif %}
     </div>
   </div>
+  <footer>
+    <p>Build {{ build_sha }} &middot; {{ build_timestamp }}</p>
+  </footer>
 </body>
 </html>
 """
+
+_options_trader_instance: Optional[options_trader.BybitOptionsTrader] = None
+
+
+def _get_options_trader() -> Optional[options_trader.BybitOptionsTrader]:
+    global _options_trader_instance
+    options_trader.configure_trading_environment(interactive=False)
+    if _options_trader_instance is None:
+        key, secret = options_trader.get_api_credentials({})
+        if key and secret:
+            _options_trader_instance = options_trader.BybitOptionsTrader(
+                key, secret, options_trader.get_base_url()
+            )
+    return _options_trader_instance
 
 
 @app.route("/", methods=["GET", "POST"])
@@ -312,6 +506,31 @@ def index():
     payload_json = None
     export_json = None
     trade = None
+    options_output = None
+
+    trade_type = request.form.get("trade_type", "perpetual").strip().lower()
+    if trade_type not in {"perpetual", "spot", "options"}:
+        trade_type = "perpetual"
+
+    direction = request.form.get("direction", "long").strip().lower()
+    if direction not in {"long", "short"}:
+        direction = "long"
+
+    order_type = request.form.get("order_type", "market").strip().lower()
+    if order_type not in {"market", "limit"}:
+        order_type = "market"
+
+    options_order_type = request.form.get("options_order_type", "market").strip().lower()
+    if options_order_type not in {"market", "limit"}:
+        options_order_type = "market"
+
+    options_type = request.form.get("options_type", "Call").strip().capitalize()
+    if options_type not in {"Call", "Put"}:
+        options_type = "Call"
+
+    options_side = request.form.get("options_side", "Buy").strip().capitalize()
+    if options_side not in {"Buy", "Sell"}:
+        options_side = "Buy"
 
     execution_exchange = request.form.get(
         "execution_exchange", DEFAULT_EXECUTION_EXCHANGE
@@ -331,57 +550,141 @@ def index():
 
     if request.method == "POST":
         try:
-            symbol = request.form["symbol"].strip().upper()
-            direction = request.form.get("direction", "long")
-            order_type = request.form.get("order_type", "market")
-            entry_price_raw = request.form.get("entry_price")
-            stop_loss_ticks = float(request.form["stop_loss_ticks"])
-            risk_percent = float(request.form["risk_percent"])
-            rr_ratio = float(request.form.get("rr_ratio", 2.0))
-
-            config: Dict[str, object] = {
-                "symbol": symbol,
-                "direction": direction,
-                "order_type": order_type,
-                "stop_loss_ticks": stop_loss_ticks,
-                "risk_percent": risk_percent,
-                "rr_ratio": rr_ratio,
-                "price_source": price_source,
-                "execution_exchange": execution_exchange,
-                "account_balance": "auto",
-                "account_mode": account_mode,
-            }
-            config["trade_mode"] = trade_mode
-            if price_to_execution_rate:
-                config["price_to_execution_rate"] = float(price_to_execution_rate)
-            if order_type == "limit" and entry_price_raw:
-                config["entry_price"] = float(entry_price_raw)
-
-            balance_fetcher = BALANCE_ADAPTERS.get(execution_exchange)
-            if balance_fetcher is None:
-                raise ValueError(
-                    f"Execution exchange '{execution_exchange}' is not supported."
-                )
-            account_asset = "AUD" if execution_exchange == "coinspot" else "USDT"
-            if execution_exchange == "bybit":
-                config["account_balance"] = _fetch_master_balance(
-                    account_mode, coin=account_asset, account_type="UNIFIED"
-                )
+            if trade_type == "options":
+                options_action = request.form.get("options_action", "calculate")
+                trader = _get_options_trader()
+                if options_action in {"journal", "open_orders", "open_positions"}:
+                    if trader is None:
+                        raise ValueError("Options credentials are not configured.")
+                    if options_action == "journal":
+                        options_output = options_trader.build_journal_report(
+                            trader, days=30
+                        )
+                    elif options_action == "open_orders":
+                        orders = trader.get_open_orders()
+                        options_output = json.dumps(orders, indent=2)
+                    elif options_action == "open_positions":
+                        positions = trader.get_positions()
+                        options_output = json.dumps(positions, indent=2)
+                else:
+                    balance = options_trader.DEMO_BALANCE
+                    if trader is not None:
+                        api_bal = trader.get_wallet_balance()
+                        if api_bal > 0:
+                            balance = api_bal
+                    risk_percent = float(
+                        request.form.get("options_risk_percent", 0) or 0
+                    )
+                    risk_usd = balance * risk_percent / 100
+                    qty = float(request.form.get("options_quantity", 0) or 0)
+                    symbol = options_trader.build_option_symbol(
+                        request.form.get("options_base", ""),
+                        request.form.get("options_strike", ""),
+                        options_type,
+                        request.form.get("options_expiry", ""),
+                        request.form.get("options_quote", "USDT"),
+                    )
+                    tick = options_trader.fetch_option_ticker(symbol)
+                    mark_price = float(tick.get("markPrice", 0) or 0)
+                    if qty <= 0 and risk_usd > 0:
+                        qty = options_trader.compute_order_qty(risk_usd, mark_price)
+                    limit_price = None
+                    if (
+                        options_order_type == "limit"
+                        and request.form.get("options_limit_price")
+                    ):
+                        limit_price = float(request.form["options_limit_price"])
+                    entry_price = limit_price or mark_price
+                    tp_multiplier = float(
+                        request.form.get("options_tp_multiplier", 3) or 3
+                    )
+                    tp_offset = None
+                    if entry_price and tp_multiplier and tp_multiplier > 0:
+                        tp_offset = entry_price * (tp_multiplier - 1)
+                    action = "buy" if options_side.lower() == "buy" else "sell"
+                    if tp_offset is not None and action == "sell":
+                        tp_offset = -tp_offset
+                    payload = {
+                        "symbol": symbol,
+                        "action": action,
+                        "quantity": round(qty, 3),
+                        "account": account_mode,
+                        "trade_mode": "options",
+                        "tp_offset": round(tp_offset, 6) if tp_offset is not None else None,
+                        "tp_multiplier": tp_multiplier,
+                    }
+                    payload_json = json.dumps(payload, indent=2)
+                    options_output = "\n".join(
+                        [
+                            f"Symbol: {symbol}",
+                            f"Side: {options_side}",
+                            f"Quantity: {qty}",
+                            f"Mark price: {mark_price}",
+                            f"Entry price: {entry_price}",
+                            f"TP multiplier: {tp_multiplier}",
+                        ]
+                    )
             else:
-                config["account_balance"] = balance_fetcher(
-                    account_asset, account_type="UNIFIED", account_mode=account_mode
+                symbol = request.form.get("symbol", "").strip().upper()
+                if not symbol:
+                    raise ValueError("Symbol is required for spot/perpetual trades.")
+                entry_price_raw = request.form.get("entry_price")
+                stop_loss_ticks_raw = request.form.get("stop_loss_ticks", "").strip()
+                risk_percent_raw = request.form.get("risk_percent", "").strip()
+                rr_ratio_raw = request.form.get("rr_ratio", "").strip()
+                if not stop_loss_ticks_raw or not risk_percent_raw or not rr_ratio_raw:
+                    raise ValueError("Stop loss ticks, risk %, and RR ratio are required.")
+                stop_loss_ticks = float(stop_loss_ticks_raw)
+                risk_percent = float(risk_percent_raw)
+                rr_ratio = float(rr_ratio_raw)
+
+                config: Dict[str, object] = {
+                    "symbol": symbol,
+                    "direction": direction,
+                    "order_type": order_type,
+                    "stop_loss_ticks": stop_loss_ticks,
+                    "risk_percent": risk_percent,
+                    "rr_ratio": rr_ratio,
+                    "price_source": price_source,
+                    "execution_exchange": execution_exchange,
+                    "account_balance": "auto",
+                    "account_mode": account_mode,
+                }
+                config["trade_mode"] = trade_mode
+                if price_to_execution_rate:
+                    config["price_to_execution_rate"] = float(price_to_execution_rate)
+                if order_type == "limit" and entry_price_raw:
+                    config["entry_price"] = float(entry_price_raw)
+
+                balance_fetcher = BALANCE_ADAPTERS.get(execution_exchange)
+                if balance_fetcher is None:
+                    raise ValueError(
+                        f"Execution exchange '{execution_exchange}' is not supported."
+                    )
+                account_asset = "AUD" if execution_exchange == "coinspot" else "USDT"
+                if execution_exchange == "bybit":
+                    config["account_balance"] = _fetch_master_balance(
+                        account_mode, coin=account_asset, account_type="UNIFIED"
+                    )
+                else:
+                    config["account_balance"] = balance_fetcher(
+                        account_asset,
+                        account_type="UNIFIED",
+                        account_mode=account_mode,
+                    )
+                if execution_exchange == "coinspot":
+                    config.setdefault("account_asset", "AUD")
+
+                trade = calculate_trade(config)
+                summary = format_trade(trade)
+                risk_info = {k.replace("_", " ").title(): v for k, v in trade.items()}
+                payload_json = json.dumps(build_webhook_payload(trade), indent=2)
+
+                price_source = trade.get("price_source", price_source)
+                execution_exchange = trade.get(
+                    "execution_exchange", execution_exchange
                 )
-            if execution_exchange == "coinspot":
-                config.setdefault("account_asset", "AUD")
-
-            trade = calculate_trade(config)
-            summary = format_trade(trade)
-            risk_info = {k.replace("_", " ").title(): v for k, v in trade.items()}
-            payload_json = json.dumps(build_webhook_payload(trade), indent=2)
-
-            price_source = trade.get("price_source", price_source)
-            execution_exchange = trade.get("execution_exchange", execution_exchange)
-            trade_mode = trade.get("trade_mode", trade_mode)
+                trade_mode = trade.get("trade_mode", trade_mode)
         except Exception as exc:  # pylint: disable=broad-except
             error = str(exc)
 
@@ -414,12 +717,38 @@ def index():
         trade_mode=trade_mode,
         account_mode=account_mode,
         price_to_execution_rate=price_to_execution_rate,
+        trade_type=trade_type,
+        direction=direction,
+        order_type=order_type,
+        options_order_type=options_order_type,
+        options_type=options_type,
+        options_side=options_side,
+        options_output=options_output,
         execution_options=sorted(EXECUTION_EXCHANGES.items()),
         price_source_options=sorted(PRICE_SOURCES.items()),
         price_mode_notes=PRICE_MODE_NOTES,
         webhook_url=PUBLIC_WEBHOOK_URL,
         export_json=export_json,
+        build_sha=BUILD_SHA,
+        build_timestamp=BUILD_TIMESTAMP,
     )
+
+
+@app.post("/execute_now")
+def execute_now():
+    payload = request.get_json(silent=True)
+    if not payload:
+        return jsonify({"status": "error", "detail": "Missing JSON payload."}), 400
+    try:
+        response = requests.post(PUBLIC_WEBHOOK_URL, json=payload, timeout=15)
+        response.raise_for_status()
+        try:
+            data = response.json()
+        except ValueError:
+            data = {"raw": response.text}
+        return jsonify({"status": "ok", "response": data})
+    except Exception as exc:  # pylint: disable=broad-except
+        return jsonify({"status": "error", "detail": str(exc)}), 400
 
 
 EDGE_CONTROLLER_NAMES = ("microsoft-edge", "msedge")
