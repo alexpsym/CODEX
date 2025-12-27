@@ -1,6 +1,8 @@
 """Flask web front-end for the crypto trade calculator."""
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -303,6 +305,7 @@ FORM_HTML = """
 </head>
 <body>
   <h1>Crypto Position Size Calculator</h1>
+  <p><a href="/options">Open Options Position Calculator</a></p>
   <div class="container">
     <div class="form">
       <form method="post">
@@ -423,6 +426,10 @@ FORM_HTML = """
         </div>
         <p class="danger-note">This immediately submits a live market order. Use with extreme caution.</p>
         <pre id="execute_result" class="copy-box hidden"></pre>
+      {% endif %}
+      {% if options_output %}
+        <h2>Options Output</h2>
+        <pre id="options_output">{{ options_output }}</pre>
       {% endif %}
       {% if options_output %}
         <h2>Options Output</h2>
