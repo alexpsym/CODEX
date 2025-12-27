@@ -1,12 +1,15 @@
 """Flask web front-end for the crypto trade calculator."""
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
 import re
 import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -53,6 +56,28 @@ PUBLIC_WEBHOOK_URL = os.getenv(
     "PUBLIC_WEBHOOK_URL", "https://codex-rdqh.onrender.com/webhook"
 )
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL") or PUBLIC_WEBHOOK_URL.rsplit("/", 1)[0]
+BUILD_TIMESTAMP = os.getenv("DEPLOY_TIMESTAMP") or time.strftime(
+    "%Y-%m-%d %H:%M:%S %Z"
+)
+
+
+def _get_git_sha() -> str:
+    env_sha = os.getenv("GIT_SHA") or os.getenv("RENDER_GIT_COMMIT")
+    if env_sha:
+        return env_sha[:7]
+    try:
+        repo_root = Path(__file__).resolve().parent.parent
+        output = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=repo_root,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    return output.decode("utf-8").strip() or "unknown"
+
+
+BUILD_SHA = _get_git_sha()
 
 
 def _fetch_master_balance(
@@ -294,6 +319,7 @@ FORM_HTML = """
 </head>
 <body>
   <h1>Crypto Position Size Calculator</h1>
+  <p>Build {{ build_sha }} &middot; {{ build_timestamp }}</p>
   <div class="container">
     <div class="form">
       <form method="post">
@@ -456,6 +482,9 @@ FORM_HTML = """
       {% endif %}
     </div>
   </div>
+  <footer>
+    <p>Build {{ build_sha }} &middot; {{ build_timestamp }}</p>
+  </footer>
 </body>
 </html>
 """
@@ -786,9 +815,28 @@ def index():
         price_mode_notes=PRICE_MODE_NOTES,
         webhook_url=PUBLIC_WEBHOOK_URL,
         export_json=export_json,
+        build_sha=BUILD_SHA,
+        build_timestamp=BUILD_TIMESTAMP,
     )
     rendered_html = re.sub(r"<p>\\s*Build[^<]*</p>", "", rendered_html)
     return rendered_html
+
+
+@app.post("/execute_now")
+def execute_now():
+    payload = request.get_json(silent=True)
+    if not payload:
+        return jsonify({"status": "error", "detail": "Missing JSON payload."}), 400
+    try:
+        response = requests.post(PUBLIC_WEBHOOK_URL, json=payload, timeout=15)
+        response.raise_for_status()
+        try:
+            data = response.json()
+        except ValueError:
+            data = {"raw": response.text}
+        return jsonify({"status": "ok", "response": data})
+    except Exception as exc:  # pylint: disable=broad-except
+        return jsonify({"status": "error", "detail": str(exc)}), 400
 
 
 @app.post("/execute_now")
