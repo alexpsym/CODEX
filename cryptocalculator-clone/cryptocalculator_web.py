@@ -890,6 +890,23 @@ def execute_now():
         return jsonify({"status": "error", "detail": str(exc)}), 400
 
 
+@app.post("/execute_now")
+def execute_now():
+    payload = request.get_json(silent=True)
+    if not payload:
+        return jsonify({"status": "error", "detail": "Missing JSON payload."}), 400
+    try:
+        response = requests.post(PUBLIC_WEBHOOK_URL, json=payload, timeout=15)
+        response.raise_for_status()
+        try:
+            data = response.json()
+        except ValueError:
+            data = {"raw": response.text}
+        return jsonify({"status": "ok", "response": data})
+    except Exception as exc:  # pylint: disable=broad-except
+        return jsonify({"status": "error", "detail": str(exc)}), 400
+
+
 EDGE_CONTROLLER_NAMES = ("microsoft-edge", "msedge")
 EDGE_EXECUTABLE_NAMES = (
     "microsoft-edge",

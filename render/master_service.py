@@ -100,6 +100,10 @@ class ManagedScript:
     port: Optional[int] = None
     _log_lines: List[str] = field(default_factory=list)
     last_output_at: Optional[float] = None
+    last_start_attempt_at: Optional[float] = None
+    last_start_error: Optional[str] = None
+    last_exit_code: Optional[int] = None
+    last_exit_reason: Optional[str] = None
 
     @property
     def is_running(self) -> bool:
@@ -116,6 +120,10 @@ class ManagedScript:
             "open_url": script_open_url(self),
             "logs_url": script_logs_url(self.name),
             "last_output_at": self.last_output_at,
+            "last_start_attempt_at": self.last_start_attempt_at,
+            "last_start_error": self.last_start_error,
+            "last_exit_code": self.last_exit_code,
+            "last_exit_reason": self.last_exit_reason,
             "standalone": self.name in STANDALONE_SCRIPTS,
         }
 
@@ -159,6 +167,11 @@ class ManagedScript:
         if not self.path.exists():
             raise FileNotFoundError(f"Script not found: {self.path}")
 
+        self.last_start_attempt_at = time.time()
+        self.last_start_error = None
+        self.last_exit_code = None
+        self.last_exit_reason = None
+        self.add_log("Starting script...")
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
         current_pythonpath = env.get("PYTHONPATH", "")
@@ -172,17 +185,17 @@ class ManagedScript:
             env["HOST"] = "127.0.0.1"
             env["APP_BASE_PATH"] = f"/apps/{quote(self.name)}"
 
+        command = [os.getenv("PYTHON", "python"), "-u", str(self.path)]
         try:
             self.process = await asyncio.create_subprocess_exec(
-                os.getenv("PYTHON", "python"),
-                "-u",
-                str(self.path),
+                *command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=str(self.path.parent),
                 env=env,
             )
         except Exception as exc:
+            self.last_start_error = str(exc)
             self.add_log(f"Failed to start: {exc}")
             raise
 
@@ -201,6 +214,11 @@ class ManagedScript:
                 self.add_log(line.decode("utf-8", errors="replace"))
         finally:
             await self.process.wait()
+            self.last_exit_code = self.process.returncode
+            if self.last_exit_reason is None:
+                self.last_exit_reason = (
+                    "Process exited unexpectedly." if self.process.returncode else None
+                )
             self.port = None
 
     async def stop(self) -> None:
@@ -1605,6 +1623,22 @@ async def list_scripts() -> JSONResponse:
     return JSONResponse(script_manager.list_scripts())
 
 
+@app.get("/scripts/{script_name:path}/status")
+async def script_status(script_name: str) -> JSONResponse:
+    script = script_manager.get(script_name)
+    return JSONResponse(
+        {
+            "name": script.name,
+            "running": script.is_running,
+            "port": script.port,
+            "last_start_attempt_at": script.last_start_attempt_at,
+            "last_start_error": script.last_start_error,
+            "last_exit_code": script.last_exit_code,
+            "last_exit_reason": script.last_exit_reason,
+        }
+    )
+
+
 def _read_bybit_settings() -> Dict[str, float]:
     try:
         settings = bybit_monitor.get_runtime_settings(force=True)
@@ -1652,6 +1686,13 @@ async def view_logs(script_name: str) -> str:
 async def proxy_app(script_name: str, request: Request, path: str = "") -> Response:
     script = script_manager.get(script_name)
     if not script.is_running or not script.port:
+        if script.last_start_attempt_at:
+            if script.last_start_error or script.last_exit_reason:
+                detail = script.last_start_error or script.last_exit_reason
+                raise HTTPException(status_code=500, detail=detail)
+            raise HTTPException(
+                status_code=503, detail=f"{script_name} is starting."
+            )
         raise HTTPException(status_code=404, detail=f"{script_name} is not running.")
 
     target = f"http://127.0.0.1:{script.port}/{path}"
