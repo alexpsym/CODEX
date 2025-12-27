@@ -1,6 +1,8 @@
 """Flask web front-end for the crypto trade calculator."""
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -14,7 +16,7 @@ import webbrowser
 from typing import Dict, Optional
 
 import requests
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, jsonify, render_template_string, request, redirect, url_for
 
 from cryptocalculator import (
     DEFAULT_EXECUTION_EXCHANGE,
