@@ -172,6 +172,7 @@ class ManagedScript:
                 self.port = _allocate_port()
             env["PORT"] = str(self.port)
             env["HOST"] = "127.0.0.1"
+            env["APP_BASE_PATH"] = f"/apps/{quote(self.name)}"
 
         try:
             self.process = await asyncio.create_subprocess_exec(

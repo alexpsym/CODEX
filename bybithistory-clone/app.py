@@ -25,6 +25,7 @@ HTML_TEMPLATE = """
 <head>
 <meta charset="UTF-8">
 <title>Bybit History</title>
+<base href="{{ base_href }}">
 <style>
 body { background-color: #121212; color: #e0e0e0; font-family: Arial, sans-serif; }
 .container { display: flex; justify-content: space-around; margin-top: 50px; }
@@ -39,7 +40,7 @@ select, input[type="date"] { width: 100%; padding: 5px; margin-top: 5px; backgro
 <div class="container">
   <div class="box">
     <h2>Trade History</h2>
-    <form action="./trade" method="post">
+    <form action="trade" method="post">
       <label for="trade-start">Start date</label>
       <input id="trade-start" type="date" name="start_date" />
       <label for="trade-end">End date</label>
@@ -56,7 +57,7 @@ select, input[type="date"] { width: 100%; padding: 5px; margin-top: 5px; backgro
   </div>
   <div class="box">
     <h2>USDT Balance History</h2>
-    <form action="./balance" method="post">
+    <form action="balance" method="post">
       <label for="balance-start">Start date</label>
       <input id="balance-start" type="date" name="start_date" />
       <label for="balance-end">End date</label>
@@ -108,7 +109,8 @@ def open_browser(url: str) -> None:
 @app.route("/")
 def index() -> str:
     """Render the main menu page."""
-    return render_template_string(HTML_TEMPLATE)
+    base_href = os.getenv("APP_BASE_PATH", "/").rstrip("/") + "/"
+    return render_template_string(HTML_TEMPLATE, base_href=base_href)
 
 
 @app.post("/trade")
