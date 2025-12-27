@@ -55,7 +55,6 @@ STANDALONE_SCRIPTS = {
     "cryptocalculator-clone",
     "ema-bounce-clone",
     "ivindicator-clone",
-    "optionstrader-clone",
     "fxscanner-oanda-clone",
     "fxweekend-clone",
     "oanda-calculator-clone",
@@ -78,7 +77,6 @@ ENTRY_OVERRIDES = {
     "ivindicator-clone": ["ivapp.py", "ivindicator.py"],
     "oanda-calculator-clone": ["oanda_calculator_web.py", "oanda_api.py"],
     "oanda_history-clone": ["oanda_history.py"],
-    "optionstrader-clone": ["optionstrader.py", "alert_server.py"],
     "payslip_audit": ["payslip_timesheet_audit.py"],
     "viddl-clone": ["master.py", "vid.py"],
 }
@@ -270,7 +268,6 @@ def categorize_script(script_path: Path) -> str:
         "crypto",
         "bybit",
         "coinspot",
-        "optionstrader",
         "ema-bounce",
         "ivin",
     )
@@ -768,6 +765,60 @@ BALANCE_LOGGER = logging.getLogger("uvicorn.error")
 BYBIT_LOGGER = logging.getLogger("uvicorn.error")
 
 
+def _get_telegram_credentials() -> tuple[str, str]:
+    token = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN") or ""
+    chat_id = os.getenv("TELEGRAM_CHAT_ID") or ""
+    return token, chat_id
+
+
+async def _send_telegram_alert(message: str) -> None:
+    token, chat_id = _get_telegram_credentials()
+    if not token or not chat_id:
+        BYBIT_LOGGER.info("Telegram alerts not configured; skipping alert.")
+        return
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": message}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(url, json=payload)
+    except Exception as exc:  # pragma: no cover - network failure
+        BYBIT_LOGGER.error("Telegram alert failed: %s", exc)
+
+
+def _format_trade_alert(
+    payload: Dict[str, object],
+    result: Optional[Dict[str, object]] = None,
+    error: Optional[str] = None,
+) -> str:
+    symbol = str(payload.get("symbol", ""))
+    action = str(payload.get("action", ""))
+    qty = payload.get("quantity")
+    account = str(payload.get("account", "live"))
+    trade_mode = str(payload.get("trade_mode", "linear"))
+    status = "FAILED" if error else "OK"
+    lines = [
+        f"Trade {status}",
+        f"Account: {account}",
+        f"Trade mode: {trade_mode}",
+        f"Symbol: {symbol}",
+        f"Side: {action}",
+        f"Qty: {qty}",
+    ]
+    if result:
+        order = result.get("order", {})
+        if order:
+            lines.append(f"Order ID: {order.get('orderId', '')}")
+        tp_order = result.get("tp_order")
+        tp_error = result.get("tp_error")
+        if tp_order:
+            lines.append(f"TP order: {tp_order.get('orderId', '')}")
+        if tp_error:
+            lines.append(f"TP error: {tp_error}")
+    if error:
+        lines.append(f"Error: {error}")
+    return "\n".join(lines)
+
+
 def _log_webhook_event(request_id: str, stage: str, details: Dict[str, object]) -> None:
     BYBIT_LOGGER.info(
         "WEBHOOK_TPSL %s %s",
@@ -925,10 +976,11 @@ async def _set_bybit_trading_stop(
     }
     if position_idx is not None:
         body["positionIdx"] = position_idx
-    if take_profit is not None:
-        body["takeProfit"] = str(take_profit)
-    if stop_loss is not None:
-        body["stopLoss"] = str(stop_loss)
+    if category != "option":
+        if take_profit is not None:
+            body["takeProfit"] = str(take_profit)
+        if stop_loss is not None:
+            body["stopLoss"] = str(stop_loss)
     _log_webhook_event(request_id, "trading_stop_request", {"payload": body})
     body_json = json.dumps(body, separators=(",", ":"))
     timestamp = str(int(time.time() * 1000))
@@ -959,6 +1011,99 @@ async def _set_bybit_trading_stop(
     if payload.get("retCode") != 0:
         raise ValueError(f"Bybit trading-stop failed: {payload.get('retMsg')}")
     return payload.get("result", {})
+
+
+async def _place_bybit_reduce_only_limit(
+    *,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+    category: str,
+    symbol: str,
+    side: str,
+    qty: float,
+    price: float,
+    request_id: str,
+) -> Dict[str, object]:
+    if category == "option":
+        price = await _round_option_price_to_tick(
+            base_url=base_url, symbol=symbol, price=price
+        )
+    body: Dict[str, object] = {
+        "category": category,
+        "symbol": symbol,
+        "side": side,
+        "orderType": "Limit",
+        "qty": str(qty),
+        "price": str(price),
+        "timeInForce": "GTC",
+        "orderLinkId": uuid4().hex,
+        "reduceOnly": True,
+    }
+    _log_webhook_event(request_id, "tp_limit_request", {"payload": body})
+    body_json = json.dumps(body, separators=(",", ":"))
+    timestamp = str(int(time.time() * 1000))
+    signature = _bybit_sign_request(timestamp, api_key, api_secret, body_json)
+    headers = {
+        "Content-Type": "application/json",
+        "X-BAPI-API-KEY": api_key,
+        "X-BAPI-SIGN": signature,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": BYBIT_RECV_WINDOW,
+        "X-BAPI-SIGN-TYPE": "2",
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.post(
+            f"{base_url}/v5/order/create", headers=headers, content=body_json
+        )
+    response.raise_for_status()
+    payload = response.json()
+    _log_webhook_event(
+        request_id,
+        "tp_limit_response",
+        {
+            "retCode": payload.get("retCode"),
+            "retMsg": payload.get("retMsg"),
+            "result": payload.get("result", {}),
+        },
+    )
+    if payload.get("retCode") != 0:
+        raise ValueError(f"Bybit TP limit order failed: {payload.get('retMsg')}")
+    return payload.get("result", {})
+
+
+_OPTION_TICK_CACHE: Dict[str, float] = {}
+
+
+async def _fetch_option_tick_size(*, base_url: str, symbol: str) -> float:
+    if symbol in _OPTION_TICK_CACHE:
+        return _OPTION_TICK_CACHE[symbol]
+    endpoint = "/v5/market/instruments-info"
+    params = {"category": "option", "symbol": symbol}
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.get(f"{base_url}{endpoint}", params=params)
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("retCode") != 0:
+        raise ValueError(
+            f"Bybit option tick lookup failed: {payload.get('retMsg')}"
+        )
+    lst = payload.get("result", {}).get("list", [])
+    if not lst:
+        raise ValueError("Bybit option tick lookup returned no data.")
+    tick = float(lst[0].get("priceFilter", {}).get("tickSize", 0) or 0)
+    if tick <= 0:
+        raise ValueError("Bybit option tick size is missing.")
+    _OPTION_TICK_CACHE[symbol] = tick
+    return tick
+
+
+async def _round_option_price_to_tick(
+    *, base_url: str, symbol: str, price: float
+) -> float:
+    tick = await _fetch_option_tick_size(base_url=base_url, symbol=symbol)
+    rounded = round(price / tick) * tick
+    return max(rounded, tick)
 
 
 async def _place_bybit_order(
@@ -1004,7 +1149,10 @@ async def _place_bybit_order(
     if account not in {"live", "demo"}:
         raise ValueError("Webhook payload account must be live or demo.")
 
-    category = "spot" if trade_mode == "spot" else "linear"
+    if trade_mode == "options":
+        category = "option"
+    else:
+        category = "spot" if trade_mode == "spot" else "linear"
     side = "Buy" if action == "buy" else "Sell"
 
     _mode, api_key, api_secret, base_url, key_source = resolve_bybit_credentials_for(
@@ -1038,22 +1186,27 @@ async def _place_bybit_order(
     )
     if take_profit_offset is None:
         take_profit_offset = _parse_trigger_offset(payload.get("take_profit_price"))
-    stop_loss_offset = _parse_offset_value(
-        payload.get("stop_loss_offset") or payload.get("sl_offset")
-    )
-    if stop_loss_offset is None:
-        stop_loss_offset = _parse_trigger_offset(payload.get("stop_loss_price"))
+    tp_multiplier = _parse_offset_value(payload.get("tp_multiplier"))
+    stop_loss_offset = None
+    if category != "option":
+        stop_loss_offset = _parse_offset_value(
+            payload.get("stop_loss_offset") or payload.get("sl_offset")
+        )
+        if stop_loss_offset is None:
+            stop_loss_offset = _parse_trigger_offset(payload.get("stop_loss_price"))
 
     take_profit = (
         None
         if take_profit_offset is not None
         else _parse_trigger_price(payload.get("take_profit_price"))
     )
-    stop_loss = (
-        None
-        if stop_loss_offset is not None
-        else _parse_trigger_price(payload.get("stop_loss_price"))
-    )
+    stop_loss = None
+    if category != "option":
+        stop_loss = (
+            None
+            if stop_loss_offset is not None
+            else _parse_trigger_price(payload.get("stop_loss_price"))
+        )
     if take_profit is not None:
         body["takeProfit"] = str(take_profit)
     if stop_loss is not None:
@@ -1092,6 +1245,8 @@ async def _place_bybit_order(
 
     tpsl_result: Optional[Dict[str, object]] = None
     tpsl_error: Optional[str] = None
+    tp_order: Optional[Dict[str, object]] = None
+    tp_error: Optional[str] = None
     if category == "linear" and any(
         item is not None
         for item in (take_profit_offset, stop_loss_offset, take_profit, stop_loss)
@@ -1173,6 +1328,56 @@ async def _place_bybit_order(
                 account,
                 exc,
             )
+    if category == "option":
+        try:
+            position = await _wait_for_position_entry(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                category=category,
+                symbol=symbol,
+                request_id=request_id,
+            )
+            if position is None:
+                raise ValueError("Position entry price not available yet.")
+            entry_price = _parse_offset_value(
+                position.get("avgPrice") or position.get("entryPrice")
+            )
+            if entry_price is None:
+                raise ValueError("Position entry price could not be parsed.")
+            tp_target = None
+            if take_profit_offset is not None:
+                tp_target = entry_price + take_profit_offset
+            elif take_profit is not None:
+                tp_target = take_profit
+            elif tp_multiplier is not None and tp_multiplier > 0:
+                offset = entry_price * (tp_multiplier - 1)
+                tp_target = entry_price + offset if side == "Buy" else entry_price - offset
+            if tp_target is None:
+                raise ValueError("No TP offset/price provided for options trade.")
+            if tp_target < 0:
+                tp_target = 0
+            exit_side = "Sell" if side == "Buy" else "Buy"
+            tp_order = await _place_bybit_reduce_only_limit(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                category=category,
+                symbol=symbol,
+                side=exit_side,
+                qty=qty_val,
+                price=tp_target,
+                request_id=request_id,
+            )
+        except Exception as exc:
+            tp_error = str(exc)
+            BYBIT_LOGGER.exception(
+                "WEBHOOK_TPSL %s tp_limit_failed symbol=%s account=%s error=%s",
+                request_id,
+                symbol,
+                account,
+                exc,
+            )
 
     return {
         "account": account,
@@ -1184,6 +1389,8 @@ async def _place_bybit_order(
         "order": data.get("result", {}),
         "tpsl": tpsl_result,
         "tpsl_error": tpsl_error,
+        "tp_order": tp_order,
+        "tp_error": tp_error,
     }
 
 
@@ -1714,13 +1921,49 @@ async def webhook(script_name: str, request: Request) -> JSONResponse:
     try:
         result = await _place_bybit_order(payload, request_id=request_id)
         script.add_log(f"Order request sent: {result}")
+        await _send_telegram_alert(_format_trade_alert(payload, result=result))
         return JSONResponse(
             {"status": "ok", "script": script_name, "request_id": request_id, "order": result}
         )
     except Exception as exc:
         script.add_log(f"Order placement failed: {exc}")
+        await _send_telegram_alert(
+            _format_trade_alert(payload, error=str(exc))
+        )
         BYBIT_LOGGER.exception(
             "WEBHOOK_TPSL %s webhook_failed script=%s error=%s",
+            request_id,
+            script_name,
+            exc,
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/execute_now")
+async def execute_now(request: Request) -> JSONResponse:
+    script_name = "cryptocalculator-clone"
+    script = script_manager.get(script_name)
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload must be a JSON object.")
+    request_id = uuid4().hex
+    _log_webhook_event(
+        request_id,
+        "execute_now_received",
+        {"script_name": script_name, "path": "/execute_now"},
+    )
+    try:
+        result = await _place_bybit_order(payload, request_id=request_id)
+        script.add_log(f"Execute-now order sent: {result}")
+        await _send_telegram_alert(_format_trade_alert(payload, result=result))
+        return JSONResponse({"status": "ok", "request_id": request_id, "order": result})
+    except Exception as exc:
+        script.add_log(f"Execute-now order failed: {exc}")
+        await _send_telegram_alert(
+            _format_trade_alert(payload, error=str(exc))
+        )
+        BYBIT_LOGGER.exception(
+            "WEBHOOK_TPSL %s execute_now_failed script=%s error=%s",
             request_id,
             script_name,
             exc,
@@ -1750,11 +1993,15 @@ async def default_webhook(request: Request) -> JSONResponse:
     try:
         result = await _place_bybit_order(payload, request_id=request_id)
         script.add_log(f"Order request sent: {result}")
+        await _send_telegram_alert(_format_trade_alert(payload, result=result))
         return JSONResponse(
             {"status": "ok", "script": script_name, "request_id": request_id, "order": result}
         )
     except Exception as exc:
         script.add_log(f"Order placement failed: {exc}")
+        await _send_telegram_alert(
+            _format_trade_alert(payload, error=str(exc))
+        )
         BYBIT_LOGGER.exception(
             "WEBHOOK_TPSL %s webhook_failed script=%s error=%s",
             request_id,
