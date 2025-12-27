@@ -6,7 +6,6 @@ import io
 import json
 import os
 from pathlib import Path
-import re
 import shutil
 import socket
 import subprocess
@@ -319,7 +318,6 @@ FORM_HTML = """
 </head>
 <body>
   <h1>Crypto Position Size Calculator</h1>
-  <p>Build {{ build_sha }} &middot; {{ build_timestamp }}</p>
   <div class="container">
     <div class="form">
       <form method="post">
@@ -483,7 +481,6 @@ FORM_HTML = """
     </div>
   </div>
   <footer>
-    <p>Build {{ build_sha }} &middot; {{ build_timestamp }}</p>
   </footer>
 </body>
 </html>
@@ -551,9 +548,19 @@ def index():
     if options_order_type not in {"market", "limit"}:
         options_order_type = "market"
 
+    options_base_options = options_trader.get_supported_option_bases()
+    options_base_set = {
+        base.strip().upper()
+        for base in options_base_options
+        if base and base.strip()
+    }
+    options_base_set.update(options_trader.DEFAULT_OPTION_BASES)
+    options_base_options = sorted(options_base_set)
+    app.logger.info("Options base options: %s", options_base_options)
+
     options_base = request.form.get("options_base", "BTC").strip().upper()
-    if options_base not in options_trader.get_supported_option_bases():
-        options_base = options_trader.get_supported_option_bases()[0]
+    if options_base not in options_base_options:
+        options_base = options_base_options[0]
 
     options_type = request.form.get("options_type", "Call").strip().capitalize()
     if options_type not in {"Call", "Put"}:
@@ -806,7 +813,7 @@ def index():
         options_base=options_base,
         options_type=options_type,
         options_side=options_side,
-        options_base_options=options_trader.get_supported_option_bases(),
+        options_base_options=options_base_options,
         options_qty_step=options_qty_step,
         options_quantity=request.form.get("options_quantity", "0"),
         options_output=options_output,
@@ -818,114 +825,10 @@ def index():
         build_sha=BUILD_SHA,
         build_timestamp=BUILD_TIMESTAMP,
     )
-    rendered_html = re.sub(r"<p>\\s*Build[^<]*</p>", "", rendered_html)
-    return rendered_html
 
 
 @app.post("/execute_now")
 def execute_now():
-    payload = request.get_json(silent=True)
-    if not payload:
-        return jsonify({"status": "error", "detail": "Missing JSON payload."}), 400
-    try:
-        response = requests.post(PUBLIC_WEBHOOK_URL, json=payload, timeout=15)
-        response.raise_for_status()
-        try:
-            data = response.json()
-        except ValueError:
-            data = {"raw": response.text}
-        return jsonify({"status": "ok", "response": data})
-    except Exception as exc:  # pylint: disable=broad-except
-        return jsonify({"status": "error", "detail": str(exc)}), 400
-
-
-@app.post("/execute_now")
-def execute_now():
-    payload = request.get_json(silent=True)
-    if not payload:
-        return jsonify({"status": "error", "detail": "Missing JSON payload."}), 400
-    try:
-        response = requests.post(PUBLIC_WEBHOOK_URL, json=payload, timeout=15)
-        response.raise_for_status()
-        try:
-            data = response.json()
-        except ValueError:
-            data = {"raw": response.text}
-        return jsonify({"status": "ok", "response": data})
-    except Exception as exc:  # pylint: disable=broad-except
-        return jsonify({"status": "error", "detail": str(exc)}), 400
-
-
-@app.post("/execute_now")
-def execute_now():
-    payload = request.get_json(silent=True)
-    if not payload:
-        return jsonify({"status": "error", "detail": "Missing JSON payload."}), 400
-    try:
-        response = requests.post(PUBLIC_WEBHOOK_URL, json=payload, timeout=15)
-        response.raise_for_status()
-        try:
-            data = response.json()
-        except ValueError:
-            data = {"raw": response.text}
-        return jsonify({"status": "ok", "response": data})
-    except Exception as exc:  # pylint: disable=broad-except
-        return jsonify({"status": "error", "detail": str(exc)}), 400
-
-
-@app.post("/execute_now")
-def execute_now():
-    payload = request.get_json(silent=True)
-    if not payload:
-        return jsonify({"status": "error", "detail": "Missing JSON payload."}), 400
-    try:
-        response = requests.post(PUBLIC_WEBHOOK_URL, json=payload, timeout=15)
-        response.raise_for_status()
-        try:
-            data = response.json()
-        except ValueError:
-            data = {"raw": response.text}
-        return jsonify({"status": "ok", "response": data})
-    except Exception as exc:  # pylint: disable=broad-except
-        return jsonify({"status": "error", "detail": str(exc)}), 400
-
-
-@app.post("/execute_now")
-def execute_now():
-    payload = request.get_json(silent=True)
-    if not payload:
-        return jsonify({"status": "error", "detail": "Missing JSON payload."}), 400
-    try:
-        response = requests.post(PUBLIC_WEBHOOK_URL, json=payload, timeout=15)
-        response.raise_for_status()
-        try:
-            data = response.json()
-        except ValueError:
-            data = {"raw": response.text}
-        return jsonify({"status": "ok", "response": data})
-    except Exception as exc:  # pylint: disable=broad-except
-        return jsonify({"status": "error", "detail": str(exc)}), 400
-
-
-@app.post("/execute_now")
-def execute_now():
-    payload = request.get_json(silent=True)
-    if not payload:
-        return jsonify({"status": "error", "detail": "Missing JSON payload."}), 400
-    try:
-        response = requests.post(PUBLIC_WEBHOOK_URL, json=payload, timeout=15)
-        response.raise_for_status()
-        try:
-            data = response.json()
-        except ValueError:
-            data = {"raw": response.text}
-        return jsonify({"status": "ok", "response": data})
-    except Exception as exc:  # pylint: disable=broad-except
-        return jsonify({"status": "error", "detail": str(exc)}), 400
-
-
-@app.post("/execute_now", endpoint="execute_now_handler")
-def execute_now_handler():
     payload = request.get_json(silent=True)
     if not payload:
         return jsonify({"status": "error", "detail": "Missing JSON payload."}), 400
