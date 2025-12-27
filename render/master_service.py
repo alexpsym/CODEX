@@ -104,6 +104,8 @@ class ManagedScript:
     last_start_error: Optional[str] = None
     last_exit_code: Optional[int] = None
     last_exit_reason: Optional[str] = None
+    last_spawn_command: Optional[List[str]] = None
+    last_spawn_cwd: Optional[str] = None
 
     @property
     def is_running(self) -> bool:
@@ -124,6 +126,8 @@ class ManagedScript:
             "last_start_error": self.last_start_error,
             "last_exit_code": self.last_exit_code,
             "last_exit_reason": self.last_exit_reason,
+            "last_spawn_command": self.last_spawn_command,
+            "last_spawn_cwd": self.last_spawn_cwd,
             "standalone": self.name in STANDALONE_SCRIPTS,
         }
 
@@ -186,12 +190,14 @@ class ManagedScript:
             env["APP_BASE_PATH"] = f"/apps/{quote(self.name)}"
 
         command = [os.getenv("PYTHON", "python"), "-u", str(self.path)]
+        self.last_spawn_command = command
+        self.last_spawn_cwd = str(self.path.parent)
         try:
             self.process = await asyncio.create_subprocess_exec(
                 *command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                cwd=str(self.path.parent),
+                cwd=self.last_spawn_cwd,
                 env=env,
             )
         except Exception as exc:
@@ -1635,6 +1641,9 @@ async def script_status(script_name: str) -> JSONResponse:
             "last_start_error": script.last_start_error,
             "last_exit_code": script.last_exit_code,
             "last_exit_reason": script.last_exit_reason,
+            "last_spawn_command": script.last_spawn_command,
+            "last_spawn_cwd": script.last_spawn_cwd,
+            "stdout_tail": script.logs(),
         }
     )
 
@@ -1688,7 +1697,13 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
     if not script.is_running or not script.port:
         if script.last_start_attempt_at:
             if script.last_start_error or script.last_exit_reason:
-                detail = script.last_start_error or script.last_exit_reason
+                detail = {
+                    "error": script.last_start_error or script.last_exit_reason,
+                    "exit_code": script.last_exit_code,
+                    "spawn_command": script.last_spawn_command,
+                    "spawn_cwd": script.last_spawn_cwd,
+                    "stdout_tail": script.logs(),
+                }
                 raise HTTPException(status_code=500, detail=detail)
             raise HTTPException(
                 status_code=503, detail=f"{script_name} is starting."
