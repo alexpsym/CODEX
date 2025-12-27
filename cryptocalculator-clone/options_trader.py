@@ -56,6 +56,7 @@ SUB_ACCOUNT_NAME = ""
 MIN_BALANCE_THRESHOLD = 10.0
 DEMO_BALANCE = float(os.getenv("DEMO_BALANCE", 0.0))
 MIN_ORDER_QTY = 0.01
+DEFAULT_OPTION_BASES = ["BTC", "ETH", "SOL"]
 
 
 def _normalize_env_choice(choice: str) -> str:
@@ -233,6 +234,7 @@ def fetch_option_instruments(
 
 
 _tick_size_cache: dict[str, float] = {}
+_min_qty_cache: dict[str, float] = {}
 
 
 def get_tick_size(symbol: str, base_url: str | None = None) -> float:
@@ -260,6 +262,63 @@ def get_tick_size(symbol: str, base_url: str | None = None) -> float:
     tick = float(lst[0].get("priceFilter", {}).get("tickSize", 0))
     _tick_size_cache[symbol] = tick
     return tick
+
+
+def get_min_order_qty(symbol: str, base_url: str | None = None) -> float:
+    """Return the minimum order quantity for ``symbol``."""
+
+    base_url = base_url or get_base_url()
+    if symbol in _min_qty_cache:
+        return _min_qty_cache[symbol]
+    endpoint = "/v5/market/instruments-info"
+    params = {"category": "option", "symbol": symbol}
+    qs = urlencode(params)
+    url = f"{base_url}{endpoint}?{qs}"
+    logger.debug("Fetching min order qty: %s", url)
+    resp = requests.get(url, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+    logger.debug("Min order qty response: %s", data)
+    if data.get("retCode") != 0:
+        raise RuntimeError(
+            f"API Error {data['retCode']}: {data.get('retMsg')}"
+        )
+    lst = data.get("result", {}).get("list", [])
+    if not lst:
+        raise RuntimeError(f"No instrument data for symbol: {symbol}")
+    min_qty = float(
+        lst[0].get("lotSizeFilter", {}).get("minOrderQty", MIN_ORDER_QTY)
+    )
+    _min_qty_cache[symbol] = min_qty
+    return min_qty
+
+
+def get_supported_option_bases(base_url: str | None = None) -> list[str]:
+    """Return available base coins for options."""
+
+    base_url = base_url or get_base_url()
+    endpoint = "/v5/market/instruments-info"
+    params = {"category": "option"}
+    instruments = []
+    cursor = None
+    while True:
+        qs = urlencode({k: v for k, v in params.items() if v is not None})
+        if cursor:
+            qs += f"&cursor={cursor}"
+        url = f"{base_url}{endpoint}?{qs}"
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("retCode") != 0:
+            break
+        instruments.extend(data.get("result", {}).get("list", []))
+        cursor = data.get("result", {}).get("nextPageCursor")
+        if not cursor:
+            break
+    bases = sorted(
+        {inst.get("baseCoin", "").upper() for inst in instruments if inst.get("baseCoin")}
+    )
+    return bases or DEFAULT_OPTION_BASES
 
 
 def round_to_tick(price: float, symbol: str) -> float:

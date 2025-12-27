@@ -971,6 +971,10 @@ async def _place_bybit_reduce_only_limit(
     price: float,
     request_id: str,
 ) -> Dict[str, object]:
+    if category == "option":
+        price = await _round_option_price_to_tick(
+            base_url=base_url, symbol=symbol, price=price
+        )
     body: Dict[str, object] = {
         "category": category,
         "symbol": symbol,
@@ -1012,6 +1016,40 @@ async def _place_bybit_reduce_only_limit(
     if payload.get("retCode") != 0:
         raise ValueError(f"Bybit TP limit order failed: {payload.get('retMsg')}")
     return payload.get("result", {})
+
+
+_OPTION_TICK_CACHE: Dict[str, float] = {}
+
+
+async def _fetch_option_tick_size(*, base_url: str, symbol: str) -> float:
+    if symbol in _OPTION_TICK_CACHE:
+        return _OPTION_TICK_CACHE[symbol]
+    endpoint = "/v5/market/instruments-info"
+    params = {"category": "option", "symbol": symbol}
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.get(f"{base_url}{endpoint}", params=params)
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("retCode") != 0:
+        raise ValueError(
+            f"Bybit option tick lookup failed: {payload.get('retMsg')}"
+        )
+    lst = payload.get("result", {}).get("list", [])
+    if not lst:
+        raise ValueError("Bybit option tick lookup returned no data.")
+    tick = float(lst[0].get("priceFilter", {}).get("tickSize", 0) or 0)
+    if tick <= 0:
+        raise ValueError("Bybit option tick size is missing.")
+    _OPTION_TICK_CACHE[symbol] = tick
+    return tick
+
+
+async def _round_option_price_to_tick(
+    *, base_url: str, symbol: str, price: float
+) -> float:
+    tick = await _fetch_option_tick_size(base_url=base_url, symbol=symbol)
+    rounded = round(price / tick) * tick
+    return max(rounded, tick)
 
 
 async def _place_bybit_order(

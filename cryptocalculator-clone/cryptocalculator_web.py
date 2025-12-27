@@ -18,6 +18,7 @@ from typing import Dict, Optional
 import requests
 from flask import Flask, jsonify, render_template_string, request, redirect, url_for
 
+from bybit_credentials import resolve_bybit_credentials_for
 from cryptocalculator import (
     DEFAULT_EXECUTION_EXCHANGE,
     DEFAULT_PRICE_SOURCE,
@@ -249,42 +250,38 @@ FORM_HTML = """
         }
       }
     }
-    async function loadSymbols(){
-      const symbolInput = document.getElementById('symbol');
-      if(!symbolInput){return;}
+    async function refreshOptionMinQty(){
+      const base = document.getElementById('options_base');
+      const strike = document.getElementById('options_strike');
+      const optType = document.getElementById('options_type');
+      const expiry = document.getElementById('options_expiry');
+      const qtyStep = document.getElementById('options_qty_step');
+      if(!base || !strike || !optType || !expiry || !qtyStep){return;}
+      const params = new URLSearchParams({
+        base: base.value || '',
+        strike: strike.value || '',
+        option_type: optType.value || '',
+        expiry: expiry.value || '',
+      });
       try{
-        const response = await fetch('/symbols/bybit');
-        if(!response.ok){throw new Error('Failed to load symbols');}
+        const response = await fetch(`/options/min-qty?${params.toString()}`);
+        if(!response.ok){throw new Error('Failed to load min qty');}
         const data = await response.json();
-        window.__symbolList = Array.isArray(data.symbols) ? data.symbols : [];
-        updateSymbolSuggestions(symbolInput.value, true);
+        qtyStep.value = data.min_qty || '0.01';
       } catch(err){
-        console.warn(err);
+        qtyStep.value = qtyStep.value || '0.01';
       }
     }
-    function updateSymbolSuggestions(value, forceShow){
-      const symbolList = document.getElementById('symbol_list');
-      const symbols = Array.isArray(window.__symbolList) ? window.__symbolList : [];
-      if(!symbolList){return;}
-      symbolList.innerHTML = '';
-      const query = (value || '').trim().toUpperCase();
-      const matches = query
-        ? symbols.filter((symbol) => symbol.startsWith(query))
-        : symbols.slice();
-      matches.forEach((symbol) => {
-        const item = document.createElement('div');
-        item.className = 'symbol-item';
-        item.textContent = symbol;
-        item.addEventListener('click', () => {
-          const input = document.getElementById('symbol');
-          if(input){
-            input.value = symbol;
-          }
-          symbolList.style.display = 'none';
-        });
-        symbolList.appendChild(item);
-      });
-      symbolList.style.display = (forceShow || query) && matches.length ? 'block' : 'none';
+    function adjustOptionsQty(direction){
+      const qtyInput = document.getElementById('options_quantity');
+      const qtyStep = document.getElementById('options_qty_step');
+      if(!qtyInput || !qtyStep){return;}
+      const step = parseFloat(qtyStep.value || '0.01');
+      const current = parseFloat(qtyInput.value || '0');
+      let next = current + (direction * step);
+      if(next < 0){next = 0;}
+      const decimals = (qtyStep.value.split('.')[1] || '').length;
+      qtyInput.value = next.toFixed(decimals);
     }
     document.addEventListener('DOMContentLoaded', function(){
       const ot = document.getElementById('order_type');
@@ -300,29 +297,22 @@ FORM_HTML = """
       const ps = document.getElementById('price_source');
       if(ps){
         ps.addEventListener('change', updatePriceMode);
-        ps.addEventListener('change', loadSymbols);
         updatePriceMode();
       }
-      const symbolInput = document.getElementById('symbol');
-      if(symbolInput){
-        symbolInput.addEventListener('input', (event) => updateSymbolSuggestions(event.target.value));
-        symbolInput.addEventListener('focus', (event) => updateSymbolSuggestions(event.target.value, true));
-      }
-      document.addEventListener('click', (event) => {
-        const symbolList = document.getElementById('symbol_list');
-        const symbolInputEl = document.getElementById('symbol');
-        if(!symbolList || !symbolInputEl){return;}
-        if(event.target !== symbolInputEl && !symbolList.contains(event.target)){
-          symbolList.style.display = 'none';
-        }
-      });
-      loadSymbols();
       const tradeType = document.getElementById('trade_type');
       if(tradeType){
         tradeType.addEventListener('change', updateTradeType);
       }
       updateTradeType();
-      ['trade_type', 'account_mode', 'direction', 'order_type', 'options_order_type', 'options_type', 'options_side'].forEach(bindButtonGroup);
+      ['trade_type', 'account_mode', 'direction', 'order_type', 'options_order_type', 'options_type', 'options_side', 'price_source', 'execution_exchange', 'options_base'].forEach(bindButtonGroup);
+      ['options_strike', 'options_expiry'].forEach((fieldId) => {
+        const el = document.getElementById(fieldId);
+        if(el){
+          el.addEventListener('change', refreshOptionMinQty);
+          el.addEventListener('blur', refreshOptionMinQty);
+        }
+      });
+      refreshOptionMinQty();
     });
   </script>
 </head>
@@ -347,20 +337,20 @@ FORM_HTML = """
         <input type="hidden" name="account_mode" id="account_mode" value="{{ account_mode }}">
         <div id="crypto_section" class="trade-section">
           <label>Symbol: <input name="symbol" id="symbol"></label><br>
-          <label>Price Source:
-            <select name="price_source" id="price_source">
-              {% for key, meta in price_source_options %}
-              <option value="{{ key }}" {{ 'selected' if key == price_source else '' }}>{{ meta['label'] }}</option>
-              {% endfor %}
-            </select>
-          </label><br>
-          <label>Execution Exchange:
-            <select name="execution_exchange" id="execution_exchange">
-              {% for key, meta in execution_options %}
-              <option value="{{ key }}" {{ 'selected' if key == execution_exchange else '' }}>{{ meta['label'] }}</option>
-              {% endfor %}
-            </select>
-          </label><br>
+          <label>Price Source:</label>
+          <div class="button-group" data-input="price_source">
+            {% for key, meta in price_source_options %}
+            <button type="button" data-value="{{ key }}">{{ meta['label'] }}</button>
+            {% endfor %}
+          </div>
+          <input type="hidden" name="price_source" id="price_source" value="{{ price_source }}">
+          <label>Execution Exchange:</label>
+          <div class="button-group" data-input="execution_exchange">
+            {% for key, meta in execution_options %}
+            <button type="button" data-value="{{ key }}">{{ meta['label'] }}</button>
+            {% endfor %}
+          </div>
+          <input type="hidden" name="execution_exchange" id="execution_exchange" value="{{ execution_exchange }}">
           <p id="price_mode_note"></p>
           <label>Direction:</label>
           <div class="button-group" data-input="direction">
@@ -392,23 +382,35 @@ FORM_HTML = """
             <button type="button" data-value="limit">Limit</button>
           </div>
           <input type="hidden" name="options_order_type" id="options_order_type" value="{{ options_order_type }}">
-          <label>Base: <input name="options_base"></label><br>
-          <label>Strike: <input name="options_strike"></label><br>
+          <label>Base:</label>
+          <div class="button-group" data-input="options_base">
+            {% for base in options_base_options %}
+            <button type="button" data-value="{{ base }}">{{ base }}</button>
+            {% endfor %}
+          </div>
+          <input type="hidden" name="options_base" id="options_base" value="{{ options_base }}">
+          <label>Strike: <input name="options_strike" id="options_strike"></label><br>
           <label>Call/Put:</label>
           <div class="button-group" data-input="options_type">
             <button type="button" data-value="Call">Call</button>
             <button type="button" data-value="Put">Put</button>
           </div>
           <input type="hidden" name="options_type" id="options_type" value="{{ options_type }}">
-          <label>Expiry (D/M/YY): <input name="options_expiry"></label><br>
-          <label>Quote: <input name="options_quote" value="USDT"></label><br>
+          <label>Expiry (D/M/YY): <input name="options_expiry" id="options_expiry"></label><br>
+          <label>Quote: USDT</label><br>
           <label>Side:</label>
           <div class="button-group" data-input="options_side">
             <button type="button" data-value="Buy">Buy</button>
             <button type="button" data-value="Sell">Sell</button>
           </div>
           <input type="hidden" name="options_side" id="options_side" value="{{ options_side }}">
-          <label>Quantity: <input name="options_quantity" value="0"></label><br>
+          <label>Quantity:</label>
+          <div class="button-group">
+            <button type="button" onclick="adjustOptionsQty(-1)">-</button>
+            <button type="button" onclick="adjustOptionsQty(1)">+</button>
+          </div>
+          <input type="hidden" id="options_qty_step" value="{{ options_qty_step }}">
+          <input name="options_quantity" id="options_quantity" value="{{ options_quantity }}"><br>
           <div id="options_limit_price_row">
             <label>Limit Price: <input name="options_limit_price"></label><br>
           </div>
@@ -485,19 +487,40 @@ FORM_HTML = """
 </html>
 """
 
-_options_trader_instance: Optional[options_trader.BybitOptionsTrader] = None
+_options_trader_instances: Dict[str, options_trader.BybitOptionsTrader] = {}
 
 
-def _get_options_trader() -> Optional[options_trader.BybitOptionsTrader]:
-    global _options_trader_instance
+def _get_options_trader(account_mode: str) -> Optional[options_trader.BybitOptionsTrader]:
     options_trader.configure_trading_environment(interactive=False)
-    if _options_trader_instance is None:
-        key, secret = options_trader.get_api_credentials({})
-        if key and secret:
-            _options_trader_instance = options_trader.BybitOptionsTrader(
-                key, secret, options_trader.get_base_url()
-            )
-    return _options_trader_instance
+    account_key = "demo" if account_mode == "demo" else "live"
+    if account_key in _options_trader_instances:
+        return _options_trader_instances[account_key]
+    _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for(
+        account_key
+    )
+    if api_key and api_secret:
+        _options_trader_instances[account_key] = options_trader.BybitOptionsTrader(
+            api_key, api_secret, base_url
+        )
+    return _options_trader_instances.get(account_key)
+
+
+@app.get("/options/min-qty")
+def options_min_qty():
+    base = request.args.get("base", "").strip().upper()
+    strike = request.args.get("strike", "").strip()
+    option_type = request.args.get("option_type", "").strip()
+    expiry = request.args.get("expiry", "").strip()
+    if not base:
+        return jsonify({"min_qty": options_trader.MIN_ORDER_QTY})
+    try:
+        symbol = options_trader.build_option_symbol(
+            base, strike, option_type, expiry, "USDT"
+        )
+        min_qty = options_trader.get_min_order_qty(symbol)
+    except Exception:  # pylint: disable=broad-except
+        min_qty = options_trader.MIN_ORDER_QTY
+    return jsonify({"min_qty": min_qty})
 
 
 @app.route("/", methods=["GET", "POST"])
@@ -525,6 +548,10 @@ def index():
     options_order_type = request.form.get("options_order_type", "market").strip().lower()
     if options_order_type not in {"market", "limit"}:
         options_order_type = "market"
+
+    options_base = request.form.get("options_base", "BTC").strip().upper()
+    if options_base not in options_trader.get_supported_option_bases():
+        options_base = options_trader.get_supported_option_bases()[0]
 
     options_type = request.form.get("options_type", "Call").strip().capitalize()
     if options_type not in {"Call", "Put"}:
@@ -554,7 +581,20 @@ def index():
         try:
             if trade_type == "options":
                 options_action = request.form.get("options_action", "calculate")
-                trader = _get_options_trader()
+                trader = _get_options_trader(account_mode)
+                symbol_filter = None
+                if (
+                    request.form.get("options_strike")
+                    and request.form.get("options_expiry")
+                    and options_type
+                ):
+                    symbol_filter = options_trader.build_option_symbol(
+                        options_base,
+                        request.form.get("options_strike", ""),
+                        options_type,
+                        request.form.get("options_expiry", ""),
+                        "USDT",
+                    )
                 if options_action in {"journal", "open_orders", "open_positions"}:
                     if trader is None:
                         raise ValueError("Options credentials are not configured.")
@@ -563,10 +603,10 @@ def index():
                             trader, days=30
                         )
                     elif options_action == "open_orders":
-                        orders = trader.get_open_orders()
+                        orders = trader.get_open_orders(symbol_filter)
                         options_output = json.dumps(orders, indent=2)
                     elif options_action == "open_positions":
-                        positions = trader.get_positions()
+                        positions = trader.get_positions(symbol_filter)
                         options_output = json.dumps(positions, indent=2)
                 else:
                     balance = options_trader.DEMO_BALANCE
@@ -580,22 +620,29 @@ def index():
                     risk_usd = balance * risk_percent / 100
                     qty = float(request.form.get("options_quantity", 0) or 0)
                     symbol = options_trader.build_option_symbol(
-                        request.form.get("options_base", ""),
+                        options_base,
                         request.form.get("options_strike", ""),
                         options_type,
                         request.form.get("options_expiry", ""),
-                        request.form.get("options_quote", "USDT"),
+                        "USDT",
                     )
-                    tick = options_trader.fetch_option_ticker(symbol)
+                    tick = options_trader.fetch_option_ticker(
+                        symbol, base_url=trader.base_url if trader else None
+                    )
                     mark_price = float(tick.get("markPrice", 0) or 0)
                     if qty <= 0 and risk_usd > 0:
-                        qty = options_trader.compute_order_qty(risk_usd, mark_price)
+                        min_qty = options_trader.get_min_order_qty(
+                            symbol, base_url=trader.base_url if trader else None
+                        )
+                        qty = options_trader.compute_order_qty(risk_usd, mark_price, min_qty)
                     limit_price = None
                     if (
                         options_order_type == "limit"
                         and request.form.get("options_limit_price")
                     ):
-                        limit_price = float(request.form["options_limit_price"])
+                        limit_price = options_trader.round_to_tick(
+                            float(request.form["options_limit_price"]), symbol
+                        )
                     entry_price = limit_price or mark_price
                     tp_multiplier = float(
                         request.form.get("options_tp_multiplier", 3) or 3
@@ -707,6 +754,23 @@ def index():
         }
         export_json = json.dumps(export_payload, indent=2)
 
+    options_qty_step = options_trader.MIN_ORDER_QTY
+    if request.method == "POST":
+        strike_value = request.form.get("options_strike", "").strip()
+        expiry_value = request.form.get("options_expiry", "").strip()
+        if strike_value and expiry_value:
+            try:
+                symbol_step = options_trader.build_option_symbol(
+                    options_base,
+                    strike_value,
+                    options_type,
+                    expiry_value,
+                    "USDT",
+                )
+                options_qty_step = options_trader.get_min_order_qty(symbol_step)
+            except Exception:  # pylint: disable=broad-except
+                options_qty_step = options_trader.MIN_ORDER_QTY
+
     return render_template_string(
         FORM_HTML,
         summary=summary,
@@ -723,8 +787,12 @@ def index():
         direction=direction,
         order_type=order_type,
         options_order_type=options_order_type,
+        options_base=options_base,
         options_type=options_type,
         options_side=options_side,
+        options_base_options=options_trader.get_supported_option_bases(),
+        options_qty_step=options_qty_step,
+        options_quantity=request.form.get("options_quantity", "0"),
         options_output=options_output,
         execution_options=sorted(EXECUTION_EXCHANGES.items()),
         price_source_options=sorted(PRICE_SOURCES.items()),
