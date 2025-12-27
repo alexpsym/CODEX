@@ -1,8 +1,9 @@
 """Simple web UI for Bybit history downloads."""
 
-import os
-import webbrowser
 import csv
+import os
+import sys
+import webbrowser
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -24,6 +25,7 @@ HTML_TEMPLATE = """
 <head>
 <meta charset="UTF-8">
 <title>Bybit History</title>
+<base href="{{ base_href }}">
 <style>
 body { background-color: #121212; color: #e0e0e0; font-family: Arial, sans-serif; }
 .container { display: flex; justify-content: space-around; margin-top: 50px; }
@@ -38,7 +40,7 @@ select, input[type="date"] { width: 100%; padding: 5px; margin-top: 5px; backgro
 <div class="container">
   <div class="box">
     <h2>Trade History</h2>
-    <form action="/trade" method="post">
+    <form action="trade" method="post">
       <label for="trade-start">Start date</label>
       <input id="trade-start" type="date" name="start_date" />
       <label for="trade-end">End date</label>
@@ -55,7 +57,7 @@ select, input[type="date"] { width: 100%; padding: 5px; margin-top: 5px; backgro
   </div>
   <div class="box">
     <h2>USDT Balance History</h2>
-    <form action="/balance" method="post">
+    <form action="balance" method="post">
       <label for="balance-start">Start date</label>
       <input id="balance-start" type="date" name="start_date" />
       <label for="balance-end">End date</label>
@@ -107,7 +109,8 @@ def open_browser(url: str) -> None:
 @app.route("/")
 def index() -> str:
     """Render the main menu page."""
-    return render_template_string(HTML_TEMPLATE)
+    base_href = os.getenv("APP_BASE_PATH", "/").rstrip("/") + "/"
+    return render_template_string(HTML_TEMPLATE, base_href=base_href)
 
 
 @app.post("/trade")
@@ -264,8 +267,14 @@ def _serve_wsgi(app: Flask, host: str = "127.0.0.1", port: int = 5000) -> None:
 
 
 if __name__ == "__main__":
-    host = "127.0.0.1"
-    port = 5000
+    host = os.getenv("HOST", "127.0.0.1")
+    port_value = os.getenv("PORT", "5000")
+    try:
+        port = int(port_value)
+    except ValueError:
+        port = 5000
     url = f"http://{host}:{port}"
-    open_browser(url)
+    is_render = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID"))
+    if sys.stdout.isatty() and not is_render:
+        open_browser(url)
     _serve_wsgi(app, host=host, port=port)
