@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import contextlib
-import html
 import io
 import json
 import os
@@ -16,7 +15,7 @@ import webbrowser
 from typing import Dict, Optional
 
 import requests
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, jsonify, render_template_string, request, redirect, url_for
 
 from cryptocalculator import (
     DEFAULT_EXECUTION_EXCHANGE,
@@ -84,6 +83,8 @@ FORM_HTML = """
     .copy-row button {cursor:pointer;}
     .copy-status {font-size:12px; color:#9ca3af;}
     .copy-box {background:#111827; border:1px solid #1f2937; padding:8px; border-radius:6px; color:#e5e7eb; max-width:520px; white-space:pre-wrap;}
+    .trade-section {padding:10px; border:1px solid #1f2937; margin-bottom:12px;}
+    .hidden {display:none;}
   </style>
   <script>
     function copyText(text, statusId){
@@ -133,6 +134,15 @@ FORM_HTML = """
       const notes = {{ price_mode_notes|tojson }};
       if(!priceSource || !note){return;}
       note.innerText = notes[priceSource.value] || '';
+    }
+    function updateTradeType(){
+      const selector = document.getElementById('trade_type');
+      const optionsSection = document.getElementById('options_section');
+      const cryptoSection = document.getElementById('crypto_section');
+      if(!selector || !optionsSection || !cryptoSection){return;}
+      const isOptions = selector.value === 'options';
+      optionsSection.classList.toggle('hidden', !isOptions);
+      cryptoSection.classList.toggle('hidden', isOptions);
     }
     async function loadSymbols(){
       const symbolInput = document.getElementById('symbol');
@@ -197,6 +207,11 @@ FORM_HTML = """
         }
       });
       loadSymbols();
+      const tradeType = document.getElementById('trade_type');
+      if(tradeType){
+        tradeType.addEventListener('change', updateTradeType);
+      }
+      updateTradeType();
     });
   </script>
 </head>
@@ -206,50 +221,72 @@ FORM_HTML = """
   <div class="container">
     <div class="form">
       <form method="post">
-        <label>Symbol: <input name="symbol" id="symbol" required></label><br>
-        <label>Price Source:
-          <select name="price_source" id="price_source">
-            {% for key, meta in price_source_options %}
-            <option value="{{ key }}" {{ 'selected' if key == price_source else '' }}>{{ meta['label'] }}</option>
-            {% endfor %}
+        <label>Trade Type:
+          <select name="trade_type" id="trade_type">
+            <option value="perpetual" {{ 'selected' if trade_type == 'perpetual' else '' }}>Perpetual Futures</option>
+            <option value="spot" {{ 'selected' if trade_type == 'spot' else '' }}>Spot</option>
+            <option value="options" {{ 'selected' if trade_type == 'options' else '' }}>Options</option>
           </select>
         </label><br>
-        <label>Execution Exchange:
-          <select name="execution_exchange" id="execution_exchange">
-            {% for key, meta in execution_options %}
-            <option value="{{ key }}" {{ 'selected' if key == execution_exchange else '' }}>{{ meta['label'] }}</option>
-            {% endfor %}
-          </select>
-        </label><br>
-        <p id="price_mode_note"></p>
-        <label>Account:
-          <select name="account_mode" id="account_mode">
-            <option value="live" {{ 'selected' if account_mode == 'live' else '' }}>Live</option>
-            <option value="demo" {{ 'selected' if account_mode == 'demo' else '' }}>Demo</option>
-          </select>
-        </label><br>
-        <label>Direction:
-          <select name="direction">
-            <option value="long">Long</option>
-            <option value="short">Short</option>
-          </select>
-        </label><br>
-        <label>Order Type:
-          <select name="order_type" id="order_type">
-            <option value="market">Market</option>
-            <option value="limit">Limit</option>
-          </select>
-        </label><br>
-        <div id="entry_price_row">
-          <label>Entry Price: <input name="entry_price" type="number" step="0.0001"></label><br>
+        <div id="crypto_section" class="trade-section">
+          <label>Symbol: <input name="symbol" id="symbol"></label><br>
+          <label>Price Source:
+            <select name="price_source" id="price_source">
+              {% for key, meta in price_source_options %}
+              <option value="{{ key }}" {{ 'selected' if key == price_source else '' }}>{{ meta['label'] }}</option>
+              {% endfor %}
+            </select>
+          </label><br>
+          <label>Execution Exchange:
+            <select name="execution_exchange" id="execution_exchange">
+              {% for key, meta in execution_options %}
+              <option value="{{ key }}" {{ 'selected' if key == execution_exchange else '' }}>{{ meta['label'] }}</option>
+              {% endfor %}
+            </select>
+          </label><br>
+          <p id="price_mode_note"></p>
+          <label>Account:
+            <select name="account_mode" id="account_mode">
+              <option value="live" {{ 'selected' if account_mode == 'live' else '' }}>Live</option>
+              <option value="demo" {{ 'selected' if account_mode == 'demo' else '' }}>Demo</option>
+            </select>
+          </label><br>
+          <label>Direction:
+            <select name="direction">
+              <option value="long">Long</option>
+              <option value="short">Short</option>
+            </select>
+          </label><br>
+          <label>Order Type:
+            <select name="order_type" id="order_type">
+              <option value="market">Market</option>
+              <option value="limit">Limit</option>
+            </select>
+          </label><br>
+          <div id="entry_price_row">
+            <label>Entry Price: <input name="entry_price" type="number" step="0.0001"></label><br>
+          </div>
+          <label>Stop loss ticks: <input name="stop_loss_ticks" type="number" step="1"></label><br>
+          <label>Risk %: <input name="risk_percent" type="number" step="0.01"></label><br>
+          <label>Risk–reward ratio: <input name="rr_ratio" type="number" step="0.1" value="2"></label><br>
+          <label>Price → Execution rate:
+            <input name="price_to_execution_rate" id="price_to_execution_rate" type="number" step="0.0001" min="0" value="{{ price_to_execution_rate }}" placeholder="e.g. 1.55">
+          </label><br>
+          <small>Use this when your price source is quoted in a different currency than your execution exchange.</small><br>
         </div>
-        <label>Stop loss ticks: <input name="stop_loss_ticks" type="number" step="1" required></label><br>
-        <label>Risk %: <input name="risk_percent" type="number" step="0.01" required></label><br>
-        <label>Risk–reward ratio: <input name="rr_ratio" type="number" step="0.1" value="2" required></label><br>
-        <label>Price → Execution rate:
-          <input name="price_to_execution_rate" id="price_to_execution_rate" type="number" step="0.0001" min="0" value="{{ price_to_execution_rate }}" placeholder="e.g. 1.55">
-        </label><br>
-        <small>Use this when your price source is quoted in a different currency than your execution exchange.</small><br>
+        <div id="options_section" class="trade-section hidden">
+          <label>Option Symbol (optional): <input name="options_symbol"></label><br>
+          <label>Base: <input name="options_base"></label><br>
+          <label>Strike: <input name="options_strike"></label><br>
+          <label>Call/Put: <input name="options_type"></label><br>
+          <label>Expiry (D/M/YY): <input name="options_expiry"></label><br>
+          <label>Quote: <input name="options_quote" value="USDT"></label><br>
+          <label>Side: <input name="options_side" value="Buy"></label><br>
+          <label>Quantity: <input name="options_quantity" value="0"></label><br>
+          <label>Limit Price: <input name="options_limit_price"></label><br>
+          <label>Risk %: <input name="options_risk_percent" value="0"></label><br>
+          <label>Auto Trade: <input type="checkbox" name="options_auto_trade"></label><br>
+        </div>
         <button type="submit">Calculate</button>
       </form>
       <h3>TradingView Webhook</h3>
@@ -280,6 +317,10 @@ FORM_HTML = """
           <button type="button" onclick="exportResult()">Export Result</button>
         </div>
       {% endif %}
+      {% if options_output %}
+        <h2>Options Output</h2>
+        <pre id="options_output">{{ options_output }}</pre>
+      {% endif %}
       {% if summary %}
         <h2>Summary</h2>
         <pre id="summary_text">{{ summary }}</pre>
@@ -308,22 +349,6 @@ FORM_HTML = """
 </html>
 """
 
-OPTIONS_STYLE = """
-<style>
-  body { background-color: #121212; color: #fff; font-family: Arial, sans-serif; }
-  button { display: block; margin: 10px 0; background-color: #333; color: #fff;
-           padding: 8px 12px; border: 1px solid #555; cursor: pointer; }
-  input { background-color: #222; color: #fff; border: 1px solid #555; }
-  table td { padding: 4px; }
-  a { color: #80b3ff; }
-</style>
-"""
-
-
-def _options_page(content: str) -> str:
-    return f"<!doctype html><html><head>{OPTIONS_STYLE}</head><body>{content}</body></html>"
-
-
 _options_trader_instance: Optional[options_trader.BybitOptionsTrader] = None
 
 
@@ -347,6 +372,11 @@ def index():
     payload_json = None
     export_json = None
     trade = None
+    options_output = None
+
+    trade_type = request.form.get("trade_type", "perpetual").strip().lower()
+    if trade_type not in {"perpetual", "spot", "options"}:
+        trade_type = "perpetual"
 
     execution_exchange = request.form.get(
         "execution_exchange", DEFAULT_EXECUTION_EXCHANGE
@@ -366,57 +396,103 @@ def index():
 
     if request.method == "POST":
         try:
-            symbol = request.form["symbol"].strip().upper()
-            direction = request.form.get("direction", "long")
-            order_type = request.form.get("order_type", "market")
-            entry_price_raw = request.form.get("entry_price")
-            stop_loss_ticks = float(request.form["stop_loss_ticks"])
-            risk_percent = float(request.form["risk_percent"])
-            rr_ratio = float(request.form.get("rr_ratio", 2.0))
-
-            config: Dict[str, object] = {
-                "symbol": symbol,
-                "direction": direction,
-                "order_type": order_type,
-                "stop_loss_ticks": stop_loss_ticks,
-                "risk_percent": risk_percent,
-                "rr_ratio": rr_ratio,
-                "price_source": price_source,
-                "execution_exchange": execution_exchange,
-                "account_balance": "auto",
-                "account_mode": account_mode,
-            }
-            config["trade_mode"] = trade_mode
-            if price_to_execution_rate:
-                config["price_to_execution_rate"] = float(price_to_execution_rate)
-            if order_type == "limit" and entry_price_raw:
-                config["entry_price"] = float(entry_price_raw)
-
-            balance_fetcher = BALANCE_ADAPTERS.get(execution_exchange)
-            if balance_fetcher is None:
-                raise ValueError(
-                    f"Execution exchange '{execution_exchange}' is not supported."
+            if trade_type == "options":
+                trader = _get_options_trader()
+                balance = options_trader.DEMO_BALANCE
+                if trader is not None:
+                    api_bal = trader.get_wallet_balance()
+                    if api_bal > 0:
+                        balance = api_bal
+                risk_percent = float(
+                    request.form.get("options_risk_percent", 0) or 0
                 )
-            account_asset = "AUD" if execution_exchange == "coinspot" else "USDT"
-            if execution_exchange == "bybit":
-                config["account_balance"] = _fetch_master_balance(
-                    account_mode, coin=account_asset, account_type="UNIFIED"
-                )
+                risk_usd = balance * risk_percent / 100
+                qty = float(request.form.get("options_quantity", 0) or 0)
+                symbol = request.form.get("options_symbol", "").strip().upper()
+                if not symbol:
+                    symbol = options_trader.build_option_symbol(
+                        request.form.get("options_base", ""),
+                        request.form.get("options_strike", ""),
+                        request.form.get("options_type", ""),
+                        request.form.get("options_expiry", ""),
+                        request.form.get("options_quote", "USDT"),
+                    )
+                if qty <= 0 and risk_usd > 0:
+                    tick = options_trader.fetch_option_ticker(symbol)
+                    price = float(tick.get("markPrice", 0) or 0)
+                    qty = options_trader.compute_order_qty(risk_usd, price)
+                cfg = {
+                    "symbol": symbol,
+                    "side": request.form.get("options_side", "Buy"),
+                    "quantity": qty,
+                    "limit_price": float(request.form["options_limit_price"])
+                    if request.form.get("options_limit_price")
+                    else None,
+                    "risk_usd": risk_usd,
+                    "auto_trade": bool(request.form.get("options_auto_trade")),
+                }
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    options_trader.execute_trade_from_cfg(cfg)
+                options_output = buf.getvalue()
             else:
-                config["account_balance"] = balance_fetcher(
-                    account_asset, account_type="UNIFIED", account_mode=account_mode
+                symbol = request.form.get("symbol", "").strip().upper()
+                if not symbol:
+                    raise ValueError("Symbol is required for spot/perpetual trades.")
+                direction = request.form.get("direction", "long")
+                order_type = request.form.get("order_type", "market")
+                entry_price_raw = request.form.get("entry_price")
+                stop_loss_ticks = float(request.form["stop_loss_ticks"])
+                risk_percent = float(request.form["risk_percent"])
+                rr_ratio = float(request.form.get("rr_ratio", 2.0))
+
+                config: Dict[str, object] = {
+                    "symbol": symbol,
+                    "direction": direction,
+                    "order_type": order_type,
+                    "stop_loss_ticks": stop_loss_ticks,
+                    "risk_percent": risk_percent,
+                    "rr_ratio": rr_ratio,
+                    "price_source": price_source,
+                    "execution_exchange": execution_exchange,
+                    "account_balance": "auto",
+                    "account_mode": account_mode,
+                }
+                config["trade_mode"] = trade_mode
+                if price_to_execution_rate:
+                    config["price_to_execution_rate"] = float(price_to_execution_rate)
+                if order_type == "limit" and entry_price_raw:
+                    config["entry_price"] = float(entry_price_raw)
+
+                balance_fetcher = BALANCE_ADAPTERS.get(execution_exchange)
+                if balance_fetcher is None:
+                    raise ValueError(
+                        f"Execution exchange '{execution_exchange}' is not supported."
+                    )
+                account_asset = "AUD" if execution_exchange == "coinspot" else "USDT"
+                if execution_exchange == "bybit":
+                    config["account_balance"] = _fetch_master_balance(
+                        account_mode, coin=account_asset, account_type="UNIFIED"
+                    )
+                else:
+                    config["account_balance"] = balance_fetcher(
+                        account_asset,
+                        account_type="UNIFIED",
+                        account_mode=account_mode,
+                    )
+                if execution_exchange == "coinspot":
+                    config.setdefault("account_asset", "AUD")
+
+                trade = calculate_trade(config)
+                summary = format_trade(trade)
+                risk_info = {k.replace("_", " ").title(): v for k, v in trade.items()}
+                payload_json = json.dumps(build_webhook_payload(trade), indent=2)
+
+                price_source = trade.get("price_source", price_source)
+                execution_exchange = trade.get(
+                    "execution_exchange", execution_exchange
                 )
-            if execution_exchange == "coinspot":
-                config.setdefault("account_asset", "AUD")
-
-            trade = calculate_trade(config)
-            summary = format_trade(trade)
-            risk_info = {k.replace("_", " ").title(): v for k, v in trade.items()}
-            payload_json = json.dumps(build_webhook_payload(trade), indent=2)
-
-            price_source = trade.get("price_source", price_source)
-            execution_exchange = trade.get("execution_exchange", execution_exchange)
-            trade_mode = trade.get("trade_mode", trade_mode)
+                trade_mode = trade.get("trade_mode", trade_mode)
         except Exception as exc:  # pylint: disable=broad-except
             error = str(exc)
 
@@ -449,6 +525,8 @@ def index():
         trade_mode=trade_mode,
         account_mode=account_mode,
         price_to_execution_rate=price_to_execution_rate,
+        trade_type=trade_type,
+        options_output=options_output,
         execution_options=sorted(EXECUTION_EXCHANGES.items()),
         price_source_options=sorted(PRICE_SOURCES.items()),
         price_mode_notes=PRICE_MODE_NOTES,
@@ -457,246 +535,9 @@ def index():
     )
 
 
-@app.route("/options")
-def options_index():
-    return _options_page(
-        """
-        <h1>Options Position Calculator</h1>
-        <button onclick=\"location.href='/options/trade'\">Create Trade</button>
-        <button onclick=\"location.href='/options/show'\">Show Open Orders/Positions</button>
-        <button onclick=\"location.href='/options/cancel'\">Cancel All Orders/Positions</button>
-        <button onclick=\"location.href='/options/edit'\">Edit Open Order</button>
-        <button onclick=\"location.href='/options/export_recent'\">Export Trade History (7 days)</button>
-        <button onclick=\"location.href='/options/export_all'\">Export All Trade History</button>
-        <button onclick=\"location.href='/options/delivery_recent'\">Export Delivery History (7 days)</button>
-        <button onclick=\"location.href='/options/delivery_all'\">Export All Delivery History</button>
-        <button onclick=\"location.href='/options/reduce'\">Place Reduce-Only Exits</button>
-        <p><a href='/'>Back to Crypto Calculator</a></p>
-        """
-    )
-
-
-@app.route("/options/trade", methods=["GET", "POST"])
-def options_trade():
-    if request.method == "POST":
-        form = request.form
-        trader = _get_options_trader()
-        balance = options_trader.DEMO_BALANCE
-        if trader is not None:
-            api_bal = trader.get_wallet_balance()
-            if api_bal > 0:
-                balance = api_bal
-        risk_percent = float(form.get("risk_percent", 0) or 0)
-        risk_usd = balance * risk_percent / 100
-        qty = float(form.get("quantity", 0) or 0)
-        symbol = form.get("symbol", "").strip().upper()
-        if not symbol:
-            symbol = options_trader.build_option_symbol(
-                form.get("base", ""),
-                form.get("strike", ""),
-                form.get("option_type", ""),
-                form.get("expiry", ""),
-                form.get("quote", "USDT"),
-            )
-        if qty <= 0 and risk_usd > 0:
-            tick = options_trader.fetch_option_ticker(symbol)
-            price = float(tick.get("markPrice", 0) or 0)
-            qty = options_trader.compute_order_qty(risk_usd, price)
-        cfg = {
-            "symbol": symbol,
-            "side": form.get("side", "Buy"),
-            "quantity": qty,
-            "limit_price": float(form["limit_price"]) if form.get("limit_price") else None,
-            "risk_usd": risk_usd,
-            "auto_trade": bool(form.get("auto_trade")),
-        }
-        buf = io.StringIO()
-        error = None
-        try:
-            with contextlib.redirect_stdout(buf):
-                options_trader.execute_trade_from_cfg(cfg)
-        except Exception as exc:  # pragma: no cover - interactive error handling
-            error = exc
-            app.logger.exception("Options trade execution failed")
-        output = buf.getvalue()
-        if error:
-            output += (
-                "\n\nERROR: "
-                + str(error)
-                + "\nProvide BYBIT_API_KEY/BYBIT_API_SECRET env vars or add "
-                "api_key/api_secret to the form's config fields."
-            )
-        return _options_page(
-            "<pre>"
-            + html.escape(output)
-            + "</pre><a href='/options'>Back</a>"
-        )
-
-    balance = options_trader.DEMO_BALANCE
-    trader = _get_options_trader()
-    if trader is not None:
-        api_bal = trader.get_wallet_balance()
-        if api_bal > 0:
-            balance = api_bal
-    html_body = render_template_string(
-        """
-        <h2>Create Trade</h2>
-        <p>Current Balance: {{balance}} USDT</p>
-        <form method='post'>
-        <table>
-        <tr><td>Symbol (optional)</td><td><input name='symbol'></td></tr>
-        <tr><td>Base</td><td><input name='base'></td></tr>
-        <tr><td>Strike</td><td><input name='strike'></td></tr>
-        <tr><td>Call/Put</td><td><input name='option_type'></td></tr>
-        <tr><td>Expiry (D/M/YY)</td><td><input name='expiry'></td></tr>
-        <tr><td>Quote</td><td><input name='quote' value='USDT'></td></tr>
-        <tr><td>Side</td><td><input name='side' value='Buy'></td></tr>
-        <tr><td>Quantity</td><td><input name='quantity' value='0'></td></tr>
-        <tr><td>Limit Price</td><td><input name='limit_price'></td></tr>
-        <tr><td>Risk %</td><td><input name='risk_percent' value='0'></td></tr>
-        <tr><td>Auto Trade</td><td><input type='checkbox' name='auto_trade'></td></tr>
-        </table>
-        <button type='submit'>Submit Trade</button>
-        </form>
-        <a href='/options'>Back</a>
-        """,
-        balance=balance,
-    )
-    return _options_page(html_body)
-
-
-def _options_requires_trader() -> Optional[options_trader.BybitOptionsTrader]:
-    trader = _get_options_trader()
-    if trader is None:
-        return None
-    return trader
-
-
-@app.route("/options/show")
-def options_show():
-    trader = _options_requires_trader()
-    if trader is None:
-        return _options_page("No trader available. Configure API keys.<br><a href='/options'>Back</a>")
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        options_trader.show_open(trader)
-    return _options_page(
-        "<pre>" + html.escape(buf.getvalue()) + "</pre><a href='/options'>Back</a>"
-    )
-
-
-@app.route("/options/cancel")
-def options_cancel():
-    trader = _options_requires_trader()
-    if trader is None:
-        return _options_page("No trader available. Configure API keys.<br><a href='/options'>Back</a>")
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        options_trader.cancel_all(trader)
-    return _options_page(
-        "<pre>" + html.escape(buf.getvalue()) + "</pre><a href='/options'>Back</a>"
-    )
-
-
-@app.route("/options/edit", methods=["GET", "POST"])
-def options_edit():
-    trader = _options_requires_trader()
-    if trader is None:
-        return _options_page("No trader available. Configure API keys.<br><a href='/options'>Back</a>")
-    if request.method == "POST":
-        oid = request.form.get("order_id", "")
-        price = request.form.get("price")
-        qty = request.form.get("qty")
-        price_val = float(price) if price else None
-        qty_val = float(qty) if qty else None
-        trader.amend_order(oid, price_val, qty_val)
-        return _options_page("Order amended.<br><a href='/options'>Back</a>")
-    html_body = render_template_string(
-        """
-        <h2>Edit Open Order</h2>
-        <form method='post'>
-        Order ID: <input name='order_id'><br>
-        New Price: <input name='price'><br>
-        New Qty: <input name='qty'><br>
-        <button type='submit'>Submit</button>
-        </form>
-        <a href='/options'>Back</a>
-        """
-    )
-    return _options_page(html_body)
-
-
-@app.route("/options/export_recent")
-def options_export_recent():
-    trader = _options_requires_trader()
-    if trader is None:
-        return _options_page("No trader available. Configure API keys.<br><a href='/options'>Back</a>")
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        options_trader.export_recent_trade_history(trader)
-    return _options_page(
-        "<pre>" + html.escape(buf.getvalue()) + "</pre><a href='/options'>Back</a>"
-    )
-
-
-@app.route("/options/export_all")
-def options_export_all():
-    trader = _options_requires_trader()
-    if trader is None:
-        return _options_page("No trader available. Configure API keys.<br><a href='/options'>Back</a>")
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        options_trader.export_all_trade_history(trader)
-    return _options_page(
-        "<pre>" + html.escape(buf.getvalue()) + "</pre><a href='/options'>Back</a>"
-    )
-
-
-@app.route("/options/delivery_recent")
-def options_delivery_recent():
-    trader = _options_requires_trader()
-    if trader is None:
-        return _options_page("No trader available. Configure API keys.<br><a href='/options'>Back</a>")
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        options_trader.export_recent_delivery_history(trader)
-    return _options_page(
-        "<pre>" + html.escape(buf.getvalue()) + "</pre><a href='/options'>Back</a>"
-    )
-
-
-@app.route("/options/delivery_all")
-def options_delivery_all():
-    trader = _options_requires_trader()
-    if trader is None:
-        return _options_page("No trader available. Configure API keys.<br><a href='/options'>Back</a>")
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        options_trader.export_all_delivery_history(trader)
-    return _options_page(
-        "<pre>" + html.escape(buf.getvalue()) + "</pre><a href='/options'>Back</a>"
-    )
-
-
-@app.route("/options/reduce")
-def options_reduce():
-    trader = _options_requires_trader()
-    if trader is None:
-        return _options_page("No trader available. Configure API keys.<br><a href='/options'>Back</a>")
-    buf = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(buf):
-            options_trader.set_profit_targets(trader)
-    except Exception as exc:  # pragma: no cover - just in case
-        app.logger.exception("Failed to set profit targets")
-        return _options_page(
-            "<pre>Failed to set profit targets: "
-            + html.escape(str(exc))
-            + "</pre><a href='/options'>Back</a>"
-        )
-    return _options_page(
-        "<pre>" + html.escape(buf.getvalue()) + "</pre><a href='/options'>Back</a>"
-    )
+@app.get("/options")
+def options_redirect():
+    return redirect(url_for("index"))
 
 
 EDGE_CONTROLLER_NAMES = ("microsoft-edge", "msedge")
