@@ -8,9 +8,17 @@
     const logBox = document.getElementById('log-box');
     const appPanel = document.getElementById('app-panel');
     const appFrame = document.getElementById('app-frame');
+    const settingsCard = document.getElementById('bybit-settings');
+    const waitInput = document.getElementById('bybit-wait-seconds');
+    const thresholdInput = document.getElementById('bybit-threshold');
+    const saveSettingsBtn = document.getElementById('bybit-save-settings');
+    const reloadSettingsBtn = document.getElementById('bybit-reload-settings');
+    const testAlertBtn = document.getElementById('bybit-test-alert');
+    const settingsStatus = document.getElementById('bybit-settings-status');
 
     const buildScriptPath = (name) => encodeURIComponent(name).replace(/%2F/g, '/');
     const appUrl = `/apps/${buildScriptPath(scriptName)}`;
+    const isBybitMonitor = scriptName.replace(/-/g, '_') === 'bybit_monitor';
 
     let logCursor = 0;
     let pollTimer = null;
@@ -154,6 +162,101 @@
         }
     };
 
+    const setSettingsBadge = (text, isError = false) => {
+        if (!settingsStatus) return;
+        settingsStatus.textContent = text;
+        settingsStatus.style.background = isError ? '#7f1d1d' : '#1f2937';
+        settingsStatus.style.color = isError ? '#fecdd3' : '#cbd5e1';
+    };
+
+    const loadSettings = async () => {
+        if (!isBybitMonitor || !settingsCard) return;
+        try {
+            const resp = await fetch('/api/bybit-monitor/settings');
+            if (!resp.ok) {
+                throw new Error(`Failed to load settings (${resp.status})`);
+            }
+            const data = await resp.json();
+            if (waitInput) waitInput.value = data.wait_seconds ?? '';
+            if (thresholdInput) thresholdInput.value = data.percent_threshold ?? '';
+            settingsCard.style.display = 'block';
+            if (data.push_ready) {
+                setSettingsBadge('Ready');
+            } else {
+                setSettingsBadge('Telegram not configured', true);
+            }
+        } catch (err) {
+            console.error(err);
+            setSettingsBadge('Load failed', true);
+        }
+    };
+
+    const saveSettings = async () => {
+        if (!isBybitMonitor || !settingsCard) return;
+        const body = {
+            wait_seconds: Number(waitInput?.value || 0),
+            percent_threshold: Number(thresholdInput?.value || 0),
+        };
+
+        if (saveSettingsBtn) saveSettingsBtn.disabled = true;
+        if (reloadSettingsBtn) reloadSettingsBtn.disabled = true;
+        if (testAlertBtn) testAlertBtn.disabled = true;
+        setSettingsBadge('Saving...');
+
+        try {
+            const resp = await fetch('/api/bybit-monitor/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || `Save failed (${resp.status})`);
+            }
+
+            const data = await resp.json();
+            if (waitInput) waitInput.value = data.wait_seconds ?? '';
+            if (thresholdInput) thresholdInput.value = data.percent_threshold ?? '';
+            setSettingsBadge('Saved');
+        } catch (err) {
+            console.error(err);
+            setSettingsBadge('Save failed', true);
+            alert(err.message || 'Unable to save settings');
+        } finally {
+            if (saveSettingsBtn) saveSettingsBtn.disabled = false;
+            if (reloadSettingsBtn) reloadSettingsBtn.disabled = false;
+            if (testAlertBtn) testAlertBtn.disabled = false;
+        }
+    };
+
+    const sendTestAlert = async () => {
+        if (!isBybitMonitor || !settingsCard) return;
+        if (testAlertBtn) testAlertBtn.disabled = true;
+        setSettingsBadge('Sending test...');
+        try {
+            const resp = await fetch('/api/bybit-monitor/push-test', { method: 'POST' });
+            const payloadText = await resp.text();
+            if (!resp.ok) {
+                throw new Error(payloadText || `Test failed (${resp.status})`);
+            }
+            const data = payloadText ? JSON.parse(payloadText) : {};
+            if (data?.sent) {
+                setSettingsBadge('Test sent');
+            } else if (data?.configured === false) {
+                setSettingsBadge('Telegram not configured', true);
+            } else {
+                setSettingsBadge('Test completed');
+            }
+        } catch (err) {
+            console.error(err);
+            setSettingsBadge('Test failed', true);
+            alert(err.message || 'Unable to send test alert');
+        } finally {
+            if (testAlertBtn) testAlertBtn.disabled = false;
+        }
+    };
+
     const backBtn = document.getElementById('nav-back');
     const forwardBtn = document.getElementById('nav-forward');
     backBtn?.addEventListener('click', () => window.history.back());
@@ -161,6 +264,18 @@
 
     startBtn?.addEventListener('click', startScript);
     stopBtn?.addEventListener('click', stopScript);
+    saveSettingsBtn?.addEventListener('click', (event) => {
+        event.preventDefault();
+        saveSettings();
+    });
+    reloadSettingsBtn?.addEventListener('click', (event) => {
+        event.preventDefault();
+        loadSettings();
+    });
+    testAlertBtn?.addEventListener('click', (event) => {
+        event.preventDefault();
+        sendTestAlert();
+    });
 
     const init = async () => {
         const running = await refreshStatus();
@@ -169,6 +284,7 @@
         }
         pollLogs();
         pollTimer = setInterval(pollLogs, 2000);
+        loadSettings();
     };
 
     init();
