@@ -309,17 +309,6 @@ FORM_HTML = """
         qtyStep.value = qtyStep.value || '0.01';
       }
     }
-    function adjustOptionsQty(direction){
-      const qtyInput = document.getElementById('options_quantity');
-      const qtyStep = document.getElementById('options_qty_step');
-      if(!qtyInput || !qtyStep){return;}
-      const step = parseFloat(qtyStep.value || '0.01');
-      const current = parseFloat(qtyInput.value || '0');
-      let next = current + (direction * step);
-      if(next < 0){next = 0;}
-      const decimals = (qtyStep.value.split('.')[1] || '').length;
-      qtyInput.value = next.toFixed(decimals);
-    }
     document.addEventListener('DOMContentLoaded', function(){
       const ot = document.getElementById('order_type');
       if(ot){
@@ -458,10 +447,6 @@ FORM_HTML = """
           </div>
           <input type="hidden" name="options_side" id="options_side" value="{{ options_side }}">
           <label>Quantity:</label>
-          <div class="button-group">
-            <button type="button" onclick="adjustOptionsQty(-1)">-</button>
-            <button type="button" onclick="adjustOptionsQty(1)">+</button>
-          </div>
           <input type="hidden" id="options_qty_step" value="{{ options_qty_step }}">
           <input name="options_quantity" id="options_quantity" value="{{ options_quantity }}"><br>
           <div id="options_limit_price_row">
