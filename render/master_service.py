@@ -600,6 +600,15 @@ SCRIPT_PAGE_TEMPLATE = """<!DOCTYPE html>
         .stop { background: #ef4444; color: #fff7ed; }
         .secondary { background: #1f2937; color: #cbd5e1; }
         .panel { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 1rem; margin-bottom: 1rem; }
+        .panel-header { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.75rem; }
+        .panel-header .meta { margin: 0; }
+        .badge { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.25rem 0.7rem; border-radius: 999px; font-weight: 700; background: #1f2937; color: #cbd5e1; }
+        .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; margin-top: 0.5rem; }
+        .settings-grid label { display: flex; flex-direction: column; gap: 0.35rem; font-weight: 700; color: #cbd5e1; }
+        .settings-grid input { padding: 0.55rem 0.75rem; border-radius: 10px; border: 1px solid #1f2937; background: #0a0f1b; color: #e5e7eb; }
+        .settings-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.75rem; }
+        .ghost-link { color: #38bdf8; font-weight: 700; text-decoration: none; }
+        .ghost-link:hover { text-decoration: underline; }
         .log-box { background: #0a0f1b; color: #e5e7eb; border-radius: 8px; padding: 0.75rem; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 220px; max-height: 360px; overflow: auto; border: 1px solid #1f2937; }
         iframe { width: 100%; height: 520px; border: 1px solid #1f2937; border-radius: 12px; background: #0a0f1b; }
     </style>
@@ -615,8 +624,33 @@ SCRIPT_PAGE_TEMPLATE = """<!DOCTYPE html>
         <button class=\"start\" id=\"start-btn\">Start</button>
         <button class=\"stop\" id=\"stop-btn\">Stop</button>
     </div>
+    <div class=\"panel\" id=\"bybit-settings\" style=\"display:none;\">
+        <div class=\"panel-header\">
+            <div>
+                <strong>Bybit monitor controls</strong>
+                <p class=\"meta\">Adjust scan interval, alert threshold, and send a Telegram test.</p>
+            </div>
+            <span class=\"badge\" id=\"bybit-settings-status\">&nbsp;</span>
+        </div>
+        <div class=\"settings-grid\">
+            <label>Wait between scans (seconds)
+                <input type=\"number\" min=\"1\" step=\"1\" id=\"bybit-wait-seconds\" />
+            </label>
+            <label>Alert threshold (% change)
+                <input type=\"number\" min=\"0.1\" step=\"0.1\" id=\"bybit-threshold\" />
+            </label>
+        </div>
+        <div class=\"settings-actions\">
+            <button id=\"bybit-save-settings\">Save settings</button>
+            <button class=\"secondary\" id=\"bybit-reload-settings\">Reset</button>
+            <button class=\"secondary\" id=\"bybit-test-alert\">Test Telegram alert</button>
+        </div>
+    </div>
     <div class=\"panel\">
-        <strong>Logs</strong>
+        <div class=\"panel-header\">
+            <strong>Logs</strong>
+            <a class=\"ghost-link\" href=\"{log_url}\" id=\"open-logs\">Open full logs</a>
+        </div>
         <div class=\"log-box\" id=\"log-box\">Waiting for output...</div>
     </div>
     <div class=\"panel\" id=\"app-panel\" style=\"display:none;\">
@@ -1599,7 +1633,7 @@ async def category_page(category: str) -> str:
 @app.get("/scripts/view/{script_name:path}", response_class=HTMLResponse)
 async def script_page(script_name: str) -> str:
     script = script_manager.get(script_name)
-    if script.name in STANDALONE_SCRIPTS:
+    if script.name in STANDALONE_SCRIPTS and script.name != "bybit_monitor":
         has_ui = script.name in WEB_APPS
         target_url = (
             f"/apps/{_encoded_script_name(script.name)}"
@@ -1613,8 +1647,11 @@ async def script_page(script_name: str) -> str:
         )
     safe_name = html.escape(script.name)
     has_ui = "true" if script.name in WEB_APPS else "false"
+    log_url = f"/logs/view/{_encoded_script_name(script.name)}"
     return (
-        SCRIPT_PAGE_TEMPLATE.replace("{script_name}", safe_name).replace("{has_ui}", has_ui)
+        SCRIPT_PAGE_TEMPLATE.replace("{script_name}", safe_name)
+        .replace("{has_ui}", has_ui)
+        .replace("{log_url}", log_url)
     )
 
 
