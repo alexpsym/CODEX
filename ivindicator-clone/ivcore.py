@@ -73,6 +73,20 @@ def fetch_options(symbol):
     return options
 
 
+def fetch_option_symbols() -> list[str]:
+    """Return available option symbols as spot pairs (e.g., BTCUSDT)."""
+    data = safe_get(f"{BASE_URL}/v5/market/instruments-info", {"category": "option"})
+    symbols = set()
+    for instrument in data.get("result", {}).get("list", []):
+        base_coin = instrument.get("baseCoin")
+        quote_coin = instrument.get("quoteCoin", "USDT")
+        if base_coin and quote_coin:
+            symbols.add(f"{base_coin}{quote_coin}")
+    if not symbols:
+        return ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    return sorted(symbols)
+
+
 def select_nearest_expiry_group(options, expiry=None):
     """Return option contracts for the nearest or given expiry."""
     grouped = defaultdict(list)

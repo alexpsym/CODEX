@@ -8,7 +8,7 @@ from typing import Dict, List, Optional
 
 from flask import Flask, jsonify, render_template_string, request
 
-from ivcore import compute_snapshot
+from ivcore import compute_snapshot, fetch_option_symbols
 from ivlog import get_logger
 
 app = Flask(__name__)
@@ -64,6 +64,7 @@ def index() -> str:
   <meta charset="utf-8" />
   <title>IV Indicator</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
   <style>
     body { background: #0b1020; color: #e2e8f0; font-family: Arial, sans-serif; margin: 0; }
     header { padding: 20px 30px; border-bottom: 1px solid #1f2937; }
@@ -106,6 +107,7 @@ def index() -> str:
         </select>
       </label>
       <button id="refresh">Refresh now</button>
+      <button id="download">Download Screenshot</button>
       <span class="muted" id="status">Waiting for data...</span>
     </div>
   </header>
@@ -210,7 +212,49 @@ def index() -> str:
     }
   }
 
+  async function loadSymbols(){
+    try {
+      const response = await fetch(buildAppUrl('/symbols'));
+      const payload = await response.json();
+      if(!response.ok){
+        throw new Error(payload.error || 'Failed to load symbols');
+      }
+      const symbols = payload.symbols || [];
+      if(!symbols.length){
+        return;
+      }
+      const current = symbolEl.value;
+      symbolEl.innerHTML = symbols.map((symbol) => (
+        `<option value="${symbol}">${symbol}</option>`
+      )).join('');
+      if (current && symbols.includes(current)) {
+        symbolEl.value = current;
+      } else if (defaultSymbol && symbols.includes(defaultSymbol)) {
+        symbolEl.value = defaultSymbol;
+      }
+    } catch (err){
+      console.error(err);
+    }
+  }
+
+  async function downloadScreenshot(){
+    statusEl.textContent = 'Capturing screenshot...';
+    const canvas = await html2canvas(document.body, {
+      scrollY: -window.scrollY,
+      windowWidth: document.documentElement.scrollWidth,
+      windowHeight: document.documentElement.scrollHeight,
+    });
+    const url = canvas.toDataURL('image/png');
+    const link = document.createElement('a');
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    link.href = url;
+    link.download = `iv-indicator-${timestamp}.png`;
+    link.click();
+    statusEl.textContent = 'Screenshot downloaded.';
+  }
+
   document.getElementById('refresh').addEventListener('click', fetchData);
+  document.getElementById('download').addEventListener('click', downloadScreenshot);
   symbolEl.addEventListener('change', fetchData);
   timeframeEl.addEventListener('change', fetchData);
 
@@ -221,7 +265,7 @@ def index() -> str:
     timeframeEl.value = defaultTimeframe;
   }
 
-  fetchData();
+  loadSymbols().then(fetchData);
   setInterval(fetchData, 4000);
 </script>
 </body>
@@ -256,6 +300,11 @@ def data():
     history_key = _history_key(symbol, timeframe, expiry)
     history = _append_history(history_key, snapshot)
     return jsonify({"snapshot": snapshot, "history": history})
+
+
+@app.get("/symbols")
+def symbols():
+    return jsonify({"symbols": fetch_option_symbols()})
 
 
 def main() -> None:
