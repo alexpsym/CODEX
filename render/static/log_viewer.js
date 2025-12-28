@@ -16,6 +16,9 @@
     let cachedLines = [];
     let refreshTimer = null;
     let cursor = 0;
+    const resultTabs = new Map();
+
+    const resultExportPattern = /Exporting data to HTML:\s*(.+)$/i;
 
     const buildScriptPath = (name) => encodeURIComponent(name).replace(/%2F/g, '/');
 
@@ -43,6 +46,10 @@
                 cachedLines.push(...newLines);
             }
 
+            if (newLines.length) {
+                handleResultExports(newLines);
+            }
+
             cursor = typeof payload.cursor === 'number' ? payload.cursor : cachedLines.length;
 
             logBox.textContent = cachedLines.length
@@ -53,6 +60,44 @@
             console.error(err);
             logBox.textContent = 'Unable to load logs. Please retry or check the server.';
         }
+    };
+
+    const normalizeResultPath = (rawPath) => rawPath.replace(/\\/g, '/').trim();
+
+    const buildResultUrl = (resultPath) => {
+        const normalized = normalizeResultPath(resultPath);
+        const scriptPath = buildScriptPath(scriptName);
+        const url = new URL(`/results/${scriptPath}/${normalized}`, window.location.origin);
+        url.searchParams.set('ts', Date.now().toString());
+        return url.toString();
+    };
+
+    const getTabKey = (resultPath) => normalizeResultPath(resultPath);
+
+    const openOrRefreshTab = (resultPath) => {
+        const tabKey = getTabKey(resultPath);
+        if (!tabKey) return;
+        const url = buildResultUrl(tabKey);
+        const existingTab = resultTabs.get(tabKey);
+        if (existingTab && !existingTab.closed) {
+            existingTab.location.href = url;
+            existingTab.focus();
+            return;
+        }
+        const safeName = `result-${scriptName}-${tabKey}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const newTab = window.open(url, safeName);
+        if (newTab) {
+            resultTabs.set(tabKey, newTab);
+        }
+    };
+
+    const handleResultExports = (lines) => {
+        lines.forEach((line) => {
+            const match = line.match(resultExportPattern);
+            if (match && match[1]) {
+                openOrRefreshTab(match[1]);
+            }
+        });
     };
 
     const downloadLog = () => {

@@ -25,6 +25,8 @@
     let appLoadTimer = null;
     let appFrameLoaded = false;
     let autoStartInFlight = false;
+    const resultTabs = new Map();
+    const resultExportPattern = /Exporting data to HTML:\s*(.+)$/i;
 
     const fetchJson = async (url, options = {}) => {
         const response = await fetch(url, options);
@@ -38,12 +40,51 @@
 
     const appendLogs = (lines) => {
         if (!lines.length) return;
+        handleResultExports(lines);
         const text = lines.join('\n') + '\n';
         if (logBox.textContent === 'Waiting for output...') {
             logBox.textContent = '';
         }
         logBox.textContent += text;
         logBox.scrollTop = logBox.scrollHeight;
+    };
+
+    const normalizeResultPath = (rawPath) => rawPath.replace(/\\/g, '/').trim();
+
+    const buildResultUrl = (resultPath) => {
+        const normalized = normalizeResultPath(resultPath);
+        const scriptPath = buildScriptPath(scriptName);
+        const url = new URL(`/results/${scriptPath}/${normalized}`, window.location.origin);
+        url.searchParams.set('ts', Date.now().toString());
+        return url.toString();
+    };
+
+    const getTabKey = (resultPath) => normalizeResultPath(resultPath);
+
+    const openOrRefreshTab = (resultPath) => {
+        const tabKey = getTabKey(resultPath);
+        if (!tabKey) return;
+        const url = buildResultUrl(tabKey);
+        const existingTab = resultTabs.get(tabKey);
+        if (existingTab && !existingTab.closed) {
+            existingTab.location.href = url;
+            existingTab.focus();
+            return;
+        }
+        const safeName = `result-${scriptName}-${tabKey}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const newTab = window.open(url, safeName);
+        if (newTab) {
+            resultTabs.set(tabKey, newTab);
+        }
+    };
+
+    const handleResultExports = (lines) => {
+        lines.forEach((line) => {
+            const match = line.match(resultExportPattern);
+            if (match && match[1]) {
+                openOrRefreshTab(match[1]);
+            }
+        });
     };
 
     const pollLogs = async () => {
