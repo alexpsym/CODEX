@@ -26,6 +26,8 @@ TIMEFRAME_MINUTES = {
 
 MINUTES_PER_YEAR = 52 * 7 * 24 * 60
 
+_OPTION_SYMBOL_CACHE: list[str] = []
+
 
 def safe_get(url, params=None):
     """Perform a GET request and return parsed JSON."""
@@ -75,16 +77,38 @@ def fetch_options(symbol):
 
 def fetch_option_symbols() -> list[str]:
     """Return available option symbols as spot pairs (e.g., BTCUSDT)."""
-    data = safe_get(f"{BASE_URL}/v5/market/instruments-info", {"category": "option"})
     symbols = set()
-    for instrument in data.get("result", {}).get("list", []):
-        base_coin = instrument.get("baseCoin")
-        quote_coin = instrument.get("quoteCoin", "USDT")
-        if base_coin and quote_coin:
-            symbols.add(f"{base_coin}{quote_coin}")
-    if not symbols:
-        return ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-    return sorted(symbols)
+    cursor = None
+    for _ in range(10):
+        params = {"category": "option", "limit": 1000}
+        if cursor:
+            params["cursor"] = cursor
+        data = safe_get(f"{BASE_URL}/v5/market/instruments-info", params)
+        result = data.get("result", {}) if isinstance(data, dict) else {}
+        for instrument in result.get("list", []):
+            base_coin = instrument.get("baseCoin")
+            quote_coin = instrument.get("quoteCoin", "USDT")
+            if base_coin and quote_coin:
+                symbols.add(f"{base_coin}{quote_coin}")
+        next_cursor = result.get("nextPageCursor")
+        if not next_cursor or next_cursor == cursor:
+            break
+        cursor = next_cursor
+
+    sorted_symbols = sorted(symbols)
+    if sorted_symbols:
+        if len(sorted_symbols) >= len(_OPTION_SYMBOL_CACHE):
+            _OPTION_SYMBOL_CACHE[:] = sorted_symbols
+        logger.info("Discovered %s option symbols.", len(sorted_symbols))
+        return list(_OPTION_SYMBOL_CACHE)
+
+    if _OPTION_SYMBOL_CACHE:
+        logger.warning("Using cached option symbols (%s).", len(_OPTION_SYMBOL_CACHE))
+        return list(_OPTION_SYMBOL_CACHE)
+
+    fallback = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    logger.warning("Falling back to default option symbols.")
+    return fallback
 
 
 def select_nearest_expiry_group(options, expiry=None):
