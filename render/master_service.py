@@ -46,6 +46,7 @@ WEB_APPS = {
     "bybithistory-clone",
     "cryptocalculator-clone",
     "oanda-calculator-clone",
+    "ivindicator-clone",
 }
 STANDALONE_SCRIPTS = {
     "Crypto-Scanner-clone",
@@ -75,7 +76,7 @@ ENTRY_OVERRIDES = {
     "extractor": ["extract_all_files.py"],
     "fxscanner-oanda-clone": ["forex_scanner.py"],
     "fxweekend-clone": ["liquidate.py"],
-    "ivindicator-clone": ["ivapp.py", "ivindicator.py"],
+    "ivindicator-clone": ["ivweb.py", "ivapp.py", "ivindicator.py"],
     "oanda-calculator-clone": ["oanda_calculator_web.py", "oanda_api.py"],
     "oanda_history-clone": ["oanda_history.py"],
     "payslip_audit": ["payslip_timesheet_audit.py"],
@@ -314,6 +315,8 @@ def _encoded_script_name(script_name: str) -> str:
 def script_open_url(script: ManagedScript) -> str:
     """Return the preferred UI URL for a script."""
 
+    if script.name in WEB_APPS:
+        return f"/apps/{_encoded_script_name(script.name)}"
     return f"/scripts/view/{_encoded_script_name(script.name)}"
 
 
