@@ -119,6 +119,14 @@ FORM_HTML = """
     .danger-note {color:#fca5a5; font-size:12px;}
   </style>
   <script>
+    const appRoot = "{{ app_root }}";
+    function buildAppUrl(path){
+      if(!path){return appRoot || '';}
+      if(appRoot){
+        return `${appRoot}${path.startsWith('/') ? '' : '/'}${path}`;
+      }
+      return path.startsWith('/') ? path : `/${path}`;
+    }
     function copyText(text, statusId){
       const status = document.getElementById(statusId);
       const done = () => { if(status){ status.innerText = 'Copied!'; setTimeout(() => status.innerText = '', 2000);} };
@@ -797,6 +805,7 @@ def index():
         export_json=export_json,
         build_sha=BUILD_SHA,
         build_timestamp=BUILD_TIMESTAMP,
+        app_root=request.script_root.rstrip("/"),
     )
 
 
