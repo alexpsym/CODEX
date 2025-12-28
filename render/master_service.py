@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import html
@@ -2087,8 +2088,11 @@ def debug_tesseract() -> JSONResponse:
 
 
 @app.get("/favicon.ico")
-async def favicon() -> RedirectResponse:
-    return RedirectResponse(url="https://render.com/favicon.ico")
+async def favicon() -> Response:
+    png_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMB/6XvZl8AAAAASUVORK5CYII="
+    )
+    return Response(content=png_bytes, media_type="image/png")
 
 
 app.mount("/static", StaticFiles(directory=BASE_DIR / "render" / "static"), name="static")
