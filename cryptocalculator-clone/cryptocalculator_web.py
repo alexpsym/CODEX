@@ -78,8 +78,8 @@ def _get_git_sha() -> str:
 
 
 BUILD_SHA = _get_git_sha()
-CRYPTO_BASE_OPTIONS = ["BTC", "DOGE", "ETH", "MNT", "SOL", "XRP"]
 DEFAULT_CRYPTO_QTY_STEP = 0.01
+DEFAULT_CRYPTO_SYMBOL = "BTCUSDT"
 
 
 def _fetch_master_balance(
@@ -261,14 +261,6 @@ FORM_HTML = """
         }
       }
     }
-    function updateSymbolFromBase(){
-      const base = document.getElementById('base_asset');
-      const symbolInput = document.getElementById('symbol');
-      if(!base || !symbolInput){return;}
-      if(!base.value){return;}
-      symbolInput.value = `${base.value}USDT`;
-      symbolInput.dispatchEvent(new Event('change'));
-    }
     async function refreshCryptoMinQty(){
       const symbolInput = document.getElementById('symbol');
       const qtyStep = document.getElementById('crypto_qty_step');
@@ -294,17 +286,6 @@ FORM_HTML = """
       if(qtyInput){
         qtyInput.step = qtyStep.value || '0.01';
       }
-    }
-    function adjustCryptoQty(direction){
-      const qtyInput = document.getElementById('quantity');
-      const qtyStep = document.getElementById('crypto_qty_step');
-      if(!qtyInput || !qtyStep){return;}
-      const step = parseFloat(qtyStep.value || '0.01');
-      const current = parseFloat(qtyInput.value || '0');
-      let next = current + (direction * step);
-      if(next < 0){next = 0;}
-      const decimals = (qtyStep.value.split('.')[1] || '').length;
-      qtyInput.value = next.toFixed(decimals);
     }
     async function refreshOptionMinQty(){
       const base = document.getElementById('options_base');
@@ -360,15 +341,11 @@ FORM_HTML = """
         tradeType.addEventListener('change', updateTradeType);
       }
       updateTradeType();
-      ['trade_type', 'account_mode', 'direction', 'order_type', 'options_order_type', 'options_type', 'options_side', 'price_source', 'execution_exchange', 'options_base', 'base_asset'].forEach(bindButtonGroup);
+      ['trade_type', 'account_mode', 'direction', 'order_type', 'options_order_type', 'options_type', 'options_side', 'price_source', 'execution_exchange', 'options_base'].forEach(bindButtonGroup);
       const symbolInput = document.getElementById('symbol');
       if(symbolInput){
         symbolInput.addEventListener('change', refreshCryptoMinQty);
         symbolInput.addEventListener('blur', refreshCryptoMinQty);
-      }
-      const baseInput = document.getElementById('base_asset');
-      if(baseInput){
-        baseInput.addEventListener('change', updateSymbolFromBase);
       }
       const execInput = document.getElementById('execution_exchange');
       if(execInput){
@@ -409,13 +386,6 @@ FORM_HTML = """
         </div>
         <input type="hidden" name="account_mode" id="account_mode" value="{{ account_mode }}">
         <div id="crypto_section" class="trade-section">
-          <label>Base:</label>
-          <div class="button-group" data-input="base_asset">
-            {% for base in base_asset_options %}
-            <button type="button" data-value="{{ base }}">{{ base }}</button>
-            {% endfor %}
-          </div>
-          <input type="hidden" name="base_asset" id="base_asset" value="{{ base_asset }}">
           <label>Symbol: <input name="symbol" id="symbol" value="{{ symbol }}"></label><br>
           <label>Price Source:</label>
           <div class="button-group" data-input="price_source">
@@ -449,10 +419,6 @@ FORM_HTML = """
           </div>
           <label>Stop loss ticks: <input name="stop_loss_ticks" id="stop_loss_ticks" type="number" step="1"></label><br>
           <label>Quantity:</label>
-          <div class="button-group">
-            <button type="button" onclick="adjustCryptoQty(-1)">-</button>
-            <button type="button" onclick="adjustCryptoQty(1)">+</button>
-          </div>
           <input type="hidden" id="crypto_qty_step" value="{{ crypto_qty_step }}">
           <input name="quantity" id="quantity" value="{{ quantity }}" type="number" min="0"><br>
           <label>Risk %: <input name="risk_percent" id="risk_percent" type="number" step="0.01"></label><br>
@@ -684,12 +650,9 @@ def index():
     if options_side not in {"Buy", "Sell"}:
         options_side = "Buy"
 
-    base_asset = request.form.get("base_asset", "BTC").strip().upper()
-    if base_asset not in CRYPTO_BASE_OPTIONS:
-        base_asset = CRYPTO_BASE_OPTIONS[0]
     symbol = request.form.get("symbol", "").strip().upper()
     if not symbol:
-        symbol = f"{base_asset}USDT"
+        symbol = DEFAULT_CRYPTO_SYMBOL
 
     execution_exchange = request.form.get(
         "execution_exchange", DEFAULT_EXECUTION_EXCHANGE
@@ -942,8 +905,6 @@ def index():
         trade_type=trade_type,
         direction=direction,
         order_type=order_type,
-        base_asset=base_asset,
-        base_asset_options=CRYPTO_BASE_OPTIONS,
         symbol=symbol,
         quantity=quantity,
         crypto_qty_step=crypto_qty_step,
