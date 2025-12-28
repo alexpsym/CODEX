@@ -78,29 +78,42 @@ def fetch_options(symbol):
 def fetch_option_symbols() -> list[str]:
     """Return available option symbols as spot pairs (e.g., BTCUSDT)."""
     symbols = set()
-    cursor = None
-    for _ in range(10):
-        params = {"category": "option", "limit": 1000}
-        if cursor:
-            params["cursor"] = cursor
-        data = safe_get(f"{BASE_URL}/v5/market/instruments-info", params)
-        result = data.get("result", {}) if isinstance(data, dict) else {}
-        for instrument in result.get("list", []):
-            base_coin = instrument.get("baseCoin")
-            quote_coin = instrument.get("quoteCoin", "USDT")
-            if base_coin and quote_coin:
-                symbols.add(f"{base_coin}{quote_coin}")
-        next_cursor = result.get("nextPageCursor")
-        if not next_cursor or next_cursor == cursor:
-            break
-        cursor = next_cursor
+    default_base_coins = {"BTC", "ETH", "SOL", "XRP", "MNT", "DOGE"}
+    cached_base_coins = {symbol.replace("USDT", "") for symbol in _OPTION_SYMBOL_CACHE}
+    base_coins = sorted(default_base_coins | cached_base_coins)
+
+    for base_coin in base_coins:
+        cursor = None
+        count = 0
+        for _ in range(10):
+            params = {"category": "option", "limit": 1000, "baseCoin": base_coin}
+            if cursor:
+                params["cursor"] = cursor
+            data = safe_get(f"{BASE_URL}/v5/market/instruments-info", params)
+            result = data.get("result", {}) if isinstance(data, dict) else {}
+            for instrument in result.get("list", []):
+                quote_coin = instrument.get("quoteCoin", "USDT")
+                if quote_coin:
+                    symbols.add(f"{base_coin}{quote_coin}")
+                    count += 1
+            next_cursor = result.get("nextPageCursor")
+            if not next_cursor or next_cursor == cursor:
+                break
+            cursor = next_cursor
+        logger.info("Option discovery: base=%s instruments=%s", base_coin, count)
 
     sorted_symbols = sorted(symbols)
     if sorted_symbols:
         if len(sorted_symbols) >= len(_OPTION_SYMBOL_CACHE):
             _OPTION_SYMBOL_CACHE[:] = sorted_symbols
-        logger.info("Discovered %s option symbols.", len(sorted_symbols))
-        return list(_OPTION_SYMBOL_CACHE)
+            logger.info("Option symbol cache refreshed (%s).", len(_OPTION_SYMBOL_CACHE))
+        else:
+            logger.warning(
+                "Option discovery returned fewer symbols (%s) than cache (%s).",
+                len(sorted_symbols),
+                len(_OPTION_SYMBOL_CACHE),
+            )
+        return list(_OPTION_SYMBOL_CACHE or sorted_symbols)
 
     if _OPTION_SYMBOL_CACHE:
         logger.warning("Using cached option symbols (%s).", len(_OPTION_SYMBOL_CACHE))
