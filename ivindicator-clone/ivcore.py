@@ -73,6 +73,20 @@ def fetch_options(symbol):
     return options
 
 
+def fetch_option_symbols() -> list[str]:
+    """Return available option symbols as spot pairs (e.g., BTCUSDT)."""
+    data = safe_get(f"{BASE_URL}/v5/market/instruments-info", {"category": "option"})
+    symbols = set()
+    for instrument in data.get("result", {}).get("list", []):
+        base_coin = instrument.get("baseCoin")
+        quote_coin = instrument.get("quoteCoin", "USDT")
+        if base_coin and quote_coin:
+            symbols.add(f"{base_coin}{quote_coin}")
+    if not symbols:
+        return ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    return sorted(symbols)
+
+
 def select_nearest_expiry_group(options, expiry=None):
     """Return option contracts for the nearest or given expiry."""
     grouped = defaultdict(list)
@@ -129,3 +143,42 @@ def update_scaled_iv(timeframe):
     """Scale annual IV to the given timeframe."""
     factor = TIMEFRAME_MINUTES[timeframe] / MINUTES_PER_YEAR
     return IV_TIMEFRAMES[timeframe] * math.sqrt(factor)
+
+
+def compute_snapshot(symbol: str, timeframe: str, expiry: datetime | None = None) -> dict:
+    """Return a JSON-serializable snapshot for the IV indicator."""
+    spot = fetch_spot_price(symbol)
+    if spot is None:
+        return {"error": "Spot fetch failed."}
+
+    options = fetch_options(symbol)
+    group = select_nearest_expiry_group(options, expiry)
+    if not group:
+        return {"error": f"No options found for symbol {symbol}."}
+
+    scaled_iv = update_scaled_iv(timeframe)
+    move = spot * scaled_iv
+    now = datetime.now(timezone.utc).astimezone(LOCAL_TZ)
+    expiry_dt = group[0]["expiry"].astimezone(LOCAL_TZ)
+    expiry_str = expiry_dt.strftime("%Y-%m-%d")
+    skew = compute_skew(group)
+    call_vol, put_vol = compute_volumes(group)
+    call_oi, put_oi = compute_open_interest(group)
+
+    return {
+        "timestamp": now.isoformat(),
+        "time_local": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "iv_percent": scaled_iv * 100,
+        "spot": spot,
+        "upper": spot + move,
+        "lower": spot - move,
+        "move": move,
+        "skew": skew,
+        "call_volume": call_vol,
+        "put_volume": put_vol,
+        "call_open_interest": call_oi,
+        "put_open_interest": put_oi,
+        "expiry": expiry_str,
+    }

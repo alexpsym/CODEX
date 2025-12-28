@@ -32,7 +32,7 @@
             button.className = 'script-btn';
             button.textContent = script.name;
             button.onclick = () => {
-                const target = `/scripts/view/${buildScriptPath(script.name)}`;
+                const target = script.open_url || `/scripts/view/${buildScriptPath(script.name)}`;
                 if (script.standalone) {
                     window.open(target, '_blank', 'noopener');
                     return;
