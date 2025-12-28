@@ -35,6 +35,7 @@ from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env")
 
+
 SKIP_DIRS = {"render", "mt5-clone", ".venv", "venv", "__pycache__", ".git", "env", "youtube"}
 SKIP_DIRS_NORMALIZED = {name.casefold() for name in SKIP_DIRS}
 SKIP_FILES = {"__init__.py"}
@@ -1939,6 +1940,27 @@ async def read_logs(script_name: str) -> JSONResponse:
         detail = f"Failed to read logs for {script_name}: {exc}"
         print(detail)
         raise HTTPException(status_code=500, detail=detail) from exc
+
+
+@app.get("/results/{script_name:path}/{result_path:path}")
+async def read_script_results(script_name: str, result_path: str) -> FileResponse:
+    safe_script_name = script_name.replace("..", "")
+    safe_result_path = result_path.replace("..", "")
+    script = script_manager.get(safe_script_name)
+    base_dir = script.last_spawn_cwd if script else None
+    if not base_dir:
+        raise HTTPException(status_code=404, detail="Script has not been started yet.")
+    file_path = Path(base_dir) / safe_result_path
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Result file not found.")
+    try:
+        resolved = file_path.resolve()
+        base_resolved = Path(base_dir).resolve()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid path: {exc}") from exc
+    if not str(resolved).startswith(str(base_resolved)):
+        raise HTTPException(status_code=403, detail="Access denied.")
+    return FileResponse(resolved)
 
 
 @app.post("/api/payslip-audit/run")
