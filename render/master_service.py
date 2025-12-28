@@ -46,6 +46,7 @@ WEB_APPS = {
     "bybithistory-clone",
     "cryptocalculator-clone",
     "oanda-calculator-clone",
+    "ivindicator-clone",
 }
 STANDALONE_SCRIPTS = {
     "Crypto-Scanner-clone",
@@ -54,7 +55,6 @@ STANDALONE_SCRIPTS = {
     "bybithistory-clone",
     "coinspot-clone",
     "cryptocalculator-clone",
-    "ema-bounce-clone",
     "ivindicator-clone",
     "fxscanner-oanda-clone",
     "fxweekend-clone",
@@ -71,11 +71,10 @@ ENTRY_OVERRIDES = {
     "coinspot-clone": ["coinspot_history.py"],
     "cryptocalculator-clone": ["cryptocalculator_web.py", "cryptocalculator.py"],
     "download_video": ["download_video.py"],
-    "ema-bounce-clone": ["ema-bounce.py"],
     "extractor": ["extract_all_files.py"],
     "fxscanner-oanda-clone": ["forex_scanner.py"],
     "fxweekend-clone": ["liquidate.py"],
-    "ivindicator-clone": ["ivapp.py", "ivindicator.py"],
+    "ivindicator-clone": ["ivweb.py", "ivapp.py", "ivindicator.py"],
     "oanda-calculator-clone": ["oanda_calculator_web.py", "oanda_api.py"],
     "oanda_history-clone": ["oanda_history.py"],
     "payslip_audit": ["payslip_timesheet_audit.py"],
@@ -293,7 +292,6 @@ def categorize_script(script_path: Path) -> str:
         "crypto",
         "bybit",
         "coinspot",
-        "ema-bounce",
         "ivin",
     )
     if any(keyword in folder or keyword in filename for keyword in crypto_keywords):
@@ -314,6 +312,8 @@ def _encoded_script_name(script_name: str) -> str:
 def script_open_url(script: ManagedScript) -> str:
     """Return the preferred UI URL for a script."""
 
+    if script.name in WEB_APPS:
+        return f"/apps/{_encoded_script_name(script.name)}"
     return f"/scripts/view/{_encoded_script_name(script.name)}"
 
 
@@ -1696,6 +1696,12 @@ async def view_logs(script_name: str) -> str:
 async def proxy_app(script_name: str, request: Request, path: str = "") -> Response:
     script = script_manager.get(script_name)
     if not script.is_running or not script.port:
+        if script.name in WEB_APPS:
+            if script.port is None:
+                script.port = _allocate_port()
+            if not script.last_start_attempt_at or script.last_start_error:
+                asyncio.create_task(_background_start(script))
+            raise HTTPException(status_code=503, detail=f"{script_name} is starting.")
         if script.last_start_attempt_at:
             if script.last_start_error or script.last_exit_reason:
                 detail = {

@@ -26,6 +26,8 @@ TIMEFRAME_MINUTES = {
 
 MINUTES_PER_YEAR = 52 * 7 * 24 * 60
 
+_OPTION_SYMBOL_CACHE: list[str] = []
+
 
 def safe_get(url, params=None):
     """Perform a GET request and return parsed JSON."""
@@ -71,6 +73,55 @@ def fetch_options(symbol):
         except Exception:  # pylint: disable=broad-except
             continue
     return options
+
+
+def fetch_option_symbols() -> list[str]:
+    """Return available option symbols as spot pairs (e.g., BTCUSDT)."""
+    symbols = set()
+    default_base_coins = {"BTC", "ETH", "SOL", "XRP", "MNT", "DOGE"}
+    cached_base_coins = {symbol.replace("USDT", "") for symbol in _OPTION_SYMBOL_CACHE}
+    base_coins = sorted(default_base_coins | cached_base_coins)
+
+    for base_coin in base_coins:
+        cursor = None
+        count = 0
+        for _ in range(10):
+            params = {"category": "option", "limit": 1000, "baseCoin": base_coin}
+            if cursor:
+                params["cursor"] = cursor
+            data = safe_get(f"{BASE_URL}/v5/market/instruments-info", params)
+            result = data.get("result", {}) if isinstance(data, dict) else {}
+            for instrument in result.get("list", []):
+                quote_coin = instrument.get("quoteCoin", "USDT")
+                if quote_coin:
+                    symbols.add(f"{base_coin}{quote_coin}")
+                    count += 1
+            next_cursor = result.get("nextPageCursor")
+            if not next_cursor or next_cursor == cursor:
+                break
+            cursor = next_cursor
+        logger.info("Option discovery: base=%s instruments=%s", base_coin, count)
+
+    sorted_symbols = sorted(symbols)
+    if sorted_symbols:
+        if len(sorted_symbols) >= len(_OPTION_SYMBOL_CACHE):
+            _OPTION_SYMBOL_CACHE[:] = sorted_symbols
+            logger.info("Option symbol cache refreshed (%s).", len(_OPTION_SYMBOL_CACHE))
+        else:
+            logger.warning(
+                "Option discovery returned fewer symbols (%s) than cache (%s).",
+                len(sorted_symbols),
+                len(_OPTION_SYMBOL_CACHE),
+            )
+        return list(_OPTION_SYMBOL_CACHE or sorted_symbols)
+
+    if _OPTION_SYMBOL_CACHE:
+        logger.warning("Using cached option symbols (%s).", len(_OPTION_SYMBOL_CACHE))
+        return list(_OPTION_SYMBOL_CACHE)
+
+    fallback = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    logger.warning("Falling back to default option symbols.")
+    return fallback
 
 
 def select_nearest_expiry_group(options, expiry=None):
@@ -129,3 +180,42 @@ def update_scaled_iv(timeframe):
     """Scale annual IV to the given timeframe."""
     factor = TIMEFRAME_MINUTES[timeframe] / MINUTES_PER_YEAR
     return IV_TIMEFRAMES[timeframe] * math.sqrt(factor)
+
+
+def compute_snapshot(symbol: str, timeframe: str, expiry: datetime | None = None) -> dict:
+    """Return a JSON-serializable snapshot for the IV indicator."""
+    spot = fetch_spot_price(symbol)
+    if spot is None:
+        return {"error": "Spot fetch failed."}
+
+    options = fetch_options(symbol)
+    group = select_nearest_expiry_group(options, expiry)
+    if not group:
+        return {"error": f"No options found for symbol {symbol}."}
+
+    scaled_iv = update_scaled_iv(timeframe)
+    move = spot * scaled_iv
+    now = datetime.now(timezone.utc).astimezone(LOCAL_TZ)
+    expiry_dt = group[0]["expiry"].astimezone(LOCAL_TZ)
+    expiry_str = expiry_dt.strftime("%Y-%m-%d")
+    skew = compute_skew(group)
+    call_vol, put_vol = compute_volumes(group)
+    call_oi, put_oi = compute_open_interest(group)
+
+    return {
+        "timestamp": now.isoformat(),
+        "time_local": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "iv_percent": scaled_iv * 100,
+        "spot": spot,
+        "upper": spot + move,
+        "lower": spot - move,
+        "move": move,
+        "skew": skew,
+        "call_volume": call_vol,
+        "put_volume": put_vol,
+        "call_open_interest": call_oi,
+        "put_open_interest": put_oi,
+        "expiry": expiry_str,
+    }
