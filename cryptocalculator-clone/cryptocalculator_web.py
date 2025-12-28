@@ -29,6 +29,7 @@ from cryptocalculator import (
     calculate_trade,
     format_trade,
     get_balance_fetcher,
+    get_execution_requirements,
     BYBIT_LINEAR_URL,
     BYBIT_SPOT_URL,
 )
@@ -77,6 +78,8 @@ def _get_git_sha() -> str:
 
 
 BUILD_SHA = _get_git_sha()
+DEFAULT_CRYPTO_QTY_STEP = 0.01
+DEFAULT_CRYPTO_SYMBOL = "BTCUSDT"
 
 
 def _fetch_master_balance(
@@ -116,6 +119,14 @@ FORM_HTML = """
     .danger-note {color:#fca5a5; font-size:12px;}
   </style>
   <script>
+    const appRoot = "{{ app_root }}";
+    function buildAppUrl(path){
+      if(!path){return appRoot || '';}
+      if(appRoot){
+        return `${appRoot}${path.startsWith('/') ? '' : '/'}${path}`;
+      }
+      return path.startsWith('/') ? path : `/${path}`;
+    }
     function copyText(text, statusId){
       const status = document.getElementById(statusId);
       const done = () => { if(status){ status.innerText = 'Copied!'; setTimeout(() => status.innerText = '', 2000);} };
@@ -250,6 +261,32 @@ FORM_HTML = """
         }
       }
     }
+    async function refreshCryptoMinQty(){
+      const symbolInput = document.getElementById('symbol');
+      const qtyStep = document.getElementById('crypto_qty_step');
+      const execExchange = document.getElementById('execution_exchange');
+      const priceSource = document.getElementById('price_source');
+      const qtyInput = document.getElementById('quantity');
+      if(!symbolInput || !qtyStep || !execExchange || !priceSource){return;}
+      const symbol = symbolInput.value.trim();
+      if(!symbol){return;}
+      const params = new URLSearchParams({
+        symbol,
+        execution_exchange: execExchange.value || '',
+        price_source: priceSource.value || '',
+      });
+      try{
+        const response = await fetch(`${buildAppUrl('/min-qty')}?${params.toString()}`);
+        if(!response.ok){throw new Error('Failed to load min qty');}
+        const data = await response.json();
+        qtyStep.value = data.min_qty || qtyStep.value || '0.01';
+      } catch(err){
+        qtyStep.value = qtyStep.value || '0.01';
+      }
+      if(qtyInput){
+        qtyInput.step = qtyStep.value || '0.01';
+      }
+    }
     async function refreshOptionMinQty(){
       const base = document.getElementById('options_base');
       const strike = document.getElementById('options_strike');
@@ -264,7 +301,7 @@ FORM_HTML = """
         expiry: expiry.value || '',
       });
       try{
-        const response = await fetch(`/options/min-qty?${params.toString()}`);
+        const response = await fetch(`${buildAppUrl('/options/min-qty')}?${params.toString()}`);
         if(!response.ok){throw new Error('Failed to load min qty');}
         const data = await response.json();
         qtyStep.value = data.min_qty || '0.01';
@@ -305,6 +342,19 @@ FORM_HTML = """
       }
       updateTradeType();
       ['trade_type', 'account_mode', 'direction', 'order_type', 'options_order_type', 'options_type', 'options_side', 'price_source', 'execution_exchange', 'options_base'].forEach(bindButtonGroup);
+      const symbolInput = document.getElementById('symbol');
+      if(symbolInput){
+        symbolInput.addEventListener('change', refreshCryptoMinQty);
+        symbolInput.addEventListener('blur', refreshCryptoMinQty);
+      }
+      const execInput = document.getElementById('execution_exchange');
+      if(execInput){
+        execInput.addEventListener('change', refreshCryptoMinQty);
+      }
+      const priceInput = document.getElementById('price_source');
+      if(priceInput){
+        priceInput.addEventListener('change', refreshCryptoMinQty);
+      }
       ['options_strike', 'options_expiry'].forEach((fieldId) => {
         const el = document.getElementById(fieldId);
         if(el){
@@ -312,6 +362,7 @@ FORM_HTML = """
           el.addEventListener('blur', refreshOptionMinQty);
         }
       });
+      refreshCryptoMinQty();
       refreshOptionMinQty();
     });
   </script>
@@ -335,7 +386,7 @@ FORM_HTML = """
         </div>
         <input type="hidden" name="account_mode" id="account_mode" value="{{ account_mode }}">
         <div id="crypto_section" class="trade-section">
-          <label>Symbol: <input name="symbol" id="symbol"></label><br>
+          <label>Symbol: <input name="symbol" id="symbol" value="{{ symbol }}"></label><br>
           <label>Price Source:</label>
           <div class="button-group" data-input="price_source">
             {% for key, meta in price_source_options %}
@@ -367,6 +418,9 @@ FORM_HTML = """
             <label>Entry Price: <input name="entry_price" type="number" step="0.0001"></label><br>
           </div>
           <label>Stop loss ticks: <input name="stop_loss_ticks" id="stop_loss_ticks" type="number" step="1"></label><br>
+          <label>Quantity:</label>
+          <input type="hidden" id="crypto_qty_step" value="{{ crypto_qty_step }}">
+          <input name="quantity" id="quantity" value="{{ quantity }}" type="number" min="0"><br>
           <label>Risk %: <input name="risk_percent" id="risk_percent" type="number" step="0.01"></label><br>
           <label>Risk–reward ratio: <input name="rr_ratio" id="rr_ratio" type="number" step="0.1" value="2"></label><br>
           <label>Price → Execution rate:
@@ -522,6 +576,32 @@ def options_min_qty():
     return jsonify({"min_qty": min_qty})
 
 
+@app.get("/min-qty")
+def crypto_min_qty():
+    symbol = request.args.get("symbol", "").strip().upper()
+    execution_exchange = request.args.get(
+        "execution_exchange", DEFAULT_EXECUTION_EXCHANGE
+    ).lower()
+    price_source = request.args.get("price_source", DEFAULT_PRICE_SOURCE).lower()
+    if execution_exchange not in EXECUTION_EXCHANGES:
+        execution_exchange = DEFAULT_EXECUTION_EXCHANGE
+    if price_source not in PRICE_SOURCES:
+        price_source = DEFAULT_PRICE_SOURCE
+    trade_mode = PRICE_SOURCES[price_source]["trade_mode"]
+    if not symbol:
+        return jsonify({"min_qty": DEFAULT_CRYPTO_QTY_STEP})
+    try:
+        min_qty, _qty_step, _fee_rate = get_execution_requirements(
+            execution_exchange,
+            symbol,
+            trade_mode,
+            {"execution_exchange": execution_exchange, "trade_mode": trade_mode},
+        )
+    except Exception:  # pylint: disable=broad-except
+        min_qty = DEFAULT_CRYPTO_QTY_STEP
+    return jsonify({"min_qty": min_qty})
+
+
 @app.route("/", methods=["GET", "POST"])
 def index():
     summary = None
@@ -570,6 +650,10 @@ def index():
     if options_side not in {"Buy", "Sell"}:
         options_side = "Buy"
 
+    symbol = request.form.get("symbol", "").strip().upper()
+    if not symbol:
+        symbol = DEFAULT_CRYPTO_SYMBOL
+
     execution_exchange = request.form.get(
         "execution_exchange", DEFAULT_EXECUTION_EXCHANGE
     ).lower()
@@ -585,6 +669,19 @@ def index():
     if account_mode not in {"live", "demo"}:
         account_mode = "live"
     price_to_execution_rate = request.form.get("price_to_execution_rate", "").strip()
+    quantity = request.form.get("quantity", "")
+
+    crypto_qty_step = DEFAULT_CRYPTO_QTY_STEP
+    if symbol:
+        try:
+            crypto_qty_step, _qty_step, _fee_rate = get_execution_requirements(
+                execution_exchange,
+                symbol,
+                trade_mode,
+                {"execution_exchange": execution_exchange, "trade_mode": trade_mode},
+            )
+        except Exception:  # pylint: disable=broad-except
+            crypto_qty_step = DEFAULT_CRYPTO_QTY_STEP
 
     if request.method == "POST":
         try:
@@ -697,7 +794,6 @@ def index():
                         ]
                     )
             else:
-                symbol = request.form.get("symbol", "").strip().upper()
                 if not symbol:
                     raise ValueError("Symbol is required for spot/perpetual trades.")
                 entry_price_raw = request.form.get("entry_price")
@@ -809,6 +905,9 @@ def index():
         trade_type=trade_type,
         direction=direction,
         order_type=order_type,
+        symbol=symbol,
+        quantity=quantity,
+        crypto_qty_step=crypto_qty_step,
         options_order_type=options_order_type,
         options_base=options_base,
         options_type=options_type,
@@ -824,6 +923,7 @@ def index():
         export_json=export_json,
         build_sha=BUILD_SHA,
         build_timestamp=BUILD_TIMESTAMP,
+        app_root=request.script_root.rstrip("/"),
     )
 
 
