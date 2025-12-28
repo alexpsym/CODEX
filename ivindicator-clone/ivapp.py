@@ -20,13 +20,7 @@ from matplotlib.animation import FuncAnimation
 from ivlog import get_logger
 from ivcore import (
     LOCAL_TZ,
-    fetch_spot_price,
-    fetch_options,
-    select_nearest_expiry_group,
-    compute_skew,
-    compute_volumes,
-    compute_open_interest,
-    update_scaled_iv,
+    compute_snapshot,
 )
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -79,22 +73,15 @@ def update_title(symbol):
 
 def update(_):
     """Refresh plot data."""
-    spot = fetch_spot_price(current_symbol)
-    if spot is None:
-        logger.warning("Spot fetch failed.")
+    snapshot = compute_snapshot(current_symbol, current_timeframe, current_expiry)
+    if "error" in snapshot:
+        logger.warning(snapshot["error"])
         return
 
-    options = fetch_options(current_symbol)
-    group = select_nearest_expiry_group(options, current_expiry)
-    if not group:
-        logger.warning("No options found for symbol %s", current_symbol)
-        return
-
-    scaled_iv = update_scaled_iv(current_timeframe)
-    move = spot * scaled_iv
-    now = datetime.now(timezone.utc).astimezone(LOCAL_TZ)
-    expiry_dt = group[0]['expiry'].astimezone(LOCAL_TZ)
-    expiry_str = expiry_dt.strftime("%Y-%m-%d")
+    spot = snapshot["spot"]
+    move = snapshot["move"]
+    now = datetime.fromisoformat(snapshot["timestamp"])
+    expiry_str = snapshot["expiry"]
 
     x_data.append(now)
     spot_data.append(spot)
@@ -107,32 +94,30 @@ def update(_):
     ax.relim()
     ax.autoscale_view()
 
-    texts[0].set_text(f"TF: {current_timeframe} | IV: {scaled_iv*100:.2f}%")
+    texts[0].set_text(f"TF: {current_timeframe} | IV: {snapshot['iv_percent']:.2f}%")
     texts[1].set_text(f"Spot: {spot:.2f}")
     texts[2].set_text(f"+1σ: {spot+move:.2f} / -1σ: {spot-move:.2f}")
-    skew = compute_skew(group)
+    skew = snapshot["skew"]
     texts[3].set_text(f"25Δ Skew: {skew:.2f}%" if skew else "25Δ Skew: n/a")
-    call_vol, put_vol = compute_volumes(group)
-    texts[4].set_text(f"Call Vol: {call_vol:,}")
-    texts[5].set_text(f"Put Vol: {put_vol:,}")
-    call_oi, put_oi = compute_open_interest(group)
-    texts[6].set_text(f"Call OI: {call_oi:,}")
-    texts[7].set_text(f"Put OI: {put_oi:,}")
+    texts[4].set_text(f"Call Vol: {snapshot['call_volume']:,}")
+    texts[5].set_text(f"Put Vol: {snapshot['put_volume']:,}")
+    texts[6].set_text(f"Call OI: {snapshot['call_open_interest']:,}")
+    texts[7].set_text(f"Put OI: {snapshot['put_open_interest']:,}")
     texts[8].set_text(f"Move: {move:.2f} USDT")
     texts[9].set_text(f"Expiry: {expiry_str}")
 
     current_metrics.update({
-        "Time": now.strftime("%Y-%m-%d %H:%M:%S"),
-        "Timeframe": current_timeframe,
-        "IV": scaled_iv * 100,
+        "Time": snapshot["time_local"],
+        "Timeframe": snapshot["timeframe"],
+        "IV": snapshot["iv_percent"],
         "Spot": spot,
         "Upper": spot + move,
         "Lower": spot - move,
-        "Skew": skew,
-        "CallVol": call_vol,
-        "PutVol": put_vol,
-        "CallOI": call_oi,
-        "PutOI": put_oi,
+        "Skew": snapshot["skew"],
+        "CallVol": snapshot["call_volume"],
+        "PutVol": snapshot["put_volume"],
+        "CallOI": snapshot["call_open_interest"],
+        "PutOI": snapshot["put_open_interest"],
         "Move": move,
         "Expiry": expiry_str,
     })
