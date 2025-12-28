@@ -119,6 +119,14 @@ FORM_HTML = """
     .danger-note {color:#fca5a5; font-size:12px;}
   </style>
   <script>
+    const appRoot = "{{ app_root }}";
+    function buildAppUrl(path){
+      if(!path){return appRoot || '';}
+      if(appRoot){
+        return `${appRoot}${path.startsWith('/') ? '' : '/'}${path}`;
+      }
+      return path.startsWith('/') ? path : `/${path}`;
+    }
     function copyText(text, statusId){
       const status = document.getElementById(statusId);
       const done = () => { if(status){ status.innerText = 'Copied!'; setTimeout(() => status.innerText = '', 2000);} };
@@ -276,7 +284,7 @@ FORM_HTML = """
         price_source: priceSource.value || '',
       });
       try{
-        const response = await fetch(`/min-qty?${params.toString()}`);
+        const response = await fetch(`${buildAppUrl('/min-qty')}?${params.toString()}`);
         if(!response.ok){throw new Error('Failed to load min qty');}
         const data = await response.json();
         qtyStep.value = data.min_qty || qtyStep.value || '0.01';
@@ -312,7 +320,7 @@ FORM_HTML = """
         expiry: expiry.value || '',
       });
       try{
-        const response = await fetch(`/options/min-qty?${params.toString()}`);
+        const response = await fetch(`${buildAppUrl('/options/min-qty')}?${params.toString()}`);
         if(!response.ok){throw new Error('Failed to load min qty');}
         const data = await response.json();
         qtyStep.value = data.min_qty || '0.01';
@@ -954,6 +962,7 @@ def index():
         export_json=export_json,
         build_sha=BUILD_SHA,
         build_timestamp=BUILD_TIMESTAMP,
+        app_root=request.script_root.rstrip("/"),
     )
 
 
