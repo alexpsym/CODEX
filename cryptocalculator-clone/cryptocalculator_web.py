@@ -128,207 +128,13 @@ FORM_HTML = """
     .qty-row {display:flex; align-items:center; gap:8px; flex-wrap:wrap;}
     .min-note {font-size:14px; color:#e2e8f0;}
   </style>
-  <script>
-    const appRoot = "{{ app_root }}";
-    function buildAppUrl(path){
-      if(!path){return appRoot || '';}
-      if(appRoot){
-        return `${appRoot}${path.startsWith('/') ? '' : '/'}${path}`;
-      }
-      return path.startsWith('/') ? path : `/${path}`;
-    }
-    function copyText(text, statusId){
-      const status = document.getElementById(statusId);
-      const done = () => { if(status){ status.innerText = 'Copied!'; setTimeout(() => status.innerText = '', 2000);} };
-      if(navigator.clipboard && navigator.clipboard.writeText){
-        navigator.clipboard.writeText(text).then(done).catch(() => {});
-      } else {
-        const temp = document.createElement('textarea');
-        temp.value = text;
-        document.body.appendChild(temp);
-        temp.select();
-        try { document.execCommand('copy'); done(); } finally { document.body.removeChild(temp); }
-      }
-    }
-    function copyFromElement(elementId, statusId){
-      const el = document.getElementById(elementId);
-      if(!el){return;}
-      copyText(el.innerText, statusId);
-    }
-    function exportResult(){
-      const payload = document.getElementById('export_json');
-      if(!payload || !payload.innerText.trim()){
-        alert('Calculate a trade first to export the result.');
-        return;
-      }
-      const blob = new Blob([payload.innerText], {type: 'application/json'});
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      link.href = url;
-      link.download = `crypto-trade-${timestamp}.json`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
-    }
-    function setButtonGroupValue(inputId, value, dispatchChange=true){
-      const input = document.getElementById(inputId);
-      if(!input){return;}
-      input.value = value;
-      const group = document.querySelector(`[data-input="${inputId}"]`);
-      if(group){
-        group.querySelectorAll('button[data-value]').forEach((btn) => {
-          btn.classList.toggle('active', btn.dataset.value === value);
-        });
-      }
-      if(dispatchChange){
-        input.dispatchEvent(new Event('change'));
-      }
-    }
-    function bindButtonGroup(inputId){
-      const group = document.querySelector(`[data-input="${inputId}"]`);
-      if(!group){return;}
-      group.querySelectorAll('button[data-value]').forEach((btn) => {
-        btn.addEventListener('click', () => setButtonGroupValue(inputId, btn.dataset.value));
-      });
-      const input = document.getElementById(inputId);
-      if(input){
-        setButtonGroupValue(inputId, input.value, false);
-      }
-    }
-    function toggleEntry(){
-      const orderType = document.getElementById('order_type');
-      const entryField = document.getElementById('entry_price_row');
-      if(!orderType || !entryField){return;}
-      entryField.style.display = orderType.value === 'market' ? 'none' : 'block';
-    }
-    function toggleOptionsEntry(){
-      const orderType = document.getElementById('options_order_type');
-      const entryField = document.getElementById('options_limit_price_row');
-      if(!orderType || !entryField){return;}
-      entryField.style.display = orderType.value === 'limit' ? 'block' : 'none';
-    }
-    function updatePriceMode(){
-      const priceSource = document.getElementById('price_source');
-      const note = document.getElementById('price_mode_note');
-      const notes = {{ price_mode_notes|tojson }};
-      if(!priceSource || !note){return;}
-      note.innerText = notes[priceSource.value] || '';
-    }
-    const optionsMinQtyMap = {{ options_min_qty_map|tojson }};
-    let optionsMinQtyTimer = null;
-    function renderOptionsMinQty(base){
-      const note = document.getElementById('options_min_qty_note');
-      if(!note){return;}
-      const quote = 'USDT';
-      const baseKey = base ? base.toUpperCase() : '';
-      const minQty = optionsMinQtyMap[baseKey];
-      const labelBase = baseKey ? `${baseKey}${quote}` : `${quote}`;
-      if(typeof minQty === 'number'){
-        note.innerText = `Min qty (${labelBase} options): ${minQty}`;
-      } else {
-        note.innerText = `Min qty (${labelBase} options): unavailable`;
-      }
-    }
-    function scheduleOptionsMinQty(){
-      if(optionsMinQtyTimer){
-        clearTimeout(optionsMinQtyTimer);
-      }
-      optionsMinQtyTimer = setTimeout(updateOptionsMinQty, 200);
-    }
-    function updateOptionsMinQty(){
-      const baseInput = document.getElementById('options_base');
-      const base = baseInput ? baseInput.value : '';
-      renderOptionsMinQty(base);
-    }
-    function updateTradeType(){
-      const selector = document.getElementById('trade_type');
-      const optionsSection = document.getElementById('options_section');
-      const cryptoSection = document.getElementById('crypto_section');
-      if(!selector || !optionsSection || !cryptoSection){return;}
-      const isOptions = selector.value === 'options';
-      optionsSection.classList.toggle('hidden', !isOptions);
-      cryptoSection.classList.toggle('hidden', isOptions);
-      const cryptoRequired = ['symbol', 'stop_loss_ticks', 'risk_percent', 'rr_ratio'];
-      cryptoRequired.forEach((fieldId) => {
-        const el = document.getElementById(fieldId);
-        if(!el){return;}
-        if(isOptions){
-          el.removeAttribute('required');
-        } else {
-          el.setAttribute('required', 'required');
-        }
-      });
-    }
-    async function enterNow(){
-      const payloadEl = document.getElementById('alert_json');
-      if(!payloadEl || !payloadEl.innerText.trim()){
-        alert('Calculate a trade first to enable immediate entry.');
-        return;
-      }
-      const ok = confirm('Place a live market order immediately? This cannot be undone.');
-      if(!ok){return;}
-      let payload = null;
-      try{
-        payload = JSON.parse(payloadEl.innerText);
-      } catch (err) {
-        alert('Could not parse the current payload. Recalculate and try again.');
-        return;
-      }
-      const resultBox = document.getElementById('execute_result');
-      if(resultBox){
-        resultBox.classList.remove('hidden');
-        resultBox.innerText = 'Submitting market order...';
-      }
-      try{
-        const resp = await fetch('/execute_now', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify(payload),
-        });
-        const data = await resp.json();
-        if(resultBox){
-          resultBox.innerText = JSON.stringify(data, null, 2);
-        }
-      } catch (err) {
-        if(resultBox){
-          resultBox.innerText = `Error: ${err}`;
-        }
-      }
-    }
-    document.addEventListener('DOMContentLoaded', function(){
-      const ot = document.getElementById('order_type');
-      if(ot){
-        ot.addEventListener('change', toggleEntry);
-        toggleEntry();
-      }
-      const oot = document.getElementById('options_order_type');
-      if(oot){
-        oot.addEventListener('change', toggleOptionsEntry);
-        toggleOptionsEntry();
-      }
-      const ps = document.getElementById('price_source');
-      if(ps){
-        ps.addEventListener('change', updatePriceMode);
-        updatePriceMode();
-      }
-      const tradeType = document.getElementById('trade_type');
-      if(tradeType){
-        tradeType.addEventListener('change', updateTradeType);
-      }
-      updateTradeType();
-      ['trade_type', 'account_mode', 'direction', 'order_type', 'options_order_type', 'options_type', 'options_side', 'price_source', 'execution_exchange', 'options_base'].forEach(bindButtonGroup);
-      const optionsBaseInput = document.getElementById('options_base');
-      if(optionsBaseInput){
-        optionsBaseInput.addEventListener('change', scheduleOptionsMinQty);
-      }
-      scheduleOptionsMinQty();
-    });
-  </script>
 </head>
-<body>
+<body data-app-root="{{ app_root }}">
   <h1>Crypto Position Size Calculator</h1>
+  <div id="js_data"
+       data-price-mode-notes='{{ price_mode_notes|tojson|e }}'
+       data-options-min-qty-map='{{ options_min_qty_map|tojson|e }}'
+       style="display:none;"></div>
   <div class="container">
     <div class="form">
       <form method="post">
@@ -378,8 +184,6 @@ FORM_HTML = """
             <label>Entry Price: <input name="entry_price" type="number" step="0.0001"></label><br>
           </div>
           <label>Stop loss ticks: <input name="stop_loss_ticks" id="stop_loss_ticks" type="number" step="1"></label><br>
-          <label>Quantity:</label>
-          <input name="quantity" id="quantity" value="{{ quantity }}" type="number" min="0"><br>
           <label>Risk %: <input name="risk_percent" id="risk_percent" type="number" step="0.01"></label><br>
           <label>Risk–reward ratio: <input name="rr_ratio" id="rr_ratio" type="number" step="0.1" value="2"></label><br>
           <label>Price → Execution rate:
@@ -447,6 +251,7 @@ FORM_HTML = """
       {% if payload_json %}
         <h2>Result</h2>
         <pre id="alert_json">{{ payload_json }}</pre>
+        <pre id="tv_payload" style="display:none;">{{ payload_json }}</pre>
         {% if export_json %}
         <pre id="export_json" style="display:none;">{{ export_json }}</pre>
         {% endif %}
@@ -457,10 +262,30 @@ FORM_HTML = """
         <div class="copy-row">
           <button type="button" onclick="exportResult()">Export Result</button>
         </div>
+        <!-- metadata from the last calculation (prevents toggling without recalculating) -->
+        <div id="calc_meta"
+             data-trade-type="{{ trade_type }}"
+             data-order-type="{{ order_type }}"
+             data-options-order-type="{{ options_order_type }}"
+             style="display:none;"></div>
+
         <div class="copy-row">
-          <button type="button" class="danger-button" onclick="enterNow()">Enter now via market order</button>
+          <button id="execute_market_btn" type="button" class="danger-button" onclick="enterNow()">
+            Enter now via market order
+          </button>
+
+          <button id="execute_limit_btn" type="button" class="danger-button" onclick="placeLimitOrder()"
+                  style="display:none;">
+            Place limit order
+          </button>
         </div>
-        <p class="danger-note">This immediately submits a live market order. Use with extreme caution.</p>
+
+        <p id="execute_market_note" class="danger-note">
+          This immediately submits a live market order. Use with extreme caution.
+        </p>
+        <p id="execute_limit_note" class="danger-note" style="display:none;">
+          This submits a live limit order (GTC) at the entry price. Use with extreme caution.
+        </p>
         <pre id="execute_result" class="copy-box hidden"></pre>
       {% endif %}
       {% if options_output %}
@@ -493,6 +318,7 @@ FORM_HTML = """
   </div>
   <footer>
   </footer>
+  <script src="{{ app_root }}/static/cryptocalculator.js"></script>
 </body>
 </html>
 """
@@ -753,6 +579,10 @@ def index():
                         "quantity": round(qty, 3),
                         "account": account_mode,
                         "trade_mode": "options",
+                        "order_type": options_order_type,
+                        "price": round(entry_price, 8)
+                        if options_order_type == "limit"
+                        else None,
                         "tp_offset": round(tp_offset, 6) if tp_offset is not None else None,
                         "tp_multiplier": tp_multiplier,
                     }
