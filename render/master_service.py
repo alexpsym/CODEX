@@ -1621,6 +1621,24 @@ async def _place_bybit_order(
     else:
         category = "spot" if trade_mode == "spot" else "linear"
     side = "Buy" if action == "buy" else "Sell"
+    order_type_raw = payload.get("order_type") or payload.get("orderType") or "market"
+    order_type = str(order_type_raw).lower().strip()
+    if order_type not in {"market", "limit"}:
+        raise ValueError("Webhook payload order_type must be market or limit.")
+
+    price_val = None
+    if order_type == "limit":
+        price_raw = payload.get("price") or payload.get("entry_price") or payload.get(
+            "limit_price"
+        )
+        if price_raw is None:
+            raise ValueError("Limit orders require price.")
+        try:
+            price_val = float(price_raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Limit order price must be numeric.") from exc
+        if price_val <= 0:
+            raise ValueError("Limit order price must be greater than zero.")
 
     _mode, api_key, api_secret, base_url, key_source = resolve_bybit_credentials_for(
         "demo" if account == "demo" else "live"
@@ -1642,11 +1660,13 @@ async def _place_bybit_order(
         "category": category,
         "symbol": symbol,
         "side": side,
-        "orderType": "Market",
+        "orderType": "Limit" if order_type == "limit" else "Market",
         "qty": str(qty_val),
         "timeInForce": "GTC",
         "orderLinkId": uuid4().hex,
     }
+    if order_type == "limit":
+        body["price"] = str(price_val)
 
     take_profit_offset = _parse_offset_value(
         payload.get("take_profit_offset") or payload.get("tp_offset")
