@@ -80,6 +80,14 @@ def _get_git_sha() -> str:
 BUILD_SHA = _get_git_sha()
 DEFAULT_CRYPTO_QTY_STEP = 0.01
 DEFAULT_CRYPTO_SYMBOL = "BTCUSDT"
+HARD_CODED_OPTIONS_MIN_QTY = {
+    "BTC": 0.01,
+    "ETH": 0.1,
+    "SOL": 1,
+    "XRP": 10,
+    "MNT": 10,
+    "DOGE": 100,
+}
 
 
 def _fetch_master_balance(
@@ -208,55 +216,31 @@ FORM_HTML = """
       if(!priceSource || !note){return;}
       note.innerText = notes[priceSource.value] || '';
     }
-    let optionsMinQtyController = null;
+    const optionsMinQtyMap = {{ options_min_qty_map|tojson }};
     let optionsMinQtyTimer = null;
-    const lastOptionsMinQtyByBase = {};
+    function renderOptionsMinQty(base){
+      const note = document.getElementById('options_min_qty_note');
+      if(!note){return;}
+      const quote = 'USDT';
+      const baseKey = base ? base.toUpperCase() : '';
+      const minQty = optionsMinQtyMap[baseKey];
+      const labelBase = baseKey ? `${baseKey}${quote}` : `${quote}`;
+      if(typeof minQty === 'number'){
+        note.innerText = `Min qty (${labelBase} options): ${minQty}`;
+      } else {
+        note.innerText = `Min qty (${labelBase} options): unavailable`;
+      }
+    }
     function scheduleOptionsMinQty(){
       if(optionsMinQtyTimer){
         clearTimeout(optionsMinQtyTimer);
       }
       optionsMinQtyTimer = setTimeout(updateOptionsMinQty, 200);
     }
-    async function updateOptionsMinQty(){
+    function updateOptionsMinQty(){
       const baseInput = document.getElementById('options_base');
-      const accountInput = document.getElementById('account_mode');
-      const note = document.getElementById('options_min_qty_note');
-      if(!note){return;}
       const base = baseInput ? baseInput.value : '';
-      const account = accountInput ? accountInput.value : 'live';
-      const quote = 'USDT';
-      const pairLabel = base ? `${base}${quote}` : `${quote}`;
-      const cacheKey = base || pairLabel;
-      if(optionsMinQtyController){
-        optionsMinQtyController.abort();
-      }
-      optionsMinQtyController = new AbortController();
-      try{
-        const url = buildAppUrl(`/options/min-qty-base?base=${encodeURIComponent(base)}&quote=${quote}&account=${encodeURIComponent(account)}`);
-        const resp = await fetch(url, {signal: optionsMinQtyController.signal});
-        const data = await resp.json();
-        const hasNumeric = data && typeof data.min_qty === 'number' && !Number.isNaN(data.min_qty);
-        const cachedValue = lastOptionsMinQtyByBase[cacheKey];
-        const minQty = hasNumeric ? data.min_qty : cachedValue;
-        const labelBase = data && data.base ? `${data.base}${data.quote || quote}` : pairLabel;
-        if(hasNumeric){
-          lastOptionsMinQtyByBase[cacheKey] = minQty;
-        }
-        const staleNote = data && data.stale ? ' (stale)' : '';
-        if(minQty === null || typeof minQty === 'undefined'){
-          note.innerText = `Min qty (${labelBase} options): unavailable`;
-        } else {
-          note.innerText = `Min qty (${labelBase} options): ${minQty}${staleNote}`;
-        }
-      } catch (err) {
-        if(err && err.name === 'AbortError'){return;}
-        const cachedValue = lastOptionsMinQtyByBase[cacheKey];
-        if(cachedValue === null || typeof cachedValue === 'undefined'){
-          note.innerText = `Min qty (${pairLabel} options): unavailable`;
-        } else {
-          note.innerText = `Min qty (${pairLabel} options): ${cachedValue} (stale)`;
-        }
-      }
+      renderOptionsMinQty(base);
     }
     function updateTradeType(){
       const selector = document.getElementById('trade_type');
@@ -338,10 +322,6 @@ FORM_HTML = """
       const optionsBaseInput = document.getElementById('options_base');
       if(optionsBaseInput){
         optionsBaseInput.addEventListener('change', scheduleOptionsMinQty);
-      }
-      const accountModeInput = document.getElementById('account_mode');
-      if(accountModeInput){
-        accountModeInput.addEventListener('change', scheduleOptionsMinQty);
       }
       scheduleOptionsMinQty();
     });
@@ -557,14 +537,7 @@ def options_min_qty():
 def options_min_qty_base():
     base = request.args.get("base", "").strip().upper()
     quote = request.args.get("quote", "USDT").strip().upper() or "USDT"
-    account_mode = request.args.get("account", "live").strip().lower()
-    if account_mode not in {"live", "demo"}:
-        account_mode = "live"
-
-    account_key = "demo" if account_mode == "demo" else "live"
-    _mode, _api_key, _api_secret, base_url, _key_source = resolve_bybit_credentials_for(
-        account_key
-    )
+    min_qty = HARD_CODED_OPTIONS_MIN_QTY.get(base)
 
     if not base:
         return jsonify(
@@ -572,37 +545,21 @@ def options_min_qty_base():
                 "base": base,
                 "quote": quote,
                 "min_qty": None,
-                "stale": True,
-                "source": "default",
+                "stale": False,
+                "source": "static",
                 "error": "missing base",
             }
         )
 
-    try:
-        min_qty, stale, source = options_trader.get_min_order_qty_snapshot(
-            base, quote_coin=quote, base_url=base_url
-        )
-        payload = {
+    return jsonify(
+        {
             "base": base,
             "quote": quote,
             "min_qty": min_qty,
-            "stale": stale,
-            "source": source,
+            "stale": False,
+            "source": "static",
         }
-        if min_qty is None:
-            payload["error"] = "no instruments matched or lookup pending"
-        return jsonify(payload)
-    except Exception as exc:  # pylint: disable=broad-except
-        return jsonify(
-            {
-                "base": base,
-                "quote": quote,
-                "min_qty": None,
-                "stale": True,
-                "source": "fallback",
-                "error": str(exc),
-            }
-        )
+    )
 
 
 @app.get("/min-qty")
@@ -925,6 +882,7 @@ def index():
             request.headers.get("x-forwarded-prefix", "").rstrip("/")
             or request.script_root.rstrip("/")
         ),
+        options_min_qty_map=HARD_CODED_OPTIONS_MIN_QTY,
     )
 
 
