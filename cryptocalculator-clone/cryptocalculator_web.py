@@ -331,7 +331,8 @@ FORM_HTML = """
 
       const resultBox = document.getElementById('execute_result');
       if(resultBox){
-        // Do not use template literals/backticks or multiline strings in inline JS; use \n escapes only.
+        /* Do not use template literals/backticks or multiline strings in inline JS.
+           Use '\\n' escapes only. */
         resultBox.textContent = 'Submitting limit order...\\n';
         resultBox.classList.remove('hidden');
       }
