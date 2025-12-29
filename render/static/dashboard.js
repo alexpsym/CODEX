@@ -2,16 +2,33 @@
     const grid = document.getElementById('grid');
     const status = document.getElementById('status');
     const refreshBtn = document.getElementById('refresh-btn');
+    const openOrdersTable = document.getElementById('open-orders-table');
+    const openOrdersBody = openOrdersTable?.querySelector('tbody');
+    const openOrdersStatus = document.getElementById('open-orders-status');
+    const openOrdersEmpty = document.getElementById('open-orders-empty');
 
     const CATEGORIES = ['Excel', 'Forex', 'Crypto', 'Other'];
 
     let scriptsCache = [];
+    let openOrdersCache = [];
     let refreshInFlight = null;
+    let openOrdersInFlight = null;
     let bybitSettingsEditing = false;
 
     const setStatus = (message, isError = false) => {
         status.textContent = message;
         status.style.color = isError ? '#fca5a5' : '#94a3b8';
+    };
+
+    const setOrdersStatus = (message, tone = 'default') => {
+        if (!openOrdersStatus) return;
+        openOrdersStatus.textContent = message;
+        openOrdersStatus.classList.remove('badge-error', 'badge-ok');
+        if (tone === 'error') {
+            openOrdersStatus.classList.add('badge-error');
+        } else if (tone === 'ok') {
+            openOrdersStatus.classList.add('badge-ok');
+        }
     };
 
     const fetchJson = async (url, options = {}) => {
@@ -57,6 +74,63 @@
         });
     };
 
+    const formatValue = (value) => {
+        if (value === null || value === undefined || value === '') return '—';
+        return value;
+    };
+
+    const formatTimestamp = (value) => {
+        if (!value) return '—';
+        const numeric = Number(value);
+        if (!Number.isNaN(numeric) && String(value).trim() !== '') {
+            const timestamp = numeric < 1_000_000_000_000 ? numeric * 1000 : numeric;
+            const date = new Date(timestamp);
+            if (!Number.isNaN(date.getTime())) {
+                return date.toLocaleString();
+            }
+        }
+        const date = new Date(value);
+        if (!Number.isNaN(date.getTime())) {
+            return date.toLocaleString();
+        }
+        return value;
+    };
+
+    const renderOpenOrders = (items) => {
+        if (!openOrdersBody || !openOrdersTable) return;
+        openOrdersBody.innerHTML = '';
+        if (!items.length) {
+            openOrdersEmpty?.setAttribute('style', 'display:block;');
+            return;
+        }
+        openOrdersEmpty?.setAttribute('style', 'display:none;');
+        items.forEach((item) => {
+            const row = document.createElement('tr');
+            const cells = [
+                item.broker,
+                item.account,
+                item.instrument,
+                item.type,
+                item.side,
+                item.size,
+                item.entry_price || item.order_price,
+                item.current_price,
+                item.stop_loss,
+                item.take_profit,
+                item.leverage,
+                formatTimestamp(item.opened_at),
+                item.id,
+                item.status,
+            ];
+            cells.forEach((cell) => {
+                const td = document.createElement('td');
+                td.textContent = formatValue(cell);
+                row.appendChild(td);
+            });
+            openOrdersBody.appendChild(row);
+        });
+    };
+
     const refresh = async () => {
         if (refreshInFlight) return refreshInFlight;
         if (bybitSettingsEditing) {
@@ -83,8 +157,35 @@
         return refreshInFlight;
     };
 
+    const refreshOpenOrders = async () => {
+        if (!openOrdersTable || openOrdersInFlight) return openOrdersInFlight;
+        openOrdersInFlight = (async () => {
+            try {
+                const payload = await fetchJson('/api/open-orders');
+                openOrdersCache = payload.items || [];
+                renderOpenOrders(openOrdersCache);
+                const updated = formatTimestamp(payload.updated_at);
+                const errorCount = (payload.errors || []).length;
+                if (errorCount) {
+                    setOrdersStatus(`Updated ${updated} • ${errorCount} source issue(s)`, 'error');
+                } else {
+                    setOrdersStatus(`Updated ${updated}`, 'ok');
+                }
+            } catch (err) {
+                console.error(err);
+                renderOpenOrders(openOrdersCache);
+                setOrdersStatus('Failed to load open orders.', 'error');
+            } finally {
+                openOrdersInFlight = null;
+            }
+        })();
+
+        return openOrdersInFlight;
+    };
+
     refreshBtn?.addEventListener('click', () => {
         refresh();
+        refreshOpenOrders();
     });
 
     const backBtn = document.getElementById('nav-back');
@@ -94,8 +195,10 @@
 
     setInterval(() => {
         refresh();
+        refreshOpenOrders();
     }, 5000);
 
     renderCategories();
     refresh();
+    refreshOpenOrders();
 })();
