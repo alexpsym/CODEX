@@ -986,6 +986,36 @@ def _build_bybit_query(params: Dict[str, str]) -> str:
     return "&".join(f"{key}={value}" for key, value in sorted(params.items()))
 
 
+def _is_bybit_open_order(status: Optional[str]) -> bool:
+    if not status:
+        return True
+    normalized = status.strip().lower()
+    open_statuses = {
+        "new",
+        "untriggered",
+        "partiallyfilled",
+        "triggered",
+        "active",
+        "working",
+        "created",
+        "open",
+    }
+    closed_statuses = {
+        "filled",
+        "cancelled",
+        "canceled",
+        "rejected",
+        "deactivated",
+        "expired",
+        "done",
+    }
+    if normalized in closed_statuses:
+        return False
+    if normalized in open_statuses:
+        return True
+    return normalized not in closed_statuses
+
+
 async def _bybit_signed_get(
     *, base_url: str, api_key: str, api_secret: str, path: str, params: Dict[str, str]
 ) -> Dict[str, object]:
@@ -1122,6 +1152,9 @@ async def _collect_bybit_open_items(
             )
             continue
         for order in orders:
+            status = order.get("orderStatus")
+            if not _is_bybit_open_order(status):
+                continue
             items.append(
                 {
                     "broker": "Bybit",
@@ -1139,7 +1172,7 @@ async def _collect_bybit_open_items(
                     "leverage": order.get("leverage"),
                     "opened_at": order.get("createdTime"),
                     "id": order.get("orderId"),
-                    "status": order.get("orderStatus") or "OPEN",
+                    "status": status or "OPEN",
                 }
             )
     return {"items": items, "errors": errors}
