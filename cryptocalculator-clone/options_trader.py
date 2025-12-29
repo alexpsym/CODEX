@@ -195,6 +195,9 @@ def fetch_option_instruments(
     expiry: str | None = None,
     option_type: str | None = None,
     base_url: str | None = None,
+    max_pages: int | None = None,
+    time_budget: float | None = None,
+    request_timeout: float = 10.0,
 ) -> list[dict]:
     """Return a list of option symbols for the given filters."""
 
@@ -213,13 +216,19 @@ def fetch_option_instruments(
 
     instruments = []
     cursor = None
+    start_time = time.monotonic()
+    page_count = 0
     while True:
+        if max_pages is not None and page_count >= max_pages:
+            break
+        if time_budget is not None and (time.monotonic() - start_time) > time_budget:
+            break
         qs = urlencode({k: v for k, v in params.items() if v is not None})
         if cursor:
             qs += f"&cursor={cursor}"
         url = f"{base_url}{endpoint}?{qs}"
         logger.debug("Fetching instruments: %s", url)
-        resp = requests.get(url, timeout=10)
+        resp = requests.get(url, timeout=request_timeout)
         resp.raise_for_status()
         data = resp.json()
         logger.debug("Instruments response: %s", data)
@@ -229,6 +238,7 @@ def fetch_option_instruments(
             )
         instruments.extend(data.get("result", {}).get("list", []))
         cursor = data.get("result", {}).get("nextPageCursor")
+        page_count += 1
         if not cursor:
             break
     return instruments
@@ -236,6 +246,60 @@ def fetch_option_instruments(
 
 _tick_size_cache: dict[str, float] = {}
 _min_qty_cache: dict[str, float] = {}
+_min_qty_base_cache: dict[tuple[str, str, str], tuple[float, float]] = {}
+_min_qty_base_ttl_seconds = 900
+_option_bases_cache: tuple[float, list[str]] | None = None
+_option_bases_cache_ttl_seconds = 6 * 60 * 60
+_option_bases_cache_last_log: float | None = None
+
+
+def get_min_order_qty_for_base(
+    base_coin: str, quote_coin: str = "USDT", base_url: str | None = None
+) -> float:
+    """Return the minimum order quantity across all options for base/quote."""
+
+    base_coin = (base_coin or "").strip().upper()
+    quote_coin = (quote_coin or "USDT").strip().upper()
+    if not base_coin:
+        return MIN_ORDER_QTY
+    base_url = base_url or get_base_url()
+    cache_key = (base_coin, quote_coin, base_url)
+    now = time.time()
+    cached = _min_qty_base_cache.get(cache_key)
+    if cached and cached[1] > now:
+        return cached[0]
+
+    try:
+        instruments = fetch_option_instruments(
+            base_coin=base_coin,
+            base_url=base_url,
+            max_pages=2,
+            time_budget=3.0,
+            request_timeout=5.0,
+        )
+    except Exception as exc:  # pragma: no cover - network guard
+        logger.warning("Failed to fetch option instruments for %s: %s", base_coin, exc)
+        if cached:
+            return cached[0]
+        return MIN_ORDER_QTY
+
+    min_candidates: list[float] = []
+    for inst in instruments:
+        if inst.get("baseCoin", "").upper() != base_coin:
+            continue
+        if inst.get("quoteCoin", "").upper() != quote_coin:
+            continue
+        raw_qty = inst.get("lotSizeFilter", {}).get("minOrderQty")
+        try:
+            qty_val = float(raw_qty)
+        except (TypeError, ValueError):
+            continue
+        if qty_val > 0:
+            min_candidates.append(qty_val)
+
+    min_qty = min(min_candidates) if min_candidates else (cached[0] if cached else MIN_ORDER_QTY)
+    _min_qty_base_cache[cache_key] = (min_qty, now + _min_qty_base_ttl_seconds)
+    return min_qty
 
 
 def get_tick_size(symbol: str, base_url: str | None = None) -> float:
@@ -298,33 +362,68 @@ def get_supported_option_bases(base_url: str | None = None) -> list[str]:
     """Return available base coins for options."""
 
     base_url = base_url or get_base_url()
+    global _option_bases_cache, _option_bases_cache_last_log
+    now = time.time()
+    if _option_bases_cache and _option_bases_cache[0] > now:
+        return list(_option_bases_cache[1])
     endpoint = "/v5/market/instruments-info"
     params = {"category": "option"}
     instruments = []
     cursor = None
+    start_time = time.monotonic()
+    page_count = 0
     try:
         while True:
+            if page_count >= 3 or (time.monotonic() - start_time) > 4:
+                break
             qs = urlencode({k: v for k, v in params.items() if v is not None})
             if cursor:
                 qs += f"&cursor={cursor}"
             url = f"{base_url}{endpoint}?{qs}"
-            resp = requests.get(url, timeout=10)
+            resp = requests.get(url, timeout=5)
             resp.raise_for_status()
             data = resp.json()
             if data.get("retCode") != 0:
                 break
             instruments.extend(data.get("result", {}).get("list", []))
             cursor = data.get("result", {}).get("nextPageCursor")
+            page_count += 1
             if not cursor:
                 break
     except requests.RequestException:
+        if _option_bases_cache:
+            if _option_bases_cache_last_log is None or now - _option_bases_cache_last_log > 300:
+                logger.warning("Using cached option bases due to fetch error.")
+                _option_bases_cache_last_log = now
+            return list(_option_bases_cache[1])
+        if _option_bases_cache_last_log is None or now - _option_bases_cache_last_log > 300:
+            logger.warning("Falling back to default option bases due to fetch error.")
+            _option_bases_cache_last_log = now
         return DEFAULT_OPTION_BASES
     bases = sorted(
         {inst.get("baseCoin", "").upper() for inst in instruments if inst.get("baseCoin")}
     )
     if not bases:
+        if _option_bases_cache:
+            if _option_bases_cache_last_log is None or now - _option_bases_cache_last_log > 300:
+                logger.warning("Using cached option bases due to empty response.")
+                _option_bases_cache_last_log = now
+            return list(_option_bases_cache[1])
+        if _option_bases_cache_last_log is None or now - _option_bases_cache_last_log > 300:
+            logger.warning("Falling back to default option bases due to empty response.")
+            _option_bases_cache_last_log = now
         return DEFAULT_OPTION_BASES
-    return sorted(set(bases) | set(DEFAULT_OPTION_BASES))
+    bases = sorted(set(bases) | set(DEFAULT_OPTION_BASES))
+    _option_bases_cache = (now + _option_bases_cache_ttl_seconds, bases)
+    return list(bases)
+
+
+def get_supported_option_bases_cached() -> list[str]:
+    """Return cached option bases or defaults without a network call."""
+
+    if _option_bases_cache:
+        return list(_option_bases_cache[1])
+    return list(DEFAULT_OPTION_BASES)
 
 
 def build_journal_csv(trader: BybitOptionsTrader, days: int = 30) -> str:
