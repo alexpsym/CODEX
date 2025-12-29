@@ -509,6 +509,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .meta { color: #94a3b8; margin-bottom: 1.5rem; }
         .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1rem; }
         .card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 1.25rem; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
+        .panel { background: #111827; border: 1px solid #1f2937; border-radius: 16px; padding: 1.5rem; margin-top: 2rem; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
+        .panel-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; }
+        .panel-header h2 { margin: 0 0 0.35rem; font-size: 1.35rem; }
+        .panel-header .meta { margin: 0; }
+        .table-wrap { overflow-x: auto; border-radius: 12px; border: 1px solid #1f2937; background: #0b1220; }
+        table { width: 100%; border-collapse: collapse; min-width: 920px; }
+        th, td { text-align: left; padding: 0.6rem 0.75rem; border-bottom: 1px solid #1f2937; font-size: 0.9rem; }
+        th { background: #0f172a; color: #cbd5e1; position: sticky; top: 0; z-index: 1; }
+        tr:hover { background: #111827; }
+        .empty-state { margin-top: 0.75rem; color: #94a3b8; }
+        .error-list { margin-top: 0.75rem; color: #fca5a5; font-size: 0.9rem; }
+        .error-list ul { margin: 0.4rem 0 0; padding-left: 1.25rem; }
         .row { display: flex; justify-content: space-between; gap: 1rem; align-items: center; }
         .nav-bar { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
         .path { color: #94a3b8; font-size: 0.9rem; word-break: break-all; }
@@ -526,6 +538,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .settings-card input { padding: 0.55rem 0.75rem; border-radius: 10px; border: 1px solid #1f2937; background: #0a0f1b; color: #e5e7eb; }
         .badge { display: inline-block; padding: 0.35rem 0.7rem; border-radius: 999px; background: #1f2937; color: #cbd5e1; font-weight: 700; }
         .badge-error { background: #7f1d1d; color: #fecdd3; }
+        .badge-ok { background: #14532d; color: #bbf7d0; }
         pre { background: #0a0f1b; color: #e5e7eb; border-radius: 8px; padding: 0.75rem; overflow: auto; max-height: 260px; white-space: pre-wrap; margin: 0; }
         .toolbar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; }
         .refresh { background: #3b82f6; color: #eaf2ff; }
@@ -543,6 +556,44 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <span id=\"status\" class=\"meta\">Loading scripts...</span>
     </div>
     <div id=\"grid\" class=\"grid\"></div>
+    <div class=\"panel\" id=\"open-orders-panel\">
+        <div class=\"panel-header\">
+            <div>
+                <h2>Open Orders / Trades</h2>
+                <p class=\"meta\">Live feed of open Forex (OANDA) and Crypto (Bybit) activity. Profit metrics are hidden.</p>
+            </div>
+            <span class=\"badge\" id=\"open-orders-status\">Loading...</span>
+        </div>
+        <div class=\"table-wrap\">
+            <table id=\"open-orders-table\">
+                <thead>
+                    <tr>
+                        <th>Broker</th>
+                        <th>Account</th>
+                        <th>Category</th>
+                        <th>Instrument</th>
+                        <th>Type</th>
+                        <th>Side</th>
+                        <th>Size</th>
+                        <th>Entry / Order</th>
+                        <th>Current / Trigger</th>
+                        <th>Stop Loss</th>
+                        <th>Take Profit</th>
+                        <th>Leverage / Margin</th>
+                        <th>Opened</th>
+                        <th>ID</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+        <p class=\"meta empty-state\" id=\"open-orders-empty\" style=\"display:none;\">No open orders or trades.</p>
+        <div class=\"error-list\" id=\"open-orders-errors\" style=\"display:none;\">
+            <strong>Source issues</strong>
+            <ul></ul>
+        </div>
+    </div>
 
     <script src=\"/static/dashboard.js\"></script>
 </body>
@@ -823,6 +874,360 @@ PROXY_HOP_HEADERS = {
 PROXY_STRIP_HEADERS = {"content-encoding", "content-length"}
 PROXY_LOGGER = logging.getLogger("uvicorn.error")
 BYBIT_RECV_WINDOW = "5000"
+
+
+def _oanda_base_url() -> str:
+    return (
+        os.getenv("OANDA_BASE_URL")
+        or os.getenv("OANDA_URL")
+        or os.getenv("OANDA_API_URL")
+        or "https://api-fxtrade.oanda.com/v3"
+    )
+
+
+def _oanda_account_context(base_url: str) -> str:
+    lowered = base_url.lower()
+    if "fxpractice" in lowered or "practice" in lowered or "sandbox" in lowered:
+        return "demo"
+    return "live"
+
+
+async def _fetch_oanda_json(
+    *, base_url: str, account_id: str, api_key: str, endpoint: str
+) -> Dict[str, object]:
+    headers = {"Authorization": f"Bearer {api_key}"}
+    url = f"{base_url}{endpoint.format(account_id=account_id)}"
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(url, headers=headers)
+    resp.raise_for_status()
+    return resp.json()
+
+
+async def _collect_oanda_open_items(
+    *, base_url: str, account_id: str, api_key: str, account_context: str
+) -> List[Dict[str, object]]:
+    trades_payload = await _fetch_oanda_json(
+        base_url=base_url,
+        account_id=account_id,
+        api_key=api_key,
+        endpoint="/accounts/{account_id}/openTrades",
+    )
+    orders_payload = await _fetch_oanda_json(
+        base_url=base_url,
+        account_id=account_id,
+        api_key=api_key,
+        endpoint="/accounts/{account_id}/pendingOrders",
+    )
+
+    items: List[Dict[str, object]] = []
+    for trade in trades_payload.get("trades", []):
+        units = trade.get("currentUnits") or trade.get("units")
+        side = "Long"
+        size = None
+        if units is not None:
+            try:
+                units_val = float(units)
+                side = "Long" if units_val >= 0 else "Short"
+                size = abs(units_val)
+            except (TypeError, ValueError):
+                size = units
+        items.append(
+            {
+                "broker": "OANDA",
+                "account": account_context,
+                "category": "forex",
+                "instrument": trade.get("instrument"),
+                "type": "Position",
+                "side": side,
+                "size": size,
+                "entry_price": trade.get("price"),
+                "order_price": None,
+                "current_price": trade.get("currentPrice"),
+                "stop_loss": (trade.get("stopLossOrder") or {}).get("price"),
+                "take_profit": (trade.get("takeProfitOrder") or {}).get("price"),
+                "leverage": trade.get("marginUsed"),
+                "opened_at": trade.get("openTime"),
+                "id": trade.get("id"),
+                "status": trade.get("state") or "OPEN",
+            }
+        )
+
+    for order in orders_payload.get("orders", []):
+        units = order.get("units")
+        side = "Buy"
+        size = None
+        if units is not None:
+            try:
+                units_val = float(units)
+                side = "Buy" if units_val >= 0 else "Sell"
+                size = abs(units_val)
+            except (TypeError, ValueError):
+                size = units
+        items.append(
+            {
+                "broker": "OANDA",
+                "account": account_context,
+                "category": "forex",
+                "instrument": order.get("instrument"),
+                "type": "Order",
+                "side": side,
+                "size": size,
+                "entry_price": None,
+                "order_price": order.get("price"),
+                "current_price": order.get("triggerPrice"),
+                "stop_loss": (order.get("stopLossOnFill") or {}).get("price"),
+                "take_profit": (order.get("takeProfitOnFill") or {}).get("price"),
+                "leverage": order.get("marginUsed"),
+                "opened_at": order.get("createTime"),
+                "id": order.get("id"),
+                "status": order.get("state") or "PENDING",
+            }
+        )
+    return items
+
+
+def _build_bybit_query(params: Dict[str, str]) -> str:
+    if not params:
+        return ""
+    return "&".join(f"{key}={value}" for key, value in sorted(params.items()))
+
+
+def _is_bybit_open_order(status: Optional[str]) -> bool:
+    if not status:
+        return True
+    normalized = status.strip().lower()
+    open_statuses = {
+        "new",
+        "untriggered",
+        "partiallyfilled",
+        "triggered",
+        "active",
+        "working",
+        "created",
+        "open",
+    }
+    closed_statuses = {
+        "filled",
+        "cancelled",
+        "canceled",
+        "rejected",
+        "deactivated",
+        "expired",
+        "done",
+    }
+    if normalized in closed_statuses:
+        return False
+    if normalized in open_statuses:
+        return True
+    return normalized not in closed_statuses
+
+
+async def _bybit_signed_get(
+    *, base_url: str, api_key: str, api_secret: str, path: str, params: Dict[str, str]
+) -> Dict[str, object]:
+    query = _build_bybit_query(params)
+    timestamp = str(int(time.time() * 1000))
+    signature = _bybit_sign_request(timestamp, api_key, api_secret, query)
+    headers = {
+        "X-BAPI-API-KEY": api_key,
+        "X-BAPI-SIGN": signature,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": BYBIT_RECV_WINDOW,
+        "X-BAPI-SIGN-TYPE": "2",
+    }
+    url = f"{base_url}{path}"
+    if query:
+        url = f"{url}?{query}"
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(url, headers=headers)
+    resp.raise_for_status()
+    payload = resp.json()
+    ret_code = payload.get("retCode")
+    if ret_code not in (0, "0"):
+        raise ValueError(payload.get("retMsg") or "Bybit request failed")
+    return payload
+
+
+async def _fetch_bybit_positions_for_category(
+    *,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+    category: str,
+) -> List[Dict[str, object]]:
+    if category == "linear":
+        combined: List[Dict[str, object]] = []
+        for settle_coin in ("USDT", "USDC"):
+            payload = await _bybit_signed_get(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                path="/v5/position/list",
+                params={"category": "linear", "settleCoin": settle_coin},
+            )
+            combined.extend(payload.get("result", {}).get("list", []))
+        return combined
+    payload = await _bybit_signed_get(
+        base_url=base_url,
+        api_key=api_key,
+        api_secret=api_secret,
+        path="/v5/position/list",
+        params={"category": category},
+    )
+    return payload.get("result", {}).get("list", [])
+
+
+async def _fetch_bybit_orders_for_category(
+    *,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+    category: str,
+) -> List[Dict[str, object]]:
+    if category == "linear":
+        combined: List[Dict[str, object]] = []
+        for settle_coin in ("USDT", "USDC"):
+            payload = await _bybit_signed_get(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                path="/v5/order/realtime",
+                params={
+                    "category": "linear",
+                    "settleCoin": settle_coin,
+                    "openOnly": "1",
+                },
+            )
+            combined.extend(payload.get("result", {}).get("list", []))
+        return combined
+    payload = await _bybit_signed_get(
+        base_url=base_url,
+        api_key=api_key,
+        api_secret=api_secret,
+        path="/v5/order/realtime",
+        params={"category": category, "openOnly": "1"},
+    )
+    return payload.get("result", {}).get("list", [])
+
+
+async def _collect_bybit_open_items(
+    *, base_url: str, api_key: str, api_secret: str, account_context: str
+) -> Dict[str, List[Dict[str, object]]]:
+    items: List[Dict[str, object]] = []
+    errors: List[Dict[str, str]] = []
+    position_categories = ["linear", "inverse", "option"]
+    order_categories = ["linear", "inverse", "spot", "option"]
+
+    for category in position_categories:
+        try:
+            positions = await _fetch_bybit_positions_for_category(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                category=category,
+            )
+        except Exception as exc:
+            errors.append(
+                {
+                    "broker": "Bybit",
+                    "account": account_context,
+                    "category": category,
+                    "message": str(exc),
+                }
+            )
+            continue
+        for position in positions:
+            size_raw = position.get("size")
+            size = None
+            try:
+                size_val = float(size_raw)
+                if size_val == 0:
+                    continue
+                size = abs(size_val)
+            except (TypeError, ValueError):
+                size = size_raw
+            items.append(
+                {
+                    "broker": "Bybit",
+                    "account": account_context,
+                    "category": category,
+                    "instrument": position.get("symbol"),
+                    "type": "Position",
+                    "side": position.get("side"),
+                    "size": size,
+                    "entry_price": position.get("avgPrice") or position.get("entryPrice"),
+                    "order_price": None,
+                    "current_price": position.get("markPrice"),
+                    "stop_loss": position.get("stopLoss"),
+                    "take_profit": position.get("takeProfit"),
+                    "leverage": position.get("leverage")
+                    or position.get("positionMargin"),
+                    "opened_at": position.get("createdTime"),
+                    "id": position.get("positionId") or position.get("positionIdx"),
+                    "status": "OPEN",
+                }
+            )
+
+    for category in order_categories:
+        try:
+            orders = await _fetch_bybit_orders_for_category(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                category=category,
+            )
+        except Exception as exc:
+            errors.append(
+                {
+                    "broker": "Bybit",
+                    "account": account_context,
+                    "category": category,
+                    "message": str(exc),
+                }
+            )
+            continue
+        for order in orders:
+            status = order.get("orderStatus")
+            if not _is_bybit_open_order(status):
+                continue
+            items.append(
+                {
+                    "broker": "Bybit",
+                    "account": account_context,
+                    "category": category,
+                    "instrument": order.get("symbol"),
+                    "type": "Order",
+                    "side": order.get("side"),
+                    "size": order.get("qty"),
+                    "entry_price": None,
+                    "order_price": order.get("price"),
+                    "current_price": order.get("triggerPrice"),
+                    "stop_loss": order.get("stopLoss"),
+                    "take_profit": order.get("takeProfit"),
+                    "leverage": order.get("leverage"),
+                    "opened_at": order.get("createdTime"),
+                    "id": order.get("orderId"),
+                    "status": status or "OPEN",
+                }
+            )
+    return {"items": items, "errors": errors}
+
+
+def _oanda_credentials(mode: str) -> Dict[str, str]:
+    suffix = "_DEMO" if mode == "demo" else ""
+    api_key = os.getenv(f"OANDA_API_KEY{suffix}") or os.getenv(f"OANDA_TOKEN{suffix}")
+    account_id = os.getenv(f"OANDA_ACCOUNT_ID{suffix}")
+    base_url = (
+        os.getenv(f"OANDA_BASE_URL{suffix}")
+        or os.getenv(f"OANDA_URL{suffix}")
+        or os.getenv(f"OANDA_API_URL{suffix}")
+        or _oanda_base_url()
+    )
+    return {
+        "api_key": api_key or "",
+        "account_id": account_id or "",
+        "base_url": base_url,
+    }
 BALANCE_LOGGER = logging.getLogger("uvicorn.error")
 BYBIT_LOGGER = logging.getLogger("uvicorn.error")
 
@@ -1556,6 +1961,91 @@ async def fetch_bybit_balance(
             "retMsg": ret_msg,
         }
     )
+
+
+@app.get("/api/open-orders")
+async def fetch_open_orders() -> JSONResponse:
+    items: List[Dict[str, object]] = []
+    errors: List[Dict[str, str]] = []
+
+    oanda_has_credentials = False
+    for account_mode in ("live", "demo"):
+        creds = _oanda_credentials(account_mode)
+        if not creds["api_key"] or not creds["account_id"]:
+            continue
+        if creds["account_id"] == "YOUR_OANDA_ACCOUNT_ID":
+            continue
+        oanda_has_credentials = True
+        try:
+            items.extend(
+                await _collect_oanda_open_items(
+                    base_url=creds["base_url"],
+                    account_id=creds["account_id"],
+                    api_key=creds["api_key"],
+                    account_context=account_mode,
+                )
+            )
+        except Exception as exc:
+            errors.append(
+                {
+                    "broker": "OANDA",
+                    "account": account_mode,
+                    "message": str(exc),
+                }
+            )
+
+    if not oanda_has_credentials:
+        errors.append(
+            {
+                "broker": "OANDA",
+                "account": "unknown",
+                "message": "Missing OANDA credentials.",
+            }
+        )
+
+    bybit_has_credentials = False
+    for account_mode in ("live", "demo"):
+        _mode, api_key, api_secret, base_url, key_source = resolve_bybit_credentials_for(
+            account_mode
+        )
+        if not api_key or not api_secret:
+            continue
+        bybit_has_credentials = True
+        try:
+            bybit_result = await _collect_bybit_open_items(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                account_context=account_mode,
+            )
+            items.extend(bybit_result["items"])
+            errors.extend(bybit_result["errors"])
+        except Exception as exc:
+            errors.append(
+                {
+                    "broker": "Bybit",
+                    "account": account_mode,
+                    "message": str(exc),
+                }
+            )
+        if key_source:
+            BYBIT_LOGGER.debug(
+                "OPEN_ORDERS account=%s base_url=%s key_source=%s",
+                account_mode,
+                base_url,
+                key_source,
+            )
+
+    if not bybit_has_credentials:
+        errors.append(
+            {
+                "broker": "Bybit",
+                "account": "unknown",
+                "message": "Missing Bybit credentials.",
+            }
+        )
+
+    return JSONResponse({"updated_at": time.time(), "items": items, "errors": errors})
 
 PAYSLIP_AUDIT_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"en\">
