@@ -297,6 +297,55 @@ FORM_HTML = """
         }
       }
     }
+    function updateExecuteButtons(){
+      const meta = document.getElementById('calc_meta');
+      if(!meta) return;
+
+      const tradeType = (meta.dataset.tradeType || "").toLowerCase();
+      const raw = (tradeType === "options")
+        ? (meta.dataset.optionsOrderType || "market")
+        : (meta.dataset.orderType || "market");
+
+      const isLimit = (raw || "market").toLowerCase() === "limit";
+
+      const marketBtn  = document.getElementById("execute_market_btn");
+      const limitBtn   = document.getElementById("execute_limit_btn");
+      const marketNote = document.getElementById("execute_market_note");
+      const limitNote  = document.getElementById("execute_limit_note");
+
+      if(marketBtn)  marketBtn.style.display  = isLimit ? "none" : "inline-block";
+      if(marketNote) marketNote.style.display = isLimit ? "none" : "block";
+      if(limitBtn)   limitBtn.style.display   = isLimit ? "inline-block" : "none";
+      if(limitNote)  limitNote.style.display  = isLimit ? "block" : "none";
+    }
+    function placeLimitOrder(){
+      const payloadEl = document.getElementById('tv_payload');
+      if(!payloadEl) return;
+
+      const ok = confirm("Submit a LIVE LIMIT order now?");
+      if(!ok) return;
+
+      const resultBox = document.getElementById('execute_result');
+      if(resultBox){
+        resultBox.textContent = 'Submitting limit order...\n';
+        resultBox.classList.remove('hidden');
+      }
+
+      fetch('{{ app_root }}/execute_now', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: payloadEl.textContent
+      })
+      .then(r => r.json().then(j => ({ ok: r.ok, json: j })))
+      .then(({ ok, json }) => {
+        if(!resultBox) return;
+        resultBox.textContent += (ok ? 'OK\n' : 'ERROR\n') + JSON.stringify(json, null, 2);
+      })
+      .catch(err => {
+        if(!resultBox) return;
+        resultBox.textContent += 'ERROR\n' + String(err);
+      });
+    }
     document.addEventListener('DOMContentLoaded', function(){
       const ot = document.getElementById('order_type');
       if(ot){
@@ -324,6 +373,7 @@ FORM_HTML = """
         optionsBaseInput.addEventListener('change', scheduleOptionsMinQty);
       }
       scheduleOptionsMinQty();
+      updateExecuteButtons();
     });
   </script>
 </head>
@@ -378,8 +428,6 @@ FORM_HTML = """
             <label>Entry Price: <input name="entry_price" type="number" step="0.0001"></label><br>
           </div>
           <label>Stop loss ticks: <input name="stop_loss_ticks" id="stop_loss_ticks" type="number" step="1"></label><br>
-          <label>Quantity:</label>
-          <input name="quantity" id="quantity" value="{{ quantity }}" type="number" min="0"><br>
           <label>Risk %: <input name="risk_percent" id="risk_percent" type="number" step="0.01"></label><br>
           <label>Risk–reward ratio: <input name="rr_ratio" id="rr_ratio" type="number" step="0.1" value="2"></label><br>
           <label>Price → Execution rate:
@@ -447,6 +495,7 @@ FORM_HTML = """
       {% if payload_json %}
         <h2>Result</h2>
         <pre id="alert_json">{{ payload_json }}</pre>
+        <pre id="tv_payload" style="display:none;">{{ payload_json }}</pre>
         {% if export_json %}
         <pre id="export_json" style="display:none;">{{ export_json }}</pre>
         {% endif %}
@@ -457,10 +506,30 @@ FORM_HTML = """
         <div class="copy-row">
           <button type="button" onclick="exportResult()">Export Result</button>
         </div>
+        <!-- metadata from the last calculation (prevents toggling without recalculating) -->
+        <div id="calc_meta"
+             data-trade-type="{{ trade_type }}"
+             data-order-type="{{ order_type }}"
+             data-options-order-type="{{ options_order_type }}"
+             style="display:none;"></div>
+
         <div class="copy-row">
-          <button type="button" class="danger-button" onclick="enterNow()">Enter now via market order</button>
+          <button id="execute_market_btn" type="button" class="danger-button" onclick="enterNow()">
+            Enter now via market order
+          </button>
+
+          <button id="execute_limit_btn" type="button" class="danger-button" onclick="placeLimitOrder()"
+                  style="display:none;">
+            Place limit order
+          </button>
         </div>
-        <p class="danger-note">This immediately submits a live market order. Use with extreme caution.</p>
+
+        <p id="execute_market_note" class="danger-note">
+          This immediately submits a live market order. Use with extreme caution.
+        </p>
+        <p id="execute_limit_note" class="danger-note" style="display:none;">
+          This submits a live limit order (GTC) at the entry price. Use with extreme caution.
+        </p>
         <pre id="execute_result" class="copy-box hidden"></pre>
       {% endif %}
       {% if options_output %}
@@ -753,6 +822,10 @@ def index():
                         "quantity": round(qty, 3),
                         "account": account_mode,
                         "trade_mode": "options",
+                        "order_type": options_order_type,
+                        "price": round(entry_price, 8)
+                        if options_order_type == "limit"
+                        else None,
                         "tp_offset": round(tp_offset, 6) if tp_offset is not None else None,
                         "tp_multiplier": tp_multiplier,
                     }
