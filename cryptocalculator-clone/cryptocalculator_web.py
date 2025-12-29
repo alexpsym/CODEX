@@ -133,9 +133,9 @@ FORM_HTML = """
     function buildAppUrl(path){
       if(!path){return appRoot || '';}
       if(appRoot){
-        return `${appRoot}${path.startsWith('/') ? '' : '/'}${path}`;
+        return appRoot + (path.startsWith('/') ? '' : '/') + path;
       }
-      return path.startsWith('/') ? path : `/${path}`;
+      return path.startsWith('/') ? path : '/' + path;
     }
     function copyText(text, statusId){
       const status = document.getElementById(statusId);
@@ -166,7 +166,7 @@ FORM_HTML = """
       const link = document.createElement('a');
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       link.href = url;
-      link.download = `crypto-trade-${timestamp}.json`;
+      link.download = 'crypto-trade-' + timestamp + '.json';
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -176,7 +176,7 @@ FORM_HTML = """
       const input = document.getElementById(inputId);
       if(!input){return;}
       input.value = value;
-      const group = document.querySelector(`[data-input="${inputId}"]`);
+      const group = document.querySelector('[data-input="' + inputId + '"]');
       if(group){
         group.querySelectorAll('button[data-value]').forEach((btn) => {
           btn.classList.toggle('active', btn.dataset.value === value);
@@ -187,7 +187,7 @@ FORM_HTML = """
       }
     }
     function bindButtonGroup(inputId){
-      const group = document.querySelector(`[data-input="${inputId}"]`);
+      const group = document.querySelector('[data-input="' + inputId + '"]');
       if(!group){return;}
       group.querySelectorAll('button[data-value]').forEach((btn) => {
         btn.addEventListener('click', (e) => {
@@ -228,11 +228,11 @@ FORM_HTML = """
       const quote = 'USDT';
       const baseKey = base ? base.toUpperCase() : '';
       const minQty = optionsMinQtyMap[baseKey];
-      const labelBase = baseKey ? `${baseKey}${quote}` : `${quote}`;
+      const labelBase = baseKey ? baseKey + quote : quote;
       if(typeof minQty === 'number'){
-        note.innerText = `Min qty (${labelBase} options): ${minQty}`;
+        note.innerText = 'Min qty (' + labelBase + ' options): ' + minQty;
       } else {
-        note.innerText = `Min qty (${labelBase} options): unavailable`;
+        note.innerText = 'Min qty (' + labelBase + ' options): unavailable';
       }
     }
     function scheduleOptionsMinQty(){
@@ -297,7 +297,7 @@ FORM_HTML = """
         }
       } catch (err) {
         if(resultBox){
-          resultBox.innerText = `Error: ${err}`;
+          resultBox.innerText = 'Error: ' + err;
         }
       }
     }
@@ -331,7 +331,8 @@ FORM_HTML = """
 
       const resultBox = document.getElementById('execute_result');
       if(resultBox){
-        resultBox.textContent = 'Submitting limit order...\n';
+        // Do not use template literals/backticks or multiline strings in inline JS; use \n escapes only.
+        resultBox.textContent = 'Submitting limit order...\\n';
         resultBox.classList.remove('hidden');
       }
 
