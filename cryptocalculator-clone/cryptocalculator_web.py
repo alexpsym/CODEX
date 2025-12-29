@@ -210,7 +210,7 @@ FORM_HTML = """
     }
     let optionsMinQtyController = null;
     let optionsMinQtyTimer = null;
-    let lastOptionsMinQty = null;
+    const lastOptionsMinQtyByBase = {};
     function scheduleOptionsMinQty(){
       if(optionsMinQtyTimer){
         clearTimeout(optionsMinQtyTimer);
@@ -226,6 +226,7 @@ FORM_HTML = """
       const account = accountInput ? accountInput.value : 'live';
       const quote = 'USDT';
       const pairLabel = base ? `${base}${quote}` : `${quote}`;
+      const cacheKey = base || pairLabel;
       if(optionsMinQtyController){
         optionsMinQtyController.abort();
       }
@@ -235,10 +236,11 @@ FORM_HTML = """
         const resp = await fetch(url, {signal: optionsMinQtyController.signal});
         const data = await resp.json();
         const hasNumeric = data && typeof data.min_qty === 'number' && !Number.isNaN(data.min_qty);
-        const minQty = hasNumeric ? data.min_qty : lastOptionsMinQty;
+        const cachedValue = lastOptionsMinQtyByBase[cacheKey];
+        const minQty = hasNumeric ? data.min_qty : cachedValue;
         const labelBase = data && data.base ? `${data.base}${data.quote || quote}` : pairLabel;
         if(hasNumeric){
-          lastOptionsMinQty = minQty;
+          lastOptionsMinQtyByBase[cacheKey] = minQty;
         }
         const staleNote = data && data.stale ? ' (stale)' : '';
         if(minQty === null || typeof minQty === 'undefined'){
@@ -248,10 +250,11 @@ FORM_HTML = """
         }
       } catch (err) {
         if(err && err.name === 'AbortError'){return;}
-        if(lastOptionsMinQty === null || typeof lastOptionsMinQty === 'undefined'){
+        const cachedValue = lastOptionsMinQtyByBase[cacheKey];
+        if(cachedValue === null || typeof cachedValue === 'undefined'){
           note.innerText = `Min qty (${pairLabel} options): unavailable`;
         } else {
-          note.innerText = `Min qty (${pairLabel} options): ${lastOptionsMinQty} (stale)`;
+          note.innerText = `Min qty (${pairLabel} options): ${cachedValue} (stale)`;
         }
       }
     }
@@ -568,7 +571,7 @@ def options_min_qty_base():
             {
                 "base": base,
                 "quote": quote,
-                "min_qty": options_trader.MIN_ORDER_QTY,
+                "min_qty": None,
                 "stale": True,
                 "source": "default",
                 "error": "missing base",
@@ -579,24 +582,22 @@ def options_min_qty_base():
         min_qty, stale, source = options_trader.get_min_order_qty_snapshot(
             base, quote_coin=quote, base_url=base_url
         )
-        return jsonify(
-            {
-                "base": base,
-                "quote": quote,
-                "min_qty": min_qty,
-                "stale": stale,
-                "source": source,
-            }
-        )
+        payload = {
+            "base": base,
+            "quote": quote,
+            "min_qty": min_qty,
+            "stale": stale,
+            "source": source,
+        }
+        if min_qty is None:
+            payload["error"] = "no instruments matched or lookup pending"
+        return jsonify(payload)
     except Exception as exc:  # pylint: disable=broad-except
-        min_qty = options_trader.get_min_order_qty_for_base(
-            base, quote_coin=quote, base_url=base_url
-        )
         return jsonify(
             {
                 "base": base,
                 "quote": quote,
-                "min_qty": min_qty,
+                "min_qty": None,
                 "stale": True,
                 "source": "fallback",
                 "error": str(exc),

@@ -253,6 +253,8 @@ _min_qty_last_good: dict[tuple[str, str, str], float] = {}
 _min_qty_inflight: dict[tuple[str, str, str], threading.Event] = {}
 _min_qty_lock = threading.Lock()
 _min_qty_semaphore = threading.Semaphore(3)
+_min_qty_debug: dict[tuple[str, str, str], dict[str, object]] = {}
+_min_qty_log_last: dict[tuple[str, str, str], float] = {}
 _option_bases_cache: tuple[float, list[str]] | None = None
 _option_bases_cache_ttl_seconds = 6 * 60 * 60
 _option_bases_cache_last_log: float | None = None
@@ -260,13 +262,13 @@ _option_bases_cache_last_log: float | None = None
 
 def get_min_order_qty_for_base(
     base_coin: str, quote_coin: str = "USDT", base_url: str | None = None
-) -> float:
+) -> float | None:
     """Return the minimum order quantity across all options for base/quote."""
 
     base_coin = (base_coin or "").strip().upper()
     quote_coin = (quote_coin or "USDT").strip().upper()
     if not base_coin:
-        return MIN_ORDER_QTY
+        return None
     base_url = base_url or get_base_url()
     cache_key = (base_coin, quote_coin, base_url)
     now = time.time()
@@ -279,7 +281,7 @@ def get_min_order_qty_for_base(
     last_good = _min_qty_last_good.get(cache_key)
     if last_good is not None:
         return last_good
-    return MIN_ORDER_QTY
+    return None
 
 
 def _schedule_min_qty_refresh(
@@ -297,6 +299,17 @@ def _schedule_min_qty_refresh(
     def _worker() -> None:
         start_time = time.monotonic()
         acquired = False
+        debug_payload: dict[str, object] = {
+            "base": base_coin,
+            "quote": quote_coin,
+            "base_url": base_url,
+            "instrument_count": 0,
+            "filtered_count": 0,
+            "min_qty_path": None,
+            "example_quote": None,
+            "example_settle": None,
+            "error": None,
+        }
         try:
             _min_qty_semaphore.acquire()
             acquired = True
@@ -307,25 +320,36 @@ def _schedule_min_qty_refresh(
                 time_budget=3.0,
                 request_timeout=5.0,
             )
+            debug_payload["instrument_count"] = len(instruments)
             min_candidates: list[float] = []
+            min_path_used: str | None = None
             for inst in instruments:
                 if inst.get("baseCoin", "").upper() != base_coin:
                     continue
-                if inst.get("quoteCoin", "").upper() != quote_coin:
+                if not _instrument_matches_quote(inst, quote_coin):
                     continue
-                raw_qty = inst.get("lotSizeFilter", {}).get("minOrderQty")
-                try:
-                    qty_val = float(raw_qty)
-                except (TypeError, ValueError):
+                if debug_payload["example_quote"] is None:
+                    debug_payload["example_quote"] = inst.get("quoteCoin")
+                if debug_payload["example_settle"] is None:
+                    debug_payload["example_settle"] = inst.get("settleCoin")
+                qty_val, path_used = _extract_min_order_qty(inst)
+                if qty_val is None:
                     continue
+                if min_path_used is None and path_used:
+                    min_path_used = path_used
                 if qty_val > 0:
                     min_candidates.append(qty_val)
-            min_qty = min(min_candidates) if min_candidates else MIN_ORDER_QTY
-            _min_qty_base_cache[cache_key] = (
-                min_qty,
-                time.time() + _min_qty_base_ttl_seconds,
-            )
-            _min_qty_last_good[cache_key] = min_qty
+            debug_payload["filtered_count"] = len(min_candidates)
+            debug_payload["min_qty_path"] = min_path_used
+            if min_candidates:
+                min_qty = min(min_candidates)
+                _min_qty_base_cache[cache_key] = (
+                    min_qty,
+                    time.time() + _min_qty_base_ttl_seconds,
+                )
+                _min_qty_last_good[cache_key] = min_qty
+            else:
+                debug_payload["error"] = "no candidates after filtering"
         except Exception as exc:  # pragma: no cover - network guard
             logger.warning(
                 "Min qty refresh failed for %s/%s: %s",
@@ -333,6 +357,7 @@ def _schedule_min_qty_refresh(
                 quote_coin,
                 exc,
             )
+            debug_payload["error"] = str(exc)
         finally:
             if acquired:
                 _min_qty_semaphore.release()
@@ -340,6 +365,7 @@ def _schedule_min_qty_refresh(
                 event = _min_qty_inflight.pop(cache_key, None)
                 if event:
                     event.set()
+            _min_qty_debug[cache_key] = debug_payload
             logger.debug(
                 "Min qty refresh completed for %s/%s in %.2fs",
                 base_coin,
@@ -352,13 +378,13 @@ def _schedule_min_qty_refresh(
 
 def get_min_order_qty_snapshot(
     base_coin: str, quote_coin: str = "USDT", base_url: str | None = None
-) -> tuple[float, bool, str]:
+) -> tuple[float | None, bool, str]:
     """Return min qty with stale flag and source."""
 
     base_coin = (base_coin or "").strip().upper()
     quote_coin = (quote_coin or "USDT").strip().upper()
     if not base_coin:
-        return MIN_ORDER_QTY, True, "default"
+        return None, True, "missing"
     base_url = base_url or get_base_url()
     cache_key = (base_coin, quote_coin, base_url)
     now = time.time()
@@ -368,9 +394,62 @@ def get_min_order_qty_snapshot(
     value = _min_qty_last_good.get(cache_key)
     if value is not None:
         _schedule_min_qty_refresh(cache_key, base_coin, quote_coin, base_url)
+        _log_min_qty_snapshot(cache_key, base_coin, quote_coin, "stale")
         return value, True, "last_good"
     _schedule_min_qty_refresh(cache_key, base_coin, quote_coin, base_url)
-    return MIN_ORDER_QTY, True, "default"
+    _log_min_qty_snapshot(cache_key, base_coin, quote_coin, "unavailable")
+    return None, True, "unavailable"
+
+
+def _instrument_matches_quote(inst: dict, quote_coin: str) -> bool:
+    quote = (inst.get("quoteCoin") or "").upper()
+    settle = (inst.get("settleCoin") or "").upper()
+    if quote or settle:
+        return quote_coin in {quote, settle}
+    return True
+
+
+def _extract_min_order_qty(inst: dict) -> tuple[float | None, str | None]:
+    lot_filter = inst.get("lotSizeFilter", {}) or {}
+    for key in ("minOrderQty", "minQty", "minOrderSize"):
+        if key in lot_filter:
+            try:
+                return float(lot_filter.get(key)), f"lotSizeFilter.{key}"
+            except (TypeError, ValueError):
+                return None, f"lotSizeFilter.{key}"
+    for key in ("minOrderQty", "minQty"):
+        if key in inst:
+            try:
+                return float(inst.get(key)), key
+            except (TypeError, ValueError):
+                return None, key
+    return None, None
+
+
+def _log_min_qty_snapshot(
+    cache_key: tuple[str, str, str],
+    base_coin: str,
+    quote_coin: str,
+    state: str,
+) -> None:
+    now = time.time()
+    last = _min_qty_log_last.get(cache_key)
+    if last and now - last < 900:
+        return
+    debug_payload = _min_qty_debug.get(cache_key, {})
+    logger.warning(
+        "Min qty %s for %s/%s: instruments=%s filtered=%s path=%s quote=%s settle=%s error=%s",
+        state,
+        base_coin,
+        quote_coin,
+        debug_payload.get("instrument_count"),
+        debug_payload.get("filtered_count"),
+        debug_payload.get("min_qty_path"),
+        debug_payload.get("example_quote"),
+        debug_payload.get("example_settle"),
+        debug_payload.get("error"),
+    )
+    _min_qty_log_last[cache_key] = now
 
 
 def get_tick_size(symbol: str, base_url: str | None = None) -> float:
