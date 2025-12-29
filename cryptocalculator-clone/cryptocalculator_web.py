@@ -345,11 +345,11 @@ FORM_HTML = """
       .then(r => r.json().then(j => ({ ok: r.ok, json: j })))
       .then(({ ok, json }) => {
         if(!resultBox) return;
-        resultBox.textContent += (ok ? 'OK\n' : 'ERROR\n') + JSON.stringify(json, null, 2);
+        resultBox.textContent += (ok ? 'OK\\n' : 'ERROR\\n') + JSON.stringify(json, null, 2);
       })
       .catch(err => {
         if(!resultBox) return;
-        resultBox.textContent += 'ERROR\n' + String(err);
+        resultBox.textContent += 'ERROR\\n' + String(err);
       });
     }
     document.addEventListener('DOMContentLoaded', function(){
