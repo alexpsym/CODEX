@@ -119,6 +119,7 @@ class ManagedScript:
             "path": str(self.path),
             "category": self.category,
             "running": self.is_running,
+            "port": self.port,
             "return_code": None if self.process is None else self.process.returncode,
             "open_url": script_open_url(self),
             "logs_url": script_logs_url(self.name),
@@ -1734,7 +1735,7 @@ async def view_logs(script_name: str) -> str:
 @app.api_route("/apps/{script_name}/{path:path}", methods=PROXY_METHODS)
 async def proxy_app(script_name: str, request: Request, path: str = "") -> Response:
     script = script_manager.get(script_name)
-    if not script.is_running or not script.port:
+    if not script.is_running:
         if script.name in WEB_APPS:
             if script.port is None:
                 script.port = _allocate_port()
@@ -1756,6 +1757,12 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
             )
         raise HTTPException(status_code=404, detail=f"{script_name} is not running.")
 
+    if script.port is None:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Upstream port not available for script: {script.name}",
+        )
+
     target = f"http://127.0.0.1:{script.port}/{path}"
     if request.url.query:
         target = f"{target}?{request.url.query}"
@@ -1764,10 +1771,11 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
     headers["X-Forwarded-Prefix"] = f"/apps/{_encoded_script_name(script.name)}"
     body = await request.body()
     PROXY_LOGGER.info(
-        "Proxying app request script=%s subpath=%s port=%s",
+        "Proxying app request script=%s subpath=%s port=%s url=%s",
         script.name,
         path,
         script.port,
+        target,
     )
 
     async with httpx.AsyncClient(follow_redirects=False) as client:
@@ -1791,9 +1799,10 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
 
     assert resp is not None
     PROXY_LOGGER.info(
-        "Proxy response script=%s subpath=%s status=%s",
+        "Proxy response script=%s subpath=%s port=%s status=%s",
         script.name,
         path,
+        script.port,
         resp.status_code,
     )
     filtered_headers = {
