@@ -620,7 +620,7 @@ def index():
     if options_order_type not in {"market", "limit"}:
         options_order_type = "market"
 
-    options_base_options = options_trader.get_supported_option_bases()
+    options_base_options = options_trader.get_supported_option_bases_cached()
     options_base_set = {
         base.strip().upper()
         for base in options_base_options
@@ -963,7 +963,7 @@ def _serve_wsgi(app: Flask, host: str = "127.0.0.1", port: int = 5000) -> None:
     try:
         from waitress import serve
     except ModuleNotFoundError:  # pragma: no cover - dependency error path
-        app.run(host=host, port=port)
+        app.run(host=host, port=port, threaded=True)
         return
 
     serve(app, host=host, port=port)

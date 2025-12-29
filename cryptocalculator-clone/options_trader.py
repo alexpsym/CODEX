@@ -195,6 +195,9 @@ def fetch_option_instruments(
     expiry: str | None = None,
     option_type: str | None = None,
     base_url: str | None = None,
+    max_pages: int | None = None,
+    time_budget: float | None = None,
+    request_timeout: float = 10.0,
 ) -> list[dict]:
     """Return a list of option symbols for the given filters."""
 
@@ -213,13 +216,19 @@ def fetch_option_instruments(
 
     instruments = []
     cursor = None
+    start_time = time.monotonic()
+    page_count = 0
     while True:
+        if max_pages is not None and page_count >= max_pages:
+            break
+        if time_budget is not None and (time.monotonic() - start_time) > time_budget:
+            break
         qs = urlencode({k: v for k, v in params.items() if v is not None})
         if cursor:
             qs += f"&cursor={cursor}"
         url = f"{base_url}{endpoint}?{qs}"
         logger.debug("Fetching instruments: %s", url)
-        resp = requests.get(url, timeout=10)
+        resp = requests.get(url, timeout=request_timeout)
         resp.raise_for_status()
         data = resp.json()
         logger.debug("Instruments response: %s", data)
@@ -229,6 +238,7 @@ def fetch_option_instruments(
             )
         instruments.extend(data.get("result", {}).get("list", []))
         cursor = data.get("result", {}).get("nextPageCursor")
+        page_count += 1
         if not cursor:
             break
     return instruments
@@ -260,7 +270,13 @@ def get_min_order_qty_for_base(
         return cached[0]
 
     try:
-        instruments = fetch_option_instruments(base_coin=base_coin, base_url=base_url)
+        instruments = fetch_option_instruments(
+            base_coin=base_coin,
+            base_url=base_url,
+            max_pages=2,
+            time_budget=3.0,
+            request_timeout=5.0,
+        )
     except Exception as exc:  # pragma: no cover - network guard
         logger.warning("Failed to fetch option instruments for %s: %s", base_coin, exc)
         if cached:
@@ -354,19 +370,24 @@ def get_supported_option_bases(base_url: str | None = None) -> list[str]:
     params = {"category": "option"}
     instruments = []
     cursor = None
+    start_time = time.monotonic()
+    page_count = 0
     try:
         while True:
+            if page_count >= 3 or (time.monotonic() - start_time) > 4:
+                break
             qs = urlencode({k: v for k, v in params.items() if v is not None})
             if cursor:
                 qs += f"&cursor={cursor}"
             url = f"{base_url}{endpoint}?{qs}"
-            resp = requests.get(url, timeout=10)
+            resp = requests.get(url, timeout=5)
             resp.raise_for_status()
             data = resp.json()
             if data.get("retCode") != 0:
                 break
             instruments.extend(data.get("result", {}).get("list", []))
             cursor = data.get("result", {}).get("nextPageCursor")
+            page_count += 1
             if not cursor:
                 break
     except requests.RequestException:
@@ -395,6 +416,14 @@ def get_supported_option_bases(base_url: str | None = None) -> list[str]:
     bases = sorted(set(bases) | set(DEFAULT_OPTION_BASES))
     _option_bases_cache = (now + _option_bases_cache_ttl_seconds, bases)
     return list(bases)
+
+
+def get_supported_option_bases_cached() -> list[str]:
+    """Return cached option bases or defaults without a network call."""
+
+    if _option_bases_cache:
+        return list(_option_bases_cache[1])
+    return list(DEFAULT_OPTION_BASES)
 
 
 def build_journal_csv(trader: BybitOptionsTrader, days: int = 30) -> str:
