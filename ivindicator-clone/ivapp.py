@@ -94,7 +94,9 @@ def update(_):
     ax.relim()
     ax.autoscale_view()
 
-    texts[0].set_text(f"TF: {current_timeframe} | IV: {snapshot['iv_percent']:.2f}%")
+    iv_value = snapshot.get("iv_percent")
+    iv_label = f"{iv_value:.2f}%" if isinstance(iv_value, (int, float)) else "n/a"
+    texts[0].set_text(f"TF: {current_timeframe} | IV: {iv_label}")
     texts[1].set_text(f"Spot: {spot:.2f}")
     texts[2].set_text(f"+1σ: {spot+move:.2f} / -1σ: {spot-move:.2f}")
     skew = snapshot["skew"]
@@ -214,11 +216,13 @@ def main():
             while True:
                 update(None)
                 if current_metrics:
+                    iv_value = current_metrics.get("IV")
+                    iv_display = iv_value if isinstance(iv_value, (int, float)) else 0.0
                     logger.info(
                         "IV snapshot: symbol=%s timeframe=%s iv=%.2f%% spot=%.2f move=%.2f expiry=%s",
                         current_symbol,
                         current_timeframe,
-                        current_metrics.get("IV", 0.0),
+                        iv_display,
                         current_metrics.get("Spot", 0.0),
                         current_metrics.get("Move", 0.0),
                         current_metrics.get("Expiry", "n/a"),

@@ -14,11 +14,6 @@ BASE_URL = "https://api.bybit.com"
 LOCAL_TZ = pytz.timezone("Australia/Brisbane")
 logger = get_logger(__name__)
 
-IV_TIMEFRAMES = {
-    "1m": 0.45, "5m": 0.42, "15m": 0.39, "30m": 0.37, "1h": 0.35,
-    "4h": 0.33, "1d": 0.30, "1w": 0.28, "1mo": 0.25,
-}
-
 TIMEFRAME_MINUTES = {
     "1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60,
     "4h": 240, "1d": 1440, "1w": 10080, "1mo": 43200,
@@ -176,10 +171,28 @@ def compute_open_interest(group):
     return int(calls), int(puts)
 
 
-def update_scaled_iv(timeframe):
+def scale_iv(base_iv: float, timeframe: str) -> float:
     """Scale annual IV to the given timeframe."""
     factor = TIMEFRAME_MINUTES[timeframe] / MINUTES_PER_YEAR
-    return IV_TIMEFRAMES[timeframe] * math.sqrt(factor)
+    return base_iv * math.sqrt(factor)
+
+
+def compute_atm_iv(group: list[dict], spot: float) -> float | None:
+    """Estimate annualized IV using options closest to spot."""
+    candidates = [opt for opt in group if opt.get("markIv") is not None and opt.get("markIv") > 0]
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda opt: abs(opt["strike"] - spot))
+    sample = [opt["markIv"] for opt in candidates[:6]]
+    if not sample:
+        return None
+
+    sample.sort()
+    mid = len(sample) // 2
+    if len(sample) % 2:
+        return sample[mid]
+    return (sample[mid - 1] + sample[mid]) / 2
 
 
 def compute_snapshot(symbol: str, timeframe: str, expiry: datetime | None = None) -> dict:
@@ -193,7 +206,8 @@ def compute_snapshot(symbol: str, timeframe: str, expiry: datetime | None = None
     if not group:
         return {"error": f"No options found for symbol {symbol}."}
 
-    scaled_iv = update_scaled_iv(timeframe)
+    base_iv = compute_atm_iv(group, spot)
+    scaled_iv = scale_iv(base_iv, timeframe) if base_iv is not None else 0.0
     move = spot * scaled_iv
     now = datetime.now(timezone.utc).astimezone(LOCAL_TZ)
     expiry_dt = group[0]["expiry"].astimezone(LOCAL_TZ)
@@ -207,7 +221,7 @@ def compute_snapshot(symbol: str, timeframe: str, expiry: datetime | None = None
         "time_local": now.strftime("%Y-%m-%d %H:%M:%S"),
         "symbol": symbol,
         "timeframe": timeframe,
-        "iv_percent": scaled_iv * 100,
+        "iv_percent": scaled_iv * 100 if base_iv is not None else None,
         "spot": spot,
         "upper": spot + move,
         "lower": spot - move,

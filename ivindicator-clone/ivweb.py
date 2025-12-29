@@ -140,9 +140,12 @@ def index() -> str:
   }
 
   function buildStats(snapshot){
+    const ivValue = (typeof snapshot.iv_percent === 'number')
+      ? snapshot.iv_percent.toFixed(2)
+      : 'n/a';
     const rows = [
       ['Time', snapshot.time_local],
-      ['IV %', snapshot.iv_percent.toFixed(2)],
+      ['IV %', ivValue],
       ['Spot', snapshot.spot.toFixed(2)],
       ['Upper', snapshot.upper.toFixed(2)],
       ['Lower', snapshot.lower.toFixed(2)],
@@ -287,11 +290,13 @@ def data():
     if "error" in snapshot:
         return jsonify({"error": snapshot["error"]}), 503
 
+    iv_value = snapshot.get("iv_percent")
+    iv_display = iv_value if isinstance(iv_value, (int, float)) else 0.0
     logger.info(
         "IV snapshot: symbol=%s timeframe=%s iv=%.2f%% spot=%.2f move=%.2f expiry=%s",
         snapshot["symbol"],
         snapshot["timeframe"],
-        snapshot["iv_percent"],
+        iv_display,
         snapshot["spot"],
         snapshot["move"],
         snapshot["expiry"],
