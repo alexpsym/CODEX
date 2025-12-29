@@ -1782,7 +1782,7 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
     async with httpx.AsyncClient(follow_redirects=False, timeout=timeout) as client:
         resp = None
         start_time = time.monotonic()
-        for attempt in range(3):
+        for attempt in range(2):
             try:
                 resp = await client.request(
                     request.method,
@@ -1822,7 +1822,7 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
                     duration,
                     exc,
                 )
-                if isinstance(exc, httpx.ConnectError) and attempt < 2:
+                if isinstance(exc, httpx.ConnectError) and attempt < 1:
                     await asyncio.sleep(0.2)
                     continue
                 raise HTTPException(
@@ -1843,6 +1843,14 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
         script.port,
         resp.status_code,
     )
+    if script.name == "cryptocalculator-clone" and resp.status_code >= 500:
+        PROXY_LOGGER.warning(
+            "Proxy upstream error script=%s subpath=%s port=%s status=%s",
+            script.name,
+            path,
+            script.port,
+            resp.status_code,
+        )
     filtered_headers = {
         k: v
         for k, v in resp.headers.items()
