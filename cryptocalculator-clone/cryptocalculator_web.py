@@ -80,6 +80,14 @@ def _get_git_sha() -> str:
 BUILD_SHA = _get_git_sha()
 DEFAULT_CRYPTO_QTY_STEP = 0.01
 DEFAULT_CRYPTO_SYMBOL = "BTCUSDT"
+HARD_CODED_OPTIONS_MIN_QTY = {
+    "BTC": 0.01,
+    "ETH": 0.1,
+    "SOL": 1,
+    "XRP": 10,
+    "MNT": 10,
+    "DOGE": 100,
+}
 
 
 def _fetch_master_balance(
@@ -117,6 +125,8 @@ FORM_HTML = """
     .button-group button.active {background:#2563eb; color:#fff; border-color:#60a5fa;}
     .danger-button {background:#b91c1c; color:#fff; border:1px solid #ef4444; font-weight:800;}
     .danger-note {color:#fca5a5; font-size:12px;}
+    .qty-row {display:flex; align-items:center; gap:8px; flex-wrap:wrap;}
+    .min-note {font-size:14px; color:#e2e8f0;}
   </style>
   <script>
     const appRoot = "{{ app_root }}";
@@ -206,6 +216,32 @@ FORM_HTML = """
       if(!priceSource || !note){return;}
       note.innerText = notes[priceSource.value] || '';
     }
+    const optionsMinQtyMap = {{ options_min_qty_map|tojson }};
+    let optionsMinQtyTimer = null;
+    function renderOptionsMinQty(base){
+      const note = document.getElementById('options_min_qty_note');
+      if(!note){return;}
+      const quote = 'USDT';
+      const baseKey = base ? base.toUpperCase() : '';
+      const minQty = optionsMinQtyMap[baseKey];
+      const labelBase = baseKey ? `${baseKey}${quote}` : `${quote}`;
+      if(typeof minQty === 'number'){
+        note.innerText = `Min qty (${labelBase} options): ${minQty}`;
+      } else {
+        note.innerText = `Min qty (${labelBase} options): unavailable`;
+      }
+    }
+    function scheduleOptionsMinQty(){
+      if(optionsMinQtyTimer){
+        clearTimeout(optionsMinQtyTimer);
+      }
+      optionsMinQtyTimer = setTimeout(updateOptionsMinQty, 200);
+    }
+    function updateOptionsMinQty(){
+      const baseInput = document.getElementById('options_base');
+      const base = baseInput ? baseInput.value : '';
+      renderOptionsMinQty(base);
+    }
     function updateTradeType(){
       const selector = document.getElementById('trade_type');
       const optionsSection = document.getElementById('options_section');
@@ -283,6 +319,11 @@ FORM_HTML = """
       }
       updateTradeType();
       ['trade_type', 'account_mode', 'direction', 'order_type', 'options_order_type', 'options_type', 'options_side', 'price_source', 'execution_exchange', 'options_base'].forEach(bindButtonGroup);
+      const optionsBaseInput = document.getElementById('options_base');
+      if(optionsBaseInput){
+        optionsBaseInput.addEventListener('change', scheduleOptionsMinQty);
+      }
+      scheduleOptionsMinQty();
     });
   </script>
 </head>
@@ -375,8 +416,11 @@ FORM_HTML = """
             <button type="button" data-value="Sell">Sell</button>
           </div>
           <input type="hidden" name="options_side" id="options_side" value="{{ options_side }}">
-          <label>Quantity:</label>
-          <input name="options_quantity" id="options_quantity" value="{{ options_quantity }}"><br>
+          <div class="qty-row">
+            <label for="options_quantity">Quantity:</label>
+            <input name="options_quantity" id="options_quantity" value="{{ options_quantity }}">
+            <span id="options_min_qty_note" class="min-note"></span>
+          </div>
           <div id="options_limit_price_row">
             <label>Limit Price: <input name="options_limit_price"></label><br>
           </div>
@@ -489,6 +533,35 @@ def options_min_qty():
     return jsonify({"min_qty": min_qty})
 
 
+@app.get("/options/min-qty-base")
+def options_min_qty_base():
+    base = request.args.get("base", "").strip().upper()
+    quote = request.args.get("quote", "USDT").strip().upper() or "USDT"
+    min_qty = HARD_CODED_OPTIONS_MIN_QTY.get(base)
+
+    if not base:
+        return jsonify(
+            {
+                "base": base,
+                "quote": quote,
+                "min_qty": None,
+                "stale": False,
+                "source": "static",
+                "error": "missing base",
+            }
+        )
+
+    return jsonify(
+        {
+            "base": base,
+            "quote": quote,
+            "min_qty": min_qty,
+            "stale": False,
+            "source": "static",
+        }
+    )
+
+
 @app.get("/min-qty")
 def crypto_min_qty():
     symbol = request.args.get("symbol", "").strip().upper()
@@ -541,7 +614,7 @@ def index():
     if options_order_type not in {"market", "limit"}:
         options_order_type = "market"
 
-    options_base_options = options_trader.get_supported_option_bases()
+    options_base_options = options_trader.get_supported_option_bases_cached()
     options_base_set = {
         base.strip().upper()
         for base in options_base_options
@@ -805,7 +878,11 @@ def index():
         export_json=export_json,
         build_sha=BUILD_SHA,
         build_timestamp=BUILD_TIMESTAMP,
-        app_root=request.script_root.rstrip("/"),
+        app_root=(
+            request.headers.get("x-forwarded-prefix", "").rstrip("/")
+            or request.script_root.rstrip("/")
+        ),
+        options_min_qty_map=HARD_CODED_OPTIONS_MIN_QTY,
     )
 
 
@@ -881,7 +958,7 @@ def _serve_wsgi(app: Flask, host: str = "127.0.0.1", port: int = 5000) -> None:
     try:
         from waitress import serve
     except ModuleNotFoundError:  # pragma: no cover - dependency error path
-        app.run(host=host, port=port)
+        app.run(host=host, port=port, threaded=True)
         return
 
     serve(app, host=host, port=port)
