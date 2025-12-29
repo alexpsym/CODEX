@@ -236,6 +236,54 @@ def fetch_option_instruments(
 
 _tick_size_cache: dict[str, float] = {}
 _min_qty_cache: dict[str, float] = {}
+_min_qty_base_cache: dict[tuple[str, str, str], tuple[float, float]] = {}
+_min_qty_base_ttl_seconds = 900
+_option_bases_cache: tuple[float, list[str]] | None = None
+_option_bases_cache_ttl_seconds = 6 * 60 * 60
+_option_bases_cache_last_log: float | None = None
+
+
+def get_min_order_qty_for_base(
+    base_coin: str, quote_coin: str = "USDT", base_url: str | None = None
+) -> float:
+    """Return the minimum order quantity across all options for base/quote."""
+
+    base_coin = (base_coin or "").strip().upper()
+    quote_coin = (quote_coin or "USDT").strip().upper()
+    if not base_coin:
+        return MIN_ORDER_QTY
+    base_url = base_url or get_base_url()
+    cache_key = (base_coin, quote_coin, base_url)
+    now = time.time()
+    cached = _min_qty_base_cache.get(cache_key)
+    if cached and cached[1] > now:
+        return cached[0]
+
+    try:
+        instruments = fetch_option_instruments(base_coin=base_coin, base_url=base_url)
+    except Exception as exc:  # pragma: no cover - network guard
+        logger.warning("Failed to fetch option instruments for %s: %s", base_coin, exc)
+        if cached:
+            return cached[0]
+        return MIN_ORDER_QTY
+
+    min_candidates: list[float] = []
+    for inst in instruments:
+        if inst.get("baseCoin", "").upper() != base_coin:
+            continue
+        if inst.get("quoteCoin", "").upper() != quote_coin:
+            continue
+        raw_qty = inst.get("lotSizeFilter", {}).get("minOrderQty")
+        try:
+            qty_val = float(raw_qty)
+        except (TypeError, ValueError):
+            continue
+        if qty_val > 0:
+            min_candidates.append(qty_val)
+
+    min_qty = min(min_candidates) if min_candidates else (cached[0] if cached else MIN_ORDER_QTY)
+    _min_qty_base_cache[cache_key] = (min_qty, now + _min_qty_base_ttl_seconds)
+    return min_qty
 
 
 def get_tick_size(symbol: str, base_url: str | None = None) -> float:
@@ -298,6 +346,10 @@ def get_supported_option_bases(base_url: str | None = None) -> list[str]:
     """Return available base coins for options."""
 
     base_url = base_url or get_base_url()
+    global _option_bases_cache, _option_bases_cache_last_log
+    now = time.time()
+    if _option_bases_cache and _option_bases_cache[0] > now:
+        return list(_option_bases_cache[1])
     endpoint = "/v5/market/instruments-info"
     params = {"category": "option"}
     instruments = []
@@ -318,13 +370,31 @@ def get_supported_option_bases(base_url: str | None = None) -> list[str]:
             if not cursor:
                 break
     except requests.RequestException:
+        if _option_bases_cache:
+            if _option_bases_cache_last_log is None or now - _option_bases_cache_last_log > 300:
+                logger.warning("Using cached option bases due to fetch error.")
+                _option_bases_cache_last_log = now
+            return list(_option_bases_cache[1])
+        if _option_bases_cache_last_log is None or now - _option_bases_cache_last_log > 300:
+            logger.warning("Falling back to default option bases due to fetch error.")
+            _option_bases_cache_last_log = now
         return DEFAULT_OPTION_BASES
     bases = sorted(
         {inst.get("baseCoin", "").upper() for inst in instruments if inst.get("baseCoin")}
     )
     if not bases:
+        if _option_bases_cache:
+            if _option_bases_cache_last_log is None or now - _option_bases_cache_last_log > 300:
+                logger.warning("Using cached option bases due to empty response.")
+                _option_bases_cache_last_log = now
+            return list(_option_bases_cache[1])
+        if _option_bases_cache_last_log is None or now - _option_bases_cache_last_log > 300:
+            logger.warning("Falling back to default option bases due to empty response.")
+            _option_bases_cache_last_log = now
         return DEFAULT_OPTION_BASES
-    return sorted(set(bases) | set(DEFAULT_OPTION_BASES))
+    bases = sorted(set(bases) | set(DEFAULT_OPTION_BASES))
+    _option_bases_cache = (now + _option_bases_cache_ttl_seconds, bases)
+    return list(bases)
 
 
 def build_journal_csv(trader: BybitOptionsTrader, days: int = 30) -> str:
