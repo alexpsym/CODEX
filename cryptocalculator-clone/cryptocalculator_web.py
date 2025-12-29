@@ -117,6 +117,8 @@ FORM_HTML = """
     .button-group button.active {background:#2563eb; color:#fff; border-color:#60a5fa;}
     .danger-button {background:#b91c1c; color:#fff; border:1px solid #ef4444; font-weight:800;}
     .danger-note {color:#fca5a5; font-size:12px;}
+    .qty-row {display:flex; align-items:center; gap:8px; flex-wrap:wrap;}
+    .min-note {font-size:14px; color:#e2e8f0;}
   </style>
   <script>
     const appRoot = "{{ app_root }}";
@@ -206,6 +208,26 @@ FORM_HTML = """
       if(!priceSource || !note){return;}
       note.innerText = notes[priceSource.value] || '';
     }
+    async function updateOptionsMinQty(){
+      const baseInput = document.getElementById('options_base');
+      const accountInput = document.getElementById('account_mode');
+      const note = document.getElementById('options_min_qty_note');
+      if(!note){return;}
+      const base = baseInput ? baseInput.value : '';
+      const account = accountInput ? accountInput.value : 'live';
+      const quote = 'USDT';
+      const pairLabel = base ? `${base}${quote}` : `${quote}`;
+      try{
+        const url = buildAppUrl(`/options/min-qty-base?base=${encodeURIComponent(base)}&quote=${quote}&account=${encodeURIComponent(account)}`);
+        const resp = await fetch(url);
+        const data = await resp.json();
+        const minQty = data && typeof data.min_qty !== 'undefined' ? data.min_qty : 'unavailable';
+        const labelBase = data && data.base ? `${data.base}${data.quote || quote}` : pairLabel;
+        note.innerText = `Min qty (${labelBase} options): ${minQty}`;
+      } catch (err) {
+        note.innerText = `Min qty (${pairLabel} options): unavailable`;
+      }
+    }
     function updateTradeType(){
       const selector = document.getElementById('trade_type');
       const optionsSection = document.getElementById('options_section');
@@ -283,6 +305,15 @@ FORM_HTML = """
       }
       updateTradeType();
       ['trade_type', 'account_mode', 'direction', 'order_type', 'options_order_type', 'options_type', 'options_side', 'price_source', 'execution_exchange', 'options_base'].forEach(bindButtonGroup);
+      const optionsBaseInput = document.getElementById('options_base');
+      if(optionsBaseInput){
+        optionsBaseInput.addEventListener('change', updateOptionsMinQty);
+      }
+      const accountModeInput = document.getElementById('account_mode');
+      if(accountModeInput){
+        accountModeInput.addEventListener('change', updateOptionsMinQty);
+      }
+      updateOptionsMinQty();
     });
   </script>
 </head>
@@ -375,8 +406,11 @@ FORM_HTML = """
             <button type="button" data-value="Sell">Sell</button>
           </div>
           <input type="hidden" name="options_side" id="options_side" value="{{ options_side }}">
-          <label>Quantity:</label>
-          <input name="options_quantity" id="options_quantity" value="{{ options_quantity }}"><br>
+          <div class="qty-row">
+            <label for="options_quantity">Quantity:</label>
+            <input name="options_quantity" id="options_quantity" value="{{ options_quantity }}">
+            <span id="options_min_qty_note" class="min-note"></span>
+          </div>
           <div id="options_limit_price_row">
             <label>Limit Price: <input name="options_limit_price"></label><br>
           </div>
@@ -487,6 +521,31 @@ def options_min_qty():
     except Exception:  # pylint: disable=broad-except
         min_qty = options_trader.MIN_ORDER_QTY
     return jsonify({"min_qty": min_qty})
+
+
+@app.get("/options/min-qty-base")
+def options_min_qty_base():
+    base = request.args.get("base", "").strip().upper()
+    quote = request.args.get("quote", "USDT").strip().upper() or "USDT"
+    account_mode = request.args.get("account", "live").strip().lower()
+    if account_mode not in {"live", "demo"}:
+        account_mode = "live"
+
+    account_key = "demo" if account_mode == "demo" else "live"
+    _mode, _api_key, _api_secret, base_url, _key_source = resolve_bybit_credentials_for(
+        account_key
+    )
+
+    if not base:
+        return jsonify({"base": base, "quote": quote, "min_qty": options_trader.MIN_ORDER_QTY})
+
+    try:
+        min_qty = options_trader.get_min_order_qty_for_base(
+            base, quote_coin=quote, base_url=base_url
+        )
+    except Exception:  # pylint: disable=broad-except
+        min_qty = options_trader.MIN_ORDER_QTY
+    return jsonify({"base": base, "quote": quote, "min_qty": min_qty})
 
 
 @app.get("/min-qty")
@@ -805,7 +864,10 @@ def index():
         export_json=export_json,
         build_sha=BUILD_SHA,
         build_timestamp=BUILD_TIMESTAMP,
-        app_root=request.script_root.rstrip("/"),
+        app_root=(
+            request.headers.get("x-forwarded-prefix", "").rstrip("/")
+            or request.script_root.rstrip("/")
+        ),
     )
 
 

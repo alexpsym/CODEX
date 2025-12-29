@@ -820,6 +820,7 @@ PROXY_HOP_HEADERS = {
     "upgrade",
 }
 PROXY_STRIP_HEADERS = {"content-encoding", "content-length"}
+PROXY_LOGGER = logging.getLogger("uvicorn.error")
 BYBIT_RECV_WINDOW = "5000"
 BALANCE_LOGGER = logging.getLogger("uvicorn.error")
 BYBIT_LOGGER = logging.getLogger("uvicorn.error")
@@ -1729,8 +1730,8 @@ async def view_logs(script_name: str) -> str:
     return _render_log_view(script_name)
 
 
-@app.api_route("/apps/{script_name:path}", methods=PROXY_METHODS)
-@app.api_route("/apps/{script_name:path}/{path:path}", methods=PROXY_METHODS)
+@app.api_route("/apps/{script_name}", methods=PROXY_METHODS)
+@app.api_route("/apps/{script_name}/{path:path}", methods=PROXY_METHODS)
 async def proxy_app(script_name: str, request: Request, path: str = "") -> Response:
     script = script_manager.get(script_name)
     if not script.is_running or not script.port:
@@ -1760,7 +1761,14 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
         target = f"{target}?{request.url.query}"
 
     headers = {k: v for k, v in request.headers.items() if k.lower() != "host"}
+    headers["X-Forwarded-Prefix"] = f"/apps/{_encoded_script_name(script.name)}"
     body = await request.body()
+    PROXY_LOGGER.info(
+        "Proxying app request script=%s subpath=%s port=%s",
+        script.name,
+        path,
+        script.port,
+    )
 
     async with httpx.AsyncClient(follow_redirects=False) as client:
         resp = None
@@ -1782,6 +1790,12 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
                 await asyncio.sleep(0.2)
 
     assert resp is not None
+    PROXY_LOGGER.info(
+        "Proxy response script=%s subpath=%s status=%s",
+        script.name,
+        path,
+        resp.status_code,
+    )
     filtered_headers = {
         k: v
         for k, v in resp.headers.items()
