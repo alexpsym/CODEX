@@ -1778,8 +1778,10 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
         target,
     )
 
-    async with httpx.AsyncClient(follow_redirects=False) as client:
+    timeout = httpx.Timeout(30.0, connect=2.0)
+    async with httpx.AsyncClient(follow_redirects=False, timeout=timeout) as client:
         resp = None
+        start_time = time.monotonic()
         for attempt in range(3):
             try:
                 resp = await client.request(
@@ -1789,13 +1791,49 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
                     headers=headers,
                 )
                 break
-            except httpx.ConnectError:
-                if attempt == 2:
-                    raise HTTPException(
-                        status_code=503,
-                        detail=f"Unable to connect to {script_name} on port {script.port}.",
-                    )
-                await asyncio.sleep(0.2)
+            except httpx.TimeoutException as exc:
+                duration = time.monotonic() - start_time
+                PROXY_LOGGER.warning(
+                    "Proxy timeout script=%s subpath=%s port=%s url=%s duration=%.2fs error=%s",
+                    script.name,
+                    path,
+                    script.port,
+                    target,
+                    duration,
+                    exc,
+                )
+                raise HTTPException(
+                    status_code=504,
+                    detail={
+                        "error": "Upstream timeout",
+                        "script": script.name,
+                        "port": script.port,
+                        "url": target,
+                    },
+                ) from exc
+            except httpx.RequestError as exc:
+                duration = time.monotonic() - start_time
+                PROXY_LOGGER.warning(
+                    "Proxy request error script=%s subpath=%s port=%s url=%s duration=%.2fs error=%s",
+                    script.name,
+                    path,
+                    script.port,
+                    target,
+                    duration,
+                    exc,
+                )
+                if isinstance(exc, httpx.ConnectError) and attempt < 2:
+                    await asyncio.sleep(0.2)
+                    continue
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "error": "Upstream request failed",
+                        "script": script.name,
+                        "port": script.port,
+                        "url": target,
+                    },
+                ) from exc
 
     assert resp is not None
     PROXY_LOGGER.info(

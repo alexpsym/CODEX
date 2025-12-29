@@ -208,6 +208,14 @@ FORM_HTML = """
       if(!priceSource || !note){return;}
       note.innerText = notes[priceSource.value] || '';
     }
+    let optionsMinQtyController = null;
+    let optionsMinQtyTimer = null;
+    function scheduleOptionsMinQty(){
+      if(optionsMinQtyTimer){
+        clearTimeout(optionsMinQtyTimer);
+      }
+      optionsMinQtyTimer = setTimeout(updateOptionsMinQty, 200);
+    }
     async function updateOptionsMinQty(){
       const baseInput = document.getElementById('options_base');
       const accountInput = document.getElementById('account_mode');
@@ -217,14 +225,19 @@ FORM_HTML = """
       const account = accountInput ? accountInput.value : 'live';
       const quote = 'USDT';
       const pairLabel = base ? `${base}${quote}` : `${quote}`;
+      if(optionsMinQtyController){
+        optionsMinQtyController.abort();
+      }
+      optionsMinQtyController = new AbortController();
       try{
         const url = buildAppUrl(`/options/min-qty-base?base=${encodeURIComponent(base)}&quote=${quote}&account=${encodeURIComponent(account)}`);
-        const resp = await fetch(url);
+        const resp = await fetch(url, {signal: optionsMinQtyController.signal});
         const data = await resp.json();
-        const minQty = data && typeof data.min_qty !== 'undefined' ? data.min_qty : 'unavailable';
+        const minQty = data && typeof data.min_qty === 'number' ? data.min_qty : 'unavailable';
         const labelBase = data && data.base ? `${data.base}${data.quote || quote}` : pairLabel;
         note.innerText = `Min qty (${labelBase} options): ${minQty}`;
       } catch (err) {
+        if(err && err.name === 'AbortError'){return;}
         note.innerText = `Min qty (${pairLabel} options): unavailable`;
       }
     }
@@ -307,13 +320,13 @@ FORM_HTML = """
       ['trade_type', 'account_mode', 'direction', 'order_type', 'options_order_type', 'options_type', 'options_side', 'price_source', 'execution_exchange', 'options_base'].forEach(bindButtonGroup);
       const optionsBaseInput = document.getElementById('options_base');
       if(optionsBaseInput){
-        optionsBaseInput.addEventListener('change', updateOptionsMinQty);
+        optionsBaseInput.addEventListener('change', scheduleOptionsMinQty);
       }
       const accountModeInput = document.getElementById('account_mode');
       if(accountModeInput){
-        accountModeInput.addEventListener('change', updateOptionsMinQty);
+        accountModeInput.addEventListener('change', scheduleOptionsMinQty);
       }
-      updateOptionsMinQty();
+      scheduleOptionsMinQty();
     });
   </script>
 </head>
@@ -537,15 +550,22 @@ def options_min_qty_base():
     )
 
     if not base:
-        return jsonify({"base": base, "quote": quote, "min_qty": options_trader.MIN_ORDER_QTY})
+        return jsonify({"base": base, "quote": quote, "min_qty": None, "error": "missing base"})
 
     try:
         min_qty = options_trader.get_min_order_qty_for_base(
             base, quote_coin=quote, base_url=base_url
         )
-    except Exception:  # pylint: disable=broad-except
-        min_qty = options_trader.MIN_ORDER_QTY
-    return jsonify({"base": base, "quote": quote, "min_qty": min_qty})
+        return jsonify({"base": base, "quote": quote, "min_qty": min_qty})
+    except Exception as exc:  # pylint: disable=broad-except
+        return jsonify(
+            {
+                "base": base,
+                "quote": quote,
+                "min_qty": None,
+                "error": str(exc),
+            }
+        )
 
 
 @app.get("/min-qty")
