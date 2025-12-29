@@ -864,7 +864,10 @@ def index():
         export_json=export_json,
         build_sha=BUILD_SHA,
         build_timestamp=BUILD_TIMESTAMP,
-        app_root=request.script_root.rstrip("/"),
+        app_root=(
+            request.headers.get("x-forwarded-prefix", "").rstrip("/")
+            or request.script_root.rstrip("/")
+        ),
     )
 
 
