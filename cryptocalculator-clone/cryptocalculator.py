@@ -955,7 +955,7 @@ def build_webhook_payload(trade: Dict[str, Any]) -> Dict[str, Any]:
     tp_offset = target_dist if action == "buy" else -target_dist
     sl_offset = -stop_dist if action == "buy" else stop_dist
 
-    return {
+    payload = {
         "symbol": trade["symbol"],
         "action": action,
         "quantity": round(trade["quantity"], 3),
@@ -963,7 +963,13 @@ def build_webhook_payload(trade: Dict[str, Any]) -> Dict[str, Any]:
         "sl_offset": round(sl_offset, 6),
         "account": trade.get("account_mode", "live"),
         "trade_mode": trade.get("trade_mode", "linear"),
+        "order_type": trade.get("order_type", "market"),
     }
+
+    if str(payload["order_type"]).lower() == "limit":
+        payload["price"] = round(float(trade["entry_price"]), 8)
+
+    return payload
 
 
 def save_summary(text: str) -> None:
