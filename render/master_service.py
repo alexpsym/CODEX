@@ -519,6 +519,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         th { background: #0f172a; color: #cbd5e1; position: sticky; top: 0; z-index: 1; }
         tr:hover { background: #111827; }
         .empty-state { margin-top: 0.75rem; color: #94a3b8; }
+        .error-list { margin-top: 0.75rem; color: #fca5a5; font-size: 0.9rem; }
+        .error-list ul { margin: 0.4rem 0 0; padding-left: 1.25rem; }
         .row { display: flex; justify-content: space-between; gap: 1rem; align-items: center; }
         .nav-bar { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
         .path { color: #94a3b8; font-size: 0.9rem; word-break: break-all; }
@@ -587,6 +589,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             </table>
         </div>
         <p class=\"meta empty-state\" id=\"open-orders-empty\" style=\"display:none;\">No open orders or trades.</p>
+        <div class=\"error-list\" id=\"open-orders-errors\" style=\"display:none;\">
+            <strong>Source issues</strong>
+            <ul></ul>
+        </div>
     </div>
 
     <script src=\"/static/dashboard.js\"></script>
@@ -1036,7 +1042,8 @@ async def _bybit_signed_get(
         resp = await client.get(url, headers=headers)
     resp.raise_for_status()
     payload = resp.json()
-    if payload.get("retCode") != 0:
+    ret_code = payload.get("retCode")
+    if ret_code not in (0, "0"):
         raise ValueError(payload.get("retMsg") or "Bybit request failed")
     return payload
 

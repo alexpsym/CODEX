@@ -6,6 +6,8 @@
     const openOrdersBody = openOrdersTable?.querySelector('tbody');
     const openOrdersStatus = document.getElementById('open-orders-status');
     const openOrdersEmpty = document.getElementById('open-orders-empty');
+    const openOrdersErrors = document.getElementById('open-orders-errors');
+    const openOrdersErrorsList = openOrdersErrors?.querySelector('ul');
 
     const CATEGORIES = ['Excel', 'Forex', 'Crypto', 'Other'];
 
@@ -96,7 +98,7 @@
         return value;
     };
 
-    const renderOpenOrders = (items, errorCount = 0) => {
+    const renderOpenOrders = (items, errorCount = 0, errors = []) => {
         if (!openOrdersBody || !openOrdersTable) return;
         openOrdersBody.innerHTML = '';
         if (!items.length) {
@@ -106,9 +108,31 @@
                     : 'No open orders or trades.';
             }
             openOrdersEmpty?.setAttribute('style', 'display:block;');
+            if (openOrdersErrors) {
+                openOrdersErrors.style.display = errorCount ? 'block' : 'none';
+            }
+            if (openOrdersErrorsList) {
+                openOrdersErrorsList.innerHTML = '';
+            }
             return;
         }
         openOrdersEmpty?.setAttribute('style', 'display:none;');
+        if (openOrdersErrors) {
+            openOrdersErrors.style.display = errorCount ? 'block' : 'none';
+        }
+        if (openOrdersErrorsList) {
+            openOrdersErrorsList.innerHTML = '';
+            errors.forEach((entry) => {
+                const item = document.createElement('li');
+                const parts = [];
+                if (entry.broker) parts.push(entry.broker);
+                if (entry.account) parts.push(entry.account);
+                if (entry.category) parts.push(entry.category);
+                const prefix = parts.length ? `${parts.join(' / ')}: ` : '';
+                item.textContent = `${prefix}${entry.message || 'Unknown error'}`;
+                openOrdersErrorsList.appendChild(item);
+            });
+        }
         items.forEach((item) => {
             const row = document.createElement('tr');
             const cells = [
@@ -170,7 +194,7 @@
                 const payload = await fetchJson('/api/open-orders');
                 openOrdersCache = payload.items || [];
                 const errorCount = (payload.errors || []).length;
-                renderOpenOrders(openOrdersCache, errorCount);
+                renderOpenOrders(openOrdersCache, errorCount, payload.errors || []);
                 const updated = formatTimestamp(payload.updated_at);
                 if (errorCount) {
                     setOrdersStatus(`Updated ${updated} • ${errorCount} source issue(s)`, 'error');
@@ -179,7 +203,7 @@
                 }
             } catch (err) {
                 console.error(err);
-                renderOpenOrders(openOrdersCache, 1);
+                renderOpenOrders(openOrdersCache, 1, [{ message: err.message }]);
                 setOrdersStatus('Failed to load open orders.', 'error');
             } finally {
                 openOrdersInFlight = null;
