@@ -83,7 +83,8 @@
         if (!value) return '—';
         const numeric = Number(value);
         if (!Number.isNaN(numeric) && String(value).trim() !== '') {
-            const date = new Date(numeric);
+            const timestamp = numeric < 1_000_000_000_000 ? numeric * 1000 : numeric;
+            const date = new Date(timestamp);
             if (!Number.isNaN(date.getTime())) {
                 return date.toLocaleString();
             }

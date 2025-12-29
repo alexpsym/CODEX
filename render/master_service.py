@@ -897,9 +897,8 @@ async def _fetch_oanda_json(
 
 
 async def _collect_oanda_open_items(
-    *, base_url: str, account_id: str, api_key: str
+    *, base_url: str, account_id: str, api_key: str, account_context: str
 ) -> List[Dict[str, object]]:
-    account_context = _oanda_account_context(base_url)
     trades_payload = await _fetch_oanda_json(
         base_url=base_url,
         account_id=account_id,
@@ -1122,6 +1121,23 @@ async def _collect_bybit_open_items(
                 }
             )
     return items
+
+
+def _oanda_credentials(mode: str) -> Dict[str, str]:
+    suffix = "_DEMO" if mode == "demo" else ""
+    api_key = os.getenv(f"OANDA_API_KEY{suffix}") or os.getenv(f"OANDA_TOKEN{suffix}")
+    account_id = os.getenv(f"OANDA_ACCOUNT_ID{suffix}")
+    base_url = (
+        os.getenv(f"OANDA_BASE_URL{suffix}")
+        or os.getenv(f"OANDA_URL{suffix}")
+        or os.getenv(f"OANDA_API_URL{suffix}")
+        or _oanda_base_url()
+    )
+    return {
+        "api_key": api_key or "",
+        "account_id": account_id or "",
+        "base_url": base_url,
+    }
 BALANCE_LOGGER = logging.getLogger("uvicorn.error")
 BYBIT_LOGGER = logging.getLogger("uvicorn.error")
 
@@ -1862,27 +1878,33 @@ async def fetch_open_orders() -> JSONResponse:
     items: List[Dict[str, object]] = []
     errors: List[Dict[str, str]] = []
 
-    oanda_api_key = os.getenv("OANDA_API_KEY") or os.getenv("OANDA_TOKEN")
-    oanda_account_id = os.getenv("OANDA_ACCOUNT_ID")
-    if oanda_api_key and oanda_account_id and oanda_account_id != "YOUR_OANDA_ACCOUNT_ID":
-        base_url = _oanda_base_url()
+    oanda_has_credentials = False
+    for account_mode in ("live", "demo"):
+        creds = _oanda_credentials(account_mode)
+        if not creds["api_key"] or not creds["account_id"]:
+            continue
+        if creds["account_id"] == "YOUR_OANDA_ACCOUNT_ID":
+            continue
+        oanda_has_credentials = True
         try:
             items.extend(
                 await _collect_oanda_open_items(
-                    base_url=base_url,
-                    account_id=oanda_account_id,
-                    api_key=oanda_api_key,
+                    base_url=creds["base_url"],
+                    account_id=creds["account_id"],
+                    api_key=creds["api_key"],
+                    account_context=account_mode,
                 )
             )
         except Exception as exc:
             errors.append(
                 {
                     "broker": "OANDA",
-                    "account": _oanda_account_context(base_url),
+                    "account": account_mode,
                     "message": str(exc),
                 }
             )
-    else:
+
+    if not oanda_has_credentials:
         errors.append(
             {
                 "broker": "OANDA",
