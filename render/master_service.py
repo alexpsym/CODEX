@@ -1055,6 +1055,18 @@ async def _fetch_bybit_positions_for_category(
     api_secret: str,
     category: str,
 ) -> List[Dict[str, object]]:
+    if category == "linear":
+        combined: List[Dict[str, object]] = []
+        for settle_coin in ("USDT", "USDC"):
+            payload = await _bybit_signed_get(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                path="/v5/position/list",
+                params={"category": "linear", "settleCoin": settle_coin},
+            )
+            combined.extend(payload.get("result", {}).get("list", []))
+        return combined
     payload = await _bybit_signed_get(
         base_url=base_url,
         api_key=api_key,
@@ -1072,6 +1084,22 @@ async def _fetch_bybit_orders_for_category(
     api_secret: str,
     category: str,
 ) -> List[Dict[str, object]]:
+    if category == "linear":
+        combined: List[Dict[str, object]] = []
+        for settle_coin in ("USDT", "USDC"):
+            payload = await _bybit_signed_get(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                path="/v5/order/realtime",
+                params={
+                    "category": "linear",
+                    "settleCoin": settle_coin,
+                    "openOnly": "1",
+                },
+            )
+            combined.extend(payload.get("result", {}).get("list", []))
+        return combined
     payload = await _bybit_signed_get(
         base_url=base_url,
         api_key=api_key,

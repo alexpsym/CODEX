@@ -101,22 +101,6 @@
     const renderOpenOrders = (items, errorCount = 0, errors = []) => {
         if (!openOrdersBody || !openOrdersTable) return;
         openOrdersBody.innerHTML = '';
-        if (!items.length) {
-            if (openOrdersEmpty) {
-                openOrdersEmpty.textContent = errorCount
-                    ? 'No open orders or trades (some sources unavailable).'
-                    : 'No open orders or trades.';
-            }
-            openOrdersEmpty?.setAttribute('style', 'display:block;');
-            if (openOrdersErrors) {
-                openOrdersErrors.style.display = errorCount ? 'block' : 'none';
-            }
-            if (openOrdersErrorsList) {
-                openOrdersErrorsList.innerHTML = '';
-            }
-            return;
-        }
-        openOrdersEmpty?.setAttribute('style', 'display:none;');
         if (openOrdersErrors) {
             openOrdersErrors.style.display = errorCount ? 'block' : 'none';
         }
@@ -133,6 +117,16 @@
                 openOrdersErrorsList.appendChild(item);
             });
         }
+        if (!items.length) {
+            if (openOrdersEmpty) {
+                openOrdersEmpty.textContent = errorCount
+                    ? 'No open orders or trades (some sources unavailable).'
+                    : 'No open orders or trades.';
+            }
+            openOrdersEmpty?.setAttribute('style', 'display:block;');
+            return;
+        }
+        openOrdersEmpty?.setAttribute('style', 'display:none;');
         items.forEach((item) => {
             const row = document.createElement('tr');
             const cells = [
