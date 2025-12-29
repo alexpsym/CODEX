@@ -96,10 +96,15 @@
         return value;
     };
 
-    const renderOpenOrders = (items) => {
+    const renderOpenOrders = (items, errorCount = 0) => {
         if (!openOrdersBody || !openOrdersTable) return;
         openOrdersBody.innerHTML = '';
         if (!items.length) {
+            if (openOrdersEmpty) {
+                openOrdersEmpty.textContent = errorCount
+                    ? 'No open orders or trades (some sources unavailable).'
+                    : 'No open orders or trades.';
+            }
             openOrdersEmpty?.setAttribute('style', 'display:block;');
             return;
         }
@@ -109,6 +114,7 @@
             const cells = [
                 item.broker,
                 item.account,
+                item.category,
                 item.instrument,
                 item.type,
                 item.side,
@@ -163,9 +169,9 @@
             try {
                 const payload = await fetchJson('/api/open-orders');
                 openOrdersCache = payload.items || [];
-                renderOpenOrders(openOrdersCache);
-                const updated = formatTimestamp(payload.updated_at);
                 const errorCount = (payload.errors || []).length;
+                renderOpenOrders(openOrdersCache, errorCount);
+                const updated = formatTimestamp(payload.updated_at);
                 if (errorCount) {
                     setOrdersStatus(`Updated ${updated} • ${errorCount} source issue(s)`, 'error');
                 } else {
@@ -173,7 +179,7 @@
                 }
             } catch (err) {
                 console.error(err);
-                renderOpenOrders(openOrdersCache);
+                renderOpenOrders(openOrdersCache, 1);
                 setOrdersStatus('Failed to load open orders.', 'error');
             } finally {
                 openOrdersInFlight = null;

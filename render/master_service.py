@@ -568,6 +568,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <tr>
                         <th>Broker</th>
                         <th>Account</th>
+                        <th>Category</th>
                         <th>Instrument</th>
                         <th>Type</th>
                         <th>Side</th>
@@ -928,6 +929,7 @@ async def _collect_oanda_open_items(
             {
                 "broker": "OANDA",
                 "account": account_context,
+                "category": "forex",
                 "instrument": trade.get("instrument"),
                 "type": "Position",
                 "side": side,
@@ -959,6 +961,7 @@ async def _collect_oanda_open_items(
             {
                 "broker": "OANDA",
                 "account": account_context,
+                "category": "forex",
                 "instrument": order.get("instrument"),
                 "type": "Order",
                 "side": side,
@@ -1044,10 +1047,11 @@ async def _fetch_bybit_orders_for_category(
 
 async def _collect_bybit_open_items(
     *, base_url: str, api_key: str, api_secret: str, account_context: str
-) -> List[Dict[str, object]]:
+) -> Dict[str, List[Dict[str, object]]]:
     items: List[Dict[str, object]] = []
-    position_categories = ["linear", "inverse"]
-    order_categories = ["linear", "inverse", "spot"]
+    errors: List[Dict[str, str]] = []
+    position_categories = ["linear", "inverse", "option"]
+    order_categories = ["linear", "inverse", "spot", "option"]
 
     for category in position_categories:
         try:
@@ -1057,7 +1061,15 @@ async def _collect_bybit_open_items(
                 api_secret=api_secret,
                 category=category,
             )
-        except Exception:
+        except Exception as exc:
+            errors.append(
+                {
+                    "broker": "Bybit",
+                    "account": account_context,
+                    "category": category,
+                    "message": str(exc),
+                }
+            )
             continue
         for position in positions:
             size_raw = position.get("size")
@@ -1073,6 +1085,7 @@ async def _collect_bybit_open_items(
                 {
                     "broker": "Bybit",
                     "account": account_context,
+                    "category": category,
                     "instrument": position.get("symbol"),
                     "type": "Position",
                     "side": position.get("side"),
@@ -1098,13 +1111,22 @@ async def _collect_bybit_open_items(
                 api_secret=api_secret,
                 category=category,
             )
-        except Exception:
+        except Exception as exc:
+            errors.append(
+                {
+                    "broker": "Bybit",
+                    "account": account_context,
+                    "category": category,
+                    "message": str(exc),
+                }
+            )
             continue
         for order in orders:
             items.append(
                 {
                     "broker": "Bybit",
                     "account": account_context,
+                    "category": category,
                     "instrument": order.get("symbol"),
                     "type": "Order",
                     "side": order.get("side"),
@@ -1120,7 +1142,7 @@ async def _collect_bybit_open_items(
                     "status": order.get("orderStatus") or "OPEN",
                 }
             )
-    return items
+    return {"items": items, "errors": errors}
 
 
 def _oanda_credentials(mode: str) -> Dict[str, str]:
@@ -1922,14 +1944,14 @@ async def fetch_open_orders() -> JSONResponse:
             continue
         bybit_has_credentials = True
         try:
-            items.extend(
-                await _collect_bybit_open_items(
-                    base_url=base_url,
-                    api_key=api_key,
-                    api_secret=api_secret,
-                    account_context=account_mode,
-                )
+            bybit_result = await _collect_bybit_open_items(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                account_context=account_mode,
             )
+            items.extend(bybit_result["items"])
+            errors.extend(bybit_result["errors"])
         except Exception as exc:
             errors.append(
                 {
