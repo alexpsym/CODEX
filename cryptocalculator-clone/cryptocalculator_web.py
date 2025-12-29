@@ -190,7 +190,11 @@ FORM_HTML = """
       const group = document.querySelector(`[data-input="${inputId}"]`);
       if(!group){return;}
       group.querySelectorAll('button[data-value]').forEach((btn) => {
-        btn.addEventListener('click', () => setButtonGroupValue(inputId, btn.dataset.value));
+        btn.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setButtonGroupValue(inputId, btn.dataset.value);
+        });
       });
       const input = document.getElementById(inputId);
       if(input){
@@ -347,6 +351,7 @@ FORM_HTML = """
       });
     }
     document.addEventListener('DOMContentLoaded', function(){
+      ['trade_type', 'account_mode', 'direction', 'order_type', 'options_order_type', 'options_type', 'options_side', 'price_source', 'execution_exchange', 'options_base'].forEach(bindButtonGroup);
       const ot = document.getElementById('order_type');
       if(ot){
         ot.addEventListener('change', toggleEntry);
@@ -367,13 +372,16 @@ FORM_HTML = """
         tradeType.addEventListener('change', updateTradeType);
       }
       updateTradeType();
-      ['trade_type', 'account_mode', 'direction', 'order_type', 'options_order_type', 'options_type', 'options_side', 'price_source', 'execution_exchange', 'options_base'].forEach(bindButtonGroup);
       const optionsBaseInput = document.getElementById('options_base');
       if(optionsBaseInput){
         optionsBaseInput.addEventListener('change', scheduleOptionsMinQty);
       }
       scheduleOptionsMinQty();
-      updateExecuteButtons();
+      try {
+        updateExecuteButtons();
+      } catch (err) {
+        console.warn('Failed to update execute buttons', err);
+      }
     });
   </script>
 </head>
