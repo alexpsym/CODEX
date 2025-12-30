@@ -1104,7 +1104,7 @@ async def _fetch_bybit_orders_for_category(
                     params={
                         "category": "linear",
                         "settleCoin": settle_coin,
-                        "openOnly": "1",
+                        "openOnly": "0",
                     },
                 )
                 combined.extend(payload.get("result", {}).get("list", []))
@@ -1117,7 +1117,7 @@ async def _fetch_bybit_orders_for_category(
             api_key=api_key,
             api_secret=api_secret,
             path="/v5/order/realtime",
-            params={"category": category, "openOnly": "1"},
+            params={"category": category, "openOnly": "0"},
         )
     except Exception as exc:
         return [], [str(exc)]
