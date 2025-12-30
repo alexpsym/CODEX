@@ -2933,6 +2933,10 @@ async def view_logs(script_name: str) -> str:
 @app.api_route("/apps/{script_name}", methods=PROXY_METHODS)
 @app.api_route("/apps/{script_name}/{path:path}", methods=PROXY_METHODS)
 async def proxy_app(script_name: str, request: Request, path: str = "") -> Response:
+    if path == "" and not request.url.path.endswith("/"):
+        suffix = f"?{request.url.query}" if request.url.query else ""
+        return RedirectResponse(url=f"{request.url.path}/{suffix}", status_code=307)
+
     script = script_manager.get(script_name)
     accept = request.headers.get("accept", "")
     wants_html = (
