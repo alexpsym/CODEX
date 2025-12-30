@@ -963,11 +963,12 @@ async def _fetch_oanda_json(
     url = f"{base_url.rstrip('/')}/v3{endpoint.format(account_id=account_id)}"
     token_last4 = api_key[-4:] if api_key else None
     BYBIT_LOGGER.info(
-        "OANDA_REQ mode=%s url=%s account_id=%s token_last4=%s",
+        "OANDA_CALL mode=%s base=%s account_id=%s token_last4=%s url=%s",
         mode,
-        url,
+        base_url,
         account_id,
         token_last4,
+        url,
     )
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.get(url, headers=headers)
@@ -986,15 +987,21 @@ async def _oanda_preflight(
     url = f"{base_url.rstrip('/')}/v3/accounts"
     token_last4 = api_key[-4:] if api_key else None
     BYBIT_LOGGER.info(
-        "OANDA_REQ mode=%s url=%s account_id=%s token_last4=%s",
+        "OANDA_CALL mode=%s base=%s account_id=%s token_last4=%s url=%s",
         mode,
-        url,
+        base_url,
         account_id,
         token_last4,
+        url,
     )
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.get(url, headers=headers)
     if resp.status_code >= 400:
+        if resp.status_code == 401:
+            raise ValueError(
+                f"OANDA preflight unauthorized for {mode} "
+                f"({resp.status_code}): {resp.text}"
+            )
         raise ValueError(f"OANDA preflight failed ({resp.status_code}): {resp.text}")
     payload = resp.json()
     accounts = [acct.get("id") for acct in payload.get("accounts", [])]
@@ -2475,11 +2482,12 @@ async def close_open_order(payload: Dict[str, object]) -> JSONResponse:
             url = f"{cfg['base_url'].rstrip('/')}{endpoint}"
             token_last4 = cfg["token"][-4:] if cfg["token"] else None
             BYBIT_LOGGER.info(
-                "OANDA_REQ mode=%s url=%s account_id=%s token_last4=%s",
+                "OANDA_CALL mode=%s base=%s account_id=%s token_last4=%s url=%s",
                 mode,
-                url,
+                cfg["base_url"],
                 cfg["account_id"],
                 token_last4,
+                url,
             )
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.put(url, headers=headers)
@@ -2494,11 +2502,12 @@ async def close_open_order(payload: Dict[str, object]) -> JSONResponse:
             url = f"{cfg['base_url'].rstrip('/')}{endpoint}"
             token_last4 = cfg["token"][-4:] if cfg["token"] else None
             BYBIT_LOGGER.info(
-                "OANDA_REQ mode=%s url=%s account_id=%s token_last4=%s",
+                "OANDA_CALL mode=%s base=%s account_id=%s token_last4=%s url=%s",
                 mode,
-                url,
+                cfg["base_url"],
                 cfg["account_id"],
                 token_last4,
+                url,
             )
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.put(
