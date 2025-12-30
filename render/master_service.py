@@ -1647,6 +1647,34 @@ def _parse_optional_float(value: object, field_name: str) -> Optional[float]:
         raise ValueError(f"OANDA payload {field_name} must be numeric.") from exc
 
 
+def _get_oanda_config(account: Optional[str]) -> Dict[str, str]:
+    acct = (account or "").strip().lower()
+    if acct in ("demo", "practice"):
+        token = os.getenv("OANDA_API_KEY_DEMO") or os.getenv("OANDA_API_KEY")
+        account_id = os.getenv("OANDA_ACCOUNT_ID_DEMO") or os.getenv("OANDA_ACCOUNT_ID")
+        base_url = os.getenv("OANDA_API_URL_DEMO") or "https://api-fxpractice.oanda.com"
+        missing = []
+        if not token:
+            missing.append("OANDA_API_KEY_DEMO (or OANDA_API_KEY fallback)")
+        if not account_id:
+            missing.append("OANDA_ACCOUNT_ID_DEMO (or OANDA_ACCOUNT_ID fallback)")
+        if missing:
+            raise ValueError(f"OANDA demo credentials missing: {', '.join(missing)}")
+        return {"token": token, "account_id": account_id, "base_url": base_url}
+
+    token = os.getenv("OANDA_API_KEY")
+    account_id = os.getenv("OANDA_ACCOUNT_ID")
+    base_url = os.getenv("OANDA_API_URL_LIVE") or "https://api-fxtrade.oanda.com"
+    missing = []
+    if not token:
+        missing.append("OANDA_API_KEY")
+    if not account_id:
+        missing.append("OANDA_ACCOUNT_ID")
+    if missing:
+        raise ValueError(f"OANDA live credentials missing: {', '.join(missing)}")
+    return {"token": token, "account_id": account_id, "base_url": base_url}
+
+
 async def _place_bybit_order(
     payload: Dict[str, object], *, request_id: str
 ) -> Dict[str, object]:
@@ -2018,13 +2046,7 @@ async def _place_oanda_order(
         "take_profit_price",
     )
 
-    creds = _oanda_credentials(account)
-    if (
-        not creds.get("api_key")
-        or not creds.get("account_id")
-        or creds["account_id"].upper() == "YOUR_OANDA_ACCOUNT_ID"
-    ):
-        raise ValueError("OANDA credentials are missing for the selected account.")
+    cfg = _get_oanda_config(account)
 
     signed_units = qty_val if action == "buy" else -qty_val
     order_payload: Dict[str, object] = {
@@ -2041,8 +2063,11 @@ async def _place_oanda_order(
     if tp_price is not None:
         order_payload["takeProfitOnFill"] = {"price": _format_decimal_value(tp_price)}
 
-    url = f"{creds['base_url'].rstrip('/')}/accounts/{creds['account_id']}/orders"
-    headers = {"Authorization": f"Bearer {creds['api_key']}"}
+    url = f"{cfg['base_url'].rstrip('/')}/v3/accounts/{cfg['account_id']}/orders"
+    headers = {
+        "Authorization": f"Bearer {cfg['token']}",
+        "Content-Type": "application/json",
+    }
     _log_webhook_event(
         request_id,
         "oanda_order_request",
