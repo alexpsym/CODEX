@@ -1786,6 +1786,50 @@ async def _round_option_price_to_tick(
     return max(rounded, tick)
 
 
+def _format_decimal_value(value: float) -> str:
+    text = f"{value:.10f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
+def _parse_optional_float(value: object, field_name: str) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"OANDA payload {field_name} must be numeric.") from exc
+
+
+def _get_oanda_config(account: Optional[str]) -> Dict[str, str]:
+    acct = (account or "").strip().lower()
+    if acct in ("demo", "practice"):
+        token = os.getenv("OANDA_API_KEY_DEMO") or os.getenv("OANDA_API_KEY")
+        account_id = os.getenv("OANDA_ACCOUNT_ID_DEMO")
+        base_url = os.getenv("OANDA_API_URL_DEMO") or "https://api-fxpractice.oanda.com"
+        missing = []
+        if not token:
+            missing.append("OANDA_API_KEY_DEMO (or OANDA_API_KEY fallback)")
+        if not account_id:
+            missing.append("OANDA_ACCOUNT_ID_DEMO")
+        if missing:
+            raise ValueError(f"OANDA demo credentials missing: {', '.join(missing)}")
+        return {"token": token, "account_id": account_id, "base_url": base_url}
+
+    token = os.getenv("OANDA_API_KEY")
+    account_id = os.getenv("OANDA_ACCOUNT_ID")
+    base_url = os.getenv("OANDA_API_URL_LIVE") or "https://api-fxtrade.oanda.com"
+    missing = []
+    if not token:
+        missing.append("OANDA_API_KEY")
+    if not account_id:
+        missing.append("OANDA_ACCOUNT_ID")
+    if missing:
+        raise ValueError(f"OANDA live credentials missing: {', '.join(missing)}")
+    return {"token": token, "account_id": account_id, "base_url": base_url}
+
+
 async def _place_bybit_order(
     payload: Dict[str, object], *, request_id: str
 ) -> Dict[str, object]:
@@ -2092,6 +2136,124 @@ async def _place_bybit_order(
         "tp_order": tp_order,
         "tp_error": tp_error,
     }
+
+
+async def _place_oanda_order(
+    payload: Dict[str, object], *, request_id: str
+) -> Dict[str, object]:
+    symbol = str(payload.get("symbol", "")).upper()
+    action = str(payload.get("action", "")).lower()
+    qty = payload.get("quantity")
+    account = str(payload.get("account", "live")).lower()
+    order_type_raw = payload.get("order_type") or payload.get("orderType") or "market"
+    order_type = str(order_type_raw).lower().strip()
+
+    _log_webhook_event(
+        request_id,
+        "oanda_payload_parsed",
+        {
+            "symbol": symbol,
+            "action": action,
+            "quantity": qty,
+            "account": account,
+            "order_type": order_type,
+        },
+    )
+
+    if action not in {"buy", "sell"}:
+        raise ValueError("OANDA payload must include action=buy|sell.")
+    if not symbol:
+        raise ValueError("OANDA payload must include a symbol.")
+    if qty is None:
+        raise ValueError("OANDA payload must include quantity.")
+    try:
+        qty_val = float(qty)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("OANDA payload quantity must be numeric.") from exc
+    if qty_val <= 0:
+        raise ValueError("OANDA payload quantity must be greater than zero.")
+    if account not in {"live", "demo"}:
+        raise ValueError("OANDA payload account must be live or demo.")
+    if order_type not in {"market", "limit"}:
+        raise ValueError("OANDA payload order_type must be market or limit.")
+
+    entry_price = None
+    if order_type == "limit":
+        entry_price = _parse_optional_float(
+            payload.get("entry_price")
+            or payload.get("price")
+            or payload.get("limit_price"),
+            "entry_price",
+        )
+        if entry_price is None or entry_price <= 0:
+            raise ValueError("OANDA limit orders require a positive entry price.")
+
+    sl_price = _parse_optional_float(
+        payload.get("stop_loss_price_value")
+        or payload.get("stop_loss_price")
+        or payload.get("sl_price"),
+        "stop_loss_price",
+    )
+    tp_price = _parse_optional_float(
+        payload.get("take_profit_price_value")
+        or payload.get("take_profit_price")
+        or payload.get("tp_price"),
+        "take_profit_price",
+    )
+
+    cfg = _get_oanda_config(account)
+
+    signed_units = qty_val if action == "buy" else -qty_val
+    order_payload: Dict[str, object] = {
+        "type": "MARKET" if order_type == "market" else "LIMIT",
+        "instrument": symbol,
+        "units": _format_decimal_value(signed_units),
+        "timeInForce": "FOK" if order_type == "market" else "GTC",
+        "positionFill": "DEFAULT",
+    }
+    if entry_price is not None:
+        order_payload["price"] = _format_decimal_value(entry_price)
+    if sl_price is not None:
+        order_payload["stopLossOnFill"] = {"price": _format_decimal_value(sl_price)}
+    if tp_price is not None:
+        order_payload["takeProfitOnFill"] = {"price": _format_decimal_value(tp_price)}
+
+    url = f"{cfg['base_url'].rstrip('/')}/v3/accounts/{cfg['account_id']}/orders"
+    headers = {
+        "Authorization": f"Bearer {cfg['token']}",
+        "Content-Type": "application/json",
+    }
+    token_last4 = cfg["token"][-4:] if cfg.get("token") else None
+    BYBIT_LOGGER.info(
+        "OANDA order cfg mode=%s base=%s account_id=%s token_last4=%s",
+        account,
+        cfg["base_url"],
+        cfg["account_id"],
+        token_last4,
+    )
+    _log_webhook_event(
+        request_id,
+        "oanda_order_request",
+        {"url": url, "order": order_payload},
+    )
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.post(url, headers=headers, json={"order": order_payload})
+    if response.status_code >= 400:
+        BYBIT_LOGGER.error(
+            "OANDA order failed status=%s response=%s",
+            response.status_code,
+            response.text,
+        )
+        raise ValueError(
+            f"OANDA order failed ({response.status_code}): {response.text}"
+        )
+    result = response.json()
+    _log_webhook_event(
+        request_id,
+        "oanda_order_response",
+        {"result": result},
+    )
+    return result
 
 
 @app.get("/api/bybit/balance")
@@ -2992,7 +3154,7 @@ async def webhook(script_name: str, request: Request) -> JSONResponse:
             }
         )
 
-    if script.name != "cryptocalculator-clone":
+    if script.name not in {"cryptocalculator-clone", "oanda-calculator-clone"}:
         return JSONResponse({"status": "ok", "script": script_name})
 
     try:
@@ -3002,7 +3164,10 @@ async def webhook(script_name: str, request: Request) -> JSONResponse:
         raise HTTPException(status_code=400, detail="Webhook payload must be JSON.") from exc
 
     try:
-        result = await _place_bybit_order(payload, request_id=request_id)
+        if script.name == "cryptocalculator-clone":
+            result = await _place_bybit_order(payload, request_id=request_id)
+        else:
+            result = await _place_oanda_order(payload, request_id=request_id)
         script.add_log(f"Order request sent: {result}")
         await _send_telegram_alert(_format_trade_alert(payload, result=result))
         return JSONResponse(
@@ -3058,23 +3223,39 @@ async def execute_now(request: Request) -> JSONResponse:
 async def default_webhook(request: Request) -> JSONResponse:
     payload_bytes = await request.body()
     payload_text = payload_bytes.decode("utf-8", errors="replace")
-    script_name = "cryptocalculator-clone"
+    request_id = uuid4().hex
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError as exc:
+        script_name = "cryptocalculator-clone"
+        script = script_manager.get(script_name)
+        script.add_log(f"Webhook received: {payload_text}")
+        script.add_log(f"Webhook payload invalid JSON: {exc}")
+        _log_webhook_event(
+            request_id,
+            "webhook_received",
+            {"script_name": script_name, "path": "/webhook"},
+        )
+        raise HTTPException(status_code=400, detail="Webhook payload must be JSON.") from exc
+
+    script_name = str(
+        payload.get("script_name") or payload.get("target_app") or "cryptocalculator-clone"
+    )
     script = script_manager.get(script_name)
     script.add_log(f"Webhook received: {payload_text}")
-    request_id = uuid4().hex
     _log_webhook_event(
         request_id,
         "webhook_received",
         {"script_name": script_name, "path": "/webhook"},
     )
-    try:
-        payload = json.loads(payload_text)
-    except json.JSONDecodeError as exc:
-        script.add_log(f"Webhook payload invalid JSON: {exc}")
-        raise HTTPException(status_code=400, detail="Webhook payload must be JSON.") from exc
 
     try:
-        result = await _place_bybit_order(payload, request_id=request_id)
+        if script.name == "cryptocalculator-clone":
+            result = await _place_bybit_order(payload, request_id=request_id)
+        elif script.name == "oanda-calculator-clone":
+            result = await _place_oanda_order(payload, request_id=request_id)
+        else:
+            return JSONResponse({"status": "ok", "script": script_name})
         script.add_log(f"Order request sent: {result}")
         await _send_telegram_alert(_format_trade_alert(payload, result=result))
         return JSONResponse(
