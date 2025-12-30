@@ -1,5 +1,6 @@
 from flask import Flask, request, render_template_string, make_response, jsonify
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -14,6 +15,7 @@ PUBLIC_WEBHOOK_URL = os.getenv(
     "PUBLIC_WEBHOOK_URL", "https://codex-rdqh.onrender.com/webhook"
 )
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL") or PUBLIC_WEBHOOK_URL.rsplit("/", 1)[0]
+LOGGER = logging.getLogger(__name__)
 
 
 def _open_edge(url: str) -> None:
@@ -300,6 +302,9 @@ def index():
         try:
             instrument_input = request.form["instrument"]
             try:
+                LOGGER.info(
+                    "OANDA_CALC_CALL get_available_instruments mode=%s", account_mode
+                )
                 available_instruments = sorted(get_available_instruments(account_mode))
             except Exception:
                 available_instruments = None
@@ -319,11 +324,17 @@ def index():
                 if entry_price_value <= 0:
                     raise ValueError("Entry price must be positive.")
 
+            LOGGER.info("OANDA_CALC_CALL get_account_details mode=%s", account_mode)
             account = get_account_details(account_mode)
             balance = float(account["account"]["balance"])
             margin_available = float(account["account"].get("marginAvailable", balance))
             account_currency = account["account"].get("currency", "AUD")
 
+            LOGGER.info(
+                "OANDA_CALC_CALL get_instrument_details mode=%s instrument=%s",
+                account_mode,
+                instrument,
+            )
             details = get_instrument_details(instrument, account_mode)
             pip_location = int(details.get("pipLocation", -4))
             display_precision = int(details.get("displayPrecision", abs(pip_location)))
@@ -339,6 +350,11 @@ def index():
             margin_rate = float(details.get("marginRate", 0.05))
             instrument_type = details.get("type", "CURRENCY")
 
+            LOGGER.info(
+                "OANDA_CALC_CALL get_price mode=%s instrument=%s",
+                account_mode,
+                instrument,
+            )
             price = get_price(instrument, account_mode)
             price_reference = entry_price_value if entry_price_value is not None else price
 
@@ -357,10 +373,20 @@ def index():
             if quote_currency != account_currency:
                 pair = f"{account_currency}_{quote_currency}"
                 try:
+                    LOGGER.info(
+                        "OANDA_CALC_CALL get_price mode=%s instrument=%s",
+                        account_mode,
+                        pair,
+                    )
                     conversion_rate = get_price(pair, account_mode)
                     risk_amount_quote = risk_amount * conversion_rate
                 except Exception:
                     pair = f"{quote_currency}_{account_currency}"
+                    LOGGER.info(
+                        "OANDA_CALC_CALL get_price mode=%s instrument=%s",
+                        account_mode,
+                        pair,
+                    )
                     conversion_rate = get_price(pair, account_mode)
                     risk_amount_quote = risk_amount / conversion_rate
                     conversion_inverse = True
@@ -437,10 +463,20 @@ def index():
             if quote_currency != account_currency:
                 pair = f"{account_currency}_{quote_currency}"
                 try:
+                    LOGGER.info(
+                        "OANDA_CALC_CALL get_price mode=%s instrument=%s",
+                        account_mode,
+                        pair,
+                    )
                     conversion_rate = get_price(pair, account_mode)
                     required_margin = required_margin / conversion_rate
                 except Exception:
                     pair = f"{quote_currency}_{account_currency}"
+                    LOGGER.info(
+                        "OANDA_CALC_CALL get_price mode=%s instrument=%s",
+                        account_mode,
+                        pair,
+                    )
                     conversion_rate = get_price(pair, account_mode)
                     required_margin = required_margin * conversion_rate
             if required_margin > margin_available:
