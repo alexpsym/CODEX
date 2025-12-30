@@ -38,20 +38,37 @@ else:
 # the selected env file (for example, ``E:\\ENV\\oanda.env``) take
 # precedence when the web app is reloaded.
 load_dotenv(ENV_PATH, override=True)
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 import requests
 
 
-def _base_url() -> str:
+def _credential_suffix(mode: str) -> str:
+    return "_DEMO" if mode == "demo" else ""
+
+
+def _base_url(mode: str = "live") -> str:
     """Return the configured API base URL with a sensible default."""
 
-    return os.getenv("OANDA_BASE_URL", "https://api-fxtrade.oanda.com/v3")
+    suffix = _credential_suffix(mode)
+    return (
+        os.getenv(f"OANDA_BASE_URL{suffix}")
+        or os.getenv(f"OANDA_URL{suffix}")
+        or os.getenv(f"OANDA_API_URL{suffix}")
+        or os.getenv("OANDA_BASE_URL")
+        or "https://api-fxtrade.oanda.com/v3"
+    )
 
 
-def _api_key() -> str:
+def _api_key(mode: str = "live") -> str:
     """Return the API token or raise an informative error."""
 
-    value = os.getenv("OANDA_API_KEY") or os.getenv("OANDA_TOKEN")
+    suffix = _credential_suffix(mode)
+    value = (
+        os.getenv(f"OANDA_API_KEY{suffix}")
+        or os.getenv(f"OANDA_TOKEN{suffix}")
+        or os.getenv("OANDA_API_KEY")
+        or os.getenv("OANDA_TOKEN")
+    )
     if not value or value.strip().upper() in {"YOUR_OANDA_API_KEY", "YOUR_OANDA_TOKEN"}:
         raise OandaAPIError(
             "OANDA_API_KEY is missing. Add it to "
@@ -60,10 +77,11 @@ def _api_key() -> str:
     return value.strip()
 
 
-def _account_id() -> str:
+def _account_id(mode: str = "live") -> str:
     """Return the account ID or raise an informative error."""
 
-    value = os.getenv("OANDA_ACCOUNT_ID")
+    suffix = _credential_suffix(mode)
+    value = os.getenv(f"OANDA_ACCOUNT_ID{suffix}") or os.getenv("OANDA_ACCOUNT_ID")
     if not value or value.strip().upper() == "YOUR_OANDA_ACCOUNT_ID":
         raise OandaAPIError(
             "OANDA_ACCOUNT_ID is missing or still set to the placeholder. "
@@ -77,10 +95,10 @@ class OandaAPIError(Exception):
     """Raised when an API request fails or is misconfigured."""
 
 
-def _request(method: str, endpoint: str, **kwargs: Any) -> Dict[str, Any]:
+def _request(method: str, endpoint: str, mode: str = "live", **kwargs: Any) -> Dict[str, Any]:
     """Send an HTTP request to the OANDA API and return the parsed JSON."""
-    api_key = _api_key()
-    url = f"{_base_url()}{endpoint}"
+    api_key = _api_key(mode)
+    url = f"{_base_url(mode)}{endpoint}"
     headers = {"Authorization": f"Bearer {api_key}"}
     resp = requests.request(method, url, headers=headers, **kwargs)
     if not resp.ok:
@@ -90,18 +108,19 @@ def _request(method: str, endpoint: str, **kwargs: Any) -> Dict[str, Any]:
     return resp.json()
 
 
-def get_account_details() -> Dict[str, Any]:
+def get_account_details(mode: str = "live") -> Dict[str, Any]:
     """Return details for the configured account."""
-    account_id = _account_id()
-    return _request("GET", f"/accounts/{account_id}")
+    account_id = _account_id(mode)
+    return _request("GET", f"/accounts/{account_id}", mode=mode)
 
 
-def get_instrument_details(instrument: str) -> Dict[str, Any]:
+def get_instrument_details(instrument: str, mode: str = "live") -> Dict[str, Any]:
     """Return metadata for a trading instrument."""
-    account_id = _account_id()
+    account_id = _account_id(mode)
     data = _request(
         "GET",
         f"/accounts/{account_id}/instruments?instruments={instrument}",
+        mode=mode,
     )
     instruments = data.get("instruments", [])
     if not instruments:
@@ -109,18 +128,18 @@ def get_instrument_details(instrument: str) -> Dict[str, Any]:
     return instruments[0]
 
 
-def get_available_instruments() -> set[str]:
+def get_available_instruments(mode: str = "live") -> set[str]:
     """Return the set of tradable instruments for the account."""
-    account_id = _account_id()
-    data = _request("GET", f"/accounts/{account_id}/instruments")
+    account_id = _account_id(mode)
+    data = _request("GET", f"/accounts/{account_id}/instruments", mode=mode)
     return {inst["name"] for inst in data.get("instruments", [])}
 
 
-def get_price(instrument: str) -> float:
+def get_price(instrument: str, mode: str = "live") -> float:
     """Return the current midpoint price for ``instrument``."""
-    account_id = _account_id()
+    account_id = _account_id(mode)
     data = _request(
-        "GET", f"/accounts/{account_id}/pricing?instruments={instrument}"
+        "GET", f"/accounts/{account_id}/pricing?instruments={instrument}", mode=mode
     )
     prices = data.get("prices", [])
     if not prices:
@@ -137,6 +156,9 @@ def build_order(
     sl_price: float,
     tp_price: float,
     units_precision: int = 0,
+    order_type: str = "market",
+    entry_price: Optional[float] = None,
+    price_precision: int = 5,
 ) -> Dict[str, Any]:
     """Construct an order dictionary compatible with the OANDA API."""
     signed_units = units if side.lower() == "buy" else -units
@@ -144,14 +166,22 @@ def build_order(
         units_str = f"{signed_units:.{units_precision}f}"
     else:
         units_str = str(int(round(signed_units)))
+    order_type = order_type.lower()
+    if order_type not in {"market", "limit"}:
+        raise ValueError("Order type must be market or limit.")
+    order: Dict[str, Any] = {
+        "type": "MARKET" if order_type == "market" else "LIMIT",
+        "instrument": instrument,
+        "units": units_str,
+        "timeInForce": "FOK" if order_type == "market" else "GTC",
+        "positionFill": "DEFAULT",
+        "stopLossOnFill": {"price": f"{sl_price:.{price_precision}f}"},
+        "takeProfitOnFill": {"price": f"{tp_price:.{price_precision}f}"},
+    }
+    if order_type == "limit":
+        if entry_price is None:
+            raise ValueError("Limit orders require an entry price.")
+        order["price"] = f"{entry_price:.{price_precision}f}"
     return {
-        "order": {
-            "type": "MARKET",
-            "instrument": instrument,
-            "units": units_str,
-            "timeInForce": "FOK",
-            "positionFill": "DEFAULT",
-            "stopLossOnFill": {"price": f"{sl_price:.5f}"},
-            "takeProfitOnFill": {"price": f"{tp_price:.5f}"},
-        }
+        "order": order
     }
