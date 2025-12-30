@@ -98,6 +98,28 @@
         return value;
     };
 
+    const closeOpenItem = async (item, button, label) => {
+        if (!button) return;
+        button.disabled = true;
+        const original = button.textContent;
+        button.textContent = '...';
+        try {
+            await fetchJson('/api/open-orders/close', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(item),
+            });
+            await refreshOpenOrders();
+            setOrdersStatus(`${label} request sent`, 'ok');
+        } catch (err) {
+            console.error(err);
+            setOrdersStatus(`Failed to ${label.toLowerCase()}.`, 'error');
+        } finally {
+            button.disabled = false;
+            button.textContent = original;
+        }
+    };
+
     const renderOpenOrders = (items, errorCount = 0, errors = []) => {
         if (!openOrdersBody || !openOrdersTable) return;
         openOrdersBody.innerHTML = '';
@@ -151,6 +173,18 @@
                 td.textContent = formatValue(cell);
                 row.appendChild(td);
             });
+            const actionCell = document.createElement('td');
+            if (item.type === 'Order' || item.type === 'Position') {
+                const label = item.type === 'Order' ? 'Cancel' : 'Close';
+                const button = document.createElement('button');
+                button.className = 'action-btn';
+                button.textContent = label;
+                button.addEventListener('click', () => closeOpenItem(item, button, label));
+                actionCell.appendChild(button);
+            } else {
+                actionCell.textContent = '—';
+            }
+            row.appendChild(actionCell);
             openOrdersBody.appendChild(row);
         });
     };
