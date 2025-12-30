@@ -2255,12 +2255,28 @@ async def view_logs(script_name: str) -> str:
 @app.api_route("/apps/{script_name}/{path:path}", methods=PROXY_METHODS)
 async def proxy_app(script_name: str, request: Request, path: str = "") -> Response:
     script = script_manager.get(script_name)
+    accept = request.headers.get("accept", "")
+    wants_html = (
+        "text/html" in accept
+        and request.query_params.get("format") != "json"
+        and request.method.upper() == "GET"
+    )
     if not script.is_running:
         if script.name in WEB_APPS:
             if script.port is None:
                 script.port = _allocate_port()
             if not script.last_start_attempt_at or script.last_start_error:
                 asyncio.create_task(_background_start(script))
+            if wants_html:
+                target_url = f"/apps/{_encoded_script_name(script.name)}"
+                return HTMLResponse(
+                    LAUNCHER_TEMPLATE.replace(
+                        "{script_name}", html.escape(script.name)
+                    )
+                    .replace("{target_url}", target_url)
+                    .replace("{has_ui}", "true"),
+                    status_code=200,
+                )
             raise HTTPException(status_code=503, detail=f"{script_name} is starting.")
         if script.last_start_attempt_at:
             if script.last_start_error or script.last_exit_reason:
@@ -2272,6 +2288,16 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
                     "stdout_tail": script.logs(),
                 }
                 raise HTTPException(status_code=500, detail=detail)
+            if script.name in WEB_APPS and wants_html:
+                target_url = f"/apps/{_encoded_script_name(script.name)}"
+                return HTMLResponse(
+                    LAUNCHER_TEMPLATE.replace(
+                        "{script_name}", html.escape(script.name)
+                    )
+                    .replace("{target_url}", target_url)
+                    .replace("{has_ui}", "true"),
+                    status_code=200,
+                )
             raise HTTPException(
                 status_code=503, detail=f"{script_name} is starting."
             )
