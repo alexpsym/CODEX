@@ -914,13 +914,21 @@ def _normalize_oanda_base_url(value: Optional[str]) -> str:
     return base
 
 
+def _clean_env(key: str) -> Optional[str]:
+    value = os.getenv(key)
+    if value is None:
+        return None
+    cleaned = value.strip().strip('"').strip("'")
+    return cleaned or None
+
+
 def _get_oanda_config(account: Optional[str]) -> Dict[str, str]:
     acct = (account or "").strip().lower()
     if acct in ("demo", "practice"):
-        token = (os.getenv("OANDA_API_KEY_DEMO") or "").strip()
-        account_id = (os.getenv("OANDA_ACCOUNT_ID_DEMO") or "").strip()
+        token = _clean_env("OANDA_API_KEY_DEMO")
+        account_id = _clean_env("OANDA_ACCOUNT_ID_DEMO")
         base_url = _normalize_oanda_base_url(
-            os.getenv("OANDA_API_URL_DEMO") or "https://api-fxpractice.oanda.com"
+            _clean_env("OANDA_API_URL_DEMO") or "https://api-fxpractice.oanda.com"
         )
         missing = []
         if not token:
@@ -929,12 +937,17 @@ def _get_oanda_config(account: Optional[str]) -> Dict[str, str]:
             missing.append("OANDA_ACCOUNT_ID_DEMO")
         if missing:
             raise ValueError(f"OANDA demo credentials missing: {', '.join(missing)}")
-        return {"token": token, "account_id": account_id, "base_url": base_url}
+        return {
+            "mode": "demo",
+            "token": token,
+            "account_id": account_id,
+            "base_url": base_url,
+        }
 
-    token = (os.getenv("OANDA_API_KEY") or "").strip()
-    account_id = (os.getenv("OANDA_ACCOUNT_ID") or "").strip()
+    token = _clean_env("OANDA_API_KEY")
+    account_id = _clean_env("OANDA_ACCOUNT_ID")
     base_url = _normalize_oanda_base_url(
-        os.getenv("OANDA_API_URL_LIVE") or "https://api-fxtrade.oanda.com"
+        _clean_env("OANDA_API_URL_LIVE") or "https://api-fxtrade.oanda.com"
     )
     missing = []
     if not token:
@@ -943,7 +956,7 @@ def _get_oanda_config(account: Optional[str]) -> Dict[str, str]:
         missing.append("OANDA_ACCOUNT_ID")
     if missing:
         raise ValueError(f"OANDA live credentials missing: {', '.join(missing)}")
-    return {"token": token, "account_id": account_id, "base_url": base_url}
+    return {"mode": "live", "token": token, "account_id": account_id, "base_url": base_url}
 
 
 def _oanda_account_context(base_url: str) -> str:
@@ -963,6 +976,13 @@ async def _fetch_oanda_json(
     }
     url = f"{base_url.rstrip('/')}/v3{endpoint.format(account_id=account_id)}"
     token_last4 = token[-4:] if token else None
+    BYBIT_LOGGER.info(
+        "OANDA_CFG mode=%s base=%s account_id=%s token_last4=%s",
+        mode,
+        base_url,
+        account_id,
+        token_last4,
+    )
     BYBIT_LOGGER.info(
         "OANDA_CALL mode=%s base=%s account_id=%s token_last4=%s url=%s",
         mode,
@@ -1006,6 +1026,13 @@ async def _oanda_preflight(
     }
     url = f"{base_url.rstrip('/')}/v3/accounts"
     token_last4 = token[-4:] if token else None
+    BYBIT_LOGGER.info(
+        "OANDA_CFG mode=%s base=%s account_id=%s token_last4=%s",
+        mode,
+        base_url,
+        account_id,
+        token_last4,
+    )
     BYBIT_LOGGER.info(
         "OANDA_CALL mode=%s base=%s account_id=%s token_last4=%s url=%s",
         mode,
