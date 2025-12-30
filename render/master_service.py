@@ -48,6 +48,7 @@ WEB_APPS = {
     "cryptocalculator-clone",
     "oanda-calculator-clone",
     "ivindicator-clone",
+    "fxweekend-clone",
 }
 STANDALONE_SCRIPTS = {
     "Crypto-Scanner-clone",
@@ -82,7 +83,9 @@ ENTRY_OVERRIDES = {
     "viddl-clone": ["master.py", "vid.py"],
 }
 
-LOG_FILE_OVERRIDES: Dict[str, Path] = {}
+LOG_FILE_OVERRIDES: Dict[str, Path] = {
+    "fxweekend-clone": BASE_DIR / "fxweekend-clone" / "trade_closure.log",
+}
 
 BYBIT_SETTINGS_PATH = bybit_monitor.SETTINGS_PATH
 
@@ -2930,6 +2933,10 @@ async def view_logs(script_name: str) -> str:
 @app.api_route("/apps/{script_name}", methods=PROXY_METHODS)
 @app.api_route("/apps/{script_name}/{path:path}", methods=PROXY_METHODS)
 async def proxy_app(script_name: str, request: Request, path: str = "") -> Response:
+    if path == "" and not request.url.path.endswith("/"):
+        suffix = f"?{request.url.query}" if request.url.query else ""
+        return RedirectResponse(url=f"{request.url.path}/{suffix}", status_code=307)
+
     script = script_manager.get(script_name)
     accept = request.headers.get("accept", "")
     wants_html = (
