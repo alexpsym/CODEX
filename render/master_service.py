@@ -991,7 +991,7 @@ async def _fetch_oanda_json(
         token_last4,
         url,
     )
-    async with httpx.AsyncClient(timeout=10) as client:
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
         try:
             resp = await client.get(url, headers=headers)
             BYBIT_LOGGER.info(
@@ -1001,6 +1001,14 @@ async def _fetch_oanda_json(
                 url,
                 resp.text[:200],
             )
+            if 300 <= resp.status_code < 400:
+                BYBIT_LOGGER.info(
+                    "OANDA_REDIRECT mode=%s status=%s url=%s location=%s",
+                    mode,
+                    resp.status_code,
+                    url,
+                    resp.headers.get("location"),
+                )
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
             BYBIT_LOGGER.error(
@@ -1041,7 +1049,7 @@ async def _oanda_preflight(
         token_last4,
         url,
     )
-    async with httpx.AsyncClient(timeout=10) as client:
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
         try:
             resp = await client.get(url, headers=headers)
             BYBIT_LOGGER.info(
@@ -1051,6 +1059,14 @@ async def _oanda_preflight(
                 url,
                 resp.text[:200],
             )
+            if 300 <= resp.status_code < 400:
+                BYBIT_LOGGER.info(
+                    "OANDA_REDIRECT mode=%s status=%s url=%s location=%s",
+                    mode,
+                    resp.status_code,
+                    url,
+                    resp.headers.get("location"),
+                )
             resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
             BYBIT_LOGGER.error(
@@ -2549,8 +2565,16 @@ async def close_open_order(payload: Dict[str, object]) -> JSONResponse:
                 token_last4,
                 url,
             )
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
                 resp = await client.put(url, headers=headers)
+            if 300 <= resp.status_code < 400:
+                BYBIT_LOGGER.info(
+                    "OANDA_REDIRECT mode=%s status=%s url=%s location=%s",
+                    mode,
+                    resp.status_code,
+                    url,
+                    resp.headers.get("location"),
+                )
             if resp.status_code >= 400:
                 raise HTTPException(
                     status_code=resp.status_code,
@@ -2569,11 +2593,19 @@ async def close_open_order(payload: Dict[str, object]) -> JSONResponse:
                 token_last4,
                 url,
             )
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
                 resp = await client.put(
                     url,
                     headers=headers,
                     json={"units": "ALL"},
+                )
+            if 300 <= resp.status_code < 400:
+                BYBIT_LOGGER.info(
+                    "OANDA_REDIRECT mode=%s status=%s url=%s location=%s",
+                    mode,
+                    resp.status_code,
+                    url,
+                    resp.headers.get("location"),
                 )
             if resp.status_code >= 400:
                 raise HTTPException(
