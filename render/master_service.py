@@ -1651,13 +1651,13 @@ def _get_oanda_config(account: Optional[str]) -> Dict[str, str]:
     acct = (account or "").strip().lower()
     if acct in ("demo", "practice"):
         token = os.getenv("OANDA_API_KEY_DEMO") or os.getenv("OANDA_API_KEY")
-        account_id = os.getenv("OANDA_ACCOUNT_ID_DEMO") or os.getenv("OANDA_ACCOUNT_ID")
+        account_id = os.getenv("OANDA_ACCOUNT_ID_DEMO")
         base_url = os.getenv("OANDA_API_URL_DEMO") or "https://api-fxpractice.oanda.com"
         missing = []
         if not token:
             missing.append("OANDA_API_KEY_DEMO (or OANDA_API_KEY fallback)")
         if not account_id:
-            missing.append("OANDA_ACCOUNT_ID_DEMO (or OANDA_ACCOUNT_ID fallback)")
+            missing.append("OANDA_ACCOUNT_ID_DEMO")
         if missing:
             raise ValueError(f"OANDA demo credentials missing: {', '.join(missing)}")
         return {"token": token, "account_id": account_id, "base_url": base_url}
@@ -2068,6 +2068,14 @@ async def _place_oanda_order(
         "Authorization": f"Bearer {cfg['token']}",
         "Content-Type": "application/json",
     }
+    token_last4 = cfg["token"][-4:] if cfg.get("token") else None
+    BYBIT_LOGGER.info(
+        "OANDA order cfg mode=%s base=%s account_id=%s token_last4=%s",
+        account,
+        cfg["base_url"],
+        cfg["account_id"],
+        token_last4,
+    )
     _log_webhook_event(
         request_id,
         "oanda_order_request",
@@ -2075,7 +2083,15 @@ async def _place_oanda_order(
     )
     async with httpx.AsyncClient(timeout=10) as client:
         response = await client.post(url, headers=headers, json={"order": order_payload})
-    response.raise_for_status()
+    if response.status_code >= 400:
+        BYBIT_LOGGER.error(
+            "OANDA order failed status=%s response=%s",
+            response.status_code,
+            response.text,
+        )
+        raise ValueError(
+            f"OANDA order failed ({response.status_code}): {response.text}"
+        )
     result = response.json()
     _log_webhook_event(
         request_id,
