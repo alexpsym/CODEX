@@ -907,6 +907,45 @@ def _oanda_base_url() -> str:
     )
 
 
+def _normalize_oanda_base_url(value: Optional[str]) -> str:
+    base = (value or "").strip().rstrip("/")
+    if base.endswith("/v3"):
+        base = base[: -len("/v3")]
+    return base
+
+
+def _get_oanda_config(account: Optional[str]) -> Dict[str, str]:
+    acct = (account or "").strip().lower()
+    if acct in ("demo", "practice"):
+        token = (os.getenv("OANDA_API_KEY_DEMO") or "").strip()
+        account_id = (os.getenv("OANDA_ACCOUNT_ID_DEMO") or "").strip()
+        base_url = _normalize_oanda_base_url(
+            os.getenv("OANDA_API_URL_DEMO") or "https://api-fxpractice.oanda.com"
+        )
+        missing = []
+        if not token:
+            missing.append("OANDA_API_KEY_DEMO")
+        if not account_id:
+            missing.append("OANDA_ACCOUNT_ID_DEMO")
+        if missing:
+            raise ValueError(f"OANDA demo credentials missing: {', '.join(missing)}")
+        return {"token": token, "account_id": account_id, "base_url": base_url}
+
+    token = (os.getenv("OANDA_API_KEY") or "").strip()
+    account_id = (os.getenv("OANDA_ACCOUNT_ID") or "").strip()
+    base_url = _normalize_oanda_base_url(
+        os.getenv("OANDA_API_URL_LIVE") or "https://api-fxtrade.oanda.com"
+    )
+    missing = []
+    if not token:
+        missing.append("OANDA_API_KEY")
+    if not account_id:
+        missing.append("OANDA_ACCOUNT_ID")
+    if missing:
+        raise ValueError(f"OANDA live credentials missing: {', '.join(missing)}")
+    return {"token": token, "account_id": account_id, "base_url": base_url}
+
+
 def _oanda_account_context(base_url: str) -> str:
     lowered = base_url.lower()
     if "fxpractice" in lowered or "practice" in lowered or "sandbox" in lowered:
@@ -915,30 +954,79 @@ def _oanda_account_context(base_url: str) -> str:
 
 
 async def _fetch_oanda_json(
-    *, base_url: str, account_id: str, api_key: str, endpoint: str
+    *, base_url: str, account_id: str, api_key: str, endpoint: str, mode: str
 ) -> Dict[str, object]:
-    headers = {"Authorization": f"Bearer {api_key}"}
-    url = f"{base_url}{endpoint.format(account_id=account_id)}"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    url = f"{base_url.rstrip('/')}/v3{endpoint.format(account_id=account_id)}"
+    token_last4 = api_key[-4:] if api_key else None
+    BYBIT_LOGGER.info(
+        "OANDA_REQ mode=%s url=%s account_id=%s token_last4=%s",
+        mode,
+        url,
+        account_id,
+        token_last4,
+    )
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.get(url, headers=headers)
-    resp.raise_for_status()
+    if resp.status_code >= 400:
+        raise ValueError(f"OANDA request failed ({resp.status_code}): {resp.text}")
     return resp.json()
+
+
+async def _oanda_preflight(
+    *, base_url: str, account_id: str, api_key: str, mode: str
+) -> None:
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    url = f"{base_url.rstrip('/')}/v3/accounts"
+    token_last4 = api_key[-4:] if api_key else None
+    BYBIT_LOGGER.info(
+        "OANDA_REQ mode=%s url=%s account_id=%s token_last4=%s",
+        mode,
+        url,
+        account_id,
+        token_last4,
+    )
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(url, headers=headers)
+    if resp.status_code >= 400:
+        raise ValueError(f"OANDA preflight failed ({resp.status_code}): {resp.text}")
+    payload = resp.json()
+    accounts = [acct.get("id") for acct in payload.get("accounts", [])]
+    if account_id not in accounts:
+        raise ValueError(
+            "OANDA account mismatch: token does not own account "
+            f"{account_id}. Available accounts: {accounts}"
+        )
 
 
 async def _collect_oanda_open_items(
     *, base_url: str, account_id: str, api_key: str, account_context: str
 ) -> List[Dict[str, object]]:
+    await _oanda_preflight(
+        base_url=base_url,
+        account_id=account_id,
+        api_key=api_key,
+        mode=account_context,
+    )
     trades_payload = await _fetch_oanda_json(
         base_url=base_url,
         account_id=account_id,
         api_key=api_key,
         endpoint="/accounts/{account_id}/openTrades",
+        mode=account_context,
     )
     orders_payload = await _fetch_oanda_json(
         base_url=base_url,
         account_id=account_id,
         api_key=api_key,
         endpoint="/accounts/{account_id}/pendingOrders",
+        mode=account_context,
     )
 
     items: List[Dict[str, object]] = []
@@ -2218,7 +2306,7 @@ async def fetch_open_orders() -> JSONResponse:
         try:
             items.extend(
                 await _collect_oanda_open_items(
-                    base_url=f"{cfg['base_url'].rstrip('/')}/v3",
+                    base_url=cfg["base_url"],
                     account_id=cfg["account_id"],
                     api_key=cfg["token"],
                     account_context=account_mode,
@@ -2364,28 +2452,65 @@ async def close_open_order(payload: Dict[str, object]) -> JSONResponse:
         raise HTTPException(status_code=400, detail="Unsupported Bybit item type.")
 
     if broker == "oanda":
-        creds = _oanda_credentials(account if account in {"live", "demo"} else "live")
-        if not creds["api_key"] or not creds["account_id"]:
-            raise HTTPException(status_code=500, detail="Missing OANDA credentials.")
+        mode = account if account in {"live", "demo"} else "live"
+        try:
+            cfg = _get_oanda_config(mode)
+        except ValueError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
         order_id = str(payload.get("id", "")).strip()
         if not order_id:
             raise HTTPException(status_code=400, detail="OANDA item ID missing.")
-        headers = {"Authorization": f"Bearer {creds['api_key']}"}
+        await _oanda_preflight(
+            base_url=cfg["base_url"],
+            account_id=cfg["account_id"],
+            api_key=cfg["token"],
+            mode=mode,
+        )
+        headers = {
+            "Authorization": f"Bearer {cfg['token']}",
+            "Content-Type": "application/json",
+        }
         if item_type == "order":
-            endpoint = f"/accounts/{creds['account_id']}/orders/{order_id}/cancel"
+            endpoint = f"/v3/accounts/{cfg['account_id']}/orders/{order_id}/cancel"
+            url = f"{cfg['base_url'].rstrip('/')}{endpoint}"
+            token_last4 = cfg["token"][-4:] if cfg["token"] else None
+            BYBIT_LOGGER.info(
+                "OANDA_REQ mode=%s url=%s account_id=%s token_last4=%s",
+                mode,
+                url,
+                cfg["account_id"],
+                token_last4,
+            )
             async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.put(f"{creds['base_url']}{endpoint}", headers=headers)
-            resp.raise_for_status()
+                resp = await client.put(url, headers=headers)
+            if resp.status_code >= 400:
+                raise HTTPException(
+                    status_code=resp.status_code,
+                    detail=f"OANDA cancel failed ({resp.status_code}): {resp.text}",
+                )
             return JSONResponse({"status": "ok", "result": resp.json()})
         if item_type == "position":
-            endpoint = f"/accounts/{creds['account_id']}/trades/{order_id}/close"
+            endpoint = f"/v3/accounts/{cfg['account_id']}/trades/{order_id}/close"
+            url = f"{cfg['base_url'].rstrip('/')}{endpoint}"
+            token_last4 = cfg["token"][-4:] if cfg["token"] else None
+            BYBIT_LOGGER.info(
+                "OANDA_REQ mode=%s url=%s account_id=%s token_last4=%s",
+                mode,
+                url,
+                cfg["account_id"],
+                token_last4,
+            )
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.put(
-                    f"{creds['base_url']}{endpoint}",
+                    url,
                     headers=headers,
                     json={"units": "ALL"},
                 )
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                raise HTTPException(
+                    status_code=resp.status_code,
+                    detail=f"OANDA close failed ({resp.status_code}): {resp.text}",
+                )
             return JSONResponse({"status": "ok", "result": resp.json()})
         raise HTTPException(status_code=400, detail="Unsupported OANDA item type.")
 
