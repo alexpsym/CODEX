@@ -907,6 +907,74 @@ def _oanda_base_url() -> str:
     )
 
 
+def _normalize_oanda_base_url(value: Optional[str]) -> str:
+    base = (value or "").strip().rstrip("/")
+    if base.endswith("/v3"):
+        base = base[: -len("/v3")]
+    return base
+
+
+def _format_decimal_value(value: float) -> str:
+    text = f"{value:.10f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
+def _parse_optional_float(value: object, field_name: str) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"OANDA payload {field_name} must be numeric.") from exc
+
+
+def _clean_env(key: str) -> Optional[str]:
+    value = os.getenv(key)
+    if value is None:
+        return None
+    cleaned = value.strip().strip('"').strip("'")
+    return cleaned or None
+
+
+def _get_oanda_config(account: Optional[str]) -> Dict[str, str]:
+    acct = (account or "").strip().lower()
+    if acct in ("demo", "practice"):
+        token = _clean_env("OANDA_API_KEY_DEMO")
+        account_id = _clean_env("OANDA_ACCOUNT_ID_DEMO")
+        base_url = _normalize_oanda_base_url(
+            _clean_env("OANDA_API_URL_DEMO") or "https://api-fxpractice.oanda.com"
+        )
+        missing = []
+        if not token:
+            missing.append("OANDA_API_KEY_DEMO")
+        if not account_id:
+            missing.append("OANDA_ACCOUNT_ID_DEMO")
+        if missing:
+            raise ValueError(f"OANDA demo credentials missing: {', '.join(missing)}")
+        return {
+            "mode": "demo",
+            "token": token,
+            "account_id": account_id,
+            "base_url": base_url,
+        }
+
+    token = _clean_env("OANDA_API_KEY")
+    account_id = _clean_env("OANDA_ACCOUNT_ID")
+    base_url = _normalize_oanda_base_url(
+        _clean_env("OANDA_API_URL_LIVE") or "https://api-fxtrade.oanda.com"
+    )
+    missing = []
+    if not token:
+        missing.append("OANDA_API_KEY")
+    if not account_id:
+        missing.append("OANDA_ACCOUNT_ID")
+    if missing:
+        raise ValueError(f"OANDA live credentials missing: {', '.join(missing)}")
+    return {"mode": "live", "token": token, "account_id": account_id, "base_url": base_url}
+
+
 def _oanda_account_context(base_url: str) -> str:
     lowered = base_url.lower()
     if "fxpractice" in lowered or "practice" in lowered or "sandbox" in lowered:
@@ -915,30 +983,149 @@ def _oanda_account_context(base_url: str) -> str:
 
 
 async def _fetch_oanda_json(
-    *, base_url: str, account_id: str, api_key: str, endpoint: str
+    *, base_url: str, account_id: str, api_key: str, endpoint: str, mode: str
 ) -> Dict[str, object]:
-    headers = {"Authorization": f"Bearer {api_key}"}
-    url = f"{base_url}{endpoint.format(account_id=account_id)}"
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(url, headers=headers)
-    resp.raise_for_status()
+    token = (api_key or "").strip().strip('"').strip("'")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    url = f"{base_url.rstrip('/')}/v3{endpoint.format(account_id=account_id)}"
+    token_last4 = token[-4:] if token else None
+    BYBIT_LOGGER.info(
+        "OANDA_CFG mode=%s base=%s account_id=%s token_last4=%s",
+        mode,
+        base_url,
+        account_id,
+        token_last4,
+    )
+    BYBIT_LOGGER.info(
+        "OANDA_CALL mode=%s base=%s account_id=%s token_last4=%s url=%s",
+        mode,
+        base_url,
+        account_id,
+        token_last4,
+        url,
+    )
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+        try:
+            resp = await client.get(url, headers=headers)
+            BYBIT_LOGGER.info(
+                "OANDA_RESP mode=%s status=%s url=%s body=%s",
+                mode,
+                resp.status_code,
+                url,
+                resp.text[:200],
+            )
+            if 300 <= resp.status_code < 400:
+                BYBIT_LOGGER.info(
+                    "OANDA_REDIRECT mode=%s status=%s url=%s location=%s",
+                    mode,
+                    resp.status_code,
+                    url,
+                    resp.headers.get("location"),
+                )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            BYBIT_LOGGER.error(
+                "OANDA_HTTP_ERR mode=%s status=%s url=%s body=%s",
+                mode,
+                exc.response.status_code,
+                str(exc.request.url),
+                exc.response.text[:500],
+            )
+            raise ValueError(
+                f"OANDA request failed ({exc.response.status_code}): {exc.response.text}"
+            ) from exc
     return resp.json()
+
+
+async def _oanda_preflight(
+    *, base_url: str, account_id: str, api_key: str, mode: str
+) -> None:
+    token = (api_key or "").strip().strip('"').strip("'")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    url = f"{base_url.rstrip('/')}/v3/accounts"
+    token_last4 = token[-4:] if token else None
+    BYBIT_LOGGER.info(
+        "OANDA_CFG mode=%s base=%s account_id=%s token_last4=%s",
+        mode,
+        base_url,
+        account_id,
+        token_last4,
+    )
+    BYBIT_LOGGER.info(
+        "OANDA_CALL mode=%s base=%s account_id=%s token_last4=%s url=%s",
+        mode,
+        base_url,
+        account_id,
+        token_last4,
+        url,
+    )
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+        try:
+            resp = await client.get(url, headers=headers)
+            BYBIT_LOGGER.info(
+                "OANDA_RESP mode=%s status=%s url=%s body=%s",
+                mode,
+                resp.status_code,
+                url,
+                resp.text[:200],
+            )
+            if 300 <= resp.status_code < 400:
+                BYBIT_LOGGER.info(
+                    "OANDA_REDIRECT mode=%s status=%s url=%s location=%s",
+                    mode,
+                    resp.status_code,
+                    url,
+                    resp.headers.get("location"),
+                )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            BYBIT_LOGGER.error(
+                "OANDA_HTTP_ERR mode=%s status=%s url=%s body=%s",
+                mode,
+                exc.response.status_code,
+                str(exc.request.url),
+                exc.response.text[:500],
+            )
+            raise ValueError(
+                f"OANDA preflight failed ({exc.response.status_code}): {exc.response.text}"
+            ) from exc
+    payload = resp.json()
+    accounts = [acct.get("id") for acct in payload.get("accounts", [])]
+    if account_id not in accounts:
+        raise ValueError(
+            "OANDA account mismatch: token does not own account "
+            f"{account_id}. Available accounts: {accounts}"
+        )
 
 
 async def _collect_oanda_open_items(
     *, base_url: str, account_id: str, api_key: str, account_context: str
 ) -> List[Dict[str, object]]:
+    await _oanda_preflight(
+        base_url=base_url,
+        account_id=account_id,
+        api_key=api_key,
+        mode=account_context,
+    )
     trades_payload = await _fetch_oanda_json(
         base_url=base_url,
         account_id=account_id,
         api_key=api_key,
         endpoint="/accounts/{account_id}/openTrades",
+        mode=account_context,
     )
     orders_payload = await _fetch_oanda_json(
         base_url=base_url,
         account_id=account_id,
         api_key=api_key,
         endpoint="/accounts/{account_id}/pendingOrders",
+        mode=account_context,
     )
 
     items: List[Dict[str, object]] = []
@@ -1008,6 +1195,126 @@ async def _collect_oanda_open_items(
     return items
 
 
+async def _place_oanda_order(
+    payload: Dict[str, object], *, request_id: str
+) -> Dict[str, object]:
+    symbol = str(payload.get("symbol", "")).upper()
+    action = str(payload.get("action", "")).lower()
+    qty = payload.get("quantity")
+    account = str(payload.get("account", "live")).lower()
+    order_type_raw = payload.get("order_type") or payload.get("orderType") or "market"
+    order_type = str(order_type_raw).lower().strip()
+
+    _log_webhook_event(
+        request_id,
+        "oanda_payload_parsed",
+        {
+            "symbol": symbol,
+            "action": action,
+            "quantity": qty,
+            "account": account,
+            "order_type": order_type,
+        },
+    )
+
+    if action not in {"buy", "sell"}:
+        raise ValueError("OANDA payload must include action=buy|sell.")
+    if not symbol:
+        raise ValueError("OANDA payload must include a symbol.")
+    if qty is None:
+        raise ValueError("OANDA payload must include quantity.")
+    try:
+        qty_val = float(qty)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("OANDA payload quantity must be numeric.") from exc
+    if qty_val <= 0:
+        raise ValueError("OANDA payload quantity must be greater than zero.")
+    if account not in {"live", "demo"}:
+        raise ValueError("OANDA payload account must be live or demo.")
+    if order_type not in {"market", "limit"}:
+        raise ValueError("OANDA payload order_type must be market or limit.")
+
+    entry_price = None
+    if order_type == "limit":
+        entry_price = _parse_optional_float(
+            payload.get("entry_price")
+            or payload.get("price")
+            or payload.get("limit_price"),
+            "entry_price",
+        )
+        if entry_price is None or entry_price <= 0:
+            raise ValueError("OANDA limit orders require a positive entry price.")
+
+    sl_price = _parse_optional_float(
+        payload.get("stop_loss_price_value")
+        or payload.get("stop_loss_price")
+        or payload.get("sl_price"),
+        "stop_loss_price",
+    )
+    tp_price = _parse_optional_float(
+        payload.get("take_profit_price_value")
+        or payload.get("take_profit_price")
+        or payload.get("tp_price"),
+        "take_profit_price",
+    )
+
+    cfg = _get_oanda_config(account)
+    BYBIT_LOGGER.info(
+        "OANDA_CFG mode=%s base=%s account_id=%s token_last4=%s",
+        cfg["mode"],
+        cfg["base_url"],
+        cfg["account_id"],
+        cfg["token"][-4:],
+    )
+    await _oanda_preflight(
+        base_url=cfg["base_url"],
+        account_id=cfg["account_id"],
+        api_key=cfg["token"],
+        mode=cfg["mode"],
+    )
+
+    signed_units = qty_val if action == "buy" else -qty_val
+    order_payload: Dict[str, object] = {
+        "type": "MARKET" if order_type == "market" else "LIMIT",
+        "instrument": symbol,
+        "units": _format_decimal_value(signed_units),
+        "timeInForce": "FOK" if order_type == "market" else "GTC",
+        "positionFill": "DEFAULT",
+    }
+    if entry_price is not None:
+        order_payload["price"] = _format_decimal_value(entry_price)
+    if sl_price is not None:
+        order_payload["stopLossOnFill"] = {"price": _format_decimal_value(sl_price)}
+    if tp_price is not None:
+        order_payload["takeProfitOnFill"] = {"price": _format_decimal_value(tp_price)}
+
+    url = (
+        f"{cfg['base_url'].rstrip('/')}/v3/accounts/{cfg['account_id']}/orders"
+    )
+    headers = {
+        "Authorization": f"Bearer {cfg['token']}",
+        "Content-Type": "application/json",
+    }
+    BYBIT_LOGGER.info(
+        "OANDA_CALL mode=%s base=%s account_id=%s token_last4=%s url=%s",
+        cfg["mode"],
+        cfg["base_url"],
+        cfg["account_id"],
+        cfg["token"][-4:],
+        url,
+    )
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+        resp = await client.post(url, headers=headers, json={"order": order_payload})
+    BYBIT_LOGGER.info(
+        "OANDA_RESP mode=%s status=%s url=%s body=%s",
+        cfg["mode"],
+        resp.status_code,
+        url,
+        resp.text[:200],
+    )
+    if resp.status_code >= 400:
+        raise ValueError(f"OANDA order failed ({resp.status_code}): {resp.text}")
+    return resp.json()
 def _build_bybit_query(params: Dict[str, str]) -> str:
     if not params:
         return ""
@@ -2048,18 +2355,17 @@ async def fetch_open_orders() -> JSONResponse:
 
     oanda_has_credentials = False
     for account_mode in ("live", "demo"):
-        creds = _oanda_credentials(account_mode)
-        if not creds["api_key"] or not creds["account_id"]:
-            continue
-        if creds["account_id"] == "YOUR_OANDA_ACCOUNT_ID":
+        try:
+            cfg = _get_oanda_config(account_mode)
+        except ValueError:
             continue
         oanda_has_credentials = True
         try:
             items.extend(
                 await _collect_oanda_open_items(
-                    base_url=creds["base_url"],
-                    account_id=creds["account_id"],
-                    api_key=creds["api_key"],
+                    base_url=cfg["base_url"],
+                    account_id=cfg["account_id"],
+                    api_key=cfg["token"],
                     account_context=account_mode,
                 )
             )
@@ -2203,28 +2509,83 @@ async def close_open_order(payload: Dict[str, object]) -> JSONResponse:
         raise HTTPException(status_code=400, detail="Unsupported Bybit item type.")
 
     if broker == "oanda":
-        creds = _oanda_credentials(account if account in {"live", "demo"} else "live")
-        if not creds["api_key"] or not creds["account_id"]:
-            raise HTTPException(status_code=500, detail="Missing OANDA credentials.")
+        mode = account if account in {"live", "demo"} else "live"
+        try:
+            cfg = _get_oanda_config(mode)
+        except ValueError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
         order_id = str(payload.get("id", "")).strip()
         if not order_id:
             raise HTTPException(status_code=400, detail="OANDA item ID missing.")
-        headers = {"Authorization": f"Bearer {creds['api_key']}"}
+        await _oanda_preflight(
+            base_url=cfg["base_url"],
+            account_id=cfg["account_id"],
+            api_key=cfg["token"],
+            mode=mode,
+        )
+        headers = {
+            "Authorization": f"Bearer {cfg['token']}",
+            "Content-Type": "application/json",
+        }
         if item_type == "order":
-            endpoint = f"/accounts/{creds['account_id']}/orders/{order_id}/cancel"
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.put(f"{creds['base_url']}{endpoint}", headers=headers)
-            resp.raise_for_status()
+            endpoint = f"/v3/accounts/{cfg['account_id']}/orders/{order_id}/cancel"
+            url = f"{cfg['base_url'].rstrip('/')}{endpoint}"
+            token_last4 = cfg["token"][-4:] if cfg["token"] else None
+            BYBIT_LOGGER.info(
+                "OANDA_CALL mode=%s base=%s account_id=%s token_last4=%s url=%s",
+                mode,
+                cfg["base_url"],
+                cfg["account_id"],
+                token_last4,
+                url,
+            )
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+                resp = await client.put(url, headers=headers)
+            if 300 <= resp.status_code < 400:
+                BYBIT_LOGGER.info(
+                    "OANDA_REDIRECT mode=%s status=%s url=%s location=%s",
+                    mode,
+                    resp.status_code,
+                    url,
+                    resp.headers.get("location"),
+                )
+            if resp.status_code >= 400:
+                raise HTTPException(
+                    status_code=resp.status_code,
+                    detail=f"OANDA cancel failed ({resp.status_code}): {resp.text}",
+                )
             return JSONResponse({"status": "ok", "result": resp.json()})
         if item_type == "position":
-            endpoint = f"/accounts/{creds['account_id']}/trades/{order_id}/close"
-            async with httpx.AsyncClient(timeout=10) as client:
+            endpoint = f"/v3/accounts/{cfg['account_id']}/trades/{order_id}/close"
+            url = f"{cfg['base_url'].rstrip('/')}{endpoint}"
+            token_last4 = cfg["token"][-4:] if cfg["token"] else None
+            BYBIT_LOGGER.info(
+                "OANDA_CALL mode=%s base=%s account_id=%s token_last4=%s url=%s",
+                mode,
+                cfg["base_url"],
+                cfg["account_id"],
+                token_last4,
+                url,
+            )
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
                 resp = await client.put(
-                    f"{creds['base_url']}{endpoint}",
+                    url,
                     headers=headers,
                     json={"units": "ALL"},
                 )
-            resp.raise_for_status()
+            if 300 <= resp.status_code < 400:
+                BYBIT_LOGGER.info(
+                    "OANDA_REDIRECT mode=%s status=%s url=%s location=%s",
+                    mode,
+                    resp.status_code,
+                    url,
+                    resp.headers.get("location"),
+                )
+            if resp.status_code >= 400:
+                raise HTTPException(
+                    status_code=resp.status_code,
+                    detail=f"OANDA close failed ({resp.status_code}): {resp.text}",
+                )
             return JSONResponse({"status": "ok", "result": resp.json()})
         raise HTTPException(status_code=400, detail="Unsupported OANDA item type.")
 
@@ -2799,7 +3160,7 @@ async def webhook(script_name: str, request: Request) -> JSONResponse:
             }
         )
 
-    if script.name != "cryptocalculator-clone":
+    if script.name not in {"cryptocalculator-clone", "oanda-calculator-clone"}:
         return JSONResponse({"status": "ok", "script": script_name})
 
     try:
@@ -2809,7 +3170,10 @@ async def webhook(script_name: str, request: Request) -> JSONResponse:
         raise HTTPException(status_code=400, detail="Webhook payload must be JSON.") from exc
 
     try:
-        result = await _place_bybit_order(payload, request_id=request_id)
+        if script.name == "cryptocalculator-clone":
+            result = await _place_bybit_order(payload, request_id=request_id)
+        else:
+            result = await _place_oanda_order(payload, request_id=request_id)
         script.add_log(f"Order request sent: {result}")
         await _send_telegram_alert(_format_trade_alert(payload, result=result))
         return JSONResponse(
@@ -2865,23 +3229,39 @@ async def execute_now(request: Request) -> JSONResponse:
 async def default_webhook(request: Request) -> JSONResponse:
     payload_bytes = await request.body()
     payload_text = payload_bytes.decode("utf-8", errors="replace")
-    script_name = "cryptocalculator-clone"
+    request_id = uuid4().hex
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError as exc:
+        script_name = "cryptocalculator-clone"
+        script = script_manager.get(script_name)
+        script.add_log(f"Webhook received: {payload_text}")
+        script.add_log(f"Webhook payload invalid JSON: {exc}")
+        _log_webhook_event(
+            request_id,
+            "webhook_received",
+            {"script_name": script_name, "path": "/webhook"},
+        )
+        raise HTTPException(status_code=400, detail="Webhook payload must be JSON.") from exc
+
+    script_name = str(
+        payload.get("script_name") or payload.get("target_app") or "cryptocalculator-clone"
+    )
     script = script_manager.get(script_name)
     script.add_log(f"Webhook received: {payload_text}")
-    request_id = uuid4().hex
     _log_webhook_event(
         request_id,
         "webhook_received",
         {"script_name": script_name, "path": "/webhook"},
     )
-    try:
-        payload = json.loads(payload_text)
-    except json.JSONDecodeError as exc:
-        script.add_log(f"Webhook payload invalid JSON: {exc}")
-        raise HTTPException(status_code=400, detail="Webhook payload must be JSON.") from exc
 
     try:
-        result = await _place_bybit_order(payload, request_id=request_id)
+        if script.name == "cryptocalculator-clone":
+            result = await _place_bybit_order(payload, request_id=request_id)
+        elif script.name == "oanda-calculator-clone":
+            result = await _place_oanda_order(payload, request_id=request_id)
+        else:
+            return JSONResponse({"status": "ok", "script": script_name})
         script.add_log(f"Order request sent: {result}")
         await _send_telegram_alert(_format_trade_alert(payload, result=result))
         return JSONResponse(

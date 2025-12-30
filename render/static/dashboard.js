@@ -227,6 +227,10 @@
         if (!openOrdersTable || openOrdersInFlight) return openOrdersInFlight;
         openOrdersInFlight = (async () => {
             try {
+                setOrdersStatus('Loading...', 'default');
+                if (openOrdersErrors) {
+                    openOrdersErrors.style.display = 'none';
+                }
                 const payload = await fetchJson('/api/open-orders');
                 openOrdersCache = payload.items || [];
                 const errorCount = (payload.errors || []).length;
