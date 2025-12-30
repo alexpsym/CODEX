@@ -174,9 +174,16 @@
                 row.appendChild(td);
             });
             const actionCell = document.createElement('td');
-            if (item.type === 'Order' || item.type === 'Position') {
-                const label = item.type === 'Order' ? 'Cancel' : 'Close';
+            actionCell.className = 'action-cell';
+
+            const t = String(item.type || '').trim().toLowerCase();
+            const isOrder = t === 'order';
+            const isPosition = t === 'position' || t === 'trade';
+
+            if (isOrder || isPosition) {
+                const label = isOrder ? 'Cancel' : 'Close';
                 const button = document.createElement('button');
+                button.type = 'button';
                 button.className = 'action-btn';
                 button.textContent = label;
                 button.addEventListener('click', () => closeOpenItem(item, button, label));
@@ -184,6 +191,7 @@
             } else {
                 actionCell.textContent = '—';
             }
+
             row.appendChild(actionCell);
             openOrdersBody.appendChild(row);
         });

@@ -542,8 +542,26 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         pre { background: #0a0f1b; color: #e5e7eb; border-radius: 8px; padding: 0.75rem; overflow: auto; max-height: 260px; white-space: pre-wrap; margin: 0; }
         .toolbar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; }
         .refresh { background: #3b82f6; color: #eaf2ff; }
-        .action-btn { padding: 0.35rem 0.55rem; border-radius: 8px; font-size: 0.8rem; font-weight: 700; background: #1f2937; color: #e2e8f0; }
-        .action-btn:hover { background: #334155; }
+        #open-orders-table th:last-child,
+        #open-orders-table td:last-child { min-width: 96px; width: 96px; }
+        .action-cell { white-space: nowrap; }
+        .action-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 72px;
+            height: 30px;
+            padding: 0 10px;
+            border-radius: 8px;
+            font-size: 0.8rem;
+            font-weight: 700;
+            appearance: none;
+            -webkit-appearance: none;
+            background-color: #1f2937;
+            color: #e2e8f0;
+            border: 1px solid #334155;
+        }
+        .action-btn:hover { background-color: #334155; }
         .action-btn:disabled { opacity: 0.6; cursor: not-allowed; }
     </style>
 </head>
