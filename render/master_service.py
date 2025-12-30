@@ -48,6 +48,7 @@ WEB_APPS = {
     "cryptocalculator-clone",
     "oanda-calculator-clone",
     "ivindicator-clone",
+    "fxweekend-clone",
 }
 STANDALONE_SCRIPTS = {
     "Crypto-Scanner-clone",
@@ -82,7 +83,9 @@ ENTRY_OVERRIDES = {
     "viddl-clone": ["master.py", "vid.py"],
 }
 
-LOG_FILE_OVERRIDES: Dict[str, Path] = {}
+LOG_FILE_OVERRIDES: Dict[str, Path] = {
+    "fxweekend-clone": BASE_DIR / "fxweekend-clone" / "trade_closure.log",
+}
 
 BYBIT_SETTINGS_PATH = bybit_monitor.SETTINGS_PATH
 

@@ -1,0 +1,10 @@
+{
+  "check_interval_seconds": 60,
+  "close_method": "positions",
+  "cutoff_hour_dst": 5,
+  "cutoff_hour_standard": 6,
+  "dry_run": false,
+  "enabled": true,
+  "instrument_allowlist": [],
+  "trigger_weekday": 5
+}
