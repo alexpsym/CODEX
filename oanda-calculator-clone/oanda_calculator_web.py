@@ -1,10 +1,18 @@
 from flask import Flask, request, render_template_string, make_response
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 from shutil import which
 from typing import Iterable, Optional
 import webbrowser
+
+# Must be the external Render URL (not 127.0.0.1) so “Copy Webhook” is correct.
+PUBLIC_WEBHOOK_URL = os.getenv(
+    "PUBLIC_WEBHOOK_URL", "https://codex-rdqh.onrender.com/webhook"
+)
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL") or PUBLIC_WEBHOOK_URL.rsplit("/", 1)[0]
 
 
 def _open_edge(url: str) -> None:
@@ -182,13 +190,13 @@ function toggleRisk(v){
   </div>
   <label>Risk–reward ratio: <input name="rr_ratio" type="number" step="0.1" value="2" required></label><br>
   <button type="submit">Calculate</button><br>
-  <button type="button" onclick="copy('https://codex-juan.onrender.com/webhook/oanda-calculator-clone')">Copy Webhook</button><br>
+  <button type="button" onclick="copy('{{ webhook_url }}')">Copy Webhook</button><br>
   {% if alert_json %}
     <button type="button" onclick="copyFromId('alert_json')">Copy JSON</button>
   {% else %}
     <button type="button" disabled>Copy JSON</button>
   {% endif %}
-  <button type="button" onclick="window.location='/download_specs'">Download Specs</button>
+  <button type="button" onclick="window.location='{{ download_url }}'">Download Specs</button>
 </form>
 {% if error %}<p style="color: red;">{{ error }}</p>{% endif %}
 {% if alert_json %}<h2>Result</h2><pre id="alert_json">{{ alert_json }}</pre>{% endif %}
@@ -216,6 +224,9 @@ def index():
     instrument_input = None
     available_instruments = None
     global last_trade_specs
+    app_root = (request.headers.get("x-forwarded-prefix", "").rstrip("/") or "")
+    webhook_url = f"{PUBLIC_WEBHOOK_URL}/oanda-calculator-clone"
+    download_url = f"{app_root}/download_specs" if app_root else "/download_specs"
     last_trade_specs = None
     if request.method == "POST":
         try:
@@ -417,6 +428,9 @@ def index():
         instrument_input=instrument_input,
         alert_json=alert_json,
         risk_info=risk_info,
+        webhook_url=webhook_url,
+        download_url=download_url,
+        app_root=app_root,
     )
 
 
@@ -448,7 +462,14 @@ def _serve_wsgi(app: Flask, host: str = "127.0.0.1", port: int = 5000) -> None:
 
 
 if __name__ == "__main__":
-    host = "127.0.0.1"
-    port = 5000
-    _open_edge(f"http://{host}:{port}/")
+    host = os.getenv("HOST", "127.0.0.1")
+    port = int(os.getenv("OANDA_CALCULATOR_PORT") or os.getenv("PORT", "5000"))
+    is_render = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID"))
+    url = f"http://{host}:{port}/"
+    if sys.stdout.isatty() and not is_render:
+        try:
+            _open_edge(url)
+        except Exception:
+            print(f"Open {url} in your browser to view the calculator.", flush=True)
+    print(f"Serving oanda-calculator on {url}", flush=True)
     _serve_wsgi(app, host=host, port=port)
