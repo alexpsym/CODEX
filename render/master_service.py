@@ -956,12 +956,13 @@ def _oanda_account_context(base_url: str) -> str:
 async def _fetch_oanda_json(
     *, base_url: str, account_id: str, api_key: str, endpoint: str, mode: str
 ) -> Dict[str, object]:
+    token = (api_key or "").strip().strip('"').strip("'")
     headers = {
-        "Authorization": f"Bearer {api_key}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
     url = f"{base_url.rstrip('/')}/v3{endpoint.format(account_id=account_id)}"
-    token_last4 = api_key[-4:] if api_key else None
+    token_last4 = token[-4:] if token else None
     BYBIT_LOGGER.info(
         "OANDA_CALL mode=%s base=%s account_id=%s token_last4=%s url=%s",
         mode,
@@ -971,21 +972,40 @@ async def _fetch_oanda_json(
         url,
     )
     async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(url, headers=headers)
-    if resp.status_code >= 400:
-        raise ValueError(f"OANDA request failed ({resp.status_code}): {resp.text}")
+        try:
+            resp = await client.get(url, headers=headers)
+            BYBIT_LOGGER.info(
+                "OANDA_RESP mode=%s status=%s url=%s body=%s",
+                mode,
+                resp.status_code,
+                url,
+                resp.text[:200],
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            BYBIT_LOGGER.error(
+                "OANDA_HTTP_ERR mode=%s status=%s url=%s body=%s",
+                mode,
+                exc.response.status_code,
+                str(exc.request.url),
+                exc.response.text[:500],
+            )
+            raise ValueError(
+                f"OANDA request failed ({exc.response.status_code}): {exc.response.text}"
+            ) from exc
     return resp.json()
 
 
 async def _oanda_preflight(
     *, base_url: str, account_id: str, api_key: str, mode: str
 ) -> None:
+    token = (api_key or "").strip().strip('"').strip("'")
     headers = {
-        "Authorization": f"Bearer {api_key}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
     url = f"{base_url.rstrip('/')}/v3/accounts"
-    token_last4 = api_key[-4:] if api_key else None
+    token_last4 = token[-4:] if token else None
     BYBIT_LOGGER.info(
         "OANDA_CALL mode=%s base=%s account_id=%s token_last4=%s url=%s",
         mode,
@@ -995,14 +1015,27 @@ async def _oanda_preflight(
         url,
     )
     async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(url, headers=headers)
-    if resp.status_code >= 400:
-        if resp.status_code == 401:
-            raise ValueError(
-                f"OANDA preflight unauthorized for {mode} "
-                f"({resp.status_code}): {resp.text}"
+        try:
+            resp = await client.get(url, headers=headers)
+            BYBIT_LOGGER.info(
+                "OANDA_RESP mode=%s status=%s url=%s body=%s",
+                mode,
+                resp.status_code,
+                url,
+                resp.text[:200],
             )
-        raise ValueError(f"OANDA preflight failed ({resp.status_code}): {resp.text}")
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            BYBIT_LOGGER.error(
+                "OANDA_HTTP_ERR mode=%s status=%s url=%s body=%s",
+                mode,
+                exc.response.status_code,
+                str(exc.request.url),
+                exc.response.text[:500],
+            )
+            raise ValueError(
+                f"OANDA preflight failed ({exc.response.status_code}): {exc.response.text}"
+            ) from exc
     payload = resp.json()
     accounts = [acct.get("id") for acct in payload.get("accounts", [])]
     if account_id not in accounts:
