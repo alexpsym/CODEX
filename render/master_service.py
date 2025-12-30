@@ -2210,18 +2210,17 @@ async def fetch_open_orders() -> JSONResponse:
 
     oanda_has_credentials = False
     for account_mode in ("live", "demo"):
-        creds = _oanda_credentials(account_mode)
-        if not creds["api_key"] or not creds["account_id"]:
-            continue
-        if creds["account_id"] == "YOUR_OANDA_ACCOUNT_ID":
+        try:
+            cfg = _get_oanda_config(account_mode)
+        except ValueError:
             continue
         oanda_has_credentials = True
         try:
             items.extend(
                 await _collect_oanda_open_items(
-                    base_url=creds["base_url"],
-                    account_id=creds["account_id"],
-                    api_key=creds["api_key"],
+                    base_url=f"{cfg['base_url'].rstrip('/')}/v3",
+                    account_id=cfg["account_id"],
+                    api_key=cfg["token"],
                     account_context=account_mode,
                 )
             )
