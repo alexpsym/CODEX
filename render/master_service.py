@@ -914,6 +914,22 @@ def _normalize_oanda_base_url(value: Optional[str]) -> str:
     return base
 
 
+def _format_decimal_value(value: float) -> str:
+    text = f"{value:.10f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
+def _parse_optional_float(value: object, field_name: str) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"OANDA payload {field_name} must be numeric.") from exc
+
+
 def _clean_env(key: str) -> Optional[str]:
     value = os.getenv(key)
     if value is None:
@@ -1179,6 +1195,126 @@ async def _collect_oanda_open_items(
     return items
 
 
+async def _place_oanda_order(
+    payload: Dict[str, object], *, request_id: str
+) -> Dict[str, object]:
+    symbol = str(payload.get("symbol", "")).upper()
+    action = str(payload.get("action", "")).lower()
+    qty = payload.get("quantity")
+    account = str(payload.get("account", "live")).lower()
+    order_type_raw = payload.get("order_type") or payload.get("orderType") or "market"
+    order_type = str(order_type_raw).lower().strip()
+
+    _log_webhook_event(
+        request_id,
+        "oanda_payload_parsed",
+        {
+            "symbol": symbol,
+            "action": action,
+            "quantity": qty,
+            "account": account,
+            "order_type": order_type,
+        },
+    )
+
+    if action not in {"buy", "sell"}:
+        raise ValueError("OANDA payload must include action=buy|sell.")
+    if not symbol:
+        raise ValueError("OANDA payload must include a symbol.")
+    if qty is None:
+        raise ValueError("OANDA payload must include quantity.")
+    try:
+        qty_val = float(qty)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("OANDA payload quantity must be numeric.") from exc
+    if qty_val <= 0:
+        raise ValueError("OANDA payload quantity must be greater than zero.")
+    if account not in {"live", "demo"}:
+        raise ValueError("OANDA payload account must be live or demo.")
+    if order_type not in {"market", "limit"}:
+        raise ValueError("OANDA payload order_type must be market or limit.")
+
+    entry_price = None
+    if order_type == "limit":
+        entry_price = _parse_optional_float(
+            payload.get("entry_price")
+            or payload.get("price")
+            or payload.get("limit_price"),
+            "entry_price",
+        )
+        if entry_price is None or entry_price <= 0:
+            raise ValueError("OANDA limit orders require a positive entry price.")
+
+    sl_price = _parse_optional_float(
+        payload.get("stop_loss_price_value")
+        or payload.get("stop_loss_price")
+        or payload.get("sl_price"),
+        "stop_loss_price",
+    )
+    tp_price = _parse_optional_float(
+        payload.get("take_profit_price_value")
+        or payload.get("take_profit_price")
+        or payload.get("tp_price"),
+        "take_profit_price",
+    )
+
+    cfg = _get_oanda_config(account)
+    BYBIT_LOGGER.info(
+        "OANDA_CFG mode=%s base=%s account_id=%s token_last4=%s",
+        cfg["mode"],
+        cfg["base_url"],
+        cfg["account_id"],
+        cfg["token"][-4:],
+    )
+    await _oanda_preflight(
+        base_url=cfg["base_url"],
+        account_id=cfg["account_id"],
+        api_key=cfg["token"],
+        mode=cfg["mode"],
+    )
+
+    signed_units = qty_val if action == "buy" else -qty_val
+    order_payload: Dict[str, object] = {
+        "type": "MARKET" if order_type == "market" else "LIMIT",
+        "instrument": symbol,
+        "units": _format_decimal_value(signed_units),
+        "timeInForce": "FOK" if order_type == "market" else "GTC",
+        "positionFill": "DEFAULT",
+    }
+    if entry_price is not None:
+        order_payload["price"] = _format_decimal_value(entry_price)
+    if sl_price is not None:
+        order_payload["stopLossOnFill"] = {"price": _format_decimal_value(sl_price)}
+    if tp_price is not None:
+        order_payload["takeProfitOnFill"] = {"price": _format_decimal_value(tp_price)}
+
+    url = (
+        f"{cfg['base_url'].rstrip('/')}/v3/accounts/{cfg['account_id']}/orders"
+    )
+    headers = {
+        "Authorization": f"Bearer {cfg['token']}",
+        "Content-Type": "application/json",
+    }
+    BYBIT_LOGGER.info(
+        "OANDA_CALL mode=%s base=%s account_id=%s token_last4=%s url=%s",
+        cfg["mode"],
+        cfg["base_url"],
+        cfg["account_id"],
+        cfg["token"][-4:],
+        url,
+    )
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+        resp = await client.post(url, headers=headers, json={"order": order_payload})
+    BYBIT_LOGGER.info(
+        "OANDA_RESP mode=%s status=%s url=%s body=%s",
+        cfg["mode"],
+        resp.status_code,
+        url,
+        resp.text[:200],
+    )
+    if resp.status_code >= 400:
+        raise ValueError(f"OANDA order failed ({resp.status_code}): {resp.text}")
+    return resp.json()
 def _build_bybit_query(params: Dict[str, str]) -> str:
     if not params:
         return ""
