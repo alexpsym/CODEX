@@ -1054,27 +1054,34 @@ async def _fetch_bybit_positions_for_category(
     api_key: str,
     api_secret: str,
     category: str,
-) -> List[Dict[str, object]]:
+) -> tuple[List[Dict[str, object]], List[str]]:
     if category == "linear":
         combined: List[Dict[str, object]] = []
+        errors: List[str] = []
         for settle_coin in ("USDT", "USDC"):
-            payload = await _bybit_signed_get(
-                base_url=base_url,
-                api_key=api_key,
-                api_secret=api_secret,
-                path="/v5/position/list",
-                params={"category": "linear", "settleCoin": settle_coin},
-            )
-            combined.extend(payload.get("result", {}).get("list", []))
-        return combined
-    payload = await _bybit_signed_get(
-        base_url=base_url,
-        api_key=api_key,
-        api_secret=api_secret,
-        path="/v5/position/list",
-        params={"category": category},
-    )
-    return payload.get("result", {}).get("list", [])
+            try:
+                payload = await _bybit_signed_get(
+                    base_url=base_url,
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    path="/v5/position/list",
+                    params={"category": "linear", "settleCoin": settle_coin},
+                )
+                combined.extend(payload.get("result", {}).get("list", []))
+            except Exception as exc:
+                errors.append(f"linear {settle_coin}: {exc}")
+        return combined, errors
+    try:
+        payload = await _bybit_signed_get(
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            path="/v5/position/list",
+            params={"category": category},
+        )
+    except Exception as exc:
+        return [], [str(exc)]
+    return payload.get("result", {}).get("list", []), []
 
 
 async def _fetch_bybit_orders_for_category(
@@ -1083,31 +1090,38 @@ async def _fetch_bybit_orders_for_category(
     api_key: str,
     api_secret: str,
     category: str,
-) -> List[Dict[str, object]]:
+) -> tuple[List[Dict[str, object]], List[str]]:
     if category == "linear":
         combined: List[Dict[str, object]] = []
+        errors: List[str] = []
         for settle_coin in ("USDT", "USDC"):
-            payload = await _bybit_signed_get(
-                base_url=base_url,
-                api_key=api_key,
-                api_secret=api_secret,
-                path="/v5/order/realtime",
-                params={
-                    "category": "linear",
-                    "settleCoin": settle_coin,
-                    "openOnly": "1",
-                },
-            )
-            combined.extend(payload.get("result", {}).get("list", []))
-        return combined
-    payload = await _bybit_signed_get(
-        base_url=base_url,
-        api_key=api_key,
-        api_secret=api_secret,
-        path="/v5/order/realtime",
-        params={"category": category, "openOnly": "1"},
-    )
-    return payload.get("result", {}).get("list", [])
+            try:
+                payload = await _bybit_signed_get(
+                    base_url=base_url,
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    path="/v5/order/realtime",
+                    params={
+                        "category": "linear",
+                        "settleCoin": settle_coin,
+                        "openOnly": "1",
+                    },
+                )
+                combined.extend(payload.get("result", {}).get("list", []))
+            except Exception as exc:
+                errors.append(f"linear {settle_coin}: {exc}")
+        return combined, errors
+    try:
+        payload = await _bybit_signed_get(
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            path="/v5/order/realtime",
+            params={"category": category, "openOnly": "1"},
+        )
+    except Exception as exc:
+        return [], [str(exc)]
+    return payload.get("result", {}).get("list", []), []
 
 
 async def _collect_bybit_open_items(
@@ -1119,23 +1133,21 @@ async def _collect_bybit_open_items(
     order_categories = ["linear", "inverse", "spot", "option"]
 
     for category in position_categories:
-        try:
-            positions = await _fetch_bybit_positions_for_category(
-                base_url=base_url,
-                api_key=api_key,
-                api_secret=api_secret,
-                category=category,
-            )
-        except Exception as exc:
+        positions, position_errors = await _fetch_bybit_positions_for_category(
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            category=category,
+        )
+        for message in position_errors:
             errors.append(
                 {
                     "broker": "Bybit",
                     "account": account_context,
                     "category": category,
-                    "message": str(exc),
+                    "message": message,
                 }
             )
-            continue
         for position in positions:
             size_raw = position.get("size")
             size = None
@@ -1169,23 +1181,21 @@ async def _collect_bybit_open_items(
             )
 
     for category in order_categories:
-        try:
-            orders = await _fetch_bybit_orders_for_category(
-                base_url=base_url,
-                api_key=api_key,
-                api_secret=api_secret,
-                category=category,
-            )
-        except Exception as exc:
+        orders, order_errors = await _fetch_bybit_orders_for_category(
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            category=category,
+        )
+        for message in order_errors:
             errors.append(
                 {
                     "broker": "Bybit",
                     "account": account_context,
                     "category": category,
-                    "message": str(exc),
+                    "message": message,
                 }
             )
-            continue
         for order in orders:
             status = order.get("orderStatus")
             if not _is_bybit_open_order(status):
