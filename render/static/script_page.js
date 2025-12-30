@@ -49,7 +49,8 @@
         logBox.scrollTop = logBox.scrollHeight;
     };
 
-    const normalizeResultPath = (rawPath) => rawPath.replace(/\\/g, '/').trim();
+    const normalizeResultPath = (rawPath) =>
+        rawPath.replace(/\\/g, '/').trim().replace(/^\/+/, '');
 
     const buildResultUrl = (resultPath) => {
         const normalized = normalizeResultPath(resultPath);

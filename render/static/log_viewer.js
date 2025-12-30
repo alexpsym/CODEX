@@ -3,7 +3,10 @@
     const saveBtn = document.getElementById('save-log-btn');
     const refreshBtn = document.getElementById('refresh-btn');
     const lineCount = document.getElementById('line-count');
-    const scriptName = (window.RENDER_LOG_VIEW && window.RENDER_LOG_VIEW.scriptName) || '';
+    const scriptName =
+        (window.RENDER_LOG_VIEW && window.RENDER_LOG_VIEW.scriptName) ||
+        (document.body && document.body.dataset && document.body.dataset.scriptName) ||
+        '';
     const settingsCard = document.getElementById('bybit-settings');
     const waitInput = document.getElementById('bybit-wait-seconds');
     const thresholdInput = document.getElementById('bybit-threshold');
@@ -62,7 +65,8 @@
         }
     };
 
-    const normalizeResultPath = (rawPath) => rawPath.replace(/\\/g, '/').trim();
+    const normalizeResultPath = (rawPath) =>
+        rawPath.replace(/\\/g, '/').trim().replace(/^\/+/, '');
 
     const buildResultUrl = (resultPath) => {
         const normalized = normalizeResultPath(resultPath);
