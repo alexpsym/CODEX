@@ -16,7 +16,6 @@ import time
 # Desktop notification functionality has been removed
 # to avoid pop-up messages on Windows or other platforms.
 notification = None
-from tqdm import tqdm
 
 # Environment variables for authentication
 API_KEY = os.getenv('OANDA_API_KEY')
@@ -91,7 +90,7 @@ def build_correlations(lookback: int = 50):
     for label, gran in TIMEFRAMES.items():
         returns = {}
         min_len = None
-        for inst in tqdm(INSTRUMENTS, desc=f"Corr {label}"):
+        for inst in INSTRUMENTS:
             candles = fetch_candles(inst, gran, count=lookback + 1, complete_only=True)
             closes = [float(c['mid']['c']) for c in candles]
             if len(closes) < 2:
@@ -132,7 +131,7 @@ def fetch_candles(instrument: str, granularity: str, count: int = 2, *, complete
 def calc_price_metrics(instrument: str):
     price_change = {}
     price_range = {}
-    for label, gran in tqdm(list(TIMEFRAMES.items()), desc=f"Metrics {instrument}"):
+    for label, gran in TIMEFRAMES.items():
         candles = fetch_candles(instrument, gran, count=2, complete_only=True)
         if len(candles) < 2:
             continue
@@ -180,7 +179,7 @@ def build_data():
 
     price_change_data = {}
     price_range_data = {}
-    for inst in tqdm(INSTRUMENTS, desc="Metrics"):
+    for inst in INSTRUMENTS:
         pc, pr = calc_price_metrics(inst)
         price_change_data[inst] = pc
     print("Price change scan complete.")
