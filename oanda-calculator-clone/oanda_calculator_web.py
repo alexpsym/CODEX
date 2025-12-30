@@ -1,4 +1,4 @@
-from flask import Flask, request, render_template_string, make_response
+from flask import Flask, request, render_template_string, make_response, jsonify
 import json
 import os
 import subprocess
@@ -7,6 +7,7 @@ from pathlib import Path
 from shutil import which
 from typing import Iterable, Optional
 import webbrowser
+import requests
 
 # Must be the external Render URL (not 127.0.0.1) so “Copy Webhook” is correct.
 PUBLIC_WEBHOOK_URL = os.getenv(
@@ -150,65 +151,123 @@ FORM_HTML = """
 <style>
   body {background:black; color:white; font-family:Arial, sans-serif;}
   input, select, button {margin:4px 0;}
+  .container {display:flex; align-items:flex-start;}
+  .form {margin-right:20px;}
+  .result {margin-left:20px;}
+  .copy-row {display:flex; gap:8px; align-items:center; margin:6px 0;}
+  .copy-row button {cursor:pointer;}
+  .copy-status {font-size:12px; color:#9ca3af;}
+  .copy-box {background:#111827; border:1px solid #1f2937; padding:8px; border-radius:6px; color:#e5e7eb; max-width:520px; white-space:pre-wrap;}
+  .trade-section {padding:10px; border:1px solid #1f2937; margin-bottom:12px;}
+  .hidden {display:none;}
+  .button-group {display:flex; flex-wrap:wrap; gap:8px; margin:6px 0;}
+  .button-group button {background:#1f2937; color:#e2e8f0; border:1px solid #334155; border-radius:8px; padding:6px 12px; font-weight:700;}
+  .button-group button.active {background:#2563eb; color:#fff; border-color:#60a5fa;}
+  .danger-button {background:#b91c1c; color:#fff; border:1px solid #ef4444; font-weight:800;}
+  .danger-note {color:#fca5a5; font-size:12px;}
 </style>
-<script>
-function copy(text){navigator.clipboard.writeText(text);}
-function copyFromId(id){
-  const el = document.getElementById(id);
-  if(el){copy(el.innerText);} 
-}
-function toggleRisk(v){
-  document.getElementById('risk_percent').style.display = v=='percent'?'block':'none';
-  document.getElementById('risk_amount').style.display = v=='amount'?'block':'none';
-}
-</script>
 </head>
-<body>
+<body data-app-root="{{ app_root }}">
 <h1>OANDA Position Size Calculator</h1>
-<form method="post">
-  <label>Instrument:
-    <input name="instrument" value="{{ instrument_input or '' }}" required>
-  </label><br>
-  <label>Side:
-    <select name="side">
-      <option value="buy">Buy</option>
-      <option value="sell">Sell</option>
-    </select>
-  </label><br>
-  <label>Stop loss (ticks): <input name="stop_ticks" type="number" step="1" required></label><br>
-  <label>Risk mode:
-    <select name="risk_mode" onchange="toggleRisk(this.value)">
-      <option value="percent">Percent</option>
-      <option value="amount">Fixed Amount</option>
-    </select>
-  </label><br>
-  <div id="risk_percent">
-    <label>Risk %: <input name="risk_pct" type="number" step="0.01"></label><br>
+<div class="container">
+  <div class="form">
+    <form method="post">
+      <div class="trade-section">
+        <label>Account:</label>
+        <div class="button-group" data-input="account_mode">
+          <button type="button" data-value="live">Live</button>
+          <button type="button" data-value="demo">Demo</button>
+        </div>
+        <input type="hidden" name="account_mode" id="account_mode" value="{{ account_mode }}">
+        <label>Instrument:
+          <input name="instrument" value="{{ instrument_input or '' }}" required>
+        </label><br>
+        <label>Side:</label>
+        <div class="button-group" data-input="side">
+          <button type="button" data-value="buy">Buy</button>
+          <button type="button" data-value="sell">Sell</button>
+        </div>
+        <input type="hidden" name="side" id="side" value="{{ side }}">
+        <label>Order Type:</label>
+        <div class="button-group" data-input="order_type">
+          <button type="button" data-value="market">Market</button>
+          <button type="button" data-value="limit">Limit</button>
+        </div>
+        <input type="hidden" name="order_type" id="order_type" value="{{ order_type }}">
+        <div id="entry_price_row" style="{% if order_type == 'market' %}display:none;{% endif %}">
+          <label>Entry Price:
+            <input name="entry_price" id="entry_price" type="number" step="0.0001" value="{{ entry_price or '' }}" {% if order_type == 'limit' %}required{% endif %}>
+          </label><br>
+        </div>
+        <label>Stop loss (ticks): <input name="stop_ticks" id="stop_ticks" type="number" step="1" value="{{ stop_ticks or '' }}" required></label><br>
+        <label>Risk mode:</label>
+        <div class="button-group" data-input="risk_mode">
+          <button type="button" data-value="percent">Percent</button>
+          <button type="button" data-value="amount">Fixed Amount</button>
+        </div>
+        <input type="hidden" name="risk_mode" id="risk_mode" value="{{ risk_mode }}">
+        <div id="risk_percent_row" style="{% if risk_mode != 'percent' %}display:none;{% endif %}">
+          <label>Risk %: <input name="risk_pct" id="risk_pct" type="number" step="0.01" value="{{ risk_pct or '' }}" {% if risk_mode == 'percent' %}required{% endif %}></label><br>
+        </div>
+        <div id="risk_amount_row" style="{% if risk_mode != 'amount' %}display:none;{% endif %}">
+          <label>Risk amount AUD: <input name="risk_aud" id="risk_aud" type="number" step="0.01" value="{{ risk_aud or '' }}" {% if risk_mode == 'amount' %}required{% endif %}></label><br>
+        </div>
+        <label>Risk–reward ratio: <input name="rr_ratio" id="rr_ratio" type="number" step="0.1" value="{{ rr_ratio or '2' }}" required></label><br>
+        <button type="submit">Calculate</button>
+      </div>
+      <h3>TradingView Webhook</h3>
+      <div class="copy-row">
+        <button type="button" onclick="copyText('{{ webhook_url }}','webhook_status')">Copy Webhook URL</button>
+        <span class="copy-status" id="webhook_status"></span>
+      </div>
+      <div class="copy-box" id="webhook_url">{{ webhook_url }}</div>
+    </form>
   </div>
-  <div id="risk_amount" style="display:none">
-    <label>Risk amount AUD: <input name="risk_aud" type="number" step="0.01"></label><br>
+  <div class="result">
+    {% if error %}<p style="color: red;">{{ error }}</p>{% endif %}
+    {% if alert_json %}
+      <h2>Result</h2>
+      <pre id="alert_json">{{ alert_json }}</pre>
+      <pre id="tv_payload" style="display:none;">{{ alert_json }}</pre>
+      <div class="copy-row">
+        <button type="button" onclick="copyFromElement('alert_json','payload_status')">Copy TradingView Message</button>
+        <span class="copy-status" id="payload_status"></span>
+      </div>
+      <div class="copy-row">
+        <button type="button" onclick="window.location='{{ download_url }}'">Download Specs</button>
+      </div>
+      <div id="calc_meta"
+           data-order-type="{{ order_type }}"
+           style="display:none;"></div>
+      <div class="copy-row">
+        <button id="execute_market_btn" type="button" class="danger-button" onclick="enterNow()">
+          Enter now via market order
+        </button>
+        <button id="execute_limit_btn" type="button" class="danger-button" onclick="placeLimitOrder()"
+                style="display:none;">
+          Place limit order
+        </button>
+      </div>
+      <p id="execute_market_note" class="danger-note">
+        This immediately submits a live market order. Use with extreme caution.
+      </p>
+      <p id="execute_limit_note" class="danger-note" style="display:none;">
+        This submits a live limit order (GTC) at the entry price. Use with extreme caution.
+      </p>
+      <pre id="execute_result" class="copy-box hidden"></pre>
+    {% endif %}
+    {% if risk_info %}
+    <h2>Position Details</h2>
+    <table border="1">
+      <tr><th>Item</th><th>Value</th></tr>
+      {% for key, value in risk_info.items() %}
+      <tr><td>{{ key }}</td><td>{{ value }}</td></tr>
+      {% endfor %}
+    </table>
+    {% endif %}
   </div>
-  <label>Risk–reward ratio: <input name="rr_ratio" type="number" step="0.1" value="2" required></label><br>
-  <button type="submit">Calculate</button><br>
-  <button type="button" onclick="copy('{{ webhook_url }}')">Copy Webhook</button><br>
-  {% if alert_json %}
-    <button type="button" onclick="copyFromId('alert_json')">Copy JSON</button>
-  {% else %}
-    <button type="button" disabled>Copy JSON</button>
-  {% endif %}
-  <button type="button" onclick="window.location='{{ download_url }}'">Download Specs</button>
-</form>
-{% if error %}<p style="color: red;">{{ error }}</p>{% endif %}
-{% if alert_json %}<h2>Result</h2><pre id="alert_json">{{ alert_json }}</pre>{% endif %}
-{% if risk_info %}
-<h2>Position Details</h2>
-<table border="1">
-  <tr><th>Item</th><th>Value</th></tr>
-  {% for key, value in risk_info.items() %}
-  <tr><td>{{ key }}</td><td>{{ value }}</td></tr>
-  {% endfor %}
-</table>
-{% endif %}
+</div>
+<script src="{{ app_root }}/static/oanda_calculator.js"></script>
 </body>
 </html>
 """
@@ -225,14 +284,23 @@ def index():
     available_instruments = None
     global last_trade_specs
     app_root = (request.headers.get("x-forwarded-prefix", "").rstrip("/") or "")
-    webhook_url = f"{PUBLIC_WEBHOOK_URL}/oanda-calculator-clone"
+    webhook_url = PUBLIC_WEBHOOK_URL
     download_url = f"{app_root}/download_specs" if app_root else "/download_specs"
     last_trade_specs = None
+    account_mode = request.form.get("account_mode", "live")
+    side = request.form.get("side", "buy")
+    order_type = request.form.get("order_type", "market")
+    risk_mode = request.form.get("risk_mode", "percent")
+    stop_ticks = request.form.get("stop_ticks", "")
+    risk_pct = request.form.get("risk_pct", "")
+    risk_aud = request.form.get("risk_aud", "")
+    rr_ratio = request.form.get("rr_ratio", "2")
+    entry_price = request.form.get("entry_price", "")
     if request.method == "POST":
         try:
             instrument_input = request.form["instrument"]
             try:
-                available_instruments = sorted(get_available_instruments())
+                available_instruments = sorted(get_available_instruments(account_mode))
             except Exception:
                 available_instruments = None
             instrument = _resolve_instrument(instrument_input, available_instruments)
@@ -240,14 +308,23 @@ def index():
             side = request.form["side"]
             stop_ticks = float(request.form["stop_ticks"])
             risk_mode = request.form["risk_mode"]
+            order_type = request.form.get("order_type", "market")
             rr_ratio = float(request.form["rr_ratio"])
+            entry_price = request.form.get("entry_price")
+            entry_price_value = None
+            if order_type == "limit":
+                if entry_price is None or not str(entry_price).strip():
+                    raise ValueError("Entry price is required for limit orders.")
+                entry_price_value = float(entry_price)
+                if entry_price_value <= 0:
+                    raise ValueError("Entry price must be positive.")
 
-            account = get_account_details()
+            account = get_account_details(account_mode)
             balance = float(account["account"]["balance"])
             margin_available = float(account["account"].get("marginAvailable", balance))
             account_currency = account["account"].get("currency", "AUD")
 
-            details = get_instrument_details(instrument)
+            details = get_instrument_details(instrument, account_mode)
             pip_location = int(details.get("pipLocation", -4))
             display_precision = int(details.get("displayPrecision", abs(pip_location)))
             units_precision = int(details.get("tradeUnitsPrecision", 0))
@@ -262,7 +339,8 @@ def index():
             margin_rate = float(details.get("marginRate", 0.05))
             instrument_type = details.get("type", "CURRENCY")
 
-            price = get_price(instrument)
+            price = get_price(instrument, account_mode)
+            price_reference = entry_price_value if entry_price_value is not None else price
 
             if risk_mode == "percent":
                 risk_pct = float(request.form.get("risk_pct", 0))
@@ -279,11 +357,11 @@ def index():
             if quote_currency != account_currency:
                 pair = f"{account_currency}_{quote_currency}"
                 try:
-                    conversion_rate = get_price(pair)
+                    conversion_rate = get_price(pair, account_mode)
                     risk_amount_quote = risk_amount * conversion_rate
                 except Exception:
                     pair = f"{quote_currency}_{account_currency}"
-                    conversion_rate = get_price(pair)
+                    conversion_rate = get_price(pair, account_mode)
                     risk_amount_quote = risk_amount / conversion_rate
                     conversion_inverse = True
 
@@ -297,7 +375,7 @@ def index():
             else:
                 # Currency pairs require multiplying by the current price to
                 # convert the risk amount into the instrument's base units.
-                units = risk_amount * price / (stop_ticks * tick_size)
+                units = risk_amount * price_reference / (stop_ticks * tick_size)
 
             # Different instruments allow different unit precision.
             if units_precision <= 0:
@@ -314,7 +392,7 @@ def index():
                     else:
                         risk_loss_value = risk_loss_value / conversion_rate
             else:
-                risk_loss_value = units * sl_distance / price
+                risk_loss_value = units * sl_distance / price_reference
             max_loss = risk_amount * 1.1
             if risk_loss_value > max_loss and units > 1:
                 if treated_as_cfd:
@@ -326,7 +404,7 @@ def index():
                             max_loss_quote = max_loss * conversion_rate
                     units = max_loss_quote / sl_distance
                 else:
-                    units = max_loss * price / sl_distance
+                    units = max_loss * price_reference / sl_distance
                 if units_precision <= 0:
                     units = int(units)
                 else:
@@ -339,7 +417,7 @@ def index():
                         else:
                             risk_loss_value = risk_loss_value / conversion_rate
                 else:
-                    risk_loss_value = units * sl_distance / price
+                    risk_loss_value = units * sl_distance / price_reference
 
             tp_distance = sl_distance * rr_ratio
             if treated_as_cfd:
@@ -350,20 +428,20 @@ def index():
                     else:
                         tp_value = tp_value / conversion_rate
             else:
-                tp_value = units * tp_distance / price
+                tp_value = units * tp_distance / price_reference
 
             sl_distance_str = _format_price_distance(sl_distance, display_precision)
             tp_distance_str = _format_price_distance(tp_distance, display_precision)
 
-            required_margin = units * price * margin_rate
+            required_margin = units * price_reference * margin_rate
             if quote_currency != account_currency:
                 pair = f"{account_currency}_{quote_currency}"
                 try:
-                    conversion_rate = get_price(pair)
+                    conversion_rate = get_price(pair, account_mode)
                     required_margin = required_margin / conversion_rate
                 except Exception:
                     pair = f"{quote_currency}_{account_currency}"
-                    conversion_rate = get_price(pair)
+                    conversion_rate = get_price(pair, account_mode)
                     required_margin = required_margin * conversion_rate
             if required_margin > margin_available:
                 raise ValueError(
@@ -372,44 +450,69 @@ def index():
                 )
 
             if side.lower() == "buy":
-                sl_price = price - sl_distance
-                tp_price = price + tp_distance
+                sl_price = price_reference - sl_distance
+                tp_price = price_reference + tp_distance
                 alert_qty = round(units, units_precision)
                 alert = {
+                    "script_name": "oanda-calculator-clone",
+                    "account": account_mode,
                     "symbol": instrument,
                     "action": side,
                     "quantity": alert_qty,
+                    "order_type": order_type,
                     "take_profit_price": f"{{{{close}}}} + {tp_distance_str}",
                     "stop_loss_price": f"{{{{close}}}} - {sl_distance_str}",
+                    "take_profit_price_value": tp_price,
+                    "stop_loss_price_value": sl_price,
                 }
             else:
-                sl_price = price + sl_distance
-                tp_price = price - tp_distance
+                sl_price = price_reference + sl_distance
+                tp_price = price_reference - tp_distance
                 alert_qty = round(units, units_precision)
                 alert = {
+                    "script_name": "oanda-calculator-clone",
+                    "account": account_mode,
                     "symbol": instrument,
                     "action": side,
                     "quantity": alert_qty,
+                    "order_type": order_type,
                     "take_profit_price": f"{{{{close}}}} - {tp_distance_str}",
                     "stop_loss_price": f"{{{{close}}}} + {sl_distance_str}",
+                    "take_profit_price_value": tp_price,
+                    "stop_loss_price_value": sl_price,
                 }
 
-            order = build_order(instrument, side, units, sl_price, tp_price, units_precision)
+            if entry_price_value is not None:
+                alert["entry_price"] = entry_price_value
+            order = build_order(
+                instrument,
+                side,
+                units,
+                sl_price,
+                tp_price,
+                units_precision,
+                order_type=order_type,
+                entry_price=entry_price_value,
+                price_precision=display_precision,
+            )
             result = json.dumps(order, indent=2)
             alert_json = json.dumps(alert, indent=2)
             risk_info = {
                 "Instrument": instrument,
                 "Side": side,
-                "Price": f"{price:.5f}",
+                "Order Type": order_type.capitalize(),
+                "Price": f"{price_reference:.{display_precision}f}",
                 "Units": str(units),
                 f"Specified Risk {account_currency}": f"{risk_amount:.2f}",
                 f"Actual Risk {account_currency}": f"{risk_loss_value:.2f}",
-                "Stop Loss Price": f"{sl_price:.5f}",
-                "Take Profit Price": f"{tp_price:.5f}",
+                "Stop Loss Price": f"{sl_price:.{display_precision}f}",
+                "Take Profit Price": f"{tp_price:.{display_precision}f}",
                 f"Potential Profit {account_currency}": f"{tp_value:.2f}",
                 f"Required Margin {account_currency}": f"{required_margin:.2f}",
                 f"Margin Available {account_currency}": f"{margin_available:.2f}",
             }
+            if entry_price_value is not None:
+                risk_info["Entry Price"] = f"{entry_price_value:.{display_precision}f}"
 
             # Store the trade details so they can be downloaded later.
             last_trade_specs = {
@@ -431,6 +534,15 @@ def index():
         webhook_url=webhook_url,
         download_url=download_url,
         app_root=app_root,
+        account_mode=account_mode,
+        side=side,
+        order_type=order_type,
+        risk_mode=risk_mode,
+        stop_ticks=stop_ticks,
+        risk_pct=risk_pct,
+        risk_aud=risk_aud,
+        rr_ratio=rr_ratio,
+        entry_price=entry_price,
     )
 
 
@@ -445,6 +557,25 @@ def download_specs():
     resp.headers["Content-Type"] = "application/json"
     resp.headers["Content-Disposition"] = "attachment; filename=trade_specs.json"
     return resp
+
+
+@app.post("/execute_now")
+def execute_now():
+    payload = request.get_json(silent=True)
+    if not payload:
+        return jsonify({"status": "error", "detail": "Missing JSON payload."}), 400
+    if "script_name" not in payload:
+        payload["script_name"] = "oanda-calculator-clone"
+    try:
+        response = requests.post(PUBLIC_WEBHOOK_URL, json=payload, timeout=15)
+        response.raise_for_status()
+        try:
+            data = response.json()
+        except ValueError:
+            data = {"raw": response.text}
+        return jsonify({"status": "ok", "response": data})
+    except Exception as exc:  # pylint: disable=broad-except
+        return jsonify({"status": "error", "detail": str(exc)}), 400
 
 
 def _serve_wsgi(app: Flask, host: str = "127.0.0.1", port: int = 5000) -> None:
