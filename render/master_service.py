@@ -542,6 +542,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         pre { background: #0a0f1b; color: #e5e7eb; border-radius: 8px; padding: 0.75rem; overflow: auto; max-height: 260px; white-space: pre-wrap; margin: 0; }
         .toolbar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; }
         .refresh { background: #3b82f6; color: #eaf2ff; }
+        .action-btn { padding: 0.35rem 0.55rem; border-radius: 8px; font-size: 0.8rem; font-weight: 700; background: #1f2937; color: #e2e8f0; }
+        .action-btn:hover { background: #334155; }
+        .action-btn:disabled { opacity: 0.6; cursor: not-allowed; }
     </style>
 </head>
 <body>
@@ -583,6 +586,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         <th>Opened</th>
                         <th>ID</th>
                         <th>Status</th>
+                        <th>Action</th>
                     </tr>
                 </thead>
                 <tbody></tbody>
@@ -1048,6 +1052,31 @@ async def _bybit_signed_get(
     return payload
 
 
+async def _bybit_signed_post(
+    *, base_url: str, api_key: str, api_secret: str, path: str, body: Dict[str, object]
+) -> Dict[str, object]:
+    body_json = json.dumps(body, separators=(",", ":"))
+    timestamp = str(int(time.time() * 1000))
+    signature = _bybit_sign_request(timestamp, api_key, api_secret, body_json)
+    headers = {
+        "Content-Type": "application/json",
+        "X-BAPI-API-KEY": api_key,
+        "X-BAPI-SIGN": signature,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": BYBIT_RECV_WINDOW,
+        "X-BAPI-SIGN-TYPE": "2",
+    }
+    url = f"{base_url}{path}"
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(url, headers=headers, content=body_json)
+    resp.raise_for_status()
+    payload = resp.json()
+    ret_code = payload.get("retCode")
+    if ret_code not in (0, "0"):
+        raise ValueError(payload.get("retMsg") or "Bybit request failed")
+    return payload
+
+
 async def _fetch_bybit_positions_for_category(
     *,
     base_url: str,
@@ -1176,6 +1205,7 @@ async def _collect_bybit_open_items(
                     or position.get("positionMargin"),
                     "opened_at": position.get("createdTime"),
                     "id": position.get("positionId") or position.get("positionIdx"),
+                    "position_idx": position.get("positionIdx"),
                     "status": "OPEN",
                 }
             )
@@ -2076,6 +2106,111 @@ async def fetch_open_orders() -> JSONResponse:
         )
 
     return JSONResponse({"updated_at": time.time(), "items": items, "errors": errors})
+
+
+@app.post("/api/open-orders/close")
+async def close_open_order(payload: Dict[str, object]) -> JSONResponse:
+    broker = str(payload.get("broker", "")).strip().lower()
+    item_type = str(payload.get("type", "")).strip().lower()
+    account = str(payload.get("account", "live")).strip().lower()
+
+    if broker == "bybit":
+        _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for(
+            "demo" if account == "demo" else "live"
+        )
+        if not api_key or not api_secret:
+            raise HTTPException(status_code=500, detail="Missing Bybit credentials.")
+        category = str(payload.get("category", "")).strip()
+        symbol = str(payload.get("instrument", "")).strip()
+        if not category or not symbol:
+            raise HTTPException(status_code=400, detail="Bybit item missing category or symbol.")
+
+        if item_type == "order":
+            order_id = str(payload.get("id", "")).strip()
+            if not order_id:
+                raise HTTPException(status_code=400, detail="Bybit order ID missing.")
+            response = await _bybit_signed_post(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                path="/v5/order/cancel",
+                body={"category": category, "symbol": symbol, "orderId": order_id},
+            )
+            return JSONResponse({"status": "ok", "result": response.get("result", {})})
+
+        if item_type == "position":
+            side_raw = str(payload.get("side", "")).strip().lower()
+            if side_raw in {"buy", "long"}:
+                close_side = "Sell"
+            elif side_raw in {"sell", "short"}:
+                close_side = "Buy"
+            else:
+                raise HTTPException(status_code=400, detail="Bybit position side missing.")
+            qty_raw = payload.get("size")
+            try:
+                qty_val = float(qty_raw)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=400, detail="Bybit position size must be numeric."
+                ) from exc
+            if qty_val <= 0:
+                raise HTTPException(
+                    status_code=400, detail="Bybit position size must be greater than zero."
+                )
+            body: Dict[str, object] = {
+                "category": category,
+                "symbol": symbol,
+                "side": close_side,
+                "orderType": "Market",
+                "qty": str(qty_val),
+                "reduceOnly": True,
+            }
+            position_idx = payload.get("position_idx")
+            if position_idx is not None:
+                try:
+                    body["positionIdx"] = int(position_idx)
+                except (TypeError, ValueError) as exc:
+                    raise HTTPException(
+                        status_code=400, detail="Bybit positionIdx must be numeric."
+                    ) from exc
+            response = await _bybit_signed_post(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                path="/v5/order/create",
+                body=body,
+            )
+            return JSONResponse({"status": "ok", "result": response.get("result", {})})
+
+        raise HTTPException(status_code=400, detail="Unsupported Bybit item type.")
+
+    if broker == "oanda":
+        creds = _oanda_credentials(account if account in {"live", "demo"} else "live")
+        if not creds["api_key"] or not creds["account_id"]:
+            raise HTTPException(status_code=500, detail="Missing OANDA credentials.")
+        order_id = str(payload.get("id", "")).strip()
+        if not order_id:
+            raise HTTPException(status_code=400, detail="OANDA item ID missing.")
+        headers = {"Authorization": f"Bearer {creds['api_key']}"}
+        if item_type == "order":
+            endpoint = f"/accounts/{creds['account_id']}/orders/{order_id}/cancel"
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.put(f"{creds['base_url']}{endpoint}", headers=headers)
+            resp.raise_for_status()
+            return JSONResponse({"status": "ok", "result": resp.json()})
+        if item_type == "position":
+            endpoint = f"/accounts/{creds['account_id']}/trades/{order_id}/close"
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.put(
+                    f"{creds['base_url']}{endpoint}",
+                    headers=headers,
+                    json={"units": "ALL"},
+                )
+            resp.raise_for_status()
+            return JSONResponse({"status": "ok", "result": resp.json()})
+        raise HTTPException(status_code=400, detail="Unsupported OANDA item type.")
+
+    raise HTTPException(status_code=400, detail="Unsupported broker.")
 
 PAYSLIP_AUDIT_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"en\">
