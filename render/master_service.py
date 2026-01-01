@@ -10,8 +10,10 @@ import json
 import logging
 import os
 import socket
+import sys
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 from urllib.parse import quote, unquote, urlparse
@@ -34,6 +36,13 @@ from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env")
+try:
+    sys.path.insert(0, str(BASE_DIR / "oanda_history-clone"))
+    import oanda_history as oanda_history_exporter
+except Exception:  # pragma: no cover - optional dependency
+    oanda_history_exporter = None
+finally:
+    sys.path.pop(0)
 
 
 SKIP_DIRS = {"render", "mt5-clone", ".venv", "venv", "__pycache__", ".git", "env", "youtube"}
@@ -43,6 +52,7 @@ MAX_LOG_LINES = 400
 PAYSLIP_REPORT_NAME = "audit_report.pdf"
 PAYSLIP_UPLOAD_ROOT = BASE_DIR / "render" / "uploads" / "payslip"
 PAYSLIP_ALLOWED_IMAGES = {".jpg", ".jpeg", ".png"}
+OANDA_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "oanda-history"
 WEB_APPS = {
     "bybithistory-clone",
     "cryptocalculator-clone",
@@ -90,6 +100,7 @@ LOG_FILE_OVERRIDES: Dict[str, Path] = {
 BYBIT_SETTINGS_PATH = bybit_monitor.SETTINGS_PATH
 
 PAYSLIP_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+OANDA_HISTORY_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 @dataclass
@@ -244,6 +255,17 @@ class ManagedScript:
             await self.process.wait()
 
 
+@dataclass
+class OandaHistoryJob:
+    job_id: str
+    status: str
+    created_at: float
+    updated_at: float
+    params: Dict[str, object]
+    output_path: Optional[Path] = None
+    error: Optional[str] = None
+
+
 def candidate_entrypoints(app_dir: Path) -> List[Path]:
     app_name = app_dir.name
     candidates: List[str] = []
@@ -317,6 +339,8 @@ def _encoded_script_name(script_name: str) -> str:
 def script_open_url(script: ManagedScript) -> str:
     """Return the preferred UI URL for a script."""
 
+    if script.name == "oanda_history-clone":
+        return "/oanda-history"
     if script.name in WEB_APPS:
         return f"/apps/{_encoded_script_name(script.name)}"
     return f"/scripts/view/{_encoded_script_name(script.name)}"
@@ -495,6 +519,7 @@ class ScriptManager:
 
 script_manager = ScriptManager(discover_scripts())
 app = FastAPI(title="Render Master Script", version="1.0")
+OANDA_HISTORY_JOBS: Dict[str, OandaHistoryJob] = {}
 
 AUTOSTART_SCRIPTS = [
     name.strip()
@@ -518,6 +543,89 @@ async def _autostart_scripts() -> None:
             script.port = _allocate_port()
 
         asyncio.create_task(_background_start(script))
+
+
+async def _fetch_oanda_transactions_window(
+    *, account_id: str, api_key: str, start: str, end: str
+) -> List[Dict[str, object]]:
+    if oanda_history_exporter is None:
+        raise RuntimeError("OANDA history exporter module not available.")
+    return await asyncio.to_thread(
+        oanda_history_exporter.fetch_transactions, account_id, api_key, start, end
+    )
+
+
+async def _collect_oanda_history_complete(
+    *, account_id: str, api_key: str, base_url: str
+) -> List[Dict[str, object]]:
+    created_time = await _fetch_oanda_account_created_time(
+        base_url=base_url,
+        account_id=account_id,
+        api_key=api_key,
+    )
+    now = datetime.now(timezone.utc)
+    end = now
+    transactions: List[Dict[str, object]] = []
+    seen_ids: set[object] = set()
+    window = timedelta(days=365)
+
+    def append_unique(items: List[Dict[str, object]]) -> None:
+        for item in items:
+            tx_id = item.get("id")
+            if tx_id is not None:
+                if tx_id in seen_ids:
+                    continue
+                seen_ids.add(tx_id)
+            transactions.append(item)
+
+    while end > created_time:
+        start = max(created_time, end - window)
+        batch = await _fetch_oanda_transactions_window(
+            account_id=account_id,
+            api_key=api_key,
+            start=_format_oanda_timestamp(start),
+            end=_format_oanda_timestamp(end),
+        )
+        append_unique(batch)
+        end = start
+
+    return transactions
+
+
+async def _run_oanda_history_export(job: OandaHistoryJob) -> None:
+    job.status = "running"
+    job.updated_at = time.time()
+    try:
+        if oanda_history_exporter is None:
+            raise RuntimeError("OANDA history exporter module not available.")
+        config = _get_oanda_history_config()
+        if job.params.get("complete"):
+            transactions = await _collect_oanda_history_complete(
+                account_id=config["account_id"],
+                api_key=config["api_key"],
+                base_url=config["base_url"],
+            )
+        else:
+            days = int(job.params.get("days", 0))
+            if days <= 0:
+                raise ValueError("Export days must be a positive integer.")
+            end = datetime.now(timezone.utc)
+            start = end - timedelta(days=days)
+            transactions = await _fetch_oanda_transactions_window(
+                account_id=config["account_id"],
+                api_key=config["api_key"],
+                start=_format_oanda_timestamp(start),
+                end=_format_oanda_timestamp(end),
+            )
+        output_path = OANDA_HISTORY_EXPORT_ROOT / f"oanda_history_{job.job_id}.csv"
+        await asyncio.to_thread(oanda_history_exporter.save_to_csv, transactions, output_path)
+        job.output_path = output_path
+        job.status = "done"
+    except Exception as exc:
+        job.status = "error"
+        job.error = str(exc)
+    finally:
+        job.updated_at = time.time()
 
 
 ASSET_VERSION = ""
@@ -1001,6 +1109,22 @@ def _get_oanda_config(account: Optional[str]) -> Dict[str, str]:
     return {"mode": "live", "token": token, "account_id": account_id, "base_url": base_url}
 
 
+def _get_oanda_history_config() -> Dict[str, str]:
+    account_id = _clean_env("OANDA_ACCOUNT_ID")
+    api_key = _clean_env("OANDA_API_KEY")
+    base_url = _normalize_oanda_base_url(
+        _clean_env("OANDA_API_URL") or "https://api-fxtrade.oanda.com"
+    )
+    missing = []
+    if not api_key:
+        missing.append("OANDA_API_KEY")
+    if not account_id:
+        missing.append("OANDA_ACCOUNT_ID")
+    if missing:
+        raise ValueError(f"OANDA export credentials missing: {', '.join(missing)}")
+    return {"account_id": account_id, "api_key": api_key, "base_url": base_url}
+
+
 def _oanda_account_context(base_url: str) -> str:
     lowered = base_url.lower()
     if "fxpractice" in lowered or "practice" in lowered or "sandbox" in lowered:
@@ -1064,6 +1188,35 @@ async def _fetch_oanda_json(
                 f"OANDA request failed ({exc.response.status_code}): {exc.response.text}"
             ) from exc
     return resp.json()
+
+
+def _parse_oanda_timestamp(value: str) -> datetime:
+    cleaned = value.replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(cleaned)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _format_oanda_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+async def _fetch_oanda_account_created_time(
+    *, base_url: str, account_id: str, api_key: str
+) -> datetime:
+    payload = await _fetch_oanda_json(
+        base_url=base_url,
+        account_id=account_id,
+        api_key=api_key,
+        endpoint="/accounts/{account_id}",
+        mode="history",
+    )
+    account = payload.get("account", {})
+    created_time = account.get("createdTime")
+    if not isinstance(created_time, str) or not created_time:
+        raise ValueError("OANDA account createdTime missing from response.")
+    return _parse_oanda_timestamp(created_time)
 
 
 async def _oanda_preflight(
@@ -2779,6 +2932,118 @@ async def close_open_order(payload: Dict[str, object]) -> JSONResponse:
 
     raise HTTPException(status_code=400, detail="Unsupported broker.")
 
+OANDA_HISTORY_TEMPLATE = """<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+    <meta charset=\"UTF-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <title>OANDA Transaction History Export</title>
+    <style>
+        :root { color-scheme: light dark; }
+        body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
+        h1 { margin-top: 0; }
+        .card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; padding: 1.5rem; max-width: 960px; margin: 0 auto; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
+        .meta { color: #94a3b8; margin-bottom: 0.75rem; line-height: 1.5; }
+        .actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1rem; }
+        button { padding: 0.7rem 1.2rem; border-radius: 12px; border: none; cursor: pointer; font-weight: 700; }
+        .primary { background: #22c55e; color: #052e16; }
+        .secondary { background: #334155; color: #e2e8f0; }
+        .status { margin-top: 1rem; color: #cbd5e1; white-space: pre-wrap; word-break: break-word; }
+        .error { margin-top: 0.75rem; color: #fca5a5; }
+        .badge { display: inline-block; padding: 0.35rem 0.65rem; border-radius: 999px; background: #1f2937; color: #cbd5e1; font-weight: 700; font-size: 0.9rem; }
+    </style>
+</head>
+<body>
+    <div class=\"card\">
+        <h1>OANDA Transaction History Export</h1>
+        <p class=\"meta\">Generate transaction history CSV exports for the selected timeframe. Jobs run in the background and will download automatically when ready.</p>
+        <div class=\"badge\">Select range</div>
+        <div class=\"actions\">
+            <button class=\"primary\" data-days=\"30\">30 days</button>
+            <button class=\"primary\" data-days=\"90\">90 days</button>
+            <button class=\"primary\" data-days=\"180\">180 days</button>
+            <button class=\"primary\" data-days=\"365\">365 days</button>
+            <button class=\"secondary\" data-complete=\"true\">Complete History</button>
+            <a href=\"/\" class=\"secondary\" style=\"text-decoration:none; display:inline-flex; align-items:center;\">Back to dashboard</a>
+        </div>
+        <div id=\"status\" class=\"status\">Choose a timeframe to start.</div>
+        <div id=\"error\" class=\"error\"></div>
+    </div>
+
+    <script>
+        const statusEl = document.getElementById('status');
+        const errorEl = document.getElementById('error');
+        const buttons = Array.from(document.querySelectorAll('button[data-days], button[data-complete]'));
+
+        const setButtonsDisabled = (disabled) => {
+            buttons.forEach((btn) => {
+                btn.disabled = disabled;
+            });
+        };
+
+        const startExport = async (payload) => {
+            errorEl.textContent = '';
+            statusEl.textContent = 'Creating export job...';
+            setButtonsDisabled(true);
+            try {
+                const response = await fetch('/api/oanda-history/export', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                if (!response.ok) {
+                    const text = await response.text();
+                    throw new Error(text || response.statusText);
+                }
+                const data = await response.json();
+                await pollJob(data.job_id);
+            } catch (err) {
+                errorEl.textContent = err.message || 'Unable to start export.';
+                statusEl.textContent = 'Export failed to start.';
+                setButtonsDisabled(false);
+            }
+        };
+
+        const pollJob = async (jobId) => {
+            statusEl.textContent = 'Job queued...';
+            while (true) {
+                await new Promise((resolve) => setTimeout(resolve, 1500));
+                const response = await fetch(`/api/oanda-history/export/${jobId}`, { cache: 'no-store' });
+                if (!response.ok) {
+                    const text = await response.text();
+                    throw new Error(text || response.statusText);
+                }
+                const data = await response.json();
+                statusEl.textContent = `Status: ${data.status}`;
+                if (data.status === 'done') {
+                    window.location.href = data.download_url;
+                    setButtonsDisabled(false);
+                    return;
+                }
+                if (data.status === 'error') {
+                    errorEl.textContent = data.error || 'Export failed.';
+                    setButtonsDisabled(false);
+                    return;
+                }
+            }
+        };
+
+        buttons.forEach((button) => {
+            button.addEventListener('click', () => {
+                const days = button.dataset.days;
+                if (days) {
+                    startExport({ days: Number(days) });
+                    return;
+                }
+                if (button.dataset.complete === 'true') {
+                    startExport({ complete: true });
+                }
+            });
+        });
+    </script>
+</body>
+</html>"""
+
 PAYSLIP_AUDIT_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"en\">
 <head>
@@ -2885,6 +3150,11 @@ async def script_page(script_name: str) -> str:
 @app.get("/payslip-audit", response_class=HTMLResponse)
 async def payslip_audit_page() -> str:
     return PAYSLIP_AUDIT_TEMPLATE
+
+
+@app.get("/oanda-history", response_class=HTMLResponse, include_in_schema=False)
+async def oanda_history_page() -> HTMLResponse:
+    return HTMLResponse(OANDA_HISTORY_TEMPLATE)
 
 
 @app.get("/scripts")
@@ -3328,6 +3598,68 @@ async def download_payslip_report(session_id: str) -> FileResponse:
     if not report_path.exists():
         raise HTTPException(status_code=404, detail="Report not found. Please rerun the audit.")
     return FileResponse(report_path, filename=PAYSLIP_REPORT_NAME, media_type="application/pdf")
+
+
+@app.post("/api/oanda-history/export")
+async def start_oanda_history_export(request: Request) -> JSONResponse:
+    if oanda_history_exporter is None:
+        raise HTTPException(status_code=500, detail="OANDA history exporter not available.")
+    payload = await request.json()
+    days = payload.get("days")
+    complete = payload.get("complete")
+    if complete and days:
+        raise HTTPException(status_code=400, detail="Specify either days or complete history.")
+    if not complete:
+        if days is None:
+            raise HTTPException(status_code=400, detail="days is required unless complete is true.")
+        try:
+            days = int(days)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="days must be an integer.") from exc
+        if days <= 0:
+            raise HTTPException(status_code=400, detail="days must be greater than zero.")
+    job_id = uuid4().hex
+    job = OandaHistoryJob(
+        job_id=job_id,
+        status="queued",
+        created_at=time.time(),
+        updated_at=time.time(),
+        params={"days": days, "complete": bool(complete)},
+    )
+    OANDA_HISTORY_JOBS[job_id] = job
+    asyncio.create_task(_run_oanda_history_export(job))
+    return JSONResponse({"job_id": job_id})
+
+
+@app.get("/api/oanda-history/export/{job_id}")
+async def oanda_history_export_status(job_id: str) -> JSONResponse:
+    job = OANDA_HISTORY_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Export job not found.")
+    payload: Dict[str, object] = {
+        "job_id": job.job_id,
+        "status": job.status,
+        "error": job.error,
+    }
+    if job.status == "done" and job.output_path is not None:
+        payload["download_url"] = f"/api/oanda-history/export/{job.job_id}/download"
+    return JSONResponse(payload)
+
+
+@app.get("/api/oanda-history/export/{job_id}/download")
+async def download_oanda_history_export(job_id: str) -> FileResponse:
+    job = OANDA_HISTORY_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Export job not found.")
+    if job.status != "done" or job.output_path is None:
+        raise HTTPException(status_code=400, detail="Export not ready.")
+    if not job.output_path.exists():
+        raise HTTPException(status_code=404, detail="Export file not found.")
+    return FileResponse(
+        job.output_path,
+        filename=job.output_path.name,
+        media_type="text/csv",
+    )
 
 
 @app.post("/webhook/{script_name:path}")
