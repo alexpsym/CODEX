@@ -290,6 +290,15 @@ _OPENED_PATHS: set[str] = set()
 
 def open_in_edge(file_path: str) -> None:
     """Open ``file_path`` in Microsoft Edge only once per run."""
+    # On Render / headless Linux there is no GUI browser. The master service log viewer
+    # already opens exported HTML via the /results/<script>/<path> endpoint.
+    if (
+        os.getenv("RENDER")
+        or os.getenv("RENDER_SERVICE_ID")
+        or os.getenv("RENDER_EXTERNAL_HOSTNAME")
+        or (platform.system() != "Windows" and not os.getenv("DISPLAY"))
+    ):
+        return
     if file_path in _OPENED_PATHS:
         print(f"Edge already open for {file_path}")
         return
