@@ -3533,14 +3533,37 @@ async def read_logs(script_name: str) -> JSONResponse:
         raise HTTPException(status_code=500, detail=detail) from exc
 
 
-@app.get("/results/{script_name}/{result_path:path}")
+@app.get("/results/{script_name:path}/{result_path:path}")
 async def read_script_results(script_name: str, result_path: str) -> FileResponse:
-    safe_script_name = script_name.replace("..", "")
-    safe_result_path = result_path.replace("..", "")
-    script = script_manager.get(safe_script_name)
+    safe_script_name = script_name.replace("..", "").strip("/")
+    safe_result_path = result_path.replace("..", "").lstrip("/")
+
+    script = None
+    try:
+        script = script_manager.get(safe_script_name)
+    except HTTPException as exc:
+        if exc.status_code == 404 and "/" in safe_script_name:
+            parts = [part for part in safe_script_name.split("/") if part]
+            resolved = False
+            for cut in range(len(parts) - 1, 0, -1):
+                candidate = "/".join(parts[:cut])
+                extra = "/".join(parts[cut:])
+                try:
+                    script = script_manager.get(candidate)
+                    safe_result_path = f"{extra}/{safe_result_path}" if extra else safe_result_path
+                    resolved = True
+                    break
+                except HTTPException:
+                    continue
+            if not resolved:
+                raise
+        else:
+            raise
+
     base_dir = script.last_spawn_cwd or str(script.path.parent) if script else None
     if not base_dir:
         raise HTTPException(status_code=404, detail="Script has not been started yet.")
+
     file_path = Path(base_dir) / safe_result_path
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="Result file not found.")
