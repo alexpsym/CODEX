@@ -496,6 +496,29 @@ class ScriptManager:
 script_manager = ScriptManager(discover_scripts())
 app = FastAPI(title="Render Master Script", version="1.0")
 
+AUTOSTART_SCRIPTS = [
+    name.strip()
+    for name in os.getenv("AUTOSTART_SCRIPTS", "").split(",")
+    if name.strip()
+]
+
+
+@app.on_event("startup")
+async def _autostart_scripts() -> None:
+    for name in AUTOSTART_SCRIPTS:
+        try:
+            script = script_manager.get(name)
+        except HTTPException:
+            continue
+
+        if script.is_running:
+            continue
+
+        if script.name in WEB_APPS and script.port is None:
+            script.port = _allocate_port()
+
+        asyncio.create_task(_background_start(script))
+
 
 ASSET_VERSION = ""
 

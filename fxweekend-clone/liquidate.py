@@ -398,6 +398,23 @@ def status() -> Dict[str, Any]:
     }
 
 
+@app.get("/api/self_test")
+def self_test() -> Dict[str, Any]:
+    account_id, api_key, base_url = get_oanda_env()
+    if not account_id or not api_key:
+        return {"ok": False, "error": "missing credentials"}
+
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    url = f"{base_url}/accounts/{account_id}"
+    try:
+        resp = _request("GET", url, headers)
+        if resp.status_code == 200:
+            return {"ok": True, "result": "connected"}
+        return {"ok": False, "error": f"{resp.status_code} {resp.text}"}
+    except requests.RequestException as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 def run_web() -> None:
     bootstrap_log()
     thread = threading.Thread(target=scheduler_loop, daemon=True)
