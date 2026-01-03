@@ -2286,6 +2286,18 @@ async def _place_bybit_order(
         body["takeProfit"] = str(take_profit)
     if stop_loss is not None:
         body["stopLoss"] = str(stop_loss)
+    if order_type == "limit" and category == "linear" and price_val is not None:
+        if take_profit_offset is not None:
+            tp_target = price_val + take_profit_offset
+            body["takeProfit"] = _format_decimal_value(tp_target)
+        if stop_loss_offset is not None:
+            sl_target = price_val + stop_loss_offset
+            body["stopLoss"] = _format_decimal_value(sl_target)
+        if "takeProfit" in body or "stopLoss" in body:
+            body["tpslMode"] = "Full"
+            body["tpOrderType"] = "Market"
+            body["slOrderType"] = "Market"
+            body.setdefault("positionIdx", 0)
     _log_webhook_event(request_id, "order_request", {"payload": body})
 
     body_json = json.dumps(body, separators=(",", ":"))
