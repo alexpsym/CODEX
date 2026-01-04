@@ -84,8 +84,8 @@ def main() -> None:
     parser.add_argument(
         "-o",
         "--output",
-        default=str(data_dir / "boq_may2025_transformed.csv"),
-        help="where to write the transformed CSV",
+        default="boq_transformed.csv",
+        help="Output CSV filename. If relative, it is written into the Downloads directory.",
     )
     args = parser.parse_args()
 
@@ -105,7 +105,8 @@ def main() -> None:
 
     output_path = Path(args.output)
     if not output_path.is_absolute():
-        output_path = data_dir / output_path
+        # Required behavior: save transformed output into Downloads
+        output_path = downloads_dir / output_path
 
     print(f"Reading {input_path}")
     df = pd.read_csv(input_path)
