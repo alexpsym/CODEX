@@ -43,6 +43,13 @@ except Exception:  # pragma: no cover - optional dependency
     oanda_history_exporter = None
 finally:
     sys.path.pop(0)
+try:
+    sys.path.insert(0, str(BASE_DIR / "bybithistory-clone"))
+    import fetch_history as bybit_history_fetcher
+except Exception:  # pragma: no cover - optional dependency
+    bybit_history_fetcher = None
+finally:
+    sys.path.pop(0)
 
 
 SKIP_DIRS = {"render", "mt5-clone", ".venv", "venv", "__pycache__", ".git", "env", "youtube"}
@@ -53,6 +60,7 @@ PAYSLIP_REPORT_NAME = "audit_report.pdf"
 PAYSLIP_UPLOAD_ROOT = BASE_DIR / "render" / "uploads" / "payslip"
 PAYSLIP_ALLOWED_IMAGES = {".jpg", ".jpeg", ".png"}
 OANDA_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "oanda-history"
+BYBIT_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "bybit-history"
 WEB_APPS = {
     "bybithistory-clone",
     "cryptocalculator-clone",
@@ -101,6 +109,7 @@ BYBIT_SETTINGS_PATH = bybit_monitor.SETTINGS_PATH
 
 PAYSLIP_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 OANDA_HISTORY_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
+BYBIT_HISTORY_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 @dataclass
@@ -266,6 +275,17 @@ class OandaHistoryJob:
     error: Optional[str] = None
 
 
+@dataclass
+class BybitHistoryJob:
+    job_id: str
+    status: str
+    created_at: float
+    updated_at: float
+    params: Dict[str, object]
+    output_path: Optional[Path] = None
+    error: Optional[str] = None
+
+
 def candidate_entrypoints(app_dir: Path) -> List[Path]:
     app_name = app_dir.name
     candidates: List[str] = []
@@ -341,6 +361,8 @@ def script_open_url(script: ManagedScript) -> str:
 
     if script.name == "oanda_history-clone":
         return "/oanda-history"
+    if script.name == "bybithistory-clone":
+        return "/bybit-history"
     if script.name in WEB_APPS:
         return f"/apps/{_encoded_script_name(script.name)}"
     return f"/scripts/view/{_encoded_script_name(script.name)}"
@@ -520,6 +542,7 @@ class ScriptManager:
 script_manager = ScriptManager(discover_scripts())
 app = FastAPI(title="Render Master Script", version="1.0")
 OANDA_HISTORY_JOBS: Dict[str, OandaHistoryJob] = {}
+BYBIT_HISTORY_JOBS: Dict[str, BybitHistoryJob] = {}
 
 AUTOSTART_SCRIPTS = [
     name.strip()
@@ -619,6 +642,71 @@ async def _run_oanda_history_export(job: OandaHistoryJob) -> None:
             )
         output_path = OANDA_HISTORY_EXPORT_ROOT / f"oanda_history_{job.job_id}.csv"
         await asyncio.to_thread(oanda_history_exporter.save_to_csv, transactions, output_path)
+        job.output_path = output_path
+        job.status = "done"
+    except Exception as exc:
+        job.status = "error"
+        job.error = str(exc)
+    finally:
+        job.updated_at = time.time()
+
+
+def _date_range_for_days(days: int) -> tuple[str, str]:
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=days)
+    return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+
+
+async def _run_bybit_history_export(job: BybitHistoryJob) -> None:
+    job.status = "running"
+    job.updated_at = time.time()
+    try:
+        if bybit_history_fetcher is None:
+            raise RuntimeError("Bybit history exporter module not available.")
+        complete = bool(job.params.get("complete"))
+        days_value = job.params.get("days")
+        if complete:
+            days = 730
+        else:
+            if days_value is None:
+                raise ValueError("days is required unless complete is true.")
+            try:
+                days = int(days_value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("days must be an integer.") from exc
+            if days <= 0:
+                raise ValueError("days must be greater than zero.")
+        start_date, end_date = _date_range_for_days(days)
+
+        def _export() -> Path:
+            import shutil
+            import tempfile
+            from pathlib import Path
+
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                prev_cwd = os.getcwd()
+                os.chdir(tmp)
+                try:
+                    filename = bybit_history_fetcher.download_history(
+                        "linear",
+                        start_date,
+                        end_date,
+                        None,
+                        True,
+                    )
+                finally:
+                    os.chdir(prev_cwd)
+                if filename is None:
+                    raise RuntimeError("No transactions found for the selected timeframe.")
+                src = tmp_path / filename
+                if not src.exists():
+                    raise RuntimeError("Export was generated but could not be found on disk.")
+                dest = BYBIT_HISTORY_EXPORT_ROOT / f"bybit_history_{job.job_id}.csv"
+                shutil.move(str(src), dest)
+                return dest
+
+        output_path = await asyncio.to_thread(_export)
         job.output_path = output_path
         job.status = "done"
     except Exception as exc:
@@ -3056,6 +3144,112 @@ OANDA_HISTORY_TEMPLATE = """<!DOCTYPE html>
 </body>
 </html>"""
 
+BYBIT_HISTORY_TEMPLATE = """<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+    <meta charset=\"UTF-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <title>Bybit Trade History Export</title>
+    <style>
+        :root { color-scheme: light dark; }
+        body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
+        h1 { margin-top: 0; }
+        .card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; padding: 1.5rem; max-width: 960px; margin: 0 auto; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
+        .meta { color: #94a3b8; margin-bottom: 0.75rem; line-height: 1.5; }
+        .actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1rem; }
+        button { padding: 0.7rem 1.2rem; border-radius: 12px; border: none; cursor: pointer; font-weight: 700; }
+        .primary { background: #22c55e; color: #052e16; }
+        .secondary { background: #334155; color: #e2e8f0; }
+        .status { margin-top: 1rem; color: #cbd5e1; white-space: pre-wrap; word-break: break-word; }
+        .error { margin-top: 0.75rem; color: #fca5a5; }
+        .badge { display: inline-block; padding: 0.35rem 0.65rem; border-radius: 999px; background: #1f2937; color: #cbd5e1; font-weight: 700; font-size: 0.9rem; }
+    </style>
+</head>
+<body>
+    <div class=\"card\">
+        <h1>Bybit Trade History Export</h1>
+        <p class=\"meta\">Generate a CSV export of Bybit execution history for the selected timeframe. Jobs run in the background and will download automatically when ready. Note: Bybit trade history is limited to the last 2 years.</p>
+        <div class=\"badge\">Select range</div>
+        <div class=\"actions\">
+            <button class=\"primary\" data-days=\"30\">30 days</button>
+            <button class=\"primary\" data-days=\"60\">60 days</button>
+            <button class=\"primary\" data-days=\"90\">90 days</button>
+            <button class=\"primary\" data-days=\"180\">180 days</button>
+            <button class=\"primary\" data-days=\"365\">365 days</button>
+            <button class=\"secondary\" data-complete=\"true\">Max (2 years)</button>
+            <a href=\"/\" class=\"secondary\" style=\"text-decoration:none; display:inline-flex; align-items:center;\">Back to dashboard</a>
+        </div>
+        <div id=\"status\" class=\"status\">Choose a timeframe to start.</div>
+        <div id=\"error\" class=\"error\"></div>
+    </div>
+
+    <script>
+        const statusEl = document.getElementById('status');
+        const errorEl = document.getElementById('error');
+        const buttons = Array.from(document.querySelectorAll('button[data-days], button[data-complete]'));
+
+        const setButtonsDisabled = (disabled) => {
+            buttons.forEach((btn) => { btn.disabled = disabled; });
+        };
+
+        const startExport = async (payload) => {
+            errorEl.textContent = '';
+            statusEl.textContent = 'Creating export job...';
+            setButtonsDisabled(true);
+            try {
+                const response = await fetch('/api/bybit-history/export', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                if (!response.ok) {
+                    const text = await response.text();
+                    throw new Error(text || response.statusText);
+                }
+                const data = await response.json();
+                await pollJob(data.job_id);
+            } catch (err) {
+                errorEl.textContent = err.message || 'Unable to start export.';
+                statusEl.textContent = 'Export failed to start.';
+                setButtonsDisabled(false);
+            }
+        };
+
+        const pollJob = async (jobId) => {
+            statusEl.textContent = 'Job queued...';
+            while (true) {
+                await new Promise((resolve) => setTimeout(resolve, 1500));
+                const response = await fetch(`/api/bybit-history/export/${jobId}`, { cache: 'no-store' });
+                if (!response.ok) {
+                    const text = await response.text();
+                    throw new Error(text || response.statusText);
+                }
+                const data = await response.json();
+                statusEl.textContent = `Status: ${data.status}`;
+                if (data.status === 'done') {
+                    window.location.href = data.download_url;
+                    setButtonsDisabled(false);
+                    return;
+                }
+                if (data.status === 'error') {
+                    errorEl.textContent = data.error || 'Export failed.';
+                    setButtonsDisabled(false);
+                    return;
+                }
+            }
+        };
+
+        buttons.forEach((button) => {
+            button.addEventListener('click', () => {
+                const days = button.dataset.days;
+                if (days) return startExport({ days: Number(days) });
+                if (button.dataset.complete === 'true') return startExport({ complete: true });
+            });
+        });
+    </script>
+</body>
+</html>"""
+
 PAYSLIP_AUDIT_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"en\">
 <head>
@@ -3167,6 +3361,11 @@ async def payslip_audit_page() -> str:
 @app.get("/oanda-history", response_class=HTMLResponse, include_in_schema=False)
 async def oanda_history_page() -> HTMLResponse:
     return HTMLResponse(OANDA_HISTORY_TEMPLATE)
+
+
+@app.get("/bybit-history", response_class=HTMLResponse, include_in_schema=False)
+async def bybit_history_page() -> HTMLResponse:
+    return HTMLResponse(BYBIT_HISTORY_TEMPLATE)
 
 
 @app.get("/scripts")
@@ -3684,6 +3883,68 @@ async def oanda_history_export_status(job_id: str) -> JSONResponse:
 @app.get("/api/oanda-history/export/{job_id}/download")
 async def download_oanda_history_export(job_id: str) -> FileResponse:
     job = OANDA_HISTORY_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Export job not found.")
+    if job.status != "done" or job.output_path is None:
+        raise HTTPException(status_code=400, detail="Export not ready.")
+    if not job.output_path.exists():
+        raise HTTPException(status_code=404, detail="Export file not found.")
+    return FileResponse(
+        job.output_path,
+        filename=job.output_path.name,
+        media_type="text/csv",
+    )
+
+
+@app.post("/api/bybit-history/export")
+async def start_bybit_history_export(request: Request) -> JSONResponse:
+    if bybit_history_fetcher is None:
+        raise HTTPException(status_code=500, detail="Bybit history exporter not available.")
+    payload = await request.json()
+    days = payload.get("days")
+    complete = payload.get("complete")
+    if complete and days:
+        raise HTTPException(status_code=400, detail="Specify either days or complete history.")
+    if not complete:
+        if days is None:
+            raise HTTPException(status_code=400, detail="days is required unless complete is true.")
+        try:
+            days = int(days)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="days must be an integer.") from exc
+        if days <= 0:
+            raise HTTPException(status_code=400, detail="days must be greater than zero.")
+    job_id = uuid4().hex
+    job = BybitHistoryJob(
+        job_id=job_id,
+        status="queued",
+        created_at=time.time(),
+        updated_at=time.time(),
+        params={"days": days, "complete": bool(complete)},
+    )
+    BYBIT_HISTORY_JOBS[job_id] = job
+    asyncio.create_task(_run_bybit_history_export(job))
+    return JSONResponse({"job_id": job_id})
+
+
+@app.get("/api/bybit-history/export/{job_id}")
+async def bybit_history_export_status(job_id: str) -> JSONResponse:
+    job = BYBIT_HISTORY_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Export job not found.")
+    payload: Dict[str, object] = {
+        "job_id": job.job_id,
+        "status": job.status,
+        "error": job.error,
+    }
+    if job.status == "done" and job.output_path is not None:
+        payload["download_url"] = f"/api/bybit-history/export/{job.job_id}/download"
+    return JSONResponse(payload)
+
+
+@app.get("/api/bybit-history/export/{job_id}/download")
+async def download_bybit_history_export(job_id: str) -> FileResponse:
+    job = BYBIT_HISTORY_JOBS.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Export job not found.")
     if job.status != "done" or job.output_path is None:
