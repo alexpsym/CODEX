@@ -16,6 +16,23 @@ from sys import exit
 
 import xlwings as xw
 
+def resolve_downloads_dir() -> Path:
+    """
+    Input location for BOQ CSVs (per requirement).
+    - Windows: C:\\Users\\User\\Downloads
+    - Fallback: ~/Downloads
+    - Optional override: BOQ_DOWNLOADS_DIR env var
+    """
+    env_path = os.environ.get("BOQ_DOWNLOADS_DIR")
+    if env_path:
+        return Path(env_path).expanduser()
+
+    windows_default = Path(r"C:\Users\User\Downloads")
+    if os.name == "nt" and windows_default.exists():
+        return windows_default
+
+    return Path.home() / "Downloads"
+
 def resolve_data_dir() -> Path:
     """Return the folder that stores ENTRIES.xlsx and CSVs.
 
@@ -45,12 +62,13 @@ ENTRY_FILE = DATA_DIR / "ENTRIES.xlsx"
 
 def find_csv() -> Path:
     """Return the CSV file containing "transformed" in its name."""
-    csv_files = list(DATA_DIR.glob("*transformed*.csv"))
+    downloads_dir = resolve_downloads_dir()
+    csv_files = list(downloads_dir.glob("*transformed*.csv"))
     if not csv_files:
-        print("No CSV file with 'transformed' in the name was found.")
+        print(f"No CSV file with 'transformed' in the name was found in {downloads_dir}.")
         exit(1)
 
-    csv_file = csv_files[0]
+    csv_file = max(csv_files, key=lambda p: p.stat().st_mtime)
     print(f"Using CSV file: {csv_file}")
     return csv_file
 

@@ -1,9 +1,9 @@
 
 import argparse
-import glob
 import os
 from pathlib import Path
 import sys
+import re
 import pandas as pd
 
 
@@ -29,21 +29,63 @@ def resolve_data_dir() -> Path:
 
     return Path.cwd()
 
+def resolve_downloads_dir() -> Path:
+    """Return the folder to search for the BOQ CSV export (input).
+
+    - Windows default: C:\\Users\\User\\Downloads (per your requirement)
+    - Otherwise: ~/Downloads
+    - Override with BOQ_DOWNLOADS_DIR if needed
+    """
+    env_path = os.environ.get("BOQ_DOWNLOADS_DIR")
+    if env_path:
+        return Path(env_path).expanduser()
+
+    windows_default = Path(r"C:\Users\User\Downloads")
+    if os.name == "nt" and windows_default.exists():
+        return windows_default
+
+    return Path.home() / "Downloads"
+
+BOQ_NAME_RE = re.compile(r"^\d{8}_\d{8}.*\.csv$", re.IGNORECASE)
+
+def pick_boq_csv_from_downloads(downloads_dir: Path) -> Path:
+    """
+    Select BOQ export CSV by filename pattern like:
+      93270421_20260104.csv  (or 93270421_20260104_*.csv)
+    This avoids accidentally picking other CSVs (e.g., bybit_history_*.csv).
+    """
+    all_csvs = sorted(downloads_dir.glob("*.csv"))
+    boq_csvs = [p for p in all_csvs if BOQ_NAME_RE.match(p.name)]
+
+    if not boq_csvs:
+        sample = "\n".join(f"  - {p.name}" for p in all_csvs[:20]) or "  (none)"
+        raise FileNotFoundError(
+            f"No BOQ CSV found in {downloads_dir} matching pattern ########_########*.csv\n"
+            f"CSV files seen (first 20):\n{sample}"
+        )
+
+    if len(boq_csvs) == 1:
+        return boq_csvs[0]
+
+    # If multiple BOQ-looking files exist, choose the most recently modified among *matches*.
+    return max(boq_csvs, key=lambda p: p.stat().st_mtime)
+
 
 def main() -> None:
     print("Starting BOQ CSV transformation...")
     data_dir = resolve_data_dir()
+    downloads_dir = resolve_downloads_dir()
     parser = argparse.ArgumentParser(description="Transform a BOQ CSV export")
     parser.add_argument(
         "input_path",
         nargs="?",
-        help="CSV file to transform. If omitted, the script looks for the only CSV file in the folder.",
+        help="CSV file to transform. If omitted, the script looks in Downloads for the most recent CSV.",
     )
     parser.add_argument(
         "-o",
         "--output",
-        default=str(data_dir / "boq_may2025_transformed.csv"),
-        help="where to write the transformed CSV",
+        default="boq_transformed.csv",
+        help="Output CSV filename. If relative, it is written into the Downloads directory.",
     )
     args = parser.parse_args()
 
@@ -51,19 +93,20 @@ def main() -> None:
     if args.input_path:
         input_path = Path(args.input_path)
         if not input_path.is_absolute():
-            input_path = data_dir / input_path
+            # Required behavior: look in Downloads for the input file
+            input_path = downloads_dir / input_path
     else:
-        csv_files = glob.glob(str(data_dir / "*.csv"))
-        if len(csv_files) == 1:
-            input_path = Path(csv_files[0])
-            print(f"🔍 Found input file: {input_path}")
-        else:
-            print("❌ Please place exactly one CSV file in this folder or specify the file name.")
+        try:
+            input_path = pick_boq_csv_from_downloads(downloads_dir)
+            print(f"🔍 Using BOQ CSV from Downloads: {input_path}")
+        except FileNotFoundError as e:
+            print(f"❌ {e}")
             sys.exit(1)
 
     output_path = Path(args.output)
     if not output_path.is_absolute():
-        output_path = data_dir / output_path
+        # Required behavior: save transformed output into Downloads
+        output_path = downloads_dir / output_path
 
     print(f"Reading {input_path}")
     df = pd.read_csv(input_path)

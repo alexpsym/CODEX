@@ -1,6 +1,6 @@
 # Render deployment guide for the unified trading runner
 
-This folder contains a lightweight FastAPI app (`render/master_service.py`) that discovers every Python script in this repository—trading bots, Excel utilities, and anything else except the `mt5-clone` folder—and lets you run them concurrently from a single Render starter instance. The app exposes:
+This folder contains a lightweight FastAPI app (`render/master_service.py`) that discovers every Python script in this repository—trading bots and anything else except the `mt5-clone` and `LEDGER-clone` folders—and lets you run them concurrently from a single Render starter instance. The app exposes:
 
 - A web UI at `/` for starting/stopping scripts and tailing their logs.
 - Webhook endpoints at `/webhook/<script-name>` so TradingView alerts can kick off a specific strategy.
@@ -41,11 +41,10 @@ Place these in your Render dashboard or a local `.env` file at the repo root. Ad
 - Any other variables referenced by the individual scripts. Because the manager runs each script in its own subprocess with the shared environment, they will read the same `.env`/dashboard values.
 
 ## 4) How the master service works
-- On startup it scans the repository for `*.py` files (skipping `mt5-clone`, virtualenv folders, and the `render` folder itself) and exposes each one in the UI.
+- On startup it scans the repository for `*.py` files (skipping `mt5-clone`, virtualenv folders, `LEDGER-clone`, and the `render` folder itself) and exposes each remaining entrypoint in the UI.
 - Clicking **Start** launches the chosen script as a background subprocess with unbuffered stdout; logs stream into the UI. Multiple scripts can run concurrently.
 - Clicking **Stop** sends a graceful terminate signal, escalating to a kill if the script does not exit within 10 seconds.
 - The webhook endpoint records the payload to the script log and starts the script if it is not already running.
-- Common helpers like `pandas` and `xlwings` are bundled in `requirements.txt` so Excel utilities (for example `LEDGER-clone/earnings_report.py`) can start without missing-module errors.
   
 For the payslip audit flow, Tesseract must be present at build time. The Dockerfile installs it alongside `ffmpeg`; after deployment you can confirm readiness by running `which tesseract` in the Render shell (the UI error about missing OCR is raised before uploads run if the binary is absent).
 
