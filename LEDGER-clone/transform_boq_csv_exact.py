@@ -3,6 +3,7 @@ import argparse
 import os
 from pathlib import Path
 import sys
+import re
 import pandas as pd
 
 
@@ -45,6 +46,30 @@ def resolve_downloads_dir() -> Path:
 
     return Path.home() / "Downloads"
 
+BOQ_NAME_RE = re.compile(r"^\d{8}_\d{8}.*\.csv$", re.IGNORECASE)
+
+def pick_boq_csv_from_downloads(downloads_dir: Path) -> Path:
+    """
+    Select BOQ export CSV by filename pattern like:
+      93270421_20260104.csv  (or 93270421_20260104_*.csv)
+    This avoids accidentally picking other CSVs (e.g., bybit_history_*.csv).
+    """
+    all_csvs = sorted(downloads_dir.glob("*.csv"))
+    boq_csvs = [p for p in all_csvs if BOQ_NAME_RE.match(p.name)]
+
+    if not boq_csvs:
+        sample = "\n".join(f"  - {p.name}" for p in all_csvs[:20]) or "  (none)"
+        raise FileNotFoundError(
+            f"No BOQ CSV found in {downloads_dir} matching pattern ########_########*.csv\n"
+            f"CSV files seen (first 20):\n{sample}"
+        )
+
+    if len(boq_csvs) == 1:
+        return boq_csvs[0]
+
+    # If multiple BOQ-looking files exist, choose the most recently modified among *matches*.
+    return max(boq_csvs, key=lambda p: p.stat().st_mtime)
+
 
 def main() -> None:
     print("Starting BOQ CSV transformation...")
@@ -71,17 +96,12 @@ def main() -> None:
             # Required behavior: look in Downloads for the input file
             input_path = downloads_dir / input_path
     else:
-        csv_files = list(downloads_dir.glob("*.csv"))
-        if not csv_files:
-            print(f"❌ No CSV files found in Downloads: {downloads_dir}")
+        try:
+            input_path = pick_boq_csv_from_downloads(downloads_dir)
+            print(f"🔍 Using BOQ CSV from Downloads: {input_path}")
+        except FileNotFoundError as e:
+            print(f"❌ {e}")
             sys.exit(1)
-
-        # If multiple CSVs exist, use the most recent one to avoid ambiguity.
-        input_path = max(csv_files, key=lambda p: p.stat().st_mtime)
-        if len(csv_files) == 1:
-            print(f"🔍 Found input file in Downloads: {input_path}")
-        else:
-            print(f"🔍 Multiple CSVs found in Downloads ({len(csv_files)}). Using most recent: {input_path}")
 
     output_path = Path(args.output)
     if not output_path.is_absolute():
