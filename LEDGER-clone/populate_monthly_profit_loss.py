@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, MutableMapping, Set, Tuple
 
 import xlwings as xw
+from openpyxl.styles import PatternFill
 from tqdm import tqdm
 
 def resolve_data_dir() -> Path:
@@ -96,6 +97,26 @@ def _pick_high_low_expense(
     highest = max(positives, key=lambda x: x[1])
     lowest = min(positives, key=lambda x: x[1])
     return highest, lowest
+
+
+def _clear_high_low_expense_formatting(ws, start_row: int, end_row: int) -> None:
+    # 1) Remove conditional formatting for entire columns C:D (covers wide sqref rules like "C:D")
+    try:
+        ws.conditional_formatting.remove("C:D")
+    except Exception:
+        pass
+
+    # 2) Clear any static fill (covers template fills / copied fills that are NOT conditional formatting)
+    no_fill = PatternFill(fill_type=None)
+    if hasattr(ws, "iter_rows"):
+        for row in ws.iter_rows(min_row=start_row, max_row=end_row, min_col=3, max_col=4):
+            for cell in row:
+                cell.fill = no_fill
+    elif hasattr(ws, "range"):
+        try:
+            ws.range((start_row, 3), (end_row, 4)).color = None
+        except Exception:
+            pass
 
 
 def _ensure_matrix(data) -> List[List]:
@@ -249,11 +270,7 @@ def populate_monthly_profit_loss(wb):
 
     # Remove any conditional formatting from the "HIGHEST EXPENSE" / "LOWEST EXPENSE" columns
     if end_row >= start_row:
-        try:
-            ws_target.conditional_formatting.remove(f"C{start_row}:D{end_row}")
-        except Exception:
-            # Some worksheet backends may not support .remove(); ignore safely
-            pass
+        _clear_high_low_expense_formatting(ws_target, start_row, end_row)
 
 
 def main() -> None:
