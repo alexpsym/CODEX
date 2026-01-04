@@ -9,7 +9,7 @@
     const openOrdersErrors = document.getElementById('open-orders-errors');
     const openOrdersErrorsList = openOrdersErrors?.querySelector('ul');
 
-    const CATEGORIES = ['Excel', 'Forex', 'Crypto', 'Other'];
+    const CATEGORIES = ['Forex', 'Crypto', 'Other'];
 
     let scriptsCache = [];
     let openOrdersCache = [];

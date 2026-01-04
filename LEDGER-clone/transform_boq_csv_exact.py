@@ -1,6 +1,5 @@
 
 import argparse
-import glob
 import os
 from pathlib import Path
 import sys
@@ -29,15 +28,33 @@ def resolve_data_dir() -> Path:
 
     return Path.cwd()
 
+def resolve_downloads_dir() -> Path:
+    """Return the folder to search for the BOQ CSV export (input).
+
+    - Windows default: C:\\Users\\User\\Downloads (per your requirement)
+    - Otherwise: ~/Downloads
+    - Override with BOQ_DOWNLOADS_DIR if needed
+    """
+    env_path = os.environ.get("BOQ_DOWNLOADS_DIR")
+    if env_path:
+        return Path(env_path).expanduser()
+
+    windows_default = Path(r"C:\Users\User\Downloads")
+    if os.name == "nt" and windows_default.exists():
+        return windows_default
+
+    return Path.home() / "Downloads"
+
 
 def main() -> None:
     print("Starting BOQ CSV transformation...")
     data_dir = resolve_data_dir()
+    downloads_dir = resolve_downloads_dir()
     parser = argparse.ArgumentParser(description="Transform a BOQ CSV export")
     parser.add_argument(
         "input_path",
         nargs="?",
-        help="CSV file to transform. If omitted, the script looks for the only CSV file in the folder.",
+        help="CSV file to transform. If omitted, the script looks in Downloads for the most recent CSV.",
     )
     parser.add_argument(
         "-o",
@@ -51,15 +68,20 @@ def main() -> None:
     if args.input_path:
         input_path = Path(args.input_path)
         if not input_path.is_absolute():
-            input_path = data_dir / input_path
+            # Required behavior: look in Downloads for the input file
+            input_path = downloads_dir / input_path
     else:
-        csv_files = glob.glob(str(data_dir / "*.csv"))
-        if len(csv_files) == 1:
-            input_path = Path(csv_files[0])
-            print(f"🔍 Found input file: {input_path}")
-        else:
-            print("❌ Please place exactly one CSV file in this folder or specify the file name.")
+        csv_files = list(downloads_dir.glob("*.csv"))
+        if not csv_files:
+            print(f"❌ No CSV files found in Downloads: {downloads_dir}")
             sys.exit(1)
+
+        # If multiple CSVs exist, use the most recent one to avoid ambiguity.
+        input_path = max(csv_files, key=lambda p: p.stat().st_mtime)
+        if len(csv_files) == 1:
+            print(f"🔍 Found input file in Downloads: {input_path}")
+        else:
+            print(f"🔍 Multiple CSVs found in Downloads ({len(csv_files)}). Using most recent: {input_path}")
 
     output_path = Path(args.output)
     if not output_path.is_absolute():
