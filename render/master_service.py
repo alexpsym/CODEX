@@ -52,7 +52,7 @@ finally:
     sys.path.pop(0)
 
 
-SKIP_DIRS = {"render", "mt5-clone", ".venv", "venv", "__pycache__", ".git", "env", "youtube"}
+SKIP_DIRS = {"render", "mt5-clone", ".venv", "venv", "__pycache__", ".git", "env", "youtube", "LEDGER-clone"}
 SKIP_DIRS_NORMALIZED = {name.casefold() for name in SKIP_DIRS}
 SKIP_FILES = {"__init__.py"}
 MAX_LOG_LINES = 400
@@ -329,9 +329,6 @@ def categorize_script(script_path: Path) -> str:
         "push",
     }
 
-    if "ledger-clone" in full:
-        return "Excel"
-
     if any(keyword in folder for keyword in ("fx", "oanda", "forex")):
         return "Forex"
 
@@ -437,23 +434,6 @@ def discover_scripts() -> List[ManagedScript]:
         if not app_dir.is_dir():
             continue
         if app_dir.name.casefold() in SKIP_DIRS_NORMALIZED or app_dir.name.startswith("."):
-            continue
-
-        # Special-case LEDGER: every .py is treated as its own managed script.
-        if app_dir.name == "LEDGER-clone":
-            for py_file in sorted(
-                p
-                for p in app_dir.glob("*.py")
-                if p.name not in SKIP_FILES and not p.name.startswith("test_")
-            ):
-                scripts.append(
-                    ManagedScript(
-                        name=f"{app_dir.name}/{py_file.name}",
-                        path=py_file,
-                        category=categorize_script(py_file),
-                        log_file=LOG_FILE_OVERRIDES.get(app_dir.name),
-                    )
-                )
             continue
 
         entry_path: Optional[Path] = None
