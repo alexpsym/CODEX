@@ -100,23 +100,37 @@ def _pick_high_low_expense(
 
 
 def _clear_high_low_expense_formatting(ws, start_row: int, end_row: int) -> None:
-    # 1) Remove conditional formatting for entire columns C:D (covers wide sqref rules like "C:D")
+    # This script uses xlwings (Excel COM). Green is coming from Excel-level
+    # conditional formatting (FormatConditions) and/or table styling, not openpyxl.
+    if hasattr(ws, "api") and hasattr(ws, "range"):
+        rng = ws.range((start_row, 3), (end_row, 4))
+
+        # 1) Remove conditional formatting rules affecting C:D (Excel FormatConditions)
+        try:
+            ws.api.Range("C:D").FormatConditions.Delete()
+        except Exception:
+            pass
+        try:
+            rng.api.FormatConditions.Delete()
+        except Exception:
+            pass
+
+        # 2) Clear direct fill; if table style re-applies, force plain white.
+        try:
+            rng.color = None
+        except Exception:
+            pass
+        try:
+            rng.color = (255, 255, 255)  # force no-highlight look even inside a Table style
+        except Exception:
+            pass
+        return
+
+    # Fallback (if you ever swap this script to openpyxl in future)
     try:
         ws.conditional_formatting.remove("C:D")
     except Exception:
         pass
-
-    # 2) Clear any static fill (covers template fills / copied fills that are NOT conditional formatting)
-    no_fill = PatternFill(fill_type=None)
-    if hasattr(ws, "iter_rows"):
-        for row in ws.iter_rows(min_row=start_row, max_row=end_row, min_col=3, max_col=4):
-            for cell in row:
-                cell.fill = no_fill
-    elif hasattr(ws, "range"):
-        try:
-            ws.range((start_row, 3), (end_row, 4)).color = None
-        except Exception:
-            pass
 
 
 def _ensure_matrix(data) -> List[List]:
