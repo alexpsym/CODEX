@@ -214,8 +214,9 @@ def populate_monthly_profit_loss(wb):
         if last_row > 2 and last_col >= 1:
             ws_target.range((3, 1), (last_row, last_col)).clear_contents()
 
+    start_row = 3
     for idx, month in enumerate(tqdm(months, desc="Populating")):
-        row_idx = idx + 3
+        row_idx = idx + start_row
         cell = ws_target.cells(row_idx, 1)
         cell.value = month
         cell.number_format = "mmm yyyy"  # e.g., "Jan 2025"
@@ -244,6 +245,15 @@ def populate_monthly_profit_loss(wb):
             tot_cell = ws_target.cells(row_idx, 2)
             tot_cell.value = total
             tot_cell.number_format = CURRENCY_FORMAT
+    end_row = row_idx if months else start_row - 1
+
+    # Remove any conditional formatting from the "HIGHEST EXPENSE" / "LOWEST EXPENSE" columns
+    if end_row >= start_row:
+        try:
+            ws_target.conditional_formatting.remove(f"C{start_row}:D{end_row}")
+        except Exception:
+            # Some worksheet backends may not support .remove(); ignore safely
+            pass
 
 
 def main() -> None:
