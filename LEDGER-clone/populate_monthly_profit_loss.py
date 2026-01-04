@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, MutableMapping, Set, Tuple
 
 import xlwings as xw
+from openpyxl.styles import PatternFill
 from tqdm import tqdm
 
 def resolve_data_dir() -> Path:
@@ -50,6 +51,88 @@ CATEGORY_ALIASES: Dict[Tuple[str, str], Tuple[str, str]] = {
 }
 
 
+def _format_currency_text(value: float) -> str:
+    """Return a compact currency string for embedding in a text cell.
+
+    Required format examples:
+      - positive: "$7.05"
+      - negative: "$-7.05" (minus sign after the dollar symbol)
+    """
+
+    if value < 0:
+        return f"$-{abs(value):,.2f}"
+    return f"${value:,.2f}"
+
+
+def _pick_high_low_expense(
+    month_values: Mapping[Tuple[str, str], float],
+) -> tuple[tuple[str, float] | None, tuple[str, float] | None]:
+    """Return (highest_expense, lowest_expense) for a month.
+
+    We only consider EXP rows. If expenses are stored as negative numbers,
+    we treat the *most negative* value as the highest expense and the value
+    closest to zero (but still negative) as the lowest expense.
+
+    If expenses are stored as positive numbers, highest=largest positive and
+    lowest=smallest positive.
+    """
+
+    exp_items = [
+        (category, value)
+        for (typ, category), value in month_values.items()
+        if _normalise_type(typ) == "EXP" and value not in (None, 0, 0.0)
+    ]
+    if not exp_items:
+        return None, None
+
+    negatives = [(cat, val) for cat, val in exp_items if val < 0]
+    positives = [(cat, val) for cat, val in exp_items if val > 0]
+
+    if negatives:
+        highest = min(negatives, key=lambda x: x[1])  # most negative
+        lowest = max(negatives, key=lambda x: x[1])  # closest to 0
+        return highest, lowest
+
+    # Fallback: all EXP values are non-negative
+    highest = max(positives, key=lambda x: x[1])
+    lowest = min(positives, key=lambda x: x[1])
+    return highest, lowest
+
+
+def _clear_high_low_expense_formatting(ws, start_row: int, end_row: int) -> None:
+    # This script uses xlwings (Excel COM). Green is coming from Excel-level
+    # conditional formatting (FormatConditions) and/or table styling, not openpyxl.
+    if hasattr(ws, "api") and hasattr(ws, "range"):
+        rng = ws.range((start_row, 3), (end_row, 4))
+
+        # 1) Remove conditional formatting rules affecting C:D (Excel FormatConditions)
+        try:
+            ws.api.Range("C:D").FormatConditions.Delete()
+        except Exception:
+            pass
+        try:
+            rng.api.FormatConditions.Delete()
+        except Exception:
+            pass
+
+        # 2) Clear direct fill; if table style re-applies, force plain white.
+        try:
+            rng.color = None
+        except Exception:
+            pass
+        try:
+            rng.color = (255, 255, 255)  # force no-highlight look even inside a Table style
+        except Exception:
+            pass
+        return
+
+    # Fallback (if you ever swap this script to openpyxl in future)
+    try:
+        ws.conditional_formatting.remove("C:D")
+    except Exception:
+        pass
+
+
 def _ensure_matrix(data) -> List[List]:
     """Return *data* as a list of rows."""
 
@@ -80,6 +163,8 @@ def build_header_map(ws) -> Dict[Tuple[str, str], int]:
     for idx, (typ, category) in enumerate(zip(row1, row2), start=1):
         if idx < 3:
             continue  # Skip MONTH and TOTAL columns
+        if idx in (3, 4):
+            continue  # Skip HIGHEST EXPENSE / LOWEST EXPENSE helper columns
         if typ is None or category is None:
             continue
         header[(_normalise_type(typ), _normalise_category(category))] = idx
@@ -164,11 +249,22 @@ def populate_monthly_profit_loss(wb):
         if last_row > 2 and last_col >= 1:
             ws_target.range((3, 1), (last_row, last_col)).clear_contents()
 
+    start_row = 3
     for idx, month in enumerate(tqdm(months, desc="Populating")):
-        row_idx = idx + 3
+        row_idx = idx + start_row
         cell = ws_target.cells(row_idx, 1)
         cell.value = month
         cell.number_format = "mmm yyyy"  # e.g., "Jan 2025"
+
+        # Populate columns C/D with highest and lowest monthly EXP accounts.
+        highest, lowest = _pick_high_low_expense(aggregated[month])
+        if highest is not None:
+            account, value = highest
+            ws_target.cells(row_idx, 3).value = f"{account} - {_format_currency_text(value)}"
+        if lowest is not None:
+            account, value = lowest
+            ws_target.cells(row_idx, 4).value = f"{account} - {_format_currency_text(value)}"
+
         total = 0.0
         for key, value in aggregated[month].items():
             if not value:
@@ -184,6 +280,11 @@ def populate_monthly_profit_loss(wb):
             tot_cell = ws_target.cells(row_idx, 2)
             tot_cell.value = total
             tot_cell.number_format = CURRENCY_FORMAT
+    end_row = row_idx if months else start_row - 1
+
+    # Remove any conditional formatting from the "HIGHEST EXPENSE" / "LOWEST EXPENSE" columns
+    if end_row >= start_row:
+        _clear_high_low_expense_formatting(ws_target, start_row, end_row)
 
 
 def main() -> None:
