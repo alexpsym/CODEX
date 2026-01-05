@@ -49,6 +49,7 @@ BLOCK_BACKOFFS = [60, 120, 300, 900, 1800]  # 1m, 2m, 5m, 15m, 30m
 DEFAULT_PERCENT_THRESHOLD = float(os.getenv("BYBIT_PERCENT_THRESHOLD", "5.0"))
 STABLECOIN_SUFFIXES = ("USDT", "USDC", "USDD", "USD")
 SETTINGS_PATH = Path(__file__).with_name("settings.json")
+STATE_PATH = Path(__file__).with_name("state.json")
 
 _session: requests.Session | None = None
 _target_logged = False
@@ -75,18 +76,26 @@ except Exception:  # pragma: no cover - very environment specific
 _notification_warning_given = False
 
 
-def _coerce_settings(data: Dict[str, float]) -> Dict[str, float]:
+def _coerce_settings(data: Dict[str, object]) -> Dict[str, float]:
     wait_seconds = int(float(data.get("wait_seconds", DEFAULT_WAIT_SECONDS)))
     pct_threshold = float(data.get("percent_threshold", DEFAULT_PERCENT_THRESHOLD))
+    ath_atl_enabled = int(float(data.get("ath_atl_enabled", 1)))
+    ath_atl_min_change_pct = float(data.get("ath_atl_min_change_pct", 0.0))
 
     if wait_seconds <= 0:
         raise ValueError("wait_seconds must be greater than zero")
     if pct_threshold <= 0:
         raise ValueError("percent_threshold must be greater than zero")
+    if ath_atl_enabled not in (0, 1):
+        ath_atl_enabled = 1 if ath_atl_enabled else 0
+    if ath_atl_min_change_pct < 0:
+        ath_atl_min_change_pct = 0.0
 
     return {
-        "wait_seconds": wait_seconds,
-        "percent_threshold": pct_threshold,
+        "wait_seconds": float(wait_seconds),
+        "percent_threshold": float(pct_threshold),
+        "ath_atl_enabled": float(ath_atl_enabled),
+        "ath_atl_min_change_pct": float(ath_atl_min_change_pct),
     }
 
 
@@ -104,6 +113,8 @@ def get_runtime_settings(force: bool = False) -> Dict[str, float]:
         settings = {
             "wait_seconds": DEFAULT_WAIT_SECONDS,
             "percent_threshold": DEFAULT_PERCENT_THRESHOLD,
+            "ath_atl_enabled": 1,
+            "ath_atl_min_change_pct": 0.0,
         }
 
         if mtime is not None:
@@ -632,9 +643,29 @@ def wait_with_log(total_seconds: int, label: str) -> None:
     time.sleep(total_seconds)
 
 
+def _load_state() -> Dict[str, object]:
+    try:
+        raw = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            raw.setdefault("symbols", {})
+            if isinstance(raw["symbols"], dict):
+                return raw
+    except Exception:
+        pass
+    return {"symbols": {}}
+
+
+def _save_state(state: Dict[str, object]) -> None:
+    tmp = STATE_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(STATE_PATH)
+
+
 def run_monitor() -> None:
     """Continuous monitoring loop."""
     previous_prices: Dict[str, float] = {}
+    state = _load_state()
+    symbols_state: Dict[str, Dict[str, float]] = state.get("symbols", {})  # type: ignore[assignment]
     iteration = 0
     blocked_streak = 0
     settings = get_runtime_settings(force=True)
@@ -655,7 +686,9 @@ def run_monitor() -> None:
             log(
                 "Monitor settings: "
                 f"wait_seconds={settings['wait_seconds']}s, "
-                f"percent_threshold={settings['percent_threshold']:.2f}%"
+                f"percent_threshold={settings['percent_threshold']:.2f}%, "
+                f"ath_atl_enabled={int(settings['ath_atl_enabled'])}, "
+                f"ath_atl_min_change_pct={settings['ath_atl_min_change_pct']:.4f}%"
             )
             last_logged_settings = dict(settings)
         log(f"Starting price check #{iteration}...")
@@ -719,44 +752,78 @@ def run_monitor() -> None:
                 "Price source returned an empty list of symbols. This is unusual, so we will simply wait "
                 "and try again."
             )
-        elif previous_prices:
-            triggered_any = False
-
-            # Notify about new or missing symbols
-            current_symbols = set(prices)
-            previous_symbols = set(previous_prices)
-            new_symbols = sorted(current_symbols - previous_symbols)
-            missing_symbols = sorted(previous_symbols - current_symbols)
-
-            for symbol in new_symbols:
-                log(f"New symbol detected: {symbol}. It will be tracked from now on.")
-            for symbol in missing_symbols:
-                log(f"Altcoin missing this round: {symbol}. It may have been delisted or is temporarily unavailable.")
-
-            for symbol in sorted(current_symbols & previous_symbols):
-                current_price = prices[symbol]
-                previous_price = previous_prices.get(symbol)
-                if previous_price in (None, 0):
-                    continue
-
-                change_pct = ((current_price - previous_price) / previous_price) * 100
-                if abs(change_pct) >= settings["percent_threshold"]:
-                    direction = "up" if change_pct > 0 else "down"
-                    message = (
-                        f"{symbol} moved {direction} by {change_pct:+.2f}% "
-                        f"(from {previous_price:.6f} to {current_price:.6f})."
-                    )
-                    log(message)
-                    send_notification("Bybit Altcoin Alert", message)
-                    triggered_any = True
-
-            if not triggered_any:
-                log(
-                    "No price jumps reached the "
-                    f"{settings['percent_threshold']:.1f}% threshold during this cycle."
-                )
         else:
-            log("Baseline prices recorded. Alerts will begin after the next update.")
+            if int(settings.get("ath_atl_enabled", 1)) == 1 and prices:
+                min_change_pct = float(settings.get("ath_atl_min_change_pct", 0.0))
+                changed_state = False
+                for symbol, current_price in prices.items():
+                    entry = symbols_state.get(symbol)
+                    if not entry:
+                        symbols_state[symbol] = {"ath": current_price, "atl": current_price}
+                        changed_state = True
+                        continue
+                    ath = float(entry.get("ath", current_price))
+                    atl = float(entry.get("atl", current_price))
+                    ath_trigger = current_price > ath * (1.0 + (min_change_pct / 100.0))
+                    atl_trigger = current_price < atl * (1.0 - (min_change_pct / 100.0))
+                    if ath_trigger:
+                        entry["ath"] = current_price
+                        symbols_state[symbol] = entry
+                        changed_state = True
+                        message = f"{symbol} NEW ATH | {ath:.6f} -> {current_price:.6f}"
+                        log(message)
+                        send_notification("Bybit ATH Alert", message)
+                    if atl_trigger:
+                        entry["atl"] = current_price
+                        symbols_state[symbol] = entry
+                        changed_state = True
+                        message = f"{symbol} NEW ATL | {atl:.6f} -> {current_price:.6f}"
+                        log(message)
+                        send_notification("Bybit ATL Alert", message)
+                if changed_state:
+                    state["symbols"] = symbols_state
+                    _save_state(state)
+
+            if previous_prices:
+                triggered_any = False
+
+                # Notify about new or missing symbols
+                current_symbols = set(prices)
+                previous_symbols = set(previous_prices)
+                new_symbols = sorted(current_symbols - previous_symbols)
+                missing_symbols = sorted(previous_symbols - current_symbols)
+
+                for symbol in new_symbols:
+                    log(f"New symbol detected: {symbol}. It will be tracked from now on.")
+                for symbol in missing_symbols:
+                    log(
+                        f"Altcoin missing this round: {symbol}. It may have been delisted or is temporarily unavailable."
+                    )
+
+                for symbol in sorted(current_symbols & previous_symbols):
+                    current_price = prices[symbol]
+                    previous_price = previous_prices.get(symbol)
+                    if previous_price in (None, 0):
+                        continue
+
+                    change_pct = ((current_price - previous_price) / previous_price) * 100
+                    if abs(change_pct) >= settings["percent_threshold"]:
+                        direction = "up" if change_pct > 0 else "down"
+                        message = (
+                            f"{symbol} moved {direction} by {change_pct:+.2f}% "
+                            f"(from {previous_price:.6f} to {current_price:.6f})."
+                        )
+                        log(message)
+                        send_notification("Bybit Altcoin Alert", message)
+                        triggered_any = True
+
+                if not triggered_any:
+                    log(
+                        "No price jumps reached the "
+                        f"{settings['percent_threshold']:.1f}% threshold during this cycle."
+                    )
+            else:
+                log("Baseline prices recorded. Alerts will begin after the next update.")
 
         previous_prices = prices
         log(
