@@ -1,0 +1,6 @@
+{
+  "wait_seconds": 300,
+  "percent_threshold": 5.0,
+  "ath_atl_enabled": 1,
+  "ath_atl_min_change_pct": 0.0
+}

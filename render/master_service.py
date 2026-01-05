@@ -33,6 +33,7 @@ from payslip_audit.tesseract import (
     is_tesseract_available,
 )
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
+from oanda_monitor import oanda_forex_monitor as oanda_monitor
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env")
@@ -72,6 +73,7 @@ STANDALONE_SCRIPTS = {
     "Crypto-Scanner-clone",
     "bybit-alert-clone",
     "bybit_monitor",
+    "oanda_monitor",
     "bybithistory-clone",
     "coinspot-clone",
     "cryptocalculator-clone",
@@ -96,6 +98,7 @@ ENTRY_OVERRIDES = {
     "fxweekend-clone": ["liquidate.py"],
     "ivindicator-clone": ["ivweb.py", "ivapp.py", "ivindicator.py"],
     "oanda-calculator-clone": ["oanda_calculator_web.py", "oanda_api.py"],
+    "oanda_monitor": ["oanda_forex_monitor.py"],
     "oanda_history-clone": ["oanda_history.py"],
     "payslip_audit": ["payslip_timesheet_audit.py"],
     "viddl-clone": ["master.py", "vid.py"],
