@@ -1,0 +1,428 @@
+## MT5 EA (pullback-on-counter-candle, EMA trend, ATR SL, 2R+ TP, AUD risk sizing, blackout window)
+
+Save as:
+`MQL5\Experts\PullbackEMA_ATR_RR.mq5`
+
+```mq5
+#property strict
+#property description "Pullback strategy: trade trend pullbacks on the close of a counter-trend candle. Trend via EMA(s). SL via ATR multiple. TP via RR. Money-risk sizing (AUD). Blackout window (AEST/AEDT -> server time)."
+#property version   "1.00"
+
+#include <Trade/Trade.mqh>
+
+CTrade trade;
+
+// ---------- Inputs ----------
+input bool   UseDualEMA              = true;     // true: trend uses Fast/Slow EMA relationship. false: trend uses TrendEMA only.
+input int    FastEMAPeriod           = 9;        // used when UseDualEMA=true
+input int    SlowEMAPeriod           = 20;       // used when UseDualEMA=true
+input int    TrendEMAPeriod          = 20;       // used when UseDualEMA=false
+
+input int    ATRPeriod               = 14;
+input double ATRMultiple             = 1.5;      // 0.5, 1.5, 2, 2.5, 3 (set in Inputs)
+
+input double RiskAUD_Target          = 10.0;     // target AUD risk per trade (position size is derived from this)
+input double RiskAUD_Min             = 9.0;      // hard filter: do NOT trade if rounded risk < this
+input double RiskAUD_Max             = 12.0;     // hard filter: do NOT trade if rounded risk > this
+
+input double RiskReward              = 2.0;      // must be >= 2.0 (set 2.0 or 3.0)
+input int    SlippagePoints          = 10;
+
+input bool   EnforceOneTradeAtATime  = true;     // true = only one open position per symbol
+input bool   CloseDuringBlackout     = true;     // if true, force-close any open position during blackout
+
+// Blackout window requirement:
+// - No NEW trade, and no OPEN trade allowed during:
+//   05:00–09:00 AEST  (local)  => 02:00–06:00 server (UTC+7 shown in your note)
+//   06:00–10:00 AEDT  (local)  => 03:00–07:00 server (UTC+8 shown in your note)
+//
+// You toggle which one you want active via UseAEDT.
+input bool   UseAEDT                 = false;    // false=AEST blackout (02-06 server). true=AEDT blackout (03-07 server)
+input int    BlackoutStartHour_AEST  = 2;        // server time
+input int    BlackoutEndHour_AEST    = 6;        // server time (end is exclusive)
+input int    BlackoutStartHour_AEDT  = 3;        // server time
+input int    BlackoutEndHour_AEDT    = 7;        // server time (end is exclusive)
+
+// ---------- Internals ----------
+int hFast = INVALID_HANDLE;
+int hSlow = INVALID_HANDLE;
+int hTrend = INVALID_HANDLE;
+int hATR  = INVALID_HANDLE;
+
+datetime lastBarTime = 0;
+
+// ---------- Helpers ----------
+bool IsNewBar()
+{
+   datetime t = iTime(_Symbol, _Period, 0);
+   if(t == 0) return false;
+   if(t != lastBarTime)
+   {
+      lastBarTime = t;
+      return true;
+   }
+   return false;
+}
+
+bool IsBlackout(datetime t)
+{
+   MqlDateTime dt;
+   TimeToStruct(t, dt);
+
+   int start = UseAEDT ? BlackoutStartHour_AEDT : BlackoutStartHour_AEST;
+   int end   = UseAEDT ? BlackoutEndHour_AEDT   : BlackoutEndHour_AEST;
+
+   return (dt.hour >= start && dt.hour < end);
+}
+
+bool GetBufferValue(int handle, int bufferIndex, int shift, double &outVal)
+{
+   double buf[];
+   ArraySetAsSeries(buf, true);
+   if(CopyBuffer(handle, bufferIndex, shift, 1, buf) != 1) return false;
+   outVal = buf[0];
+   return true;
+}
+
+double NormalizeVolume(double vol)
+{
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double vmax = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+
+   if(step <= 0) step = 0.01;
+
+   // round DOWN to step (risk must not exceed max due to rounding up)
+   double steps = MathFloor(vol / step);
+   double v = steps * step;
+
+   if(v < vmin) v = 0.0;
+   if(v > vmax) v = vmax;
+
+   // normalize digits for display
+   int digits = (int)MathRound(-MathLog10(step));
+   if(digits < 0) digits = 2;
+   return NormalizeDouble(v, digits);
+}
+
+bool CalcRiskFor1Lot(double stopPoints, double &lossPerLotAUD)
+{
+   // Generic point value:
+   // tick_value = value of one tick_size move for 1 lot (usually in deposit currency in tester)
+   // value_per_point = tick_value * (_Point / tick_size)
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+
+   if(tickValue <= 0 || tickSize <= 0 || _Point <= 0) return false;
+
+   double valuePerPoint = tickValue * (_Point / tickSize);
+   lossPerLotAUD = stopPoints * valuePerPoint;
+
+   return (lossPerLotAUD > 0);
+}
+
+bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &tp, double &vol, double &riskRoundedAUD)
+{
+   // RR guard
+   double rr = RiskReward;
+   if(rr < 2.0) rr = 2.0;
+
+   // price
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(ask <= 0 || bid <= 0) return false;
+
+   price = (type == ORDER_TYPE_BUY) ? ask : bid;
+
+   // ATR from closed candle [1]
+   double atr = 0.0;
+   if(!GetBufferValue(hATR, 0, 1, atr)) return false;
+   if(atr <= 0) return false;
+
+   double slDistPrice = atr * ATRMultiple;
+   double stopPoints  = slDistPrice / _Point;
+   if(stopPoints <= 0) return false;
+
+   // broker stops-level check (in points)
+   int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   if(stopsLevel > 0 && stopPoints < stopsLevel) return false;
+
+   if(type == ORDER_TYPE_BUY)
+   {
+      sl = price - slDistPrice;
+      tp = price + slDistPrice * rr;
+   }
+   else
+   {
+      sl = price + slDistPrice;
+      tp = price - slDistPrice * rr;
+   }
+
+   // enforce TP >= 2R (already true if rr>=2, but keep explicit)
+   double tpDist = MathAbs(tp - price);
+   if(tpDist < (2.0 * MathAbs(price - sl))) return false;
+
+   // lot sizing by money risk
+   double lossPerLot = 0.0;
+   if(!CalcRiskFor1Lot(stopPoints, lossPerLot)) return false;
+
+   double volRaw = RiskAUD_Target / lossPerLot;
+   vol = NormalizeVolume(volRaw);
+   if(vol <= 0) return false;
+
+   // recompute rounded risk with the rounded volume
+   double risk = lossPerLot * vol;
+   riskRoundedAUD = risk;
+
+   // hard risk filters
+   if(risk < RiskAUD_Min || risk > RiskAUD_Max) return false;
+
+   return true;
+}
+
+bool InPosition()
+{
+   if(!EnforceOneTradeAtATime) return false;
+   return PositionSelect(_Symbol);
+}
+
+// Signal:
+// - Determine trend on CLOSED candle [1]
+// - Enter on NEW bar if candle [1] is counter-trend (bearish in uptrend; bullish in downtrend)
+bool GetSignal(ENUM_ORDER_TYPE &outType)
+{
+   double c1 = iClose(_Symbol, _Period, 1);
+   double o1 = iOpen(_Symbol,  _Period, 1);
+   if(c1 == 0 || o1 == 0) return false;
+
+   bool candleBear = (c1 < o1);
+   bool candleBull = (c1 > o1);
+
+   bool up = false, down = false;
+
+   if(UseDualEMA)
+   {
+      double fast1=0, slow1=0;
+      if(!GetBufferValue(hFast, 0, 1, fast1)) return false;
+      if(!GetBufferValue(hSlow, 0, 1, slow1)) return false;
+
+      up   = (c1 > slow1 && fast1 > slow1);
+      down = (c1 < slow1 && fast1 < slow1);
+   }
+   else
+   {
+      double ema1=0;
+      if(!GetBufferValue(hTrend, 0, 1, ema1)) return false;
+
+      up   = (c1 > ema1);
+      down = (c1 < ema1);
+   }
+
+   if(up && candleBear)
+   {
+      outType = ORDER_TYPE_BUY;
+      return true;
+   }
+   if(down && candleBull)
+   {
+      outType = ORDER_TYPE_SELL;
+      return true;
+   }
+
+   return false;
+}
+
+void TryCloseForBlackout()
+{
+   if(!CloseDuringBlackout) return;
+   if(!PositionSelect(_Symbol)) return;
+
+   // If within blackout, close immediately on this tick.
+   if(IsBlackout(TimeCurrent()))
+   {
+      trade.PositionClose(_Symbol);
+   }
+}
+
+// ---------- MT5 lifecycle ----------
+int OnInit()
+{
+   // Indicator handles
+   if(UseDualEMA)
+   {
+      hFast = iMA(_Symbol, _Period, FastEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
+      hSlow = iMA(_Symbol, _Period, SlowEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
+      if(hFast == INVALID_HANDLE || hSlow == INVALID_HANDLE) return INIT_FAILED;
+   }
+   else
+   {
+      hTrend = iMA(_Symbol, _Period, TrendEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
+      if(hTrend == INVALID_HANDLE) return INIT_FAILED;
+   }
+
+   hATR = iATR(_Symbol, _Period, ATRPeriod);
+   if(hATR == INVALID_HANDLE) return INIT_FAILED;
+
+   trade.SetDeviationInPoints(SlippagePoints);
+
+   return INIT_SUCCEEDED;
+}
+
+void OnDeinit(const int reason)
+{
+   if(hFast  != INVALID_HANDLE) IndicatorRelease(hFast);
+   if(hSlow  != INVALID_HANDLE) IndicatorRelease(hSlow);
+   if(hTrend != INVALID_HANDLE) IndicatorRelease(hTrend);
+   if(hATR   != INVALID_HANDLE) IndicatorRelease(hATR);
+}
+
+void OnTick()
+{
+   // Enforce "no open trade during blackout"
+   TryCloseForBlackout();
+
+   if(!IsNewBar()) return;
+
+   // No new trades during blackout
+   if(IsBlackout(TimeCurrent())) return;
+
+   // One trade at a time (per symbol)
+   if(InPosition()) return;
+
+   // Signal
+   ENUM_ORDER_TYPE sigType;
+   if(!GetSignal(sigType)) return;
+
+   // Build order params (includes all hard filters)
+   double price=0, sl=0, tp=0, vol=0, riskRounded=0;
+   if(!BuildOrderParams(sigType, price, sl, tp, vol, riskRounded)) return;
+
+   // Send
+   bool ok = false;
+   if(sigType == ORDER_TYPE_BUY)
+      ok = trade.Buy(vol, _Symbol, price, sl, tp, "PullbackEMA_ATR_RR");
+   else
+      ok = trade.Sell(vol, _Symbol, price, sl, tp, "PullbackEMA_ATR_RR");
+
+   (void)ok; // keep silent; Strategy Tester log will show errors if any
+}
+```
+
+### What this EA enforces (exactly as requested)
+
+* Trend is based on EMA(s): either **dual EMA (9/20 default)** or **single EMA** (toggle in Inputs).
+* Entry is on the **next bar** after a **counter-trend candle fully closes** (bearish candle in uptrend = buy; bullish candle in downtrend = sell).
+* Stop loss is **ATR × multiple** (set 0.5 / 1.5 / 2 / 2.5 / 3 in Inputs).
+* Take profit is **RR × SL distance**, with RR clamped to **minimum 2.0** (set 2.0 or 3.0).
+* Position sizing is **money-risk sizing in AUD** (target 10 AUD), with hard filter:
+
+  * **skip trade if rounded risk < 9 AUD or > 12 AUD**
+* Time rule (server-time blackout):
+
+  * AEST requirement (05:00–09:00 AEST) becomes **02:00–06:00 server time** when using your stated mapping.
+  * AEDT requirement (06:00–10:00 AEDT) becomes **03:00–07:00 server time** when using your stated mapping.
+  * The EA **will not open trades** in blackout and (optionally) **will force-close** any open trade during blackout.
+* Works on **any symbol**; your `EURUSD.a` symbol details (e.g., digits/tick size/contract size) are consistent with standard FX sizing assumptions. 
+
+---
+
+## EA input preset (.set)
+
+Save as:
+
+* For normal loading in the tester UI: `MQL5\Presets\PullbackEMA_ATR_RR.set`
+* For auto-start tester via config: MetaTrader’s docs note `ExpertParameters` is read from `MQL5\Profiles\Tester`. ([metatrader5.com][1])
+
+```ini
+UseDualEMA=true
+FastEMAPeriod=9
+SlowEMAPeriod=20
+TrendEMAPeriod=20
+
+ATRPeriod=14
+ATRMultiple=1.5
+
+RiskAUD_Target=10.0
+RiskAUD_Min=9.0
+RiskAUD_Max=12.0
+
+RiskReward=2.0
+SlippagePoints=10
+
+EnforceOneTradeAtATime=true
+CloseDuringBlackout=true
+
+UseAEDT=false
+BlackoutStartHour_AEST=2
+BlackoutEndHour_AEST=6
+BlackoutStartHour_AEDT=3
+BlackoutEndHour_AEDT=7
+```
+
+---
+
+## Tester settings file (.ini) for Visual Backtest (efficient + correct)
+
+MetaTrader’s config docs define the key `[Tester]` fields (Model, ExecutionMode, Optimization, Deposit, Currency, Leverage, Visual, FromDate, ToDate, etc.). ([metatrader5.com][1])
+Visualization requires optimization disabled. ([metatrader5.com][2])
+
+Save as:
+`PullbackEMA_ATR_RR_visual.ini`
+
+```ini
+[Tester]
+; EA path is relative to MQL5\Experts (no .ex5 needed here)
+Expert=PullbackEMA_ATR_RR
+ExpertParameters=PullbackEMA_ATR_RR.set
+
+; Change Symbol to anything (e.g., XAUUSD.a, GBPJPY.a, etc.)
+Symbol=EURUSD.a
+Period=M1
+
+; Tick model:
+; 4 = Every tick based on real ticks (most accurate, slower)
+Model=4
+
+; 0 = normal execution (no random delay)
+ExecutionMode=0
+
+; Must be 0 for visualization mode
+Optimization=0
+ForwardMode=0
+
+; Set your desired range (YYYY.MM.DD)
+FromDate=2025.05.01
+ToDate=2025.05.31
+
+Deposit=2500
+Currency=AUD
+Leverage=1:30
+
+; Visual mode ON
+Visual=1
+
+; Optional report output
+Report=reports\PullbackEMA_ATR_RR_EURUSD_M1.htm
+ReplaceReport=1
+
+; Agents: local only (visual testing requires a local agent)
+UseLocal=1
+UseRemote=0
+UseCloud=0
+
+ShutdownTerminal=0
+```
+
+---
+
+## Notes that matter for your rules
+
+* If you set `UseAEDT=true`, the blackout becomes **03:00–07:00 server time**. If `UseAEDT=false`, it is **02:00–06:00 server time**.
+* If Pepperstone’s server time doesn’t match your “UTC+7/UTC+8” assumption, do this once:
+
+  * In tester visual mode, print the server hour by adding a temporary `Print(TimeToString(TimeCurrent(), TIME_MINUTES));` and compare to your wall clock, then adjust the blackout hours accordingly.
+
+If you want the pullback to be stricter (example: require the counter-trend candle to touch the fast EMA, or require 2 consecutive counter-trend candles), say so and I’ll tighten the signal logic.
+
+[1]: https://www.metatrader5.com/en/terminal/help/start_advanced/start "Platform Start - For Advanced Users - Getting Started - MetaTrader 5 Help"
+[2]: https://www.metatrader5.com/en/terminal/help/algotrading/visualization?utm_source=chatgpt.com "Testing Visualization - Algorithmic Trading, Trading Robots"
