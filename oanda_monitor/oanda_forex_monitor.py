@@ -28,10 +28,16 @@ from urllib3.util.retry import Retry
 
 API_PATH_PRICING = "/v3/accounts/{accountID}/pricing"
 API_PATH_INSTRUMENTS = "/v3/accounts/{accountID}/instruments"
+API_PATH_CANDLES = "/v3/instruments/{instrument}/candles"
 DEFAULT_WAIT_SECONDS = int(os.getenv("OANDA_WAIT_SECONDS", "30"))
 DEFAULT_PERCENT_THRESHOLD = float(os.getenv("OANDA_PERCENT_THRESHOLD", "0.10"))  # percent
 DEFAULT_ATH_ATL_ENABLED = int(os.getenv("OANDA_ATH_ATL_ENABLED", "1"))
-DEFAULT_ATH_ATL_MIN_CHANGE_PCT = float(os.getenv("OANDA_ATH_ATL_MIN_CHANGE_PCT", "0.0"))  # percent
+DEFAULT_ATH_ATL_MIN_BREAK_PCT = float(os.getenv("OANDA_ATH_ATL_MIN_BREAK_PCT", "0.0"))  # percent
+DEFAULT_ATH_ATL_COOLDOWN_SECONDS = int(os.getenv("OANDA_ATH_ATL_COOLDOWN_SECONDS", "3600"))
+DEFAULT_ATH_ATL_GRANULARITY = os.getenv("OANDA_ATH_ATL_GRANULARITY", "D")
+DEFAULT_ATH_ATL_PRICE = os.getenv("OANDA_ATH_ATL_PRICE", "M")
+DEFAULT_ATH_ATL_BACKFILL_BATCH = int(os.getenv("OANDA_ATH_ATL_BACKFILL_BATCH", "3"))
+DEFAULT_ATH_ATL_BACKFILL_MAX_PAGES = int(os.getenv("OANDA_ATH_ATL_BACKFILL_MAX_PAGES", "20"))
 SETTINGS_PATH = Path(__file__).with_name("settings.json")
 STATE_PATH = Path(__file__).with_name("state.json")
 
@@ -82,6 +88,26 @@ def send_push_notification(title: str, message: str) -> bool:
         return False
 
 
+def push_notifications_ready() -> bool:
+    return _push_configured()
+
+
+def send_push_test() -> Dict[str, object]:
+    configured = _push_configured()
+    success = False
+    if configured:
+        success = send_push_notification(
+            "OANDA monitor Telegram test",
+            "If you received this, Telegram alerts are working for oanda_monitor.",
+        )
+    detail = (
+        "Telegram alerts are not configured (set TELEGRAM_BOT_TOKEN/TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)."
+        if not configured
+        else "Test Telegram alert sent successfully." if success else "Telegram alert send attempt failed."
+    )
+    return {"sent": success, "detail": detail, "configured": configured}
+
+
 def _get_session() -> requests.Session:
     global _session
     if _session is None:
@@ -115,7 +141,20 @@ def _coerce_settings(data: Dict[str, object]) -> Dict[str, float]:
     wait_seconds = as_int("wait_seconds", DEFAULT_WAIT_SECONDS)
     pct_threshold = as_float("percent_threshold", DEFAULT_PERCENT_THRESHOLD)
     ath_atl_enabled = as_int("ath_atl_enabled", DEFAULT_ATH_ATL_ENABLED)
-    ath_atl_min_change_pct = as_float("ath_atl_min_change_pct", DEFAULT_ATH_ATL_MIN_CHANGE_PCT)
+    ath_atl_min_break_pct = as_float("ath_atl_min_break_pct", DEFAULT_ATH_ATL_MIN_BREAK_PCT)
+    ath_atl_cooldown_seconds = as_int(
+        "ath_atl_cooldown_seconds", DEFAULT_ATH_ATL_COOLDOWN_SECONDS
+    )
+    ath_atl_granularity = str(
+        data.get("ath_atl_granularity", DEFAULT_ATH_ATL_GRANULARITY)
+    ).strip()
+    ath_atl_price = str(data.get("ath_atl_price", DEFAULT_ATH_ATL_PRICE)).strip().upper()
+    ath_atl_backfill_batch = as_int(
+        "ath_atl_backfill_batch", DEFAULT_ATH_ATL_BACKFILL_BATCH
+    )
+    ath_atl_backfill_max_pages = as_int(
+        "ath_atl_backfill_max_pages", DEFAULT_ATH_ATL_BACKFILL_MAX_PAGES
+    )
 
     if wait_seconds <= 0:
         raise ValueError("wait_seconds must be greater than zero")
@@ -123,14 +162,29 @@ def _coerce_settings(data: Dict[str, object]) -> Dict[str, float]:
         raise ValueError("percent_threshold must be greater than zero")
     if ath_atl_enabled not in (0, 1):
         ath_atl_enabled = 1 if ath_atl_enabled else 0
-    if ath_atl_min_change_pct < 0:
-        ath_atl_min_change_pct = 0.0
+    if ath_atl_min_break_pct < 0:
+        ath_atl_min_break_pct = 0.0
+    if ath_atl_cooldown_seconds < 0:
+        ath_atl_cooldown_seconds = 0
+    if not ath_atl_granularity:
+        ath_atl_granularity = DEFAULT_ATH_ATL_GRANULARITY
+    if not ath_atl_price:
+        ath_atl_price = DEFAULT_ATH_ATL_PRICE
+    if ath_atl_backfill_batch < 1:
+        ath_atl_backfill_batch = 1
+    if ath_atl_backfill_max_pages < 1:
+        ath_atl_backfill_max_pages = 1
 
     return {
         "wait_seconds": float(wait_seconds),
         "percent_threshold": float(pct_threshold),
         "ath_atl_enabled": float(ath_atl_enabled),
-        "ath_atl_min_change_pct": float(ath_atl_min_change_pct),
+        "ath_atl_min_break_pct": float(ath_atl_min_break_pct),
+        "ath_atl_cooldown_seconds": float(ath_atl_cooldown_seconds),
+        "ath_atl_granularity": ath_atl_granularity,
+        "ath_atl_price": ath_atl_price,
+        "ath_atl_backfill_batch": float(ath_atl_backfill_batch),
+        "ath_atl_backfill_max_pages": float(ath_atl_backfill_max_pages),
     }
 
 
@@ -146,7 +200,12 @@ def get_runtime_settings(force: bool = False) -> Dict[str, float]:
             "wait_seconds": DEFAULT_WAIT_SECONDS,
             "percent_threshold": DEFAULT_PERCENT_THRESHOLD,
             "ath_atl_enabled": DEFAULT_ATH_ATL_ENABLED,
-            "ath_atl_min_change_pct": DEFAULT_ATH_ATL_MIN_CHANGE_PCT,
+            "ath_atl_min_break_pct": DEFAULT_ATH_ATL_MIN_BREAK_PCT,
+            "ath_atl_cooldown_seconds": DEFAULT_ATH_ATL_COOLDOWN_SECONDS,
+            "ath_atl_granularity": DEFAULT_ATH_ATL_GRANULARITY,
+            "ath_atl_price": DEFAULT_ATH_ATL_PRICE,
+            "ath_atl_backfill_batch": DEFAULT_ATH_ATL_BACKFILL_BATCH,
+            "ath_atl_backfill_max_pages": DEFAULT_ATH_ATL_BACKFILL_MAX_PAGES,
         }
         if mtime is not None:
             try:
@@ -285,6 +344,151 @@ def _pct_change(new: float, old: float) -> float:
     return ((new - old) / old) * 100.0
 
 
+def _price_bucket_key(price: str) -> str:
+    if price == "B":
+        return "bid"
+    if price == "A":
+        return "ask"
+    return "mid"
+
+
+def _parse_oanda_time(value: str) -> _dt.datetime:
+    cleaned = value.replace("Z", "+00:00")
+    return _dt.datetime.fromisoformat(cleaned)
+
+
+def _extract_candle_high_low(candle: Dict[str, object], price_key: str) -> Tuple[float, float] | None:
+    price_blob = candle.get(price_key) or {}
+    if not isinstance(price_blob, dict):
+        return None
+    high = price_blob.get("h")
+    low = price_blob.get("l")
+    try:
+        return float(high), float(low)
+    except (TypeError, ValueError):
+        return None
+
+
+def fetch_historical_baseline(
+    *,
+    base_url: str,
+    token: str,
+    instrument: str,
+    granularity: str,
+    price: str,
+    max_pages: int,
+) -> Tuple[float, float] | None:
+    session = _get_session()
+    url = f"{base_url}{API_PATH_CANDLES.format(instrument=instrument)}"
+    price_key = _price_bucket_key(price)
+    ath = None
+    atl = None
+    to_param = None
+    last_to = None
+    for _ in range(max_pages):
+        params = {
+            "count": 5000,
+            "granularity": granularity,
+            "price": price,
+        }
+        if to_param:
+            params["to"] = to_param
+        response = session.get(url, headers=_oanda_headers(token), params=params, timeout=20)
+        response.raise_for_status()
+        data = response.json()
+        candles = data.get("candles") or []
+        if not candles:
+            break
+        for candle in candles:
+            if not isinstance(candle, dict):
+                continue
+            parsed = _extract_candle_high_low(candle, price_key)
+            if parsed is None:
+                continue
+            high, low = parsed
+            ath = high if ath is None else max(ath, high)
+            atl = low if atl is None else min(atl, low)
+        oldest_time = None
+        for candle in reversed(candles):
+            if not isinstance(candle, dict):
+                continue
+            candle_time = candle.get("time")
+            if isinstance(candle_time, str):
+                oldest_time = candle_time
+                break
+        if not oldest_time:
+            break
+        oldest_dt = _parse_oanda_time(oldest_time) - _dt.timedelta(seconds=1)
+        to_param = oldest_dt.isoformat()
+        if to_param == last_to:
+            break
+        last_to = to_param
+    if ath is None or atl is None:
+        return None
+    return ath, atl
+
+
+def _get_symbol_state(symbols_state: Dict[str, Dict[str, object]], symbol: str) -> Dict[str, object]:
+    entry = symbols_state.get(symbol)
+    if not isinstance(entry, dict):
+        entry = {}
+    entry.setdefault("baseline_ready", False)
+    entry.setdefault("last_ath_alert_at", 0.0)
+    entry.setdefault("last_atl_alert_at", 0.0)
+    return entry
+
+
+def backfill_baselines(
+    *,
+    base_url: str,
+    token: str,
+    instruments: List[str],
+    settings: Dict[str, float],
+    symbols_state: Dict[str, Dict[str, object]],
+) -> bool:
+    batch_size = int(settings["ath_atl_backfill_batch"])
+    max_pages = int(settings["ath_atl_backfill_max_pages"])
+    granularity = str(settings["ath_atl_granularity"])
+    price = str(settings["ath_atl_price"])
+    pending = [
+        instrument
+        for instrument in instruments
+        if not _get_symbol_state(symbols_state, instrument).get("baseline_ready")
+    ]
+    if not pending:
+        return False
+    changed = False
+    for instrument in pending[:batch_size]:
+        try:
+            baseline = fetch_historical_baseline(
+                base_url=base_url,
+                token=token,
+                instrument=instrument,
+                granularity=granularity,
+                price=price,
+                max_pages=max_pages,
+            )
+        except Exception as exc:
+            log(f"Failed to backfill {instrument} candles: {exc}")
+            continue
+        if baseline is None:
+            log(f"No historical candles returned for {instrument}; skipping baseline.")
+            continue
+        ath, atl = baseline
+        entry = _get_symbol_state(symbols_state, instrument)
+        entry.update(
+            {
+                "ath": ath,
+                "atl": atl,
+                "baseline_ready": True,
+            }
+        )
+        symbols_state[instrument] = entry
+        changed = True
+        log(f"Baseline ready for {instrument}: ATH={ath:.6f} ATL={atl:.6f}.")
+    return changed
+
+
 def run_monitor() -> None:
     token = _oanda_token()
     account_id = _oanda_account_id()
@@ -326,7 +530,12 @@ def run_monitor() -> None:
                 f"wait_seconds={int(settings['wait_seconds'])}s, "
                 f"percent_threshold={settings['percent_threshold']:.2f}%, "
                 f"ath_atl_enabled={int(settings['ath_atl_enabled'])}, "
-                f"ath_atl_min_change_pct={settings['ath_atl_min_change_pct']:.4f}%"
+                f"ath_atl_min_break_pct={settings['ath_atl_min_break_pct']:.4f}%, "
+                f"ath_atl_cooldown_seconds={int(settings['ath_atl_cooldown_seconds'])}, "
+                f"ath_atl_granularity={settings['ath_atl_granularity']}, "
+                f"ath_atl_price={settings['ath_atl_price']}, "
+                f"ath_atl_backfill_batch={int(settings['ath_atl_backfill_batch'])}, "
+                f"ath_atl_backfill_max_pages={int(settings['ath_atl_backfill_max_pages'])}"
             )
             last_logged_settings = dict(settings)
         log(f"Starting price check #{iteration}...")
@@ -349,27 +558,38 @@ def run_monitor() -> None:
             log("Empty pricing response; waiting and retrying.")
         else:
             if int(settings["ath_atl_enabled"]) == 1:
-                min_change_pct = float(settings["ath_atl_min_change_pct"])
-                changed_state = False
+                baseline_changed = backfill_baselines(
+                    base_url=base_url,
+                    token=token,
+                    instruments=list(prices.keys()),
+                    settings=settings,
+                    symbols_state=symbols_state,
+                )
+                changed_state = baseline_changed
+                min_break_pct = float(settings["ath_atl_min_break_pct"])
+                cooldown_seconds = int(settings["ath_atl_cooldown_seconds"])
+                now_ts = time.time()
                 for symbol, price in prices.items():
-                    entry = symbols_state.get(symbol)
-                    if not entry:
-                        symbols_state[symbol] = {"ath": price, "atl": price}
-                        changed_state = True
+                    entry = _get_symbol_state(symbols_state, symbol)
+                    if not entry.get("baseline_ready"):
                         continue
                     ath = float(entry.get("ath", price))
                     atl = float(entry.get("atl", price))
-                    ath_trigger = price > ath * (1.0 + (min_change_pct / 100.0))
-                    atl_trigger = price < atl * (1.0 - (min_change_pct / 100.0))
-                    if ath_trigger:
+                    ath_trigger = price > ath * (1.0 + (min_break_pct / 100.0))
+                    atl_trigger = price < atl * (1.0 - (min_break_pct / 100.0))
+                    last_ath_alert = float(entry.get("last_ath_alert_at", 0.0))
+                    last_atl_alert = float(entry.get("last_atl_alert_at", 0.0))
+                    if ath_trigger and (cooldown_seconds <= 0 or now_ts - last_ath_alert >= cooldown_seconds):
                         entry["ath"] = price
+                        entry["last_ath_alert_at"] = now_ts
                         symbols_state[symbol] = entry
                         changed_state = True
                         msg = f"{symbol} NEW ATH | {ath:.6f} -> {price:.6f}"
                         log(msg)
                         send_push_notification("OANDA ATH Alert", msg)
-                    if atl_trigger:
+                    if atl_trigger and (cooldown_seconds <= 0 or now_ts - last_atl_alert >= cooldown_seconds):
                         entry["atl"] = price
+                        entry["last_atl_alert_at"] = now_ts
                         symbols_state[symbol] = entry
                         changed_state = True
                         msg = f"{symbol} NEW ATL | {atl:.6f} -> {price:.6f}"

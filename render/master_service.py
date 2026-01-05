@@ -33,6 +33,7 @@ from payslip_audit.tesseract import (
     is_tesseract_available,
 )
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
+from oanda_monitor import oanda_forex_monitor as oanda_monitor
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env")
