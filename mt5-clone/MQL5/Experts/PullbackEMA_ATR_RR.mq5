@@ -20,6 +20,9 @@ input double RiskReward              = 2.0;      // must be >= 2.0 (set 2.0 or 3
 input int    SlippagePoints          = 10;
 input bool   EnforceOneTradeAtATime  = true;     // true = only one open position per symbol
 input bool   CloseDuringBlackout     = true;     // if true, force-close any open position during blackout
+input bool   IncludeCommissionInRisk = true;     // include commission in lot sizing + risk filters
+input bool   AdjustTPForCommission   = true;     // extend TP so net RR matches RiskReward
+input double CommissionPerLotPerSide = 3.50;     // commission per side per 1.00 lot (account currency)
 
 // Blackout window requirement:
 // - No NEW trade, and no OPEN trade allowed during:
@@ -116,6 +119,16 @@ bool CalcRiskFor1Lot(double stopPoints, double &lossPerLotAUD)
    return (lossPerLotAUD > 0);
 }
 
+double ValuePerPointPerLot()
+{
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+
+   if(tickValue <= 0 || tickSize <= 0 || _Point <= 0) return 0.0;
+
+   return tickValue * (_Point / tickSize);
+}
+
 bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &tp, double &vol, double &riskRoundedAUD)
 {
    // RR guard
@@ -142,6 +155,33 @@ bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &t
    int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
    if(stopsLevel > 0 && stopPoints < stopsLevel) return false;
 
+   // money loss per 1.00 lot if SL hit
+   double lossPerLotSL = 0.0;
+   if(!CalcRiskFor1Lot(stopPoints, lossPerLotSL)) return false;
+
+   // commission per lot (round-turn)
+   double commissionRoundTurnPerLot = 2.0 * CommissionPerLotPerSide;
+   double totalRiskPerLot = lossPerLotSL;
+   if(IncludeCommissionInRisk)
+      totalRiskPerLot += commissionRoundTurnPerLot;
+
+   if(totalRiskPerLot <= 0) return false;
+
+   // lot sizing by money risk
+   double volRaw = RiskAUD_Target / totalRiskPerLot;
+   vol = NormalizeVolume(volRaw);
+   if(vol <= 0) return false;
+
+   // recompute rounded risk with the rounded volume
+   double riskSL = lossPerLotSL * vol;
+   double riskCommission = commissionRoundTurnPerLot * vol;
+   double riskTotal = IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
+
+   riskRoundedAUD = riskTotal;
+
+   // hard risk filters
+   if(riskTotal < RiskAUD_Min || riskTotal > RiskAUD_Max) return false;
+
    if(type == ORDER_TYPE_BUY)
    {
       sl = price - slDistPrice;
@@ -157,20 +197,22 @@ bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &t
    double tpDist = MathAbs(tp - price);
    if(tpDist < (2.0 * MathAbs(price - sl))) return false;
 
-   // lot sizing by money risk
-   double lossPerLot = 0.0;
-   if(!CalcRiskFor1Lot(stopPoints, lossPerLot)) return false;
+   // Optionally adjust TP so RR is net of commission
+   if(AdjustTPForCommission)
+   {
+      double valuePerPoint = ValuePerPointPerLot();
+      if(valuePerPoint > 0.0)
+      {
+         double commissionRT = riskCommission;
+         double extraPoints = commissionRT / (valuePerPoint * vol);
+         double extraPrice = extraPoints * _Point;
 
-   double volRaw = RiskAUD_Target / lossPerLot;
-   vol = NormalizeVolume(volRaw);
-   if(vol <= 0) return false;
-
-   // recompute rounded risk with the rounded volume
-   double risk = lossPerLot * vol;
-   riskRoundedAUD = risk;
-
-   // hard risk filters
-   if(risk < RiskAUD_Min || risk > RiskAUD_Max) return false;
+         if(type == ORDER_TYPE_BUY)
+            tp += extraPrice;
+         else
+            tp -= extraPrice;
+      }
+   }
 
    return true;
 }

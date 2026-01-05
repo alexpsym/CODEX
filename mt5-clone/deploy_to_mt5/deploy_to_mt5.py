@@ -121,6 +121,14 @@ def main():
         eprint("\nERROR:", str(ex))
         return 1
 
+    # Also copy EA .set files into MQL5\\Profiles\\Tester (your requirement)
+    src_presets = src_mql5 / "Presets"
+    dst_tester = mt5_data / "MQL5" / "Profiles" / "Tester"
+    if src_presets.exists():
+        dst_tester.mkdir(parents=True, exist_ok=True)
+        for set_file in src_presets.glob("*.set"):
+            safe_copy_file(set_file, dst_tester / set_file.name)
+
     print(f"\nDone. Files copied/replaced: {copied}")
     print("If MT5 is open, refresh Navigator or restart MT5 to see new/updated Experts/Presets.")
     return 0
