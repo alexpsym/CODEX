@@ -23,7 +23,7 @@ input bool   CloseDuringBlackout     = true;     // if true, force-close any ope
 input bool   IncludeCommissionInRisk = true;     // include commission in lot sizing + risk filters
 input bool   AdjustTPForCommission   = true;     // extend TP so net RR matches RiskReward
 input double CommissionPerLotPerSide = 3.50;     // commission per side per 1.00 lot (account currency)
-input int    RiskSlippageBufferPoints = 50;      // buffer added to stop distance for sizing (points)
+input int    RiskSlippageBufferPoints = 50;      // buffer added to stop distance for max-risk guard (points)
 input bool   UseRolloverWindow       = true;     // avoid trading around rollover window
 input bool   CloseBeforeRollover     = true;     // close open position before rollover window
 input int    RolloverStartHour       = 23;       // server time
@@ -185,11 +185,9 @@ bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &t
    int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
    if(stopsLevel > 0 && stopPoints < stopsLevel) return false;
 
-   double effectiveStopPoints = stopPoints + MathMax(0, RiskSlippageBufferPoints);
-
-   // money loss per 1.00 lot if SL hit
+   // money loss per 1.00 lot if SL hit (size using actual stop distance)
    double lossPerLotSL = 0.0;
-   if(!CalcRiskFor1Lot(effectiveStopPoints, lossPerLotSL)) return false;
+   if(!CalcRiskFor1Lot(stopPoints, lossPerLotSL)) return false;
 
    // commission per lot (round-turn)
    double commissionRoundTurnPerLot = 2.0 * CommissionPerLotPerSide;
@@ -211,8 +209,22 @@ bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &t
 
    riskRoundedAUD = riskTotal;
 
-   // hard risk filters
+   // hard risk filters based on actual SL distance
    if(riskTotal < RiskAUD_Min || riskTotal > RiskAUD_Max) return false;
+
+   // optional max-risk guard using buffer (does not affect sizing)
+   if(RiskSlippageBufferPoints > 0)
+   {
+      double bufferedStopPoints = stopPoints + RiskSlippageBufferPoints;
+      double lossPerLotBuffered = 0.0;
+      if(!CalcRiskFor1Lot(bufferedStopPoints, lossPerLotBuffered)) return false;
+
+      double riskBuffered = lossPerLotBuffered * vol;
+      if(IncludeCommissionInRisk)
+         riskBuffered += commissionRoundTurnPerLot * vol;
+
+      if(riskBuffered > RiskAUD_Max) return false;
+   }
 
    if(type == ORDER_TYPE_BUY)
    {
