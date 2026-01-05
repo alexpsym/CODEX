@@ -262,7 +262,9 @@ bool PendingOrderExistsByMagic(ulong &ticketOut)
    int total = OrdersTotal();
    for(int i=0; i<total; i++)
    {
-      if(!OrderSelect(i, SELECT_BY_POS, MODE_TRADES)) continue;
+      ulong ticket = OrderGetTicket(i);
+      if(ticket == 0) continue;
+      if(!OrderSelect(ticket)) continue;
       string sym = OrderGetString(ORDER_SYMBOL);
       if(sym != _Symbol) continue;
 
