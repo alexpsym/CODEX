@@ -16,9 +16,26 @@
     const testAlertBtn = document.getElementById('bybit-test-alert');
     const settingsStatus = document.getElementById('bybit-settings-status');
 
+    const oandaSettingsCard = document.getElementById('oanda-settings');
+    const oandaWaitInput = document.getElementById('oanda-wait-seconds');
+    const oandaThresholdInput = document.getElementById('oanda-threshold');
+    const oandaAthAtlEnabled = document.getElementById('oanda-ath-atl-enabled');
+    const oandaAthAtlMinBreak = document.getElementById('oanda-ath-atl-min-break');
+    const oandaAthAtlCooldown = document.getElementById('oanda-ath-atl-cooldown');
+    const oandaAthAtlGranularity = document.getElementById('oanda-ath-atl-granularity');
+    const oandaAthAtlPrice = document.getElementById('oanda-ath-atl-price');
+    const oandaAthAtlBackfillBatch = document.getElementById('oanda-ath-atl-backfill-batch');
+    const oandaAthAtlBackfillPages = document.getElementById('oanda-ath-atl-backfill-pages');
+    const oandaSaveSettingsBtn = document.getElementById('oanda-save-settings');
+    const oandaReloadSettingsBtn = document.getElementById('oanda-reload-settings');
+    const oandaTestAlertBtn = document.getElementById('oanda-test-alert');
+    const oandaSettingsStatus = document.getElementById('oanda-settings-status');
+
     const buildScriptPath = (name) => encodeURIComponent(name).replace(/%2F/g, '/');
     const appUrl = `/apps/${buildScriptPath(scriptName)}`;
-    const isBybitMonitor = scriptName.replace(/-/g, '_') === 'bybit_monitor';
+    const normalizedScriptName = scriptName.replace(/-/g, '_');
+    const isBybitMonitor = normalizedScriptName === 'bybit_monitor';
+    const isOandaMonitor = normalizedScriptName === 'oanda_monitor';
 
     let logCursor = 0;
     let pollTimer = null;
@@ -204,14 +221,14 @@
         }
     };
 
-    const setSettingsBadge = (text, isError = false) => {
-        if (!settingsStatus) return;
-        settingsStatus.textContent = text;
-        settingsStatus.style.background = isError ? '#7f1d1d' : '#1f2937';
-        settingsStatus.style.color = isError ? '#fecdd3' : '#cbd5e1';
+    const setSettingsBadge = (target, text, isError = false) => {
+        if (!target) return;
+        target.textContent = text;
+        target.style.background = isError ? '#7f1d1d' : '#1f2937';
+        target.style.color = isError ? '#fecdd3' : '#cbd5e1';
     };
 
-    const loadSettings = async () => {
+    const loadBybitSettings = async () => {
         if (!isBybitMonitor || !settingsCard) return;
         try {
             const resp = await fetch('/api/bybit-monitor/settings');
@@ -223,17 +240,46 @@
             if (thresholdInput) thresholdInput.value = data.percent_threshold ?? '';
             settingsCard.style.display = 'block';
             if (data.push_ready) {
-                setSettingsBadge('Ready');
+                setSettingsBadge(settingsStatus, 'Ready');
             } else {
-                setSettingsBadge('Telegram not configured', true);
+                setSettingsBadge(settingsStatus, 'Telegram not configured', true);
             }
         } catch (err) {
             console.error(err);
-            setSettingsBadge('Load failed', true);
+            setSettingsBadge(settingsStatus, 'Load failed', true);
         }
     };
 
-    const saveSettings = async () => {
+    const loadOandaSettings = async () => {
+        if (!isOandaMonitor || !oandaSettingsCard) return;
+        try {
+            const resp = await fetch('/api/oanda-monitor/settings');
+            if (!resp.ok) {
+                throw new Error(`Failed to load settings (${resp.status})`);
+            }
+            const data = await resp.json();
+            if (oandaWaitInput) oandaWaitInput.value = data.wait_seconds ?? '';
+            if (oandaThresholdInput) oandaThresholdInput.value = data.percent_threshold ?? '';
+            if (oandaAthAtlEnabled) oandaAthAtlEnabled.checked = Number(data.ath_atl_enabled ?? 0) === 1;
+            if (oandaAthAtlMinBreak) oandaAthAtlMinBreak.value = data.ath_atl_min_break_pct ?? '';
+            if (oandaAthAtlCooldown) oandaAthAtlCooldown.value = data.ath_atl_cooldown_seconds ?? '';
+            if (oandaAthAtlGranularity) oandaAthAtlGranularity.value = data.ath_atl_granularity ?? '';
+            if (oandaAthAtlPrice) oandaAthAtlPrice.value = (data.ath_atl_price ?? 'M').toUpperCase();
+            if (oandaAthAtlBackfillBatch) oandaAthAtlBackfillBatch.value = data.ath_atl_backfill_batch ?? '';
+            if (oandaAthAtlBackfillPages) oandaAthAtlBackfillPages.value = data.ath_atl_backfill_max_pages ?? '';
+            oandaSettingsCard.style.display = 'block';
+            if (data.push_ready) {
+                setSettingsBadge(oandaSettingsStatus, 'Ready');
+            } else {
+                setSettingsBadge(oandaSettingsStatus, 'Telegram not configured', true);
+            }
+        } catch (err) {
+            console.error(err);
+            setSettingsBadge(oandaSettingsStatus, 'Load failed', true);
+        }
+    };
+
+    const saveBybitSettings = async () => {
         if (!isBybitMonitor || !settingsCard) return;
         const body = {
             wait_seconds: Number(waitInput?.value || 0),
@@ -243,7 +289,7 @@
         if (saveSettingsBtn) saveSettingsBtn.disabled = true;
         if (reloadSettingsBtn) reloadSettingsBtn.disabled = true;
         if (testAlertBtn) testAlertBtn.disabled = true;
-        setSettingsBadge('Saving...');
+        setSettingsBadge(settingsStatus, 'Saving...');
 
         try {
             const resp = await fetch('/api/bybit-monitor/settings', {
@@ -260,10 +306,10 @@
             const data = await resp.json();
             if (waitInput) waitInput.value = data.wait_seconds ?? '';
             if (thresholdInput) thresholdInput.value = data.percent_threshold ?? '';
-            setSettingsBadge('Saved');
+            setSettingsBadge(settingsStatus, 'Saved');
         } catch (err) {
             console.error(err);
-            setSettingsBadge('Save failed', true);
+            setSettingsBadge(settingsStatus, 'Save failed', true);
             alert(err.message || 'Unable to save settings');
         } finally {
             if (saveSettingsBtn) saveSettingsBtn.disabled = false;
@@ -272,10 +318,63 @@
         }
     };
 
-    const sendTestAlert = async () => {
+    const saveOandaSettings = async () => {
+        if (!isOandaMonitor || !oandaSettingsCard) return;
+        const body = {
+            wait_seconds: Number(oandaWaitInput?.value || 0),
+            percent_threshold: Number(oandaThresholdInput?.value || 0),
+            ath_atl_enabled: oandaAthAtlEnabled?.checked ? 1 : 0,
+            ath_atl_min_break_pct: Number(oandaAthAtlMinBreak?.value || 0),
+            ath_atl_cooldown_seconds: Number(oandaAthAtlCooldown?.value || 0),
+            ath_atl_granularity: oandaAthAtlGranularity?.value || '',
+            ath_atl_price: oandaAthAtlPrice?.value || '',
+            ath_atl_backfill_batch: Number(oandaAthAtlBackfillBatch?.value || 0),
+            ath_atl_backfill_max_pages: Number(oandaAthAtlBackfillPages?.value || 0),
+        };
+
+        if (oandaSaveSettingsBtn) oandaSaveSettingsBtn.disabled = true;
+        if (oandaReloadSettingsBtn) oandaReloadSettingsBtn.disabled = true;
+        if (oandaTestAlertBtn) oandaTestAlertBtn.disabled = true;
+        setSettingsBadge(oandaSettingsStatus, 'Saving...');
+
+        try {
+            const resp = await fetch('/api/oanda-monitor/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+
+            if (!resp.ok) {
+                const detail = await resp.text();
+                throw new Error(detail || `Save failed (${resp.status})`);
+            }
+
+            const data = await resp.json();
+            if (oandaWaitInput) oandaWaitInput.value = data.wait_seconds ?? '';
+            if (oandaThresholdInput) oandaThresholdInput.value = data.percent_threshold ?? '';
+            if (oandaAthAtlEnabled) oandaAthAtlEnabled.checked = Number(data.ath_atl_enabled ?? 0) === 1;
+            if (oandaAthAtlMinBreak) oandaAthAtlMinBreak.value = data.ath_atl_min_break_pct ?? '';
+            if (oandaAthAtlCooldown) oandaAthAtlCooldown.value = data.ath_atl_cooldown_seconds ?? '';
+            if (oandaAthAtlGranularity) oandaAthAtlGranularity.value = data.ath_atl_granularity ?? '';
+            if (oandaAthAtlPrice) oandaAthAtlPrice.value = (data.ath_atl_price ?? 'M').toUpperCase();
+            if (oandaAthAtlBackfillBatch) oandaAthAtlBackfillBatch.value = data.ath_atl_backfill_batch ?? '';
+            if (oandaAthAtlBackfillPages) oandaAthAtlBackfillPages.value = data.ath_atl_backfill_max_pages ?? '';
+            setSettingsBadge(oandaSettingsStatus, 'Saved');
+        } catch (err) {
+            console.error(err);
+            setSettingsBadge(oandaSettingsStatus, 'Save failed', true);
+            alert(err.message || 'Unable to save settings');
+        } finally {
+            if (oandaSaveSettingsBtn) oandaSaveSettingsBtn.disabled = false;
+            if (oandaReloadSettingsBtn) oandaReloadSettingsBtn.disabled = false;
+            if (oandaTestAlertBtn) oandaTestAlertBtn.disabled = false;
+        }
+    };
+
+    const sendBybitTestAlert = async () => {
         if (!isBybitMonitor || !settingsCard) return;
         if (testAlertBtn) testAlertBtn.disabled = true;
-        setSettingsBadge('Sending test...');
+        setSettingsBadge(settingsStatus, 'Sending test...');
         try {
             const resp = await fetch('/api/bybit-monitor/push-test', { method: 'POST' });
             const payloadText = await resp.text();
@@ -284,18 +383,45 @@
             }
             const data = payloadText ? JSON.parse(payloadText) : {};
             if (data?.sent) {
-                setSettingsBadge('Test sent');
+                setSettingsBadge(settingsStatus, 'Test sent');
             } else if (data?.configured === false) {
-                setSettingsBadge('Telegram not configured', true);
+                setSettingsBadge(settingsStatus, 'Telegram not configured', true);
             } else {
-                setSettingsBadge('Test completed');
+                setSettingsBadge(settingsStatus, 'Test completed');
             }
         } catch (err) {
             console.error(err);
-            setSettingsBadge('Test failed', true);
+            setSettingsBadge(settingsStatus, 'Test failed', true);
             alert(err.message || 'Unable to send test alert');
         } finally {
             if (testAlertBtn) testAlertBtn.disabled = false;
+        }
+    };
+
+    const sendOandaTestAlert = async () => {
+        if (!isOandaMonitor || !oandaSettingsCard) return;
+        if (oandaTestAlertBtn) oandaTestAlertBtn.disabled = true;
+        setSettingsBadge(oandaSettingsStatus, 'Sending test...');
+        try {
+            const resp = await fetch('/api/oanda-monitor/push-test', { method: 'POST' });
+            const payloadText = await resp.text();
+            if (!resp.ok) {
+                throw new Error(payloadText || `Test failed (${resp.status})`);
+            }
+            const data = payloadText ? JSON.parse(payloadText) : {};
+            if (data?.sent) {
+                setSettingsBadge(oandaSettingsStatus, 'Test sent');
+            } else if (data?.configured === false) {
+                setSettingsBadge(oandaSettingsStatus, 'Telegram not configured', true);
+            } else {
+                setSettingsBadge(oandaSettingsStatus, 'Test completed');
+            }
+        } catch (err) {
+            console.error(err);
+            setSettingsBadge(oandaSettingsStatus, 'Test failed', true);
+            alert(err.message || 'Unable to send test alert');
+        } finally {
+            if (oandaTestAlertBtn) oandaTestAlertBtn.disabled = false;
         }
     };
 
@@ -308,15 +434,27 @@
     stopBtn?.addEventListener('click', stopScript);
     saveSettingsBtn?.addEventListener('click', (event) => {
         event.preventDefault();
-        saveSettings();
+        saveBybitSettings();
     });
     reloadSettingsBtn?.addEventListener('click', (event) => {
         event.preventDefault();
-        loadSettings();
+        loadBybitSettings();
     });
     testAlertBtn?.addEventListener('click', (event) => {
         event.preventDefault();
-        sendTestAlert();
+        sendBybitTestAlert();
+    });
+    oandaSaveSettingsBtn?.addEventListener('click', (event) => {
+        event.preventDefault();
+        saveOandaSettings();
+    });
+    oandaReloadSettingsBtn?.addEventListener('click', (event) => {
+        event.preventDefault();
+        loadOandaSettings();
+    });
+    oandaTestAlertBtn?.addEventListener('click', (event) => {
+        event.preventDefault();
+        sendOandaTestAlert();
     });
 
     const init = async () => {
@@ -326,7 +464,8 @@
         }
         pollLogs();
         pollTimer = setInterval(pollLogs, 2000);
-        loadSettings();
+        loadBybitSettings();
+        loadOandaSettings();
     };
 
     init();
