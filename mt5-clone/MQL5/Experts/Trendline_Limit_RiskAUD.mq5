@@ -1,6 +1,6 @@
 #property strict
-#property description "Trendline limit-order EA: press button to place a limit order exactly on a trendline, with manual SL/TP. Repositions each new candle by deleting+recreating pending order to preserve AUD risk sizing (commission-aware)."
-#property version   "1.00"
+#property description "Trendline limit-order EA: press button to place a limit order exactly on a trendline. SL/TP are set by DISTANCE in MT5 POINTS. Repositions each new candle by deleting+recreating pending order to preserve AUD risk sizing (commission-aware)."
+#property version   "1.10"
 
 #include <Trade/Trade.mqh>
 
@@ -24,13 +24,17 @@ enum TL_Direction
 
 input TL_Direction Direction          = TL_BUY_LIMIT;
 
-// Manual protection (prices)
-input double ManualSL_Price           = 0.0;    // REQUIRED: SL price
-input double ManualTP_Price           = 0.0;    // REQUIRED: TP price
+// Manual protection (DISTANCES, in MT5 POINTS)
+input int    SL_DistancePoints        = 200;    // Stop distance in MT5 points (example: 54 points = 5.4 pips on 5-digit FX)
+input int    TP_DistancePoints        = 400;    // Target distance in MT5 points
+
+// Notes (for clarity)
+// NOTE: 1 MT5 point = 1 TradingView tick.
+// NOTE: On 5-digit FX / 3-digit JPY, 1 pip = 10 points (e.g., 5.4 pips = 54 points). On 4-digit/2-digit symbols, 1 pip is typically 1 point.
 
 // Trendline selection
-input string TrendlineObjectName      = "";     // if blank, EA can pick from clicks (EnablePickTrendlineByClick=true)
-input bool   EnablePickTrendlineByClick = true; // click a trendline on chart to set it as active
+input string TrendlineObjectName        = "";     // if blank, EA can pick from clicks (EnablePickTrendlineByClick=true)
+input bool   EnablePickTrendlineByClick = true;   // click a trendline on chart to set it as active
 
 // Order housekeeping
 input int    MagicNumber              = 91001;
@@ -44,10 +48,10 @@ input int    UIButtonX                = 10;
 input int    UIButtonY                = 20;
 
 // -------------------- Internals --------------------
-string  g_trendName      = "";
-bool    g_armed          = false;
-ulong   g_ticket         = 0;
-datetime g_lastBarTime   = 0;
+string   g_trendName    = "";
+bool     g_armed        = false;
+ulong    g_ticket       = 0;
+datetime g_lastBarTime  = 0;
 
 string BTN_PLACE  = "TL_EA_BTN_PLACE";
 string BTN_CANCEL = "TL_EA_BTN_CANCEL";
@@ -95,6 +99,17 @@ double NormalizeVolume(double vol)
    return NormalizeDouble(v, digits);
 }
 
+// For display only (your requested conversion note)
+int PointsPerPip()
+{
+   // Common MT5 convention:
+   // 5 digits (EURUSD 1.23456) or 3 digits (USDJPY 123.456) => 1 pip = 10 points
+   // 4 digits / 2 digits => 1 pip = 1 point
+   int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   if(digits == 5 || digits == 3) return 10;
+   return 1;
+}
+
 bool CalcRiskFor1Lot(double stopPoints, double &lossPerLotAUD)
 {
    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
@@ -119,45 +134,45 @@ bool TrendlineExists(const string name)
 double GetTrendlinePriceAtTime(const string name, datetime t)
 {
    // For trendline, line_id=0 is fine
-   double v = ObjectGetValueByTime(0, name, t, 0); // returns price for specified time :contentReference[oaicite:3]{index=3}
+   double v = ObjectGetValueByTime(0, name, t, 0);
    return v;
 }
 
-bool ValidateSLTP(double entry, double sl, double tp, bool isBuyLimit, string &why)
+bool BuildSLTPFromDistances(double entry, bool isBuyLimit, double &slOut, double &tpOut, string &why)
 {
-   if(sl <= 0.0 || tp <= 0.0)
+   if(SL_DistancePoints <= 0 || TP_DistancePoints <= 0)
    {
-      why = "ManualSL_Price and ManualTP_Price must both be set (>0).";
+      why = "SL_DistancePoints and TP_DistancePoints must both be > 0.";
       return false;
    }
 
+   double slDist = (double)SL_DistancePoints * _Point;
+   double tpDist = (double)TP_DistancePoints * _Point;
+
    if(isBuyLimit)
    {
-      if(!(sl < entry && entry < tp))
-      {
-         why = "For BUY LIMIT, must be SL < Entry < TP.";
-         return false;
-      }
+      slOut = entry - slDist;
+      tpOut = entry + tpDist;
    }
    else
    {
-      if(!(tp < entry && entry < sl))
-      {
-         why = "For SELL LIMIT, must be TP < Entry < SL.";
-         return false;
-      }
+      slOut = entry + slDist;
+      tpOut = entry - tpDist;
    }
+
+   slOut = NormalizePrice(slOut);
+   tpOut = NormalizePrice(tpOut);
 
    // Stops level guard (broker minimum distance, in points)
    int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
    if(stopsLevel > 0)
    {
-      if(MathAbs(entry - sl) < stopsLevel * _Point)
+      if(MathAbs(entry - slOut) < stopsLevel * _Point)
       {
          why = "SL too close to entry for broker stops-level.";
          return false;
       }
-      if(MathAbs(entry - tp) < stopsLevel * _Point)
+      if(MathAbs(entry - tpOut) < stopsLevel * _Point)
       {
          why = "TP too close to entry for broker stops-level.";
          return false;
@@ -178,7 +193,7 @@ bool IsLimitPriceValid(double entry, bool isBuyLimit, string &why)
       return false;
    }
 
-   // BuyLimit must be below current market; SellLimit must be above current market :contentReference[oaicite:4]{index=4}
+   // BuyLimit must be below current market; SellLimit must be above current market
    if(isBuyLimit && !(entry < ask))
    {
       why = "Buy Limit entry is not below current Ask (this would be a Buy Stop).";
@@ -288,10 +303,7 @@ bool PendingOrderExistsByMagic(ulong &ticketOut)
 bool DeleteTicketIfExists(ulong t)
 {
    if(t == 0) return true;
-
-   // If ticket not found, treat as already gone
-   if(!OrderSelect((ulong)t)) return true;
-
+   if(!OrderSelect((ulong)t)) return true; // already gone
    return trade.OrderDelete((ulong)t);
 }
 
@@ -350,7 +362,7 @@ void RemoveUI()
    ObjectDelete(0, LBL_STATUS);
 }
 
-bool PlaceOrReplacePending(const bool firstTime)
+bool PlaceOrReplacePending()
 {
    if(!TrendlineExists(g_trendName))
    {
@@ -370,11 +382,10 @@ bool PlaceOrReplacePending(const bool firstTime)
    }
 
    entry = NormalizePrice(entry);
-   double sl = NormalizePrice(ManualSL_Price);
-   double tp = NormalizePrice(ManualTP_Price);
 
    string why="";
-   if(!ValidateSLTP(entry, sl, tp, isBuyLimit, why))
+   double sl=0, tp=0;
+   if(!BuildSLTPFromDistances(entry, isBuyLimit, sl, tp, why))
    {
       UpdateStatus("SL/TP invalid: " + why);
       return false;
@@ -393,13 +404,11 @@ bool PlaceOrReplacePending(const bool firstTime)
       return false;
    }
 
-   // If required, block if another pending exists (same magic)
    if(AlsoBlockIfPendingExists)
    {
       ulong other=0;
       if(PendingOrderExistsByMagic(other))
       {
-         // If it's our own ticket, fine; otherwise block
          if(g_ticket == 0 || other != g_ticket)
          {
             UpdateStatus("Blocked: existing pending order (same magic).");
@@ -408,17 +417,16 @@ bool PlaceOrReplacePending(const bool firstTime)
       }
    }
 
-   // Delete old ticket if present (volume cannot be modified on pending order -> recreate) :contentReference[oaicite:5]{index=5}
+   // Delete old ticket if present (volume cannot be modified on pending order -> recreate)
    if(g_ticket != 0)
       DeleteTicketIfExists(g_ticket);
 
    bool ok=false;
    if(isBuyLimit)
-      ok = trade.BuyLimit(vol, entry, _Symbol, sl, tp, ORDER_TIME_GTC, 0, EA_COMMENT);  // :contentReference[oaicite:6]{index=6}
+      ok = trade.BuyLimit(vol, entry, _Symbol, sl, tp, ORDER_TIME_GTC, 0, EA_COMMENT);
    else
-      ok = trade.SellLimit(vol, entry, _Symbol, sl, tp, ORDER_TIME_GTC, 0, EA_COMMENT); // :contentReference[oaicite:7]{index=7}
+      ok = trade.SellLimit(vol, entry, _Symbol, sl, tp, ORDER_TIME_GTC, 0, EA_COMMENT);
 
-   // BuyLimit/SellLimit "true" != guaranteed server accept; check ResultOrder/Retcode :contentReference[oaicite:8]{index=8}
    ulong newTicket = (ulong)trade.ResultOrder();
    int ret = (int)trade.ResultRetcode();
 
@@ -431,12 +439,17 @@ bool PlaceOrReplacePending(const bool firstTime)
 
    g_ticket = newTicket;
 
+   int ppp = PointsPerPip();
+   double slPips = (ppp > 0) ? ((double)SL_DistancePoints / (double)ppp) : 0.0;
+   double tpPips = (ppp > 0) ? ((double)TP_DistancePoints / (double)ppp) : 0.0;
+
    string side = isBuyLimit ? "BUY LIMIT" : "SELL LIMIT";
    UpdateStatus(
-      (g_armed ? "ARMED " : "") +
-      side +
+      "ARMED " + side +
       " | TL=" + g_trendName +
       " | Entry=" + DoubleToString(entry, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)) +
+      " | SL=" + IntegerToString(SL_DistancePoints) + "pt (" + DoubleToString(slPips, 1) + "pip)" +
+      " | TP=" + IntegerToString(TP_DistancePoints) + "pt (" + DoubleToString(tpPips, 1) + "pip)" +
       " | Vol=" + DoubleToString(vol, 2) +
       " | Risk~" + DoubleToString(riskRounded, 2)
    );
@@ -453,7 +466,7 @@ void Arm()
    }
 
    g_armed = true;
-   PlaceOrReplacePending(true);
+   PlaceOrReplacePending();
 }
 
 void DisarmAndCancel()
@@ -475,7 +488,6 @@ void RefreshActiveTrendlineFromInput()
 
 void MaybeStopIfFilled()
 {
-   // If position exists, assume pending filled; stop managing
    if(PositionSelect(_Symbol))
    {
       g_armed = false;
@@ -493,10 +505,11 @@ int OnInit()
    RefreshActiveTrendlineFromInput();
    EnsureUI();
 
-   // Initialize bar time
    g_lastBarTime = iTime(_Symbol, _Period, 0);
 
-   UpdateStatus("Ready. Trendline=" + (g_trendName=="" ? "<none>" : g_trendName));
+   int ppp = PointsPerPip();
+   string pipNote = (ppp == 10) ? "1 pip=10 points" : "1 pip=1 point";
+   UpdateStatus("Ready. Trendline=" + (g_trendName=="" ? "<none>" : g_trendName) + " | " + pipNote + " | 1 point=1 TradingView tick");
    return INIT_SUCCEEDED;
 }
 
@@ -508,22 +521,19 @@ void OnDeinit(const int reason)
 void OnTick()
 {
    MaybeStopIfFilled();
-
    if(!g_armed) return;
 
    if(IsNewBar())
    {
-      // Reposition order on each new candle (delete + recreate to keep risk sizing consistent) :contentReference[oaicite:9]{index=9}
-      PlaceOrReplacePending(false);
+      // Reposition order on each new candle (delete + recreate to keep risk sizing consistent)
+      PlaceOrReplacePending();
    }
 }
 
-// Buttons + optional trendline pick
 void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
 {
    if(id == CHARTEVENT_OBJECT_CLICK)
    {
-      // Button clicks
       if(sparam == BTN_PLACE)
       {
          RefreshActiveTrendlineFromInput();
@@ -536,7 +546,6 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
          return;
       }
 
-      // Trendline pick by click
       if(EnablePickTrendlineByClick)
       {
          if(TrendlineExists(sparam))
