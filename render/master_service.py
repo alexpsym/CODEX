@@ -33,6 +33,7 @@ from payslip_audit.tesseract import (
     is_tesseract_available,
 )
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
+from oanda_monitor import oanda_forex_monitor as oanda_monitor
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env")
@@ -72,6 +73,7 @@ STANDALONE_SCRIPTS = {
     "Crypto-Scanner-clone",
     "bybit-alert-clone",
     "bybit_monitor",
+    "oanda_monitor",
     "bybithistory-clone",
     "coinspot-clone",
     "cryptocalculator-clone",
@@ -96,6 +98,7 @@ ENTRY_OVERRIDES = {
     "fxweekend-clone": ["liquidate.py"],
     "ivindicator-clone": ["ivweb.py", "ivapp.py", "ivindicator.py"],
     "oanda-calculator-clone": ["oanda_calculator_web.py", "oanda_api.py"],
+    "oanda_monitor": ["oanda_forex_monitor.py"],
     "oanda_history-clone": ["oanda_history.py"],
     "payslip_audit": ["payslip_timesheet_audit.py"],
     "viddl-clone": ["master.py", "vid.py"],
@@ -882,7 +885,8 @@ SCRIPT_PAGE_TEMPLATE = """<!DOCTYPE html>
         .badge { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.25rem 0.7rem; border-radius: 999px; font-weight: 700; background: #1f2937; color: #cbd5e1; }
         .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; margin-top: 0.5rem; }
         .settings-grid label { display: flex; flex-direction: column; gap: 0.35rem; font-weight: 700; color: #cbd5e1; }
-        .settings-grid input { padding: 0.55rem 0.75rem; border-radius: 10px; border: 1px solid #1f2937; background: #0a0f1b; color: #e5e7eb; }
+        .settings-grid input,
+        .settings-grid select { padding: 0.55rem 0.75rem; border-radius: 10px; border: 1px solid #1f2937; background: #0a0f1b; color: #e5e7eb; }
         .settings-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.75rem; }
         .ghost-link { color: #38bdf8; font-weight: 700; text-decoration: none; }
         .ghost-link:hover { text-decoration: underline; }
@@ -921,6 +925,53 @@ SCRIPT_PAGE_TEMPLATE = """<!DOCTYPE html>
             <button id=\"bybit-save-settings\">Save settings</button>
             <button class=\"secondary\" id=\"bybit-reload-settings\">Reset</button>
             <button class=\"secondary\" id=\"bybit-test-alert\">Test Telegram alert</button>
+        </div>
+    </div>
+    <div class=\"panel\" id=\"oanda-settings\" style=\"display:none;\">
+        <div class=\"panel-header\">
+            <div>
+                <strong>OANDA monitor controls</strong>
+                <p class=\"meta\">Tune polling, ATH/ATL alerts, and send a Telegram test.</p>
+            </div>
+            <span class=\"badge\" id=\"oanda-settings-status\">&nbsp;</span>
+        </div>
+        <div class=\"settings-grid\">
+            <label>Wait between scans (seconds)
+                <input type=\"number\" min=\"1\" step=\"1\" id=\"oanda-wait-seconds\" />
+            </label>
+            <label>Alert threshold (% change)
+                <input type=\"number\" min=\"0.01\" step=\"0.01\" id=\"oanda-threshold\" />
+            </label>
+            <label>Enable ATH/ATL alerts
+                <input type=\"checkbox\" id=\"oanda-ath-atl-enabled\" />
+            </label>
+            <label>Min ATH/ATL break (%)
+                <input type=\"number\" min=\"0\" step=\"0.01\" id=\"oanda-ath-atl-min-break\" />
+            </label>
+            <label>ATH/ATL cooldown (seconds)
+                <input type=\"number\" min=\"0\" step=\"1\" id=\"oanda-ath-atl-cooldown\" />
+            </label>
+            <label>ATH/ATL granularity
+                <input type=\"text\" id=\"oanda-ath-atl-granularity\" />
+            </label>
+            <label>ATH/ATL price bucket
+                <select id=\"oanda-ath-atl-price\">
+                    <option value=\"M\">Mid</option>
+                    <option value=\"B\">Bid</option>
+                    <option value=\"A\">Ask</option>
+                </select>
+            </label>
+            <label>ATH/ATL backfill batch
+                <input type=\"number\" min=\"1\" step=\"1\" id=\"oanda-ath-atl-backfill-batch\" />
+            </label>
+            <label>ATH/ATL backfill pages
+                <input type=\"number\" min=\"1\" step=\"1\" id=\"oanda-ath-atl-backfill-pages\" />
+            </label>
+        </div>
+        <div class=\"settings-actions\">
+            <button id=\"oanda-save-settings\">Save settings</button>
+            <button class=\"secondary\" id=\"oanda-reload-settings\">Reset</button>
+            <button class=\"secondary\" id=\"oanda-test-alert\">Test Telegram alert</button>
         </div>
     </div>
     <div class=\"panel\">
@@ -1037,7 +1088,8 @@ LOG_VIEWER_TEMPLATE = """<!DOCTYPE html>
         .settings-card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 1rem; margin: 1rem 0; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
         .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; margin-top: 0.5rem; }
         .settings-grid label { display: flex; flex-direction: column; gap: 0.35rem; font-weight: 700; color: #cbd5e1; }
-        .settings-grid input { padding: 0.55rem 0.75rem; border-radius: 10px; border: 1px solid #1f2937; background: #0a0f1b; color: #e5e7eb; }
+        .settings-grid input,
+        .settings-grid select { padding: 0.55rem 0.75rem; border-radius: 10px; border: 1px solid #1f2937; background: #0a0f1b; color: #e5e7eb; }
         .secondary { background: #1f2937; color: #cbd5e1; }
         .settings-header { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
         .settings-header .meta { margin: 0; }
@@ -1070,6 +1122,52 @@ LOG_VIEWER_TEMPLATE = """<!DOCTYPE html>
         <div class=\"controls\">
             <button id=\"bybit-save-settings\">Save settings</button>
             <button class=\"secondary\" id=\"bybit-reload-settings\">Reset</button>
+        </div>
+    </div>
+    <div class=\"settings-card\" id=\"oanda-settings\" style=\"display:none;\">
+        <div class=\"settings-header\">
+            <div>
+                <strong>OANDA monitor settings</strong>
+                <p class=\"meta\">Adjust OANDA monitoring and ATH/ATL thresholds.</p>
+            </div>
+            <span class=\"badge\" id=\"oanda-settings-status\">&nbsp;</span>
+        </div>
+        <div class=\"settings-grid\">
+            <label>Wait between scans (seconds)
+                <input type=\"number\" min=\"1\" step=\"1\" id=\"oanda-wait-seconds\" />
+            </label>
+            <label>Alert threshold (% change)
+                <input type=\"number\" min=\"0.01\" step=\"0.01\" id=\"oanda-threshold\" />
+            </label>
+            <label>Enable ATH/ATL alerts
+                <input type=\"checkbox\" id=\"oanda-ath-atl-enabled\" />
+            </label>
+            <label>Min ATH/ATL break (%)
+                <input type=\"number\" min=\"0\" step=\"0.01\" id=\"oanda-ath-atl-min-break\" />
+            </label>
+            <label>ATH/ATL cooldown (seconds)
+                <input type=\"number\" min=\"0\" step=\"1\" id=\"oanda-ath-atl-cooldown\" />
+            </label>
+            <label>ATH/ATL granularity
+                <input type=\"text\" id=\"oanda-ath-atl-granularity\" />
+            </label>
+            <label>ATH/ATL price bucket
+                <select id=\"oanda-ath-atl-price\">
+                    <option value=\"M\">Mid</option>
+                    <option value=\"B\">Bid</option>
+                    <option value=\"A\">Ask</option>
+                </select>
+            </label>
+            <label>ATH/ATL backfill batch
+                <input type=\"number\" min=\"1\" step=\"1\" id=\"oanda-ath-atl-backfill-batch\" />
+            </label>
+            <label>ATH/ATL backfill pages
+                <input type=\"number\" min=\"1\" step=\"1\" id=\"oanda-ath-atl-backfill-pages\" />
+            </label>
+        </div>
+        <div class=\"controls\">
+            <button id=\"oanda-save-settings\">Save settings</button>
+            <button class=\"secondary\" id=\"oanda-reload-settings\">Reset</button>
         </div>
     </div>
     <pre id=\"log-box\">Loading logs...</pre>
@@ -3395,6 +3493,39 @@ def _update_bybit_settings(payload: Dict[str, object]) -> Dict[str, float]:
         raise HTTPException(status_code=500, detail=f"Failed to save settings: {exc}") from exc
 
 
+def _read_oanda_settings() -> Dict[str, float]:
+    try:
+        settings = oanda_monitor.get_runtime_settings(force=True)
+        settings["push_ready"] = oanda_monitor.push_notifications_ready()
+        return settings
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=500, detail=f"Failed to load settings: {exc}") from exc
+
+
+def _update_oanda_settings(payload: Dict[str, object]) -> Dict[str, float]:
+    try:
+        if not isinstance(payload, dict):
+            payload = {}
+        updates: Dict[str, object] = {}
+        for key in (
+            "wait_seconds",
+            "percent_threshold",
+            "ath_atl_enabled",
+            "ath_atl_min_break_pct",
+            "ath_atl_cooldown_seconds",
+            "ath_atl_granularity",
+            "ath_atl_price",
+            "ath_atl_backfill_batch",
+            "ath_atl_backfill_max_pages",
+        ):
+            if key in payload:
+                updates[key] = payload.get(key)
+        return oanda_monitor.update_runtime_settings(**updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(status_code=500, detail=f"Failed to save settings: {exc}") from exc
+
 
 
 def _render_log_view(script_name: str) -> str:
@@ -3586,11 +3717,34 @@ async def update_bybit_monitor_settings(payload: Dict[str, object]) -> JSONRespo
     return JSONResponse(_update_bybit_settings(payload))
 
 
+@app.get("/api/oanda-monitor/settings")
+async def oanda_monitor_settings() -> JSONResponse:
+    return JSONResponse(_read_oanda_settings())
+
+
+@app.post("/api/oanda-monitor/settings")
+async def update_oanda_monitor_settings(payload: Dict[str, object]) -> JSONResponse:
+    return JSONResponse(_update_oanda_settings(payload))
+
+
 
 @app.post("/api/bybit-monitor/push-test")
 async def bybit_monitor_push_test() -> JSONResponse:
     try:
         result = bybit_monitor.send_push_test()
+        configured = bool(result.get("configured"))
+        status_code = 200 if (result.get("sent") or not configured) else 400
+        return JSONResponse(result, status_code=status_code)
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(
+            status_code=500, detail=f"Failed to send Telegram alert test: {exc}"
+        ) from exc
+
+
+@app.post("/api/oanda-monitor/push-test")
+async def oanda_monitor_push_test() -> JSONResponse:
+    try:
+        result = oanda_monitor.send_push_test()
         configured = bool(result.get("configured"))
         status_code = 200 if (result.get("sent") or not configured) else 400
         return JSONResponse(result, status_code=status_code)
