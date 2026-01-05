@@ -23,6 +23,13 @@ input bool   CloseDuringBlackout     = true;     // if true, force-close any ope
 input bool   IncludeCommissionInRisk = true;     // include commission in lot sizing + risk filters
 input bool   AdjustTPForCommission   = true;     // extend TP so net RR matches RiskReward
 input double CommissionPerLotPerSide = 3.50;     // commission per side per 1.00 lot (account currency)
+input int    RiskSlippageBufferPoints = 50;      // buffer added to stop distance for sizing (points)
+input bool   UseRolloverWindow       = true;     // avoid trading around rollover window
+input bool   CloseBeforeRollover     = true;     // close open position before rollover window
+input int    RolloverStartHour       = 23;       // server time
+input int    RolloverStartMinute     = 55;       // server time
+input int    RolloverEndHour         = 0;        // server time
+input int    RolloverEndMinute       = 10;       // server time
 
 // Blackout window requirement:
 // - No NEW trade, and no OPEN trade allowed during:
@@ -68,6 +75,29 @@ bool IsBlackout(datetime t)
    int end   = UseAEDT ? BlackoutEndHour_AEDT   : BlackoutEndHour_AEST;
 
    return (dt.hour >= start && dt.hour < end);
+}
+
+bool IsTimeInWindow(datetime t, int startHour, int startMinute, int endHour, int endMinute)
+{
+   MqlDateTime dt;
+   TimeToStruct(t, dt);
+
+   int current = dt.hour * 60 + dt.min;
+   int start = startHour * 60 + startMinute;
+   int end = endHour * 60 + endMinute;
+
+   if(start == end) return false;
+   if(start < end)
+      return (current >= start && current < end);
+
+   // window crosses midnight
+   return (current >= start || current < end);
+}
+
+bool IsRolloverWindow(datetime t)
+{
+   if(!UseRolloverWindow) return false;
+   return IsTimeInWindow(t, RolloverStartHour, RolloverStartMinute, RolloverEndHour, RolloverEndMinute);
 }
 
 bool GetBufferValue(int handle, int bufferIndex, int shift, double &outVal)
@@ -155,9 +185,11 @@ bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &t
    int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
    if(stopsLevel > 0 && stopPoints < stopsLevel) return false;
 
+   double effectiveStopPoints = stopPoints + MathMax(0, RiskSlippageBufferPoints);
+
    // money loss per 1.00 lot if SL hit
    double lossPerLotSL = 0.0;
-   if(!CalcRiskFor1Lot(stopPoints, lossPerLotSL)) return false;
+   if(!CalcRiskFor1Lot(effectiveStopPoints, lossPerLotSL)) return false;
 
    // commission per lot (round-turn)
    double commissionRoundTurnPerLot = 2.0 * CommissionPerLotPerSide;
@@ -282,6 +314,16 @@ void TryCloseForBlackout()
    }
 }
 
+void TryCloseForRollover()
+{
+   if(!CloseBeforeRollover) return;
+   if(!PositionSelect(_Symbol)) return;
+   if(IsRolloverWindow(TimeCurrent()))
+   {
+      trade.PositionClose(_Symbol);
+   }
+}
+
 // ---------- MT5 lifecycle ----------
 int OnInit()
 {
@@ -318,11 +360,13 @@ void OnTick()
 {
    // Enforce "no open trade during blackout"
    TryCloseForBlackout();
+   TryCloseForRollover();
 
    if(!IsNewBar()) return;
 
    // No new trades during blackout
    if(IsBlackout(TimeCurrent())) return;
+   if(IsRolloverWindow(TimeCurrent())) return;
 
    // One trade at a time (per symbol)
    if(InPosition()) return;
