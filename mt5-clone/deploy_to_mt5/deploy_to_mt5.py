@@ -61,7 +61,7 @@ def list_all_files(root: Path) -> list[Path]:
 
 def deploy_tree(src_mql5: Path, mt5_data: Path) -> int:
     """
-    Copy everything under src_mql5 into mt5_data\MQL5, replacing existing files.
+    Copy everything under src_mql5 into mt5_data\\MQL5, replacing existing files.
     Returns number of files copied.
     """
     if not src_mql5.exists() or not src_mql5.is_dir():

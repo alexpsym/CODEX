@@ -300,5 +300,8 @@ void OnTick()
    else
       ok = trade.Sell(vol, _Symbol, price, sl, tp, "PullbackEMA_ATR_RR");
 
-   (void)ok; // keep silent; Strategy Tester log will show errors if any
+   if(!ok)
+   {
+      // keep silent; Strategy Tester log will show errors if any
+   }
 }
