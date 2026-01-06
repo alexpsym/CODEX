@@ -128,7 +128,7 @@ double NormalizeVolumeToStep(double vol, bool roundUp)
    double steps = roundUp ? MathCeil(vol / step) : MathFloor(vol / step);
    double v = steps * step;
 
-   if(v < vmin) v = 0.0;
+   if(v < vmin) v = vmin;
    if(v > vmax) v = vmax;
 
    // normalize digits for display

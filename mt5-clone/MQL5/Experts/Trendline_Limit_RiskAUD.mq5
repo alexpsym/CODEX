@@ -90,7 +90,7 @@ double NormalizeVolume(double vol)
    double steps = MathFloor(vol / step);
    double v = steps * step;
 
-   if(v < vmin) v = 0.0;
+   if(v < vmin) v = vmin;
    if(v > vmax) v = vmax;
 
    int digits = (int)MathRound(-MathLog10(step));
@@ -251,6 +251,34 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
    double riskSL = lossPerLotSL * vol;
    double riskCommission = commissionRTPerLot * vol;
    double riskTotal = IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
+
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double vmax = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   if(step <= 0) step = 0.01;
+   int digits = (int)MathRound(-MathLog10(step));
+   if(digits < 0) digits = 2;
+
+   if(riskTotal > RiskAUD_Max)
+   {
+      while(riskTotal > RiskAUD_Max && vol - step >= vmin)
+      {
+         vol = NormalizeDouble(vol - step, digits);
+         riskSL = lossPerLotSL * vol;
+         riskCommission = commissionRTPerLot * vol;
+         riskTotal = IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
+      }
+   }
+   else if(riskTotal < RiskAUD_Min)
+   {
+      while(riskTotal < RiskAUD_Min && vol + step <= vmax)
+      {
+         vol = NormalizeDouble(vol + step, digits);
+         riskSL = lossPerLotSL * vol;
+         riskCommission = commissionRTPerLot * vol;
+         riskTotal = IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
+      }
+   }
 
    outVol = vol;
    outRiskRoundedAUD = riskTotal;
