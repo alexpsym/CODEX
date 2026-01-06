@@ -26,6 +26,7 @@ input double CommissionPerLotPerSide = 3.50;     // commission per side per 1.00
 input int    RiskSlippageBufferPoints = 50;      // buffer added to stop distance for max-risk guard (points)
 input bool   UseRolloverWindow       = true;     // avoid trading around rollover window
 input bool   CloseBeforeRollover     = true;     // close open position before rollover window
+input bool   Debug                   = true;     // prints reason-coded messages for filters
 input int    RolloverStartHour       = 23;       // server time
 input int    RolloverStartMinute     = 55;       // server time
 input int    RolloverEndHour         = 0;        // server time
@@ -52,6 +53,11 @@ int hATR  = INVALID_HANDLE;
 datetime lastBarTime = 0;
 
 // ---------- Helpers ----------
+void Dbg(string msg)
+{
+   if(Debug) Print("PBEMA_ATR_RR: ", msg);
+}
+
 bool IsNewBar()
 {
    datetime t = iTime(_Symbol, _Period, 0);
@@ -111,7 +117,7 @@ bool GetBufferValue(int handle, int bufferIndex, int shift, double &outVal)
    return true;
 }
 
-double NormalizeVolume(double vol)
+double NormalizeVolumeToStep(double vol, bool roundUp)
 {
    double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
@@ -119,8 +125,7 @@ double NormalizeVolume(double vol)
 
    if(step <= 0) step = 0.01;
 
-   // round DOWN to step (risk must not exceed max due to rounding up)
-   double steps = MathFloor(vol / step);
+   double steps = roundUp ? MathCeil(vol / step) : MathFloor(vol / step);
    double v = steps * step;
 
    if(v < vmin) v = vmin;
@@ -141,7 +146,11 @@ bool CalcRiskFor1Lot(double stopPoints, double &lossPerLotAUD)
    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
    double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
 
-   if(tickValue <= 0 || tickSize <= 0 || _Point <= 0) return false;
+   if(tickValue <= 0 || tickSize <= 0 || _Point <= 0)
+   {
+      Dbg(StringFormat("FAIL: tickValue=%g tickSize=%g point=%g", tickValue, tickSize, _Point));
+      return false;
+   }
 
    double valuePerPoint = tickValue * (_Point / tickSize);
    lossPerLotAUD = stopPoints * valuePerPoint;
@@ -159,6 +168,13 @@ double ValuePerPointPerLot()
    return tickValue * (_Point / tickSize);
 }
 
+double CalcRiskForVolume(double lossPerLotSL, double commissionRoundTurnPerLot, double vol)
+{
+   double riskSL = lossPerLotSL * vol;
+   double riskCommission = commissionRoundTurnPerLot * vol;
+   return IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
+}
+
 bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &tp, double &vol, double &riskRoundedAUD)
 {
    // RR guard
@@ -168,26 +184,53 @@ bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &t
    // price
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   if(ask <= 0 || bid <= 0) return false;
+   if(ask <= 0 || bid <= 0)
+   {
+      Dbg("FAIL: ask/bid <= 0");
+      return false;
+   }
 
    price = (type == ORDER_TYPE_BUY) ? ask : bid;
 
    // ATR from closed candle [1]
    double atr = 0.0;
-   if(!GetBufferValue(hATR, 0, 1, atr)) return false;
-   if(atr <= 0) return false;
+   if(!GetBufferValue(hATR, 0, 1, atr))
+   {
+      Dbg("FAIL: ATR CopyBuffer");
+      return false;
+   }
+   if(atr <= 0)
+   {
+      Dbg("FAIL: atr <= 0");
+      return false;
+   }
 
    double slDistPrice = atr * ATRMultiple;
    double stopPoints  = slDistPrice / _Point;
-   if(stopPoints <= 0) return false;
+   if(stopPoints <= 0)
+   {
+      Dbg("FAIL: stopPoints <= 0");
+      return false;
+   }
 
    // broker stops-level check (in points)
    int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
-   if(stopsLevel > 0 && stopPoints < stopsLevel) return false;
+   double minStopPoints = (stopsLevel > 0) ? (stopsLevel + 1) : 0.0;
+   Dbg(StringFormat("INFO: atr=%g stopPoints=%g stopsLevel=%d", atr, stopPoints, stopsLevel));
+   if(minStopPoints > 0.0 && stopPoints < minStopPoints)
+   {
+      Dbg("WARN: stopPoints < stopsLevel, widening to broker minimum");
+      stopPoints = minStopPoints;
+      slDistPrice = stopPoints * _Point;
+   }
 
    // money loss per 1.00 lot if SL hit (size using actual stop distance)
    double lossPerLotSL = 0.0;
-   if(!CalcRiskFor1Lot(stopPoints, lossPerLotSL)) return false;
+   if(!CalcRiskFor1Lot(stopPoints, lossPerLotSL))
+   {
+      Dbg("FAIL: tick value/size invalid for risk calc");
+      return false;
+   }
 
    // commission per lot (round-turn)
    double commissionRoundTurnPerLot = 2.0 * CommissionPerLotPerSide;
@@ -195,17 +238,38 @@ bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &t
    if(IncludeCommissionInRisk)
       totalRiskPerLot += commissionRoundTurnPerLot;
 
-   if(totalRiskPerLot <= 0) return false;
+   if(totalRiskPerLot <= 0)
+   {
+      Dbg("FAIL: totalRiskPerLot <= 0");
+      return false;
+   }
 
    // lot sizing by money risk
    double volRaw = RiskAUD_Target / totalRiskPerLot;
-   vol = NormalizeVolume(volRaw);
-   if(vol <= 0) return false;
+   double volDown = NormalizeVolumeToStep(volRaw, false);
+   double volUp = NormalizeVolumeToStep(volRaw, true);
 
-   // recompute rounded risk with the rounded volume
-   double riskSL = lossPerLotSL * vol;
-   double riskCommission = commissionRoundTurnPerLot * vol;
-   double riskTotal = IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
+   double bestVol = 0.0;
+   double bestRisk = 0.0;
+   double bestDiff = 1e100;
+
+   double candidates[2] = {volDown, volUp};
+   for(int i = 0; i < 2; i++)
+   {
+      double volCandidate = candidates[i];
+      if(volCandidate <= 0) continue;
+
+      double riskCandidate = CalcRiskForVolume(lossPerLotSL, commissionRoundTurnPerLot, volCandidate);
+      if(riskCandidate < RiskAUD_Min || riskCandidate > RiskAUD_Max) continue;
+
+      double diff = MathAbs(RiskAUD_Target - riskCandidate);
+      if(diff < bestDiff)
+      {
+         bestDiff = diff;
+         bestVol = volCandidate;
+         bestRisk = riskCandidate;
+      }
+   }
 
    double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
@@ -238,20 +302,32 @@ bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &t
    riskRoundedAUD = riskTotal;
 
    // hard risk filters based on actual SL distance
-   if(riskTotal < RiskAUD_Min || riskTotal > RiskAUD_Max) return false;
+   if(riskTotal < RiskAUD_Min || riskTotal > RiskAUD_Max)
+   {
+      Dbg("FAIL: risk outside bounds after rounding");
+      return false;
+   }
 
    // optional max-risk guard using buffer (does not affect sizing)
    if(RiskSlippageBufferPoints > 0)
    {
       double bufferedStopPoints = stopPoints + RiskSlippageBufferPoints;
       double lossPerLotBuffered = 0.0;
-      if(!CalcRiskFor1Lot(bufferedStopPoints, lossPerLotBuffered)) return false;
+      if(!CalcRiskFor1Lot(bufferedStopPoints, lossPerLotBuffered))
+      {
+         Dbg("FAIL: buffered risk calc invalid");
+         return false;
+      }
 
       double riskBuffered = lossPerLotBuffered * vol;
       if(IncludeCommissionInRisk)
          riskBuffered += commissionRoundTurnPerLot * vol;
 
-      if(riskBuffered > RiskAUD_Max) return false;
+      if(riskBuffered > RiskAUD_Max)
+      {
+         Dbg("FAIL: buffered risk exceeds max");
+         return false;
+      }
    }
 
    if(type == ORDER_TYPE_BUY)
@@ -267,7 +343,11 @@ bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &t
 
    // enforce TP >= 2R (already true if rr>=2, but keep explicit)
    double tpDist = MathAbs(tp - price);
-   if(tpDist < (2.0 * MathAbs(price - sl))) return false;
+   if(tpDist < (2.0 * MathAbs(price - sl)))
+   {
+      Dbg("FAIL: TP < 2R guard");
+      return false;
+   }
 
    // Optionally adjust TP so RR is net of commission
    if(AdjustTPForCommission)
