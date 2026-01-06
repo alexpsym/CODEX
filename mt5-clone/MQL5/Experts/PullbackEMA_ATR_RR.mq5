@@ -175,7 +175,6 @@ double CalcRiskForVolume(double lossPerLotSL, double commissionRoundTurnPerLot, 
    return IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
 }
 
-// Build order parameters from signal and risk rules.
 bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &tp, double &vol, double &riskRoundedAUD)
 {
    // RR guard
