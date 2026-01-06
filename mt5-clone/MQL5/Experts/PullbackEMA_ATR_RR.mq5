@@ -335,7 +335,7 @@ bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &t
       double valuePerPoint = ValuePerPointPerLot();
       if(valuePerPoint > 0.0)
       {
-         double commissionRT = riskCommission;
+         double commissionRT = commissionRoundTurnPerLot * vol;
          double extraPoints = commissionRT / (valuePerPoint * vol);
          double extraPrice = extraPoints * _Point;
 
