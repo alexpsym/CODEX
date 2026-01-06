@@ -128,7 +128,7 @@ double NormalizeVolumeToStep(double vol, bool roundUp)
    double steps = roundUp ? MathCeil(vol / step) : MathFloor(vol / step);
    double v = steps * step;
 
-   if(v < vmin) v = 0.0;
+   if(v < vmin) v = vmin;
    if(v > vmax) v = vmax;
 
    // normalize digits for display
@@ -271,14 +271,34 @@ bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &t
       }
    }
 
-   vol = bestVol;
-   if(vol <= 0)
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double vmax = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   if(step <= 0) step = 0.01;
+   int digits = (int)MathRound(-MathLog10(step));
+   if(digits < 0) digits = 2;
+
+   if(riskTotal > RiskAUD_Max)
    {
-      Dbg(StringFormat("FAIL: rounded risk outside bounds (min=%g max=%g)", RiskAUD_Min, RiskAUD_Max));
-      return false;
+      while(riskTotal > RiskAUD_Max && vol - step >= vmin)
+      {
+         vol = NormalizeDouble(vol - step, digits);
+         riskSL = lossPerLotSL * vol;
+         riskCommission = commissionRoundTurnPerLot * vol;
+         riskTotal = IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
+      }
+   }
+   else if(riskTotal < RiskAUD_Min)
+   {
+      while(riskTotal < RiskAUD_Min && vol + step <= vmax)
+      {
+         vol = NormalizeDouble(vol + step, digits);
+         riskSL = lossPerLotSL * vol;
+         riskCommission = commissionRoundTurnPerLot * vol;
+         riskTotal = IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
+      }
    }
 
-   double riskTotal = bestRisk;
    riskRoundedAUD = riskTotal;
 
    // hard risk filters based on actual SL distance
