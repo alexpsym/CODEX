@@ -262,23 +262,34 @@ bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &t
       double riskCandidate = CalcRiskForVolume(lossPerLotSL, commissionRoundTurnPerLot, volCandidate);
       if(riskCandidate < RiskAUD_Min || riskCandidate > RiskAUD_Max) continue;
 
-      double diff = MathAbs(RiskAUD_Target - riskCandidate);
-      if(diff < bestDiff)
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double vmax = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   if(step <= 0) step = 0.01;
+   int digits = (int)MathRound(-MathLog10(step));
+   if(digits < 0) digits = 2;
+
+   if(riskTotal > RiskAUD_Max)
+   {
+      while(riskTotal > RiskAUD_Max && vol - step >= vmin)
       {
-         bestDiff = diff;
-         bestVol = volCandidate;
-         bestRisk = riskCandidate;
+         vol = NormalizeDouble(vol - step, digits);
+         riskSL = lossPerLotSL * vol;
+         riskCommission = commissionRoundTurnPerLot * vol;
+         riskTotal = IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
+      }
+   }
+   else if(riskTotal < RiskAUD_Min)
+   {
+      while(riskTotal < RiskAUD_Min && vol + step <= vmax)
+      {
+         vol = NormalizeDouble(vol + step, digits);
+         riskSL = lossPerLotSL * vol;
+         riskCommission = commissionRoundTurnPerLot * vol;
+         riskTotal = IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
       }
    }
 
-   vol = bestVol;
-   if(vol <= 0)
-   {
-      Dbg(StringFormat("FAIL: rounded risk outside bounds (min=%g max=%g)", RiskAUD_Min, RiskAUD_Max));
-      return false;
-   }
-
-   double riskTotal = bestRisk;
    riskRoundedAUD = riskTotal;
 
    // hard risk filters based on actual SL distance

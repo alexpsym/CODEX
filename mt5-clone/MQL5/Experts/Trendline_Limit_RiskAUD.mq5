@@ -315,12 +315,6 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
       outVol = vol;
       outRiskRoundedAUD = riskTotal;
 
-      if(riskTotal < RiskAUD_Min)
-      {
-         why = "Rounded risk falls below RiskAUD_Min after buffer adjustment.";
-         return false;
-      }
-
       if(riskWorst > RiskAUD_Max)
       {
          why = "Worst-case buffered risk exceeds RiskAUD_Max.";
