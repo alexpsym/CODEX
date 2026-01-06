@@ -14,7 +14,7 @@ input int    TrendEMAPeriod          = 20;       // used when UseDualEMA=false
 input int    ATRPeriod               = 14;
 input double ATRMultiple             = 1.5;      // 0.5, 1.5, 2, 2.5, 3 (set in Inputs)
 input double RiskAUD_Target          = 10.0;     // target AUD risk per trade (position size is derived from this)
-input double RiskAUD_Min             = 9.0;      // hard filter: do NOT trade if rounded risk < this
+input double RiskAUD_Min             = 9.0;      // hard filter: do NOT trade if rounded risk < this (runtime enforces >= 10 AUD)
 input double RiskAUD_Max             = 12.0;     // hard filter: do NOT trade if rounded risk > this
 input double RiskReward              = 2.0;      // must be >= 2.0 (set 2.0 or 3.0)
 input int    SlippagePoints          = 10;
@@ -244,71 +244,90 @@ bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &t
       return false;
    }
 
-   // lot sizing by money risk
-   double volRaw = RiskAUD_Target / totalRiskPerLot;
-   double volDown = NormalizeVolumeToStep(volRaw, false);
-   double volUp = NormalizeVolumeToStep(volRaw, true);
+   // -------------------- Risk/position sizing (aligned with Trendline_Limit_RiskAUD)
+   // Hard requirement: losing trades must never be < 10 AUD (after rounding).
+   double riskMin = MathMax(RiskAUD_Min, 10.0);
+   double riskMax = MathMax(RiskAUD_Max, riskMin);
+   double riskTarget = MathMax(RiskAUD_Target, riskMin);
 
-   double bestVol = 0.0;
-   double bestRisk = 0.0;
-   double bestDiff = 1e100;
+   // lot sizing by money risk (nominal SL distance)
+   double volRaw = riskTarget / totalRiskPerLot;
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double vmax = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   if(step <= 0) step = 0.01;
+   int volDigits = (int)MathRound(-MathLog10(step));
+   if(volDigits < 0) volDigits = 2;
 
-   double candidates[2] = {volDown, volUp};
-   for(int i = 0; i < 2; i++)
+   double v = NormalizeVolumeToStep(volRaw, false); // start from rounded-down
+   if(v <= 0)
    {
-      double volCandidate = candidates[i];
-      if(volCandidate <= 0) continue;
-
-      double riskCandidate = CalcRiskForVolume(lossPerLotSL, commissionRoundTurnPerLot, volCandidate);
-      if(riskCandidate < RiskAUD_Min || riskCandidate > RiskAUD_Max) continue;
-
-      double diff = MathAbs(RiskAUD_Target - riskCandidate);
-      if(diff < bestDiff)
-      {
-         bestDiff = diff;
-         bestVol = volCandidate;
-         bestRisk = riskCandidate;
-      }
-   }
-
-   vol = bestVol;
-   if(vol <= 0)
-   {
-      Dbg(StringFormat("FAIL: rounded risk outside bounds (min=%g max=%g)", RiskAUD_Min, RiskAUD_Max));
+      Dbg("FAIL: computed volume invalid");
       return false;
    }
 
-   double riskTotal = bestRisk;
-   riskRoundedAUD = riskTotal;
+   double riskNominal = CalcRiskForVolume(lossPerLotSL, commissionRoundTurnPerLot, v);
 
-   // hard risk filters based on actual SL distance
-   if(riskTotal < RiskAUD_Min || riskTotal > RiskAUD_Max)
+   // Step down if above max
+   while(riskNominal > riskMax && (v - step) >= vmin)
    {
-      Dbg("FAIL: risk outside bounds after rounding");
+      v = NormalizeDouble(v - step, volDigits);
+      if(v < vmin) v = vmin;
+      riskNominal = CalcRiskForVolume(lossPerLotSL, commissionRoundTurnPerLot, v);
+   }
+
+   // Step up if below min (guarantee >= 10 AUD)
+   while(riskNominal < riskMin && (v + step) <= vmax)
+   {
+      v = NormalizeDouble(v + step, volDigits);
+      if(v > vmax) v = vmax;
+      riskNominal = CalcRiskForVolume(lossPerLotSL, commissionRoundTurnPerLot, v);
+   }
+
+   if(riskNominal < riskMin)
+   {
+      Dbg(StringFormat("FAIL: cannot reach guaranteed min risk %.2f AUD within SYMBOL_VOLUME_MAX", riskMin));
+      return false;
+   }
+   if(riskNominal > riskMax)
+   {
+      Dbg(StringFormat("FAIL: even SYMBOL_VOLUME_MIN exceeds max risk (minVol risk=%.2f, max=%.2f)", riskNominal, riskMax));
       return false;
    }
 
-   // optional max-risk guard using buffer (does not affect sizing)
+   // Optional slippage buffer: attempt to reduce volume so worst-case <= max,
+   // but NEVER reduce volume below the guaranteed minimum-risk requirement.
    if(RiskSlippageBufferPoints > 0)
    {
       double bufferedStopPoints = stopPoints + RiskSlippageBufferPoints;
       double lossPerLotBuffered = 0.0;
-      if(!CalcRiskFor1Lot(bufferedStopPoints, lossPerLotBuffered))
+      if(CalcRiskFor1Lot(bufferedStopPoints, lossPerLotBuffered))
       {
-         Dbg("FAIL: buffered risk calc invalid");
-         return false;
-      }
+         double riskBuffered = (lossPerLotBuffered * v);
+         if(IncludeCommissionInRisk)
+            riskBuffered += commissionRoundTurnPerLot * v;
 
-      double riskBuffered = lossPerLotBuffered * vol;
-      if(IncludeCommissionInRisk)
-         riskBuffered += commissionRoundTurnPerLot * vol;
+         while(riskBuffered > riskMax && (v - step) >= vmin)
+         {
+            double vNext = NormalizeDouble(v - step, volDigits);
+            double riskNext = CalcRiskForVolume(lossPerLotSL, commissionRoundTurnPerLot, vNext);
+            if(riskNext < riskMin) break; // do not violate min-risk guarantee
 
-      if(riskBuffered > RiskAUD_Max)
-      {
-         Dbg("FAIL: buffered risk exceeds max");
-         return false;
+            v = vNext;
+            riskNominal = riskNext;
+
+            riskBuffered = (lossPerLotBuffered * v);
+            if(IncludeCommissionInRisk)
+               riskBuffered += commissionRoundTurnPerLot * v;
+         }
+
+         if(Debug && riskBuffered > riskMax)
+            Dbg(StringFormat("WARN: buffered risk %.2f > max %.2f, but min-risk guarantee enforced; proceeding", riskBuffered, riskMax));
       }
    }
+
+   vol = v;
+   riskRoundedAUD = riskNominal;
 
    if(type == ORDER_TYPE_BUY)
    {

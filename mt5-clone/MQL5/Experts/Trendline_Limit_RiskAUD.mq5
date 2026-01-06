@@ -8,7 +8,7 @@ CTrade trade;
 
 // -------------------- Inputs (risk model copied from PullbackEMA_ATR_RR) --------------------
 input double RiskAUD_Target           = 10.0;   // target AUD risk per trade (position size is derived from this)
-input double RiskAUD_Min              = 9.0;    // hard filter: do NOT trade if rounded risk < this
+input double RiskAUD_Min              = 9.0;    // hard filter: do NOT trade if rounded risk < this (runtime enforces >= 10 AUD)
 input double RiskAUD_Max              = 12.0;   // hard filter: do NOT trade if rounded risk > this
 input bool   IncludeCommissionInRisk  = true;   // include commission in lot sizing + risk filters
 input double CommissionPerLotPerSide  = 3.50;   // commission per side per 1.00 lot (account currency)
@@ -211,6 +211,12 @@ bool IsLimitPriceValid(double entry, bool isBuyLimit, string &why)
 
 bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outRiskRoundedAUD, string &why)
 {
+   const double GUARANTEED_MIN_RISK_AUD = 10.0;
+   double riskMin = MathMax(RiskAUD_Min, GUARANTEED_MIN_RISK_AUD);
+   double riskMax = MathMax(RiskAUD_Max, riskMin);
+   double riskTarget = MathMax(RiskAUD_Target, riskMin);
+   why = "";
+
    double stopPoints = MathAbs(entry - sl) / _Point;
    if(stopPoints <= 0)
    {
@@ -237,7 +243,7 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
       return false;
    }
 
-   double volRaw = RiskAUD_Target / riskPerLotSizing;
+   double volRaw = riskTarget / riskPerLotSizing;
    double vol = NormalizeVolume(volRaw);
    if(vol <= 0)
    {
@@ -257,9 +263,9 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
    int digits = (int)MathRound(-MathLog10(step));
    if(digits < 0) digits = 2;
 
-   if(riskTotal > RiskAUD_Max)
+   if(riskTotal > riskMax)
    {
-      while(riskTotal > RiskAUD_Max && vol - step >= vmin)
+      while(riskTotal > riskMax && vol - step >= vmin)
       {
          vol = NormalizeDouble(vol - step, digits);
          riskSL = lossPerLotSL * vol;
@@ -267,9 +273,9 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
          riskTotal = IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
       }
    }
-   else if(riskTotal < RiskAUD_Min)
+   else if(riskTotal < riskMin)
    {
-      while(riskTotal < RiskAUD_Min && vol + step <= vmax)
+      while(riskTotal < riskMin && vol + step <= vmax)
       {
          vol = NormalizeDouble(vol + step, digits);
          riskSL = lossPerLotSL * vol;
@@ -281,9 +287,14 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
    outVol = vol;
    outRiskRoundedAUD = riskTotal;
 
-   if(riskTotal < RiskAUD_Min || riskTotal > RiskAUD_Max)
+   if(riskTotal < riskMin)
    {
-      why = "Rounded risk is outside RiskAUD_Min/Max filters.";
+      why = "Rounded risk is below the guaranteed minimum (>=10 AUD).";
+      return false;
+   }
+   if(riskTotal > riskMax)
+   {
+      why = "Rounded risk exceeds RiskAUD_Max filter.";
       return false;
    }
 
@@ -301,9 +312,15 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
       if(IncludeCommissionInRisk)
          riskWorst += commissionRTPerLot * vol;
 
-      while(riskWorst > RiskAUD_Max && vol - step >= vmin)
+      while(riskWorst > riskMax && vol - step >= vmin)
       {
-         vol = NormalizeDouble(vol - step, digits);
+         double vNext = NormalizeDouble(vol - step, digits);
+         double riskNext = IncludeCommissionInRisk
+            ? (lossPerLotSL * vNext + commissionRTPerLot * vNext)
+            : (lossPerLotSL * vNext);
+         if(riskNext < riskMin) break;
+
+         vol = vNext;
          riskSL = lossPerLotSL * vol;
          riskCommission = commissionRTPerLot * vol;
          riskTotal = IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
@@ -315,14 +332,10 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
       outVol = vol;
       outRiskRoundedAUD = riskTotal;
 
-      if(riskWorst > RiskAUD_Max)
-      {
-         why = "Worst-case buffered risk exceeds RiskAUD_Max.";
-         return false;
-      }
+      if(riskWorst > riskMax)
+         why = "WARN: worst-case buffered risk exceeds RiskAUD_Max (min-risk guarantee enforced).";
    }
 
-   why = "";
    return true;
 }
 
@@ -464,6 +477,7 @@ bool PlaceOrReplacePending()
       UpdateStatus("Risk sizing blocked: " + why);
       return false;
    }
+   string riskWarn = why;
 
    if(AlsoBlockIfPendingExists)
    {
@@ -512,7 +526,8 @@ bool PlaceOrReplacePending()
       " | SL=" + IntegerToString(SL_DistancePoints) + "pt (" + DoubleToString(slPips, 1) + "pip)" +
       " | TP=" + IntegerToString(TP_DistancePoints) + "pt (" + DoubleToString(tpPips, 1) + "pip)" +
       " | Vol=" + DoubleToString(vol, 2) +
-      " | Risk~" + DoubleToString(riskRounded, 2)
+      " | Risk~" + DoubleToString(riskRounded, 2) +
+      (riskWarn == "" ? "" : " | " + riskWarn)
    );
 
    return true;
