@@ -427,7 +427,7 @@ void TryCloseForRollover()
 // ---------- MT5 lifecycle ----------
 int OnInit()
 {
-   Print("PBEMA_ATR_RR INIT BUILD ", __DATE__, " ", __TIME__);
+   Print("PBEMA_ATR_RR INIT BUILD ", __DATE__);
 
    // Indicator handles
    if(UseDualEMA)
