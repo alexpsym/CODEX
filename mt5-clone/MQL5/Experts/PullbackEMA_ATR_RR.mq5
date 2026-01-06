@@ -271,34 +271,14 @@ bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &t
       }
    }
 
-   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double vmax = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   if(step <= 0) step = 0.01;
-   int digits = (int)MathRound(-MathLog10(step));
-   if(digits < 0) digits = 2;
-
-   if(riskTotal > RiskAUD_Max)
+   vol = bestVol;
+   if(vol <= 0)
    {
-      while(riskTotal > RiskAUD_Max && vol - step >= vmin)
-      {
-         vol = NormalizeDouble(vol - step, digits);
-         riskSL = lossPerLotSL * vol;
-         riskCommission = commissionRoundTurnPerLot * vol;
-         riskTotal = IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
-      }
-   }
-   else if(riskTotal < RiskAUD_Min)
-   {
-      while(riskTotal < RiskAUD_Min && vol + step <= vmax)
-      {
-         vol = NormalizeDouble(vol + step, digits);
-         riskSL = lossPerLotSL * vol;
-         riskCommission = commissionRoundTurnPerLot * vol;
-         riskTotal = IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
-      }
+      Dbg(StringFormat("FAIL: rounded risk outside bounds (min=%g max=%g)", RiskAUD_Min, RiskAUD_Max));
+      return false;
    }
 
+   double riskTotal = bestRisk;
    riskRoundedAUD = riskTotal;
 
    // hard risk filters based on actual SL distance
@@ -447,6 +427,8 @@ void TryCloseForRollover()
 // ---------- MT5 lifecycle ----------
 int OnInit()
 {
+   Print("PBEMA_ATR_RR INIT BUILD ", __DATE__, " ", __TIME__, " Debug=", Debug);
+
    // Indicator handles
    if(UseDualEMA)
    {
@@ -478,6 +460,11 @@ void OnDeinit(const int reason)
 
 void OnTick()
 {
+   static long ticks = 0;
+   ticks++;
+   if(Debug && (ticks % 5000) == 0)
+      Comment("PBEMA_ATR_RR ticks=", ticks, " time=", TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS));
+
    // Enforce "no open trade during blackout"
    TryCloseForBlackout();
    TryCloseForRollover();
