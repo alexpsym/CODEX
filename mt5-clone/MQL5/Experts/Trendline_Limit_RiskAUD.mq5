@@ -218,10 +218,8 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
       return false;
    }
 
-   double effectiveStopPoints = stopPoints + MathMax(0, RiskSlippageBufferPoints);
-
    double lossPerLotSL = 0.0;
-   if(!CalcRiskFor1Lot(effectiveStopPoints, lossPerLotSL))
+   if(!CalcRiskFor1Lot(stopPoints, lossPerLotSL))
    {
       why = "Failed to compute tick value based risk for 1 lot.";
       return false;
@@ -229,17 +227,17 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
 
    double commissionRTPerLot = 2.0 * CommissionPerLotPerSide;
 
-   double totalRiskPerLot = lossPerLotSL;
+   double riskPerLotSizing = lossPerLotSL;
    if(IncludeCommissionInRisk)
-      totalRiskPerLot += commissionRTPerLot;
+      riskPerLotSizing += commissionRTPerLot;
 
-   if(totalRiskPerLot <= 0)
+   if(riskPerLotSizing <= 0)
    {
       why = "Total risk per lot invalid.";
       return false;
    }
 
-   double volRaw = RiskAUD_Target / totalRiskPerLot;
+   double volRaw = RiskAUD_Target / riskPerLotSizing;
    double vol = NormalizeVolume(volRaw);
    if(vol <= 0)
    {
@@ -247,7 +245,7 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
       return false;
    }
 
-   // recompute rounded risk with rounded volume
+   // recompute rounded risk with rounded volume (nominal SL)
    double riskSL = lossPerLotSL * vol;
    double riskCommission = commissionRTPerLot * vol;
    double riskTotal = IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
@@ -287,6 +285,47 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
    {
       why = "Rounded risk is outside RiskAUD_Min/Max filters.";
       return false;
+   }
+
+   double effectiveStopPoints = stopPoints + MathMax(0, RiskSlippageBufferPoints);
+   if(effectiveStopPoints > stopPoints)
+   {
+      double lossPerLotWorst = 0.0;
+      if(!CalcRiskFor1Lot(effectiveStopPoints, lossPerLotWorst))
+      {
+         why = "Failed to compute worst-case risk for 1 lot.";
+         return false;
+      }
+
+      double riskWorst = lossPerLotWorst * vol;
+      if(IncludeCommissionInRisk)
+         riskWorst += commissionRTPerLot * vol;
+
+      while(riskWorst > RiskAUD_Max && vol - step >= vmin)
+      {
+         vol = NormalizeDouble(vol - step, digits);
+         riskSL = lossPerLotSL * vol;
+         riskCommission = commissionRTPerLot * vol;
+         riskTotal = IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
+         riskWorst = lossPerLotWorst * vol;
+         if(IncludeCommissionInRisk)
+            riskWorst += commissionRTPerLot * vol;
+      }
+
+      outVol = vol;
+      outRiskRoundedAUD = riskTotal;
+
+      if(riskTotal < RiskAUD_Min)
+      {
+         why = "Rounded risk falls below RiskAUD_Min after buffer adjustment.";
+         return false;
+      }
+
+      if(riskWorst > RiskAUD_Max)
+      {
+         why = "Worst-case buffered risk exceeds RiskAUD_Max.";
+         return false;
+      }
    }
 
    why = "";
