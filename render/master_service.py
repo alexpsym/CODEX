@@ -722,16 +722,44 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .toolbar { display: flex; gap: 0.75rem; align-items: center; justify-content: center; margin-bottom: 1.75rem; flex-wrap: wrap; }
         #status { color: #94a3b8; }
 
-        .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
-        @media (max-width: 920px) { .cols { grid-template-columns: 1fr; } }
-
         .panel { background: #111827; border: 1px solid #1f2937; border-radius: 16px; padding: 1.25rem; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
         .panel-header { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; margin-bottom: 0.75rem; }
         .panel-sub { color: #94a3b8; margin-top: 0.25rem; font-size: 0.95rem; line-height: 1.4; }
         .oo-toolbar { display:flex; gap:0.6rem; align-items:center; }
 
-        .script-stack { display: flex; flex-direction: column; gap: 0.65rem; margin-top: 0.9rem; }
-        .script-row { display: flex; flex-wrap: wrap; gap: 0.65rem; margin-top: 0.9rem; }
+        .category-title{
+            margin: 1.25rem 0 1rem;
+            text-align: center;
+            font-size: 2.35rem;
+            font-weight: 900;
+            letter-spacing: 0.2px;
+            color: #e2e8f0;
+        }
+        .category-grid{
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.25rem;
+            margin-top: 1.25rem;
+        }
+        @media (max-width: 920px){
+            .category-grid{ grid-template-columns: 1fr; }
+        }
+        .category{
+            width: 100%;
+        }
+        .category-wide{
+            margin-top: 1.5rem;
+        }
+        .script-stack{
+            display: flex;
+            flex-direction: column;
+            gap: 0.65rem;
+        }
+        .script-row{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.65rem;
+        }
 
         .script-btn {
             width: 100%;
@@ -848,32 +876,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             </div>
         </section>
 
-        <div class=\"cols\">
-            <section class=\"panel\">
-                <div class=\"panel-header\">
-                    <h2>Forex</h2>
-                    <span class=\"status-pill\" id=\"forex-count\">—</span>
-                </div>
-                <div class=\"panel-sub\">OANDA, FX scanners, calculators, and weekend tools.</div>
+        <!-- CATEGORIES (your sketch layout) -->
+        <div class=\"category-grid\">
+            <section class=\"category\">
+                <div class=\"category-title\">Forex</div>
                 <div id=\"forex-scripts\" class=\"script-stack\"></div>
             </section>
 
-            <section class=\"panel\">
-                <div class=\"panel-header\">
-                    <h2>Crypto</h2>
-                    <span class=\"status-pill\" id=\"crypto-count\">—</span>
-                </div>
-                <div class=\"panel-sub\">Bybit, Coinspot, crypto scanners, IV tools, and calculators.</div>
+            <section class=\"category\">
+                <div class=\"category-title\">Crypto</div>
                 <div id=\"crypto-scripts\" class=\"script-stack\"></div>
             </section>
         </div>
 
-        <section class=\"panel\" style=\"margin-top: 1rem;\">
-            <div class=\"panel-header\">
-                <h2>Other</h2>
-                <span class=\"status-pill\" id=\"other-count\">—</span>
-            </div>
-            <div class=\"panel-sub\">Utility scripts and non-trading tools.</div>
+        <section class=\"category category-wide\">
+            <div class=\"category-title\">Other</div>
             <div id=\"other-scripts\" class=\"script-row\"></div>
         </section>
     </div>
