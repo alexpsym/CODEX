@@ -722,30 +722,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .toolbar { display: flex; gap: 0.75rem; align-items: center; justify-content: center; margin-bottom: 1.75rem; flex-wrap: wrap; }
         #status { color: #94a3b8; }
 
-        .hero { display: flex; justify-content: center; margin: 0 0 2rem; }
-        .hero-btn {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            width: min(720px, 100%);
-            padding: 1.05rem 1.25rem;
-            border-radius: 16px;
-            border: 2px solid #334155;
-            background: #111827;
-            color: #e2e8f0;
-            text-decoration: none;
-            font-weight: 900;
-            letter-spacing: 0.2px;
-            box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
-        }
-        .hero-btn:hover { background: #0f172a; border-color: #38bdf8; }
-
         .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
         @media (max-width: 920px) { .cols { grid-template-columns: 1fr; } }
 
         .panel { background: #111827; border: 1px solid #1f2937; border-radius: 16px; padding: 1.25rem; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
         .panel-header { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; margin-bottom: 0.75rem; }
         .panel-sub { color: #94a3b8; margin-top: 0.25rem; font-size: 0.95rem; line-height: 1.4; }
+        .oo-toolbar { display:flex; gap:0.6rem; align-items:center; }
 
         .script-stack { display: flex; flex-direction: column; gap: 0.65rem; margin-top: 0.9rem; }
         .script-row { display: flex; flex-wrap: wrap; gap: 0.65rem; margin-top: 0.9rem; }
@@ -782,12 +765,32 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .status-pill.running { background: #14532d; color: #bbf7d0; border-color: #22c55e55; }
         .status-pill.stopped { background: #7f1d1d; color: #fecdd3; border-color: #ef444455; }
         .empty-state { color: #94a3b8; margin-top: 0.9rem; }
+
+        .table-wrap { overflow-x: auto; border-radius: 12px; border: 1px solid #1f2937; background: #0b1220; }
+        #open-orders-table { width: 100%; border-collapse: collapse; min-width: 920px; }
+        #open-orders-table th, #open-orders-table td { text-align:left; padding:0.6rem 0.75rem; border-bottom:1px solid #1f2937; font-size:0.9rem; }
+        #open-orders-table th { background:#0f172a; color:#cbd5e1; position:sticky; top:0; z-index:1; }
+        #open-orders-table tr:hover { background:#111827; }
+
+        .action-cell { white-space: nowrap; }
+        .action-btn {
+            display:inline-flex; align-items:center; justify-content:center;
+            min-width:72px; height:30px; padding:0 10px;
+            border-radius:8px; font-size:0.8rem; font-weight:900;
+            background:#1f2937; color:#e2e8f0; border:1px solid #334155;
+        }
+        .action-btn:hover { background:#334155; }
+        .action-btn:disabled { opacity:0.6; cursor:not-allowed; }
+
+        .error-list { margin-top:0.75rem; color:#fca5a5; font-size:0.9rem; }
+        .error-list ul { margin:0.4rem 0 0; padding-left:1.25rem; }
     </style>
 </head>
 <body>
     <div class=\"nav-bar\">
         <button class=\"secondary\" id=\"nav-back\">Back</button>
         <button class=\"secondary\" id=\"nav-forward\">Forward</button>
+        <button class=\"secondary\" id=\"nav-home\">Dashboard</button>
     </div>
 
     <div class=\"home\">
@@ -799,9 +802,51 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <span id=\"status\">Loading scripts...</span>
         </div>
 
-        <div class=\"hero\">
-            <a class=\"hero-btn\" href=\"/open-orders\" target=\"_blank\" rel=\"noopener\">Open Orders / Positions</a>
-        </div>
+        <section class=\"panel\" style=\"margin-bottom: 1rem;\" id=\"open-orders-panel\">
+            <div class=\"panel-header\">
+                <div>
+                    <h2>Open Orders / Positions</h2>
+                    <div class=\"panel-sub\">Unchanged view, just moved to the top.</div>
+                </div>
+                <div class=\"oo-toolbar\">
+                    <button class=\"secondary\" id=\"oo-refresh-btn\">Refresh</button>
+                    <span class=\"status-pill\" id=\"oo-status\">Loading...</span>
+                </div>
+            </div>
+
+            <div class=\"table-wrap\">
+                <table id=\"open-orders-table\">
+                    <thead>
+                        <tr>
+                            <th>Broker</th>
+                            <th>Account</th>
+                            <th>Category</th>
+                            <th>Instrument</th>
+                            <th>Type</th>
+                            <th>Side</th>
+                            <th>Size</th>
+                            <th>Entry / Order</th>
+                            <th>Current / Trigger</th>
+                            <th>Stop Loss</th>
+                            <th>Take Profit</th>
+                            <th>Leverage / Margin</th>
+                            <th>Opened</th>
+                            <th>ID</th>
+                            <th>Status</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+
+            <p class=\"meta\" id=\"open-orders-empty\" style=\"display:none;\">No open orders or trades.</p>
+
+            <div class=\"error-list\" id=\"open-orders-errors\" style=\"display:none;\">
+                <strong>Source issues</strong>
+                <ul></ul>
+            </div>
+        </section>
 
         <div class=\"cols\">
             <section class=\"panel\">
@@ -833,115 +878,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </section>
     </div>
 
-    <script src=\"/static/dashboard.js\"></script>
-</body>
-</html>"""
-
-OPEN_ORDERS_TEMPLATE = """<!DOCTYPE html>
-<html lang=\"en\">
-<head>
-    <meta charset=\"UTF-8\" />
-    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-    <title>Open Orders / Positions</title>
-    <style>
-        :root { color-scheme: light dark; }
-        body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
-        h1 { margin-top: 0; }
-        .meta { color: #94a3b8; margin: 0.75rem 0 1.25rem; line-height: 1.5; }
-        .nav-bar { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
-        button { padding: 0.55rem 0.9rem; border-radius: 10px; border: none; cursor: pointer; font-weight: 800; }
-        .secondary { background: #1f2937; color: #cbd5e1; }
-        .refresh { background: #3b82f6; color: #eaf2ff; }
-        .toolbar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
-        .badge { display: inline-block; padding: 0.35rem 0.7rem; border-radius: 999px; background: #1f2937; color: #cbd5e1; font-weight: 900; border: 1px solid #334155; }
-        .badge-error { background: #7f1d1d; color: #fecdd3; border-color: #ef444455; }
-        .badge-ok { background: #14532d; color: #bbf7d0; border-color: #22c55e55; }
-
-        .panel { background: #111827; border: 1px solid #1f2937; border-radius: 16px; padding: 1.5rem; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
-        .panel-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; }
-        .panel-header h2 { margin: 0 0 0.35rem; font-size: 1.35rem; }
-        .table-wrap { overflow-x: auto; border-radius: 12px; border: 1px solid #1f2937; background: #0b1220; }
-        table { width: 100%; border-collapse: collapse; min-width: 920px; }
-        th, td { text-align: left; padding: 0.6rem 0.75rem; border-bottom: 1px solid #1f2937; font-size: 0.9rem; }
-        th { background: #0f172a; color: #cbd5e1; position: sticky; top: 0; z-index: 1; }
-        tr:hover { background: #111827; }
-        .empty-state { margin-top: 0.75rem; color: #94a3b8; }
-        .error-list { margin-top: 0.75rem; color: #fca5a5; font-size: 0.9rem; }
-        .error-list ul { margin: 0.4rem 0 0; padding-left: 1.25rem; }
-        #open-orders-table th:last-child,
-        #open-orders-table td:last-child { min-width: 96px; width: 96px; }
-        .action-cell { white-space: nowrap; }
-        .action-btn {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            min-width: 72px;
-            height: 30px;
-            padding: 0 10px;
-            border-radius: 8px;
-            font-size: 0.8rem;
-            font-weight: 900;
-            appearance: none;
-            -webkit-appearance: none;
-            background-color: #1f2937;
-            color: #e2e8f0;
-            border: 1px solid #334155;
-        }
-        .action-btn:hover { background-color: #334155; }
-        .action-btn:disabled { opacity: 0.6; cursor: not-allowed; }
-    </style>
-</head>
-<body>
-    <div class=\"nav-bar\">
-        <button class=\"secondary\" id=\"nav-back\">Back</button>
-        <button class=\"secondary\" id=\"nav-forward\">Forward</button>
-        <button class=\"secondary\" id=\"nav-home\">Dashboard</button>
-    </div>
-
-    <h1>Open Orders / Positions</h1>
-    <p class=\"meta\">Live feed of open Forex (OANDA) and Crypto (Bybit) activity. Profit metrics are hidden.</p>
-
-    <div class=\"toolbar\">
-        <button class=\"refresh\" id=\"refresh-btn\">Refresh</button>
-        <span class=\"badge\" id=\"open-orders-status\">Loading...</span>
-    </div>
-
-    <div class=\"panel\" id=\"open-orders-panel\">
-        <div class=\"table-wrap\">
-            <table id=\"open-orders-table\">
-                <thead>
-                    <tr>
-                        <th>Broker</th>
-                        <th>Account</th>
-                        <th>Category</th>
-                        <th>Instrument</th>
-                        <th>Type</th>
-                        <th>Side</th>
-                        <th>Size</th>
-                        <th>Entry / Order</th>
-                        <th>Current / Trigger</th>
-                        <th>Stop Loss</th>
-                        <th>Take Profit</th>
-                        <th>Leverage / Margin</th>
-                        <th>Opened</th>
-                        <th>ID</th>
-                        <th>Status</th>
-                        <th>Action</th>
-                    </tr>
-                </thead>
-                <tbody></tbody>
-            </table>
-        </div>
-        <p class=\"meta empty-state\" id=\"open-orders-empty\" style=\"display:none;\">No open orders or trades.</p>
-        <div class=\"error-list\" id=\"open-orders-errors\" style=\"display:none;\">
-            <strong>Source issues</strong>
-            <ul></ul>
-        </div>
-    </div>
-
     <script src=\"/static/open_orders.js\"></script>
 </body>
 </html>"""
+
 
 
 CATEGORY_TEMPLATE = """<!DOCTYPE html>
