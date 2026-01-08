@@ -26,7 +26,10 @@ input TL_Direction Direction          = TL_BUY_LIMIT;
 
 // Manual protection (DISTANCES, in MT5 POINTS)
 input int    SL_DistancePoints        = 200;    // Stop distance in MT5 points (example: 54 points = 5.4 pips on 5-digit FX)
-input int    TP_DistancePoints        = 400;    // Target distance in MT5 points
+input bool   AutoTP_NetRR_Enabled      = true;   // if true, EA ignores TP_DistancePoints and auto-sets TP so NET profit >= NetRR_Target * R (after commissions)
+input double NetRR_Target              = 2.0;    // desired net R-multiple on winners (e.g., 2.0 means NET >= 2R after commissions)
+input int    AutoTP_SafetyPoints       = 0;      // extra points added to computed TP (additional safety buffer)
+input int    TP_DistancePoints         = 400;    // (fallback) Target distance in MT5 points when AutoTP_NetRR_Enabled=false
 
 // Notes (for clarity)
 // NOTE: 1 MT5 point = 1 TradingView tick.
@@ -138,32 +141,22 @@ double GetTrendlinePriceAtTime(const string name, datetime t)
    return v;
 }
 
-bool BuildSLTPFromDistances(double entry, bool isBuyLimit, double &slOut, double &tpOut, string &why)
+bool BuildSLFromDistance(double entry, bool isBuyLimit, double &slOut, string &why)
 {
-   if(SL_DistancePoints <= 0 || TP_DistancePoints <= 0)
+   if(SL_DistancePoints <= 0)
    {
-      why = "SL_DistancePoints and TP_DistancePoints must both be > 0.";
+      why = "SL_DistancePoints must be > 0.";
       return false;
    }
 
    double slDist = (double)SL_DistancePoints * _Point;
-   double tpDist = (double)TP_DistancePoints * _Point;
 
-   if(isBuyLimit)
-   {
-      slOut = entry - slDist;
-      tpOut = entry + tpDist;
-   }
-   else
-   {
-      slOut = entry + slDist;
-      tpOut = entry - tpDist;
-   }
+   if(isBuyLimit) slOut = entry - slDist;
+   else           slOut = entry + slDist;
 
    slOut = NormalizePrice(slOut);
-   tpOut = NormalizePrice(tpOut);
 
-   // Stops level guard (broker minimum distance, in points)
+   // broker stops-level check (distance from entry)
    int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
    if(stopsLevel > 0)
    {
@@ -172,6 +165,30 @@ bool BuildSLTPFromDistances(double entry, bool isBuyLimit, double &slOut, double
          why = "SL too close to entry for broker stops-level.";
          return false;
       }
+   }
+
+   why = "";
+   return true;
+}
+
+bool BuildTPManualFromDistance(double entry, bool isBuyLimit, double &tpOut, string &why)
+{
+   if(TP_DistancePoints <= 0)
+   {
+      why = "TP_DistancePoints must be > 0 (or enable AutoTP_NetRR_Enabled).";
+      return false;
+   }
+
+   double tpDist = (double)TP_DistancePoints * _Point;
+
+   if(isBuyLimit) tpOut = entry + tpDist;
+   else           tpOut = entry - tpDist;
+
+   tpOut = NormalizePrice(tpOut);
+
+   int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   if(stopsLevel > 0)
+   {
       if(MathAbs(entry - tpOut) < stopsLevel * _Point)
       {
          why = "TP too close to entry for broker stops-level.";
@@ -182,6 +199,92 @@ bool BuildSLTPFromDistances(double entry, bool isBuyLimit, double &slOut, double
    why = "";
    return true;
 }
+
+// Computes TP so that NET profit (after commissions) is >= NetRR_Target * 1R, where:
+// 1R is interpreted as (SL loss + commissions) if IncludeCommissionInRisk=true, else (SL loss + commissions) is still used for the "R" base.
+bool ComputeAutoTP_NetRR(double entry, bool isBuyLimit, double sl, double vol, double riskRoundedAUD, double &tpOut, int &tpPointsOut, double &effNetRR, string &why)
+{
+   if(vol <= 0)
+   {
+      why = "Invalid volume for AutoTP.";
+      return false;
+   }
+   if(NetRR_Target <= 0)
+   {
+      why = "NetRR_Target must be > 0.";
+      return false;
+   }
+
+   // Estimate round-trip commission in account currency (AUD)
+   double commissionRT = CommissionPerLotPerSide * 2.0 * vol;
+
+   // Define 1R base as (SL loss + commissions), regardless of IncludeCommissionInRisk
+   double rBase = riskRoundedAUD;
+   if(!IncludeCommissionInRisk)
+      rBase += commissionRT;
+
+   double requiredNetProfit = NetRR_Target * rBase;
+   double requiredGrossProfit = requiredNetProfit + commissionRT; // gross must cover commissions to achieve required net
+
+   // Profit per 1 point move (pre-eval in deposit currency)
+   ENUM_ORDER_TYPE ot = isBuyLimit ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+
+   double testPrice = isBuyLimit ? (entry + _Point) : (entry - _Point);
+   double p1 = 0.0;
+   if(!OrderCalcProfit(ot, _Symbol, vol, entry, testPrice, p1))
+   {
+      why = "OrderCalcProfit failed while estimating profit-per-point.";
+      return false;
+   }
+
+   double profitPerPoint = MathAbs(p1);
+   if(profitPerPoint <= 0)
+   {
+      why = "Profit-per-point is zero/invalid (symbol config).";
+      return false;
+   }
+
+   // Points needed to GUARANTEE required gross profit (ceil + optional safety)
+   int pts = (int)MathCeil(requiredGrossProfit / profitPerPoint);
+   if(pts < 1) pts = 1;
+   pts += AutoTP_SafetyPoints;
+
+   // Build TP price
+   double tp = isBuyLimit ? (entry + (double)pts * _Point) : (entry - (double)pts * _Point);
+   tp = NormalizePrice(tp);
+
+   // broker stops-level check (distance from entry)
+   int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   if(stopsLevel > 0)
+   {
+      if(MathAbs(entry - tp) < stopsLevel * _Point)
+      {
+         // if too close, push it out to the minimum and re-normalize
+         int minPts = stopsLevel + AutoTP_SafetyPoints;
+         if(minPts < pts) minPts = pts;
+         pts = minPts;
+         tp = isBuyLimit ? (entry + (double)pts * _Point) : (entry - (double)pts * _Point);
+         tp = NormalizePrice(tp);
+      }
+   }
+
+   // Compute effective NET RR after normalization (for logging/UI)
+   double grossAtTP = 0.0;
+   if(!OrderCalcProfit(ot, _Symbol, vol, entry, tp, grossAtTP))
+   {
+      why = "OrderCalcProfit failed while validating final TP.";
+      return false;
+   }
+
+   double netAtTP = grossAtTP - commissionRT;
+   effNetRR = (rBase > 0) ? (netAtTP / rBase) : 0.0;
+
+   tpOut = tp;
+   tpPointsOut = pts;
+   why = "";
+   return true;
+}
+
 
 bool IsLimitPriceValid(double entry, bool isBuyLimit, string &why)
 {
@@ -211,8 +314,8 @@ bool IsLimitPriceValid(double entry, bool isBuyLimit, string &why)
 
 bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outRiskRoundedAUD, string &why)
 {
-   const double GUARANTEED_MIN_RISK_AUD = 10.0;
-   double riskMin = MathMax(RiskAUD_Min, GUARANTEED_MIN_RISK_AUD);
+   // NOTE: Previously enforced a hard minimum of 10 AUD. Removed to allow smaller R values.
+   double riskMin = RiskAUD_Min;
    double riskMax = MathMax(RiskAUD_Max, riskMin);
    double riskTarget = MathMax(RiskAUD_Target, riskMin);
    why = "";
@@ -289,7 +392,7 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
 
    if(riskTotal < riskMin)
    {
-      why = "Rounded risk is below the guaranteed minimum (>=10 AUD).";
+      why = "Rounded risk is below RiskAUD_Min filter.";
       return false;
    }
    if(riskTotal > riskMax)
@@ -459,9 +562,10 @@ bool PlaceOrReplacePending()
 
    string why="";
    double sl=0, tp=0;
-   if(!BuildSLTPFromDistances(entry, isBuyLimit, sl, tp, why))
+
+   if(!BuildSLFromDistance(entry, isBuyLimit, sl, why))
    {
-      UpdateStatus("SL/TP invalid: " + why);
+      UpdateStatus("SL invalid: " + why);
       return false;
    }
 
@@ -478,6 +582,28 @@ bool PlaceOrReplacePending()
       return false;
    }
    string riskWarn = why;
+
+   // Build TP AFTER volume is known (so we can guarantee NET RR after commissions)
+   int autoTpPts = 0;
+   double effNetRR = 0.0;
+
+   if(AutoTP_NetRR_Enabled)
+   {
+      if(!ComputeAutoTP_NetRR(entry, isBuyLimit, sl, vol, riskRounded, tp, autoTpPts, effNetRR, why))
+      {
+         UpdateStatus("Auto-TP blocked: " + why);
+         return false;
+      }
+   }
+   else
+   {
+      if(!BuildTPManualFromDistance(entry, isBuyLimit, tp, why))
+      {
+         UpdateStatus("TP invalid: " + why);
+         return false;
+      }
+   }
+
 
    if(AlsoBlockIfPendingExists)
    {
@@ -516,7 +642,8 @@ bool PlaceOrReplacePending()
 
    int ppp = PointsPerPip();
    double slPips = (ppp > 0) ? ((double)SL_DistancePoints / (double)ppp) : 0.0;
-   double tpPips = (ppp > 0) ? ((double)TP_DistancePoints / (double)ppp) : 0.0;
+   int tpPtsDisplay = AutoTP_NetRR_Enabled ? autoTpPts : TP_DistancePoints;
+   double tpPips = (ppp > 0) ? ((double)tpPtsDisplay / (double)ppp) : 0.0;
 
    string side = isBuyLimit ? "BUY LIMIT" : "SELL LIMIT";
    UpdateStatus(
@@ -524,7 +651,8 @@ bool PlaceOrReplacePending()
       " | TL=" + g_trendName +
       " | Entry=" + DoubleToString(entry, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)) +
       " | SL=" + IntegerToString(SL_DistancePoints) + "pt (" + DoubleToString(slPips, 1) + "pip)" +
-      " | TP=" + IntegerToString(TP_DistancePoints) + "pt (" + DoubleToString(tpPips, 1) + "pip)" +
+      " | TP=" + IntegerToString(tpPtsDisplay) + "pt (" + DoubleToString(tpPips, 1) + "pip)" +
+      (AutoTP_NetRR_Enabled ? (" | NetRR~" + DoubleToString(effNetRR, 2)) : "") +
       " | Vol=" + DoubleToString(vol, 2) +
       " | Risk~" + DoubleToString(riskRounded, 2) +
       (riskWarn == "" ? "" : " | " + riskWarn)
