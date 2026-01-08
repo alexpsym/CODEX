@@ -7,7 +7,7 @@ import re
 import shutil
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
@@ -676,6 +676,7 @@ def extract_timesheet_entries(
     date_positions: Dict[int, date] = {}
     date_markers: List[Tuple[int, Optional[date]]] = []
     pending_shift_totals: List[Tuple[int, Decimal, str]] = []
+    extended_period = (pay_period[0] - timedelta(days=60), pay_period[1] + timedelta(days=60))
 
     for idx, line in enumerate(lines):
         dt = parse_timesheet_date(line, pay_period)
@@ -699,6 +700,28 @@ def extract_timesheet_entries(
             continue
 
         if any(pattern.match(normalize_timesheet_date_text(line)) for pattern in TIMESHEET_DATE_PATTERNS):
+            candidate_any = parse_timesheet_date(line, extended_period)
+            if candidate_any is not None:
+                date_markers.append((idx, candidate_any))
+                if pay_period[0] <= candidate_any <= pay_period[1]:
+                    current = candidate_any
+                    seen_totals.setdefault(candidate_any, set())
+                    date_positions[idx] = candidate_any
+
+                    inline_hours = parse_hours(line)
+                    if inline_hours > 0:
+                        normalized = SPACE_RE.sub(" ", line.lower()).strip()
+                        key = f"{fmt_hours(inline_hours)}|{normalized}"
+                        if key not in seen_totals[current]:
+                            entry = TimesheetEntry(hours=inline_hours, label="Day Total", counts=True, raw=line)
+                            score = (True, inline_hours)
+                            existing = best_totals.get(current)
+                            if existing is None or score > existing[0]:
+                                best_totals[current] = (score, entry)
+                            seen_totals[current].add(key)
+                else:
+                    current = None
+                continue
             date_markers.append((idx, None))
             current = None
             continue
@@ -748,24 +771,31 @@ def extract_timesheet_entries(
 
         seen_totals[current].add(key)
 
-    resolved_markers: List[Tuple[int, date]] = sorted(date_positions.items())
-    if pending_shift_totals and not resolved_markers:
+    if pending_shift_totals:
         for marker_idx, marker_dt in date_markers:
             if marker_dt is not None:
                 continue
-            fallback_dt = resolve_inline_date(normalize_timesheet_date_text(lines[marker_idx]), pay_period)
-            if fallback_dt and pay_period[0] <= fallback_dt <= pay_period[1]:
+            fallback_dt = parse_timesheet_date(lines[marker_idx], extended_period)
+            if fallback_dt is None:
+                continue
+            date_markers.append((marker_idx, fallback_dt))
+            if pay_period[0] <= fallback_dt <= pay_period[1]:
                 seen_totals.setdefault(fallback_dt, set())
-                resolved_markers.append((marker_idx, fallback_dt))
-        resolved_markers.sort()
+                date_positions.setdefault(marker_idx, fallback_dt)
+
+    boundary_markers: List[Tuple[int, date]] = sorted(
+        [(idx, dt) for idx, dt in date_markers if dt is not None], key=lambda pair: pair[0]
+    )
 
     unassigned_shift_totals: List[Tuple[int, Decimal, str]] = []
-    if pending_shift_totals and resolved_markers:
-        indexed_dates = resolved_markers
+    if pending_shift_totals and boundary_markers:
+        indexed_dates = boundary_markers
         for idx, hours, normalized in pending_shift_totals:
             nearest_idx, nearest_dt = min(
                 indexed_dates, key=lambda pair: (abs(pair[0] - idx), pair[0])
             )
+            if not (pay_period[0] <= nearest_dt <= pay_period[1]):
+                continue
             seen_totals.setdefault(nearest_dt, set())
             key = f"{fmt_hours(hours)}|{normalized}"
             if key in seen_totals[nearest_dt]:
@@ -1344,4 +1374,3 @@ if __name__ == "__main__":
     except Exception as exc:  # noqa: BLE001 - surface clear errors to CLI
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
-
