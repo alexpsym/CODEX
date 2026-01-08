@@ -710,14 +710,156 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <style>
         :root { color-scheme: light dark; }
         body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
+        h1 { margin: 0; text-align: center; }
+        h2 { margin: 0; font-size: 1.35rem; }
+        .meta { color: #94a3b8; margin: 0.75rem 0 1.5rem; line-height: 1.5; }
+        .home { max-width: 1120px; margin: 0 auto; }
+        .nav-bar { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+        button { padding: 0.55rem 0.9rem; border-radius: 10px; border: none; cursor: pointer; font-weight: 800; }
+        .secondary { background: #1f2937; color: #cbd5e1; }
+        .refresh { background: #3b82f6; color: #eaf2ff; }
+
+        .toolbar { display: flex; gap: 0.75rem; align-items: center; justify-content: center; margin-bottom: 1.75rem; flex-wrap: wrap; }
+        #status { color: #94a3b8; }
+
+        .hero { display: flex; justify-content: center; margin: 0 0 2rem; }
+        .hero-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: min(720px, 100%);
+            padding: 1.05rem 1.25rem;
+            border-radius: 16px;
+            border: 2px solid #334155;
+            background: #111827;
+            color: #e2e8f0;
+            text-decoration: none;
+            font-weight: 900;
+            letter-spacing: 0.2px;
+            box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+        }
+        .hero-btn:hover { background: #0f172a; border-color: #38bdf8; }
+
+        .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+        @media (max-width: 920px) { .cols { grid-template-columns: 1fr; } }
+
+        .panel { background: #111827; border: 1px solid #1f2937; border-radius: 16px; padding: 1.25rem; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
+        .panel-header { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; margin-bottom: 0.75rem; }
+        .panel-sub { color: #94a3b8; margin-top: 0.25rem; font-size: 0.95rem; line-height: 1.4; }
+
+        .script-stack { display: flex; flex-direction: column; gap: 0.65rem; margin-top: 0.9rem; }
+        .script-row { display: flex; flex-wrap: wrap; gap: 0.65rem; margin-top: 0.9rem; }
+
+        .script-btn {
+            width: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem;
+            text-align: left;
+            padding: 0.9rem 1rem;
+            border-radius: 14px;
+            border: 1px solid #334155;
+            background: #0a0f1b;
+            color: #e5e7eb;
+        }
+        .script-btn:hover { background: #0f172a; }
+        .script-btn.compact { width: auto; min-width: 190px; padding: 0.75rem 0.9rem; }
+        .script-name { font-weight: 900; }
+        .status-pill {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0.25rem 0.7rem;
+            border-radius: 999px;
+            font-size: 0.85rem;
+            font-weight: 900;
+            background: #1f2937;
+            color: #cbd5e1;
+            border: 1px solid #334155;
+            white-space: nowrap;
+        }
+        .status-pill.running { background: #14532d; color: #bbf7d0; border-color: #22c55e55; }
+        .status-pill.stopped { background: #7f1d1d; color: #fecdd3; border-color: #ef444455; }
+        .empty-state { color: #94a3b8; margin-top: 0.9rem; }
+    </style>
+</head>
+<body>
+    <div class=\"nav-bar\">
+        <button class=\"secondary\" id=\"nav-back\">Back</button>
+        <button class=\"secondary\" id=\"nav-forward\">Forward</button>
+    </div>
+
+    <div class=\"home\">
+        <h1>Render Master Control</h1>
+        <p class=\"meta\">Click a script to open its page (start/stop, logs, and settings if available). Use Open Orders / Positions for a live view of OANDA + Bybit open activity.</p>
+
+        <div class=\"toolbar\">
+            <button class=\"refresh\" id=\"refresh-btn\">Refresh</button>
+            <span id=\"status\">Loading scripts...</span>
+        </div>
+
+        <div class=\"hero\">
+            <a class=\"hero-btn\" href=\"/open-orders\" target=\"_blank\" rel=\"noopener\">Open Orders / Positions</a>
+        </div>
+
+        <div class=\"cols\">
+            <section class=\"panel\">
+                <div class=\"panel-header\">
+                    <h2>Forex</h2>
+                    <span class=\"status-pill\" id=\"forex-count\">—</span>
+                </div>
+                <div class=\"panel-sub\">OANDA, FX scanners, calculators, and weekend tools.</div>
+                <div id=\"forex-scripts\" class=\"script-stack\"></div>
+            </section>
+
+            <section class=\"panel\">
+                <div class=\"panel-header\">
+                    <h2>Crypto</h2>
+                    <span class=\"status-pill\" id=\"crypto-count\">—</span>
+                </div>
+                <div class=\"panel-sub\">Bybit, Coinspot, crypto scanners, IV tools, and calculators.</div>
+                <div id=\"crypto-scripts\" class=\"script-stack\"></div>
+            </section>
+        </div>
+
+        <section class=\"panel\" style=\"margin-top: 1rem;\">
+            <div class=\"panel-header\">
+                <h2>Other</h2>
+                <span class=\"status-pill\" id=\"other-count\">—</span>
+            </div>
+            <div class=\"panel-sub\">Utility scripts and non-trading tools.</div>
+            <div id=\"other-scripts\" class=\"script-row\"></div>
+        </section>
+    </div>
+
+    <script src=\"/static/dashboard.js\"></script>
+</body>
+</html>"""
+
+OPEN_ORDERS_TEMPLATE = """<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+    <meta charset=\"UTF-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <title>Open Orders / Positions</title>
+    <style>
+        :root { color-scheme: light dark; }
+        body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
         h1 { margin-top: 0; }
-        .meta { color: #94a3b8; margin-bottom: 1.5rem; }
-        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1rem; }
-        .card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 1.25rem; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
-        .panel { background: #111827; border: 1px solid #1f2937; border-radius: 16px; padding: 1.5rem; margin-top: 2rem; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
+        .meta { color: #94a3b8; margin: 0.75rem 0 1.25rem; line-height: 1.5; }
+        .nav-bar { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+        button { padding: 0.55rem 0.9rem; border-radius: 10px; border: none; cursor: pointer; font-weight: 800; }
+        .secondary { background: #1f2937; color: #cbd5e1; }
+        .refresh { background: #3b82f6; color: #eaf2ff; }
+        .toolbar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
+        .badge { display: inline-block; padding: 0.35rem 0.7rem; border-radius: 999px; background: #1f2937; color: #cbd5e1; font-weight: 900; border: 1px solid #334155; }
+        .badge-error { background: #7f1d1d; color: #fecdd3; border-color: #ef444455; }
+        .badge-ok { background: #14532d; color: #bbf7d0; border-color: #22c55e55; }
+
+        .panel { background: #111827; border: 1px solid #1f2937; border-radius: 16px; padding: 1.5rem; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
         .panel-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; }
         .panel-header h2 { margin: 0 0 0.35rem; font-size: 1.35rem; }
-        .panel-header .meta { margin: 0; }
         .table-wrap { overflow-x: auto; border-radius: 12px; border: 1px solid #1f2937; background: #0b1220; }
         table { width: 100%; border-collapse: collapse; min-width: 920px; }
         th, td { text-align: left; padding: 0.6rem 0.75rem; border-bottom: 1px solid #1f2937; font-size: 0.9rem; }
@@ -726,27 +868,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .empty-state { margin-top: 0.75rem; color: #94a3b8; }
         .error-list { margin-top: 0.75rem; color: #fca5a5; font-size: 0.9rem; }
         .error-list ul { margin: 0.4rem 0 0; padding-left: 1.25rem; }
-        .row { display: flex; justify-content: space-between; gap: 1rem; align-items: center; }
-        .nav-bar { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
-        .path { color: #94a3b8; font-size: 0.9rem; word-break: break-all; }
-        .pill { display: inline-block; padding: 0.3rem 0.65rem; border-radius: 999px; font-weight: 700; font-size: 0.9rem; }
-        .running { background: #22c55e22; color: #86efac; }
-        .stopped { background: #ef444422; color: #fecdd3; }
-        .actions { display: flex; gap: 0.5rem; margin: 0.75rem 0; }
-        button { padding: 0.55rem 0.9rem; border-radius: 10px; border: none; cursor: pointer; font-weight: 700; }
-        .start { background: #22c55e; color: #052e16; }
-        .stop { background: #ef4444; color: #fff7ed; }
-        .secondary { background: #1f2937; color: #cbd5e1; }
-        .settings-card { margin-top: 0.5rem; padding: 0.75rem; border: 1px solid #1f2937; border-radius: 10px; background: #0d1728; display: flex; flex-direction: column; gap: 0.75rem; }
-        .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.5rem; }
-        .settings-card label { display: flex; flex-direction: column; gap: 0.25rem; font-weight: 700; color: #cbd5e1; font-size: 0.95rem; }
-        .settings-card input { padding: 0.55rem 0.75rem; border-radius: 10px; border: 1px solid #1f2937; background: #0a0f1b; color: #e5e7eb; }
-        .badge { display: inline-block; padding: 0.35rem 0.7rem; border-radius: 999px; background: #1f2937; color: #cbd5e1; font-weight: 700; }
-        .badge-error { background: #7f1d1d; color: #fecdd3; }
-        .badge-ok { background: #14532d; color: #bbf7d0; }
-        pre { background: #0a0f1b; color: #e5e7eb; border-radius: 8px; padding: 0.75rem; overflow: auto; max-height: 260px; white-space: pre-wrap; margin: 0; }
-        .toolbar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; }
-        .refresh { background: #3b82f6; color: #eaf2ff; }
         #open-orders-table th:last-child,
         #open-orders-table td:last-child { min-width: 96px; width: 96px; }
         .action-cell { white-space: nowrap; }
@@ -759,7 +880,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             padding: 0 10px;
             border-radius: 8px;
             font-size: 0.8rem;
-            font-weight: 700;
+            font-weight: 900;
             appearance: none;
             -webkit-appearance: none;
             background-color: #1f2937;
@@ -774,22 +895,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div class=\"nav-bar\">
         <button class=\"secondary\" id=\"nav-back\">Back</button>
         <button class=\"secondary\" id=\"nav-forward\">Forward</button>
+        <button class=\"secondary\" id=\"nav-home\">Dashboard</button>
     </div>
-    <h1>Render Master Control</h1>
-    <p class=\"meta\">Pick a category to see its scripts. From there you can start, stop, and monitor anything in this repository (everything except the mt5-clone folder). Webhooks can be sent to <code>/webhook/&lt;script-name&gt;</code>.</p>
+
+    <h1>Open Orders / Positions</h1>
+    <p class=\"meta\">Live feed of open Forex (OANDA) and Crypto (Bybit) activity. Profit metrics are hidden.</p>
+
     <div class=\"toolbar\">
         <button class=\"refresh\" id=\"refresh-btn\">Refresh</button>
-        <span id=\"status\" class=\"meta\">Loading scripts...</span>
+        <span class=\"badge\" id=\"open-orders-status\">Loading...</span>
     </div>
-    <div id=\"grid\" class=\"grid\"></div>
+
     <div class=\"panel\" id=\"open-orders-panel\">
-        <div class=\"panel-header\">
-            <div>
-                <h2>Open Orders / Trades</h2>
-                <p class=\"meta\">Live feed of open Forex (OANDA) and Crypto (Bybit) activity. Profit metrics are hidden.</p>
-            </div>
-            <span class=\"badge\" id=\"open-orders-status\">Loading...</span>
-        </div>
         <div class=\"table-wrap\">
             <table id=\"open-orders-table\">
                 <thead>
@@ -822,7 +939,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
     </div>
 
-    <script src=\"/static/dashboard.js\"></script>
+    <script src=\"/static/open_orders.js\"></script>
 </body>
 </html>"""
 
@@ -3396,6 +3513,11 @@ PAYSLIP_AUDIT_TEMPLATE = """<!DOCTYPE html>
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
     return HTML_TEMPLATE.replace("{asset_version}", ASSET_VERSION)
+
+
+@app.get("/open-orders", response_class=HTMLResponse)
+async def open_orders_page() -> str:
+    return OPEN_ORDERS_TEMPLATE
 
 
 @app.get("/category/{category}", response_class=HTMLResponse)
