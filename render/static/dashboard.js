@@ -1,274 +1,247 @@
 (() => {
-    const grid = document.getElementById('grid');
-    const status = document.getElementById('status');
-    const refreshBtn = document.getElementById('refresh-btn');
-    const openOrdersTable = document.getElementById('open-orders-table');
-    const openOrdersBody = openOrdersTable?.querySelector('tbody');
-    const openOrdersStatus = document.getElementById('open-orders-status');
-    const openOrdersEmpty = document.getElementById('open-orders-empty');
-    const openOrdersErrors = document.getElementById('open-orders-errors');
-    const openOrdersErrorsList = openOrdersErrors?.querySelector('ul');
+  const refreshBtn = document.getElementById('refresh-btn');
+  const status = document.getElementById('status');
 
-    const CATEGORIES = ['Forex', 'Crypto', 'Other'];
+  const forexList = document.getElementById('forex-scripts');
+  const cryptoList = document.getElementById('crypto-scripts');
+  const otherList = document.getElementById('other-scripts');
 
-    let scriptsCache = [];
-    let openOrdersCache = [];
-    let refreshInFlight = null;
-    let openOrdersInFlight = null;
-    let bybitSettingsEditing = false;
+  // Open Orders (inline)
+  const ooRefreshBtn = document.getElementById('oo-refresh-btn');
+  const ooStatus = document.getElementById('oo-status');
+  const ooTable = document.getElementById('open-orders-table');
+  const ooTbody = ooTable?.querySelector('tbody');
+  const ooEmpty = document.getElementById('open-orders-empty');
+  const ooErrorsBox = document.getElementById('open-orders-errors');
+  const ooErrorsList = ooErrorsBox?.querySelector('ul');
 
-    const setStatus = (message, isError = false) => {
-        status.textContent = message;
-        status.style.color = isError ? '#fca5a5' : '#94a3b8';
-    };
+  let scriptsInFlight = null;
+  let ooInFlight = null;
 
-    const setOrdersStatus = (message, tone = 'default') => {
-        if (!openOrdersStatus) return;
-        openOrdersStatus.textContent = message;
-        openOrdersStatus.classList.remove('badge-error', 'badge-ok');
-        if (tone === 'error') {
-            openOrdersStatus.classList.add('badge-error');
-        } else if (tone === 'ok') {
-            openOrdersStatus.classList.add('badge-ok');
-        }
-    };
+  const setStatus = (msg, isErr = false) => {
+    if (!status) return;
+    status.textContent = msg;
+    status.style.color = isErr ? '#fca5a5' : '#94a3b8';
+  };
 
-    const fetchJson = async (url, options = {}) => {
-        const response = await fetch(url, options);
-        if (!response.ok) {
-            const body = await response.text();
-            const detail = body || response.statusText;
-            throw new Error(`${options.method || 'GET'} ${url} failed with ${response.status}: ${detail}`);
-        }
-        return response.json();
-    };
+  const fetchJson = async (url, options = {}) => {
+    const res = await fetch(url, options);
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`${options.method || 'GET'} ${url} failed: ${res.status} ${body || res.statusText}`);
+    }
+    return res.json();
+  };
 
-    const renderCategories = () => {
-        refreshBtn.textContent = 'Refresh';
-        setStatus('Select a category to manage scripts');
+  // Normalize /scripts category values (prevents empty lists)
+  const normCategory = (cat) => {
+    const c = String(cat || '').trim().toLowerCase();
+    if (c === 'forex' || c.includes('oanda') || c.includes('fx')) return 'Forex';
+    if (c === 'crypto' || c.includes('bybit') || c.includes('coinspot')) return 'Crypto';
+    return 'Other';
+  };
 
-        grid.innerHTML = '';
-        CATEGORIES.forEach((category) => {
-            const matching = scriptsCache.filter((s) => s.category === category);
+  const makeScriptButton = (script, compact = false) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `script-btn${compact ? ' compact' : ''}`;
 
-            const card = document.createElement('div');
-            card.className = 'card';
+    const name = document.createElement('div');
+    name.className = 'script-name';
+    name.textContent = script.name;
 
-            const header = document.createElement('div');
-            header.className = 'row';
-            const title = document.createElement('div');
-            title.innerHTML = `<strong>${category}</strong><div class="path">${matching.length} scripts</div>`;
-            header.appendChild(title);
-            card.appendChild(header);
+    const pill = document.createElement('span');
+    pill.className = `status-pill ${script.running ? 'running' : 'stopped'}`;
+    pill.textContent = script.running ? 'Running' : 'Stopped';
 
-            const actions = document.createElement('div');
-            actions.className = 'actions';
-            const openBtn = document.createElement('button');
-            openBtn.className = 'start';
-            openBtn.textContent = 'View scripts';
-            openBtn.onclick = () => {
-                window.location.href = `/category/${encodeURIComponent(category)}`;
-            };
-            actions.appendChild(openBtn);
-            card.appendChild(actions);
+    btn.appendChild(name);
+    btn.appendChild(pill);
 
-            grid.appendChild(card);
-        });
-    };
-
-    const formatValue = (value) => {
-        if (value === null || value === undefined || value === '') return '—';
-        return value;
-    };
-
-    const formatTimestamp = (value) => {
-        if (!value) return '—';
-        const numeric = Number(value);
-        if (!Number.isNaN(numeric) && String(value).trim() !== '') {
-            const timestamp = numeric < 1_000_000_000_000 ? numeric * 1000 : numeric;
-            const date = new Date(timestamp);
-            if (!Number.isNaN(date.getTime())) {
-                return date.toLocaleString();
-            }
-        }
-        const date = new Date(value);
-        if (!Number.isNaN(date.getTime())) {
-            return date.toLocaleString();
-        }
-        return value;
-    };
-
-    const closeOpenItem = async (item, button, label) => {
-        if (!button) return;
-        button.disabled = true;
-        const original = button.textContent;
-        button.textContent = '...';
-        try {
-            await fetchJson('/api/open-orders/close', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(item),
-            });
-            await refreshOpenOrders();
-            setOrdersStatus(`${label} request sent`, 'ok');
-        } catch (err) {
-            console.error(err);
-            setOrdersStatus(`Failed to ${label.toLowerCase()}.`, 'error');
-        } finally {
-            button.disabled = false;
-            button.textContent = original;
-        }
-    };
-
-    const renderOpenOrders = (items, errorCount = 0, errors = []) => {
-        if (!openOrdersBody || !openOrdersTable) return;
-        openOrdersBody.innerHTML = '';
-        if (openOrdersErrors) {
-            openOrdersErrors.style.display = errorCount ? 'block' : 'none';
-        }
-        if (openOrdersErrorsList) {
-            openOrdersErrorsList.innerHTML = '';
-            errors.forEach((entry) => {
-                const item = document.createElement('li');
-                const parts = [];
-                if (entry.broker) parts.push(entry.broker);
-                if (entry.account) parts.push(entry.account);
-                if (entry.category) parts.push(entry.category);
-                const prefix = parts.length ? `${parts.join(' / ')}: ` : '';
-                item.textContent = `${prefix}${entry.message || 'Unknown error'}`;
-                openOrdersErrorsList.appendChild(item);
-            });
-        }
-        if (!items.length) {
-            if (openOrdersEmpty) {
-                openOrdersEmpty.textContent = errorCount
-                    ? 'No open orders or trades (some sources unavailable).'
-                    : 'No open orders or trades.';
-            }
-            openOrdersEmpty?.setAttribute('style', 'display:block;');
-            return;
-        }
-        openOrdersEmpty?.setAttribute('style', 'display:none;');
-        items.forEach((item) => {
-            const row = document.createElement('tr');
-            const cells = [
-                item.broker,
-                item.account,
-                item.category,
-                item.instrument,
-                item.type,
-                item.side,
-                item.size,
-                item.entry_price || item.order_price,
-                item.current_price,
-                item.stop_loss,
-                item.take_profit,
-                item.leverage,
-                formatTimestamp(item.opened_at),
-                item.id,
-                item.status,
-            ];
-            cells.forEach((cell) => {
-                const td = document.createElement('td');
-                td.textContent = formatValue(cell);
-                row.appendChild(td);
-            });
-            const actionCell = document.createElement('td');
-            actionCell.className = 'action-cell';
-
-            const t = String(item.type || '').trim().toLowerCase();
-            const isOrder = t === 'order';
-            const isPosition = t === 'position' || t === 'trade';
-
-            if (isOrder || isPosition) {
-                const label = isOrder ? 'Cancel' : 'Close';
-                const button = document.createElement('button');
-                button.type = 'button';
-                button.className = 'action-btn';
-                button.textContent = label;
-                button.addEventListener('click', () => closeOpenItem(item, button, label));
-                actionCell.appendChild(button);
-            } else {
-                actionCell.textContent = '—';
-            }
-
-            row.appendChild(actionCell);
-            openOrdersBody.appendChild(row);
-        });
-    };
-
-    const refresh = async () => {
-        if (refreshInFlight) return refreshInFlight;
-        if (bybitSettingsEditing) {
-            setStatus('Editing Bybit monitor settings (auto-refresh paused)');
-            return Promise.resolve();
-        }
-
-        setStatus('Loading scripts...');
-        refreshInFlight = (async () => {
-            try {
-                scriptsCache = await fetchJson('/scripts');
-                renderCategories();
-            } catch (err) {
-                console.error(err);
-                setStatus('Failed to load scripts.', true);
-                if (!grid.children.length) {
-                    renderCategories();
-                }
-            } finally {
-                refreshInFlight = null;
-            }
-        })();
-
-        return refreshInFlight;
-    };
-
-    const refreshOpenOrders = async () => {
-        if (!openOrdersTable || openOrdersInFlight) return openOrdersInFlight;
-        openOrdersInFlight = (async () => {
-            try {
-                setOrdersStatus('Loading...', 'default');
-                if (openOrdersErrors) {
-                    openOrdersErrors.style.display = 'none';
-                }
-                const payload = await fetchJson('/api/open-orders');
-                openOrdersCache = payload.items || [];
-                const errorCount = (payload.errors || []).length;
-                renderOpenOrders(openOrdersCache, errorCount, payload.errors || []);
-                const updated = formatTimestamp(payload.updated_at);
-                if (errorCount) {
-                    setOrdersStatus(`Updated ${updated} • ${errorCount} source issue(s)`, 'error');
-                } else {
-                    setOrdersStatus(`Updated ${updated}`, 'ok');
-                }
-            } catch (err) {
-                console.error(err);
-                renderOpenOrders(openOrdersCache, 1, [{ message: err.message }]);
-                setOrdersStatus('Failed to load open orders.', 'error');
-            } finally {
-                openOrdersInFlight = null;
-            }
-        })();
-
-        return openOrdersInFlight;
-    };
-
-    refreshBtn?.addEventListener('click', () => {
-        refresh();
-        refreshOpenOrders();
+    btn.addEventListener('click', () => {
+      window.location.href = `/scripts/view/${encodeURIComponent(script.name)}`;
     });
 
-    const backBtn = document.getElementById('nav-back');
-    const forwardBtn = document.getElementById('nav-forward');
-    backBtn?.addEventListener('click', () => window.history.back());
-    forwardBtn?.addEventListener('click', () => window.history.forward());
+    return btn;
+  };
 
-    setInterval(() => {
-        refresh();
-        refreshOpenOrders();
-    }, 5000);
+  const renderList = (container, scripts, compact = false) => {
+    if (!container) return;
+    container.innerHTML = '';
+    scripts
+      .slice()
+      .sort((a, b) => String(a.name).localeCompare(String(b.name)))
+      .forEach((s) => container.appendChild(makeScriptButton(s, compact)));
+  };
 
-    renderCategories();
-    refresh();
-    refreshOpenOrders();
+  const refreshScripts = async () => {
+    if (scriptsInFlight) return scriptsInFlight;
+
+    scriptsInFlight = (async () => {
+      try {
+        setStatus('Loading scripts...');
+        const scripts = await fetchJson('/scripts');
+        const mapped = scripts.map((s) => ({ ...s, _cat: normCategory(s.category) }));
+
+        renderList(forexList, mapped.filter((s) => s._cat === 'Forex'), false);
+        renderList(cryptoList, mapped.filter((s) => s._cat === 'Crypto'), false);
+        renderList(otherList, mapped.filter((s) => s._cat === 'Other'), true);
+
+        setStatus(`Updated ${new Date().toLocaleTimeString()}`);
+      } catch (e) {
+        console.error(e);
+        setStatus('Failed to load scripts.', true);
+      } finally {
+        scriptsInFlight = null;
+      }
+    })();
+
+    return scriptsInFlight;
+  };
+
+  // -------- Open Orders / Positions (unchanged endpoints) --------
+  const fmt = (v) => (v === null || v === undefined || v === '' ? '—' : v);
+  const fmtTime = (v) => {
+    if (!v) return '—';
+    const n = Number(v);
+    if (!Number.isNaN(n)) {
+      const ms = n < 1_000_000_000_000 ? n * 1000 : n;
+      const d = new Date(ms);
+      if (!Number.isNaN(d.getTime())) return d.toLocaleString();
+    }
+    const d = new Date(v);
+    if (!Number.isNaN(d.getTime())) return d.toLocaleString();
+    return String(v);
+  };
+
+  const setOoPill = (text, tone) => {
+    if (!ooStatus) return;
+    ooStatus.textContent = text;
+    ooStatus.classList.remove('running', 'stopped');
+    if (tone === 'ok') ooStatus.classList.add('running');
+    if (tone === 'bad') ooStatus.classList.add('stopped');
+  };
+
+  const renderOpenOrders = (items, errors) => {
+    if (!ooTbody) return;
+
+    ooTbody.innerHTML = '';
+
+    if (ooErrorsBox) ooErrorsBox.style.display = errors?.length ? 'block' : 'none';
+    if (ooErrorsList) {
+      ooErrorsList.innerHTML = '';
+      (errors || []).forEach((err) => {
+        const li = document.createElement('li');
+        li.textContent = err.message || String(err);
+        ooErrorsList.appendChild(li);
+      });
+    }
+
+    if (!items?.length) {
+      if (ooEmpty) ooEmpty.style.display = 'block';
+      return;
+    }
+    if (ooEmpty) ooEmpty.style.display = 'none';
+
+    items.forEach((item) => {
+      const tr = document.createElement('tr');
+
+      const cols = [
+        item.broker,
+        item.account,
+        item.category,
+        item.instrument,
+        item.type,
+        item.side,
+        item.size,
+        item.entry_price || item.order_price,
+        item.current_price,
+        item.stop_loss,
+        item.take_profit,
+        item.leverage,
+        fmtTime(item.opened_at),
+        item.id,
+        item.status,
+      ];
+
+      cols.forEach((c) => {
+        const td = document.createElement('td');
+        td.textContent = fmt(c);
+        tr.appendChild(td);
+      });
+
+      const actionTd = document.createElement('td');
+      actionTd.className = 'action-cell';
+
+      const t = String(item.type || '').toLowerCase();
+      const isOrder = t === 'order';
+      const isPosition = t === 'position' || t === 'trade';
+
+      if (isOrder || isPosition) {
+        const label = isOrder ? 'Cancel' : 'Close';
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'action-btn';
+        btn.textContent = label;
+
+        btn.addEventListener('click', async () => {
+          btn.disabled = true;
+          const old = btn.textContent;
+          btn.textContent = '...';
+          try {
+            await fetchJson('/api/open-orders/close', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(item),
+            });
+            await refreshOpenOrders();
+          } catch (e) {
+            console.error(e);
+            setOoPill('Action failed', 'bad');
+          } finally {
+            btn.disabled = false;
+            btn.textContent = old;
+          }
+        });
+
+        actionTd.appendChild(btn);
+      } else {
+        actionTd.textContent = '—';
+      }
+
+      tr.appendChild(actionTd);
+      ooTbody.appendChild(tr);
+    });
+  };
+
+  const refreshOpenOrders = async () => {
+    if (ooInFlight) return ooInFlight;
+
+    ooInFlight = (async () => {
+      try {
+        setOoPill('Loading...', 'ok');
+        const payload = await fetchJson('/api/open-orders');
+        renderOpenOrders(payload.items || [], payload.errors || []);
+        setOoPill((payload.errors || []).length ? 'Updated (issues)' : 'Updated', (payload.errors || []).length ? 'bad' : 'ok');
+      } catch (e) {
+        console.error(e);
+        renderOpenOrders([], [{ message: e.message }]);
+        setOoPill('Failed', 'bad');
+      } finally {
+        ooInFlight = null;
+      }
+    })();
+
+    return ooInFlight;
+  };
+
+  refreshBtn?.addEventListener('click', () => { refreshScripts(); refreshOpenOrders(); });
+  ooRefreshBtn?.addEventListener('click', () => refreshOpenOrders());
+
+  document.getElementById('nav-back')?.addEventListener('click', () => window.history.back());
+  document.getElementById('nav-forward')?.addEventListener('click', () => window.history.forward());
+
+  setInterval(() => { refreshScripts(); refreshOpenOrders(); }, 5000);
+
+  refreshScripts();
+  refreshOpenOrders();
 })();
