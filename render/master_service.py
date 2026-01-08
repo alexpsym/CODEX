@@ -818,6 +818,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div class=\"nav-bar\">
         <button class=\"secondary\" id=\"nav-back\">Back</button>
         <button class=\"secondary\" id=\"nav-forward\">Forward</button>
+        <button class=\"secondary\" id=\"nav-home\">Dashboard</button>
     </div>
 
     <div class=\"home\">
@@ -894,7 +895,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </section>
     </div>
 
-    <script src=\"/static/dashboard.js\"></script>
+    <script src=\"/static/open_orders.js\"></script>
 </body>
 </html>"""
 
@@ -3469,6 +3470,11 @@ PAYSLIP_AUDIT_TEMPLATE = """<!DOCTYPE html>
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
     return HTML_TEMPLATE.replace("{asset_version}", ASSET_VERSION)
+
+
+@app.get("/open-orders", response_class=HTMLResponse)
+async def open_orders_page() -> str:
+    return OPEN_ORDERS_TEMPLATE
 
 
 @app.get("/category/{category}", response_class=HTMLResponse)
