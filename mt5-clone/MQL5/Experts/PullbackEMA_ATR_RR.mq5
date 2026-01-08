@@ -14,14 +14,17 @@ input int    TrendEMAPeriod          = 20;       // used when UseDualEMA=false
 input int    ATRPeriod               = 14;
 input double ATRMultiple             = 1.5;      // 0.5, 1.5, 2, 2.5, 3 (set in Inputs)
 input double RiskAUD_Target          = 10.0;     // target AUD risk per trade (position size is derived from this)
-input double RiskAUD_Min             = 9.0;      // hard filter: do NOT trade if rounded risk < this (runtime enforces >= 10 AUD)
+input double RiskAUD_Min             = 9.0;      // hard filter: do NOT trade if rounded risk < this
 input double RiskAUD_Max             = 12.0;     // hard filter: do NOT trade if rounded risk > this
-input double RiskReward              = 2.0;      // must be >= 2.0 (set 2.0 or 3.0)
+input bool   AutoTP_NetRR_Enabled    = true;     // if true, EA ignores RiskReward and auto-sets TP so NET profit >= NetRR_Target * R (after commissions)
+input double NetRR_Target            = 2.0;      // desired net R-multiple on winners (e.g., 2.0 means NET >= 2R after commissions)
+input int    AutoTP_SafetyPoints     = 0;        // extra points added to computed TP (additional safety buffer)
+input double RiskReward              = 2.0;      // used when AutoTP_NetRR_Enabled=false
 input int    SlippagePoints          = 10;
 input bool   EnforceOneTradeAtATime  = true;     // true = only one open position per symbol
 input bool   CloseDuringBlackout     = true;     // if true, force-close any open position during blackout
 input bool   IncludeCommissionInRisk = true;     // include commission in lot sizing + risk filters
-input bool   AdjustTPForCommission   = true;     // extend TP so net RR matches RiskReward
+input bool   AdjustTPForCommission   = true;     // extend TP so net RR matches RiskReward when AutoTP_NetRR_Enabled=false
 input double CommissionPerLotPerSide = 3.50;     // commission per side per 1.00 lot (account currency)
 input int    RiskSlippageBufferPoints = 50;      // buffer added to stop distance for max-risk guard (points)
 input bool   UseRolloverWindow       = true;     // avoid trading around rollover window
@@ -175,6 +178,76 @@ double CalcRiskForVolume(double lossPerLotSL, double commissionRoundTurnPerLot, 
    return IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
 }
 
+// Computes TP so that NET profit (after commissions) is >= NetRR_Target * 1R, where:
+// 1R is interpreted as (SL loss + commissions) if IncludeCommissionInRisk=true, else (SL loss + commissions) is still used for the "R" base.
+bool ComputeAutoTP_NetRR(ENUM_ORDER_TYPE type, double entry, double vol, double riskRoundedAUD, double &tpOut, string &why)
+{
+   if(vol <= 0)
+   {
+      why = "Invalid volume for AutoTP.";
+      return false;
+   }
+   if(NetRR_Target <= 0)
+   {
+      why = "NetRR_Target must be > 0.";
+      return false;
+   }
+
+   // Estimate round-trip commission in account currency (AUD)
+   double commissionRT = CommissionPerLotPerSide * 2.0 * vol;
+
+   // Define 1R base as (SL loss + commissions), regardless of IncludeCommissionInRisk
+   double rBase = riskRoundedAUD;
+   if(!IncludeCommissionInRisk)
+      rBase += commissionRT;
+
+   double requiredNetProfit = NetRR_Target * rBase;
+   double requiredGrossProfit = requiredNetProfit + commissionRT; // gross must cover commissions to achieve required net
+
+   // Profit per 1 point move (pre-eval in deposit currency)
+   double testPrice = (type == ORDER_TYPE_BUY) ? (entry + _Point) : (entry - _Point);
+   double p1 = 0.0;
+   if(!OrderCalcProfit(type, _Symbol, vol, entry, testPrice, p1))
+   {
+      why = "OrderCalcProfit failed while estimating profit-per-point.";
+      return false;
+   }
+
+   double profitPerPoint = MathAbs(p1);
+   if(profitPerPoint <= 0)
+   {
+      why = "Profit-per-point is zero/invalid (symbol config).";
+      return false;
+   }
+
+   // Points needed to GUARANTEE required gross profit (ceil + optional safety)
+   int pts = (int)MathCeil(requiredGrossProfit / profitPerPoint);
+   if(pts < 1) pts = 1;
+   pts += AutoTP_SafetyPoints;
+
+   // Build TP price
+   double tp = (type == ORDER_TYPE_BUY) ? (entry + (double)pts * _Point) : (entry - (double)pts * _Point);
+   tp = NormalizeDouble(tp, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
+
+   // broker stops-level check (distance from entry)
+   int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   if(stopsLevel > 0)
+   {
+      if(MathAbs(entry - tp) < stopsLevel * _Point)
+      {
+         int minPts = stopsLevel + AutoTP_SafetyPoints;
+         if(minPts < pts) minPts = pts;
+         pts = minPts;
+         tp = (type == ORDER_TYPE_BUY) ? (entry + (double)pts * _Point) : (entry - (double)pts * _Point);
+         tp = NormalizeDouble(tp, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS));
+      }
+   }
+
+   tpOut = tp;
+   why = "";
+   return true;
+}
+
 bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &tp, double &vol, double &riskRoundedAUD)
 {
    // RR guard
@@ -245,8 +318,7 @@ bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &t
    }
 
    // -------------------- Risk/position sizing (aligned with Trendline_Limit_RiskAUD)
-   // Hard requirement: losing trades must never be < 10 AUD (after rounding).
-   double riskMin = MathMax(RiskAUD_Min, 10.0);
+   double riskMin = RiskAUD_Min;
    double riskMax = MathMax(RiskAUD_Max, riskMin);
    double riskTarget = MathMax(RiskAUD_Target, riskMin);
 
@@ -276,7 +348,7 @@ bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &t
       riskNominal = CalcRiskForVolume(lossPerLotSL, commissionRoundTurnPerLot, v);
    }
 
-   // Step up if below min (guarantee >= 10 AUD)
+   // Step up if below min
    while(riskNominal < riskMin && (v + step) <= vmax)
    {
       v = NormalizeDouble(v + step, volDigits);
@@ -286,7 +358,7 @@ bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &t
 
    if(riskNominal < riskMin)
    {
-      Dbg(StringFormat("FAIL: cannot reach guaranteed min risk %.2f AUD within SYMBOL_VOLUME_MAX", riskMin));
+      Dbg(StringFormat("FAIL: cannot reach min risk %.2f AUD within SYMBOL_VOLUME_MAX", riskMin));
       return false;
    }
    if(riskNominal > riskMax)
@@ -296,7 +368,7 @@ bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &t
    }
 
    // Optional slippage buffer: attempt to reduce volume so worst-case <= max,
-   // but NEVER reduce volume below the guaranteed minimum-risk requirement.
+   // but NEVER reduce volume below the minimum-risk requirement.
    if(RiskSlippageBufferPoints > 0)
    {
       double bufferedStopPoints = stopPoints + RiskSlippageBufferPoints;
@@ -311,7 +383,7 @@ bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &t
          {
             double vNext = NormalizeDouble(v - step, volDigits);
             double riskNext = CalcRiskForVolume(lossPerLotSL, commissionRoundTurnPerLot, vNext);
-            if(riskNext < riskMin) break; // do not violate min-risk guarantee
+            if(riskNext < riskMin) break; // do not violate minimum-risk requirement
 
             v = vNext;
             riskNominal = riskNext;
@@ -322,7 +394,7 @@ bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &t
          }
 
          if(Debug && riskBuffered > riskMax)
-            Dbg(StringFormat("WARN: buffered risk %.2f > max %.2f, but min-risk guarantee enforced; proceeding", riskBuffered, riskMax));
+            Dbg(StringFormat("WARN: buffered risk %.2f > max %.2f, but minimum-risk requirement enforced; proceeding", riskBuffered, riskMax));
       }
    }
 
@@ -330,38 +402,49 @@ bool BuildOrderParams(ENUM_ORDER_TYPE type, double &price, double &sl, double &t
    riskRoundedAUD = riskNominal;
 
    if(type == ORDER_TYPE_BUY)
-   {
       sl = price - slDistPrice;
-      tp = price + slDistPrice * rr;
+   else
+      sl = price + slDistPrice;
+
+   if(AutoTP_NetRR_Enabled)
+   {
+      string why = "";
+      if(!ComputeAutoTP_NetRR(type, price, vol, riskRoundedAUD, tp, why))
+      {
+         Dbg("FAIL: auto TP " + why);
+         return false;
+      }
    }
    else
    {
-      sl = price + slDistPrice;
-      tp = price - slDistPrice * rr;
-   }
+      if(type == ORDER_TYPE_BUY)
+         tp = price + slDistPrice * rr;
+      else
+         tp = price - slDistPrice * rr;
 
-   // enforce TP >= 2R (already true if rr>=2, but keep explicit)
-   double tpDist = MathAbs(tp - price);
-   if(tpDist < (2.0 * MathAbs(price - sl)))
-   {
-      Dbg("FAIL: TP < 2R guard");
-      return false;
-   }
-
-   // Optionally adjust TP so RR is net of commission
-   if(AdjustTPForCommission)
-   {
-      double valuePerPoint = ValuePerPointPerLot();
-      if(valuePerPoint > 0.0)
+      // enforce TP >= 2R (already true if rr>=2, but keep explicit)
+      double tpDist = MathAbs(tp - price);
+      if(tpDist < (2.0 * MathAbs(price - sl)))
       {
-         double commissionRT = commissionRoundTurnPerLot * vol;
-         double extraPoints = commissionRT / (valuePerPoint * vol);
-         double extraPrice = extraPoints * _Point;
+         Dbg("FAIL: TP < 2R guard");
+         return false;
+      }
 
-         if(type == ORDER_TYPE_BUY)
-            tp += extraPrice;
-         else
-            tp -= extraPrice;
+      // Optionally adjust TP so RR is net of commission
+      if(AdjustTPForCommission)
+      {
+         double valuePerPoint = ValuePerPointPerLot();
+         if(valuePerPoint > 0.0)
+         {
+            double commissionRT = commissionRoundTurnPerLot * vol;
+            double extraPoints = commissionRT / (valuePerPoint * vol);
+            double extraPrice = extraPoints * _Point;
+
+            if(type == ORDER_TYPE_BUY)
+               tp += extraPrice;
+            else
+               tp -= extraPrice;
+         }
       }
    }
 
