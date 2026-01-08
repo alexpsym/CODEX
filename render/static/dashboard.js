@@ -239,6 +239,7 @@
 
   document.getElementById('nav-back')?.addEventListener('click', () => window.history.back());
   document.getElementById('nav-forward')?.addEventListener('click', () => window.history.forward());
+  document.getElementById('nav-home')?.addEventListener('click', () => { window.location.href = '/'; });
 
   setInterval(() => { refreshScripts(); refreshOpenOrders(); }, 5000);
 
