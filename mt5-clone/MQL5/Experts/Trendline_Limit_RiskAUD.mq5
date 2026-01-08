@@ -43,6 +43,7 @@ input bool   EnablePickTrendlineByClick = true;   // click a trendline on chart 
 input int    MagicNumber              = 91001;
 input bool   EnforceOneTradeAtATime   = true;   // blocks if there's an open position on this symbol
 input bool   AlsoBlockIfPendingExists = true;   // blocks if another EA pending order exists on this symbol (same magic)
+input int    PendingCancelAfterMinutes = 60;     // cancel/disarm if limit order not filled after X minutes (age measured from first successful placement)
 
 // Chart UI
 input bool   ShowButtons              = true;
@@ -55,6 +56,8 @@ string   g_trendName    = "";
 bool     g_armed        = false;
 ulong    g_ticket       = 0;
 datetime g_lastBarTime  = 0;
+datetime g_armStartTime = 0;      // when the EA first successfully placed the pending order for this arming session
+datetime g_expireAt     = 0;      // server-side pending order expiration timestamp (when PendingCancelAfterMinutes>0)
 
 string BTN_PLACE  = "TL_EA_BTN_PLACE";
 string BTN_CANCEL = "TL_EA_BTN_CANCEL";
@@ -484,6 +487,42 @@ bool DeleteTicketIfExists(ulong t)
    return trade.OrderDelete((ulong)t);
 }
 
+bool CheckAndHandlePendingExpiry()
+{
+   if(!g_armed) return false;
+   if(PendingCancelAfterMinutes <= 0) return false;
+   if(g_armStartTime <= 0) return false;
+
+   long ageSec = (long)(TimeCurrent() - g_armStartTime);
+   if(ageSec < (long)PendingCancelAfterMinutes * 60L) return false;
+
+   // Cancel *any* remaining pending for this EA on this symbol (ticket can change due to delete+recreate each new bar)
+   if(g_ticket != 0)
+      DeleteTicketIfExists(g_ticket);
+
+   ulong other = 0;
+   if(PendingOrderExistsByMagic(other))
+      DeleteTicketIfExists(other);
+
+   g_ticket = 0;
+   g_armed = false;
+   g_armStartTime = 0;
+   g_expireAt = 0;
+
+   UpdateStatus("EXPIRED -> cancelled after " + IntegerToString(PendingCancelAfterMinutes) + " min (no fill)");
+   return true;
+}
+
+datetime ComputeExpireAt()
+{
+   if(PendingCancelAfterMinutes <= 0) return 0;
+   datetime now = TimeCurrent();
+   datetime exp = now + (datetime)(PendingCancelAfterMinutes * 60);
+   // ensure expiration is strictly in the future (some brokers reject exp<=now)
+   if(exp <= now) exp = now + 60;
+   return exp;
+}
+
 void UpdateStatus(const string msg)
 {
    if(!ShowButtons) return;
@@ -623,10 +662,21 @@ bool PlaceOrReplacePending()
       DeleteTicketIfExists(g_ticket);
 
    bool ok=false;
+
+   // Prefer server-side expiration so the pending order is removed even if the EA/terminal disconnects.
+   ENUM_ORDER_TYPE_TIME tt = ORDER_TIME_GTC;
+   datetime exp = 0;
+   if(PendingCancelAfterMinutes > 0)
+   {
+      if(g_expireAt <= 0) g_expireAt = ComputeExpireAt();
+      tt = ORDER_TIME_SPECIFIED;
+      exp = g_expireAt;
+   }
+
    if(isBuyLimit)
-      ok = trade.BuyLimit(vol, entry, _Symbol, sl, tp, ORDER_TIME_GTC, 0, EA_COMMENT);
+      ok = trade.BuyLimit(vol, entry, _Symbol, sl, tp, tt, exp, EA_COMMENT);
    else
-      ok = trade.SellLimit(vol, entry, _Symbol, sl, tp, ORDER_TIME_GTC, 0, EA_COMMENT);
+      ok = trade.SellLimit(vol, entry, _Symbol, sl, tp, tt, exp, EA_COMMENT);
 
    ulong newTicket = (ulong)trade.ResultOrder();
    int ret = (int)trade.ResultRetcode();
@@ -669,13 +719,27 @@ void Arm()
       return;
    }
 
+   // Start the aging timer from the initial arming placement (NOT from each delete+recreate on new bars).
+   g_armStartTime = TimeCurrent();
+   g_expireAt = ComputeExpireAt();
+
    g_armed = true;
-   PlaceOrReplacePending();
+
+   if(!PlaceOrReplacePending())
+   {
+      // If we couldn't place an order, do not remain armed.
+      g_armed = false;
+      g_ticket = 0;
+      g_armStartTime = 0;
+      g_expireAt = 0;
+   }
 }
 
 void DisarmAndCancel()
 {
    g_armed = false;
+   g_armStartTime = 0;
+   g_expireAt = 0;
 
    if(g_ticket != 0)
       DeleteTicketIfExists(g_ticket);
@@ -696,6 +760,8 @@ void MaybeStopIfFilled()
    {
       g_armed = false;
       g_ticket = 0;
+      g_armStartTime = 0;
+      g_expireAt = 0;
       UpdateStatus("FILLED -> management stopped");
    }
 }
@@ -714,11 +780,16 @@ int OnInit()
    int ppp = PointsPerPip();
    string pipNote = (ppp == 10) ? "1 pip=10 points" : "1 pip=1 point";
    UpdateStatus("Ready. Trendline=" + (g_trendName=="" ? "<none>" : g_trendName) + " | " + pipNote + " | 1 point=1 TradingView tick");
+
+   if(PendingCancelAfterMinutes > 0)
+      EventSetTimer(10);
+
    return INIT_SUCCEEDED;
 }
 
 void OnDeinit(const int reason)
 {
+   EventKillTimer();
    RemoveUI();
 }
 
@@ -726,12 +797,20 @@ void OnTick()
 {
    MaybeStopIfFilled();
    if(!g_armed) return;
+   if(CheckAndHandlePendingExpiry()) return;
 
    if(IsNewBar())
    {
       // Reposition order on each new candle (delete + recreate to keep risk sizing consistent)
       PlaceOrReplacePending();
    }
+}
+
+void OnTimer()
+{
+   // Timer ensures expiry is enforced even if ticks are sparse (e.g., quiet markets / temporary feed hiccups).
+   MaybeStopIfFilled();
+   CheckAndHandlePendingExpiry();
 }
 
 void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
