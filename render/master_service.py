@@ -895,7 +895,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </section>
     </div>
 
-    <script src=\"/static/open_orders.js\"></script>
+    <script src=\"/static/dashboard.js\"></script>
 </body>
 </html>"""
 
