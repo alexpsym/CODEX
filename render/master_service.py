@@ -87,13 +87,10 @@ STANDALONE_SCRIPTS = {
 ENTRY_OVERRIDES = {
     "Crypto-Scanner-clone": ["continuous_scan.py", "scan.py"],
     "LEDGER-clone": ["process_entries.py"],
-    "PUSH": ["PUSH.py"],
     "bybit_monitor": ["bybit_altcoin_monitor.py"],
     "bybithistory-clone": ["app.py"],
     "coinspot-clone": ["coinspot_history.py"],
     "cryptocalculator-clone": ["cryptocalculator_web.py", "cryptocalculator.py"],
-    "download_video": ["download_video.py"],
-    "extractor": ["extract_all_files.py"],
     "fxscanner-oanda-clone": ["forex_scanner.py"],
     "fxweekend-clone": ["liquidate.py"],
     "ivindicator-clone": ["ivweb.py", "ivapp.py", "ivindicator.py"],
@@ -101,7 +98,6 @@ ENTRY_OVERRIDES = {
     "oanda_monitor": ["oanda_forex_monitor.py"],
     "oanda_history-clone": ["oanda_history.py"],
     "payslip_audit": ["payslip_timesheet_audit.py"],
-    "viddl-clone": ["master.py", "vid.py"],
 }
 
 LOG_FILE_OVERRIDES: Dict[str, Path] = {
@@ -324,13 +320,7 @@ def categorize_script(script_path: Path) -> str:
     filename = script_path.name.lower()
     full = f"{folder}/{filename}"
 
-    other_explicit = {
-        "download_video",
-        "extractor",
-        "viddl-clone",
-        "payslip_audit",
-        "push",
-    }
+    other_explicit = {"payslip_audit"}
 
     if any(keyword in folder for keyword in ("fx", "oanda", "forex")):
         return "Forex"
