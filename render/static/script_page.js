@@ -602,6 +602,7 @@
 
     const loadBybitSettings = async () => {
         if (!isBybitMonitor || !settingsCard) return;
+        settingsCard.style.display = 'block';
         try {
             const resp = await fetch('/api/bybit-monitor/settings');
             if (!resp.ok) {
@@ -610,7 +611,6 @@
             const data = await resp.json();
             if (waitInput) waitInput.value = data.wait_seconds ?? '';
             if (thresholdInput) thresholdInput.value = data.percent_threshold ?? '';
-            settingsCard.style.display = 'block';
             if (data.push_ready) {
                 setSettingsBadge(settingsStatus, 'Ready');
             } else {
@@ -624,6 +624,7 @@
 
     const loadOandaSettings = async () => {
         if (!isOandaMonitor || !oandaSettingsCard) return;
+        oandaSettingsCard.style.display = 'block';
         try {
             const resp = await fetch('/api/oanda-monitor/settings');
             if (!resp.ok) {
@@ -639,7 +640,6 @@
             if (oandaAthAtlPrice) oandaAthAtlPrice.value = (data.ath_atl_price ?? 'M').toUpperCase();
             if (oandaAthAtlBackfillBatch) oandaAthAtlBackfillBatch.value = data.ath_atl_backfill_batch ?? '';
             if (oandaAthAtlBackfillPages) oandaAthAtlBackfillPages.value = data.ath_atl_backfill_max_pages ?? '';
-            oandaSettingsCard.style.display = 'block';
             if (data.push_ready) {
                 setSettingsBadge(oandaSettingsStatus, 'Ready');
             } else {
