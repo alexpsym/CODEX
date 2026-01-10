@@ -152,8 +152,241 @@
         target.style.color = isError ? '#fecdd3' : '#cbd5e1';
     };
 
+    const el = (tag, attrs = {}, children = []) => {
+        const node = document.createElement(tag);
+        Object.entries(attrs).forEach(([key, value]) => {
+            if (key === 'class') {
+                node.className = value;
+            } else if (key === 'text') {
+                node.textContent = value;
+            } else if (key.startsWith('on') && typeof value === 'function') {
+                node.addEventListener(key.slice(2), value);
+            } else {
+                node.setAttribute(key, String(value));
+            }
+        });
+        children.forEach((child) => {
+            node.appendChild(typeof child === 'string' ? document.createTextNode(child) : child);
+        });
+        return node;
+    };
+
+    const setupCustomAlerts = (monitor, parentCard) => {
+        if (!parentCard) return;
+        const apiBase =
+            monitor === 'oanda'
+                ? '/api/oanda-monitor/custom-alerts'
+                : '/api/bybit-monitor/custom-alerts';
+
+        const section = el('div', { class: 'settings-section' }, [
+            el('h3', { text: 'Custom alerts', style: 'margin-top:16px;' }),
+        ]);
+
+        const status = el('div', { class: 'meta', text: '' });
+        const list = el('div', {
+            id: `${monitor}-custom-alerts-list`,
+            style: 'display:flex;flex-direction:column;gap:10px;margin-top:10px;',
+        });
+
+        const symbolInput = el('input', {
+            placeholder: monitor === 'oanda' ? 'EUR_USD' : 'BTCUSDT',
+            style: 'width:180px;',
+        });
+        const kindSelect = el('select', {}, [
+            el('option', { value: 'price', text: 'price' }),
+            el('option', { value: 'move', text: 'move' }),
+        ]);
+        const directionSelect = el('select');
+        const unitSelect = el('select');
+        const thresholdInput = el('input', { placeholder: 'threshold', style: 'width:120px;' });
+        const windowInput = el('input', { placeholder: 'window_seconds', style: 'width:140px;' });
+        const targetPriceInput = el('input', {
+            placeholder: 'target_price',
+            style: 'width:140px;',
+        });
+        const createBtn = el('button', { class: 'secondary', text: 'Add alert' });
+
+        const formRow = el(
+            'div',
+            {
+                style:
+                    'display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:10px;',
+            },
+            [
+                symbolInput,
+                kindSelect,
+                directionSelect,
+                unitSelect,
+                thresholdInput,
+                windowInput,
+                targetPriceInput,
+                createBtn,
+            ],
+        );
+
+        section.appendChild(formRow);
+        section.appendChild(status);
+        section.appendChild(list);
+        parentCard.appendChild(section);
+
+        const renderForm = () => {
+            const kind = kindSelect.value;
+            directionSelect.innerHTML = '';
+            unitSelect.innerHTML = '';
+
+            if (kind === 'price') {
+                directionSelect.appendChild(el('option', { value: 'above', text: 'above' }));
+                directionSelect.appendChild(el('option', { value: 'below', text: 'below' }));
+                unitSelect.style.display = 'none';
+                thresholdInput.style.display = 'none';
+                windowInput.style.display = 'none';
+                targetPriceInput.style.display = '';
+            } else {
+                directionSelect.appendChild(el('option', { value: 'either', text: 'either' }));
+                directionSelect.appendChild(el('option', { value: 'up', text: 'up' }));
+                directionSelect.appendChild(el('option', { value: 'down', text: 'down' }));
+
+                if (monitor === 'oanda') {
+                    unitSelect.appendChild(el('option', { value: 'pips', text: 'pips' }));
+                    unitSelect.appendChild(el('option', { value: 'pct', text: '%' }));
+                } else {
+                    unitSelect.appendChild(el('option', { value: 'pct', text: '%' }));
+                    unitSelect.appendChild(el('option', { value: 'abs', text: 'abs' }));
+                }
+
+                unitSelect.style.display = '';
+                thresholdInput.style.display = '';
+                windowInput.style.display = '';
+                targetPriceInput.style.display = 'none';
+            }
+        };
+
+        const renderList = (alerts) => {
+            list.innerHTML = '';
+            if (!alerts.length) {
+                list.appendChild(el('div', { class: 'meta', text: 'No custom alerts yet.' }));
+                return;
+            }
+            alerts.forEach((alert) => {
+                const left = el('div', { style: 'flex:1;min-width:320px;' });
+                let description = `${alert.symbol} | ${alert.kind}`;
+                if (alert.kind === 'price') {
+                    description += ` ${alert.direction} ${alert.target_price}`;
+                }
+                if (alert.kind === 'move') {
+                    const unitSuffix = alert.unit === 'pct' ? '%' : alert.unit || '';
+                    description += ` ${alert.direction} ${alert.threshold}${unitSuffix} in ${alert.window_seconds}s`;
+                }
+                left.appendChild(el('div', { text: description, style: 'font-weight:600;' }));
+                left.appendChild(el('div', { class: 'meta', text: `id: ${alert.id}` }));
+
+                const toggle = el('input', {
+                    type: 'checkbox',
+                    ...(alert.enabled ? { checked: '' } : {}),
+                    onchange: async () => {
+                        await fetch(`${apiBase}/${encodeURIComponent(alert.id)}/enabled`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ enabled: toggle.checked }),
+                        });
+                        await loadAlerts();
+                    },
+                });
+
+                const deleteBtn = el('button', {
+                    class: 'secondary',
+                    text: 'Delete',
+                    onclick: async () => {
+                        await fetch(`${apiBase}/${encodeURIComponent(alert.id)}`, {
+                            method: 'DELETE',
+                        });
+                        await loadAlerts();
+                    },
+                });
+
+                const row = el(
+                    'div',
+                    {
+                        style:
+                            'display:flex;gap:12px;align-items:center;justify-content:space-between;' +
+                            'padding:10px;border:1px solid rgba(255,255,255,0.08);border-radius:10px;',
+                    },
+                    [
+                        left,
+                        el('div', { style: 'display:flex;gap:10px;align-items:center;' }, [
+                            el(
+                                'label',
+                                { style: 'display:flex;gap:6px;align-items:center;' },
+                                [toggle, el('span', { text: 'On' })],
+                            ),
+                            deleteBtn,
+                        ]),
+                    ],
+                );
+
+                list.appendChild(row);
+            });
+        };
+
+        const loadAlerts = async () => {
+            status.textContent = 'Loading...';
+            const resp = await fetch(apiBase);
+            if (!resp.ok) {
+                throw new Error(`GET ${apiBase} failed (${resp.status})`);
+            }
+            const data = await resp.json();
+            const alerts = Array.isArray(data?.alerts) ? data.alerts : [];
+            renderList(alerts);
+            status.textContent = '';
+        };
+
+        const createAlert = async () => {
+            const symbol = (symbolInput.value || '').trim().toUpperCase();
+            if (!symbol) {
+                status.textContent = 'symbol required';
+                return;
+            }
+            const kind = kindSelect.value;
+            const payload = { symbol, kind, enabled: true };
+            if (kind === 'price') {
+                payload.direction = directionSelect.value;
+                payload.target_price = Number(targetPriceInput.value);
+            } else {
+                payload.direction = directionSelect.value;
+                payload.unit = unitSelect.value;
+                payload.threshold = Number(thresholdInput.value);
+                payload.window_seconds = Number(windowInput.value);
+            }
+            status.textContent = 'Saving...';
+            const resp = await fetch(apiBase, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (!resp.ok) {
+                throw new Error(`POST ${apiBase} failed (${resp.status})`);
+            }
+            status.textContent = '';
+            await loadAlerts();
+        };
+
+        kindSelect.addEventListener('change', renderForm);
+        createBtn.addEventListener('click', (event) => {
+            event.preventDefault();
+            createAlert().catch((err) => {
+                status.textContent = String(err);
+            });
+        });
+
+        renderForm();
+        loadAlerts().catch((err) => {
+            status.textContent = String(err);
+        });
+    };
+
     const loadBybitSettings = async () => {
         if (!isBybitMonitor || !settingsCard) return;
+        settingsCard.style.display = 'block';
         try {
             const resp = await fetch('/api/bybit-monitor/settings');
             if (!resp.ok) {
@@ -162,7 +395,6 @@
             const data = await resp.json();
             if (waitInput) waitInput.value = data.wait_seconds ?? '';
             if (thresholdInput) thresholdInput.value = data.percent_threshold ?? '';
-            settingsCard.style.display = 'block';
             setSettingsBadge(settingsStatus, 'Ready');
         } catch (err) {
             console.error(err);
@@ -172,6 +404,7 @@
 
     const loadOandaSettings = async () => {
         if (!isOandaMonitor || !oandaSettingsCard) return;
+        oandaSettingsCard.style.display = 'block';
         try {
             const resp = await fetch('/api/oanda-monitor/settings');
             if (!resp.ok) {
@@ -187,7 +420,6 @@
             if (oandaAthAtlPrice) oandaAthAtlPrice.value = (data.ath_atl_price ?? 'M').toUpperCase();
             if (oandaAthAtlBackfillBatch) oandaAthAtlBackfillBatch.value = data.ath_atl_backfill_batch ?? '';
             if (oandaAthAtlBackfillPages) oandaAthAtlBackfillPages.value = data.ath_atl_backfill_max_pages ?? '';
-            oandaSettingsCard.style.display = 'block';
             setSettingsBadge(oandaSettingsStatus, 'Ready');
         } catch (err) {
             console.error(err);
@@ -305,6 +537,12 @@
     fetchLogs({ reset: true });
     loadBybitSettings();
     loadOandaSettings();
+    if (isBybitMonitor && settingsCard) {
+        setupCustomAlerts('bybit', settingsCard);
+    }
+    if (isOandaMonitor && oandaSettingsCard) {
+        setupCustomAlerts('oanda', oandaSettingsCard);
+    }
 
     window.addEventListener('beforeunload', () => {
         if (refreshTimer) {

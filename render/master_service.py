@@ -1241,7 +1241,7 @@ LOG_VIEWER_TEMPLATE = """<!DOCTYPE html>
             scriptName: {script_name_json}
         }};
     </script>
-    <script src=\"/static/log_viewer.js\"></script>
+    <script src=\"/static/log_viewer.js?v=1\"></script>
 </body>
 </html>"""
 
