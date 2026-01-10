@@ -1241,7 +1241,7 @@ LOG_VIEWER_TEMPLATE = """<!DOCTYPE html>
             scriptName: {script_name_json}
         }};
     </script>
-    <script src=\"/static/log_viewer.js\"></script>
+    <script src=\"/static/log_viewer.js?v=1\"></script>
 </body>
 </html>"""
 
@@ -3794,6 +3794,62 @@ async def oanda_monitor_settings() -> JSONResponse:
 @app.post("/api/oanda-monitor/settings")
 async def update_oanda_monitor_settings(payload: Dict[str, object]) -> JSONResponse:
     return JSONResponse(_update_oanda_settings(payload))
+
+
+@app.get("/api/bybit-monitor/custom-alerts")
+async def bybit_monitor_custom_alerts() -> JSONResponse:
+    return JSONResponse({"alerts": bybit_monitor.get_custom_alerts(force=True)})
+
+
+@app.post("/api/bybit-monitor/custom-alerts")
+async def upsert_bybit_monitor_custom_alert(request: Request) -> JSONResponse:
+    payload = await request.json()
+    alert = bybit_monitor.upsert_custom_alert(payload or {})
+    return JSONResponse({"ok": True, "alert": alert})
+
+
+@app.delete("/api/bybit-monitor/custom-alerts/{alert_id}")
+async def delete_bybit_monitor_custom_alert(alert_id: str) -> JSONResponse:
+    bybit_monitor.delete_custom_alert(alert_id)
+    return JSONResponse({"ok": True, "alert_id": alert_id})
+
+
+@app.post("/api/bybit-monitor/custom-alerts/{alert_id}/enabled")
+async def set_bybit_monitor_custom_alert_enabled(
+    alert_id: str, request: Request
+) -> JSONResponse:
+    payload = await request.json()
+    enabled = bool((payload or {}).get("enabled", True))
+    alert = bybit_monitor.set_custom_alert_enabled(alert_id, enabled)
+    return JSONResponse({"ok": True, "alert": alert})
+
+
+@app.get("/api/oanda-monitor/custom-alerts")
+async def oanda_monitor_custom_alerts() -> JSONResponse:
+    return JSONResponse({"alerts": oanda_monitor.get_custom_alerts(force=True)})
+
+
+@app.post("/api/oanda-monitor/custom-alerts")
+async def upsert_oanda_monitor_custom_alert(request: Request) -> JSONResponse:
+    payload = await request.json()
+    alert = oanda_monitor.upsert_custom_alert(payload or {})
+    return JSONResponse({"ok": True, "alert": alert})
+
+
+@app.delete("/api/oanda-monitor/custom-alerts/{alert_id}")
+async def delete_oanda_monitor_custom_alert(alert_id: str) -> JSONResponse:
+    oanda_monitor.delete_custom_alert(alert_id)
+    return JSONResponse({"ok": True, "alert_id": alert_id})
+
+
+@app.post("/api/oanda-monitor/custom-alerts/{alert_id}/enabled")
+async def set_oanda_monitor_custom_alert_enabled(
+    alert_id: str, request: Request
+) -> JSONResponse:
+    payload = await request.json()
+    enabled = bool((payload or {}).get("enabled", True))
+    alert = oanda_monitor.set_custom_alert_enabled(alert_id, enabled)
+    return JSONResponse({"ok": True, "alert": alert})
 
 
 
