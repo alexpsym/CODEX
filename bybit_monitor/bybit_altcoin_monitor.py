@@ -15,6 +15,8 @@ import socket
 import sys
 import time
 import traceback
+import uuid
+from collections import deque
 from pathlib import Path
 from hashlib import sha256
 from typing import Dict, Iterable, Tuple
@@ -57,6 +59,7 @@ DEFAULT_ATH_ATL_BACKFILL_MAX_PAGES = int(os.getenv("BYBIT_ATH_ATL_BACKFILL_MAX_P
 STABLECOIN_SUFFIXES = ("USDT", "USDC", "USDD", "USD")
 SETTINGS_PATH = Path(__file__).with_name("settings.json")
 STATE_PATH = Path(__file__).with_name("state.json")
+CUSTOM_ALERTS_PATH = Path(__file__).with_name("custom_alerts.json")
 
 _session: requests.Session | None = None
 _target_logged = False
@@ -68,6 +71,8 @@ _push_warning_given = False
 _push_success_logged = False
 _push_failure_logged = False
 _push_config_logged = False
+_alerts_cache: list[dict] | None = None
+_alerts_mtime: float | None = None
 
 def _get_telegram_credentials() -> tuple[str, str]:
     """Return Telegram credentials from environment variables."""
@@ -81,6 +86,266 @@ except Exception:  # pragma: no cover - very environment specific
     _plyer_notification = None
 
 _notification_warning_given = False
+
+_ALLOWED_ALERT_KINDS = {"price", "move"}
+_ALLOWED_PRICE_DIRECTIONS = {"above", "below"}
+_ALLOWED_MOVE_DIRECTIONS = {"up", "down", "either"}
+_ALLOWED_MOVE_UNITS = {"pct", "abs"}
+
+
+def _load_custom_alerts() -> list[dict]:
+    try:
+        raw = json.loads(CUSTOM_ALERTS_PATH.read_text(encoding="utf-8"))
+        if isinstance(raw, list):
+            return [alert for alert in raw if isinstance(alert, dict)]
+    except FileNotFoundError:
+        return []
+    except Exception:
+        return []
+    return []
+
+
+def _save_custom_alerts(alerts: list[dict]) -> None:
+    tmp = CUSTOM_ALERTS_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(alerts, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(CUSTOM_ALERTS_PATH)
+
+
+def get_custom_alerts(force: bool = False) -> list[dict]:
+    global _alerts_cache, _alerts_mtime
+    try:
+        mtime = CUSTOM_ALERTS_PATH.stat().st_mtime
+    except FileNotFoundError:
+        mtime = None
+    if force or _alerts_cache is None or mtime != _alerts_mtime:
+        _alerts_cache = _load_custom_alerts()
+        _alerts_mtime = mtime
+    return list(_alerts_cache or [])
+
+
+def _coerce_alert(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError("Alert payload must be an object.")
+    alert_id = str(payload.get("id") or "").strip() or uuid.uuid4().hex
+    symbol = str(payload.get("symbol") or "").strip().upper()
+    if not symbol:
+        raise ValueError("symbol is required")
+
+    kind = str(payload.get("kind") or "").strip().lower()
+    if kind not in _ALLOWED_ALERT_KINDS:
+        raise ValueError("kind must be one of: price, move")
+
+    enabled = bool(payload.get("enabled", True))
+    cooldown_seconds = int(float(payload.get("cooldown_seconds", 0) or 0))
+    if cooldown_seconds < 0:
+        cooldown_seconds = 0
+
+    alert: dict = {
+        "id": alert_id,
+        "symbol": symbol,
+        "kind": kind,
+        "enabled": enabled,
+        "cooldown_seconds": cooldown_seconds,
+    }
+
+    if kind == "price":
+        direction = str(payload.get("direction") or "").strip().lower()
+        if direction not in _ALLOWED_PRICE_DIRECTIONS:
+            raise ValueError("direction must be above or below for price alerts")
+        try:
+            target_price = float(payload.get("target_price"))
+        except Exception as exc:
+            raise ValueError("target_price must be a number") from exc
+        if target_price <= 0:
+            raise ValueError("target_price must be > 0")
+        alert.update({"direction": direction, "target_price": target_price})
+        return alert
+
+    direction = str(payload.get("direction") or "").strip().lower()
+    if direction not in _ALLOWED_MOVE_DIRECTIONS:
+        raise ValueError("direction must be up, down, or either for move alerts")
+    unit = str(payload.get("unit") or "pct").strip().lower()
+    if unit not in _ALLOWED_MOVE_UNITS:
+        raise ValueError("unit must be pct or abs")
+    try:
+        threshold = float(payload.get("threshold"))
+    except Exception as exc:
+        raise ValueError("threshold must be a number") from exc
+    if threshold <= 0:
+        raise ValueError("threshold must be > 0")
+    window_seconds = int(float(payload.get("window_seconds", 0) or 0))
+    if window_seconds <= 0:
+        raise ValueError("window_seconds must be > 0")
+    alert.update(
+        {
+            "direction": direction,
+            "unit": unit,
+            "threshold": threshold,
+            "window_seconds": window_seconds,
+        }
+    )
+    return alert
+
+
+def upsert_custom_alert(payload: dict) -> dict:
+    alerts = get_custom_alerts(force=True)
+    alert = _coerce_alert(payload)
+    for idx, existing in enumerate(alerts):
+        if str(existing.get("id")) == alert["id"]:
+            alerts[idx] = alert
+            _save_custom_alerts(alerts)
+            get_custom_alerts(force=True)
+            return alert
+    alerts.append(alert)
+    _save_custom_alerts(alerts)
+    get_custom_alerts(force=True)
+    return alert
+
+
+def delete_custom_alert(alert_id: str) -> None:
+    alert_id = str(alert_id or "").strip()
+    if not alert_id:
+        raise ValueError("alert_id is required")
+    alerts = get_custom_alerts(force=True)
+    alerts = [alert for alert in alerts if str(alert.get("id")) != alert_id]
+    _save_custom_alerts(alerts)
+    get_custom_alerts(force=True)
+
+
+def set_custom_alert_enabled(alert_id: str, enabled: bool) -> dict:
+    alert_id = str(alert_id or "").strip()
+    if not alert_id:
+        raise ValueError("alert_id is required")
+    alerts = get_custom_alerts(force=True)
+    for alert in alerts:
+        if str(alert.get("id")) == alert_id:
+            alert["enabled"] = bool(enabled)
+            _save_custom_alerts(alerts)
+            get_custom_alerts(force=True)
+            return dict(alert)
+    raise ValueError("Unknown alert id")
+
+
+def _evaluate_move_condition(
+    unit: str,
+    direction: str,
+    threshold: float,
+    current: float,
+    window_min: float,
+    window_max: float,
+) -> tuple[bool, str, float, float]:
+    if direction in ("up", "either"):
+        ref = window_min
+        if ref > 0:
+            measured = ((current - ref) / ref) * 100.0 if unit == "pct" else (current - ref)
+            if measured >= threshold:
+                return True, "up", measured, ref
+    if direction in ("down", "either"):
+        ref = window_max
+        if ref > 0:
+            measured = ((ref - current) / ref) * 100.0 if unit == "pct" else (ref - current)
+            if measured >= threshold:
+                return True, "down", measured, ref
+    return False, direction, 0.0, current
+
+
+def evaluate_custom_alerts(
+    alerts: list[dict],
+    prices: Dict[str, float],
+    state: Dict[str, object],
+    price_history: Dict[str, deque],
+) -> bool:
+    now = time.time()
+    alert_state = state.get("custom_alerts")
+    if not isinstance(alert_state, dict):
+        alert_state = {}
+        state["custom_alerts"] = alert_state
+
+    enabled_alerts = [alert for alert in alerts if alert.get("enabled", True)]
+    max_window = 0
+    for alert in enabled_alerts:
+        if alert.get("kind") == "move":
+            max_window = max(max_window, int(alert.get("window_seconds", 0) or 0))
+
+    if max_window > 0:
+        cutoff = now - max_window
+        for symbol, price in prices.items():
+            dq = price_history.get(symbol)
+            if dq is None:
+                dq = deque()
+                price_history[symbol] = dq
+            dq.append((now, float(price)))
+            while dq and dq[0][0] < cutoff:
+                dq.popleft()
+
+    changed = False
+    for alert in enabled_alerts:
+        symbol = alert.get("symbol")
+        if not symbol or symbol not in prices:
+            continue
+        current = float(prices[symbol])
+        alert_id = str(alert.get("id"))
+        st = alert_state.get(alert_id)
+        if not isinstance(st, dict):
+            st = {}
+            alert_state[alert_id] = st
+            changed = True
+
+        armed = bool(st.get("armed", True))
+        last_trigger_at = float(st.get("last_trigger_at", 0) or 0)
+        cooldown = int(alert.get("cooldown_seconds", 0) or 0)
+        can_trigger = cooldown <= 0 or (now - last_trigger_at) >= cooldown
+
+        if alert.get("kind") == "price":
+            direction = str(alert.get("direction"))
+            target = float(alert.get("target_price"))
+            condition_met = current >= target if direction == "above" else current <= target
+            if condition_met and armed and can_trigger:
+                st["armed"] = False
+                st["last_trigger_at"] = now
+                changed = True
+                msg = f"{symbol} PRICE {direction.upper()} {target} | now {current}"
+                log(msg)
+                send_notification("BYBIT Custom Price Alert", msg)
+            elif not condition_met and not armed:
+                st["armed"] = True
+                changed = True
+            continue
+
+        window_s = int(alert.get("window_seconds"))
+        dq = price_history.get(symbol)
+        if not dq:
+            continue
+        cutoff = now - window_s
+        window_prices = [price for (ts, price) in dq if ts >= cutoff]
+        if len(window_prices) < 2:
+            continue
+        window_min = min(window_prices)
+        window_max = max(window_prices)
+        unit = str(alert.get("unit") or "pct")
+        direction = str(alert.get("direction") or "either")
+        threshold = float(alert.get("threshold"))
+
+        triggered, resolved_dir, measured, ref = _evaluate_move_condition(
+            unit, direction, threshold, current, window_min, window_max
+        )
+
+        if triggered and armed and can_trigger:
+            st["armed"] = False
+            st["last_trigger_at"] = now
+            changed = True
+            unit_label = "%" if unit == "pct" else ""
+            msg = (
+                f"{symbol} MOVE {resolved_dir.upper()} {measured:.4f}{unit_label} in {window_s}s "
+                f"| ref {ref:.8f} -> now {current:.8f}"
+            )
+            log(msg)
+            send_notification("BYBIT Custom Move Alert", msg)
+        elif not triggered and not armed:
+            st["armed"] = True
+            changed = True
+
+    return changed
 
 
 def _coerce_settings(data: Dict[str, object]) -> Dict[str, float]:
@@ -705,11 +970,12 @@ def _load_state() -> Dict[str, object]:
         raw = json.loads(STATE_PATH.read_text(encoding="utf-8"))
         if isinstance(raw, dict):
             raw.setdefault("symbols", {})
+            raw.setdefault("custom_alerts", {})
             if isinstance(raw["symbols"], dict):
                 return raw
     except Exception:
         pass
-    return {"symbols": {}}
+    return {"symbols": {}, "custom_alerts": {}}
 
 
 def _save_state(state: Dict[str, object]) -> None:
@@ -837,6 +1103,7 @@ def backfill_baselines(
 def run_monitor() -> None:
     """Continuous monitoring loop."""
     previous_prices: Dict[str, float] = {}
+    price_history: Dict[str, deque] = {}
     state = _load_state()
     symbols_state: Dict[str, Dict[str, float]] = state.get("symbols", {})  # type: ignore[assignment]
     iteration = 0
@@ -1010,6 +1277,18 @@ def run_monitor() -> None:
                     )
             else:
                 log("Baseline prices recorded. Alerts will begin after the next update.")
+
+            # Custom alerts (per-symbol price + move alerts)
+            try:
+                custom_alerts_definitions = get_custom_alerts()
+                if custom_alerts_definitions:
+                    if evaluate_custom_alerts(
+                        custom_alerts_definitions, prices, state, price_history
+                    ):
+                        _save_state(state)
+            except Exception:
+                log("Custom alert evaluation failed for this cycle.")
+                traceback.print_exc()
 
         previous_prices = prices
         log(
