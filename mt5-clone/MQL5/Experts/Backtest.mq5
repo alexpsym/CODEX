@@ -58,7 +58,7 @@ datetime lastBarTime = 0;
 // ---------- Helpers ----------
 void Dbg(string msg)
 {
-   if(Debug) Print("PBEMA_ATR_RR: ", msg);
+   if(Debug) Print("BACKTEST: ", msg);
 }
 
 bool IsNewBar()
@@ -529,7 +529,7 @@ void TryCloseForRollover()
 // ---------- MT5 lifecycle ----------
 int OnInit()
 {
-   Print("PBEMA_ATR_RR INIT BUILD ", __DATE__);
+   Print("BACKTEST INIT BUILD ", __DATE__);
 
    // Indicator handles
    if(UseDualEMA)
@@ -565,7 +565,7 @@ void OnTick()
    static long ticks = 0;
    ticks++;
    if(Debug && (ticks % 5000) == 0)
-      Comment("PBEMA_ATR_RR ticks=", ticks, " time=", TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS));
+      Comment("BACKTEST ticks=", ticks, " time=", TimeToString(TimeCurrent(), TIME_DATE | TIME_SECONDS));
 
    // Enforce "no open trade during blackout"
    TryCloseForBlackout();
@@ -591,9 +591,9 @@ void OnTick()
    // Send
    bool ok = false;
    if(sigType == ORDER_TYPE_BUY)
-      ok = trade.Buy(vol, _Symbol, price, sl, tp, "PullbackEMA_ATR_RR");
+      ok = trade.Buy(vol, _Symbol, price, sl, tp, "Backtest");
    else
-      ok = trade.Sell(vol, _Symbol, price, sl, tp, "PullbackEMA_ATR_RR");
+      ok = trade.Sell(vol, _Symbol, price, sl, tp, "Backtest");
 
    if(!ok)
    {

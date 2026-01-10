@@ -1,30 +1,33 @@
 #property strict
-#property description "Trendline limit-order EA: press button to place a limit order exactly on a trendline. SL/TP are set by DISTANCE in MT5 POINTS. Repositions each new candle by deleting+recreating pending order to preserve AUD risk sizing (commission-aware)."
-#property version   "1.10"
+#property description "Trader EA: (1) Trendline limit-order execution with on-chart arm/cancel buttons and per-bar re-anchoring; (2) EMA bounce/pullback market execution derived from PullbackEMA_ATR_RR signal logic. SL/TP are set by DISTANCE in MT5 POINTS, with optional AutoTP to guarantee NET RR after commissions."
+#property version   "2.00"
 
 #include <Trade/Trade.mqh>
 
 CTrade trade;
 
-// -------------------- Inputs (risk model copied from PullbackEMA_ATR_RR) --------------------
-input double RiskAUD_Target           = 10.0;   // target AUD risk per trade (position size is derived from this)
-input double RiskAUD_Min              = 9.0;    // hard filter: do NOT trade if rounded risk < this (runtime enforces >= 10 AUD)
+// -------------------- Strategy selection --------------------
+enum StrategyMode
+{
+   STRAT_TRENDLINE_LIMIT = 0,
+   STRAT_EMA_BOUNCE      = 1
+};
+
+input group "Strategy"
+input StrategyMode Strategy = STRAT_TRENDLINE_LIMIT;
+
+// -------------------- Inputs (risk model originally aligned with PullbackEMA_ATR_RR) --------------------
+input group "Risk (account currency)"
+input double RiskAUD_Target           = 10.0;   // target risk per trade (position size is derived from this)
+input double RiskAUD_Min              = 9.0;    // hard filter: do NOT trade if rounded risk < this
 input double RiskAUD_Max              = 12.0;   // hard filter: do NOT trade if rounded risk > this
 input bool   IncludeCommissionInRisk  = true;   // include commission in lot sizing + risk filters
 input double CommissionPerLotPerSide  = 3.50;   // commission per side per 1.00 lot (account currency)
 input int    RiskSlippageBufferPoints = 50;     // buffer added to stop distance for sizing (points)
 input int    SlippagePoints           = 10;
 
-// -------------------- Inputs (trendline execution) --------------------
-enum TL_Direction
-{
-   TL_BUY_LIMIT  = 0,
-   TL_SELL_LIMIT = 1
-};
-
-input TL_Direction Direction          = TL_BUY_LIMIT;
-
-// Manual protection (DISTANCES, in MT5 POINTS)
+// -------------------- Inputs (shared protection: DISTANCES, in MT5 POINTS) --------------------
+input group "Stops & Targets (points)"
 input int    SL_DistancePoints        = 200;    // Stop distance in MT5 points (example: 54 points = 5.4 pips on 5-digit FX)
 input bool   AutoTP_NetRR_Enabled      = true;   // if true, EA ignores TP_DistancePoints and auto-sets TP so NET profit >= NetRR_Target * R (after commissions)
 input double NetRR_Target              = 2.0;    // desired net R-multiple on winners (e.g., 2.0 means NET >= 2R after commissions)
@@ -35,37 +38,65 @@ input int    TP_DistancePoints         = 400;    // (fallback) Target distance i
 // NOTE: 1 MT5 point = 1 TradingView tick.
 // NOTE: On 5-digit FX / 3-digit JPY, 1 pip = 10 points (e.g., 5.4 pips = 54 points). On 4-digit/2-digit symbols, 1 pip is typically 1 point.
 
-// Trendline selection
-input string TrendlineObjectName        = "";     // if blank, EA can pick from clicks (EnablePickTrendlineByClick=true)
-input bool   EnablePickTrendlineByClick = true;   // click a trendline on chart to set it as active
+// -------------------- Inputs (Trendline strategy only) --------------------
+input group "Trendline strategy (Trendline Limit)"
+enum TL_Direction
+{
+   TL_BUY_LIMIT  = 0,
+   TL_SELL_LIMIT = 1
+};
 
-// Order housekeeping
+input TL_Direction Direction           = TL_BUY_LIMIT;
+input string       TrendlineObjectName = "";     // required for Strategy=Trendline unless you enable click-pick
+input bool         EnablePickTrendlineByClick = false;  // default OFF: paste the trendline name into TrendlineObjectName
+input int          PendingCancelAfterMinutes  = 60;     // cancel/disarm if limit order not filled after X minutes (age measured from first successful placement)
+
+// -------------------- Inputs (EMA bounce strategy only) --------------------
+input group "EMA bounce strategy (derived from PullbackEMA_ATR_RR)"
+input bool   UseDualEMA       = true;     // true: trend uses Fast/Slow EMA relationship. false: trend uses TrendEMA only.
+input int    FastEMAPeriod    = 9;        // used when UseDualEMA=true
+input int    SlowEMAPeriod    = 20;       // used when UseDualEMA=true
+input int    TrendEMAPeriod   = 20;       // used when UseDualEMA=false
+input bool   Debug            = false;    // prints reason-coded messages for EMA bounce filters
+
+// -------------------- Order housekeeping --------------------
+input group "Orders"
 input int    MagicNumber              = 91001;
 input bool   EnforceOneTradeAtATime   = true;   // blocks if there's an open position on this symbol
-input bool   AlsoBlockIfPendingExists = true;   // blocks if another EA pending order exists on this symbol (same magic)
-input int    PendingCancelAfterMinutes = 60;     // cancel/disarm if limit order not filled after X minutes (age measured from first successful placement)
+input bool   AlsoBlockIfPendingExists = true;   // blocks if another EA pending order exists on this symbol (same magic) [trendline only]
 
-// Chart UI
+// -------------------- Chart UI --------------------
+input group "UI"
 input bool   ShowButtons              = true;
-input int    UIButtonCorner           = 0;      // 0=left-top, 1=right-top, 2=left-bottom, 3=right-bottom
+input int    UIButtonCorner           = 2;      // 0=left-top, 1=right-top, 2=left-bottom, 3=right-bottom
 input int    UIButtonX                = 10;
-input int    UIButtonY                = 20;
+input int    UIButtonY                = 40;
 
 // -------------------- Internals --------------------
 string   g_trendName    = "";
 bool     g_armed        = false;
-ulong    g_ticket       = 0;
+ulong    g_ticket       = 0;      // trendline pending ticket (will change each bar because we recreate)
 datetime g_lastBarTime  = 0;
 datetime g_armStartTime = 0;      // when the EA first successfully placed the pending order for this arming session
-datetime g_expireAt     = 0;      // server-side pending order expiration timestamp (when PendingCancelAfterMinutes>0)
+datetime g_expireAt     = 0;      // server-side pending order expiration timestamp
 
-string BTN_PLACE  = "TL_EA_BTN_PLACE";
-string BTN_CANCEL = "TL_EA_BTN_CANCEL";
-string LBL_STATUS = "TL_EA_STATUS";
+// EMA handles (ema bounce strategy)
+int hFast  = INVALID_HANDLE;
+int hSlow  = INVALID_HANDLE;
+int hTrend = INVALID_HANDLE;
 
-string EA_COMMENT = "Trendline_Limit_RiskAUD";
+string BTN_PLACE  = "TR_EA_BTN_PLACE";
+string BTN_CANCEL = "TR_EA_BTN_CANCEL";
+string LBL_STATUS = "TR_EA_STATUS";
+
+string EA_COMMENT = "Trader";
 
 // -------------------- Helpers --------------------
+void Dbg(const string msg)
+{
+   if(Debug) Print(EA_COMMENT, ": ", msg);
+}
+
 bool IsNewBar()
 {
    datetime t = iTime(_Symbol, _Period, 0);
@@ -105,12 +136,9 @@ double NormalizeVolume(double vol)
    return NormalizeDouble(v, digits);
 }
 
-// For display only (your requested conversion note)
+// For display only (pip/point note)
 int PointsPerPip()
 {
-   // Common MT5 convention:
-   // 5 digits (EURUSD 1.23456) or 3 digits (USDJPY 123.456) => 1 pip = 10 points
-   // 4 digits / 2 digits => 1 pip = 1 point
    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    if(digits == 5 || digits == 3) return 10;
    return 1;
@@ -129,6 +157,7 @@ bool CalcRiskFor1Lot(double stopPoints, double &lossPerLotAUD)
    return (lossPerLotAUD > 0);
 }
 
+// -------------------- Trendline helpers --------------------
 bool TrendlineExists(const string name)
 {
    if(name == "") return false;
@@ -139,12 +168,11 @@ bool TrendlineExists(const string name)
 
 double GetTrendlinePriceAtTime(const string name, datetime t)
 {
-   // For trendline, line_id=0 is fine
-   double v = ObjectGetValueByTime(0, name, t, 0);
-   return v;
+   // line_id=0 is fine for trendline
+   return ObjectGetValueByTime(0, name, t, 0);
 }
 
-bool BuildSLFromDistance(double entry, bool isBuyLimit, double &slOut, string &why)
+bool BuildSLFromDistance(double entry, bool isBuy, double &slOut, string &why)
 {
    if(SL_DistancePoints <= 0)
    {
@@ -154,12 +182,11 @@ bool BuildSLFromDistance(double entry, bool isBuyLimit, double &slOut, string &w
 
    double slDist = (double)SL_DistancePoints * _Point;
 
-   if(isBuyLimit) slOut = entry - slDist;
-   else           slOut = entry + slDist;
+   if(isBuy) slOut = entry - slDist;
+   else      slOut = entry + slDist;
 
    slOut = NormalizePrice(slOut);
 
-   // broker stops-level check (distance from entry)
    int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
    if(stopsLevel > 0)
    {
@@ -174,7 +201,7 @@ bool BuildSLFromDistance(double entry, bool isBuyLimit, double &slOut, string &w
    return true;
 }
 
-bool BuildTPManualFromDistance(double entry, bool isBuyLimit, double &tpOut, string &why)
+bool BuildTPManualFromDistance(double entry, bool isBuy, double &tpOut, string &why)
 {
    if(TP_DistancePoints <= 0)
    {
@@ -184,8 +211,8 @@ bool BuildTPManualFromDistance(double entry, bool isBuyLimit, double &tpOut, str
 
    double tpDist = (double)TP_DistancePoints * _Point;
 
-   if(isBuyLimit) tpOut = entry + tpDist;
-   else           tpOut = entry - tpDist;
+   if(isBuy) tpOut = entry + tpDist;
+   else      tpOut = entry - tpDist;
 
    tpOut = NormalizePrice(tpOut);
 
@@ -203,9 +230,8 @@ bool BuildTPManualFromDistance(double entry, bool isBuyLimit, double &tpOut, str
    return true;
 }
 
-// Computes TP so that NET profit (after commissions) is >= NetRR_Target * 1R, where:
-// 1R is interpreted as (SL loss + commissions) if IncludeCommissionInRisk=true, else (SL loss + commissions) is still used for the "R" base.
-bool ComputeAutoTP_NetRR(double entry, bool isBuyLimit, double sl, double vol, double riskRoundedAUD, double &tpOut, int &tpPointsOut, double &effNetRR, string &why)
+// Computes TP so that NET profit (after commissions) is >= NetRR_Target * 1R
+bool ComputeAutoTP_NetRR(double entry, bool isBuy, double vol, double riskRoundedAUD, double &tpOut, int &tpPointsOut, double &effNetRR, string &why)
 {
    if(vol <= 0)
    {
@@ -218,21 +244,18 @@ bool ComputeAutoTP_NetRR(double entry, bool isBuyLimit, double sl, double vol, d
       return false;
    }
 
-   // Estimate round-trip commission in account currency (AUD)
    double commissionRT = CommissionPerLotPerSide * 2.0 * vol;
 
-   // Define 1R base as (SL loss + commissions), regardless of IncludeCommissionInRisk
    double rBase = riskRoundedAUD;
    if(!IncludeCommissionInRisk)
       rBase += commissionRT;
 
    double requiredNetProfit = NetRR_Target * rBase;
-   double requiredGrossProfit = requiredNetProfit + commissionRT; // gross must cover commissions to achieve required net
+   double requiredGrossProfit = requiredNetProfit + commissionRT;
 
-   // Profit per 1 point move (pre-eval in deposit currency)
-   ENUM_ORDER_TYPE ot = isBuyLimit ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   ENUM_ORDER_TYPE ot = isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
 
-   double testPrice = isBuyLimit ? (entry + _Point) : (entry - _Point);
+   double testPrice = isBuy ? (entry + _Point) : (entry - _Point);
    double p1 = 0.0;
    if(!OrderCalcProfit(ot, _Symbol, vol, entry, testPrice, p1))
    {
@@ -247,31 +270,26 @@ bool ComputeAutoTP_NetRR(double entry, bool isBuyLimit, double sl, double vol, d
       return false;
    }
 
-   // Points needed to GUARANTEE required gross profit (ceil + optional safety)
    int pts = (int)MathCeil(requiredGrossProfit / profitPerPoint);
    if(pts < 1) pts = 1;
    pts += AutoTP_SafetyPoints;
 
-   // Build TP price
-   double tp = isBuyLimit ? (entry + (double)pts * _Point) : (entry - (double)pts * _Point);
+   double tp = isBuy ? (entry + (double)pts * _Point) : (entry - (double)pts * _Point);
    tp = NormalizePrice(tp);
 
-   // broker stops-level check (distance from entry)
    int stopsLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
    if(stopsLevel > 0)
    {
       if(MathAbs(entry - tp) < stopsLevel * _Point)
       {
-         // if too close, push it out to the minimum and re-normalize
          int minPts = stopsLevel + AutoTP_SafetyPoints;
          if(minPts < pts) minPts = pts;
          pts = minPts;
-         tp = isBuyLimit ? (entry + (double)pts * _Point) : (entry - (double)pts * _Point);
+         tp = isBuy ? (entry + (double)pts * _Point) : (entry - (double)pts * _Point);
          tp = NormalizePrice(tp);
       }
    }
 
-   // Compute effective NET RR after normalization (for logging/UI)
    double grossAtTP = 0.0;
    if(!OrderCalcProfit(ot, _Symbol, vol, entry, tp, grossAtTP))
    {
@@ -288,7 +306,6 @@ bool ComputeAutoTP_NetRR(double entry, bool isBuyLimit, double sl, double vol, d
    return true;
 }
 
-
 bool IsLimitPriceValid(double entry, bool isBuyLimit, string &why)
 {
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -299,7 +316,6 @@ bool IsLimitPriceValid(double entry, bool isBuyLimit, string &why)
       return false;
    }
 
-   // BuyLimit must be below current market; SellLimit must be above current market
    if(isBuyLimit && !(entry < ask))
    {
       why = "Buy Limit entry is not below current Ask (this would be a Buy Stop).";
@@ -317,7 +333,6 @@ bool IsLimitPriceValid(double entry, bool isBuyLimit, string &why)
 
 bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outRiskRoundedAUD, string &why)
 {
-   // NOTE: Previously enforced a hard minimum of 10 AUD. Removed to allow smaller R values.
    double riskMin = RiskAUD_Min;
    double riskMax = MathMax(RiskAUD_Max, riskMin);
    double riskTarget = MathMax(RiskAUD_Target, riskMin);
@@ -357,7 +372,6 @@ bool ComputeVolumeFromRisk(double entry, double sl, double &outVol, double &outR
       return false;
    }
 
-   // recompute rounded risk with rounded volume (nominal SL)
    double riskSL = lossPerLotSL * vol;
    double riskCommission = commissionRTPerLot * vol;
    double riskTotal = IncludeCommissionInRisk ? (riskSL + riskCommission) : riskSL;
@@ -483,8 +497,17 @@ bool PendingOrderExistsByMagic(ulong &ticketOut)
 bool DeleteTicketIfExists(ulong t)
 {
    if(t == 0) return true;
-   if(!OrderSelect((ulong)t)) return true; // already gone
+   if(!OrderSelect((ulong)t)) return true;
    return trade.OrderDelete((ulong)t);
+}
+
+datetime ComputeExpireAt()
+{
+   if(PendingCancelAfterMinutes <= 0) return 0;
+   datetime now = TimeCurrent();
+   datetime exp = now + (datetime)(PendingCancelAfterMinutes * 60);
+   if(exp <= now) exp = now + 60;
+   return exp;
 }
 
 bool CheckAndHandlePendingExpiry()
@@ -496,7 +519,6 @@ bool CheckAndHandlePendingExpiry()
    long ageSec = (long)(TimeCurrent() - g_armStartTime);
    if(ageSec < (long)PendingCancelAfterMinutes * 60L) return false;
 
-   // Cancel *any* remaining pending for this EA on this symbol (ticket can change due to delete+recreate each new bar)
    if(g_ticket != 0)
       DeleteTicketIfExists(g_ticket);
 
@@ -509,20 +531,66 @@ bool CheckAndHandlePendingExpiry()
    g_armStartTime = 0;
    g_expireAt = 0;
 
-   UpdateStatus("EXPIRED -> cancelled after " + IntegerToString(PendingCancelAfterMinutes) + " min (no fill)");
+   // UI update happens via UpdateStatus()
    return true;
 }
 
-datetime ComputeExpireAt()
+// ---------- EMA bounce helpers ----------
+bool GetBufferValue(const int handle, const int bufferIndex, const int shift, double &outVal)
 {
-   if(PendingCancelAfterMinutes <= 0) return 0;
-   datetime now = TimeCurrent();
-   datetime exp = now + (datetime)(PendingCancelAfterMinutes * 60);
-   // ensure expiration is strictly in the future (some brokers reject exp<=now)
-   if(exp <= now) exp = now + 60;
-   return exp;
+   double buf[];
+   ArraySetAsSeries(buf, true);
+   if(CopyBuffer(handle, bufferIndex, shift, 1, buf) != 1) return false;
+   outVal = buf[0];
+   return true;
 }
 
+// Signal (copied/adapted from PullbackEMA_ATR_RR):
+// - Determine trend on CLOSED candle [1]
+// - Enter on NEW bar if candle [1] is counter-trend (bearish in uptrend; bullish in downtrend)
+bool GetEmaBounceSignal(ENUM_ORDER_TYPE &outType)
+{
+   double c1 = iClose(_Symbol, _Period, 1);
+   double o1 = iOpen(_Symbol,  _Period, 1);
+   if(c1 == 0 || o1 == 0) return false;
+
+   bool candleBear = (c1 < o1);
+   bool candleBull = (c1 > o1);
+
+   bool up = false, down = false;
+
+   if(UseDualEMA)
+   {
+      double fast1=0, slow1=0;
+      if(!GetBufferValue(hFast, 0, 1, fast1)) return false;
+      if(!GetBufferValue(hSlow, 0, 1, slow1)) return false;
+
+      up   = (c1 > slow1 && fast1 > slow1);
+      down = (c1 < slow1 && fast1 < slow1);
+   }
+   else
+   {
+      double ema1=0;
+      if(!GetBufferValue(hTrend, 0, 1, ema1)) return false;
+      up   = (c1 > ema1);
+      down = (c1 < ema1);
+   }
+
+   if(up && candleBear)
+   {
+      outType = ORDER_TYPE_BUY;
+      return true;
+   }
+   if(down && candleBull)
+   {
+      outType = ORDER_TYPE_SELL;
+      return true;
+   }
+
+   return false;
+}
+
+// -------------------- UI helpers --------------------
 void UpdateStatus(const string msg)
 {
    if(!ShowButtons) return;
@@ -535,7 +603,6 @@ void EnsureUI()
 {
    if(!ShowButtons) return;
 
-   // PLACE button
    if(ObjectFind(0, BTN_PLACE) < 0)
    {
       ObjectCreate(0, BTN_PLACE, OBJ_BUTTON, 0, 0, 0);
@@ -547,7 +614,6 @@ void EnsureUI()
       ObjectSetString(0, BTN_PLACE, OBJPROP_TEXT, "PLACE / ARM");
    }
 
-   // CANCEL button
    if(ObjectFind(0, BTN_CANCEL) < 0)
    {
       ObjectCreate(0, BTN_CANCEL, OBJ_BUTTON, 0, 0, 0);
@@ -559,7 +625,6 @@ void EnsureUI()
       ObjectSetString(0, BTN_CANCEL, OBJPROP_TEXT, "CANCEL");
    }
 
-   // Status label
    if(ObjectFind(0, LBL_STATUS) < 0)
    {
       ObjectCreate(0, LBL_STATUS, OBJ_LABEL, 0, 0, 0);
@@ -578,7 +643,8 @@ void RemoveUI()
    ObjectDelete(0, LBL_STATUS);
 }
 
-bool PlaceOrReplacePending()
+// -------------------- Trendline execution --------------------
+bool PlaceOrReplacePendingTrendline()
 {
    if(!TrendlineExists(g_trendName))
    {
@@ -588,7 +654,6 @@ bool PlaceOrReplacePending()
 
    bool isBuyLimit = (Direction == TL_BUY_LIMIT);
 
-   // Price at the OPEN time of the current bar; updates once per new candle
    datetime barTime = iTime(_Symbol, _Period, 0);
    double entry = GetTrendlinePriceAtTime(g_trendName, barTime);
    if(entry <= 0.0)
@@ -596,7 +661,6 @@ bool PlaceOrReplacePending()
       UpdateStatus("Trendline price unavailable (enable Ray Right?).");
       return false;
    }
-
    entry = NormalizePrice(entry);
 
    string why="";
@@ -622,13 +686,12 @@ bool PlaceOrReplacePending()
    }
    string riskWarn = why;
 
-   // Build TP AFTER volume is known (so we can guarantee NET RR after commissions)
    int autoTpPts = 0;
    double effNetRR = 0.0;
 
    if(AutoTP_NetRR_Enabled)
    {
-      if(!ComputeAutoTP_NetRR(entry, isBuyLimit, sl, vol, riskRounded, tp, autoTpPts, effNetRR, why))
+      if(!ComputeAutoTP_NetRR(entry, isBuyLimit, vol, riskRounded, tp, autoTpPts, effNetRR, why))
       {
          UpdateStatus("Auto-TP blocked: " + why);
          return false;
@@ -643,7 +706,6 @@ bool PlaceOrReplacePending()
       }
    }
 
-
    if(AlsoBlockIfPendingExists)
    {
       ulong other=0;
@@ -657,13 +719,11 @@ bool PlaceOrReplacePending()
       }
    }
 
-   // Delete old ticket if present (volume cannot be modified on pending order -> recreate)
    if(g_ticket != 0)
       DeleteTicketIfExists(g_ticket);
 
    bool ok=false;
 
-   // Prefer server-side expiration so the pending order is removed even if the EA/terminal disconnects.
    ENUM_ORDER_TYPE_TIME tt = ORDER_TIME_GTC;
    datetime exp = 0;
    if(PendingCancelAfterMinutes > 0)
@@ -697,7 +757,7 @@ bool PlaceOrReplacePending()
 
    string side = isBuyLimit ? "BUY LIMIT" : "SELL LIMIT";
    UpdateStatus(
-      "ARMED " + side +
+      "ARMED (Trendline) " + side +
       " | TL=" + g_trendName +
       " | Entry=" + DoubleToString(entry, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)) +
       " | SL=" + IntegerToString(SL_DistancePoints) + "pt (" + DoubleToString(slPips, 1) + "pip)" +
@@ -711,30 +771,94 @@ bool PlaceOrReplacePending()
    return true;
 }
 
-void Arm()
+// -------------------- EMA bounce execution --------------------
+bool PlaceMarketEmaBounce()
 {
-   if(InPosition())
+   ENUM_ORDER_TYPE sigType;
+   if(!GetEmaBounceSignal(sigType)) return false;
+
+   bool isBuy = (sigType == ORDER_TYPE_BUY);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(ask <= 0 || bid <= 0)
    {
-      UpdateStatus("Blocked: already in position.");
-      return;
+      UpdateStatus("No Bid/Ask.");
+      return false;
    }
 
-   // Start the aging timer from the initial arming placement (NOT from each delete+recreate on new bars).
-   g_armStartTime = TimeCurrent();
-   g_expireAt = ComputeExpireAt();
+   double entry = isBuy ? ask : bid;
+   entry = NormalizePrice(entry);
 
-   g_armed = true;
+   string why="";
+   double sl=0, tp=0;
 
-   if(!PlaceOrReplacePending())
+   if(!BuildSLFromDistance(entry, isBuy, sl, why))
    {
-      // If we couldn't place an order, do not remain armed.
-      g_armed = false;
-      g_ticket = 0;
-      g_armStartTime = 0;
-      g_expireAt = 0;
+      UpdateStatus("SL invalid: " + why);
+      return false;
    }
+
+   double vol=0, riskRounded=0;
+   if(!ComputeVolumeFromRisk(entry, sl, vol, riskRounded, why))
+   {
+      UpdateStatus("Risk sizing blocked: " + why);
+      return false;
+   }
+   string riskWarn = why;
+
+   int autoTpPts = 0;
+   double effNetRR = 0.0;
+
+   if(AutoTP_NetRR_Enabled)
+   {
+      if(!ComputeAutoTP_NetRR(entry, isBuy, vol, riskRounded, tp, autoTpPts, effNetRR, why))
+      {
+         UpdateStatus("Auto-TP blocked: " + why);
+         return false;
+      }
+   }
+   else
+   {
+      if(!BuildTPManualFromDistance(entry, isBuy, tp, why))
+      {
+         UpdateStatus("TP invalid: " + why);
+         return false;
+      }
+   }
+
+   bool ok = false;
+   // Market execution (price=0). Sizing uses observed Bid/Ask above; minor slippage is controlled by SlippagePoints.
+   if(isBuy)
+      ok = trade.Buy(vol, _Symbol, 0.0, sl, tp, EA_COMMENT);
+   else
+      ok = trade.Sell(vol, _Symbol, 0.0, sl, tp, EA_COMMENT);
+
+   int ret = (int)trade.ResultRetcode();
+   if(!ok)
+   {
+      UpdateStatus("Order failed. Retcode=" + IntegerToString(ret));
+      return false;
+   }
+
+   int ppp = PointsPerPip();
+   double slPips = (ppp > 0) ? ((double)SL_DistancePoints / (double)ppp) : 0.0;
+   int tpPtsDisplay = AutoTP_NetRR_Enabled ? autoTpPts : TP_DistancePoints;
+   double tpPips = (ppp > 0) ? ((double)tpPtsDisplay / (double)ppp) : 0.0;
+
+   UpdateStatus(
+      "ORDER SENT (EMA Bounce) " + string(isBuy ? "BUY" : "SELL") +
+      " | SL=" + IntegerToString(SL_DistancePoints) + "pt (" + DoubleToString(slPips, 1) + "pip)" +
+      " | TP=" + IntegerToString(tpPtsDisplay) + "pt (" + DoubleToString(tpPips, 1) + "pip)" +
+      (AutoTP_NetRR_Enabled ? (" | NetRR~" + DoubleToString(effNetRR, 2)) : "") +
+      " | Vol=" + DoubleToString(vol, 2) +
+      " | Risk~" + DoubleToString(riskRounded, 2) +
+      (riskWarn == "" ? "" : " | " + riskWarn)
+   );
+
+   return true;
 }
 
+// -------------------- Arming / lifecycle --------------------
 void DisarmAndCancel()
 {
    g_armed = false;
@@ -752,6 +876,46 @@ void RefreshActiveTrendlineFromInput()
 {
    if(TrendlineObjectName != "")
       g_trendName = TrendlineObjectName;
+}
+
+void Arm()
+{
+   if(InPosition())
+   {
+      UpdateStatus("Blocked: already in position.");
+      return;
+   }
+
+   // For trendline, start the aging timer from the initial arming placement.
+   if(Strategy == STRAT_TRENDLINE_LIMIT)
+   {
+      RefreshActiveTrendlineFromInput();
+      if(!TrendlineExists(g_trendName))
+      {
+         UpdateStatus("Trendline not found: set TrendlineObjectName.");
+         return;
+      }
+
+      g_armStartTime = TimeCurrent();
+      g_expireAt = ComputeExpireAt();
+   }
+
+   g_armed = true;
+
+   if(Strategy == STRAT_TRENDLINE_LIMIT)
+   {
+      if(!PlaceOrReplacePendingTrendline())
+      {
+         g_armed = false;
+         g_ticket = 0;
+         g_armStartTime = 0;
+         g_expireAt = 0;
+      }
+   }
+   else
+   {
+      UpdateStatus("ARMED (EMA Bounce) | Waiting for new-bar signal");
+   }
 }
 
 void MaybeStopIfFilled()
@@ -772,17 +936,43 @@ int OnInit()
    trade.SetDeviationInPoints(SlippagePoints);
    trade.SetExpertMagicNumber(MagicNumber);
 
-   RefreshActiveTrendlineFromInput();
    EnsureUI();
+
+   // Prepare EMA handles only when needed.
+   if(Strategy == STRAT_EMA_BOUNCE)
+   {
+      if(UseDualEMA)
+      {
+         hFast = iMA(_Symbol, _Period, FastEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
+         hSlow = iMA(_Symbol, _Period, SlowEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
+         if(hFast == INVALID_HANDLE || hSlow == INVALID_HANDLE)
+            return INIT_FAILED;
+      }
+      else
+      {
+         hTrend = iMA(_Symbol, _Period, TrendEMAPeriod, 0, MODE_EMA, PRICE_CLOSE);
+         if(hTrend == INVALID_HANDLE)
+            return INIT_FAILED;
+      }
+   }
 
    g_lastBarTime = iTime(_Symbol, _Period, 0);
 
    int ppp = PointsPerPip();
    string pipNote = (ppp == 10) ? "1 pip=10 points" : "1 pip=1 point";
-   UpdateStatus("Ready. Trendline=" + (g_trendName=="" ? "<none>" : g_trendName) + " | " + pipNote + " | 1 point=1 TradingView tick");
+   string strat = (Strategy == STRAT_TRENDLINE_LIMIT) ? "Trendline" : "EMA Bounce";
 
-   if(PendingCancelAfterMinutes > 0)
-      EventSetTimer(10);
+   if(Strategy == STRAT_TRENDLINE_LIMIT)
+   {
+      RefreshActiveTrendlineFromInput();
+      UpdateStatus("Ready (" + strat + "). Trendline=" + (g_trendName=="" ? "<none>" : g_trendName) + " | " + pipNote + " | 1 point=1 TradingView tick");
+      if(PendingCancelAfterMinutes > 0)
+         EventSetTimer(10);
+   }
+   else
+   {
+      UpdateStatus("Ready (" + strat + ") | " + pipNote + " | 1 point=1 TradingView tick");
+   }
 
    return INIT_SUCCEEDED;
 }
@@ -791,26 +981,55 @@ void OnDeinit(const int reason)
 {
    EventKillTimer();
    RemoveUI();
+
+   if(hFast  != INVALID_HANDLE) IndicatorRelease(hFast);
+   if(hSlow  != INVALID_HANDLE) IndicatorRelease(hSlow);
+   if(hTrend != INVALID_HANDLE) IndicatorRelease(hTrend);
 }
 
 void OnTick()
 {
    MaybeStopIfFilled();
    if(!g_armed) return;
-   if(CheckAndHandlePendingExpiry()) return;
 
-   if(IsNewBar())
+   if(Strategy == STRAT_TRENDLINE_LIMIT)
    {
-      // Reposition order on each new candle (delete + recreate to keep risk sizing consistent)
-      PlaceOrReplacePending();
+      if(CheckAndHandlePendingExpiry())
+      {
+         UpdateStatus("EXPIRED -> cancelled after " + IntegerToString(PendingCancelAfterMinutes) + " min (no fill)");
+         return;
+      }
+
+      if(IsNewBar())
+      {
+         PlaceOrReplacePendingTrendline();
+      }
+      return;
    }
+
+   // EMA bounce: evaluate once per new bar
+   if(!IsNewBar()) return;
+
+   if(InPosition())
+   {
+      g_armed = false;
+      return;
+   }
+
+   // If a signal occurs, place a market order and stop.
+   if(PlaceMarketEmaBounce())
+      g_armed = false;
 }
 
 void OnTimer()
 {
-   // Timer ensures expiry is enforced even if ticks are sparse (e.g., quiet markets / temporary feed hiccups).
+   // Timer is used only for trendline pending expiry enforcement.
    MaybeStopIfFilled();
-   CheckAndHandlePendingExpiry();
+   if(Strategy == STRAT_TRENDLINE_LIMIT)
+   {
+      if(CheckAndHandlePendingExpiry())
+         UpdateStatus("EXPIRED -> cancelled after " + IntegerToString(PendingCancelAfterMinutes) + " min (no fill)");
+   }
 }
 
 void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
@@ -819,7 +1038,6 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
    {
       if(sparam == BTN_PLACE)
       {
-         RefreshActiveTrendlineFromInput();
          Arm();
          return;
       }
@@ -829,7 +1047,8 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
          return;
       }
 
-      if(EnablePickTrendlineByClick)
+      // Optional: click-pick trendline (OFF by default)
+      if(Strategy == STRAT_TRENDLINE_LIMIT && EnablePickTrendlineByClick)
       {
          if(TrendlineExists(sparam))
          {
