@@ -828,6 +828,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         <div class=\"toolbar\">
             <button class=\"refresh\" id=\"refresh-btn\">Refresh</button>
+            <button class=\"secondary\" id=\"alerts-backup-restore-btn\">Alerts backup/restore</button>
             <span id=\"status\">Loading scripts...</span>
         </div>
 
@@ -3804,6 +3805,49 @@ async def set_oanda_monitor_custom_alert_enabled(
     enabled = bool((payload or {}).get("enabled", True))
     alert = oanda_monitor.set_custom_alert_enabled(alert_id, enabled)
     return JSONResponse({"ok": True, "alert": alert})
+
+
+@app.get("/api/alerts/backup")
+async def backup_all_alerts() -> Response:
+    payload = {
+        "version": 1,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "bybit": {"alerts": bybit_monitor.get_custom_alerts(force=True)},
+        "oanda": {"alerts": oanda_monitor.get_custom_alerts(force=True)},
+    }
+    blob = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
+    headers = {"Content-Disposition": 'attachment; filename="codex-alerts-backup.json"'}
+    return Response(content=blob, media_type="application/json", headers=headers)
+
+
+@app.post("/api/alerts/restore")
+async def restore_all_alerts(file: UploadFile = File(...)) -> JSONResponse:
+    raw = await file.read()
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="Backup must be a JSON object")
+
+    bybit_alerts = []
+    oanda_alerts = []
+    if isinstance(data.get("bybit"), dict) and isinstance(data["bybit"].get("alerts"), list):
+        bybit_alerts = data["bybit"]["alerts"]
+    if isinstance(data.get("oanda"), dict) and isinstance(data["oanda"].get("alerts"), list):
+        oanda_alerts = data["oanda"]["alerts"]
+
+    bybit_restored = bybit_monitor.replace_custom_alerts(bybit_alerts)
+    oanda_restored = oanda_monitor.replace_custom_alerts(oanda_alerts)
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "bybit_restored": len(bybit_restored),
+            "oanda_restored": len(oanda_restored),
+        }
+    )
 
 
 
