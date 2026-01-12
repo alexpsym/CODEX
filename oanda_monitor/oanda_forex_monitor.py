@@ -189,6 +189,20 @@ def set_custom_alert_enabled(alert_id: str, enabled: bool) -> dict:
     raise ValueError("Unknown alert id")
 
 
+def replace_custom_alerts(alerts_payload: object) -> list[dict]:
+    """Replace ALL custom alerts with the provided list (used for backup/restore)."""
+    if not isinstance(alerts_payload, list):
+        raise ValueError("alerts must be a list")
+    replaced: list[dict] = []
+    for item in alerts_payload:
+        if not isinstance(item, dict):
+            continue
+        replaced.append(_coerce_alert(item))
+    _save_custom_alerts(replaced)
+    get_custom_alerts(force=True)
+    return list(replaced)
+
+
 def _pip_size_from_location(pip_location: int) -> float:
     try:
         return float(10 ** int(pip_location))
