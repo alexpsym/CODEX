@@ -53,7 +53,18 @@ finally:
     sys.path.pop(0)
 
 
-SKIP_DIRS = {"render", "mt5-clone", ".venv", "venv", "__pycache__", ".git", "env", "youtube", "LEDGER-clone"}
+SKIP_DIRS = {
+    "render",
+    "mt5-clone",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".git",
+    "env",
+    "youtube",
+    "LEDGER-clone",
+    "viddl-clone",
+}
 SKIP_DIRS_NORMALIZED = {name.casefold() for name in SKIP_DIRS}
 SKIP_FILES = {"__init__.py"}
 MAX_LOG_LINES = 400
