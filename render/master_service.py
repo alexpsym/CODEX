@@ -1199,9 +1199,9 @@ LOG_VIEWER_TEMPLATE = """<!DOCTYPE html>
     <pre id=\"log-box\">Loading logs...</pre>
 
     <script>
-        window.RENDER_LOG_VIEW = {{
+        window.RENDER_LOG_VIEW = {
             scriptName: {script_name_json}
-        }};
+        };
     </script>
     <script src=\"/static/log_viewer.js?v=1\"></script>
 </body>

@@ -164,6 +164,15 @@
         return node;
     };
 
+    const normalizeOandaSymbol = (raw) => {
+        let s = (raw || '').trim().toUpperCase();
+        s = s.replace(/\s+/g, '').replace(/[/-]/g, '_');
+        if (!s.includes('_') && /^[A-Z]{6}$/.test(s)) {
+            s = `${s.slice(0, 3)}_${s.slice(3)}`;
+        }
+        return s;
+    };
+
     const setupCustomAlerts = (monitor, parentCard) => {
         if (!parentCard) return;
         const apiBase =
@@ -358,7 +367,10 @@
         };
 
         const createAlert = async () => {
-            const symbol = (symbolInput.value || '').trim().toUpperCase();
+            const symbol =
+                monitor === 'oanda'
+                    ? normalizeOandaSymbol(symbolInput.value)
+                    : (symbolInput.value || '').trim().toUpperCase();
             if (!symbol) {
                 status.textContent = 'symbol required';
                 return;

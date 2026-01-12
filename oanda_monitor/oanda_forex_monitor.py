@@ -16,6 +16,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import os
+import re
 import sys
 import time
 import traceback
@@ -56,6 +57,15 @@ _ALLOWED_MOVE_DIRECTIONS = {"up", "down", "either"}
 _ALLOWED_MOVE_UNITS = {"pips", "pct"}
 
 
+def _normalize_oanda_symbol(raw: str) -> str:
+    s = str(raw or "").strip().upper()
+    s = re.sub(r"\s+", "", s)
+    s = s.replace("/", "_").replace("-", "_")
+    if "_" not in s and re.fullmatch(r"[A-Z]{6}", s):
+        s = f"{s[:3]}_{s[3:]}"
+    return s
+
+
 def _load_custom_alerts() -> list[dict]:
     try:
         raw = json.loads(CUSTOM_ALERTS_PATH.read_text(encoding="utf-8"))
@@ -90,7 +100,7 @@ def _coerce_alert(payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("Alert payload must be an object.")
     alert_id = str(payload.get("id") or "").strip() or uuid.uuid4().hex
-    symbol = str(payload.get("symbol") or "").strip().upper()
+    symbol = _normalize_oanda_symbol(payload.get("symbol"))
     if not symbol:
         raise ValueError("symbol is required")
 
@@ -264,6 +274,7 @@ def evaluate_custom_alerts(
     pip_sizes: Dict[str, float],
 ) -> bool:
     now = time.time()
+    grace_seconds = 2
     alert_state = state.get("custom_alerts")
     if not isinstance(alert_state, dict):
         alert_state = {}
@@ -276,13 +287,8 @@ def evaluate_custom_alerts(
             max_window = max(max_window, int(alert.get("window_seconds", 0) or 0))
 
     if max_window > 0:
-        cutoff = now - max_window
-        for symbol, price in prices.items():
-            dq = price_history.get(symbol)
-            if dq is None:
-                dq = deque()
-                price_history[symbol] = dq
-            dq.append((now, float(price)))
+        cutoff = now - max_window - grace_seconds
+        for dq in price_history.values():
             while dq and dq[0][0] < cutoff:
                 dq.popleft()
 
@@ -324,7 +330,7 @@ def evaluate_custom_alerts(
         dq = price_history.get(symbol)
         if not dq:
             continue
-        cutoff = now - window_s
+        cutoff = now - window_s - grace_seconds
         window_prices = [price for (ts, price) in dq if ts >= cutoff]
         if len(window_prices) < 2:
             continue
@@ -803,6 +809,7 @@ def run_monitor() -> None:
     state = _load_state()
     last_logged_settings = None
     iteration = 0
+    history_keep_s = int(os.getenv("OANDA_PRICE_HISTORY_SECONDS", "3600"))
 
     while True:
         iteration += 1
@@ -833,6 +840,16 @@ def run_monitor() -> None:
         if not prices:
             log("Empty pricing response; waiting and retrying.")
         else:
+            now = time.time()
+            cutoff = now - history_keep_s
+            for sym, px in prices.items():
+                dq = price_history.get(sym)
+                if dq is None:
+                    dq = deque()
+                    price_history[sym] = dq
+                dq.append((now, float(px)))
+                while dq and dq[0][0] < cutoff:
+                    dq.popleft()
             if previous_prices:
                 triggered_any = False
                 current_symbols = set(prices)
