@@ -17,13 +17,6 @@
     const oandaSettingsCard = document.getElementById('oanda-settings');
     const oandaWaitInput = document.getElementById('oanda-wait-seconds');
     const oandaThresholdInput = document.getElementById('oanda-threshold');
-    const oandaAthAtlEnabled = document.getElementById('oanda-ath-atl-enabled');
-    const oandaAthAtlMinBreak = document.getElementById('oanda-ath-atl-min-break');
-    const oandaAthAtlCooldown = document.getElementById('oanda-ath-atl-cooldown');
-    const oandaAthAtlGranularity = document.getElementById('oanda-ath-atl-granularity');
-    const oandaAthAtlPrice = document.getElementById('oanda-ath-atl-price');
-    const oandaAthAtlBackfillBatch = document.getElementById('oanda-ath-atl-backfill-batch');
-    const oandaAthAtlBackfillPages = document.getElementById('oanda-ath-atl-backfill-pages');
     const oandaSaveSettingsBtn = document.getElementById('oanda-save-settings');
     const oandaReloadSettingsBtn = document.getElementById('oanda-reload-settings');
     const oandaSettingsStatus = document.getElementById('oanda-settings-status');
@@ -199,7 +192,16 @@
         const directionSelect = el('select');
         const unitSelect = el('select');
         const thresholdInput = el('input', { placeholder: 'threshold', style: 'width:120px;' });
-        const windowInput = el('input', { placeholder: 'window_seconds', style: 'width:140px;' });
+        const windowSelect = el('select', { style: 'width:140px;' }, [
+            el('option', { value: '60', text: '1' }),
+            el('option', { value: '300', text: '5' }),
+            el('option', { value: '900', text: '15' }),
+            el('option', { value: '1800', text: '30' }),
+            el('option', { value: '3600', text: 'hour' }),
+            el('option', { value: '86400', text: 'day' }),
+            el('option', { value: '604800', text: 'week' }),
+            el('option', { value: '2592000', text: 'month' }),
+        ]);
         const targetPriceInput = el('input', {
             placeholder: 'target_price',
             style: 'width:140px;',
@@ -218,7 +220,7 @@
                 directionSelect,
                 unitSelect,
                 thresholdInput,
-                windowInput,
+                windowSelect,
                 targetPriceInput,
                 createBtn,
             ],
@@ -239,7 +241,7 @@
                 directionSelect.appendChild(el('option', { value: 'below', text: 'below' }));
                 unitSelect.style.display = 'none';
                 thresholdInput.style.display = 'none';
-                windowInput.style.display = 'none';
+                windowSelect.style.display = 'none';
                 targetPriceInput.style.display = '';
             } else {
                 directionSelect.appendChild(el('option', { value: 'either', text: 'either' }));
@@ -256,9 +258,24 @@
 
                 unitSelect.style.display = '';
                 thresholdInput.style.display = '';
-                windowInput.style.display = '';
+                windowSelect.style.display = '';
                 targetPriceInput.style.display = 'none';
             }
+        };
+
+        const formatWindow = (seconds) => {
+            const s = Number(seconds);
+            const map = {
+                60: '1m',
+                300: '5m',
+                900: '15m',
+                1800: '30m',
+                3600: 'hour',
+                86400: 'day',
+                604800: 'week',
+                2592000: 'month',
+            };
+            return map[s] || `${s}s`;
         };
 
         const renderList = (alerts) => {
@@ -275,7 +292,7 @@
                 }
                 if (alert.kind === 'move') {
                     const unitSuffix = alert.unit === 'pct' ? '%' : alert.unit || '';
-                    description += ` ${alert.direction} ${alert.threshold}${unitSuffix} in ${alert.window_seconds}s`;
+                    description += ` ${alert.direction} ${alert.threshold}${unitSuffix} in ${formatWindow(alert.window_seconds)}`;
                 }
                 left.appendChild(el('div', { text: description, style: 'font-weight:600;' }));
                 left.appendChild(el('div', { class: 'meta', text: `id: ${alert.id}` }));
@@ -355,7 +372,7 @@
                 payload.direction = directionSelect.value;
                 payload.unit = unitSelect.value;
                 payload.threshold = Number(thresholdInput.value);
-                payload.window_seconds = Number(windowInput.value);
+                payload.window_seconds = Number(windowSelect.value);
             }
             status.textContent = 'Saving...';
             const resp = await fetch(apiBase, {
@@ -413,13 +430,6 @@
             const data = await resp.json();
             if (oandaWaitInput) oandaWaitInput.value = data.wait_seconds ?? '';
             if (oandaThresholdInput) oandaThresholdInput.value = data.percent_threshold ?? '';
-            if (oandaAthAtlEnabled) oandaAthAtlEnabled.checked = Number(data.ath_atl_enabled ?? 0) === 1;
-            if (oandaAthAtlMinBreak) oandaAthAtlMinBreak.value = data.ath_atl_min_break_pct ?? '';
-            if (oandaAthAtlCooldown) oandaAthAtlCooldown.value = data.ath_atl_cooldown_seconds ?? '';
-            if (oandaAthAtlGranularity) oandaAthAtlGranularity.value = data.ath_atl_granularity ?? '';
-            if (oandaAthAtlPrice) oandaAthAtlPrice.value = (data.ath_atl_price ?? 'M').toUpperCase();
-            if (oandaAthAtlBackfillBatch) oandaAthAtlBackfillBatch.value = data.ath_atl_backfill_batch ?? '';
-            if (oandaAthAtlBackfillPages) oandaAthAtlBackfillPages.value = data.ath_atl_backfill_max_pages ?? '';
             setSettingsBadge(oandaSettingsStatus, 'Ready');
         } catch (err) {
             console.error(err);
@@ -469,13 +479,6 @@
         const body = {
             wait_seconds: Number(oandaWaitInput?.value || 0),
             percent_threshold: Number(oandaThresholdInput?.value || 0),
-            ath_atl_enabled: oandaAthAtlEnabled?.checked ? 1 : 0,
-            ath_atl_min_break_pct: Number(oandaAthAtlMinBreak?.value || 0),
-            ath_atl_cooldown_seconds: Number(oandaAthAtlCooldown?.value || 0),
-            ath_atl_granularity: oandaAthAtlGranularity?.value || '',
-            ath_atl_price: oandaAthAtlPrice?.value || '',
-            ath_atl_backfill_batch: Number(oandaAthAtlBackfillBatch?.value || 0),
-            ath_atl_backfill_max_pages: Number(oandaAthAtlBackfillPages?.value || 0),
         };
 
         if (oandaSaveSettingsBtn) oandaSaveSettingsBtn.disabled = true;
@@ -497,13 +500,6 @@
             const data = await resp.json();
             if (oandaWaitInput) oandaWaitInput.value = data.wait_seconds ?? '';
             if (oandaThresholdInput) oandaThresholdInput.value = data.percent_threshold ?? '';
-            if (oandaAthAtlEnabled) oandaAthAtlEnabled.checked = Number(data.ath_atl_enabled ?? 0) === 1;
-            if (oandaAthAtlMinBreak) oandaAthAtlMinBreak.value = data.ath_atl_min_break_pct ?? '';
-            if (oandaAthAtlCooldown) oandaAthAtlCooldown.value = data.ath_atl_cooldown_seconds ?? '';
-            if (oandaAthAtlGranularity) oandaAthAtlGranularity.value = data.ath_atl_granularity ?? '';
-            if (oandaAthAtlPrice) oandaAthAtlPrice.value = (data.ath_atl_price ?? 'M').toUpperCase();
-            if (oandaAthAtlBackfillBatch) oandaAthAtlBackfillBatch.value = data.ath_atl_backfill_batch ?? '';
-            if (oandaAthAtlBackfillPages) oandaAthAtlBackfillPages.value = data.ath_atl_backfill_max_pages ?? '';
             setSettingsBadge(oandaSettingsStatus, 'Saved');
         } catch (err) {
             console.error(err);
