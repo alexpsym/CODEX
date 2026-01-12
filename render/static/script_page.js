@@ -19,13 +19,6 @@
     const oandaSettingsCard = document.getElementById('oanda-settings');
     const oandaWaitInput = document.getElementById('oanda-wait-seconds');
     const oandaThresholdInput = document.getElementById('oanda-threshold');
-    const oandaAthAtlEnabled = document.getElementById('oanda-ath-atl-enabled');
-    const oandaAthAtlMinBreak = document.getElementById('oanda-ath-atl-min-break');
-    const oandaAthAtlCooldown = document.getElementById('oanda-ath-atl-cooldown');
-    const oandaAthAtlGranularity = document.getElementById('oanda-ath-atl-granularity');
-    const oandaAthAtlPrice = document.getElementById('oanda-ath-atl-price');
-    const oandaAthAtlBackfillBatch = document.getElementById('oanda-ath-atl-backfill-batch');
-    const oandaAthAtlBackfillPages = document.getElementById('oanda-ath-atl-backfill-pages');
     const oandaSaveSettingsBtn = document.getElementById('oanda-save-settings');
     const oandaReloadSettingsBtn = document.getElementById('oanda-reload-settings');
     const oandaTestAlertBtn = document.getElementById('oanda-test-alert');
@@ -315,10 +308,22 @@
             unitSelect.appendChild(option);
         });
 
-        const windowInput = document.createElement('input');
-        windowInput.type = 'number';
-        windowInput.min = '1';
-        windowInput.step = '1';
+        const windowSelect = document.createElement('select');
+        [
+            { label: '1', seconds: 60 },
+            { label: '5', seconds: 300 },
+            { label: '15', seconds: 900 },
+            { label: '30', seconds: 1800 },
+            { label: 'hour', seconds: 3600 },
+            { label: 'day', seconds: 86400 },
+            { label: 'week', seconds: 604800 },
+            { label: 'month', seconds: 2592000 },
+        ].forEach((opt) => {
+            const option = document.createElement('option');
+            option.value = String(opt.seconds);
+            option.textContent = opt.label;
+            windowSelect.appendChild(option);
+        });
 
         const cooldownInput = document.createElement('input');
         cooldownInput.type = 'number';
@@ -336,7 +341,7 @@
         const moveDirectionLabel = makeLabel('Move direction', moveDirectionSelect);
         const thresholdLabel = makeLabel('Move threshold', thresholdInput);
         const unitLabel = makeLabel('Move unit', unitSelect);
-        const windowLabel = makeLabel('Window (seconds)', windowInput);
+        const windowLabel = makeLabel('Window', windowSelect);
         const cooldownLabel = makeLabel('Cooldown (seconds)', cooldownInput);
         const enabledLabel = makeLabel('Enabled', enabledInput);
 
@@ -397,7 +402,7 @@
             moveDirectionSelect.value = 'either';
             thresholdInput.value = '';
             unitSelect.value = unitOptions[0].value;
-            windowInput.value = '';
+            windowSelect.value = '60';
             cooldownInput.value = '';
             enabledInput.checked = true;
             saveBtn.textContent = 'Save alert';
@@ -431,7 +436,7 @@
                 if (alert.kind === 'price') {
                     detail.textContent = `Price ${alert.direction} ${alert.target_price}`;
                 } else {
-                    detail.textContent = `Move ${alert.direction} ${alert.threshold} ${alert.unit} in ${alert.window_seconds}s`;
+                    detail.textContent = `Move ${alert.direction} ${alert.threshold} ${alert.unit} in ${formatWindow(alert.window_seconds)}`;
                 }
                 const cooldownText = alert.cooldown_seconds
                     ? `Cooldown ${alert.cooldown_seconds}s`
@@ -481,7 +486,7 @@
                         moveDirectionSelect.value = alert.direction || 'either';
                         thresholdInput.value = alert.threshold ?? '';
                         unitSelect.value = alert.unit || unitOptions[0].value;
-                        windowInput.value = alert.window_seconds ?? '';
+                        windowSelect.value = String(alert.window_seconds ?? 60);
                     }
                     cooldownInput.value = alert.cooldown_seconds ?? '';
                     enabledInput.checked = Boolean(alert.enabled);
@@ -529,6 +534,21 @@
             }
         };
 
+        const formatWindow = (seconds) => {
+            const s = Number(seconds);
+            const map = {
+                60: '1m',
+                300: '5m',
+                900: '15m',
+                1800: '30m',
+                3600: 'hour',
+                86400: 'day',
+                604800: 'week',
+                2592000: 'month',
+            };
+            return map[s] || `${s}s`;
+        };
+
         const parseRequiredNumber = (input, label) => {
             const value = Number(input.value);
             if (!Number.isFinite(value)) {
@@ -565,9 +585,9 @@
                     if (threshold <= 0) {
                         throw new Error('Move threshold must be greater than zero');
                     }
-                    const windowSeconds = parseRequiredNumber(windowInput, 'Window seconds');
-                    if (windowSeconds <= 0) {
-                        throw new Error('Window seconds must be greater than zero');
+                    const windowSeconds = Number(windowSelect.value);
+                    if (!Number.isFinite(windowSeconds) || windowSeconds <= 0) {
+                        throw new Error('Window must be selected');
                     }
                     payload.direction = moveDirectionSelect.value;
                     payload.threshold = threshold;
@@ -633,13 +653,6 @@
             const data = await resp.json();
             if (oandaWaitInput) oandaWaitInput.value = data.wait_seconds ?? '';
             if (oandaThresholdInput) oandaThresholdInput.value = data.percent_threshold ?? '';
-            if (oandaAthAtlEnabled) oandaAthAtlEnabled.checked = Number(data.ath_atl_enabled ?? 0) === 1;
-            if (oandaAthAtlMinBreak) oandaAthAtlMinBreak.value = data.ath_atl_min_break_pct ?? '';
-            if (oandaAthAtlCooldown) oandaAthAtlCooldown.value = data.ath_atl_cooldown_seconds ?? '';
-            if (oandaAthAtlGranularity) oandaAthAtlGranularity.value = data.ath_atl_granularity ?? '';
-            if (oandaAthAtlPrice) oandaAthAtlPrice.value = (data.ath_atl_price ?? 'M').toUpperCase();
-            if (oandaAthAtlBackfillBatch) oandaAthAtlBackfillBatch.value = data.ath_atl_backfill_batch ?? '';
-            if (oandaAthAtlBackfillPages) oandaAthAtlBackfillPages.value = data.ath_atl_backfill_max_pages ?? '';
             if (data.push_ready) {
                 setSettingsBadge(oandaSettingsStatus, 'Ready');
             } else {
@@ -695,13 +708,6 @@
         const body = {
             wait_seconds: Number(oandaWaitInput?.value || 0),
             percent_threshold: Number(oandaThresholdInput?.value || 0),
-            ath_atl_enabled: oandaAthAtlEnabled?.checked ? 1 : 0,
-            ath_atl_min_break_pct: Number(oandaAthAtlMinBreak?.value || 0),
-            ath_atl_cooldown_seconds: Number(oandaAthAtlCooldown?.value || 0),
-            ath_atl_granularity: oandaAthAtlGranularity?.value || '',
-            ath_atl_price: oandaAthAtlPrice?.value || '',
-            ath_atl_backfill_batch: Number(oandaAthAtlBackfillBatch?.value || 0),
-            ath_atl_backfill_max_pages: Number(oandaAthAtlBackfillPages?.value || 0),
         };
 
         if (oandaSaveSettingsBtn) oandaSaveSettingsBtn.disabled = true;
@@ -724,13 +730,6 @@
             const data = await resp.json();
             if (oandaWaitInput) oandaWaitInput.value = data.wait_seconds ?? '';
             if (oandaThresholdInput) oandaThresholdInput.value = data.percent_threshold ?? '';
-            if (oandaAthAtlEnabled) oandaAthAtlEnabled.checked = Number(data.ath_atl_enabled ?? 0) === 1;
-            if (oandaAthAtlMinBreak) oandaAthAtlMinBreak.value = data.ath_atl_min_break_pct ?? '';
-            if (oandaAthAtlCooldown) oandaAthAtlCooldown.value = data.ath_atl_cooldown_seconds ?? '';
-            if (oandaAthAtlGranularity) oandaAthAtlGranularity.value = data.ath_atl_granularity ?? '';
-            if (oandaAthAtlPrice) oandaAthAtlPrice.value = (data.ath_atl_price ?? 'M').toUpperCase();
-            if (oandaAthAtlBackfillBatch) oandaAthAtlBackfillBatch.value = data.ath_atl_backfill_batch ?? '';
-            if (oandaAthAtlBackfillPages) oandaAthAtlBackfillPages.value = data.ath_atl_backfill_max_pages ?? '';
             setSettingsBadge(oandaSettingsStatus, 'Saved');
         } catch (err) {
             console.error(err);

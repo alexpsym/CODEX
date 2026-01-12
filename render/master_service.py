@@ -995,7 +995,7 @@ SCRIPT_PAGE_TEMPLATE = """<!DOCTYPE html>
         <div class=\"panel-header\">
             <div>
                 <strong>OANDA monitor controls</strong>
-                <p class=\"meta\">Tune polling, ATH/ATL alerts, and send a Telegram test.</p>
+                <p class=\"meta\">Tune polling and send a Telegram test.</p>
             </div>
             <span class=\"badge\" id=\"oanda-settings-status\">&nbsp;</span>
         </div>
@@ -1005,31 +1005,6 @@ SCRIPT_PAGE_TEMPLATE = """<!DOCTYPE html>
             </label>
             <label>Alert threshold (% change)
                 <input type=\"number\" min=\"0.01\" step=\"0.01\" id=\"oanda-threshold\" />
-            </label>
-            <label>Enable ATH/ATL alerts
-                <input type=\"checkbox\" id=\"oanda-ath-atl-enabled\" />
-            </label>
-            <label>Min ATH/ATL break (%)
-                <input type=\"number\" min=\"0\" step=\"0.01\" id=\"oanda-ath-atl-min-break\" />
-            </label>
-            <label>ATH/ATL cooldown (seconds)
-                <input type=\"number\" min=\"0\" step=\"1\" id=\"oanda-ath-atl-cooldown\" />
-            </label>
-            <label>ATH/ATL granularity
-                <input type=\"text\" id=\"oanda-ath-atl-granularity\" />
-            </label>
-            <label>ATH/ATL price bucket
-                <select id=\"oanda-ath-atl-price\">
-                    <option value=\"M\">Mid</option>
-                    <option value=\"B\">Bid</option>
-                    <option value=\"A\">Ask</option>
-                </select>
-            </label>
-            <label>ATH/ATL backfill batch
-                <input type=\"number\" min=\"1\" step=\"1\" id=\"oanda-ath-atl-backfill-batch\" />
-            </label>
-            <label>ATH/ATL backfill pages
-                <input type=\"number\" min=\"1\" step=\"1\" id=\"oanda-ath-atl-backfill-pages\" />
             </label>
         </div>
         <div class=\"settings-actions\">
@@ -1192,7 +1167,7 @@ LOG_VIEWER_TEMPLATE = """<!DOCTYPE html>
         <div class=\"settings-header\">
             <div>
                 <strong>OANDA monitor settings</strong>
-                <p class=\"meta\">Adjust OANDA monitoring and ATH/ATL thresholds.</p>
+                <p class=\"meta\">Adjust OANDA monitoring.</p>
             </div>
             <span class=\"badge\" id=\"oanda-settings-status\">&nbsp;</span>
         </div>
@@ -1202,31 +1177,6 @@ LOG_VIEWER_TEMPLATE = """<!DOCTYPE html>
             </label>
             <label>Alert threshold (% change)
                 <input type=\"number\" min=\"0.01\" step=\"0.01\" id=\"oanda-threshold\" />
-            </label>
-            <label>Enable ATH/ATL alerts
-                <input type=\"checkbox\" id=\"oanda-ath-atl-enabled\" />
-            </label>
-            <label>Min ATH/ATL break (%)
-                <input type=\"number\" min=\"0\" step=\"0.01\" id=\"oanda-ath-atl-min-break\" />
-            </label>
-            <label>ATH/ATL cooldown (seconds)
-                <input type=\"number\" min=\"0\" step=\"1\" id=\"oanda-ath-atl-cooldown\" />
-            </label>
-            <label>ATH/ATL granularity
-                <input type=\"text\" id=\"oanda-ath-atl-granularity\" />
-            </label>
-            <label>ATH/ATL price bucket
-                <select id=\"oanda-ath-atl-price\">
-                    <option value=\"M\">Mid</option>
-                    <option value=\"B\">Bid</option>
-                    <option value=\"A\">Ask</option>
-                </select>
-            </label>
-            <label>ATH/ATL backfill batch
-                <input type=\"number\" min=\"1\" step=\"1\" id=\"oanda-ath-atl-backfill-batch\" />
-            </label>
-            <label>ATH/ATL backfill pages
-                <input type=\"number\" min=\"1\" step=\"1\" id=\"oanda-ath-atl-backfill-pages\" />
             </label>
         </div>
         <div class=\"controls\">
@@ -3579,13 +3529,6 @@ def _update_oanda_settings(payload: Dict[str, object]) -> Dict[str, float]:
         for key in (
             "wait_seconds",
             "percent_threshold",
-            "ath_atl_enabled",
-            "ath_atl_min_break_pct",
-            "ath_atl_cooldown_seconds",
-            "ath_atl_granularity",
-            "ath_atl_price",
-            "ath_atl_backfill_batch",
-            "ath_atl_backfill_max_pages",
         ):
             if key in payload:
                 updates[key] = payload.get(key)

@@ -351,49 +351,15 @@ def evaluate_custom_alerts(
 def _coerce_settings(data: Dict[str, object]) -> Dict[str, float]:
     wait_seconds = int(float(data.get("wait_seconds", DEFAULT_WAIT_SECONDS)))
     pct_threshold = float(data.get("percent_threshold", DEFAULT_PERCENT_THRESHOLD))
-    ath_atl_enabled = int(float(data.get("ath_atl_enabled", DEFAULT_ATH_ATL_ENABLED)))
-    ath_atl_min_break_pct = float(
-        data.get("ath_atl_min_break_pct", DEFAULT_ATH_ATL_MIN_BREAK_PCT)
-    )
-    ath_atl_cooldown_seconds = int(
-        float(data.get("ath_atl_cooldown_seconds", DEFAULT_ATH_ATL_COOLDOWN_SECONDS))
-    )
-    ath_atl_granularity = str(
-        data.get("ath_atl_granularity", DEFAULT_ATH_ATL_GRANULARITY)
-    ).strip()
-    ath_atl_backfill_batch = int(
-        float(data.get("ath_atl_backfill_batch", DEFAULT_ATH_ATL_BACKFILL_BATCH))
-    )
-    ath_atl_backfill_max_pages = int(
-        float(data.get("ath_atl_backfill_max_pages", DEFAULT_ATH_ATL_BACKFILL_MAX_PAGES))
-    )
 
     if wait_seconds <= 0:
         raise ValueError("wait_seconds must be greater than zero")
     if pct_threshold <= 0:
         raise ValueError("percent_threshold must be greater than zero")
-    if ath_atl_enabled not in (0, 1):
-        ath_atl_enabled = 1 if ath_atl_enabled else 0
-    if ath_atl_min_break_pct < 0:
-        ath_atl_min_break_pct = 0.0
-    if ath_atl_cooldown_seconds < 0:
-        ath_atl_cooldown_seconds = 0
-    if not ath_atl_granularity:
-        ath_atl_granularity = DEFAULT_ATH_ATL_GRANULARITY
-    if ath_atl_backfill_batch < 1:
-        ath_atl_backfill_batch = 1
-    if ath_atl_backfill_max_pages < 1:
-        ath_atl_backfill_max_pages = 1
 
     return {
         "wait_seconds": float(wait_seconds),
         "percent_threshold": float(pct_threshold),
-        "ath_atl_enabled": float(ath_atl_enabled),
-        "ath_atl_min_break_pct": float(ath_atl_min_break_pct),
-        "ath_atl_cooldown_seconds": float(ath_atl_cooldown_seconds),
-        "ath_atl_granularity": ath_atl_granularity,
-        "ath_atl_backfill_batch": float(ath_atl_backfill_batch),
-        "ath_atl_backfill_max_pages": float(ath_atl_backfill_max_pages),
     }
 
 
@@ -411,12 +377,6 @@ def get_runtime_settings(force: bool = False) -> Dict[str, float]:
         settings = {
             "wait_seconds": DEFAULT_WAIT_SECONDS,
             "percent_threshold": DEFAULT_PERCENT_THRESHOLD,
-            "ath_atl_enabled": DEFAULT_ATH_ATL_ENABLED,
-            "ath_atl_min_break_pct": DEFAULT_ATH_ATL_MIN_BREAK_PCT,
-            "ath_atl_cooldown_seconds": DEFAULT_ATH_ATL_COOLDOWN_SECONDS,
-            "ath_atl_granularity": DEFAULT_ATH_ATL_GRANULARITY,
-            "ath_atl_backfill_batch": DEFAULT_ATH_ATL_BACKFILL_BATCH,
-            "ath_atl_backfill_max_pages": DEFAULT_ATH_ATL_BACKFILL_MAX_PAGES,
         }
 
         if mtime is not None:
@@ -437,12 +397,6 @@ def update_runtime_settings(
     *,
     wait_seconds: int | None = None,
     percent_threshold: float | None = None,
-    ath_atl_enabled: int | None = None,
-    ath_atl_min_break_pct: float | None = None,
-    ath_atl_cooldown_seconds: int | None = None,
-    ath_atl_granularity: str | None = None,
-    ath_atl_backfill_batch: int | None = None,
-    ath_atl_backfill_max_pages: int | None = None,
 ) -> Dict[str, float]:
     """Update the persisted settings file and return the sanitized values."""
 
@@ -452,18 +406,6 @@ def update_runtime_settings(
         current["wait_seconds"] = wait_seconds
     if percent_threshold is not None:
         current["percent_threshold"] = percent_threshold
-    if ath_atl_enabled is not None:
-        current["ath_atl_enabled"] = ath_atl_enabled
-    if ath_atl_min_break_pct is not None:
-        current["ath_atl_min_break_pct"] = ath_atl_min_break_pct
-    if ath_atl_cooldown_seconds is not None:
-        current["ath_atl_cooldown_seconds"] = ath_atl_cooldown_seconds
-    if ath_atl_granularity is not None:
-        current["ath_atl_granularity"] = ath_atl_granularity
-    if ath_atl_backfill_batch is not None:
-        current["ath_atl_backfill_batch"] = ath_atl_backfill_batch
-    if ath_atl_backfill_max_pages is not None:
-        current["ath_atl_backfill_max_pages"] = ath_atl_backfill_max_pages
 
     sanitized = _coerce_settings(current)
     SETTINGS_PATH.write_text(json.dumps(sanitized, indent=2), encoding="utf-8")
@@ -1105,7 +1047,6 @@ def run_monitor() -> None:
     previous_prices: Dict[str, float] = {}
     price_history: Dict[str, deque] = {}
     state = _load_state()
-    symbols_state: Dict[str, Dict[str, float]] = state.get("symbols", {})  # type: ignore[assignment]
     iteration = 0
     blocked_streak = 0
     settings = get_runtime_settings(force=True)
@@ -1126,13 +1067,7 @@ def run_monitor() -> None:
             log(
                 "Monitor settings: "
                 f"wait_seconds={settings['wait_seconds']}s, "
-                f"percent_threshold={settings['percent_threshold']:.2f}%, "
-                f"ath_atl_enabled={int(settings['ath_atl_enabled'])}, "
-                f"ath_atl_min_break_pct={settings['ath_atl_min_break_pct']:.4f}%, "
-                f"ath_atl_cooldown_seconds={int(settings['ath_atl_cooldown_seconds'])}, "
-                f"ath_atl_granularity={settings['ath_atl_granularity']}, "
-                f"ath_atl_backfill_batch={int(settings['ath_atl_backfill_batch'])}, "
-                f"ath_atl_backfill_max_pages={int(settings['ath_atl_backfill_max_pages'])}"
+                f"percent_threshold={settings['percent_threshold']:.2f}%"
             )
             last_logged_settings = dict(settings)
         log(f"Starting price check #{iteration}...")
@@ -1197,46 +1132,6 @@ def run_monitor() -> None:
                 "and try again."
             )
         else:
-            if int(settings.get("ath_atl_enabled", 1)) == 1 and prices:
-                baseline_changed = backfill_baselines(
-                    symbols=list(prices.keys()),
-                    settings=settings,
-                    symbols_state=symbols_state,
-                )
-                changed_state = baseline_changed
-                min_break_pct = float(settings.get("ath_atl_min_break_pct", 0.0))
-                cooldown_seconds = int(settings.get("ath_atl_cooldown_seconds", 0))
-                now_ts = time.time()
-                for symbol, current_price in prices.items():
-                    entry = _get_symbol_state(symbols_state, symbol)
-                    if not entry.get("baseline_ready"):
-                        continue
-                    ath = float(entry.get("ath", current_price))
-                    atl = float(entry.get("atl", current_price))
-                    ath_trigger = current_price > ath * (1.0 + (min_break_pct / 100.0))
-                    atl_trigger = current_price < atl * (1.0 - (min_break_pct / 100.0))
-                    last_ath_alert = float(entry.get("last_ath_alert_at", 0.0))
-                    last_atl_alert = float(entry.get("last_atl_alert_at", 0.0))
-                    if ath_trigger and (cooldown_seconds <= 0 or now_ts - last_ath_alert >= cooldown_seconds):
-                        entry["ath"] = current_price
-                        entry["last_ath_alert_at"] = now_ts
-                        symbols_state[symbol] = entry
-                        changed_state = True
-                        message = f"{symbol} NEW ATH | {ath:.6f} -> {current_price:.6f}"
-                        log(message)
-                        send_notification("Bybit ATH Alert", message)
-                    if atl_trigger and (cooldown_seconds <= 0 or now_ts - last_atl_alert >= cooldown_seconds):
-                        entry["atl"] = current_price
-                        entry["last_atl_alert_at"] = now_ts
-                        symbols_state[symbol] = entry
-                        changed_state = True
-                        message = f"{symbol} NEW ATL | {atl:.6f} -> {current_price:.6f}"
-                        log(message)
-                        send_notification("Bybit ATL Alert", message)
-                if changed_state:
-                    state["symbols"] = symbols_state
-                    _save_state(state)
-
             if previous_prices:
                 triggered_any = False
 
