@@ -1786,6 +1786,17 @@ async def _place_oanda_order(
         order_payload["takeProfitOnFill"] = {
             "price": _quantize_oanda_price(tp_price, display_precision)
         }
+    BYBIT_LOGGER.info(
+        "OANDA_ORDER_PRECISION symbol=%s displayPrecision=%s tradeUnitsPrecision=%s "
+        "units=%s price=%s sl=%s tp=%s",
+        symbol,
+        display_precision,
+        units_precision,
+        order_payload.get("units"),
+        order_payload.get("price"),
+        (order_payload.get("stopLossOnFill") or {}).get("price"),
+        (order_payload.get("takeProfitOnFill") or {}).get("price"),
+    )
 
     url = (
         f"{cfg['base_url'].rstrip('/')}/v3/accounts/{cfg['account_id']}/orders"
@@ -2901,6 +2912,17 @@ async def _place_oanda_order(
         order_payload["takeProfitOnFill"] = {
             "price": _quantize_oanda_price(tp_price, display_precision)
         }
+    BYBIT_LOGGER.info(
+        "OANDA_ORDER_PRECISION symbol=%s displayPrecision=%s tradeUnitsPrecision=%s "
+        "units=%s price=%s sl=%s tp=%s",
+        symbol,
+        display_precision,
+        units_precision,
+        order_payload.get("units"),
+        order_payload.get("price"),
+        (order_payload.get("stopLossOnFill") or {}).get("price"),
+        (order_payload.get("takeProfitOnFill") or {}).get("price"),
+    )
 
     url = f"{cfg['base_url'].rstrip('/')}/v3/accounts/{cfg['account_id']}/orders"
     headers = {
