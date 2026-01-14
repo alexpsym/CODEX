@@ -488,6 +488,8 @@ def index():
             if side.lower() == "buy":
                 sl_price = price_reference - sl_distance
                 tp_price = price_reference + tp_distance
+                sl_price_str = f"{sl_price:.{display_precision}f}"
+                tp_price_str = f"{tp_price:.{display_precision}f}"
                 alert_qty = round(units, units_precision)
                 alert = {
                     "script_name": "oanda-calculator-clone",
@@ -498,12 +500,14 @@ def index():
                     "order_type": order_type,
                     "take_profit_price": f"{{{{close}}}} + {tp_distance_str}",
                     "stop_loss_price": f"{{{{close}}}} - {sl_distance_str}",
-                    "take_profit_price_value": tp_price,
-                    "stop_loss_price_value": sl_price,
+                    "take_profit_price_value": tp_price_str,
+                    "stop_loss_price_value": sl_price_str,
                 }
             else:
                 sl_price = price_reference + sl_distance
                 tp_price = price_reference - tp_distance
+                sl_price_str = f"{sl_price:.{display_precision}f}"
+                tp_price_str = f"{tp_price:.{display_precision}f}"
                 alert_qty = round(units, units_precision)
                 alert = {
                     "script_name": "oanda-calculator-clone",
@@ -514,8 +518,8 @@ def index():
                     "order_type": order_type,
                     "take_profit_price": f"{{{{close}}}} - {tp_distance_str}",
                     "stop_loss_price": f"{{{{close}}}} + {sl_distance_str}",
-                    "take_profit_price_value": tp_price,
-                    "stop_loss_price_value": sl_price,
+                    "take_profit_price_value": tp_price_str,
+                    "stop_loss_price_value": sl_price_str,
                 }
 
             if entry_price_value is not None:
