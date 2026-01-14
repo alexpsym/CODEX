@@ -13,6 +13,7 @@ import socket
 import sys
 import time
 from dataclasses import dataclass, field
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
@@ -1256,6 +1257,53 @@ def _parse_optional_float(value: object, field_name: str) -> Optional[float]:
         raise ValueError(f"OANDA payload {field_name} must be numeric.") from exc
 
 
+def _quantize_oanda_price(value: float, precision: int) -> str:
+    normalized = max(0, precision)
+    quantizer = Decimal("1").scaleb(-normalized)
+    quantized = Decimal(str(value)).quantize(quantizer, rounding=ROUND_HALF_UP)
+    return f"{quantized:.{normalized}f}"
+
+
+async def _fetch_oanda_display_precision(
+    *,
+    base_url: str,
+    account_id: str,
+    api_key: str,
+    symbol: str,
+    mode: str,
+) -> int:
+    default_precision = 5
+    if not symbol:
+        return default_precision
+    try:
+        payload = await _fetch_oanda_json(
+            base_url=base_url,
+            account_id=account_id,
+            api_key=api_key,
+            endpoint=f"/accounts/{{account_id}}/instruments?instruments={symbol}",
+            mode=mode,
+        )
+    except Exception as exc:
+        BYBIT_LOGGER.warning(
+            "OANDA instrument lookup failed symbol=%s error=%s", symbol, exc
+        )
+        return default_precision
+    instruments = payload.get("instruments") or []
+    for instrument in instruments:
+        name = str(instrument.get("name", "")).upper()
+        if name and name == symbol.upper():
+            try:
+                return int(instrument.get("displayPrecision", default_precision))
+            except (TypeError, ValueError):
+                return default_precision
+    if instruments:
+        try:
+            return int(instruments[0].get("displayPrecision", default_precision))
+        except (TypeError, ValueError):
+            return default_precision
+    return default_precision
+
+
 def _clean_env(key: str) -> Optional[str]:
     value = os.getenv(key)
     if value is None:
@@ -1643,6 +1691,13 @@ async def _place_oanda_order(
         api_key=cfg["token"],
         mode=cfg["mode"],
     )
+    display_precision = await _fetch_oanda_display_precision(
+        base_url=cfg["base_url"],
+        account_id=cfg["account_id"],
+        api_key=cfg["token"],
+        symbol=symbol,
+        mode=cfg["mode"],
+    )
 
     signed_units = qty_val if action == "buy" else -qty_val
     order_payload: Dict[str, object] = {
@@ -1653,11 +1708,15 @@ async def _place_oanda_order(
         "positionFill": "DEFAULT",
     }
     if entry_price is not None:
-        order_payload["price"] = _format_decimal_value(entry_price)
+        order_payload["price"] = _quantize_oanda_price(entry_price, display_precision)
     if sl_price is not None:
-        order_payload["stopLossOnFill"] = {"price": _format_decimal_value(sl_price)}
+        order_payload["stopLossOnFill"] = {
+            "price": _quantize_oanda_price(sl_price, display_precision)
+        }
     if tp_price is not None:
-        order_payload["takeProfitOnFill"] = {"price": _format_decimal_value(tp_price)}
+        order_payload["takeProfitOnFill"] = {
+            "price": _quantize_oanda_price(tp_price, display_precision)
+        }
 
     url = (
         f"{cfg['base_url'].rstrip('/')}/v3/accounts/{cfg['account_id']}/orders"
@@ -2737,6 +2796,13 @@ async def _place_oanda_order(
     )
 
     cfg = _get_oanda_config(account)
+    display_precision = await _fetch_oanda_display_precision(
+        base_url=cfg["base_url"],
+        account_id=cfg["account_id"],
+        api_key=cfg["token"],
+        symbol=symbol,
+        mode=account,
+    )
 
     signed_units = qty_val if action == "buy" else -qty_val
     order_payload: Dict[str, object] = {
@@ -2747,11 +2813,15 @@ async def _place_oanda_order(
         "positionFill": "DEFAULT",
     }
     if entry_price is not None:
-        order_payload["price"] = _format_decimal_value(entry_price)
+        order_payload["price"] = _quantize_oanda_price(entry_price, display_precision)
     if sl_price is not None:
-        order_payload["stopLossOnFill"] = {"price": _format_decimal_value(sl_price)}
+        order_payload["stopLossOnFill"] = {
+            "price": _quantize_oanda_price(sl_price, display_precision)
+        }
     if tp_price is not None:
-        order_payload["takeProfitOnFill"] = {"price": _format_decimal_value(tp_price)}
+        order_payload["takeProfitOnFill"] = {
+            "price": _quantize_oanda_price(tp_price, display_precision)
+        }
 
     url = f"{cfg['base_url'].rstrip('/')}/v3/accounts/{cfg['account_id']}/orders"
     headers = {
