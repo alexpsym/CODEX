@@ -1,6 +1,7 @@
 """Unified Render-friendly service for running repo scripts with a web UI."""
 from __future__ import annotations
 
+import math
 import asyncio
 import base64
 import hashlib
@@ -1257,11 +1258,91 @@ def _parse_optional_float(value: object, field_name: str) -> Optional[float]:
         raise ValueError(f"OANDA payload {field_name} must be numeric.") from exc
 
 
+_OANDA_INSTRUMENT_META_CACHE: Dict[tuple[str, str], Dict[str, int]] = {}
+_OANDA_INSTRUMENT_META_CACHE_TS: Dict[tuple[str, str], float] = {}
+_OANDA_INSTRUMENT_META_TTL_SECONDS = 12 * 60 * 60  # 12 hours
+
+
+def _quantize_oanda_units(value: float, precision: int) -> str:
+    normalized = max(0, int(precision))
+    quantizer = Decimal("1").scaleb(-normalized)
+    quantized = Decimal(str(value)).quantize(quantizer, rounding=ROUND_HALF_UP)
+    return f"{quantized:.{normalized}f}"
+
+
 def _quantize_oanda_price(value: float, precision: int) -> str:
     normalized = max(0, precision)
     quantizer = Decimal("1").scaleb(-normalized)
     quantized = Decimal(str(value)).quantize(quantizer, rounding=ROUND_HALF_UP)
     return f"{quantized:.{normalized}f}"
+
+
+async def _fetch_oanda_instrument_meta(
+    *,
+    base_url: str,
+    account_id: str,
+    api_key: str,
+    symbol: str,
+    mode: str,
+) -> Dict[str, int]:
+    if not symbol:
+        raise ValueError("OANDA instrument name missing; cannot determine precision.")
+
+    cache_key = (mode.strip().lower(), symbol.upper())
+    now = time.time()
+    cached = _OANDA_INSTRUMENT_META_CACHE.get(cache_key)
+    cached_ts = _OANDA_INSTRUMENT_META_CACHE_TS.get(cache_key, 0.0)
+    if cached and (now - cached_ts) < _OANDA_INSTRUMENT_META_TTL_SECONDS:
+        return cached
+
+    try:
+        payload = await _fetch_oanda_json(
+            base_url=base_url,
+            account_id=account_id,
+            api_key=api_key,
+            endpoint=f"/accounts/{{account_id}}/instruments?instruments={symbol}",
+            mode=mode,
+        )
+    except Exception as exc:
+        if cached:
+            BYBIT_LOGGER.warning(
+                "OANDA instrument lookup failed; using cached meta symbol=%s mode=%s error=%s",
+                symbol,
+                mode,
+                exc,
+            )
+            return cached
+        raise ValueError(
+            f"OANDA instrument lookup failed for {symbol} (mode={mode}). "
+            "Refusing to place the order to avoid precision errors. "
+            "Check OANDA connectivity/credentials."
+        ) from exc
+    instruments = payload.get("instruments") or []
+    for instrument in instruments:
+        name = str(instrument.get("name", "")).upper()
+        if name and name == symbol.upper():
+            try:
+                meta = {
+                    "displayPrecision": int(instrument.get("displayPrecision")),
+                    "tradeUnitsPrecision": int(instrument.get("tradeUnitsPrecision", 0)),
+                }
+                _OANDA_INSTRUMENT_META_CACHE[cache_key] = meta
+                _OANDA_INSTRUMENT_META_CACHE_TS[cache_key] = now
+                return meta
+            except (TypeError, ValueError):
+                break
+
+    if cached:
+        BYBIT_LOGGER.warning(
+            "OANDA instrument meta missing/unparseable; using cached meta symbol=%s mode=%s",
+            symbol,
+            mode,
+        )
+        return cached
+    raise ValueError(
+        f"OANDA instrument meta missing/unparseable for {symbol} (mode={mode}). "
+        "Refusing to place the order to avoid precision errors."
+    )
 
 
 async def _fetch_oanda_display_precision(
@@ -1272,36 +1353,14 @@ async def _fetch_oanda_display_precision(
     symbol: str,
     mode: str,
 ) -> int:
-    default_precision = 5
-    if not symbol:
-        return default_precision
-    try:
-        payload = await _fetch_oanda_json(
-            base_url=base_url,
-            account_id=account_id,
-            api_key=api_key,
-            endpoint=f"/accounts/{{account_id}}/instruments?instruments={symbol}",
-            mode=mode,
-        )
-    except Exception as exc:
-        BYBIT_LOGGER.warning(
-            "OANDA instrument lookup failed symbol=%s error=%s", symbol, exc
-        )
-        return default_precision
-    instruments = payload.get("instruments") or []
-    for instrument in instruments:
-        name = str(instrument.get("name", "")).upper()
-        if name and name == symbol.upper():
-            try:
-                return int(instrument.get("displayPrecision", default_precision))
-            except (TypeError, ValueError):
-                return default_precision
-    if instruments:
-        try:
-            return int(instruments[0].get("displayPrecision", default_precision))
-        except (TypeError, ValueError):
-            return default_precision
-    return default_precision
+    meta = await _fetch_oanda_instrument_meta(
+        base_url=base_url,
+        account_id=account_id,
+        api_key=api_key,
+        symbol=symbol,
+        mode=mode,
+    )
+    return int(meta["displayPrecision"])
 
 
 def _clean_env(key: str) -> Optional[str]:
@@ -1691,19 +1750,29 @@ async def _place_oanda_order(
         api_key=cfg["token"],
         mode=cfg["mode"],
     )
-    display_precision = await _fetch_oanda_display_precision(
+    meta = await _fetch_oanda_instrument_meta(
         base_url=cfg["base_url"],
         account_id=cfg["account_id"],
         api_key=cfg["token"],
         symbol=symbol,
         mode=cfg["mode"],
     )
+    display_precision = int(meta["displayPrecision"])
+    units_precision = int(meta.get("tradeUnitsPrecision", 0))
+
+    if units_precision <= 0 and not math.isclose(
+        qty_val, float(int(qty_val)), rel_tol=0.0, abs_tol=1e-9
+    ):
+        raise ValueError(
+            f"OANDA instrument {symbol} requires whole-number units (tradeUnitsPrecision=0). "
+            f"quantity={qty_val} is not valid."
+        )
 
     signed_units = qty_val if action == "buy" else -qty_val
     order_payload: Dict[str, object] = {
         "type": "MARKET" if order_type == "market" else "LIMIT",
         "instrument": symbol,
-        "units": _format_decimal_value(signed_units),
+        "units": _quantize_oanda_units(signed_units, units_precision),
         "timeInForce": "FOK" if order_type == "market" else "GTC",
         "positionFill": "DEFAULT",
     }
@@ -2796,19 +2865,29 @@ async def _place_oanda_order(
     )
 
     cfg = _get_oanda_config(account)
-    display_precision = await _fetch_oanda_display_precision(
+    meta = await _fetch_oanda_instrument_meta(
         base_url=cfg["base_url"],
         account_id=cfg["account_id"],
         api_key=cfg["token"],
         symbol=symbol,
         mode=account,
     )
+    display_precision = int(meta["displayPrecision"])
+    units_precision = int(meta.get("tradeUnitsPrecision", 0))
+
+    if units_precision <= 0 and not math.isclose(
+        qty_val, float(int(qty_val)), rel_tol=0.0, abs_tol=1e-9
+    ):
+        raise ValueError(
+            f"OANDA instrument {symbol} requires whole-number units (tradeUnitsPrecision=0). "
+            f"quantity={qty_val} is not valid."
+        )
 
     signed_units = qty_val if action == "buy" else -qty_val
     order_payload: Dict[str, object] = {
         "type": "MARKET" if order_type == "market" else "LIMIT",
         "instrument": symbol,
-        "units": _format_decimal_value(signed_units),
+        "units": _quantize_oanda_units(signed_units, units_precision),
         "timeInForce": "FOK" if order_type == "market" else "GTC",
         "positionFill": "DEFAULT",
     }
