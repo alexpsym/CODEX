@@ -41,3 +41,36 @@ The DLL exports two functions:
 
 You can import these functions from MQL4 using the `import` directive if you wish to call the DLL from a script.
 
+## CSV Converter for Forex Tester 6
+
+If your data uses ISO timestamps like `2000-05-30 17:27:00-05:00`, Forex Tester 6
+often fails to import it directly. Use the included converter script to produce
+a format FT6 imports reliably.
+
+### Convert to FT6 format
+
+```
+python convert_to_ft6.py eurusd.csv eurusd_ft6.csv
+```
+
+The output file contains:
+
+```
+YYYYMMDD,HHMMSS,Open,High,Low,Close,Volume
+```
+
+By default the converter normalizes timestamps to UTC when a timezone offset is
+present. To keep the original timezone, pass `--no-utc`.
+
+### Resample to perfect M1 candles
+
+If your data is irregular (missing minutes or tick-like), you can resample into
+clean M1 bars and fill missing minutes with flat candles using the previous
+close:
+
+```
+python resample_to_ft6_m1.py eurusd.csv eurusd_ft6_M1.csv
+```
+
+This script uses the same FT6 output format and converts timestamps to UTC by
+default. Use `--no-utc` to preserve the original timezone.
