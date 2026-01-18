@@ -570,8 +570,22 @@ def load_config(filename: str) -> Dict[str, Any]:
 def _validate_tick_multiple(value: float, tick_size: float, label: str) -> None:
     if tick_size <= 0:
         raise ValueError("Tick size must be greater than zero")
-    if not math.isclose((value / tick_size) % 1, 0.0, rel_tol=1e-9, abs_tol=1e-9):
+    ratio = value / tick_size
+    nearest = round(ratio)
+    if not math.isclose(ratio, nearest, rel_tol=1e-9, abs_tol=1e-9):
         raise ValueError(f"{label} is not aligned with tick size {tick_size}")
+
+
+def _round_to_tick(value: float, tick_size: float) -> float:
+    """Snap value to nearest tick multiple using Decimal (avoids float drift)."""
+    from decimal import Decimal, ROUND_HALF_UP
+
+    if tick_size <= 0:
+        return float(value)
+    tick = Decimal(str(tick_size))
+    raw = Decimal(str(value))
+    steps = (raw / tick).to_integral_value(rounding=ROUND_HALF_UP)
+    return float(steps * tick)
 
 
 def calculate_trade(
@@ -660,10 +674,14 @@ def calculate_trade(
     else:
         entry_price = float(market_price)
 
+    entry_price = _round_to_tick(entry_price, tick_size)
+
     if cfg["direction"] == "long":
         stop_price = entry_price - stop_distance
     else:
         stop_price = entry_price + stop_distance
+
+    stop_price = _round_to_tick(stop_price, tick_size)
 
     entry_price_execution = entry_price * conversion_rate
     stop_price_execution = stop_price * conversion_rate
@@ -709,6 +727,8 @@ def calculate_trade(
         target_price = entry_price + ticks * tick_size
     else:
         target_price = entry_price - ticks * tick_size
+
+    target_price = _round_to_tick(target_price, tick_size)
 
     target_price_execution = target_price * conversion_rate
 
