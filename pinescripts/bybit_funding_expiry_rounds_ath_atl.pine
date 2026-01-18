@@ -42,8 +42,8 @@ M = month(now, utcZone)
 D = dayofmonth(now, utcZone)
 
 // Helper to generate timestamp for a given day offset and hour
-getTs(dayOffset, hour) =>
-    timestamp(utcZone, Y, M, D + dayOffset, hour, 0)
+getTs(dayOffset, hr) =>
+    timestamp(utcZone, Y, M, D + dayOffset, hr, 0)
 
 // Build list of future funding timestamps
 times = array.new_int()
@@ -87,9 +87,10 @@ var line[] roundLines = array.new_line()
 
 if barstate.islast
     // clear old lines
-    for i = 0 to array.size(roundLines) - 1
-        line.delete(array.get(roundLines, i))
-    array.clear(roundLines)
+    if array.size(roundLines) > 0
+        for i = 0 to array.size(roundLines) - 1
+            line.delete(array.get(roundLines, i))
+        array.clear(roundLines)
 
     if showRounds
         step = roundStep
