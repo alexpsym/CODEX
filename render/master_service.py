@@ -76,6 +76,8 @@ PAYSLIP_ALLOWED_IMAGES = {".jpg", ".jpeg", ".png"}
 OANDA_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "oanda-history"
 BYBIT_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "bybit-history"
 PENDING_WEBHOOKS_PATH = BASE_DIR / "render" / "data" / "pending_webhooks.json"
+WATCHLIST_PATH = BASE_DIR / "render" / "data" / "watchlist.json"
+WATCHLIST_MAX_ITEMS = 50
 WEB_APPS = {
     "bybithistory-clone",
     "cryptocalculator-clone",
@@ -124,6 +126,58 @@ PAYSLIP_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 OANDA_HISTORY_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
 BYBIT_HISTORY_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
 PENDING_WEBHOOKS_PATH.parent.mkdir(parents=True, exist_ok=True)
+WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+_WATCHLIST_CACHE: Optional[List[str]] = None
+
+
+def _normalize_watchlist(items: Iterable[object]) -> List[str]:
+    normalized: List[str] = []
+    seen = set()
+    for item in items:
+        symbol = str(item or "").strip().upper()
+        if not symbol:
+            continue
+        if len(symbol) == 6 and symbol.isalpha():
+            symbol = f"{symbol[:3]}_{symbol[3:]}"
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+        normalized.append(symbol)
+        if len(normalized) >= WATCHLIST_MAX_ITEMS:
+            break
+    return normalized
+
+
+def _load_watchlist() -> List[str]:
+    if not WATCHLIST_PATH.exists():
+        return []
+    try:
+        payload = json.loads(WATCHLIST_PATH.read_text(encoding="utf-8"))
+    except Exception:  # pragma: no cover - defensive
+        return []
+    if not isinstance(payload, list):
+        return []
+    return _normalize_watchlist(payload)
+
+
+def _get_watchlist() -> List[str]:
+    global _WATCHLIST_CACHE
+    if _WATCHLIST_CACHE is None:
+        _WATCHLIST_CACHE = _load_watchlist()
+    return list(_WATCHLIST_CACHE)
+
+
+def _save_watchlist(items: List[str]) -> None:
+    WATCHLIST_PATH.write_text(json.dumps(items, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _set_watchlist(items: Iterable[object]) -> List[str]:
+    global _WATCHLIST_CACHE
+    normalized = _normalize_watchlist(items)
+    _WATCHLIST_CACHE = normalized
+    _save_watchlist(normalized)
+    return list(normalized)
 
 
 @dataclass
@@ -817,6 +871,97 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         .error-list { margin-top:0.75rem; color:#fca5a5; font-size:0.9rem; }
         .error-list ul { margin:0.4rem 0 0; padding-left:1.25rem; }
+
+        .watchlist-widget {
+            position: fixed;
+            top: 16px;
+            right: 16px;
+            width: min(280px, calc(100% - 32px));
+            background: #0f172a;
+            border: 1px solid #1f2937;
+            border-radius: 14px;
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            color: #e2e8f0;
+            z-index: 999;
+            box-shadow: 0 16px 30px rgba(15, 23, 42, 0.55);
+        }
+        .watchlist-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            font-weight: 900;
+        }
+        .watchlist-sub {
+            color: #94a3b8;
+            font-size: 0.75rem;
+        }
+        .watchlist-input {
+            display: flex;
+            gap: 6px;
+        }
+        .watchlist-input input {
+            flex: 1;
+            border-radius: 10px;
+            border: 1px solid #334155;
+            background: #0b1220;
+            color: #e2e8f0;
+            padding: 6px 8px;
+            font-size: 0.85rem;
+        }
+        .watchlist-input button {
+            border-radius: 10px;
+            border: 1px solid #334155;
+            background: #1f2937;
+            color: #e2e8f0;
+            font-weight: 700;
+            padding: 6px 10px;
+            cursor: pointer;
+        }
+        .watchlist-input button:hover { background: #334155; }
+        .watchlist-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            max-height: 240px;
+            overflow: auto;
+        }
+        .watchlist-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 6px 8px;
+            border-radius: 10px;
+            border: 1px solid #1f2937;
+            background: #0b1220;
+        }
+        .watchlist-symbol {
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .watchlist-remove {
+            border: none;
+            background: transparent;
+            color: #fca5a5;
+            cursor: pointer;
+            font-weight: 900;
+        }
+        .watchlist-empty {
+            color: #94a3b8;
+            font-size: 0.8rem;
+        }
+        .watchlist-status {
+            color: #cbd5f5;
+            font-size: 0.75rem;
+            min-height: 1em;
+        }
     </style>
 </head>
 <body>
@@ -900,6 +1045,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <div id=\"other-scripts\" class=\"script-row\"></div>
         </section>
     </div>
+
+    <aside class=\"watchlist-widget\" id=\"watchlist-widget\">
+        <div class=\"watchlist-header\">
+            <span>Watchlist</span>
+            <span class=\"watchlist-sub\">Saved with alerts backup</span>
+        </div>
+        <div class=\"watchlist-input\">
+            <input id=\"watchlist-input\" type=\"text\" placeholder=\"BTCUSDT, EURUSD\" />
+            <button type=\"button\" id=\"watchlist-add-btn\">Add</button>
+        </div>
+        <div class=\"watchlist-status\" id=\"watchlist-status\"></div>
+        <div class=\"watchlist-empty\" id=\"watchlist-empty\">No items yet.</div>
+        <ul class=\"watchlist-list\" id=\"watchlist-items\"></ul>
+    </aside>
 
     <script src=\"/static/dashboard.js\"></script>
 </body>
@@ -4100,13 +4259,36 @@ async def set_pending_webhook_enabled(
     return JSONResponse({"ok": True, "item": item})
 
 
+@app.get("/api/watchlist")
+async def get_watchlist() -> JSONResponse:
+    return JSONResponse({"items": _get_watchlist()})
+
+
+@app.post("/api/watchlist")
+async def set_watchlist(request: Request) -> JSONResponse:
+    payload = await request.json()
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Watchlist payload must be an object.")
+    items = payload.get("items", [])
+    if not isinstance(items, list):
+        raise HTTPException(status_code=400, detail="Watchlist items must be a list.")
+    normalized = _set_watchlist(items)
+    return JSONResponse({"ok": True, "items": normalized})
+
+
 @app.get("/api/alerts/backup")
 async def backup_all_alerts() -> Response:
-    payload = {
-        "version": 1,
-        "exported_at": datetime.now(timezone.utc).isoformat(),
+    alerts_payload = {
         "bybit": {"alerts": bybit_monitor.get_custom_alerts(force=True)},
         "oanda": {"alerts": oanda_monitor.get_custom_alerts(force=True)},
+    }
+    payload = {
+        "version": 2,
+        "savedAt": datetime.now(timezone.utc).isoformat(),
+        "alerts": alerts_payload,
+        "watchlist": _get_watchlist(),
     }
     blob = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
     headers = {"Content-Disposition": 'attachment; filename="codex-alerts-backup.json"'}
@@ -4124,21 +4306,43 @@ async def restore_all_alerts(file: UploadFile = File(...)) -> JSONResponse:
     if not isinstance(data, dict):
         raise HTTPException(status_code=400, detail="Backup must be a JSON object")
 
-    bybit_alerts = []
-    oanda_alerts = []
-    if isinstance(data.get("bybit"), dict) and isinstance(data["bybit"].get("alerts"), list):
-        bybit_alerts = data["bybit"]["alerts"]
-    if isinstance(data.get("oanda"), dict) and isinstance(data["oanda"].get("alerts"), list):
-        oanda_alerts = data["oanda"]["alerts"]
+    if "alerts" in data:
+        alerts_payload = data.get("alerts")
+        if not isinstance(alerts_payload, dict):
+            raise HTTPException(status_code=400, detail="Alerts payload must be an object.")
+    else:
+        if not isinstance(data.get("bybit"), dict) and not isinstance(data.get("oanda"), dict):
+            raise HTTPException(status_code=400, detail="Backup missing alerts section.")
+        alerts_payload = data
 
-    bybit_restored = bybit_monitor.replace_custom_alerts(bybit_alerts)
-    oanda_restored = oanda_monitor.replace_custom_alerts(oanda_alerts)
+    bybit_block = alerts_payload.get("bybit")
+    oanda_block = alerts_payload.get("oanda")
+    if not isinstance(bybit_block, dict) or not isinstance(oanda_block, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="Backup must include bybit and oanda alert sections.",
+        )
+    if not isinstance(bybit_block.get("alerts"), list) or not isinstance(
+        oanda_block.get("alerts"), list
+    ):
+        raise HTTPException(status_code=400, detail="Alert lists must be arrays.")
+
+    watchlist_items: List[str] = []
+    if "watchlist" in data:
+        if not isinstance(data["watchlist"], list):
+            raise HTTPException(status_code=400, detail="Watchlist must be a list.")
+        watchlist_items = _normalize_watchlist(data["watchlist"])
+
+    bybit_restored = bybit_monitor.replace_custom_alerts(bybit_block["alerts"])
+    oanda_restored = oanda_monitor.replace_custom_alerts(oanda_block["alerts"])
+    _set_watchlist(watchlist_items)
 
     return JSONResponse(
         {
             "ok": True,
             "bybit_restored": len(bybit_restored),
             "oanda_restored": len(oanda_restored),
+            "watchlist_restored": len(watchlist_items),
         }
     )
 
