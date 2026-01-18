@@ -68,6 +68,48 @@
         }
     };
 
+    const setPendingWebhookEnabled = async (item, button, enabled) => {
+        if (!button) return;
+        button.disabled = true;
+        const original = button.textContent;
+        button.textContent = '...';
+        try {
+            await fetchJson(`/api/pending-webhooks/${encodeURIComponent(item.id)}/enabled`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled }),
+            });
+            await refresh();
+            setBadge(`Webhook ${enabled ? 'enabled' : 'disabled'}`, 'ok');
+        } catch (err) {
+            console.error(err);
+            setBadge('Failed to update webhook.', 'error');
+        } finally {
+            button.disabled = false;
+            button.textContent = original;
+        }
+    };
+
+    const deletePendingWebhook = async (item, button) => {
+        if (!button) return;
+        button.disabled = true;
+        const original = button.textContent;
+        button.textContent = '...';
+        try {
+            await fetchJson(`/api/pending-webhooks/${encodeURIComponent(item.id)}`, {
+                method: 'DELETE',
+            });
+            await refresh();
+            setBadge('Webhook removed', 'ok');
+        } catch (err) {
+            console.error(err);
+            setBadge('Failed to remove webhook.', 'error');
+        } finally {
+            button.disabled = false;
+            button.textContent = original;
+        }
+    };
+
     const render = (items, errors = []) => {
         if (!tbody) return;
         tbody.innerHTML = '';
@@ -130,6 +172,7 @@
             const t = String(item.type || '').trim().toLowerCase();
             const isOrder = t === 'order';
             const isPosition = t === 'position' || t === 'trade';
+            const isWebhook = t === 'webhook';
 
             if (isOrder || isPosition) {
                 const label = isOrder ? 'Cancel' : 'Close';
@@ -139,6 +182,24 @@
                 button.textContent = label;
                 button.addEventListener('click', () => closeOpenItem(item, button, label));
                 actionCell.appendChild(button);
+            } else if (isWebhook) {
+                const enabled = item.enabled !== false;
+                const toggleButton = document.createElement('button');
+                toggleButton.type = 'button';
+                toggleButton.className = 'action-btn';
+                toggleButton.textContent = enabled ? 'Disable' : 'Enable';
+                toggleButton.addEventListener('click', () =>
+                    setPendingWebhookEnabled(item, toggleButton, !enabled),
+                );
+                actionCell.appendChild(toggleButton);
+
+                const removeButton = document.createElement('button');
+                removeButton.type = 'button';
+                removeButton.className = 'action-btn';
+                removeButton.textContent = 'Remove';
+                removeButton.style.marginLeft = '0.4rem';
+                removeButton.addEventListener('click', () => deletePendingWebhook(item, removeButton));
+                actionCell.appendChild(removeButton);
             } else {
                 actionCell.textContent = '—';
             }

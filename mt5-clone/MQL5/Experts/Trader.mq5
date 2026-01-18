@@ -63,6 +63,7 @@ ulong    g_ticket       = 0;
 datetime g_lastBarTime  = 0;
 datetime g_armStartTime = 0;
 datetime g_expireAt     = 0;
+bool     g_wasInPosition = false;
 
 // EMA handles
 int hFast  = INVALID_HANDLE;
@@ -607,10 +608,21 @@ void OnTick()
          return;
       }
 
-      if(InPosition())
+      bool nowInPos = InPosition();
+
+      if(nowInPos)
       {
          // once filled, stop managing pendings
+         g_wasInPosition = true;
          CancelAllPendingByMagic();
+         return;
+      }
+
+      // position just closed -> immediately re-arm next pending
+      if(g_wasInPosition)
+      {
+         g_wasInPosition = false;
+         PlaceOrReplacePendingTrendline();
          return;
       }
 
@@ -649,9 +661,19 @@ void OnTimer()
       return;
    }
 
-   if(InPosition())
+   bool nowInPos = InPosition();
+
+   if(nowInPos)
    {
+      g_wasInPosition = true;
       CancelAllPendingByMagic();
+      return;
+   }
+
+   if(g_wasInPosition)
+   {
+      g_wasInPosition = false;
+      PlaceOrReplacePendingTrendline();
       return;
    }
 
