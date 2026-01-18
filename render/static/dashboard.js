@@ -16,8 +16,16 @@
   const ooErrorsBox = document.getElementById('open-orders-errors');
   const ooErrorsList = ooErrorsBox?.querySelector('ul');
 
+  const watchlistWidget = document.getElementById('watchlist-widget');
+  const watchlistInput = document.getElementById('watchlist-input');
+  const watchlistAddBtn = document.getElementById('watchlist-add-btn');
+  const watchlistList = document.getElementById('watchlist-items');
+  const watchlistEmpty = document.getElementById('watchlist-empty');
+  const watchlistStatus = document.getElementById('watchlist-status');
+
   let scriptsInFlight = null;
   let ooInFlight = null;
+  let watchlistItems = [];
 
   const setStatus = (msg, isErr = false) => {
     if (!status) return;
@@ -32,6 +40,104 @@
       throw new Error(`${options.method || 'GET'} ${url} failed: ${res.status} ${body || res.statusText}`);
     }
     return res.json();
+  };
+
+  const normalizeSymbol = (value) => {
+    const trimmed = String(value || '').trim().toUpperCase();
+    if (!trimmed) return '';
+    if (trimmed.length === 6 && /^[A-Z]+$/.test(trimmed)) {
+      return `${trimmed.slice(0, 3)}_${trimmed.slice(3)}`;
+    }
+    return trimmed;
+  };
+
+  const normalizeWatchlist = (items) => {
+    const unique = new Set();
+    const normalized = [];
+    items.forEach((item) => {
+      const symbol = normalizeSymbol(item);
+      if (!symbol || unique.has(symbol)) return;
+      unique.add(symbol);
+      normalized.push(symbol);
+    });
+    return normalized.slice(0, 50);
+  };
+
+  const setWatchlistStatus = (message) => {
+    if (!watchlistStatus) return;
+    watchlistStatus.textContent = message;
+  };
+
+  const renderWatchlist = () => {
+    if (!watchlistList || !watchlistEmpty) return;
+    watchlistList.innerHTML = '';
+    watchlistEmpty.style.display = watchlistItems.length ? 'none' : 'block';
+    watchlistItems.forEach((symbol, index) => {
+      const row = document.createElement('li');
+      row.className = 'watchlist-item';
+
+      const label = document.createElement('span');
+      label.className = 'watchlist-symbol';
+      label.textContent = symbol;
+      label.title = 'Click to copy';
+      label.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(symbol);
+          setWatchlistStatus(`Copied ${symbol}`);
+        } catch (err) {
+          console.error(err);
+          setWatchlistStatus('Clipboard unavailable');
+        }
+      });
+
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'watchlist-remove';
+      removeBtn.type = 'button';
+      removeBtn.textContent = '×';
+      removeBtn.addEventListener('click', () => {
+        watchlistItems.splice(index, 1);
+        saveWatchlist(watchlistItems);
+        renderWatchlist();
+      });
+
+      row.appendChild(label);
+      row.appendChild(removeBtn);
+      watchlistList.appendChild(row);
+    });
+  };
+
+  const saveWatchlist = async (items) => {
+    const normalized = normalizeWatchlist(items);
+    watchlistItems = normalized;
+    renderWatchlist();
+    try {
+      await fetchJson('/api/watchlist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items: normalized }),
+      });
+      setWatchlistStatus(`Saved ${normalized.length} item${normalized.length === 1 ? '' : 's'}`);
+    } catch (err) {
+      console.error(err);
+      setWatchlistStatus('Failed to save watchlist');
+    }
+  };
+
+  const loadWatchlist = async () => {
+    if (!watchlistWidget) return;
+    try {
+      const data = await fetchJson('/api/watchlist');
+      watchlistItems = normalizeWatchlist(Array.isArray(data?.items) ? data.items : []);
+      renderWatchlist();
+      if (watchlistItems.length) {
+        setWatchlistStatus(`Loaded ${watchlistItems.length} item${watchlistItems.length === 1 ? '' : 's'}`);
+      } else {
+        setWatchlistStatus('');
+      }
+    } catch (err) {
+      console.error(err);
+      setWatchlistStatus('Failed to load watchlist');
+    }
   };
 
   const downloadAlertsBackup = async () => {
@@ -56,6 +162,7 @@
     const res = await fetch('/api/alerts/restore', { method: 'POST', body: fd });
     const txt = await res.text();
     if (!res.ok) throw new Error(txt);
+    await loadWatchlist();
   };
 
   const openAlertsModal = () => {
@@ -152,6 +259,29 @@
   };
 
   alertsBtn?.addEventListener('click', () => openAlertsModal());
+
+  watchlistAddBtn?.addEventListener('click', () => {
+    if (!watchlistInput) return;
+    const raw = watchlistInput.value || '';
+    const tokens = raw.split(/[\s,]+/).filter(Boolean);
+    if (!tokens.length) return;
+    const merged = normalizeWatchlist([...watchlistItems, ...tokens]);
+    if (merged.length === watchlistItems.length) {
+      watchlistInput.value = '';
+      return;
+    }
+    if (merged.length >= 50 && watchlistItems.length < merged.length) {
+      setWatchlistStatus('Max 50 symbols');
+    }
+    saveWatchlist(merged);
+    watchlistInput.value = '';
+  });
+
+  watchlistInput?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    watchlistAddBtn?.click();
+  });
 
   // Normalize /scripts category values (prevents empty lists)
   const normCategory = (cat) => {
@@ -365,4 +495,5 @@
 
   refreshScripts();
   refreshOpenOrders();
+  loadWatchlist();
 })();
