@@ -75,6 +75,7 @@ PAYSLIP_UPLOAD_ROOT = BASE_DIR / "render" / "uploads" / "payslip"
 PAYSLIP_ALLOWED_IMAGES = {".jpg", ".jpeg", ".png"}
 OANDA_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "oanda-history"
 BYBIT_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "bybit-history"
+PENDING_WEBHOOKS_PATH = BASE_DIR / "render" / "data" / "pending_webhooks.json"
 WEB_APPS = {
     "bybithistory-clone",
     "cryptocalculator-clone",
@@ -122,6 +123,7 @@ BYBIT_SETTINGS_PATH = bybit_monitor.SETTINGS_PATH
 PAYSLIP_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 OANDA_HISTORY_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
 BYBIT_HISTORY_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
+PENDING_WEBHOOKS_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
 @dataclass
@@ -2088,6 +2090,83 @@ async def _collect_bybit_open_items(
     return {"items": items, "errors": errors}
 
 
+def _load_pending_webhooks() -> List[Dict[str, object]]:
+    if not PENDING_WEBHOOKS_PATH.exists():
+        return []
+    try:
+        payload = json.loads(PENDING_WEBHOOKS_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:  # pragma: no cover - defensive
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unable to read pending webhooks: {exc}",
+        ) from exc
+    if not isinstance(payload, list):
+        raise HTTPException(status_code=500, detail="Pending webhooks data must be a list.")
+    cleaned: List[Dict[str, object]] = []
+    for entry in payload:
+        if isinstance(entry, dict):
+            cleaned.append(entry)
+    return cleaned
+
+
+def _save_pending_webhooks(items: List[Dict[str, object]]) -> None:
+    PENDING_WEBHOOKS_PATH.write_text(
+        json.dumps(items, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def _upsert_pending_webhook(payload: Dict[str, object]) -> Dict[str, object]:
+    items = _load_pending_webhooks()
+    if not isinstance(payload, dict):
+        payload = {}
+
+    webhook_id = str(payload.get("id", "")).strip()
+    if not webhook_id:
+        webhook_id = f"wh_{uuid4().hex[:12]}"
+
+    now_ts = int(time.time())
+    entry = dict(payload)
+    entry["id"] = webhook_id
+    entry.setdefault("broker", "WEBHOOK")
+    entry.setdefault("type", "webhook")
+    entry.setdefault("status", "WAITING")
+    entry.setdefault("enabled", True)
+    entry.setdefault("created_at", now_ts)
+    entry["updated_at"] = now_ts
+
+    replaced = False
+    for idx, existing in enumerate(items):
+        if str(existing.get("id", "")).strip() == webhook_id:
+            items[idx] = entry
+            replaced = True
+            break
+    if not replaced:
+        items.append(entry)
+
+    _save_pending_webhooks(items)
+    return entry
+
+
+def _set_pending_webhook_enabled(webhook_id: str, enabled: bool) -> Dict[str, object]:
+    items = _load_pending_webhooks()
+    for idx, entry in enumerate(items):
+        if str(entry.get("id", "")).strip() == webhook_id:
+            items[idx] = {**entry, "enabled": enabled, "updated_at": int(time.time())}
+            _save_pending_webhooks(items)
+            return items[idx]
+    raise HTTPException(status_code=404, detail="Pending webhook not found.")
+
+
+def _delete_pending_webhook(webhook_id: str) -> bool:
+    items = _load_pending_webhooks()
+    remaining = [entry for entry in items if str(entry.get("id", "")).strip() != webhook_id]
+    if len(remaining) == len(items):
+        return False
+    _save_pending_webhooks(remaining)
+    return True
+
+
 def _oanda_credentials(mode: str) -> Dict[str, str]:
     suffix = "_DEMO" if mode == "demo" else ""
     api_key = os.getenv(f"OANDA_API_KEY{suffix}") or os.getenv(f"OANDA_TOKEN{suffix}")
@@ -3145,6 +3224,17 @@ async def fetch_open_orders() -> JSONResponse:
             }
         )
 
+    try:
+        items.extend(_load_pending_webhooks())
+    except HTTPException as exc:
+        errors.append(
+            {
+                "broker": "WEBHOOK",
+                "account": "local",
+                "message": str(exc.detail),
+            }
+        )
+
     return JSONResponse({"updated_at": time.time(), "items": items, "errors": errors})
 
 
@@ -3609,7 +3699,7 @@ async def category_page(category: str) -> str:
 @app.get("/scripts/view/{script_name:path}", response_class=HTMLResponse)
 async def script_page(script_name: str) -> str:
     script = script_manager.get(script_name)
-    if script.name in STANDALONE_SCRIPTS and script.name != "bybit_monitor":
+    if script.name in STANDALONE_SCRIPTS and script.name not in {"bybit_monitor", "oanda_monitor"}:
         has_ui = script.name in WEB_APPS
         target_url = (
             f"/apps/{_encoded_script_name(script.name)}"
@@ -3976,6 +4066,38 @@ async def set_oanda_monitor_custom_alert_enabled(
     enabled = bool((payload or {}).get("enabled", True))
     alert = oanda_monitor.set_custom_alert_enabled(alert_id, enabled)
     return JSONResponse({"ok": True, "alert": alert})
+
+
+@app.get("/api/pending-webhooks")
+async def list_pending_webhooks() -> JSONResponse:
+    return JSONResponse({"items": _load_pending_webhooks()})
+
+
+@app.post("/api/pending-webhooks")
+async def upsert_pending_webhook(request: Request) -> JSONResponse:
+    payload = await request.json()
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Pending webhook payload must be an object.")
+    item = _upsert_pending_webhook(payload)
+    return JSONResponse({"ok": True, "item": item})
+
+
+@app.delete("/api/pending-webhooks/{webhook_id}")
+async def delete_pending_webhook(webhook_id: str) -> JSONResponse:
+    deleted = _delete_pending_webhook(webhook_id)
+    return JSONResponse({"ok": True, "id": webhook_id, "deleted": deleted})
+
+
+@app.post("/api/pending-webhooks/{webhook_id}/enabled")
+async def set_pending_webhook_enabled(
+    webhook_id: str, request: Request
+) -> JSONResponse:
+    payload = await request.json()
+    enabled = bool((payload or {}).get("enabled", True))
+    item = _set_pending_webhook_enabled(webhook_id, enabled)
+    return JSONResponse({"ok": True, "item": item})
 
 
 @app.get("/api/alerts/backup")
