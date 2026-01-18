@@ -1,0 +1,145 @@
+//@version=6
+indicator("Bybit Funding/Expiry + Round Numbers + ATH/ATL", overlay=true)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SYMBOL FILTERS
+// ─────────────────────────────────────────────────────────────────────────────
+isForex = syminfo.type == "forex"
+
+// Only show Bybit funding/expiry for NON-forex charts
+allowBybitTimingLines = not isForex
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+showFunding   = input.bool(true,  "Show Future Funding Lines (Non-Forex Only)")
+showExpiry    = input.bool(true,  "Show Next Option Expiry Line (Non-Forex Only)")
+numFunding    = input.int(3,      "Number of Future Funding Intervals", minval=1)
+fundingColor  = input.color(color.blue,  "Funding Line Color")
+expiryColor   = input.color(color.black, "Expiry Line Color")
+
+showRounds    = input.bool(true,  "Show Nearby Round Numbers")
+roundStep     = input.float(100.0,"Round Number Step (price units)", minval=0.00000001)
+roundLevels   = input.int(6,      "How Many Levels Above/Below", minval=1)
+roundColor    = input.color(color.gray,  "Round Line Color")
+
+showATHATL    = input.bool(true,  "Show ATH/ATL Lines")
+athColor      = input.color(color.green, "ATH Line Color")
+atlColor      = input.color(color.red,   "ATL Line Color")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BYBIT FUNDING SCHEDULE (UTC)
+// ─────────────────────────────────────────────────────────────────────────────
+fundingHours = array.from(0, 8, 16)
+utcZone      = "GMT"
+
+// Current UTC timestamp
+now = timenow
+
+// UTC date components
+Y = year(now, utcZone)
+M = month(now, utcZone)
+D = dayofmonth(now, utcZone)
+
+// Helper to generate timestamp for a given day offset and hour
+getTs(dayOffset, hr) =>
+    timestamp(utcZone, Y, M, D + dayOffset, hr, 0)
+
+// Build list of future funding timestamps
+times = array.new_int()
+for hourValue in fundingHours
+    ts = getTs(0, hourValue)
+    if ts > now
+        array.push(times, ts)
+// Include next day's funding times
+for hourValue in fundingHours
+    array.push(times, getTs(1, hourValue))
+array.sort(times)
+
+// Draw funding lines on ≤30 min intraday charts (NON-FOREX ONLY)
+if allowBybitTimingLines and showFunding and timeframe.isintraday and timeframe.multiplier <= 30
+    topPrice = ta.highest(high, 100)
+    lowPrice = ta.lowest(low, 100)
+    for i = 0 to numFunding - 1
+        if i < array.size(times)
+            fTs = array.get(times, i)
+            line.new(x1 = fTs, y1 = lowPrice, x2 = fTs, y2 = topPrice,
+                     xloc = xloc.bar_time, extend = extend.both,
+                     color = fundingColor, style = line.style_dashed)
+
+// Compute next option expiry at 08:00 UTC (Brisbane 18:00)
+expTs = timestamp(utcZone, Y, M, D, 8, 0)
+if expTs <= now
+    expTs := timestamp(utcZone, Y, M, D + 1, 8, 0)
+
+// Draw single expiry line on ≤4 h intraday charts (NON-FOREX ONLY)
+if allowBybitTimingLines and showExpiry and timeframe.isintraday and timeframe.multiplier <= 240
+    topPrice = ta.highest(high, 100)
+    lowPrice = ta.lowest(low, 100)
+    line.new(x1 = expTs, y1 = lowPrice, x2 = expTs, y2 = topPrice,
+             xloc = xloc.bar_time, extend = extend.both,
+             color = expiryColor, style = line.style_dashed, width = 2)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NEARBY ROUND NUMBERS (HORIZONTAL LINES)
+// ─────────────────────────────────────────────────────────────────────────────
+var line[] roundLines = array.new_line()
+
+if barstate.islast
+    // clear old lines
+    if array.size(roundLines) > 0
+        for i = 0 to array.size(roundLines) - 1
+            line.delete(array.get(roundLines, i))
+        array.clear(roundLines)
+
+    if showRounds
+        step = roundStep
+        base = math.round(close / step) * step
+
+        // draw levels around current price
+        for k = -roundLevels to roundLevels
+            lvl = base + (k * step)
+            ln = line.new(
+                x1 = bar_index - 1, y1 = lvl,
+                x2 = bar_index,     y2 = lvl,
+                xloc = xloc.bar_index,
+                extend = extend.both,
+                color = roundColor,
+                style = line.style_solid,
+                width = 1
+            )
+            array.push(roundLines, ln)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ALL TIME HIGH / LOW (HORIZONTAL LINES)
+// ─────────────────────────────────────────────────────────────────────────────
+var float ATH = na
+var float ATL = na
+
+if na(ATH)
+    ATH := high
+if na(ATL)
+    ATL := low
+
+ATH := math.max(ATH, high)
+ATL := math.min(ATL, low)
+
+var line athLine = na
+var line atlLine = na
+
+if barstate.islast
+    if showATHATL
+        if na(athLine)
+            athLine := line.new(bar_index - 1, ATH, bar_index, ATH, xloc=xloc.bar_index, extend=extend.both, color=athColor, width=2)
+        else
+            line.set_y1(athLine, ATH), line.set_y2(athLine, ATH)
+
+        if na(atlLine)
+            atlLine := line.new(bar_index - 1, ATL, bar_index, ATL, xloc=xloc.bar_index, extend=extend.both, color=atlColor, width=2)
+        else
+            line.set_y1(atlLine, ATL), line.set_y2(atlLine, ATL)
+    else
+        if not na(athLine)
+            line.delete(athLine), athLine := na
+        if not na(atlLine)
+            line.delete(atlLine), atlLine := na
