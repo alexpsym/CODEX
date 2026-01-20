@@ -872,94 +872,67 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .error-list { margin-top:0.75rem; color:#fca5a5; font-size:0.9rem; }
         .error-list ul { margin:0.4rem 0 0; padding-left:1.25rem; }
 
-        .watchlist-widget {
-            position: fixed;
-            top: 16px;
-            right: 16px;
-            width: min(280px, calc(100% - 32px));
-            background: #0f172a;
-            border: 1px solid #1f2937;
-            border-radius: 14px;
-            padding: 12px;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            color: #e2e8f0;
-            z-index: 999;
-            box-shadow: 0 16px 30px rgba(15, 23, 42, 0.55);
+        .top-grid {
+            display: grid;
+            grid-template-columns: 1fr 320px;
+            gap: 1rem;
+            align-items: start;
+            margin-bottom: 1rem;
         }
-        .watchlist-header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 8px;
-            font-weight: 900;
+        @media (max-width: 1100px) {
+            .top-grid { grid-template-columns: 1fr; }
         }
+
         .watchlist-sub {
             color: #94a3b8;
-            font-size: 0.75rem;
+            margin-top: 0.25rem;
+            font-size: 0.95rem;
+            line-height: 1.4;
         }
-        .watchlist-input {
+        #watchlist-widget .watchlist-input {
             display: flex;
             gap: 6px;
+            margin: 0.75rem 0 0.5rem;
         }
-        .watchlist-input input {
+        #watchlist-widget .watchlist-input input {
             flex: 1;
             border-radius: 10px;
             border: 1px solid #334155;
             background: #0b1220;
             color: #e2e8f0;
             padding: 6px 8px;
-            font-size: 0.85rem;
+            font-size: 0.9rem;
         }
-        .watchlist-input button {
+        #watchlist-widget .watchlist-input button {
             border-radius: 10px;
             border: 1px solid #334155;
             background: #1f2937;
             color: #e2e8f0;
-            font-weight: 700;
+            font-weight: 900;
             padding: 6px 10px;
             cursor: pointer;
         }
-        .watchlist-input button:hover { background: #334155; }
-        .watchlist-list {
-            list-style: none;
-            padding: 0;
-            margin: 0;
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-            max-height: 240px;
-            overflow: auto;
+        #watchlist-widget .watchlist-input button:hover { background: #334155; }
+
+        #watchlist-table { width: 100%; border-collapse: collapse; }
+        #watchlist-table th, #watchlist-table td {
+            text-align:left;
+            padding:0.55rem 0.65rem;
+            border-bottom:1px solid #1f2937;
+            font-size:0.9rem;
         }
-        .watchlist-item {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 8px;
-            padding: 6px 8px;
-            border-radius: 10px;
-            border: 1px solid #1f2937;
-            background: #0b1220;
+        #watchlist-table th {
+            background:#0f172a;
+            color:#cbd5e1;
+            position:sticky;
+            top:0;
+            z-index:1;
         }
-        .watchlist-symbol {
-            font-weight: 700;
-            cursor: pointer;
-        }
-        .watchlist-remove {
-            border: none;
-            background: transparent;
-            color: #fca5a5;
-            cursor: pointer;
-            font-weight: 900;
-        }
-        .watchlist-empty {
-            color: #94a3b8;
-            font-size: 0.8rem;
-        }
+        #watchlist-table tr:hover { background:#111827; }
+
         .watchlist-status {
-            color: #cbd5f5;
-            font-size: 0.75rem;
+            color: #94a3b8;
+            font-size: 0.85rem;
             min-height: 1em;
         }
     </style>
@@ -981,51 +954,86 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <span id=\"status\">Loading scripts...</span>
         </div>
 
-        <section class=\"panel\" style=\"margin-bottom: 1rem;\" id=\"open-orders-panel\">
-            <div class=\"panel-header\">
-                <div>
-                    <h2>Open Orders / Positions</h2>
-                    <div class=\"panel-sub\">Unchanged view, just moved to the top.</div>
+        <div class=\"top-grid\">
+            <section class=\"panel\" id=\"open-orders-panel\">
+                <div class=\"panel-header\">
+                    <div>
+                        <h2>Open Orders / Positions</h2>
+                        <div class=\"panel-sub\">Unchanged view, just moved to the top.</div>
+                    </div>
+                    <div class=\"oo-toolbar\">
+                        <button class=\"secondary\" id=\"oo-refresh-btn\">Refresh</button>
+                        <span class=\"status-pill\" id=\"oo-status\">Loading...</span>
+                    </div>
                 </div>
-                <div class=\"oo-toolbar\">
-                    <button class=\"secondary\" id=\"oo-refresh-btn\">Refresh</button>
-                    <span class=\"status-pill\" id=\"oo-status\">Loading...</span>
+
+                <div class=\"table-wrap\">
+                    <table id=\"open-orders-table\">
+                        <thead>
+                            <tr>
+                                <th>Broker</th>
+                                <th>Account</th>
+                                <th>Category</th>
+                                <th>Instrument</th>
+                                <th>Type</th>
+                                <th>Side</th>
+                                <th>Size</th>
+                                <th>Entry / Order</th>
+                                <th>Current / Trigger</th>
+                                <th>Stop Loss</th>
+                                <th>Take Profit</th>
+                                <th>Leverage / Margin</th>
+                                <th>Opened</th>
+                                <th>ID</th>
+                                <th>Status</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
                 </div>
-            </div>
 
-            <div class=\"table-wrap\">
-                <table id=\"open-orders-table\">
-                    <thead>
-                        <tr>
-                            <th>Broker</th>
-                            <th>Account</th>
-                            <th>Category</th>
-                            <th>Instrument</th>
-                            <th>Type</th>
-                            <th>Side</th>
-                            <th>Size</th>
-                            <th>Entry / Order</th>
-                            <th>Current / Trigger</th>
-                            <th>Stop Loss</th>
-                            <th>Take Profit</th>
-                            <th>Leverage / Margin</th>
-                            <th>Opened</th>
-                            <th>ID</th>
-                            <th>Status</th>
-                            <th>Action</th>
-                        </tr>
-                    </thead>
-                    <tbody></tbody>
-                </table>
-            </div>
+                <p class=\"meta\" id=\"open-orders-empty\" style=\"display:none;\">No open orders or trades.</p>
 
-            <p class=\"meta\" id=\"open-orders-empty\" style=\"display:none;\">No open orders or trades.</p>
+                <div class=\"error-list\" id=\"open-orders-errors\" style=\"display:none;\">
+                    <strong>Source issues</strong>
+                    <ul></ul>
+                </div>
+            </section>
 
-            <div class=\"error-list\" id=\"open-orders-errors\" style=\"display:none;\">
-                <strong>Source issues</strong>
-                <ul></ul>
-            </div>
-        </section>
+            <section class=\"panel\" id=\"watchlist-widget\">
+                <div class=\"panel-header\">
+                    <div>
+                        <h2>Watchlist</h2>
+                        <div class=\"watchlist-sub\">Saved with alerts backup</div>
+                    </div>
+                    <div class=\"oo-toolbar\">
+                        <span class=\"status-pill\" id=\"watchlist-count\">0</span>
+                    </div>
+                </div>
+
+                <div class=\"watchlist-input\">
+                    <input id=\"watchlist-input\" type=\"text\" placeholder=\"BTCUSDT, EURUSD\" />
+                    <button type=\"button\" id=\"watchlist-add-btn\">Add</button>
+                </div>
+
+                <div class=\"watchlist-status\" id=\"watchlist-status\"></div>
+
+                <div class=\"table-wrap\">
+                    <table id=\"watchlist-table\">
+                        <thead>
+                            <tr>
+                                <th>Instrument</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id=\"watchlist-items\"></tbody>
+                    </table>
+                </div>
+
+                <p class=\"meta\" id=\"watchlist-empty\" style=\"display:none;\">No items yet.</p>
+            </section>
+        </div>
 
         <!-- CATEGORIES (your sketch layout) -->
         <div class=\"category-grid\">
@@ -1045,20 +1053,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <div id=\"other-scripts\" class=\"script-row\"></div>
         </section>
     </div>
-
-    <aside class=\"watchlist-widget\" id=\"watchlist-widget\">
-        <div class=\"watchlist-header\">
-            <span>Watchlist</span>
-            <span class=\"watchlist-sub\">Saved with alerts backup</span>
-        </div>
-        <div class=\"watchlist-input\">
-            <input id=\"watchlist-input\" type=\"text\" placeholder=\"BTCUSDT, EURUSD\" />
-            <button type=\"button\" id=\"watchlist-add-btn\">Add</button>
-        </div>
-        <div class=\"watchlist-status\" id=\"watchlist-status\"></div>
-        <div class=\"watchlist-empty\" id=\"watchlist-empty\">No items yet.</div>
-        <ul class=\"watchlist-list\" id=\"watchlist-items\"></ul>
-    </aside>
 
     <script src=\"/static/dashboard.js\"></script>
 </body>

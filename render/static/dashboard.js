@@ -22,6 +22,7 @@
   const watchlistList = document.getElementById('watchlist-items');
   const watchlistEmpty = document.getElementById('watchlist-empty');
   const watchlistStatus = document.getElementById('watchlist-status');
+  const watchlistCount = document.getElementById('watchlist-count');
 
   let scriptsInFlight = null;
   let ooInFlight = null;
@@ -70,17 +71,19 @@
 
   const renderWatchlist = () => {
     if (!watchlistList || !watchlistEmpty) return;
+
     watchlistList.innerHTML = '';
     watchlistEmpty.style.display = watchlistItems.length ? 'none' : 'block';
-    watchlistItems.forEach((symbol, index) => {
-      const row = document.createElement('li');
-      row.className = 'watchlist-item';
+    if (watchlistCount) watchlistCount.textContent = String(watchlistItems.length);
 
-      const label = document.createElement('span');
-      label.className = 'watchlist-symbol';
-      label.textContent = symbol;
-      label.title = 'Click to copy';
-      label.addEventListener('click', async () => {
+    watchlistItems.forEach((symbol, index) => {
+      const row = document.createElement('tr');
+
+      const symbolCell = document.createElement('td');
+      symbolCell.textContent = symbol;
+      symbolCell.style.cursor = 'pointer';
+      symbolCell.title = 'Click to copy';
+      symbolCell.addEventListener('click', async () => {
         try {
           await navigator.clipboard.writeText(symbol);
           setWatchlistStatus(`Copied ${symbol}`);
@@ -90,18 +93,22 @@
         }
       });
 
+      const actionCell = document.createElement('td');
+      actionCell.className = 'action-cell';
+
       const removeBtn = document.createElement('button');
-      removeBtn.className = 'watchlist-remove';
+      removeBtn.className = 'action-btn';
       removeBtn.type = 'button';
-      removeBtn.textContent = '×';
+      removeBtn.textContent = 'Remove';
       removeBtn.addEventListener('click', () => {
         watchlistItems.splice(index, 1);
         saveWatchlist(watchlistItems);
         renderWatchlist();
       });
 
-      row.appendChild(label);
-      row.appendChild(removeBtn);
+      actionCell.appendChild(removeBtn);
+      row.appendChild(symbolCell);
+      row.appendChild(actionCell);
       watchlistList.appendChild(row);
     });
   };
