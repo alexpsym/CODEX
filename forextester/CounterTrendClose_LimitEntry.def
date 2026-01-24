@@ -1,0 +1,13 @@
+; CounterTrendClose_LimitEntry.def
+; FT6 requires these exact export names:
+; InitStrategy, DoneStrategy, ResetStrategy, GetSingleTick, ReplaceStr, IntrfProcsRec
+
+EXPORTS
+    InitStrategy
+    DoneStrategy
+    ResetStrategy
+    GetSingleTick
+
+    ; Alias the C++ mangled exports -> clean FT6 names
+    ReplaceStr=?ReplaceStr@@YGXAAPADPAD@Z
+    IntrfProcsRec=?IntrfProcsRec@@3UTInterfaceProcRec@@A
