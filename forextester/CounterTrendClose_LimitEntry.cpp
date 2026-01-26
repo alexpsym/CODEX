@@ -27,11 +27,9 @@
 //     NFP pattern: first Friday of month, 08:30 ET (12:30 UTC during US DST, 13:30 UTC otherwise).
 //     Small exception list for known shifted releases.
 //
-// - DAILY LOSS LIMIT:
-//     Only allow max MaxLossesPerDay losses per Brisbane trading day.
-//     If losses for TODAY reach MaxLossesPerDay -> block any NEW entries until next day.
-//     Loss is attributed to the day the trade was OPENED (not closed).
-//
+// - SESSION LOSS LIMIT:
+//     Only allow max MaxLossesPerSession losses per strategy session.
+//     Losses count from InitStrategy() until next strategy restart/reset.
 //     Implementation uses ticket-disappearance detection + OrderSelect(ticket, MODE_HISTORY).
 //
 // - Pending expiry:
@@ -96,9 +94,9 @@ int NewYorkOpenUTC_Hour    = 13;
 bool UseNfpBlackout        = true;
 int  NfpBlackoutMinutes    = 10;   // adjustable in settings
 
-// DAILY LOSS LIMIT settings
-bool UseDailyLossLimit     = true;
-int  MaxLossesPerDay       = 2;    // adjustable in settings
+// SESSION LOSS LIMIT settings
+bool UseSessionLossLimit     = true;
+int  MaxLossesPerSession     = 2;    // adjustable in settings
 
 // DEBUG
 bool DebugLogs = true;
@@ -112,7 +110,7 @@ static char STRAT_DESC[] =
 "Trend filter last N bodies + last2 pullback rule + LIMIT entries. "
 "ATR(N) SL, TP >= 2R. Brisbane no-trade (UTC 18-23) liquidates + cancels. "
 "NFP blackout (minutes adjustable) liquidates + cancels + blocks new entries. "
-"Daily loss limit (losses/day adjustable) blocks new entries after limit reached. "
+"Session loss limit (losses/session adjustable) blocks new entries after limit reached. "
 "Pending expiry N bars. Session filter +/- 1h around LDN/FF/NY fixed UTC opens. "
 "DebugLogs prints block reasons.";
 
@@ -147,8 +145,8 @@ static char OPT_NYUTC[]    = "NewYorkOpenUTC_Hour";
 static char OPT_NFPUSE[]   = "UseNfpBlackout";
 static char OPT_NFPMIN[]   = "NfpBlackoutMinutes";
 
-static char OPT_DLOSSUSE[] = "UseDailyLossLimit";
-static char OPT_DLOSSMAX[] = "MaxLossesPerDay";
+static char OPT_DLOSSUSE[] = "UseSessionLossLimit";
+static char OPT_DLOSSMAX[] = "MaxLossesPerSession";
 
 static char OPT_DEBUG[]    = "DebugLogs";
 
@@ -570,143 +568,20 @@ static bool InNfpBlackoutUTC(int minutes)
 }
 
 //----------------------------------------------------
-// DAILY LOSS LIMIT (losses attributed to OPEN DAY in Brisbane)
+// SESSION LOSS LIMIT (losses tracked since strategy init/reset)
 //----------------------------------------------------
-static int BrisbaneDayIdFromUTC(TDateTime utc)
-{
-    // Brisbane = UTC+10 (no DST)
-    TDateTime bris = utc + (10.0 / 24.0);
-    return (int)floor(bris);
-}
-
-struct TicketOpenDay
-{
-    int ticket;
-    int openDayId;  // Brisbane day id
-};
-
 #define MAX_TRACKED_TICKETS 256
-static TicketOpenDay g_ticketDays[MAX_TRACKED_TICKETS];
-static int g_ticketDaysCount = 0;
+static int g_sessionLosses = 0;
 
 // previous-bar snapshot of *open* trade tickets
 static int g_prevOpenTickets[MAX_TRACKED_TICKETS];
 static int g_prevOpenTicketsCount = 0;
-
-// per-day loss counter (small ring)
-struct DayLossCount
-{
-    int dayId;   // Brisbane day id
-    int losses;
-};
-#define MAX_DAY_BUCKETS 32
-static DayLossCount g_dayLoss[MAX_DAY_BUCKETS];
-static int g_dayLossCount = 0;
-
-static int SafeTicketDayCount()
-{
-    if (g_ticketDaysCount < 0) return 0;
-    if (g_ticketDaysCount > MAX_TRACKED_TICKETS) return MAX_TRACKED_TICKETS;
-    return g_ticketDaysCount;
-}
 
 static int SafePrevTicketsCount()
 {
     if (g_prevOpenTicketsCount < 0) return 0;
     if (g_prevOpenTicketsCount > MAX_TRACKED_TICKETS) return MAX_TRACKED_TICKETS;
     return g_prevOpenTicketsCount;
-}
-
-static int SafeDayLossCount()
-{
-    if (g_dayLossCount < 0) return 0;
-    if (g_dayLossCount > MAX_DAY_BUCKETS) return MAX_DAY_BUCKETS;
-    return g_dayLossCount;
-}
-
-static int FindTicketIndex(int ticket)
-{
-    int n = SafeTicketDayCount();
-    for (int i = 0; i < n; i++)
-        if (g_ticketDays[i].ticket == ticket) return i;
-    return -1;
-}
-
-static void ShiftTicketDaysLeftBy1()
-{
-    for (int i = 1; i < MAX_TRACKED_TICKETS; i++)
-        g_ticketDays[i - 1] = g_ticketDays[i];
-}
-
-static void TrackTicketOpenDayIfMissing(int ticket, TDateTime openTimeUTC)
-{
-    if (ticket <= 0) return;
-    if (FindTicketIndex(ticket) >= 0) return;
-
-    if (g_ticketDaysCount >= MAX_TRACKED_TICKETS)
-    {
-        ShiftTicketDaysLeftBy1();
-        g_ticketDaysCount = MAX_TRACKED_TICKETS - 1;
-    }
-
-    if (g_ticketDaysCount < 0) g_ticketDaysCount = 0;
-    if (g_ticketDaysCount > MAX_TRACKED_TICKETS) g_ticketDaysCount = MAX_TRACKED_TICKETS;
-
-    if (g_ticketDaysCount < MAX_TRACKED_TICKETS)
-    {
-        g_ticketDays[g_ticketDaysCount].ticket = ticket;
-        g_ticketDays[g_ticketDaysCount].openDayId = BrisbaneDayIdFromUTC(openTimeUTC);
-        g_ticketDaysCount++;
-    }
-}
-
-static void ShiftDayLossLeftBy1()
-{
-    for (int i = 1; i < MAX_DAY_BUCKETS; i++)
-        g_dayLoss[i - 1] = g_dayLoss[i];
-}
-
-static int GetLossBucketIndex(int dayId)
-{
-    int n = SafeDayLossCount();
-    for (int i = 0; i < n; i++)
-        if (g_dayLoss[i].dayId == dayId) return i;
-    return -1;
-}
-
-static int GetLossesForDay(int dayId)
-{
-    int idx = GetLossBucketIndex(dayId);
-    if (idx < 0) return 0;
-    if (idx >= MAX_DAY_BUCKETS) return 0;
-    return g_dayLoss[idx].losses;
-}
-
-static void IncrementLossForDay(int dayId)
-{
-    int idx = GetLossBucketIndex(dayId);
-    if (idx < 0)
-    {
-        if (g_dayLossCount >= MAX_DAY_BUCKETS)
-        {
-            ShiftDayLossLeftBy1();
-            g_dayLossCount = MAX_DAY_BUCKETS - 1;
-        }
-
-        if (g_dayLossCount < 0) g_dayLossCount = 0;
-        if (g_dayLossCount > MAX_DAY_BUCKETS) g_dayLossCount = MAX_DAY_BUCKETS;
-
-        if (g_dayLossCount < MAX_DAY_BUCKETS)
-        {
-            g_dayLoss[g_dayLossCount].dayId = dayId;
-            g_dayLoss[g_dayLossCount].losses = 0;
-            idx = g_dayLossCount;
-            g_dayLossCount++;
-        }
-    }
-
-    if (idx >= 0 && idx < MAX_DAY_BUCKETS)
-        g_dayLoss[idx].losses++;
 }
 
 static bool TicketInArray(int ticket, int* arr, int n)
@@ -724,7 +599,7 @@ static double SafeNetProfit()
     return OrderProfit();
 }
 
-// Build current list of open MARKET position tickets; also ensure openDay is tracked
+// Build current list of open MARKET position tickets
 static void BuildCurrentOpenTradeTickets(char* ccy, int* outArr, int& outCount)
 {
     outCount = 0;
@@ -741,8 +616,6 @@ static void BuildCurrentOpenTradeTickets(char* ccy, int* outArr, int& outCount)
         int ticket = OrderTicket();
         if (ticket <= 0) continue;
 
-        TrackTicketOpenDayIfMissing(ticket, OrderOpenTime());
-
         if (outCount < MAX_TRACKED_TICKETS)
         {
             outArr[outCount] = ticket;
@@ -751,7 +624,7 @@ static void BuildCurrentOpenTradeTickets(char* ccy, int* outArr, int& outCount)
     }
 }
 
-// When a ticket disappears from MODE_TRADES, try select it in history and count loss (against open day)
+// When a ticket disappears from MODE_TRADES, try select it in history and count loss
 static void ProcessClosedTickets_AsLosses(int* curTickets, int curCount)
 {
     int prevN = SafePrevTicketsCount();
@@ -764,12 +637,6 @@ static void ProcessClosedTickets_AsLosses(int* curTickets, int curCount)
         if (TicketInArray(ticket, curTickets, curCount))
             continue; // still open
 
-        int tIdx = FindTicketIndex(ticket);
-        if (tIdx < 0)
-            continue; // no open-day record -> ignore
-
-        int openDayId = g_ticketDays[tIdx].openDayId;
-
         // Try select closed order from history by ticket
         if (OrderSelect(ticket, SELECT_BY_TICKET, MODE_HISTORY))
         {
@@ -779,16 +646,16 @@ static void ProcessClosedTickets_AsLosses(int* curTickets, int curCount)
                 double net = SafeNetProfit();
                 if (net < 0.0)
                 {
-                    IncrementLossForDay(openDayId);
+                    g_sessionLosses++;
                     if (DebugLogs)
-                        PrintF("LOSS COUNTED: ticket=%d net=%.2f openDayId=%d lossesNow=%d",
-                               ticket, net, openDayId, GetLossesForDay(openDayId));
+                        PrintF("LOSS COUNTED: ticket=%d net=%.2f sessionLosses=%d",
+                               ticket, net, g_sessionLosses);
                 }
                 else
                 {
                     if (DebugLogs)
-                        PrintF("CLOSE (not loss): ticket=%d net=%.2f openDayId=%d",
-                               ticket, net, openDayId);
+                        PrintF("CLOSE (not loss): ticket=%d net=%.2f",
+                               ticket, net);
                 }
             }
         }
@@ -800,12 +667,10 @@ static void ProcessClosedTickets_AsLosses(int* curTickets, int curCount)
     }
 }
 
-static bool DailyLossLimitHitToday()
+static bool SessionLossLimitHit()
 {
-    if (MaxLossesPerDay < 0) return false;
-    int todayId = BrisbaneDayIdFromUTC(Time(0));
-    int lossesToday = GetLossesForDay(todayId);
-    return (lossesToday >= MaxLossesPerDay);
+    if (MaxLossesPerSession < 0) return false;
+    return (g_sessionLosses >= MaxLossesPerSession);
 }
 
 //----------------------------------------------------
@@ -847,16 +712,15 @@ extern "C" __declspec(dllexport) void __stdcall InitStrategy()
     RegOption(OPT_NFPUSE, ot_Boolean, &UseNfpBlackout);
     RegOption(OPT_NFPMIN, ot_Integer, &NfpBlackoutMinutes);
 
-    RegOption(OPT_DLOSSUSE, ot_Boolean, &UseDailyLossLimit);
-    RegOption(OPT_DLOSSMAX, ot_Integer, &MaxLossesPerDay);
+    RegOption(OPT_DLOSSUSE, ot_Boolean, &UseSessionLossLimit);
+    RegOption(OPT_DLOSSMAX, ot_Integer, &MaxLossesPerSession);
 
     RegOption(OPT_DEBUG, ot_Boolean, &DebugLogs);
 
     g_lastBarTime = 0.0;
 
-    g_ticketDaysCount = 0;
     g_prevOpenTicketsCount = 0;
-    g_dayLossCount = 0;
+    g_sessionLosses = 0;
 }
 
 extern "C" __declspec(dllexport) void __stdcall DoneStrategy()
@@ -868,9 +732,8 @@ extern "C" __declspec(dllexport) void __stdcall ResetStrategy()
 {
     g_lastBarTime = 0.0;
 
-    g_ticketDaysCount = 0;
     g_prevOpenTicketsCount = 0;
-    g_dayLossCount = 0;
+    g_sessionLosses = 0;
 }
 
 extern "C" __declspec(dllexport) void __stdcall GetSingleTick()
@@ -891,7 +754,7 @@ extern "C" __declspec(dllexport) void __stdcall GetSingleTick()
     if (!IsNewBar())
         return;
 
-    // ---- DAILY LOSS LIMIT TRACKING ----
+    // ---- SESSION LOSS LIMIT TRACKING ----
     int curOpenTickets[MAX_TRACKED_TICKETS];
     int curOpenCount = 0;
 
@@ -911,11 +774,8 @@ extern "C" __declspec(dllexport) void __stdcall GetSingleTick()
         int inNT   = InNoTradeWindowUTC() ? 1 : 0;
         int inNFP  = (UseNfpBlackout && InNfpBlackoutUTC(NfpBlackoutMinutes)) ? 1 : 0;
 
-        int todayId = BrisbaneDayIdFromUTC(Time(0));
-        int lossesToday = GetLossesForDay(todayId);
-
-        PrintF("STATE: %s TF=%d Bars=%d SessOK=%d NoTrade=%d NFPBlackout=%d LossesToday=%d/%d ExpBars=%d TrendN=%d ATR_Period=%d",
-               ccy, Timeframe, Bars(), inSess, inNT, inNFP, lossesToday, MaxLossesPerDay,
+        PrintF("STATE: %s TF=%d Bars=%d SessOK=%d NoTrade=%d NFPBlackout=%d SessionLosses=%d/%d ExpBars=%d TrendN=%d ATR_Period=%d",
+               ccy, Timeframe, Bars(), inSess, inNT, inNFP, g_sessionLosses, MaxLossesPerSession,
                PendingExpiryBars, TrendLookbackBars, ATR_Period);
     }
 
@@ -936,12 +796,12 @@ extern "C" __declspec(dllexport) void __stdcall GetSingleTick()
         return;
     }
 
-    // Daily loss limit enforcement (NEW ENTRIES ONLY)
-    if (UseDailyLossLimit)
+    // Session loss limit enforcement (NEW ENTRIES ONLY)
+    if (UseSessionLossLimit)
     {
-        if (DailyLossLimitHitToday())
+        if (SessionLossLimitHit())
         {
-            LogBlock("DailyLossLimit: max losses reached for today (Brisbane day, losses counted by OPEN day)");
+            LogBlock("SessionLossLimit: max losses reached for this strategy session");
             return;
         }
     }
