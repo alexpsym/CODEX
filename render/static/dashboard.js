@@ -163,13 +163,14 @@
 
   const restoreAlertsBackup = async (file) => {
     if (!file) return;
-    if (!confirm('Restore will REPLACE alerts for BOTH Bybit and OANDA. Continue?')) return;
+    if (!confirm('Restore will REPLACE: alerts (Bybit + OANDA), watchlist, and pending webhooks. Continue?')) return;
     const fd = new FormData();
     fd.append('file', file);
     const res = await fetch('/api/alerts/restore', { method: 'POST', body: fd });
     const txt = await res.text();
     if (!res.ok) throw new Error(txt);
     await loadWatchlist();
+    await refreshOpenOrders();
   };
 
   const openAlertsModal = () => {
@@ -191,12 +192,12 @@
     box.style.color = '#e2e8f0';
 
     const title = document.createElement('div');
-    title.textContent = 'Alerts backup/restore (Bybit + OANDA)';
+    title.textContent = 'Alerts + webhooks backup/restore';
     title.style.fontWeight = '900';
     title.style.marginBottom = '8px';
 
     const msg = document.createElement('div');
-    msg.textContent = 'Backup downloads one file. Restore uploads that same file.';
+    msg.textContent = 'Backup includes alerts, watchlist, and pending webhooks. Restore replaces them.';
     msg.style.color = '#94a3b8';
     msg.style.marginBottom = '12px';
 

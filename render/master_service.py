@@ -2269,6 +2269,33 @@ def _save_pending_webhooks(items: List[Dict[str, object]]) -> None:
     )
 
 
+def _normalize_pending_webhooks(items: object) -> List[Dict[str, object]]:
+    if not isinstance(items, list):
+        raise HTTPException(status_code=400, detail="Pending webhooks must be a list.")
+    now_ts = int(time.time())
+    cleaned: List[Dict[str, object]] = []
+    for entry in items:
+        if not isinstance(entry, dict):
+            continue
+        payload = dict(entry)
+        webhook_id = str(payload.get("id", "")).strip() or f"wh_{uuid4().hex[:12]}"
+        payload["id"] = webhook_id
+        payload.setdefault("broker", "WEBHOOK")
+        payload.setdefault("type", "webhook")
+        payload.setdefault("status", "WAITING")
+        payload.setdefault("enabled", True)
+        payload.setdefault("created_at", now_ts)
+        payload["updated_at"] = now_ts
+        cleaned.append(payload)
+    return cleaned
+
+
+def _replace_pending_webhooks(items: object) -> List[Dict[str, object]]:
+    normalized = _normalize_pending_webhooks(items)
+    _save_pending_webhooks(normalized)
+    return normalized
+
+
 def _upsert_pending_webhook(payload: Dict[str, object]) -> Dict[str, object]:
     items = _load_pending_webhooks()
     if not isinstance(payload, dict):
@@ -4279,10 +4306,11 @@ async def backup_all_alerts() -> Response:
         "oanda": {"alerts": oanda_monitor.get_custom_alerts(force=True)},
     }
     payload = {
-        "version": 2,
+        "version": 3,
         "savedAt": datetime.now(timezone.utc).isoformat(),
         "alerts": alerts_payload,
         "watchlist": _get_watchlist(),
+        "pending_webhooks": _load_pending_webhooks(),
     }
     blob = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
     headers = {"Content-Disposition": 'attachment; filename="codex-alerts-backup.json"'}
@@ -4327,6 +4355,10 @@ async def restore_all_alerts(file: UploadFile = File(...)) -> JSONResponse:
             raise HTTPException(status_code=400, detail="Watchlist must be a list.")
         watchlist_items = _normalize_watchlist(data["watchlist"])
 
+    pending_restored: List[Dict[str, object]] = []
+    if "pending_webhooks" in data:
+        pending_restored = _replace_pending_webhooks(data["pending_webhooks"])
+
     bybit_restored = bybit_monitor.replace_custom_alerts(bybit_block["alerts"])
     oanda_restored = oanda_monitor.replace_custom_alerts(oanda_block["alerts"])
     _set_watchlist(watchlist_items)
@@ -4337,6 +4369,7 @@ async def restore_all_alerts(file: UploadFile = File(...)) -> JSONResponse:
             "bybit_restored": len(bybit_restored),
             "oanda_restored": len(oanda_restored),
             "watchlist_restored": len(watchlist_items),
+            "pending_webhooks_restored": len(pending_restored),
         }
     )
 
