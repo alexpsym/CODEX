@@ -4,6 +4,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from shutil import which
 from typing import Iterable, Optional
@@ -196,6 +197,12 @@ FORM_HTML = """
           <button type="button" data-value="limit">Limit</button>
         </div>
         <input type="hidden" name="order_type" id="order_type" value="{{ order_type }}">
+        <label>Show in Dashboard Open Orders:</label>
+        <div class="button-group" data-input="track_pending">
+          <button type="button" data-value="yes">Yes</button>
+          <button type="button" data-value="no">No</button>
+        </div>
+        <input type="hidden" name="track_pending" id="track_pending" value="{{ track_pending }}">
         <div id="entry_price_row" style="{% if order_type == 'market' %}display:none;{% endif %}">
           <label>Entry Price:
             <input name="entry_price" id="entry_price" type="number" step="0.0001" value="{{ entry_price or '' }}" {% if order_type == 'limit' %}required{% endif %}>
@@ -292,6 +299,7 @@ def index():
     account_mode = request.form.get("account_mode", "live")
     side = request.form.get("side", "buy")
     order_type = request.form.get("order_type", "market")
+    track_pending = request.form.get("track_pending", "no")
     risk_mode = request.form.get("risk_mode", "percent")
     stop_ticks = request.form.get("stop_ticks", "")
     risk_pct = request.form.get("risk_pct", "")
@@ -554,6 +562,62 @@ def index():
             if entry_price_value is not None:
                 risk_info["Entry Price"] = f"{entry_price_value:.{display_precision}f}"
 
+            # Optionally register this as a pending webhook so it appears in the dashboard.
+            if str(track_pending).lower() == "yes":
+                safe_symbol = "".join(
+                    ch for ch in instrument if ch.isalnum() or ch in "_-"
+                )
+                safe_side = "".join(ch for ch in side if ch.isalnum() or ch in "_-")
+                safe_ot = "".join(
+                    ch for ch in order_type if ch.isalnum() or ch in "_-"
+                )
+                webhook_id = (
+                    f"calc_oanda_{account_mode}_{safe_symbol}_{safe_side}_{safe_ot}"
+                )
+
+                pending_item = {
+                    "id": webhook_id,
+                    "broker": "WEBHOOK",
+                    "account": account_mode,
+                    "category": "OANDA",
+                    "instrument": instrument,
+                    "type": "webhook",
+                    "side": side,
+                    "size": str(alert_qty),
+                    "entry_price": (
+                        f"{entry_price_value:.{display_precision}f}"
+                        if entry_price_value is not None
+                        else None
+                    ),
+                    "order_price": (
+                        f"{entry_price_value:.{display_precision}f}"
+                        if entry_price_value is not None
+                        else None
+                    ),
+                    "current_price": f"{price:.{display_precision}f}",
+                    "stop_loss": sl_price_str,
+                    "take_profit": tp_price_str,
+                    "leverage": None,
+                    "opened_at": int(time.time()),
+                    "status": "WAITING",
+                    "enabled": True,
+                    "source": "oanda-calculator-clone",
+                }
+
+                try:
+                    resp = requests.post(
+                        f"{PUBLIC_BASE_URL.rstrip('/')}/api/pending-webhooks",
+                        json=pending_item,
+                        timeout=10,
+                    )
+                    resp.raise_for_status()
+                    saved = (resp.json() or {}).get("item") or {}
+                    pending_id = saved.get("id", webhook_id)
+                    alert["pending_webhook_id"] = pending_id
+                    risk_info["Pending webhook id"] = pending_id
+                except Exception as exc:
+                    risk_info["Pending webhook error"] = str(exc)
+
             # Store the trade details so they can be downloaded later.
             last_trade_specs = {
                 "order": order,
@@ -583,6 +647,7 @@ def index():
         risk_aud=risk_aud,
         rr_ratio=rr_ratio,
         entry_price=entry_price,
+        track_pending=track_pending,
     )
 
 
