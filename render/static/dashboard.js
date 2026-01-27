@@ -163,13 +163,14 @@
 
   const restoreAlertsBackup = async (file) => {
     if (!file) return;
-    if (!confirm('Restore will REPLACE alerts for BOTH Bybit and OANDA. Continue?')) return;
+    if (!confirm('Restore will REPLACE: alerts (Bybit + OANDA), watchlist, and pending webhooks. Continue?')) return;
     const fd = new FormData();
     fd.append('file', file);
     const res = await fetch('/api/alerts/restore', { method: 'POST', body: fd });
     const txt = await res.text();
     if (!res.ok) throw new Error(txt);
     await loadWatchlist();
+    await refreshOpenOrders();
   };
 
   const openAlertsModal = () => {
@@ -191,12 +192,12 @@
     box.style.color = '#e2e8f0';
 
     const title = document.createElement('div');
-    title.textContent = 'Alerts backup/restore (Bybit + OANDA)';
+    title.textContent = 'Alerts + webhooks backup/restore';
     title.style.fontWeight = '900';
     title.style.marginBottom = '8px';
 
     const msg = document.createElement('div');
-    msg.textContent = 'Backup downloads one file. Restore uploads that same file.';
+    msg.textContent = 'Backup includes alerts, watchlist, and pending webhooks. Restore replaces them.';
     msg.style.color = '#94a3b8';
     msg.style.marginBottom = '12px';
 
@@ -432,6 +433,7 @@
       const t = String(item.type || '').toLowerCase();
       const isOrder = t === 'order';
       const isPosition = t === 'position' || t === 'trade';
+      const isWebhook = t === 'webhook';
 
       if (isOrder || isPosition) {
         const label = isOrder ? 'Cancel' : 'Close';
@@ -461,6 +463,57 @@
         });
 
         actionTd.appendChild(btn);
+      } else if (isWebhook) {
+        const enabled = item.enabled !== false;
+
+        const toggleBtn = document.createElement('button');
+        toggleBtn.type = 'button';
+        toggleBtn.className = 'action-btn';
+        toggleBtn.textContent = enabled ? 'Disable' : 'Enable';
+        toggleBtn.addEventListener('click', async () => {
+          toggleBtn.disabled = true;
+          const old = toggleBtn.textContent;
+          toggleBtn.textContent = '...';
+          try {
+            await fetchJson(`/api/pending-webhooks/${encodeURIComponent(item.id)}/enabled`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ enabled: !enabled }),
+            });
+            await refreshOpenOrders();
+          } catch (e) {
+            console.error(e);
+            setOoPill('Action failed', 'bad');
+          } finally {
+            toggleBtn.disabled = false;
+            toggleBtn.textContent = old;
+          }
+        });
+        actionTd.appendChild(toggleBtn);
+
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'action-btn';
+        removeBtn.textContent = 'Remove';
+        removeBtn.style.marginLeft = '0.4rem';
+        removeBtn.addEventListener('click', async () => {
+          removeBtn.disabled = true;
+          const old = removeBtn.textContent;
+          removeBtn.textContent = '...';
+          try {
+            await fetchJson(`/api/pending-webhooks/${encodeURIComponent(item.id)}`, {
+              method: 'DELETE',
+            });
+            await refreshOpenOrders();
+          } catch (e) {
+            console.error(e);
+            setOoPill('Action failed', 'bad');
+          } finally {
+            removeBtn.disabled = false;
+            removeBtn.textContent = old;
+          }
+        });
+        actionTd.appendChild(removeBtn);
       } else {
         actionTd.textContent = '—';
       }

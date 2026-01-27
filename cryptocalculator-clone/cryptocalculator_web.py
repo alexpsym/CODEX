@@ -180,6 +180,12 @@ FORM_HTML = """
             <button type="button" data-value="limit">Limit</button>
           </div>
           <input type="hidden" name="order_type" id="order_type" value="{{ order_type }}">
+          <label>Show in Dashboard Open Orders:</label>
+          <div class="button-group" data-input="track_pending">
+            <button type="button" data-value="yes">Yes</button>
+            <button type="button" data-value="no">No</button>
+          </div>
+          <input type="hidden" name="track_pending" id="track_pending" value="{{ track_pending }}">
           <div id="entry_price_row">
             <label>Entry Price: <input name="entry_price" type="number" step="0.0001"></label><br>
           </div>
@@ -482,6 +488,7 @@ def index():
         account_mode = "live"
     price_to_execution_rate = request.form.get("price_to_execution_rate", "").strip()
     quantity = request.form.get("quantity", "")
+    track_pending = request.form.get("track_pending", "no")
 
     if request.method == "POST":
         try:
@@ -650,7 +657,72 @@ def index():
                 trade = calculate_trade(config)
                 summary = format_trade(trade)
                 risk_info = {k.replace("_", " ").title(): v for k, v in trade.items()}
-                payload_json = json.dumps(build_webhook_payload(trade), indent=2)
+                payload = build_webhook_payload(trade)
+
+                if str(track_pending).lower() == "yes":
+                    symbol_safe = "".join(
+                        ch for ch in str(trade["symbol"]) if ch.isalnum() or ch in "_-"
+                    )
+                    dir_safe = "".join(
+                        ch
+                        for ch in str(trade["direction"])
+                        if ch.isalnum() or ch in "_-"
+                    )
+                    ot_safe = "".join(
+                        ch
+                        for ch in str(trade["order_type"])
+                        if ch.isalnum() or ch in "_-"
+                    )
+                    ex_safe = "".join(
+                        ch
+                        for ch in str(trade.get("execution_exchange", ""))
+                        if ch.isalnum() or ch in "_-"
+                    )
+                    webhook_id = (
+                        f"calc_crypto_{account_mode}_{ex_safe}_{symbol_safe}_"
+                        f"{dir_safe}_{ot_safe}"
+                    )
+
+                    side = "buy" if str(trade["direction"]).lower() == "long" else "sell"
+
+                    pending_item = {
+                        "id": webhook_id,
+                        "broker": "WEBHOOK",
+                        "account": account_mode,
+                        "category": str(
+                            trade.get("execution_exchange", "BYBIT")
+                        ).upper(),
+                        "instrument": str(trade["symbol"]),
+                        "type": "webhook",
+                        "side": side,
+                        "size": str(trade.get("quantity")),
+                        "entry_price": trade.get("entry_price_execution"),
+                        "order_price": trade.get("entry_price_execution"),
+                        "current_price": trade.get("entry_price_execution"),
+                        "stop_loss": trade.get("stop_price_execution"),
+                        "take_profit": trade.get("target_price_execution"),
+                        "leverage": None,
+                        "opened_at": int(time.time()),
+                        "status": "WAITING",
+                        "enabled": True,
+                        "source": "cryptocalculator-clone",
+                    }
+
+                    try:
+                        resp = requests.post(
+                            f"{PUBLIC_BASE_URL.rstrip('/')}/api/pending-webhooks",
+                            json=pending_item,
+                            timeout=10,
+                        )
+                        resp.raise_for_status()
+                        saved = (resp.json() or {}).get("item") or {}
+                        pending_id = saved.get("id", webhook_id)
+                        payload["pending_webhook_id"] = pending_id
+                        risk_info["Pending webhook id"] = pending_id
+                    except Exception as exc:
+                        risk_info["Pending webhook error"] = str(exc)
+
+                payload_json = json.dumps(payload, indent=2)
 
                 price_source = trade.get("price_source", price_source)
                 execution_exchange = trade.get(
@@ -713,6 +785,7 @@ def index():
             or request.script_root.rstrip("/")
         ),
         options_min_qty_map=HARD_CODED_OPTIONS_MIN_QTY,
+        track_pending=track_pending,
     )
 
 
