@@ -432,6 +432,7 @@
       const t = String(item.type || '').toLowerCase();
       const isOrder = t === 'order';
       const isPosition = t === 'position' || t === 'trade';
+      const isWebhook = t === 'webhook';
 
       if (isOrder || isPosition) {
         const label = isOrder ? 'Cancel' : 'Close';
@@ -461,6 +462,57 @@
         });
 
         actionTd.appendChild(btn);
+      } else if (isWebhook) {
+        const enabled = item.enabled !== false;
+
+        const toggleBtn = document.createElement('button');
+        toggleBtn.type = 'button';
+        toggleBtn.className = 'action-btn';
+        toggleBtn.textContent = enabled ? 'Disable' : 'Enable';
+        toggleBtn.addEventListener('click', async () => {
+          toggleBtn.disabled = true;
+          const old = toggleBtn.textContent;
+          toggleBtn.textContent = '...';
+          try {
+            await fetchJson(`/api/pending-webhooks/${encodeURIComponent(item.id)}/enabled`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ enabled: !enabled }),
+            });
+            await refreshOpenOrders();
+          } catch (e) {
+            console.error(e);
+            setOoPill('Action failed', 'bad');
+          } finally {
+            toggleBtn.disabled = false;
+            toggleBtn.textContent = old;
+          }
+        });
+        actionTd.appendChild(toggleBtn);
+
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'action-btn';
+        removeBtn.textContent = 'Remove';
+        removeBtn.style.marginLeft = '0.4rem';
+        removeBtn.addEventListener('click', async () => {
+          removeBtn.disabled = true;
+          const old = removeBtn.textContent;
+          removeBtn.textContent = '...';
+          try {
+            await fetchJson(`/api/pending-webhooks/${encodeURIComponent(item.id)}`, {
+              method: 'DELETE',
+            });
+            await refreshOpenOrders();
+          } catch (e) {
+            console.error(e);
+            setOoPill('Action failed', 'bad');
+          } finally {
+            removeBtn.disabled = false;
+            removeBtn.textContent = old;
+          }
+        });
+        actionTd.appendChild(removeBtn);
       } else {
         actionTd.textContent = '—';
       }
