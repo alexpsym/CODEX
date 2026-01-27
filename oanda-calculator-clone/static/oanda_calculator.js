@@ -228,7 +228,7 @@ function placeLimitOrder() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  ['account_mode', 'side', 'order_type', 'risk_mode'].forEach(bindButtonGroup);
+  ['account_mode', 'side', 'order_type', 'risk_mode', 'track_pending'].forEach(bindButtonGroup);
   const orderType = document.getElementById('order_type');
   if (orderType) {
     orderType.addEventListener('change', toggleEntry);

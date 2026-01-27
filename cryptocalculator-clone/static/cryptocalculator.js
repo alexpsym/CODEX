@@ -307,7 +307,7 @@ function placeLimitOrder() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  ['trade_type', 'account_mode', 'direction', 'order_type', 'options_order_type', 'options_type', 'options_side', 'price_source', 'execution_exchange', 'options_base'].forEach(bindButtonGroup);
+  ['trade_type', 'account_mode', 'direction', 'order_type', 'options_order_type', 'options_type', 'options_side', 'price_source', 'execution_exchange', 'options_base', 'track_pending'].forEach(bindButtonGroup);
   const ot = document.getElementById('order_type');
   if (ot) {
     ot.addEventListener('change', toggleEntry);
