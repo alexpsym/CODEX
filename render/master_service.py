@@ -4018,12 +4018,11 @@ async def category_page(category: str) -> str:
 async def script_page(script_name: str) -> str:
     script = script_manager.get(script_name)
     if script.name in STANDALONE_SCRIPTS and script.name not in {"bybit_monitor", "oanda_monitor"}:
-        has_ui = script.name in WEB_APPS
-        target_url = (
-            f"/apps/{_encoded_script_name(script.name)}"
-            if has_ui
-            else f"/logs/view/{_encoded_script_name(script.name)}"
-        )
+        target_url = script_open_url(script)
+        fallback_logs = f"/logs/view/{_encoded_script_name(script.name)}"
+        if target_url == f"/scripts/view/{_encoded_script_name(script.name)}":
+            target_url = fallback_logs
+        has_ui = target_url != fallback_logs
         return (
             LAUNCHER_TEMPLATE.replace("{script_name}", html.escape(script.name))
             .replace("{target_url}", target_url)
