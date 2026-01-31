@@ -316,7 +316,8 @@
     btn.appendChild(pill);
 
     btn.addEventListener('click', () => {
-      window.location.href = `/scripts/view/${encodeURIComponent(script.name)}`;
+      const target = script.open_url || `/scripts/view/${encodeURIComponent(script.name)}`;
+      window.location.href = target;
     });
 
     return btn;
