@@ -1,0 +1,539 @@
+--- /mnt/data/CODEX-orig/CODEX-master/render/master_service.py	2026-01-26 07:47:16.000000000 +0000
++++ /mnt/data/CODEX-master/render/master_service.py	2026-01-31 03:12:48.886138801 +0000
+@@ -16,6 +16,7 @@
+ from dataclasses import dataclass, field
+ from decimal import Decimal, ROUND_HALF_UP
+ from datetime import datetime, timedelta, timezone
++from dateutil.relativedelta import relativedelta
+ from pathlib import Path
+ from typing import Dict, Iterable, List, Optional
+ from urllib.parse import quote, unquote, urlparse
+@@ -586,9 +587,14 @@
+ OANDA_HISTORY_JOBS: Dict[str, OandaHistoryJob] = {}
+ BYBIT_HISTORY_JOBS: Dict[str, BybitHistoryJob] = {}
+ 
++_AUTOSTART_ENV = os.getenv("AUTOSTART_SCRIPTS")
++if _AUTOSTART_ENV is None:
++    # Default autostart set for Render deploys (override by setting AUTOSTART_SCRIPTS).
++    _AUTOSTART_ENV = "bybit_monitor,oanda_monitor,fxweekend-clone"
++
+ AUTOSTART_SCRIPTS = [
+     name.strip()
+-    for name in os.getenv("AUTOSTART_SCRIPTS", "").split(",")
++    for name in _AUTOSTART_ENV.split(",")
+     if name.strip()
+ ]
+ 
+@@ -657,6 +663,42 @@
+     return transactions
+ 
+ 
++async def _collect_oanda_history_range(
++    *,
++    account_id: str,
++    api_key: str,
++    start: datetime,
++    end: datetime,
++) -> List[Dict[str, object]]:
++    """Collect OANDA transactions over an arbitrary time range by splitting into <=365-day windows."""
++    transactions: List[Dict[str, object]] = []
++    seen_ids: set[object] = set()
++    window = timedelta(days=365)
++    current_end = end
++
++    def append_unique(items: List[Dict[str, object]]) -> None:
++        for item in items:
++            tx_id = item.get("id")
++            if tx_id is not None:
++                if tx_id in seen_ids:
++                    continue
++                seen_ids.add(tx_id)
++            transactions.append(item)
++
++    while current_end > start:
++        current_start = max(start, current_end - window)
++        batch = await _fetch_oanda_transactions_window(
++            account_id=account_id,
++            api_key=api_key,
++            start=_format_oanda_timestamp(current_start),
++            end=_format_oanda_timestamp(current_end),
++        )
++        append_unique(batch)
++        current_end = current_start
++
++    return transactions
++
++
+ async def _run_oanda_history_export(job: OandaHistoryJob) -> None:
+     job.status = "running"
+     job.updated_at = time.time()
+@@ -664,24 +706,51 @@
+         if oanda_history_exporter is None:
+             raise RuntimeError("OANDA history exporter module not available.")
+         config = _get_oanda_history_config()
+-        if job.params.get("complete"):
++
++        period = _normalize_period(job.params.get("period"))
++        complete = bool(job.params.get("complete")) or period == "complete"
++
++        if complete:
+             transactions = await _collect_oanda_history_complete(
+                 account_id=config["account_id"],
+                 api_key=config["api_key"],
+                 base_url=config["base_url"],
+             )
+         else:
+-            days = int(job.params.get("days", 0))
+-            if days <= 0:
+-                raise ValueError("Export days must be a positive integer.")
+-            end = datetime.now(timezone.utc)
+-            start = end - timedelta(days=days)
+-            transactions = await _fetch_oanda_transactions_window(
+-                account_id=config["account_id"],
+-                api_key=config["api_key"],
+-                start=_format_oanda_timestamp(start),
+-                end=_format_oanda_timestamp(end),
+-            )
++            end_dt = datetime.now(timezone.utc)
++
++            if period:
++                delta = OANDA_PERIOD_DELTAS.get(period)
++                if delta is None:
++                    raise ValueError(f"Unsupported period: {period}")
++                start_dt = end_dt - delta
++            else:
++                days_value = job.params.get("days", 0)
++                try:
++                    days = int(days_value)
++                except (TypeError, ValueError) as exc:
++                    raise ValueError("Export days must be a positive integer.") from exc
++                if days <= 0:
++                    raise ValueError("Export days must be a positive integer.")
++                start_dt = end_dt - timedelta(days=days)
++
++            # OANDA's time-based transactions query supports a maximum window of 365 days.
++            # Split larger periods into yearly windows (same approach as "complete").
++            if end_dt - start_dt > timedelta(days=365):
++                transactions = await _collect_oanda_history_range(
++                    account_id=config["account_id"],
++                    api_key=config["api_key"],
++                    start=start_dt,
++                    end=end_dt,
++                )
++            else:
++                transactions = await _fetch_oanda_transactions_window(
++                    account_id=config["account_id"],
++                    api_key=config["api_key"],
++                    start=_format_oanda_timestamp(start_dt),
++                    end=_format_oanda_timestamp(end_dt),
++                )
++
+         output_path = OANDA_HISTORY_EXPORT_ROOT / f"oanda_history_{job.job_id}.csv"
+         await asyncio.to_thread(oanda_history_exporter.save_to_csv, transactions, output_path)
+         job.output_path = output_path
+@@ -699,17 +768,77 @@
+     return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+ 
+ 
++OANDA_PERIOD_DELTAS: Dict[str, relativedelta] = {
++    "day": relativedelta(days=1),
++    "week": relativedelta(days=7),
++    "month": relativedelta(months=1),
++    "year": relativedelta(years=1),
++    "3y": relativedelta(years=3),
++}
++
++BYBIT_PERIOD_DELTAS: Dict[str, relativedelta] = {
++    "day": relativedelta(days=1),
++    "week": relativedelta(days=7),
++    "month": relativedelta(months=1),
++    "year": relativedelta(years=1),
++    "3y": relativedelta(years=3),
++}
++
++
++def _normalize_period(value: object) -> Optional[str]:
++    if value is None:
++        return None
++    if not isinstance(value, str):
++        return None
++    period = value.strip().casefold()
++    if period in {"day", "week", "month", "year", "3y", "complete"}:
++        return period
++    return None
++
++
++def _date_range_for_period(period: str, *, max_days: Optional[int] = None) -> tuple[str, str]:
++    """Return YYYY-MM-DD start/end for a named period.
++
++    - period: day | week | month | year | 3y | complete
++    - max_days: optional clamp for providers with a hard retention limit (e.g. Bybit 2 years).
++    """
++    end = datetime.now(timezone.utc)
++    if period == "complete":
++        if max_days is None:
++            # Caller will handle true "complete" (e.g. OANDA uses account creation time).
++            start = end
++        else:
++            start = end - timedelta(days=max_days)
++        return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
++
++    delta = OANDA_PERIOD_DELTAS.get(period)
++    if delta is None:
++        raise ValueError(f"Unknown period: {period}")
++    start = end - delta
++
++    if max_days is not None:
++        earliest = end - timedelta(days=max_days)
++        if start < earliest:
++            start = earliest
++
++    return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
++
+ async def _run_bybit_history_export(job: BybitHistoryJob) -> None:
+     job.status = "running"
+     job.updated_at = time.time()
+     try:
+         if bybit_history_fetcher is None:
+             raise RuntimeError("Bybit history exporter module not available.")
+-        complete = bool(job.params.get("complete"))
+-        days_value = job.params.get("days")
++
++        period = _normalize_period(job.params.get("period"))
++        complete = bool(job.params.get("complete")) or period == "complete"
++
+         if complete:
+-            days = 730
++            start_date, end_date = _date_range_for_period("complete", max_days=730)
++        elif period:
++            start_date, end_date = _date_range_for_period(period, max_days=730)
+         else:
++            days_value = job.params.get("days")
+             if days_value is None:
+                 raise ValueError("days is required unless complete is true.")
+             try:
+@@ -718,7 +847,10 @@
+                 raise ValueError("days must be an integer.") from exc
+             if days <= 0:
+                 raise ValueError("days must be greater than zero.")
+-        start_date, end_date = _date_range_for_days(days)
++            # Clamp to the Bybit API retention window (2 years) even for legacy days payloads.
++            if days > 730:
++                days = 730
++            start_date, end_date = _date_range_for_days(days)
+ 
+         def _export() -> Path:
+             import shutil
+@@ -872,15 +1004,26 @@
+         .error-list { margin-top:0.75rem; color:#fca5a5; font-size:0.9rem; }
+         .error-list ul { margin:0.4rem 0 0; padding-left:1.25rem; }
+ 
+-        .top-grid {
++        .top-stack {
+             display: grid;
+-            grid-template-columns: 1fr 320px;
++            grid-template-columns: 1fr;
+             gap: 1rem;
+             align-items: start;
+             margin-bottom: 1rem;
+         }
++
++        .top-panel {
++            height: 420px;
++            display: flex;
++            flex-direction: column;
++        }
++
++        .top-panel .table-wrap {
++            flex: 1;
++            overflow: auto;
++        }
+         @media (max-width: 1100px) {
+-            .top-grid { grid-template-columns: 1fr; }
++            .top-stack { grid-template-columns: 1fr; }
+         }
+ 
+         .watchlist-sub {
+@@ -954,8 +1097,41 @@
+             <span id=\"status\">Loading scripts...</span>
+         </div>
+ 
+-        <div class=\"top-grid\">
+-            <section class=\"panel\" id=\"open-orders-panel\">
++        <div class=\"top-stack\">
++
++            <section class=\"panel top-panel\" id=\"watchlist-widget\">
++                <div class=\"panel-header\">
++                    <div>
++                        <h2>Watchlist</h2>
++                        <div class=\"watchlist-sub\">Saved with alerts backup</div>
++                    </div>
++                    <div class=\"oo-toolbar\">
++                        <span class=\"status-pill\" id=\"watchlist-count\">0</span>
++                    </div>
++                </div>
++
++                <div class=\"watchlist-input\">
++                    <input id=\"watchlist-input\" type=\"text\" placeholder=\"BTCUSDT, EURUSD\" />
++                    <button type=\"button\" id=\"watchlist-add-btn\">Add</button>
++                </div>
++
++                <div class=\"watchlist-status\" id=\"watchlist-status\"></div>
++
++                <div class=\"table-wrap\">
++                    <table id=\"watchlist-table\">
++                        <thead>
++                            <tr>
++                                <th>Instrument</th>
++                                <th>Action</th>
++                            </tr>
++                        </thead>
++                        <tbody id=\"watchlist-items\"></tbody>
++                    </table>
++                </div>
++
++                <p class=\"meta\" id=\"watchlist-empty\" style=\"display:none;\">No items yet.</p>
++            </section>
++            <section class=\"panel top-panel\" id=\"open-orders-panel\">
+                 <div class=\"panel-header\">
+                     <div>
+                         <h2>Open Orders / Positions</h2>
+@@ -999,41 +1175,7 @@
+                     <strong>Source issues</strong>
+                     <ul></ul>
+                 </div>
+-            </section>
+-
+-            <section class=\"panel\" id=\"watchlist-widget\">
+-                <div class=\"panel-header\">
+-                    <div>
+-                        <h2>Watchlist</h2>
+-                        <div class=\"watchlist-sub\">Saved with alerts backup</div>
+-                    </div>
+-                    <div class=\"oo-toolbar\">
+-                        <span class=\"status-pill\" id=\"watchlist-count\">0</span>
+-                    </div>
+-                </div>
+-
+-                <div class=\"watchlist-input\">
+-                    <input id=\"watchlist-input\" type=\"text\" placeholder=\"BTCUSDT, EURUSD\" />
+-                    <button type=\"button\" id=\"watchlist-add-btn\">Add</button>
+-                </div>
+-
+-                <div class=\"watchlist-status\" id=\"watchlist-status\"></div>
+-
+-                <div class=\"table-wrap\">
+-                    <table id=\"watchlist-table\">
+-                        <thead>
+-                            <tr>
+-                                <th>Instrument</th>
+-                                <th>Action</th>
+-                            </tr>
+-                        </thead>
+-                        <tbody id=\"watchlist-items\"></tbody>
+-                    </table>
+-                </div>
+-
+-                <p class=\"meta\" id=\"watchlist-empty\" style=\"display:none;\">No items yet.</p>
+-            </section>
+-        </div>
++            </section></div>
+ 
+         <!-- CATEGORIES (your sketch layout) -->
+         <div class=\"category-grid\">
+@@ -3577,12 +3719,12 @@
+         <p class=\"meta\">Generate transaction history CSV exports for the selected timeframe. Jobs run in the background and will download automatically when ready.</p>
+         <div class=\"badge\">Select range</div>
+         <div class=\"actions\">
+-            <button class=\"primary\" data-days=\"30\">30 days</button>
+-            <button class=\"primary\" data-days=\"90\">90 days</button>
+-            <button class=\"primary\" data-days=\"180\">180 days</button>
+-            <button class=\"primary\" data-days=\"365\">365 days</button>
+-            <button class=\"secondary\" data-complete=\"true\">Complete History</button>
+-            <a href=\"/\" class=\"secondary\" style=\"text-decoration:none; display:inline-flex; align-items:center;\">Back to dashboard</a>
++            <button class=\"primary\" data-period=\"day\">DAY</button>
++            <button class=\"primary\" data-period=\"week\">WEEK</button>
++            <button class=\"primary\" data-period=\"month\">MONTH</button>
++            <button class=\"primary\" data-period=\"year\">YEAR</button>
++            <button class=\"primary\" data-period=\"3y\">3 YEARS</button>
++            <button class=\"primary\" data-period=\"complete\">COMPLETE</button>
+         </div>
+         <div id=\"status\" class=\"status\">Choose a timeframe to start.</div>
+         <div id=\"error\" class=\"error\"></div>
+@@ -3591,7 +3733,7 @@
+     <script>
+         const statusEl = document.getElementById('status');
+         const errorEl = document.getElementById('error');
+-        const buttons = Array.from(document.querySelectorAll('button[data-days], button[data-complete]'));
++        const buttons = Array.from(document.querySelectorAll('button[data-period]'));
+ 
+         const setButtonsDisabled = (disabled) => {
+             buttons.forEach((btn) => {
+@@ -3648,13 +3790,9 @@
+ 
+         buttons.forEach((button) => {
+             button.addEventListener('click', () => {
+-                const days = button.dataset.days;
+-                if (days) {
+-                    startExport({ days: Number(days) });
+-                    return;
+-                }
+-                if (button.dataset.complete === 'true') {
+-                    startExport({ complete: true });
++                const period = button.dataset.period;
++                if (period) {
++                    startExport({ period });
+                 }
+             });
+         });
+@@ -3689,13 +3827,12 @@
+         <p class=\"meta\">Generate a CSV export of Bybit execution history for the selected timeframe. Jobs run in the background and will download automatically when ready. Note: Bybit trade history is limited to the last 2 years.</p>
+         <div class=\"badge\">Select range</div>
+         <div class=\"actions\">
+-            <button class=\"primary\" data-days=\"30\">30 days</button>
+-            <button class=\"primary\" data-days=\"60\">60 days</button>
+-            <button class=\"primary\" data-days=\"90\">90 days</button>
+-            <button class=\"primary\" data-days=\"180\">180 days</button>
+-            <button class=\"primary\" data-days=\"365\">365 days</button>
+-            <button class=\"secondary\" data-complete=\"true\">Max (2 years)</button>
+-            <a href=\"/\" class=\"secondary\" style=\"text-decoration:none; display:inline-flex; align-items:center;\">Back to dashboard</a>
++            <button class=\"primary\" data-period=\"day\">DAY</button>
++            <button class=\"primary\" data-period=\"week\">WEEK</button>
++            <button class=\"primary\" data-period=\"month\">MONTH</button>
++            <button class=\"primary\" data-period=\"year\">YEAR</button>
++            <button class=\"primary\" data-period=\"3y\">3 YEARS</button>
++            <button class=\"primary\" data-period=\"complete\">COMPLETE</button>
+         </div>
+         <div id=\"status\" class=\"status\">Choose a timeframe to start.</div>
+         <div id=\"error\" class=\"error\"></div>
+@@ -3704,7 +3841,7 @@
+     <script>
+         const statusEl = document.getElementById('status');
+         const errorEl = document.getElementById('error');
+-        const buttons = Array.from(document.querySelectorAll('button[data-days], button[data-complete]'));
++        const buttons = Array.from(document.querySelectorAll('button[data-period]'));
+ 
+         const setButtonsDisabled = (disabled) => {
+             buttons.forEach((btn) => { btn.disabled = disabled; });
+@@ -3759,9 +3896,10 @@
+ 
+         buttons.forEach((button) => {
+             button.addEventListener('click', () => {
+-                const days = button.dataset.days;
+-                if (days) return startExport({ days: Number(days) });
+-                if (button.dataset.complete === 'true') return startExport({ complete: true });
++                const period = button.dataset.period;
++                if (period) {
++                    startExport({ period });
++                }
+             });
+         });
+     </script>
+@@ -4587,32 +4725,46 @@
+     if oanda_history_exporter is None:
+         raise HTTPException(status_code=500, detail="OANDA history exporter not available.")
+     payload = await request.json()
++
++    period = _normalize_period(payload.get("period"))
+     days = payload.get("days")
+     complete = payload.get("complete")
+-    if complete and days:
+-        raise HTTPException(status_code=400, detail="Specify either days or complete history.")
+-    if not complete:
++
++    if period is not None:
++        if days is not None or complete:
++            raise HTTPException(status_code=400, detail="Specify only one of period, days, or complete.")
++        if period == "complete":
++            complete = True
++            period = None
++
++    params: Dict[str, object] = {}
++    if complete:
++        params = {"complete": True}
++    elif period is not None:
++        params = {"period": period, "complete": False}
++    else:
+         if days is None:
+             raise HTTPException(status_code=400, detail="days is required unless complete is true.")
+         try:
+-            days = int(days)
++            days_int = int(days)
+         except (TypeError, ValueError) as exc:
+             raise HTTPException(status_code=400, detail="days must be an integer.") from exc
+-        if days <= 0:
++        if days_int <= 0:
+             raise HTTPException(status_code=400, detail="days must be greater than zero.")
++        params = {"days": days_int, "complete": False}
++
+     job_id = uuid4().hex
+     job = OandaHistoryJob(
+         job_id=job_id,
+         status="queued",
+         created_at=time.time(),
+         updated_at=time.time(),
+-        params={"days": days, "complete": bool(complete)},
++        params=params,
+     )
+     OANDA_HISTORY_JOBS[job_id] = job
+     asyncio.create_task(_run_oanda_history_export(job))
+     return JSONResponse({"job_id": job_id})
+ 
+-
+ @app.get("/api/oanda-history/export/{job_id}")
+ async def oanda_history_export_status(job_id: str) -> JSONResponse:
+     job = OANDA_HISTORY_JOBS.get(job_id)
+@@ -4649,32 +4801,46 @@
+     if bybit_history_fetcher is None:
+         raise HTTPException(status_code=500, detail="Bybit history exporter not available.")
+     payload = await request.json()
++
++    period = _normalize_period(payload.get("period"))
+     days = payload.get("days")
+     complete = payload.get("complete")
+-    if complete and days:
+-        raise HTTPException(status_code=400, detail="Specify either days or complete history.")
+-    if not complete:
++
++    if period is not None:
++        if days is not None or complete:
++            raise HTTPException(status_code=400, detail="Specify only one of period, days, or complete.")
++        if period == "complete":
++            complete = True
++            period = None
++
++    params: Dict[str, object] = {}
++    if complete:
++        params = {"complete": True}
++    elif period is not None:
++        params = {"period": period, "complete": False}
++    else:
+         if days is None:
+             raise HTTPException(status_code=400, detail="days is required unless complete is true.")
+         try:
+-            days = int(days)
++            days_int = int(days)
+         except (TypeError, ValueError) as exc:
+             raise HTTPException(status_code=400, detail="days must be an integer.") from exc
+-        if days <= 0:
++        if days_int <= 0:
+             raise HTTPException(status_code=400, detail="days must be greater than zero.")
++        params = {"days": days_int, "complete": False}
++
+     job_id = uuid4().hex
+     job = BybitHistoryJob(
+         job_id=job_id,
+         status="queued",
+         created_at=time.time(),
+         updated_at=time.time(),
+-        params={"days": days, "complete": bool(complete)},
++        params=params,
+     )
+     BYBIT_HISTORY_JOBS[job_id] = job
+     asyncio.create_task(_run_bybit_history_export(job))
+     return JSONResponse({"job_id": job_id})
+ 
+-
+ @app.get("/api/bybit-history/export/{job_id}")
+ async def bybit_history_export_status(job_id: str) -> JSONResponse:
+     job = BYBIT_HISTORY_JOBS.get(job_id)
