@@ -54,6 +54,13 @@ except Exception:  # pragma: no cover - optional dependency
     bybit_history_fetcher = None
 finally:
     sys.path.pop(0)
+try:
+    sys.path.insert(0, str(BASE_DIR / "coinspot-clone"))
+    import coinspot_history as coinspot_history_exporter
+except Exception:  # pragma: no cover - optional dependency
+    coinspot_history_exporter = None
+finally:
+    sys.path.pop(0)
 
 
 SKIP_DIRS = {
@@ -76,6 +83,7 @@ PAYSLIP_UPLOAD_ROOT = BASE_DIR / "render" / "uploads" / "payslip"
 PAYSLIP_ALLOWED_IMAGES = {".jpg", ".jpeg", ".png"}
 OANDA_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "oanda-history"
 BYBIT_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "bybit-history"
+COINSPOT_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "coinspot-history"
 PENDING_WEBHOOKS_PATH = BASE_DIR / "render" / "data" / "pending_webhooks.json"
 WATCHLIST_PATH = BASE_DIR / "render" / "data" / "watchlist.json"
 WATCHLIST_MAX_ITEMS = 50
@@ -126,6 +134,7 @@ BYBIT_SETTINGS_PATH = bybit_monitor.SETTINGS_PATH
 PAYSLIP_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 OANDA_HISTORY_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
 BYBIT_HISTORY_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
+COINSPOT_HISTORY_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
 PENDING_WEBHOOKS_PATH.parent.mkdir(parents=True, exist_ok=True)
 WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
 
@@ -355,6 +364,17 @@ class BybitHistoryJob:
     error: Optional[str] = None
 
 
+@dataclass
+class CoinspotHistoryJob:
+    job_id: str
+    status: str
+    created_at: float
+    updated_at: float
+    params: Dict[str, object]
+    output_path: Optional[Path] = None
+    error: Optional[str] = None
+
+
 def candidate_entrypoints(app_dir: Path) -> List[Path]:
     app_name = app_dir.name
     candidates: List[str] = []
@@ -423,6 +443,8 @@ def script_open_url(script: ManagedScript) -> str:
         return "/oanda-history"
     if script.name == "bybithistory-clone":
         return "/bybit-history"
+    if script.name == "coinspot-clone":
+        return "/coinspot-history"
     if script.name in WEB_APPS:
         return f"/apps/{_encoded_script_name(script.name)}"
     return f"/scripts/view/{_encoded_script_name(script.name)}"
@@ -586,6 +608,7 @@ script_manager = ScriptManager(discover_scripts())
 app = FastAPI(title="Render Master Script", version="1.0")
 OANDA_HISTORY_JOBS: Dict[str, OandaHistoryJob] = {}
 BYBIT_HISTORY_JOBS: Dict[str, BybitHistoryJob] = {}
+COINSPOT_HISTORY_JOBS: Dict[str, CoinspotHistoryJob] = {}
 
 _AUTOSTART_ENV = os.getenv("AUTOSTART_SCRIPTS")
 if _AUTOSTART_ENV is None:
@@ -823,6 +846,7 @@ def _date_range_for_period(period: str, *, max_days: Optional[int] = None) -> tu
 
     return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
 
+
 async def _run_bybit_history_export(job: BybitHistoryJob) -> None:
     job.status = "running"
     job.updated_at = time.time()
@@ -879,6 +903,59 @@ async def _run_bybit_history_export(job: BybitHistoryJob) -> None:
                 dest = BYBIT_HISTORY_EXPORT_ROOT / f"bybit_history_{job.job_id}.csv"
                 shutil.move(str(src), dest)
                 return dest
+
+        output_path = await asyncio.to_thread(_export)
+        job.output_path = output_path
+        job.status = "done"
+    except Exception as exc:
+        job.status = "error"
+        job.error = str(exc)
+    finally:
+        job.updated_at = time.time()
+
+
+async def _run_coinspot_history_export(job: CoinspotHistoryJob) -> None:
+    job.status = "running"
+    job.updated_at = time.time()
+    try:
+        if coinspot_history_exporter is None:
+            raise RuntimeError("CoinSpot history exporter module not available.")
+
+        period = _normalize_period(job.params.get("period"))
+        complete = bool(job.params.get("complete")) or period == "complete"
+
+        if complete:
+            start_date, end_date = None, None
+        elif period:
+            start_date, end_date = _date_range_for_period(period)
+        else:
+            days_value = job.params.get("days")
+            if days_value is None:
+                raise ValueError("days is required unless complete is true.")
+            try:
+                days = int(days_value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("days must be an integer.") from exc
+            if days <= 0:
+                raise ValueError("days must be greater than zero.")
+            start_date, end_date = _date_range_for_days(days)
+
+        def _export() -> Path:
+            import shutil
+            import tempfile
+            from pathlib import Path
+
+            dest = COINSPOT_HISTORY_EXPORT_ROOT / f"coinspot_history_{job.job_id}.zip"
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                zip_path = tmp_path / dest.name
+                coinspot_history_exporter.export_zip(
+                    start_date,
+                    end_date,
+                    output_path=zip_path,
+                )
+                shutil.move(str(zip_path), dest)
+            return dest
 
         output_path = await asyncio.to_thread(_export)
         job.output_path = output_path
@@ -3933,6 +4010,112 @@ BYBIT_HISTORY_TEMPLATE = """<!DOCTYPE html>
 </body>
 </html>"""
 
+COINSPOT_HISTORY_TEMPLATE = """<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+    <meta charset=\"UTF-8\" />
+    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+    <title>CoinSpot History Export</title>
+    <style>
+        :root { color-scheme: light dark; }
+        body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
+        h1 { margin-top: 0; }
+        .card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; padding: 1.5rem; max-width: 960px; margin: 0 auto; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
+        .meta { color: #94a3b8; margin-bottom: 0.75rem; line-height: 1.5; }
+        .actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1rem; }
+        button { padding: 0.7rem 1.2rem; border-radius: 12px; border: none; cursor: pointer; font-weight: 700; }
+        .primary { background: #22c55e; color: #052e16; }
+        .secondary { background: #334155; color: #e2e8f0; }
+        .status { margin-top: 1rem; color: #cbd5e1; white-space: pre-wrap; word-break: break-word; }
+        .error { margin-top: 0.75rem; color: #fca5a5; }
+        .badge { display: inline-block; padding: 0.35rem 0.65rem; border-radius: 999px; background: #1f2937; color: #cbd5e1; font-weight: 700; font-size: 0.9rem; }
+    </style>
+</head>
+<body>
+    <div class=\"card\">
+        <h1>CoinSpot History Export</h1>
+        <p class=\"meta\">Generate a ZIP file containing CoinSpot deposits, withdrawals, orders, and transfer history. Jobs run in the background and will download automatically when ready.</p>
+        <div class=\"badge\">Select range</div>
+        <div class=\"actions\">
+            <button class=\"primary\" data-period=\"day\">DAY</button>
+            <button class=\"primary\" data-period=\"week\">WEEK</button>
+            <button class=\"primary\" data-period=\"month\">MONTH</button>
+            <button class=\"primary\" data-period=\"year\">YEAR</button>
+            <button class=\"primary\" data-period=\"3y\">3 YEARS</button>
+            <button class=\"primary\" data-period=\"complete\">COMPLETE</button>
+        </div>
+        <div id=\"status\" class=\"status\">Choose a timeframe to start.</div>
+        <div id=\"error\" class=\"error\"></div>
+    </div>
+
+    <script>
+        const statusEl = document.getElementById('status');
+        const errorEl = document.getElementById('error');
+        const buttons = Array.from(document.querySelectorAll('button[data-period]'));
+
+        const setButtonsDisabled = (disabled) => {
+            buttons.forEach((btn) => { btn.disabled = disabled; });
+        };
+
+        const startExport = async (payload) => {
+            errorEl.textContent = '';
+            statusEl.textContent = 'Creating export job...';
+            setButtonsDisabled(true);
+            try {
+                const response = await fetch('/api/coinspot-history/export', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                if (!response.ok) {
+                    const text = await response.text();
+                    throw new Error(text || response.statusText);
+                }
+                const data = await response.json();
+                await pollJob(data.job_id);
+            } catch (err) {
+                errorEl.textContent = err.message || 'Unable to start export.';
+                statusEl.textContent = 'Export failed to start.';
+                setButtonsDisabled(false);
+            }
+        };
+
+        const pollJob = async (jobId) => {
+            statusEl.textContent = 'Job queued...';
+            while (true) {
+                await new Promise((resolve) => setTimeout(resolve, 1500));
+                const response = await fetch(`/api/coinspot-history/export/${jobId}`, { cache: 'no-store' });
+                if (!response.ok) {
+                    const text = await response.text();
+                    throw new Error(text || response.statusText);
+                }
+                const data = await response.json();
+                statusEl.textContent = `Status: ${data.status}`;
+                if (data.status === 'done') {
+                    window.location.href = data.download_url;
+                    setButtonsDisabled(false);
+                    return;
+                }
+                if (data.status === 'error') {
+                    errorEl.textContent = data.error || 'Export failed.';
+                    setButtonsDisabled(false);
+                    return;
+                }
+            }
+        };
+
+        buttons.forEach((button) => {
+            button.addEventListener('click', () => {
+                const period = button.dataset.period;
+                if (period) {
+                    startExport({ period });
+                }
+            });
+        });
+    </script>
+</body>
+</html>"""
+
 PAYSLIP_AUDIT_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"en\">
 <head>
@@ -4053,6 +4236,11 @@ async def oanda_history_page() -> HTMLResponse:
 @app.get("/bybit-history", response_class=HTMLResponse, include_in_schema=False)
 async def bybit_history_page() -> HTMLResponse:
     return HTMLResponse(BYBIT_HISTORY_TEMPLATE)
+
+
+@app.get("/coinspot-history", response_class=HTMLResponse, include_in_schema=False)
+async def coinspot_history_page() -> HTMLResponse:
+    return HTMLResponse(COINSPOT_HISTORY_TEMPLATE)
 
 
 @app.get("/scripts")
@@ -4825,6 +5013,80 @@ async def download_oanda_history_export(job_id: str) -> FileResponse:
         job.output_path,
         filename=job.output_path.name,
         media_type="text/csv",
+    )
+
+
+@app.post("/api/coinspot-history/export")
+async def start_coinspot_history_export(request: Request) -> JSONResponse:
+    payload = await request.json()
+    period = _normalize_period(payload.get("period"))
+    days = payload.get("days")
+    complete = payload.get("complete")
+
+    if period is not None:
+        if days is not None or complete:
+            raise HTTPException(status_code=400, detail="Specify only one of period, days, or complete.")
+        if period == "complete":
+            complete = True
+            period = None
+
+    params: Dict[str, object] = {}
+    if complete:
+        params = {"complete": True}
+    elif period is not None:
+        params = {"period": period, "complete": False}
+    else:
+        if days is None:
+            raise HTTPException(status_code=400, detail="days is required unless complete is true.")
+        try:
+            days_int = int(days)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="days must be an integer.") from exc
+        if days_int <= 0:
+            raise HTTPException(status_code=400, detail="days must be greater than zero.")
+        params = {"days": days_int, "complete": False}
+
+    job_id = uuid4().hex
+    job = CoinspotHistoryJob(
+        job_id=job_id,
+        status="queued",
+        created_at=time.time(),
+        updated_at=time.time(),
+        params=params,
+    )
+    COINSPOT_HISTORY_JOBS[job_id] = job
+    asyncio.create_task(_run_coinspot_history_export(job))
+    return JSONResponse({"job_id": job_id})
+
+
+@app.get("/api/coinspot-history/export/{job_id}")
+async def coinspot_history_export_status(job_id: str) -> JSONResponse:
+    job = COINSPOT_HISTORY_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Export job not found.")
+    payload: Dict[str, object] = {
+        "job_id": job.job_id,
+        "status": job.status,
+        "error": job.error,
+    }
+    if job.status == "done" and job.output_path is not None:
+        payload["download_url"] = f"/api/coinspot-history/export/{job.job_id}/download"
+    return JSONResponse(payload)
+
+
+@app.get("/api/coinspot-history/export/{job_id}/download")
+async def download_coinspot_history_export(job_id: str) -> FileResponse:
+    job = COINSPOT_HISTORY_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Export job not found.")
+    if job.status != "done" or job.output_path is None:
+        raise HTTPException(status_code=404, detail="Export not ready.")
+    if not job.output_path.exists():
+        raise HTTPException(status_code=404, detail="Export file not found.")
+    return FileResponse(
+        job.output_path,
+        filename=f"coinspot_history_{job_id}.zip",
+        media_type="application/zip",
     )
 
 
