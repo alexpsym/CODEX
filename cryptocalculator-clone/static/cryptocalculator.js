@@ -121,10 +121,15 @@ function bindButtonGroup(inputId) {
 function toggleEntry() {
   const orderType = document.getElementById('order_type');
   const entryField = document.getElementById('entry_price_row');
+  const cancelField = document.getElementById('limit_cancel_row');
   if (!orderType || !entryField) {
     return;
   }
-  entryField.style.display = orderType.value === 'market' ? 'none' : 'block';
+  const isLimit = orderType.value !== 'market';
+  entryField.style.display = isLimit ? 'block' : 'none';
+  if (cancelField) {
+    cancelField.style.display = isLimit ? 'block' : 'none';
+  }
 }
 
 function toggleOptionsEntry() {

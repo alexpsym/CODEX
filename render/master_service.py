@@ -30,6 +30,7 @@ import httpx
 from starlette.responses import RedirectResponse
 
 from bybit_credentials import resolve_bybit_credentials_for
+from render.dropbox_sync import download_bytes, upload_bytes
 from payslip_audit.tesseract import (
     TESSERACT_MISSING_MESSAGE,
     _resolve_tesseract_binary,
@@ -87,7 +88,26 @@ COINSPOT_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "coinspot-histo
 PENDING_WEBHOOKS_PATH = BASE_DIR / "render" / "data" / "pending_webhooks.json"
 WATCHLIST_PATH = BASE_DIR / "render" / "data" / "watchlist.json"
 WATCHLIST_MAX_ITEMS = 50
+DROPBOX_SYNC_ENABLED = os.getenv("DROPBOX_SYNC_ENABLED", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+DROPBOX_BACKUP_PATH = os.getenv(
+    "DROPBOX_BACKUP_PATH", "/codex/master_control_backup.json"
+).strip()
+DROPBOX_SYNC_DEBOUNCE_SECONDS = float(
+    os.getenv("DROPBOX_SYNC_DEBOUNCE_SECONDS", "2")
+)
+LIMIT_CANCEL_POLL_SECONDS = float(
+    os.getenv("LIMIT_CANCEL_POLL_SECONDS", "5")
+)
+FILL_ALERT_POLL_SECONDS = float(
+    os.getenv("FILL_ALERT_POLL_SECONDS", "8")
+)
 WEB_APPS = {
+    "bybit_trigger_bounce_trader",
     "bybithistory-clone",
     "cryptocalculator-clone",
     "oanda-calculator-clone",
@@ -139,6 +159,9 @@ PENDING_WEBHOOKS_PATH.parent.mkdir(parents=True, exist_ok=True)
 WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 _WATCHLIST_CACHE: Optional[List[str]] = None
+_DROPBOX_UPLOAD_TASK: Optional[asyncio.Task] = None
+_BYBIT_EXEC_LAST_SEEN: Dict[str, int] = {}
+_OANDA_TX_LAST_SEEN: Dict[str, str] = {}
 
 
 def _normalize_watchlist(items: Iterable[object]) -> List[str]:
@@ -188,6 +211,97 @@ def _set_watchlist(items: Iterable[object]) -> List[str]:
     _WATCHLIST_CACHE = normalized
     _save_watchlist(normalized)
     return list(normalized)
+
+
+def _build_state_backup_payload() -> bytes:
+    alerts_payload = {
+        "bybit": {"alerts": bybit_monitor.get_custom_alerts(force=True)},
+        "oanda": {"alerts": oanda_monitor.get_custom_alerts(force=True)},
+    }
+    payload = {
+        "alerts": alerts_payload,
+        "watchlist": _get_watchlist(),
+        "pending_webhooks": _load_pending_webhooks(),
+    }
+    return json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
+
+
+def _schedule_dropbox_upload_state_backup() -> None:
+    if not DROPBOX_SYNC_ENABLED:
+        return
+
+    global _DROPBOX_UPLOAD_TASK
+    if _DROPBOX_UPLOAD_TASK is not None and not _DROPBOX_UPLOAD_TASK.done():
+        return
+
+    async def _delayed_upload() -> None:
+        await asyncio.sleep(DROPBOX_SYNC_DEBOUNCE_SECONDS)
+        try:
+            payload = _build_state_backup_payload()
+            await asyncio.to_thread(upload_bytes, DROPBOX_BACKUP_PATH, payload)
+            BYBIT_LOGGER.info("Dropbox backup uploaded to %s", DROPBOX_BACKUP_PATH)
+        except Exception as exc:  # pragma: no cover - network failure
+            BYBIT_LOGGER.error("Dropbox backup failed: %s", exc)
+
+    _DROPBOX_UPLOAD_TASK = asyncio.create_task(_delayed_upload())
+
+
+def _restore_alerts_payload(data: Dict[str, object]) -> Dict[str, object]:
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="Backup payload must be a JSON object.")
+    alerts_payload = data
+    if "alerts" in data:
+        alerts_payload = data.get("alerts")
+        if not isinstance(alerts_payload, dict):
+            raise HTTPException(status_code=400, detail="Backup missing alerts section.")
+    bybit_block = alerts_payload.get("bybit") if isinstance(alerts_payload, dict) else None
+    oanda_block = alerts_payload.get("oanda") if isinstance(alerts_payload, dict) else None
+    if not isinstance(bybit_block, dict) or not isinstance(oanda_block, dict):
+        raise HTTPException(status_code=400, detail="Backup alerts format invalid.")
+    if not isinstance(bybit_block.get("alerts"), list) or not isinstance(
+        oanda_block.get("alerts"), list
+    ):
+        raise HTTPException(status_code=400, detail="Backup alerts list missing.")
+
+    watchlist_items: List[str] = []
+    if "watchlist" in data:
+        if not isinstance(data["watchlist"], list):
+            raise HTTPException(status_code=400, detail="Backup watchlist must be a list.")
+        watchlist_items = _normalize_watchlist(data["watchlist"])
+
+    pending_restored: List[Dict[str, object]] = []
+    if "pending_webhooks" in data:
+        pending_restored = _replace_pending_webhooks(data["pending_webhooks"])
+
+    bybit_restored = bybit_monitor.replace_custom_alerts(bybit_block["alerts"])
+    oanda_restored = oanda_monitor.replace_custom_alerts(oanda_block["alerts"])
+    _set_watchlist(watchlist_items)
+    return {
+        "bybit_restored": len(bybit_restored),
+        "oanda_restored": len(oanda_restored),
+        "watchlist_restored": len(watchlist_items),
+        "pending_webhooks_restored": len(pending_restored),
+    }
+
+
+async def _dropbox_restore_state_backup_on_startup() -> None:
+    if not DROPBOX_SYNC_ENABLED:
+        return
+    try:
+        payload = await asyncio.to_thread(download_bytes, DROPBOX_BACKUP_PATH)
+        data = json.loads(payload.decode("utf-8"))
+        restored = _restore_alerts_payload(data)
+        BYBIT_LOGGER.info(
+            "Dropbox restore complete: bybit=%s oanda=%s watchlist=%s pending=%s",
+            restored["bybit_restored"],
+            restored["oanda_restored"],
+            restored["watchlist_restored"],
+            restored["pending_webhooks_restored"],
+        )
+    except FileNotFoundError:
+        BYBIT_LOGGER.info("Dropbox restore skipped; no backup found at %s", DROPBOX_BACKUP_PATH)
+    except Exception as exc:  # pragma: no cover - startup failure
+        BYBIT_LOGGER.error("Dropbox restore failed: %s", exc)
 
 
 @dataclass
@@ -624,6 +738,9 @@ AUTOSTART_SCRIPTS = [
 
 @app.on_event("startup")
 async def _autostart_scripts() -> None:
+    await _dropbox_restore_state_backup_on_startup()
+    asyncio.create_task(_poll_bybit_fills())
+    asyncio.create_task(_poll_oanda_fills())
     for name in AUTOSTART_SCRIPTS:
         try:
             script = script_manager.get(name)
@@ -640,12 +757,17 @@ async def _autostart_scripts() -> None:
 
 
 async def _fetch_oanda_transactions_window(
-    *, account_id: str, api_key: str, start: str, end: str
+    *, account_id: str, api_key: str, base_url: str, start: str, end: str
 ) -> List[Dict[str, object]]:
     if oanda_history_exporter is None:
         raise RuntimeError("OANDA history exporter module not available.")
     return await asyncio.to_thread(
-        oanda_history_exporter.fetch_transactions, account_id, api_key, start, end
+        oanda_history_exporter.fetch_transactions,
+        account_id,
+        api_key,
+        start,
+        end,
+        base_url,
     )
 
 
@@ -677,6 +799,7 @@ async def _collect_oanda_history_complete(
         batch = await _fetch_oanda_transactions_window(
             account_id=account_id,
             api_key=api_key,
+            base_url=base_url,
             start=_format_oanda_timestamp(start),
             end=_format_oanda_timestamp(end),
         )
@@ -713,6 +836,7 @@ async def _collect_oanda_history_range(
         batch = await _fetch_oanda_transactions_window(
             account_id=account_id,
             api_key=api_key,
+            base_url=base_url,
             start=_format_oanda_timestamp(current_start),
             end=_format_oanda_timestamp(current_end),
         )
@@ -728,7 +852,8 @@ async def _run_oanda_history_export(job: OandaHistoryJob) -> None:
     try:
         if oanda_history_exporter is None:
             raise RuntimeError("OANDA history exporter module not available.")
-        config = _get_oanda_history_config()
+        account_mode = str(job.params.get("account") or "live").strip().lower()
+        config = _get_oanda_history_config(account_mode)
 
         period = _normalize_period(job.params.get("period"))
         complete = bool(job.params.get("complete")) or period == "complete"
@@ -770,6 +895,7 @@ async def _run_oanda_history_export(job: OandaHistoryJob) -> None:
                 transactions = await _fetch_oanda_transactions_window(
                     account_id=config["account_id"],
                     api_key=config["api_key"],
+                    base_url=config["base_url"],
                     start=_format_oanda_timestamp(start_dt),
                     end=_format_oanda_timestamp(end_dt),
                 )
@@ -854,6 +980,7 @@ async def _run_bybit_history_export(job: BybitHistoryJob) -> None:
         if bybit_history_fetcher is None:
             raise RuntimeError("Bybit history exporter module not available.")
 
+        account_mode = str(job.params.get("account") or "live").strip().lower()
         period = _normalize_period(job.params.get("period"))
         complete = bool(job.params.get("complete")) or period == "complete"
 
@@ -884,6 +1011,11 @@ async def _run_bybit_history_export(job: BybitHistoryJob) -> None:
             with tempfile.TemporaryDirectory() as tmp:
                 tmp_path = Path(tmp)
                 prev_cwd = os.getcwd()
+                prev_env = os.environ.get("BYBIT_ENV")
+                if account_mode in {"demo", "testnet", "paper"}:
+                    os.environ["BYBIT_ENV"] = "demo"
+                else:
+                    os.environ["BYBIT_ENV"] = "live"
                 os.chdir(tmp)
                 try:
                     filename = bybit_history_fetcher.download_history(
@@ -895,6 +1027,10 @@ async def _run_bybit_history_export(job: BybitHistoryJob) -> None:
                     )
                 finally:
                     os.chdir(prev_cwd)
+                    if prev_env is None:
+                        os.environ.pop("BYBIT_ENV", None)
+                    else:
+                        os.environ["BYBIT_ENV"] = prev_env
                 if filename is None:
                     raise RuntimeError("No transactions found for the selected timeframe.")
                 src = tmp_path / filename
@@ -1782,7 +1918,28 @@ def _get_oanda_config(account: Optional[str]) -> Dict[str, str]:
     return {"mode": "live", "token": token, "account_id": account_id, "base_url": base_url}
 
 
-def _get_oanda_history_config() -> Dict[str, str]:
+def _get_oanda_history_config(mode: str = "live") -> Dict[str, str]:
+    acct = (mode or "live").strip().lower()
+    if acct in ("demo", "practice"):
+        account_id = _clean_env("OANDA_ACCOUNT_ID_DEMO")
+        api_key = _clean_env("OANDA_API_KEY_DEMO")
+        base_url = _normalize_oanda_base_url(
+            _clean_env("OANDA_API_URL_DEMO") or "https://api-fxpractice.oanda.com"
+        )
+        missing = []
+        if not api_key:
+            missing.append("OANDA_API_KEY_DEMO")
+        if not account_id:
+            missing.append("OANDA_ACCOUNT_ID_DEMO")
+        if missing:
+            raise ValueError(f"OANDA demo export credentials missing: {', '.join(missing)}")
+        return {
+            "account_id": account_id,
+            "api_key": api_key,
+            "base_url": base_url,
+            "mode": "demo",
+        }
+
     account_id = _clean_env("OANDA_ACCOUNT_ID")
     api_key = _clean_env("OANDA_API_KEY")
     base_url = _normalize_oanda_base_url(
@@ -1795,7 +1952,12 @@ def _get_oanda_history_config() -> Dict[str, str]:
         missing.append("OANDA_ACCOUNT_ID")
     if missing:
         raise ValueError(f"OANDA export credentials missing: {', '.join(missing)}")
-    return {"account_id": account_id, "api_key": api_key, "base_url": base_url}
+    return {
+        "account_id": account_id,
+        "api_key": api_key,
+        "base_url": base_url,
+        "mode": "live",
+    }
 
 
 def _oanda_account_context(base_url: str) -> str:
@@ -2412,7 +2574,7 @@ async def _collect_bybit_open_items(
                     "take_profit": position.get("takeProfit"),
                     "leverage": position.get("leverage")
                     or position.get("positionMargin"),
-                    "opened_at": position.get("createdTime"),
+                    "opened_at": position.get("updatedTime") or position.get("createdTime"),
                     "id": position.get("positionId") or position.get("positionIdx"),
                     "position_idx": position.get("positionIdx"),
                     "status": "OPEN",
@@ -2547,6 +2709,17 @@ def _upsert_pending_webhook(payload: Dict[str, object]) -> Dict[str, object]:
     return entry
 
 
+def _update_pending_webhook(webhook_id: str, updates: Dict[str, object]) -> Optional[Dict[str, object]]:
+    items = _load_pending_webhooks()
+    for idx, entry in enumerate(items):
+        if str(entry.get("id", "")).strip() == webhook_id:
+            merged = {**entry, **updates, "updated_at": int(time.time())}
+            items[idx] = merged
+            _save_pending_webhooks(items)
+            return merged
+    return None
+
+
 def _set_pending_webhook_enabled(webhook_id: str, enabled: bool) -> Dict[str, object]:
     items = _load_pending_webhooks()
     for idx, entry in enumerate(items):
@@ -2639,6 +2812,47 @@ def _format_trade_alert(
     return "\n".join(lines)
 
 
+def _format_bybit_fill_alert(payload: Dict[str, object]) -> str:
+    symbol = payload.get("symbol")
+    side = payload.get("side")
+    qty = payload.get("qty")
+    price = payload.get("execPrice") or payload.get("fillPrice")
+    exec_type = payload.get("execType") or payload.get("type")
+    category = payload.get("category")
+    reduce_only = payload.get("reduceOnly")
+    account = payload.get("account")
+    lines = [
+        "Bybit fill",
+        f"Account: {account}",
+        f"Category: {category}",
+        f"Symbol: {symbol}",
+        f"Side: {side}",
+        f"Qty: {qty}",
+        f"Price: {price}",
+        f"Type: {exec_type}",
+        f"Reduce only: {reduce_only}",
+    ]
+    return "\n".join(lines)
+
+
+def _format_oanda_fill_alert(payload: Dict[str, object]) -> str:
+    tx_type = payload.get("type")
+    instrument = payload.get("instrument")
+    units = payload.get("units")
+    price = payload.get("price")
+    account = payload.get("account")
+    lines = [
+        "OANDA fill",
+        f"Account: {account}",
+        f"Type: {tx_type}",
+        f"Instrument: {instrument}",
+        f"Units: {units}",
+        f"Price: {price}",
+        f"Reason: {payload.get('reason')}",
+    ]
+    return "\n".join(lines)
+
+
 def _log_webhook_event(request_id: str, stage: str, details: Dict[str, object]) -> None:
     BYBIT_LOGGER.info(
         "WEBHOOK_TPSL %s %s",
@@ -2703,6 +2917,24 @@ def _parse_trigger_offset(value: object) -> Optional[float]:
                 return None
             return offset if op == "+" else -offset
     return None
+
+
+def _parse_limit_cancel_settings(payload: Dict[str, object]) -> tuple[Optional[float], Optional[float]]:
+    offset = _parse_offset_value(
+        payload.get("limit_cancel_offset")
+        or payload.get("limit_cancel_distance")
+        or payload.get("limit_cancel_value")
+    )
+    pct = _parse_offset_value(
+        payload.get("limit_cancel_offset_pct")
+        or payload.get("limit_cancel_pct")
+        or payload.get("limit_cancel_percent")
+    )
+    if pct is not None and pct <= 0:
+        pct = None
+    if offset is not None and offset <= 0:
+        offset = None
+    return offset, pct
 
 
 async def _fetch_bybit_positions(
@@ -3022,6 +3254,7 @@ async def _place_bybit_order(
     order_type = str(order_type_raw).lower().strip()
     if order_type not in {"market", "limit"}:
         raise ValueError("Webhook payload order_type must be market or limit.")
+    limit_cancel_offset, limit_cancel_pct = _parse_limit_cancel_settings(payload)
 
     price_val = None
     if order_type == "limit":
@@ -3138,6 +3371,25 @@ async def _place_bybit_order(
     )
     if data.get("retCode") != 0:
         raise ValueError(f"Bybit order failed: {data.get('retMsg')}")
+    order_result = data.get("result", {}) or {}
+    order_id = order_result.get("orderId")
+    pending_id = str(payload.get("pending_webhook_id") or "").strip()
+    if pending_id:
+        _update_pending_webhook(
+            pending_id,
+            {
+                "broker": "Bybit",
+                "account": account,
+                "category": category,
+                "instrument": symbol,
+                "type": "Order",
+                "status": "OPEN",
+                "order_id": order_id,
+                "limit_cancel_offset": limit_cancel_offset,
+                "limit_cancel_offset_pct": limit_cancel_pct,
+            },
+        )
+        _schedule_dropbox_upload_state_backup()
 
     tpsl_result: Optional[Dict[str, object]] = None
     tpsl_error: Optional[str] = None
@@ -3275,6 +3527,26 @@ async def _place_bybit_order(
                 exc,
             )
 
+    if (
+        order_type == "limit"
+        and (limit_cancel_offset is not None or limit_cancel_pct is not None)
+        and order_id
+    ):
+        asyncio.create_task(
+            _monitor_bybit_limit_cancel(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                category=category,
+                symbol=symbol,
+                order_id=order_id,
+                limit_price=price_val,
+                limit_cancel_offset=limit_cancel_offset,
+                limit_cancel_offset_pct=limit_cancel_pct,
+                pending_webhook_id=pending_id or None,
+            )
+        )
+
     return {
         "account": account,
         "category": category,
@@ -3282,7 +3554,7 @@ async def _place_bybit_order(
         "side": side,
         "quantity": qty_val,
         "key_source": key_source,
-        "order": data.get("result", {}),
+        "order": order_result,
         "tpsl": tpsl_result,
         "tpsl_error": tpsl_error,
         "tp_order": tp_order,
@@ -3437,7 +3709,414 @@ async def _place_oanda_order(
         "oanda_order_response",
         {"result": result},
     )
+    order_id = _extract_oanda_order_id(result)
+    limit_cancel_offset, limit_cancel_pct = _parse_limit_cancel_settings(payload)
+    pending_id = str(payload.get("pending_webhook_id") or "").strip()
+    if pending_id:
+        _update_pending_webhook(
+            pending_id,
+            {
+                "broker": "OANDA",
+                "account": account,
+                "category": "forex",
+                "instrument": symbol,
+                "type": "Order",
+                "status": "OPEN",
+                "order_id": order_id,
+                "limit_cancel_offset": limit_cancel_offset,
+                "limit_cancel_offset_pct": limit_cancel_pct,
+            },
+        )
+        _schedule_dropbox_upload_state_backup()
+
+    if (
+        order_type == "limit"
+        and (limit_cancel_offset is not None or limit_cancel_pct is not None)
+        and order_id
+        and entry_price is not None
+    ):
+        asyncio.create_task(
+            _monitor_oanda_limit_cancel(
+                cfg=cfg,
+                instrument=symbol,
+                order_id=order_id,
+                limit_price=entry_price,
+                limit_cancel_offset=limit_cancel_offset,
+                limit_cancel_offset_pct=limit_cancel_pct,
+                pending_webhook_id=pending_id or None,
+            )
+        )
+
     return result
+
+
+def _extract_oanda_order_id(result: Dict[str, object]) -> Optional[str]:
+    for key in (
+        "orderCreateTransaction",
+        "orderFillTransaction",
+        "orderCancelTransaction",
+    ):
+        entry = result.get(key)
+        if isinstance(entry, dict):
+            order_id = entry.get("id")
+            if order_id:
+                return str(order_id)
+    order = result.get("order")
+    if isinstance(order, dict):
+        order_id = order.get("id")
+        if order_id:
+            return str(order_id)
+    return None
+
+
+def _limit_cancel_triggered(
+    *, current_price: float, limit_price: float, offset: Optional[float], pct: Optional[float]
+) -> bool:
+    distance = abs(current_price - limit_price)
+    if offset is not None and distance >= offset:
+        return True
+    if pct is not None:
+        pct_distance = limit_price * (pct / 100)
+        if distance >= pct_distance:
+            return True
+    return False
+
+
+async def _fetch_bybit_market_price(
+    *, base_url: str, category: str, symbol: str
+) -> float:
+    url = f"{base_url}/v5/market/tickers"
+    params = {"category": category, "symbol": symbol}
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.get(url, params=params)
+    response.raise_for_status()
+    payload = response.json()
+    ticker_list = (payload.get("result") or {}).get("list") or []
+    if not ticker_list:
+        raise ValueError("Bybit ticker data missing.")
+    last_price = ticker_list[0].get("lastPrice")
+    if last_price is None:
+        raise ValueError("Bybit ticker missing lastPrice.")
+    return float(last_price)
+
+
+async def _is_bybit_order_open(
+    *, base_url: str, api_key: str, api_secret: str, category: str, symbol: str, order_id: str
+) -> bool:
+    payload = await _bybit_signed_get(
+        base_url=base_url,
+        api_key=api_key,
+        api_secret=api_secret,
+        path="/v5/order/realtime",
+        params={"category": category, "symbol": symbol, "orderId": order_id, "openOnly": "0"},
+    )
+    items = (payload.get("result") or {}).get("list") or []
+    if not items:
+        return False
+    status = items[0].get("orderStatus")
+    return _is_bybit_open_order(status)
+
+
+async def _cancel_bybit_order(
+    *, base_url: str, api_key: str, api_secret: str, category: str, symbol: str, order_id: str
+) -> None:
+    await _bybit_signed_post(
+        base_url=base_url,
+        api_key=api_key,
+        api_secret=api_secret,
+        path="/v5/order/cancel",
+        body={"category": category, "symbol": symbol, "orderId": order_id},
+    )
+
+
+async def _monitor_bybit_limit_cancel(
+    *,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+    category: str,
+    symbol: str,
+    order_id: str,
+    limit_price: Optional[float],
+    limit_cancel_offset: Optional[float],
+    limit_cancel_offset_pct: Optional[float],
+    pending_webhook_id: Optional[str],
+) -> None:
+    if limit_price is None:
+        return
+    while True:
+        await asyncio.sleep(LIMIT_CANCEL_POLL_SECONDS)
+        try:
+            if not await _is_bybit_order_open(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                category=category,
+                symbol=symbol,
+                order_id=order_id,
+            ):
+                if pending_webhook_id:
+                    _update_pending_webhook(
+                        pending_webhook_id,
+                        {"status": "CLOSED", "limit_cancel_reason": "filled"},
+                    )
+                break
+            current_price = await _fetch_bybit_market_price(
+                base_url=base_url,
+                category=category,
+                symbol=symbol,
+            )
+            if _limit_cancel_triggered(
+                current_price=current_price,
+                limit_price=limit_price,
+                offset=limit_cancel_offset,
+                pct=limit_cancel_offset_pct,
+            ):
+                await _cancel_bybit_order(
+                    base_url=base_url,
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    category=category,
+                    symbol=symbol,
+                    order_id=order_id,
+                )
+                if pending_webhook_id:
+                    _update_pending_webhook(
+                        pending_webhook_id,
+                        {"status": "CANCELLED", "limit_cancel_reason": "price_moved"},
+                    )
+                _schedule_dropbox_upload_state_backup()
+                break
+        except Exception as exc:  # pragma: no cover - background task
+            BYBIT_LOGGER.error("Bybit limit cancel monitor error: %s", exc)
+            break
+
+
+async def _fetch_oanda_mid_price(
+    *, cfg: Dict[str, str], instrument: str, mode: str
+) -> float:
+    token = cfg["token"]
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    url = f"{cfg['base_url'].rstrip('/')}/v3/accounts/{cfg['account_id']}/pricing"
+    params = {"instruments": instrument}
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+        resp = await client.get(url, headers=headers, params=params)
+    if resp.status_code >= 400:
+        raise ValueError(f"OANDA pricing failed ({resp.status_code}): {resp.text}")
+    payload = resp.json()
+    prices = payload.get("prices") or []
+    if not prices:
+        raise ValueError("OANDA pricing data missing.")
+    price = prices[0]
+    bids = price.get("bids") or []
+    asks = price.get("asks") or []
+    bid = float(bids[0]["price"]) if bids else None
+    ask = float(asks[0]["price"]) if asks else None
+    if bid is not None and ask is not None:
+        return (bid + ask) / 2
+    if price.get("closeoutBid") is not None and price.get("closeoutAsk") is not None:
+        return (float(price["closeoutBid"]) + float(price["closeoutAsk"])) / 2
+    if bid is not None:
+        return bid
+    if ask is not None:
+        return ask
+    raise ValueError("OANDA pricing missing bid/ask data.")
+
+
+async def _is_oanda_order_open(*, cfg: Dict[str, str], order_id: str, mode: str) -> bool:
+    payload = await _fetch_oanda_json(
+        base_url=cfg["base_url"],
+        account_id=cfg["account_id"],
+        api_key=cfg["token"],
+        endpoint="/accounts/{account_id}/pendingOrders",
+        mode=mode,
+    )
+    orders = payload.get("orders") or []
+    for order in orders:
+        if str(order.get("id", "")).strip() == order_id:
+            return True
+    return False
+
+
+async def _cancel_oanda_order(*, cfg: Dict[str, str], order_id: str, mode: str) -> None:
+    headers = {
+        "Authorization": f"Bearer {cfg['token']}",
+        "Content-Type": "application/json",
+    }
+    endpoint = f"/v3/accounts/{cfg['account_id']}/orders/{order_id}/cancel"
+    url = f"{cfg['base_url'].rstrip('/')}{endpoint}"
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+        resp = await client.put(url, headers=headers)
+    if resp.status_code >= 400:
+        raise ValueError(f"OANDA cancel failed ({resp.status_code}): {resp.text}")
+
+
+async def _monitor_oanda_limit_cancel(
+    *,
+    cfg: Dict[str, str],
+    instrument: str,
+    order_id: str,
+    limit_price: float,
+    limit_cancel_offset: Optional[float],
+    limit_cancel_offset_pct: Optional[float],
+    pending_webhook_id: Optional[str],
+) -> None:
+    mode = cfg.get("mode", "live")
+    while True:
+        await asyncio.sleep(LIMIT_CANCEL_POLL_SECONDS)
+        try:
+            if not await _is_oanda_order_open(cfg=cfg, order_id=order_id, mode=mode):
+                if pending_webhook_id:
+                    _update_pending_webhook(
+                        pending_webhook_id,
+                        {"status": "CLOSED", "limit_cancel_reason": "filled"},
+                    )
+                break
+            current_price = await _fetch_oanda_mid_price(
+                cfg=cfg, instrument=instrument, mode=mode
+            )
+            if _limit_cancel_triggered(
+                current_price=current_price,
+                limit_price=limit_price,
+                offset=limit_cancel_offset,
+                pct=limit_cancel_offset_pct,
+            ):
+                await _cancel_oanda_order(cfg=cfg, order_id=order_id, mode=mode)
+                if pending_webhook_id:
+                    _update_pending_webhook(
+                        pending_webhook_id,
+                        {"status": "CANCELLED", "limit_cancel_reason": "price_moved"},
+                    )
+                _schedule_dropbox_upload_state_backup()
+                break
+        except Exception as exc:  # pragma: no cover - background task
+            BYBIT_LOGGER.error("OANDA limit cancel monitor error: %s", exc)
+            break
+
+
+async def _fetch_bybit_executions(
+    *,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+    category: str,
+    start_time: int,
+) -> List[Dict[str, object]]:
+    payload = await _bybit_signed_get(
+        base_url=base_url,
+        api_key=api_key,
+        api_secret=api_secret,
+        path="/v5/execution/list",
+        params={
+            "category": category,
+            "startTime": str(start_time),
+            "limit": "50",
+        },
+    )
+    return (payload.get("result") or {}).get("list", []) or []
+
+
+async def _poll_bybit_fills() -> None:
+    lookback_seconds = int(os.getenv("BYBIT_EXEC_LOOKBACK_SECONDS", "60"))
+    categories = ["linear", "spot", "option", "inverse"]
+    while True:
+        await asyncio.sleep(FILL_ALERT_POLL_SECONDS)
+        for account in ("live", "demo"):
+            try:
+                _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for(
+                    "demo" if account == "demo" else "live"
+                )
+                if not api_key or not api_secret:
+                    continue
+                last_seen = _BYBIT_EXEC_LAST_SEEN.get(account)
+                if last_seen is None:
+                    last_seen = int((time.time() - lookback_seconds) * 1000)
+                max_seen = last_seen
+                for category in categories:
+                    try:
+                        executions = await _fetch_bybit_executions(
+                            base_url=base_url,
+                            api_key=api_key,
+                            api_secret=api_secret,
+                            category=category,
+                            start_time=last_seen,
+                        )
+                    except Exception:
+                        continue
+                    for entry in executions:
+                        exec_time = int(entry.get("execTime") or 0)
+                        if exec_time <= last_seen:
+                            continue
+                        max_seen = max(max_seen, exec_time)
+                        entry_payload = {
+                            **entry,
+                            "account": account,
+                            "category": category,
+                        }
+                        await _send_telegram_alert(_format_bybit_fill_alert(entry_payload))
+                _BYBIT_EXEC_LAST_SEEN[account] = max_seen
+            except Exception as exc:  # pragma: no cover - background task
+                BYBIT_LOGGER.error("Bybit fill poll error: %s", exc)
+
+
+async def _fetch_oanda_transactions(
+    *,
+    cfg: Dict[str, str],
+    since_id: Optional[str],
+) -> List[Dict[str, object]]:
+    token = cfg["token"]
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    url = f"{cfg['base_url'].rstrip('/')}/v3/accounts/{cfg['account_id']}/transactions"
+    params: Dict[str, str] = {}
+    if since_id:
+        params["sinceID"] = since_id
+    else:
+        params["pageSize"] = "1"
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+        resp = await client.get(url, headers=headers, params=params)
+    if resp.status_code >= 400:
+        raise ValueError(f"OANDA transactions failed ({resp.status_code}): {resp.text}")
+    payload = resp.json()
+    return payload.get("transactions", []) or []
+
+
+async def _poll_oanda_fills() -> None:
+    while True:
+        await asyncio.sleep(FILL_ALERT_POLL_SECONDS)
+        for account in ("live", "demo"):
+            try:
+                cfg = _get_oanda_config(account)
+            except ValueError:
+                continue
+            try:
+                last_seen = _OANDA_TX_LAST_SEEN.get(account)
+                transactions = await _fetch_oanda_transactions(cfg=cfg, since_id=last_seen)
+                if not transactions:
+                    continue
+                if last_seen is None:
+                    _OANDA_TX_LAST_SEEN[account] = str(transactions[-1].get("id", ""))
+                    continue
+                max_seen = int(last_seen or 0)
+                for entry in transactions:
+                    tx_id_raw = str(entry.get("id", "")).strip()
+                    if not tx_id_raw:
+                        continue
+                    try:
+                        tx_id = int(tx_id_raw)
+                    except ValueError:
+                        continue
+                    if tx_id <= max_seen:
+                        continue
+                    if tx_id > max_seen:
+                        max_seen = tx_id
+                    tx_type = str(entry.get("type") or "")
+                    if "ORDER_FILL" not in tx_type:
+                        continue
+                    entry_payload = {**entry, "account": account}
+                    await _send_telegram_alert(_format_oanda_fill_alert(entry_payload))
+                _OANDA_TX_LAST_SEEN[account] = str(max_seen)
+            except Exception as exc:  # pragma: no cover - background task
+                BYBIT_LOGGER.error("OANDA fill poll error: %s", exc)
 
 
 @app.get("/api/bybit/balance")
@@ -3809,6 +4488,10 @@ OANDA_HISTORY_TEMPLATE = """<!DOCTYPE html>
         .card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; padding: 1.5rem; max-width: 960px; margin: 0 auto; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
         .meta { color: #94a3b8; margin-bottom: 0.75rem; line-height: 1.5; }
         .actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1rem; }
+        .toggle-group { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 0.75rem; }
+        .toggle-group button.active { background: #38bdf8; color: #0f172a; }
+        .toggle-group { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 0.75rem; }
+        .toggle-group button.active { background: #38bdf8; color: #0f172a; }
         button { padding: 0.7rem 1.2rem; border-radius: 12px; border: none; cursor: pointer; font-weight: 700; }
         .primary { background: #22c55e; color: #052e16; }
         .secondary { background: #334155; color: #e2e8f0; }
@@ -3821,7 +4504,12 @@ OANDA_HISTORY_TEMPLATE = """<!DOCTYPE html>
     <div class=\"card\">
         <h1>OANDA Transaction History Export</h1>
         <p class=\"meta\">Generate transaction history CSV exports for the selected timeframe. Jobs run in the background and will download automatically when ready.</p>
-        <div class=\"badge\">Select range</div>
+        <div class=\"badge\">Account</div>
+        <div class=\"toggle-group\" data-group=\"account\">
+            <button class=\"secondary\" data-account=\"live\">LIVE</button>
+            <button class=\"secondary\" data-account=\"demo\">DEMO</button>
+        </div>
+        <div class=\"badge\" style=\"margin-top: 1rem;\">Select range</div>
         <div class=\"actions\">
             <button class=\"primary\" data-period=\"day\">DAY</button>
             <button class=\"primary\" data-period=\"week\">WEEK</button>
@@ -3838,6 +4526,8 @@ OANDA_HISTORY_TEMPLATE = """<!DOCTYPE html>
         const statusEl = document.getElementById('status');
         const errorEl = document.getElementById('error');
         const buttons = Array.from(document.querySelectorAll('button[data-period]'));
+        const accountButtons = Array.from(document.querySelectorAll('button[data-account]'));
+        let selectedAccount = 'demo';
 
         const setButtonsDisabled = (disabled) => {
             buttons.forEach((btn) => {
@@ -3853,7 +4543,7 @@ OANDA_HISTORY_TEMPLATE = """<!DOCTYPE html>
                 const response = await fetch('/api/oanda-history/export', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload),
+                    body: JSON.stringify({ ...payload, account: selectedAccount }),
                 });
                 if (!response.ok) {
                     const text = await response.text();
@@ -3892,6 +4582,18 @@ OANDA_HISTORY_TEMPLATE = """<!DOCTYPE html>
             }
         };
 
+        accountButtons.forEach((button) => {
+            button.addEventListener('click', () => {
+                const account = button.dataset.account || 'live';
+                selectedAccount = account;
+                accountButtons.forEach((btn) => btn.classList.toggle('active', btn === button));
+            });
+        });
+        const defaultAccountButton = accountButtons.find((btn) => btn.dataset.account === selectedAccount);
+        if (defaultAccountButton) {
+            defaultAccountButton.classList.add('active');
+        }
+
         buttons.forEach((button) => {
             button.addEventListener('click', () => {
                 const period = button.dataset.period;
@@ -3929,7 +4631,12 @@ BYBIT_HISTORY_TEMPLATE = """<!DOCTYPE html>
     <div class=\"card\">
         <h1>Bybit Trade History Export</h1>
         <p class=\"meta\">Generate a CSV export of Bybit execution history for the selected timeframe. Jobs run in the background and will download automatically when ready. Note: Bybit trade history is limited to the last 2 years.</p>
-        <div class=\"badge\">Select range</div>
+        <div class=\"badge\">Account</div>
+        <div class=\"toggle-group\" data-group=\"account\">
+            <button class=\"secondary\" data-account=\"live\">LIVE</button>
+            <button class=\"secondary\" data-account=\"demo\">DEMO</button>
+        </div>
+        <div class=\"badge\" style=\"margin-top: 1rem;\">Select range</div>
         <div class=\"actions\">
             <button class=\"primary\" data-period=\"day\">DAY</button>
             <button class=\"primary\" data-period=\"week\">WEEK</button>
@@ -3946,6 +4653,8 @@ BYBIT_HISTORY_TEMPLATE = """<!DOCTYPE html>
         const statusEl = document.getElementById('status');
         const errorEl = document.getElementById('error');
         const buttons = Array.from(document.querySelectorAll('button[data-period]'));
+        const accountButtons = Array.from(document.querySelectorAll('button[data-account]'));
+        let selectedAccount = 'demo';
 
         const setButtonsDisabled = (disabled) => {
             buttons.forEach((btn) => { btn.disabled = disabled; });
@@ -3959,7 +4668,7 @@ BYBIT_HISTORY_TEMPLATE = """<!DOCTYPE html>
                 const response = await fetch('/api/bybit-history/export', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload),
+                    body: JSON.stringify({ ...payload, account: selectedAccount }),
                 });
                 if (!response.ok) {
                     const text = await response.text();
@@ -3997,6 +4706,18 @@ BYBIT_HISTORY_TEMPLATE = """<!DOCTYPE html>
                 }
             }
         };
+
+        accountButtons.forEach((button) => {
+            button.addEventListener('click', () => {
+                const account = button.dataset.account || 'live';
+                selectedAccount = account;
+                accountButtons.forEach((btn) => btn.classList.toggle('active', btn === button));
+            });
+        });
+        const defaultAccountButton = accountButtons.find((btn) => btn.dataset.account === selectedAccount);
+        if (defaultAccountButton) {
+            defaultAccountButton.classList.add('active');
+        }
 
         buttons.forEach((button) => {
             button.addEventListener('click', () => {
@@ -4526,12 +5247,14 @@ async def bybit_monitor_custom_alerts() -> JSONResponse:
 async def upsert_bybit_monitor_custom_alert(request: Request) -> JSONResponse:
     payload = await request.json()
     alert = bybit_monitor.upsert_custom_alert(payload or {})
+    _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "alert": alert})
 
 
 @app.delete("/api/bybit-monitor/custom-alerts/{alert_id}")
 async def delete_bybit_monitor_custom_alert(alert_id: str) -> JSONResponse:
     bybit_monitor.delete_custom_alert(alert_id)
+    _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "alert_id": alert_id})
 
 
@@ -4542,6 +5265,7 @@ async def set_bybit_monitor_custom_alert_enabled(
     payload = await request.json()
     enabled = bool((payload or {}).get("enabled", True))
     alert = bybit_monitor.set_custom_alert_enabled(alert_id, enabled)
+    _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "alert": alert})
 
 
@@ -4554,12 +5278,14 @@ async def oanda_monitor_custom_alerts() -> JSONResponse:
 async def upsert_oanda_monitor_custom_alert(request: Request) -> JSONResponse:
     payload = await request.json()
     alert = oanda_monitor.upsert_custom_alert(payload or {})
+    _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "alert": alert})
 
 
 @app.delete("/api/oanda-monitor/custom-alerts/{alert_id}")
 async def delete_oanda_monitor_custom_alert(alert_id: str) -> JSONResponse:
     oanda_monitor.delete_custom_alert(alert_id)
+    _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "alert_id": alert_id})
 
 
@@ -4570,6 +5296,7 @@ async def set_oanda_monitor_custom_alert_enabled(
     payload = await request.json()
     enabled = bool((payload or {}).get("enabled", True))
     alert = oanda_monitor.set_custom_alert_enabled(alert_id, enabled)
+    _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "alert": alert})
 
 
@@ -4586,12 +5313,14 @@ async def upsert_pending_webhook(request: Request) -> JSONResponse:
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Pending webhook payload must be an object.")
     item = _upsert_pending_webhook(payload)
+    _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "item": item})
 
 
 @app.delete("/api/pending-webhooks/{webhook_id}")
 async def delete_pending_webhook(webhook_id: str) -> JSONResponse:
     deleted = _delete_pending_webhook(webhook_id)
+    _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "id": webhook_id, "deleted": deleted})
 
 
@@ -4602,6 +5331,7 @@ async def set_pending_webhook_enabled(
     payload = await request.json()
     enabled = bool((payload or {}).get("enabled", True))
     item = _set_pending_webhook_enabled(webhook_id, enabled)
+    _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "item": item})
 
 
@@ -4621,6 +5351,7 @@ async def set_watchlist(request: Request) -> JSONResponse:
     if not isinstance(items, list):
         raise HTTPException(status_code=400, detail="Watchlist items must be a list.")
     normalized = _set_watchlist(items)
+    _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "items": normalized})
 
 
@@ -4649,54 +5380,9 @@ async def restore_all_alerts(file: UploadFile = File(...)) -> JSONResponse:
         data = json.loads(raw.decode("utf-8"))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}") from exc
-
-    if not isinstance(data, dict):
-        raise HTTPException(status_code=400, detail="Backup must be a JSON object")
-
-    if "alerts" in data:
-        alerts_payload = data.get("alerts")
-        if not isinstance(alerts_payload, dict):
-            raise HTTPException(status_code=400, detail="Alerts payload must be an object.")
-    else:
-        if not isinstance(data.get("bybit"), dict) and not isinstance(data.get("oanda"), dict):
-            raise HTTPException(status_code=400, detail="Backup missing alerts section.")
-        alerts_payload = data
-
-    bybit_block = alerts_payload.get("bybit")
-    oanda_block = alerts_payload.get("oanda")
-    if not isinstance(bybit_block, dict) or not isinstance(oanda_block, dict):
-        raise HTTPException(
-            status_code=400,
-            detail="Backup must include bybit and oanda alert sections.",
-        )
-    if not isinstance(bybit_block.get("alerts"), list) or not isinstance(
-        oanda_block.get("alerts"), list
-    ):
-        raise HTTPException(status_code=400, detail="Alert lists must be arrays.")
-
-    watchlist_items: List[str] = []
-    if "watchlist" in data:
-        if not isinstance(data["watchlist"], list):
-            raise HTTPException(status_code=400, detail="Watchlist must be a list.")
-        watchlist_items = _normalize_watchlist(data["watchlist"])
-
-    pending_restored: List[Dict[str, object]] = []
-    if "pending_webhooks" in data:
-        pending_restored = _replace_pending_webhooks(data["pending_webhooks"])
-
-    bybit_restored = bybit_monitor.replace_custom_alerts(bybit_block["alerts"])
-    oanda_restored = oanda_monitor.replace_custom_alerts(oanda_block["alerts"])
-    _set_watchlist(watchlist_items)
-
-    return JSONResponse(
-        {
-            "ok": True,
-            "bybit_restored": len(bybit_restored),
-            "oanda_restored": len(oanda_restored),
-            "watchlist_restored": len(watchlist_items),
-            "pending_webhooks_restored": len(pending_restored),
-        }
-    )
+    restored = _restore_alerts_payload(data)
+    _schedule_dropbox_upload_state_backup()
+    return JSONResponse({"ok": True, **restored})
 
 
 
@@ -4946,6 +5632,9 @@ async def start_oanda_history_export(request: Request) -> JSONResponse:
         raise HTTPException(status_code=500, detail="OANDA history exporter not available.")
     payload = await request.json()
 
+    account = str(payload.get("account") or "demo").strip().lower()
+    if account not in {"live", "demo"}:
+        account = "live"
     period = _normalize_period(payload.get("period"))
     days = payload.get("days")
     complete = payload.get("complete")
@@ -4957,11 +5646,11 @@ async def start_oanda_history_export(request: Request) -> JSONResponse:
             complete = True
             period = None
 
-    params: Dict[str, object] = {}
+    params: Dict[str, object] = {"account": account}
     if complete:
-        params = {"complete": True}
+        params.update({"complete": True})
     elif period is not None:
-        params = {"period": period, "complete": False}
+        params.update({"period": period, "complete": False})
     else:
         if days is None:
             raise HTTPException(status_code=400, detail="days is required unless complete is true.")
@@ -4971,7 +5660,7 @@ async def start_oanda_history_export(request: Request) -> JSONResponse:
             raise HTTPException(status_code=400, detail="days must be an integer.") from exc
         if days_int <= 0:
             raise HTTPException(status_code=400, detail="days must be greater than zero.")
-        params = {"days": days_int, "complete": False}
+        params.update({"days": days_int, "complete": False})
 
     job_id = uuid4().hex
     job = OandaHistoryJob(
@@ -5030,11 +5719,11 @@ async def start_coinspot_history_export(request: Request) -> JSONResponse:
             complete = True
             period = None
 
-    params: Dict[str, object] = {}
+    params: Dict[str, object] = {"account": account}
     if complete:
-        params = {"complete": True}
+        params.update({"complete": True})
     elif period is not None:
-        params = {"period": period, "complete": False}
+        params.update({"period": period, "complete": False})
     else:
         if days is None:
             raise HTTPException(status_code=400, detail="days is required unless complete is true.")
@@ -5044,7 +5733,7 @@ async def start_coinspot_history_export(request: Request) -> JSONResponse:
             raise HTTPException(status_code=400, detail="days must be an integer.") from exc
         if days_int <= 0:
             raise HTTPException(status_code=400, detail="days must be greater than zero.")
-        params = {"days": days_int, "complete": False}
+        params.update({"days": days_int, "complete": False})
 
     job_id = uuid4().hex
     job = CoinspotHistoryJob(
@@ -5096,6 +5785,9 @@ async def start_bybit_history_export(request: Request) -> JSONResponse:
         raise HTTPException(status_code=500, detail="Bybit history exporter not available.")
     payload = await request.json()
 
+    account = str(payload.get("account") or "demo").strip().lower()
+    if account not in {"live", "demo"}:
+        account = "live"
     period = _normalize_period(payload.get("period"))
     days = payload.get("days")
     complete = payload.get("complete")
@@ -5107,11 +5799,11 @@ async def start_bybit_history_export(request: Request) -> JSONResponse:
             complete = True
             period = None
 
-    params: Dict[str, object] = {}
+    params: Dict[str, object] = {"account": account}
     if complete:
-        params = {"complete": True}
+        params.update({"complete": True})
     elif period is not None:
-        params = {"period": period, "complete": False}
+        params.update({"period": period, "complete": False})
     else:
         if days is None:
             raise HTTPException(status_code=400, detail="days is required unless complete is true.")
@@ -5121,7 +5813,7 @@ async def start_bybit_history_export(request: Request) -> JSONResponse:
             raise HTTPException(status_code=400, detail="days must be an integer.") from exc
         if days_int <= 0:
             raise HTTPException(status_code=400, detail="days must be greater than zero.")
-        params = {"days": days_int, "complete": False}
+        params.update({"days": days_int, "complete": False})
 
     job_id = uuid4().hex
     job = BybitHistoryJob(

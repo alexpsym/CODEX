@@ -7,7 +7,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Generator, List, Tuple
 
 from env_helpers import load_bybit_live_env
-from bybit_credentials import resolve_bybit_credentials
+from bybit_credentials import resolve_bybit_credentials_for
 
 BRISBANE_TZ = timezone(timedelta(hours=10))
 
@@ -312,7 +312,10 @@ def export_balance_history(months: int = 12) -> str:
         Name of the saved XLSX file.
     """
     # pylint: disable=too-many-locals,too-many-branches
-    _mode, api_key, api_secret, _base_url, _key_source = resolve_bybit_credentials()
+    mode_env = (os.getenv("BYBIT_ENV", "live") or "live").strip().lower()
+    _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for(
+        mode_env
+    )
     if not api_key or not api_secret:
         raise EnvironmentError(
             "Bybit API credentials are missing. Provide BYBIT_API_KEY1/BYBIT_API_SECRET1 "
@@ -325,7 +328,7 @@ def export_balance_history(months: int = 12) -> str:
     if months > 24:
         raise ValueError("Bybit only allows querying up to 24 months of data")
 
-    session = HTTP(api_key=api_key, api_secret=api_secret)
+    session = HTTP(api_key=api_key, api_secret=api_secret, endpoint=base_url)
 
     end_month = datetime.now(timezone.utc).replace(
         day=1, hour=0, minute=0, second=0, microsecond=0
@@ -408,7 +411,10 @@ def download_history(
         CSV filename when rows are present; otherwise ``None``.
     """
     # pylint: disable=too-many-locals,too-many-branches
-    _mode, api_key, api_secret, _base_url, _key_source = resolve_bybit_credentials()
+    mode_env = (os.getenv("BYBIT_ENV", "live") or "live").strip().lower()
+    _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for(
+        mode_env
+    )
     if not api_key or not api_secret:
         raise EnvironmentError(
             "Bybit API credentials are missing. Provide BYBIT_API_KEY1/BYBIT_API_SECRET1 "
@@ -418,7 +424,7 @@ def download_history(
     if HTTP is None:
         raise ImportError("pybit module is required to download history")
 
-    session = HTTP(api_key=api_key, api_secret=api_secret)
+    session = HTTP(api_key=api_key, api_secret=api_secret, endpoint=base_url)
 
     params: Dict[str, Any] = {"category": category}
     if symbol:

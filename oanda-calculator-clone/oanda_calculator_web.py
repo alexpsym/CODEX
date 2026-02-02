@@ -207,6 +207,13 @@ FORM_HTML = """
           <label>Entry Price:
             <input name="entry_price" id="entry_price" type="number" step="0.0001" value="{{ entry_price or '' }}" {% if order_type == 'limit' %}required{% endif %}>
           </label><br>
+          <label>Limit cancel offset (abs):
+            <input name="limit_cancel_offset" id="limit_cancel_offset" type="number" step="0.0001" value="{{ limit_cancel_offset or '' }}">
+          </label><br>
+          <label>Limit cancel offset (%):
+            <input name="limit_cancel_offset_pct" id="limit_cancel_offset_pct" type="number" step="0.01" value="{{ limit_cancel_offset_pct or '' }}">
+          </label><br>
+          <small>Cancel pending limit orders if price moves away by the given distance.</small><br>
         </div>
         <label>Stop loss (ticks): <input name="stop_ticks" id="stop_ticks" type="number" step="1" value="{{ stop_ticks or '' }}" required></label><br>
         <label>Risk mode:</label>
@@ -306,6 +313,8 @@ def index():
     risk_aud = request.form.get("risk_aud", "")
     rr_ratio = request.form.get("rr_ratio", "2")
     entry_price = request.form.get("entry_price", "")
+    limit_cancel_offset = request.form.get("limit_cancel_offset", "")
+    limit_cancel_offset_pct = request.form.get("limit_cancel_offset_pct", "")
     if request.method == "POST":
         try:
             instrument_input = request.form["instrument"]
@@ -331,6 +340,14 @@ def index():
                 entry_price_value = float(entry_price)
                 if entry_price_value <= 0:
                     raise ValueError("Entry price must be positive.")
+            cancel_offset_value = (
+                float(limit_cancel_offset) if str(limit_cancel_offset).strip() else None
+            )
+            cancel_offset_pct_value = (
+                float(limit_cancel_offset_pct)
+                if str(limit_cancel_offset_pct).strip()
+                else None
+            )
 
             LOGGER.info("OANDA_CALC_CALL get_account_details mode=%s", account_mode)
             account = get_account_details(account_mode)
@@ -532,6 +549,10 @@ def index():
 
             if entry_price_value is not None:
                 alert["entry_price"] = entry_price_value
+            if cancel_offset_value is not None:
+                alert["limit_cancel_offset"] = cancel_offset_value
+            if cancel_offset_pct_value is not None:
+                alert["limit_cancel_offset_pct"] = cancel_offset_pct_value
             order = build_order(
                 instrument,
                 side,
@@ -561,6 +582,10 @@ def index():
             }
             if entry_price_value is not None:
                 risk_info["Entry Price"] = f"{entry_price_value:.{display_precision}f}"
+            if cancel_offset_value is not None:
+                risk_info["Limit cancel offset"] = cancel_offset_value
+            if cancel_offset_pct_value is not None:
+                risk_info["Limit cancel offset %"] = cancel_offset_pct_value
 
             # Optionally register this as a pending webhook so it appears in the dashboard.
             if str(track_pending).lower() == "yes":
@@ -602,6 +627,8 @@ def index():
                     "status": "WAITING",
                     "enabled": True,
                     "source": "oanda-calculator-clone",
+                    "limit_cancel_offset": cancel_offset_value,
+                    "limit_cancel_offset_pct": cancel_offset_pct_value,
                 }
 
                 try:
@@ -647,6 +674,8 @@ def index():
         risk_aud=risk_aud,
         rr_ratio=rr_ratio,
         entry_price=entry_price,
+        limit_cancel_offset=limit_cancel_offset,
+        limit_cancel_offset_pct=limit_cancel_offset_pct,
         track_pending=track_pending,
     )
 

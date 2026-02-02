@@ -1,4 +1,4 @@
 {
   "wait_seconds": 360,
-  "percent_threshold": 3.0
+  "percent_threshold": 5.0
 }
