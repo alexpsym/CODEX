@@ -20,7 +20,20 @@ except ImportError:  # pragma: no cover - fallback for environments without requ
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
-API_URL = os.getenv("OANDA_API_URL", "https://api-fxtrade.oanda.com/v3")
+DEFAULT_OANDA_LIVE_URL = "https://api-fxtrade.oanda.com/v3"
+DEFAULT_OANDA_DEMO_URL = "https://api-fxpractice.oanda.com/v3"
+
+
+def _resolve_api_url(base_url: Optional[str] = None) -> str:
+    if base_url:
+        return base_url.rstrip("/")
+    env_url = os.getenv("OANDA_API_URL")
+    if env_url:
+        return env_url.rstrip("/")
+    mode = (os.getenv("OANDA_ENV") or os.getenv("OANDA_MODE") or "live").strip().lower()
+    if mode in {"demo", "practice"}:
+        return (os.getenv("OANDA_API_URL_DEMO") or DEFAULT_OANDA_DEMO_URL).rstrip("/")
+    return (os.getenv("OANDA_API_URL_LIVE") or DEFAULT_OANDA_LIVE_URL).rstrip("/")
 
 CSV_FIELDNAMES = [
     "TICKET",
@@ -106,6 +119,7 @@ def fetch_transactions(
     api_key: str,
     start: Optional[str] = None,
     end: Optional[str] = None,
+    base_url: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Fetch transaction history from Oanda.
 
@@ -135,7 +149,8 @@ def fetch_transactions(
         raise RuntimeError("The 'requests' package is required to fetch transactions")
 
     headers = {"Authorization": f"Bearer {api_key}"}
-    url = f"{API_URL}/accounts/{account_id}/transactions"
+    api_url = _resolve_api_url(base_url)
+    url = f"{api_url}/accounts/{account_id}/transactions"
     params: Dict[str, str] = {}
     start = _normalize_date(start)
     end = _normalize_date(end)
@@ -168,7 +183,7 @@ def fetch_transactions(
 
     append_unique(data.get("transactions"))
 
-    base_api_url = API_URL if API_URL.endswith("/") else API_URL + "/"
+    base_api_url = api_url if api_url.endswith("/") else api_url + "/"
     page_queue: list[str] = []
     seen_pages: set[str] = set()
 

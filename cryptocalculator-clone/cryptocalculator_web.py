@@ -189,6 +189,11 @@ FORM_HTML = """
           <div id="entry_price_row">
             <label>Entry Price: <input name="entry_price" type="number" step="0.0001"></label><br>
           </div>
+          <div id="limit_cancel_row">
+            <label>Limit cancel offset (abs): <input name="limit_cancel_offset" type="number" step="0.0001" value="{{ limit_cancel_offset or '' }}"></label><br>
+            <label>Limit cancel offset (%): <input name="limit_cancel_offset_pct" type="number" step="0.01" value="{{ limit_cancel_offset_pct or '' }}"></label><br>
+            <small>Cancel pending limit orders if price moves away by the given distance.</small><br>
+          </div>
           <label>Stop loss ticks: <input name="stop_loss_ticks" id="stop_loss_ticks" type="number" step="1"></label><br>
           <label>Risk %: <input name="risk_percent" id="risk_percent" type="number" step="0.01"></label><br>
           <label>Risk–reward ratio: <input name="rr_ratio" id="rr_ratio" type="number" step="0.1" value="2"></label><br>
@@ -489,6 +494,8 @@ def index():
     price_to_execution_rate = request.form.get("price_to_execution_rate", "").strip()
     quantity = request.form.get("quantity", "")
     track_pending = request.form.get("track_pending", "no")
+    limit_cancel_offset_raw = request.form.get("limit_cancel_offset", "").strip()
+    limit_cancel_offset_pct_raw = request.form.get("limit_cancel_offset_pct", "").strip()
 
     if request.method == "POST":
         try:
@@ -659,6 +666,19 @@ def index():
                 risk_info = {k.replace("_", " ").title(): v for k, v in trade.items()}
                 payload = build_webhook_payload(trade)
 
+                limit_cancel_offset = (
+                    float(limit_cancel_offset_raw) if limit_cancel_offset_raw else None
+                )
+                limit_cancel_offset_pct = (
+                    float(limit_cancel_offset_pct_raw) if limit_cancel_offset_pct_raw else None
+                )
+                if limit_cancel_offset is not None:
+                    payload["limit_cancel_offset"] = limit_cancel_offset
+                    risk_info["Limit cancel offset"] = limit_cancel_offset
+                if limit_cancel_offset_pct is not None:
+                    payload["limit_cancel_offset_pct"] = limit_cancel_offset_pct
+                    risk_info["Limit cancel offset %"] = limit_cancel_offset_pct
+
                 if str(track_pending).lower() == "yes":
                     symbol_safe = "".join(
                         ch for ch in str(trade["symbol"]) if ch.isalnum() or ch in "_-"
@@ -706,6 +726,8 @@ def index():
                         "status": "WAITING",
                         "enabled": True,
                         "source": "cryptocalculator-clone",
+                        "limit_cancel_offset": limit_cancel_offset,
+                        "limit_cancel_offset_pct": limit_cancel_offset_pct,
                     }
 
                     try:
@@ -786,6 +808,8 @@ def index():
         ),
         options_min_qty_map=HARD_CODED_OPTIONS_MIN_QTY,
         track_pending=track_pending,
+        limit_cancel_offset=limit_cancel_offset_raw,
+        limit_cancel_offset_pct=limit_cancel_offset_pct_raw,
     )
 
 
