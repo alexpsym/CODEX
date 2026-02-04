@@ -3403,6 +3403,8 @@ async def _place_bybit_order(
     order_type = str(order_type_raw).lower().strip()
     if order_type not in {"market", "limit"}:
         raise ValueError("Webhook payload order_type must be market or limit.")
+    if is_trendline_options:
+        order_type = "market"
     limit_cancel_offset, limit_cancel_pct = _parse_limit_cancel_settings(payload)
 
     price_val = None

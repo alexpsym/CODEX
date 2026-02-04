@@ -185,6 +185,7 @@ function updateTradeType() {
   const cryptoSection = document.getElementById('crypto_section');
   const manual = document.getElementById('options_manual_fields');
   const trend = document.getElementById('options_trendline_fields');
+  const orderTypeRow = document.getElementById('options_order_type_row');
   if (!selector || !optionsSection || !cryptoSection) {
     return;
   }
@@ -197,6 +198,13 @@ function updateTradeType() {
   }
   if (trend) {
     trend.classList.toggle('hidden', !isTrendline);
+  }
+  if (orderTypeRow) {
+    orderTypeRow.classList.toggle('hidden', isTrendline);
+  }
+  if (isTrendline) {
+    setButtonGroupValue('options_order_type', 'market');
+    toggleOptionsEntry();
   }
   const cryptoRequired = ['symbol', 'stop_loss_ticks', 'risk_percent', 'rr_ratio'];
   cryptoRequired.forEach((fieldId) => {

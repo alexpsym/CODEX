@@ -204,12 +204,14 @@ FORM_HTML = """
           <small>Use this when your price source is quoted in a different currency than your execution exchange.</small><br>
         </div>
         <div id="options_section" class="trade-section hidden">
-          <label>Order Type:</label>
-          <div class="button-group" data-input="options_order_type">
-            <button type="button" data-value="market">Market</button>
-            <button type="button" data-value="limit">Limit</button>
+          <div id="options_order_type_row">
+            <label>Order Type:</label>
+            <div class="button-group" data-input="options_order_type">
+              <button type="button" data-value="market">Market</button>
+              <button type="button" data-value="limit">Limit</button>
+            </div>
+            <input type="hidden" name="options_order_type" id="options_order_type" value="{{ options_order_type }}">
           </div>
-          <input type="hidden" name="options_order_type" id="options_order_type" value="{{ options_order_type }}">
           <label>Base:</label>
           <div class="button-group" data-input="options_base">
             {% for base in options_base_options %}
@@ -469,6 +471,8 @@ def index():
     options_order_type = request.form.get("options_order_type", "market").strip().lower()
     if options_order_type not in {"market", "limit"}:
         options_order_type = "market"
+    if trade_type == "trendline_options":
+        options_order_type = "market"
 
     options_base_options = options_trader.get_supported_option_bases_cached()
     options_base_set = {
@@ -583,7 +587,7 @@ def index():
                             "trade_mode": "options",
                             "options_mode": "trendline",
                             "action": "buy",
-                            "order_type": options_order_type,
+                            "order_type": "market",
                             "base_coin": options_base,
                             "option_type": options_type,
                             "expiry": request.form.get("options_expiry", ""),
