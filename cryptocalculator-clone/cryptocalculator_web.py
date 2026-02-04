@@ -143,6 +143,7 @@ FORM_HTML = """
           <button type="button" data-value="perpetual">Perpetual Futures</button>
           <button type="button" data-value="spot">Spot</button>
           <button type="button" data-value="options">Options</button>
+          <button type="button" data-value="trendline_options">Trendline Options</button>
         </div>
         <input type="hidden" name="trade_type" id="trade_type" value="{{ trade_type }}">
         <label>Account:</label>
@@ -203,12 +204,14 @@ FORM_HTML = """
           <small>Use this when your price source is quoted in a different currency than your execution exchange.</small><br>
         </div>
         <div id="options_section" class="trade-section hidden">
-          <label>Order Type:</label>
-          <div class="button-group" data-input="options_order_type">
-            <button type="button" data-value="market">Market</button>
-            <button type="button" data-value="limit">Limit</button>
+          <div id="options_order_type_row">
+            <label>Order Type:</label>
+            <div class="button-group" data-input="options_order_type">
+              <button type="button" data-value="market">Market</button>
+              <button type="button" data-value="limit">Limit</button>
+            </div>
+            <input type="hidden" name="options_order_type" id="options_order_type" value="{{ options_order_type }}">
           </div>
-          <input type="hidden" name="options_order_type" id="options_order_type" value="{{ options_order_type }}">
           <label>Base:</label>
           <div class="button-group" data-input="options_base">
             {% for base in options_base_options %}
@@ -216,7 +219,6 @@ FORM_HTML = """
             {% endfor %}
           </div>
           <input type="hidden" name="options_base" id="options_base" value="{{ options_base }}">
-          <label>Strike: <input name="options_strike" id="options_strike"></label><br>
           <label>Call/Put:</label>
           <div class="button-group" data-input="options_type">
             <button type="button" data-value="Call">Call</button>
@@ -231,10 +233,29 @@ FORM_HTML = """
             <button type="button" data-value="Sell">Sell</button>
           </div>
           <input type="hidden" name="options_side" id="options_side" value="{{ options_side }}">
-          <div class="qty-row">
-            <label for="options_quantity">Quantity:</label>
-            <input name="options_quantity" id="options_quantity" value="{{ options_quantity }}">
-            <span id="options_min_qty_note" class="min-note"></span>
+          <div id="options_manual_fields">
+            <label>Strike: <input name="options_strike" id="options_strike"></label><br>
+            <div class="qty-row">
+              <label for="options_quantity">Quantity:</label>
+              <input name="options_quantity" id="options_quantity" value="{{ options_quantity }}">
+              <span id="options_min_qty_note" class="min-note"></span>
+            </div>
+          </div>
+          <div id="options_trendline_fields" class="hidden">
+            <label>Risk (USDT, incl fees):
+              <input name="options_risk_usdt" id="options_risk_usdt" type="number" step="0.01"
+                     value="{{ options_risk_usdt or 5 }}">
+            </label><br>
+            <label>Max overage (USDT):
+              <input name="options_risk_tolerance" id="options_risk_tolerance" type="number" step="0.01"
+                     value="{{ options_risk_tolerance or 0.5 }}">
+            </label><br>
+            <label>Fee mode:
+              <select name="options_fee_mode" id="options_fee_mode">
+                <option value="roundtrip" {% if options_fee_mode != "open" %}selected{% endif %}>roundtrip</option>
+                <option value="open" {% if options_fee_mode == "open" %}selected{% endif %}>open</option>
+              </select>
+            </label><br>
           </div>
           <div id="options_limit_price_row">
             <label>Limit Price: <input name="options_limit_price"></label><br>
@@ -436,7 +457,7 @@ def index():
     options_output = None
 
     trade_type = request.form.get("trade_type", "perpetual").strip().lower()
-    if trade_type not in {"perpetual", "spot", "options"}:
+    if trade_type not in {"perpetual", "spot", "options", "trendline_options"}:
         trade_type = "perpetual"
 
     direction = request.form.get("direction", "long").strip().lower()
@@ -449,6 +470,8 @@ def index():
 
     options_order_type = request.form.get("options_order_type", "market").strip().lower()
     if options_order_type not in {"market", "limit"}:
+        options_order_type = "market"
+    if trade_type == "trendline_options":
         options_order_type = "market"
 
     options_base_options = options_trader.get_supported_option_bases_cached()
@@ -499,7 +522,7 @@ def index():
 
     if request.method == "POST":
         try:
-            if trade_type == "options":
+            if trade_type in {"options", "trendline_options"}:
                 options_action = request.form.get("options_action", "calculate")
                 trader = _get_options_trader(account_mode)
                 symbol_filter = None
@@ -543,74 +566,123 @@ def index():
                         positions = trader.get_positions(symbol_filter)
                         options_output = options_trader.format_open_positions(positions)
                 else:
-                    balance = options_trader.DEMO_BALANCE
-                    if trader is not None:
-                        api_bal = trader.get_wallet_balance()
-                        if api_bal > 0:
-                            balance = api_bal
-                    risk_percent = float(
-                        request.form.get("options_risk_percent", 0) or 0
-                    )
-                    risk_usd = balance * risk_percent / 100
-                    qty = float(request.form.get("options_quantity", 0) or 0)
-                    symbol = options_trader.build_option_symbol(
-                        options_base,
-                        request.form.get("options_strike", ""),
-                        options_type,
-                        request.form.get("options_expiry", ""),
-                        "USDT",
-                    )
-                    tick = options_trader.fetch_option_ticker(
-                        symbol, base_url=trader.base_url if trader else None
-                    )
-                    mark_price = float(tick.get("markPrice", 0) or 0)
-                    if qty <= 0 and risk_usd > 0:
-                        min_qty = options_trader.get_min_order_qty(
+                    if trade_type == "trendline_options":
+                        if options_side.lower() != "buy":
+                            raise ValueError(
+                                "Trendline Options mode only supports Buy (risk is capped by premium)."
+                            )
+                        risk_usdt = float(
+                            request.form.get("options_risk_usdt", 0) or 0
+                        )
+                        tol_usdt = float(
+                            request.form.get("options_risk_tolerance", 0.5) or 0.5
+                        )
+                        fee_mode = (
+                            request.form.get("options_fee_mode") or "roundtrip"
+                        ).strip().lower()
+                        if risk_usdt <= 0:
+                            raise ValueError("Risk (USDT) must be > 0.")
+                        payload = {
+                            "account": account_mode,
+                            "trade_mode": "options",
+                            "options_mode": "trendline",
+                            "action": "buy",
+                            "order_type": "market",
+                            "base_coin": options_base,
+                            "option_type": options_type,
+                            "expiry": request.form.get("options_expiry", ""),
+                            "risk_usdt": round(risk_usdt, 4),
+                            "risk_tolerance_usdt": round(tol_usdt, 4),
+                            "fee_mode": fee_mode,
+                            "tp_multiplier": float(
+                                request.form.get("options_tp_multiplier", 3) or 3
+                            ),
+                        }
+                        payload_json = json.dumps(payload, indent=2)
+                        options_output = "\n".join(
+                            [
+                                "Trendline Options mode:",
+                                f"Base: {options_base}",
+                                f"Type: {options_type}",
+                                f"Expiry: {payload['expiry']}",
+                                f"Risk (USDT): {risk_usdt} (+{tol_usdt} tolerance)",
+                                f"Order type: {options_order_type}",
+                                f"Fee mode: {fee_mode}",
+                            ]
+                        )
+                    else:
+                        balance = options_trader.DEMO_BALANCE
+                        if trader is not None:
+                            api_bal = trader.get_wallet_balance()
+                            if api_bal > 0:
+                                balance = api_bal
+                        risk_percent = float(
+                            request.form.get("options_risk_percent", 0) or 0
+                        )
+                        risk_usd = balance * risk_percent / 100
+                        qty = float(request.form.get("options_quantity", 0) or 0)
+                        symbol = options_trader.build_option_symbol(
+                            options_base,
+                            request.form.get("options_strike", ""),
+                            options_type,
+                            request.form.get("options_expiry", ""),
+                            "USDT",
+                        )
+                        tick = options_trader.fetch_option_ticker(
                             symbol, base_url=trader.base_url if trader else None
                         )
-                        qty = options_trader.compute_order_qty(risk_usd, mark_price, min_qty)
-                    limit_price = None
-                    if (
-                        options_order_type == "limit"
-                        and request.form.get("options_limit_price")
-                    ):
-                        limit_price = options_trader.round_to_tick(
-                            float(request.form["options_limit_price"]), symbol
+                        mark_price = float(tick.get("markPrice", 0) or 0)
+                        if qty <= 0 and risk_usd > 0:
+                            min_qty = options_trader.get_min_order_qty(
+                                symbol, base_url=trader.base_url if trader else None
+                            )
+                            qty = options_trader.compute_order_qty(
+                                risk_usd, mark_price, min_qty
+                            )
+                        limit_price = None
+                        if (
+                            options_order_type == "limit"
+                            and request.form.get("options_limit_price")
+                        ):
+                            limit_price = options_trader.round_to_tick(
+                                float(request.form["options_limit_price"]), symbol
+                            )
+                        entry_price = limit_price or mark_price
+                        tp_multiplier = float(
+                            request.form.get("options_tp_multiplier", 3) or 3
                         )
-                    entry_price = limit_price or mark_price
-                    tp_multiplier = float(
-                        request.form.get("options_tp_multiplier", 3) or 3
-                    )
-                    tp_offset = None
-                    if entry_price and tp_multiplier and tp_multiplier > 0:
-                        tp_offset = entry_price * (tp_multiplier - 1)
-                    action = "buy" if options_side.lower() == "buy" else "sell"
-                    if tp_offset is not None and action == "sell":
-                        tp_offset = -tp_offset
-                    payload = {
-                        "symbol": symbol,
-                        "action": action,
-                        "quantity": round(qty, 3),
-                        "account": account_mode,
-                        "trade_mode": "options",
-                        "order_type": options_order_type,
-                        "price": round(entry_price, 8)
-                        if options_order_type == "limit"
-                        else None,
-                        "tp_offset": round(tp_offset, 6) if tp_offset is not None else None,
-                        "tp_multiplier": tp_multiplier,
-                    }
-                    payload_json = json.dumps(payload, indent=2)
-                    options_output = "\n".join(
-                        [
-                            f"Symbol: {symbol}",
-                            f"Side: {options_side}",
-                            f"Quantity: {qty}",
-                            f"Mark price: {mark_price}",
-                            f"Entry price: {entry_price}",
-                            f"TP multiplier: {tp_multiplier}",
-                        ]
-                    )
+                        tp_offset = None
+                        if entry_price and tp_multiplier and tp_multiplier > 0:
+                            tp_offset = entry_price * (tp_multiplier - 1)
+                        action = "buy" if options_side.lower() == "buy" else "sell"
+                        if tp_offset is not None and action == "sell":
+                            tp_offset = -tp_offset
+                        payload = {
+                            "symbol": symbol,
+                            "action": action,
+                            "quantity": round(qty, 3),
+                            "account": account_mode,
+                            "trade_mode": "options",
+                            "order_type": options_order_type,
+                            "price": round(entry_price, 8)
+                            if options_order_type == "limit"
+                            else None,
+                            "tp_offset": round(tp_offset, 6)
+                            if tp_offset is not None
+                            else None,
+                            "tp_multiplier": tp_multiplier,
+                        }
+                        payload_json = json.dumps(payload, indent=2)
+                        options_output = "\n".join(
+                            [
+                                f"Symbol: {symbol}",
+                                f"Side: {options_side}",
+                                f"Quantity: {qty}",
+                                f"Mark price: {mark_price}",
+                                f"Entry price: {entry_price}",
+                                f"TP multiplier: {tp_multiplier}",
+                            ]
+                        )
             else:
                 if not symbol:
                     raise ValueError("Symbol is required for spot/perpetual trades.")
@@ -794,6 +866,11 @@ def index():
         options_side=options_side,
         options_base_options=options_base_options,
         options_quantity=request.form.get("options_quantity", "0"),
+        options_risk_usdt=request.form.get("options_risk_usdt"),
+        options_risk_tolerance=request.form.get("options_risk_tolerance"),
+        options_fee_mode=(request.form.get("options_fee_mode") or "roundtrip")
+        .strip()
+        .lower(),
         options_output=options_output,
         execution_options=sorted(EXECUTION_EXCHANGES.items()),
         price_source_options=sorted(PRICE_SOURCES.items()),

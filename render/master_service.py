@@ -1734,6 +1734,8 @@ PROXY_HOP_HEADERS = {
 PROXY_STRIP_HEADERS = {"content-encoding", "content-length"}
 PROXY_LOGGER = logging.getLogger("uvicorn.error")
 BYBIT_RECV_WINDOW = "5000"
+BYBIT_OPTIONS_TAKER_FEE_RATE = float(os.getenv("BYBIT_OPTIONS_TAKER_FEE_RATE", "0.0003"))
+BYBIT_OPTIONS_MAKER_FEE_RATE = float(os.getenv("BYBIT_OPTIONS_MAKER_FEE_RATE", "0.0002"))
 
 
 def _oanda_base_url() -> str:
@@ -2937,6 +2939,147 @@ def _parse_limit_cancel_settings(payload: Dict[str, object]) -> tuple[Optional[f
     return offset, pct
 
 
+def _expiry_to_bybit_expdate(expiry_dmy: str) -> str:
+    parts = [p.strip() for p in str(expiry_dmy).replace("-", "/").split("/") if p.strip()]
+    if len(parts) != 3:
+        raise ValueError("expiry must be D/M/YY")
+    day, month, year = (int(part) for part in parts)
+    if year < 100:
+        year += 2000
+    dt = datetime(year, month, day)
+    return f"{dt.day}{dt.strftime('%b').upper()}{str(dt.year)[2:]}"
+
+
+def _round_step(value: float, step: float) -> float:
+    if step <= 0:
+        return value
+    n = math.floor(value / step + 1e-12)
+    return n * step
+
+
+async def _bybit_public_get(base_url: str, endpoint: str, params: Dict[str, str]) -> Dict[str, object]:
+    async with httpx.AsyncClient(timeout=10) as client:
+        response = await client.get(f"{base_url}{endpoint}", params=params)
+    response.raise_for_status()
+    data = response.json()
+    if data.get("retCode") != 0:
+        raise ValueError(f"Bybit public API error: {data.get('retMsg')}")
+    return data
+
+
+async def _resolve_trendline_option_order(
+    *,
+    base_url: str,
+    base_coin: str,
+    option_type: str,
+    expiry: str,
+    order_type: str,
+    risk_usdt: float,
+    tolerance_usdt: float,
+    fee_mode: str,
+    request_id: str,
+) -> Dict[str, object]:
+    if not base_coin:
+        raise ValueError("base_coin is required for trendline options.")
+    if risk_usdt <= 0:
+        raise ValueError("risk_usdt must be > 0.")
+
+    exp_date = _expiry_to_bybit_expdate(expiry)
+    opt = str(option_type).strip().capitalize()
+    if opt not in {"Call", "Put"}:
+        raise ValueError("option_type must be Call or Put.")
+
+    inst = await _bybit_public_get(
+        base_url,
+        "/v5/market/instruments-info",
+        {"category": "option", "baseCoin": base_coin, "expDate": exp_date, "optionType": opt},
+    )
+    inst_list = inst.get("result", {}).get("list", []) or []
+    inst_map = {item.get("symbol"): item for item in inst_list if item.get("symbol")}
+
+    tks = await _bybit_public_get(
+        base_url,
+        "/v5/market/tickers",
+        {"category": "option", "baseCoin": base_coin, "expDate": exp_date, "symbol": ""},
+    )
+    tk_list = tks.get("result", {}).get("list", []) or []
+
+    sides = 2 if fee_mode == "roundtrip" else 1
+    fee_rate = (
+        BYBIT_OPTIONS_TAKER_FEE_RATE
+        if order_type == "market"
+        else BYBIT_OPTIONS_MAKER_FEE_RATE
+    )
+
+    target_min = risk_usdt
+    target_max = risk_usdt + max(0.0, tolerance_usdt)
+
+    best: Optional[Dict[str, object]] = None
+    best_score = float("inf")
+
+    for tk in tk_list:
+        sym = tk.get("symbol")
+        if not sym or sym not in inst_map:
+            continue
+
+        parts = str(sym).split("-")
+        if len(parts) < 4:
+            continue
+        sym_opt = parts[3].upper()
+        if (opt == "Call" and sym_opt != "C") or (opt == "Put" and sym_opt != "P"):
+            continue
+
+        ask = float(tk.get("ask1Price") or 0)
+        bid = float(tk.get("bid1Price") or 0)
+        lastp = float(tk.get("lastPrice") or 0)
+        mark = float(tk.get("markPrice") or 0)
+
+        price = ask or lastp or mark or bid
+        if price <= 0:
+            continue
+
+        inst_info = inst_map[sym]
+        lot = inst_info.get("lotSizeFilter", {}) or {}
+        min_qty = float(lot.get("minOrderQty") or 0)
+        step = float(lot.get("qtyStep") or min_qty or 0)
+        max_qty = float(lot.get("maxOrderQty") or 0)
+
+        if min_qty <= 0 or step <= 0:
+            continue
+
+        per_unit = price * (1.0 + fee_rate * sides)
+        if per_unit <= 0:
+            continue
+
+        qty_floor = _round_step(target_max / per_unit, step)
+        if qty_floor < min_qty:
+            qty_floor = min_qty
+        if max_qty > 0 and qty_floor > max_qty:
+            continue
+
+        total = per_unit * qty_floor
+        if total > target_max:
+            continue
+
+        penalty = 0.0 if total >= target_min else (target_min - total) * 10.0
+        score = abs(total - target_min) + penalty
+
+        if score < best_score:
+            best_score = score
+            best = {
+                "symbol": sym,
+                "qty": round(qty_floor, 8),
+                "limit_price": round(price, 8),
+                "total_est": total,
+            }
+
+    if not best:
+        raise ValueError("No option found that fits the requested risk/tolerance.")
+
+    _log_webhook_event(request_id, "trendline_option_resolved", best)
+    return best
+
+
 async def _fetch_bybit_positions(
     *,
     base_url: str,
@@ -3210,6 +3353,8 @@ async def _place_bybit_order(
     qty = payload.get("quantity")
     account = str(payload.get("account", "live")).lower()
     trade_mode = str(payload.get("trade_mode", "linear")).lower()
+    options_mode = str(payload.get("options_mode", "")).lower()
+    is_trendline_options = trade_mode == "options" and options_mode == "trendline"
     _log_webhook_event(
         request_id,
         "payload_parsed",
@@ -3229,18 +3374,22 @@ async def _place_bybit_order(
 
     if action not in {"buy", "sell"}:
         raise ValueError("Webhook payload must include action=buy|sell.")
-    if not symbol:
+    if not symbol and not is_trendline_options:
         raise ValueError("Webhook payload must include a symbol.")
-    if qty is None:
+    if qty is None and not is_trendline_options:
         raise ValueError("Webhook payload must include quantity.")
+    if is_trendline_options and action != "buy":
+        raise ValueError("Trendline Options mode only supports action=buy.")
 
-    try:
-        qty_val = float(qty)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("Webhook payload quantity must be numeric.") from exc
+    qty_val: Optional[float] = None
+    if not is_trendline_options:
+        try:
+            qty_val = float(qty)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Webhook payload quantity must be numeric.") from exc
 
-    if qty_val <= 0:
-        raise ValueError("Webhook payload quantity must be greater than zero.")
+        if qty_val <= 0:
+            raise ValueError("Webhook payload quantity must be greater than zero.")
 
     if account not in {"live", "demo"}:
         raise ValueError("Webhook payload account must be live or demo.")
@@ -3254,6 +3403,8 @@ async def _place_bybit_order(
     order_type = str(order_type_raw).lower().strip()
     if order_type not in {"market", "limit"}:
         raise ValueError("Webhook payload order_type must be market or limit.")
+    if is_trendline_options:
+        order_type = "market"
     limit_cancel_offset, limit_cancel_pct = _parse_limit_cancel_settings(payload)
 
     price_val = None
@@ -3261,14 +3412,15 @@ async def _place_bybit_order(
         price_raw = payload.get("price") or payload.get("entry_price") or payload.get(
             "limit_price"
         )
-        if price_raw is None:
+        if price_raw is None and not is_trendline_options:
             raise ValueError("Limit orders require price.")
-        try:
-            price_val = float(price_raw)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("Limit order price must be numeric.") from exc
-        if price_val <= 0:
-            raise ValueError("Limit order price must be greater than zero.")
+        if price_raw is not None:
+            try:
+                price_val = float(price_raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Limit order price must be numeric.") from exc
+            if price_val <= 0:
+                raise ValueError("Limit order price must be greater than zero.")
 
     _mode, api_key, api_secret, base_url, key_source = resolve_bybit_credentials_for(
         "demo" if account == "demo" else "live"
@@ -3285,6 +3437,29 @@ async def _place_bybit_order(
             "key_source": key_source,
         },
     )
+
+    if is_trendline_options:
+        resolved = await _resolve_trendline_option_order(
+            base_url=base_url,
+            base_coin=str(payload.get("base_coin", "")).upper(),
+            option_type=str(payload.get("option_type", "Call")),
+            expiry=str(payload.get("expiry", "")),
+            order_type=order_type,
+            risk_usdt=float(payload.get("risk_usdt", 0) or 0),
+            tolerance_usdt=float(payload.get("risk_tolerance_usdt", 0.5) or 0.5),
+            fee_mode=str(payload.get("fee_mode", "roundtrip") or "roundtrip"),
+            request_id=request_id,
+        )
+        symbol = str(resolved.get("symbol", "")).upper()
+        qty_val = float(resolved.get("qty", 0) or 0)
+        if order_type == "limit":
+            price_val = float(resolved.get("limit_price", 0) or 0)
+        if not symbol:
+            raise ValueError("Trendline options resolver did not return a symbol.")
+        if qty_val <= 0:
+            raise ValueError("Trendline options resolver returned invalid qty.")
+        if order_type == "limit" and (price_val is None or price_val <= 0):
+            raise ValueError("Trendline options resolver returned invalid price.")
 
     body: Dict[str, object] = {
         "category": category,
