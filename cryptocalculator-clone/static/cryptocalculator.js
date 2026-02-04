@@ -183,12 +183,21 @@ function updateTradeType() {
   const selector = document.getElementById('trade_type');
   const optionsSection = document.getElementById('options_section');
   const cryptoSection = document.getElementById('crypto_section');
+  const manual = document.getElementById('options_manual_fields');
+  const trend = document.getElementById('options_trendline_fields');
   if (!selector || !optionsSection || !cryptoSection) {
     return;
   }
-  const isOptions = selector.value === 'options';
+  const isOptions = selector.value === 'options' || selector.value === 'trendline_options';
+  const isTrendline = selector.value === 'trendline_options';
   optionsSection.classList.toggle('hidden', !isOptions);
   cryptoSection.classList.toggle('hidden', isOptions);
+  if (manual) {
+    manual.classList.toggle('hidden', isTrendline);
+  }
+  if (trend) {
+    trend.classList.toggle('hidden', !isTrendline);
+  }
   const cryptoRequired = ['symbol', 'stop_loss_ticks', 'risk_percent', 'rr_ratio'];
   cryptoRequired.forEach((fieldId) => {
     const el = document.getElementById(fieldId);
@@ -249,7 +258,7 @@ function updateExecuteButtons() {
   }
 
   const tradeType = (meta.dataset.tradeType || '').toLowerCase();
-  const raw = tradeType === 'options'
+  const raw = tradeType === 'options' || tradeType === 'trendline_options'
     ? (meta.dataset.optionsOrderType || 'market')
     : (meta.dataset.orderType || 'market');
 
