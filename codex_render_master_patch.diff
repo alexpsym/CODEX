@@ -1,0 +1,516 @@
+diff -ruN /mnt/data/orig/CODEX-master/PATCH_README.md /mnt/data/work/CODEX-master/PATCH_README.md
+--- /mnt/data/orig/CODEX-master/PATCH_README.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/work/CODEX-master/PATCH_README.md	2026-02-07 23:03:26.920680403 +0000
+@@ -0,0 +1,107 @@
++# CODEX Render Master Control Patch
++
++This patch implements the changes requested in your last two messages:
++
++1) **Webhook pendings (WAITING rows) show SL/TP as distances** rather than fixed prices.
++2) The **manual Alerts backup/restore UI button is removed** from the dashboard.
++3) **Autostart can be set to start ALL scripts** after deploy (with an optional exclude list).
++4) **Triggered webhook pendings no longer linger/duplicate** broker orders in the Open Orders / Positions table.
++
++---
++
++## What you should see after applying
++
++### A) Webhook pending rows (Type=webhook, Status=WAITING)
++- The **Stop Loss** and **Take Profit** columns show **distance from entry**:
++  - `abs(stop_loss - entry_price)`
++  - `abs(take_profit - entry_price)`
++- Once the webhook triggers and the order is created, the pending row is **no longer included** in `/api/open-orders`.
++
++### B) No more duplicate/clutter after the webhook triggers
++- When the pending webhook triggers, the dashboard should show only the real broker objects:
++  - the **Position** (OPEN)
++  - the **SL** and **TP** orders (Untriggered)
++- The old “calc_crypto_..._short_market” (or similar) row should **not remain**.
++
++### C) Dashboard toolbar
++- Only **Refresh** remains (the **Alerts backup/restore** button is removed).
++
++### D) Autostart behavior
++- Default remains: `bybit_monitor,oanda_monitor,fxweekend-clone`
++- New option:
++  - `AUTOSTART_SCRIPTS=ALL` (or `*`) starts every discovered script
++  - `AUTOSTART_EXCLUDE=name1,name2` skips specific scripts
++
++---
++
++## Files changed
++
++### Backend
++- `render/master_service.py`
++  - Autostart: adds `ALL/*` support and `AUTOSTART_EXCLUDE`
++  - Pending webhooks:
++    - enforce `broker=WEBHOOK` and `type=webhook`
++    - on successful broker order creation, mark pending webhook `TRIGGERED` + `enabled=False` instead of mutating into a broker order row
++    - `/api/open-orders` includes **only** pending webhooks where `status=WAITING` and `enabled=true`
++  - Dashboard HTML: removes the Alerts backup/restore button and changes watchlist subtext to “Saved locally”
++
++### Front-end
++- `render/static/dashboard.js`
++  - removes Alerts backup/restore modal + event bindings
++  - for webhook WAITING rows, renders SL/TP as distances
++
++- `render/static/open_orders.js`
++  - for webhook WAITING rows, renders SL/TP as distances
++
++---
++
++## How to apply
++
++You have a unified diff file (`.diff`). From the repo root (the folder that contains `render/`):
++
++```bash
++# 1) Backup (recommended)
++cp -a . ../CODEX-backup-before-patch
++
++# 2) Apply the patch
++patch -p1 < codex_render_master_patch.diff
++
++# 3) Deploy
++# Push to GitHub / redeploy Render as you normally do
++```
++
++If `patch` reports offsets, that’s fine as long as it applies cleanly.
++
++---
++
++## Render environment variables
++
++### Default autostart (unchanged)
++No change needed.
++
++### Start everything
++Set:
++- `AUTOSTART_SCRIPTS=ALL`
++
++Optional excludes:
++- `AUTOSTART_EXCLUDE=scriptA,scriptB`
++
++Notes:
++- Starting *everything* can be unsafe if some scripts are intended to run only on-demand. Use `AUTOSTART_EXCLUDE` to avoid that.
++
++---
++
++## Implementation notes (why this fixes the duplication)
++
++Previously, when a webhook triggered, the code updated the pending webhook entry to look like a Bybit/OANDA order (changing `broker`/`type`/`status`).
++
++At the same time, `/api/open-orders` was already pulling real broker orders from Bybit/OANDA.
++
++So you ended up with:
++- the real broker orders/position **plus**
++- a “fake” broker order row sourced from `pending_webhooks.json`
++
++This patch fixes that by:
++- keeping pending webhooks local-only (`WEBHOOK/webhook`)
++- marking them consumed (`TRIGGERED`, `enabled=false`)
++- and only returning `WAITING` pendings in `/api/open-orders`.
+diff -ruN /mnt/data/orig/CODEX-master/render/master_service.py /mnt/data/work/CODEX-master/render/master_service.py
+--- /mnt/data/orig/CODEX-master/render/master_service.py	2026-02-04 10:55:09.000000000 +0000
++++ /mnt/data/work/CODEX-master/render/master_service.py	2026-02-07 22:57:58.036882645 +0000
+@@ -729,19 +729,47 @@
+     # Default autostart set for Render deploys (override by setting AUTOSTART_SCRIPTS).
+     _AUTOSTART_ENV = "bybit_monitor,oanda_monitor,fxweekend-clone"
+ 
+-AUTOSTART_SCRIPTS = [
++# AUTOSTART_SCRIPTS supports:
++#   - comma-separated script names
++#   - ALL or * to start every discovered script
++_AUTOSTART_EXCLUDE_ENV = os.getenv("AUTOSTART_EXCLUDE") or ""
++AUTOSTART_EXCLUDE = {
+     name.strip()
+-    for name in _AUTOSTART_ENV.split(",")
++    for name in _AUTOSTART_EXCLUDE_ENV.split(",")
+     if name.strip()
++}
++
++AUTOSTART_SCRIPTS_RAW = [
++    name.strip() for name in _AUTOSTART_ENV.split(",") if name.strip()
+ ]
+ 
+ 
++def _compute_autostart_scripts() -> List[str]:
++    """Resolve autostart script names from env.
++
++    AUTOSTART_SCRIPTS supports:
++      - comma-separated script names
++      - ALL or * to start every discovered script
++    AUTOSTART_EXCLUDE may contain a comma-separated list of script names to skip.
++    """
++
++    want_all = any(token.upper() == "ALL" or token == "*" for token in AUTOSTART_SCRIPTS_RAW)
++    if want_all:
++        names = list(script_manager.names)
++    else:
++        names = list(AUTOSTART_SCRIPTS_RAW)
++
++    if AUTOSTART_EXCLUDE:
++        names = [name for name in names if name not in AUTOSTART_EXCLUDE]
++    return names
++
++
+ @app.on_event("startup")
+ async def _autostart_scripts() -> None:
+     await _dropbox_restore_state_backup_on_startup()
+     asyncio.create_task(_poll_bybit_fills())
+     asyncio.create_task(_poll_oanda_fills())
+-    for name in AUTOSTART_SCRIPTS:
++    for name in _compute_autostart_scripts():
+         try:
+             script = script_manager.get(name)
+         except HTTPException:
+@@ -1306,7 +1334,6 @@
+ 
+         <div class=\"toolbar\">
+             <button class=\"refresh\" id=\"refresh-btn\">Refresh</button>
+-            <button class=\"secondary\" id=\"alerts-backup-restore-btn\">Alerts backup/restore</button>
+             <span id=\"status\">Loading scripts...</span>
+         </div>
+ 
+@@ -1316,7 +1343,7 @@
+                 <div class=\"panel-header\">
+                     <div>
+                         <h2>Watchlist</h2>
+-                        <div class=\"watchlist-sub\">Saved with alerts backup</div>
++                        <div class=\"watchlist-sub\">Saved locally</div>
+                     </div>
+                     <div class=\"oo-toolbar\">
+                         <span class=\"status-pill\" id=\"watchlist-count\">0</span>
+@@ -2663,8 +2690,9 @@
+         payload = dict(entry)
+         webhook_id = str(payload.get("id", "")).strip() or f"wh_{uuid4().hex[:12]}"
+         payload["id"] = webhook_id
+-        payload.setdefault("broker", "WEBHOOK")
+-        payload.setdefault("type", "webhook")
++        # Pending webhook entries are local-only and must never masquerade as broker orders.
++        payload["broker"] = "WEBHOOK"
++        payload["type"] = "webhook"
+         payload.setdefault("status", "WAITING")
+         payload.setdefault("enabled", True)
+         payload.setdefault("created_at", now_ts)
+@@ -2691,8 +2719,9 @@
+     now_ts = int(time.time())
+     entry = dict(payload)
+     entry["id"] = webhook_id
+-    entry.setdefault("broker", "WEBHOOK")
+-    entry.setdefault("type", "webhook")
++    # Pending webhook entries are local-only and must never masquerade as broker orders.
++    entry["broker"] = "WEBHOOK"
++    entry["type"] = "webhook"
+     entry.setdefault("status", "WAITING")
+     entry.setdefault("enabled", True)
+     entry.setdefault("created_at", now_ts)
+@@ -2716,6 +2745,9 @@
+     for idx, entry in enumerate(items):
+         if str(entry.get("id", "")).strip() == webhook_id:
+             merged = {**entry, **updates, "updated_at": int(time.time())}
++            # Prevent callers from converting a pending-webhook record into a broker order.
++            merged["broker"] = "WEBHOOK"
++            merged["type"] = "webhook"
+             items[idx] = merged
+             _save_pending_webhooks(items)
+             return merged
+@@ -3550,15 +3582,17 @@
+     order_id = order_result.get("orderId")
+     pending_id = str(payload.get("pending_webhook_id") or "").strip()
+     if pending_id:
++        # Mark the local pending webhook as triggered/consumed. Do not convert it into a broker order.
+         _update_pending_webhook(
+             pending_id,
+             {
+-                "broker": "Bybit",
++                "status": "TRIGGERED",
++                "enabled": False,
++                "triggered_at": int(time.time()),
++                "exchange": "Bybit",
+                 "account": account,
+                 "category": category,
+                 "instrument": symbol,
+-                "type": "Order",
+-                "status": "OPEN",
+                 "order_id": order_id,
+                 "limit_cancel_offset": limit_cancel_offset,
+                 "limit_cancel_offset_pct": limit_cancel_pct,
+@@ -3888,15 +3922,17 @@
+     limit_cancel_offset, limit_cancel_pct = _parse_limit_cancel_settings(payload)
+     pending_id = str(payload.get("pending_webhook_id") or "").strip()
+     if pending_id:
++        # Mark the local pending webhook as triggered/consumed. Do not convert it into a broker order.
+         _update_pending_webhook(
+             pending_id,
+             {
+-                "broker": "OANDA",
++                "status": "TRIGGERED",
++                "enabled": False,
++                "triggered_at": int(time.time()),
++                "exchange": "OANDA",
+                 "account": account,
+                 "category": "forex",
+                 "instrument": symbol,
+-                "type": "Order",
+-                "status": "OPEN",
+                 "order_id": order_id,
+                 "limit_cancel_offset": limit_cancel_offset,
+                 "limit_cancel_offset_pct": limit_cancel_pct,
+@@ -4478,7 +4514,15 @@
+         )
+ 
+     try:
+-        items.extend(_load_pending_webhooks())
++        pending = _load_pending_webhooks()
++        items.extend(
++            [
++                p
++                for p in pending
++                if bool(p.get("enabled", True))
++                and str(p.get("status", "WAITING")).upper() == "WAITING"
++            ]
++        )
+     except HTTPException as exc:
+         errors.append(
+             {
+diff -ruN /mnt/data/orig/CODEX-master/render/static/dashboard.js /mnt/data/work/CODEX-master/render/static/dashboard.js
+--- /mnt/data/orig/CODEX-master/render/static/dashboard.js	2026-02-04 10:55:09.000000000 +0000
++++ /mnt/data/work/CODEX-master/render/static/dashboard.js	2026-02-07 23:01:26.778143118 +0000
+@@ -1,7 +1,6 @@
+ (() => {
+   const refreshBtn = document.getElementById('refresh-btn');
+   const status = document.getElementById('status');
+-  const alertsBtn = document.getElementById('alerts-backup-restore-btn');
+ 
+   const forexList = document.getElementById('forex-scripts');
+   const cryptoList = document.getElementById('crypto-scripts');
+@@ -147,126 +146,6 @@
+     }
+   };
+ 
+-  const downloadAlertsBackup = async () => {
+-    const res = await fetch('/api/alerts/backup', { headers: { 'Cache-Control': 'no-store' } });
+-    if (!res.ok) throw new Error(await res.text());
+-    const blob = await res.blob();
+-    const url = URL.createObjectURL(blob);
+-    const a = document.createElement('a');
+-    a.href = url;
+-    a.download = 'codex-alerts-backup.json';
+-    document.body.appendChild(a);
+-    a.click();
+-    a.remove();
+-    URL.revokeObjectURL(url);
+-  };
+-
+-  const restoreAlertsBackup = async (file) => {
+-    if (!file) return;
+-    if (!confirm('Restore will REPLACE: alerts (Bybit + OANDA), watchlist, and pending webhooks. Continue?')) return;
+-    const fd = new FormData();
+-    fd.append('file', file);
+-    const res = await fetch('/api/alerts/restore', { method: 'POST', body: fd });
+-    const txt = await res.text();
+-    if (!res.ok) throw new Error(txt);
+-    await loadWatchlist();
+-    await refreshOpenOrders();
+-  };
+-
+-  const openAlertsModal = () => {
+-    const overlay = document.createElement('div');
+-    overlay.style.position = 'fixed';
+-    overlay.style.inset = '0';
+-    overlay.style.background = 'rgba(0,0,0,0.6)';
+-    overlay.style.display = 'flex';
+-    overlay.style.alignItems = 'center';
+-    overlay.style.justifyContent = 'center';
+-    overlay.style.zIndex = '9999';
+-
+-    const box = document.createElement('div');
+-    box.style.width = 'min(520px, calc(100% - 24px))';
+-    box.style.background = '#111827';
+-    box.style.border = '1px solid #1f2937';
+-    box.style.borderRadius = '12px';
+-    box.style.padding = '16px';
+-    box.style.color = '#e2e8f0';
+-
+-    const title = document.createElement('div');
+-    title.textContent = 'Alerts + webhooks backup/restore';
+-    title.style.fontWeight = '900';
+-    title.style.marginBottom = '8px';
+-
+-    const msg = document.createElement('div');
+-    msg.textContent = 'Backup includes alerts, watchlist, and pending webhooks. Restore replaces them.';
+-    msg.style.color = '#94a3b8';
+-    msg.style.marginBottom = '12px';
+-
+-    const row = document.createElement('div');
+-    row.style.display = 'flex';
+-    row.style.gap = '8px';
+-
+-    const downloadBtn = document.createElement('button');
+-    downloadBtn.className = 'secondary';
+-    downloadBtn.textContent = 'Download backup';
+-
+-    const restoreBtn = document.createElement('button');
+-    restoreBtn.className = 'secondary';
+-    restoreBtn.textContent = 'Restore from file';
+-
+-    const closeBtn = document.createElement('button');
+-    closeBtn.className = 'secondary';
+-    closeBtn.textContent = 'Close';
+-    closeBtn.style.marginLeft = 'auto';
+-
+-    const fileInput = document.createElement('input');
+-    fileInput.type = 'file';
+-    fileInput.accept = 'application/json,.json';
+-    fileInput.style.display = 'none';
+-
+-    downloadBtn.addEventListener('click', async () => {
+-      downloadBtn.disabled = true;
+-      try {
+-        await downloadAlertsBackup();
+-      } finally {
+-        downloadBtn.disabled = false;
+-      }
+-    });
+-
+-    restoreBtn.addEventListener('click', () => fileInput.click());
+-    fileInput.addEventListener('change', async () => {
+-      const f = fileInput.files && fileInput.files[0];
+-      if (!f) return;
+-      restoreBtn.disabled = true;
+-      try {
+-        await restoreAlertsBackup(f);
+-        alert('Alerts restored.');
+-        overlay.remove();
+-      } catch (e) {
+-        alert(e.message || String(e));
+-      } finally {
+-        restoreBtn.disabled = false;
+-        fileInput.value = '';
+-      }
+-    });
+-
+-    const close = () => overlay.remove();
+-    closeBtn.addEventListener('click', close);
+-    overlay.addEventListener('click', (e) => {
+-      if (e.target === overlay) close();
+-    });
+-
+-    row.appendChild(downloadBtn);
+-    row.appendChild(restoreBtn);
+-    row.appendChild(closeBtn);
+-    box.appendChild(title);
+-    box.appendChild(msg);
+-    box.appendChild(row);
+-    box.appendChild(fileInput);
+-    overlay.appendChild(box);
+-    document.body.appendChild(overlay);
+-  };
+-
+-  alertsBtn?.addEventListener('click', () => openAlertsModal());
+ 
+   watchlistAddBtn?.addEventListener('click', () => {
+     if (!watchlistInput) return;
+@@ -404,6 +283,27 @@
+     items.forEach((item) => {
+       const tr = document.createElement('tr');
+ 
++      const t = String(item.type || '').toLowerCase();
++      const isWebhook = t === 'webhook';
++      const isWebhookPending = isWebhook && String(item.status || '').toUpperCase() === 'WAITING';
++
++      const entryRef = (item.entry_price ?? item.order_price ?? item.current_price);
++      const toNum = (v) => {
++        if (v === null || v === undefined || v === '') return null;
++        const n = Number(v);
++        return Number.isFinite(n) ? n : null;
++      };
++
++      let stopLossCell = item.stop_loss;
++      let takeProfitCell = item.take_profit;
++      if (isWebhookPending) {
++        const entryNum = toNum(entryRef);
++        const slNum = toNum(item.stop_loss);
++        const tpNum = toNum(item.take_profit);
++        if (entryNum !== null && slNum !== null) stopLossCell = Math.abs(slNum - entryNum);
++        if (entryNum !== null && tpNum !== null) takeProfitCell = Math.abs(tpNum - entryNum);
++      }
++
+       const cols = [
+         item.broker,
+         item.account,
+@@ -414,8 +314,8 @@
+         item.size,
+         item.entry_price || item.order_price,
+         item.current_price,
+-        item.stop_loss,
+-        item.take_profit,
++        stopLossCell,
++        takeProfitCell,
+         item.leverage,
+         fmtTime(item.opened_at),
+         item.id,
+@@ -431,10 +331,8 @@
+       const actionTd = document.createElement('td');
+       actionTd.className = 'action-cell';
+ 
+-      const t = String(item.type || '').toLowerCase();
+       const isOrder = t === 'order';
+       const isPosition = t === 'position' || t === 'trade';
+-      const isWebhook = t === 'webhook';
+ 
+       if (isOrder || isPosition) {
+         const label = isOrder ? 'Cancel' : 'Close';
+diff -ruN /mnt/data/orig/CODEX-master/render/static/open_orders.js /mnt/data/work/CODEX-master/render/static/open_orders.js
+--- /mnt/data/orig/CODEX-master/render/static/open_orders.js	2026-02-04 10:55:09.000000000 +0000
++++ /mnt/data/work/CODEX-master/render/static/open_orders.js	2026-02-07 23:02:14.057032828 +0000
+@@ -143,6 +143,27 @@
+ 
+         items.forEach((item) => {
+             const row = document.createElement('tr');
++
++            const t = String(item.type || '').trim().toLowerCase();
++            const isWebhook = t === 'webhook';
++            const isWebhookPending = isWebhook && String(item.status || '').toUpperCase() === 'WAITING';
++            const entryRef = (item.entry_price ?? item.order_price ?? item.current_price);
++            const toNum = (v) => {
++                if (v === null || v === undefined || v === '') return null;
++                const n = Number(v);
++                return Number.isFinite(n) ? n : null;
++            };
++
++            let stopLossCell = item.stop_loss;
++            let takeProfitCell = item.take_profit;
++            if (isWebhookPending) {
++                const entryNum = toNum(entryRef);
++                const slNum = toNum(item.stop_loss);
++                const tpNum = toNum(item.take_profit);
++                if (entryNum !== null && slNum !== null) stopLossCell = Math.abs(slNum - entryNum);
++                if (entryNum !== null && tpNum !== null) takeProfitCell = Math.abs(tpNum - entryNum);
++            }
++
+             const cells = [
+                 item.broker,
+                 item.account,
+@@ -153,8 +174,8 @@
+                 item.size,
+                 item.entry_price || item.order_price,
+                 item.current_price,
+-                item.stop_loss,
+-                item.take_profit,
++                stopLossCell,
++                takeProfitCell,
+                 item.leverage,
+                 formatTimestamp(item.opened_at),
+                 item.id,
+@@ -169,10 +190,8 @@
+             const actionCell = document.createElement('td');
+             actionCell.className = 'action-cell';
+ 
+-            const t = String(item.type || '').trim().toLowerCase();
+             const isOrder = t === 'order';
+             const isPosition = t === 'position' || t === 'trade';
+-            const isWebhook = t === 'webhook';
+ 
+             if (isOrder || isPosition) {
+                 const label = isOrder ? 'Cancel' : 'Close';
