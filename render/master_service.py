@@ -2663,8 +2663,8 @@ def _normalize_pending_webhooks(items: object) -> List[Dict[str, object]]:
         payload = dict(entry)
         webhook_id = str(payload.get("id", "")).strip() or f"wh_{uuid4().hex[:12]}"
         payload["id"] = webhook_id
-        payload.setdefault("broker", "WEBHOOK")
-        payload.setdefault("type", "webhook")
+        payload["broker"] = "WEBHOOK"
+        payload["type"] = "webhook"
         payload.setdefault("status", "WAITING")
         payload.setdefault("enabled", True)
         payload.setdefault("created_at", now_ts)
@@ -2691,8 +2691,8 @@ def _upsert_pending_webhook(payload: Dict[str, object]) -> Dict[str, object]:
     now_ts = int(time.time())
     entry = dict(payload)
     entry["id"] = webhook_id
-    entry.setdefault("broker", "WEBHOOK")
-    entry.setdefault("type", "webhook")
+    entry["broker"] = "WEBHOOK"
+    entry["type"] = "webhook"
     entry.setdefault("status", "WAITING")
     entry.setdefault("enabled", True)
     entry.setdefault("created_at", now_ts)
@@ -4509,16 +4509,29 @@ async def close_open_order(payload: Dict[str, object]) -> JSONResponse:
             raise HTTPException(status_code=400, detail="Bybit item missing category or symbol.")
 
         if item_type == "order":
-            order_id = str(payload.get("id", "")).strip()
-            if not order_id:
+            order_ref = str(payload.get("id", "")).strip()
+            if not order_ref:
                 raise HTTPException(status_code=400, detail="Bybit order ID missing.")
-            response = await _bybit_signed_post(
-                base_url=base_url,
-                api_key=api_key,
-                api_secret=api_secret,
-                path="/v5/order/cancel",
-                body={"category": category, "symbol": symbol, "orderId": order_id},
-            )
+            cancel_body: Dict[str, object] = {"category": category, "symbol": symbol}
+            if order_ref.startswith("calc_"):
+                cancel_body["orderLinkId"] = order_ref
+            else:
+                cancel_body["orderId"] = order_ref
+            try:
+                response = await _bybit_signed_post(
+                    base_url=base_url,
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    path="/v5/order/cancel",
+                    body=cancel_body,
+                )
+            except Exception as exc:
+                if _delete_pending_webhook(order_ref):
+                    _schedule_dropbox_upload_state_backup()
+                    return JSONResponse({"status": "ok", "removed_local": True})
+                raise HTTPException(
+                    status_code=502, detail=f"Bybit cancel failed: {exc}"
+                ) from exc
             return JSONResponse({"status": "ok", "result": response.get("result", {})})
 
         if item_type == "position":

@@ -456,7 +456,7 @@
             await refreshOpenOrders();
           } catch (e) {
             console.error(e);
-            setOoPill('Action failed', 'bad');
+            setOoPill(e?.message || 'Action failed', 'bad');
           } finally {
             btn.disabled = false;
             btn.textContent = old;
@@ -484,7 +484,7 @@
             await refreshOpenOrders();
           } catch (e) {
             console.error(e);
-            setOoPill('Action failed', 'bad');
+            setOoPill(e?.message || 'Action failed', 'bad');
           } finally {
             toggleBtn.disabled = false;
             toggleBtn.textContent = old;
@@ -508,7 +508,7 @@
             await refreshOpenOrders();
           } catch (e) {
             console.error(e);
-            setOoPill('Action failed', 'bad');
+            setOoPill(e?.message || 'Action failed', 'bad');
           } finally {
             removeBtn.disabled = false;
             removeBtn.textContent = old;
