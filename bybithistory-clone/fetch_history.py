@@ -23,6 +23,47 @@ try:
 except ImportError:  # pragma: no cover - package not installed during tests
     HTTP = None  # type: ignore
 
+
+def _build_bybit_session(api_key: str, api_secret: str, base_url: str) -> "HTTP":
+    """Return a pybit HTTP session across multiple pybit versions.
+
+    The pybit unified_trading HTTP constructor has changed signatures across
+    releases (e.g. some accept `endpoint=`, some accept `base_url=` or only
+    `testnet=`). Render deployments can therefore fail at runtime with:
+
+        _V5HTTPManager.__init__() got an unexpected keyword argument 'endpoint'
+
+    This helper progressively tries the common signatures and falls back to
+    `testnet=` inference when the base URL cannot be injected.
+    """
+
+    if HTTP is None:  # pragma: no cover
+        raise ImportError("pybit module is required")
+
+    url = (base_url or "").strip().rstrip("/")
+    inferred_testnet = any(token in url for token in ("testnet", "demo"))
+
+    # 1) Newer code in this repo historically used endpoint=.
+    try:
+        return HTTP(api_key=api_key, api_secret=api_secret, endpoint=url)
+    except TypeError:
+        pass
+
+    # 2) Some versions renamed the parameter.
+    try:
+        return HTTP(api_key=api_key, api_secret=api_secret, base_url=url)
+    except TypeError:
+        pass
+
+    # 3) Some versions use a testnet flag and do not allow overriding the URL.
+    try:
+        return HTTP(api_key=api_key, api_secret=api_secret, testnet=inferred_testnet)
+    except TypeError:
+        pass
+
+    # 4) Last resort: try without any environment parameter.
+    return HTTP(api_key=api_key, api_secret=api_secret)
+
 SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000
 # Bybit only allows querying executions from roughly the last two years.
 # Using a small cushion prevents requests right at the limit from failing.
@@ -328,7 +369,7 @@ def export_balance_history(months: int = 12) -> str:
     if months > 24:
         raise ValueError("Bybit only allows querying up to 24 months of data")
 
-    session = HTTP(api_key=api_key, api_secret=api_secret, endpoint=base_url)
+    session = _build_bybit_session(api_key, api_secret, base_url)
 
     end_month = datetime.now(timezone.utc).replace(
         day=1, hour=0, minute=0, second=0, microsecond=0
@@ -424,7 +465,7 @@ def download_history(
     if HTTP is None:
         raise ImportError("pybit module is required to download history")
 
-    session = HTTP(api_key=api_key, api_secret=api_secret, endpoint=base_url)
+    session = _build_bybit_session(api_key, api_secret, base_url)
 
     params: Dict[str, Any] = {"category": category}
     if symbol:
