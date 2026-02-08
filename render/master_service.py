@@ -4849,9 +4849,11 @@ BYBIT_HISTORY_TEMPLATE = """<!DOCTYPE html>
         .card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; padding: 1.5rem; max-width: 960px; margin: 0 auto; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
         .meta { color: #94a3b8; margin-bottom: 0.75rem; line-height: 1.5; }
         .actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1rem; }
+        .toggle-group { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.75rem; }
         button { padding: 0.7rem 1.2rem; border-radius: 12px; border: none; cursor: pointer; font-weight: 700; }
         .primary { background: #22c55e; color: #052e16; }
         .secondary { background: #334155; color: #e2e8f0; }
+        .toggle-group button.active { background: #2563eb; color: #e2e8f0; }
         .status { margin-top: 1rem; color: #cbd5e1; white-space: pre-wrap; word-break: break-word; }
         .error { margin-top: 0.75rem; color: #fca5a5; }
         .badge { display: inline-block; padding: 0.35rem 0.65rem; border-radius: 999px; background: #1f2937; color: #cbd5e1; font-weight: 700; font-size: 0.9rem; }
