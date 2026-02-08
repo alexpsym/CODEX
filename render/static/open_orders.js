@@ -33,6 +33,18 @@
         return value;
     };
 
+    const toNumber = (value) => {
+        const numeric = Number(value);
+        return Number.isFinite(numeric) ? numeric : null;
+    };
+
+    const formatDistance = (value, entryValue) => {
+        const numeric = toNumber(value);
+        const entry = toNumber(entryValue);
+        if (numeric === null || entry === null) return value;
+        return Math.abs(numeric - entry);
+    };
+
     const formatTimestamp = (value) => {
         if (!value) return '—';
         const numeric = Number(value);
@@ -143,6 +155,16 @@
 
         items.forEach((item) => {
             const row = document.createElement('tr');
+            const t = String(item.type || '').trim().toLowerCase();
+            const isWebhook = t === 'webhook';
+            const status = String(item.status || '').trim().toUpperCase();
+            const entryPrice = item.entry_price || item.order_price;
+            const stopLoss =
+                isWebhook && status === 'WAITING' ? formatDistance(item.stop_loss, entryPrice) : item.stop_loss;
+            const takeProfit =
+                isWebhook && status === 'WAITING'
+                    ? formatDistance(item.take_profit, entryPrice)
+                    : item.take_profit;
             const cells = [
                 item.broker,
                 item.account,
@@ -151,10 +173,10 @@
                 item.type,
                 item.side,
                 item.size,
-                item.entry_price || item.order_price,
+                entryPrice,
                 item.current_price,
-                item.stop_loss,
-                item.take_profit,
+                stopLoss,
+                takeProfit,
                 item.leverage,
                 formatTimestamp(item.opened_at),
                 item.id,
@@ -169,10 +191,8 @@
             const actionCell = document.createElement('td');
             actionCell.className = 'action-cell';
 
-            const t = String(item.type || '').trim().toLowerCase();
             const isOrder = t === 'order';
             const isPosition = t === 'position' || t === 'trade';
-            const isWebhook = t === 'webhook';
 
             if (isOrder || isPosition) {
                 const label = isOrder ? 'Cancel' : 'Close';

@@ -729,11 +729,39 @@ if _AUTOSTART_ENV is None:
     # Default autostart set for Render deploys (override by setting AUTOSTART_SCRIPTS).
     _AUTOSTART_ENV = "bybit_monitor,oanda_monitor,fxweekend-clone"
 
-AUTOSTART_SCRIPTS = [
+# AUTOSTART_SCRIPTS supports:
+#   - comma-separated script names
+#   - ALL or * to start every discovered script
+_AUTOSTART_EXCLUDE_ENV = os.getenv("AUTOSTART_EXCLUDE") or ""
+AUTOSTART_EXCLUDE = {
     name.strip()
-    for name in _AUTOSTART_ENV.split(",")
+    for name in _AUTOSTART_EXCLUDE_ENV.split(",")
     if name.strip()
+}
+
+AUTOSTART_SCRIPTS_RAW = [
+    name.strip() for name in _AUTOSTART_ENV.split(",") if name.strip()
 ]
+
+
+def _compute_autostart_scripts() -> List[str]:
+    """Resolve autostart script names from env.
+
+    AUTOSTART_SCRIPTS supports:
+      - comma-separated script names
+      - ALL or * to start every discovered script
+    AUTOSTART_EXCLUDE may contain a comma-separated list of script names to skip.
+    """
+
+    want_all = any(token.upper() == "ALL" or token == "*" for token in AUTOSTART_SCRIPTS_RAW)
+    if want_all:
+        names = list(script_manager.names)
+    else:
+        names = list(AUTOSTART_SCRIPTS_RAW)
+
+    if AUTOSTART_EXCLUDE:
+        names = [name for name in names if name not in AUTOSTART_EXCLUDE]
+    return names
 
 
 @app.on_event("startup")
@@ -741,7 +769,7 @@ async def _autostart_scripts() -> None:
     await _dropbox_restore_state_backup_on_startup()
     asyncio.create_task(_poll_bybit_fills())
     asyncio.create_task(_poll_oanda_fills())
-    for name in AUTOSTART_SCRIPTS:
+    for name in _compute_autostart_scripts():
         try:
             script = script_manager.get(name)
         except HTTPException:
@@ -1306,7 +1334,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         <div class=\"toolbar\">
             <button class=\"refresh\" id=\"refresh-btn\">Refresh</button>
-            <button class=\"secondary\" id=\"alerts-backup-restore-btn\">Alerts backup/restore</button>
             <span id=\"status\">Loading scripts...</span>
         </div>
 
@@ -1316,7 +1343,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <div class=\"panel-header\">
                     <div>
                         <h2>Watchlist</h2>
-                        <div class=\"watchlist-sub\">Saved with alerts backup</div>
+                        <div class=\"watchlist-sub\">Saved locally</div>
                     </div>
                     <div class=\"oo-toolbar\">
                         <span class=\"status-pill\" id=\"watchlist-count\">0</span>
@@ -2716,6 +2743,9 @@ def _update_pending_webhook(webhook_id: str, updates: Dict[str, object]) -> Opti
     for idx, entry in enumerate(items):
         if str(entry.get("id", "")).strip() == webhook_id:
             merged = {**entry, **updates, "updated_at": int(time.time())}
+            # Prevent callers from converting a pending-webhook record into a broker order.
+            merged["broker"] = "WEBHOOK"
+            merged["type"] = "webhook"
             items[idx] = merged
             _save_pending_webhooks(items)
             return merged
@@ -3550,15 +3580,17 @@ async def _place_bybit_order(
     order_id = order_result.get("orderId")
     pending_id = str(payload.get("pending_webhook_id") or "").strip()
     if pending_id:
+        # Mark the local pending webhook as triggered/consumed. Do not convert it into a broker order.
         _update_pending_webhook(
             pending_id,
             {
-                "broker": "Bybit",
+                "status": "TRIGGERED",
+                "enabled": False,
+                "triggered_at": int(time.time()),
+                "exchange": "Bybit",
                 "account": account,
                 "category": category,
                 "instrument": symbol,
-                "type": "Order",
-                "status": "OPEN",
                 "order_id": order_id,
                 "limit_cancel_offset": limit_cancel_offset,
                 "limit_cancel_offset_pct": limit_cancel_pct,
@@ -3888,15 +3920,17 @@ async def _place_oanda_order(
     limit_cancel_offset, limit_cancel_pct = _parse_limit_cancel_settings(payload)
     pending_id = str(payload.get("pending_webhook_id") or "").strip()
     if pending_id:
+        # Mark the local pending webhook as triggered/consumed. Do not convert it into a broker order.
         _update_pending_webhook(
             pending_id,
             {
-                "broker": "OANDA",
+                "status": "TRIGGERED",
+                "enabled": False,
+                "triggered_at": int(time.time()),
+                "exchange": "OANDA",
                 "account": account,
                 "category": "forex",
                 "instrument": symbol,
-                "type": "Order",
-                "status": "OPEN",
                 "order_id": order_id,
                 "limit_cancel_offset": limit_cancel_offset,
                 "limit_cancel_offset_pct": limit_cancel_pct,
@@ -4478,7 +4512,15 @@ async def fetch_open_orders() -> JSONResponse:
         )
 
     try:
-        items.extend(_load_pending_webhooks())
+        pending = _load_pending_webhooks()
+        items.extend(
+            [
+                entry
+                for entry in pending
+                if bool(entry.get("enabled", True))
+                and str(entry.get("status", "WAITING")).upper() == "WAITING"
+            ]
+        )
     except HTTPException as exc:
         errors.append(
             {
