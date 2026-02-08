@@ -1,7 +1,6 @@
 (() => {
   const refreshBtn = document.getElementById('refresh-btn');
   const status = document.getElementById('status');
-  const alertsBtn = document.getElementById('alerts-backup-restore-btn');
 
   const forexList = document.getElementById('forex-scripts');
   const cryptoList = document.getElementById('crypto-scripts');
@@ -147,127 +146,6 @@
     }
   };
 
-  const downloadAlertsBackup = async () => {
-    const res = await fetch('/api/alerts/backup', { headers: { 'Cache-Control': 'no-store' } });
-    if (!res.ok) throw new Error(await res.text());
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'codex-alerts-backup.json';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-  };
-
-  const restoreAlertsBackup = async (file) => {
-    if (!file) return;
-    if (!confirm('Restore will REPLACE: alerts (Bybit + OANDA), watchlist, and pending webhooks. Continue?')) return;
-    const fd = new FormData();
-    fd.append('file', file);
-    const res = await fetch('/api/alerts/restore', { method: 'POST', body: fd });
-    const txt = await res.text();
-    if (!res.ok) throw new Error(txt);
-    await loadWatchlist();
-    await refreshOpenOrders();
-  };
-
-  const openAlertsModal = () => {
-    const overlay = document.createElement('div');
-    overlay.style.position = 'fixed';
-    overlay.style.inset = '0';
-    overlay.style.background = 'rgba(0,0,0,0.6)';
-    overlay.style.display = 'flex';
-    overlay.style.alignItems = 'center';
-    overlay.style.justifyContent = 'center';
-    overlay.style.zIndex = '9999';
-
-    const box = document.createElement('div');
-    box.style.width = 'min(520px, calc(100% - 24px))';
-    box.style.background = '#111827';
-    box.style.border = '1px solid #1f2937';
-    box.style.borderRadius = '12px';
-    box.style.padding = '16px';
-    box.style.color = '#e2e8f0';
-
-    const title = document.createElement('div');
-    title.textContent = 'Alerts + webhooks backup/restore';
-    title.style.fontWeight = '900';
-    title.style.marginBottom = '8px';
-
-    const msg = document.createElement('div');
-    msg.textContent = 'Backup includes alerts, watchlist, and pending webhooks. Restore replaces them.';
-    msg.style.color = '#94a3b8';
-    msg.style.marginBottom = '12px';
-
-    const row = document.createElement('div');
-    row.style.display = 'flex';
-    row.style.gap = '8px';
-
-    const downloadBtn = document.createElement('button');
-    downloadBtn.className = 'secondary';
-    downloadBtn.textContent = 'Download backup';
-
-    const restoreBtn = document.createElement('button');
-    restoreBtn.className = 'secondary';
-    restoreBtn.textContent = 'Restore from file';
-
-    const closeBtn = document.createElement('button');
-    closeBtn.className = 'secondary';
-    closeBtn.textContent = 'Close';
-    closeBtn.style.marginLeft = 'auto';
-
-    const fileInput = document.createElement('input');
-    fileInput.type = 'file';
-    fileInput.accept = 'application/json,.json';
-    fileInput.style.display = 'none';
-
-    downloadBtn.addEventListener('click', async () => {
-      downloadBtn.disabled = true;
-      try {
-        await downloadAlertsBackup();
-      } finally {
-        downloadBtn.disabled = false;
-      }
-    });
-
-    restoreBtn.addEventListener('click', () => fileInput.click());
-    fileInput.addEventListener('change', async () => {
-      const f = fileInput.files && fileInput.files[0];
-      if (!f) return;
-      restoreBtn.disabled = true;
-      try {
-        await restoreAlertsBackup(f);
-        alert('Alerts restored.');
-        overlay.remove();
-      } catch (e) {
-        alert(e.message || String(e));
-      } finally {
-        restoreBtn.disabled = false;
-        fileInput.value = '';
-      }
-    });
-
-    const close = () => overlay.remove();
-    closeBtn.addEventListener('click', close);
-    overlay.addEventListener('click', (e) => {
-      if (e.target === overlay) close();
-    });
-
-    row.appendChild(downloadBtn);
-    row.appendChild(restoreBtn);
-    row.appendChild(closeBtn);
-    box.appendChild(title);
-    box.appendChild(msg);
-    box.appendChild(row);
-    box.appendChild(fileInput);
-    overlay.appendChild(box);
-    document.body.appendChild(overlay);
-  };
-
-  alertsBtn?.addEventListener('click', () => openAlertsModal());
-
   watchlistAddBtn?.addEventListener('click', () => {
     if (!watchlistInput) return;
     const raw = watchlistInput.value || '';
@@ -359,6 +237,16 @@
 
   // -------- Open Orders / Positions (unchanged endpoints) --------
   const fmt = (v) => (v === null || v === undefined || v === '' ? '—' : v);
+  const toNumber = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const formatDistance = (value, entryValue) => {
+    const numeric = toNumber(value);
+    const entry = toNumber(entryValue);
+    if (numeric === null || entry === null) return value;
+    return Math.abs(numeric - entry);
+  };
   const fmtTime = (v) => {
     if (!v) return '—';
     const n = Number(v);
@@ -404,6 +292,15 @@
     items.forEach((item) => {
       const tr = document.createElement('tr');
 
+      const t = String(item.type || '').toLowerCase();
+      const isWebhook = t === 'webhook';
+      const status = String(item.status || '').trim().toUpperCase();
+      const entryPrice = item.entry_price || item.order_price;
+      const stopLoss =
+        isWebhook && status === 'WAITING' ? formatDistance(item.stop_loss, entryPrice) : item.stop_loss;
+      const takeProfit =
+        isWebhook && status === 'WAITING' ? formatDistance(item.take_profit, entryPrice) : item.take_profit;
+
       const cols = [
         item.broker,
         item.account,
@@ -412,10 +309,10 @@
         item.type,
         item.side,
         item.size,
-        item.entry_price || item.order_price,
+        entryPrice,
         item.current_price,
-        item.stop_loss,
-        item.take_profit,
+        stopLoss,
+        takeProfit,
         item.leverage,
         fmtTime(item.opened_at),
         item.id,
@@ -431,10 +328,8 @@
       const actionTd = document.createElement('td');
       actionTd.className = 'action-cell';
 
-      const t = String(item.type || '').toLowerCase();
       const isOrder = t === 'order';
       const isPosition = t === 'position' || t === 'trade';
-      const isWebhook = t === 'webhook';
 
       if (isOrder || isPosition) {
         const label = isOrder ? 'Cancel' : 'Close';
