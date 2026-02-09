@@ -1041,11 +1041,21 @@ async def _run_bybit_history_export(job: BybitHistoryJob) -> None:
                 prev_cwd = os.getcwd()
                 prev_env = os.environ.get("BYBIT_ENV")
                 if account_mode in {"demo", "testnet", "paper"}:
-                    os.environ["BYBIT_ENV"] = "demo"
+                    os.environ["BYBIT_ENV"] = "testnet"
                 else:
                     os.environ["BYBIT_ENV"] = "live"
                 os.chdir(tmp)
                 try:
+                    target_mode = os.environ["BYBIT_ENV"]
+                    _mode, _key, _secret, _base_url, key_source = (
+                        resolve_bybit_credentials_for(target_mode)
+                    )
+                    if target_mode in {"testnet", "demo", "paper"} and key_source == "LEGACY":
+                        raise RuntimeError(
+                            "DEMO/Testnet export requires BYBIT_API_KEY2 and "
+                            "BYBIT_API_SECRET2 (testnet keypair). Live/legacy keys "
+                            "cannot authenticate on testnet."
+                        )
                     filename = bybit_history_fetcher.download_history(
                         "linear",
                         start_date,
