@@ -138,6 +138,57 @@ def _limit_to_two_years(start: int | None, end: int | None) -> tuple[int, int]:
     return start, end
 
 
+def _normalize_endpoint(mode: str, base_url: str) -> str:
+    """Return a safe endpoint for the given Bybit environment.
+
+    This is a defensive guardrail for misconfigured env vars.
+    Demo keys must use https://api-demo.bybit.com; testnet uses
+    https://api-testnet.bybit.com.
+    """
+
+    url = (base_url or "").strip().rstrip("/")
+    m = (mode or "live").strip().lower()
+
+    if m == "demo":
+        # If someone accidentally points demo at testnet/mainnet, force it.
+        if "api-demo.bybit.com" not in url:
+            return "https://api-demo.bybit.com"
+        return url
+    if m == "testnet":
+        if "api-testnet.bybit.com" not in url:
+            return "https://api-testnet.bybit.com"
+        return url
+    # live
+    if "api.bybit.com" not in url:
+        return "https://api.bybit.com"
+    return url
+
+
+def _limit_time_window(mode: str, start: int | None, end: int | None) -> tuple[int, int]:
+    """Clip start and end times based on the environment retention rules."""
+
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    m = (mode or "live").strip().lower()
+    if m == "demo":
+        # Demo Trading keeps orders for 7 days.
+        earliest = now_ms - SEVEN_DAYS_MS + LIMIT_CUSHION_MS
+    else:
+        earliest = now_ms - TWO_YEARS_MS + LIMIT_CUSHION_MS
+
+    if end is None:
+        end = now_ms
+    else:
+        end = min(end, now_ms)
+    end = max(end, earliest)
+
+    if start is None:
+        start = earliest
+    else:
+        start = max(start, earliest)
+    start = min(start, end)
+    return start, end
+
+
 def _fetch_pages(session: HTTP, **params: Any) -> Generator[List[Dict[str, Any]], None, None]:
     """Yield pages of execution data from Bybit."""
     cursor: str | None = None
@@ -354,9 +405,7 @@ def export_balance_history(months: int = 12) -> str:
     """
     # pylint: disable=too-many-locals,too-many-branches
     mode_env = (os.getenv("BYBIT_ENV", "live") or "live").strip().lower()
-    _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for(
-        mode_env
-    )
+    mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for(mode_env)
     if not api_key or not api_secret:
         raise EnvironmentError(
             "Bybit API credentials are missing. Provide BYBIT_API_KEY1/BYBIT_API_SECRET1 "
@@ -369,6 +418,7 @@ def export_balance_history(months: int = 12) -> str:
     if months > 24:
         raise ValueError("Bybit only allows querying up to 24 months of data")
 
+    base_url = _normalize_endpoint(mode, base_url)
     session = _build_bybit_session(api_key, api_secret, base_url)
 
     end_month = datetime.now(timezone.utc).replace(
@@ -453,9 +503,7 @@ def download_history(
     """
     # pylint: disable=too-many-locals,too-many-branches
     mode_env = (os.getenv("BYBIT_ENV", "live") or "live").strip().lower()
-    _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for(
-        mode_env
-    )
+    mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for(mode_env)
     if not api_key or not api_secret:
         raise EnvironmentError(
             "Bybit API credentials are missing. Provide BYBIT_API_KEY1/BYBIT_API_SECRET1 "
@@ -465,6 +513,7 @@ def download_history(
     if HTTP is None:
         raise ImportError("pybit module is required to download history")
 
+    base_url = _normalize_endpoint(mode, base_url)
     session = _build_bybit_session(api_key, api_secret, base_url)
 
     params: Dict[str, Any] = {"category": category}
@@ -473,7 +522,8 @@ def download_history(
 
     start_ms = _parse_date(start_date) if start_date else None
     end_ms = _parse_date(end_date) if end_date else None
-    start_ms, end_ms = _limit_to_two_years(start_ms, end_ms)
+    # Live/testnet: ~2 years. Demo: 7 days.
+    start_ms, end_ms = _limit_time_window(mode, start_ms, end_ms)
 
     rows: List[Dict[str, Any]] = []
 

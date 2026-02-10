@@ -1012,10 +1012,14 @@ async def _run_bybit_history_export(job: BybitHistoryJob) -> None:
         period = _normalize_period(job.params.get("period"))
         complete = bool(job.params.get("complete")) or period == "complete"
 
+        # Bybit Demo Trading only retains ~7 days of orders/executions.
+        # Live/Testnet supports up to ~2 years.
+        max_days = 7 if account_mode in {"demo", "paper"} else 730
+
         if complete:
-            start_date, end_date = _date_range_for_period("complete", max_days=730)
+            start_date, end_date = _date_range_for_period("complete", max_days=max_days)
         elif period:
-            start_date, end_date = _date_range_for_period(period, max_days=730)
+            start_date, end_date = _date_range_for_period(period, max_days=max_days)
         else:
             days_value = job.params.get("days")
             if days_value is None:
@@ -1026,9 +1030,9 @@ async def _run_bybit_history_export(job: BybitHistoryJob) -> None:
                 raise ValueError("days must be an integer.") from exc
             if days <= 0:
                 raise ValueError("days must be greater than zero.")
-            # Clamp to the Bybit API retention window (2 years) even for legacy days payloads.
-            if days > 730:
-                days = 730
+            # Clamp to the Bybit API retention window.
+            if days > max_days:
+                days = max_days
             start_date, end_date = _date_range_for_days(days)
 
         def _export() -> Path:
@@ -4863,7 +4867,9 @@ BYBIT_HISTORY_TEMPLATE = """<!DOCTYPE html>
         button { padding: 0.7rem 1.2rem; border-radius: 12px; border: none; cursor: pointer; font-weight: 700; }
         .primary { background: #22c55e; color: #052e16; }
         .secondary { background: #334155; color: #e2e8f0; }
+        .toggle-group { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 0.75rem; }
         .toggle-group button.active { background: #2563eb; color: #e2e8f0; }
+        .hidden { display: none !important; }
         .status { margin-top: 1rem; color: #cbd5e1; white-space: pre-wrap; word-break: break-word; }
         .error { margin-top: 0.75rem; color: #fca5a5; }
         .badge { display: inline-block; padding: 0.35rem 0.65rem; border-radius: 999px; background: #1f2937; color: #cbd5e1; font-weight: 700; font-size: 0.9rem; }
@@ -4879,13 +4885,14 @@ BYBIT_HISTORY_TEMPLATE = """<!DOCTYPE html>
             <button class=\"secondary\" data-account=\"demo\">DEMO</button>
         </div>
         <div class=\"badge\" style=\"margin-top: 1rem;\">Select range</div>
-        <div class=\"actions\">
+        <div class=\"actions\" id=\"range-buttons\">
             <button class=\"primary\" data-period=\"day\">DAY</button>
             <button class=\"primary\" data-period=\"week\">WEEK</button>
             <button class=\"primary\" data-period=\"month\">MONTH</button>
             <button class=\"primary\" data-period=\"year\">YEAR</button>
             <button class=\"primary\" data-period=\"3y\">3 YEARS</button>
             <button class=\"primary\" data-period=\"complete\">COMPLETE</button>
+            <button class=\"primary hidden\" data-days=\"7\" id=\"demo-7d\">7 DAYS</button>
         </div>
         <div id=\"status\" class=\"status\">Choose a timeframe to start.</div>
         <div id=\"error\" class=\"error\"></div>
@@ -4894,12 +4901,20 @@ BYBIT_HISTORY_TEMPLATE = """<!DOCTYPE html>
     <script>
         const statusEl = document.getElementById('status');
         const errorEl = document.getElementById('error');
-        const buttons = Array.from(document.querySelectorAll('button[data-period]'));
+        const rangeButtonsEl = document.getElementById('range-buttons');
+        const periodButtons = Array.from(document.querySelectorAll('button[data-period]'));
+        const demo7dButton = document.getElementById('demo-7d');
         const accountButtons = Array.from(document.querySelectorAll('button[data-account]'));
         let selectedAccount = 'demo';
 
         const setButtonsDisabled = (disabled) => {
-            buttons.forEach((btn) => { btn.disabled = disabled; });
+            Array.from(rangeButtonsEl.querySelectorAll('button')).forEach((btn) => { btn.disabled = disabled; });
+        };
+
+        const syncRangeButtons = () => {
+            const isDemo = selectedAccount === 'demo';
+            periodButtons.forEach((btn) => btn.classList.toggle('hidden', isDemo));
+            if (demo7dButton) demo7dButton.classList.toggle('hidden', !isDemo);
         };
 
         const startExport = async (payload) => {
@@ -4954,6 +4969,7 @@ BYBIT_HISTORY_TEMPLATE = """<!DOCTYPE html>
                 const account = button.dataset.account || 'live';
                 selectedAccount = account;
                 accountButtons.forEach((btn) => btn.classList.toggle('active', btn === button));
+                syncRangeButtons();
             });
         });
         const defaultAccountButton = accountButtons.find((btn) => btn.dataset.account === selectedAccount);
@@ -4961,14 +4977,18 @@ BYBIT_HISTORY_TEMPLATE = """<!DOCTYPE html>
             defaultAccountButton.classList.add('active');
         }
 
-        buttons.forEach((button) => {
+        periodButtons.forEach((button) => {
             button.addEventListener('click', () => {
                 const period = button.dataset.period;
-                if (period) {
-                    startExport({ period });
-                }
+                if (period) startExport({ period });
             });
         });
+
+        if (demo7dButton) {
+            demo7dButton.addEventListener('click', () => startExport({ days: 7 }));
+        }
+
+        syncRangeButtons();
     </script>
 </body>
 </html>"""
