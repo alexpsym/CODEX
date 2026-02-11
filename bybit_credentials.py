@@ -17,6 +17,27 @@ import os
 from typing import Dict, Tuple
 
 
+def _coerce_base_url(env_mode: str, candidate: str) -> str:
+    """Force environment-correct Bybit hosts even if env vars are misconfigured."""
+
+    c = (candidate or "").strip()
+    lower = c.lower()
+
+    if env_mode == "demo":
+        if "api-demo.bybit.com" not in lower:
+            return "https://api-demo.bybit.com"
+        return c
+
+    if env_mode in {"testnet", "paper"}:
+        if "api-testnet.bybit.com" not in lower:
+            return "https://api-testnet.bybit.com"
+        return c
+
+    if "api.bybit.com" not in lower:
+        return "https://api.bybit.com"
+    return c
+
+
 def resolve_bybit_credentials() -> Tuple[str, str, str, str]:
     """Return (mode, key, secret, base_url, key_source).
 
@@ -35,19 +56,29 @@ def resolve_bybit_credentials() -> Tuple[str, str, str, str]:
         key = os.getenv("BYBIT_API_KEY2") or os.getenv("BYBIT_API_KEY") or ""
         secret = os.getenv("BYBIT_API_SECRET2") or os.getenv("BYBIT_API_SECRET") or ""
         if mode == "demo":
-            # Mainnet Demo Trading is a separate domain.
-            base_url = os.getenv("BYBIT_BASE_URL_DEMO") or "https://api-demo.bybit.com"
+            base_url = _coerce_base_url(
+                "demo",
+                os.getenv("BYBIT_BASE_URL_DEMO")
+                or os.getenv("BYBIT_API_BASE_DEMO")
+                or "https://api-demo.bybit.com",
+            )
         else:
-            base_url = (
+            base_url = _coerce_base_url(
+                "testnet",
                 os.getenv("BYBIT_BASE_URL_TESTNET")
                 or os.getenv("BYBIT_API_BASE_TESTNET")
-                or "https://api-testnet.bybit.com"
+                or "https://api-testnet.bybit.com",
             )
         key_source = "KEY2" if os.getenv("BYBIT_API_KEY2") or os.getenv("BYBIT_API_SECRET2") else "LEGACY"
     else:
         key = os.getenv("BYBIT_API_KEY1") or os.getenv("BYBIT_API_KEY") or ""
         secret = os.getenv("BYBIT_API_SECRET1") or os.getenv("BYBIT_API_SECRET") or ""
-        base_url = os.getenv("BYBIT_BASE_URL") or os.getenv("BYBIT_API_BASE") or "https://api.bybit.com"
+        base_url = _coerce_base_url(
+            "live",
+            os.getenv("BYBIT_BASE_URL")
+            or os.getenv("BYBIT_API_BASE")
+            or "https://api.bybit.com",
+        )
         key_source = "KEY1" if os.getenv("BYBIT_API_KEY1") or os.getenv("BYBIT_API_SECRET1") else "LEGACY"
 
     return mode, key, secret, base_url.rstrip("/"), key_source
@@ -61,14 +92,20 @@ def resolve_bybit_credentials_for(mode: str) -> Tuple[str, str, str, str, str]:
         key = os.getenv("BYBIT_API_KEY2") or os.getenv("BYBIT_API_KEY") or ""
         secret = os.getenv("BYBIT_API_SECRET2") or os.getenv("BYBIT_API_SECRET") or ""
         if normalized == "testnet":
-            base_url = (
+            base_url = _coerce_base_url(
+                "testnet",
                 os.getenv("BYBIT_BASE_URL_TESTNET")
                 or os.getenv("BYBIT_API_BASE_TESTNET")
-                or "https://api-testnet.bybit.com"
+                or "https://api-testnet.bybit.com",
             )
             env_label = "testnet"
         else:
-            base_url = os.getenv("BYBIT_BASE_URL_DEMO") or "https://api-demo.bybit.com"
+            base_url = _coerce_base_url(
+                "demo",
+                os.getenv("BYBIT_BASE_URL_DEMO")
+                or os.getenv("BYBIT_API_BASE_DEMO")
+                or "https://api-demo.bybit.com",
+            )
             env_label = "demo"
         key_source = (
             "KEY2"
@@ -79,11 +116,12 @@ def resolve_bybit_credentials_for(mode: str) -> Tuple[str, str, str, str, str]:
 
     key = os.getenv("BYBIT_API_KEY1") or os.getenv("BYBIT_API_KEY") or ""
     secret = os.getenv("BYBIT_API_SECRET1") or os.getenv("BYBIT_API_SECRET") or ""
-    base_url = (
+    base_url = _coerce_base_url(
+        "live",
         os.getenv("BYBIT_BASE_URL_LIVE")
         or os.getenv("BYBIT_BASE_URL")
         or os.getenv("BYBIT_API_BASE")
-        or "https://api.bybit.com"
+        or "https://api.bybit.com",
     )
     key_source = (
         "KEY1"

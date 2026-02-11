@@ -1014,7 +1014,9 @@ async def _run_bybit_history_export(job: BybitHistoryJob) -> None:
 
         # Bybit Demo Trading only retains ~7 days of orders/executions.
         # Live/Testnet supports up to ~2 years.
-        max_days = 7 if account_mode in {"demo", "paper"} else 730
+        max_days = 730
+        if account_mode == "demo":
+            max_days = 7
 
         if complete:
             start_date, end_date = _date_range_for_period("complete", max_days=max_days)
@@ -1045,7 +1047,7 @@ async def _run_bybit_history_export(job: BybitHistoryJob) -> None:
                 prev_cwd = os.getcwd()
                 prev_env = os.environ.get("BYBIT_ENV")
                 if account_mode in {"demo", "testnet", "paper"}:
-                    os.environ["BYBIT_ENV"] = "testnet"
+                    os.environ["BYBIT_ENV"] = account_mode
                 else:
                     os.environ["BYBIT_ENV"] = "live"
                 os.chdir(tmp)
