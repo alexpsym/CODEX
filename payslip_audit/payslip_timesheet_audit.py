@@ -862,8 +862,17 @@ def parse_timesheets(
 
     for dt, hours in shift_sums.items():
         entry = TimesheetEntry(hours=hours, label="Sum of shift totals", counts=True, raw="Aggregated shift totals")
-        score = (True, hours)
         existing = best_totals.get(dt)
+
+        # "Sum of shift totals" is derived from OCR lines and can be wrong if any
+        # Shift Total lines are attached to the wrong date after OCR misses a
+        # date header. If we already found an explicit Day Total, keep it.
+        if existing is not None:
+            _, existing_entry = existing
+            if existing_entry.label == "Day Total" and "aggregated" not in existing_entry.raw.lower():
+                continue
+
+        score = (True, hours)
         if existing is None or score > existing[0]:
             best_totals[dt] = (score, entry)
 
