@@ -3,8 +3,14 @@ from __future__ import annotations
 
 import csv
 import os
+import time
+import hashlib
+import hmac
+import urllib.parse
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Generator, List, Tuple
+
+import requests
 
 from env_helpers import load_bybit_live_env
 from bybit_credentials import resolve_bybit_credentials_for
@@ -199,6 +205,75 @@ def _fetch_pages(session: HTTP, **params: Any) -> Generator[List[Dict[str, Any]]
         result = response["result"]
         yield result.get("list", [])
         cursor = result.get("nextPageCursor")
+        if not cursor:
+            break
+
+
+def _bybit_make_query(params: Dict[str, Any]) -> str:
+    items = []
+    for key in sorted(params.keys()):
+        value = params[key]
+        if value is None:
+            continue
+        items.append(f"{key}={urllib.parse.quote(str(value), safe='')}")
+    return "&".join(items)
+
+
+def _bybit_signed_get_v5(
+    *,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+    path: str,
+    params: Dict[str, Any],
+    recv_window: str = "5000",
+) -> Dict[str, Any]:
+    """Signed V5 GET request for environments pybit cannot target (e.g. api-demo)."""
+    timestamp = str(int(time.time() * 1000))
+    query = _bybit_make_query(params)
+    origin = f"{timestamp}{api_key}{recv_window}{query}"
+    signature = hmac.new(api_secret.encode(), origin.encode(), hashlib.sha256).hexdigest()
+    headers = {
+        "X-BAPI-API-KEY": api_key,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": recv_window,
+        "X-BAPI-SIGN": signature,
+        "X-BAPI-SIGN-TYPE": "2",
+    }
+    url = f"{base_url.rstrip('/')}{path}"
+    resp = requests.get(url, headers=headers, params=params, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    if (data or {}).get("retCode") not in (0, "0", None):
+        raise RuntimeError(f"Bybit API error: {data.get('retMsg') or data}")
+    return data
+
+
+def _fetch_pages_demo(
+    *,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+    **params: Any,
+) -> Generator[List[Dict[str, Any]], None, None]:
+    cursor = None
+    while True:
+        query_params = dict(params)
+        if cursor:
+            query_params["cursor"] = cursor
+        payload = _bybit_signed_get_v5(
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            path="/v5/execution/list",
+            params=query_params,
+        )
+        result = (payload.get("result") or {}) if isinstance(payload, dict) else {}
+        page = (result.get("list") or []) if isinstance(result, dict) else []
+        if not isinstance(page, list):
+            page = []
+        yield [row for row in page if isinstance(row, dict)]
+        cursor = result.get("nextPageCursor") if isinstance(result, dict) else None
         if not cursor:
             break
 
@@ -510,11 +585,12 @@ def download_history(
             "(or KEY2 for demo) or legacy BYBIT_API_KEY/BYBIT_API_SECRET."
         )
 
-    if HTTP is None:
-        raise ImportError("pybit module is required to download history")
-
     base_url = _normalize_endpoint(mode, base_url)
-    session = _build_bybit_session(api_key, api_secret, base_url)
+    session = None
+    if mode != "demo":
+        if HTTP is None:
+            raise ImportError("pybit module is required to download history")
+        session = _build_bybit_session(api_key, api_secret, base_url)
 
     params: Dict[str, Any] = {"category": category}
     if symbol:
@@ -536,7 +612,16 @@ def download_history(
                 "startTime": chunk_start,
                 "endTime": chunk_end,
             }
-            for page in _fetch_pages(session, **chunk_params):
+            if mode == "demo":
+                pages = _fetch_pages_demo(
+                    base_url=base_url,
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    **chunk_params,
+                )
+            else:
+                pages = _fetch_pages(session, **chunk_params)
+            for page in pages:
                 for row in page:
                     _convert_exec_time(row, bool(template))
                 rows.extend(page)
@@ -545,7 +630,16 @@ def download_history(
             params["startTime"] = start_ms
         if end_ms is not None:
             params["endTime"] = end_ms
-        for page in _fetch_pages(session, **params):
+        if mode == "demo":
+            pages = _fetch_pages_demo(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                **params,
+            )
+        else:
+            pages = _fetch_pages(session, **params)
+        for page in pages:
             for row in page:
                 _convert_exec_time(row, bool(template))
             rows.extend(page)
