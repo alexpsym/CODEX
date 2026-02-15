@@ -3935,9 +3935,17 @@ async def _place_oanda_order(
     order_id = _extract_oanda_order_id(result)
     limit_cancel_offset, limit_cancel_pct = _parse_limit_cancel_settings(payload)
     pending_id = str(payload.get("pending_webhook_id") or "").strip()
+    if not pending_id:
+        # Backwards compatibility: older TradingView alerts may not include
+        # pending_webhook_id. Infer the deterministic id used by
+        # oanda-calculator-clone when track_pending=yes.
+        safe_symbol = "".join(ch for ch in instrument if ch.isalnum() or ch in "_-")
+        safe_side = "".join(ch for ch in action if ch.isalnum() or ch in "_-")
+        safe_ot = "".join(ch for ch in order_type if ch.isalnum() or ch in "_-")
+        pending_id = f"calc_oanda_{account}_{safe_symbol}_{safe_side}_{safe_ot}"
     if pending_id:
         # Mark the local pending webhook as triggered/consumed. Do not convert it into a broker order.
-        _update_pending_webhook(
+        updated = _update_pending_webhook(
             pending_id,
             {
                 "status": "TRIGGERED",
@@ -3952,7 +3960,8 @@ async def _place_oanda_order(
                 "limit_cancel_offset_pct": limit_cancel_pct,
             },
         )
-        _schedule_dropbox_upload_state_backup()
+        if updated:
+            _schedule_dropbox_upload_state_backup()
 
     if (
         order_type == "limit"
