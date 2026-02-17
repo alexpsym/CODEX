@@ -209,14 +209,24 @@ def _fetch_pages(session: HTTP, **params: Any) -> Generator[List[Dict[str, Any]]
             break
 
 
-def _bybit_make_query(params: Dict[str, Any]) -> str:
-    items = []
+def _bybit_make_query(params: Dict[str, Any]) -> tuple[str, list[tuple[str, str]]]:
+    """Build a query string and an ordered params list.
+
+    Bybit verifies the signature using the exact queryString that arrives.
+    Therefore the ordering used for signing must match the ordering used
+    in the actual request.
+    """
+
+    ordered: list[tuple[str, str]] = []
     for key in sorted(params.keys()):
-        value = params[key]
+        value = params.get(key)
         if value is None:
             continue
-        items.append(f"{key}={urllib.parse.quote(str(value), safe='')}")
-    return "&".join(items)
+        ordered.append((str(key), str(value)))
+
+    # Use urlencode so encoding matches what requests will send.
+    query = urllib.parse.urlencode(ordered, safe="")
+    return query, ordered
 
 
 def _bybit_signed_get_v5(
@@ -230,7 +240,7 @@ def _bybit_signed_get_v5(
 ) -> Dict[str, Any]:
     """Signed V5 GET request for environments pybit cannot target (e.g. api-demo)."""
     timestamp = str(int(time.time() * 1000))
-    query = _bybit_make_query(params)
+    query, ordered_params = _bybit_make_query(params)
     origin = f"{timestamp}{api_key}{recv_window}{query}"
     signature = hmac.new(api_secret.encode(), origin.encode(), hashlib.sha256).hexdigest()
     headers = {
@@ -241,7 +251,8 @@ def _bybit_signed_get_v5(
         "X-BAPI-SIGN-TYPE": "2",
     }
     url = f"{base_url.rstrip('/')}{path}"
-    resp = requests.get(url, headers=headers, params=params, timeout=15)
+    # IMPORTANT: send params in the same order used to build the signature.
+    resp = requests.get(url, headers=headers, params=ordered_params, timeout=15)
     resp.raise_for_status()
     data = resp.json()
     if (data or {}).get("retCode") not in (0, "0", None):
