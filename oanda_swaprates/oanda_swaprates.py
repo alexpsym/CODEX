@@ -117,10 +117,52 @@ def _read_watchlist() -> List[str]:
 
 def _resolve_instruments() -> List[str]:
     raw = (os.getenv("OANDA_SWAP_INSTRUMENTS") or os.getenv("OANDA_INSTRUMENTS") or "").strip()
+
+    def clean_token(t: str) -> str:
+        # remove common junk from env formatting
+        t = t.strip().strip('"').strip("'")
+        t = t.strip("[](){}")
+        return _normalize_symbol(t)
+
+    fx_re = re.compile(r"^[A-Z]{3}_[A-Z]{3}$")  # FX only
+
+    # 1) env var list (supports JSON array or CSV)
+    tokens: List[str] = []
     if raw:
-        tokens = [t for t in re.split(r"[\s,]+", raw) if t]
-        return [_normalize_symbol(t) for t in tokens if _normalize_symbol(t)]
-    return _read_watchlist()
+        if raw.lstrip().startswith("["):
+            try:
+                arr = json.loads(raw)
+                if isinstance(arr, list):
+                    tokens = [str(x) for x in arr]
+            except Exception:
+                tokens = []
+        if not tokens:
+            tokens = [t for t in re.split(r"[,\s]+", raw) if t]
+
+        out: List[str] = []
+        seen = set()
+        for t in tokens:
+            sym = clean_token(t)
+            if not sym or sym in seen:
+                continue
+            if not fx_re.match(sym):
+                continue  # skip non-FX so we don't 400 the whole request
+            seen.add(sym)
+            out.append(sym)
+        return out
+
+    # 2) fallback: watchlist (filter FX only)
+    out: List[str] = []
+    seen = set()
+    for item in _read_watchlist():
+        sym = clean_token(item)
+        if not sym or sym in seen:
+            continue
+        if not fx_re.match(sym):
+            continue
+        seen.add(sym)
+        out.append(sym)
+    return out
 
 
 @dataclass(frozen=True)
