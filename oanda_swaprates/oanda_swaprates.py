@@ -39,6 +39,7 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 from requests.adapters import HTTPAdapter
+from tabulate import tabulate
 from urllib3.util.retry import Retry
 
 
@@ -242,57 +243,39 @@ def fetch_swap_rates(
     return out
 
 
-def _fmt_pct(x: Optional[float]) -> str:
-    if x is None:
-        return "-"
-    return f"{x:.8f} ({x * 100:.4f}%)"
-
-
 def _print_table(rates: List[SwapRate], *, top_n: Optional[int] = None) -> None:
+    def pct(x: Optional[float]) -> str:
+        if x is None:
+            return "-"
+        return f"{x:.8f} ({x*100:.3f}%)"
+
     rows = []
     for r in rates:
         spread = r.spread
-        rows.append(
-            (
-                r.instrument,
-                _fmt_pct(r.long_rate),
-                _fmt_pct(r.short_rate),
-                "-" if spread is None else f"{spread:.8f} ({spread * 100:.4f}%)",
-                ",".join(r.days_of_week) if r.days_of_week else "-",
-            )
-        )
+        rows.append([
+            r.instrument,
+            pct(r.long_rate),
+            pct(r.short_rate),
+            "-" if spread is None else f"{spread:.8f} ({spread*100:.3f}%)",
+            ",".join(r.days_of_week) if r.days_of_week else "-",
+        ])
 
-    def sort_key(row: Tuple[str, str, str, str, str]) -> float:
-        spread_str = row[3]
-        if spread_str == "-":
+    # sort by abs(spread) desc (missing spread last)
+    def key(row):
+        s = row[3]
+        if s == "-":
             return -1.0
         try:
-            return abs(float(spread_str.split()[0]))
+            return abs(float(s.split()[0]))
         except Exception:
             return -1.0
 
-    rows.sort(key=sort_key, reverse=True)
+    rows.sort(key=key, reverse=True)
     if top_n is not None and top_n > 0:
         rows = rows[:top_n]
 
-    header = ("Instrument", "LongRate", "ShortRate", "Long-Short", "FinancingDays")
-    widths = [len(h) for h in header]
-    for row in rows:
-        for i, cell in enumerate(row):
-            widths[i] = max(widths[i], len(str(cell)))
-
-    def line(sep: str = "-") -> str:
-        return "+" + "+".join(sep * (w + 2) for w in widths) + "+"
-
-    def fmt_row(cols: Tuple[str, ...]) -> str:
-        return "|" + "|".join(f" {str(c):<{widths[i]}} " for i, c in enumerate(cols)) + "|"
-
-    print(line("-"))
-    print(fmt_row(header))
-    print(line("="))
-    for row in rows:
-        print(fmt_row(tuple(str(c) for c in row)))
-    print(line("-"))
+    headers = ["Instrument", "Long", "Short", "Long-Short", "Days"]
+    print(tabulate(rows, headers=headers, tablefmt="grid", stralign="right", disable_numparse=True))
 
 
 def main() -> int:
