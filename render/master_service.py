@@ -325,19 +325,6 @@ async def _bybit_resolve_and_fetch_specs(query: str) -> Optional[Dict[str, objec
     except Exception:
         ticker = None
 
-    funding = None
-    if category in {"linear", "inverse"}:
-        try:
-            payload = await _get(
-                "/v5/market/funding/history",
-                {"category": category, "symbol": symbol, "limit": 1},
-            )
-            items = (payload.get("result") or {}).get("list") or []
-            if isinstance(items, list) and items and isinstance(items[0], dict):
-                funding = items[0]
-        except Exception:
-            funding = None
-
     specs = {
         "source": "bybit",
         "query": query,
@@ -357,10 +344,10 @@ async def _bybit_resolve_and_fetch_specs(query: str) -> Optional[Dict[str, objec
         "fundingRate": (ticker or {}).get("fundingRate"),
         "nextFundingTime": (ticker or {}).get("nextFundingTime"),
         "openInterest": (ticker or {}).get("openInterest"),
+        "openInterestValue": (ticker or {}).get("openInterestValue"),
         "volume24h": (ticker or {}).get("volume24h"),
         "turnover24h": (ticker or {}).get("turnover24h"),
-        "fundingHistory.fundingRate": (funding or {}).get("fundingRate"),
-        "fundingHistory.fundingRateTimestamp": (funding or {}).get("fundingRateTimestamp"),
+        "scannerVolume24h": (ticker or {}).get("turnover24h"),
     }
     return {k: v for k, v in specs.items() if v is not None}
 
@@ -1458,7 +1445,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         .script-btn:hover { background: #0f172a; }
         .script-btn.compact { width: auto; min-width: 190px; padding: 0.75rem 0.9rem; }
-        #instrument-specs-widget .specs-row{
+        #instrument-specs-widget .instrument-specs-row{
             display: flex;
             gap: 0.65rem;
             align-items: center;
@@ -1500,19 +1487,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         .status-pill.running { background: #14532d; color: #bbf7d0; border-color: #22c55e55; }
         .status-pill.stopped { background: #7f1d1d; color: #fecdd3; border-color: #ef444455; }
-        .status-dot {
-            width: 10px;
-            height: 10px;
-            border-radius: 999px;
-            border: 1px solid #334155;
-            flex: 0 0 auto;
-            background: #ef4444;
-            box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.18);
+        .status-dot{
+            width:12px;
+            height:12px;
+            border-radius:999px;
+            display:inline-block;
+            flex:0 0 12px;
+            margin-left:auto;
+            box-shadow:0 0 0 1px rgba(255,255,255,.12) inset;
         }
-        .status-dot.running {
-            background: #22c55e;
-            border-color: #22c55e;
-            box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.2);
+        .status-dot.running{
+            background:#22c55e;
+            box-shadow:0 0 0 1px #14532d inset, 0 0 8px rgba(34,197,94,.35);
+        }
+        .status-dot.stopped{
+            background:#ef4444;
+            box-shadow:0 0 0 1px #7f1d1d inset, 0 0 8px rgba(239,68,68,.28);
         }
         .empty-state { color: #94a3b8; margin-top: 0.9rem; }
 
@@ -1635,10 +1625,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         <div class="panel-sub">Type a symbol (e.g. eurusd, BTCUSDT) and load full specs in a new tab.</div>
                     </div>
                 </div>
-                <div class="specs-row">
-                    <input id="instrument-specs-input" type="text" placeholder="eurusd" />
-                    <button type="button" id="instrument-specs-go">Confirm</button>
-                </div>
+                <form id="instrument-specs-form" class="instrument-specs-row" action="/instrument-specs" method="get" target="_blank">
+                    <input id="instrument-specs-input" name="q" type="text" placeholder="eurusd / BTCUSDT" />
+                    <button id="instrument-specs-go" type="submit">Confirm</button>
+                </form>
             </section>
 
             <section class=\"panel top-panel\" id=\"watchlist-widget\">

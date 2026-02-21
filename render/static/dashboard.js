@@ -24,7 +24,7 @@
   const watchlistCount = document.getElementById('watchlist-count');
 
   const instrumentSpecsInput = document.getElementById('instrument-specs-input');
-  const instrumentSpecsGo = document.getElementById('instrument-specs-go');
+  const instrumentSpecsForm = document.getElementById('instrument-specs-form');
 
   let scriptsInFlight = null;
   let ooInFlight = null;
@@ -447,19 +447,9 @@
   refreshBtn?.addEventListener('click', () => { refreshScripts(); refreshOpenOrders(); });
   ooRefreshBtn?.addEventListener('click', () => refreshOpenOrders());
 
-  const openInstrumentSpecs = () => {
+  instrumentSpecsForm?.addEventListener('submit', (event) => {
     const q = String(instrumentSpecsInput?.value || '').trim();
-    if (!q) return;
-    const url = `/instrument-specs?q=${encodeURIComponent(q)}`;
-    const opened = window.open(url, '_blank', 'noopener');
-    if (!opened) window.location.href = url;
-  };
-
-  instrumentSpecsGo?.addEventListener('click', openInstrumentSpecs);
-  instrumentSpecsInput?.addEventListener('keydown', (event) => {
-    if (event.key !== 'Enter') return;
-    event.preventDefault();
-    openInstrumentSpecs();
+    if (!q) event.preventDefault();
   });
 
 
