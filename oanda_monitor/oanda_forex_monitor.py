@@ -293,6 +293,7 @@ def evaluate_custom_alerts(
                 dq.popleft()
 
     changed = False
+    fired_price_alert_ids: set[str] = set()
     for alert in enabled_alerts:
         symbol = alert.get("symbol")
         if not symbol or symbol not in prices:
@@ -317,6 +318,7 @@ def evaluate_custom_alerts(
             if condition_met and armed and can_trigger:
                 st["armed"] = False
                 st["last_trigger_at"] = now
+                fired_price_alert_ids.add(alert_id)
                 changed = True
                 msg = f"{symbol} PRICE {direction.upper()} {target} | now {current}"
                 log(msg)
@@ -359,6 +361,22 @@ def evaluate_custom_alerts(
         elif not triggered and not armed:
             st["armed"] = True
             changed = True
+
+    if fired_price_alert_ids:
+        original_count = len(alerts)
+        alerts[:] = [
+            alert
+            for alert in alerts
+            if str(alert.get("id")) not in fired_price_alert_ids or alert.get("kind") != "price"
+        ]
+        if len(alerts) != original_count:
+            for fired_id in fired_price_alert_ids:
+                alert_state.pop(fired_id, None)
+            changed = True
+            log(
+                f"Auto-removed {original_count - len(alerts)} fired fixed-price alert(s): "
+                f"{', '.join(sorted(fired_price_alert_ids))}"
+            )
 
     return changed
 
