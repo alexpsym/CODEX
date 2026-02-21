@@ -1400,17 +1400,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <style>
         :root { color-scheme: light dark; }
         body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
-        h1 { margin: 0; text-align: center; }
         h2 { margin: 0; font-size: 1.35rem; }
         .meta { color: #94a3b8; margin: 0.75rem 0 1.5rem; line-height: 1.5; }
         .home { max-width: 1400px; margin: 0 auto; }
-        .nav-bar { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
         button { padding: 0.55rem 0.9rem; border-radius: 10px; border: none; cursor: pointer; font-weight: 800; }
         .secondary { background: #1f2937; color: #cbd5e1; }
         .refresh { background: #3b82f6; color: #eaf2ff; }
-
-        .toolbar { display: flex; gap: 0.75rem; align-items: center; justify-content: center; margin-bottom: 1.75rem; flex-wrap: wrap; }
-        #status { color: #94a3b8; }
 
         .panel { background: #111827; border: 1px solid #1f2937; border-radius: 16px; padding: 1.25rem; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
         .panel-header { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; margin-bottom: 0.75rem; }
@@ -1505,6 +1500,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         .status-pill.running { background: #14532d; color: #bbf7d0; border-color: #22c55e55; }
         .status-pill.stopped { background: #7f1d1d; color: #fecdd3; border-color: #ef444455; }
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 999px;
+            border: 1px solid #334155;
+            flex: 0 0 auto;
+            background: #ef4444;
+            box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.18);
+        }
+        .status-dot.running {
+            background: #22c55e;
+            border-color: #22c55e;
+            box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.2);
+        }
         .empty-state { color: #94a3b8; margin-top: 0.9rem; }
 
         .table-wrap { overflow-x: auto; border-radius: 12px; border: 1px solid #1f2937; background: #0b1220; }
@@ -1603,21 +1612,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </style>
 </head>
 <body>
-    <div class=\"nav-bar\">
-        <button class=\"secondary\" id=\"nav-back\">Back</button>
-        <button class=\"secondary\" id=\"nav-forward\">Forward</button>
-        <button class=\"secondary\" id=\"nav-home\">Dashboard</button>
-    </div>
-
     <div class=\"home\">
-        <h1>Render Master Control</h1>
-        <p class=\"meta\">Click a script to open its page (start/stop, logs, and settings if available). Use Open Orders / Positions for a live view of OANDA + Bybit open activity.</p>
-
-        <div class=\"toolbar\">
-            <button class=\"refresh\" id=\"refresh-btn\">Refresh</button>
-            <span id=\"status\">Loading scripts...</span>
-        </div>
-
         <div class="layout">
             <aside class="panel sidebar">
                 <div class="category-title">Forex</div>
