@@ -2247,12 +2247,19 @@ def _normalize_oanda_symbol_query(user_value: str, available_instruments: Option
 
 
 def _oanda_base_url() -> str:
-    return (
+    raw = (
         os.getenv("OANDA_BASE_URL")
         or os.getenv("OANDA_URL")
         or os.getenv("OANDA_API_URL")
-        or "https://api-fxtrade.oanda.com/v3"
-    )
+        or ""
+    ).strip()
+    if raw:
+        return _normalize_oanda_base_url(raw)
+
+    env = (os.getenv("OANDA_ENV") or "live").strip().lower()
+    if env in {"practice", "demo", "test"}:
+        return "https://api-fxpractice.oanda.com"
+    return "https://api-fxtrade.oanda.com"
 
 
 def _normalize_oanda_base_url(value: Optional[str]) -> str:
