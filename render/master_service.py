@@ -7,9 +7,11 @@ import base64
 import hashlib
 import hmac
 import html
+import io
 import json
 import logging
 import os
+import re
 import socket
 import sys
 import time
@@ -27,6 +29,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 import httpx
+import requests
+from PIL import Image, ImageDraw, ImageFont
 from starlette.responses import RedirectResponse
 
 from bybit_credentials import resolve_bybit_credentials_for
@@ -78,6 +82,16 @@ SKIP_DIRS = {
 }
 SKIP_DIRS_NORMALIZED = {name.casefold() for name in SKIP_DIRS}
 SKIP_FILES = {"__init__.py"}
+HIDDEN_SCRIPTS = {
+    "oanda_swap_rates",
+    "oanda-swap-rates",
+    "oanda-swap-rates-clone",
+    "oanda_swap_rates_clone",
+    "swap_rates_oanda",
+    "swap-rates-oanda",
+    "swap_rates",
+    "swap-rates",
+}
 MAX_LOG_LINES = 400
 PAYSLIP_REPORT_NAME = "audit_report.pdf"
 PAYSLIP_UPLOAD_ROOT = BASE_DIR / "render" / "uploads" / "payslip"
@@ -180,6 +194,296 @@ def _normalize_watchlist(items: Iterable[object]) -> List[str]:
         if len(normalized) >= WATCHLIST_MAX_ITEMS:
             break
     return normalized
+
+
+def _norm_symbol(s: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "", (s or "")).upper()
+
+
+def _normalize_instrument_key(value: object) -> str:
+    return _norm_symbol(str(value or ""))
+
+
+def _oanda_aliases(name: str, display_name: Optional[str] = None) -> set[str]:
+    aliases = set()
+    if name:
+        aliases.add(name)
+        aliases.add(name.replace("_", ""))
+        aliases.add(name.replace("_", "/"))
+    if display_name:
+        aliases.add(display_name)
+        aliases.add(display_name.replace("/", ""))
+        aliases.add(display_name.replace("/", "_"))
+        aliases.add(display_name.replace(" ", ""))
+    return {_norm_symbol(x) for x in aliases if x}
+
+
+def resolve_oanda_instrument(user_query: str, instruments: List[Dict[str, object]]) -> Optional[Dict[str, object]]:
+    qn = _norm_symbol(user_query)
+    if not qn:
+        return None
+
+    for inst in instruments:
+        name = str(inst.get("name") or "")
+        display = str(inst.get("displayName") or "")
+        if qn in _oanda_aliases(name, display):
+            return inst
+
+    for inst in instruments:
+        name = str(inst.get("name") or "")
+        display = str(inst.get("displayName") or "")
+        aliases = _oanda_aliases(name, display)
+        if any(qn in a or a in qn for a in aliases):
+            return inst
+
+    return None
+
+
+def _oanda_base_url() -> str:
+    env = (os.getenv("OANDA_ENV") or "live").strip().lower()
+    if env in {"practice", "demo", "test"}:
+        return "https://api-fxpractice.oanda.com"
+    return "https://api-fxtrade.oanda.com"
+
+
+def _oanda_token() -> str:
+    return (os.getenv("OANDA_API_KEY") or os.getenv("OANDA_ACCESS_TOKEN") or "").strip()
+
+
+BYBIT_BASE = "https://api.bybit.com"
+
+
+def _bybit_get(path: str, params: Dict[str, object]) -> Dict[str, object]:
+    response = requests.get(f"{BYBIT_BASE}{path}", params=params, timeout=10)
+    response.raise_for_status()
+    return response.json()
+
+
+def _bybit_avg_7d_turnover_usd(symbol: str, category: str = "linear") -> Optional[float]:
+    try:
+        end_ms = int(time.time() * 1000)
+        data = _bybit_get(
+            "/v5/market/kline",
+            {
+                "category": category,
+                "symbol": symbol,
+                "interval": "D",
+                "end": end_ms,
+                "limit": 10,
+            },
+        )
+        rows = (data.get("result") or {}).get("list") or []
+        if not rows:
+            return None
+
+        turnovers: List[float] = []
+        for row in rows[:7]:
+            if isinstance(row, list) and len(row) >= 7:
+                try:
+                    turnovers.append(float(row[6]))
+                except Exception:
+                    continue
+        if not turnovers:
+            return None
+        return sum(turnovers) / len(turnovers)
+    except Exception:
+        return None
+
+
+async def _oanda_resolve_and_fetch_specs(query: str) -> Optional[Dict[str, object]]:
+    token = _oanda_token()
+    account_id = (os.getenv("OANDA_ACCOUNT_ID") or "").strip()
+    if not token or not account_id:
+        return None
+
+    want_key = _normalize_instrument_key(query)
+    if not want_key:
+        return None
+
+    url = f"{_oanda_base_url()}/v3/accounts/{account_id}/instruments"
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(timeout=20) as client:
+        res = await client.get(url, headers=headers)
+    if res.status_code != 200:
+        return None
+    data = res.json() or {}
+    instruments = data.get("instruments") or []
+    if not isinstance(instruments, list):
+        return None
+
+    inst_rows = [inst for inst in instruments if isinstance(inst, dict)]
+    matched = resolve_oanda_instrument(query, inst_rows)
+    if not matched:
+        return None
+
+    financing = matched.get("financing") or {}
+    return {
+        "source": "oanda",
+        "query": query,
+        "resolved_symbol": matched.get("name"),
+        "type": matched.get("type"),
+        "displayName": matched.get("displayName"),
+        "pipLocation": matched.get("pipLocation"),
+        "displayPrecision": matched.get("displayPrecision"),
+        "tradeUnitsPrecision": matched.get("tradeUnitsPrecision"),
+        "minimumTradeSize": matched.get("minimumTradeSize"),
+        "maximumOrderUnits": matched.get("maximumOrderUnits"),
+        "marginRate": matched.get("marginRate"),
+        "financing.longRate": financing.get("longRate"),
+        "financing.shortRate": financing.get("shortRate"),
+        "financing.financingDaysOfWeek": financing.get("financingDaysOfWeek"),
+    }
+
+
+async def _bybit_resolve_and_fetch_specs(query: str) -> Optional[Dict[str, object]]:
+    want_key = _normalize_instrument_key(query)
+    if not want_key:
+        return None
+
+    creds = resolve_bybit_credentials_for("default")
+    base_url = creds.get("base_url") if isinstance(creds, dict) else None
+    base_url = base_url or BYBIT_BASE
+
+    async def _get(path: str, params: Dict[str, object]) -> Dict[str, object]:
+        async with httpx.AsyncClient(timeout=20) as client:
+            res = await client.get(f"{base_url}{path}", params=params)
+        res.raise_for_status()
+        return res.json()
+
+    async def _find_symbol_in_instruments(category: str) -> Optional[Dict[str, object]]:
+        cursor: Optional[str] = None
+        for _ in range(4):
+            params: Dict[str, object] = {"category": category, "limit": 1000}
+            if cursor:
+                params["cursor"] = cursor
+            payload = await _get("/v5/market/instruments-info", params)
+            result = payload.get("result") or {}
+            items = result.get("list") or []
+            if isinstance(items, list):
+                for inst in items:
+                    if not isinstance(inst, dict):
+                        continue
+                    if _normalize_instrument_key(inst.get("symbol")) == want_key:
+                        inst = dict(inst)
+                        inst["_category"] = category
+                        return inst
+            cursor = result.get("nextPageCursor")
+            if not cursor:
+                break
+        return None
+
+    resolved_inst = None
+    for cat in ("linear", "inverse", "spot"):
+        try:
+            resolved_inst = await _find_symbol_in_instruments(cat)
+        except Exception:
+            continue
+        if resolved_inst:
+            break
+    if not resolved_inst:
+        return None
+
+    category = str(resolved_inst.get("_category") or "")
+    symbol = str(resolved_inst.get("symbol") or "")
+
+    ticker = None
+    try:
+        payload = await _get("/v5/market/tickers", {"category": category, "symbol": symbol})
+        items = (payload.get("result") or {}).get("list") or []
+        if isinstance(items, list) and items and isinstance(items[0], dict):
+            ticker = items[0]
+    except Exception:
+        ticker = None
+
+    specs: Dict[str, object] = {
+        "source": "bybit",
+        "query": query,
+        "resolved_symbol": (ticker or {}).get("symbol") or symbol,
+        "category": category,
+        "lastPrice": (ticker or {}).get("lastPrice"),
+        "fundingRate": (ticker or {}).get("fundingRate"),
+        "nextFundingTime": (ticker or {}).get("nextFundingTime"),
+        "launchTime": resolved_inst.get("launchTime"),
+        "openInterest": (ticker or {}).get("openInterest"),
+        "openInterestValue": (ticker or {}).get("openInterestValue"),
+        "volume24h": (ticker or {}).get("volume24h"),
+        "turnover24h": (ticker or {}).get("turnover24h"),
+    }
+
+    avg7d = _bybit_avg_7d_turnover_usd(str((ticker or {}).get("symbol") or symbol), category)
+    if avg7d is not None:
+        specs["avg7dTurnoverUsd"] = avg7d
+
+    specs["_units"] = {
+        "fundingRate": "fraction",
+        "lastPrice": "price",
+        "launchTime": "timestamp_ms",
+        "nextFundingTime": "timestamp_ms",
+        "openInterest": "contracts",
+        "openInterestValue": "usd_value",
+        "volume24h": "base_units_24h",
+        "turnover24h": "usd_value_24h",
+        "avg7dTurnoverUsd": "usd_value_per_day_avg_7d",
+    }
+
+    return {k: v for k, v in specs.items() if v is not None}
+
+
+async def _fetch_instrument_specs(query: str) -> Dict[str, object]:
+    q = str(query or "").strip()
+    if not q:
+        raise HTTPException(status_code=400, detail="query is required")
+
+    oanda = await _oanda_resolve_and_fetch_specs(q)
+    if oanda:
+        return oanda
+
+    bybit = await _bybit_resolve_and_fetch_specs(q)
+    if bybit:
+        return bybit
+
+    raise HTTPException(status_code=404, detail=f"Instrument not found for query: {q}")
+
+
+def _specs_to_lines(specs: Dict[str, object]) -> List[str]:
+    lines: List[str] = []
+    for k in sorted(specs.keys()):
+        v = specs[k]
+        if isinstance(v, (dict, list)):
+            lines.append(f"{k}: {json.dumps(v, ensure_ascii=False)}")
+        else:
+            lines.append(f"{k}: {v}")
+    return lines
+
+
+def _render_specs_jpg_bytes(specs: Dict[str, object]) -> bytes:
+    lines = ["Instrument Specs", ""] + _specs_to_lines(specs)
+    try:
+        font = ImageFont.truetype("DejaVuSansMono.ttf", 16)
+    except Exception:
+        font = ImageFont.load_default()
+
+    wrapped: List[str] = []
+    for line in lines:
+        if len(line) <= 120:
+            wrapped.append(line)
+            continue
+        while line:
+            wrapped.append(line[:120])
+            line = line[120:]
+
+    pad = 24
+    line_h = 22
+    max_w = 1400
+    height = pad * 2 + line_h * (len(wrapped) + 1)
+    img = Image.new("RGB", (max_w, max(400, height)), (11, 18, 32))
+    draw = ImageDraw.Draw(img)
+    for idx, line in enumerate(wrapped):
+        draw.text((pad, pad + idx * line_h), line, font=font, fill=(226, 232, 240))
+
+    out = io.BytesIO()
+    img.save(out, format="JPEG", quality=92)
+    return out.getvalue()
 
 
 def _load_watchlist() -> List[str]:
@@ -633,6 +937,8 @@ def discover_scripts() -> List[ManagedScript]:
         if not app_dir.is_dir():
             continue
         if app_dir.name.casefold() in SKIP_DIRS_NORMALIZED or app_dir.name.startswith("."):
+            continue
+        if app_dir.name.casefold() in HIDDEN_SCRIPTS:
             continue
 
         entry_path: Optional[Path] = None
@@ -1158,57 +1464,49 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <style>
         :root { color-scheme: light dark; }
         body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
-        h1 { margin: 0; text-align: center; }
         h2 { margin: 0; font-size: 1.35rem; }
         .meta { color: #94a3b8; margin: 0.75rem 0 1.5rem; line-height: 1.5; }
-        .home { max-width: 1120px; margin: 0 auto; }
-        .nav-bar { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+        .home { max-width: 1400px; margin: 0 auto; }
         button { padding: 0.55rem 0.9rem; border-radius: 10px; border: none; cursor: pointer; font-weight: 800; }
         .secondary { background: #1f2937; color: #cbd5e1; }
         .refresh { background: #3b82f6; color: #eaf2ff; }
-
-        .toolbar { display: flex; gap: 0.75rem; align-items: center; justify-content: center; margin-bottom: 1.75rem; flex-wrap: wrap; }
-        #status { color: #94a3b8; }
 
         .panel { background: #111827; border: 1px solid #1f2937; border-radius: 16px; padding: 1.25rem; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
         .panel-header { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; margin-bottom: 0.75rem; }
         .panel-sub { color: #94a3b8; margin-top: 0.25rem; font-size: 0.95rem; line-height: 1.4; }
         .oo-toolbar { display:flex; gap:0.6rem; align-items:center; }
 
+        .layout{
+            display: grid;
+            grid-template-columns: 260px 1fr;
+            gap: 1.25rem;
+            margin-top: 1.25rem;
+            align-items: start;
+        }
+        @media (max-width: 980px){
+            .layout{ grid-template-columns: 1fr; }
+        }
+        .sidebar{
+            position: sticky;
+            top: 1rem;
+            max-height: calc(100vh - 2rem);
+            overflow: auto;
+            padding: 1rem;
+        }
         .category-title{
-            margin: 1.25rem 0 1rem;
-            text-align: center;
-            font-size: 2.35rem;
+            margin: 0.6rem 0 0.5rem;
+            text-align: left;
+            font-size: 1.05rem;
             font-weight: 900;
             letter-spacing: 0.2px;
             color: #e2e8f0;
-        }
-        .category-grid{
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 1.25rem;
-            margin-top: 1.25rem;
-        }
-        @media (max-width: 920px){
-            .category-grid{ grid-template-columns: 1fr; }
-        }
-        .category{
-            width: 100%;
-        }
-        .category-wide{
-            margin-top: 1.5rem;
         }
         .script-stack{
             display: flex;
             flex-direction: column;
             gap: 0.65rem;
         }
-        .script-row{
-            display: flex;
-            flex-wrap: wrap;
-            gap: 0.65rem;
-        }
-
+        
         .script-btn {
             width: 100%;
             display: flex;
@@ -1224,6 +1522,32 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         .script-btn:hover { background: #0f172a; }
         .script-btn.compact { width: auto; min-width: 190px; padding: 0.75rem 0.9rem; }
+        #instrument-specs-widget .instrument-specs-row{
+            display: flex;
+            gap: 0.65rem;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        #instrument-specs-widget input{
+            flex: 1;
+            min-width: 200px;
+            border-radius: 10px;
+            border: 1px solid #334155;
+            background: #0b1220;
+            color: #e2e8f0;
+            padding: 8px 10px;
+            font-size: 0.95rem;
+        }
+        #instrument-specs-widget button{
+            border-radius: 10px;
+            border: 1px solid #334155;
+            background: #1f2937;
+            color: #e2e8f0;
+            font-weight: 900;
+            padding: 8px 12px;
+            cursor: pointer;
+        }
+        #instrument-specs-widget button:hover{ background: #334155; }
         .script-name { font-weight: 900; }
         .status-pill {
             display: inline-flex;
@@ -1240,6 +1564,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         .status-pill.running { background: #14532d; color: #bbf7d0; border-color: #22c55e55; }
         .status-pill.stopped { background: #7f1d1d; color: #fecdd3; border-color: #ef444455; }
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            min-width: 10px;
+            border-radius: 999px;
+            display: inline-block;
+            margin-left: 10px;
+            box-shadow: 0 0 0 1px rgba(255,255,255,0.12) inset;
+        }
+        .status-dot.running { background: #22c55e; }
+        .status-dot.stopped { background: #ef4444; }
         .empty-state { color: #94a3b8; margin-top: 0.9rem; }
 
         .table-wrap { overflow-x: auto; border-radius: 12px; border: 1px solid #1f2937; background: #0b1220; }
@@ -1338,22 +1673,34 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </style>
 </head>
 <body>
-    <div class=\"nav-bar\">
-        <button class=\"secondary\" id=\"nav-back\">Back</button>
-        <button class=\"secondary\" id=\"nav-forward\">Forward</button>
-        <button class=\"secondary\" id=\"nav-home\">Dashboard</button>
-    </div>
-
     <div class=\"home\">
-        <h1>Render Master Control</h1>
-        <p class=\"meta\">Click a script to open its page (start/stop, logs, and settings if available). Use Open Orders / Positions for a live view of OANDA + Bybit open activity.</p>
+        <div class="layout">
+            <aside class="panel sidebar">
+                <div class="category-title">Forex</div>
+                <div id="forex-scripts" class="script-stack"></div>
 
-        <div class=\"toolbar\">
-            <button class=\"refresh\" id=\"refresh-btn\">Refresh</button>
-            <span id=\"status\">Loading scripts...</span>
-        </div>
+                <div class="category-title" style="margin-top:1rem">Crypto</div>
+                <div id="crypto-scripts" class="script-stack"></div>
 
-        <div class=\"top-stack\">
+                <div class="category-title" style="margin-top:1rem">Other</div>
+                <div id="other-scripts" class="script-stack"></div>
+            </aside>
+
+            <main>
+            <div class="top-stack">
+
+            <section class="panel" id="instrument-specs-widget">
+                <div class="panel-header">
+                    <div>
+                        <h2>Instrument Specs</h2>
+                        <div class="panel-sub">Type a symbol (e.g. eurusd, BTCUSDT) and load full specs in a new tab.</div>
+                    </div>
+                </div>
+                <form id="instrument-specs-form" class="instrument-specs-row" action="/instrument-specs" method="get" target="_blank">
+                    <input id="instrument-specs-input" name="q" type="text" placeholder="eurusd / BTCUSDT" />
+                    <button id="instrument-specs-go" type="submit">Confirm</button>
+                </form>
+            </section>
 
             <section class=\"panel top-panel\" id=\"watchlist-widget\">
                 <div class=\"panel-header\">
@@ -1432,31 +1779,63 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <ul></ul>
                 </div>
             </section></div>
-
-        <!-- CATEGORIES (your sketch layout) -->
-        <div class=\"category-grid\">
-            <section class=\"category\">
-                <div class=\"category-title\">Forex</div>
-                <div id=\"forex-scripts\" class=\"script-stack\"></div>
-            </section>
-
-            <section class=\"category\">
-                <div class=\"category-title\">Crypto</div>
-                <div id=\"crypto-scripts\" class=\"script-stack\"></div>
-            </section>
+            </main>
         </div>
-
-        <section class=\"category category-wide\">
-            <div class=\"category-title\">Other</div>
-            <div id=\"other-scripts\" class=\"script-row\"></div>
-        </section>
     </div>
 
     <script src=\"/static/dashboard.js\"></script>
 </body>
 </html>"""
 
+INSTRUMENT_SPECS_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Instrument Specs</title>
+    <style>
+        :root { color-scheme: light dark; }
+        body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
+        .wrap { max-width: 1200px; margin: 0 auto; }
+        h1 { margin: 0 0 0.75rem; }
+        .meta { color: #94a3b8; margin: 0 0 1.25rem; line-height: 1.5; }
+        .bar { display:flex; gap:0.6rem; align-items:center; margin-bottom: 1rem; }
+        input { flex: 1; min-width: 240px; border-radius: 10px; border: 1px solid #334155; background: #0b1220; color: #e2e8f0; padding: 8px 10px; font-size: 0.95rem; }
+        button, .btn { background: #1f2937; color: #e2e8f0; border: 1px solid #334155; border-radius: 10px; padding: 8px 12px; cursor: pointer; font-weight: 900; text-decoration:none; display:inline-flex; align-items:center; }
+        button:hover, .btn:hover { background: #334155; }
+        .panel { background: #111827; border: 1px solid #1f2937; border-radius: 16px; padding: 1.25rem; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
+        .table-wrap { overflow-x: auto; border-radius: 12px; border: 1px solid #1f2937; background: #0b1220; }
+        table { width: 100%; border-collapse: collapse; min-width: 720px; }
+        th, td { text-align:left; padding:0.6rem 0.75rem; border-bottom:1px solid #1f2937; font-size:0.9rem; }
+        th { background:#0f172a; color:#cbd5e1; position:sticky; top:0; z-index:1; }
+        #err { color:#fca5a5; white-space: pre-wrap; }
+    </style>
+</head>
+<body>
+<div class="wrap">
+    <h1>Instrument Specs</h1>
+    <p class="meta">Type a symbol (e.g. eurusd, BTCUSDT). The tool auto-detects OANDA/Bybit and returns available specs.</p>
 
+    <div class="bar">
+      <input id="q" type="text" placeholder="eurusd" />
+      <button id="load" type="button">Load</button>
+      <a class="btn" id="download" href="#">Download JPG</a>
+      <a class="btn" href="/">Back</a>
+    </div>
+
+    <section class="panel">
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Field</th><th>Value</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <div id="err"></div>
+    </section>
+</div>
+<script src="/static/instrument_specs.js"></script>
+</body>
+</html>"""
 
 CATEGORY_TEMPLATE = """<!DOCTYPE html>
 <html lang=\"en\">
@@ -5178,6 +5557,30 @@ PAYSLIP_AUDIT_TEMPLATE = """<!DOCTYPE html>
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
     return HTML_TEMPLATE.replace("{asset_version}", ASSET_VERSION)
+
+
+@app.get("/instrument-specs", response_class=HTMLResponse)
+async def instrument_specs_page() -> str:
+    return INSTRUMENT_SPECS_TEMPLATE
+
+
+@app.get("/api/instrument-specs")
+async def api_instrument_specs(query: str) -> JSONResponse:
+    specs = await _fetch_instrument_specs(query)
+    return JSONResponse(specs)
+
+
+@app.get("/api/instrument-specs.jpg")
+async def api_instrument_specs_jpg(query: str) -> Response:
+    specs = await _fetch_instrument_specs(query)
+    jpg = _render_specs_jpg_bytes(specs)
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(specs.get("resolved_symbol") or query or "instrument").strip("_"))
+    filename = f"instrument_specs_{safe or 'instrument'}.jpg"
+    return Response(
+        content=jpg,
+        media_type="image/jpeg",
+        headers={"Content-Disposition": f"attachment; filename=\"{filename}\""},
+    )
 
 
 @app.get("/open-orders", response_class=HTMLResponse)
