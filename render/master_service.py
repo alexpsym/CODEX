@@ -270,7 +270,40 @@ def _oanda_base_url() -> str:
 
 
 def _oanda_token() -> str:
-    return (os.getenv("OANDA_API_KEY") or os.getenv("OANDA_ACCESS_TOKEN") or "").strip()
+    env = (os.getenv("OANDA_ENV") or "live").strip().lower()
+    if env in {"practice", "demo", "test"}:
+        return (
+            os.getenv("OANDA_API_KEY_DEMO")
+            or os.getenv("OANDA_ACCESS_TOKEN_DEMO")
+            or os.getenv("OANDA_API_KEY_PRACTICE")
+            or os.getenv("OANDA_ACCESS_TOKEN_PRACTICE")
+            or os.getenv("OANDA_API_KEY")
+            or os.getenv("OANDA_ACCESS_TOKEN")
+            or ""
+        ).strip()
+    return (
+        os.getenv("OANDA_API_KEY")
+        or os.getenv("OANDA_ACCESS_TOKEN")
+        or os.getenv("OANDA_API_KEY_LIVE")
+        or os.getenv("OANDA_ACCESS_TOKEN_LIVE")
+        or ""
+    ).strip()
+
+
+def _oanda_account_id_for_specs() -> str:
+    env = (os.getenv("OANDA_ENV") or "live").strip().lower()
+    if env in {"practice", "demo", "test"}:
+        return (
+            os.getenv("OANDA_ACCOUNT_ID_DEMO")
+            or os.getenv("OANDA_ACCOUNT_ID_PRACTICE")
+            or os.getenv("OANDA_ACCOUNT_ID")
+            or ""
+        ).strip()
+    return (
+        os.getenv("OANDA_ACCOUNT_ID")
+        or os.getenv("OANDA_ACCOUNT_ID_LIVE")
+        or ""
+    ).strip()
 
 
 BYBIT_BASE = "https://api.bybit.com"
@@ -315,8 +348,9 @@ def _bybit_avg_7d_turnover_usd(symbol: str, category: str = "linear") -> Optiona
 
 async def _oanda_resolve_and_fetch_specs(query: str) -> Optional[Dict[str, object]]:
     token = _oanda_token()
-    account_id = (os.getenv("OANDA_ACCOUNT_ID") or "").strip()
+    account_id = _oanda_account_id_for_specs()
     if not token or not account_id:
+        print(f"[instrument-specs] OANDA creds missing for env={os.getenv('OANDA_ENV', 'live')!r}")
         return None
 
     want_key = _normalize_instrument_key(query)
