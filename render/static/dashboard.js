@@ -23,6 +23,9 @@
   const watchlistStatus = document.getElementById('watchlist-status');
   const watchlistCount = document.getElementById('watchlist-count');
 
+  const instrumentSpecsInput = document.getElementById('instrument-specs-input');
+  const instrumentSpecsGo = document.getElementById('instrument-specs-go');
+
   let scriptsInFlight = null;
   let ooInFlight = null;
   let watchlistItems = [];
@@ -221,7 +224,7 @@
 
         renderList(forexList, mapped.filter((s) => s._cat === 'Forex'), false);
         renderList(cryptoList, mapped.filter((s) => s._cat === 'Crypto'), false);
-        renderList(otherList, mapped.filter((s) => s._cat === 'Other'), true);
+        renderList(otherList, mapped.filter((s) => s._cat === 'Other'), false);
 
         setStatus(`Updated ${new Date().toLocaleTimeString()}`);
       } catch (e) {
@@ -442,6 +445,20 @@
 
   refreshBtn?.addEventListener('click', () => { refreshScripts(); refreshOpenOrders(); });
   ooRefreshBtn?.addEventListener('click', () => refreshOpenOrders());
+
+  const openInstrumentSpecs = () => {
+    const q = String(instrumentSpecsInput?.value || '').trim();
+    if (!q) return;
+    const url = `/instrument-specs?q=${encodeURIComponent(q)}`;
+    window.open(url, '_blank', 'noopener');
+  };
+
+  instrumentSpecsGo?.addEventListener('click', openInstrumentSpecs);
+  instrumentSpecsInput?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    openInstrumentSpecs();
+  });
 
   document.getElementById('nav-back')?.addEventListener('click', () => window.history.back());
   document.getElementById('nav-forward')?.addEventListener('click', () => window.history.forward());
