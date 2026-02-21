@@ -579,6 +579,7 @@ def download_history(
     end_date: str | None = None,
     symbol: str | None = None,
     template: bool | None = True,
+    mode_override: str | None = None,
 ) -> str | None:
     """Download execution history from Bybit and save as CSV.
 
@@ -588,7 +589,7 @@ def download_history(
         CSV filename when rows are present; otherwise ``None``.
     """
     # pylint: disable=too-many-locals,too-many-branches
-    mode_env = (os.getenv("BYBIT_ENV", "live") or "live").strip().lower()
+    mode_env = ((mode_override or os.getenv("BYBIT_ENV", "live")) or "live").strip().lower()
     mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for(mode_env)
     if not api_key or not api_secret:
         raise EnvironmentError(

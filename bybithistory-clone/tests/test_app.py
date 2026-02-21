@@ -64,10 +64,12 @@ def test_trade_prefers_manual_dates(monkeypatch):
         "start_date": "2024-01-01",
         "end_date": "2024-01-10",
         "period": "week",
+        "mode": "demo",
     })})
 
-    def fake_download(*args):
+    def fake_download(*args, **kwargs):
         captured["args"] = args
+        captured["kwargs"] = kwargs
         return "file.csv"
 
     monkeypatch.setattr(app.fetch_history, "download_history", fake_download)
@@ -76,6 +78,7 @@ def test_trade_prefers_manual_dates(monkeypatch):
     result = app.trade()
     assert result == "file.csv"
     assert captured["args"][1:3] == ("2024-01-01", "2024-01-10")
+    assert captured["kwargs"]["mode_override"] == "demo"
 
 
 def test_trade_handles_empty_history(monkeypatch):
@@ -92,7 +95,7 @@ def test_trade_handles_empty_history(monkeypatch):
         {"form": FakeForm({"start_date": "2024-01-01", "end_date": "2024-01-10"})},
     )
 
-    monkeypatch.setattr(app.fetch_history, "download_history", lambda *args: None)
+    monkeypatch.setattr(app.fetch_history, "download_history", lambda *args, **kwargs: None)
 
     result = app.trade()
     assert result == "No transactions found for the selected date range."
