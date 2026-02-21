@@ -23,6 +23,9 @@
   const watchlistStatus = document.getElementById('watchlist-status');
   const watchlistCount = document.getElementById('watchlist-count');
 
+  const instrumentSpecsInput = document.getElementById('instrument-specs-input');
+  const instrumentSpecsGo = document.getElementById('instrument-specs-go');
+
   let scriptsInFlight = null;
   let ooInFlight = null;
   let watchlistItems = [];
@@ -186,12 +189,13 @@
     name.className = 'script-name';
     name.textContent = script.name;
 
-    const pill = document.createElement('span');
-    pill.className = `status-pill ${script.running ? 'running' : 'stopped'}`;
-    pill.textContent = script.running ? 'Running' : 'Stopped';
+    const dot = document.createElement('span');
+    dot.className = `status-dot ${script.running ? 'running' : 'stopped'}`;
+    dot.title = script.running ? 'Running' : 'Stopped';
+    dot.setAttribute('aria-label', script.running ? 'Running' : 'Stopped');
 
     btn.appendChild(name);
-    btn.appendChild(pill);
+    btn.appendChild(dot);
 
     btn.addEventListener('click', () => {
       const target = script.open_url || `/scripts/view/${encodeURIComponent(script.name)}`;
@@ -221,7 +225,7 @@
 
         renderList(forexList, mapped.filter((s) => s._cat === 'Forex'), false);
         renderList(cryptoList, mapped.filter((s) => s._cat === 'Crypto'), false);
-        renderList(otherList, mapped.filter((s) => s._cat === 'Other'), true);
+        renderList(otherList, mapped.filter((s) => s._cat === 'Other'), false);
 
         setStatus(`Updated ${new Date().toLocaleTimeString()}`);
       } catch (e) {
@@ -443,9 +447,21 @@
   refreshBtn?.addEventListener('click', () => { refreshScripts(); refreshOpenOrders(); });
   ooRefreshBtn?.addEventListener('click', () => refreshOpenOrders());
 
-  document.getElementById('nav-back')?.addEventListener('click', () => window.history.back());
-  document.getElementById('nav-forward')?.addEventListener('click', () => window.history.forward());
-  document.getElementById('nav-home')?.addEventListener('click', () => { window.location.href = '/'; });
+  const openInstrumentSpecs = () => {
+    const q = String(instrumentSpecsInput?.value || '').trim();
+    if (!q) return;
+    const url = `/instrument-specs?q=${encodeURIComponent(q)}`;
+    const opened = window.open(url, '_blank', 'noopener');
+    if (!opened) window.location.href = url;
+  };
+
+  instrumentSpecsGo?.addEventListener('click', openInstrumentSpecs);
+  instrumentSpecsInput?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    openInstrumentSpecs();
+  });
+
 
   setInterval(() => { refreshScripts(); refreshOpenOrders(); }, 5000);
 
