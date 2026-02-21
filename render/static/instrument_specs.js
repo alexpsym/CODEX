@@ -32,10 +32,10 @@
     nextFundingTime: 'nextFundingTime (Brisbane time)',
     launchTime: 'launchTime (Brisbane time)',
     openInterest: 'openInterest (contracts)',
-    openInterestValue: 'openInterestValue (USD value)',
-    volume24h: 'volume24h (base units, 24h)',
-    turnover24h: 'turnover24h (USD value, 24h)',
-    avg7dVolumeUsd: 'average7dVolume (USD value/day)',
+    openInterestValue: 'openInterestValue (USD)',
+    volume24h: 'volume24h (contracts/base units)',
+    turnover24h: 'turnover24h (USD)',
+    avg7dTurnoverUsd: 'avg7dVolume (USD)',
   };
 
   function isNumericLike(v) {
@@ -93,7 +93,7 @@
       return formatPercentFromFraction(value);
     }
 
-    if (/^(turnover24h|openInterestValue|avg7dVolumeUsd)$/i.test(key)) {
+    if (/^(turnover24h|openInterestValue|avg7dTurnoverUsd)$/i.test(key)) {
       return `$${compactNumber(value)}`;
     }
 

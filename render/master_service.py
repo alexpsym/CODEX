@@ -412,7 +412,7 @@ async def _bybit_resolve_and_fetch_specs(query: str) -> Optional[Dict[str, objec
 
     avg7d = _bybit_avg_7d_turnover_usd(str((ticker or {}).get("symbol") or symbol), category)
     if avg7d is not None:
-        specs["avg7dVolumeUsd"] = avg7d
+        specs["avg7dTurnoverUsd"] = avg7d
 
     specs["_units"] = {
         "fundingRate": "fraction",
@@ -423,7 +423,7 @@ async def _bybit_resolve_and_fetch_specs(query: str) -> Optional[Dict[str, objec
         "openInterestValue": "usd_value",
         "volume24h": "base_units_24h",
         "turnover24h": "usd_value_24h",
-        "avg7dVolumeUsd": "usd_value_per_day_avg_7d",
+        "avg7dTurnoverUsd": "usd_value_per_day_avg_7d",
     }
 
     return {k: v for k, v in specs.items() if v is not None}
@@ -1564,12 +1564,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         .status-pill.running { background: #14532d; color: #bbf7d0; border-color: #22c55e55; }
         .status-pill.stopped { background: #7f1d1d; color: #fecdd3; border-color: #ef444455; }
-        .status-dot{
-            width:10px;height:10px;border-radius:999px;display:inline-block;
-            margin-left:auto;flex:0 0 10px;
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            min-width: 10px;
+            border-radius: 999px;
+            display: inline-block;
+            margin-left: 10px;
+            box-shadow: 0 0 0 1px rgba(255,255,255,0.12) inset;
         }
-        .status-dot.running{ background:#22c55e; box-shadow:0 0 8px rgba(34,197,94,.35); }
-        .status-dot.stopped{ background:#ef4444; box-shadow:0 0 8px rgba(239,68,68,.28); }
+        .status-dot.running { background: #22c55e; }
+        .status-dot.stopped { background: #ef4444; }
         .empty-state { color: #94a3b8; margin-top: 0.9rem; }
 
         .table-wrap { overflow-x: auto; border-radius: 12px; border: 1px solid #1f2937; background: #0b1220; }
