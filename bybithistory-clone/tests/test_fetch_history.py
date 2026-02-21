@@ -12,14 +12,19 @@ from unittest.mock import MagicMock, patch
 import fetch_history
 
 
-def test_parse_date():
-    """Verify date parsing."""
-    assert fetch_history._parse_date("1970-01-01") == 0
+def test_parse_date_start():
+    """Start date parsing uses Brisbane local midnight."""
+    assert fetch_history._parse_date_start("1970-01-01") == -36000000
 
 
-def test_parse_date_pre_epoch():
-    """Ensure dates before 1970 are handled on all platforms."""
-    assert fetch_history._parse_date("1969-12-31") == -86400000
+def test_parse_date_end():
+    """End date parsing uses Brisbane local end-of-day."""
+    assert fetch_history._parse_date_end("1970-01-01") == 50399999
+
+
+def test_parse_date_start_pre_epoch():
+    """Ensure pre-epoch start dates are handled correctly."""
+    assert fetch_history._parse_date_start("1969-12-31") == -122400000
 
 
 def test_download_history_env_missing(monkeypatch):
@@ -248,7 +253,7 @@ def test_filename_format(monkeypatch):
 
     name = fetch_history.download_history("linear", "2023-01-01", "2023-01-02")
 
-    expected = "Bybit-UM-USDTPerp-TradeHistory-1672531200-1672617600.csv"
+    expected = "Bybit-UM-USDTPerp-TradeHistory-1672495200-1672667999.csv"
     assert captured["name"] == expected
     assert name == expected
 
