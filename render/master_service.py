@@ -29,6 +29,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 import httpx
+import requests
 from PIL import Image, ImageDraw, ImageFont
 from starlette.responses import RedirectResponse
 
@@ -195,13 +196,47 @@ def _normalize_watchlist(items: Iterable[object]) -> List[str]:
     return normalized
 
 
+def _norm_symbol(s: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "", (s or "")).upper()
+
+
 def _normalize_instrument_key(value: object) -> str:
-    s = str(value or "").strip().upper()
-    if not s:
-        return ""
-    s = re.sub(r"[\s+/\\-]+", "", s)
-    s = s.replace("_", "")
-    return s.casefold()
+    return _norm_symbol(str(value or ""))
+
+
+def _oanda_aliases(name: str, display_name: Optional[str] = None) -> set[str]:
+    aliases = set()
+    if name:
+        aliases.add(name)
+        aliases.add(name.replace("_", ""))
+        aliases.add(name.replace("_", "/"))
+    if display_name:
+        aliases.add(display_name)
+        aliases.add(display_name.replace("/", ""))
+        aliases.add(display_name.replace("/", "_"))
+        aliases.add(display_name.replace(" ", ""))
+    return {_norm_symbol(x) for x in aliases if x}
+
+
+def resolve_oanda_instrument(user_query: str, instruments: List[Dict[str, object]]) -> Optional[Dict[str, object]]:
+    qn = _norm_symbol(user_query)
+    if not qn:
+        return None
+
+    for inst in instruments:
+        name = str(inst.get("name") or "")
+        display = str(inst.get("displayName") or "")
+        if qn in _oanda_aliases(name, display):
+            return inst
+
+    for inst in instruments:
+        name = str(inst.get("name") or "")
+        display = str(inst.get("displayName") or "")
+        aliases = _oanda_aliases(name, display)
+        if any(qn in a or a in qn for a in aliases):
+            return inst
+
+    return None
 
 
 def _oanda_base_url() -> str:
@@ -213,6 +248,46 @@ def _oanda_base_url() -> str:
 
 def _oanda_token() -> str:
     return (os.getenv("OANDA_API_KEY") or os.getenv("OANDA_ACCESS_TOKEN") or "").strip()
+
+
+BYBIT_BASE = "https://api.bybit.com"
+
+
+def _bybit_get(path: str, params: Dict[str, object]) -> Dict[str, object]:
+    response = requests.get(f"{BYBIT_BASE}{path}", params=params, timeout=10)
+    response.raise_for_status()
+    return response.json()
+
+
+def _bybit_avg_7d_turnover_usd(symbol: str, category: str = "linear") -> Optional[float]:
+    try:
+        end_ms = int(time.time() * 1000)
+        data = _bybit_get(
+            "/v5/market/kline",
+            {
+                "category": category,
+                "symbol": symbol,
+                "interval": "D",
+                "end": end_ms,
+                "limit": 10,
+            },
+        )
+        rows = (data.get("result") or {}).get("list") or []
+        if not rows:
+            return None
+
+        turnovers: List[float] = []
+        for row in rows[:7]:
+            if isinstance(row, list) and len(row) >= 7:
+                try:
+                    turnovers.append(float(row[6]))
+                except Exception:
+                    continue
+        if not turnovers:
+            return None
+        return sum(turnovers) / len(turnovers)
+    except Exception:
+        return None
 
 
 async def _oanda_resolve_and_fetch_specs(query: str) -> Optional[Dict[str, object]]:
@@ -236,13 +311,8 @@ async def _oanda_resolve_and_fetch_specs(query: str) -> Optional[Dict[str, objec
     if not isinstance(instruments, list):
         return None
 
-    matched: Optional[Dict[str, object]] = None
-    for inst in instruments:
-        if not isinstance(inst, dict):
-            continue
-        if _normalize_instrument_key(inst.get("name")) == want_key:
-            matched = inst
-            break
+    inst_rows = [inst for inst in instruments if isinstance(inst, dict)]
+    matched = resolve_oanda_instrument(query, inst_rows)
     if not matched:
         return None
 
@@ -272,7 +342,7 @@ async def _bybit_resolve_and_fetch_specs(query: str) -> Optional[Dict[str, objec
 
     creds = resolve_bybit_credentials_for("default")
     base_url = creds.get("base_url") if isinstance(creds, dict) else None
-    base_url = base_url or "https://api.bybit.com"
+    base_url = base_url or BYBIT_BASE
 
     async def _get(path: str, params: Dict[str, object]) -> Dict[str, object]:
         async with httpx.AsyncClient(timeout=20) as client:
@@ -325,30 +395,37 @@ async def _bybit_resolve_and_fetch_specs(query: str) -> Optional[Dict[str, objec
     except Exception:
         ticker = None
 
-    specs = {
+    specs: Dict[str, object] = {
         "source": "bybit",
         "query": query,
-        "resolved_symbol": symbol,
+        "resolved_symbol": (ticker or {}).get("symbol") or symbol,
         "category": category,
-        "baseCoin": resolved_inst.get("baseCoin"),
-        "quoteCoin": resolved_inst.get("quoteCoin"),
-        "status": resolved_inst.get("status"),
-        "launchTime": resolved_inst.get("launchTime"),
-        "priceFilter": resolved_inst.get("priceFilter"),
-        "lotSizeFilter": resolved_inst.get("lotSizeFilter"),
-        "leverageFilter": resolved_inst.get("leverageFilter"),
-        "contractType": resolved_inst.get("contractType"),
         "lastPrice": (ticker or {}).get("lastPrice"),
-        "indexPrice": (ticker or {}).get("indexPrice"),
-        "markPrice": (ticker or {}).get("markPrice"),
         "fundingRate": (ticker or {}).get("fundingRate"),
         "nextFundingTime": (ticker or {}).get("nextFundingTime"),
+        "launchTime": resolved_inst.get("launchTime"),
         "openInterest": (ticker or {}).get("openInterest"),
         "openInterestValue": (ticker or {}).get("openInterestValue"),
         "volume24h": (ticker or {}).get("volume24h"),
         "turnover24h": (ticker or {}).get("turnover24h"),
-        "scannerVolume24h": (ticker or {}).get("turnover24h"),
     }
+
+    avg7d = _bybit_avg_7d_turnover_usd(str((ticker or {}).get("symbol") or symbol), category)
+    if avg7d is not None:
+        specs["avg7dVolumeUsd"] = avg7d
+
+    specs["_units"] = {
+        "fundingRate": "fraction",
+        "lastPrice": "price",
+        "launchTime": "timestamp_ms",
+        "nextFundingTime": "timestamp_ms",
+        "openInterest": "contracts",
+        "openInterestValue": "usd_value",
+        "volume24h": "base_units_24h",
+        "turnover24h": "usd_value_24h",
+        "avg7dVolumeUsd": "usd_value_per_day_avg_7d",
+    }
+
     return {k: v for k, v in specs.items() if v is not None}
 
 
@@ -1488,22 +1565,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .status-pill.running { background: #14532d; color: #bbf7d0; border-color: #22c55e55; }
         .status-pill.stopped { background: #7f1d1d; color: #fecdd3; border-color: #ef444455; }
         .status-dot{
-            width:12px;
-            height:12px;
-            border-radius:999px;
-            display:inline-block;
-            flex:0 0 12px;
-            margin-left:auto;
-            box-shadow:0 0 0 1px rgba(255,255,255,.12) inset;
+            width:10px;height:10px;border-radius:999px;display:inline-block;
+            margin-left:auto;flex:0 0 10px;
         }
-        .status-dot.running{
-            background:#22c55e;
-            box-shadow:0 0 0 1px #14532d inset, 0 0 8px rgba(34,197,94,.35);
-        }
-        .status-dot.stopped{
-            background:#ef4444;
-            box-shadow:0 0 0 1px #7f1d1d inset, 0 0 8px rgba(239,68,68,.28);
-        }
+        .status-dot.running{ background:#22c55e; box-shadow:0 0 8px rgba(34,197,94,.35); }
+        .status-dot.stopped{ background:#ef4444; box-shadow:0 0 8px rgba(239,68,68,.28); }
         .empty-state { color: #94a3b8; margin-top: 0.9rem; }
 
         .table-wrap { overflow-x: auto; border-radius: 12px; border: 1px solid #1f2937; background: #0b1220; }

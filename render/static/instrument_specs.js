@@ -20,101 +20,146 @@
     'quoteCoin',
     'source',
     'status',
+    'scannerVolume24h',
+    '_units',
   ]);
 
-  const fetchJson = async (url) => {
-    const res = await fetch(url);
-    const text = await res.text();
-    if (!res.ok) throw new Error(text || `${res.status} ${res.statusText}`);
-    try {
-      return JSON.parse(text);
-    } catch {
-      throw new Error(text || 'Invalid JSON');
-    }
+  const FIELD_LABELS = {
+    resolved_symbol: 'resolved_symbol',
+    category: 'category',
+    lastPrice: 'lastPrice (price)',
+    fundingRate: 'fundingRate (%)',
+    nextFundingTime: 'nextFundingTime (Brisbane time)',
+    launchTime: 'launchTime (Brisbane time)',
+    openInterest: 'openInterest (contracts)',
+    openInterestValue: 'openInterestValue (USD value)',
+    volume24h: 'volume24h (base units, 24h)',
+    turnover24h: 'turnover24h (USD value, 24h)',
+    avg7dVolumeUsd: 'average7dVolume (USD value/day)',
   };
 
-  const isNumericLike = (v) => {
+  function isNumericLike(v) {
     if (v === null || v === undefined) return false;
     if (typeof v === 'number') return Number.isFinite(v);
     if (typeof v !== 'string') return false;
     const s = v.trim();
     return s !== '' && /^-?\d+(\.\d+)?$/.test(s);
-  };
+  }
 
-  const formatTimestampValue = (v) => {
-    if (!isNumericLike(v)) return null;
-    const n = Number(v);
+  function formatTimestampBrisbane(value) {
+    if (!isNumericLike(value)) return null;
+    const n = Number(value);
     if (!Number.isFinite(n)) return null;
-    const ms = n < 1_000_000_000_000 ? n * 1000 : n;
+    const ms = n < 1e12 ? n * 1000 : n;
     const d = new Date(ms);
     if (Number.isNaN(d.getTime())) return null;
-    return `${d.toLocaleString()} (${d.toISOString().replace('T', ' ').replace('Z', ' UTC')})`;
-  };
 
-  const compactNumber = (v, decimals = 2) => {
-    if (!isNumericLike(v)) return String(v ?? '—');
+    return new Intl.DateTimeFormat('en-AU', {
+      timeZone: 'Australia/Brisbane',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).format(d) + ' (Brisbane)';
+  }
+
+  function compactNumber(n, decimals = 2) {
+    const num = Number(n);
+    if (!Number.isFinite(num)) return String(n ?? '—');
+    const abs = Math.abs(num);
+    if (abs >= 1e12) return `${(num / 1e12).toFixed(decimals).replace(/\.00$/, '')}T`;
+    if (abs >= 1e9) return `${(num / 1e9).toFixed(decimals).replace(/\.00$/, '')}B`;
+    if (abs >= 1e6) return `${(num / 1e6).toFixed(decimals).replace(/\.00$/, '')}M`;
+    if (abs >= 1e3) return `${(num / 1e3).toFixed(decimals).replace(/\.00$/, '')}K`;
+    return num.toFixed(decimals).replace(/\.00$/, '');
+  }
+
+  function formatPercentFromFraction(v, decimals = 4) {
     const n = Number(v);
-    const abs = Math.abs(n);
-    const units = [
-      [1e12, 'T'],
-      [1e9, 'B'],
-      [1e6, 'M'],
-      [1e3, 'K'],
-    ];
-    for (const [div, suffix] of units) {
-      if (abs >= div) return `${(n / div).toFixed(decimals).replace(/\.00$/, '')}${suffix}`;
-    }
-    return n.toFixed(decimals).replace(/\.00$/, '');
-  };
+    if (!Number.isFinite(n)) return String(v ?? '—');
+    return `${(n * 100).toFixed(decimals).replace(/0+$/, '').replace(/\.$/, '')}%`;
+  }
 
-  const formatFieldValue = (key, value) => {
-    if (/(time|timestamp)$/i.test(key)) {
-      const ts = formatTimestampValue(value);
-      if (ts) return ts;
+  function formatValue(key, value) {
+    if (key === 'launchTime' || key === 'nextFundingTime' || /(time|timestamp)$/i.test(key)) {
+      const t = formatTimestampBrisbane(value);
+      if (t) return t;
     }
-    if (/(^|\.)(volume24h|turnover24h|openInterest|openInterestValue)$/i.test(key)) {
-      return compactNumber(value, 2);
+
+    if (key === 'fundingRate' || key.endsWith('.fundingRate')) {
+      return formatPercentFromFraction(value);
     }
+
+    if (/^(turnover24h|openInterestValue|avg7dVolumeUsd)$/i.test(key)) {
+      return `$${compactNumber(value)}`;
+    }
+
+    if (/^(volume24h|openInterest)$/i.test(key)) {
+      return compactNumber(value);
+    }
+
     if (typeof value === 'object' && value !== null) return JSON.stringify(value);
     return String(value ?? '—');
-  };
+  }
 
-  const render = (specs) => {
-    if (!rows) return;
-    rows.innerHTML = '';
-    const entries = Object.entries(specs || {}).sort((a, b) => String(a[0]).localeCompare(String(b[0])));
-    entries.forEach(([key, value]) => {
-      if (HIDE_FIELDS.has(key)) return;
-      const tr = document.createElement('tr');
-      const td1 = document.createElement('td');
-      const td2 = document.createElement('td');
-      td1.textContent = key;
-      td2.textContent = formatFieldValue(key, value);
-      tr.appendChild(td1);
-      tr.appendChild(td2);
-      rows.appendChild(tr);
-    });
-  };
-
-  const setErr = (message) => {
+  function setErr(message) {
     if (!err) return;
     err.textContent = message || '';
-  };
+  }
 
-  const load = async () => {
+  function renderSpecsTable(specs) {
+    if (!rows) return;
+    rows.innerHTML = '';
+    const flattenedEntries = Object.entries(specs || {}).sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+
+    for (const [key, value] of flattenedEntries) {
+      if (HIDE_FIELDS.has(key)) continue;
+
+      const tr = document.createElement('tr');
+      const tdKey = document.createElement('td');
+      const tdVal = document.createElement('td');
+      tdKey.textContent = FIELD_LABELS[key] || key;
+      tdVal.textContent = formatValue(key, value);
+      tr.appendChild(tdKey);
+      tr.appendChild(tdVal);
+      rows.appendChild(tr);
+    }
+  }
+
+  async function loadSpecs(q) {
+    const res = await fetch(`/api/instrument-specs?query=${encodeURIComponent(q)}`);
+    let data = null;
+    try {
+      data = await res.json();
+    } catch {
+      data = null;
+    }
+
+    if (!res.ok) {
+      setErr((data && data.detail) || 'Lookup failed');
+      renderSpecsTable({});
+      return;
+    }
+
+    setErr('');
+    renderSpecsTable(data);
+  }
+
+  async function load() {
     const q = String(qInput?.value || '').trim();
     if (!q) return;
-    setErr('');
     try {
-      const specs = await fetchJson(`/api/instrument-specs?query=${encodeURIComponent(q)}`);
-      render(specs);
+      await loadSpecs(q);
       if (dl) dl.href = `/api/instrument-specs.jpg?query=${encodeURIComponent(q)}`;
       history.replaceState(null, '', `/instrument-specs?q=${encodeURIComponent(q)}`);
     } catch (e) {
-      render({});
-      setErr(e.message || String(e));
+      setErr(e?.message || String(e));
+      renderSpecsTable({});
     }
-  };
+  }
 
   loadBtn?.addEventListener('click', load);
   qInput?.addEventListener('keydown', (event) => {
