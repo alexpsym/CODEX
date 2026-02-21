@@ -239,6 +239,29 @@ def resolve_oanda_instrument(user_query: str, instruments: List[Dict[str, object
     return None
 
 
+def _instrument_lookup_key(value: str) -> str:
+    return "".join(ch for ch in (value or "").upper() if ch.isalnum())
+
+
+def _normalize_oanda_symbol_query(user_value: str, available_instruments: Optional[List[str]] = None) -> str:
+    if not user_value or not user_value.strip():
+        raise ValueError("Instrument is required")
+
+    raw = user_value.strip().upper()
+    if "_" in raw and len(raw) >= 7:
+        return raw
+
+    lookup = _instrument_lookup_key(raw)
+    if available_instruments:
+        mapping = {_instrument_lookup_key(inst): inst for inst in available_instruments if inst}
+        if lookup in mapping:
+            return mapping[lookup]
+
+    if len(lookup) == 6 and lookup.isalpha():
+        return f"{lookup[:3]}_{lookup[3:]}"
+    return raw
+
+
 def _oanda_base_url() -> str:
     env = (os.getenv("OANDA_ENV") or "live").strip().lower()
     if env in {"practice", "demo", "test"}:
@@ -312,7 +335,13 @@ async def _oanda_resolve_and_fetch_specs(query: str) -> Optional[Dict[str, objec
         return None
 
     inst_rows = [inst for inst in instruments if isinstance(inst, dict)]
-    matched = resolve_oanda_instrument(query, inst_rows)
+    available_names = [str(inst.get("name") or "") for inst in inst_rows]
+    try:
+        normalized_query = _normalize_oanda_symbol_query(query, available_names)
+    except ValueError:
+        return None
+
+    matched = resolve_oanda_instrument(normalized_query, inst_rows)
     if not matched:
         return None
 
@@ -2158,6 +2187,29 @@ PROXY_LOGGER = logging.getLogger("uvicorn.error")
 BYBIT_RECV_WINDOW = "5000"
 BYBIT_OPTIONS_TAKER_FEE_RATE = float(os.getenv("BYBIT_OPTIONS_TAKER_FEE_RATE", "0.0003"))
 BYBIT_OPTIONS_MAKER_FEE_RATE = float(os.getenv("BYBIT_OPTIONS_MAKER_FEE_RATE", "0.0002"))
+
+
+def _instrument_lookup_key(value: str) -> str:
+    return "".join(ch for ch in (value or "").upper() if ch.isalnum())
+
+
+def _normalize_oanda_symbol_query(user_value: str, available_instruments: Optional[List[str]] = None) -> str:
+    if not user_value or not user_value.strip():
+        raise ValueError("Instrument is required")
+
+    raw = user_value.strip().upper()
+    if "_" in raw and len(raw) >= 7:
+        return raw
+
+    lookup = _instrument_lookup_key(raw)
+    if available_instruments:
+        mapping = {_instrument_lookup_key(inst): inst for inst in available_instruments if inst}
+        if lookup in mapping:
+            return mapping[lookup]
+
+    if len(lookup) == 6 and lookup.isalpha():
+        return f"{lookup[:3]}_{lookup[3:]}"
+    return raw
 
 
 def _oanda_base_url() -> str:
