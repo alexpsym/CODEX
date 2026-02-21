@@ -12,14 +12,19 @@ from unittest.mock import MagicMock, patch
 import fetch_history
 
 
-def test_parse_date():
-    """Verify date parsing."""
-    assert fetch_history._parse_date("1970-01-01") == 0
+def test_parse_date_start():
+    """Start date parsing uses Brisbane local midnight."""
+    assert fetch_history._parse_date_start("1970-01-01") == -36000000
 
 
-def test_parse_date_pre_epoch():
-    """Ensure dates before 1970 are handled on all platforms."""
-    assert fetch_history._parse_date("1969-12-31") == -86400000
+def test_parse_date_end():
+    """End date parsing uses Brisbane local end-of-day."""
+    assert fetch_history._parse_date_end("1970-01-01") == 50399999
+
+
+def test_parse_date_start_pre_epoch():
+    """Ensure pre-epoch start dates are handled correctly."""
+    assert fetch_history._parse_date_start("1969-12-31") == -122400000
 
 
 def test_download_history_env_missing(monkeypatch):
@@ -29,6 +34,31 @@ def test_download_history_env_missing(monkeypatch):
     with pytest.raises(EnvironmentError):
         fetch_history.download_history("linear")
 
+
+
+
+def test_download_history_mode_override(monkeypatch):
+    """mode_override takes precedence over BYBIT_ENV."""
+    monkeypatch.setenv("BYBIT_API_KEY", "k")
+    monkeypatch.setenv("BYBIT_API_SECRET", "s")
+    monkeypatch.setenv("BYBIT_ENV", "live")
+
+    monkeypatch.setattr(fetch_history, "HTTP", MagicMock())
+
+    captured = {}
+
+    def fake_fetch_demo(**kwargs):
+        captured["called"] = True
+        return [[]]
+
+    monkeypatch.setattr(fetch_history, "_fetch_pages_demo", fake_fetch_demo)
+    monkeypatch.setattr(fetch_history, "_fetch_pages", lambda *a, **k: [[]])
+
+    fetch_history.download_history(
+        "linear", "2023-01-01", "2023-01-02", mode_override="demo"
+    )
+
+    assert captured.get("called") is True
 
 def test_download_history_calls_api(monkeypatch):
     """Check API call parameters."""
@@ -223,7 +253,7 @@ def test_filename_format(monkeypatch):
 
     name = fetch_history.download_history("linear", "2023-01-01", "2023-01-02")
 
-    expected = "Bybit-UM-USDTPerp-TradeHistory-1672531200-1672617600.csv"
+    expected = "Bybit-UM-USDTPerp-TradeHistory-1672495200-1672667999.csv"
     assert captured["name"] == expected
     assert name == expected
 

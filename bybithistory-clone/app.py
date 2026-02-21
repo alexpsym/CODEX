@@ -52,6 +52,13 @@ select, input[type="date"] { width: 100%; padding: 5px; margin-top: 5px; backgro
         <option value="month">Last Month</option>
         <option value="all">All Time</option>
       </select>
+      <label for="trade-mode">Environment</label>
+      <select id="trade-mode" name="mode">
+        <option value="live">Live</option>
+        <option value="demo">Demo</option>
+        <option value="testnet">Testnet</option>
+      </select>
+      <p class="hint">Demo uses Bybit Demo Trading account history (7-day retention).</p>
       <button type="submit">Generate</button>
     </form>
   </div>
@@ -118,10 +125,13 @@ def trade() -> object:
     """Handle trade history export."""
     start = (request.form.get("start_date", "") or "").strip()
     end = (request.form.get("end_date", "") or "").strip()
+    mode = (request.form.get("mode", "live") or "live").strip().lower()
     if not start or not end:
         period = request.form.get("period", "week")
         start, end = _range_from_period(period)
-    filename = fetch_history.download_history("linear", start, end, None, True)
+    filename = fetch_history.download_history(
+        "linear", start, end, None, True, mode_override=mode
+    )
     if filename is None:
         return "No transactions found for the selected date range."
     return send_file(filename, as_attachment=True)

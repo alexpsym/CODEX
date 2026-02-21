@@ -120,9 +120,19 @@ def _apply_template(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return formatted
 
 
-def _parse_date(date_str: str) -> int:
-    """Convert date string in YYYY-MM-DD to milliseconds since epoch."""
-    dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+def _parse_date_start(date_str: str) -> int:
+    """Convert YYYY-MM-DD to Brisbane local start-of-day in epoch ms."""
+    dt = datetime.strptime(date_str, "%Y-%m-%d").replace(
+        hour=0, minute=0, second=0, microsecond=0, tzinfo=BRISBANE_TZ
+    )
+    return int(dt.timestamp() * 1000)
+
+
+def _parse_date_end(date_str: str) -> int:
+    """Convert YYYY-MM-DD to Brisbane local end-of-day in epoch ms (inclusive)."""
+    dt = datetime.strptime(date_str, "%Y-%m-%d").replace(
+        hour=23, minute=59, second=59, microsecond=999000, tzinfo=BRISBANE_TZ
+    )
     return int(dt.timestamp() * 1000)
 
 
@@ -579,6 +589,7 @@ def download_history(
     end_date: str | None = None,
     symbol: str | None = None,
     template: bool | None = True,
+    mode_override: str | None = None,
 ) -> str | None:
     """Download execution history from Bybit and save as CSV.
 
@@ -588,7 +599,7 @@ def download_history(
         CSV filename when rows are present; otherwise ``None``.
     """
     # pylint: disable=too-many-locals,too-many-branches
-    mode_env = (os.getenv("BYBIT_ENV", "live") or "live").strip().lower()
+    mode_env = ((mode_override or os.getenv("BYBIT_ENV", "live")) or "live").strip().lower()
     mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for(mode_env)
     if not api_key or not api_secret:
         raise EnvironmentError(
@@ -607,8 +618,8 @@ def download_history(
     if symbol:
         params["symbol"] = symbol
 
-    start_ms = _parse_date(start_date) if start_date else None
-    end_ms = _parse_date(end_date) if end_date else None
+    start_ms = _parse_date_start(start_date) if start_date else None
+    end_ms = _parse_date_end(end_date) if end_date else None
     # Live/testnet: ~2 years. Demo: 7 days.
     start_ms, end_ms = _limit_time_window(mode, start_ms, end_ms)
 
