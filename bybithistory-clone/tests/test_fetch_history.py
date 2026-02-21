@@ -30,6 +30,31 @@ def test_download_history_env_missing(monkeypatch):
         fetch_history.download_history("linear")
 
 
+
+
+def test_download_history_mode_override(monkeypatch):
+    """mode_override takes precedence over BYBIT_ENV."""
+    monkeypatch.setenv("BYBIT_API_KEY", "k")
+    monkeypatch.setenv("BYBIT_API_SECRET", "s")
+    monkeypatch.setenv("BYBIT_ENV", "live")
+
+    monkeypatch.setattr(fetch_history, "HTTP", MagicMock())
+
+    captured = {}
+
+    def fake_fetch_demo(**kwargs):
+        captured["called"] = True
+        return [[]]
+
+    monkeypatch.setattr(fetch_history, "_fetch_pages_demo", fake_fetch_demo)
+    monkeypatch.setattr(fetch_history, "_fetch_pages", lambda *a, **k: [[]])
+
+    fetch_history.download_history(
+        "linear", "2023-01-01", "2023-01-02", mode_override="demo"
+    )
+
+    assert captured.get("called") is True
+
 def test_download_history_calls_api(monkeypatch):
     """Check API call parameters."""
     monkeypatch.setenv("BYBIT_API_KEY", "k")
