@@ -792,6 +792,8 @@ def _infer_account_currency(account_label: str) -> str:
     text = (account_label or "").upper()
     if any(part in text for part in ("BYBIT", "BINANCE")):
         return "USDT"
+    if "COINSPOT" in text:
+        return "AUD"
     if any(part in text for part in ("OANDA", "PEPPERSTONE")):
         return "AUD"
     return ""
@@ -1013,8 +1015,9 @@ def _parse_excel_account_workbook(
                     "exit_price": exit_price,
                     "swap": swap,
                     "commission": commission,
+                    "commission_currency": "AUD" if _is_fx_account_label(account_label) else "USDT",
                     "fees": commission,
-                    "fee_currency": account_currency,
+                    "fee_currency": "AUD" if _is_fx_account_label(account_label) else "USDT",
                     "realized_pnl": net_profit,
                     "realized_pnl_currency": account_currency,
                     "net_profit": net_profit,
@@ -1159,6 +1162,27 @@ def _load_cashflows_from_dropbox(active_folder: str) -> Dict[str, List[Dict[str,
     return out
 
 
+def _latest_balances_from_cashflows(active_folder: str) -> List[Dict[str, object]]:
+    ledger = _load_cashflows_from_dropbox(active_folder)
+    items: List[Dict[str, object]] = []
+    for account, events in ledger.items():
+        if not events:
+            continue
+        latest = events[-1]
+        items.append(
+            {
+                "account": account,
+                "label": account,
+                "balance": _to_float(latest.get("new_balance")),
+                "nav": None,
+                "currency": str(latest.get("currency") or _infer_account_currency(account)),
+                "source": "cashflow_ledger",
+                "as_of": latest.get("date"),
+            }
+        )
+    return sorted(items, key=lambda x: str(x.get("label") or ""))
+
+
 def _import_trading_journal_from_dropbox_excel() -> Dict[str, object]:
     active_folder, entries = _resolve_trading_journal_dropbox_folder()
     configured = TRADING_JOURNAL_DROPBOX_FOLDER.strip()
@@ -1260,9 +1284,12 @@ def _journal_rows_from_bybit_execution(entry: Dict[str, object]) -> List[Dict[st
             "entry_price": exec_price,
             "exit_price": exec_price,
             "qty": qty,
+            "qty_unit": "native",
             "notional_usd": (exec_price or 0.0) * qty,
+            "commission": exec_fee,
+            "commission_currency": "USDT",
             "fees": exec_fee,
-            "fee_currency": str(entry.get("feeCurrency") or "USDT"),
+            "fee_currency": "USDT",
             "realized_pnl": exec_pnl,
             "realized_pnl_currency": str(entry.get("currency") or "USDT"),
             "strategy_tag": "",
@@ -1299,10 +1326,14 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             "close_time": close_time,
             "entry_price": price,
             "exit_price": price,
-            "qty": qty,
+            "qty": qty / 100000.0,
+            "qty_raw": qty,
+            "qty_unit": "lots",
             "notional_usd": None,
+            "commission": fees,
+            "commission_currency": "AUD",
             "fees": fees,
-            "fee_currency": str(entry.get("accountCurrency") or ""),
+            "fee_currency": "AUD",
             "realized_pnl": realized_pnl,
             "realized_pnl_currency": str(entry.get("accountCurrency") or ""),
             "strategy_tag": "",
@@ -7044,11 +7075,20 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
 @app.get("/api/trading-journal/balances")
 async def trading_journal_balances() -> JSONResponse:
     rows = _get_trading_journal_rows()
+    state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
+    source_folder = str(state.get("source_folder") if isinstance(state, dict) else "")
+
+    cashflow_items = _latest_balances_from_cashflows(source_folder) if source_folder else []
     excel = _get_excel_account_balances()
+
     by_acc = {
         str((bal.get("account") or bal.get("label") or "")).upper(): dict(bal)
         for bal in excel
     }
+    for bal in cashflow_items:
+        key = str((bal.get("account") or bal.get("label") or "")).upper()
+        if key:
+            by_acc[key] = dict(bal)
 
     for row in rows:
         account = str(row.get("account_label") or row.get("account") or "").strip()
@@ -7067,4 +7107,3 @@ async def trading_journal_balances() -> JSONResponse:
 
     items = sorted(by_acc.values(), key=lambda x: str(x.get("label") or ""))
     return JSONResponse({"items": items})
-

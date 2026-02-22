@@ -7,6 +7,10 @@
   const filterInput = q('#tj-filter');
 
   let activeFlags = new Set();
+
+  function normYes(v) {
+    return ['yes', 'y', 'true', '1'].includes(String(v ?? '').trim().toLowerCase());
+  }
   let state = {
     rows: [],
     sortKey: 'close_time',
@@ -35,14 +39,28 @@
   }
 
   function applyFlagFilters(rows) {
-    let out = rows;
-    if (activeFlags.has('errors')) out = out.filter((r) => (r.metrics && r.metrics.error) || r.entry_comments === 'Error');
-    if (activeFlags.has('breakeven')) out = out.filter((r) => String(r.breakeven || '').toLowerCase() === 'yes');
-    if (activeFlags.has('held_news')) out = out.filter((r) => String(r.metrics?.held_through_news || '').toLowerCase() === 'yes');
-    if (activeFlags.has('spiked_out')) out = out.filter((r) => String(r.metrics?.spiked_out || '').toLowerCase() === 'yes');
-    if (activeFlags.has('early_close')) out = out.filter((r) => String(r.metrics?.early_close || '').toLowerCase() === 'yes');
+    let out = [...rows];
+    if (activeFlags.has('errors')) {
+      out = out.filter((r) => {
+        const m = r.metrics || {};
+        return !!(m.error || m.ERROR || r.error);
+      });
+    }
+    if (activeFlags.has('breakeven')) {
+      out = out.filter((r) => normYes(r.breakeven));
+    }
+    if (activeFlags.has('held_news')) {
+      out = out.filter((r) => normYes(r.metrics?.held_through_news));
+    }
+    if (activeFlags.has('spiked_out')) {
+      out = out.filter((r) => normYes(r.metrics?.spiked_out));
+    }
+    if (activeFlags.has('early_close')) {
+      out = out.filter((r) => normYes(r.metrics?.early_close));
+    }
     return out;
   }
+
 
   function sortRows(rows) {
     const out = [...rows];
@@ -95,12 +113,12 @@
         <td title="${r.symbol_raw || r.symbol || ''}">${r.symbol || '—'}</td>
         <td>${r.side || '—'}</td>
         <td>${r.setup || '—'}</td>
-        <td>${fmtNum(r.qty, 6)}${r.qty_unit === 'lots' ? ' lot' : ''}</td>
+        <td>${fmtNum(r.qty, r.qty_unit === 'lots' ? 6 : 6)}${r.qty_unit === 'lots' ? ' lot' : ''}</td>
         <td>${fmtNum(r.entry_price, 6)}</td>
         <td>${fmtNum(r.exit_price, 6)}</td>
         <td>${fmtNum(r.stop_loss, 6)}</td>
         <td>${fmtNum(r.take_profit, 6)}</td>
-        <td>${fmtNum(r.commission ?? r.fees, 4)}</td>
+        <td>${fmtNum(r.commission ?? r.fees, 4)} ${r.commission_currency || r.fee_currency || ''}</td>
         <td class="num ${Number.isFinite(pnl) ? (pnl > 0 ? 'pos' : (pnl < 0 ? 'neg' : '')) : ''}">${fmtNum(pnl, 4)} ${r.realized_pnl_currency || r.currency || ''}</td>
         <td>${Number.isFinite(bal) ? `${fmtNum(bal, 2)} ${ccy}` : '—'}</td>
         <td>${r.breakeven || '—'}</td>
@@ -213,11 +231,14 @@
     });
   });
 
-  q('#btn-errors')?.addEventListener('click', () => toggle('errors'));
-  q('#btn-breakeven')?.addEventListener('click', () => toggle('breakeven'));
-  q('#btn-held-news')?.addEventListener('click', () => toggle('held_news'));
-  q('#btn-spiked-out')?.addEventListener('click', () => toggle('spiked_out'));
-  q('#btn-early-close')?.addEventListener('click', () => toggle('early_close'));
+  document.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-flag]');
+    if (!btn) return;
+    const flag = btn.dataset.flag;
+    if (!flag) return;
+    toggle(flag);
+    btn.classList.toggle('active', activeFlags.has(flag));
+  });
 
   filterInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') load(); });
 
