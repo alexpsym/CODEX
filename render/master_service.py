@@ -5720,6 +5720,11 @@ async def fetch_bybit_balance(
     )
 
 
+@app.get("/", response_class=HTMLResponse)
+async def home_page() -> str:
+    return HTML_TEMPLATE
+
+
 @app.get("/trading-journal", response_class=HTMLResponse)
 async def trading_journal_page() -> str:
     return """
