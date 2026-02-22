@@ -5720,6 +5720,11 @@ async def fetch_bybit_balance(
     )
 
 
+@app.get("/", response_class=HTMLResponse)
+async def home_page() -> str:
+    return HTML_TEMPLATE
+
+
 @app.get("/trading-journal", response_class=HTMLResponse)
 async def trading_journal_page() -> str:
     return """
@@ -6432,6 +6437,66 @@ async def _background_start(script: ManagedScript) -> None:
         script.add_log(f"Failed to start: {exc}")
 
 
+@app.get("/scripts")
+async def list_scripts() -> JSONResponse:
+    return JSONResponse(script_manager.list_scripts())
+
+
+@app.get("/api/open-orders")
+async def list_open_orders() -> JSONResponse:
+    items: List[Dict[str, object]] = []
+    errors: List[Dict[str, str]] = []
+
+    for account in ("live", "demo"):
+        try:
+            cfg = _get_oanda_config(account)
+            items.extend(
+                await _collect_oanda_open_items(
+                    base_url=cfg["base_url"],
+                    account_id=cfg["account_id"],
+                    api_key=cfg["token"],
+                    account_context=account,
+                )
+            )
+        except Exception as exc:
+            errors.append(
+                {
+                    "broker": "OANDA",
+                    "account": account,
+                    "category": "forex",
+                    "message": str(exc),
+                }
+            )
+
+    for account in ("live", "demo"):
+        try:
+            _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for(
+                account
+            )
+            if not api_key or not api_secret:
+                raise ValueError("Bybit API credentials are not configured.")
+            result = await _collect_bybit_open_items(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                account_context=account,
+            )
+            items.extend(result.get("items", []))
+            errors.extend(result.get("errors", []))
+        except Exception as exc:
+            errors.append(
+                {
+                    "broker": "Bybit",
+                    "account": account,
+                    "category": "unknown",
+                    "message": str(exc),
+                }
+            )
+
+    items.extend(_load_pending_webhooks())
+    return JSONResponse({"items": items, "errors": errors})
+
+
 @app.post("/scripts/{script_name:path}/start")
 async def start_script(script_name: str) -> JSONResponse:
     # Never launch the payslip audit script directly; force users to the upload flow
@@ -7038,7 +7103,9 @@ async def favicon() -> Response:
     return Response(content=png_bytes, media_type="image/png")
 
 
-app.mount("/static", StaticFiles(directory=BASE_DIR / "render" / "static"), name="static")@app.get("/api/trading-journal")
+app.mount("/static", StaticFiles(directory=BASE_DIR / "render" / "static"), name="static")
+
+@app.get("/api/trading-journal")
 async def trading_journal_items(filter: str = "") -> JSONResponse:
     items = _get_trading_journal_rows()
     query = (filter or "").strip().lower()
