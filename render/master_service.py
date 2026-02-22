@@ -20,7 +20,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
 from dateutil.relativedelta import relativedelta
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import quote, unquote, urlparse
 from uuid import uuid4
 
@@ -30,11 +30,12 @@ from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 import httpx
 import requests
+import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 from starlette.responses import RedirectResponse
 
 from bybit_credentials import resolve_bybit_credentials_for
-from render.dropbox_sync import download_bytes, upload_bytes
+from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from payslip_audit.tesseract import (
     TESSERACT_MISSING_MESSAGE,
     _resolve_tesseract_binary,
@@ -103,6 +104,12 @@ PENDING_WEBHOOKS_PATH = BASE_DIR / "render" / "data" / "pending_webhooks.json"
 WATCHLIST_PATH = BASE_DIR / "render" / "data" / "watchlist.json"
 TRADING_JOURNAL_PATH = BASE_DIR / "render" / "data" / "trading_journal.json"
 TRADING_JOURNAL_STATE_PATH = BASE_DIR / "render" / "data" / "trading_journal_state.json"
+TRADING_JOURNAL_DROPBOX_FOLDER = os.getenv(
+    "TRADING_JOURNAL_DROPBOX_FOLDER", "/Apps/alexpsym_render/master_control"
+).strip()
+TRADING_JOURNAL_DROPBOX_RECURSIVE = os.getenv(
+    "TRADING_JOURNAL_DROPBOX_RECURSIVE", "0"
+).strip().lower() in {"1", "true", "yes", "on"}
 WATCHLIST_MAX_ITEMS = 50
 DROPBOX_SYNC_ENABLED = os.getenv("DROPBOX_SYNC_ENABLED", "").strip().lower() in {
     "1",
@@ -663,6 +670,229 @@ def _save_trading_journal_state(state: Dict[str, object]) -> None:
         json.dumps(state, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _load_json_file(path: Path, default):
+    try:
+        if not path.exists():
+            return default
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def _save_json_file(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _get_trading_journal_rows() -> List[Dict[str, object]]:
+    data = _load_json_file(TRADING_JOURNAL_PATH, {"items": []})
+    if isinstance(data, list):
+        return [row for row in data if isinstance(row, dict)]
+    items = data.get("items") if isinstance(data, dict) else []
+    return items if isinstance(items, list) else []
+
+
+def _set_trading_journal_rows(rows: List[Dict[str, object]]) -> None:
+    _save_json_file(TRADING_JOURNAL_PATH, {"items": rows, "updated_at": _utc_now_iso()})
+
+
+def _norm_col(name: object) -> str:
+    value = str(name or "").strip().lower()
+    for char in [" ", "-", "/", "(", ")", "[", "]", "."]:
+        value = value.replace(char, "_")
+    while "__" in value:
+        value = value.replace("__", "_")
+    return value.strip("_")
+
+
+def _first_present(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    cols = {_norm_col(col): col for col in df.columns}
+    for candidate in candidates:
+        if candidate in cols:
+            return cols[candidate]
+    return None
+
+
+def _parse_excel_account_workbook(
+    file_name: str, dbx_path: str, payload: bytes
+) -> Tuple[List[Dict[str, object]], Optional[Dict[str, object]]]:
+    bio = io.BytesIO(payload)
+    try:
+        xls = pd.ExcelFile(bio, engine="openpyxl")
+    except Exception:
+        bio.seek(0)
+        xls = pd.ExcelFile(bio, engine="xlrd")
+
+    all_rows: List[Dict[str, object]] = []
+    account_balance: Optional[Dict[str, object]] = None
+    account_label = Path(file_name).stem.strip() or file_name
+
+    for sheet in xls.sheet_names:
+        df = pd.read_excel(xls, sheet_name=sheet)
+        if df is None or df.empty:
+            continue
+        df.columns = [str(col) for col in df.columns]
+
+        symbol_col = _first_present(df, ["symbol", "instrument", "pair", "market"])
+        side_col = _first_present(df, ["side", "direction", "buy_sell", "type"])
+        close_time_col = _first_present(
+            df, ["close_time", "closetime", "exit_time", "time_close", "closed_at"]
+        )
+        entry_col = _first_present(df, ["entry", "entry_price", "open_price", "price_open"])
+        exit_col = _first_present(df, ["exit", "exit_price", "close_price", "price_close"])
+        qty_col = _first_present(df, ["qty", "quantity", "size", "units", "volume"])
+        pnl_col = _first_present(df, ["realized_pnl", "pnl", "profit", "pl", "net_pnl"])
+        fee_col = _first_present(df, ["fees", "fee", "commission", "cost"])
+
+        trade_signal_count = sum(
+            candidate is not None for candidate in [symbol_col, side_col, entry_col, exit_col, pnl_col]
+        )
+        if trade_signal_count >= 3:
+            for idx, row in df.iterrows():
+                symbol = str(row.get(symbol_col, "")).strip() if symbol_col else ""
+                if not symbol or symbol.lower() == "nan":
+                    continue
+
+                side = str(row.get(side_col, "")).strip() if side_col else ""
+                status = "closed" if (exit_col and pd.notna(row.get(exit_col))) else "unknown"
+
+                close_time_val = row.get(close_time_col) if close_time_col else None
+                close_time_iso = None
+                if pd.notna(close_time_val):
+                    try:
+                        close_time_iso = pd.to_datetime(close_time_val, utc=True).isoformat()
+                    except Exception:
+                        close_time_iso = str(close_time_val)
+
+                entry = float(row.get(entry_col)) if entry_col and pd.notna(row.get(entry_col)) else None
+                exit_price = float(row.get(exit_col)) if exit_col and pd.notna(row.get(exit_col)) else None
+                qty = float(row.get(qty_col)) if qty_col and pd.notna(row.get(qty_col)) else None
+                fees = float(row.get(fee_col)) if fee_col and pd.notna(row.get(fee_col)) else 0.0
+                pnl = float(row.get(pnl_col)) if pnl_col and pd.notna(row.get(pnl_col)) else None
+
+                notional = None
+                if qty is not None and entry is not None:
+                    notional = abs(qty * entry)
+
+                row_id = f"excel:{account_label}:{sheet}:{idx}:{symbol}:{close_time_iso or ''}"
+                all_rows.append(
+                    {
+                        "id": row_id,
+                        "source": "excel",
+                        "account": account_label,
+                        "account_label": account_label,
+                        "sheet": sheet,
+                        "symbol": symbol.upper().replace("/", ""),
+                        "side": side,
+                        "qty": qty,
+                        "entry_price": entry,
+                        "exit_price": exit_price,
+                        "notional_usd": notional,
+                        "fees": fees,
+                        "fee_currency": "",
+                        "realized_pnl": pnl,
+                        "realized_pnl_currency": "",
+                        "status": status,
+                        "close_time": close_time_iso,
+                        "raw_refs": {"dropbox_path": dbx_path, "sheet": sheet, "row_index": int(idx)},
+                        "updated_at": _utc_now_iso(),
+                    }
+                )
+
+        bal_col = _first_present(df, ["balance", "account_balance", "cash_balance"])
+        nav_col = _first_present(df, ["nav", "equity", "account_equity"])
+        ccy_col = _first_present(df, ["currency", "ccy", "account_currency"])
+        if bal_col or nav_col:
+            for _, row in df.iterrows():
+                bal_val = row.get(bal_col) if bal_col else None
+                nav_val = row.get(nav_col) if nav_col else None
+                if pd.isna(bal_val) and pd.isna(nav_val):
+                    continue
+                account_balance = {
+                    "source": "excel",
+                    "account": account_label,
+                    "label": account_label,
+                    "balance": float(bal_val) if bal_col and pd.notna(bal_val) else None,
+                    "nav": float(nav_val) if nav_col and pd.notna(nav_val) else None,
+                    "currency": str(row.get(ccy_col)).strip() if ccy_col and pd.notna(row.get(ccy_col)) else "",
+                    "dropbox_path": dbx_path,
+                }
+                break
+
+    return all_rows, account_balance
+
+
+def _import_trading_journal_from_dropbox_excel() -> Dict[str, object]:
+    if not TRADING_JOURNAL_DROPBOX_FOLDER:
+        raise HTTPException(status_code=500, detail="TRADING_JOURNAL_DROPBOX_FOLDER is not set.")
+
+    entries = list_excel_files(
+        TRADING_JOURNAL_DROPBOX_FOLDER, recursive=TRADING_JOURNAL_DROPBOX_RECURSIVE
+    )
+    workbook_count = 0
+    rows: List[Dict[str, object]] = []
+    balances: List[Dict[str, object]] = []
+    errors: List[Dict[str, str]] = []
+
+    for entry in entries:
+        name = str(entry.get("name") or "")
+        dbx_path = str(entry.get("path_lower") or entry.get("path_display") or "")
+        if not dbx_path:
+            continue
+        try:
+            payload = download_bytes(dbx_path)
+            parsed_rows, parsed_balance = _parse_excel_account_workbook(name, dbx_path, payload)
+            rows.extend(parsed_rows)
+            if parsed_balance:
+                balances.append(parsed_balance)
+            workbook_count += 1
+        except Exception as exc:
+            errors.append({"file": name, "path": dbx_path, "error": str(exc)})
+
+    dedup: Dict[str, Dict[str, object]] = {}
+    for row in rows:
+        row_id = str(row.get("id") or "")
+        if row_id:
+            dedup[row_id] = row
+
+    final_rows = sorted(
+        dedup.values(),
+        key=lambda row: str(row.get("close_time") or ""),
+        reverse=True,
+    )
+
+    _set_trading_journal_rows(final_rows)
+    _save_json_file(
+        TRADING_JOURNAL_STATE_PATH,
+        {
+            "updated_at": _utc_now_iso(),
+            "excel_account_balances": balances,
+            "source_folder": TRADING_JOURNAL_DROPBOX_FOLDER,
+            "workbooks_seen": workbook_count,
+            "errors": errors,
+        },
+    )
+
+    return {
+        "ok": True,
+        "source_folder": TRADING_JOURNAL_DROPBOX_FOLDER,
+        "workbooks_seen": workbook_count,
+        "rows_imported": len(final_rows),
+        "balances_found": len(balances),
+        "errors": errors,
+    }
+
+
+def _get_excel_account_balances() -> List[Dict[str, object]]:
+    state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
+    items = state.get("excel_account_balances") if isinstance(state, dict) else []
+    return items if isinstance(items, list) else []
 
 
 def _to_float(value: object) -> Optional[float]:
@@ -5230,87 +5460,31 @@ async def _fetch_oanda_account_summary(account: str) -> Dict[str, object]:
 
 @app.get("/api/trading-journal")
 async def trading_journal_items(filter: str = "") -> JSONResponse:
-    rows = _get_trading_journal()
-    filtered = _trading_journal_filter_rows(rows, filter)
-    return JSONResponse({"items": filtered, "count": len(filtered), "total": len(rows)})
+    items = _get_trading_journal_rows()
+    query = (filter or "").strip().lower()
+    if query:
+        def match(row: Dict[str, object]) -> bool:
+            haystack = " ".join([
+                str(row.get("symbol") or ""),
+                str(row.get("account_label") or row.get("account") or ""),
+                str(row.get("source") or ""),
+                str(row.get("sheet") or ""),
+            ]).lower()
+            return query in haystack
+        items = [row for row in items if match(row)]
+    return JSONResponse({"items": items, "count": len(items)})
 
 
 @app.get("/api/trading-journal/balances")
 async def trading_journal_balances() -> JSONResponse:
-    items: List[Dict[str, object]] = []
-    for account in ("live", "demo"):
-        try:
-            bybit_payload = json.loads((await fetch_bybit_balance(account=account)).body)
-            items.append(
-                {
-                    "account": f"bybit-{account}",
-                    "label": f"Bybit {account.title()}",
-                    "currency": bybit_payload.get("coin") or "USDT",
-                    "balance": _to_float(bybit_payload.get("balance")),
-                    "nav": None,
-                }
-            )
-        except Exception:
-            continue
-    for account in ("live", "demo"):
-        try:
-            items.append(await _fetch_oanda_account_summary(account))
-        except Exception:
-            continue
+    items = _get_excel_account_balances()
     return JSONResponse({"items": items})
 
 
 @app.post("/api/trading-journal/sync")
 async def trading_journal_sync() -> JSONResponse:
-    inserted = 0
-    categories = ["linear", "spot", "option", "inverse"]
-    lookback_ms = int((time.time() - 86400) * 1000)
-    for account in ("live", "demo"):
-        try:
-            _mode, api_key, api_secret, base_url, _ = resolve_bybit_credentials_for(account)
-            if not api_key or not api_secret:
-                continue
-            for category in categories:
-                executions = await _fetch_bybit_executions(
-                    base_url=base_url,
-                    api_key=api_key,
-                    api_secret=api_secret,
-                    category=category,
-                    start_time=lookback_ms,
-                )
-                for execution in executions:
-                    inserted += _upsert_trading_journal_rows(
-                        _journal_rows_from_bybit_execution(
-                            {**execution, "account": account, "category": category}
-                        )
-                    )
-        except Exception:
-            continue
-    for account in ("live", "demo"):
-        try:
-            cfg = _get_oanda_config(account)
-        except ValueError:
-            continue
-        state = _load_trading_journal_state()
-        since_id = str(state.get(f"oanda_{account}_since_id") or "").strip() or None
-        try:
-            transactions = await _fetch_oanda_transactions(cfg=cfg, since_id=since_id)
-        except Exception:
-            continue
-        max_seen = since_id
-        for tx in transactions:
-            tx_id = str(tx.get("id") or "")
-            if tx_id:
-                max_seen = tx_id
-            if "ORDER_FILL" not in str(tx.get("type") or ""):
-                continue
-            inserted += _upsert_trading_journal_rows(
-                _journal_rows_from_oanda_order_fill({**tx, "account": account})
-            )
-        if max_seen:
-            state[f"oanda_{account}_since_id"] = max_seen
-            _save_trading_journal_state(state)
-    return JSONResponse({"status": "ok", "updated": inserted})
+    result = await asyncio.to_thread(_import_trading_journal_from_dropbox_excel)
+    return JSONResponse(result)
 
 
 @app.get("/api/open-orders")

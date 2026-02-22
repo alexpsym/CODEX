@@ -6,7 +6,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -14,6 +14,8 @@ import httpx
 DROPBOX_TOKEN_URL = "https://api.dropboxapi.com/oauth2/token"
 DROPBOX_UPLOAD_URL = "https://content.dropboxapi.com/2/files/upload"
 DROPBOX_DOWNLOAD_URL = "https://content.dropboxapi.com/2/files/download"
+DROPBOX_LIST_FOLDER_URL = "https://api.dropboxapi.com/2/files/list_folder"
+DROPBOX_LIST_FOLDER_CONTINUE_URL = "https://api.dropboxapi.com/2/files/list_folder/continue"
 
 
 @dataclass
@@ -91,3 +93,56 @@ def download_bytes(path: str) -> bytes:
         raise FileNotFoundError("Dropbox path not found.")
     response.raise_for_status()
     return response.content
+
+
+
+def list_folder(path: str, recursive: bool = False) -> List[Dict[str, Any]]:
+    if not path.startswith("/"):
+        raise ValueError("Dropbox path must be absolute (start with /).")
+    token = get_dropbox_access_token()
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    payload = {
+        "path": path,
+        "recursive": recursive,
+        "include_deleted": False,
+        "include_has_explicit_shared_members": False,
+        "include_mounted_folders": True,
+        "include_non_downloadable_files": False,
+    }
+
+    entries: List[Dict[str, Any]] = []
+    response = httpx.post(DROPBOX_LIST_FOLDER_URL, headers=headers, json=payload, timeout=20)
+    if response.status_code == 409:
+        raise FileNotFoundError(f"Dropbox folder not found: {path}")
+    response.raise_for_status()
+    data = response.json()
+    entries.extend(data.get("entries", []))
+
+    cursor = data.get("cursor")
+    has_more = bool(data.get("has_more"))
+    while has_more and cursor:
+        resp2 = httpx.post(
+            DROPBOX_LIST_FOLDER_CONTINUE_URL,
+            headers=headers,
+            json={"cursor": cursor},
+            timeout=20,
+        )
+        resp2.raise_for_status()
+        data2 = resp2.json()
+        entries.extend(data2.get("entries", []))
+        cursor = data2.get("cursor")
+        has_more = bool(data2.get("has_more"))
+    return entries
+
+
+def list_excel_files(path: str, recursive: bool = False) -> List[Dict[str, Any]]:
+    entries = list_folder(path, recursive=recursive)
+    out: List[Dict[str, Any]] = []
+    for entry in entries:
+        if entry.get(".tag") != "file":
+            continue
+        name = str(entry.get("name") or "")
+        lower = name.lower()
+        if lower.endswith(".xlsx") or lower.endswith(".xlsm") or lower.endswith(".xls"):
+            out.append(entry)
+    return out

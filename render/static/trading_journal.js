@@ -74,10 +74,15 @@
     try {
       setStatus('Loading…');
       const filter = (filterInput.value || '').trim();
-      const [journal, balances] = await Promise.all([
-        fetchJson(`/api/trading-journal${filter ? `?filter=${encodeURIComponent(filter)}` : ''}`),
-        fetchJson('/api/trading-journal/balances')
-      ]);
+
+      let journal = await fetchJson(`/api/trading-journal${filter ? `?filter=${encodeURIComponent(filter)}` : ''}`);
+      if ((!journal.items || !journal.items.length) && !filter) {
+        await fetchJson('/api/trading-journal/sync', { method: 'POST' });
+        journal = await fetchJson('/api/trading-journal');
+      }
+
+      const balances = await fetchJson('/api/trading-journal/balances');
+
       renderRows(Array.isArray(journal.items) ? journal.items : []);
       renderBalances(Array.isArray(balances.items) ? balances.items : []);
       setStatus(`Updated ${new Date().toLocaleTimeString()}`);
