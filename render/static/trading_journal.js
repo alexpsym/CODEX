@@ -26,6 +26,15 @@
     return res.json();
   }
 
+  function metricChips(metrics) {
+    if (!metrics || typeof metrics !== 'object') return '—';
+    return Object.entries(metrics)
+      .filter(([, v]) => `${v || ''}`.trim())
+      .slice(0, 10)
+      .map(([k, v]) => `<span class="pill" style="margin-right:4px;">${k}: ${v}</span>`)
+      .join(' ');
+  }
+
   function renderRows(rows) {
     tbody.innerHTML = '';
     if (!rows.length) {
@@ -36,22 +45,36 @@
 
     for (const r of rows) {
       const tr = document.createElement('tr');
-      const pnl = Number(r.realized_pnl);
+      const pnl = Number(r.net_profit ?? r.realized_pnl);
       tr.innerHTML = `
         <td>${fmtTime(r.close_time || r.open_time)}</td>
-        <td><span class="pill">${r.source || '—'}</span></td>
         <td>${r.account_label || r.account || '—'}</td>
         <td>${r.symbol || '—'}</td>
         <td>${r.side || '—'}</td>
+        <td>${r.setup || '—'}</td>
         <td>${fmtNum(r.qty, 6)}</td>
         <td>${fmtNum(r.entry_price, 6)}</td>
         <td>${fmtNum(r.exit_price, 6)}</td>
-        <td>${fmtNum(r.notional_usd, 2)}</td>
-        <td>${fmtNum(r.fees, 4)} ${r.fee_currency || ''}</td>
-        <td class="num ${Number.isFinite(pnl) ? (pnl >= 0 ? 'pos' : 'neg') : ''}">${fmtNum(r.realized_pnl, 4)} ${r.realized_pnl_currency || ''}</td>
+        <td>${fmtNum(r.commission ?? r.fees, 4)}</td>
+        <td class="num ${Number.isFinite(pnl) ? (pnl >= 0 ? 'pos' : 'neg') : ''}">${fmtNum(pnl, 4)}</td>
+        <td>${r.breakeven || '—'}</td>
         <td>${r.status || '—'}</td>
       `;
       tbody.appendChild(tr);
+
+      const detail = document.createElement('tr');
+      detail.style.display = 'none';
+      detail.innerHTML = `
+        <td colspan="12" style="white-space:normal;">
+          <div class="muted" style="margin-bottom:6px;"><strong>Comments:</strong> ${r.notes || ''} ${r.pre_trade_comments || ''} ${r.entry_comments || ''} ${r.trade_management || ''} ${r.exit_comments || ''}</div>
+          <div style="margin-bottom:6px;"><strong>SL/TP:</strong> ${fmtNum(r.stop_loss, 6)} / ${fmtNum(r.take_profit, 6)} &nbsp; <strong>Swap:</strong> ${fmtNum(r.swap, 4)} &nbsp; <strong>High/Low:</strong> ${fmtNum(r.highest_price, 6)} / ${fmtNum(r.lowest_price, 6)}</div>
+          <div><strong>Tags:</strong> ${metricChips(r.metrics)}</div>
+        </td>
+      `;
+      tbody.appendChild(detail);
+      tr.addEventListener('click', () => {
+        detail.style.display = detail.style.display === 'none' ? '' : 'none';
+      });
     }
   }
 
@@ -104,6 +127,13 @@
     }
   });
   filterInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') load(); });
+
+  document.querySelectorAll('.tj-chip').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      filterInput.value = btn.getAttribute('data-q') || '';
+      load();
+    });
+  });
 
   load();
   setInterval(load, 15000);

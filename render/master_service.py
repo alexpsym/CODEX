@@ -704,11 +704,53 @@ def _set_trading_journal_rows(rows: List[Dict[str, object]]) -> None:
 
 def _norm_col(name: object) -> str:
     value = str(name or "").strip().lower()
-    for char in [" ", "-", "/", "(", ")", "[", "]", "."]:
+    value = re.sub(r"\s+", " ", value)
+    value = value.replace("/", " ").replace("?", " ")
+    for char in [" ", "-", "(", ")", "[", "]", ".", ":"]:
         value = value.replace(char, "_")
     while "__" in value:
         value = value.replace("__", "_")
     return value.strip("_")
+
+
+def _is_empty_cell(value: object) -> bool:
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except Exception:
+        pass
+    if isinstance(value, str):
+        return value.strip() == ""
+    return False
+
+
+def _cell_to_str(value: object) -> str:
+    if _is_empty_cell(value):
+        return ""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value).strip()
+
+
+def _cell_to_float(value: object) -> Optional[float]:
+    if _is_empty_cell(value):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _cell_to_iso(value: object) -> Optional[str]:
+    if _is_empty_cell(value):
+        return None
+    try:
+        return pd.to_datetime(value, utc=True).isoformat()
+    except Exception:
+        text = _cell_to_str(value)
+        return text or None
 
 
 def _first_present(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
@@ -733,94 +775,190 @@ def _parse_excel_account_workbook(
     account_balance: Optional[Dict[str, object]] = None
     account_label = Path(file_name).stem.strip() or file_name
 
+    core_aliases: Dict[str, List[str]] = {
+        "open_time": ["opening_time", "open_time", "entry_time"],
+        "side": ["type_buy_sell", "type", "side", "direction"],
+        "symbol": ["symbol", "instrument", "pair", "market"],
+        "setup": ["setup"],
+        "qty": ["size_quantity", "size", "quantity", "qty", "units", "volume"],
+        "close_time": ["closing_time", "close_time", "exit_time", "time_close", "closed_at"],
+        "entry_price": ["entry_price", "entry", "open_price", "price_open"],
+        "exit_price": ["closing_price", "close_price", "exit_price", "exit", "price_close"],
+        "swap": ["swap"],
+        "commission": ["commission", "fee", "fees", "cost"],
+        "net_profit": ["net_profit", "profit", "pnl", "pl", "realized_pnl"],
+        "stop_loss": ["stop_loss_optional", "stop_loss", "sl"],
+        "take_profit": ["take_profit_optional", "take_profit", "tp"],
+        "highest_price": ["highest_price_optional", "highest_price"],
+        "lowest_price": ["lowest_price_optional", "lowest_price"],
+        "notes": ["notes"],
+        "pre_trade_comments": ["pre_trade_comments"],
+        "entry_comments": ["entry_comments"],
+        "trade_management": ["trade_management"],
+        "exit_comments": ["exit_comments"],
+        "breakeven": ["breakeven", "breakeven_"],
+    }
+    metrics_aliases: Dict[str, List[str]] = {
+        "error": ["error"],
+        "ath_atl": ["ath_atl"],
+        "ema_bounce": ["ema_bounce"],
+        "timeframe": ["timeframe"],
+        "pattern": ["pattern"],
+        "held_through_news": ["held_through_news"],
+        "early_close": ["early_close"],
+        "near_perfect_entry": ["near_perfect_entry"],
+        "near_win": ["near_win"],
+        "near_round_number": ["near_round_number"],
+        "close_stop_out": ["close_stop_out"],
+        "spiked_out": ["spiked_out"],
+        "suggestions": ["suggestions"],
+        "sl": ["sl"],
+    }
+
     for sheet in xls.sheet_names:
         df = pd.read_excel(xls, sheet_name=sheet)
         if df is None or df.empty:
             continue
         df.columns = [str(col) for col in df.columns]
+        normalized_to_original = {_norm_col(col): col for col in df.columns}
 
-        symbol_col = _first_present(df, ["symbol", "instrument", "pair", "market"])
-        side_col = _first_present(df, ["side", "direction", "buy_sell", "type"])
-        close_time_col = _first_present(
-            df, ["close_time", "closetime", "exit_time", "time_close", "closed_at"]
-        )
-        entry_col = _first_present(df, ["entry", "entry_price", "open_price", "price_open"])
-        exit_col = _first_present(df, ["exit", "exit_price", "close_price", "price_close"])
-        qty_col = _first_present(df, ["qty", "quantity", "size", "units", "volume"])
-        pnl_col = _first_present(df, ["realized_pnl", "pnl", "profit", "pl", "net_pnl"])
-        fee_col = _first_present(df, ["fees", "fee", "commission", "cost"])
+        def _resolve(alias_list: List[str]) -> Optional[str]:
+            for alias in alias_list:
+                if alias in normalized_to_original:
+                    return normalized_to_original[alias]
+            return None
 
-        trade_signal_count = sum(
-            candidate is not None for candidate in [symbol_col, side_col, entry_col, exit_col, pnl_col]
-        )
-        if trade_signal_count >= 3:
-            for idx, row in df.iterrows():
-                symbol = str(row.get(symbol_col, "")).strip() if symbol_col else ""
-                if not symbol or symbol.lower() == "nan":
+        resolved_core = {key: _resolve(aliases) for key, aliases in core_aliases.items()}
+        symbol_col = resolved_core.get("symbol")
+        if symbol_col is None:
+            continue
+
+        for idx, row in df.iterrows():
+            symbol_raw = row.get(symbol_col)
+            if _is_empty_cell(symbol_raw):
+                continue
+
+            raw_excel: Dict[str, object] = {}
+            normalized_values: Dict[str, object] = {}
+            for original_col in df.columns:
+                value = row.get(original_col)
+                if _is_empty_cell(value):
                     continue
+                raw_excel[original_col] = value.item() if hasattr(value, "item") else value
+                normalized_values[_norm_col(original_col)] = value
+            if not raw_excel:
+                continue
 
-                side = str(row.get(side_col, "")).strip() if side_col else ""
-                status = "closed" if (exit_col and pd.notna(row.get(exit_col))) else "unknown"
+            metrics: Dict[str, object] = {}
+            used_norm_cols = set()
 
-                close_time_val = row.get(close_time_col) if close_time_col else None
-                close_time_iso = None
-                if pd.notna(close_time_val):
-                    try:
-                        close_time_iso = pd.to_datetime(close_time_val, utc=True).isoformat()
-                    except Exception:
-                        close_time_iso = str(close_time_val)
+            def _pick_value(col_name: Optional[str]) -> object:
+                if not col_name:
+                    return None
+                norm = _norm_col(col_name)
+                used_norm_cols.add(norm)
+                return normalized_values.get(norm)
 
-                entry = float(row.get(entry_col)) if entry_col and pd.notna(row.get(entry_col)) else None
-                exit_price = float(row.get(exit_col)) if exit_col and pd.notna(row.get(exit_col)) else None
-                qty = float(row.get(qty_col)) if qty_col and pd.notna(row.get(qty_col)) else None
-                fees = float(row.get(fee_col)) if fee_col and pd.notna(row.get(fee_col)) else 0.0
-                pnl = float(row.get(pnl_col)) if pnl_col and pd.notna(row.get(pnl_col)) else None
+            for metric_key, aliases in metrics_aliases.items():
+                metric_col = _resolve(aliases)
+                metric_val = _pick_value(metric_col)
+                if not _is_empty_cell(metric_val):
+                    metrics[metric_key] = _cell_to_str(metric_val)
 
-                notional = None
-                if qty is not None and entry is not None:
-                    notional = abs(qty * entry)
+            open_time_iso = _cell_to_iso(_pick_value(resolved_core.get("open_time")))
+            close_time_iso = _cell_to_iso(_pick_value(resolved_core.get("close_time")))
+            side = _cell_to_str(_pick_value(resolved_core.get("side"))).upper()
+            setup = _cell_to_str(_pick_value(resolved_core.get("setup")))
+            entry_price = _cell_to_float(_pick_value(resolved_core.get("entry_price")))
+            exit_price = _cell_to_float(_pick_value(resolved_core.get("exit_price")))
+            qty = _cell_to_float(_pick_value(resolved_core.get("qty")))
+            swap = _cell_to_float(_pick_value(resolved_core.get("swap")))
+            commission = _cell_to_float(_pick_value(resolved_core.get("commission")))
+            net_profit = _cell_to_float(_pick_value(resolved_core.get("net_profit")))
+            stop_loss = _cell_to_float(_pick_value(resolved_core.get("stop_loss")))
+            take_profit = _cell_to_float(_pick_value(resolved_core.get("take_profit")))
+            highest_price = _cell_to_float(_pick_value(resolved_core.get("highest_price")))
+            lowest_price = _cell_to_float(_pick_value(resolved_core.get("lowest_price")))
+            notes = _cell_to_str(_pick_value(resolved_core.get("notes")))
+            pre_trade_comments = _cell_to_str(_pick_value(resolved_core.get("pre_trade_comments")))
+            entry_comments = _cell_to_str(_pick_value(resolved_core.get("entry_comments")))
+            trade_management = _cell_to_str(_pick_value(resolved_core.get("trade_management")))
+            exit_comments = _cell_to_str(_pick_value(resolved_core.get("exit_comments")))
+            breakeven = _cell_to_str(_pick_value(resolved_core.get("breakeven")))
 
-                row_id = f"excel:{account_label}:{sheet}:{idx}:{symbol}:{close_time_iso or ''}"
-                all_rows.append(
-                    {
-                        "id": row_id,
-                        "source": "excel",
-                        "account": account_label,
-                        "account_label": account_label,
-                        "sheet": sheet,
-                        "symbol": symbol.upper().replace("/", ""),
-                        "side": side,
-                        "qty": qty,
-                        "entry_price": entry,
-                        "exit_price": exit_price,
-                        "notional_usd": notional,
-                        "fees": fees,
-                        "fee_currency": "",
-                        "realized_pnl": pnl,
-                        "realized_pnl_currency": "",
-                        "status": status,
-                        "close_time": close_time_iso,
-                        "raw_refs": {"dropbox_path": dbx_path, "sheet": sheet, "row_index": int(idx)},
-                        "updated_at": _utc_now_iso(),
-                    }
-                )
+            for core_col in resolved_core.values():
+                if core_col:
+                    used_norm_cols.add(_norm_col(core_col))
 
-        bal_col = _first_present(df, ["balance", "account_balance", "cash_balance"])
-        nav_col = _first_present(df, ["nav", "equity", "account_equity"])
-        ccy_col = _first_present(df, ["currency", "ccy", "account_currency"])
+            for norm_col, value in normalized_values.items():
+                if norm_col in used_norm_cols:
+                    continue
+                if _is_empty_cell(value):
+                    continue
+                metrics.setdefault(norm_col, _cell_to_str(value))
+
+            symbol = _cell_to_str(symbol_raw)
+            status = "closed" if close_time_iso else "open"
+            notional = abs((qty or 0.0) * (entry_price or 0.0)) if qty is not None and entry_price is not None else None
+            row_id = f"excel:{account_label}:{sheet}:{idx}:{symbol}:{close_time_iso or ''}"
+
+            all_rows.append(
+                {
+                    "id": row_id,
+                    "source": "excel",
+                    "account": account_label,
+                    "account_label": account_label,
+                    "sheet": sheet,
+                    "symbol": symbol.upper().replace("/", ""),
+                    "side": side,
+                    "setup": setup,
+                    "open_time": open_time_iso,
+                    "close_time": close_time_iso,
+                    "qty": qty,
+                    "entry_price": entry_price,
+                    "exit_price": exit_price,
+                    "swap": swap,
+                    "commission": commission,
+                    "net_profit": net_profit,
+                    "realized_pnl": net_profit,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "highest_price": highest_price,
+                    "lowest_price": lowest_price,
+                    "breakeven": breakeven,
+                    "notes": notes,
+                    "pre_trade_comments": pre_trade_comments,
+                    "entry_comments": entry_comments,
+                    "trade_management": trade_management,
+                    "exit_comments": exit_comments,
+                    "status": status,
+                    "notional_usd": notional,
+                    "fees": commission,
+                    "fee_currency": "",
+                    "realized_pnl_currency": "",
+                    "metrics": metrics,
+                    "raw_excel": raw_excel,
+                    "raw_refs": {"dropbox_path": dbx_path, "sheet": sheet, "row_index": int(idx)},
+                    "updated_at": _utc_now_iso(),
+                }
+            )
+
+        bal_col = _resolve(["balance", "account_balance", "cash_balance"])
+        nav_col = _resolve(["nav", "equity", "account_equity"])
+        ccy_col = _resolve(["currency", "ccy", "account_currency"])
         if bal_col or nav_col:
             for _, row in df.iterrows():
                 bal_val = row.get(bal_col) if bal_col else None
                 nav_val = row.get(nav_col) if nav_col else None
-                if pd.isna(bal_val) and pd.isna(nav_val):
+                if _is_empty_cell(bal_val) and _is_empty_cell(nav_val):
                     continue
                 account_balance = {
                     "source": "excel",
                     "account": account_label,
                     "label": account_label,
-                    "balance": float(bal_val) if bal_col and pd.notna(bal_val) else None,
-                    "nav": float(nav_val) if nav_col and pd.notna(nav_val) else None,
-                    "currency": str(row.get(ccy_col)).strip() if ccy_col and pd.notna(row.get(ccy_col)) else "",
+                    "balance": _cell_to_float(bal_val),
+                    "nav": _cell_to_float(nav_val),
+                    "currency": _cell_to_str(row.get(ccy_col)) if ccy_col else "",
                     "dropbox_path": dbx_path,
                 }
                 break
@@ -5403,14 +5541,21 @@ async def trading_journal_page() -> str:
       <button id=\"tj-sync-btn\">Sync now</button>
       <span id=\"tj-status\" class=\"muted\"></span>
     </div>
+    <div id="tj-quick-filters" class="toolbar" style="padding:8px 12px; margin-top:-6px; margin-bottom:12px; flex-wrap:wrap;">
+      <button class="tj-chip" data-q="error">Errors only</button>
+      <button class="tj-chip" data-q="breakeven">Breakeven only</button>
+      <button class="tj-chip" data-q="held through news">Held through news</button>
+      <button class="tj-chip" data-q="spiked out">Spiked out</button>
+      <button class="tj-chip" data-q="early close">Early close</button>
+    </div>
     <div id=\"tj-balances\" class=\"balances\"></div>
     <div class=\"table-wrap\">
       <table id=\"tj-table\">
         <thead>
           <tr>
-            <th>Close Time</th><th>Source</th><th>Account</th><th>Symbol</th><th>Side</th>
-            <th>Qty</th><th>Entry</th><th>Exit</th><th>Notional (USD)</th>
-            <th>Fees</th><th>Realized P&L</th><th>Status</th>
+            <th>Close Time</th><th>Account</th><th>Symbol</th><th>Side</th><th>Setup</th>
+            <th>Qty</th><th>Entry</th><th>Exit</th><th>Commission</th>
+            <th>Net Profit</th><th>Breakeven</th><th>Status</th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -5463,14 +5608,28 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
     items = _get_trading_journal_rows()
     query = (filter or "").strip().lower()
     if query:
+
         def match(row: Dict[str, object]) -> bool:
-            haystack = " ".join([
-                str(row.get("symbol") or ""),
-                str(row.get("account_label") or row.get("account") or ""),
-                str(row.get("source") or ""),
-                str(row.get("sheet") or ""),
-            ]).lower()
+            metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+            raw_excel = row.get("raw_excel") if isinstance(row.get("raw_excel"), dict) else {}
+            haystack = " ".join(
+                [
+                    str(row.get("symbol") or ""),
+                    str(row.get("account_label") or row.get("account") or ""),
+                    str(row.get("source") or ""),
+                    str(row.get("sheet") or ""),
+                    str(row.get("setup") or ""),
+                    str(row.get("notes") or ""),
+                    str(row.get("pre_trade_comments") or ""),
+                    str(row.get("entry_comments") or ""),
+                    str(row.get("trade_management") or ""),
+                    str(row.get("exit_comments") or ""),
+                    " ".join(str(v) for v in metrics.values()),
+                    " ".join(str(v) for v in raw_excel.values()),
+                ]
+            ).lower()
             return query in haystack
+
         items = [row for row in items if match(row)]
     return JSONResponse({"items": items, "count": len(items)})
 
