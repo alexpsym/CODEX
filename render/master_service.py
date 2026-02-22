@@ -7038,7 +7038,9 @@ async def favicon() -> Response:
     return Response(content=png_bytes, media_type="image/png")
 
 
-app.mount("/static", StaticFiles(directory=BASE_DIR / "render" / "static"), name="static")@app.get("/api/trading-journal")
+app.mount("/static", StaticFiles(directory=BASE_DIR / "render" / "static"), name="static")
+
+@app.get("/api/trading-journal")
 async def trading_journal_items(filter: str = "") -> JSONResponse:
     items = _get_trading_journal_rows()
     query = (filter or "").strip().lower()
