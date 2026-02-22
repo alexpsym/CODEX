@@ -105,7 +105,7 @@ WATCHLIST_PATH = BASE_DIR / "render" / "data" / "watchlist.json"
 TRADING_JOURNAL_PATH = BASE_DIR / "render" / "data" / "trading_journal.json"
 TRADING_JOURNAL_STATE_PATH = BASE_DIR / "render" / "data" / "trading_journal_state.json"
 TRADING_JOURNAL_DROPBOX_FOLDER = os.getenv(
-    "TRADING_JOURNAL_DROPBOX_FOLDER", "/Apps/alexpsym_render/master_control"
+    "TRADING_JOURNAL_DROPBOX_FOLDER", "/master_control"
 ).strip()
 TRADING_JOURNAL_DROPBOX_RECURSIVE = os.getenv(
     "TRADING_JOURNAL_DROPBOX_RECURSIVE", "0"
@@ -970,9 +970,41 @@ def _import_trading_journal_from_dropbox_excel() -> Dict[str, object]:
     if not TRADING_JOURNAL_DROPBOX_FOLDER:
         raise HTTPException(status_code=500, detail="TRADING_JOURNAL_DROPBOX_FOLDER is not set.")
 
-    entries = list_excel_files(
-        TRADING_JOURNAL_DROPBOX_FOLDER, recursive=TRADING_JOURNAL_DROPBOX_RECURSIVE
-    )
+    configured = TRADING_JOURNAL_DROPBOX_FOLDER.strip()
+    candidates: List[str] = []
+    if configured:
+        candidates.append(configured)
+
+    prefix = "/Apps/alexpsym_render"
+    if configured.lower().startswith(prefix.lower()):
+        stripped = configured[len(prefix) :]
+        if not stripped:
+            stripped = "/"
+        if not stripped.startswith("/"):
+            stripped = "/" + stripped
+        candidates.append(stripped)
+
+    if configured.startswith("/") and not configured.lower().startswith("/apps/"):
+        candidates.append(f"{prefix}{configured}")
+
+    entries: Optional[List[Dict[str, Any]]] = None
+    active_folder = configured
+    last_exc: Optional[Exception] = None
+    for candidate in dict.fromkeys(candidates):
+        try:
+            entries = list_excel_files(
+                candidate, recursive=TRADING_JOURNAL_DROPBOX_RECURSIVE
+            )
+            active_folder = candidate
+            break
+        except Exception as exc:
+            last_exc = exc
+
+    if entries is None:
+        if last_exc is not None:
+            raise last_exc
+        raise FileNotFoundError(f"Dropbox folder not found: {configured}")
+
     workbook_count = 0
     rows: List[Dict[str, object]] = []
     balances: List[Dict[str, object]] = []
@@ -1011,7 +1043,8 @@ def _import_trading_journal_from_dropbox_excel() -> Dict[str, object]:
         {
             "updated_at": _utc_now_iso(),
             "excel_account_balances": balances,
-            "source_folder": TRADING_JOURNAL_DROPBOX_FOLDER,
+            "source_folder": active_folder,
+            "configured_folder": configured,
             "workbooks_seen": workbook_count,
             "errors": errors,
         },
@@ -1019,7 +1052,8 @@ def _import_trading_journal_from_dropbox_excel() -> Dict[str, object]:
 
     return {
         "ok": True,
-        "source_folder": TRADING_JOURNAL_DROPBOX_FOLDER,
+        "source_folder": active_folder,
+        "configured_folder": configured,
         "workbooks_seen": workbook_count,
         "rows_imported": len(final_rows),
         "balances_found": len(balances),
