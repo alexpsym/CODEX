@@ -107,6 +107,7 @@ def _coerce_alert(payload: dict) -> dict:
     kind = str(payload.get("kind") or "").strip().lower()
     if kind not in _ALLOWED_ALERT_KINDS:
         raise ValueError("kind must be one of: price, move")
+    message = str(payload.get("message") or "").strip()
 
     enabled = bool(payload.get("enabled", True))
     cooldown_seconds = int(float(payload.get("cooldown_seconds", 0) or 0))
@@ -132,6 +133,8 @@ def _coerce_alert(payload: dict) -> dict:
         if target_price <= 0:
             raise ValueError("target_price must be > 0")
         alert.update({"direction": direction, "target_price": target_price})
+        if message:
+            alert["message"] = message[:500]
         return alert
 
     direction = str(payload.get("direction") or "").strip().lower()
@@ -321,8 +324,10 @@ def evaluate_custom_alerts(
                 fired_price_alert_ids.add(alert_id)
                 changed = True
                 msg = f"{symbol} PRICE {direction.upper()} {target} | now {current}"
-                log(msg)
-                send_push_notification("OANDA Custom Price Alert", msg)
+                custom_msg = str(alert.get("message") or "").strip()
+                notify_msg = f"{msg}\nNote: {custom_msg}" if custom_msg else msg
+                log(msg if not custom_msg else f"{msg} | note={custom_msg}")
+                send_push_notification("OANDA Custom Price Alert", notify_msg)
             elif not condition_met and not armed:
                 st["armed"] = True
                 changed = True
