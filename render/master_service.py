@@ -5483,8 +5483,14 @@ async def trading_journal_balances() -> JSONResponse:
 
 @app.post("/api/trading-journal/sync")
 async def trading_journal_sync() -> JSONResponse:
-    result = await asyncio.to_thread(_import_trading_journal_from_dropbox_excel)
-    return JSONResponse(result)
+    try:
+        result = await asyncio.to_thread(_import_trading_journal_from_dropbox_excel)
+        return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse(
+            {"ok": False, "error": str(exc), "type": exc.__class__.__name__},
+            status_code=500,
+        )
 
 
 @app.get("/api/open-orders")
