@@ -6,6 +6,7 @@
   const status = q('#tj-status');
   const filterInput = q('#tj-filter');
 
+  let activeFlags = new Set();
   let state = {
     rows: [],
     sortKey: 'close_time',
@@ -31,6 +32,16 @@
     const text = await res.text();
     if (!res.ok) throw new Error(`${res.status} ${text}`);
     try { return JSON.parse(text); } catch { return {}; }
+  }
+
+  function applyFlagFilters(rows) {
+    let out = rows;
+    if (activeFlags.has('errors')) out = out.filter((r) => (r.metrics && r.metrics.error) || r.entry_comments === 'Error');
+    if (activeFlags.has('breakeven')) out = out.filter((r) => String(r.breakeven || '').toLowerCase() === 'yes');
+    if (activeFlags.has('held_news')) out = out.filter((r) => String(r.metrics?.held_through_news || '').toLowerCase() === 'yes');
+    if (activeFlags.has('spiked_out')) out = out.filter((r) => String(r.metrics?.spiked_out || '').toLowerCase() === 'yes');
+    if (activeFlags.has('early_close')) out = out.filter((r) => String(r.metrics?.early_close || '').toLowerCase() === 'yes');
+    return out;
   }
 
   function sortRows(rows) {
@@ -138,6 +149,23 @@
     });
   }
 
+  function renderAll() {
+    const filtered = applyFlagFilters(state.rows);
+    renderRows(filtered);
+    renderSortIndicators();
+  }
+
+  function toggle(flag) {
+    if (activeFlags.has(flag)) activeFlags.delete(flag);
+    else activeFlags.add(flag);
+    qa('.tj-chip[data-flag]').forEach((btn) => {
+      const on = activeFlags.has(btn.dataset.flag || '');
+      btn.style.opacity = on ? '1' : '0.7';
+      btn.style.outline = on ? '1px solid #60a5fa' : 'none';
+    });
+    renderAll();
+  }
+
   async function load() {
     try {
       setStatus('Loading…');
@@ -153,10 +181,9 @@
       state.rows = Array.isArray(journal.items) ? journal.items : [];
       state.stats = journal.stats || null;
 
-      renderRows(state.rows);
+      renderAll();
       renderBalances(Array.isArray(balances.items) ? balances.items : []);
       renderStats(state.stats);
-      renderSortIndicators();
       setStatus(`Updated ${new Date().toLocaleTimeString()}`);
     } catch (e) {
       console.error(e);
@@ -182,10 +209,15 @@
       if (!key) return;
       if (state.sortKey === key) state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
       else { state.sortKey = key; state.sortDir = 'asc'; }
-      renderRows(state.rows);
-      renderSortIndicators();
+      renderAll();
     });
   });
+
+  q('#btn-errors')?.addEventListener('click', () => toggle('errors'));
+  q('#btn-breakeven')?.addEventListener('click', () => toggle('breakeven'));
+  q('#btn-held-news')?.addEventListener('click', () => toggle('held_news'));
+  q('#btn-spiked-out')?.addEventListener('click', () => toggle('spiked_out'));
+  q('#btn-early-close')?.addEventListener('click', () => toggle('early_close'));
 
   filterInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') load(); });
 
