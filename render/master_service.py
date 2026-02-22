@@ -20,7 +20,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
 from dateutil.relativedelta import relativedelta
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import quote, unquote, urlparse
 from uuid import uuid4
 
@@ -30,11 +30,12 @@ from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 import httpx
 import requests
+import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 from starlette.responses import RedirectResponse
 
 from bybit_credentials import resolve_bybit_credentials_for
-from render.dropbox_sync import download_bytes, upload_bytes
+from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from payslip_audit.tesseract import (
     TESSERACT_MISSING_MESSAGE,
     _resolve_tesseract_binary,
@@ -101,6 +102,14 @@ BYBIT_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "bybit-history"
 COINSPOT_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "coinspot-history"
 PENDING_WEBHOOKS_PATH = BASE_DIR / "render" / "data" / "pending_webhooks.json"
 WATCHLIST_PATH = BASE_DIR / "render" / "data" / "watchlist.json"
+TRADING_JOURNAL_PATH = BASE_DIR / "render" / "data" / "trading_journal.json"
+TRADING_JOURNAL_STATE_PATH = BASE_DIR / "render" / "data" / "trading_journal_state.json"
+TRADING_JOURNAL_DROPBOX_FOLDER = os.getenv(
+    "TRADING_JOURNAL_DROPBOX_FOLDER", "/Apps/alexpsym_render/master_control"
+).strip()
+TRADING_JOURNAL_DROPBOX_RECURSIVE = os.getenv(
+    "TRADING_JOURNAL_DROPBOX_RECURSIVE", "0"
+).strip().lower() in {"1", "true", "yes", "on"}
 WATCHLIST_MAX_ITEMS = 50
 DROPBOX_SYNC_ENABLED = os.getenv("DROPBOX_SYNC_ENABLED", "").strip().lower() in {
     "1",
@@ -171,8 +180,10 @@ BYBIT_HISTORY_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
 COINSPOT_HISTORY_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
 PENDING_WEBHOOKS_PATH.parent.mkdir(parents=True, exist_ok=True)
 WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+TRADING_JOURNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 _WATCHLIST_CACHE: Optional[List[str]] = None
+_TRADING_JOURNAL_CACHE: Optional[List[Dict[str, object]]] = None
 _DROPBOX_UPLOAD_TASK: Optional[asyncio.Task] = None
 _BYBIT_EXEC_LAST_SEEN: Dict[str, int] = {}
 _OANDA_TX_LAST_SEEN: Dict[str, str] = {}
@@ -580,6 +591,541 @@ def _set_watchlist(items: Iterable[object]) -> List[str]:
     return list(normalized)
 
 
+def _load_trading_journal() -> List[Dict[str, object]]:
+    if not TRADING_JOURNAL_PATH.exists():
+        return []
+    try:
+        payload = json.loads(TRADING_JOURNAL_PATH.read_text(encoding="utf-8"))
+    except Exception:  # pragma: no cover - defensive
+        return []
+    if not isinstance(payload, list):
+        return []
+    rows: List[Dict[str, object]] = []
+    for entry in payload:
+        if isinstance(entry, dict):
+            rows.append(entry)
+    return rows
+
+
+def _get_trading_journal() -> List[Dict[str, object]]:
+    global _TRADING_JOURNAL_CACHE
+    if _TRADING_JOURNAL_CACHE is None:
+        _TRADING_JOURNAL_CACHE = _load_trading_journal()
+    return [dict(item) for item in _TRADING_JOURNAL_CACHE]
+
+
+def _save_trading_journal(rows: List[Dict[str, object]]) -> None:
+    global _TRADING_JOURNAL_CACHE
+    sorted_rows = sorted(
+        rows,
+        key=lambda item: str(item.get("close_time") or item.get("open_time") or ""),
+        reverse=True,
+    )
+    _TRADING_JOURNAL_CACHE = [dict(item) for item in sorted_rows]
+    TRADING_JOURNAL_PATH.write_text(
+        json.dumps(sorted_rows, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def _upsert_trading_journal_rows(rows: Iterable[Dict[str, object]]) -> int:
+    existing = _get_trading_journal()
+    by_id: Dict[str, Dict[str, object]] = {}
+    for row in existing:
+        row_id = str(row.get("id") or "").strip()
+        if row_id:
+            by_id[row_id] = row
+    changed = 0
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        row_id = str(row.get("id") or "").strip()
+        if not row_id:
+            continue
+        row["id"] = row_id
+        row["updated_at"] = datetime.now(timezone.utc).isoformat()
+        if row_id in by_id:
+            by_id[row_id].update(row)
+        else:
+            by_id[row_id] = row
+        changed += 1
+    if changed:
+        _save_trading_journal(list(by_id.values()))
+    return changed
+
+
+def _load_trading_journal_state() -> Dict[str, object]:
+    if not TRADING_JOURNAL_STATE_PATH.exists():
+        return {}
+    try:
+        payload = json.loads(TRADING_JOURNAL_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:  # pragma: no cover - defensive
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_trading_journal_state(state: Dict[str, object]) -> None:
+    TRADING_JOURNAL_STATE_PATH.write_text(
+        json.dumps(state, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _load_json_file(path: Path, default):
+    try:
+        if not path.exists():
+            return default
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def _save_json_file(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _get_trading_journal_rows() -> List[Dict[str, object]]:
+    data = _load_json_file(TRADING_JOURNAL_PATH, {"items": []})
+    if isinstance(data, list):
+        return [row for row in data if isinstance(row, dict)]
+    items = data.get("items") if isinstance(data, dict) else []
+    return items if isinstance(items, list) else []
+
+
+def _set_trading_journal_rows(rows: List[Dict[str, object]]) -> None:
+    _save_json_file(TRADING_JOURNAL_PATH, {"items": rows, "updated_at": _utc_now_iso()})
+
+
+def _norm_col(name: object) -> str:
+    value = str(name or "").strip().lower()
+    value = re.sub(r"\s+", " ", value)
+    value = value.replace("/", " ").replace("?", " ")
+    for char in [" ", "-", "(", ")", "[", "]", ".", ":"]:
+        value = value.replace(char, "_")
+    while "__" in value:
+        value = value.replace("__", "_")
+    return value.strip("_")
+
+
+def _is_empty_cell(value: object) -> bool:
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except Exception:
+        pass
+    if isinstance(value, str):
+        return value.strip() == ""
+    return False
+
+
+def _cell_to_str(value: object) -> str:
+    if _is_empty_cell(value):
+        return ""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value).strip()
+
+
+def _cell_to_float(value: object) -> Optional[float]:
+    if _is_empty_cell(value):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _cell_to_iso(value: object) -> Optional[str]:
+    if _is_empty_cell(value):
+        return None
+    try:
+        return pd.to_datetime(value, utc=True).isoformat()
+    except Exception:
+        text = _cell_to_str(value)
+        return text or None
+
+
+def _first_present(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    cols = {_norm_col(col): col for col in df.columns}
+    for candidate in candidates:
+        if candidate in cols:
+            return cols[candidate]
+    return None
+
+
+def _parse_excel_account_workbook(
+    file_name: str, dbx_path: str, payload: bytes
+) -> Tuple[List[Dict[str, object]], Optional[Dict[str, object]]]:
+    bio = io.BytesIO(payload)
+    try:
+        xls = pd.ExcelFile(bio, engine="openpyxl")
+    except Exception:
+        bio.seek(0)
+        xls = pd.ExcelFile(bio, engine="xlrd")
+
+    all_rows: List[Dict[str, object]] = []
+    account_balance: Optional[Dict[str, object]] = None
+    account_label = Path(file_name).stem.strip() or file_name
+
+    core_aliases: Dict[str, List[str]] = {
+        "open_time": ["opening_time", "open_time", "entry_time"],
+        "side": ["type_buy_sell", "type", "side", "direction"],
+        "symbol": ["symbol", "instrument", "pair", "market"],
+        "setup": ["setup"],
+        "qty": ["size_quantity", "size", "quantity", "qty", "units", "volume"],
+        "close_time": ["closing_time", "close_time", "exit_time", "time_close", "closed_at"],
+        "entry_price": ["entry_price", "entry", "open_price", "price_open"],
+        "exit_price": ["closing_price", "close_price", "exit_price", "exit", "price_close"],
+        "swap": ["swap"],
+        "commission": ["commission", "fee", "fees", "cost"],
+        "net_profit": ["net_profit", "profit", "pnl", "pl", "realized_pnl"],
+        "stop_loss": ["stop_loss_optional", "stop_loss", "sl"],
+        "take_profit": ["take_profit_optional", "take_profit", "tp"],
+        "highest_price": ["highest_price_optional", "highest_price"],
+        "lowest_price": ["lowest_price_optional", "lowest_price"],
+        "notes": ["notes"],
+        "pre_trade_comments": ["pre_trade_comments"],
+        "entry_comments": ["entry_comments"],
+        "trade_management": ["trade_management"],
+        "exit_comments": ["exit_comments"],
+        "breakeven": ["breakeven", "breakeven_"],
+    }
+    metrics_aliases: Dict[str, List[str]] = {
+        "error": ["error"],
+        "ath_atl": ["ath_atl"],
+        "ema_bounce": ["ema_bounce"],
+        "timeframe": ["timeframe"],
+        "pattern": ["pattern"],
+        "held_through_news": ["held_through_news"],
+        "early_close": ["early_close"],
+        "near_perfect_entry": ["near_perfect_entry"],
+        "near_win": ["near_win"],
+        "near_round_number": ["near_round_number"],
+        "close_stop_out": ["close_stop_out"],
+        "spiked_out": ["spiked_out"],
+        "suggestions": ["suggestions"],
+        "sl": ["sl"],
+    }
+
+    for sheet in xls.sheet_names:
+        df = pd.read_excel(xls, sheet_name=sheet)
+        if df is None or df.empty:
+            continue
+        df.columns = [str(col) for col in df.columns]
+        normalized_to_original = {_norm_col(col): col for col in df.columns}
+
+        def _resolve(alias_list: List[str]) -> Optional[str]:
+            for alias in alias_list:
+                if alias in normalized_to_original:
+                    return normalized_to_original[alias]
+            return None
+
+        resolved_core = {key: _resolve(aliases) for key, aliases in core_aliases.items()}
+        symbol_col = resolved_core.get("symbol")
+        if symbol_col is None:
+            continue
+
+        for idx, row in df.iterrows():
+            symbol_raw = row.get(symbol_col)
+            if _is_empty_cell(symbol_raw):
+                continue
+
+            raw_excel: Dict[str, object] = {}
+            normalized_values: Dict[str, object] = {}
+            for original_col in df.columns:
+                value = row.get(original_col)
+                if _is_empty_cell(value):
+                    continue
+                raw_excel[original_col] = value.item() if hasattr(value, "item") else value
+                normalized_values[_norm_col(original_col)] = value
+            if not raw_excel:
+                continue
+
+            metrics: Dict[str, object] = {}
+            used_norm_cols = set()
+
+            def _pick_value(col_name: Optional[str]) -> object:
+                if not col_name:
+                    return None
+                norm = _norm_col(col_name)
+                used_norm_cols.add(norm)
+                return normalized_values.get(norm)
+
+            for metric_key, aliases in metrics_aliases.items():
+                metric_col = _resolve(aliases)
+                metric_val = _pick_value(metric_col)
+                if not _is_empty_cell(metric_val):
+                    metrics[metric_key] = _cell_to_str(metric_val)
+
+            open_time_iso = _cell_to_iso(_pick_value(resolved_core.get("open_time")))
+            close_time_iso = _cell_to_iso(_pick_value(resolved_core.get("close_time")))
+            side = _cell_to_str(_pick_value(resolved_core.get("side"))).upper()
+            setup = _cell_to_str(_pick_value(resolved_core.get("setup")))
+            entry_price = _cell_to_float(_pick_value(resolved_core.get("entry_price")))
+            exit_price = _cell_to_float(_pick_value(resolved_core.get("exit_price")))
+            qty = _cell_to_float(_pick_value(resolved_core.get("qty")))
+            swap = _cell_to_float(_pick_value(resolved_core.get("swap")))
+            commission = _cell_to_float(_pick_value(resolved_core.get("commission")))
+            net_profit = _cell_to_float(_pick_value(resolved_core.get("net_profit")))
+            stop_loss = _cell_to_float(_pick_value(resolved_core.get("stop_loss")))
+            take_profit = _cell_to_float(_pick_value(resolved_core.get("take_profit")))
+            highest_price = _cell_to_float(_pick_value(resolved_core.get("highest_price")))
+            lowest_price = _cell_to_float(_pick_value(resolved_core.get("lowest_price")))
+            notes = _cell_to_str(_pick_value(resolved_core.get("notes")))
+            pre_trade_comments = _cell_to_str(_pick_value(resolved_core.get("pre_trade_comments")))
+            entry_comments = _cell_to_str(_pick_value(resolved_core.get("entry_comments")))
+            trade_management = _cell_to_str(_pick_value(resolved_core.get("trade_management")))
+            exit_comments = _cell_to_str(_pick_value(resolved_core.get("exit_comments")))
+            breakeven = _cell_to_str(_pick_value(resolved_core.get("breakeven")))
+
+            for core_col in resolved_core.values():
+                if core_col:
+                    used_norm_cols.add(_norm_col(core_col))
+
+            for norm_col, value in normalized_values.items():
+                if norm_col in used_norm_cols:
+                    continue
+                if _is_empty_cell(value):
+                    continue
+                metrics.setdefault(norm_col, _cell_to_str(value))
+
+            symbol = _cell_to_str(symbol_raw)
+            status = "closed" if close_time_iso else "open"
+            notional = abs((qty or 0.0) * (entry_price or 0.0)) if qty is not None and entry_price is not None else None
+            row_id = f"excel:{account_label}:{sheet}:{idx}:{symbol}:{close_time_iso or ''}"
+
+            all_rows.append(
+                {
+                    "id": row_id,
+                    "source": "excel",
+                    "account": account_label,
+                    "account_label": account_label,
+                    "sheet": sheet,
+                    "symbol": symbol.upper().replace("/", ""),
+                    "side": side,
+                    "setup": setup,
+                    "open_time": open_time_iso,
+                    "close_time": close_time_iso,
+                    "qty": qty,
+                    "entry_price": entry_price,
+                    "exit_price": exit_price,
+                    "swap": swap,
+                    "commission": commission,
+                    "net_profit": net_profit,
+                    "realized_pnl": net_profit,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "highest_price": highest_price,
+                    "lowest_price": lowest_price,
+                    "breakeven": breakeven,
+                    "notes": notes,
+                    "pre_trade_comments": pre_trade_comments,
+                    "entry_comments": entry_comments,
+                    "trade_management": trade_management,
+                    "exit_comments": exit_comments,
+                    "status": status,
+                    "notional_usd": notional,
+                    "fees": commission,
+                    "fee_currency": "",
+                    "realized_pnl_currency": "",
+                    "metrics": metrics,
+                    "raw_excel": raw_excel,
+                    "raw_refs": {"dropbox_path": dbx_path, "sheet": sheet, "row_index": int(idx)},
+                    "updated_at": _utc_now_iso(),
+                }
+            )
+
+        bal_col = _resolve(["balance", "account_balance", "cash_balance"])
+        nav_col = _resolve(["nav", "equity", "account_equity"])
+        ccy_col = _resolve(["currency", "ccy", "account_currency"])
+        if bal_col or nav_col:
+            for _, row in df.iterrows():
+                bal_val = row.get(bal_col) if bal_col else None
+                nav_val = row.get(nav_col) if nav_col else None
+                if _is_empty_cell(bal_val) and _is_empty_cell(nav_val):
+                    continue
+                account_balance = {
+                    "source": "excel",
+                    "account": account_label,
+                    "label": account_label,
+                    "balance": _cell_to_float(bal_val),
+                    "nav": _cell_to_float(nav_val),
+                    "currency": _cell_to_str(row.get(ccy_col)) if ccy_col else "",
+                    "dropbox_path": dbx_path,
+                }
+                break
+
+    return all_rows, account_balance
+
+
+def _import_trading_journal_from_dropbox_excel() -> Dict[str, object]:
+    if not TRADING_JOURNAL_DROPBOX_FOLDER:
+        raise HTTPException(status_code=500, detail="TRADING_JOURNAL_DROPBOX_FOLDER is not set.")
+
+    entries = list_excel_files(
+        TRADING_JOURNAL_DROPBOX_FOLDER, recursive=TRADING_JOURNAL_DROPBOX_RECURSIVE
+    )
+    workbook_count = 0
+    rows: List[Dict[str, object]] = []
+    balances: List[Dict[str, object]] = []
+    errors: List[Dict[str, str]] = []
+
+    for entry in entries:
+        name = str(entry.get("name") or "")
+        dbx_path = str(entry.get("path_lower") or entry.get("path_display") or "")
+        if not dbx_path:
+            continue
+        try:
+            payload = download_bytes(dbx_path)
+            parsed_rows, parsed_balance = _parse_excel_account_workbook(name, dbx_path, payload)
+            rows.extend(parsed_rows)
+            if parsed_balance:
+                balances.append(parsed_balance)
+            workbook_count += 1
+        except Exception as exc:
+            errors.append({"file": name, "path": dbx_path, "error": str(exc)})
+
+    dedup: Dict[str, Dict[str, object]] = {}
+    for row in rows:
+        row_id = str(row.get("id") or "")
+        if row_id:
+            dedup[row_id] = row
+
+    final_rows = sorted(
+        dedup.values(),
+        key=lambda row: str(row.get("close_time") or ""),
+        reverse=True,
+    )
+
+    _set_trading_journal_rows(final_rows)
+    _save_json_file(
+        TRADING_JOURNAL_STATE_PATH,
+        {
+            "updated_at": _utc_now_iso(),
+            "excel_account_balances": balances,
+            "source_folder": TRADING_JOURNAL_DROPBOX_FOLDER,
+            "workbooks_seen": workbook_count,
+            "errors": errors,
+        },
+    )
+
+    return {
+        "ok": True,
+        "source_folder": TRADING_JOURNAL_DROPBOX_FOLDER,
+        "workbooks_seen": workbook_count,
+        "rows_imported": len(final_rows),
+        "balances_found": len(balances),
+        "errors": errors,
+    }
+
+
+def _get_excel_account_balances() -> List[Dict[str, object]]:
+    state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
+    items = state.get("excel_account_balances") if isinstance(state, dict) else []
+    return items if isinstance(items, list) else []
+
+
+def _to_float(value: object) -> Optional[float]:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _journal_rows_from_bybit_execution(entry: Dict[str, object]) -> List[Dict[str, object]]:
+    account = str(entry.get("account") or "unknown").strip().lower()
+    category = str(entry.get("category") or "").strip().lower()
+    symbol = str(entry.get("symbol") or "").strip().upper()
+    order_id = str(entry.get("orderId") or "")
+    exec_id = str(entry.get("execId") or "")
+    if not symbol or not order_id or not exec_id:
+        return []
+    qty = _to_float(entry.get("execQty")) or 0.0
+    exec_price = _to_float(entry.get("execPrice"))
+    exec_fee = _to_float(entry.get("execFee")) or 0.0
+    exec_pnl = _to_float(entry.get("execPnl")) or 0.0
+    exec_time_raw = _to_float(entry.get("execTime"))
+    close_time = None
+    if exec_time_raw:
+        close_time = datetime.fromtimestamp(exec_time_raw / 1000, tz=timezone.utc).isoformat()
+    side = str(entry.get("side") or "")
+    return [
+        {
+            "id": f"bybit:{account}:{category}:{symbol}:{order_id}:{exec_id}",
+            "source": "bybit",
+            "account": account,
+            "account_label": f"Bybit {account.title()}",
+            "asset_class": "crypto",
+            "symbol": symbol,
+            "side": side.title() if side else "",
+            "status": "closed" if exec_pnl != 0 else "filled",
+            "open_time": close_time,
+            "close_time": close_time,
+            "entry_price": exec_price,
+            "exit_price": exec_price,
+            "qty": qty,
+            "notional_usd": (exec_price or 0.0) * qty,
+            "fees": exec_fee,
+            "fee_currency": str(entry.get("feeCurrency") or "USDT"),
+            "realized_pnl": exec_pnl,
+            "realized_pnl_currency": str(entry.get("currency") or "USDT"),
+            "strategy_tag": "",
+            "notes": "",
+            "raw_refs": {"orderId": order_id, "execIds": [exec_id]},
+        }
+    ]
+
+
+def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[str, object]]:
+    account = str(entry.get("account") or "unknown").strip().lower()
+    tx_id = str(entry.get("id") or "").strip()
+    symbol = str(entry.get("instrument") or "").strip().upper()
+    if not tx_id or not symbol:
+        return []
+    units = _to_float(entry.get("units")) or 0.0
+    qty = abs(units)
+    side = "Buy" if units >= 0 else "Sell"
+    price = _to_float(entry.get("price"))
+    realized_pnl = (_to_float(entry.get("pl")) or 0.0) + (_to_float(entry.get("financing")) or 0.0)
+    fees = abs(_to_float(entry.get("halfSpreadCost")) or 0.0)
+    close_time = str(entry.get("time") or "")
+    return [
+        {
+            "id": f"oanda:{account}:{symbol}:{tx_id}",
+            "source": "oanda",
+            "account": account,
+            "account_label": f"OANDA {account.title()}",
+            "asset_class": "forex",
+            "symbol": symbol,
+            "side": side,
+            "status": "closed",
+            "open_time": close_time,
+            "close_time": close_time,
+            "entry_price": price,
+            "exit_price": price,
+            "qty": qty,
+            "notional_usd": None,
+            "fees": fees,
+            "fee_currency": str(entry.get("accountCurrency") or ""),
+            "realized_pnl": realized_pnl,
+            "realized_pnl_currency": str(entry.get("accountCurrency") or ""),
+            "strategy_tag": "",
+            "notes": "",
+            "raw_refs": {"transactionId": tx_id, "orderId": entry.get("orderID")},
+        }
+    ]
+
+
 def _build_state_backup_payload() -> bytes:
     alerts_payload = {
         "bybit": {"alerts": bybit_monitor.get_custom_alerts(force=True)},
@@ -926,6 +1472,8 @@ def script_open_url(script: ManagedScript) -> str:
         return "/bybit-history"
     if script.name == "coinspot-clone":
         return "/coinspot-history"
+    if script.name == "trading-journal":
+        return "/trading-journal"
     if script.name in WEB_APPS:
         return f"/apps/{_encoded_script_name(script.name)}"
     return f"/scripts/view/{_encoded_script_name(script.name)}"
@@ -1064,7 +1612,29 @@ class ScriptManager:
         raise HTTPException(status_code=404, detail=f"Script not found: {name}")
 
     def list_scripts(self) -> List[Dict[str, object]]:
-        return sorted((script.to_summary() for script in self._scripts.values()), key=lambda s: s["name"])
+        items = [script.to_summary() for script in self._scripts.values()]
+        items.append(
+            {
+                "id": "trading-journal",
+                "name": "trading-journal",
+                "path": str(BASE_DIR / "render" / "master_service.py"),
+                "category": "Other",
+                "running": True,
+                "port": None,
+                "return_code": None,
+                "open_url": "/trading-journal",
+                "logs_url": None,
+                "last_output_at": None,
+                "last_start_attempt_at": None,
+                "last_start_error": None,
+                "last_exit_code": None,
+                "last_exit_reason": None,
+                "last_spawn_command": None,
+                "last_spawn_cwd": None,
+                "standalone": False,
+            }
+        )
+        return sorted(items, key=lambda s: str(s["name"]).lower())
 
     def get(self, name: str) -> ManagedScript:
         resolved = self._resolve_name(name)
@@ -4759,6 +5329,9 @@ async def _poll_bybit_fills() -> None:
                             "account": account,
                             "category": category,
                         }
+                        journal_rows = _journal_rows_from_bybit_execution(entry_payload)
+                        if journal_rows:
+                            _upsert_trading_journal_rows(journal_rows)
                         await _send_telegram_alert(_format_bybit_fill_alert(entry_payload))
                 _BYBIT_EXEC_LAST_SEEN[account] = max_seen
             except Exception as exc:  # pragma: no cover - background task
@@ -4819,6 +5392,9 @@ async def _poll_oanda_fills() -> None:
                     if "ORDER_FILL" not in tx_type:
                         continue
                     entry_payload = {**entry, "account": account}
+                    journal_rows = _journal_rows_from_oanda_order_fill(entry_payload)
+                    if journal_rows:
+                        _upsert_trading_journal_rows(journal_rows)
                     await _send_telegram_alert(_format_oanda_fill_alert(entry_payload))
                 _OANDA_TX_LAST_SEEN[account] = str(max_seen)
             except Exception as exc:  # pragma: no cover - background task
@@ -4925,6 +5501,155 @@ async def fetch_bybit_balance(
             "retMsg": ret_msg,
         }
     )
+
+
+@app.get("/trading-journal", response_class=HTMLResponse)
+async def trading_journal_page() -> str:
+    return """
+<!doctype html>
+<html>
+<head>
+  <meta charset=\"utf-8\"/>
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>
+  <title>Trading Journal</title>
+  <style>
+    body { background:#0b1220; color:#e5e7eb; font-family:system-ui,sans-serif; margin:0; }
+    .wrap { max-width: 1400px; margin: 0 auto; padding: 16px; }
+    .toolbar, .balances, .table-wrap { background:#111827; border:1px solid #1f2937; border-radius:12px; }
+    .toolbar { display:flex; gap:8px; align-items:center; padding:12px; margin-bottom:12px; }
+    .toolbar input { flex:1; background:#0f172a; color:#e5e7eb; border:1px solid #334155; border-radius:8px; padding:8px 10px; }
+    .toolbar button { background:#2563eb; color:white; border:0; border-radius:8px; padding:8px 12px; cursor:pointer; }
+    .balances { padding:12px; margin-bottom:12px; display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:10px; }
+    .bal-card { background:#0f172a; border:1px solid #1f2937; border-radius:10px; padding:10px; }
+    .table-wrap { padding:8px; overflow:auto; }
+    table { width:100%; border-collapse:collapse; min-width:1200px; }
+    th, td { padding:10px 8px; border-bottom:1px solid #1f2937; white-space:nowrap; }
+    th { color:#93c5fd; text-align:left; position:sticky; top:0; background:#111827; }
+    tr:hover td { background:#0f172a; }
+    .muted { color:#94a3b8; }
+    .pill { border:1px solid #334155; border-radius:999px; padding:2px 8px; font-size:12px; }
+    .num.pos { color:#86efac; }
+    .num.neg { color:#fca5a5; }
+  </style>
+</head>
+<body>
+  <div class=\"wrap\">
+    <div class=\"toolbar\">
+      <input id=\"tj-filter\" placeholder=\"Filter symbol / account / source (e.g. EURUSD, BTCUSDT, oanda, bybit demo)\" />
+      <button id=\"tj-filter-btn\">Filter</button>
+      <button id=\"tj-clear-btn\">Clear</button>
+      <button id=\"tj-sync-btn\">Sync now</button>
+      <span id=\"tj-status\" class=\"muted\"></span>
+    </div>
+    <div id="tj-quick-filters" class="toolbar" style="padding:8px 12px; margin-top:-6px; margin-bottom:12px; flex-wrap:wrap;">
+      <button class="tj-chip" data-q="error">Errors only</button>
+      <button class="tj-chip" data-q="breakeven">Breakeven only</button>
+      <button class="tj-chip" data-q="held through news">Held through news</button>
+      <button class="tj-chip" data-q="spiked out">Spiked out</button>
+      <button class="tj-chip" data-q="early close">Early close</button>
+    </div>
+    <div id=\"tj-balances\" class=\"balances\"></div>
+    <div class=\"table-wrap\">
+      <table id=\"tj-table\">
+        <thead>
+          <tr>
+            <th>Close Time</th><th>Account</th><th>Symbol</th><th>Side</th><th>Setup</th>
+            <th>Qty</th><th>Entry</th><th>Exit</th><th>Commission</th>
+            <th>Net Profit</th><th>Breakeven</th><th>Status</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div id=\"tj-empty\" class=\"muted\" style=\"padding:12px; display:none;\">No trades found.</div>
+    </div>
+  </div>
+  <script src=\"/static/trading_journal.js\"></script>
+</body>
+</html>
+"""
+
+
+def _trading_journal_filter_rows(rows: List[Dict[str, object]], query: str) -> List[Dict[str, object]]:
+    needle = query.strip().lower()
+    if not needle:
+        return rows
+    matched: List[Dict[str, object]] = []
+    for row in rows:
+        haystack = " ".join(
+            str(row.get(field, ""))
+            for field in ("source", "account", "account_label", "symbol", "side", "status")
+        ).lower()
+        if needle in haystack:
+            matched.append(row)
+    return matched
+
+
+async def _fetch_oanda_account_summary(account: str) -> Dict[str, object]:
+    cfg = _get_oanda_config(account)
+    payload = await _fetch_oanda_json(
+        cfg["base_url"],
+        f"/v3/accounts/{cfg['account_id']}/summary",
+        cfg["token"],
+    )
+    account_payload = payload.get("account") if isinstance(payload, dict) else {}
+    if not isinstance(account_payload, dict):
+        account_payload = {}
+    return {
+        "account": account,
+        "label": f"OANDA {account.title()}",
+        "currency": account_payload.get("currency") or "",
+        "balance": _to_float(account_payload.get("balance")),
+        "nav": _to_float(account_payload.get("NAV")),
+    }
+
+
+@app.get("/api/trading-journal")
+async def trading_journal_items(filter: str = "") -> JSONResponse:
+    items = _get_trading_journal_rows()
+    query = (filter or "").strip().lower()
+    if query:
+
+        def match(row: Dict[str, object]) -> bool:
+            metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+            raw_excel = row.get("raw_excel") if isinstance(row.get("raw_excel"), dict) else {}
+            haystack = " ".join(
+                [
+                    str(row.get("symbol") or ""),
+                    str(row.get("account_label") or row.get("account") or ""),
+                    str(row.get("source") or ""),
+                    str(row.get("sheet") or ""),
+                    str(row.get("setup") or ""),
+                    str(row.get("notes") or ""),
+                    str(row.get("pre_trade_comments") or ""),
+                    str(row.get("entry_comments") or ""),
+                    str(row.get("trade_management") or ""),
+                    str(row.get("exit_comments") or ""),
+                    " ".join(str(v) for v in metrics.values()),
+                    " ".join(str(v) for v in raw_excel.values()),
+                ]
+            ).lower()
+            return query in haystack
+
+        items = [row for row in items if match(row)]
+    return JSONResponse({"items": items, "count": len(items)})
+
+
+@app.get("/api/trading-journal/balances")
+async def trading_journal_balances() -> JSONResponse:
+    items = _get_excel_account_balances()
+    return JSONResponse({"items": items})
+
+
+@app.post("/api/trading-journal/sync")
+async def trading_journal_sync() -> JSONResponse:
+    try:
+        result = await asyncio.to_thread(_import_trading_journal_from_dropbox_excel)
+        return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse(
+            {"ok": False, "error": str(exc), "type": exc.__class__.__name__},
+            status_code=500,
+        )
 
 
 @app.get("/api/open-orders")
