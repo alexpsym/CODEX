@@ -1,9 +1,17 @@
 (() => {
   const q = (s) => document.querySelector(s);
+  const qa = (s) => Array.from(document.querySelectorAll(s));
   const tbody = q('#tj-table tbody');
   const empty = q('#tj-empty');
   const status = q('#tj-status');
   const filterInput = q('#tj-filter');
+
+  let state = {
+    rows: [],
+    sortKey: 'close_time',
+    sortDir: 'desc',
+    stats: null,
+  };
 
   const fmtNum = (v, d = 2) => {
     const n = Number(v);
@@ -13,84 +21,121 @@
   const fmtTime = (v) => {
     if (!v) return '—';
     const d = new Date(v);
-    return Number.isNaN(d.getTime())
-      ? String(v)
-      : d.toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' });
+    return Number.isNaN(d.getTime()) ? String(v) : d.toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' });
   };
 
   const setStatus = (msg) => { status.textContent = msg || ''; };
 
   async function fetchJson(url, options = {}) {
     const res = await fetch(url, { cache: 'no-store', ...options });
-    if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
-    return res.json();
+    const text = await res.text();
+    if (!res.ok) throw new Error(`${res.status} ${text}`);
+    try { return JSON.parse(text); } catch { return {}; }
   }
 
-  function metricChips(metrics) {
-    if (!metrics || typeof metrics !== 'object') return '—';
-    return Object.entries(metrics)
-      .filter(([, v]) => `${v || ''}`.trim())
-      .slice(0, 10)
-      .map(([k, v]) => `<span class="pill" style="margin-right:4px;">${k}: ${v}</span>`)
-      .join(' ');
+  function sortRows(rows) {
+    const out = [...rows];
+    const { sortKey, sortDir } = state;
+    const dir = sortDir === 'asc' ? 1 : -1;
+    out.sort((a, b) => {
+      let av = a?.[sortKey], bv = b?.[sortKey];
+      if (sortKey === 'close_time' || sortKey === 'open_time') {
+        av = av ? new Date(av).getTime() : -Infinity;
+        bv = bv ? new Date(bv).getTime() : -Infinity;
+      }
+      const an = Number(av), bn = Number(bv);
+      const bothNum = Number.isFinite(an) && Number.isFinite(bn);
+      if (bothNum) return (an - bn) * dir;
+      const as = String(av ?? '').toLowerCase();
+      const bs = String(bv ?? '').toLowerCase();
+      if (as < bs) return -1 * dir;
+      if (as > bs) return 1 * dir;
+      return 0;
+    });
+    return out;
+  }
+
+  function renderSortIndicators() {
+    qa('#tj-table thead th[data-sort]').forEach((th) => {
+      const key = th.dataset.sort;
+      const base = th.textContent.replace(/[ ▲▼]$/, '');
+      th.textContent = base + (key === state.sortKey ? (state.sortDir === 'asc' ? ' ▲' : ' ▼') : '');
+      th.style.cursor = 'pointer';
+    });
   }
 
   function renderRows(rows) {
+    const sorted = sortRows(rows);
     tbody.innerHTML = '';
-    if (!rows.length) {
+    if (!sorted.length) {
       empty.style.display = 'block';
       return;
     }
     empty.style.display = 'none';
 
-    for (const r of rows) {
-      const tr = document.createElement('tr');
+    for (const r of sorted) {
       const pnl = Number(r.net_profit ?? r.realized_pnl);
+      const bal = Number(r.balance_after_trade);
+      const ccy = r.balance_after_trade_currency || r.currency || '';
+      const tr = document.createElement('tr');
       tr.innerHTML = `
         <td>${fmtTime(r.close_time || r.open_time)}</td>
         <td>${r.account_label || r.account || '—'}</td>
-        <td>${r.symbol || '—'}</td>
+        <td title="${r.symbol_raw || r.symbol || ''}">${r.symbol || '—'}</td>
         <td>${r.side || '—'}</td>
         <td>${r.setup || '—'}</td>
-        <td>${fmtNum(r.qty, 6)}</td>
+        <td>${fmtNum(r.qty, 6)}${r.qty_unit === 'lots' ? ' lot' : ''}</td>
         <td>${fmtNum(r.entry_price, 6)}</td>
         <td>${fmtNum(r.exit_price, 6)}</td>
+        <td>${fmtNum(r.stop_loss, 6)}</td>
+        <td>${fmtNum(r.take_profit, 6)}</td>
         <td>${fmtNum(r.commission ?? r.fees, 4)}</td>
-        <td class="num ${Number.isFinite(pnl) ? (pnl >= 0 ? 'pos' : 'neg') : ''}">${fmtNum(pnl, 4)}</td>
+        <td class="num ${Number.isFinite(pnl) ? (pnl > 0 ? 'pos' : (pnl < 0 ? 'neg' : '')) : ''}">${fmtNum(pnl, 4)} ${r.realized_pnl_currency || r.currency || ''}</td>
+        <td>${Number.isFinite(bal) ? `${fmtNum(bal, 2)} ${ccy}` : '—'}</td>
         <td>${r.breakeven || '—'}</td>
         <td>${r.status || '—'}</td>
       `;
       tbody.appendChild(tr);
-
-      const detail = document.createElement('tr');
-      detail.style.display = 'none';
-      detail.innerHTML = `
-        <td colspan="12" style="white-space:normal;">
-          <div class="muted" style="margin-bottom:6px;"><strong>Comments:</strong> ${r.notes || ''} ${r.pre_trade_comments || ''} ${r.entry_comments || ''} ${r.trade_management || ''} ${r.exit_comments || ''}</div>
-          <div style="margin-bottom:6px;"><strong>SL/TP:</strong> ${fmtNum(r.stop_loss, 6)} / ${fmtNum(r.take_profit, 6)} &nbsp; <strong>Swap:</strong> ${fmtNum(r.swap, 4)} &nbsp; <strong>High/Low:</strong> ${fmtNum(r.highest_price, 6)} / ${fmtNum(r.lowest_price, 6)}</div>
-          <div><strong>Tags:</strong> ${metricChips(r.metrics)}</div>
-        </td>
-      `;
-      tbody.appendChild(detail);
-      tr.addEventListener('click', () => {
-        detail.style.display = detail.style.display === 'none' ? '' : 'none';
-      });
     }
   }
 
   function renderBalances(items) {
     const wrap = q('#tj-balances');
     wrap.innerHTML = '';
-    for (const b of items || []) {
+    (items || []).forEach((b) => {
       const div = document.createElement('div');
       div.className = 'bal-card';
       div.innerHTML = `
         <div class="muted">${b.label || b.account || 'Account'}</div>
         <div style="font-size:1.1rem;font-weight:600">${fmtNum(b.balance, 2)} ${b.currency || ''}</div>
-        ${b.nav != null ? `<div class="muted">NAV: ${fmtNum(b.nav, 2)} ${b.currency || ''}</div>` : ''}
+        ${b.missing_balance ? `<div class="muted">Balance not found in workbook</div>` : ''}
       `;
       wrap.appendChild(div);
-    }
+    });
+  }
+
+  function renderStats(stats) {
+    const wrap = q('#tj-stats');
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    if (!stats) return;
+
+    const cards = [
+      ['Total trades', stats?.totals?.trades],
+      ['Wins', stats?.totals?.wins],
+      ['Losses', stats?.totals?.losses],
+      ['Break even', stats?.totals?.break_even],
+      ['Avg stop loss', stats?.totals?.avg_stop_loss],
+      ['Avg target', stats?.totals?.avg_take_profit],
+      ['Most wins instrument', stats?.instrument_with_most_wins?.symbol || '—'],
+      ['Most losses instrument', stats?.instrument_with_most_losses?.symbol || '—'],
+    ];
+    cards.forEach(([label, value]) => {
+      const div = document.createElement('div');
+      div.className = 'bal-card';
+      div.innerHTML = `<div class="muted">${label}</div><div style="font-size:1.05rem;font-weight:600">${typeof value === 'number' ? fmtNum(value, 6) : (value ?? '—')}</div>`;
+      wrap.appendChild(div);
+    });
   }
 
   async function load() {
@@ -105,9 +150,13 @@
       }
 
       const balances = await fetchJson('/api/trading-journal/balances');
+      state.rows = Array.isArray(journal.items) ? journal.items : [];
+      state.stats = journal.stats || null;
 
-      renderRows(Array.isArray(journal.items) ? journal.items : []);
+      renderRows(state.rows);
       renderBalances(Array.isArray(balances.items) ? balances.items : []);
+      renderStats(state.stats);
+      renderSortIndicators();
       setStatus(`Updated ${new Date().toLocaleTimeString()}`);
     } catch (e) {
       console.error(e);
@@ -126,14 +175,19 @@
       setStatus(`Sync failed: ${e.message}`);
     }
   });
-  filterInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') load(); });
 
-  document.querySelectorAll('.tj-chip').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      filterInput.value = btn.getAttribute('data-q') || '';
-      load();
+  qa('#tj-table thead th[data-sort]').forEach((th) => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.sort;
+      if (!key) return;
+      if (state.sortKey === key) state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
+      else { state.sortKey = key; state.sortDir = 'asc'; }
+      renderRows(state.rows);
+      renderSortIndicators();
     });
   });
+
+  filterInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') load(); });
 
   load();
   setInterval(load, 15000);
