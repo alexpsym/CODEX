@@ -15,12 +15,13 @@ import re
 import socket
 import sys
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
 from dateutil.relativedelta import relativedelta
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import quote, unquote, urlparse
 from uuid import uuid4
 
@@ -30,11 +31,12 @@ from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 import httpx
 import requests
+import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 from starlette.responses import RedirectResponse
 
 from bybit_credentials import resolve_bybit_credentials_for
-from render.dropbox_sync import download_bytes, upload_bytes
+from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from payslip_audit.tesseract import (
     TESSERACT_MISSING_MESSAGE,
     _resolve_tesseract_binary,
@@ -101,6 +103,14 @@ BYBIT_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "bybit-history"
 COINSPOT_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "coinspot-history"
 PENDING_WEBHOOKS_PATH = BASE_DIR / "render" / "data" / "pending_webhooks.json"
 WATCHLIST_PATH = BASE_DIR / "render" / "data" / "watchlist.json"
+TRADING_JOURNAL_PATH = BASE_DIR / "render" / "data" / "trading_journal.json"
+TRADING_JOURNAL_STATE_PATH = BASE_DIR / "render" / "data" / "trading_journal_state.json"
+TRADING_JOURNAL_DROPBOX_FOLDER = os.getenv(
+    "TRADING_JOURNAL_DROPBOX_FOLDER", "/master_control"
+).strip()
+TRADING_JOURNAL_DROPBOX_RECURSIVE = os.getenv(
+    "TRADING_JOURNAL_DROPBOX_RECURSIVE", "0"
+).strip().lower() in {"1", "true", "yes", "on"}
 WATCHLIST_MAX_ITEMS = 50
 DROPBOX_SYNC_ENABLED = os.getenv("DROPBOX_SYNC_ENABLED", "").strip().lower() in {
     "1",
@@ -171,8 +181,10 @@ BYBIT_HISTORY_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
 COINSPOT_HISTORY_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
 PENDING_WEBHOOKS_PATH.parent.mkdir(parents=True, exist_ok=True)
 WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+TRADING_JOURNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 _WATCHLIST_CACHE: Optional[List[str]] = None
+_TRADING_JOURNAL_CACHE: Optional[List[Dict[str, object]]] = None
 _DROPBOX_UPLOAD_TASK: Optional[asyncio.Task] = None
 _BYBIT_EXEC_LAST_SEEN: Dict[str, int] = {}
 _OANDA_TX_LAST_SEEN: Dict[str, str] = {}
@@ -580,6 +592,726 @@ def _set_watchlist(items: Iterable[object]) -> List[str]:
     return list(normalized)
 
 
+def _load_trading_journal() -> List[Dict[str, object]]:
+    if not TRADING_JOURNAL_PATH.exists():
+        return []
+    try:
+        payload = json.loads(TRADING_JOURNAL_PATH.read_text(encoding="utf-8"))
+    except Exception:  # pragma: no cover - defensive
+        return []
+    if not isinstance(payload, list):
+        return []
+    rows: List[Dict[str, object]] = []
+    for entry in payload:
+        if isinstance(entry, dict):
+            rows.append(entry)
+    return rows
+
+
+def _get_trading_journal() -> List[Dict[str, object]]:
+    global _TRADING_JOURNAL_CACHE
+    if _TRADING_JOURNAL_CACHE is None:
+        _TRADING_JOURNAL_CACHE = _load_trading_journal()
+    return [dict(item) for item in _TRADING_JOURNAL_CACHE]
+
+
+def _save_trading_journal(rows: List[Dict[str, object]]) -> None:
+    global _TRADING_JOURNAL_CACHE
+    sorted_rows = sorted(
+        rows,
+        key=lambda item: str(item.get("close_time") or item.get("open_time") or ""),
+        reverse=True,
+    )
+    _TRADING_JOURNAL_CACHE = [dict(item) for item in sorted_rows]
+    TRADING_JOURNAL_PATH.write_text(
+        json.dumps(sorted_rows, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def _upsert_trading_journal_rows(rows: Iterable[Dict[str, object]]) -> int:
+    existing = _get_trading_journal()
+    by_id: Dict[str, Dict[str, object]] = {}
+    for row in existing:
+        row_id = str(row.get("id") or "").strip()
+        if row_id:
+            by_id[row_id] = row
+    changed = 0
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        row_id = str(row.get("id") or "").strip()
+        if not row_id:
+            continue
+        row["id"] = row_id
+        row["updated_at"] = datetime.now(timezone.utc).isoformat()
+        if row_id in by_id:
+            by_id[row_id].update(row)
+        else:
+            by_id[row_id] = row
+        changed += 1
+    if changed:
+        _save_trading_journal(list(by_id.values()))
+    return changed
+
+
+def _load_trading_journal_state() -> Dict[str, object]:
+    if not TRADING_JOURNAL_STATE_PATH.exists():
+        return {}
+    try:
+        payload = json.loads(TRADING_JOURNAL_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:  # pragma: no cover - defensive
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_trading_journal_state(state: Dict[str, object]) -> None:
+    TRADING_JOURNAL_STATE_PATH.write_text(
+        json.dumps(state, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _load_json_file(path: Path, default):
+    try:
+        if not path.exists():
+            return default
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def _save_json_file(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _get_trading_journal_rows() -> List[Dict[str, object]]:
+    data = _load_json_file(TRADING_JOURNAL_PATH, {"items": []})
+    if isinstance(data, list):
+        return [row for row in data if isinstance(row, dict)]
+    items = data.get("items") if isinstance(data, dict) else []
+    return items if isinstance(items, list) else []
+
+
+def _set_trading_journal_rows(rows: List[Dict[str, object]]) -> None:
+    _save_json_file(TRADING_JOURNAL_PATH, {"items": rows, "updated_at": _utc_now_iso()})
+
+
+def _norm_col(name: object) -> str:
+    value = str(name or "").strip().lower()
+    value = re.sub(r"\s+", " ", value)
+    value = value.replace("/", " ").replace("?", " ")
+    for char in [" ", "-", "(", ")", "[", "]", ".", ":"]:
+        value = value.replace(char, "_")
+    while "__" in value:
+        value = value.replace("__", "_")
+    return value.strip("_")
+
+
+def _excel_cell_to_python(value: object) -> object:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):  # type: ignore[arg-type]
+            return None
+    except Exception:
+        pass
+    if isinstance(value, (pd.Timestamp, datetime)):
+        try:
+            return pd.to_datetime(value).isoformat()
+        except Exception:
+            return str(value)
+    try:
+        if hasattr(value, "item"):
+            value = value.item()
+    except Exception:
+        pass
+    return value
+
+
+def _canonical_symbol(symbol: str) -> str:
+    symbol_norm = (symbol or "").strip().upper().replace("/", "")
+    symbol_norm = re.sub(r"\.[A-Z0-9]+$", "", symbol_norm)
+    symbol_norm = symbol_norm.replace("_", "")
+    return symbol_norm
+
+
+def _is_fx_account_label(account_label: str) -> bool:
+    text = (account_label or "").upper()
+    return ("OANDA" in text) or ("PEPPERSTONE" in text)
+
+
+def _normalize_fx_qty_for_display(
+    account_label: str, symbol: str, raw_qty: Optional[float]
+) -> Optional[float]:
+    if raw_qty is None:
+        return None
+    if "OANDA" in (account_label or "").upper():
+        return raw_qty / 100000.0
+    return raw_qty
+
+
+def _safe_float_from_row(row: pd.Series, col: Optional[str]) -> Optional[float]:
+    if not col:
+        return None
+    value = row.get(col)
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _safe_str_from_row(row: pd.Series, col: Optional[str]) -> str:
+    if not col:
+        return ""
+    value = row.get(col)
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    return str(value).strip()
+
+
+def _boolish_text(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _infer_account_currency(account_label: str) -> str:
+    text = (account_label or "").upper()
+    if any(part in text for part in ("BYBIT", "BINANCE")):
+        return "USDT"
+    if any(part in text for part in ("OANDA", "PEPPERSTONE")):
+        return "AUD"
+    return ""
+
+
+def _is_empty_cell(value: object) -> bool:
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except Exception:
+        pass
+    if isinstance(value, str):
+        return value.strip() == ""
+    return False
+
+
+def _cell_to_str(value: object) -> str:
+    if _is_empty_cell(value):
+        return ""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value).strip()
+
+
+def _cell_to_float(value: object) -> Optional[float]:
+    if _is_empty_cell(value):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _cell_to_iso(value: object) -> Optional[str]:
+    if _is_empty_cell(value):
+        return None
+    try:
+        return pd.to_datetime(value, utc=True).isoformat()
+    except Exception:
+        text = _cell_to_str(value)
+        return text or None
+
+
+def _first_present(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    cols = {_norm_col(col): col for col in df.columns}
+    for candidate in candidates:
+        if candidate in cols:
+            return cols[candidate]
+    return None
+
+
+def _parse_excel_account_workbook(
+    file_name: str, dbx_path: str, payload: bytes
+) -> Tuple[List[Dict[str, object]], Optional[Dict[str, object]]]:
+    bio = io.BytesIO(payload)
+    try:
+        xls = pd.ExcelFile(bio, engine="openpyxl")
+    except Exception:
+        bio.seek(0)
+        xls = pd.ExcelFile(bio, engine="xlrd")
+
+    all_rows: List[Dict[str, object]] = []
+    account_balance: Optional[Dict[str, object]] = None
+    account_label = Path(file_name).stem.strip() or file_name
+
+    for sheet in xls.sheet_names:
+        df = pd.read_excel(xls, sheet_name=sheet)
+        if df is None or df.empty:
+            continue
+        df.columns = [str(col) for col in df.columns]
+        norm_to_orig = {_norm_col(col): col for col in df.columns}
+
+        open_time_col = _first_present(df, ["opening_time", "open_time", "entry_time", "time_open"])
+        close_time_col = _first_present(df, ["closing_time", "close_time", "exit_time", "time_close", "closed_at"])
+        side_col = _first_present(df, ["type_buy_sell", "side", "direction", "buy_sell", "type"])
+        symbol_col = _first_present(df, ["symbol", "instrument", "pair", "market"])
+        setup_col = _first_present(df, ["setup"])
+        qty_col = _first_present(df, ["size_quantity", "qty", "quantity", "size", "units", "volume"])
+        entry_col = _first_present(df, ["entry_price", "entry", "open_price", "price_open"])
+        exit_col = _first_present(df, ["closing_price", "exit_price", "exit", "close_price", "price_close"])
+        swap_col = _first_present(df, ["swap"])
+        commission_col = _first_present(df, ["commission", "fee", "fees", "cost"])
+        pnl_col = _first_present(df, ["net_profit", "realized_pnl", "pnl", "profit", "pl", "net_pnl"])
+        sl_col = _first_present(df, ["stop_loss_optional", "stop_loss", "sl"])
+        tp_col = _first_present(df, ["take_profit_optional", "take_profit", "tp"])
+        high_col = _first_present(df, ["highest_price_optional", "highest_price"])
+        low_col = _first_present(df, ["lowest_price_optional", "lowest_price"])
+        notes_col = _first_present(df, ["notes"])
+        pre_trade_col = _first_present(df, ["pre_trade_comments"])
+        entry_comments_col = _first_present(df, ["entry_comments"])
+        trade_mgmt_col = _first_present(df, ["trade_management"])
+        exit_comments_col = _first_present(df, ["exit_comments"])
+        breakeven_col = _first_present(df, ["breakeven"])
+
+        extra_aliases = {
+            "error": ["error"],
+            "ath_atl": ["ath_atl"],
+            "ema_bounce": ["ema_bounce"],
+            "timeframe": ["timeframe"],
+            "pattern": ["pattern"],
+            "held_through_news": ["held_through_news"],
+            "early_close": ["early_close"],
+            "near_perfect_entry": ["near_perfect_entry"],
+            "near_win": ["near_win"],
+            "near_round_number": ["near_round_number"],
+            "close_stop_out": ["close_stop_out"],
+            "spiked_out": ["spiked_out"],
+            "suggestions": ["suggestions"],
+        }
+        extra_cols = {key: _first_present(df, aliases) for key, aliases in extra_aliases.items()}
+
+        trade_signal_count = sum(col is not None for col in [symbol_col, side_col, entry_col, exit_col, pnl_col])
+        if trade_signal_count >= 3:
+            for idx, row in df.iterrows():
+                symbol_raw = _safe_str_from_row(row, symbol_col)
+                if not symbol_raw or symbol_raw.lower() == "nan":
+                    continue
+
+                account_currency = _infer_account_currency(account_label)
+                symbol_canon = _canonical_symbol(symbol_raw)
+
+                open_time_iso = None
+                close_time_iso = None
+                for col_name, target in ((open_time_col, "open"), (close_time_col, "close")):
+                    if not col_name:
+                        continue
+                    raw_t = row.get(col_name)
+                    try:
+                        if pd.isna(raw_t):
+                            continue
+                    except Exception:
+                        pass
+                    try:
+                        iso = pd.to_datetime(raw_t).isoformat()
+                    except Exception:
+                        iso = str(raw_t)
+                    if target == "open":
+                        open_time_iso = iso
+                    else:
+                        close_time_iso = iso
+
+                raw_qty = _safe_float_from_row(row, qty_col)
+                qty_display = _normalize_fx_qty_for_display(account_label, symbol_canon, raw_qty)
+                entry_price = _safe_float_from_row(row, entry_col)
+                exit_price = _safe_float_from_row(row, exit_col)
+                commission = _safe_float_from_row(row, commission_col)
+                swap = _safe_float_from_row(row, swap_col)
+                net_profit = _safe_float_from_row(row, pnl_col)
+                stop_loss = _safe_float_from_row(row, sl_col)
+                take_profit = _safe_float_from_row(row, tp_col)
+                highest_price = _safe_float_from_row(row, high_col)
+                lowest_price = _safe_float_from_row(row, low_col)
+
+                raw_excel: Dict[str, object] = {}
+                for col_name in df.columns:
+                    value = _excel_cell_to_python(row.get(col_name))
+                    if value is None or (isinstance(value, str) and not value.strip()):
+                        continue
+                    raw_excel[str(col_name)] = value
+
+                metrics: Dict[str, object] = {}
+                for key, col_name in extra_cols.items():
+                    if not col_name:
+                        continue
+                    value = _excel_cell_to_python(row.get(col_name))
+                    if value is None or (isinstance(value, str) and not str(value).strip()):
+                        continue
+                    metrics[key] = value
+
+                used_norm = {
+                    _norm_col(x)
+                    for x in [
+                        open_time_col, close_time_col, side_col, symbol_col, setup_col, qty_col,
+                        entry_col, exit_col, swap_col, commission_col, pnl_col, sl_col, tp_col,
+                        high_col, low_col, notes_col, pre_trade_col, entry_comments_col,
+                        trade_mgmt_col, exit_comments_col, breakeven_col,
+                    ] if x
+                }
+                used_norm.update(_norm_col(c) for c in extra_cols.values() if c)
+                for norm_name, orig_name in norm_to_orig.items():
+                    if norm_name in used_norm:
+                        continue
+                    value = _excel_cell_to_python(row.get(orig_name))
+                    if value is None or (isinstance(value, str) and not str(value).strip()):
+                        continue
+                    metrics.setdefault(norm_name, value)
+
+                row_id = f"excel:{account_label}:{sheet}:{idx}:{symbol_canon}:{close_time_iso or ''}"
+                side_txt = _safe_str_from_row(row, side_col).upper()
+                setup_txt = _safe_str_from_row(row, setup_col)
+                breakeven_txt = _boolish_text(_safe_str_from_row(row, breakeven_col))
+                status = "closed" if exit_price is not None else "unknown"
+                notional = (
+                    abs((qty_display or 0.0) * (entry_price or 0.0))
+                    if (qty_display is not None and entry_price is not None)
+                    else None
+                )
+
+                all_rows.append({
+                    "id": row_id,
+                    "source": "excel",
+                    "account": account_label,
+                    "account_label": account_label,
+                    "sheet": sheet,
+                    "asset_class": "fx" if _is_fx_account_label(account_label) else "crypto",
+                    "currency": account_currency,
+                    "symbol": symbol_canon,
+                    "symbol_raw": symbol_raw,
+                    "side": side_txt,
+                    "setup": setup_txt,
+                    "open_time": open_time_iso,
+                    "close_time": close_time_iso,
+                    "qty": qty_display,
+                    "qty_raw": raw_qty,
+                    "qty_unit": "lots" if _is_fx_account_label(account_label) else "native",
+                    "entry_price": entry_price,
+                    "exit_price": exit_price,
+                    "swap": swap,
+                    "commission": commission,
+                    "fees": commission,
+                    "fee_currency": account_currency,
+                    "realized_pnl": net_profit,
+                    "realized_pnl_currency": account_currency,
+                    "net_profit": net_profit,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "highest_price": highest_price,
+                    "lowest_price": lowest_price,
+                    "breakeven": breakeven_txt,
+                    "notes": _safe_str_from_row(row, notes_col),
+                    "pre_trade_comments": _safe_str_from_row(row, pre_trade_col),
+                    "entry_comments": _safe_str_from_row(row, entry_comments_col),
+                    "trade_management": _safe_str_from_row(row, trade_mgmt_col),
+                    "exit_comments": _safe_str_from_row(row, exit_comments_col),
+                    "notional_usd": notional,
+                    "status": status,
+                    "metrics": metrics,
+                    "raw_excel": raw_excel,
+                    "raw_refs": {"dropbox_path": dbx_path, "sheet": sheet, "row_index": int(idx)},
+                    "updated_at": _utc_now_iso(),
+                })
+
+        bal_col = _first_present(df, ["balance", "account_balance", "cash_balance"])
+        nav_col = _first_present(df, ["nav", "equity", "account_equity"])
+        ccy_col = _first_present(df, ["currency", "ccy", "account_currency"])
+        if bal_col or nav_col:
+            for _, row in df.iterrows():
+                bal_val = row.get(bal_col) if bal_col else None
+                nav_val = row.get(nav_col) if nav_col else None
+                if _is_empty_cell(bal_val) and _is_empty_cell(nav_val):
+                    continue
+                account_balance = {
+                    "source": "excel",
+                    "account": account_label,
+                    "label": account_label,
+                    "balance": _cell_to_float(bal_val),
+                    "nav": _cell_to_float(nav_val),
+                    "currency": _cell_to_str(row.get(ccy_col)) if ccy_col else _infer_account_currency(account_label),
+                    "dropbox_path": dbx_path,
+                }
+                break
+
+    return all_rows, account_balance
+def _resolve_trading_journal_dropbox_folder() -> Tuple[str, List[Dict[str, Any]]]:
+    if not TRADING_JOURNAL_DROPBOX_FOLDER:
+        raise HTTPException(status_code=500, detail="TRADING_JOURNAL_DROPBOX_FOLDER is not set.")
+
+    configured = TRADING_JOURNAL_DROPBOX_FOLDER.strip()
+    candidates: List[str] = []
+    if configured:
+        candidates.append(configured)
+
+    prefix = "/Apps/alexpsym_render"
+    if configured.lower().startswith(prefix.lower()):
+        stripped = configured[len(prefix) :]
+        if not stripped:
+            stripped = "/"
+        if not stripped.startswith("/"):
+            stripped = "/" + stripped
+        candidates.append(stripped)
+
+    if configured.startswith("/") and not configured.lower().startswith("/apps/"):
+        candidates.append(f"{prefix}{configured}")
+
+    entries: Optional[List[Dict[str, Any]]] = None
+    active_folder = configured
+    last_exc: Optional[Exception] = None
+    for candidate in dict.fromkeys(candidates):
+        try:
+            entries = list_excel_files(candidate, recursive=TRADING_JOURNAL_DROPBOX_RECURSIVE)
+            active_folder = candidate
+            break
+        except Exception as exc:
+            last_exc = exc
+
+    if entries is None:
+        if last_exc is not None:
+            raise last_exc
+        raise FileNotFoundError(f"Dropbox folder not found: {configured}")
+
+    return active_folder, entries
+
+
+def _join_dropbox_path(folder: str, name: str) -> str:
+    root = (folder or "").rstrip("/")
+    if not root:
+        root = "/"
+    if root == "/":
+        return f"/{name.lstrip('/')}"
+    return f"{root}/{name.lstrip('/')}"
+
+
+def _load_cashflows_from_dropbox(active_folder: str) -> Dict[str, List[Dict[str, object]]]:
+    out: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    cashflow_path = _join_dropbox_path(active_folder, "account_cashflows.xlsx")
+    try:
+        payload = download_bytes(cashflow_path)
+    except Exception:
+        return out
+    bio = io.BytesIO(payload)
+    try:
+        df = pd.read_excel(bio, sheet_name="Cashflows")
+    except Exception:
+        return out
+    if df is None or df.empty:
+        return out
+    df.columns = [str(c) for c in df.columns]
+    acct_col = _first_present(df, ["account"])
+    date_col = _first_present(df, ["date"])
+    amount_col = _first_present(df, ["amount"])
+    bal_col = _first_present(df, ["new_balance", "newbalance"])
+    ccy_col = _first_present(df, ["currency"])
+    reason_col = _first_present(df, ["reason"])
+    if not acct_col or not date_col or not bal_col:
+        return out
+
+    for _, row in df.iterrows():
+        account = _safe_str_from_row(row, acct_col)
+        if not account:
+            continue
+        raw_date = row.get(date_col)
+        try:
+            if pd.isna(raw_date):
+                continue
+        except Exception:
+            pass
+        try:
+            dt_iso = pd.to_datetime(raw_date).isoformat()
+        except Exception:
+            dt_iso = str(raw_date)
+        out[account].append(
+            {
+                "date": dt_iso,
+                "amount": _safe_float_from_row(row, amount_col),
+                "new_balance": _safe_float_from_row(row, bal_col),
+                "currency": _safe_str_from_row(row, ccy_col),
+                "reason": _safe_str_from_row(row, reason_col),
+            }
+        )
+
+    for account in list(out.keys()):
+        out[account] = sorted(out[account], key=lambda x: str(x.get("date") or ""))
+    return out
+
+
+def _import_trading_journal_from_dropbox_excel() -> Dict[str, object]:
+    active_folder, entries = _resolve_trading_journal_dropbox_folder()
+    configured = TRADING_JOURNAL_DROPBOX_FOLDER.strip()
+
+    workbook_count = 0
+    rows: List[Dict[str, object]] = []
+    balances: List[Dict[str, object]] = []
+    errors: List[Dict[str, str]] = []
+
+    for entry in entries:
+        name = str(entry.get("name") or "")
+        dbx_path = str(entry.get("path_lower") or entry.get("path_display") or "")
+        if not dbx_path:
+            continue
+        try:
+            payload = download_bytes(dbx_path)
+            parsed_rows, parsed_balance = _parse_excel_account_workbook(name, dbx_path, payload)
+            rows.extend(parsed_rows)
+            if parsed_balance:
+                balances.append(parsed_balance)
+            workbook_count += 1
+        except Exception as exc:
+            errors.append({"file": name, "path": dbx_path, "error": str(exc)})
+
+    dedup: Dict[str, Dict[str, object]] = {}
+    for row in rows:
+        row_id = str(row.get("id") or "")
+        if row_id:
+            dedup[row_id] = row
+
+    final_rows = sorted(dedup.values(), key=lambda row: str(row.get("close_time") or ""), reverse=True)
+
+    _set_trading_journal_rows(final_rows)
+    _save_json_file(
+        TRADING_JOURNAL_STATE_PATH,
+        {
+            "updated_at": _utc_now_iso(),
+            "excel_account_balances": balances,
+            "source_folder": active_folder,
+            "configured_folder": configured,
+            "workbooks_seen": workbook_count,
+            "errors": errors,
+        },
+    )
+
+    return {
+        "ok": True,
+        "source_folder": active_folder,
+        "configured_folder": configured,
+        "workbooks_seen": workbook_count,
+        "rows_imported": len(final_rows),
+        "balances_found": len(balances),
+        "errors": errors,
+    }
+def _get_excel_account_balances() -> List[Dict[str, object]]:
+    state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
+    items = state.get("excel_account_balances") if isinstance(state, dict) else []
+    return items if isinstance(items, list) else []
+
+
+def _to_float(value: object) -> Optional[float]:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _journal_rows_from_bybit_execution(entry: Dict[str, object]) -> List[Dict[str, object]]:
+    account = str(entry.get("account") or "unknown").strip().lower()
+    category = str(entry.get("category") or "").strip().lower()
+    symbol = str(entry.get("symbol") or "").strip().upper()
+    order_id = str(entry.get("orderId") or "")
+    exec_id = str(entry.get("execId") or "")
+    if not symbol or not order_id or not exec_id:
+        return []
+    qty = _to_float(entry.get("execQty")) or 0.0
+    exec_price = _to_float(entry.get("execPrice"))
+    exec_fee = _to_float(entry.get("execFee")) or 0.0
+    exec_pnl = _to_float(entry.get("execPnl")) or 0.0
+    exec_time_raw = _to_float(entry.get("execTime"))
+    close_time = None
+    if exec_time_raw:
+        close_time = datetime.fromtimestamp(exec_time_raw / 1000, tz=timezone.utc).isoformat()
+    side = str(entry.get("side") or "")
+    return [
+        {
+            "id": f"bybit:{account}:{category}:{symbol}:{order_id}:{exec_id}",
+            "source": "bybit",
+            "account": account,
+            "account_label": f"Bybit {account.title()}",
+            "asset_class": "crypto",
+            "symbol": symbol,
+            "side": side.title() if side else "",
+            "status": "closed" if exec_pnl != 0 else "filled",
+            "open_time": close_time,
+            "close_time": close_time,
+            "entry_price": exec_price,
+            "exit_price": exec_price,
+            "qty": qty,
+            "notional_usd": (exec_price or 0.0) * qty,
+            "fees": exec_fee,
+            "fee_currency": str(entry.get("feeCurrency") or "USDT"),
+            "realized_pnl": exec_pnl,
+            "realized_pnl_currency": str(entry.get("currency") or "USDT"),
+            "strategy_tag": "",
+            "notes": "",
+            "raw_refs": {"orderId": order_id, "execIds": [exec_id]},
+        }
+    ]
+
+
+def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[str, object]]:
+    account = str(entry.get("account") or "unknown").strip().lower()
+    tx_id = str(entry.get("id") or "").strip()
+    symbol = str(entry.get("instrument") or "").strip().upper()
+    if not tx_id or not symbol:
+        return []
+    units = _to_float(entry.get("units")) or 0.0
+    qty = abs(units)
+    side = "Buy" if units >= 0 else "Sell"
+    price = _to_float(entry.get("price"))
+    realized_pnl = (_to_float(entry.get("pl")) or 0.0) + (_to_float(entry.get("financing")) or 0.0)
+    fees = abs(_to_float(entry.get("halfSpreadCost")) or 0.0)
+    close_time = str(entry.get("time") or "")
+    return [
+        {
+            "id": f"oanda:{account}:{symbol}:{tx_id}",
+            "source": "oanda",
+            "account": account,
+            "account_label": f"OANDA {account.title()}",
+            "asset_class": "forex",
+            "symbol": symbol,
+            "side": side,
+            "status": "closed",
+            "open_time": close_time,
+            "close_time": close_time,
+            "entry_price": price,
+            "exit_price": price,
+            "qty": qty,
+            "notional_usd": None,
+            "fees": fees,
+            "fee_currency": str(entry.get("accountCurrency") or ""),
+            "realized_pnl": realized_pnl,
+            "realized_pnl_currency": str(entry.get("accountCurrency") or ""),
+            "strategy_tag": "",
+            "notes": "",
+            "raw_refs": {"transactionId": tx_id, "orderId": entry.get("orderID")},
+        }
+    ]
+
+
 def _build_state_backup_payload() -> bytes:
     alerts_payload = {
         "bybit": {"alerts": bybit_monitor.get_custom_alerts(force=True)},
@@ -926,6 +1658,8 @@ def script_open_url(script: ManagedScript) -> str:
         return "/bybit-history"
     if script.name == "coinspot-clone":
         return "/coinspot-history"
+    if script.name == "trading-journal":
+        return "/trading-journal"
     if script.name in WEB_APPS:
         return f"/apps/{_encoded_script_name(script.name)}"
     return f"/scripts/view/{_encoded_script_name(script.name)}"
@@ -1064,7 +1798,29 @@ class ScriptManager:
         raise HTTPException(status_code=404, detail=f"Script not found: {name}")
 
     def list_scripts(self) -> List[Dict[str, object]]:
-        return sorted((script.to_summary() for script in self._scripts.values()), key=lambda s: s["name"])
+        items = [script.to_summary() for script in self._scripts.values()]
+        items.append(
+            {
+                "id": "trading-journal",
+                "name": "trading-journal",
+                "path": str(BASE_DIR / "render" / "master_service.py"),
+                "category": "Other",
+                "running": True,
+                "port": None,
+                "return_code": None,
+                "open_url": "/trading-journal",
+                "logs_url": None,
+                "last_output_at": None,
+                "last_start_attempt_at": None,
+                "last_start_error": None,
+                "last_exit_code": None,
+                "last_exit_reason": None,
+                "last_spawn_command": None,
+                "last_spawn_cwd": None,
+                "standalone": False,
+            }
+        )
+        return sorted(items, key=lambda s: str(s["name"]).lower())
 
     def get(self, name: str) -> ManagedScript:
         resolved = self._resolve_name(name)
@@ -4759,6 +5515,9 @@ async def _poll_bybit_fills() -> None:
                             "account": account,
                             "category": category,
                         }
+                        journal_rows = _journal_rows_from_bybit_execution(entry_payload)
+                        if journal_rows:
+                            _upsert_trading_journal_rows(journal_rows)
                         await _send_telegram_alert(_format_bybit_fill_alert(entry_payload))
                 _BYBIT_EXEC_LAST_SEEN[account] = max_seen
             except Exception as exc:  # pragma: no cover - background task
@@ -4819,6 +5578,9 @@ async def _poll_oanda_fills() -> None:
                     if "ORDER_FILL" not in tx_type:
                         continue
                     entry_payload = {**entry, "account": account}
+                    journal_rows = _journal_rows_from_oanda_order_fill(entry_payload)
+                    if journal_rows:
+                        _upsert_trading_journal_rows(journal_rows)
                     await _send_telegram_alert(_format_oanda_fill_alert(entry_payload))
                 _OANDA_TX_LAST_SEEN[account] = str(max_seen)
             except Exception as exc:  # pragma: no cover - background task
@@ -4927,836 +5689,284 @@ async def fetch_bybit_balance(
     )
 
 
-@app.get("/api/open-orders")
-async def fetch_open_orders() -> JSONResponse:
-    items: List[Dict[str, object]] = []
-    errors: List[Dict[str, str]] = []
+@app.get("/trading-journal", response_class=HTMLResponse)
+async def trading_journal_page() -> str:
+    return """
+<!doctype html>
+<html>
+<head>
+  <meta charset=\"utf-8\"/>
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>
+  <title>Trading Journal</title>
+  <style>
+    body { background:#0b1220; color:#e5e7eb; font-family:system-ui,sans-serif; margin:0; }
+    .wrap { max-width: 1400px; margin: 0 auto; padding: 16px; }
+    .toolbar, .balances, .table-wrap { background:#111827; border:1px solid #1f2937; border-radius:12px; }
+    .toolbar { display:flex; gap:8px; align-items:center; padding:12px; margin-bottom:12px; }
+    .toolbar input { flex:1; background:#0f172a; color:#e5e7eb; border:1px solid #334155; border-radius:8px; padding:8px 10px; }
+    .toolbar button { background:#2563eb; color:white; border:0; border-radius:8px; padding:8px 12px; cursor:pointer; }
+    .balances { padding:12px; margin-bottom:12px; display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:10px; }
+    .bal-card { background:#0f172a; border:1px solid #1f2937; border-radius:10px; padding:10px; }
+    .table-wrap { padding:8px; overflow:auto; }
+    table { width:100%; border-collapse:collapse; min-width:1200px; }
+    th, td { padding:10px 8px; border-bottom:1px solid #1f2937; white-space:nowrap; }
+    th { color:#93c5fd; text-align:left; position:sticky; top:0; background:#111827; }
+    tr:hover td { background:#0f172a; }
+    .muted { color:#94a3b8; }
+    .pill { border:1px solid #334155; border-radius:999px; padding:2px 8px; font-size:12px; }
+    .num.pos { color:#86efac; }
+    .num.neg { color:#fca5a5; }
+  </style>
+</head>
+<body>
+  <div class=\"wrap\">
+    <div class=\"toolbar\">
+      <input id=\"tj-filter\" placeholder=\"Filter symbol / account / source (e.g. EURUSD, BTCUSDT, oanda, bybit demo)\" />
+      <button id=\"tj-filter-btn\">Filter</button>
+      <button id=\"tj-clear-btn\">Clear</button>
+      <button id=\"tj-sync-btn\">Sync now</button>
+      <span id=\"tj-status\" class=\"muted\"></span>
+    </div>
+    <div id="tj-quick-filters" class="toolbar" style="padding:8px 12px; margin-top:-6px; margin-bottom:12px; flex-wrap:wrap;">
+      <button id="btn-errors" class="tj-chip" data-flag="errors">Errors only</button>
+      <button id="btn-breakeven" class="tj-chip" data-flag="breakeven">Breakeven only</button>
+      <button id="btn-held-news" class="tj-chip" data-flag="held_news">Held through news</button>
+      <button id="btn-spiked-out" class="tj-chip" data-flag="spiked_out">Spiked out</button>
+      <button id="btn-early-close" class="tj-chip" data-flag="early_close">Early close</button>
+    </div>
+    <div id=\"tj-stats\" class=\"balances\"></div>
+    <div id=\"tj-balances\" class=\"balances\"></div>
+    <div class=\"table-wrap\">
+      <table id=\"tj-table\">
+        <thead>
+          <tr>
+            <th data-sort="close_time">Close Time</th>
+            <th data-sort="account_label">Account</th>
+            <th data-sort="symbol">Symbol</th>
+            <th data-sort="side">Side</th>
+            <th data-sort="setup">Setup</th>
+            <th data-sort="qty">Qty</th>
+            <th data-sort="entry_price">Entry</th>
+            <th data-sort="exit_price">Exit</th>
+            <th data-sort="stop_loss">Stop Loss</th>
+            <th data-sort="take_profit">Target</th>
+            <th data-sort="commission">Commission</th>
+            <th data-sort="net_profit">Net Profit</th>
+            <th data-sort="balance_after_trade">Bal After Trade</th>
+            <th data-sort="breakeven">Breakeven</th>
+            <th data-sort="status">Status</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div id=\"tj-empty\" class=\"muted\" style=\"padding:12px; display:none;\">No trades found.</div>
+    </div>
+  </div>
+  <script src=\"/static/trading_journal.js\"></script>
+</body>
+</html>
+"""
 
-    oanda_has_credentials = False
-    for account_mode in ("live", "demo"):
+
+def _trading_journal_filter_rows(rows: List[Dict[str, object]], query: str) -> List[Dict[str, object]]:
+    needle = query.strip().lower()
+    if not needle:
+        return rows
+    matched: List[Dict[str, object]] = []
+    for row in rows:
+        haystack = " ".join(
+            str(row.get(field, ""))
+            for field in ("source", "account", "account_label", "symbol", "side", "status")
+        ).lower()
+        if needle in haystack:
+            matched.append(row)
+    return matched
+
+
+async def _fetch_oanda_account_summary(account: str) -> Dict[str, object]:
+    cfg = _get_oanda_config(account)
+    payload = await _fetch_oanda_json(
+        cfg["base_url"],
+        f"/v3/accounts/{cfg['account_id']}/summary",
+        cfg["token"],
+    )
+    account_payload = payload.get("account") if isinstance(payload, dict) else {}
+    if not isinstance(account_payload, dict):
+        account_payload = {}
+    return {
+        "account": account,
+        "label": f"OANDA {account.title()}",
+        "currency": account_payload.get("currency") or "",
+        "balance": _to_float(account_payload.get("balance")),
+        "nav": _to_float(account_payload.get("NAV")),
+    }
+
+
+def _row_sort_dt(row: Dict[str, object]) -> str:
+    return str(row.get("close_time") or row.get("open_time") or "")
+
+
+def _is_win(row: Dict[str, object]) -> bool:
+    pnl = _to_float(row.get("net_profit"))
+    return pnl is not None and pnl > 0
+
+
+def _is_loss(row: Dict[str, object]) -> bool:
+    pnl = _to_float(row.get("net_profit"))
+    return pnl is not None and pnl < 0
+
+
+def _is_be(row: Dict[str, object]) -> bool:
+    breakeven = str(row.get("breakeven") or "").strip().lower()
+    pnl = _to_float(row.get("net_profit"))
+    return breakeven in {"yes", "y", "true", "1"} or (pnl is not None and abs(pnl) < 1e-12)
+
+
+def _calc_balance_after_trade(
+    rows: List[Dict[str, object]], current_balances: List[Dict[str, object]]
+) -> List[Dict[str, object]]:
+    state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
+    active_folder = str(state.get("source_folder") if isinstance(state, dict) else "")
+    cashflows = _load_cashflows_from_dropbox(active_folder) if active_folder else {}
+
+    out_rows = [dict(row) for row in rows]
+    by_account: Dict[str, List[int]] = defaultdict(list)
+    for idx, row in enumerate(out_rows):
+        account = str(row.get("account_label") or row.get("account") or "")
+        by_account[account].append(idx)
+
+    def _to_ts(value: object) -> float:
+        if value in (None, ""):
+            return float("-inf")
         try:
-            cfg = _get_oanda_config(account_mode)
-        except ValueError:
+            return float(pd.to_datetime(value).timestamp())
+        except Exception:
+            return float("-inf")
+
+    for account, indices in by_account.items():
+        events = cashflows.get(account) or cashflows.get(account.upper()) or []
+        if not events:
             continue
-        oanda_has_credentials = True
-        try:
-            items.extend(
-                await _collect_oanda_open_items(
-                    base_url=cfg["base_url"],
-                    account_id=cfg["account_id"],
-                    api_key=cfg["token"],
-                    account_context=account_mode,
-                )
-            )
-        except Exception as exc:
-            errors.append(
-                {
-                    "broker": "OANDA",
-                    "account": account_mode,
-                    "message": str(exc),
-                }
-            )
+        events_sorted = sorted(events, key=lambda e: _to_ts(e.get("date")))
+        trade_indices = sorted(indices, key=lambda i: _to_ts(out_rows[i].get("close_time") or out_rows[i].get("open_time")))
 
-    if not oanda_has_credentials:
-        errors.append(
+        segment_running: Dict[int, float] = {}
+        for row_idx in trade_indices:
+            row = out_rows[row_idx]
+            trade_ts = _to_ts(row.get("close_time") or row.get("open_time"))
+            anchor = -1
+            for i, event in enumerate(events_sorted):
+                if _to_ts(event.get("date")) <= trade_ts:
+                    anchor = i
+                else:
+                    break
+            if anchor < 0:
+                continue
+            if anchor not in segment_running:
+                start_bal = _to_float(events_sorted[anchor].get("new_balance"))
+                if start_bal is None:
+                    continue
+                segment_running[anchor] = start_bal
+
+            pnl = _to_float(row.get("net_profit"))
+            if pnl is not None:
+                segment_running[anchor] += pnl
+
+            row["balance_after_trade"] = segment_running[anchor]
+            row["balance_after_trade_currency"] = str(events_sorted[anchor].get("currency") or row.get("currency") or "")
+
+    return out_rows
+def _avg(values: List[float]) -> Optional[float]:
+    return (sum(values) / len(values)) if values else None
+
+
+def _compute_journal_stats(
+    rows: List[Dict[str, object]], balances: List[Dict[str, object]]
+) -> Dict[str, object]:
+    balance_by_account: List[Dict[str, object]] = []
+    for bal in balances:
+        balance_by_account.append(
             {
-                "broker": "OANDA",
-                "account": "unknown",
-                "message": "Missing OANDA credentials.",
+                "account": bal.get("account") or bal.get("label"),
+                "label": bal.get("label") or bal.get("account"),
+                "balance": _to_float(bal.get("balance")),
+                "currency": bal.get("currency") or "",
             }
         )
 
-    bybit_has_credentials = False
-    for account_mode in ("live", "demo"):
-        _mode, api_key, api_secret, base_url, key_source = resolve_bybit_credentials_for(
-            account_mode
-        )
-        if not api_key or not api_secret:
-            continue
-        bybit_has_credentials = True
-        try:
-            bybit_result = await _collect_bybit_open_items(
-                base_url=base_url,
-                api_key=api_key,
-                api_secret=api_secret,
-                account_context=account_mode,
-            )
-            items.extend(bybit_result["items"])
-            errors.extend(bybit_result["errors"])
-        except Exception as exc:
-            errors.append(
-                {
-                    "broker": "Bybit",
-                    "account": account_mode,
-                    "message": str(exc),
-                }
-            )
-        if key_source:
-            BYBIT_LOGGER.debug(
-                "OPEN_ORDERS account=%s base_url=%s key_source=%s",
-                account_mode,
-                base_url,
-                key_source,
-            )
+    by_instrument: Dict[str, Dict[str, object]] = {}
+    most_wins: Dict[str, object] = {"symbol": None, "wins": -1}
+    most_losses: Dict[str, object] = {"symbol": None, "losses": -1}
 
-    if not bybit_has_credentials:
-        errors.append(
-            {
-                "broker": "Bybit",
-                "account": "unknown",
-                "message": "Missing Bybit credentials.",
-            }
-        )
-
-    try:
-        pending = _load_pending_webhooks()
-        items.extend(
-            [
-                entry
-                for entry in pending
-                if bool(entry.get("enabled", True))
-                and str(entry.get("status", "WAITING")).upper() == "WAITING"
-            ]
-        )
-    except HTTPException as exc:
-        errors.append(
-            {
-                "broker": "WEBHOOK",
-                "account": "local",
-                "message": str(exc.detail),
-            }
-        )
-
-    return JSONResponse({"updated_at": time.time(), "items": items, "errors": errors})
-
-
-@app.post("/api/open-orders/close")
-async def close_open_order(payload: Dict[str, object]) -> JSONResponse:
-    broker = str(payload.get("broker", "")).strip().lower()
-    item_type = str(payload.get("type", "")).strip().lower()
-    account = str(payload.get("account", "live")).strip().lower()
-
-    if broker == "bybit":
-        _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for(
-            "demo" if account == "demo" else "live"
-        )
-        if not api_key or not api_secret:
-            raise HTTPException(status_code=500, detail="Missing Bybit credentials.")
-        category = str(payload.get("category", "")).strip()
-        symbol = str(payload.get("instrument", "")).strip()
-        if not category or not symbol:
-            raise HTTPException(status_code=400, detail="Bybit item missing category or symbol.")
-
-        if item_type == "order":
-            order_ref = str(payload.get("id", "")).strip()
-            if not order_ref:
-                raise HTTPException(status_code=400, detail="Bybit order ID missing.")
-            cancel_body: Dict[str, object] = {"category": category, "symbol": symbol}
-            if order_ref.startswith("calc_"):
-                cancel_body["orderLinkId"] = order_ref
-            else:
-                cancel_body["orderId"] = order_ref
-            try:
-                response = await _bybit_signed_post(
-                    base_url=base_url,
-                    api_key=api_key,
-                    api_secret=api_secret,
-                    path="/v5/order/cancel",
-                    body=cancel_body,
-                )
-            except Exception as exc:
-                if _delete_pending_webhook(order_ref):
-                    _schedule_dropbox_upload_state_backup()
-                    return JSONResponse({"status": "ok", "removed_local": True})
-                raise HTTPException(
-                    status_code=502, detail=f"Bybit cancel failed: {exc}"
-                ) from exc
-            return JSONResponse({"status": "ok", "result": response.get("result", {})})
-
-        if item_type == "position":
-            side_raw = str(payload.get("side", "")).strip().lower()
-            if side_raw in {"buy", "long"}:
-                close_side = "Sell"
-            elif side_raw in {"sell", "short"}:
-                close_side = "Buy"
-            else:
-                raise HTTPException(status_code=400, detail="Bybit position side missing.")
-            qty_raw = payload.get("size")
-            try:
-                qty_val = float(qty_raw)
-            except (TypeError, ValueError) as exc:
-                raise HTTPException(
-                    status_code=400, detail="Bybit position size must be numeric."
-                ) from exc
-            if qty_val <= 0:
-                raise HTTPException(
-                    status_code=400, detail="Bybit position size must be greater than zero."
-                )
-            body: Dict[str, object] = {
-                "category": category,
+    for row in rows:
+        symbol = str(row.get("symbol") or "")
+        if symbol not in by_instrument:
+            by_instrument[symbol] = {
                 "symbol": symbol,
-                "side": close_side,
-                "orderType": "Market",
-                "qty": str(qty_val),
-                "reduceOnly": True,
+                "total_trades": 0,
+                "wins": 0,
+                "losses": 0,
+                "break_even": 0,
+                "stop_losses": [],
+                "take_profits": [],
+                "sl_distances": [],
+                "tp_distances": [],
             }
-            position_idx = payload.get("position_idx")
-            if position_idx is not None:
-                try:
-                    body["positionIdx"] = int(position_idx)
-                except (TypeError, ValueError) as exc:
-                    raise HTTPException(
-                        status_code=400, detail="Bybit positionIdx must be numeric."
-                    ) from exc
-            response = await _bybit_signed_post(
-                base_url=base_url,
-                api_key=api_key,
-                api_secret=api_secret,
-                path="/v5/order/create",
-                body=body,
-            )
-            return JSONResponse({"status": "ok", "result": response.get("result", {})})
+        bucket = by_instrument[symbol]
+        bucket["total_trades"] += 1
+        if _is_win(row):
+            bucket["wins"] += 1
+        elif _is_loss(row):
+            bucket["losses"] += 1
+        else:
+            bucket["break_even"] += 1
 
-        raise HTTPException(status_code=400, detail="Unsupported Bybit item type.")
+        sl = _to_float(row.get("stop_loss"))
+        tp = _to_float(row.get("take_profit"))
+        entry = _to_float(row.get("entry_price"))
+        if sl is not None:
+            bucket["stop_losses"].append(sl)
+        if tp is not None:
+            bucket["take_profits"].append(tp)
+        if entry is not None and sl is not None:
+            bucket["sl_distances"].append(abs(entry - sl))
+        if entry is not None and tp is not None:
+            bucket["tp_distances"].append(abs(tp - entry))
 
-    if broker == "oanda":
-        mode = account if account in {"live", "demo"} else "live"
-        try:
-            cfg = _get_oanda_config(mode)
-        except ValueError as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-        order_id = str(payload.get("id", "")).strip()
-        if not order_id:
-            raise HTTPException(status_code=400, detail="OANDA item ID missing.")
-        await _oanda_preflight(
-            base_url=cfg["base_url"],
-            account_id=cfg["account_id"],
-            api_key=cfg["token"],
-            mode=mode,
-        )
-        headers = {
-            "Authorization": f"Bearer {cfg['token']}",
-            "Content-Type": "application/json",
-        }
-        if item_type == "order":
-            endpoint = f"/v3/accounts/{cfg['account_id']}/orders/{order_id}/cancel"
-            url = f"{cfg['base_url'].rstrip('/')}{endpoint}"
-            token_last4 = cfg["token"][-4:] if cfg["token"] else None
-            BYBIT_LOGGER.info(
-                "OANDA_CALL mode=%s base=%s account_id=%s token_last4=%s url=%s",
-                mode,
-                cfg["base_url"],
-                cfg["account_id"],
-                token_last4,
-                url,
-            )
-            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-                resp = await client.put(url, headers=headers)
-            if 300 <= resp.status_code < 400:
-                BYBIT_LOGGER.info(
-                    "OANDA_REDIRECT mode=%s status=%s url=%s location=%s",
-                    mode,
-                    resp.status_code,
-                    url,
-                    resp.headers.get("location"),
-                )
-            if resp.status_code >= 400:
-                raise HTTPException(
-                    status_code=resp.status_code,
-                    detail=f"OANDA cancel failed ({resp.status_code}): {resp.text}",
-                )
-            return JSONResponse({"status": "ok", "result": resp.json()})
-        if item_type == "position":
-            endpoint = f"/v3/accounts/{cfg['account_id']}/trades/{order_id}/close"
-            url = f"{cfg['base_url'].rstrip('/')}{endpoint}"
-            token_last4 = cfg["token"][-4:] if cfg["token"] else None
-            BYBIT_LOGGER.info(
-                "OANDA_CALL mode=%s base=%s account_id=%s token_last4=%s url=%s",
-                mode,
-                cfg["base_url"],
-                cfg["account_id"],
-                token_last4,
-                url,
-            )
-            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-                resp = await client.put(
-                    url,
-                    headers=headers,
-                    json={"units": "ALL"},
-                )
-            if 300 <= resp.status_code < 400:
-                BYBIT_LOGGER.info(
-                    "OANDA_REDIRECT mode=%s status=%s url=%s location=%s",
-                    mode,
-                    resp.status_code,
-                    url,
-                    resp.headers.get("location"),
-                )
-            if resp.status_code >= 400:
-                raise HTTPException(
-                    status_code=resp.status_code,
-                    detail=f"OANDA close failed ({resp.status_code}): {resp.text}",
-                )
-            return JSONResponse({"status": "ok", "result": resp.json()})
-        raise HTTPException(status_code=400, detail="Unsupported OANDA item type.")
+    out_by_instrument: List[Dict[str, object]] = []
+    for _, bucket in by_instrument.items():
+        item = dict(bucket)
+        item["avg_stop_loss"] = _avg(item.pop("stop_losses"))
+        item["avg_take_profit"] = _avg(item.pop("take_profits"))
+        item["avg_sl_distance"] = _avg(item.pop("sl_distances"))
+        item["avg_tp_distance"] = _avg(item.pop("tp_distances"))
+        out_by_instrument.append(item)
+        if item["wins"] > most_wins["wins"]:
+            most_wins = {"symbol": item["symbol"], "wins": item["wins"]}
+        if item["losses"] > most_losses["losses"]:
+            most_losses = {"symbol": item["symbol"], "losses": item["losses"]}
+    out_by_instrument.sort(key=lambda x: (-(x.get("total_trades") or 0), str(x.get("symbol") or "")))
 
-    raise HTTPException(status_code=400, detail="Unsupported broker.")
+    all_sl = [_to_float(row.get("stop_loss")) for row in rows]
+    all_tp = [_to_float(row.get("take_profit")) for row in rows]
+    all_sl = [x for x in all_sl if x is not None]
+    all_tp = [x for x in all_tp if x is not None]
 
-OANDA_HISTORY_TEMPLATE = """<!DOCTYPE html>
-<html lang=\"en\">
-<head>
-    <meta charset=\"UTF-8\" />
-    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-    <title>OANDA Transaction History Export</title>
-    <style>
-        :root { color-scheme: light dark; }
-        body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
-        h1 { margin-top: 0; }
-        .card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; padding: 1.5rem; max-width: 960px; margin: 0 auto; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
-        .meta { color: #94a3b8; margin-bottom: 0.75rem; line-height: 1.5; }
-        .actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1rem; }
-        .toggle-group { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 0.75rem; }
-        .toggle-group button.active { background: #38bdf8; color: #0f172a; }
-        .toggle-group { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 0.75rem; }
-        .toggle-group button.active { background: #38bdf8; color: #0f172a; }
-        button { padding: 0.7rem 1.2rem; border-radius: 12px; border: none; cursor: pointer; font-weight: 700; }
-        .primary { background: #22c55e; color: #052e16; }
-        .secondary { background: #334155; color: #e2e8f0; }
-        .status { margin-top: 1rem; color: #cbd5e1; white-space: pre-wrap; word-break: break-word; }
-        .error { margin-top: 0.75rem; color: #fca5a5; }
-        .badge { display: inline-block; padding: 0.35rem 0.65rem; border-radius: 999px; background: #1f2937; color: #cbd5e1; font-weight: 700; font-size: 0.9rem; }
-    </style>
-</head>
-<body>
-    <div class=\"card\">
-        <h1>OANDA Transaction History Export</h1>
-        <p class=\"meta\">Generate transaction history CSV exports for the selected timeframe. Jobs run in the background and will download automatically when ready.</p>
-        <div class=\"badge\">Account</div>
-        <div class=\"toggle-group\" data-group=\"account\">
-            <button class=\"secondary\" data-account=\"live\">LIVE</button>
-            <button class=\"secondary\" data-account=\"demo\">DEMO</button>
-        </div>
-        <div class=\"badge\" style=\"margin-top: 1rem;\">Select range</div>
-        <div class=\"actions\">
-            <button class=\"primary\" data-period=\"day\">DAY</button>
-            <button class=\"primary\" data-period=\"week\">WEEK</button>
-            <button class=\"primary\" data-period=\"month\">MONTH</button>
-            <button class=\"primary\" data-period=\"year\">YEAR</button>
-            <button class=\"primary\" data-period=\"3y\">3 YEARS</button>
-            <button class=\"primary\" data-period=\"complete\">COMPLETE</button>
-        </div>
-        <div id=\"status\" class=\"status\">Choose a timeframe to start.</div>
-        <div id=\"error\" class=\"error\"></div>
-    </div>
-
-    <script>
-        const statusEl = document.getElementById('status');
-        const errorEl = document.getElementById('error');
-        const buttons = Array.from(document.querySelectorAll('button[data-period]'));
-        const accountButtons = Array.from(document.querySelectorAll('button[data-account]'));
-        let selectedAccount = 'demo';
-
-        const setButtonsDisabled = (disabled) => {
-            buttons.forEach((btn) => {
-                btn.disabled = disabled;
-            });
-        };
-
-        const startExport = async (payload) => {
-            errorEl.textContent = '';
-            statusEl.textContent = 'Creating export job...';
-            setButtonsDisabled(true);
-            try {
-                const response = await fetch('/api/oanda-history/export', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ ...payload, account: selectedAccount }),
-                });
-                if (!response.ok) {
-                    const text = await response.text();
-                    throw new Error(text || response.statusText);
-                }
-                const data = await response.json();
-                await pollJob(data.job_id);
-            } catch (err) {
-                errorEl.textContent = err.message || 'Unable to start export.';
-                statusEl.textContent = 'Export failed to start.';
-                setButtonsDisabled(false);
-            }
-        };
-
-        const pollJob = async (jobId) => {
-            statusEl.textContent = 'Job queued...';
-            while (true) {
-                await new Promise((resolve) => setTimeout(resolve, 1500));
-                const response = await fetch(`/api/oanda-history/export/${jobId}`, { cache: 'no-store' });
-                if (!response.ok) {
-                    const text = await response.text();
-                    throw new Error(text || response.statusText);
-                }
-                const data = await response.json();
-                statusEl.textContent = `Status: ${data.status}`;
-                if (data.status === 'done') {
-                    window.location.href = data.download_url;
-                    setButtonsDisabled(false);
-                    return;
-                }
-                if (data.status === 'error') {
-                    errorEl.textContent = data.error || 'Export failed.';
-                    setButtonsDisabled(false);
-                    return;
-                }
-            }
-        };
-
-        accountButtons.forEach((button) => {
-            button.addEventListener('click', () => {
-                const account = button.dataset.account || 'live';
-                selectedAccount = account;
-                accountButtons.forEach((btn) => btn.classList.toggle('active', btn === button));
-            });
-        });
-        const defaultAccountButton = accountButtons.find((btn) => btn.dataset.account === selectedAccount);
-        if (defaultAccountButton) {
-            defaultAccountButton.classList.add('active');
-        }
-
-        buttons.forEach((button) => {
-            button.addEventListener('click', () => {
-                const period = button.dataset.period;
-                if (period) {
-                    startExport({ period });
-                }
-            });
-        });
-    </script>
-</body>
-</html>"""
-
-BYBIT_HISTORY_TEMPLATE = """<!DOCTYPE html>
-<html lang=\"en\">
-<head>
-    <meta charset=\"UTF-8\" />
-    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-    <title>Bybit Trade History Export</title>
-    <style>
-        :root { color-scheme: light dark; }
-        body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
-        h1 { margin-top: 0; }
-        .card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; padding: 1.5rem; max-width: 960px; margin: 0 auto; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
-        .meta { color: #94a3b8; margin-bottom: 0.75rem; line-height: 1.5; }
-        .actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1rem; }
-        .toggle-group { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.75rem; }
-        button { padding: 0.7rem 1.2rem; border-radius: 12px; border: none; cursor: pointer; font-weight: 700; }
-        .primary { background: #22c55e; color: #052e16; }
-        .secondary { background: #334155; color: #e2e8f0; }
-        .toggle-group { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 0.75rem; }
-        .toggle-group button.active { background: #2563eb; color: #e2e8f0; }
-        .hidden { display: none !important; }
-        .status { margin-top: 1rem; color: #cbd5e1; white-space: pre-wrap; word-break: break-word; }
-        .error { margin-top: 0.75rem; color: #fca5a5; }
-        .badge { display: inline-block; padding: 0.35rem 0.65rem; border-radius: 999px; background: #1f2937; color: #cbd5e1; font-weight: 700; font-size: 0.9rem; }
-    </style>
-</head>
-<body>
-    <div class=\"card\">
-        <h1>Bybit Trade History Export</h1>
-        <p class=\"meta\">Generate a CSV export of Bybit execution history for the selected timeframe. Jobs run in the background and will download automatically when ready. Note: Bybit trade history is limited to the last 2 years.</p>
-        <div class=\"badge\">Account</div>
-        <div class=\"toggle-group\" data-group=\"account\">
-            <button class=\"secondary\" data-account=\"live\">LIVE</button>
-            <button class=\"secondary\" data-account=\"demo\">DEMO</button>
-        </div>
-        <div class=\"badge\" style=\"margin-top: 1rem;\">Select range</div>
-        <div class=\"actions\" id=\"range-buttons\">
-            <button class=\"primary\" data-period=\"day\">DAY</button>
-            <button class=\"primary\" data-period=\"week\">WEEK</button>
-            <button class=\"primary\" data-period=\"month\">MONTH</button>
-            <button class=\"primary\" data-period=\"year\">YEAR</button>
-            <button class=\"primary\" data-period=\"3y\">3 YEARS</button>
-            <button class=\"primary\" data-period=\"complete\">COMPLETE</button>
-            <button class=\"primary hidden\" data-days=\"7\" id=\"demo-7d\">7 DAYS</button>
-        </div>
-        <div id=\"status\" class=\"status\">Choose a timeframe to start.</div>
-        <div id=\"error\" class=\"error\"></div>
-    </div>
-
-    <script>
-        const statusEl = document.getElementById('status');
-        const errorEl = document.getElementById('error');
-        const rangeButtonsEl = document.getElementById('range-buttons');
-        const periodButtons = Array.from(document.querySelectorAll('button[data-period]'));
-        const demo7dButton = document.getElementById('demo-7d');
-        const accountButtons = Array.from(document.querySelectorAll('button[data-account]'));
-        let selectedAccount = 'demo';
-
-        const setButtonsDisabled = (disabled) => {
-            Array.from(rangeButtonsEl.querySelectorAll('button')).forEach((btn) => { btn.disabled = disabled; });
-        };
-
-        const syncRangeButtons = () => {
-            const isDemo = selectedAccount === 'demo';
-            periodButtons.forEach((btn) => btn.classList.toggle('hidden', isDemo));
-            if (demo7dButton) demo7dButton.classList.toggle('hidden', !isDemo);
-        };
-
-        const startExport = async (payload) => {
-            errorEl.textContent = '';
-            statusEl.textContent = 'Creating export job...';
-            setButtonsDisabled(true);
-            try {
-                const response = await fetch('/api/bybit-history/export', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ ...payload, account: selectedAccount }),
-                });
-                if (!response.ok) {
-                    const text = await response.text();
-                    throw new Error(text || response.statusText);
-                }
-                const data = await response.json();
-                await pollJob(data.job_id);
-            } catch (err) {
-                errorEl.textContent = err.message || 'Unable to start export.';
-                statusEl.textContent = 'Export failed to start.';
-                setButtonsDisabled(false);
-            }
-        };
-
-        const pollJob = async (jobId) => {
-            statusEl.textContent = 'Job queued...';
-            while (true) {
-                await new Promise((resolve) => setTimeout(resolve, 1500));
-                const response = await fetch(`/api/bybit-history/export/${jobId}`, { cache: 'no-store' });
-                if (!response.ok) {
-                    const text = await response.text();
-                    throw new Error(text || response.statusText);
-                }
-                const data = await response.json();
-                statusEl.textContent = `Status: ${data.status}`;
-                if (data.status === 'done') {
-                    window.location.href = data.download_url;
-                    setButtonsDisabled(false);
-                    return;
-                }
-                if (data.status === 'error') {
-                    errorEl.textContent = data.error || 'Export failed.';
-                    setButtonsDisabled(false);
-                    return;
-                }
-            }
-        };
-
-        accountButtons.forEach((button) => {
-            button.addEventListener('click', () => {
-                const account = button.dataset.account || 'live';
-                selectedAccount = account;
-                accountButtons.forEach((btn) => btn.classList.toggle('active', btn === button));
-                syncRangeButtons();
-            });
-        });
-        const defaultAccountButton = accountButtons.find((btn) => btn.dataset.account === selectedAccount);
-        if (defaultAccountButton) {
-            defaultAccountButton.classList.add('active');
-        }
-
-        periodButtons.forEach((button) => {
-            button.addEventListener('click', () => {
-                const period = button.dataset.period;
-                if (period) startExport({ period });
-            });
-        });
-
-        if (demo7dButton) {
-            demo7dButton.addEventListener('click', () => startExport({ days: 7 }));
-        }
-
-        syncRangeButtons();
-    </script>
-</body>
-</html>"""
-
-COINSPOT_HISTORY_TEMPLATE = """<!DOCTYPE html>
-<html lang=\"en\">
-<head>
-    <meta charset=\"UTF-8\" />
-    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-    <title>CoinSpot History Export</title>
-    <style>
-        :root { color-scheme: light dark; }
-        body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
-        h1 { margin-top: 0; }
-        .card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; padding: 1.5rem; max-width: 960px; margin: 0 auto; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
-        .meta { color: #94a3b8; margin-bottom: 0.75rem; line-height: 1.5; }
-        .actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1rem; }
-        button { padding: 0.7rem 1.2rem; border-radius: 12px; border: none; cursor: pointer; font-weight: 700; }
-        .primary { background: #22c55e; color: #052e16; }
-        .secondary { background: #334155; color: #e2e8f0; }
-        .status { margin-top: 1rem; color: #cbd5e1; white-space: pre-wrap; word-break: break-word; }
-        .error { margin-top: 0.75rem; color: #fca5a5; }
-        .badge { display: inline-block; padding: 0.35rem 0.65rem; border-radius: 999px; background: #1f2937; color: #cbd5e1; font-weight: 700; font-size: 0.9rem; }
-    </style>
-</head>
-<body>
-    <div class=\"card\">
-        <h1>CoinSpot History Export</h1>
-        <p class=\"meta\">Generate a ZIP file containing CoinSpot deposits, withdrawals, orders, and transfer history. Jobs run in the background and will download automatically when ready.</p>
-        <div class=\"badge\">Select range</div>
-        <div class=\"actions\">
-            <button class=\"primary\" data-period=\"day\">DAY</button>
-            <button class=\"primary\" data-period=\"week\">WEEK</button>
-            <button class=\"primary\" data-period=\"month\">MONTH</button>
-            <button class=\"primary\" data-period=\"year\">YEAR</button>
-            <button class=\"primary\" data-period=\"3y\">3 YEARS</button>
-            <button class=\"primary\" data-period=\"complete\">COMPLETE</button>
-        </div>
-        <div id=\"status\" class=\"status\">Choose a timeframe to start.</div>
-        <div id=\"error\" class=\"error\"></div>
-    </div>
-
-    <script>
-        const statusEl = document.getElementById('status');
-        const errorEl = document.getElementById('error');
-        const buttons = Array.from(document.querySelectorAll('button[data-period]'));
-
-        const setButtonsDisabled = (disabled) => {
-            buttons.forEach((btn) => { btn.disabled = disabled; });
-        };
-
-        const startExport = async (payload) => {
-            errorEl.textContent = '';
-            statusEl.textContent = 'Creating export job...';
-            setButtonsDisabled(true);
-            try {
-                const response = await fetch('/api/coinspot-history/export', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload),
-                });
-                if (!response.ok) {
-                    const text = await response.text();
-                    throw new Error(text || response.statusText);
-                }
-                const data = await response.json();
-                await pollJob(data.job_id);
-            } catch (err) {
-                errorEl.textContent = err.message || 'Unable to start export.';
-                statusEl.textContent = 'Export failed to start.';
-                setButtonsDisabled(false);
-            }
-        };
-
-        const pollJob = async (jobId) => {
-            statusEl.textContent = 'Job queued...';
-            while (true) {
-                await new Promise((resolve) => setTimeout(resolve, 1500));
-                const response = await fetch(`/api/coinspot-history/export/${jobId}`, { cache: 'no-store' });
-                if (!response.ok) {
-                    const text = await response.text();
-                    throw new Error(text || response.statusText);
-                }
-                const data = await response.json();
-                statusEl.textContent = `Status: ${data.status}`;
-                if (data.status === 'done') {
-                    window.location.href = data.download_url;
-                    setButtonsDisabled(false);
-                    return;
-                }
-                if (data.status === 'error') {
-                    errorEl.textContent = data.error || 'Export failed.';
-                    setButtonsDisabled(false);
-                    return;
-                }
-            }
-        };
-
-        buttons.forEach((button) => {
-            button.addEventListener('click', () => {
-                const period = button.dataset.period;
-                if (period) {
-                    startExport({ period });
-                }
-            });
-        });
-    </script>
-</body>
-</html>"""
-
-PAYSLIP_AUDIT_TEMPLATE = """<!DOCTYPE html>
-<html lang=\"en\">
-<head>
-    <meta charset=\"UTF-8\" />
-    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-    <title>Payslip Audit Upload</title>
-    <style>
-        :root { color-scheme: light dark; }
-        body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
-        h1 { margin-top: 0; }
-        .card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; padding: 1.5rem; max-width: 960px; margin: 0 auto; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
-        .meta { color: #94a3b8; margin-bottom: 0.75rem; line-height: 1.5; }
-        .drop-zone { border: 2px dashed #334155; border-radius: 14px; padding: 2rem; text-align: center; background: #0a0f1b; transition: border-color 0.2s ease, background 0.2s ease; }
-        .drop-zone.dragover { border-color: #38bdf8; background: #0b1930; }
-        .actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1rem; }
-        button { padding: 0.7rem 1.2rem; border-radius: 12px; border: none; cursor: pointer; font-weight: 700; }
-        .primary { background: #22c55e; color: #052e16; }
-        .secondary { background: #334155; color: #e2e8f0; }
-        .status { margin-top: 1rem; color: #cbd5e1; white-space: pre-wrap; word-break: break-word; }
-        ul { margin: 0.5rem 0 0; padding-left: 1.25rem; color: #cbd5e1; }
-        .badge { display: inline-block; padding: 0.35rem 0.65rem; border-radius: 999px; background: #1f2937; color: #cbd5e1; font-weight: 700; font-size: 0.9rem; }
-        .log { background: #0a0f1b; border: 1px solid #1f2937; border-radius: 10px; padding: 0.75rem; margin-top: 1rem; white-space: pre-wrap; color: #e5e7eb; min-height: 120px; }
-    </style>
-</head>
-<body>
-    <div class=\"card\">
-        <h1>Payslip Audit Upload</h1>
-        <p class=\"meta\">Upload the payslip PDF plus all related timesheet screenshots. Drag and drop the files into the window below or use the file picker. The audit will begin automatically once the uploads are validated.</p>
-        <div class=\"badge\">Step 1</div>
-        <h3>Upload payslip and timesheets</h3>
-        <div id=\"drop-zone\" class=\"drop-zone\">
-            <p><strong>Drag &amp; drop your payslip PDF and timesheet images here</strong></p>
-            <p class=\"meta\">Accepted formats: PDF, JPG, JPEG, PNG. The payslip file is required along with at least one timesheet image.</p>
-            <input id=\"file-input\" type=\"file\" multiple accept=\".pdf,.jpg,.jpeg,.png\" style=\"display:none\" />
-            <div class=\"actions\">
-                <button id=\"pick-btn\" class=\"secondary\">Choose files</button>
-                <button id=\"clear-btn\" class=\"secondary\">Clear selection</button>
-            </div>
-            <ul id=\"file-list\"></ul>
-        </div>
-
-        <div class=\"badge\" style=\"margin-top:1.5rem\">Step 2</div>
-        <h3>Run audit</h3>
-        <p class=\"meta\">When you are ready, start the upload. The report will download automatically after the audit finishes.</p>
-        <div class=\"actions\">
-            <button id=\"upload-btn\" class=\"primary\">Upload &amp; Start Audit</button>
-            <a href=\"/\" class=\"secondary\" style=\"text-decoration:none; display:inline-flex; align-items:center;\">Back to dashboard</a>
-        </div>
-        <div id=\"status\" class=\"status\">Select your payslip PDF and timesheet screenshots to begin.</div>
-        <div id=\"log\" class=\"log\">Awaiting upload...</div>
-    </div>
-
-    <script>
-        window.PAYSLIP_AUDIT_CONFIG = {
-            uploadEndpoint: '/api/payslip-audit/run',
-            reportBase: '/api/payslip-audit/report/',
-        };
-    </script>
-    <script src=\"/static/payslip_audit.js\"></script>
-</body>
-</html>"""
-
-
-
-
-@app.get("/", response_class=HTMLResponse)
-async def index() -> str:
-    return HTML_TEMPLATE.replace("{asset_version}", ASSET_VERSION)
-
-
-@app.get("/instrument-specs", response_class=HTMLResponse)
-async def instrument_specs_page() -> str:
-    return INSTRUMENT_SPECS_TEMPLATE
-
-
-@app.get("/api/instrument-specs")
-async def api_instrument_specs(query: str) -> JSONResponse:
-    specs = await _fetch_instrument_specs(query)
-    return JSONResponse(specs)
-
-
-@app.get("/api/instrument-specs.jpg")
-async def api_instrument_specs_jpg(query: str) -> Response:
-    specs = await _fetch_instrument_specs(query)
-    jpg = _render_specs_jpg_bytes(specs)
-    safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(specs.get("resolved_symbol") or query or "instrument").strip("_"))
-    filename = f"instrument_specs_{safe or 'instrument'}.jpg"
-    return Response(
-        content=jpg,
-        media_type="image/jpeg",
-        headers={"Content-Disposition": f"attachment; filename=\"{filename}\""},
-    )
-
-
-@app.get("/open-orders", response_class=HTMLResponse)
-async def open_orders_page() -> str:
-    return OPEN_ORDERS_TEMPLATE
-
-
-@app.get("/category/{category}", response_class=HTMLResponse)
-async def category_page(category: str) -> str:
-    safe_category = html.escape(category)
-    return CATEGORY_TEMPLATE.replace("{category}", safe_category)
-
-
-@app.get("/scripts/view/{script_name:path}", response_class=HTMLResponse)
-async def script_page(script_name: str) -> str:
-    script = script_manager.get(script_name)
-    if script.name in STANDALONE_SCRIPTS and script.name not in {"bybit_monitor", "oanda_monitor"}:
-        target_url = script_open_url(script)
-        fallback_logs = f"/logs/view/{_encoded_script_name(script.name)}"
-        if target_url == f"/scripts/view/{_encoded_script_name(script.name)}":
-            target_url = fallback_logs
-        has_ui = target_url != fallback_logs
-        return (
-            LAUNCHER_TEMPLATE.replace("{script_name}", html.escape(script.name))
-            .replace("{target_url}", target_url)
-            .replace("{has_ui}", "true" if has_ui else "false")
-        )
-    safe_name = html.escape(script.name)
-    has_ui = "true" if script.name in WEB_APPS else "false"
-    log_url = f"/logs/view/{_encoded_script_name(script.name)}"
-    return (
-        SCRIPT_PAGE_TEMPLATE.replace("{script_name}", safe_name)
-        .replace("{has_ui}", has_ui)
-        .replace("{log_url}", log_url)
-    )
-
-
-
-
-@app.get("/payslip-audit", response_class=HTMLResponse)
-async def payslip_audit_page() -> str:
-    return PAYSLIP_AUDIT_TEMPLATE
-
-
-@app.get("/oanda-history", response_class=HTMLResponse, include_in_schema=False)
-async def oanda_history_page() -> HTMLResponse:
-    return HTMLResponse(OANDA_HISTORY_TEMPLATE)
-
-
-@app.get("/bybit-history", response_class=HTMLResponse, include_in_schema=False)
-async def bybit_history_page() -> HTMLResponse:
-    return HTMLResponse(BYBIT_HISTORY_TEMPLATE)
-
-
-@app.get("/coinspot-history", response_class=HTMLResponse, include_in_schema=False)
-async def coinspot_history_page() -> HTMLResponse:
-    return HTMLResponse(COINSPOT_HISTORY_TEMPLATE)
-
-
-@app.get("/scripts")
-async def list_scripts() -> JSONResponse:
-    return JSONResponse(script_manager.list_scripts())
-
-
-@app.get("/scripts/{script_name:path}/status")
-async def script_status(script_name: str) -> JSONResponse:
-    script = script_manager.get(script_name)
-    return JSONResponse(
-        {
-            "name": script.name,
-            "running": script.is_running,
-            "port": script.port,
-            "last_start_attempt_at": script.last_start_attempt_at,
-            "last_start_error": script.last_start_error,
-            "last_exit_code": script.last_exit_code,
-            "last_exit_reason": script.last_exit_reason,
-            "last_spawn_command": script.last_spawn_command,
-            "last_spawn_cwd": script.last_spawn_cwd,
-            "stdout_tail": script.logs(),
-        }
-    )
-
-
+    return {
+        "totals": {
+            "trades": len(rows),
+            "wins": sum(1 for row in rows if _is_win(row)),
+            "losses": sum(1 for row in rows if _is_loss(row)),
+            "break_even": sum(1 for row in rows if _is_be(row)),
+            "avg_stop_loss": _avg(all_sl),
+            "avg_take_profit": _avg(all_tp),
+        },
+        "balances": balance_by_account,
+        "by_instrument": out_by_instrument,
+        "instrument_with_most_wins": most_wins if most_wins["symbol"] else None,
+        "instrument_with_most_losses": most_losses if most_losses["symbol"] else None,
+        "balance_after_trade_note": "Approximate unless cashflow ledger fully captures deposits/withdrawals/transfers.",
+    }
 def _read_bybit_settings() -> Dict[str, float]:
     try:
         settings = bybit_monitor.get_runtime_settings(force=True)
@@ -6797,4 +7007,64 @@ async def favicon() -> Response:
     return Response(content=png_bytes, media_type="image/png")
 
 
-app.mount("/static", StaticFiles(directory=BASE_DIR / "render" / "static"), name="static")
+app.mount("/static", StaticFiles(directory=BASE_DIR / "render" / "static"), name="static")@app.get("/api/trading-journal")
+async def trading_journal_items(filter: str = "") -> JSONResponse:
+    items = _get_trading_journal_rows()
+    query = (filter or "").strip().lower()
+    if query:
+
+        def match(row: Dict[str, object]) -> bool:
+            searchable = [
+                row.get("symbol"),
+                row.get("symbol_raw"),
+                row.get("account_label"),
+                row.get("account"),
+                row.get("source"),
+                row.get("sheet"),
+                row.get("setup"),
+                row.get("breakeven"),
+                row.get("notes"),
+                row.get("pre_trade_comments"),
+                row.get("entry_comments"),
+                row.get("trade_management"),
+                row.get("exit_comments"),
+            ]
+            metrics = row.get("metrics")
+            if isinstance(metrics, dict):
+                searchable.extend(metrics.values())
+            hay = " ".join(str(x or "") for x in searchable).lower()
+            return query in hay
+
+        items = [r for r in items if match(r)]
+
+    balances = _get_excel_account_balances()
+    items = _calc_balance_after_trade(items, balances)
+    stats = _compute_journal_stats(items, balances)
+    return JSONResponse({"items": items, "count": len(items), "stats": stats})
+@app.get("/api/trading-journal/balances")
+async def trading_journal_balances() -> JSONResponse:
+    rows = _get_trading_journal_rows()
+    excel = _get_excel_account_balances()
+    by_acc = {
+        str((bal.get("account") or bal.get("label") or "")).upper(): dict(bal)
+        for bal in excel
+    }
+
+    for row in rows:
+        account = str(row.get("account_label") or row.get("account") or "").strip()
+        if not account:
+            continue
+        key = account.upper()
+        if key not in by_acc:
+            by_acc[key] = {
+                "account": account,
+                "label": account,
+                "balance": None,
+                "nav": None,
+                "currency": _infer_account_currency(account),
+                "missing_balance": True,
+            }
+
+    items = sorted(by_acc.values(), key=lambda x: str(x.get("label") or ""))
+    return JSONResponse({"items": items})
+
