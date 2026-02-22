@@ -101,6 +101,8 @@ BYBIT_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "bybit-history"
 COINSPOT_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "coinspot-history"
 PENDING_WEBHOOKS_PATH = BASE_DIR / "render" / "data" / "pending_webhooks.json"
 WATCHLIST_PATH = BASE_DIR / "render" / "data" / "watchlist.json"
+TRADING_JOURNAL_PATH = BASE_DIR / "render" / "data" / "trading_journal.json"
+TRADING_JOURNAL_STATE_PATH = BASE_DIR / "render" / "data" / "trading_journal_state.json"
 WATCHLIST_MAX_ITEMS = 50
 DROPBOX_SYNC_ENABLED = os.getenv("DROPBOX_SYNC_ENABLED", "").strip().lower() in {
     "1",
@@ -171,8 +173,10 @@ BYBIT_HISTORY_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
 COINSPOT_HISTORY_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
 PENDING_WEBHOOKS_PATH.parent.mkdir(parents=True, exist_ok=True)
 WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+TRADING_JOURNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 _WATCHLIST_CACHE: Optional[List[str]] = None
+_TRADING_JOURNAL_CACHE: Optional[List[Dict[str, object]]] = None
 _DROPBOX_UPLOAD_TASK: Optional[asyncio.Task] = None
 _BYBIT_EXEC_LAST_SEEN: Dict[str, int] = {}
 _OANDA_TX_LAST_SEEN: Dict[str, str] = {}
@@ -580,6 +584,180 @@ def _set_watchlist(items: Iterable[object]) -> List[str]:
     return list(normalized)
 
 
+def _load_trading_journal() -> List[Dict[str, object]]:
+    if not TRADING_JOURNAL_PATH.exists():
+        return []
+    try:
+        payload = json.loads(TRADING_JOURNAL_PATH.read_text(encoding="utf-8"))
+    except Exception:  # pragma: no cover - defensive
+        return []
+    if not isinstance(payload, list):
+        return []
+    rows: List[Dict[str, object]] = []
+    for entry in payload:
+        if isinstance(entry, dict):
+            rows.append(entry)
+    return rows
+
+
+def _get_trading_journal() -> List[Dict[str, object]]:
+    global _TRADING_JOURNAL_CACHE
+    if _TRADING_JOURNAL_CACHE is None:
+        _TRADING_JOURNAL_CACHE = _load_trading_journal()
+    return [dict(item) for item in _TRADING_JOURNAL_CACHE]
+
+
+def _save_trading_journal(rows: List[Dict[str, object]]) -> None:
+    global _TRADING_JOURNAL_CACHE
+    sorted_rows = sorted(
+        rows,
+        key=lambda item: str(item.get("close_time") or item.get("open_time") or ""),
+        reverse=True,
+    )
+    _TRADING_JOURNAL_CACHE = [dict(item) for item in sorted_rows]
+    TRADING_JOURNAL_PATH.write_text(
+        json.dumps(sorted_rows, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def _upsert_trading_journal_rows(rows: Iterable[Dict[str, object]]) -> int:
+    existing = _get_trading_journal()
+    by_id: Dict[str, Dict[str, object]] = {}
+    for row in existing:
+        row_id = str(row.get("id") or "").strip()
+        if row_id:
+            by_id[row_id] = row
+    changed = 0
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        row_id = str(row.get("id") or "").strip()
+        if not row_id:
+            continue
+        row["id"] = row_id
+        row["updated_at"] = datetime.now(timezone.utc).isoformat()
+        if row_id in by_id:
+            by_id[row_id].update(row)
+        else:
+            by_id[row_id] = row
+        changed += 1
+    if changed:
+        _save_trading_journal(list(by_id.values()))
+    return changed
+
+
+def _load_trading_journal_state() -> Dict[str, object]:
+    if not TRADING_JOURNAL_STATE_PATH.exists():
+        return {}
+    try:
+        payload = json.loads(TRADING_JOURNAL_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:  # pragma: no cover - defensive
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _save_trading_journal_state(state: Dict[str, object]) -> None:
+    TRADING_JOURNAL_STATE_PATH.write_text(
+        json.dumps(state, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def _to_float(value: object) -> Optional[float]:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _journal_rows_from_bybit_execution(entry: Dict[str, object]) -> List[Dict[str, object]]:
+    account = str(entry.get("account") or "unknown").strip().lower()
+    category = str(entry.get("category") or "").strip().lower()
+    symbol = str(entry.get("symbol") or "").strip().upper()
+    order_id = str(entry.get("orderId") or "")
+    exec_id = str(entry.get("execId") or "")
+    if not symbol or not order_id or not exec_id:
+        return []
+    qty = _to_float(entry.get("execQty")) or 0.0
+    exec_price = _to_float(entry.get("execPrice"))
+    exec_fee = _to_float(entry.get("execFee")) or 0.0
+    exec_pnl = _to_float(entry.get("execPnl")) or 0.0
+    exec_time_raw = _to_float(entry.get("execTime"))
+    close_time = None
+    if exec_time_raw:
+        close_time = datetime.fromtimestamp(exec_time_raw / 1000, tz=timezone.utc).isoformat()
+    side = str(entry.get("side") or "")
+    return [
+        {
+            "id": f"bybit:{account}:{category}:{symbol}:{order_id}:{exec_id}",
+            "source": "bybit",
+            "account": account,
+            "account_label": f"Bybit {account.title()}",
+            "asset_class": "crypto",
+            "symbol": symbol,
+            "side": side.title() if side else "",
+            "status": "closed" if exec_pnl != 0 else "filled",
+            "open_time": close_time,
+            "close_time": close_time,
+            "entry_price": exec_price,
+            "exit_price": exec_price,
+            "qty": qty,
+            "notional_usd": (exec_price or 0.0) * qty,
+            "fees": exec_fee,
+            "fee_currency": str(entry.get("feeCurrency") or "USDT"),
+            "realized_pnl": exec_pnl,
+            "realized_pnl_currency": str(entry.get("currency") or "USDT"),
+            "strategy_tag": "",
+            "notes": "",
+            "raw_refs": {"orderId": order_id, "execIds": [exec_id]},
+        }
+    ]
+
+
+def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[str, object]]:
+    account = str(entry.get("account") or "unknown").strip().lower()
+    tx_id = str(entry.get("id") or "").strip()
+    symbol = str(entry.get("instrument") or "").strip().upper()
+    if not tx_id or not symbol:
+        return []
+    units = _to_float(entry.get("units")) or 0.0
+    qty = abs(units)
+    side = "Buy" if units >= 0 else "Sell"
+    price = _to_float(entry.get("price"))
+    realized_pnl = (_to_float(entry.get("pl")) or 0.0) + (_to_float(entry.get("financing")) or 0.0)
+    fees = abs(_to_float(entry.get("halfSpreadCost")) or 0.0)
+    close_time = str(entry.get("time") or "")
+    return [
+        {
+            "id": f"oanda:{account}:{symbol}:{tx_id}",
+            "source": "oanda",
+            "account": account,
+            "account_label": f"OANDA {account.title()}",
+            "asset_class": "forex",
+            "symbol": symbol,
+            "side": side,
+            "status": "closed",
+            "open_time": close_time,
+            "close_time": close_time,
+            "entry_price": price,
+            "exit_price": price,
+            "qty": qty,
+            "notional_usd": None,
+            "fees": fees,
+            "fee_currency": str(entry.get("accountCurrency") or ""),
+            "realized_pnl": realized_pnl,
+            "realized_pnl_currency": str(entry.get("accountCurrency") or ""),
+            "strategy_tag": "",
+            "notes": "",
+            "raw_refs": {"transactionId": tx_id, "orderId": entry.get("orderID")},
+        }
+    ]
+
+
 def _build_state_backup_payload() -> bytes:
     alerts_payload = {
         "bybit": {"alerts": bybit_monitor.get_custom_alerts(force=True)},
@@ -926,6 +1104,8 @@ def script_open_url(script: ManagedScript) -> str:
         return "/bybit-history"
     if script.name == "coinspot-clone":
         return "/coinspot-history"
+    if script.name == "trading-journal":
+        return "/trading-journal"
     if script.name in WEB_APPS:
         return f"/apps/{_encoded_script_name(script.name)}"
     return f"/scripts/view/{_encoded_script_name(script.name)}"
@@ -1064,7 +1244,29 @@ class ScriptManager:
         raise HTTPException(status_code=404, detail=f"Script not found: {name}")
 
     def list_scripts(self) -> List[Dict[str, object]]:
-        return sorted((script.to_summary() for script in self._scripts.values()), key=lambda s: s["name"])
+        items = [script.to_summary() for script in self._scripts.values()]
+        items.append(
+            {
+                "id": "trading-journal",
+                "name": "trading-journal",
+                "path": str(BASE_DIR / "render" / "master_service.py"),
+                "category": "Other",
+                "running": True,
+                "port": None,
+                "return_code": None,
+                "open_url": "/trading-journal",
+                "logs_url": None,
+                "last_output_at": None,
+                "last_start_attempt_at": None,
+                "last_start_error": None,
+                "last_exit_code": None,
+                "last_exit_reason": None,
+                "last_spawn_command": None,
+                "last_spawn_cwd": None,
+                "standalone": False,
+            }
+        )
+        return sorted(items, key=lambda s: str(s["name"]).lower())
 
     def get(self, name: str) -> ManagedScript:
         resolved = self._resolve_name(name)
@@ -4759,6 +4961,9 @@ async def _poll_bybit_fills() -> None:
                             "account": account,
                             "category": category,
                         }
+                        journal_rows = _journal_rows_from_bybit_execution(entry_payload)
+                        if journal_rows:
+                            _upsert_trading_journal_rows(journal_rows)
                         await _send_telegram_alert(_format_bybit_fill_alert(entry_payload))
                 _BYBIT_EXEC_LAST_SEEN[account] = max_seen
             except Exception as exc:  # pragma: no cover - background task
@@ -4819,6 +5024,9 @@ async def _poll_oanda_fills() -> None:
                     if "ORDER_FILL" not in tx_type:
                         continue
                     entry_payload = {**entry, "account": account}
+                    journal_rows = _journal_rows_from_oanda_order_fill(entry_payload)
+                    if journal_rows:
+                        _upsert_trading_journal_rows(journal_rows)
                     await _send_telegram_alert(_format_oanda_fill_alert(entry_payload))
                 _OANDA_TX_LAST_SEEN[account] = str(max_seen)
             except Exception as exc:  # pragma: no cover - background task
@@ -4925,6 +5133,184 @@ async def fetch_bybit_balance(
             "retMsg": ret_msg,
         }
     )
+
+
+@app.get("/trading-journal", response_class=HTMLResponse)
+async def trading_journal_page() -> str:
+    return """
+<!doctype html>
+<html>
+<head>
+  <meta charset=\"utf-8\"/>
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>
+  <title>Trading Journal</title>
+  <style>
+    body { background:#0b1220; color:#e5e7eb; font-family:system-ui,sans-serif; margin:0; }
+    .wrap { max-width: 1400px; margin: 0 auto; padding: 16px; }
+    .toolbar, .balances, .table-wrap { background:#111827; border:1px solid #1f2937; border-radius:12px; }
+    .toolbar { display:flex; gap:8px; align-items:center; padding:12px; margin-bottom:12px; }
+    .toolbar input { flex:1; background:#0f172a; color:#e5e7eb; border:1px solid #334155; border-radius:8px; padding:8px 10px; }
+    .toolbar button { background:#2563eb; color:white; border:0; border-radius:8px; padding:8px 12px; cursor:pointer; }
+    .balances { padding:12px; margin-bottom:12px; display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:10px; }
+    .bal-card { background:#0f172a; border:1px solid #1f2937; border-radius:10px; padding:10px; }
+    .table-wrap { padding:8px; overflow:auto; }
+    table { width:100%; border-collapse:collapse; min-width:1200px; }
+    th, td { padding:10px 8px; border-bottom:1px solid #1f2937; white-space:nowrap; }
+    th { color:#93c5fd; text-align:left; position:sticky; top:0; background:#111827; }
+    tr:hover td { background:#0f172a; }
+    .muted { color:#94a3b8; }
+    .pill { border:1px solid #334155; border-radius:999px; padding:2px 8px; font-size:12px; }
+    .num.pos { color:#86efac; }
+    .num.neg { color:#fca5a5; }
+  </style>
+</head>
+<body>
+  <div class=\"wrap\">
+    <div class=\"toolbar\">
+      <input id=\"tj-filter\" placeholder=\"Filter symbol / account / source (e.g. EURUSD, BTCUSDT, oanda, bybit demo)\" />
+      <button id=\"tj-filter-btn\">Filter</button>
+      <button id=\"tj-clear-btn\">Clear</button>
+      <button id=\"tj-sync-btn\">Sync now</button>
+      <span id=\"tj-status\" class=\"muted\"></span>
+    </div>
+    <div id=\"tj-balances\" class=\"balances\"></div>
+    <div class=\"table-wrap\">
+      <table id=\"tj-table\">
+        <thead>
+          <tr>
+            <th>Close Time</th><th>Source</th><th>Account</th><th>Symbol</th><th>Side</th>
+            <th>Qty</th><th>Entry</th><th>Exit</th><th>Notional (USD)</th>
+            <th>Fees</th><th>Realized P&L</th><th>Status</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div id=\"tj-empty\" class=\"muted\" style=\"padding:12px; display:none;\">No trades found.</div>
+    </div>
+  </div>
+  <script src=\"/static/trading_journal.js\"></script>
+</body>
+</html>
+"""
+
+
+def _trading_journal_filter_rows(rows: List[Dict[str, object]], query: str) -> List[Dict[str, object]]:
+    needle = query.strip().lower()
+    if not needle:
+        return rows
+    matched: List[Dict[str, object]] = []
+    for row in rows:
+        haystack = " ".join(
+            str(row.get(field, ""))
+            for field in ("source", "account", "account_label", "symbol", "side", "status")
+        ).lower()
+        if needle in haystack:
+            matched.append(row)
+    return matched
+
+
+async def _fetch_oanda_account_summary(account: str) -> Dict[str, object]:
+    cfg = _get_oanda_config(account)
+    payload = await _fetch_oanda_json(
+        cfg["base_url"],
+        f"/v3/accounts/{cfg['account_id']}/summary",
+        cfg["token"],
+    )
+    account_payload = payload.get("account") if isinstance(payload, dict) else {}
+    if not isinstance(account_payload, dict):
+        account_payload = {}
+    return {
+        "account": account,
+        "label": f"OANDA {account.title()}",
+        "currency": account_payload.get("currency") or "",
+        "balance": _to_float(account_payload.get("balance")),
+        "nav": _to_float(account_payload.get("NAV")),
+    }
+
+
+@app.get("/api/trading-journal")
+async def trading_journal_items(filter: str = "") -> JSONResponse:
+    rows = _get_trading_journal()
+    filtered = _trading_journal_filter_rows(rows, filter)
+    return JSONResponse({"items": filtered, "count": len(filtered), "total": len(rows)})
+
+
+@app.get("/api/trading-journal/balances")
+async def trading_journal_balances() -> JSONResponse:
+    items: List[Dict[str, object]] = []
+    for account in ("live", "demo"):
+        try:
+            bybit_payload = json.loads((await fetch_bybit_balance(account=account)).body)
+            items.append(
+                {
+                    "account": f"bybit-{account}",
+                    "label": f"Bybit {account.title()}",
+                    "currency": bybit_payload.get("coin") or "USDT",
+                    "balance": _to_float(bybit_payload.get("balance")),
+                    "nav": None,
+                }
+            )
+        except Exception:
+            continue
+    for account in ("live", "demo"):
+        try:
+            items.append(await _fetch_oanda_account_summary(account))
+        except Exception:
+            continue
+    return JSONResponse({"items": items})
+
+
+@app.post("/api/trading-journal/sync")
+async def trading_journal_sync() -> JSONResponse:
+    inserted = 0
+    categories = ["linear", "spot", "option", "inverse"]
+    lookback_ms = int((time.time() - 86400) * 1000)
+    for account in ("live", "demo"):
+        try:
+            _mode, api_key, api_secret, base_url, _ = resolve_bybit_credentials_for(account)
+            if not api_key or not api_secret:
+                continue
+            for category in categories:
+                executions = await _fetch_bybit_executions(
+                    base_url=base_url,
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    category=category,
+                    start_time=lookback_ms,
+                )
+                for execution in executions:
+                    inserted += _upsert_trading_journal_rows(
+                        _journal_rows_from_bybit_execution(
+                            {**execution, "account": account, "category": category}
+                        )
+                    )
+        except Exception:
+            continue
+    for account in ("live", "demo"):
+        try:
+            cfg = _get_oanda_config(account)
+        except ValueError:
+            continue
+        state = _load_trading_journal_state()
+        since_id = str(state.get(f"oanda_{account}_since_id") or "").strip() or None
+        try:
+            transactions = await _fetch_oanda_transactions(cfg=cfg, since_id=since_id)
+        except Exception:
+            continue
+        max_seen = since_id
+        for tx in transactions:
+            tx_id = str(tx.get("id") or "")
+            if tx_id:
+                max_seen = tx_id
+            if "ORDER_FILL" not in str(tx.get("type") or ""):
+                continue
+            inserted += _upsert_trading_journal_rows(
+                _journal_rows_from_oanda_order_fill({**tx, "account": account})
+            )
+        if max_seen:
+            state[f"oanda_{account}_since_id"] = max_seen
+            _save_trading_journal_state(state)
+    return JSONResponse({"status": "ok", "updated": inserted})
 
 
 @app.get("/api/open-orders")
