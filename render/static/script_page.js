@@ -287,6 +287,11 @@
         targetPriceInput.min = '0';
         targetPriceInput.step = '0.0001';
 
+        const messageInput = document.createElement('input');
+        messageInput.type = 'text';
+        messageInput.placeholder = 'Optional Telegram note (fixed price alerts only)';
+        messageInput.maxLength = 500;
+
         const moveDirectionSelect = document.createElement('select');
         ['up', 'down', 'either'].forEach((direction) => {
             const option = document.createElement('option');
@@ -338,6 +343,7 @@
         const kindLabel = makeLabel('Alert type', kindSelect);
         const priceDirectionLabel = makeLabel('Price direction', priceDirectionSelect);
         const targetPriceLabel = makeLabel('Target price', targetPriceInput);
+        const messageLabel = makeLabel('Telegram message', messageInput);
         const moveDirectionLabel = makeLabel('Move direction', moveDirectionSelect);
         const thresholdLabel = makeLabel('Move threshold', thresholdInput);
         const unitLabel = makeLabel('Move unit', unitSelect);
@@ -345,7 +351,7 @@
         const cooldownLabel = makeLabel('Cooldown (seconds)', cooldownInput);
         const enabledLabel = makeLabel('Enabled', enabledInput);
 
-        const priceFields = [priceDirectionLabel, targetPriceLabel];
+        const priceFields = [priceDirectionLabel, targetPriceLabel, messageLabel];
         const moveFields = [moveDirectionLabel, thresholdLabel, unitLabel, windowLabel];
 
         const updateKindVisibility = () => {
@@ -365,6 +371,7 @@
             kindLabel,
             priceDirectionLabel,
             targetPriceLabel,
+            messageLabel,
             moveDirectionLabel,
             thresholdLabel,
             unitLabel,
@@ -399,6 +406,7 @@
             kindSelect.value = 'price';
             priceDirectionSelect.value = 'above';
             targetPriceInput.value = '';
+            messageInput.value = '';
             moveDirectionSelect.value = 'either';
             thresholdInput.value = '';
             unitSelect.value = unitOptions[0].value;
@@ -435,6 +443,9 @@
                 detail.className = 'meta';
                 if (alert.kind === 'price') {
                     detail.textContent = `Price ${alert.direction} ${alert.target_price}`;
+                    if (alert.message) {
+                        detail.textContent += ` · Note: ${alert.message}`;
+                    }
                 } else {
                     detail.textContent = `Move ${alert.direction} ${alert.threshold} ${alert.unit} in ${formatWindow(alert.window_seconds)}`;
                 }
@@ -482,11 +493,13 @@
                     if (alert.kind === 'price') {
                         priceDirectionSelect.value = alert.direction || 'above';
                         targetPriceInput.value = alert.target_price ?? '';
+                        messageInput.value = alert.message || '';
                     } else {
                         moveDirectionSelect.value = alert.direction || 'either';
                         thresholdInput.value = alert.threshold ?? '';
                         unitSelect.value = alert.unit || unitOptions[0].value;
                         windowSelect.value = String(alert.window_seconds ?? 60);
+                        messageInput.value = '';
                     }
                     cooldownInput.value = alert.cooldown_seconds ?? '';
                     enabledInput.checked = Boolean(alert.enabled);
@@ -580,6 +593,10 @@
                     }
                     payload.direction = priceDirectionSelect.value;
                     payload.target_price = target;
+                    const customMessage = messageInput.value.trim();
+                    if (customMessage) {
+                        payload.message = customMessage;
+                    }
                 } else {
                     const threshold = parseRequiredNumber(thresholdInput, 'Move threshold');
                     if (threshold <= 0) {
