@@ -7174,3 +7174,15 @@ async def trading_journal_balances() -> JSONResponse:
 
     items = sorted(by_acc.values(), key=lambda x: str(x.get("label") or ""))
     return JSONResponse({"items": items})
+
+
+@app.post("/api/trading-journal/sync")
+async def trading_journal_sync() -> JSONResponse:
+    try:
+        result = _import_trading_journal_from_dropbox_excel()
+        return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse(
+            {"ok": False, "detail": str(exc)},
+            status_code=500,
+        )
