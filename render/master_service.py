@@ -1135,6 +1135,26 @@ def _join_dropbox_path(folder: str, name: str) -> str:
     return f"{root}/{name.lstrip('/')}"
 
 
+def _cashflow_template_bytes() -> bytes:
+    buffer = io.BytesIO()
+    cols = ["account", "date", "amount", "new_balance", "currency", "reason"]
+    template = pd.DataFrame(columns=cols)
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        template.to_excel(writer, sheet_name="Cashflows", index=False)
+    return buffer.getvalue()
+
+
+def _ensure_cashflow_template(active_folder: str) -> bool:
+    cashflow_path = _join_dropbox_path(active_folder, "account_cashflows.xlsx")
+    try:
+        download_bytes(cashflow_path)
+        return False
+    except Exception:
+        pass
+    upload_bytes(cashflow_path, _cashflow_template_bytes())
+    return True
+
+
 def _load_cashflows_from_dropbox(active_folder: str) -> Dict[str, List[Dict[str, object]]]:
     out: Dict[str, List[Dict[str, object]]] = defaultdict(list)
     cashflow_path = _join_dropbox_path(active_folder, "account_cashflows.xlsx")
@@ -1215,6 +1235,11 @@ def _latest_balances_from_cashflows(active_folder: str) -> List[Dict[str, object
 def _import_trading_journal_from_dropbox_excel() -> Dict[str, object]:
     active_folder, entries = _resolve_trading_journal_dropbox_folder()
     configured = TRADING_JOURNAL_DROPBOX_FOLDER.strip()
+    cashflow_template_created = False
+    try:
+        cashflow_template_created = _ensure_cashflow_template(active_folder)
+    except Exception:
+        cashflow_template_created = False
 
     workbook_count = 0
     rows: List[Dict[str, object]] = []
@@ -1252,6 +1277,7 @@ def _import_trading_journal_from_dropbox_excel() -> Dict[str, object]:
             "excel_account_balances": balances,
             "source_folder": active_folder,
             "configured_folder": configured,
+            "cashflow_template_created": cashflow_template_created,
             "workbooks_seen": workbook_count,
             "errors": errors,
         },
@@ -1261,6 +1287,7 @@ def _import_trading_journal_from_dropbox_excel() -> Dict[str, object]:
         "ok": True,
         "source_folder": active_folder,
         "configured_folder": configured,
+        "cashflow_template_created": cashflow_template_created,
         "workbooks_seen": workbook_count,
         "rows_imported": len(final_rows),
         "balances_found": len(balances),

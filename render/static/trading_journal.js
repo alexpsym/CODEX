@@ -39,30 +39,42 @@
   }
 
   function applyFlagFilters(rows) {
+    const hasAnyKey = (record, keys) => {
+      const metrics = record?.metrics || {};
+      const pools = [record || {}, metrics];
+      return pools.some((pool) => keys.some((key) => {
+        const v = pool[key] ?? pool[key.toUpperCase()] ?? pool[key.toLowerCase()];
+        return normYes(v) || (!!v && !['false', '0', 'no', 'n'].includes(String(v).trim().toLowerCase()));
+      }));
+    };
+
     let out = [...rows];
     if (activeFlags.has('errors')) {
-      out = out.filter((r) => {
-        const m = r.metrics || {};
-        return !!(m.errors || m.error || m.ERROR || r.errors || r.error);
-      });
+      out = out.filter((r) => hasAnyKey(r, ['errors', 'error']));
     }
     if (activeFlags.has('breakeven')) {
       out = out.filter((r) => normYes(r.breakeven));
     }
     if (activeFlags.has('held_news')) {
-      out = out.filter((r) => normYes(r.metrics?.held_through_news));
+      out = out.filter((r) => hasAnyKey(r, ['held_through_news', 'held_news']));
     }
     if (activeFlags.has('spiked_out')) {
-      out = out.filter((r) => normYes(r.metrics?.spiked_out));
+      out = out.filter((r) => hasAnyKey(r, ['spiked_out', 'spike_out']));
     }
     if (activeFlags.has('early_close')) {
-      out = out.filter((r) => normYes(r.metrics?.early_close));
+      out = out.filter((r) => hasAnyKey(r, ['early_close', 'closed_early']));
     }
     return out;
   }
 
   function qtyPrecision(row) {
-    if (row?.qty_unit === 'lots') return 6;
+    if (row?.qty_unit === 'lots') {
+      const qty = Math.abs(Number(row?.qty));
+      if (!Number.isFinite(qty)) return 4;
+      if (qty >= 1) return 2;
+      if (qty >= 0.1) return 3;
+      return 6;
+    }
     const qty = Number(row?.qty);
     if (!Number.isFinite(qty)) return 6;
     if (Math.abs(qty) > 0 && Math.abs(qty) < 0.01) return 12;
