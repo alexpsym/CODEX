@@ -7,6 +7,7 @@
   const filterInput = q('#tj-filter');
 
   let activeFlags = new Set();
+  let autoRefreshTimer = null;
 
   function normYes(v) {
     return ['yes', 'y', 'true', '1'].includes(String(v ?? '').trim().toLowerCase());
@@ -14,13 +15,27 @@
   let state = {
     rows: [],
     sortKey: 'close_time',
-    sortDir: 'desc',
+    sortDir: localStorage.getItem('tj.sortDir') || 'desc',
     stats: null,
+    view: localStorage.getItem('tj.view') || 'trades',
   };
+  try { filterInput.value = localStorage.getItem('tj.filter') || ''; } catch {}
 
   const fmtNum = (v, d = 2) => {
     const n = Number(v);
-    return Number.isFinite(n) ? n.toLocaleString(undefined, { maximumFractionDigits: d }) : '—';
+    if (!Number.isFinite(n)) return '—';
+    if (Math.abs(n) > 0 && Math.abs(n) < Math.pow(10, -Math.max(2, d)) && Math.abs(n) < 1e-4) {
+      return n.toPrecision(8);
+    }
+    return n.toLocaleString(undefined, { maximumFractionDigits: d });
+  };
+  const fmtQty = (v, row) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return '—';
+    const d = qtyPrecision(row);
+    let out = n.toLocaleString(undefined, { maximumFractionDigits: d });
+    if (Number(out.replace(/,/g, '')) === 0 && n !== 0) out = n.toPrecision(Math.min(12, Math.max(4, d)));
+    return out;
   };
 
   const fmtTime = (v) => {
@@ -77,10 +92,101 @@
     }
     const qty = Number(row?.qty);
     if (!Number.isFinite(qty)) return 6;
-    if (Math.abs(qty) > 0 && Math.abs(qty) < 0.01) return 12;
+    if (Math.abs(qty) > 0 && Math.abs(qty) < 1e-8) return 18;
+    if (Math.abs(qty) < 0.01) return 12;
     return 8;
   }
 
+
+  function persistUiState() {
+    try {
+      localStorage.setItem('tj.filter', filterInput.value || '');
+      localStorage.setItem('tj.sortKey', state.sortKey || '');
+      localStorage.setItem('tj.sortDir', state.sortDir || 'desc');
+      localStorage.setItem('tj.flags', JSON.stringify(Array.from(activeFlags)));
+      localStorage.setItem('tj.view', state.view || 'trades');
+    } catch {}
+  }
+
+  try {
+    state.sortKey = localStorage.getItem('tj.sortKey') || state.sortKey;
+    const savedFlags = JSON.parse(localStorage.getItem('tj.flags') || '[]');
+    if (Array.isArray(savedFlags)) savedFlags.forEach((f) => activeFlags.add(String(f)));
+  } catch {}
+
+  function fmtProfitPct(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return '—';
+    return `${fmtNum(n, 4)}%`;
+  }
+
+  function fmtR(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return '—';
+    return `${fmtNum(n, 3)}R`;
+  }
+
+  function distanceLabel(item, kind) {
+    const isFx = (item?.asset_class || '').toLowerCase() === 'fx';
+    const val = isFx ? (kind === 'sl' ? item.avg_sl_distance_pips : item.avg_tp_distance_pips)
+                     : (kind === 'sl' ? item.avg_sl_distance_quote : item.avg_tp_distance_quote);
+    const suffix = isFx ? ' pips' : ` ${item.quote_currency || 'quote'}`;
+    return Number.isFinite(Number(val)) ? `${fmtNum(val, isFx ? 1 : 6)}${suffix}` : '—';
+  }
+
+  function renderInstrumentView(stats) {
+    const body = q('#tj-inst-table tbody');
+    const emptyInst = q('#tj-inst-empty');
+    if (!body) return;
+    body.innerHTML = '';
+    const list = Array.isArray(stats?.by_instrument) ? stats.by_instrument : [];
+    if (!list.length) {
+      if (emptyInst) emptyInst.style.display = 'block';
+      return;
+    }
+    if (emptyInst) emptyInst.style.display = 'none';
+    list.forEach((item) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${item.symbol || '—'}</td>
+        <td>${item.asset_class || '—'}</td>
+        <td style="text-align:right">${fmtNum(item.total_trades,0)}</td>
+        <td style="text-align:right">${fmtNum(item.wins,0)}</td>
+        <td style="text-align:right">${fmtNum(item.losses,0)}</td>
+        <td style="text-align:right">${fmtNum(item.break_even,0)}</td>
+        <td style="text-align:right">${distanceLabel(item,'sl')}</td>
+        <td style="text-align:right">${distanceLabel(item,'tp')}</td>`;
+      body.appendChild(tr);
+    });
+  }
+
+  function syncTopScrollbar() {
+    const top = q('#tj-top-scroll');
+    const topInner = q('#tj-top-scroll > div');
+    const wrap = q('#tj-trades-wrap');
+    const table = q('#tj-table');
+    if (!top || !topInner || !wrap || !table) return;
+    topInner.style.width = `${table.scrollWidth}px`;
+    let guard = false;
+    top.onscroll = () => { if (guard) return; guard = true; wrap.scrollLeft = top.scrollLeft; guard = false; };
+    wrap.onscroll = () => { if (guard) return; guard = true; top.scrollLeft = wrap.scrollLeft; guard = false; };
+  }
+
+  function applyView() {
+    const tradesWrap = q('#tj-trades-wrap');
+    const instWrap = q('#tj-inst-view');
+    const topScroll = q('#tj-top-scroll');
+    const tradesBtn = q('#tj-view-trades-btn');
+    const instBtn = q('#tj-view-inst-btn');
+    const showInst = state.view === 'instrument';
+    tradesWrap?.classList.toggle('hidden', showInst);
+    topScroll?.classList.toggle('hidden', showInst);
+    instWrap?.classList.toggle('hidden', !showInst);
+    [tradesBtn, instBtn].forEach((b) => { if (b) { b.style.outline='none'; b.style.opacity='0.8'; }});
+    if (showInst) { if (instBtn) { instBtn.style.outline='1px solid #60a5fa'; instBtn.style.opacity='1'; } }
+    else { if (tradesBtn) { tradesBtn.style.outline='1px solid #60a5fa'; tradesBtn.style.opacity='1'; } }
+    persistUiState();
+  }
 
   function sortRows(rows) {
     const out = [...rows];
@@ -133,16 +239,17 @@
         <td title="${r.symbol_raw || r.symbol || ''}">${r.symbol || '—'}</td>
         <td>${r.side || '—'}</td>
         <td>${r.setup || '—'}</td>
-        <td>${fmtNum(r.qty, qtyPrecision(r))}${r.qty_unit === 'lots' ? ' lot' : ''}</td>
+        <td>${fmtQty(r.qty, r)}${r.qty_unit === 'lots' ? ' lot' : ''}</td>
         <td>${fmtNum(r.entry_price, 6)}</td>
         <td>${fmtNum(r.exit_price, 6)}</td>
         <td>${fmtNum(r.stop_loss, 6)}</td>
         <td>${fmtNum(r.take_profit, 6)}</td>
         <td>${fmtNum(r.commission ?? r.fees, 4)} ${r.commission_currency || r.fee_currency || ''}</td>
         <td class="num ${Number.isFinite(pnl) ? (pnl > 0 ? 'pos' : (pnl < 0 ? 'neg' : '')) : ''}">${fmtNum(pnl, 4)} ${r.realized_pnl_currency || r.currency || ''}</td>
+        <td class="num ${Number(r.profit_pct) > 0 ? 'pos' : (Number(r.profit_pct) < 0 ? 'neg' : '')}">${fmtProfitPct(r.profit_pct)}</td>
+        <td class="num ${Number(r.r_multiple) > 0 ? 'pos' : (Number(r.r_multiple) < 0 ? 'neg' : '')}">${fmtR(r.r_multiple)}</td>
         <td>${Number.isFinite(bal) ? `${fmtNum(bal, 2)} ${ccy}` : '—'}</td>
         <td>${r.breakeven || '—'}</td>
-        <td>${r.status || '—'}</td>
       `;
       tbody.appendChild(tr);
     }
@@ -174,8 +281,13 @@
       ['Wins', stats?.totals?.wins],
       ['Losses', stats?.totals?.losses],
       ['Break even', stats?.totals?.break_even],
+      ['Unique instruments', stats?.totals?.unique_instruments],
+      ['Crypto instruments', stats?.totals?.crypto_instruments],
+      ['Forex instruments', stats?.totals?.fx_instruments],
       ['Avg stop loss', stats?.totals?.avg_stop_loss],
       ['Avg target', stats?.totals?.avg_take_profit],
+      ['Avg profit %', stats?.totals?.avg_profit_pct],
+      ['Avg R', stats?.totals?.avg_r_multiple],
       ['Most wins instrument', stats?.instrument_with_most_wins?.symbol || '—'],
       ['Most losses instrument', stats?.instrument_with_most_losses?.symbol || '—'],
     ];
@@ -186,42 +298,16 @@
       wrap.appendChild(div);
     });
 
-    const byInst = Array.isArray(stats?.by_instrument) ? stats.by_instrument : [];
-    if (!byInst.length) return;
-
-    const tableCard = document.createElement('div');
-    tableCard.className = 'bal-card';
-    const rowsHtml = byInst
-      .map((item) => `
-        <tr>
-          <td>${item.symbol || '—'}</td>
-          <td style="text-align:right">${fmtNum(item.total_trades, 0)}</td>
-          <td style="text-align:right">${fmtNum(item.avg_stop_loss, 6)}</td>
-          <td style="text-align:right">${fmtNum(item.avg_take_profit, 6)}</td>
-        </tr>
-      `)
-      .join('');
-    tableCard.innerHTML = `
-      <div class="muted" style="margin-bottom:6px">Per-instrument averages</div>
-      <table style="width:100%;border-collapse:collapse;font-size:0.9rem">
-        <thead>
-          <tr>
-            <th style="text-align:left">Symbol</th>
-            <th style="text-align:right">Trades</th>
-            <th style="text-align:right">Avg stop loss</th>
-            <th style="text-align:right">Avg target</th>
-          </tr>
-        </thead>
-        <tbody>${rowsHtml}</tbody>
-      </table>
-    `;
-    wrap.appendChild(tableCard);
   }
 
   function renderAll() {
     const filtered = applyFlagFilters(state.rows);
     renderRows(filtered);
     renderSortIndicators();
+    renderInstrumentView(state.stats);
+    applyView();
+    syncTopScrollbar();
+    persistUiState();
   }
 
   function toggle(flag) {
@@ -232,6 +318,7 @@
       btn.style.opacity = on ? '1' : '0.7';
       btn.style.outline = on ? '1px solid #60a5fa' : 'none';
     });
+    persistUiState();
     renderAll();
   }
 
@@ -250,6 +337,7 @@
       state.rows = Array.isArray(journal.items) ? journal.items : [];
       state.stats = journal.stats || null;
 
+      persistUiState();
       renderAll();
       renderBalances(Array.isArray(balances.items) ? balances.items : []);
       renderStats(state.stats);
@@ -260,8 +348,10 @@
     }
   }
 
-  q('#tj-filter-btn')?.addEventListener('click', load);
-  q('#tj-clear-btn')?.addEventListener('click', () => { filterInput.value = ''; load(); });
+  q('#tj-filter-btn')?.addEventListener('click', () => { persistUiState(); load(); });
+  q('#tj-view-trades-btn')?.addEventListener('click', () => { state.view = 'trades'; applyView(); });
+  q('#tj-view-inst-btn')?.addEventListener('click', () => { state.view = 'instrument'; applyView(); });
+  q('#tj-clear-btn')?.addEventListener('click', () => { filterInput.value = ''; persistUiState(); load(); });
   q('#tj-sync-btn')?.addEventListener('click', async () => {
     try {
       setStatus('Syncing…');
@@ -278,6 +368,7 @@
       if (!key) return;
       if (state.sortKey === key) state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
       else { state.sortKey = key; state.sortDir = 'asc'; }
+      persistUiState();
       renderAll();
     });
   });
@@ -291,8 +382,11 @@
     btn.classList.toggle('active', activeFlags.has(flag));
   });
 
+  filterInput?.addEventListener('input', persistUiState);
   filterInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') load(); });
 
+  qa('.tj-chip[data-flag]').forEach((btn) => { const on = activeFlags.has(btn.dataset.flag || ''); btn.classList.toggle('active', on); btn.style.opacity = on ? '1' : '0.7'; btn.style.outline = on ? '1px solid #60a5fa' : 'none'; });
+  applyView();
   load();
-  setInterval(load, 15000);
+  autoRefreshTimer = setInterval(load, 15000);
 })();
