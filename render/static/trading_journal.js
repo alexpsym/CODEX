@@ -39,26 +39,46 @@
   }
 
   function applyFlagFilters(rows) {
+    const hasAnyKey = (record, keys) => {
+      const metrics = record?.metrics || {};
+      const pools = [record || {}, metrics];
+      return pools.some((pool) => keys.some((key) => {
+        const v = pool[key] ?? pool[key.toUpperCase()] ?? pool[key.toLowerCase()];
+        return normYes(v) || (!!v && !['false', '0', 'no', 'n'].includes(String(v).trim().toLowerCase()));
+      }));
+    };
+
     let out = [...rows];
     if (activeFlags.has('errors')) {
-      out = out.filter((r) => {
-        const m = r.metrics || {};
-        return !!(m.error || m.ERROR || r.error);
-      });
+      out = out.filter((r) => hasAnyKey(r, ['errors', 'error']));
     }
     if (activeFlags.has('breakeven')) {
       out = out.filter((r) => normYes(r.breakeven));
     }
     if (activeFlags.has('held_news')) {
-      out = out.filter((r) => normYes(r.metrics?.held_through_news));
+      out = out.filter((r) => hasAnyKey(r, ['held_through_news', 'held_news']));
     }
     if (activeFlags.has('spiked_out')) {
-      out = out.filter((r) => normYes(r.metrics?.spiked_out));
+      out = out.filter((r) => hasAnyKey(r, ['spiked_out', 'spike_out']));
     }
     if (activeFlags.has('early_close')) {
-      out = out.filter((r) => normYes(r.metrics?.early_close));
+      out = out.filter((r) => hasAnyKey(r, ['early_close', 'closed_early']));
     }
     return out;
+  }
+
+  function qtyPrecision(row) {
+    if (row?.qty_unit === 'lots') {
+      const qty = Math.abs(Number(row?.qty));
+      if (!Number.isFinite(qty)) return 4;
+      if (qty >= 1) return 2;
+      if (qty >= 0.1) return 3;
+      return 6;
+    }
+    const qty = Number(row?.qty);
+    if (!Number.isFinite(qty)) return 6;
+    if (Math.abs(qty) > 0 && Math.abs(qty) < 0.01) return 12;
+    return 8;
   }
 
 
@@ -113,7 +133,7 @@
         <td title="${r.symbol_raw || r.symbol || ''}">${r.symbol || '—'}</td>
         <td>${r.side || '—'}</td>
         <td>${r.setup || '—'}</td>
-        <td>${fmtNum(r.qty, r.qty_unit === 'lots' ? 6 : 6)}${r.qty_unit === 'lots' ? ' lot' : ''}</td>
+        <td>${fmtNum(r.qty, qtyPrecision(r))}${r.qty_unit === 'lots' ? ' lot' : ''}</td>
         <td>${fmtNum(r.entry_price, 6)}</td>
         <td>${fmtNum(r.exit_price, 6)}</td>
         <td>${fmtNum(r.stop_loss, 6)}</td>
@@ -165,6 +185,37 @@
       div.innerHTML = `<div class="muted">${label}</div><div style="font-size:1.05rem;font-weight:600">${typeof value === 'number' ? fmtNum(value, 6) : (value ?? '—')}</div>`;
       wrap.appendChild(div);
     });
+
+    const byInst = Array.isArray(stats?.by_instrument) ? stats.by_instrument : [];
+    if (!byInst.length) return;
+
+    const tableCard = document.createElement('div');
+    tableCard.className = 'bal-card';
+    const rowsHtml = byInst
+      .map((item) => `
+        <tr>
+          <td>${item.symbol || '—'}</td>
+          <td style="text-align:right">${fmtNum(item.total_trades, 0)}</td>
+          <td style="text-align:right">${fmtNum(item.avg_stop_loss, 6)}</td>
+          <td style="text-align:right">${fmtNum(item.avg_take_profit, 6)}</td>
+        </tr>
+      `)
+      .join('');
+    tableCard.innerHTML = `
+      <div class="muted" style="margin-bottom:6px">Per-instrument averages</div>
+      <table style="width:100%;border-collapse:collapse;font-size:0.9rem">
+        <thead>
+          <tr>
+            <th style="text-align:left">Symbol</th>
+            <th style="text-align:right">Trades</th>
+            <th style="text-align:right">Avg stop loss</th>
+            <th style="text-align:right">Avg target</th>
+          </tr>
+        </thead>
+        <tbody>${rowsHtml}</tbody>
+      </table>
+    `;
+    wrap.appendChild(tableCard);
   }
 
   function renderAll() {

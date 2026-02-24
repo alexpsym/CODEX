@@ -769,7 +769,33 @@ def _safe_float_from_row(row: pd.Series, col: Optional[str]) -> Optional[float]:
     try:
         return float(value)
     except Exception:
+        pass
+    text = str(value or "").strip()
+    if not text:
         return None
+    negative = text.startswith("(") and text.endswith(")")
+    if negative:
+        text = text[1:-1].strip()
+    text = re.sub(r"[^0-9+\-eE.]", "", text)
+    if not text:
+        return None
+    try:
+        num = float(text)
+        return -num if negative else num
+    except Exception:
+        return None
+
+
+def _norm_account_key(name: object) -> str:
+    text = str(name or "").upper().strip()
+    if not text:
+        return ""
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"[^A-Z0-9 ]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"(?:\s+|^)#\s*\d+$", "", text).strip()
+    text = re.sub(r"\s+DEMO\s*\d+$", " DEMO", text).strip()
+    return text
 
 
 def _safe_str_from_row(row: pd.Series, col: Optional[str]) -> str:
@@ -1109,6 +1135,26 @@ def _join_dropbox_path(folder: str, name: str) -> str:
     return f"{root}/{name.lstrip('/')}"
 
 
+def _cashflow_template_bytes() -> bytes:
+    buffer = io.BytesIO()
+    cols = ["account", "date", "amount", "new_balance", "currency", "reason"]
+    template = pd.DataFrame(columns=cols)
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        template.to_excel(writer, sheet_name="Cashflows", index=False)
+    return buffer.getvalue()
+
+
+def _ensure_cashflow_template(active_folder: str) -> bool:
+    cashflow_path = _join_dropbox_path(active_folder, "account_cashflows.xlsx")
+    try:
+        download_bytes(cashflow_path)
+        return False
+    except Exception:
+        pass
+    upload_bytes(cashflow_path, _cashflow_template_bytes())
+    return True
+
+
 def _load_cashflows_from_dropbox(active_folder: str) -> Dict[str, List[Dict[str, object]]]:
     out: Dict[str, List[Dict[str, object]]] = defaultdict(list)
     cashflow_path = _join_dropbox_path(active_folder, "account_cashflows.xlsx")
@@ -1135,7 +1181,8 @@ def _load_cashflows_from_dropbox(active_folder: str) -> Dict[str, List[Dict[str,
 
     for _, row in df.iterrows():
         account = _safe_str_from_row(row, acct_col)
-        if not account:
+        account_key = _norm_account_key(account)
+        if not account_key:
             continue
         raw_date = row.get(date_col)
         try:
@@ -1147,8 +1194,9 @@ def _load_cashflows_from_dropbox(active_folder: str) -> Dict[str, List[Dict[str,
             dt_iso = pd.to_datetime(raw_date).isoformat()
         except Exception:
             dt_iso = str(raw_date)
-        out[account].append(
+        out[account_key].append(
             {
+                "account": account,
                 "date": dt_iso,
                 "amount": _safe_float_from_row(row, amount_col),
                 "new_balance": _safe_float_from_row(row, bal_col),
@@ -1157,25 +1205,26 @@ def _load_cashflows_from_dropbox(active_folder: str) -> Dict[str, List[Dict[str,
             }
         )
 
-    for account in list(out.keys()):
-        out[account] = sorted(out[account], key=lambda x: str(x.get("date") or ""))
+    for account_key in list(out.keys()):
+        out[account_key] = sorted(out[account_key], key=lambda x: str(x.get("date") or ""))
     return out
 
 
 def _latest_balances_from_cashflows(active_folder: str) -> List[Dict[str, object]]:
     ledger = _load_cashflows_from_dropbox(active_folder)
     items: List[Dict[str, object]] = []
-    for account, events in ledger.items():
+    for account_key, events in ledger.items():
         if not events:
             continue
         latest = events[-1]
+        label = str(latest.get("account") or account_key)
         items.append(
             {
-                "account": account,
-                "label": account,
+                "account": label,
+                "label": label,
                 "balance": _to_float(latest.get("new_balance")),
                 "nav": None,
-                "currency": str(latest.get("currency") or _infer_account_currency(account)),
+                "currency": str(latest.get("currency") or _infer_account_currency(label)),
                 "source": "cashflow_ledger",
                 "as_of": latest.get("date"),
             }
@@ -1186,6 +1235,11 @@ def _latest_balances_from_cashflows(active_folder: str) -> List[Dict[str, object
 def _import_trading_journal_from_dropbox_excel() -> Dict[str, object]:
     active_folder, entries = _resolve_trading_journal_dropbox_folder()
     configured = TRADING_JOURNAL_DROPBOX_FOLDER.strip()
+    cashflow_template_created = False
+    try:
+        cashflow_template_created = _ensure_cashflow_template(active_folder)
+    except Exception:
+        cashflow_template_created = False
 
     workbook_count = 0
     rows: List[Dict[str, object]] = []
@@ -1223,6 +1277,7 @@ def _import_trading_journal_from_dropbox_excel() -> Dict[str, object]:
             "excel_account_balances": balances,
             "source_folder": active_folder,
             "configured_folder": configured,
+            "cashflow_template_created": cashflow_template_created,
             "workbooks_seen": workbook_count,
             "errors": errors,
         },
@@ -1232,6 +1287,7 @@ def _import_trading_journal_from_dropbox_excel() -> Dict[str, object]:
         "ok": True,
         "source_folder": active_folder,
         "configured_folder": configured,
+        "cashflow_template_created": cashflow_template_created,
         "workbooks_seen": workbook_count,
         "rows_imported": len(final_rows),
         "balances_found": len(balances),
@@ -5869,7 +5925,9 @@ def _calc_balance_after_trade(
     by_account: Dict[str, List[int]] = defaultdict(list)
     for idx, row in enumerate(out_rows):
         account = str(row.get("account_label") or row.get("account") or "")
-        by_account[account].append(idx)
+        account_key = _norm_account_key(account)
+        if account_key:
+            by_account[account_key].append(idx)
 
     def _to_ts(value: object) -> float:
         if value in (None, ""):
@@ -5879,8 +5937,8 @@ def _calc_balance_after_trade(
         except Exception:
             return float("-inf")
 
-    for account, indices in by_account.items():
-        events = cashflows.get(account) or cashflows.get(account.upper()) or []
+    for account_key, indices in by_account.items():
+        events = cashflows.get(account_key) or []
         if not events:
             continue
         events_sorted = sorted(events, key=lambda e: _to_ts(e.get("date")))
@@ -7148,12 +7206,15 @@ async def trading_journal_balances() -> JSONResponse:
     cashflow_items = _latest_balances_from_cashflows(source_folder) if source_folder else []
     excel = _get_excel_account_balances()
 
-    by_acc = {
-        str((bal.get("account") or bal.get("label") or "")).upper(): dict(bal)
-        for bal in excel
-    }
+    by_acc: Dict[str, Dict[str, object]] = {}
+    for bal in excel:
+        label = str((bal.get("account") or bal.get("label") or "")).strip()
+        key = _norm_account_key(label)
+        if key:
+            by_acc[key] = dict(bal)
     for bal in cashflow_items:
-        key = str((bal.get("account") or bal.get("label") or "")).upper()
+        label = str((bal.get("account") or bal.get("label") or "")).strip()
+        key = _norm_account_key(label)
         if key:
             by_acc[key] = dict(bal)
 
@@ -7161,7 +7222,7 @@ async def trading_journal_balances() -> JSONResponse:
         account = str(row.get("account_label") or row.get("account") or "").strip()
         if not account:
             continue
-        key = account.upper()
+        key = _norm_account_key(account)
         if key not in by_acc:
             by_acc[key] = {
                 "account": account,
