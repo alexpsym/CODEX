@@ -44,6 +44,20 @@
     return Number.isNaN(d.getTime()) ? String(v) : d.toLocaleString('en-AU', { timeZone: 'Australia/Brisbane' });
   };
 
+  const fmtDuration = (seconds) => {
+    const n = Number(seconds);
+    if (!Number.isFinite(n) || n < 0) return '—';
+    const total = Math.round(n);
+    const d = Math.floor(total / 86400);
+    const h = Math.floor((total % 86400) / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const parts = [];
+    if (d) parts.push(`${d}d`);
+    if (h || d) parts.push(`${h}h`);
+    parts.push(`${m}m`);
+    return parts.join(' ');
+  };
+
   const setStatus = (msg) => { status.textContent = msg || ''; };
 
   async function fetchJson(url, options = {}) {
@@ -126,11 +140,22 @@
     return `${fmtNum(n, 3)}R`;
   }
 
-  function distanceLabel(item, kind) {
+  function distanceLabel(item, kind, variant = 'all') {
     const isFx = (item?.asset_class || '').toLowerCase() === 'fx';
-    const val = isFx ? (kind === 'sl' ? item.avg_sl_distance_pips : item.avg_tp_distance_pips)
-                     : (kind === 'sl' ? item.avg_sl_distance_quote : item.avg_tp_distance_quote);
-    const suffix = isFx ? ' pips' : ` ${item.quote_currency || 'quote'}`;
+    const suffix = isFx ? ' pips' : ` ${item.quote_currency || 'USDT'}`;
+
+    const keyMap = isFx
+      ? {
+          sl: { all: 'avg_sl_distance_pips', wins: 'avg_sl_distance_pips_wins', losses: 'avg_sl_distance_pips_losses' },
+          tp: { all: 'avg_tp_distance_pips', wins: 'avg_tp_distance_pips_wins', losses: 'avg_tp_distance_pips_losses' },
+        }
+      : {
+          sl: { all: 'avg_sl_distance_quote', wins: 'avg_sl_distance_quote_wins', losses: 'avg_sl_distance_quote_losses' },
+          tp: { all: 'avg_tp_distance_quote', wins: 'avg_tp_distance_quote_wins', losses: 'avg_tp_distance_quote_losses' },
+        };
+
+    const key = keyMap?.[kind]?.[variant];
+    const val = key ? item?.[key] : undefined;
     return Number.isFinite(Number(val)) ? `${fmtNum(val, isFx ? 1 : 6)}${suffix}` : '—';
   }
 
@@ -154,8 +179,11 @@
         <td style="text-align:right">${fmtNum(item.wins,0)}</td>
         <td style="text-align:right">${fmtNum(item.losses,0)}</td>
         <td style="text-align:right">${fmtNum(item.break_even,0)}</td>
-        <td style="text-align:right">${distanceLabel(item,'sl')}</td>
-        <td style="text-align:right">${distanceLabel(item,'tp')}</td>`;
+        <td style="text-align:right">${distanceLabel(item,'sl','wins')}</td>
+        <td style="text-align:right">${distanceLabel(item,'sl','losses')}</td>
+        <td style="text-align:right">${distanceLabel(item,'tp','wins')}</td>
+        <td style="text-align:right">${distanceLabel(item,'tp','losses')}</td>
+        <td style="text-align:right">${fmtDuration(item.avg_trade_duration_seconds)}</td>`;
       body.appendChild(tr);
     });
   }
@@ -229,10 +257,40 @@
     empty.style.display = 'none';
 
     for (const r of sorted) {
+      const rowType = String(r.row_type || 'trade').toLowerCase();
+      const isCashflow = rowType === 'cashflow';
       const pnl = Number(r.net_profit ?? r.realized_pnl);
-      const bal = Number(r.balance_after_trade);
+      const bal = Number(r.balance_after_trade ?? r.cashflow_new_balance);
       const ccy = r.balance_after_trade_currency || r.currency || '';
       const tr = document.createElement('tr');
+
+      if (isCashflow) {
+        const amt = Number(r.cashflow_amount);
+        const flowCls = Number.isFinite(amt) ? (amt > 0 ? 'pos' : (amt < 0 ? 'neg' : '')) : '';
+        const flowLabel = r.side || (amt > 0 ? 'DEPOSIT' : (amt < 0 ? 'WITHDRAWAL' : 'CASHFLOW'));
+        tr.innerHTML = `
+          <td>${fmtTime(r.close_time || r.open_time)}</td>
+          <td>${r.account_label || r.account || '—'}</td>
+          <td>${r.symbol || 'CASHFLOW'}</td>
+          <td>${flowLabel}</td>
+          <td title="${r.cashflow_reason || ''}">${r.cashflow_reason || r.setup || '—'}</td>
+          <td>—</td>
+          <td>—</td>
+          <td>—</td>
+          <td>—</td>
+          <td>—</td>
+          <td>—</td>
+          <td class="num ${flowCls}">${Number.isFinite(amt) ? `${fmtNum(amt, 2)} ${ccy}` : '—'}</td>
+          <td>—</td>
+          <td>—</td>
+          <td>${Number.isFinite(bal) ? `${fmtNum(bal, 2)} ${ccy}` : '—'}</td>
+          <td>—</td>
+          <td>—</td>
+        `;
+        tbody.appendChild(tr);
+        continue;
+      }
+
       tr.innerHTML = `
         <td>${fmtTime(r.close_time || r.open_time)}</td>
         <td>${r.account_label || r.account || '—'}</td>
@@ -249,6 +307,7 @@
         <td class="num ${Number(r.profit_pct) > 0 ? 'pos' : (Number(r.profit_pct) < 0 ? 'neg' : '')}">${fmtProfitPct(r.profit_pct)}</td>
         <td class="num ${Number(r.r_multiple) > 0 ? 'pos' : (Number(r.r_multiple) < 0 ? 'neg' : '')}">${fmtR(r.r_multiple)}</td>
         <td>${Number.isFinite(bal) ? `${fmtNum(bal, 2)} ${ccy}` : '—'}</td>
+        <td>${fmtDuration(r.trade_duration_seconds)}</td>
         <td>${r.breakeven || '—'}</td>
       `;
       tbody.appendChild(tr);
@@ -288,6 +347,8 @@
       ['Avg target', stats?.totals?.avg_take_profit],
       ['Avg profit %', stats?.totals?.avg_profit_pct],
       ['Avg R', stats?.totals?.avg_r_multiple],
+      ['Avg winner duration', fmtDuration(stats?.totals?.avg_winner_duration_seconds)],
+      ['Avg loser duration', fmtDuration(stats?.totals?.avg_loser_duration_seconds)],
       ['Most wins instrument', stats?.instrument_with_most_wins?.symbol || '—'],
       ['Most losses instrument', stats?.instrument_with_most_losses?.symbol || '—'],
     ];
@@ -374,7 +435,7 @@
   });
 
   document.addEventListener('click', (e) => {
-    const btn = e.target.closest('[data-flag]');
+    const btn = e.target?.closest ? e.target.closest('button[data-flag]') : null;
     if (!btn) return;
     const flag = btn.dataset.flag;
     if (!flag) return;
