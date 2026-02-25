@@ -1232,6 +1232,75 @@ def _latest_balances_from_cashflows(active_folder: str) -> List[Dict[str, object
     return sorted(items, key=lambda x: str(x.get("label") or ""))
 
 
+def _cashflow_rows_for_journal(active_folder: str) -> List[Dict[str, object]]:
+    ledger = _load_cashflows_from_dropbox(active_folder)
+    rows: List[Dict[str, object]] = []
+    for account_key, events in ledger.items():
+        for idx, ev in enumerate(events or []):
+            event_dt = str(ev.get("date") or "")
+            if not event_dt:
+                continue
+            account_label = str(ev.get("account") or account_key or "").strip()
+            amount = _to_float(ev.get("amount"))
+            new_balance = _to_float(ev.get("new_balance"))
+            currency = str(ev.get("currency") or _infer_account_currency(account_label))
+            reason = str(ev.get("reason") or "").strip()
+            if amount is None and new_balance is None:
+                continue
+            flow_type = "cashflow"
+            if amount is not None:
+                if amount > 0:
+                    flow_type = "deposit"
+                elif amount < 0:
+                    flow_type = "withdrawal"
+            rows.append(
+                {
+                    "id": f"cashflow:{account_key}:{event_dt}:{idx}",
+                    "row_type": "cashflow",
+                    "cashflow_type": flow_type,
+                    "cashflow_reason": reason,
+                    "cashflow_amount": amount,
+                    "cashflow_new_balance": new_balance,
+                    "source": "cashflow_ledger",
+                    "account": account_label,
+                    "account_label": account_label,
+                    "sheet": "Cashflows",
+                    "asset_class": "fx" if _is_fx_account_label(account_label) else "crypto",
+                    "currency": currency,
+                    "symbol": "CASHFLOW",
+                    "symbol_raw": "CASHFLOW",
+                    "side": flow_type.upper(),
+                    "setup": reason,
+                    "open_time": event_dt,
+                    "close_time": event_dt,
+                    "qty": None,
+                    "qty_raw": None,
+                    "qty_unit": "",
+                    "entry_price": None,
+                    "exit_price": None,
+                    "swap": None,
+                    "commission": None,
+                    "commission_currency": currency,
+                    "fees": None,
+                    "fee_currency": currency,
+                    "realized_pnl": None,
+                    "realized_pnl_currency": currency,
+                    "net_profit": None,
+                    "stop_loss": None,
+                    "take_profit": None,
+                    "highest_price": None,
+                    "lowest_price": None,
+                    "breakeven": "",
+                    "notes": reason,
+                    "status": "cashflow",
+                    "balance_after_trade": new_balance,
+                    "balance_after_trade_currency": currency,
+                    "updated_at": _utc_now_iso(),
+                }
+            )
+    return sorted(rows, key=_row_sort_dt, reverse=True)
+
+
 def _import_trading_journal_from_dropbox_excel() -> Dict[str, object]:
     active_folder, entries = _resolve_trading_journal_dropbox_folder()
     configured = TRADING_JOURNAL_DROPBOX_FOLDER.strip()
@@ -5803,10 +5872,10 @@ async def trading_journal_page() -> str:
     .balances { padding:12px; margin-bottom:12px; display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:10px; }
     .hidden { display:none !important; }
     .bal-card { background:#0f172a; border:1px solid #1f2937; border-radius:10px; padding:10px; }
-    .table-wrap { padding:8px; overflow:auto; }
+    .table-wrap { padding:8px; overflow:auto; max-height:70vh; position:relative; }
     table { width:100%; border-collapse:collapse; min-width:1200px; }
     th, td { padding:10px 8px; border-bottom:1px solid #1f2937; white-space:nowrap; }
-    th { color:#93c5fd; text-align:left; position:sticky; top:0; background:#111827; }
+    th { color:#93c5fd; text-align:left; position:sticky; top:0; background:#111827; z-index:5; }
     tr:hover td { background:#0f172a; }
     .muted { color:#94a3b8; }
     .pill { border:1px solid #334155; border-radius:999px; padding:2px 8px; font-size:12px; }
@@ -5857,6 +5926,7 @@ async def trading_journal_page() -> str:
             <th data-sort="profit_pct">Profit %</th>
             <th data-sort="r_multiple">R-Multiple</th>
             <th data-sort="balance_after_trade">Bal After Trade</th>
+            <th data-sort="trade_duration_seconds">Trade Duration</th>
             <th data-sort="breakeven">Breakeven</th>
           </tr>
         </thead>
@@ -5866,7 +5936,7 @@ async def trading_journal_page() -> str:
       </div>
       <div id="tj-inst-view" class="table-wrap hidden">
         <table id="tj-inst-table">
-          <thead><tr><th>Symbol</th><th>Class</th><th>Trades</th><th>Wins</th><th>Losses</th><th>Break-even</th><th>Avg stop distance</th><th>Avg target distance</th></tr></thead>
+          <thead><tr><th>Symbol</th><th>Class</th><th>Trades</th><th>Wins</th><th>Losses</th><th>Break-even</th><th>Avg stop dist (W)</th><th>Avg stop dist (L)</th><th>Avg target dist (W)</th><th>Avg target dist (L)</th><th>Avg duration</th></tr></thead>
           <tbody></tbody>
         </table>
         <div id="tj-inst-empty" class="muted" style="padding:12px; display:none;">No instrument data.</div>
@@ -5917,6 +5987,34 @@ def _row_sort_dt(row: Dict[str, object]) -> str:
     return str(row.get("close_time") or row.get("open_time") or "")
 
 
+def _row_type(row: Dict[str, object]) -> str:
+    return str(row.get("row_type") or "trade").strip().lower() or "trade"
+
+
+def _is_trade_row(row: Dict[str, object]) -> bool:
+    return _row_type(row) == "trade"
+
+
+def _trade_duration_seconds(row: Dict[str, object]) -> Optional[int]:
+    if not _is_trade_row(row):
+        return None
+    open_time = row.get("open_time")
+    close_time = row.get("close_time")
+    if not open_time or not close_time:
+        return None
+    try:
+        open_ts = pd.to_datetime(open_time)
+        close_ts = pd.to_datetime(close_time)
+        if pd.isna(open_ts) or pd.isna(close_ts):
+            return None
+        delta = (close_ts - open_ts).total_seconds()
+        if delta < 0:
+            return None
+        return int(round(delta))
+    except Exception:
+        return None
+
+
 def _is_win(row: Dict[str, object]) -> bool:
     pnl = _to_float(row.get("net_profit"))
     return pnl is not None and pnl > 0
@@ -5943,6 +6041,8 @@ def _calc_balance_after_trade(
     out_rows = [dict(row) for row in rows]
     by_account: Dict[str, List[int]] = defaultdict(list)
     for idx, row in enumerate(out_rows):
+        if not _is_trade_row(row):
+            continue
         account = str(row.get("account_label") or row.get("account") or "")
         account_key = _norm_account_key(account)
         if account_key:
@@ -5961,7 +6061,12 @@ def _calc_balance_after_trade(
         if not events:
             continue
         events_sorted = sorted(events, key=lambda e: _to_ts(e.get("date")))
-        trade_indices = sorted(indices, key=lambda i: _to_ts(out_rows[i].get("close_time") or out_rows[i].get("open_time")))
+        trade_indices = sorted(
+            indices,
+            key=lambda i: _to_ts(
+                out_rows[i].get("close_time") or out_rows[i].get("open_time")
+            ),
+        )
 
         segment_running: Dict[int, float] = {}
         for row_idx in trade_indices:
@@ -5986,9 +6091,13 @@ def _calc_balance_after_trade(
                 segment_running[anchor] += pnl
 
             row["balance_after_trade"] = segment_running[anchor]
-            row["balance_after_trade_currency"] = str(events_sorted[anchor].get("currency") or row.get("currency") or "")
+            row["balance_after_trade_currency"] = str(
+                events_sorted[anchor].get("currency") or row.get("currency") or ""
+            )
 
     return out_rows
+
+
 def _avg(values: List[float]) -> Optional[float]:
     return (sum(values) / len(values)) if values else None
 
@@ -6016,6 +6125,15 @@ def _enrich_trade_row_metrics(rows: List[Dict[str, object]]) -> List[Dict[str, o
     out: List[Dict[str, object]] = []
     for row in rows:
         r = dict(row)
+        r["row_type"] = _row_type(r)
+
+        if not _is_trade_row(r):
+            r.setdefault("profit_pct", None)
+            r.setdefault("r_multiple", None)
+            r["trade_duration_seconds"] = None
+            out.append(r)
+            continue
+
         entry = _to_float(r.get("entry_price"))
         sl = _to_float(r.get("stop_loss"))
         pnl = _to_float(r.get("net_profit"))
@@ -6043,6 +6161,7 @@ def _enrich_trade_row_metrics(rows: List[Dict[str, object]]) -> List[Dict[str, o
 
         r["profit_pct"] = profit_pct
         r["r_multiple"] = r_multiple
+        r["trade_duration_seconds"] = _trade_duration_seconds(r)
         out.append(r)
     return out
 
@@ -6050,6 +6169,8 @@ def _enrich_trade_row_metrics(rows: List[Dict[str, object]]) -> List[Dict[str, o
 def _compute_journal_stats(
     rows: List[Dict[str, object]], balances: List[Dict[str, object]]
 ) -> Dict[str, object]:
+    trade_rows = [dict(r) for r in rows if _is_trade_row(r)]
+
     balance_by_account: List[Dict[str, object]] = []
     for bal in balances:
         balance_by_account.append(
@@ -6065,8 +6186,10 @@ def _compute_journal_stats(
     most_wins: Dict[str, object] = {"symbol": None, "wins": -1}
     most_losses: Dict[str, object] = {"symbol": None, "losses": -1}
 
-    for row in rows:
+    for row in trade_rows:
         symbol = str(row.get("symbol") or "")
+        if not symbol:
+            continue
         if symbol not in by_instrument:
             by_instrument[symbol] = {
                 "symbol": symbol,
@@ -6078,15 +6201,23 @@ def _compute_journal_stats(
                 "take_profits": [],
                 "sl_distances": [],
                 "tp_distances": [],
+                "durations": [],
+                "quote_currency": "USDT",
             }
         bucket = by_instrument[symbol]
         bucket["total_trades"] += 1
-        if _is_win(row):
+        is_win = _is_win(row)
+        is_loss = _is_loss(row)
+        if is_win:
             bucket["wins"] += 1
-        elif _is_loss(row):
+        elif is_loss:
             bucket["losses"] += 1
         else:
             bucket["break_even"] += 1
+
+        dur = _to_float(row.get("trade_duration_seconds"))
+        if dur is not None and dur >= 0:
+            bucket["durations"].append(dur)
 
         sl = _to_float(row.get("stop_loss"))
         tp = _to_float(row.get("take_profit"))
@@ -6095,20 +6226,30 @@ def _compute_journal_stats(
             bucket["stop_losses"].append(sl)
         if tp is not None:
             bucket["take_profits"].append(tp)
+
+        def _append_metric(prefix: str, dist: float) -> None:
+            if str(row.get("asset_class") or "").lower() == "fx":
+                pip_val = dist / _pip_size_for_symbol(symbol)
+                bucket.setdefault(f"{prefix}_pips", []).append(pip_val)
+                if is_win:
+                    bucket.setdefault(f"{prefix}_pips_wins", []).append(pip_val)
+                elif is_loss:
+                    bucket.setdefault(f"{prefix}_pips_losses", []).append(pip_val)
+            else:
+                bucket.setdefault(f"{prefix}_quote", []).append(dist)
+                if is_win:
+                    bucket.setdefault(f"{prefix}_quote_wins", []).append(dist)
+                elif is_loss:
+                    bucket.setdefault(f"{prefix}_quote_losses", []).append(dist)
+
         if entry is not None and sl is not None:
             dist = abs(entry - sl)
             bucket["sl_distances"].append(dist)
-            if str(row.get("asset_class") or "").lower() == "fx":
-                bucket.setdefault("sl_distances_pips", []).append(dist / _pip_size_for_symbol(symbol))
-            else:
-                bucket.setdefault("sl_distances_quote", []).append(dist)
+            _append_metric("sl_distances", dist)
         if entry is not None and tp is not None:
             dist = abs(tp - entry)
             bucket["tp_distances"].append(dist)
-            if str(row.get("asset_class") or "").lower() == "fx":
-                bucket.setdefault("tp_distances_pips", []).append(dist / _pip_size_for_symbol(symbol))
-            else:
-                bucket.setdefault("tp_distances_quote", []).append(dist)
+            _append_metric("tp_distances", dist)
 
     out_by_instrument: List[Dict[str, object]] = []
     for _, bucket in by_instrument.items():
@@ -6117,40 +6258,77 @@ def _compute_journal_stats(
         item["avg_take_profit"] = _avg(item.pop("take_profits"))
         item["avg_sl_distance"] = _avg(item.pop("sl_distances"))
         item["avg_tp_distance"] = _avg(item.pop("tp_distances"))
+        item["avg_trade_duration_seconds"] = _avg(item.pop("durations", []))
         item["avg_sl_distance_pips"] = _avg(item.pop("sl_distances_pips", []))
         item["avg_tp_distance_pips"] = _avg(item.pop("tp_distances_pips", []))
         item["avg_sl_distance_quote"] = _avg(item.pop("sl_distances_quote", []))
         item["avg_tp_distance_quote"] = _avg(item.pop("tp_distances_quote", []))
-        item["asset_class"] = "fx" if any(str(r.get("symbol") or "") == item["symbol"] and str(r.get("asset_class") or "").lower() == "fx" for r in rows) else "crypto"
+        item["avg_sl_distance_pips_wins"] = _avg(item.pop("sl_distances_pips_wins", []))
+        item["avg_sl_distance_pips_losses"] = _avg(item.pop("sl_distances_pips_losses", []))
+        item["avg_tp_distance_pips_wins"] = _avg(item.pop("tp_distances_pips_wins", []))
+        item["avg_tp_distance_pips_losses"] = _avg(item.pop("tp_distances_pips_losses", []))
+        item["avg_sl_distance_quote_wins"] = _avg(item.pop("sl_distances_quote_wins", []))
+        item["avg_sl_distance_quote_losses"] = _avg(item.pop("sl_distances_quote_losses", []))
+        item["avg_tp_distance_quote_wins"] = _avg(item.pop("tp_distances_quote_wins", []))
+        item["avg_tp_distance_quote_losses"] = _avg(item.pop("tp_distances_quote_losses", []))
+        item["asset_class"] = (
+            "fx"
+            if any(
+                str(r.get("symbol") or "") == item["symbol"]
+                and str(r.get("asset_class") or "").lower() == "fx"
+                for r in trade_rows
+            )
+            else "crypto"
+        )
+        if item["asset_class"] == "crypto":
+            item["quote_currency"] = "USDT"
         out_by_instrument.append(item)
         if item["wins"] > most_wins["wins"]:
             most_wins = {"symbol": item["symbol"], "wins": item["wins"]}
         if item["losses"] > most_losses["losses"]:
             most_losses = {"symbol": item["symbol"], "losses": item["losses"]}
-    out_by_instrument.sort(key=lambda x: (-(x.get("total_trades") or 0), str(x.get("symbol") or "")))
+    out_by_instrument.sort(
+        key=lambda x: (-(x.get("total_trades") or 0), str(x.get("symbol") or ""))
+    )
 
-    all_sl = [_to_float(row.get("stop_loss")) for row in rows]
-    all_tp = [_to_float(row.get("take_profit")) for row in rows]
+    all_sl = [_to_float(row.get("stop_loss")) for row in trade_rows]
+    all_tp = [_to_float(row.get("take_profit")) for row in trade_rows]
     all_sl = [x for x in all_sl if x is not None]
     all_tp = [x for x in all_tp if x is not None]
-    profit_pct_vals = [_to_float(row.get("profit_pct")) for row in rows]
+    profit_pct_vals = [_to_float(row.get("profit_pct")) for row in trade_rows]
     profit_pct_vals = [x for x in profit_pct_vals if x is not None]
-    r_mult_vals = [_to_float(row.get("r_multiple")) for row in rows]
+    r_mult_vals = [_to_float(row.get("r_multiple")) for row in trade_rows]
     r_mult_vals = [x for x in r_mult_vals if x is not None]
-    unique_symbols = sorted({str(r.get("symbol") or "") for r in rows if str(r.get("symbol") or "").strip()})
-    fx_symbols = sorted({str(r.get("symbol") or "") for r in rows if str(r.get("asset_class") or "").lower() == "fx"})
-    crypto_symbols = sorted({str(r.get("symbol") or "") for r in rows if str(r.get("asset_class") or "").lower() == "crypto"})
+    winner_durations = [
+        _to_float(row.get("trade_duration_seconds")) for row in trade_rows if _is_win(row)
+    ]
+    winner_durations = [x for x in winner_durations if x is not None and x >= 0]
+    loser_durations = [
+        _to_float(row.get("trade_duration_seconds")) for row in trade_rows if _is_loss(row)
+    ]
+    loser_durations = [x for x in loser_durations if x is not None and x >= 0]
+    unique_symbols = sorted(
+        {str(r.get("symbol") or "") for r in trade_rows if str(r.get("symbol") or "").strip()}
+    )
+    fx_symbols = sorted(
+        {str(r.get("symbol") or "") for r in trade_rows if str(r.get("asset_class") or "").lower() == "fx"}
+    )
+    crypto_symbols = sorted(
+        {str(r.get("symbol") or "") for r in trade_rows if str(r.get("asset_class") or "").lower() == "crypto"}
+    )
 
     return {
         "totals": {
-            "trades": len(rows),
-            "wins": sum(1 for row in rows if _is_win(row)),
-            "losses": sum(1 for row in rows if _is_loss(row)),
-            "break_even": sum(1 for row in rows if _is_be(row)),
+            "trades": len(trade_rows),
+            "wins": sum(1 for row in trade_rows if _is_win(row)),
+            "losses": sum(1 for row in trade_rows if _is_loss(row)),
+            "break_even": sum(1 for row in trade_rows if _is_be(row)),
             "avg_stop_loss": _avg(all_sl),
             "avg_take_profit": _avg(all_tp),
             "avg_profit_pct": _avg(profit_pct_vals),
             "avg_r_multiple": _avg(r_mult_vals),
+            "avg_winner_duration_seconds": _avg(winner_durations),
+            "avg_loser_duration_seconds": _avg(loser_durations),
             "unique_instruments": len(unique_symbols),
             "crypto_instruments": len(crypto_symbols),
             "fx_instruments": len(fx_symbols),
@@ -6161,6 +6339,7 @@ def _compute_journal_stats(
         "instrument_with_most_losses": most_losses if most_losses["symbol"] else None,
         "balance_after_trade_note": "Approximate unless cashflow ledger fully captures deposits/withdrawals/transfers.",
     }
+
 def _read_bybit_settings() -> Dict[str, float]:
     try:
         settings = bybit_monitor.get_runtime_settings(force=True)
@@ -7294,10 +7473,15 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
         items = [r for r in items if match(r)]
 
     balances = _get_excel_account_balances()
-    items = _calc_balance_after_trade(items, balances)
-    items = _enrich_trade_row_metrics(items)
-    stats = _compute_journal_stats(items, balances)
-    return JSONResponse({"items": items, "count": len(items), "stats": stats})
+    state_meta = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
+    source_folder = str(state_meta.get("source_folder") if isinstance(state_meta, dict) else "")
+
+    trade_items = _enrich_trade_row_metrics(_calc_balance_after_trade(items, balances))
+    cashflow_rows = _cashflow_rows_for_journal(source_folder) if source_folder else []
+
+    combined_items = sorted([*trade_items, *cashflow_rows], key=_row_sort_dt, reverse=True)
+    stats = _compute_journal_stats(combined_items, balances)
+    return JSONResponse({"items": combined_items, "count": len(combined_items), "stats": stats})
 @app.get("/api/trading-journal/balances")
 async def trading_journal_balances() -> JSONResponse:
     rows = _get_trading_journal_rows()
@@ -7353,9 +7537,16 @@ async def trading_journal_balances() -> JSONResponse:
             }
     for key, bal in latest_by_acc.items():
         if key in by_acc:
-            merged = dict(by_acc[key])
-            merged.update({k: v for k, v in bal.items() if v is not None})
-            by_acc[key] = merged
+            existing = dict(by_acc[key])
+            if str(existing.get("source") or "").strip().lower() == "cashflow_ledger":
+                # Cashflow ledger is authoritative for final balance; only backfill missing fields.
+                for k, v in bal.items():
+                    if existing.get(k) in (None, "") and v is not None:
+                        existing[k] = v
+                by_acc[key] = existing
+            else:
+                existing.update({k: v for k, v in bal.items() if v is not None})
+                by_acc[key] = existing
         else:
             by_acc[key] = bal
 
