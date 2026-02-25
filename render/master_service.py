@@ -6202,7 +6202,7 @@ def _compute_journal_stats(
                 "sl_distances": [],
                 "tp_distances": [],
                 "durations": [],
-                "quote_currency": "USDT",
+                "quote_currency": "USDT" if str(row.get("asset_class") or "").lower() != "fx" else "",
             }
         bucket = by_instrument[symbol]
         bucket["total_trades"] += 1
@@ -6281,7 +6281,10 @@ def _compute_journal_stats(
             else "crypto"
         )
         if item["asset_class"] == "crypto":
+            # Crypto distance metrics are denominated in quote currency; default to USDT.
             item["quote_currency"] = "USDT"
+        else:
+            item["quote_currency"] = ""
         out_by_instrument.append(item)
         if item["wins"] > most_wins["wins"]:
             most_wins = {"symbol": item["symbol"], "wins": item["wins"]}
@@ -7476,6 +7479,7 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
     state_meta = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
     source_folder = str(state_meta.get("source_folder") if isinstance(state_meta, dict) else "")
 
+    # Pull cashflow rows from the active source folder tracked in journal state.
     trade_items = _enrich_trade_row_metrics(_calc_balance_after_trade(items, balances))
     cashflow_rows = _cashflow_rows_for_journal(source_folder) if source_folder else []
 
