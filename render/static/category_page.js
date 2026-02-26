@@ -30,10 +30,10 @@
 
             const button = document.createElement('button');
             button.className = 'script-btn';
-            button.textContent = script.name;
+            button.textContent = script.label || script.name;
             button.onclick = () => {
                 const target = script.open_url || `/scripts/view/${buildScriptPath(script.name)}`;
-                if (script.standalone) {
+                if (script.standalone || target === '/trading-journal') {
                     window.open(target, '_blank', 'noopener');
                     return;
                 }

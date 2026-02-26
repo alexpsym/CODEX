@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import asyncio
+import threading
 import base64
 import hashlib
 import hmac
@@ -21,7 +22,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
 from dateutil.relativedelta import relativedelta
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Callable
 from urllib.parse import quote, unquote, urlparse
 from uuid import uuid4
 
@@ -86,6 +87,8 @@ SKIP_DIRS_NORMALIZED = {name.casefold() for name in SKIP_DIRS}
 SKIP_FILES = {"__init__.py"}
 HIDDEN_SCRIPTS = {
     "oanda_swap_rates",
+    "oanda_swaprates",
+    "oanda-swaprates",
     "oanda-swap-rates",
     "oanda-swap-rates-clone",
     "oanda_swap_rates_clone",
@@ -94,6 +97,19 @@ HIDDEN_SCRIPTS = {
     "swap_rates",
     "swap-rates",
 }
+RETIRED_SCRIPT_NAMES = {
+    "oanda_swap_rates",
+    "oanda_swaprates",
+    "oanda-swaprates",
+    "oanda-swap-rates",
+    "oanda-swap-rates-clone",
+    "oanda_swap_rates_clone",
+    "swap_rates_oanda",
+    "swap-rates-oanda",
+    "swap_rates",
+    "swap-rates",
+}
+
 MAX_LOG_LINES = 400
 PAYSLIP_REPORT_NAME = "audit_report.pdf"
 PAYSLIP_UPLOAD_ROOT = BASE_DIR / "render" / "uploads" / "payslip"
@@ -105,9 +121,42 @@ PENDING_WEBHOOKS_PATH = BASE_DIR / "render" / "data" / "pending_webhooks.json"
 WATCHLIST_PATH = BASE_DIR / "render" / "data" / "watchlist.json"
 TRADING_JOURNAL_PATH = BASE_DIR / "render" / "data" / "trading_journal.json"
 TRADING_JOURNAL_STATE_PATH = BASE_DIR / "render" / "data" / "trading_journal_state.json"
+TRADING_JOURNAL_SYNC_STATE_PATH = BASE_DIR / "render" / "data" / "trading_journal_sync_state.json"
 TRADING_JOURNAL_DROPBOX_FOLDER = os.getenv(
     "TRADING_JOURNAL_DROPBOX_FOLDER", "/master_control"
 ).strip()
+TRADING_JOURNAL_SYNC_STATE: Dict[str, object] = {
+    "running": False,
+    "progress": 0,
+    "message": "",
+    "ok": None,
+    "error": None,
+    "result": None,
+    "started_at": None,
+    "finished_at": None,
+    "updated_at": None,
+}
+TRADING_JOURNAL_SYNC_LOCK = threading.Lock()
+
+
+def _sync_state_snapshot() -> Dict[str, object]:
+    data = _load_json_file(TRADING_JOURNAL_SYNC_STATE_PATH, {})
+    if not isinstance(data, dict):
+        data = {}
+    merged = dict(TRADING_JOURNAL_SYNC_STATE)
+    merged.update(data)
+    return merged
+
+
+def _set_trading_journal_sync_state(**updates: object) -> None:
+    with TRADING_JOURNAL_SYNC_LOCK:
+        merged = _sync_state_snapshot()
+        merged.update(updates)
+        merged["updated_at"] = _utc_now_iso()
+        TRADING_JOURNAL_SYNC_STATE.update(merged)
+        _save_json_file(TRADING_JOURNAL_SYNC_STATE_PATH, merged)
+
+
 TRADING_JOURNAL_DROPBOX_RECURSIVE = os.getenv(
     "TRADING_JOURNAL_DROPBOX_RECURSIVE", "0"
 ).strip().lower() in {"1", "true", "yes", "on"}
@@ -849,6 +898,30 @@ def _cell_to_str(value: object) -> str:
 def _cell_to_float(value: object) -> Optional[float]:
     if _is_empty_cell(value):
         return None
+    if isinstance(value, (int, float)):
+        try:
+            return float(value)
+        except Exception:
+            return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        neg = False
+        if text.startswith("(") and text.endswith(")"):
+            neg = True
+            text = text[1:-1].strip()
+        text = text.replace(",", "")
+        text = re.sub(r"(?i)\b(AUD|USD|USDT|EUR|GBP|JPY|CHF|NZD|CAD)\b", "", text).strip()
+        text = text.replace("$", "").strip()
+        text = re.sub(r"[^0-9+\-\.eE]", "", text).strip()
+        if not text:
+            return None
+        try:
+            val = float(text)
+            return -val if neg else val
+        except Exception:
+            return None
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -1301,10 +1374,16 @@ def _cashflow_rows_for_journal(active_folder: str) -> List[Dict[str, object]]:
     return sorted(rows, key=_row_sort_dt, reverse=True)
 
 
-def _import_trading_journal_from_dropbox_excel() -> Dict[str, object]:
+def _import_trading_journal_from_dropbox_excel(
+    progress_cb: Optional[Callable[[int, str], None]] = None,
+) -> Dict[str, object]:
+    if progress_cb:
+        progress_cb(2, "Resolving Dropbox folder…")
     active_folder, entries = _resolve_trading_journal_dropbox_folder()
     configured = TRADING_JOURNAL_DROPBOX_FOLDER.strip()
     cashflow_template_created = False
+    if progress_cb:
+        progress_cb(6, "Checking cashflow template…")
     try:
         cashflow_template_created = _ensure_cashflow_template(active_folder)
     except Exception:
@@ -1315,12 +1394,19 @@ def _import_trading_journal_from_dropbox_excel() -> Dict[str, object]:
     balances: List[Dict[str, object]] = []
     errors: List[Dict[str, str]] = []
 
-    for entry in entries:
+    total_files = len(entries)
+    if progress_cb:
+        progress_cb(10, f"Found {total_files} workbook(s)…")
+
+    for entry_index, entry in enumerate(entries, start=1):
         name = str(entry.get("name") or "")
         dbx_path = str(entry.get("path_lower") or entry.get("path_display") or "")
         if not dbx_path:
             continue
         try:
+            if progress_cb:
+                pct = 10 + int(80 * (entry_index / max(total_files, 1)))
+                progress_cb(pct, f"Importing {entry_index}/{total_files}: {name}")
             payload = download_bytes(dbx_path)
             parsed_rows, parsed_balance = _parse_excel_account_workbook(name, dbx_path, payload)
             rows.extend(parsed_rows)
@@ -1338,6 +1424,8 @@ def _import_trading_journal_from_dropbox_excel() -> Dict[str, object]:
 
     final_rows = sorted(dedup.values(), key=lambda row: str(row.get("close_time") or ""), reverse=True)
 
+    if progress_cb:
+        progress_cb(95, "Finalising…")
     _set_trading_journal_rows(final_rows)
     _save_json_file(
         TRADING_JOURNAL_STATE_PATH,
@@ -1586,6 +1674,7 @@ class ManagedScript:
         return {
             "id": self.name,
             "name": self.name,
+            "label": friendly_script_label(self.name),
             "path": str(self.path),
             "category": self.category,
             "running": self.is_running,
@@ -1827,6 +1916,57 @@ def script_logs_url(script_name: str) -> str:
     return f"/logs/{_encoded_script_name(script_name)}"
 
 
+FRIENDLY_SCRIPT_LABELS: Dict[str, str] = {
+    "Crypto-Scanner-clone": "Crypto Scanner",
+    "PUSH": "Push",
+    "bybit_monitor": "Bybit Monitor",
+    "bybit_trigger_bounce_trader": "Bybit Bounce Trader",
+    "bybithistory-clone": "Bybit History",
+    "coinspot-clone": "CoinSpot History",
+    "cryptocalculator-clone": "Bybit Calculator",
+    "download_video": "Video Downloader",
+    "extractor": "Extractor",
+    "forextester": "Forex Tester",
+    "fxscanner-oanda-clone": "OANDA Scanner",
+    "fxweekend-clone": "FX Weekend",
+    "ivindicator-clone": "IV Indicator",
+    "journal": "Journal",
+    "oanda-calculator-clone": "OANDA Calculator",
+    "oanda_history-clone": "OANDA History",
+    "oanda_monitor": "OANDA Monitor",
+    "payslip_audit": "Payslip Audit",
+    "pinescripts": "Pine Scripts",
+    "trading-journal": "Trading Journal",
+}
+
+_TITLE_UPPER = {"FX", "MT5", "OANDA", "BYBIT", "USDT", "IV"}
+
+
+def friendly_script_label(name: str) -> str:
+    """Human-friendly label for UI buttons."""
+
+    if not name:
+        return ""
+
+    if name in FRIENDLY_SCRIPT_LABELS:
+        return FRIENDLY_SCRIPT_LABELS[name]
+
+    label = str(name).strip()
+
+    label = re.sub(r"[-_]?clone$", "", label, flags=re.IGNORECASE)
+    label = re.sub(r"[-_]?master$", "", label, flags=re.IGNORECASE)
+    label = re.sub(r"[_\-]+", " ", label).strip()
+
+    parts: List[str] = []
+    for token in label.split():
+        up = token.upper()
+        if up in _TITLE_UPPER:
+            parts.append(up)
+        else:
+            parts.append(token[:1].upper() + token[1:].lower())
+    return " ".join(parts)
+
+
 def _payslip_session_dir(session_id: str) -> Path:
     return PAYSLIP_UPLOAD_ROOT / session_id
 
@@ -1944,10 +2084,13 @@ class ScriptManager:
         self._aliases.setdefault(normalized, target)
 
     def _resolve_name(self, name: str) -> str:
+        normalized = self._normalize(name)
+        if normalized in {self._normalize(n) for n in RETIRED_SCRIPT_NAMES}:
+            raise HTTPException(status_code=410, detail=f"Script is retired and unavailable: {name}")
+
         if name in self._scripts:
             return name
 
-        normalized = self._normalize(name)
         if normalized in self._aliases:
             return self._aliases[normalized]
 
@@ -1959,6 +2102,7 @@ class ScriptManager:
             {
                 "id": "trading-journal",
                 "name": "trading-journal",
+                "label": friendly_script_label("trading-journal"),
                 "path": str(BASE_DIR / "render" / "master_service.py"),
                 "category": "Other",
                 "running": True,
@@ -5869,9 +6013,9 @@ async def trading_journal_page() -> str:
     .toolbar { display:flex; gap:8px; align-items:center; padding:12px; margin-bottom:12px; }
     .toolbar input { flex:1; background:#0f172a; color:#e5e7eb; border:1px solid #334155; border-radius:8px; padding:8px 10px; }
     .toolbar button { background:#2563eb; color:white; border:0; border-radius:8px; padding:8px 12px; cursor:pointer; }
-    .balances { padding:12px; margin-bottom:12px; display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:10px; }
+    .balances { padding:8px; margin-bottom:10px; display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:8px; }
     .hidden { display:none !important; }
-    .bal-card { background:#0f172a; border:1px solid #1f2937; border-radius:10px; padding:10px; }
+    .bal-card { background:#0f172a; border:1px solid #1f2937; border-radius:10px; padding:8px; }
     .table-wrap { padding:8px; overflow:auto; max-height:70vh; position:relative; }
     table { width:100%; border-collapse:collapse; min-width:1200px; }
     th, td { padding:10px 8px; border-bottom:1px solid #1f2937; white-space:nowrap; }
@@ -5881,9 +6025,23 @@ async def trading_journal_page() -> str:
     .pill { border:1px solid #334155; border-radius:999px; padding:2px 8px; font-size:12px; }
     .num.pos { color:#86efac; }
     .num.neg { color:#fca5a5; }
+
+    .loading-overlay { position:fixed; inset:0; background:rgba(11,18,32,0.92); display:flex; align-items:center; justify-content:center; z-index:9999; }
+    .loading-panel { width:min(520px, calc(100% - 32px)); background:#111827; border:1px solid #1f2937; border-radius:14px; padding:16px; }
+    .loading-bar { height:10px; background:#0f172a; border:1px solid #1f2937; border-radius:999px; overflow:hidden; }
+    #tj-loading-bar { height:100%; width:0%; background:#2563eb; }
   </style>
 </head>
 <body>
+  <div id="tj-loading" class="loading-overlay">
+    <div class="loading-panel">
+      <div style="font-weight:700;margin-bottom:6px;">Loading Trading Journal</div>
+      <div id="tj-loading-text" class="muted" style="margin-bottom:10px;">Starting…</div>
+      <div class="loading-bar"><div id="tj-loading-bar"></div></div>
+      <div id="tj-loading-pct" class="muted" style="margin-top:8px; text-align:right;">0%</div>
+    </div>
+  </div>
+
   <div class="wrap">
     <div class="toolbar" style="margin-bottom:8px;">
       <button id="tj-view-trades-btn">All trades</button>
@@ -5936,7 +6094,7 @@ async def trading_journal_page() -> str:
       </div>
       <div id="tj-inst-view" class="table-wrap hidden">
         <table id="tj-inst-table">
-          <thead><tr><th>Symbol</th><th>Class</th><th>Trades</th><th>Wins</th><th>Losses</th><th>Break-even</th><th>Avg stop dist (W)</th><th>Avg stop dist (L)</th><th>Avg target dist (W)</th><th>Avg target dist (L)</th><th>Avg duration</th></tr></thead>
+          <thead><tr><th data-sort="symbol">Symbol</th><th data-sort="asset_class">Class</th><th data-sort="total_trades">Trades</th><th data-sort="wins">Wins</th><th data-sort="losses">Losses</th><th data-sort="break_even">Break-even</th><th data-sort="avg_sl_w">Avg stop dist (W)</th><th data-sort="avg_sl_l">Avg stop dist (L)</th><th data-sort="avg_tp_w">Avg target dist (W)</th><th data-sort="avg_tp_l">Avg target dist (L)</th><th data-sort="avg_duration">Avg duration</th></tr></thead>
           <tbody></tbody>
         </table>
         <div id="tj-inst-empty" class="muted" style="padding:12px; display:none;">No instrument data.</div>
@@ -6166,6 +6324,16 @@ def _enrich_trade_row_metrics(rows: List[Dict[str, object]]) -> List[Dict[str, o
     return out
 
 
+def _is_fx_asset_class(value: object) -> bool:
+    text = str(value or "").strip().lower()
+    return text in {"fx", "forex", "foreign_exchange"}
+
+
+def _is_crypto_asset_class(value: object) -> bool:
+    text = str(value or "").strip().lower()
+    return text in {"crypto", "cryptocurrency", "digital_asset", "digitalasset"}
+
+
 def _compute_journal_stats(
     rows: List[Dict[str, object]], balances: List[Dict[str, object]]
 ) -> Dict[str, object]:
@@ -6202,7 +6370,7 @@ def _compute_journal_stats(
                 "sl_distances": [],
                 "tp_distances": [],
                 "durations": [],
-                "quote_currency": "USDT" if str(row.get("asset_class") or "").lower() != "fx" else "",
+                "quote_currency": "USDT" if not _is_fx_asset_class(row.get("asset_class")) else "",
             }
         bucket = by_instrument[symbol]
         bucket["total_trades"] += 1
@@ -6228,7 +6396,7 @@ def _compute_journal_stats(
             bucket["take_profits"].append(tp)
 
         def _append_metric(prefix: str, dist: float) -> None:
-            if str(row.get("asset_class") or "").lower() == "fx":
+            if _is_fx_asset_class(row.get("asset_class")):
                 pip_val = dist / _pip_size_for_symbol(symbol)
                 bucket.setdefault(f"{prefix}_pips", []).append(pip_val)
                 if is_win:
@@ -6275,7 +6443,7 @@ def _compute_journal_stats(
             "fx"
             if any(
                 str(r.get("symbol") or "") == item["symbol"]
-                and str(r.get("asset_class") or "").lower() == "fx"
+                and _is_fx_asset_class(r.get("asset_class"))
                 for r in trade_rows
             )
             else "crypto"
@@ -6310,14 +6478,29 @@ def _compute_journal_stats(
         _to_float(row.get("trade_duration_seconds")) for row in trade_rows if _is_loss(row)
     ]
     loser_durations = [x for x in loser_durations if x is not None and x >= 0]
+
+    fx_trade_durations = [
+        _to_float(row.get("trade_duration_seconds"))
+        for row in trade_rows
+        if _is_fx_asset_class(row.get("asset_class"))
+    ]
+    fx_trade_durations = [x for x in fx_trade_durations if x is not None and x >= 0]
+
+    crypto_trade_durations = [
+        _to_float(row.get("trade_duration_seconds"))
+        for row in trade_rows
+        if _is_crypto_asset_class(row.get("asset_class"))
+    ]
+    crypto_trade_durations = [x for x in crypto_trade_durations if x is not None and x >= 0]
+
     unique_symbols = sorted(
         {str(r.get("symbol") or "") for r in trade_rows if str(r.get("symbol") or "").strip()}
     )
     fx_symbols = sorted(
-        {str(r.get("symbol") or "") for r in trade_rows if str(r.get("asset_class") or "").lower() == "fx"}
+        {str(r.get("symbol") or "") for r in trade_rows if _is_fx_asset_class(r.get("asset_class"))}
     )
     crypto_symbols = sorted(
-        {str(r.get("symbol") or "") for r in trade_rows if str(r.get("asset_class") or "").lower() == "crypto"}
+        {str(r.get("symbol") or "") for r in trade_rows if _is_crypto_asset_class(r.get("asset_class"))}
     )
 
     return {
@@ -6332,6 +6515,8 @@ def _compute_journal_stats(
             "avg_r_multiple": _avg(r_mult_vals),
             "avg_winner_duration_seconds": _avg(winner_durations),
             "avg_loser_duration_seconds": _avg(loser_durations),
+            "avg_fx_duration_seconds": _avg(fx_trade_durations),
+            "avg_crypto_duration_seconds": _avg(crypto_trade_durations),
             "unique_instruments": len(unique_symbols),
             "crypto_instruments": len(crypto_symbols),
             "fx_instruments": len(fx_symbols),
@@ -7497,16 +7682,44 @@ async def trading_journal_balances() -> JSONResponse:
     excel = _get_excel_account_balances()
 
     by_acc: Dict[str, Dict[str, object]] = {}
+
+    # Priority for displayed balances:
+    #   1) Excel workbook-provided balance (authoritative when present)
+    #   2) Cashflow ledger (fallback when workbook balance missing)
+    #   3) Latest trade-derived balance_after_trade (fallback when both missing)
     for bal in excel:
         label = str((bal.get("account") or bal.get("label") or "")).strip()
         key = _norm_account_key(label)
         if key:
             by_acc[key] = dict(bal)
+
     for bal in cashflow_items:
         label = str((bal.get("account") or bal.get("label") or "")).strip()
         key = _norm_account_key(label)
-        if key:
+        if not key:
+            continue
+
+        existing = dict(by_acc.get(key) or {})
+        existing_balance = _to_float(existing.get("balance"))
+        cash_balance = _to_float(bal.get("balance"))
+
+        if not existing:
             by_acc[key] = dict(bal)
+            continue
+
+        if existing_balance is None and cash_balance is not None:
+            merged = dict(bal)
+            for k, v in existing.items():
+                if merged.get(k) in (None, "") and v not in (None, ""):
+                    merged[k] = v
+            by_acc[key] = merged
+            continue
+
+        merged = dict(existing)
+        for k, v in dict(bal).items():
+            if merged.get(k) in (None, "") and v not in (None, ""):
+                merged[k] = v
+        by_acc[key] = merged
 
     for row in rows:
         account = str(row.get("account_label") or row.get("account") or "").strip()
@@ -7540,17 +7753,21 @@ async def trading_journal_balances() -> JSONResponse:
                 "as_of": row.get("close_time") or row.get("open_time"),
             }
     for key, bal in latest_by_acc.items():
-        if key in by_acc:
-            existing = dict(by_acc[key])
-            if str(existing.get("source") or "").strip().lower() == "cashflow_ledger":
-                # Cashflow ledger is authoritative for final balance; only backfill missing fields.
-                for k, v in bal.items():
-                    if existing.get(k) in (None, "") and v is not None:
-                        existing[k] = v
-                by_acc[key] = existing
-            else:
-                existing.update({k: v for k, v in bal.items() if v is not None})
-                by_acc[key] = existing
+        existing = dict(by_acc.get(key) or {})
+        existing_balance = _to_float(existing.get("balance")) if existing else None
+
+        if existing and existing_balance is not None:
+            merged = dict(existing)
+            for k, v in bal.items():
+                if merged.get(k) in (None, "") and v is not None:
+                    merged[k] = v
+            by_acc[key] = merged
+            continue
+
+        if existing:
+            merged = dict(existing)
+            merged.update({k: v for k, v in bal.items() if v is not None})
+            by_acc[key] = merged
         else:
             by_acc[key] = bal
 
@@ -7558,13 +7775,75 @@ async def trading_journal_balances() -> JSONResponse:
     return JSONResponse({"items": items})
 
 
+@app.get("/api/trading-journal/sync/status")
+async def trading_journal_sync_status() -> JSONResponse:
+    with TRADING_JOURNAL_SYNC_LOCK:
+        snapshot = _sync_state_snapshot()
+        TRADING_JOURNAL_SYNC_STATE.update(snapshot)
+    return JSONResponse(snapshot)
+
+
+async def _run_trading_journal_sync_job() -> None:
+    def _cb(progress: int, message: str) -> None:
+        _set_trading_journal_sync_state(
+            running=True,
+            progress=int(progress),
+            message=str(message or ""),
+            ok=None,
+            error=None,
+            result=None,
+        )
+
+    _set_trading_journal_sync_state(
+        running=True,
+        progress=0,
+        message="Starting…",
+        ok=None,
+        error=None,
+        result=None,
+        started_at=_utc_now_iso(),
+        finished_at=None,
+    )
+
+    try:
+        result = await asyncio.to_thread(_import_trading_journal_from_dropbox_excel, progress_cb=_cb)
+        _set_trading_journal_sync_state(
+            running=False,
+            progress=100,
+            message="Done",
+            ok=True,
+            error=None,
+            result=result,
+            finished_at=_utc_now_iso(),
+        )
+    except Exception as exc:
+        _set_trading_journal_sync_state(
+            running=False,
+            progress=100,
+            message=f"Failed: {exc}",
+            ok=False,
+            error=str(exc),
+            result=None,
+            finished_at=_utc_now_iso(),
+        )
+
+
 @app.post("/api/trading-journal/sync")
 async def trading_journal_sync() -> JSONResponse:
-    try:
-        result = _import_trading_journal_from_dropbox_excel()
-        return JSONResponse(result)
-    except Exception as exc:
-        return JSONResponse(
-            {"ok": False, "detail": str(exc)},
-            status_code=500,
-        )
+    with TRADING_JOURNAL_SYNC_LOCK:
+        running = bool(_sync_state_snapshot().get("running"))
+    if running:
+        return await trading_journal_sync_status()
+
+    _set_trading_journal_sync_state(
+        running=True,
+        progress=0,
+        message="Queued…",
+        ok=None,
+        error=None,
+        result=None,
+        started_at=_utc_now_iso(),
+        finished_at=None,
+    )
+    asyncio.create_task(_run_trading_journal_sync_job())
+    return await trading_journal_sync_status()
