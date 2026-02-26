@@ -21,6 +21,10 @@
 
   let activeFlags = new Set();
   let autoRefreshTimer = null;
+  // Auto-refresh cadence increased from the old 15s interval to 60s scheduled refreshes.
+  const AUTO_REFRESH_MS = 60000;
+  let loadInFlight = false;
+  let activeAbort = null;
 
   function normYes(v) {
     return ['yes', 'y', 'true', '1'].includes(String(v ?? '').trim().toLowerCase());
@@ -86,9 +90,9 @@
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  async function waitForSync() {
+  async function waitForSync(signal) {
     while (true) {
-      const st = await fetchJson('/api/trading-journal/sync/status');
+      const st = await fetchJson('/api/trading-journal/sync/status', { signal });
       const p = Number(st?.progress);
       const msg = st?.message || 'Syncing…';
       setLoading(Number.isFinite(p) ? p : 20, msg);
@@ -458,57 +462,103 @@
     renderAll();
   }
 
-  async function load() {
+  async function load({ silent = false } = {}) {
+    if (loadInFlight) return;
+    loadInFlight = true;
+    // Cancel any prior request chain so rapid manual actions cannot overlap with refresh work.
+    if (activeAbort) { try { activeAbort.abort(); } catch {} }
+    activeAbort = new AbortController();
+    const signal = activeAbort.signal;
     try {
-      setStatus('Loading…');
-      setLoading(5, 'Loading…');
+      setStatus(silent ? 'Refreshing…' : 'Loading…');
+      if (!silent) setLoading(5, 'Loading…');
       const filter = (filterInput.value || '').trim();
 
-      setLoading(15, 'Fetching journal…');
-      let journal = await fetchJson(`/api/trading-journal${filter ? `?filter=${encodeURIComponent(filter)}` : ''}`);
+      if (!silent) setLoading(15, 'Fetching journal…');
+      let journal = await fetchJson(`/api/trading-journal${filter ? `?filter=${encodeURIComponent(filter)}` : ''}`, { signal });
 
       const hasItems = Array.isArray(journal?.items) && journal.items.length > 0;
       if (!hasItems) {
+        // Silent background refresh should not trigger Dropbox sync loops when journal is empty.
+        if (silent) {
+          state.rows = Array.isArray(journal?.items) ? journal.items : [];
+          state.stats = journal?.stats || null;
+          renderAll();
+          setStatus(`Updated ${new Date().toLocaleTimeString()}`);
+          return;
+        }
         if (filter) {
           // If a filter is set (often persisted in localStorage) and the journal file is empty after a deploy,
           // do a cheap unfiltered check before deciding to sync.
-          const base = await fetchJson('/api/trading-journal');
+          const base = await fetchJson('/api/trading-journal', { signal });
           const baseHasItems = Array.isArray(base?.items) && base.items.length > 0;
           if (!baseHasItems) {
-            setLoading(20, 'Syncing from Dropbox…');
-            await fetchJson('/api/trading-journal/sync', { method: 'POST' });
-            await waitForSync();
-            setLoading(70, 'Fetching journal…');
-            journal = await fetchJson(`/api/trading-journal?filter=${encodeURIComponent(filter)}`);
+            if (!silent) setLoading(20, 'Syncing from Dropbox…');
+            await fetchJson('/api/trading-journal/sync', { method: 'POST', signal });
+            await waitForSync(signal);
+            if (!silent) setLoading(70, 'Fetching journal…');
+            journal = await fetchJson(`/api/trading-journal?filter=${encodeURIComponent(filter)}`, { signal });
           }
         } else {
-          setLoading(20, 'Syncing from Dropbox…');
-          await fetchJson('/api/trading-journal/sync', { method: 'POST' });
-          await waitForSync();
-          setLoading(70, 'Fetching journal…');
-          journal = await fetchJson('/api/trading-journal');
+          if (!silent) setLoading(20, 'Syncing from Dropbox…');
+          await fetchJson('/api/trading-journal/sync', { method: 'POST', signal });
+          await waitForSync(signal);
+          if (!silent) setLoading(70, 'Fetching journal…');
+          journal = await fetchJson('/api/trading-journal', { signal });
         }
       }
 
-      setLoading(85, 'Fetching balances…');
-      const balances = await fetchJson('/api/trading-journal/balances');
+      if (!silent) setLoading(85, 'Fetching balances…');
+      const balances = await fetchJson('/api/trading-journal/balances', { signal });
       state.rows = Array.isArray(journal.items) ? journal.items : [];
       state.stats = journal.stats || null;
 
       persistUiState();
-      setLoading(95, 'Rendering…');
+      if (!silent) setLoading(95, 'Rendering…');
       renderAll();
       renderBalances(Array.isArray(balances.items) ? balances.items : []);
       renderStats(state.stats);
       setStatus(`Updated ${new Date().toLocaleTimeString()}`);
-      setLoading(100, 'Done');
-      hideLoading();
+      if (!silent) { setLoading(100, 'Done'); hideLoading(); }
     } catch (e) {
+      if (e && (e.name === 'AbortError' || e.code === 20)) return;
       console.error(e);
-      hideLoading();
+      if (!silent) hideLoading();
       setStatus(`Load failed: ${e.message}`);
+    } finally {
+      loadInFlight = false;
+      scheduleAutoRefresh();
     }
   }
+
+  function stopAutoRefresh() {
+    if (autoRefreshTimer) {
+      clearTimeout(autoRefreshTimer);
+      autoRefreshTimer = null;
+    }
+  }
+
+  function scheduleAutoRefresh() {
+    stopAutoRefresh();
+    if (document.hidden) return;
+    autoRefreshTimer = setTimeout(() => load({ silent: true }), AUTO_REFRESH_MS);
+  }
+
+  // When the tab is hidden we stop the timer and abort active network work to reduce backend pressure.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      stopAutoRefresh();
+      if (activeAbort) { try { activeAbort.abort(); } catch {} }
+      return;
+    }
+    scheduleAutoRefresh();
+  });
+
+  // Also clean up on navigation away so no refresh request survives route changes.
+  window.addEventListener('pagehide', () => {
+    stopAutoRefresh();
+    if (activeAbort) { try { activeAbort.abort(); } catch {} }
+  });
 
   q('#tj-filter-btn')?.addEventListener('click', () => { persistUiState(); load(); });
   q('#tj-view-trades-btn')?.addEventListener('click', () => { state.view = 'trades'; applyView(); });
@@ -565,5 +615,5 @@
   qa('.tj-chip[data-flag]').forEach((btn) => { const on = activeFlags.has(btn.dataset.flag || ''); btn.classList.toggle('active', on); btn.style.opacity = on ? '1' : '0.7'; btn.style.outline = on ? '1px solid #60a5fa' : 'none'; });
   applyView();
   load();
-  autoRefreshTimer = setInterval(load, 15000);
+  scheduleAutoRefresh();
 })();

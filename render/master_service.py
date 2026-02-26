@@ -1228,20 +1228,43 @@ def _ensure_cashflow_template(active_folder: str) -> bool:
     return True
 
 
+# 30s default unless CASHFLOW_CACHE_TTL_SECONDS is configured.
+_CASHFLOW_CACHE_TTL_SECONDS = int(os.getenv("CASHFLOW_CACHE_TTL_SECONDS", "30"))
+_CASHFLOW_CACHE: Dict[str, Tuple[float, Dict[str, List[Dict[str, object]]]]] = {}  # keyed by active Dropbox folder
+_CASHFLOW_CACHE_LOCK = threading.Lock()
+
+
 def _load_cashflows_from_dropbox(active_folder: str) -> Dict[str, List[Dict[str, object]]]:
+    folder_key = str(active_folder or "").strip()
+    if folder_key:
+        now = time.time()
+        with _CASHFLOW_CACHE_LOCK:
+            cached = _CASHFLOW_CACHE.get(folder_key)
+        if cached and (now - cached[0] < _CASHFLOW_CACHE_TTL_SECONDS):
+            return cached[1]
+
     out: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+
+    def _cache_and_return() -> Dict[str, List[Dict[str, object]]]:
+        # Cache successful, empty, and error fallbacks to avoid retry storms during Dropbox issues.
+        payload: Dict[str, List[Dict[str, object]]] = dict(out)
+        if folder_key:
+            with _CASHFLOW_CACHE_LOCK:
+                _CASHFLOW_CACHE[folder_key] = (time.time(), payload)
+        return payload
+
     cashflow_path = _join_dropbox_path(active_folder, "account_cashflows.xlsx")
     try:
         payload = download_bytes(cashflow_path)
     except Exception:
-        return out
+        return _cache_and_return()
     bio = io.BytesIO(payload)
     try:
         df = pd.read_excel(bio, sheet_name="Cashflows")
     except Exception:
-        return out
+        return _cache_and_return()
     if df is None or df.empty:
-        return out
+        return _cache_and_return()
     df.columns = [str(c) for c in df.columns]
     acct_col = _first_present(df, ["account"])
     date_col = _first_present(df, ["date"])
@@ -1250,7 +1273,7 @@ def _load_cashflows_from_dropbox(active_folder: str) -> Dict[str, List[Dict[str,
     ccy_col = _first_present(df, ["currency"])
     reason_col = _first_present(df, ["reason"])
     if not acct_col or not date_col or not bal_col:
-        return out
+        return _cache_and_return()
 
     for _, row in df.iterrows():
         account = _safe_str_from_row(row, acct_col)
@@ -1280,7 +1303,7 @@ def _load_cashflows_from_dropbox(active_folder: str) -> Dict[str, List[Dict[str,
 
     for account_key in list(out.keys()):
         out[account_key] = sorted(out[account_key], key=lambda x: str(x.get("date") or ""))
-    return out
+    return _cache_and_return()
 
 
 def _latest_balances_from_cashflows(active_folder: str) -> List[Dict[str, object]]:
