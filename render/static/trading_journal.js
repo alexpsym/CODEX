@@ -466,12 +466,28 @@
 
       setLoading(15, 'Fetching journal…');
       let journal = await fetchJson(`/api/trading-journal${filter ? `?filter=${encodeURIComponent(filter)}` : ''}`);
-      if ((!journal.items || !journal.items.length) && !filter) {
-        setLoading(20, 'Syncing from Dropbox…');
-        await fetchJson('/api/trading-journal/sync', { method: 'POST' });
-        await waitForSync();
-        setLoading(70, 'Fetching journal…');
-        journal = await fetchJson('/api/trading-journal');
+
+      const hasItems = Array.isArray(journal?.items) && journal.items.length > 0;
+      if (!hasItems) {
+        if (filter) {
+          // If a filter is set (often persisted in localStorage) and the journal file is empty after a deploy,
+          // do a cheap unfiltered check before deciding to sync.
+          const base = await fetchJson('/api/trading-journal');
+          const baseHasItems = Array.isArray(base?.items) && base.items.length > 0;
+          if (!baseHasItems) {
+            setLoading(20, 'Syncing from Dropbox…');
+            await fetchJson('/api/trading-journal/sync', { method: 'POST' });
+            await waitForSync();
+            setLoading(70, 'Fetching journal…');
+            journal = await fetchJson(`/api/trading-journal?filter=${encodeURIComponent(filter)}`);
+          }
+        } else {
+          setLoading(20, 'Syncing from Dropbox…');
+          await fetchJson('/api/trading-journal/sync', { method: 'POST' });
+          await waitForSync();
+          setLoading(70, 'Fetching journal…');
+          journal = await fetchJson('/api/trading-journal');
+        }
       }
 
       setLoading(85, 'Fetching balances…');

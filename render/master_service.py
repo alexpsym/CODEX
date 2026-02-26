@@ -1389,6 +1389,27 @@ def _import_trading_journal_from_dropbox_excel(
     except Exception:
         cashflow_template_created = False
 
+    # Refresh entries after possibly creating the cashflow template.
+    # Exclude the cashflow ledger file itself from workbook imports.
+    used_recursive_fallback = False
+    try:
+        refreshed = list_excel_files(active_folder, recursive=TRADING_JOURNAL_DROPBOX_RECURSIVE)
+        if (not refreshed) and (not TRADING_JOURNAL_DROPBOX_RECURSIVE):
+            # If the user keeps workbooks in subfolders, do a one-shot recursive scan.
+            refreshed = list_excel_files(active_folder, recursive=True)
+            used_recursive_fallback = bool(refreshed)
+        entries = refreshed if isinstance(refreshed, list) else entries
+    except Exception:
+        pass
+    entries = [
+        e
+        for e in (entries or [])
+        if str((e or {}).get("name") or "").strip().lower() != "account_cashflows.xlsx"
+    ]
+
+    existing_rows = _get_trading_journal_rows()
+    existing_count = len(existing_rows)
+
     workbook_count = 0
     rows: List[Dict[str, object]] = []
     balances: List[Dict[str, object]] = []
@@ -1397,6 +1418,38 @@ def _import_trading_journal_from_dropbox_excel(
     total_files = len(entries)
     if progress_cb:
         progress_cb(10, f"Found {total_files} workbook(s)…")
+
+    if total_files == 0:
+        msg = (
+            f"No Excel workbooks found in Dropbox folder {active_folder!r} "
+            f"(configured {configured!r})."
+        )
+        # Don't wipe an existing journal just because Dropbox is empty / misconfigured.
+        _save_json_file(
+            TRADING_JOURNAL_STATE_PATH,
+            {
+                "updated_at": _utc_now_iso(),
+                "excel_account_balances": balances,
+                "source_folder": active_folder,
+                "configured_folder": configured,
+                "cashflow_template_created": cashflow_template_created,
+                "workbooks_seen": 0,
+                "used_recursive_fallback": used_recursive_fallback,
+                "errors": [{"file": "", "path": active_folder, "error": msg}],
+            },
+        )
+        return {
+            "ok": False,
+            "message": msg,
+            "source_folder": active_folder,
+            "configured_folder": configured,
+            "cashflow_template_created": cashflow_template_created,
+            "workbooks_seen": 0,
+            "rows_imported": 0,
+            "balances_found": 0,
+            "used_recursive_fallback": used_recursive_fallback,
+            "errors": [{"file": "", "path": active_folder, "error": msg}],
+        }
 
     for entry_index, entry in enumerate(entries, start=1):
         name = str(entry.get("name") or "")
@@ -1426,7 +1479,24 @@ def _import_trading_journal_from_dropbox_excel(
 
     if progress_cb:
         progress_cb(95, "Finalising…")
-    _set_trading_journal_rows(final_rows)
+
+    if (not final_rows) and existing_count:
+        # Keep prior data if the import produced no rows (common when folder is wrong or parsing failed).
+        msg = "Imported 0 rows; keeping existing journal data."
+        errors.append({"file": "", "path": active_folder, "error": msg})
+    else:
+        _set_trading_journal_rows(final_rows)
+
+    ok_flag = bool(final_rows) or bool(balances)
+    message = (
+        "Done"
+        if ok_flag
+        else (
+            "No trade rows imported from Excel workbooks. "
+            "Check your TRADING_JOURNAL_DROPBOX_FOLDER and ensure your journal workbooks (xlsx/xlsm/xls) are inside it."
+        )
+    )
+
     _save_json_file(
         TRADING_JOURNAL_STATE_PATH,
         {
@@ -1436,18 +1506,21 @@ def _import_trading_journal_from_dropbox_excel(
             "configured_folder": configured,
             "cashflow_template_created": cashflow_template_created,
             "workbooks_seen": workbook_count,
+            "used_recursive_fallback": used_recursive_fallback,
             "errors": errors,
         },
     )
 
     return {
-        "ok": True,
+        "ok": ok_flag,
+        "message": message,
         "source_folder": active_folder,
         "configured_folder": configured,
         "cashflow_template_created": cashflow_template_created,
         "workbooks_seen": workbook_count,
         "rows_imported": len(final_rows),
         "balances_found": len(balances),
+        "used_recursive_fallback": used_recursive_fallback,
         "errors": errors,
     }
 def _get_excel_account_balances() -> List[Dict[str, object]]:
@@ -7633,8 +7706,16 @@ app.mount("/static", StaticFiles(directory=BASE_DIR / "render" / "static"), name
 @app.get("/api/trading-journal")
 async def trading_journal_items(filter: str = "") -> JSONResponse:
     items = _get_trading_journal_rows()
-    query = (filter or "").strip().lower()
-    if query:
+
+    def _norm_search_text(value: object) -> str:
+        text = str(value or "").lower()
+        text = text.replace("_", " ").replace("-", " ")
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
+
+    query = _norm_search_text((filter or "").strip())
+    tokens = [t for t in query.split(" ") if t]
+    if tokens:
 
         def match(row: Dict[str, object]) -> bool:
             searchable = [
@@ -7655,8 +7736,8 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
             metrics = row.get("metrics")
             if isinstance(metrics, dict):
                 searchable.extend(metrics.values())
-            hay = " ".join(str(x or "") for x in searchable).lower()
-            return query in hay
+            hay = _norm_search_text(" ".join(str(x or "") for x in searchable))
+            return all(tok in hay for tok in tokens)
 
         items = [r for r in items if match(r)]
 
@@ -7807,12 +7888,14 @@ async def _run_trading_journal_sync_job() -> None:
 
     try:
         result = await asyncio.to_thread(_import_trading_journal_from_dropbox_excel, progress_cb=_cb)
+        ok_flag = bool(result.get("ok", True)) if isinstance(result, dict) else True
+        msg = "Done" if ok_flag else str((result or {}).get("message") or (result or {}).get("error") or "Failed")
         _set_trading_journal_sync_state(
             running=False,
             progress=100,
-            message="Done",
-            ok=True,
-            error=None,
+            message=msg,
+            ok=ok_flag,
+            error=None if ok_flag else msg,
             result=result,
             finished_at=_utc_now_iso(),
         )
