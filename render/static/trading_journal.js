@@ -5,6 +5,19 @@
   const empty = q('#tj-empty');
   const status = q('#tj-status');
   const filterInput = q('#tj-filter');
+  const loading = q('#tj-loading');
+  const loadingText = q('#tj-loading-text');
+  const loadingBar = q('#tj-loading-bar');
+  const loadingPct = q('#tj-loading-pct');
+
+  const setLoading = (pct, msg) => {
+    if (loadingText) loadingText.textContent = msg || '';
+    const p = Math.max(0, Math.min(100, Number(pct) || 0));
+    if (loadingBar) loadingBar.style.width = `${p}%`;
+    if (loadingPct) loadingPct.textContent = `${Math.round(p)}%`;
+    if (loading) loading.style.display = 'flex';
+  };
+  const hideLoading = () => { if (loading) loading.style.display = 'none'; };
 
   let activeFlags = new Set();
   let autoRefreshTimer = null;
@@ -16,6 +29,8 @@
     rows: [],
     sortKey: 'close_time',
     sortDir: localStorage.getItem('tj.sortDir') || 'desc',
+    instSortKey: localStorage.getItem('tj.instSortKey') || 'total_trades',
+    instSortDir: localStorage.getItem('tj.instSortDir') || 'desc',
     stats: null,
     view: localStorage.getItem('tj.view') || 'trades',
   };
@@ -51,10 +66,12 @@
     const d = Math.floor(total / 86400);
     const h = Math.floor((total % 86400) / 3600);
     const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
     const parts = [];
     if (d) parts.push(`${d}d`);
     if (h || d) parts.push(`${h}h`);
-    parts.push(`${m}m`);
+    if (m || h || d) parts.push(`${m}m`);
+    parts.push(`${s}s`);
     return parts.join(' ');
   };
 
@@ -65,6 +82,22 @@
     const text = await res.text();
     if (!res.ok) throw new Error(`${res.status} ${text}`);
     try { return JSON.parse(text); } catch { return {}; }
+  }
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  async function waitForSync() {
+    while (true) {
+      const st = await fetchJson('/api/trading-journal/sync/status');
+      const p = Number(st?.progress);
+      const msg = st?.message || 'Syncing…';
+      setLoading(Number.isFinite(p) ? p : 20, msg);
+      if (!st?.running) {
+        if (st?.ok === false) throw new Error(st?.error || st?.message || 'Sync failed');
+        return st;
+      }
+      await sleep(500);
+    }
   }
 
   function applyFlagFilters(rows) {
@@ -117,6 +150,8 @@
       localStorage.setItem('tj.filter', filterInput.value || '');
       localStorage.setItem('tj.sortKey', state.sortKey || '');
       localStorage.setItem('tj.sortDir', state.sortDir || 'desc');
+      localStorage.setItem('tj.instSortKey', state.instSortKey || '');
+      localStorage.setItem('tj.instSortDir', state.instSortDir || 'desc');
       localStorage.setItem('tj.flags', JSON.stringify(Array.from(activeFlags)));
       localStorage.setItem('tj.view', state.view || 'trades');
     } catch {}
@@ -124,6 +159,9 @@
 
   try {
     state.sortKey = localStorage.getItem('tj.sortKey') || state.sortKey;
+    state.sortDir = localStorage.getItem('tj.sortDir') || state.sortDir;
+    state.instSortKey = localStorage.getItem('tj.instSortKey') || state.instSortKey;
+    state.instSortDir = localStorage.getItem('tj.instSortDir') || state.instSortDir;
     const savedFlags = JSON.parse(localStorage.getItem('tj.flags') || '[]');
     if (Array.isArray(savedFlags)) savedFlags.forEach((f) => activeFlags.add(String(f)));
   } catch {}
@@ -164,7 +202,44 @@
     const emptyInst = q('#tj-inst-empty');
     if (!body) return;
     body.innerHTML = '';
-    const list = Array.isArray(stats?.by_instrument) ? stats.by_instrument : [];
+    const listRaw = Array.isArray(stats?.by_instrument) ? stats.by_instrument : [];
+    const key = state.instSortKey || 'total_trades';
+    const dir = (state.instSortDir || 'desc') === 'asc' ? 1 : -1;
+
+    const pickNum = (item, fxKey, cryptoKey) => {
+      const isFx = String(item?.asset_class || '').toLowerCase() === 'fx';
+      const v = isFx ? item?.[fxKey] : item?.[cryptoKey];
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+
+    const getVal = (item) => {
+      if (key === 'symbol') return String(item?.symbol || '');
+      if (key === 'asset_class') return String(item?.asset_class || '');
+      if (key === 'total_trades') return Number.isFinite(Number(item?.total_trades)) ? Number(item.total_trades) : null;
+      if (key === 'wins') return Number.isFinite(Number(item?.wins)) ? Number(item.wins) : null;
+      if (key === 'losses') return Number.isFinite(Number(item?.losses)) ? Number(item.losses) : null;
+      if (key === 'break_even') return Number.isFinite(Number(item?.break_even)) ? Number(item.break_even) : null;
+      if (key === 'avg_sl_w') return pickNum(item, 'avg_sl_distance_pips_wins', 'avg_sl_distance_quote_wins');
+      if (key === 'avg_sl_l') return pickNum(item, 'avg_sl_distance_pips_losses', 'avg_sl_distance_quote_losses');
+      if (key === 'avg_tp_w') return pickNum(item, 'avg_tp_distance_pips_wins', 'avg_tp_distance_quote_wins');
+      if (key === 'avg_tp_l') return pickNum(item, 'avg_tp_distance_pips_losses', 'avg_tp_distance_quote_losses');
+      if (key === 'avg_duration') return Number.isFinite(Number(item?.avg_trade_duration_seconds)) ? Number(item.avg_trade_duration_seconds) : null;
+      return null;
+    };
+
+    const list = listRaw.slice().sort((a, b) => {
+      const av = getVal(a);
+      const bv = getVal(b);
+      const aNull = av === null || av === undefined || (typeof av === 'number' && !Number.isFinite(av));
+      const bNull = bv === null || bv === undefined || (typeof bv === 'number' && !Number.isFinite(bv));
+      if (aNull && bNull) return 0;
+      if (aNull) return 1;
+      if (bNull) return -1;
+
+      if (typeof av === 'number' && typeof bv === 'number') return dir * (av - bv);
+      return dir * String(av).localeCompare(String(bv));
+    });
     if (!list.length) {
       if (emptyInst) emptyInst.style.display = 'block';
       return;
@@ -322,7 +397,7 @@
       div.className = 'bal-card';
       div.innerHTML = `
         <div class="muted">${b.label || b.account || 'Account'}</div>
-        <div style="font-size:1.1rem;font-weight:600">${fmtNum(b.balance, 2)} ${b.currency || ''}</div>
+        <div style="font-size:1.0rem;font-weight:600">${fmtNum(b.balance, (() => { const c = String(b.currency || '').toUpperCase(); if (c === 'AUD' || c === 'USD') return 2; if (c === 'USDT') return 8; return 6; })())} ${b.currency || ''}</div>
         ${b.missing_balance ? `<div class="muted">Balance not found in workbook</div>` : ''}
       `;
       wrap.appendChild(div);
@@ -347,15 +422,15 @@
       ['Avg target', stats?.totals?.avg_take_profit],
       ['Avg profit %', stats?.totals?.avg_profit_pct],
       ['Avg R', stats?.totals?.avg_r_multiple],
-      ['Avg winner duration', fmtDuration(stats?.totals?.avg_winner_duration_seconds)],
-      ['Avg loser duration', fmtDuration(stats?.totals?.avg_loser_duration_seconds)],
+      ['Avg FX duration', fmtDuration(stats?.totals?.avg_fx_duration_seconds)],
+      ['Avg crypto duration', fmtDuration(stats?.totals?.avg_crypto_duration_seconds)],
       ['Most wins instrument', stats?.instrument_with_most_wins?.symbol || '—'],
       ['Most losses instrument', stats?.instrument_with_most_losses?.symbol || '—'],
     ];
     cards.forEach(([label, value]) => {
       const div = document.createElement('div');
       div.className = 'bal-card';
-      div.innerHTML = `<div class="muted">${label}</div><div style="font-size:1.05rem;font-weight:600">${typeof value === 'number' ? fmtNum(value, 6) : (value ?? '—')}</div>`;
+      div.innerHTML = `<div class="muted">${label}</div><div style="font-size:0.95rem;font-weight:600">${typeof value === 'number' ? fmtNum(value, 6) : (value ?? '—')}</div>`;
       wrap.appendChild(div);
     });
 
@@ -386,25 +461,35 @@
   async function load() {
     try {
       setStatus('Loading…');
+      setLoading(5, 'Loading…');
       const filter = (filterInput.value || '').trim();
 
+      setLoading(15, 'Fetching journal…');
       let journal = await fetchJson(`/api/trading-journal${filter ? `?filter=${encodeURIComponent(filter)}` : ''}`);
       if ((!journal.items || !journal.items.length) && !filter) {
+        setLoading(20, 'Syncing from Dropbox…');
         await fetchJson('/api/trading-journal/sync', { method: 'POST' });
+        await waitForSync();
+        setLoading(70, 'Fetching journal…');
         journal = await fetchJson('/api/trading-journal');
       }
 
+      setLoading(85, 'Fetching balances…');
       const balances = await fetchJson('/api/trading-journal/balances');
       state.rows = Array.isArray(journal.items) ? journal.items : [];
       state.stats = journal.stats || null;
 
       persistUiState();
+      setLoading(95, 'Rendering…');
       renderAll();
       renderBalances(Array.isArray(balances.items) ? balances.items : []);
       renderStats(state.stats);
       setStatus(`Updated ${new Date().toLocaleTimeString()}`);
+      setLoading(100, 'Done');
+      hideLoading();
     } catch (e) {
       console.error(e);
+      hideLoading();
       setStatus(`Load failed: ${e.message}`);
     }
   }
@@ -416,9 +501,12 @@
   q('#tj-sync-btn')?.addEventListener('click', async () => {
     try {
       setStatus('Syncing…');
+      setLoading(10, 'Syncing from Dropbox…');
       await fetchJson('/api/trading-journal/sync', { method: 'POST' });
+      await waitForSync();
       await load();
     } catch (e) {
+      hideLoading();
       setStatus(`Sync failed: ${e.message}`);
     }
   });
@@ -429,6 +517,18 @@
       if (!key) return;
       if (state.sortKey === key) state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
       else { state.sortKey = key; state.sortDir = 'asc'; }
+      persistUiState();
+      renderAll();
+    });
+  });
+
+
+  qa('#tj-inst-table thead th[data-sort]').forEach((th) => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.sort;
+      if (!key) return;
+      if (state.instSortKey === key) state.instSortDir = state.instSortDir === 'asc' ? 'desc' : 'asc';
+      else { state.instSortKey = key; state.instSortDir = 'desc'; }
       persistUiState();
       renderAll();
     });
