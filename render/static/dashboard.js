@@ -187,7 +187,7 @@
 
     const name = document.createElement('div');
     name.className = 'script-name';
-    name.textContent = script.name;
+    name.textContent = script.label || script.name;
 
     const dot = document.createElement('span');
     dot.className = `status-dot ${script.running ? 'running' : 'stopped'}`;
@@ -199,6 +199,10 @@
 
     btn.addEventListener('click', () => {
       const target = script.open_url || `/scripts/view/${encodeURIComponent(script.name)}`;
+      if (script.standalone || target === '/trading-journal') {
+        window.open(target, '_blank', 'noopener');
+        return;
+      }
       window.location.href = target;
     });
 
