@@ -26,7 +26,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Callable
 from urllib.parse import quote, unquote, urlparse
 from uuid import uuid4
 
-from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
@@ -4971,22 +4971,6 @@ async def _round_option_price_to_tick(
     return max(rounded, tick)
 
 
-def _format_decimal_value(value: float) -> str:
-    text = f"{value:.10f}"
-    if "." in text:
-        text = text.rstrip("0").rstrip(".")
-    return text
-
-
-def _parse_optional_float(value: object, field_name: str) -> Optional[float]:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"OANDA payload {field_name} must be numeric.") from exc
-
-
 def _get_oanda_config(account: Optional[str]) -> Dict[str, str]:
     acct = (account or "").strip().lower()
     if acct in ("demo", "practice"):
@@ -5687,6 +5671,53 @@ async def _cancel_bybit_order(
     )
 
 
+async def _close_bybit_position_market(
+    *,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+    category: str,
+    symbol: str,
+    side: str,
+    qty: object,
+    position_idx: Optional[int],
+    order_link_id: Optional[str],
+) -> Dict[str, object]:
+    """Close a Bybit position by submitting a reduce-only market order."""
+    side_norm = str(side or "").strip().lower()
+    if side_norm in {"buy", "long"}:
+        close_side = "Sell"
+    elif side_norm in {"sell", "short"}:
+        close_side = "Buy"
+    else:
+        raise ValueError(f"Unknown Bybit position side: {side}")
+
+    category_norm = str(category or "linear").strip().lower()
+    body: Dict[str, object] = {
+        "category": category_norm,
+        "symbol": symbol,
+        "side": close_side,
+        "orderType": "Market",
+        "qty": str(qty),
+        "reduceOnly": True,
+    }
+    if position_idx is not None:
+        body["positionIdx"] = int(position_idx)
+
+    if order_link_id:
+        body["orderLinkId"] = str(order_link_id).strip()
+    elif category_norm == "option":
+        body["orderLinkId"] = f"close-{uuid4().hex[:26]}"
+
+    return await _bybit_signed_post(
+        base_url=base_url,
+        api_key=api_key,
+        api_secret=api_secret,
+        path="/v5/order/create",
+        body=body,
+    )
+
+
 async def _monitor_bybit_limit_cancel(
     *,
     base_url: str,
@@ -5807,6 +5838,19 @@ async def _cancel_oanda_order(*, cfg: Dict[str, str], order_id: str, mode: str) 
         resp = await client.put(url, headers=headers)
     if resp.status_code >= 400:
         raise ValueError(f"OANDA cancel failed ({resp.status_code}): {resp.text}")
+
+
+async def _close_oanda_trade(*, cfg: Dict[str, str], trade_id: str, mode: str) -> None:
+    headers = {
+        "Authorization": f"Bearer {cfg['token']}",
+        "Content-Type": "application/json",
+    }
+    endpoint = f"/v3/accounts/{cfg['account_id']}/trades/{trade_id}/close"
+    url = f"{cfg['base_url'].rstrip('/')}{endpoint}"
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+        resp = await client.put(url, headers=headers, json={"units": "ALL"})
+    if resp.status_code >= 400:
+        raise ValueError(f"OANDA trade close failed ({resp.status_code}): {resp.text}")
 
 
 async def _monitor_oanda_limit_cancel(
@@ -7116,6 +7160,91 @@ async def list_open_orders() -> JSONResponse:
 
     items.extend(_load_pending_webhooks())
     return JSONResponse({"items": items, "errors": errors})
+
+
+@app.post("/api/open-orders/close")
+async def close_open_order(item: Dict[str, Any] = Body(...)) -> JSONResponse:
+    broker = str(item.get("broker", "")).strip().lower()
+    account = str(item.get("account", "live")).strip().lower()
+    category = str(item.get("category", "")).strip().lower()
+    instrument = str(item.get("instrument", "")).strip().upper()
+    item_type = str(item.get("type", "")).strip().lower()
+    item_id = str(item.get("id", "")).strip()
+
+    if not broker or not item_type or not item_id:
+        raise HTTPException(status_code=400, detail="Missing broker/type/id in request.")
+
+    action = "cancel" if item_type == "order" else "close"
+
+    try:
+        if broker == "bybit":
+            _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for(
+                "demo" if account in {"demo", "practice"} else "live"
+            )
+            if not api_key or not api_secret:
+                raise ValueError("Bybit API credentials are not configured.")
+
+            if action == "cancel":
+                if not instrument:
+                    raise ValueError("Bybit instrument is missing.")
+                await _cancel_bybit_order(
+                    base_url=base_url,
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    category=category or "linear",
+                    symbol=instrument,
+                    order_id=item_id,
+                )
+            else:
+                position_idx_raw = item.get("position_idx")
+                position_idx = None
+                if position_idx_raw is not None and str(position_idx_raw).strip() != "":
+                    try:
+                        position_idx = int(position_idx_raw)
+                    except (TypeError, ValueError):
+                        position_idx = None
+
+                if not instrument:
+                    raise ValueError("Bybit instrument is missing.")
+                qty = item.get("size")
+                if qty is None or str(qty).strip() == "" or str(qty).strip() in {"0", "0.0"}:
+                    raise ValueError("Bybit position size is missing.")
+                try:
+                    qty_num = float(qty)
+                    if qty_num <= 0:
+                        raise ValueError("Bybit position size must be > 0.")
+                    qty = _format_decimal_value(qty_num)
+                except (TypeError, ValueError):
+                    pass
+
+                await _close_bybit_position_market(
+                    base_url=base_url,
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    category=category or "linear",
+                    symbol=instrument,
+                    side=str(item.get("side", "")),
+                    qty=qty,
+                    position_idx=position_idx,
+                    order_link_id=str(item.get("order_link_id", "")).strip() or None,
+                )
+
+        elif broker == "oanda":
+            cfg = _get_oanda_config(account)
+            mode = account if account in {"demo", "practice"} else "live"
+            if action == "cancel":
+                await _cancel_oanda_order(cfg=cfg, order_id=item_id, mode=mode)
+            else:
+                await _close_oanda_trade(cfg=cfg, trade_id=item_id, mode=mode)
+        else:
+            raise ValueError(f"Unsupported broker: {broker}")
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return JSONResponse({"ok": True, "broker": broker, "action": action, "id": item_id})
 
 
 @app.post("/scripts/{script_name:path}/start")
