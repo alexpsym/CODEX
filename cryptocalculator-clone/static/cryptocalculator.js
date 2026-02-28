@@ -31,6 +31,256 @@ const priceModeNotes = getJsonData('priceModeNotes');
 const optionsMinQtyMap = getJsonData('optionsMinQtyMap');
 let optionsMinQtyTimer = null;
 
+const SYMBOL_SUFFIXES = ['USDT', 'USDC', 'USD', 'AUD', 'BTC', 'ETH'];
+const SPECS_HIDE_FIELDS = new Set([
+  'contractType',
+  'fundingHistory.fundingRate',
+  'fundingHistory.fundingRateTimestamp',
+  'indexPrice',
+  'leverageFilter',
+  'lotSizeFilter',
+  'markPrice',
+  'priceFilter',
+  'query',
+  'baseCoin',
+  'quoteCoin',
+  'source',
+  'status',
+  'scannerVolume24h',
+  '_units',
+]);
+const SPECS_FIELD_LABELS = {
+  resolved_symbol: 'resolved_symbol',
+  category: 'category',
+  lastPrice: 'lastPrice (price)',
+  fundingRate: 'fundingRate (%)',
+  nextFundingTime: 'nextFundingTime (Brisbane time)',
+  launchTime: 'launchTime (Brisbane time)',
+  openInterest: 'openInterest (contracts)',
+  openInterestValue: 'openInterestValue (USD)',
+  volume24h: 'volume24h (contracts/base units)',
+  turnover24h: 'turnover24h (USD)',
+  avg7dTurnoverUsd: 'avg7dVolume (USD)',
+};
+
+function normSymbol(value) {
+  return String(value || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+}
+
+function looksLikeFullSymbol(value) {
+  const s = normSymbol(value);
+  if (s.length < 6) {
+    return false;
+  }
+  return SYMBOL_SUFFIXES.some((x) => s.endsWith(x));
+}
+
+function setSymbolStatus(text) {
+  const el = document.getElementById('symbol_status');
+  if (el) {
+    el.textContent = text || '';
+  }
+}
+
+function isNumericLike(v) {
+  if (v === null || v === undefined) {
+    return false;
+  }
+  if (typeof v === 'number') {
+    return Number.isFinite(v);
+  }
+  if (typeof v !== 'string') {
+    return false;
+  }
+  const s = v.trim();
+  return s !== '' && /^-?\d+(\.\d+)?$/.test(s);
+}
+
+function formatTimestampBrisbane(value) {
+  if (!isNumericLike(value)) {
+    return null;
+  }
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
+    return null;
+  }
+  const ms = n < 1e12 ? n * 1000 : n;
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) {
+    return null;
+  }
+  return new Intl.DateTimeFormat('en-AU', {
+    timeZone: 'Australia/Brisbane',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(d) + ' (Brisbane)';
+}
+
+function compactNumber(n, decimals = 2) {
+  const num = Number(n);
+  if (!Number.isFinite(num)) {
+    return String(n ?? '—');
+  }
+  const abs = Math.abs(num);
+  if (abs >= 1e12) {
+    return `${(num / 1e12).toFixed(decimals).replace(/\.00$/, '')}T`;
+  }
+  if (abs >= 1e9) {
+    return `${(num / 1e9).toFixed(decimals).replace(/\.00$/, '')}B`;
+  }
+  if (abs >= 1e6) {
+    return `${(num / 1e6).toFixed(decimals).replace(/\.00$/, '')}M`;
+  }
+  if (abs >= 1e3) {
+    return `${(num / 1e3).toFixed(decimals).replace(/\.00$/, '')}K`;
+  }
+  return num.toFixed(decimals).replace(/\.00$/, '');
+}
+
+function formatPercentFromFraction(v, decimals = 4) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) {
+    return String(v ?? '—');
+  }
+  return `${(n * 100).toFixed(decimals).replace(/0+$/, '').replace(/\.$/, '')}%`;
+}
+
+function formatSpecValue(key, value) {
+  if (key === 'launchTime' || key === 'nextFundingTime' || /(time|timestamp)$/i.test(key)) {
+    const t = formatTimestampBrisbane(value);
+    if (t) {
+      return t;
+    }
+  }
+  if (key === 'fundingRate' || key.endsWith('.fundingRate')) {
+    return formatPercentFromFraction(value);
+  }
+  if (/^(turnover24h|openInterestValue|avg7dTurnoverUsd)$/i.test(key)) {
+    return `$${compactNumber(value)}`;
+  }
+  if (/^(volume24h|openInterest)$/i.test(key)) {
+    return compactNumber(value);
+  }
+  if (typeof value === 'object' && value !== null) {
+    return JSON.stringify(value);
+  }
+  return String(value ?? '—');
+}
+
+function renderEmbeddedSpecs(specs) {
+  const rows = document.getElementById('embedded_specs_rows');
+  if (!rows) {
+    return;
+  }
+  rows.innerHTML = '';
+  const entries = Object.entries(specs || {}).sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+  for (const [key, value] of entries) {
+    if (SPECS_HIDE_FIELDS.has(key)) {
+      continue;
+    }
+    const tr = document.createElement('tr');
+    const tdKey = document.createElement('td');
+    tdKey.textContent = SPECS_FIELD_LABELS[key] || key;
+    const tdVal = document.createElement('td');
+    tdVal.textContent = formatSpecValue(key, value);
+    tr.appendChild(tdKey);
+    tr.appendChild(tdVal);
+    rows.appendChild(tr);
+  }
+}
+
+function setEmbeddedSpecsStatus(text) {
+  const el = document.getElementById('embedded_specs_status');
+  if (el) {
+    el.textContent = text || '';
+  }
+}
+
+async function resolveSymbol(force = false) {
+  const symbolEl = document.getElementById('symbol');
+  const tradeTypeEl = document.getElementById('trade_type');
+  if (!symbolEl) {
+    return null;
+  }
+  const tradeType = (tradeTypeEl ? tradeTypeEl.value : '').toLowerCase();
+  if (tradeType === 'options' || tradeType === 'trendline_options') {
+    return null;
+  }
+
+  const raw = String(symbolEl.value || '').trim();
+  const normalized = normSymbol(raw);
+  if (!normalized) {
+    setSymbolStatus('');
+    return null;
+  }
+  symbolEl.value = normalized;
+  if (!force && looksLikeFullSymbol(normalized)) {
+    setSymbolStatus('');
+    return normalized;
+  }
+
+  const priceSourceEl = document.getElementById('price_source');
+  const priceSource = priceSourceEl ? String(priceSourceEl.value || '').trim() : '';
+  setSymbolStatus('Resolving...');
+  try {
+    const url = buildAppUrl(`/api/resolve-symbol?symbol=${encodeURIComponent(normalized)}&price_source=${encodeURIComponent(priceSource)}`);
+    const resp = await fetch(url, { cache: 'no-store' });
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok) {
+      setSymbolStatus((data && data.detail) ? String(data.detail) : 'No match');
+      return null;
+    }
+    const resolved = normSymbol(data && data.resolved_symbol);
+    if (resolved) {
+      symbolEl.value = resolved;
+      setSymbolStatus(resolved === normalized ? '' : `→ ${resolved}`);
+      return resolved;
+    }
+    setSymbolStatus('No match');
+    return null;
+  } catch {
+    setSymbolStatus('Resolve failed');
+    return null;
+  }
+}
+
+async function loadEmbeddedSpecs() {
+  const symbolEl = document.getElementById('symbol');
+  const panel = document.getElementById('embedded_specs');
+  if (!symbolEl || !panel) {
+    return;
+  }
+  const resolved = await resolveSymbol(true);
+  const q = normSymbol(resolved || symbolEl.value);
+  if (!q) {
+    return;
+  }
+
+  panel.style.display = 'block';
+  setEmbeddedSpecsStatus('Loading...');
+  try {
+    // instrument specs endpoint is served by the main dashboard at site-root.
+    // Do NOT prefix with appRoot (otherwise it becomes /<script>/api/instrument-specs -> 404).
+    const resp = await fetch(`/api/instrument-specs?query=${encodeURIComponent(q)}`, { cache: 'no-store' });
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok) {
+      setEmbeddedSpecsStatus((data && data.detail) ? String(data.detail) : 'Lookup failed');
+      renderEmbeddedSpecs({});
+      return;
+    }
+    setEmbeddedSpecsStatus('');
+    renderEmbeddedSpecs(data);
+  } catch {
+    setEmbeddedSpecsStatus('Lookup failed');
+    renderEmbeddedSpecs({});
+  }
+}
+
 function copyText(text, statusId) {
   const status = document.getElementById(statusId);
   const done = () => {
@@ -359,5 +609,44 @@ document.addEventListener('DOMContentLoaded', () => {
     updateExecuteButtons();
   } catch (err) {
     console.warn('Failed to update execute buttons', err);
+  }
+
+  const symbolEl = document.getElementById('symbol');
+  if (symbolEl) {
+    symbolEl.addEventListener('blur', () => {
+      resolveSymbol(false);
+    });
+  }
+
+  const specsBtn = document.getElementById('symbol_specs_btn');
+  if (specsBtn) {
+    specsBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      loadEmbeddedSpecs();
+    });
+  }
+
+  const form = document.querySelector('form');
+  let submitInFlight = false;
+  if (form) {
+    form.addEventListener('submit', async (e) => {
+      if (submitInFlight) {
+        return;
+      }
+      const tradeTypeEl = document.getElementById('trade_type');
+      const tradeType = (tradeTypeEl ? tradeTypeEl.value : '').toLowerCase();
+      if (tradeType === 'options' || tradeType === 'trendline_options') {
+        return;
+      }
+      e.preventDefault();
+      submitInFlight = true;
+      try {
+        await resolveSymbol(true);
+      } finally {
+        submitInFlight = false;
+      }
+      form.submit();
+    });
   }
 });
