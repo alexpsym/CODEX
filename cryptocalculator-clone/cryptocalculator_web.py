@@ -286,9 +286,9 @@ FORM_HTML = """
   <style>
     body {background:black; color:white; font-family:Arial, sans-serif;}
     input, select, button {margin:4px 0;}
-    .container {display:flex; align-items:flex-start;}
-    .form {margin-right:20px;}
-    .result {margin-left:20px;}
+    .container {display:flex; align-items:flex-start; gap:20px;}
+    .form {flex:0 0 520px; max-width:520px;}
+    .result {flex:1 1 640px; max-width:980px;}
     .copy-row {display:flex; gap:8px; align-items:center; margin:6px 0;}
     .copy-row button {cursor:pointer;}
     .copy-status {font-size:12px; color:#9ca3af;}
@@ -304,10 +304,11 @@ FORM_HTML = """
     .min-note {font-size:14px; color:#e2e8f0;}
     .symbol-row {display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:4px 0 10px;}
     .symbol-row input {min-width: 180px;}
-    .specs-panel {margin-top: 12px;}
-    .table-wrap { overflow-x: auto; border-radius: 12px; border: 1px solid #1f2937; background: #0b1220; }
-    .specs-table { width: 100%; border-collapse: collapse; min-width: 520px; }
-    .specs-table th, .specs-table td { text-align:left; padding:0.55rem 0.65rem; border-bottom:1px solid #1f2937; font-size:0.9rem; }
+    .specs-panel {margin-top: 12px; max-width:980px;}
+    .table-wrap { overflow:auto; max-height:70vh; border-radius: 12px; border: 1px solid #1f2937; background: #0b1220; }
+    .specs-table { width: 100%; border-collapse: collapse; min-width: 480px; }
+    .specs-table th, .specs-table td { text-align:left; padding:0.55rem 0.65rem; border-bottom:1px solid #1f2937; font-size:0.9rem; vertical-align:top; }
+    .specs-table td { white-space: normal; word-break: break-word; }
     .specs-table th { background:#0f172a; color:#cbd5e1; position:sticky; top:0; z-index:1; }
   </style>
 </head>

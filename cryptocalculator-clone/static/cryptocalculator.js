@@ -32,6 +32,19 @@ const optionsMinQtyMap = getJsonData('optionsMinQtyMap');
 let optionsMinQtyTimer = null;
 
 const SYMBOL_SUFFIXES = ['USDT', 'USDC', 'USD', 'AUD', 'BTC', 'ETH'];
+const SPECS_PRIMARY_KEYS = [
+  'resolved_symbol',
+  'category',
+  'lastPrice',
+  'fundingRate',
+  'nextFundingTime',
+  'openInterest',
+  'openInterestValue',
+  'volume24h',
+  'turnover24h',
+  'avg7dTurnoverUsd',
+  'launchTime',
+];
 const SPECS_HIDE_FIELDS = new Set([
   'contractType',
   'fundingHistory.fundingRate',
@@ -178,8 +191,35 @@ function renderEmbeddedSpecs(specs) {
     return;
   }
   rows.innerHTML = '';
-  const entries = Object.entries(specs || {}).sort((a, b) => String(a[0]).localeCompare(String(b[0])));
-  for (const [key, value] of entries) {
+
+  const obj = (specs && typeof specs === 'object') ? specs : {};
+  const source = String(obj.source || '');
+
+  const keys = [];
+  for (const key of SPECS_PRIMARY_KEYS) {
+    if (obj[key] !== null && obj[key] !== undefined) {
+      keys.push(key);
+    }
+  }
+  if (!keys.length) {
+    for (const [k, v] of Object.entries(obj)) {
+      if (SPECS_HIDE_FIELDS.has(k)) {
+        continue;
+      }
+      if (typeof v === 'object' && v !== null) {
+        continue;
+      }
+      keys.push(k);
+    }
+    keys.sort((a, b) => String(a).localeCompare(String(b)));
+  }
+
+  if (source && source !== 'bybit') {
+    setEmbeddedSpecsStatus(`Source: ${source} (forced to Bybit next load)`);
+  }
+
+  for (const key of keys) {
+    const value = obj[key];
     if (SPECS_HIDE_FIELDS.has(key)) {
       continue;
     }
@@ -266,7 +306,8 @@ async function loadEmbeddedSpecs() {
   try {
     // instrument specs endpoint is served by the main dashboard at site-root.
     // Do NOT prefix with appRoot (otherwise it becomes /<script>/api/instrument-specs -> 404).
-    const resp = await fetch(`/api/instrument-specs?query=${encodeURIComponent(q)}`, { cache: 'no-store' });
+    // Force Bybit so BTC* doesn't resolve to OANDA crypto CFD specs (financing fields).
+    const resp = await fetch(`/api/instrument-specs?query=${encodeURIComponent(q)}&prefer=bybit`, { cache: 'no-store' });
     const data = await resp.json().catch(() => null);
     if (!resp.ok) {
       setEmbeddedSpecsStatus((data && data.detail) ? String(data.detail) : 'Lookup failed');
