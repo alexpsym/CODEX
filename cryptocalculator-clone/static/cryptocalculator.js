@@ -264,7 +264,9 @@ async function loadEmbeddedSpecs() {
   panel.style.display = 'block';
   setEmbeddedSpecsStatus('Loading...');
   try {
-    const resp = await fetch(buildAppUrl(`/api/instrument-specs?query=${encodeURIComponent(q)}`), { cache: 'no-store' });
+    // instrument specs endpoint is served by the main dashboard at site-root.
+    // Do NOT prefix with appRoot (otherwise it becomes /<script>/api/instrument-specs -> 404).
+    const resp = await fetch(`/api/instrument-specs?query=${encodeURIComponent(q)}`, { cache: 'no-store' });
     const data = await resp.json().catch(() => null);
     if (!resp.ok) {
       setEmbeddedSpecsStatus((data && data.detail) ? String(data.detail) : 'Lookup failed');
