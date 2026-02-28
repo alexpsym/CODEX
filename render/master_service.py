@@ -1993,12 +1993,6 @@ def _encoded_script_name(script_name: str) -> str:
 def script_open_url(script: ManagedScript) -> str:
     """Return the preferred UI URL for a script."""
 
-    if script.name == "oanda_history-clone":
-        return "/oanda-history"
-    if script.name == "bybithistory-clone":
-        return "/bybit-history"
-    if script.name == "coinspot-clone":
-        return "/coinspot-history"
     if script.name == "trading-journal":
         return "/trading-journal"
     if script.name in WEB_APPS:
@@ -3186,6 +3180,62 @@ SCRIPT_PAGE_TEMPLATE = """<!DOCTYPE html>
         <iframe id=\"app-frame\" title=\"Script UI\"></iframe>
     </div>
     <script src=\"/static/script_page.js\"></script>
+</body>
+</html>"""
+
+PAYSLIP_AUDIT_PAGE_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Payslip Audit</title>
+    <style>
+        :root { color-scheme: light dark; }
+        body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
+        h1 { margin: 0 0 0.5rem; }
+        .meta { color: #94a3b8; margin: 0.5rem 0 1rem; line-height: 1.5; }
+        .nav-bar { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+        .secondary { padding: 0.55rem 0.9rem; border-radius: 10px; border: none; cursor: pointer; font-weight: 800; background: #1f2937; color: #cbd5e1; text-decoration: none; display: inline-block; }
+        .start { padding: 0.55rem 0.9rem; border-radius: 10px; border: none; cursor: pointer; font-weight: 900; background: #22c55e; color: #052e12; }
+        .panel { background: #111827; border: 1px solid #1f2937; border-radius: 16px; padding: 1.25rem; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); max-width: 980px; }
+        #drop-zone { margin-top: 0.75rem; border: 2px dashed #334155; border-radius: 14px; padding: 1.5rem; text-align: center; background: #0a0f1b; }
+        #drop-zone.dragover { border-color: #60a5fa; background: #0b1a33; }
+        .actions { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-top: 1rem; }
+        #file-list { margin: 0.75rem 0 0; padding-left: 1.1rem; color: #cbd5e1; }
+        #log { margin-top: 1rem; background: #0a0f1b; border: 1px solid #1f2937; border-radius: 12px; padding: 0.9rem; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 160px; }
+    </style>
+</head>
+<body>
+    <div class="nav-bar">
+        <a class="secondary" href="/">Home</a>
+        <a class="secondary" href="/scripts/view/payslip_audit">Reload</a>
+    </div>
+
+    <div class="panel">
+        <h1>Payslip Audit</h1>
+        <p class="meta">Upload exactly 1 payslip PDF and 1+ timesheet screenshots (JPG/PNG). The report downloads automatically after processing.</p>
+
+        <div id="drop-zone">Drop files here</div>
+        <input id="file-input" type="file" multiple accept=".pdf,image/*" style="display:none" />
+
+        <div class="actions">
+            <button class="secondary" id="pick-btn" type="button">Pick files</button>
+            <button class="secondary" id="clear-btn" type="button">Clear</button>
+            <button class="start" id="upload-btn" type="button">Upload & Start Audit</button>
+        </div>
+
+        <p class="meta" id="status"></p>
+        <ul id="file-list"></ul>
+        <pre id="log">Awaiting upload...</pre>
+    </div>
+
+    <script>
+        window.PAYSLIP_AUDIT_CONFIG = {
+            uploadEndpoint: "/api/payslip-audit/run",
+            reportBase: "/api/payslip-audit/report/",
+        };
+    </script>
+    <script src="/static/payslip_audit.js"></script>
 </body>
 </html>"""
 
@@ -6132,6 +6182,53 @@ async def fetch_bybit_balance(
 @app.get("/", response_class=HTMLResponse)
 async def home_page() -> str:
     return HTML_TEMPLATE
+
+
+@app.get("/scripts/view/{script_name:path}", response_class=HTMLResponse)
+async def script_view_page(script_name: str) -> str:
+    try:
+        script = script_manager.get(script_name)
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            raise HTTPException(status_code=404, detail="Script not found") from exc
+        raise
+
+    if script.name == "payslip_audit":
+        return PAYSLIP_AUDIT_PAGE_TEMPLATE
+
+    return (
+        SCRIPT_PAGE_TEMPLATE.replace("{script_name}", html.escape(script.name))
+        .replace("{has_ui}", "true" if script.name in WEB_APPS else "false")
+        .replace("{log_url}", f"/logs/view/{_encoded_script_name(script.name)}")
+    )
+
+
+@app.get("/payslip-audit")
+@app.get("/payslip-audit/")
+async def legacy_payslip_audit(request: Request) -> Response:
+    suffix = f"?{request.url.query}" if request.url.query else ""
+    return RedirectResponse(url=f"/scripts/view/payslip_audit{suffix}", status_code=307)
+
+
+@app.get("/bybit-history")
+@app.get("/bybit-history/")
+async def legacy_bybit_history(request: Request) -> Response:
+    suffix = f"?{request.url.query}" if request.url.query else ""
+    return RedirectResponse(url=f"/apps/bybithistory-clone/{suffix}", status_code=307)
+
+
+@app.get("/oanda-history")
+@app.get("/oanda-history/")
+async def legacy_oanda_history(request: Request) -> Response:
+    suffix = f"?{request.url.query}" if request.url.query else ""
+    return RedirectResponse(url=f"/scripts/view/oanda_history-clone{suffix}", status_code=307)
+
+
+@app.get("/coinspot-history")
+@app.get("/coinspot-history/")
+async def legacy_coinspot_history(request: Request) -> Response:
+    suffix = f"?{request.url.query}" if request.url.query else ""
+    return RedirectResponse(url=f"/scripts/view/coinspot-clone{suffix}", status_code=307)
 
 
 @app.get("/trading-journal", response_class=HTMLResponse)
