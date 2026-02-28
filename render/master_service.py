@@ -123,6 +123,7 @@ WATCHLIST_PATH = BASE_DIR / "render" / "data" / "watchlist.json"
 TRADING_JOURNAL_PATH = BASE_DIR / "render" / "data" / "trading_journal.json"
 TRADING_JOURNAL_STATE_PATH = BASE_DIR / "render" / "data" / "trading_journal_state.json"
 TRADING_JOURNAL_SYNC_STATE_PATH = BASE_DIR / "render" / "data" / "trading_journal_sync_state.json"
+TRADING_JOURNAL_IMPORT_CACHE_PATH = BASE_DIR / "render" / "data" / "trading_journal_import_cache.json"
 TRADING_JOURNAL_DROPBOX_FOLDER = os.getenv(
     "TRADING_JOURNAL_DROPBOX_FOLDER", "/master_control"
 ).strip()
@@ -1122,6 +1123,16 @@ def _get_trading_journal_rows() -> List[Dict[str, object]]:
 
 def _set_trading_journal_rows(rows: List[Dict[str, object]]) -> None:
     _save_json_file(TRADING_JOURNAL_PATH, {"items": rows, "updated_at": _utc_now_iso()})
+    _schedule_dropbox_upload_state_backup()
+
+
+def _load_trading_journal_import_cache() -> Dict[str, object]:
+    data = _load_json_file(TRADING_JOURNAL_IMPORT_CACHE_PATH, {})
+    return data if isinstance(data, dict) else {}
+
+
+def _save_trading_journal_import_cache(cache: Dict[str, object]) -> None:
+    _save_json_file(TRADING_JOURNAL_IMPORT_CACHE_PATH, cache)
 
 
 def _norm_col(name: object) -> str:
@@ -1818,9 +1829,14 @@ def _import_trading_journal_from_dropbox_excel(
     existing_count = len(existing_rows)
 
     workbook_count = 0
+    reused_count = 0
     rows: List[Dict[str, object]] = []
     balances: List[Dict[str, object]] = []
     errors: List[Dict[str, str]] = []
+    cache = _load_trading_journal_import_cache()
+    files_cache_raw = cache.get("files") if isinstance(cache, dict) else None
+    files_cache: Dict[str, Dict[str, object]] = files_cache_raw if isinstance(files_cache_raw, dict) else {}
+    next_files_cache: Dict[str, Dict[str, object]] = {}
 
     total_files = len(entries)
     if progress_cb:
@@ -1861,18 +1877,37 @@ def _import_trading_journal_from_dropbox_excel(
     for entry_index, entry in enumerate(entries, start=1):
         name = str(entry.get("name") or "")
         dbx_path = str(entry.get("path_lower") or entry.get("path_display") or "")
+        dbx_rev = str(entry.get("rev") or "")
         if not dbx_path:
             continue
         try:
             if progress_cb:
                 pct = 10 + int(80 * (entry_index / max(total_files, 1)))
                 progress_cb(pct, f"Importing {entry_index}/{total_files}: {name}")
-            payload = download_bytes(dbx_path)
-            parsed_rows, parsed_balance = _parse_excel_account_workbook(name, dbx_path, payload)
+
+            cached = files_cache.get(dbx_path) if dbx_rev else None
+            cached_rev = str(cached.get("rev") or "") if isinstance(cached, dict) else ""
+            if cached and dbx_rev and cached_rev == dbx_rev:
+                cached_rows = cached.get("rows")
+                cached_balance = cached.get("balance")
+                parsed_rows = cached_rows if isinstance(cached_rows, list) else []
+                parsed_balance = cached_balance if isinstance(cached_balance, dict) else None
+                reused_count += 1
+            else:
+                payload = download_bytes(dbx_path)
+                parsed_rows, parsed_balance = _parse_excel_account_workbook(name, dbx_path, payload)
+
             rows.extend(parsed_rows)
             if parsed_balance:
                 balances.append(parsed_balance)
             workbook_count += 1
+            next_files_cache[dbx_path] = {
+                "rev": dbx_rev,
+                "rows": parsed_rows,
+                "balance": parsed_balance,
+                "name": name,
+                "updated_at": _utc_now_iso(),
+            }
         except Exception as exc:
             errors.append({"file": name, "path": dbx_path, "error": str(exc)})
 
@@ -1927,10 +1962,19 @@ def _import_trading_journal_from_dropbox_excel(
             "configured_folder": configured,
             "cashflow_template_created": cashflow_template_created,
             "workbooks_seen": workbook_count,
+            "workbooks_reused": reused_count,
             "used_recursive_fallback": used_recursive_fallback,
             "errors": errors,
         },
     )
+    _save_trading_journal_import_cache(
+        {
+            "updated_at": _utc_now_iso(),
+            "source_folder": active_folder,
+            "files": next_files_cache,
+        }
+    )
+    _schedule_dropbox_upload_state_backup()
 
     return {
         "ok": ok_flag,
@@ -1939,6 +1983,7 @@ def _import_trading_journal_from_dropbox_excel(
         "configured_folder": configured,
         "cashflow_template_created": cashflow_template_created,
         "workbooks_seen": workbook_count,
+        "workbooks_reused": reused_count,
         "rows_imported": len(final_rows),
         "balances_found": len(balances),
         "used_recursive_fallback": used_recursive_fallback,
@@ -2059,6 +2104,9 @@ def _build_state_backup_payload() -> bytes:
         "alerts": alerts_payload,
         "watchlist": _get_watchlist(),
         "pending_webhooks": _load_pending_webhooks(),
+        "trading_journal": _load_json_file(TRADING_JOURNAL_PATH, {"items": []}),
+        "trading_journal_state": _load_json_file(TRADING_JOURNAL_STATE_PATH, {}),
+        "trading_journal_import_cache": _load_json_file(TRADING_JOURNAL_IMPORT_CACHE_PATH, {}),
     }
     return json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
 
@@ -2110,6 +2158,18 @@ def _restore_alerts_payload(data: Dict[str, object]) -> Dict[str, object]:
     if "pending_webhooks" in data:
         pending_restored = _replace_pending_webhooks(data["pending_webhooks"])
 
+    journal_restored = 0
+    if "trading_journal" in data and isinstance(data["trading_journal"], (dict, list)):
+        _save_json_file(TRADING_JOURNAL_PATH, data["trading_journal"])
+        rows = _get_trading_journal_rows()
+        journal_restored = len(rows)
+
+    if "trading_journal_state" in data and isinstance(data["trading_journal_state"], dict):
+        _save_json_file(TRADING_JOURNAL_STATE_PATH, data["trading_journal_state"])
+
+    if "trading_journal_import_cache" in data and isinstance(data["trading_journal_import_cache"], dict):
+        _save_json_file(TRADING_JOURNAL_IMPORT_CACHE_PATH, data["trading_journal_import_cache"])
+
     bybit_restored = bybit_monitor.replace_custom_alerts(bybit_block["alerts"])
     oanda_restored = oanda_monitor.replace_custom_alerts(oanda_block["alerts"])
     _set_watchlist(watchlist_items)
@@ -2118,6 +2178,7 @@ def _restore_alerts_payload(data: Dict[str, object]) -> Dict[str, object]:
         "oanda_restored": len(oanda_restored),
         "watchlist_restored": len(watchlist_items),
         "pending_webhooks_restored": len(pending_restored),
+        "journal_rows_restored": journal_restored,
     }
 
 
@@ -2129,11 +2190,12 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
         data = json.loads(payload.decode("utf-8"))
         restored = _restore_alerts_payload(data)
         BYBIT_LOGGER.info(
-            "Dropbox restore complete: bybit=%s oanda=%s watchlist=%s pending=%s",
+            "Dropbox restore complete: bybit=%s oanda=%s watchlist=%s pending=%s journal_rows=%s",
             restored["bybit_restored"],
             restored["oanda_restored"],
             restored["watchlist_restored"],
             restored["pending_webhooks_restored"],
+            restored.get("journal_rows_restored", 0),
         )
     except FileNotFoundError:
         BYBIT_LOGGER.info("Dropbox restore skipped; no backup found at %s", DROPBOX_BACKUP_PATH)
