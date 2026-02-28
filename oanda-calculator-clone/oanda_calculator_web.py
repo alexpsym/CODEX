@@ -125,6 +125,33 @@ app = Flask(__name__)
 # downloaded later.
 last_trade_specs = None
 
+_OANDA_INSTRUMENT_CACHE_TTL_SECONDS = int(
+    os.getenv('OANDA_INSTRUMENT_CACHE_TTL_SECONDS', '3600')
+)
+_OANDA_INSTRUMENT_CACHE = {
+    'live': {'ts': 0.0, 'items': None},
+    'demo': {'ts': 0.0, 'items': None},
+}
+
+
+def _get_available_instruments_cached(account_mode: str) -> Optional[list[str]]:
+    mode = (account_mode or 'live').strip().lower()
+    if mode not in {'live', 'demo'}:
+        mode = 'live'
+    now = time.time()
+    entry = _OANDA_INSTRUMENT_CACHE.get(mode) or {}
+    ts = float(entry.get('ts') or 0.0)
+    items = entry.get('items')
+    if isinstance(items, list) and (now - ts) <= _OANDA_INSTRUMENT_CACHE_TTL_SECONDS:
+        return items
+    try:
+        LOGGER.info('OANDA_CALC_CALL get_available_instruments mode=%s', mode)
+        instruments = sorted(get_available_instruments(mode))
+    except Exception:
+        instruments = None
+    _OANDA_INSTRUMENT_CACHE[mode] = {'ts': now, 'items': instruments}
+    return instruments
+
 
 def _instrument_lookup_key(value: str) -> str:
     """Return a canonical lookup key for an instrument string."""
@@ -146,6 +173,21 @@ def _resolve_instrument(user_value: str, available: Optional[Iterable[str]]) -> 
         return match
     raise ValueError(f"Instrument {user_value} not available")
 
+
+@app.get('/api/resolve-instrument')
+def resolve_instrument_api():
+    raw = request.args.get('instrument', '')
+    account_mode = request.args.get('account_mode', 'live')
+    if not raw or not str(raw).strip():
+        return jsonify({'detail': 'instrument is required'}), 400
+
+    available = _get_available_instruments_cached(account_mode)
+    try:
+        resolved = _resolve_instrument(raw, available)
+    except Exception as exc:
+        return jsonify({'detail': str(exc), 'input': raw}), 404
+    return jsonify({'input': raw, 'resolved': resolved, 'account_mode': account_mode})
+
 FORM_HTML = """
 <!doctype html>
 <html>
@@ -154,9 +196,9 @@ FORM_HTML = """
 <style>
   body {background:black; color:white; font-family:Arial, sans-serif;}
   input, select, button {margin:4px 0;}
-  .container {display:flex; align-items:flex-start;}
-  .form {margin-right:20px;}
-  .result {margin-left:20px;}
+  .container {display:flex; align-items:flex-start; gap:20px;}
+  .form {flex:0 0 520px; max-width:520px;}
+  .result {flex:1 1 640px; max-width:980px;}
   .copy-row {display:flex; gap:8px; align-items:center; margin:6px 0;}
   .copy-row button {cursor:pointer;}
   .copy-status {font-size:12px; color:#9ca3af;}
@@ -168,6 +210,14 @@ FORM_HTML = """
   .button-group button.active {background:#2563eb; color:#fff; border-color:#60a5fa;}
   .danger-button {background:#b91c1c; color:#fff; border:1px solid #ef4444; font-weight:800;}
   .danger-note {color:#fca5a5; font-size:12px;}
+  .symbol-row {display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:4px 0 10px;}
+  .symbol-row input {min-width: 180px;}
+  .specs-panel {margin-top: 12px; max-width:980px;}
+  .table-wrap { overflow:auto; max-height:70vh; border-radius: 12px; border: 1px solid #1f2937; background: #0b1220; }
+  .specs-table { width: 100%; border-collapse: collapse; min-width: 480px; }
+  .specs-table th, .specs-table td { text-align:left; padding:0.55rem 0.65rem; border-bottom:1px solid #1f2937; font-size:0.9rem; vertical-align:top; }
+  .specs-table td { white-space: normal; word-break: break-word; }
+  .specs-table th { background:#0f172a; color:#cbd5e1; position:sticky; top:0; z-index:1; }
 </style>
 </head>
 <body data-app-root="{{ app_root }}">
@@ -182,9 +232,12 @@ FORM_HTML = """
           <button type="button" data-value="demo">Demo</button>
         </div>
         <input type="hidden" name="account_mode" id="account_mode" value="{{ account_mode }}">
-        <label>Instrument:
-          <input name="instrument" value="{{ instrument_input or '' }}" required>
-        </label><br>
+        <label>Instrument:</label>
+        <div class="symbol-row">
+          <input name="instrument" id="instrument" value="{{ instrument_input or '' }}" required autocomplete="off">
+          <button type="button" id="instrument_specs_btn">Specs</button>
+          <span class="copy-status" id="instrument_status"></span>
+        </div>
         <label>Side:</label>
         <div class="button-group" data-input="side">
           <button type="button" data-value="buy">Buy</button>
@@ -241,6 +294,16 @@ FORM_HTML = """
   </div>
   <div class="result">
     {% if error %}<p style="color: red;">{{ error }}</p>{% endif %}
+    <div id="embedded_specs" class="trade-section specs-panel hidden">
+      <h2>Instrument Specs</h2>
+      <div class="copy-status" id="embedded_specs_status"></div>
+      <div class="table-wrap">
+        <table class="specs-table">
+          <thead><tr><th>Field</th><th>Value</th></tr></thead>
+          <tbody id="embedded_specs_rows"></tbody>
+        </table>
+      </div>
+    </div>
     {% if alert_json %}
       <h2>Result</h2>
       <pre id="alert_json">{{ alert_json }}</pre>
@@ -318,13 +381,7 @@ def index():
     if request.method == "POST":
         try:
             instrument_input = request.form["instrument"]
-            try:
-                LOGGER.info(
-                    "OANDA_CALC_CALL get_available_instruments mode=%s", account_mode
-                )
-                available_instruments = sorted(get_available_instruments(account_mode))
-            except Exception:
-                available_instruments = None
+            available_instruments = _get_available_instruments_cached(account_mode)
             instrument = _resolve_instrument(instrument_input, available_instruments)
             instrument_input = instrument
             side = request.form["side"]

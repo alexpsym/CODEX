@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import socket
@@ -30,6 +31,8 @@ from cryptocalculator import (
     format_trade,
     get_balance_fetcher,
     get_execution_requirements,
+    BYBIT_INSTRUMENT_INFO_LINEAR,
+    BYBIT_INSTRUMENT_INFO_SPOT,
     BYBIT_LINEAR_URL,
     BYBIT_SPOT_URL,
 )
@@ -37,10 +40,182 @@ import options_trader
 
 app = Flask(__name__)
 
+_BYBIT_SYMBOL_CACHE_TTL_SECONDS = int(
+    os.getenv("BYBIT_SYMBOL_CACHE_TTL_SECONDS", "3600")
+)
+_BYBIT_SYMBOL_CACHE: Dict[str, Dict[str, object]] = {
+    "linear": {"ts": 0.0, "symbols": []},
+    "spot": {"ts": 0.0, "symbols": []},
+}
+
+
+def _norm_symbol(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "", (value or "")).upper()
+
+
+def _bybit_category_for_price_source(price_source: str) -> str:
+    meta = PRICE_SOURCES.get(price_source) or {}
+    trade_mode = str(meta.get("trade_mode") or "").lower()
+    return "spot" if trade_mode == "spot" else "linear"
+
+
+def _fetch_bybit_symbols(category: str) -> list[str]:
+    url = (
+        BYBIT_INSTRUMENT_INFO_SPOT
+        if category == "spot"
+        else BYBIT_INSTRUMENT_INFO_LINEAR
+    )
+    symbols: list[str] = []
+    cursor: Optional[str] = None
+    for _ in range(10):
+        params: Dict[str, object] = {"limit": 1000}
+        if cursor:
+            params["cursor"] = cursor
+        resp = requests.get(url, params=params, timeout=15)
+        resp.raise_for_status()
+        payload = resp.json() or {}
+        result = payload.get("result") or {}
+        items = result.get("list") or []
+        if isinstance(items, list):
+            for inst in items:
+                if not isinstance(inst, dict):
+                    continue
+                sym = inst.get("symbol")
+                if sym:
+                    symbols.append(str(sym).upper())
+        cursor = result.get("nextPageCursor")
+        if not cursor:
+            break
+    return sorted(set(symbols))
+
+
+def _get_bybit_symbols_cached(category: str) -> list[str]:
+    category = "spot" if category == "spot" else "linear"
+    now = time.time()
+    entry = _BYBIT_SYMBOL_CACHE.get(category)
+    if entry:
+        ts = float(entry.get("ts") or 0.0)
+        cached = entry.get("symbols")
+        if isinstance(cached, list) and (now - ts) <= _BYBIT_SYMBOL_CACHE_TTL_SECONDS:
+            return cached
+
+    try:
+        symbols = _fetch_bybit_symbols(category)
+    except Exception:
+        if entry and isinstance(entry.get("symbols"), list):
+            return entry["symbols"]  # type: ignore[return-value]
+        return []
+
+    _BYBIT_SYMBOL_CACHE[category] = {"ts": now, "symbols": symbols}
+    return symbols
+
+
+def _resolve_crypto_symbol(raw: str, price_source: str) -> Optional[Dict[str, object]]:
+    want = _norm_symbol(raw)
+    if not want:
+        return None
+
+    meta = PRICE_SOURCES.get(price_source) or {}
+    exchange = str(meta.get("exchange") or "").lower()
+    category = _bybit_category_for_price_source(price_source)
+
+    if exchange == "bybit":
+        symbols = _get_bybit_symbols_cached(category)
+        symbol_set = set(symbols)
+
+        if want in symbol_set:
+            return {
+                "input": raw,
+                "normalized": want,
+                "resolved_symbol": want,
+                "source": "bybit",
+            }
+
+        preferred_quotes = (
+            ["USDT", "USDC", "USD"]
+            if category != "spot"
+            else ["USDT", "USDC", "USD", "BTC", "ETH"]
+        )
+        for quote in preferred_quotes:
+            cand = want + quote
+            if cand in symbol_set:
+                return {
+                    "input": raw,
+                    "normalized": want,
+                    "resolved_symbol": cand,
+                    "source": "bybit",
+                }
+
+        starts = [s for s in symbols if s.startswith(want)]
+        if starts:
+            starts.sort(key=lambda s: (0 if s.endswith("USDT") else 1, len(s), s))
+            return {
+                "input": raw,
+                "normalized": want,
+                "resolved_symbol": starts[0],
+                "source": "bybit",
+                "candidates": starts[:10],
+            }
+
+        contains = [s for s in symbols if want in s]
+        if contains:
+            contains.sort(key=lambda s: (0 if s.endswith("USDT") else 1, len(s), s))
+            return {
+                "input": raw,
+                "normalized": want,
+                "resolved_symbol": contains[0],
+                "source": "bybit",
+                "candidates": contains[:10],
+            }
+        return None
+
+    if exchange == "coinspot":
+        if want.endswith(("USDT", "AUD", "USD", "BTC", "ETH")) and len(want) > 3:
+            return {
+                "input": raw,
+                "normalized": want,
+                "resolved_symbol": want,
+                "source": "coinspot",
+            }
+        return {
+            "input": raw,
+            "normalized": want,
+            "resolved_symbol": want + "USDT",
+            "source": "coinspot",
+        }
+
+    return {"input": raw, "normalized": want, "resolved_symbol": want}
+
 
 @app.get("/symbols/bybit")
 def bybit_symbols_placeholder():
     return jsonify({"symbols": [], "detail": "Symbol lookup is disabled."})
+
+
+@app.get("/api/resolve-symbol")
+def resolve_symbol_api():
+    raw = request.args.get("symbol", "")
+    price_source = (
+        request.args.get("price_source", DEFAULT_PRICE_SOURCE).strip().lower()
+        or DEFAULT_PRICE_SOURCE
+    )
+    if price_source not in PRICE_SOURCES:
+        price_source = DEFAULT_PRICE_SOURCE
+
+    resolved = _resolve_crypto_symbol(raw, price_source)
+    if not resolved or not resolved.get("resolved_symbol"):
+        return (
+            jsonify(
+                {
+                    "detail": f"No match for '{raw}'",
+                    "input": raw,
+                    "price_source": price_source,
+                }
+            ),
+            404,
+        )
+    resolved["price_source"] = price_source
+    return jsonify(resolved)
 
 PRICE_MODE_NOTES = {
     key: (
@@ -111,9 +286,9 @@ FORM_HTML = """
   <style>
     body {background:black; color:white; font-family:Arial, sans-serif;}
     input, select, button {margin:4px 0;}
-    .container {display:flex; align-items:flex-start;}
-    .form {margin-right:20px;}
-    .result {margin-left:20px;}
+    .container {display:flex; align-items:flex-start; gap:20px;}
+    .form {flex:0 0 520px; max-width:520px;}
+    .result {flex:1 1 640px; max-width:980px;}
     .copy-row {display:flex; gap:8px; align-items:center; margin:6px 0;}
     .copy-row button {cursor:pointer;}
     .copy-status {font-size:12px; color:#9ca3af;}
@@ -127,6 +302,14 @@ FORM_HTML = """
     .danger-note {color:#fca5a5; font-size:12px;}
     .qty-row {display:flex; align-items:center; gap:8px; flex-wrap:wrap;}
     .min-note {font-size:14px; color:#e2e8f0;}
+    .symbol-row {display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:4px 0 10px;}
+    .symbol-row input {min-width: 180px;}
+    .specs-panel {margin-top: 12px; max-width:980px;}
+    .table-wrap { overflow:auto; max-height:70vh; border-radius: 12px; border: 1px solid #1f2937; background: #0b1220; }
+    .specs-table { width: 100%; border-collapse: collapse; min-width: 480px; }
+    .specs-table th, .specs-table td { text-align:left; padding:0.55rem 0.65rem; border-bottom:1px solid #1f2937; font-size:0.9rem; vertical-align:top; }
+    .specs-table td { white-space: normal; word-break: break-word; }
+    .specs-table th { background:#0f172a; color:#cbd5e1; position:sticky; top:0; z-index:1; }
   </style>
 </head>
 <body data-app-root="{{ app_root }}">
@@ -153,7 +336,12 @@ FORM_HTML = """
         </div>
         <input type="hidden" name="account_mode" id="account_mode" value="{{ account_mode }}">
         <div id="crypto_section" class="trade-section">
-          <label>Symbol: <input name="symbol" id="symbol" value="{{ symbol }}"></label><br>
+          <label>Symbol:</label>
+          <div class="symbol-row">
+            <input name="symbol" id="symbol" value="{{ symbol }}" autocomplete="off">
+            <button type="button" id="symbol_specs_btn">Specs</button>
+            <span class="copy-status" id="symbol_status"></span>
+          </div>
           <label>Price Source:</label>
           <div class="button-group" data-input="price_source">
             {% for key, meta in price_source_options %}
@@ -346,6 +534,16 @@ FORM_HTML = """
           {% endfor %}
         </table>
       {% endif %}
+      <div id="embedded_specs" class="trade-section specs-panel" style="display:none;">
+        <h2>Instrument Specs</h2>
+        <div class="copy-status" id="embedded_specs_status"></div>
+        <div class="table-wrap">
+          <table class="specs-table">
+            <thead><tr><th>Field</th><th>Value</th></tr></thead>
+            <tbody id="embedded_specs_rows"></tbody>
+          </table>
+        </div>
+      </div>
     </div>
   </div>
   <footer>
@@ -509,6 +707,13 @@ def index():
     price_source = request.form.get("price_source", DEFAULT_PRICE_SOURCE).lower()
     if price_source not in PRICE_SOURCES:
         price_source = DEFAULT_PRICE_SOURCE
+
+    if symbol and not any(
+        symbol.endswith(sfx) for sfx in ("USDT", "USDC", "USD", "AUD", "BTC", "ETH")
+    ):
+        resolved = _resolve_crypto_symbol(symbol, price_source)
+        if resolved and resolved.get("resolved_symbol"):
+            symbol = str(resolved["resolved_symbol"]).upper()
 
     trade_mode = PRICE_SOURCES[price_source]["trade_mode"]
     account_mode = request.form.get("account_mode", "live").strip().lower()
