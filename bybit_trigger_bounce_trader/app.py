@@ -20,18 +20,26 @@ APP_BASE_PATH = os.getenv("APP_BASE_PATH", "")
 DEFAULT_CONFIG: Dict[str, str] = {
     "account_mode": "demo",
     "symbols": "BTCUSDT",
-    "strategies": "ema9_long,vwap_long",
+    # UI only exposes a single choice: EMA or VWAP.
+    # The trader still accepts legacy comma-separated strategies.
+    "strategy": "EMA",
     "category": "linear",
     "trigger_by": "LastPrice",
+    # Bybit V5 interval enum: 1/3/5/15/30/60/120/240/360/720/D/W/M
     "interval": "1",
     "poll_seconds": "2",
-    "kline_limit": "200",
     "ema_len": "9",
-    "vwap_len": "20",
+    "vwap_anchor": "session",  # session|week (UTC)
+    # Risk / sizing
+    "risk_mode": "fixed_qty",  # fixed_qty|percent
+    "risk_pct": "1",
+    "account_balance": "auto",  # auto|number
+    "account_type": "UNIFIED",
+    "account_asset": "USDT",
     "default_qty": "0.001",
     "qty_map": "{}",
-    "tp_pct": "0",
-    "sl_pct": "0",
+    "tp_ticks": "0",
+    "sl_ticks": "0",
     "min_amend_ticks": "1",
     "min_gap_ticks": "2",
 }
@@ -50,6 +58,19 @@ def _load_config() -> Dict[str, str]:
     config = dict(DEFAULT_CONFIG)
     if isinstance(payload, dict):
         config.update({k: str(v) for k, v in payload.items()})
+
+    # Backwards compatibility for older persisted keys.
+    if not config.get("strategy"):
+        strategies = str(config.get("strategies") or "").strip().lower()
+        config["strategy"] = "VWAP" if "vwap" in strategies and "ema" not in strategies else "EMA"
+    if not config.get("vwap_anchor"):
+        config["vwap_anchor"] = "session"
+    if not config.get("risk_mode"):
+        config["risk_mode"] = "fixed_qty"
+    if not config.get("tp_ticks"):
+        config["tp_ticks"] = str(config.get("tp_pct") or "0")
+    if not config.get("sl_ticks"):
+        config["sl_ticks"] = str(config.get("sl_pct") or "0")
     return config
 
 
@@ -74,15 +95,23 @@ def _build_env(config: Dict[str, str]) -> Dict[str, str]:
     env["BYBIT_TRIGGER_BY"] = config["trigger_by"]
     env["BYBIT_KLINE_INTERVAL"] = config["interval"]
     env["BOUNCE_POLL_SECONDS"] = config["poll_seconds"]
-    env["BOUNCE_KLINE_LIMIT"] = config["kline_limit"]
     env["BOUNCE_SYMBOLS"] = config["symbols"]
-    env["BOUNCE_STRATEGIES"] = config["strategies"]
+    # Map the UI dropdown to the strategy tokens understood by the trader.
+    strategy_ui = (config.get("strategy") or "EMA").strip().upper()
+    env["BOUNCE_STRATEGIES"] = "ema" if strategy_ui == "EMA" else "vwap"
     env["EMA_LEN"] = config["ema_len"]
-    env["VWAP_LEN"] = config["vwap_len"]
+    env["BOUNCE_VWAP_ANCHOR"] = config.get("vwap_anchor", "session")
+
+    env["BOUNCE_RISK_MODE"] = config.get("risk_mode", "fixed_qty")
+    env["BOUNCE_RISK_PCT"] = config.get("risk_pct", "0")
+    env["BOUNCE_ACCOUNT_BALANCE"] = config.get("account_balance", "auto")
+    env["BOUNCE_ACCOUNT_TYPE"] = config.get("account_type", "UNIFIED")
+    env["BOUNCE_ACCOUNT_ASSET"] = config.get("account_asset", "USDT")
+
     env["BOUNCE_DEFAULT_QTY"] = config["default_qty"]
     env["BOUNCE_QTY_MAP"] = config["qty_map"]
-    env["BOUNCE_TP_PCT"] = config["tp_pct"]
-    env["BOUNCE_SL_PCT"] = config["sl_pct"]
+    env["BOUNCE_TP_TICKS"] = config.get("tp_ticks", "0")
+    env["BOUNCE_SL_TICKS"] = config.get("sl_ticks", "0")
     env["BOUNCE_MIN_AMEND_TICKS"] = config["min_amend_ticks"]
     env["BOUNCE_MIN_GAP_TICKS"] = config["min_gap_ticks"]
     return env
@@ -124,18 +153,22 @@ def index() -> str:
         config = {
             "account_mode": request.form.get("account_mode", "demo"),
             "symbols": request.form.get("symbols", DEFAULT_CONFIG["symbols"]).strip(),
-            "strategies": request.form.get("strategies", DEFAULT_CONFIG["strategies"]).strip(),
+            "strategy": request.form.get("strategy", DEFAULT_CONFIG["strategy"]).strip(),
             "category": request.form.get("category", DEFAULT_CONFIG["category"]).strip(),
             "trigger_by": request.form.get("trigger_by", DEFAULT_CONFIG["trigger_by"]).strip(),
             "interval": request.form.get("interval", DEFAULT_CONFIG["interval"]).strip(),
             "poll_seconds": request.form.get("poll_seconds", DEFAULT_CONFIG["poll_seconds"]).strip(),
-            "kline_limit": request.form.get("kline_limit", DEFAULT_CONFIG["kline_limit"]).strip(),
             "ema_len": request.form.get("ema_len", DEFAULT_CONFIG["ema_len"]).strip(),
-            "vwap_len": request.form.get("vwap_len", DEFAULT_CONFIG["vwap_len"]).strip(),
+            "vwap_anchor": request.form.get("vwap_anchor", DEFAULT_CONFIG["vwap_anchor"]).strip(),
+            "risk_mode": request.form.get("risk_mode", DEFAULT_CONFIG["risk_mode"]).strip(),
+            "risk_pct": request.form.get("risk_pct", DEFAULT_CONFIG["risk_pct"]).strip(),
+            "account_balance": request.form.get("account_balance", DEFAULT_CONFIG["account_balance"]).strip(),
+            "account_type": request.form.get("account_type", DEFAULT_CONFIG["account_type"]).strip(),
+            "account_asset": request.form.get("account_asset", DEFAULT_CONFIG["account_asset"]).strip(),
             "default_qty": request.form.get("default_qty", DEFAULT_CONFIG["default_qty"]).strip(),
             "qty_map": request.form.get("qty_map", DEFAULT_CONFIG["qty_map"]).strip(),
-            "tp_pct": request.form.get("tp_pct", DEFAULT_CONFIG["tp_pct"]).strip(),
-            "sl_pct": request.form.get("sl_pct", DEFAULT_CONFIG["sl_pct"]).strip(),
+            "tp_ticks": request.form.get("tp_ticks", DEFAULT_CONFIG["tp_ticks"]).strip(),
+            "sl_ticks": request.form.get("sl_ticks", DEFAULT_CONFIG["sl_ticks"]).strip(),
             "min_amend_ticks": request.form.get("min_amend_ticks", DEFAULT_CONFIG["min_amend_ticks"]).strip(),
             "min_gap_ticks": request.form.get("min_gap_ticks", DEFAULT_CONFIG["min_gap_ticks"]).strip(),
         }
@@ -176,7 +209,7 @@ def status() -> Dict[str, object]:
         "running": _is_running(),
         "account_mode": config.get("account_mode", "demo"),
         "symbols": config.get("symbols", ""),
-        "strategies": config.get("strategies", ""),
+        "strategy": config.get("strategy", ""),
     }
 
 
@@ -238,8 +271,11 @@ FORM_HTML = """
             <input name="symbols" value="{{ config.symbols }}" />
           </label>
           <label>
-            Strategies (comma-separated)
-            <input name="strategies" value="{{ config.strategies }}" />
+            Strategy
+            <select name="strategy" id="strategy">
+              <option value="EMA" {% if config.strategy == "EMA" %}selected{% endif %}>EMA</option>
+              <option value="VWAP" {% if config.strategy == "VWAP" %}selected{% endif %}>VWAP</option>
+            </select>
           </label>
           <label>
             Category
@@ -260,49 +296,87 @@ FORM_HTML = """
           </label>
           <label>
             Interval
-            <input name="interval" value="{{ config.interval }}" />
+            <select name="interval" id="interval">
+              <option value="1" {% if config.interval == "1" %}selected{% endif %}>1min</option>
+              <option value="5" {% if config.interval == "5" %}selected{% endif %}>5min</option>
+              <option value="15" {% if config.interval == "15" %}selected{% endif %}>15min</option>
+              <option value="30" {% if config.interval == "30" %}selected{% endif %}>30min</option>
+              <option value="60" {% if config.interval == "60" %}selected{% endif %}>1h</option>
+              <option value="240" {% if config.interval == "240" %}selected{% endif %}>4h</option>
+              <option value="D" {% if config.interval == "D" %}selected{% endif %}>Daily</option>
+              <option value="W" {% if config.interval == "W" %}selected{% endif %}>Weekly</option>
+              <option value="M" {% if config.interval == "M" %}selected{% endif %}>Monthly</option>
+            </select>
           </label>
           <label>
             Poll Seconds
             <input name="poll_seconds" value="{{ config.poll_seconds }}" />
           </label>
           <label>
-            Kline Limit
-            <input name="kline_limit" value="{{ config.kline_limit }}" />
-          </label>
-          <label>
             EMA Length
-            <input name="ema_len" value="{{ config.ema_len }}" />
+            <input name="ema_len" id="ema_len" value="{{ config.ema_len }}" />
           </label>
           <label>
-            VWAP Length
-            <input name="vwap_len" value="{{ config.vwap_len }}" />
+            VWAP Anchor
+            <select name="vwap_anchor" id="vwap_anchor">
+              <option value="session" {% if config.vwap_anchor == "session" %}selected{% endif %}>Session (UTC day)</option>
+              <option value="week" {% if config.vwap_anchor == "week" %}selected{% endif %}>Week (UTC Mon)</option>
+            </select>
+          </label>
+          <label>
+            Risk Mode
+            <select name="risk_mode" id="risk_mode">
+              <option value="fixed_qty" {% if config.risk_mode == "fixed_qty" %}selected{% endif %}>Fixed Qty</option>
+              <option value="percent" {% if config.risk_mode == "percent" %}selected{% endif %}>Risk %</option>
+            </select>
+          </label>
+          <label id="risk_pct_label">
+            Risk %
+            <input name="risk_pct" id="risk_pct" value="{{ config.risk_pct }}" />
+          </label>
+          <label id="account_balance_label">
+            Account Balance (auto or number)
+            <input name="account_balance" id="account_balance" value="{{ config.account_balance }}" />
+          </label>
+          <label id="account_type_label">
+            Account Type
+            <input name="account_type" id="account_type" value="{{ config.account_type }}" />
+          </label>
+          <label id="account_asset_label">
+            Account Asset
+            <input name="account_asset" id="account_asset" value="{{ config.account_asset }}" />
           </label>
           <label>
             Default Qty
-            <input name="default_qty" value="{{ config.default_qty }}" />
+            <input name="default_qty" id="default_qty" value="{{ config.default_qty }}" />
           </label>
           <label>
-            Qty Map (JSON)
-            <textarea name="qty_map">{{ config.qty_map }}</textarea>
+            TP Ticks (0 to disable)
+            <input name="tp_ticks" value="{{ config.tp_ticks }}" />
           </label>
           <label>
-            TP % (0 to disable)
-            <input name="tp_pct" value="{{ config.tp_pct }}" />
-          </label>
-          <label>
-            SL % (0 to disable)
-            <input name="sl_pct" value="{{ config.sl_pct }}" />
-          </label>
-          <label>
-            Min Amend Ticks
-            <input name="min_amend_ticks" value="{{ config.min_amend_ticks }}" />
-          </label>
-          <label>
-            Min Gap Ticks
-            <input name="min_gap_ticks" value="{{ config.min_gap_ticks }}" />
+            SL Ticks (0 to disable)
+            <input name="sl_ticks" value="{{ config.sl_ticks }}" />
           </label>
         </div>
+
+        <details style="margin-top: 1rem;">
+          <summary style="cursor:pointer; font-weight: 700;">Advanced</summary>
+          <div class="grid" style="margin-top: 1rem;">
+            <label>
+              Qty Map (JSON) - optional per-symbol override (only used in Fixed Qty mode)
+              <textarea name="qty_map">{{ config.qty_map }}</textarea>
+            </label>
+            <label>
+              Min Amend Ticks
+              <input name="min_amend_ticks" value="{{ config.min_amend_ticks }}" />
+            </label>
+            <label>
+              Min Gap Ticks
+              <input name="min_gap_ticks" value="{{ config.min_gap_ticks }}" />
+            </label>
+          </div>
+        </details>
         <div class="actions">
           <button class="secondary" type="submit" name="action" value="save">Save</button>
           <button class="primary" type="submit" name="action" value="arm">ARM / START</button>
@@ -318,6 +392,31 @@ FORM_HTML = """
         </div>
         <p class="warning">Tip: Keep account mode on demo until you intentionally switch to live.</p>
       </form>
+
+      <script>
+        function syncVisibility() {
+          const strat = (document.getElementById('strategy') || {}).value || 'EMA';
+          const riskMode = (document.getElementById('risk_mode') || {}).value || 'fixed_qty';
+
+          // Strategy-specific controls
+          const emaLen = document.getElementById('ema_len');
+          const vwapAnchor = document.getElementById('vwap_anchor');
+          if (emaLen) emaLen.closest('label').style.display = (strat === 'EMA') ? '' : 'none';
+          if (vwapAnchor) vwapAnchor.closest('label').style.display = (strat === 'VWAP') ? '' : 'none';
+
+          // Risk controls
+          const showRisk = riskMode === 'percent';
+          for (const id of ['risk_pct_label','account_balance_label','account_type_label','account_asset_label']) {
+            const el = document.getElementById(id);
+            if (el) el.style.display = showRisk ? '' : 'none';
+          }
+          const defaultQty = document.getElementById('default_qty');
+          if (defaultQty) defaultQty.closest('label').style.display = showRisk ? 'none' : '';
+        }
+        document.getElementById('strategy')?.addEventListener('change', syncVisibility);
+        document.getElementById('risk_mode')?.addEventListener('change', syncVisibility);
+        syncVisibility();
+      </script>
     </div>
   </body>
 </html>
