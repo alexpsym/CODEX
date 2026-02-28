@@ -346,12 +346,15 @@
       if (isCashflow) {
         const amt = Number(r.cashflow_amount);
         const flowCls = Number.isFinite(amt) ? (amt > 0 ? 'pos' : (amt < 0 ? 'neg' : '')) : '';
-        const flowLabel = r.side || (amt > 0 ? 'DEPOSIT' : (amt < 0 ? 'WITHDRAWAL' : 'CASHFLOW'));
+        const baseLabel = r.side || (amt > 0 ? 'DEPOSIT' : (amt < 0 ? 'WITHDRAWAL' : 'CASHFLOW'));
+        const amtLabel = Number.isFinite(amt) ? ` (${fmtNum(amt, 2)} ${ccy})` : '';
+        const flowLabel = `${baseLabel}${amtLabel}`;
         tr.innerHTML = `
+          <td>${fmtTime(r.open_time || r.close_time)}</td>
           <td>${fmtTime(r.close_time || r.open_time)}</td>
           <td>${r.account_label || r.account || '—'}</td>
           <td>${r.symbol || 'CASHFLOW'}</td>
-          <td>${flowLabel}</td>
+          <td class="num ${flowCls}">${flowLabel}</td>
           <td title="${r.cashflow_reason || ''}">${r.cashflow_reason || r.setup || '—'}</td>
           <td>—</td>
           <td>—</td>
@@ -359,7 +362,7 @@
           <td>—</td>
           <td>—</td>
           <td>—</td>
-          <td class="num ${flowCls}">${Number.isFinite(amt) ? `${fmtNum(amt, 2)} ${ccy}` : '—'}</td>
+          <td>—</td>
           <td>—</td>
           <td>—</td>
           <td>${Number.isFinite(bal) ? `${fmtNum(bal, 2)} ${ccy}` : '—'}</td>
@@ -371,6 +374,7 @@
       }
 
       tr.innerHTML = `
+        <td>${fmtTime(r.open_time)}</td>
         <td>${fmtTime(r.close_time || r.open_time)}</td>
         <td>${r.account_label || r.account || '—'}</td>
         <td title="${r.symbol_raw || r.symbol || ''}">${r.symbol || '—'}</td>
