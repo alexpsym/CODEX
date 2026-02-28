@@ -22,7 +22,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
 from dateutil.relativedelta import relativedelta
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Callable
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Callable
 from urllib.parse import quote, unquote, urlparse
 from uuid import uuid4
 
@@ -6184,6 +6184,37 @@ async def home_page() -> str:
     return HTML_TEMPLATE
 
 
+@app.get("/instrument-specs", response_class=HTMLResponse)
+@app.get("/instrument-specs/", response_class=HTMLResponse)
+async def instrument_specs_page() -> str:
+    return INSTRUMENT_SPECS_TEMPLATE
+
+
+@app.get("/api/instrument-specs")
+async def api_instrument_specs(
+    query: Optional[str] = None, q: Optional[str] = None
+) -> JSONResponse:
+    lookup = str(query or q or "").strip()
+    specs = await _fetch_instrument_specs(lookup)
+    return JSONResponse(specs)
+
+
+@app.get("/api/instrument-specs.jpg")
+async def api_instrument_specs_jpg(
+    query: Optional[str] = None, q: Optional[str] = None
+) -> Response:
+    lookup = str(query or q or "").strip()
+    specs = await _fetch_instrument_specs(lookup)
+    blob = _render_specs_jpg_bytes(specs)
+    safe = "".join(
+        ch for ch in lookup if ch.isalnum() or ch in ("_", "-", ".")
+    ) or "query"
+    headers = {
+        "Content-Disposition": f'inline; filename="instrument-specs-{safe}.jpg"'
+    }
+    return Response(content=blob, media_type="image/jpeg", headers=headers)
+
+
 @app.get("/scripts/view/{script_name:path}", response_class=HTMLResponse)
 async def script_view_page(script_name: str) -> str:
     try:
@@ -7204,6 +7235,99 @@ async def list_scripts() -> JSONResponse:
     return JSONResponse(script_manager.list_scripts())
 
 
+def _safe_float(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _side_key(value: object, *, broker: str) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"buy", "long"}:
+        return "buy"
+    if raw in {"sell", "short"}:
+        return "sell"
+    if broker.lower() == "oanda":
+        if raw == "long":
+            return "buy"
+        if raw == "short":
+            return "sell"
+    return raw
+
+
+def _qty_matches(a: object, b: object) -> bool:
+    a_num = _safe_float(a)
+    b_num = _safe_float(b)
+    if a_num is None or b_num is None:
+        return str(a or "").strip() == str(b or "").strip()
+    return abs(abs(a_num) - abs(b_num)) <= max(1e-9, abs(a_num), abs(b_num)) * 1e-6
+
+
+def _pending_webhook_is_superseded(
+    pending: Dict[str, object],
+    open_items: List[Dict[str, object]],
+    consumed_open_indices: Optional[Set[int]] = None,
+) -> bool:
+    status = str(pending.get("status", "")).strip().upper()
+    enabled = pending.get("enabled") is not False
+    if status in {"WAITING", "PENDING", ""} and enabled:
+        return False
+
+    pending_order_id = str(pending.get("order_id", "")).strip()
+    pending_instrument = str(pending.get("instrument", "")).strip().upper()
+    pending_side = _side_key(pending.get("side"), broker=str(pending.get("broker", "")))
+    pending_size = pending.get("size")
+
+    for idx, item in enumerate(open_items):
+        if consumed_open_indices and idx in consumed_open_indices:
+            continue
+        if str(item.get("broker", "")).strip().upper() == "WEBHOOK":
+            continue
+
+        open_id = str(item.get("id", "")).strip()
+        if pending_order_id and open_id and pending_order_id == open_id:
+            if consumed_open_indices is not None:
+                consumed_open_indices.add(idx)
+            return True
+
+        if pending_order_id:
+            continue
+
+        instrument = str(item.get("instrument", "")).strip().upper()
+        side = _side_key(item.get("side"), broker=str(item.get("broker", "")))
+        size = item.get("size")
+        if (
+            pending_instrument
+            and instrument == pending_instrument
+            and side
+            and side == pending_side
+            and _qty_matches(pending_size, size)
+        ):
+            if consumed_open_indices is not None:
+                consumed_open_indices.add(idx)
+            return True
+
+    return False
+
+
+def _filter_pending_webhooks(
+    pending_items: List[Dict[str, object]], open_items: List[Dict[str, object]]
+) -> List[Dict[str, object]]:
+    consumed_open_indices: Set[int] = set()
+    filtered: List[Dict[str, object]] = []
+    for pending in pending_items:
+        if not _pending_webhook_is_superseded(
+            pending,
+            open_items,
+            consumed_open_indices=consumed_open_indices,
+        ):
+            filtered.append(pending)
+    return filtered
+
+
 @app.get("/api/open-orders")
 async def list_open_orders() -> JSONResponse:
     items: List[Dict[str, object]] = []
@@ -7255,7 +7379,11 @@ async def list_open_orders() -> JSONResponse:
                 }
             )
 
-    items.extend(_load_pending_webhooks())
+    pending = _load_pending_webhooks()
+    if pending:
+        pending = _filter_pending_webhooks(pending, items)
+        items.extend(pending)
+
     return JSONResponse({"items": items, "errors": errors})
 
 
