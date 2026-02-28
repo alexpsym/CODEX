@@ -477,6 +477,30 @@
       if (!silent) setLoading(15, 'Fetching journal…');
       let journal = await fetchJson(`/api/trading-journal${filter ? `?filter=${encodeURIComponent(filter)}` : ''}`, { signal });
 
+      // Auto-sync from Dropbox on load (throttled) so Excel workbooks are picked up even when
+      // live webhook trades already exist.
+      if (!silent) {
+        try {
+          const st = await fetchJson('/api/trading-journal/sync/status', { signal });
+          const lastFinished = new Date(st?.finished_at || 0).getTime() || 0;
+          const localLast = Number(localStorage.getItem('tj_last_auto_sync_ms') || 0) || 0;
+          const now = Date.now();
+          const minMs = 5 * 60 * 1000;
+          const anchor = Math.max(lastFinished, localLast);
+          if (!st?.running && (now - anchor > minMs)) {
+            if (!silent) setLoading(20, 'Syncing from Dropbox…');
+            await fetchJson('/api/trading-journal/sync', { method: 'POST', signal });
+            await waitForSync(signal);
+            localStorage.setItem('tj_last_auto_sync_ms', String(Date.now()));
+            if (!silent) setLoading(70, 'Fetching journal…');
+            journal = await fetchJson(`/api/trading-journal${filter ? `?filter=${encodeURIComponent(filter)}` : ''}`, { signal });
+          }
+        } catch (e) {
+          // Ignore auto-sync errors; manual Sync now remains available.
+          console.warn('Auto-sync skipped:', e);
+        }
+      }
+
       const hasItems = Array.isArray(journal?.items) && journal.items.length > 0;
       if (!hasItems) {
         // Silent background refresh should not trigger Dropbox sync loops when journal is empty.

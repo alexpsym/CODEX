@@ -1509,11 +1509,23 @@ def _parse_excel_account_workbook(
                     "updated_at": _utc_now_iso(),
                 })
 
-        bal_col = _first_present(df, ["balance", "account_balance", "cash_balance"])
+        bal_col = _first_present(
+            df,
+            [
+                "balance",
+                "account_balance",
+                "cash_balance",
+                "balance_after_trade",
+                "bal_after_trade",
+                "bal_after",
+                "balance_after",
+            ],
+        )
         nav_col = _first_present(df, ["nav", "equity", "account_equity"])
         ccy_col = _first_present(df, ["currency", "ccy", "account_currency"])
         if bal_col or nav_col:
-            for _, row in df.iterrows():
+            # Prefer the most recent non-empty balance-like row (usually bottom of sheet).
+            for _, row in df.iloc[::-1].iterrows():
                 bal_val = row.get(bal_col) if bal_col else None
                 nav_val = row.get(nav_col) if nav_col else None
                 if _is_empty_cell(bal_val) and _is_empty_cell(nav_val):
@@ -1869,7 +1881,7 @@ def _import_trading_journal_from_dropbox_excel(
         if row_id:
             dedup[row_id] = row
 
-    final_rows = sorted(dedup.values(), key=lambda row: str(row.get("close_time") or ""), reverse=True)
+    final_rows = sorted(dedup.values(), key=_row_sort_dt, reverse=True)
 
     if progress_cb:
         progress_cb(95, "Finalising…")
@@ -1879,7 +1891,21 @@ def _import_trading_journal_from_dropbox_excel(
         msg = "Imported 0 rows; keeping existing journal data."
         errors.append({"file": "", "path": active_folder, "error": msg})
     else:
-        _set_trading_journal_rows(final_rows)
+        if existing_count:
+            # Merge Excel-imported rows into the existing journal so webhook-fed rows are not wiped.
+            combined: Dict[str, Dict[str, object]] = {}
+            for r in existing_rows:
+                rid = str(r.get("id") or "")
+                if rid:
+                    combined[rid] = r
+            for r in final_rows:
+                rid = str(r.get("id") or "")
+                if rid:
+                    combined[rid] = r
+            merged_rows = sorted(combined.values(), key=_row_sort_dt, reverse=True)
+            _set_trading_journal_rows(merged_rows)
+        else:
+            _set_trading_journal_rows(final_rows)
 
     ok_flag = bool(final_rows) or bool(balances)
     message = (
@@ -5625,23 +5651,10 @@ async def _place_bybit_order(
     order_id = order_result.get("orderId")
     pending_id = str(payload.get("pending_webhook_id") or "").strip()
     if pending_id:
-        # Mark the local pending webhook as triggered/consumed. Do not convert it into a broker order.
-        _update_pending_webhook(
-            pending_id,
-            {
-                "status": "TRIGGERED",
-                "enabled": False,
-                "triggered_at": int(time.time()),
-                "exchange": "Bybit",
-                "account": account,
-                "category": category,
-                "instrument": symbol,
-                "order_id": order_id,
-                "limit_cancel_offset": limit_cancel_offset,
-                "limit_cancel_offset_pct": limit_cancel_pct,
-            },
-        )
-        _schedule_dropbox_upload_state_backup()
+        # Once the webhook has fired, remove it immediately so it doesn't linger
+        # in the Open Orders / Positions table.
+        if _delete_pending_webhook(pending_id):
+            _schedule_dropbox_upload_state_backup()
 
     tpsl_result: Optional[Dict[str, object]] = None
     tpsl_error: Optional[str] = None
@@ -5973,23 +5986,9 @@ async def _place_oanda_order(
         safe_ot = "".join(ch for ch in order_type if ch.isalnum() or ch in "_-")
         pending_id = f"calc_oanda_{account}_{safe_symbol}_{safe_side}_{safe_ot}"
     if pending_id:
-        # Mark the local pending webhook as triggered/consumed. Do not convert it into a broker order.
-        updated = _update_pending_webhook(
-            pending_id,
-            {
-                "status": "TRIGGERED",
-                "enabled": False,
-                "triggered_at": int(time.time()),
-                "exchange": "OANDA",
-                "account": account,
-                "category": "forex",
-                "instrument": symbol,
-                "order_id": order_id,
-                "limit_cancel_offset": limit_cancel_offset,
-                "limit_cancel_offset_pct": limit_cancel_pct,
-            },
-        )
-        if updated:
+        # Once the webhook has fired, remove it immediately so it doesn't linger
+        # in the Open Orders / Positions table.
+        if _delete_pending_webhook(pending_id):
             _schedule_dropbox_upload_state_backup()
 
     if (
@@ -7651,6 +7650,13 @@ def _qty_matches(a: object, b: object) -> bool:
     return abs(abs(a_num) - abs(b_num)) <= max(1e-9, abs(a_num), abs(b_num)) * 1e-6
 
 
+PENDING_WEBHOOK_TERMINAL_STATUSES = {"TRIGGERED", "CLOSED", "CANCELLED"}
+
+
+def _pending_webhook_is_terminal(status: object) -> bool:
+    return str(status or "").strip().upper() in PENDING_WEBHOOK_TERMINAL_STATUSES
+
+
 def _pending_webhook_is_superseded(
     pending: Dict[str, object],
     open_items: List[Dict[str, object]],
@@ -7704,6 +7710,8 @@ def _filter_pending_webhooks(
     consumed_open_indices: Set[int] = set()
     filtered: List[Dict[str, object]] = []
     for pending in pending_items:
+        if _pending_webhook_is_terminal(pending.get("status")):
+            continue
         if not _pending_webhook_is_superseded(
             pending,
             open_items,
@@ -7766,6 +7774,16 @@ async def list_open_orders() -> JSONResponse:
 
     pending = _load_pending_webhooks()
     if pending:
+        # Once a pending-webhook has fired (or otherwise reached a terminal state),
+        # it must disappear from the Open Orders / Positions table immediately.
+        terminal = [p for p in pending if _pending_webhook_is_terminal(p.get("status"))]
+        if terminal:
+            pending = [
+                p for p in pending if not _pending_webhook_is_terminal(p.get("status"))
+            ]
+            _save_pending_webhooks(pending)
+            _schedule_dropbox_upload_state_backup()
+
         pending = _filter_pending_webhooks(pending, items)
         items.extend(pending)
 

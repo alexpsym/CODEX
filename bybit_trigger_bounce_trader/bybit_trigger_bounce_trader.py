@@ -31,6 +31,7 @@ import os
 import time
 import hmac
 import hashlib
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -53,7 +54,7 @@ CATEGORY = os.getenv("BYBIT_CATEGORY", "linear").strip().lower()  # linear/inver
 TRIGGER_BY = os.getenv("BYBIT_TRIGGER_BY", "LastPrice")  # LastPrice / MarkPrice / IndexPrice (linear/inverse)
 INTERVAL = os.getenv("BYBIT_KLINE_INTERVAL", "1")  # "1","3","5","15","30","60","240","D", etc.
 POLL_SECONDS = float(os.getenv("BOUNCE_POLL_SECONDS", "2.0"))
-KLINE_LIMIT = int(os.getenv("BOUNCE_KLINE_LIMIT", "200"))
+KLINE_LIMIT = int(os.getenv("BOUNCE_KLINE_LIMIT", "1000"))  # per-page limit; Bybit allows up to 1000
 
 # Symbols:
 # Example: "BTCUSDT,ETHUSDT,SOLUSDT"
@@ -67,7 +68,8 @@ SYMBOLS = [s.strip().upper() for s in (os.getenv("BOUNCE_SYMBOLS", "BTCUSDT").sp
 STRATEGIES = [s.strip().lower() for s in (os.getenv("BOUNCE_STRATEGIES", "ema9_long,vwap_long").split(",")) if s.strip()]
 
 EMA_LEN = int(os.getenv("EMA_LEN", "9"))
-VWAP_LEN = int(os.getenv("VWAP_LEN", "20"))
+# VWAP anchor (UTC): session = UTC day, week = UTC week (Mon 00:00)
+VWAP_ANCHOR = (os.getenv("BOUNCE_VWAP_ANCHOR", "session") or "session").strip().lower()
 
 # Per-symbol qty (contracts) map as JSON, fallback default qty:
 # Example:
@@ -79,9 +81,15 @@ except Exception:
     QTY_MAP = {}
 DEFAULT_QTY = os.getenv("BOUNCE_DEFAULT_QTY", "0.001")
 
-# Optional TP/SL as % from entry trigger price (0 disables)
-TP_PCT = float(os.getenv("BOUNCE_TP_PCT", "0"))  # e.g. 0.25 means +0.25% for longs
-SL_PCT = float(os.getenv("BOUNCE_SL_PCT", "0"))  # e.g. 0.15 means -0.15% for longs
+TP_TICKS = int(os.getenv("BOUNCE_TP_TICKS", "0"))  # 0 disables
+SL_TICKS = int(os.getenv("BOUNCE_SL_TICKS", "0"))  # 0 disables
+
+# Sizing
+RISK_MODE = (os.getenv("BOUNCE_RISK_MODE", "fixed_qty") or "fixed_qty").strip().lower()  # fixed_qty|percent
+RISK_PCT = float(os.getenv("BOUNCE_RISK_PCT", "0") or 0)
+ACCOUNT_BALANCE_RAW = (os.getenv("BOUNCE_ACCOUNT_BALANCE", "auto") or "auto").strip().lower()
+ACCOUNT_TYPE = (os.getenv("BOUNCE_ACCOUNT_TYPE", "UNIFIED") or "UNIFIED").strip()
+ACCOUNT_ASSET = (os.getenv("BOUNCE_ACCOUNT_ASSET", "USDT") or "USDT").strip().upper()
 
 # Only amend the conditional order if trigger price changed by >= this many ticks
 MIN_AMEND_TICKS = int(os.getenv("BOUNCE_MIN_AMEND_TICKS", "1"))
@@ -168,6 +176,7 @@ def _signed_post(path: str, body: dict, timeout: float = 10.0) -> dict:
 class InstrumentFilters:
     tick_size: float
     qty_step: float
+    min_qty: float
 
 
 _instrument_cache: Dict[str, InstrumentFilters] = {}
@@ -193,11 +202,15 @@ def _get_instrument_filters(symbol: str) -> InstrumentFilters:
 
     tick = float(price_filter.get("tickSize") or 0)
     step = float(lot_filter.get("qtyStep") or 0)
+    min_qty = float(lot_filter.get("minTrdQty") or lot_filter.get("minOrderQty") or 0)
 
     if tick <= 0 or step <= 0:
         raise RuntimeError(f"Bad filters for {symbol}: tick={tick}, step={step}")
+    if min_qty <= 0:
+        # Some categories use a different field name; keep a sane fallback.
+        min_qty = step
 
-    f = InstrumentFilters(tick_size=tick, qty_step=step)
+    f = InstrumentFilters(tick_size=tick, qty_step=step, min_qty=min_qty)
     _instrument_cache[symbol] = f
     return f
 
@@ -213,22 +226,9 @@ def _get_last_price(symbol: str) -> float:
     return last
 
 
-def _get_klines(symbol: str) -> List[dict]:
-    # /v5/market/kline
-    j = _public_get(
-        "/v5/market/kline",
-        params={
-            "category": CATEGORY,
-            "symbol": symbol,
-            "interval": INTERVAL,
-            "limit": str(KLINE_LIMIT),
-        },
-        timeout=10,
-    )
-    candles = ((j.get("result") or {}).get("list") or [])
-    # Candle array format (Bybit): [startTime, open, high, low, close, volume, turnover]
-    out = []
-    for c in candles:
+def _parse_candles(raw: list) -> List[dict]:
+    out: List[dict] = []
+    for c in raw:
         if not isinstance(c, list) or len(c) < 6:
             continue
         try:
@@ -244,8 +244,61 @@ def _get_klines(symbol: str) -> List[dict]:
             )
         except Exception:
             continue
+    return out
 
-    # Ensure ASC time order for indicator calc
+
+def _get_klines(symbol: str, *, end_ms: Optional[int] = None, limit: int = KLINE_LIMIT) -> List[dict]:
+    """Fetch up to *limit* klines ending at *end_ms* (ms). Bybit returns reverse-sorted."""
+    params = {
+        "category": CATEGORY,
+        "symbol": symbol,
+        "interval": INTERVAL,
+        "limit": str(limit),
+    }
+    if end_ms is not None:
+        params["end"] = str(end_ms)
+    j = _public_get("/v5/market/kline", params=params, timeout=10)
+    candles = ((j.get("result") or {}).get("list") or [])
+    out = _parse_candles(candles)
+    out.sort(key=lambda x: x["ts"])
+    return out
+
+
+def _anchor_start_ms(anchor: str, now_ms: int) -> int:
+    now = datetime.fromtimestamp(now_ms / 1000.0, tz=timezone.utc)
+    if anchor == "week":
+        # ISO week start (Mon 00:00 UTC)
+        day_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+        delta_days = day_start.isoweekday() - 1
+        week_start = day_start - timedelta(days=delta_days)
+        return int(week_start.timestamp() * 1000)
+    day_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+    return int(day_start.timestamp() * 1000)
+
+
+def _get_klines_since_anchor(symbol: str, anchor: str) -> List[dict]:
+    """Fetch klines back until we cover the anchor start (UTC)."""
+    now_ms = int(time.time() * 1000)
+    start_ms = _anchor_start_ms(anchor, now_ms)
+
+    merged: Dict[int, dict] = {}
+    end_ms: Optional[int] = None
+
+    # In the worst case (1m VWAP week) we may need ~11 pages. Keep some headroom.
+    for _ in range(20):
+        batch = _get_klines(symbol, end_ms=end_ms, limit=KLINE_LIMIT)
+        if not batch:
+            break
+        for c in batch:
+            merged[c["ts"]] = c
+        earliest = min(c["ts"] for c in batch)
+        if earliest <= start_ms:
+            break
+        end_ms = earliest - 1
+        if end_ms <= 0:
+            break
+
+    out = [c for ts, c in merged.items() if ts >= start_ms]
     out.sort(key=lambda x: x["ts"])
     return out
 
@@ -264,10 +317,10 @@ def _ema(values: List[float], length: int) -> Optional[float]:
     return float(e)
 
 
-def _vwap(candles: List[dict], length: int) -> Optional[float]:
-    if length <= 0 or len(candles) < length:
+def _vwap(candles: List[dict]) -> Optional[float]:
+    if not candles:
         return None
-    window = candles[-length:]
+    window = candles
     pv = 0.0
     vv = 0.0
     for c in window:
@@ -375,26 +428,111 @@ def _place_or_amend_conditional_market(
 
 
 def _compute_tp_sl(entry: float, tick: float, side: str) -> Tuple[Optional[float], Optional[float]]:
-    if TP_PCT <= 0 and SL_PCT <= 0:
+    if TP_TICKS <= 0 and SL_TICKS <= 0:
         return None, None
 
+    tp: Optional[float] = None
+    sl: Optional[float] = None
+
     if side == "Buy":
-        tp = entry * (1.0 + TP_PCT / 100.0) if TP_PCT > 0 else None
-        sl = entry * (1.0 - SL_PCT / 100.0) if SL_PCT > 0 else None
-        if tp is not None:
-            tp = _ceil_to_tick(tp, tick)
-        if sl is not None:
-            sl = _floor_to_tick(sl, tick)
+        if TP_TICKS > 0:
+            tp = _ceil_to_tick(entry + (TP_TICKS * tick), tick)
+        if SL_TICKS > 0:
+            sl = _floor_to_tick(entry - (SL_TICKS * tick), tick)
         return tp, sl
 
-    # Sell
-    tp = entry * (1.0 - TP_PCT / 100.0) if TP_PCT > 0 else None
-    sl = entry * (1.0 + SL_PCT / 100.0) if SL_PCT > 0 else None
-    if tp is not None:
-        tp = _floor_to_tick(tp, tick)
-    if sl is not None:
-        sl = _ceil_to_tick(sl, tick)
+    if TP_TICKS > 0:
+        tp = _floor_to_tick(entry - (TP_TICKS * tick), tick)
+    if SL_TICKS > 0:
+        sl = _ceil_to_tick(entry + (SL_TICKS * tick), tick)
     return tp, sl
+
+
+def _fee_rate_for_category(category: str) -> float:
+    return 0.001 if category == "spot" else 0.0006
+
+
+def _signed_get(path: str, params: dict, timeout: float = 10.0) -> dict:
+    from urllib.parse import urlencode
+
+    query = urlencode(params)
+    ts = str(int(time.time() * 1000))
+    sig = _sign_v5(ts, API_KEY, API_SECRET, query)
+    headers = {
+        "X-BAPI-API-KEY": API_KEY,
+        "X-BAPI-SIGN": sig,
+        "X-BAPI-TIMESTAMP": ts,
+        "X-BAPI-RECV-WINDOW": BYBIT_RECV_WINDOW,
+        "X-BAPI-SIGN-TYPE": "2",
+    }
+    url = f"{BASE_URL}{path}?{query}"
+    r = session.get(url, headers=headers, timeout=timeout)
+    r.raise_for_status()
+    j = r.json()
+    if j.get("retCode") not in (0, "0", None):
+        raise RuntimeError(f"Bybit error {j.get('retCode')}: {j.get('retMsg')}")
+    return j
+
+
+_balance_cache: Tuple[float, float] = (0.0, 0.0)
+
+
+def _get_account_balance() -> float:
+    global _balance_cache
+    now = time.time()
+    cached_ts, cached_bal = _balance_cache
+    if cached_ts and (now - cached_ts) < 15:
+        return cached_bal
+
+    if ACCOUNT_BALANCE_RAW != "auto":
+        bal = float(ACCOUNT_BALANCE_RAW)
+        _balance_cache = (now, bal)
+        return bal
+
+    payload = _signed_get(
+        "/v5/account/wallet-balance",
+        params={"accountType": ACCOUNT_TYPE, "coin": ACCOUNT_ASSET},
+        timeout=10,
+    )
+    lst = ((payload.get("result") or {}).get("list") or [])
+    for item in lst:
+        for c in item.get("coin", []) or []:
+            if (c.get("coin") or "").upper() == ACCOUNT_ASSET:
+                raw = c.get("walletBalance") or c.get("equity") or c.get("availableToWithdraw") or "0"
+                bal = float(raw)
+                _balance_cache = (now, bal)
+                return bal
+    raise RuntimeError(f"Wallet balance missing for {ACCOUNT_ASSET} ({ACCOUNT_TYPE}).")
+
+
+def _risk_qty(
+    *,
+    entry: float,
+    side: str,
+    tick: float,
+    qty_step: float,
+    min_qty: float,
+    fee_rate: float,
+) -> Optional[float]:
+    if RISK_MODE != "percent" or RISK_PCT <= 0 or SL_TICKS <= 0:
+        return None
+
+    balance = _get_account_balance()
+    risk_amount = balance * (RISK_PCT / 100.0)
+
+    stop_distance = SL_TICKS * tick
+    stop_price = entry - stop_distance if side == "Buy" else entry + stop_distance
+
+    net_per_unit_loss = stop_distance + fee_rate * (entry + stop_price)
+    if net_per_unit_loss <= 0:
+        return None
+
+    raw_qty = risk_amount / net_per_unit_loss
+    steps = max(1, round(raw_qty / qty_step))
+    qty = steps * qty_step
+    if qty < min_qty:
+        return None
+    return qty
 
 
 # Track last trigger price we armed per (symbol,strategy) to avoid spam amends
@@ -431,32 +569,42 @@ def _desired_trigger_for_strategy(symbol: str, strategy: str) -> Optional[Tuple[
     """
     Returns (side, triggerDirection, indicator_price_raw)
     """
-    candles = _get_klines(symbol)
-    if len(candles) < max(EMA_LEN, VWAP_LEN) + 2:
-        return None
+    strategy = (strategy or "").strip().lower()
 
-    closes = [c["c"] for c in candles]
-
-    if strategy == "ema9_long":
+    if strategy in {"ema", "ema_long", "ema9_long"}:
+        candles = _get_klines(symbol)
+        if len(candles) < EMA_LEN + 2:
+            return None
+        closes = [c["c"] for c in candles]
         ema_val = _ema(closes, EMA_LEN)
         if ema_val is None:
             return None
         return ("Buy", 2, ema_val)
 
-    if strategy == "ema9_short":
+    if strategy in {"ema_short", "ema9_short"}:
+        candles = _get_klines(symbol)
+        if len(candles) < EMA_LEN + 2:
+            return None
+        closes = [c["c"] for c in candles]
         ema_val = _ema(closes, EMA_LEN)
         if ema_val is None:
             return None
         return ("Sell", 1, ema_val)
 
-    if strategy == "vwap_long":
-        vwap_val = _vwap(candles, VWAP_LEN)
+    if strategy in {"vwap", "vwap_long"}:
+        candles = _get_klines_since_anchor(symbol, VWAP_ANCHOR)
+        if len(candles) < 2:
+            return None
+        vwap_val = _vwap(candles)
         if vwap_val is None:
             return None
         return ("Buy", 2, vwap_val)
 
     if strategy == "vwap_short":
-        vwap_val = _vwap(candles, VWAP_LEN)
+        candles = _get_klines_since_anchor(symbol, VWAP_ANCHOR)
+        if len(candles) < 2:
+            return None
+        vwap_val = _vwap(candles)
         if vwap_val is None:
             return None
         return ("Sell", 1, vwap_val)
@@ -468,7 +616,8 @@ def main() -> None:
     print(f"MODE={MODE} BASE={BASE_URL} CATEGORY={CATEGORY} INTERVAL={INTERVAL} TRIGGER_BY={TRIGGER_BY}")
     print(f"SYMBOLS={SYMBOLS}")
     print(f"STRATEGIES={STRATEGIES}")
-    print(f"POLL_SECONDS={POLL_SECONDS} EMA_LEN={EMA_LEN} VWAP_LEN={VWAP_LEN}")
+    print(f"POLL_SECONDS={POLL_SECONDS} EMA_LEN={EMA_LEN} VWAP_ANCHOR={VWAP_ANCHOR}")
+    print(f"TP_TICKS={TP_TICKS} SL_TICKS={SL_TICKS} RISK_MODE={RISK_MODE} RISK_PCT={RISK_PCT} BALANCE={ACCOUNT_BALANCE_RAW}")
 
     # warm cache
     for sym in SYMBOLS:
@@ -504,14 +653,27 @@ def main() -> None:
                     if not _should_amend(key, trigger, tick):
                         continue
 
-                    qty_s = QTY_MAP.get(sym, DEFAULT_QTY)
-                    try:
-                        qty_f = float(qty_s)
-                    except Exception:
-                        qty_f = float(DEFAULT_QTY)
+                    fee_rate = _fee_rate_for_category(CATEGORY)
+                    risk_qty = _risk_qty(
+                        entry=trigger,
+                        side=side,
+                        tick=tick,
+                        qty_step=filters.qty_step,
+                        min_qty=filters.min_qty,
+                        fee_rate=fee_rate,
+                    )
 
-                    qty_f = _round_qty_step(qty_f, filters.qty_step)
-                    if qty_f <= 0:
+                    if risk_qty is None:
+                        qty_s = QTY_MAP.get(sym, DEFAULT_QTY)
+                        try:
+                            qty_f = float(qty_s)
+                        except Exception:
+                            qty_f = float(DEFAULT_QTY)
+                        qty_f = _round_qty_step(qty_f, filters.qty_step)
+                    else:
+                        qty_f = _round_qty_step(risk_qty, filters.qty_step)
+
+                    if qty_f < filters.min_qty:
                         continue
 
                     qty = f"{qty_f:.12f}".rstrip("0").rstrip(".")
