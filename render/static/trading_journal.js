@@ -25,6 +25,7 @@
   const AUTO_REFRESH_MS = 60000;
   let loadInFlight = false;
   let activeAbort = null;
+  let syncWatchTimer = null;
 
   function normYes(v) {
     return ['yes', 'y', 'true', '1'].includes(String(v ?? '').trim().toLowerCase());
@@ -101,6 +102,42 @@
         return st;
       }
       await sleep(500);
+    }
+  }
+
+  function watchSyncCompletion() {
+    if (syncWatchTimer) return;
+    const poll = async () => {
+      try {
+        const st = await fetchJson('/api/trading-journal/sync/status');
+        if (st?.running) {
+          syncWatchTimer = setTimeout(poll, 900);
+          return;
+        }
+        syncWatchTimer = null;
+        if (st?.ok === false) {
+          setStatus(`Background sync failed: ${st?.error || st?.message || 'unknown error'}`);
+          return;
+        }
+        localStorage.setItem('tj_last_auto_sync_ms', String(Date.now()));
+        await load({ silent: true, skipAutoSync: true });
+      } catch (e) {
+        syncWatchTimer = setTimeout(poll, 1500);
+      }
+    };
+    syncWatchTimer = setTimeout(poll, 800);
+  }
+
+  async function triggerBackgroundSync() {
+    try {
+      const st = await fetchJson('/api/trading-journal/sync/status');
+      if (!st?.running) {
+        await fetchJson('/api/trading-journal/sync', { method: 'POST' });
+      }
+      setStatus('Background Dropbox sync running…');
+      watchSyncCompletion();
+    } catch (e) {
+      console.warn('Background sync skipped:', e);
     }
   }
 
@@ -346,12 +383,15 @@
       if (isCashflow) {
         const amt = Number(r.cashflow_amount);
         const flowCls = Number.isFinite(amt) ? (amt > 0 ? 'pos' : (amt < 0 ? 'neg' : '')) : '';
-        const flowLabel = r.side || (amt > 0 ? 'DEPOSIT' : (amt < 0 ? 'WITHDRAWAL' : 'CASHFLOW'));
+        const baseLabel = r.side || (amt > 0 ? 'DEPOSIT' : (amt < 0 ? 'WITHDRAWAL' : 'CASHFLOW'));
+        const amtLabel = Number.isFinite(amt) ? ` (${fmtNum(amt, 2)} ${ccy})` : '';
+        const flowLabel = `${baseLabel}${amtLabel}`;
         tr.innerHTML = `
+          <td>${fmtTime(r.open_time || r.close_time)}</td>
           <td>${fmtTime(r.close_time || r.open_time)}</td>
           <td>${r.account_label || r.account || '—'}</td>
           <td>${r.symbol || 'CASHFLOW'}</td>
-          <td>${flowLabel}</td>
+          <td class="num ${flowCls}">${flowLabel}</td>
           <td title="${r.cashflow_reason || ''}">${r.cashflow_reason || r.setup || '—'}</td>
           <td>—</td>
           <td>—</td>
@@ -359,7 +399,7 @@
           <td>—</td>
           <td>—</td>
           <td>—</td>
-          <td class="num ${flowCls}">${Number.isFinite(amt) ? `${fmtNum(amt, 2)} ${ccy}` : '—'}</td>
+          <td>—</td>
           <td>—</td>
           <td>—</td>
           <td>${Number.isFinite(bal) ? `${fmtNum(bal, 2)} ${ccy}` : '—'}</td>
@@ -371,6 +411,7 @@
       }
 
       tr.innerHTML = `
+        <td>${fmtTime(r.open_time)}</td>
         <td>${fmtTime(r.close_time || r.open_time)}</td>
         <td>${r.account_label || r.account || '—'}</td>
         <td title="${r.symbol_raw || r.symbol || ''}">${r.symbol || '—'}</td>
@@ -462,7 +503,7 @@
     renderAll();
   }
 
-  async function load({ silent = false } = {}) {
+  async function load({ silent = false, skipAutoSync = false } = {}) {
     if (loadInFlight) return;
     loadInFlight = true;
     // Cancel any prior request chain so rapid manual actions cannot overlap with refresh work.
@@ -478,8 +519,8 @@
       let journal = await fetchJson(`/api/trading-journal${filter ? `?filter=${encodeURIComponent(filter)}` : ''}`, { signal });
 
       // Auto-sync from Dropbox on load (throttled) so Excel workbooks are picked up even when
-      // live webhook trades already exist.
-      if (!silent) {
+      // live webhook trades already exist. This runs in the background and does not block UI load.
+      if (!silent && !skipAutoSync) {
         try {
           const st = await fetchJson('/api/trading-journal/sync/status', { signal });
           const lastFinished = new Date(st?.finished_at || 0).getTime() || 0;
@@ -488,12 +529,7 @@
           const minMs = 5 * 60 * 1000;
           const anchor = Math.max(lastFinished, localLast);
           if (!st?.running && (now - anchor > minMs)) {
-            if (!silent) setLoading(20, 'Syncing from Dropbox…');
-            await fetchJson('/api/trading-journal/sync', { method: 'POST', signal });
-            await waitForSync(signal);
-            localStorage.setItem('tj_last_auto_sync_ms', String(Date.now()));
-            if (!silent) setLoading(70, 'Fetching journal…');
-            journal = await fetchJson(`/api/trading-journal${filter ? `?filter=${encodeURIComponent(filter)}` : ''}`, { signal });
+            triggerBackgroundSync();
           }
         } catch (e) {
           // Ignore auto-sync errors; manual Sync now remains available.
@@ -502,34 +538,9 @@
       }
 
       const hasItems = Array.isArray(journal?.items) && journal.items.length > 0;
-      if (!hasItems) {
-        // Silent background refresh should not trigger Dropbox sync loops when journal is empty.
-        if (silent) {
-          state.rows = Array.isArray(journal?.items) ? journal.items : [];
-          state.stats = journal?.stats || null;
-          renderAll();
-          setStatus(`Updated ${new Date().toLocaleTimeString()}`);
-          return;
-        }
-        if (filter) {
-          // If a filter is set (often persisted in localStorage) and the journal file is empty after a deploy,
-          // do a cheap unfiltered check before deciding to sync.
-          const base = await fetchJson('/api/trading-journal', { signal });
-          const baseHasItems = Array.isArray(base?.items) && base.items.length > 0;
-          if (!baseHasItems) {
-            if (!silent) setLoading(20, 'Syncing from Dropbox…');
-            await fetchJson('/api/trading-journal/sync', { method: 'POST', signal });
-            await waitForSync(signal);
-            if (!silent) setLoading(70, 'Fetching journal…');
-            journal = await fetchJson(`/api/trading-journal?filter=${encodeURIComponent(filter)}`, { signal });
-          }
-        } else {
-          if (!silent) setLoading(20, 'Syncing from Dropbox…');
-          await fetchJson('/api/trading-journal/sync', { method: 'POST', signal });
-          await waitForSync(signal);
-          if (!silent) setLoading(70, 'Fetching journal…');
-          journal = await fetchJson('/api/trading-journal', { signal });
-        }
+      if (!hasItems && !silent && !skipAutoSync) {
+        // Empty journal should still render immediately; sync in background and refresh when ready.
+        triggerBackgroundSync();
       }
 
       if (!silent) setLoading(85, 'Fetching balances…');
