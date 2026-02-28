@@ -7062,11 +7062,16 @@ def _compute_journal_stats(
                 elif is_loss:
                     bucket.setdefault(f"{prefix}_quote_losses", []).append(dist)
 
-        if entry is not None and sl is not None:
+        def _is_valid_price_level(val: Optional[float]) -> bool:
+            # Some imports represent missing SL/TP as 0.0, which explodes distance metrics
+            # (e.g., GBPAUD entries around ~1.7 => ~17,000 pips). Treat 0/NaN/inf as invalid.
+            return val is not None and math.isfinite(val) and val > 0
+
+        if _is_valid_price_level(entry) and _is_valid_price_level(sl):
             dist = abs(entry - sl)
             bucket["sl_distances"].append(dist)
             _append_metric("sl_distances", dist)
-        if entry is not None and tp is not None:
+        if _is_valid_price_level(entry) and _is_valid_price_level(tp):
             dist = abs(tp - entry)
             bucket["tp_distances"].append(dist)
             _append_metric("tp_distances", dist)
@@ -8545,9 +8550,9 @@ async def trading_journal_balances() -> JSONResponse:
     by_acc: Dict[str, Dict[str, object]] = {}
 
     # Priority for displayed balances:
-    #   1) Excel workbook-provided balance (authoritative when present)
-    #   2) Cashflow ledger (fallback when workbook balance missing)
-    #   3) Latest trade-derived balance_after_trade (fallback when both missing)
+    #   - Prefer explicit balances (Excel/cashflow) *only if they are at least as recent* as
+    #     the latest trade-derived balance.
+    #   - Otherwise, use latest trade-derived balance_after_trade for the displayed balance.
     for bal in excel:
         label = str((bal.get("account") or bal.get("label") or "")).strip()
         key = _norm_account_key(label)
@@ -8613,16 +8618,41 @@ async def trading_journal_balances() -> JSONResponse:
                 "source": "latest_trade_row",
                 "as_of": row.get("close_time") or row.get("open_time"),
             }
+    def _ts(value: object) -> float:
+        if value in (None, ""):
+            return float("-inf")
+        try:
+            return float(pd.to_datetime(value).timestamp())
+        except Exception:
+            return float("-inf")
+
     for key, bal in latest_by_acc.items():
         existing = dict(by_acc.get(key) or {})
         existing_balance = _to_float(existing.get("balance")) if existing else None
 
+        # If we already have a numeric balance (Excel/cashflow), only keep it when it is
+        # at least as recent as the latest trade-derived balance.
         if existing and existing_balance is not None:
-            merged = dict(existing)
-            for k, v in bal.items():
-                if merged.get(k) in (None, "") and v is not None:
-                    merged[k] = v
-            by_acc[key] = merged
+            existing_ts = _ts(existing.get("as_of"))
+            trade_ts = _ts(bal.get("as_of"))
+            if trade_ts > existing_ts:
+                merged = dict(existing)
+                merged["balance"] = bal.get("balance")
+                merged["currency"] = bal.get("currency") or merged.get("currency")
+                merged["nav"] = bal.get("nav") if bal.get("nav") is not None else merged.get("nav")
+                merged["source"] = bal.get("source") or merged.get("source")
+                merged["as_of"] = bal.get("as_of") or merged.get("as_of")
+                # Fill any remaining missing fields from the trade-derived payload.
+                for k, v in bal.items():
+                    if merged.get(k) in (None, "") and v is not None:
+                        merged[k] = v
+                by_acc[key] = merged
+            else:
+                merged = dict(existing)
+                for k, v in bal.items():
+                    if merged.get(k) in (None, "") and v is not None:
+                        merged[k] = v
+                by_acc[key] = merged
             continue
 
         if existing:
