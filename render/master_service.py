@@ -118,6 +118,7 @@ OANDA_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "oanda-history"
 BYBIT_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "bybit-history"
 COINSPOT_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "coinspot-history"
 PENDING_WEBHOOKS_PATH = BASE_DIR / "render" / "data" / "pending_webhooks.json"
+BOUNCE_TRADERS_PATH = BASE_DIR / "render" / "data" / "bounce_traders.json"
 WATCHLIST_PATH = BASE_DIR / "render" / "data" / "watchlist.json"
 TRADING_JOURNAL_PATH = BASE_DIR / "render" / "data" / "trading_journal.json"
 TRADING_JOURNAL_STATE_PATH = BASE_DIR / "render" / "data" / "trading_journal_state.json"
@@ -4734,10 +4735,47 @@ async def _collect_bybit_open_items(
                     "leverage": order.get("leverage"),
                     "opened_at": order.get("createdTime"),
                     "id": order.get("orderId"),
+                    "order_link_id": order.get("orderLinkId"),
                     "status": status or "OPEN",
                 }
             )
     return {"items": items, "errors": errors}
+
+
+def _load_bounce_traders() -> List[Dict[str, object]]:
+    if not BOUNCE_TRADERS_PATH.exists():
+        return []
+    try:
+        payload = json.loads(BOUNCE_TRADERS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(payload, list):
+        return []
+    rows: List[Dict[str, object]] = []
+    for entry in payload:
+        if isinstance(entry, dict):
+            rows.append(dict(entry))
+    return rows
+
+
+def _save_bounce_traders(items: List[Dict[str, object]]) -> None:
+    BOUNCE_TRADERS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    BOUNCE_TRADERS_PATH.write_text(json.dumps(items, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _to_dt_utc(value: object) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
 
 
 def _load_pending_webhooks() -> List[Dict[str, object]]:
@@ -6721,6 +6759,7 @@ async def trading_journal_page() -> str:
       <table id="tj-table">
         <thead>
           <tr>
+            <th data-sort="open_time">Open Time</th>
             <th data-sort="close_time">Close Time</th>
             <th data-sort="account_label">Account</th>
             <th data-sort="symbol">Symbol</th>
@@ -6735,7 +6774,7 @@ async def trading_journal_page() -> str:
             <th data-sort="net_profit">Net Profit</th>
             <th data-sort="profit_pct">Profit %</th>
             <th data-sort="r_multiple">R-Multiple</th>
-            <th data-sort="balance_after_trade">Bal After Trade</th>
+            <th data-sort="balance_after_trade">Balance After</th>
             <th data-sort="trade_duration_seconds">Trade Duration</th>
             <th data-sort="breakeven">Breakeven</th>
           </tr>
@@ -6820,7 +6859,8 @@ def _trade_duration_seconds(row: Dict[str, object]) -> Optional[int]:
         delta = (close_ts - open_ts).total_seconds()
         if delta < 0:
             return None
-        return int(round(delta))
+        # Never show 0s durations for trades. Anything under 1s (including 0) rounds up to 1s.
+        return max(1, int(math.ceil(delta)))
     except Exception:
         return None
 
@@ -7792,6 +7832,99 @@ async def list_open_orders() -> JSONResponse:
         pending = _filter_pending_webhooks(pending, items)
         items.extend(pending)
 
+    # Surface active bounce-trader sessions as pending rows and retire those rows
+    # immediately after entry fills (mirrors webhook pending row behavior).
+    try:
+        bounce_script_running = script_manager.get("bybit_trigger_bounce_trader").is_running
+    except Exception:
+        bounce_script_running = False
+
+    if bounce_script_running:
+        sessions = _load_bounce_traders()
+        changed = False
+        now = datetime.now(timezone.utc)
+
+        bybit_orders = [
+            row
+            for row in items
+            if str(row.get("broker", "")).lower() == "bybit"
+            and str(row.get("type", "")).lower() == "order"
+        ]
+        bybit_positions = [
+            row
+            for row in items
+            if str(row.get("broker", "")).lower() == "bybit"
+            and str(row.get("type", "")).lower() == "position"
+        ]
+
+        for session in sessions:
+            if not bool(session.get("running")):
+                continue
+
+            instrument = str(session.get("instrument") or "").strip().upper()
+            side = str(session.get("side") or "").strip().title()
+            account = str(session.get("account") or "").strip().lower() or "demo"
+            category = str(session.get("category") or "").strip().lower() or "linear"
+            order_link_id = str(session.get("order_link_id") or "").strip()
+
+            if order_link_id:
+                if any(
+                    str(row.get("order_link_id") or "").strip() == order_link_id
+                    and str(row.get("account") or "").strip().lower() == account
+                    and str(row.get("category") or "").strip().lower() == category
+                    for row in bybit_orders
+                ) and not bool(session.get("seen_order")):
+                    session["seen_order"] = True
+                    changed = True
+
+            has_position = any(
+                str(row.get("instrument") or "").strip().upper() == instrument
+                and str(row.get("side") or "").strip().title() == side
+                and str(row.get("account") or "").strip().lower() == account
+                and str(row.get("category") or "").strip().lower() == category
+                for row in bybit_positions
+            )
+
+            started_at = _to_dt_utc(session.get("started_at"))
+            age_seconds = (now - started_at).total_seconds() if started_at else 0.0
+            seen_order = bool(session.get("seen_order"))
+
+            if has_position and (seen_order or age_seconds >= 30):
+                if bool(session.get("show_in_open_orders", True)):
+                    session["show_in_open_orders"] = False
+                    session["status"] = "filled"
+                    session["updated_at"] = now.isoformat()
+                    changed = True
+                continue
+
+            if not bool(session.get("show_in_open_orders", True)):
+                continue
+
+            items.append(
+                {
+                    "broker": "BOUNCE",
+                    "account": account,
+                    "category": category,
+                    "instrument": instrument,
+                    "type": "Bounce",
+                    "side": side,
+                    "size": "—",
+                    "entry_price": None,
+                    "order_price": None,
+                    "current_price": None,
+                    "stop_loss": None,
+                    "take_profit": None,
+                    "leverage": None,
+                    "opened_at": session.get("started_at"),
+                    "id": session.get("id"),
+                    "order_link_id": order_link_id,
+                    "status": "WAITING",
+                }
+            )
+
+        if changed:
+            _save_bounce_traders(sessions)
+
     return JSONResponse({"items": items, "errors": errors})
 
 
@@ -8533,6 +8666,10 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
     # Pull cashflow rows from the active source folder tracked in journal state.
     trade_items = _enrich_trade_row_metrics(_calc_balance_after_trade(items, balances))
     cashflow_rows = _cashflow_rows_for_journal(source_folder) if source_folder else []
+    if tokens:
+        # Apply the same filter tokens to cashflow rows so symbol filters (e.g. BTCUSDT)
+        # do not include deposits/withdrawals.
+        cashflow_rows = [r for r in cashflow_rows if match(r)]
 
     combined_items = sorted([*trade_items, *cashflow_rows], key=_row_sort_dt, reverse=True)
     stats = _compute_journal_stats(combined_items, balances)

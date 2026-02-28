@@ -66,6 +66,9 @@ SYMBOLS = [s.strip().upper() for s in (os.getenv("BOUNCE_SYMBOLS", "BTCUSDT").sp
 #  - vwap_long   : enter long when price FALLS to VWAP from above
 #  - vwap_short  : enter short when price RISES to VWAP from below
 STRATEGIES = [s.strip().lower() for s in (os.getenv("BOUNCE_STRATEGIES", "ema9_long,vwap_long").split(",")) if s.strip()]
+BOUNCE_SIDE_RAW = (os.getenv("BOUNCE_SIDE", "Buy") or "Buy").strip().title()
+BOUNCE_SIDE = BOUNCE_SIDE_RAW if BOUNCE_SIDE_RAW in {"Buy", "Sell"} else "Buy"
+SESSION_ID = (os.getenv("BOUNCE_SESSION_ID", "") or "").strip()
 
 EMA_LEN = int(os.getenv("EMA_LEN", "9"))
 # VWAP anchor (UTC): session = UTC day, week = UTC week (Mon 00:00)
@@ -357,7 +360,8 @@ def _round_qty_step(qty: float, step: float) -> float:
 
 def _make_order_link_id(symbol: str, strategy: str) -> str:
     # Must be <= 36 chars
-    raw = f"BB_{symbol}_{strategy}_{INTERVAL}"
+    session_token = "".join(ch for ch in SESSION_ID.upper() if ch.isalnum())[:6] or "GEN"
+    raw = f"BB{session_token}_{symbol}_{strategy}_{INTERVAL}"
     return raw[:36]
 
 
@@ -579,7 +583,9 @@ def _desired_trigger_for_strategy(symbol: str, strategy: str) -> Optional[Tuple[
         ema_val = _ema(closes, EMA_LEN)
         if ema_val is None:
             return None
-        return ("Buy", 2, ema_val)
+        if strategy in {"ema_long", "ema9_long"}:
+            return ("Buy", 2, ema_val)
+        return (BOUNCE_SIDE, 2 if BOUNCE_SIDE == "Buy" else 1, ema_val)
 
     if strategy in {"ema_short", "ema9_short"}:
         candles = _get_klines(symbol)
@@ -598,7 +604,9 @@ def _desired_trigger_for_strategy(symbol: str, strategy: str) -> Optional[Tuple[
         vwap_val = _vwap(candles)
         if vwap_val is None:
             return None
-        return ("Buy", 2, vwap_val)
+        if strategy == "vwap_long":
+            return ("Buy", 2, vwap_val)
+        return (BOUNCE_SIDE, 2 if BOUNCE_SIDE == "Buy" else 1, vwap_val)
 
     if strategy == "vwap_short":
         candles = _get_klines_since_anchor(symbol, VWAP_ANCHOR)
@@ -616,7 +624,7 @@ def main() -> None:
     print(f"MODE={MODE} BASE={BASE_URL} CATEGORY={CATEGORY} INTERVAL={INTERVAL} TRIGGER_BY={TRIGGER_BY}")
     print(f"SYMBOLS={SYMBOLS}")
     print(f"STRATEGIES={STRATEGIES}")
-    print(f"POLL_SECONDS={POLL_SECONDS} EMA_LEN={EMA_LEN} VWAP_ANCHOR={VWAP_ANCHOR}")
+    print(f"POLL_SECONDS={POLL_SECONDS} EMA_LEN={EMA_LEN} VWAP_ANCHOR={VWAP_ANCHOR} SIDE={BOUNCE_SIDE} SESSION_ID={SESSION_ID or 'n/a'}")
     print(f"TP_TICKS={TP_TICKS} SL_TICKS={SL_TICKS} RISK_MODE={RISK_MODE} RISK_PCT={RISK_PCT} BALANCE={ACCOUNT_BALANCE_RAW}")
 
     # warm cache

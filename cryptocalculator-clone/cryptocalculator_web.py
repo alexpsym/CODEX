@@ -310,6 +310,18 @@ FORM_HTML = """
     .specs-table th, .specs-table td { text-align:left; padding:0.55rem 0.65rem; border-bottom:1px solid #1f2937; font-size:0.9rem; vertical-align:top; }
     .specs-table td { white-space: normal; word-break: break-word; }
     .specs-table th { background:#0f172a; color:#cbd5e1; position:sticky; top:0; z-index:1; }
+    .specs-table tbody tr:nth-child(odd) { background:#0b1220; }
+    .specs-table tbody tr:nth-child(even) { background:#0c1526; }
+    .specs-table tbody tr:hover { background:#111c33; }
+    .specs-table td:first-child { color:#cbd5e1; width: 46%; }
+    .specs-table td:nth-child(2) { text-align:right; font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; color:#f8fafc; }
+    .specs-table th:nth-child(2) { text-align:right; }
+    .specs-section-row td { background:#0f172a !important; color:#e2e8f0; font-weight:800; text-transform:uppercase; letter-spacing:0.06em; font-size:0.78rem; border-bottom:1px solid #1f2937; }
+    .specs-summary { display:grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap:10px; margin:10px 0 12px; }
+    .specs-card { background:#0f172a; border:1px solid #1f2937; border-radius:12px; padding:10px; }
+    .specs-card .label { color:#94a3b8; font-size:12px; margin-bottom:6px; }
+    .specs-card .value { color:#f8fafc; font-weight:800; font-size:16px; font-variant-numeric: tabular-nums; }
+    .specs-card .sub { color:#9ca3af; font-size:12px; margin-top:4px; }
   </style>
 </head>
 <body data-app-root="{{ app_root }}">
@@ -537,6 +549,7 @@ FORM_HTML = """
       <div id="embedded_specs" class="trade-section specs-panel" style="display:none;">
         <h2>Instrument Specs</h2>
         <div class="copy-status" id="embedded_specs_status"></div>
+        <div id="embedded_specs_summary" class="specs-summary"></div>
         <div class="table-wrap">
           <table class="specs-table">
             <thead><tr><th>Field</th><th>Value</th></tr></thead>

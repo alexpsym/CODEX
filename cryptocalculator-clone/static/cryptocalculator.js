@@ -63,18 +63,28 @@ const SPECS_HIDE_FIELDS = new Set([
   '_units',
 ]);
 const SPECS_FIELD_LABELS = {
-  resolved_symbol: 'resolved_symbol',
-  category: 'category',
-  lastPrice: 'lastPrice (price)',
-  fundingRate: 'fundingRate (%)',
-  nextFundingTime: 'nextFundingTime (Brisbane time)',
-  launchTime: 'launchTime (Brisbane time)',
-  openInterest: 'openInterest (contracts)',
-  openInterestValue: 'openInterestValue (USD)',
-  volume24h: 'volume24h (contracts/base units)',
-  turnover24h: 'turnover24h (USD)',
-  avg7dTurnoverUsd: 'avg7dVolume (USD)',
+  resolved_symbol: 'Symbol',
+  category: 'Market',
+  lastPrice: 'Last price',
+  fundingRate: 'Funding rate',
+  nextFundingTime: 'Next funding',
+  launchTime: 'Launch time',
+  openInterest: 'Open interest',
+  openInterestValue: 'Open interest (USD)',
+  volume24h: '24h volume',
+  turnover24h: '24h turnover (USD)',
+  avg7dTurnoverUsd: '7d avg turnover (USD)',
 };
+
+const SPECS_GROUPS = [
+  { title: 'Contract', keys: ['resolved_symbol', 'category', 'launchTime'] },
+  { title: 'Price', keys: ['lastPrice'] },
+  { title: 'Funding', keys: ['fundingRate', 'nextFundingTime'] },
+  { title: 'Open interest', keys: ['openInterest', 'openInterestValue'] },
+  { title: 'Volume', keys: ['volume24h', 'turnover24h', 'avg7dTurnoverUsd'] },
+  { title: 'Scanner', predicate: (k) => k.startsWith('scan.') },
+  { title: 'Other', predicate: (_k) => true },
+];
 
 function normSymbol(value) {
   return String(value || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
@@ -155,6 +165,71 @@ function compactNumber(n, decimals = 2) {
   return num.toFixed(decimals).replace(/\.00$/, '');
 }
 
+function formatNumber(n, minDecimals = 0, maxDecimals = 2) {
+  const num = Number(n);
+  if (!Number.isFinite(num)) {
+    return String(n ?? '—');
+  }
+  return new Intl.NumberFormat('en-US', {
+    minimumFractionDigits: minDecimals,
+    maximumFractionDigits: maxDecimals,
+  }).format(num);
+}
+
+function formatPrice(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
+    return String(value ?? '—');
+  }
+  const abs = Math.abs(n);
+  if (abs >= 1) return formatNumber(n, 2, 2);
+  if (abs >= 0.01) return formatNumber(n, 4, 4);
+  if (abs >= 0.0001) return formatNumber(n, 6, 6);
+  return formatNumber(n, 8, 8);
+}
+
+function titleCaseWords(text) {
+  return String(text || '')
+    .replace(/[_\-.]+/g, ' ')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => {
+      const lower = w.toLowerCase();
+      if (lower === 'usd') return 'USD';
+      if (lower === 'oi') return 'OI';
+      if (lower === 'tp') return 'TP';
+      if (lower === 'sl') return 'SL';
+      if (lower === 'atr') return 'ATR';
+      if (lower === 'ema') return 'EMA';
+      if (lower === 'vwap') return 'VWAP';
+      if (lower === 'pnl') return 'PnL';
+      return w.charAt(0).toUpperCase() + w.slice(1);
+    })
+    .join(' ');
+}
+
+function prettifyScanKey(key) {
+  const parts = String(key || '').split('.');
+  if (parts.length < 2 || parts[0] !== 'scan') return null;
+  const metric = parts[1] || '';
+  const tfRaw = parts.slice(2).join('.') || '';
+  const metricLabelMap = {
+    fundingRate: 'Funding rate',
+    openInterest: 'Open interest',
+    openInterestValue: 'Open interest (USD)',
+    volume: 'Volume',
+    turnover: 'Turnover (USD)',
+  };
+  const metricLabel = metricLabelMap[metric] || titleCaseWords(metric);
+  const tf = tfRaw
+    .replace(/(\d+)([MHDW])/g, (_m, n, u) => `${n}${String(u).toLowerCase()}`)
+    .replace(/_/g, ' ')
+    .trim();
+  return tf ? `${metricLabel} (${tf})` : metricLabel;
+}
+
 function formatPercentFromFraction(v, decimals = 4) {
   const n = Number(v);
   if (!Number.isFinite(n)) {
@@ -164,6 +239,9 @@ function formatPercentFromFraction(v, decimals = 4) {
 }
 
 function formatSpecValue(key, value, unit) {
+  if (key === 'category' && value !== null && value !== undefined) {
+    return titleCaseWords(value);
+  }
   if (unit === 'timestamp_ms') {
     const t = formatTimestampBrisbane(value);
     if (t) return t;
@@ -182,7 +260,7 @@ function formatSpecValue(key, value, unit) {
     return Number.isFinite(n) ? n.toFixed(4) : String(value ?? '—');
   }
   if (unit === 'price' && isNumericLike(value)) {
-    return String(value);
+    return formatPrice(value);
   }
   if (key === 'launchTime' || key === 'nextFundingTime' || /(time|timestamp)$/i.test(key)) {
     const t = formatTimestampBrisbane(value);
@@ -205,6 +283,41 @@ function formatSpecValue(key, value, unit) {
   return String(value ?? '—');
 }
 
+function renderEmbeddedSpecsSummary(obj, units) {
+  const el = document.getElementById('embedded_specs_summary');
+  if (!el) return;
+  el.innerHTML = '';
+
+  const cards = [
+    { label: 'Symbol', key: 'resolved_symbol' },
+    { label: 'Market', key: 'category' },
+    { label: 'Last price', key: 'lastPrice' },
+    { label: 'Funding', key: 'fundingRate', subKey: 'nextFundingTime', subLabel: 'Next' },
+    { label: 'Open interest', key: 'openInterestValue', subKey: 'openInterest', subLabel: 'Contracts' },
+    { label: '24h turnover', key: 'turnover24h', subKey: 'volume24h', subLabel: 'Vol' },
+  ];
+
+  for (const card of cards) {
+    const wrap = document.createElement('div');
+    wrap.className = 'specs-card';
+    const label = document.createElement('div');
+    label.className = 'label';
+    label.textContent = card.label;
+    const value = document.createElement('div');
+    value.className = 'value';
+    value.textContent = formatSpecValue(card.key, obj[card.key], units[card.key]);
+    wrap.appendChild(label);
+    wrap.appendChild(value);
+    if (card.subKey) {
+      const sub = document.createElement('div');
+      sub.className = 'sub';
+      sub.textContent = `${card.subLabel}: ${formatSpecValue(card.subKey, obj[card.subKey], units[card.subKey])}`;
+      wrap.appendChild(sub);
+    }
+    el.appendChild(wrap);
+  }
+}
+
 function renderEmbeddedSpecs(specs) {
   const rows = document.getElementById('embedded_specs_rows');
   if (!rows) {
@@ -215,6 +328,8 @@ function renderEmbeddedSpecs(specs) {
   const obj = (specs && typeof specs === 'object') ? specs : {};
   const units = (obj._units && typeof obj._units === 'object') ? obj._units : {};
   const source = String(obj.source || '');
+
+  renderEmbeddedSpecsSummary(obj, units);
   const keys = [];
   // 1) Primary keys
   for (const key of SPECS_PRIMARY_KEYS) {
@@ -241,19 +356,46 @@ function renderEmbeddedSpecs(specs) {
     setEmbeddedSpecsStatus(`Source: ${source} (forced to Bybit next load)`);
   }
 
-  for (const key of keys) {
-    const value = obj[key];
-    if (SPECS_HIDE_FIELDS.has(key)) {
-      continue;
+  const remaining = new Set(keys.filter((k) => !SPECS_HIDE_FIELDS.has(k)));
+
+  for (const group of SPECS_GROUPS) {
+    const groupKeys = [];
+    if (group.keys) {
+      for (const k of group.keys) {
+        if (remaining.has(k)) {
+          groupKeys.push(k);
+          remaining.delete(k);
+        }
+      }
+    } else if (group.predicate) {
+      const picked = Array.from(remaining).filter((k) => group.predicate(k));
+      picked.sort((a, b) => a.localeCompare(b));
+      for (const k of picked) {
+        groupKeys.push(k);
+        remaining.delete(k);
+      }
     }
-    const tr = document.createElement('tr');
-    const tdKey = document.createElement('td');
-    tdKey.textContent = SPECS_FIELD_LABELS[key] || key;
-    const tdVal = document.createElement('td');
-    tdVal.textContent = formatSpecValue(key, value, units[key]);
-    tr.appendChild(tdKey);
-    tr.appendChild(tdVal);
-    rows.appendChild(tr);
+    if (!groupKeys.length) continue;
+
+    const sectionTr = document.createElement('tr');
+    sectionTr.className = 'specs-section-row';
+    const sectionTd = document.createElement('td');
+    sectionTd.colSpan = 2;
+    sectionTd.textContent = group.title;
+    sectionTr.appendChild(sectionTd);
+    rows.appendChild(sectionTr);
+
+    for (const key of groupKeys) {
+      const value = obj[key];
+      const tr = document.createElement('tr');
+      const tdKey = document.createElement('td');
+      tdKey.textContent = SPECS_FIELD_LABELS[key] || prettifyScanKey(key) || titleCaseWords(key);
+      const tdVal = document.createElement('td');
+      tdVal.textContent = formatSpecValue(key, value, units[key]);
+      tr.appendChild(tdKey);
+      tr.appendChild(tdVal);
+      rows.appendChild(tr);
+    }
   }
 }
 
