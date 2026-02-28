@@ -163,7 +163,27 @@ function formatPercentFromFraction(v, decimals = 4) {
   return `${(n * 100).toFixed(decimals).replace(/0+$/, '').replace(/\.$/, '')}%`;
 }
 
-function formatSpecValue(key, value) {
+function formatSpecValue(key, value, unit) {
+  if (unit === 'timestamp_ms') {
+    const t = formatTimestampBrisbane(value);
+    if (t) return t;
+  }
+  if (unit === 'fraction') {
+    return formatPercentFromFraction(value, 2);
+  }
+  if (unit === 'usd_value' || unit === 'usd_value_24h' || unit === 'usd_value_per_day_avg_7d') {
+    return `$${compactNumber(value)}`;
+  }
+  if (unit === 'contracts' || unit === 'base_units_24h') {
+    return compactNumber(value);
+  }
+  if (unit === 'ratio') {
+    const n = Number(value);
+    return Number.isFinite(n) ? n.toFixed(4) : String(value ?? '—');
+  }
+  if (unit === 'price' && isNumericLike(value)) {
+    return String(value);
+  }
   if (key === 'launchTime' || key === 'nextFundingTime' || /(time|timestamp)$/i.test(key)) {
     const t = formatTimestampBrisbane(value);
     if (t) {
@@ -193,25 +213,28 @@ function renderEmbeddedSpecs(specs) {
   rows.innerHTML = '';
 
   const obj = (specs && typeof specs === 'object') ? specs : {};
+  const units = (obj._units && typeof obj._units === 'object') ? obj._units : {};
   const source = String(obj.source || '');
-
   const keys = [];
+  // 1) Primary keys
   for (const key of SPECS_PRIMARY_KEYS) {
     if (obj[key] !== null && obj[key] !== undefined) {
       keys.push(key);
     }
   }
-  if (!keys.length) {
-    for (const [k, v] of Object.entries(obj)) {
-      if (SPECS_HIDE_FIELDS.has(k)) {
-        continue;
-      }
-      if (typeof v === 'object' && v !== null) {
-        continue;
-      }
-      keys.push(k);
-    }
-    keys.sort((a, b) => String(a).localeCompare(String(b)));
+  // 2) Scanner metrics
+  const scanKeys = Object.keys(obj).filter((k) => k.startsWith('scan.'));
+  scanKeys.sort((a, b) => a.localeCompare(b));
+  for (const k of scanKeys) {
+    if (!keys.includes(k)) keys.push(k);
+  }
+  // 3) Remaining scalar keys
+  const rest = Object.keys(obj).filter((k) => !k.startsWith('scan.') && !SPECS_HIDE_FIELDS.has(k) && k !== '_units');
+  rest.sort((a, b) => a.localeCompare(b));
+  for (const k of rest) {
+    const v = obj[k];
+    if (typeof v === 'object' && v !== null) continue;
+    if (!keys.includes(k)) keys.push(k);
   }
 
   if (source && source !== 'bybit') {
@@ -227,7 +250,7 @@ function renderEmbeddedSpecs(specs) {
     const tdKey = document.createElement('td');
     tdKey.textContent = SPECS_FIELD_LABELS[key] || key;
     const tdVal = document.createElement('td');
-    tdVal.textContent = formatSpecValue(key, value);
+    tdVal.textContent = formatSpecValue(key, value, units[key]);
     tr.appendChild(tdKey);
     tr.appendChild(tdVal);
     rows.appendChild(tr);
@@ -307,7 +330,7 @@ async function loadEmbeddedSpecs() {
     // instrument specs endpoint is served by the main dashboard at site-root.
     // Do NOT prefix with appRoot (otherwise it becomes /<script>/api/instrument-specs -> 404).
     // Force Bybit so BTC* doesn't resolve to OANDA crypto CFD specs (financing fields).
-    const resp = await fetch(`/api/instrument-specs?query=${encodeURIComponent(q)}&prefer=bybit`, { cache: 'no-store' });
+    const resp = await fetch(`/api/instrument-specs?query=${encodeURIComponent(q)}&prefer=bybit&include_scanner=1`, { cache: 'no-store' });
     const data = await resp.json().catch(() => null);
     if (!resp.ok) {
       setEmbeddedSpecsStatus((data && data.detail) ? String(data.detail) : 'Lookup failed');

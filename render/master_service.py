@@ -553,33 +553,391 @@ async def _bybit_resolve_and_fetch_specs(query: str) -> Optional[Dict[str, objec
     return {k: v for k, v in specs.items() if v is not None}
 
 
-async def _fetch_instrument_specs(query: str, prefer: Optional[str] = None) -> Dict[str, object]:
+async def _fetch_instrument_specs(
+    query: str,
+    prefer: Optional[str] = None,
+    *,
+    include_scanner: bool = False,
+) -> Dict[str, object]:
     q = str(query or "").strip()
     if not q:
         raise HTTPException(status_code=400, detail="query is required")
 
     pref = str(prefer or "").strip().lower()
+    specs: Optional[Dict[str, object]] = None
     if pref in {"bybit", "crypto", "perp", "perpetual"}:
-        bybit = await _bybit_resolve_and_fetch_specs(q)
-        if bybit:
-            return bybit
+        specs = await _bybit_resolve_and_fetch_specs(q)
+    elif pref in {"oanda", "fx", "forex"}:
+        specs = await _oanda_resolve_and_fetch_specs(q)
+    else:
+        specs = await _oanda_resolve_and_fetch_specs(q)
+        if not specs:
+            specs = await _bybit_resolve_and_fetch_specs(q)
+
+    if not specs:
         raise HTTPException(status_code=404, detail=f"Instrument not found for query: {q}")
 
-    if pref in {"oanda", "fx", "forex"}:
-        oanda = await _oanda_resolve_and_fetch_specs(q)
-        if oanda:
-            return oanda
-        raise HTTPException(status_code=404, detail=f"Instrument not found for query: {q}")
+    if include_scanner:
+        try:
+            await _attach_scanner_metrics(specs)
+        except Exception:
+            pass
 
-    oanda = await _oanda_resolve_and_fetch_specs(q)
-    if oanda:
-        return oanda
+    return specs
 
-    bybit = await _bybit_resolve_and_fetch_specs(q)
-    if bybit:
-        return bybit
 
-    raise HTTPException(status_code=404, detail=f"Instrument not found for query: {q}")
+def _truthy_query_param(value: Optional[str]) -> bool:
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _percentile_rank(values: List[float], current: float) -> float:
+    arr = list(values) + [current]
+    if not arr:
+        return 0.0
+    cur = float(current)
+    less = 0
+    equal = 0
+    for v in arr:
+        fv = float(v)
+        if fv < cur:
+            less += 1
+        elif fv == cur:
+            equal += 1
+    if equal <= 0:
+        equal = 1
+    first = less + 1
+    last = less + equal
+    avg_rank = (first + last) / 2.0
+    return float(avg_rank) / float(len(arr))
+
+
+def _pearson_corr(xs: List[float], ys: List[float]) -> float:
+    if not xs or not ys or len(xs) != len(ys):
+        return 0.0
+    n = len(xs)
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    cov = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    vx = sum((x - mx) ** 2 for x in xs)
+    vy = sum((y - my) ** 2 for y in ys)
+    if vx <= 0 or vy <= 0:
+        return 0.0
+    return float(cov / math.sqrt(vx * vy))
+
+
+async def _bybit_public_get_json(
+    base_url: str, path: str, params: Dict[str, object]
+) -> Dict[str, object]:
+    async with httpx.AsyncClient(timeout=20) as client:
+        res = await client.get(f"{base_url}{path}", params=params)
+    res.raise_for_status()
+    return res.json() or {}
+
+
+def _bybit_parse_kline_rows(rows: object) -> List[List[str]]:
+    out: List[List[str]] = []
+    if not isinstance(rows, list):
+        return out
+    for row in rows:
+        if isinstance(row, list) and len(row) >= 7:
+            out.append([str(x) for x in row])
+    out.sort(key=lambda r: int(float(r[0])))
+    return out
+
+
+def _ma_window_changes(values: List[float], window: int = 20) -> List[float]:
+    changes: List[float] = []
+    if len(values) <= window:
+        return changes
+    for i in range(window, len(values)):
+        prev = values[i - window : i]
+        avg_prev = sum(prev) / float(len(prev)) if prev else 0.0
+        cur = values[i]
+        if avg_prev <= 0:
+            changes.append(0.0)
+        else:
+            changes.append((cur - avg_prev) / avg_prev)
+    return changes
+
+
+_BYBIT_VOLUME_INTERVALS = {
+    "5M": "5",
+    "15M": "15",
+    "30M": "30",
+    "1H": "60",
+    "4H": "240",
+}
+
+_BYBIT_OI_INTERVALS = {
+    "5M": ("5min", 2),
+    "15M": ("15min", 2),
+    "30M": ("30min", 2),
+    "1H": ("1h", 2),
+    "4H": ("4h", 2),
+    "1D": ("1d", 2),
+    "1W": ("1d", 7),
+    "1M": ("1d", 30),
+}
+
+_BYBIT_FUNDING_LOOKBACK_MINUTES = {
+    "5M": 5,
+    "15M": 15,
+    "30M": 30,
+    "1H": 60,
+    "4H": 240,
+    "1D": 1440,
+    "1W": 10080,
+    "1M": 43200,
+}
+
+
+async def _attach_bybit_scanner_metrics(specs: Dict[str, object]) -> None:
+    base_url = BYBIT_BASE
+    symbol = str(specs.get("resolved_symbol") or "").strip().upper()
+    category = str(specs.get("category") or "linear").strip().lower() or "linear"
+    if not symbol:
+        return
+
+    units = specs.get("_units")
+    if not isinstance(units, dict):
+        units = {}
+        specs["_units"] = units
+
+    for tf, interval in _BYBIT_VOLUME_INTERVALS.items():
+        try:
+            payload = await _bybit_public_get_json(
+                base_url,
+                "/v5/market/kline",
+                {"category": category, "symbol": symbol, "interval": interval, "limit": 220},
+            )
+            rows = _bybit_parse_kline_rows((payload.get("result") or {}).get("list"))
+            vols = [float(r[5]) for r in rows if len(r) > 5]
+            changes = _ma_window_changes(vols, window=20)
+            if not changes:
+                continue
+            latest = float(changes[-1])
+            percentile = (
+                _percentile_rank([float(x) for x in changes[:-1]], latest)
+                if len(changes) > 1
+                else 0.0
+            )
+            specs[f"scan.volumeMA.{tf}"] = latest
+            specs[f"scan.volumeMA_percentile.{tf}"] = percentile
+            units[f"scan.volumeMA.{tf}"] = "fraction"
+            units[f"scan.volumeMA_percentile.{tf}"] = "fraction"
+        except Exception:
+            continue
+
+    if category in {"linear", "inverse"}:
+        for tf, (interval_time, window) in _BYBIT_OI_INTERVALS.items():
+            try:
+                payload = await _bybit_public_get_json(
+                    base_url,
+                    "/v5/market/open-interest",
+                    {
+                        "category": category,
+                        "symbol": symbol,
+                        "intervalTime": interval_time,
+                        "limit": 200,
+                    },
+                )
+                rows = (payload.get("result") or {}).get("list") or []
+                if not isinstance(rows, list) or len(rows) < (window + 2):
+                    continue
+                rows_sorted = sorted(
+                    [r for r in rows if isinstance(r, dict)],
+                    key=lambda r: int(float(r.get("timestamp", 0) or 0)),
+                )
+                vals = [float(r.get("openInterest", 0) or 0) for r in rows_sorted]
+                changes: List[float] = []
+                for i in range(window, len(vals)):
+                    first = vals[i - window]
+                    last = vals[i]
+                    changes.append(0.0 if first <= 0 else (last - first) / first)
+                if not changes:
+                    continue
+                latest = float(changes[-1])
+                percentile = (
+                    _percentile_rank([float(x) for x in changes[:-1]], latest)
+                    if len(changes) > 1
+                    else 0.0
+                )
+                specs[f"scan.openInterestChange.{tf}"] = latest
+                specs[f"scan.openInterestChange_percentile.{tf}"] = percentile
+                units[f"scan.openInterestChange.{tf}"] = "fraction"
+                units[f"scan.openInterestChange_percentile.{tf}"] = "fraction"
+            except Exception:
+                continue
+
+        try:
+            now_ms = int(time.time() * 1000)
+            hist = await _bybit_public_get_json(
+                base_url,
+                "/v5/market/funding/history",
+                {"category": category, "symbol": symbol, "limit": 200},
+            )
+            rows = (hist.get("result") or {}).get("list") or []
+            rows_sorted = sorted(
+                [r for r in rows if isinstance(r, dict)],
+                key=lambda r: int(float(r.get("fundingRateTimestamp", 0) or 0)),
+            )
+            cur = specs.get("fundingRate")
+            if cur is not None:
+                specs["scan.fundingRate.current"] = float(cur)
+                units["scan.fundingRate.current"] = "fraction"
+            for tf, minutes in _BYBIT_FUNDING_LOOKBACK_MINUTES.items():
+                target = now_ms - int(minutes * 60 * 1000)
+                val = None
+                for row in reversed(rows_sorted):
+                    ts = int(float(row.get("fundingRateTimestamp", 0) or 0))
+                    if ts <= target:
+                        val = float(row.get("fundingRate", 0) or 0)
+                        break
+                if val is None:
+                    continue
+                specs[f"scan.fundingRate.{tf}"] = val
+                units[f"scan.fundingRate.{tf}"] = "fraction"
+        except Exception:
+            pass
+
+        try:
+            if symbol != "BTCUSDT":
+                payload_s = await _bybit_public_get_json(
+                    base_url,
+                    "/v5/market/kline",
+                    {"category": category, "symbol": symbol, "interval": "1", "limit": 600},
+                )
+                payload_b = await _bybit_public_get_json(
+                    base_url,
+                    "/v5/market/kline",
+                    {
+                        "category": category,
+                        "symbol": "BTCUSDT",
+                        "interval": "1",
+                        "limit": 600,
+                    },
+                )
+                rows_s = _bybit_parse_kline_rows((payload_s.get("result") or {}).get("list"))
+                rows_b = _bybit_parse_kline_rows((payload_b.get("result") or {}).get("list"))
+                closes_s = [float(r[4]) for r in rows_s if len(r) > 4]
+                closes_b = [float(r[4]) for r in rows_b if len(r) > 4]
+                for tf, minutes in {"5M": 5, "15M": 15, "30M": 30, "1H": 60, "4H": 240}.items():
+                    if len(closes_s) < minutes + 1 or len(closes_b) < minutes + 1:
+                        continue
+                    s_seg = closes_s[-(minutes + 1) :]
+                    b_seg = closes_b[-(minutes + 1) :]
+                    s_ret = [
+                        (s_seg[i + 1] - s_seg[i]) / s_seg[i]
+                        for i in range(minutes)
+                        if s_seg[i] != 0
+                    ]
+                    b_ret = [
+                        (b_seg[i + 1] - b_seg[i]) / b_seg[i]
+                        for i in range(minutes)
+                        if b_seg[i] != 0
+                    ]
+                    if len(s_ret) != minutes or len(b_ret) != minutes:
+                        continue
+                    corr = _pearson_corr(s_ret, b_ret)
+                    specs[f"scan.corrToBTC.{tf}"] = corr
+                    units[f"scan.corrToBTC.{tf}"] = "ratio"
+        except Exception:
+            pass
+
+
+_OANDA_SCAN_TIMEFRAMES = {
+    "5M": "M5",
+    "15M": "M15",
+    "30M": "M30",
+    "1H": "H1",
+    "4H": "H4",
+}
+
+
+async def _oanda_get_json(
+    path: str, *, params: Optional[Dict[str, object]] = None
+) -> Optional[Dict[str, object]]:
+    token = _oanda_token()
+    if not token:
+        return None
+    headers = {"Authorization": f"Bearer {token}"}
+    url = f"{_oanda_base_url()}{path}"
+    async with httpx.AsyncClient(timeout=20) as client:
+        res = await client.get(url, headers=headers, params=params)
+    if res.status_code != 200:
+        return None
+    return res.json() or {}
+
+
+async def _attach_oanda_scanner_metrics(specs: Dict[str, object]) -> None:
+    symbol = str(specs.get("resolved_symbol") or "").strip().upper()
+    if not symbol:
+        return
+
+    units = specs.get("_units")
+    if not isinstance(units, dict):
+        units = {}
+        specs["_units"] = units
+
+    for label, granularity in _OANDA_SCAN_TIMEFRAMES.items():
+        payload = await _oanda_get_json(
+            f"/v3/instruments/{symbol}/candles",
+            params={"granularity": granularity, "count": 3, "price": "M"},
+        )
+        if not payload:
+            continue
+        candles = payload.get("candles") or []
+        if not isinstance(candles, list):
+            continue
+        complete = [c for c in candles if isinstance(c, dict) and c.get("complete")]
+        if len(complete) < 2:
+            continue
+        last2 = complete[-2:]
+        try:
+            o = float(((last2[0].get("mid") or {}).get("o")))
+            c = float(((last2[-1].get("mid") or {}).get("c")))
+            h = max(float(((x.get("mid") or {}).get("h"))) for x in last2)
+            l = min(float(((x.get("mid") or {}).get("l"))) for x in last2)
+        except Exception:
+            continue
+        if o <= 0:
+            continue
+        specs[f"scan.priceChange.{label}"] = (c - o) / o
+        specs[f"scan.priceRange.{label}"] = (h - l) / o
+        units[f"scan.priceChange.{label}"] = "fraction"
+        units[f"scan.priceRange.{label}"] = "fraction"
+
+    account_id = _oanda_account_id_for_specs()
+    if account_id:
+        pricing = await _oanda_get_json(
+            f"/v3/accounts/{account_id}/pricing",
+            params={"instruments": symbol},
+        )
+        if pricing and isinstance(pricing.get("prices"), list) and pricing["prices"]:
+            item = pricing["prices"][0]
+            try:
+                bid = float(item.get("closeoutBid", 0) or 0)
+                ask = float(item.get("closeoutAsk", 0) or 0)
+            except Exception:
+                bid = 0.0
+                ask = 0.0
+            if bid > 0 and ask > 0:
+                specs["scan.spread"] = (ask - bid) / ask
+                specs["scan.bid"] = bid
+                specs["scan.ask"] = ask
+                units["scan.spread"] = "fraction"
+                units["scan.bid"] = "price"
+                units["scan.ask"] = "price"
+
+
+async def _attach_scanner_metrics(specs: Dict[str, object]) -> None:
+    src = str(specs.get("source") or "").strip().lower()
+    if src == "bybit":
+        await _attach_bybit_scanner_metrics(specs)
+    elif src == "oanda":
+        await _attach_oanda_scanner_metrics(specs)
 
 
 def _specs_to_lines(specs: Dict[str, object]) -> List[str]:
@@ -6208,9 +6566,14 @@ async def api_instrument_specs(
     query: Optional[str] = None,
     q: Optional[str] = None,
     prefer: Optional[str] = None,
+    include_scanner: Optional[str] = None,
 ) -> JSONResponse:
     lookup = str(query or q or "").strip()
-    specs = await _fetch_instrument_specs(lookup, prefer=prefer)
+    specs = await _fetch_instrument_specs(
+        lookup,
+        prefer=prefer,
+        include_scanner=_truthy_query_param(include_scanner),
+    )
     return JSONResponse(specs)
 
 
@@ -6219,9 +6582,14 @@ async def api_instrument_specs_jpg(
     query: Optional[str] = None,
     q: Optional[str] = None,
     prefer: Optional[str] = None,
+    include_scanner: Optional[str] = None,
 ) -> Response:
     lookup = str(query or q or "").strip()
-    specs = await _fetch_instrument_specs(lookup, prefer=prefer)
+    specs = await _fetch_instrument_specs(
+        lookup,
+        prefer=prefer,
+        include_scanner=_truthy_query_param(include_scanner),
+    )
     blob = _render_specs_jpg_bytes(specs)
     safe = "".join(
         ch for ch in lookup if ch.isalnum() or ch in ("_", "-", ".")

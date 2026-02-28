@@ -125,6 +125,179 @@ function toggleRiskMode() {
   }
 }
 
+const OANDA_SPECS_HIDE_KEYS = new Set([
+  'query',
+  '_units',
+  'source',
+  'financing.longRate',
+  'financing.shortRate',
+  'financing.financingDaysOfWeek',
+]);
+const OANDA_SPECS_PRIMARY_KEYS = [
+  'resolved_symbol',
+  'type',
+  'displayName',
+  'pipLocation',
+  'displayPrecision',
+  'tradeUnitsPrecision',
+  'minimumTradeSize',
+  'maximumOrderUnits',
+  'marginRate',
+  'scan.spread',
+  'scan.bid',
+  'scan.ask',
+];
+
+function isNumericLike(v) {
+  if (v === null || v === undefined) return false;
+  if (typeof v === 'number') return Number.isFinite(v);
+  if (typeof v !== 'string') return false;
+  const s = v.trim();
+  return s !== '' && /^-?\d+(\.\d+)?$/.test(s);
+}
+
+function compactNumber(n, decimals = 2) {
+  const num = Number(n);
+  if (!Number.isFinite(num)) return String(n ?? '—');
+  const abs = Math.abs(num);
+  if (abs >= 1e12) return `${(num / 1e12).toFixed(decimals).replace(/\.00$/, '')}T`;
+  if (abs >= 1e9) return `${(num / 1e9).toFixed(decimals).replace(/\.00$/, '')}B`;
+  if (abs >= 1e6) return `${(num / 1e6).toFixed(decimals).replace(/\.00$/, '')}M`;
+  if (abs >= 1e3) return `${(num / 1e3).toFixed(decimals).replace(/\.00$/, '')}K`;
+  return num.toFixed(decimals).replace(/\.00$/, '');
+}
+
+function formatPercentFromFraction(v, decimals = 2) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return String(v ?? '—');
+  return `${(n * 100).toFixed(decimals).replace(/0+$/, '').replace(/\.$/, '')}%`;
+}
+
+function setInstrumentStatus(text) {
+  const el = document.getElementById('instrument_status');
+  if (el) el.textContent = text || '';
+}
+
+async function resolveInstrument(force = false) {
+  const input = document.getElementById('instrument');
+  if (!input) return null;
+  const raw = String(input.value || '').trim();
+  if (!raw) {
+    setInstrumentStatus('');
+    return null;
+  }
+
+  input.value = raw.toUpperCase();
+  if (!force && raw.includes('_')) {
+    setInstrumentStatus('');
+    return input.value;
+  }
+
+  const modeEl = document.getElementById('account_mode');
+  const mode = modeEl ? String(modeEl.value || 'live') : 'live';
+  setInstrumentStatus('Resolving...');
+  try {
+    const url = buildAppUrl(`/api/resolve-instrument?instrument=${encodeURIComponent(raw)}&account_mode=${encodeURIComponent(mode)}`);
+    const resp = await fetch(url, { cache: 'no-store' });
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok) {
+      setInstrumentStatus((data && data.detail) ? String(data.detail) : 'No match');
+      return null;
+    }
+    const resolved = String((data && data.resolved) ? data.resolved : '').toUpperCase();
+    if (resolved) {
+      const before = input.value;
+      input.value = resolved;
+      setInstrumentStatus(before === resolved ? '' : `→ ${resolved}`);
+      return resolved;
+    }
+    setInstrumentStatus('No match');
+    return null;
+  } catch {
+    setInstrumentStatus('Resolve failed');
+    return null;
+  }
+}
+
+function formatSpecValue(key, value, unit) {
+  if (unit === 'fraction') return formatPercentFromFraction(value, 2);
+  if (unit === 'usd_value' || unit === 'usd_value_24h') return `$${compactNumber(value)}`;
+  if (unit === 'contracts' || unit === 'base_units_24h') return compactNumber(value);
+  if (unit === 'price') return String(value ?? '—');
+  if (typeof value === 'object' && value !== null) return JSON.stringify(value);
+  return String(value ?? '—');
+}
+
+function setEmbeddedSpecsStatus(text) {
+  const el = document.getElementById('embedded_specs_status');
+  if (el) el.textContent = text || '';
+}
+
+function renderEmbeddedSpecs(specs) {
+  const rows = document.getElementById('embedded_specs_rows');
+  if (!rows) return;
+  rows.innerHTML = '';
+
+  const obj = (specs && typeof specs === 'object') ? specs : {};
+  const units = (obj._units && typeof obj._units === 'object') ? obj._units : {};
+  const keys = [];
+  for (const k of OANDA_SPECS_PRIMARY_KEYS) {
+    if (obj[k] !== null && obj[k] !== undefined) keys.push(k);
+  }
+  const scanKeys = Object.keys(obj).filter((k) => k.startsWith('scan.')).sort((a, b) => a.localeCompare(b));
+  for (const k of scanKeys) {
+    if (!keys.includes(k)) keys.push(k);
+  }
+  const rest = Object.keys(obj)
+    .filter((k) => !k.startsWith('scan.') && !OANDA_SPECS_HIDE_KEYS.has(k) && k !== '_units')
+    .sort((a, b) => a.localeCompare(b));
+  for (const k of rest) {
+    const v = obj[k];
+    if (typeof v === 'object' && v !== null) continue;
+    if (!keys.includes(k)) keys.push(k);
+  }
+
+  for (const key of keys) {
+    if (OANDA_SPECS_HIDE_KEYS.has(key) || key === '_units') continue;
+    const value = obj[key];
+    const tr = document.createElement('tr');
+    const tdKey = document.createElement('td');
+    tdKey.textContent = key;
+    const tdVal = document.createElement('td');
+    tdVal.textContent = formatSpecValue(key, value, units[key]);
+    tr.appendChild(tdKey);
+    tr.appendChild(tdVal);
+    rows.appendChild(tr);
+  }
+}
+
+async function loadEmbeddedSpecs() {
+  const panel = document.getElementById('embedded_specs');
+  const input = document.getElementById('instrument');
+  if (!panel || !input) return;
+
+  const resolved = await resolveInstrument(true);
+  const q = String(resolved || input.value || '').trim().toUpperCase();
+  if (!q) return;
+
+  panel.classList.remove('hidden');
+  setEmbeddedSpecsStatus('Loading...');
+  try {
+    const resp = await fetch(`/api/instrument-specs?query=${encodeURIComponent(q)}&prefer=oanda&include_scanner=1`, { cache: 'no-store' });
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok) {
+      setEmbeddedSpecsStatus((data && data.detail) ? String(data.detail) : 'Lookup failed');
+      renderEmbeddedSpecs({});
+      return;
+    }
+    setEmbeddedSpecsStatus('');
+    renderEmbeddedSpecs(data);
+  } catch {
+    setEmbeddedSpecsStatus('Lookup failed');
+    renderEmbeddedSpecs({});
+  }
+}
+
 async function enterNow() {
   const payloadEl = document.getElementById('alert_json');
   if (!payloadEl || !payloadEl.innerText.trim()) {
@@ -240,4 +413,34 @@ document.addEventListener('DOMContentLoaded', () => {
     toggleRiskMode();
   }
   updateExecuteButtons();
+
+  const instrumentEl = document.getElementById('instrument');
+  if (instrumentEl) {
+    instrumentEl.addEventListener('blur', () => resolveInstrument(false));
+  }
+
+  const specsBtn = document.getElementById('instrument_specs_btn');
+  if (specsBtn) {
+    specsBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      loadEmbeddedSpecs();
+    });
+  }
+
+  const form = document.querySelector('form');
+  let submitInFlight = false;
+  if (form) {
+    form.addEventListener('submit', async (e) => {
+      if (submitInFlight) return;
+      e.preventDefault();
+      submitInFlight = true;
+      try {
+        await resolveInstrument(true);
+      } finally {
+        submitInFlight = false;
+      }
+      form.submit();
+    });
+  }
 });
