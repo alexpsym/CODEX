@@ -1993,12 +1993,6 @@ def _encoded_script_name(script_name: str) -> str:
 def script_open_url(script: ManagedScript) -> str:
     """Return the preferred UI URL for a script."""
 
-    if script.name == "oanda_history-clone":
-        return "/oanda-history"
-    if script.name == "bybithistory-clone":
-        return "/bybit-history"
-    if script.name == "coinspot-clone":
-        return "/coinspot-history"
     if script.name == "trading-journal":
         return "/trading-journal"
     if script.name in WEB_APPS:
@@ -6132,6 +6126,43 @@ async def fetch_bybit_balance(
 @app.get("/", response_class=HTMLResponse)
 async def home_page() -> str:
     return HTML_TEMPLATE
+
+
+@app.get("/scripts/view/{script_name:path}", response_class=HTMLResponse)
+async def script_view_page(script_name: str) -> str:
+    try:
+        script = script_manager.get(script_name)
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            raise HTTPException(status_code=404, detail="Script not found") from exc
+        raise
+
+    return (
+        SCRIPT_PAGE_TEMPLATE.replace("{script_name}", html.escape(script.name))
+        .replace("{has_ui}", "true" if script.name in WEB_APPS else "false")
+        .replace("{log_url}", f"/logs/view/{_encoded_script_name(script.name)}")
+    )
+
+
+@app.get("/bybit-history")
+@app.get("/bybit-history/")
+async def legacy_bybit_history(request: Request) -> Response:
+    suffix = f"?{request.url.query}" if request.url.query else ""
+    return RedirectResponse(url=f"/apps/bybithistory-clone/{suffix}", status_code=307)
+
+
+@app.get("/oanda-history")
+@app.get("/oanda-history/")
+async def legacy_oanda_history(request: Request) -> Response:
+    suffix = f"?{request.url.query}" if request.url.query else ""
+    return RedirectResponse(url=f"/scripts/view/oanda_history-clone{suffix}", status_code=307)
+
+
+@app.get("/coinspot-history")
+@app.get("/coinspot-history/")
+async def legacy_coinspot_history(request: Request) -> Response:
+    suffix = f"?{request.url.query}" if request.url.query else ""
+    return RedirectResponse(url=f"/scripts/view/coinspot-clone{suffix}", status_code=307)
 
 
 @app.get("/trading-journal", response_class=HTMLResponse)
