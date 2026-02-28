@@ -553,10 +553,23 @@ async def _bybit_resolve_and_fetch_specs(query: str) -> Optional[Dict[str, objec
     return {k: v for k, v in specs.items() if v is not None}
 
 
-async def _fetch_instrument_specs(query: str) -> Dict[str, object]:
+async def _fetch_instrument_specs(query: str, prefer: Optional[str] = None) -> Dict[str, object]:
     q = str(query or "").strip()
     if not q:
         raise HTTPException(status_code=400, detail="query is required")
+
+    pref = str(prefer or "").strip().lower()
+    if pref in {"bybit", "crypto", "perp", "perpetual"}:
+        bybit = await _bybit_resolve_and_fetch_specs(q)
+        if bybit:
+            return bybit
+        raise HTTPException(status_code=404, detail=f"Instrument not found for query: {q}")
+
+    if pref in {"oanda", "fx", "forex"}:
+        oanda = await _oanda_resolve_and_fetch_specs(q)
+        if oanda:
+            return oanda
+        raise HTTPException(status_code=404, detail=f"Instrument not found for query: {q}")
 
     oanda = await _oanda_resolve_and_fetch_specs(q)
     if oanda:
@@ -6192,19 +6205,23 @@ async def instrument_specs_page() -> str:
 
 @app.get("/api/instrument-specs")
 async def api_instrument_specs(
-    query: Optional[str] = None, q: Optional[str] = None
+    query: Optional[str] = None,
+    q: Optional[str] = None,
+    prefer: Optional[str] = None,
 ) -> JSONResponse:
     lookup = str(query or q or "").strip()
-    specs = await _fetch_instrument_specs(lookup)
+    specs = await _fetch_instrument_specs(lookup, prefer=prefer)
     return JSONResponse(specs)
 
 
 @app.get("/api/instrument-specs.jpg")
 async def api_instrument_specs_jpg(
-    query: Optional[str] = None, q: Optional[str] = None
+    query: Optional[str] = None,
+    q: Optional[str] = None,
+    prefer: Optional[str] = None,
 ) -> Response:
     lookup = str(query or q or "").strip()
-    specs = await _fetch_instrument_specs(lookup)
+    specs = await _fetch_instrument_specs(lookup, prefer=prefer)
     blob = _render_specs_jpg_bytes(specs)
     safe = "".join(
         ch for ch in lookup if ch.isalnum() or ch in ("_", "-", ".")
