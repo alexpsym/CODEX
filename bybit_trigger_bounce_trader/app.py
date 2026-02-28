@@ -34,10 +34,9 @@ DEFAULT_CONFIG: Dict[str, str] = {
     "vwap_anchor": "session",  # session|week (UTC)
     "risk_mode": "fixed_qty",  # fixed_qty|percent
     "risk_pct": "1",
-    "account_asset": "USDT",
+    "rr_ratio": "2",
     "default_qty": "0.001",
     "qty_map": "{}",
-    "tp_ticks": "0",
     "sl_ticks": "0",
     "min_amend_ticks": "1",
     "min_gap_ticks": "2",
@@ -152,10 +151,27 @@ def _load_config() -> Dict[str, str]:
         config["vwap_anchor"] = "session"
     if not config.get("risk_mode"):
         config["risk_mode"] = "fixed_qty"
-    if not config.get("tp_ticks"):
-        config["tp_ticks"] = str(config.get("tp_pct") or "0")
     if not config.get("sl_ticks"):
         config["sl_ticks"] = str(config.get("sl_pct") or "0")
+    # Migrate legacy tp_ticks -> rr_ratio (best-effort)
+    rr_raw = str(config.get("rr_ratio") or "").strip()
+    if not rr_raw:
+        rr_val = None
+        try:
+            sl = float(str(config.get("sl_ticks") or "0"))
+            tp = float(str(config.get("tp_ticks") or "0"))
+            if sl > 0 and tp > 0:
+                rr_val = tp / sl
+        except Exception:
+            rr_val = None
+        config["rr_ratio"] = str(rr_val if rr_val is not None else DEFAULT_CONFIG["rr_ratio"])
+    else:
+        try:
+            rr = float(rr_raw)
+            if rr <= 0:
+                config["rr_ratio"] = "0"
+        except Exception:
+            config["rr_ratio"] = DEFAULT_CONFIG["rr_ratio"]
     side = (config.get("side") or "Buy").strip().title()
     config["side"] = side if side in {"Buy", "Sell"} else "Buy"
     return config
@@ -185,11 +201,11 @@ def _build_env(config: Dict[str, str], *, symbol: str, session_id: str) -> Dict[
     env["BOUNCE_RISK_PCT"] = config.get("risk_pct", "0")
     env["BOUNCE_ACCOUNT_BALANCE"] = "auto"
     env["BOUNCE_ACCOUNT_TYPE"] = "UNIFIED"
-    env["BOUNCE_ACCOUNT_ASSET"] = config.get("account_asset", "USDT")
+    env["BOUNCE_ACCOUNT_ASSET"] = "USDT"
 
     env["BOUNCE_DEFAULT_QTY"] = config["default_qty"]
     env["BOUNCE_QTY_MAP"] = config["qty_map"]
-    env["BOUNCE_TP_TICKS"] = config.get("tp_ticks", "0")
+    env["BOUNCE_RR_RATIO"] = config.get("rr_ratio", "0")
     env["BOUNCE_SL_TICKS"] = config.get("sl_ticks", "0")
     env["BOUNCE_MIN_AMEND_TICKS"] = config["min_amend_ticks"]
     env["BOUNCE_MIN_GAP_TICKS"] = config["min_gap_ticks"]
@@ -318,10 +334,9 @@ def index() -> str:
             "vwap_anchor": request.form.get("vwap_anchor", DEFAULT_CONFIG["vwap_anchor"]).strip(),
             "risk_mode": request.form.get("risk_mode", DEFAULT_CONFIG["risk_mode"]).strip(),
             "risk_pct": request.form.get("risk_pct", DEFAULT_CONFIG["risk_pct"]).strip(),
-            "account_asset": request.form.get("account_asset", DEFAULT_CONFIG["account_asset"]).strip(),
+            "rr_ratio": request.form.get("rr_ratio", DEFAULT_CONFIG["rr_ratio"]).strip(),
             "default_qty": request.form.get("default_qty", DEFAULT_CONFIG["default_qty"]).strip(),
             "qty_map": request.form.get("qty_map", DEFAULT_CONFIG["qty_map"]).strip(),
-            "tp_ticks": request.form.get("tp_ticks", DEFAULT_CONFIG["tp_ticks"]).strip(),
             "sl_ticks": request.form.get("sl_ticks", DEFAULT_CONFIG["sl_ticks"]).strip(),
             "min_amend_ticks": request.form.get("min_amend_ticks", DEFAULT_CONFIG["min_amend_ticks"]).strip(),
             "min_gap_ticks": request.form.get("min_gap_ticks", DEFAULT_CONFIG["min_gap_ticks"]).strip(),
@@ -525,17 +540,13 @@ FORM_HTML = """
             Risk %
             <input name="risk_pct" id="risk_pct" value="{{ config.risk_pct }}" />
           </label>
-          <label id="account_asset_label">
-            Account Asset
-            <input name="account_asset" id="account_asset" value="{{ config.account_asset }}" />
-          </label>
           <label>
             Default Qty
             <input name="default_qty" id="default_qty" value="{{ config.default_qty }}" />
           </label>
           <label>
-            TP Ticks (0 to disable)
-            <input name="tp_ticks" value="{{ config.tp_ticks }}" />
+            Risk Reward (RR) (0 to disable TP)
+            <input name="rr_ratio" value="{{ config.rr_ratio }}" />
           </label>
           <label>
             SL Ticks (0 to disable)
@@ -625,7 +636,7 @@ FORM_HTML = """
           if (vwapAnchor) vwapAnchor.closest('label').style.display = (strat === 'VWAP') ? '' : 'none';
 
           const showRisk = riskMode === 'percent';
-          for (const id of ['risk_pct_label','account_asset_label']) {
+          for (const id of ['risk_pct_label']) {
             const el = document.getElementById(id);
             if (el) el.style.display = showRisk ? '' : 'none';
           }

@@ -84,8 +84,20 @@ except Exception:
     QTY_MAP = {}
 DEFAULT_QTY = os.getenv("BOUNCE_DEFAULT_QTY", "0.001")
 
-TP_TICKS = int(os.getenv("BOUNCE_TP_TICKS", "0"))  # 0 disables
 SL_TICKS = int(os.getenv("BOUNCE_SL_TICKS", "0"))  # 0 disables
+_RR_RAW = (os.getenv("BOUNCE_RR_RATIO", "") or "").strip()
+if _RR_RAW:
+    try:
+        RR_RATIO = float(_RR_RAW)
+    except Exception:
+        RR_RATIO = 0.0
+else:
+    # Legacy fallback: derive RR from fixed TP ticks if present.
+    try:
+        _tp_legacy = int(os.getenv("BOUNCE_TP_TICKS", "0"))
+        RR_RATIO = (_tp_legacy / SL_TICKS) if (SL_TICKS > 0 and _tp_legacy > 0) else 0.0
+    except Exception:
+        RR_RATIO = 0.0
 
 # Sizing
 RISK_MODE = (os.getenv("BOUNCE_RISK_MODE", "fixed_qty") or "fixed_qty").strip().lower()  # fixed_qty|percent
@@ -432,23 +444,40 @@ def _place_or_amend_conditional_market(
 
 
 def _compute_tp_sl(entry: float, tick: float, side: str) -> Tuple[Optional[float], Optional[float]]:
-    if TP_TICKS <= 0 and SL_TICKS <= 0:
-        return None, None
-
+    """Compute SL in ticks and TP from net RR (fee-aware)."""
     tp: Optional[float] = None
     sl: Optional[float] = None
 
-    if side == "Buy":
-        if TP_TICKS > 0:
-            tp = _ceil_to_tick(entry + (TP_TICKS * tick), tick)
-        if SL_TICKS > 0:
+    if SL_TICKS > 0:
+        if side == "Buy":
             sl = _floor_to_tick(entry - (SL_TICKS * tick), tick)
+        else:
+            sl = _ceil_to_tick(entry + (SL_TICKS * tick), tick)
+
+    if RR_RATIO <= 0 or SL_TICKS <= 0:
         return tp, sl
 
-    if TP_TICKS > 0:
-        tp = _floor_to_tick(entry - (TP_TICKS * tick), tick)
-    if SL_TICKS > 0:
-        sl = _ceil_to_tick(entry + (SL_TICKS * tick), tick)
+    fee_rate = _fee_rate_for_category(CATEGORY)
+    if fee_rate >= 1:
+        return tp, sl
+
+    stop_distance = SL_TICKS * tick
+    stop_price = entry - stop_distance if side == "Buy" else entry + stop_distance
+    # Per-unit net loss at stop includes fees on entry+exit.
+    net_per_unit_loss = stop_distance + fee_rate * (entry + stop_price)
+    if net_per_unit_loss <= 0:
+        return tp, sl
+
+    min_profit = net_per_unit_loss * RR_RATIO
+    # Required favorable move per unit to realize min_profit after both-leg fees.
+    diff_required = (min_profit + (2 * entry * fee_rate)) / (1 - fee_rate)
+    ticks = math.ceil(diff_required / tick)
+
+    if side == "Buy":
+        tp = _ceil_to_tick(entry + (ticks * tick), tick)
+    else:
+        tp = _floor_to_tick(entry - (ticks * tick), tick)
+
     return tp, sl
 
 
@@ -539,6 +568,37 @@ def _risk_qty(
     return qty
 
 
+def _has_open_position(symbol: str) -> bool:
+    """Return True when Bybit shows a non-zero open position for symbol."""
+    try:
+        payload = _signed_get(
+            "/v5/position/list",
+            params={"category": CATEGORY, "symbol": symbol},
+            timeout=10,
+        )
+    except Exception:
+        return False
+
+    lst = ((payload.get("result") or {}).get("list") or [])
+    for pos in lst:
+        if (pos.get("symbol") or "").upper() != symbol.upper():
+            continue
+        raw_size = (
+            pos.get("size")
+            or pos.get("qty")
+            or pos.get("positionQty")
+            or pos.get("positionSize")
+            or "0"
+        )
+        try:
+            size = float(raw_size)
+        except Exception:
+            size = 0.0
+        if abs(size) > 0:
+            return True
+    return False
+
+
 # Track last trigger price we armed per (symbol,strategy) to avoid spam amends
 _last_armed_trigger: Dict[str, float] = {}
 
@@ -625,15 +685,25 @@ def main() -> None:
     print(f"SYMBOLS={SYMBOLS}")
     print(f"STRATEGIES={STRATEGIES}")
     print(f"POLL_SECONDS={POLL_SECONDS} EMA_LEN={EMA_LEN} VWAP_ANCHOR={VWAP_ANCHOR} SIDE={BOUNCE_SIDE} SESSION_ID={SESSION_ID or 'n/a'}")
-    print(f"TP_TICKS={TP_TICKS} SL_TICKS={SL_TICKS} RISK_MODE={RISK_MODE} RISK_PCT={RISK_PCT} BALANCE={ACCOUNT_BALANCE_RAW}")
+    print(f"RR_RATIO={RR_RATIO} SL_TICKS={SL_TICKS} RISK_MODE={RISK_MODE} RISK_PCT={RISK_PCT} BALANCE={ACCOUNT_BALANCE_RAW}")
 
     # warm cache
     for sym in SYMBOLS:
         _get_instrument_filters(sym)
 
+    active_symbols = list(SYMBOLS)
+
     while True:
         try:
-            for sym in SYMBOLS:
+            for sym in list(active_symbols):
+                if _has_open_position(sym):
+                    print(f"[AUTO-STOP] {sym} position detected; stopping bounce trader for this instrument.")
+                    try:
+                        active_symbols.remove(sym)
+                    except ValueError:
+                        pass
+                    continue
+
                 filters = _get_instrument_filters(sym)
                 tick = filters.tick_size
 
@@ -702,6 +772,10 @@ def main() -> None:
                     )
 
                     _last_armed_trigger[key] = trigger
+
+            if not active_symbols:
+                print("No active instruments remaining (all triggered). Exiting.")
+                return
 
             time.sleep(POLL_SECONDS)
 
