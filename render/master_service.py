@@ -237,6 +237,8 @@ TRADING_JOURNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
 _WATCHLIST_CACHE: Optional[List[str]] = None
 _TRADING_JOURNAL_CACHE: Optional[List[Dict[str, object]]] = None
 _DROPBOX_UPLOAD_TASK: Optional[asyncio.Task] = None
+_DROPBOX_UPLOAD_TIMER: Optional[threading.Timer] = None
+_DROPBOX_UPLOAD_TIMER_LOCK = threading.Lock()
 _BYBIT_EXEC_LAST_SEEN: Dict[str, int] = {}
 _OANDA_TX_LAST_SEEN: Dict[str, str] = {}
 
@@ -1021,10 +1023,18 @@ def _load_trading_journal() -> List[Dict[str, object]]:
         payload = json.loads(TRADING_JOURNAL_PATH.read_text(encoding="utf-8"))
     except Exception:  # pragma: no cover - defensive
         return []
-    if not isinstance(payload, list):
+
+    items: object
+    if isinstance(payload, dict):
+        items = payload.get("items")
+    else:
+        items = payload
+
+    if not isinstance(items, list):
         return []
+
     rows: List[Dict[str, object]] = []
-    for entry in payload:
+    for entry in items:
         if isinstance(entry, dict):
             rows.append(entry)
     return rows
@@ -1045,14 +1055,12 @@ def _save_trading_journal(rows: List[Dict[str, object]]) -> None:
         reverse=True,
     )
     _TRADING_JOURNAL_CACHE = [dict(item) for item in sorted_rows]
-    TRADING_JOURNAL_PATH.write_text(
-        json.dumps(sorted_rows, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    _save_json_file(TRADING_JOURNAL_PATH, {"items": sorted_rows, "updated_at": _utc_now_iso()})
+    _schedule_dropbox_upload_state_backup()
 
 
 def _upsert_trading_journal_rows(rows: Iterable[Dict[str, object]]) -> int:
-    existing = _get_trading_journal()
+    existing = _get_trading_journal_rows()
     by_id: Dict[str, Dict[str, object]] = {}
     for row in existing:
         row_id = str(row.get("id") or "").strip()
@@ -1110,7 +1118,9 @@ def _load_json_file(path: Path, default):
 
 def _save_json_file(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _get_trading_journal_rows() -> List[Dict[str, object]]:
@@ -2115,20 +2125,27 @@ def _schedule_dropbox_upload_state_backup() -> None:
     if not DROPBOX_SYNC_ENABLED:
         return
 
-    global _DROPBOX_UPLOAD_TASK
-    if _DROPBOX_UPLOAD_TASK is not None and not _DROPBOX_UPLOAD_TASK.done():
-        return
+    global _DROPBOX_UPLOAD_TIMER
+    with _DROPBOX_UPLOAD_TIMER_LOCK:
+        if _DROPBOX_UPLOAD_TIMER is not None:
+            try:
+                _DROPBOX_UPLOAD_TIMER.cancel()
+            except Exception:
+                pass
+            _DROPBOX_UPLOAD_TIMER = None
 
-    async def _delayed_upload() -> None:
-        await asyncio.sleep(DROPBOX_SYNC_DEBOUNCE_SECONDS)
-        try:
-            payload = _build_state_backup_payload()
-            await asyncio.to_thread(upload_bytes, DROPBOX_BACKUP_PATH, payload)
-            BYBIT_LOGGER.info("Dropbox backup uploaded to %s", DROPBOX_BACKUP_PATH)
-        except Exception as exc:  # pragma: no cover - network failure
-            BYBIT_LOGGER.error("Dropbox backup failed: %s", exc)
+        def _run_upload() -> None:
+            try:
+                payload = _build_state_backup_payload()
+                upload_bytes(DROPBOX_BACKUP_PATH, payload)
+                BYBIT_LOGGER.info("Dropbox backup uploaded to %s", DROPBOX_BACKUP_PATH)
+            except Exception as exc:  # pragma: no cover - network failure
+                BYBIT_LOGGER.error("Dropbox backup failed: %s", exc)
 
-    _DROPBOX_UPLOAD_TASK = asyncio.create_task(_delayed_upload())
+        t = threading.Timer(DROPBOX_SYNC_DEBOUNCE_SECONDS, _run_upload)
+        t.daemon = True
+        _DROPBOX_UPLOAD_TIMER = t
+        t.start()
 
 
 def _restore_alerts_payload(data: Dict[str, object]) -> Dict[str, object]:
@@ -6769,6 +6786,20 @@ async def trading_journal_page() -> str:
     .hidden { display:none !important; }
     .bal-card { background:#0f172a; border:1px solid #1f2937; border-radius:10px; padding:8px; }
     .table-wrap { padding:8px; overflow:auto; max-height:70vh; position:relative; }
+    #tj-cal-view, #tj-equity-view { padding:8px; }
+    .cal-nav { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; }
+    .cal-title { font-weight:700; color:#cbd5e1; }
+    .cal-grid { display:grid; grid-template-columns:repeat(7, minmax(0, 1fr)); gap:8px; }
+    .cal-dow { color:#93c5fd; font-size:12px; padding:4px 6px; text-transform:uppercase; letter-spacing:0.04em; }
+    .cal-day { min-height:114px; background:#0f172a; border:1px solid #1f2937; border-radius:10px; padding:8px; }
+    .cal-day.empty { opacity:0.45; }
+    .cal-day.has-trades { border-color:#2563eb; box-shadow:0 0 0 1px rgba(37,99,235,0.2) inset; }
+    .cal-day-num { font-size:12px; color:#cbd5e1; margin-bottom:6px; }
+    .cal-lines { display:flex; flex-direction:column; gap:2px; font-size:12px; }
+    .cal-lines .muted { font-size:11px; }
+    .equity-card { background:#0f172a; border:1px solid #1f2937; border-radius:10px; padding:10px; margin-bottom:10px; }
+    .equity-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; }
+    .equity-canvas { width:100%; height:220px; display:block; background:#0b1220; border:1px solid #1f2937; border-radius:8px; }
     table { width:100%; border-collapse:collapse; min-width:1200px; }
     th, td { padding:10px 8px; border-bottom:1px solid #1f2937; white-space:nowrap; }
     th { color:#93c5fd; text-align:left; position:sticky; top:0; background:#111827; z-index:5; }
@@ -6798,6 +6829,8 @@ async def trading_journal_page() -> str:
     <div class="toolbar" style="margin-bottom:8px;">
       <button id="tj-view-trades-btn">All trades</button>
       <button id="tj-view-inst-btn">Instrument averages</button>
+      <button id="tj-view-cal-btn">P/L calendar</button>
+      <button id="tj-view-equity-btn">Equity curve</button>
     </div>
     <div class="toolbar">
       <input id="tj-filter" placeholder="Filter symbol / account / source (e.g. EURUSD, BTCUSDT, oanda, bybit demo)" />
@@ -6851,6 +6884,17 @@ async def trading_journal_page() -> str:
           <tbody></tbody>
         </table>
         <div id="tj-inst-empty" class="muted" style="padding:12px; display:none;">No instrument data.</div>
+      </div>
+      <div id="tj-cal-view" class="hidden">
+        <div class="cal-nav">
+          <button id="tj-cal-prev">◀ Prev</button>
+          <div id="tj-cal-title" class="cal-title"></div>
+          <button id="tj-cal-next">Next ▶</button>
+        </div>
+        <div id="tj-cal-grid" class="cal-grid"></div>
+      </div>
+      <div id="tj-equity-view" class="hidden">
+        <div id="tj-equity-wrap"></div>
       </div>
     </div>
   </div>
@@ -7093,6 +7137,17 @@ def _compute_journal_stats(
 ) -> Dict[str, object]:
     trade_rows = [dict(r) for r in rows if _is_trade_row(r)]
 
+    def _is_valid_price_level(val: Optional[float]) -> bool:
+        # Some imports represent missing SL/TP/entry as 0.0, which explodes distance metrics.
+        return val is not None and math.isfinite(val) and val > 0
+
+    def _pct_distance(entry: Optional[float], level: Optional[float]) -> Optional[float]:
+        if not _is_valid_price_level(entry) or not _is_valid_price_level(level):
+            return None
+        if entry == 0:
+            return None
+        return (abs(level - entry) / entry) * 100.0
+
     balance_by_account: List[Dict[str, object]] = []
     for bal in balances:
         balance_by_account.append(
@@ -7164,11 +7219,6 @@ def _compute_journal_stats(
                 elif is_loss:
                     bucket.setdefault(f"{prefix}_quote_losses", []).append(dist)
 
-        def _is_valid_price_level(val: Optional[float]) -> bool:
-            # Some imports represent missing SL/TP as 0.0, which explodes distance metrics
-            # (e.g., GBPAUD entries around ~1.7 => ~17,000 pips). Treat 0/NaN/inf as invalid.
-            return val is not None and math.isfinite(val) and val > 0
-
         if _is_valid_price_level(entry) and _is_valid_price_level(sl):
             dist = abs(entry - sl)
             bucket["sl_distances"].append(dist)
@@ -7221,10 +7271,22 @@ def _compute_journal_stats(
         key=lambda x: (-(x.get("total_trades") or 0), str(x.get("symbol") or ""))
     )
 
-    all_sl = [_to_float(row.get("stop_loss")) for row in trade_rows]
-    all_tp = [_to_float(row.get("take_profit")) for row in trade_rows]
-    all_sl = [x for x in all_sl if x is not None]
-    all_tp = [x for x in all_tp if x is not None]
+    all_sl_pct: List[float] = []
+    all_tp_pct: List[float] = []
+    all_durations: List[float] = []
+    for row in trade_rows:
+        entry = _to_float(row.get("entry_price"))
+        sl = _to_float(row.get("stop_loss"))
+        tp = _to_float(row.get("take_profit"))
+        sl_pct = _pct_distance(entry, sl)
+        tp_pct = _pct_distance(entry, tp)
+        if sl_pct is not None:
+            all_sl_pct.append(sl_pct)
+        if tp_pct is not None:
+            all_tp_pct.append(tp_pct)
+        dur = _to_float(row.get("trade_duration_seconds"))
+        if dur is not None and dur >= 0:
+            all_durations.append(dur)
     profit_pct_vals = [_to_float(row.get("profit_pct")) for row in trade_rows]
     profit_pct_vals = [x for x in profit_pct_vals if x is not None]
     r_mult_vals = [_to_float(row.get("r_multiple")) for row in trade_rows]
@@ -7262,20 +7324,134 @@ def _compute_journal_stats(
         {str(r.get("symbol") or "") for r in trade_rows if _is_crypto_asset_class(r.get("asset_class"))}
     )
 
+    all_trade_durations = [_to_float(row.get("trade_duration_seconds")) for row in trade_rows]
+    all_trade_durations = [x for x in all_trade_durations if x is not None and x >= 0]
+    min_trade_duration = min(all_trade_durations) if all_trade_durations else None
+    max_trade_duration = max(all_trade_durations) if all_trade_durations else None
+
+    total_wins = sum(1 for row in trade_rows if _is_win(row))
+    total_losses = sum(1 for row in trade_rows if _is_loss(row))
+    denom = total_wins + total_losses
+    win_rate_pct = (total_wins / denom * 100.0) if denom else None
+
+    fx_wins = sum(
+        1
+        for row in trade_rows
+        if _is_fx_asset_class(row.get("asset_class")) and _is_win(row)
+    )
+    fx_losses = sum(
+        1
+        for row in trade_rows
+        if _is_fx_asset_class(row.get("asset_class")) and _is_loss(row)
+    )
+    denom_fx = fx_wins + fx_losses
+    fx_win_rate_pct = (fx_wins / denom_fx * 100.0) if denom_fx else None
+
+    crypto_wins = sum(
+        1
+        for row in trade_rows
+        if _is_crypto_asset_class(row.get("asset_class")) and _is_win(row)
+    )
+    crypto_losses = sum(
+        1
+        for row in trade_rows
+        if _is_crypto_asset_class(row.get("asset_class")) and _is_loss(row)
+    )
+    denom_crypto = crypto_wins + crypto_losses
+    crypto_win_rate_pct = (crypto_wins / denom_crypto * 100.0) if denom_crypto else None
+
+    def _to_ts(value: object) -> float:
+        if value in (None, ""):
+            return float("-inf")
+        try:
+            return float(pd.to_datetime(value).timestamp())
+        except Exception:
+            return float("-inf")
+
+    # Drawdown stats (%), segmented by cashflow anchors so deposits/withdrawals
+    # do not show up as drawdowns.
+    cashflow_rows = [r for r in rows if _row_type(r) == "cashflow"]
+    events_by_account: Dict[str, List[Tuple[float, str]]] = defaultdict(list)
+    for r in cashflow_rows:
+        account = str(r.get("account_label") or r.get("account") or "").strip()
+        account_key = _norm_account_key(account)
+        event_dt = r.get("close_time") or r.get("open_time")
+        if not account_key or not event_dt:
+            continue
+        ts = _to_ts(event_dt)
+        if math.isfinite(ts):
+            events_by_account[account_key].append((ts, str(event_dt)))
+    for account_key in list(events_by_account.keys()):
+        events_by_account[account_key] = sorted(events_by_account[account_key], key=lambda x: x[0])
+
+    segments: Dict[Tuple[str, str], List[Tuple[float, float]]] = defaultdict(list)
+    for row in trade_rows:
+        account = str(row.get("account_label") or row.get("account") or "").strip()
+        account_key = _norm_account_key(account)
+        if not account_key:
+            continue
+        dt = row.get("close_time") or row.get("open_time")
+        ts = _to_ts(dt)
+        bal = _to_float(row.get("balance_after_trade"))
+        if bal is None or not math.isfinite(bal) or bal <= 0 or not math.isfinite(ts):
+            continue
+
+        anchor_id = "__no_anchor__"
+        for ev_ts, ev_id in events_by_account.get(account_key, []):
+            if ev_ts <= ts:
+                anchor_id = ev_id
+            else:
+                break
+        segments[(account_key, anchor_id)].append((ts, bal))
+
+    dd_vals: List[float] = []
+    for pts in segments.values():
+        pts_sorted = sorted(pts, key=lambda x: x[0])
+        peak: Optional[float] = None
+        for _, bal in pts_sorted:
+            if peak is None or bal > peak:
+                peak = bal
+            if peak and peak > 0:
+                dd = (peak - bal) / peak * 100.0
+                if dd > 0 and math.isfinite(dd):
+                    dd_vals.append(dd)
+
+    if dd_vals:
+        max_drawdown_pct = max(dd_vals)
+        min_drawdown_pct = min(dd_vals)
+        avg_drawdown_pct = sum(dd_vals) / len(dd_vals)
+    else:
+        max_drawdown_pct = 0.0
+        min_drawdown_pct = 0.0
+        avg_drawdown_pct = 0.0
+
     return {
         "totals": {
             "trades": len(trade_rows),
             "wins": sum(1 for row in trade_rows if _is_win(row)),
             "losses": sum(1 for row in trade_rows if _is_loss(row)),
             "break_even": sum(1 for row in trade_rows if _is_be(row)),
-            "avg_stop_loss": _avg(all_sl),
-            "avg_take_profit": _avg(all_tp),
+            # Express these as % distance from entry, not raw price levels.
+            # Keep legacy keys for backward compatibility.
+            "avg_stop_pct": _avg(all_sl_pct),
+            "avg_target_pct": _avg(all_tp_pct),
+            "avg_stop_loss": _avg(all_sl_pct),
+            "avg_take_profit": _avg(all_tp_pct),
             "avg_profit_pct": _avg(profit_pct_vals),
             "avg_r_multiple": _avg(r_mult_vals),
+            "avg_duration_seconds": _avg(all_durations),
             "avg_winner_duration_seconds": _avg(winner_durations),
             "avg_loser_duration_seconds": _avg(loser_durations),
             "avg_fx_duration_seconds": _avg(fx_trade_durations),
             "avg_crypto_duration_seconds": _avg(crypto_trade_durations),
+            "min_trade_duration_seconds": min_trade_duration,
+            "max_trade_duration_seconds": max_trade_duration,
+            "win_rate_pct": win_rate_pct,
+            "fx_win_rate_pct": fx_win_rate_pct,
+            "crypto_win_rate_pct": crypto_win_rate_pct,
+            "max_drawdown_pct": max_drawdown_pct,
+            "min_drawdown_pct": min_drawdown_pct,
+            "avg_drawdown_pct": avg_drawdown_pct,
             "unique_instruments": len(unique_symbols),
             "crypto_instruments": len(crypto_symbols),
             "fx_instruments": len(fx_symbols),
@@ -8937,5 +9113,12 @@ async def trading_journal_sync() -> JSONResponse:
         started_at=_utc_now_iso(),
         finished_at=None,
     )
-    asyncio.create_task(_run_trading_journal_sync_job())
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_run_trading_journal_sync_job())
+    except RuntimeError:
+        threading.Thread(
+            target=lambda: asyncio.run(_run_trading_journal_sync_job()),
+            daemon=True,
+        ).start()
     return await trading_journal_sync_status()
