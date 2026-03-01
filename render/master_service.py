@@ -1136,6 +1136,57 @@ def _set_trading_journal_rows(rows: List[Dict[str, object]]) -> None:
     _schedule_dropbox_upload_state_backup()
 
 
+def _exclude_bybit_demo_row(row: Dict[str, object]) -> bool:
+    """Return True if this journal row should be excluded (Bybit Demo)."""
+
+    src = str(row.get("source") or "").strip().lower()
+    acc = str(row.get("account") or "").strip().lower()
+    label = str(row.get("account_label") or row.get("account") or "").strip()
+    if src == "bybit" and acc == "demo":
+        return True
+    return _is_bybit_demo_account_label(label)
+
+
+def _purge_bybit_demo_journal_state() -> int:
+    """Remove any Bybit Demo rows/balances already persisted on disk."""
+
+    removed = 0
+    try:
+        rows = _get_trading_journal_rows()
+        kept = [r for r in rows if isinstance(r, dict) and not _exclude_bybit_demo_row(r)]
+        removed = max(0, len(rows) - len(kept))
+        if removed:
+            _set_trading_journal_rows(kept)
+            global _TRADING_JOURNAL_CACHE
+            _TRADING_JOURNAL_CACHE = [dict(r) for r in kept]
+    except Exception:
+        # Defensive: never break startup or API endpoints for a cleanup.
+        removed = 0
+
+    try:
+        state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
+        if isinstance(state, dict):
+            bals = state.get("excel_account_balances")
+            if isinstance(bals, list):
+                kept_bals: List[Dict[str, object]] = []
+                removed_bals = 0
+                for b in bals:
+                    if not isinstance(b, dict):
+                        continue
+                    label = b.get("label") or b.get("account")
+                    if _is_bybit_demo_account_label(label):
+                        removed_bals += 1
+                        continue
+                    kept_bals.append(b)
+                if removed_bals:
+                    state["excel_account_balances"] = kept_bals
+                    _save_trading_journal_state(state)
+    except Exception:
+        pass
+
+    return removed
+
+
 def _load_trading_journal_import_cache() -> Dict[str, object]:
     data = _load_json_file(TRADING_JOURNAL_IMPORT_CACHE_PATH, {})
     return data if isinstance(data, dict) else {}
@@ -1339,6 +1390,11 @@ def _first_present(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     return None
 
 
+def _is_bybit_demo_account_label(label: object) -> bool:
+    text = str(label or "").strip().upper()
+    return bool(text) and ("BYBIT" in text) and ("DEMO" in text)
+
+
 def _parse_excel_account_workbook(
     file_name: str, dbx_path: str, payload: bytes
 ) -> Tuple[List[Dict[str, object]], Optional[Dict[str, object]]]:
@@ -1352,6 +1408,10 @@ def _parse_excel_account_workbook(
     all_rows: List[Dict[str, object]] = []
     account_balance: Optional[Dict[str, object]] = None
     account_label = Path(file_name).stem.strip() or file_name
+
+    # User preference: never import/journal Bybit Demo workbook content.
+    if _is_bybit_demo_account_label(account_label):
+        return [], None
 
     for sheet in xls.sheet_names:
         df = pd.read_excel(xls, sheet_name=sheet)
@@ -2016,6 +2076,9 @@ def _to_float(value: object) -> Optional[float]:
 
 def _journal_rows_from_bybit_execution(entry: Dict[str, object]) -> List[Dict[str, object]]:
     account = str(entry.get("account") or "unknown").strip().lower()
+    # User preference: do not journal Bybit Demo fills.
+    if account == "demo":
+        return []
     category = str(entry.get("category") or "").strip().lower()
     symbol = str(entry.get("symbol") or "").strip().upper()
     order_id = str(entry.get("orderId") or "")
@@ -2759,6 +2822,7 @@ def _compute_autostart_scripts() -> List[str]:
 @app.on_event("startup")
 async def _autostart_scripts() -> None:
     await _dropbox_restore_state_backup_on_startup()
+    _purge_bybit_demo_journal_state()
     asyncio.create_task(_poll_bybit_fills())
     asyncio.create_task(_poll_oanda_fills())
     for name in _compute_autostart_scripts():
@@ -6782,6 +6846,9 @@ async def trading_journal_page() -> str:
     .toolbar { display:flex; gap:8px; align-items:center; padding:12px; margin-bottom:12px; }
     .toolbar input { flex:1; background:#0f172a; color:#e5e7eb; border:1px solid #334155; border-radius:8px; padding:8px 10px; }
     .toolbar button { background:#2563eb; color:white; border:0; border-radius:8px; padding:8px 12px; cursor:pointer; }
+    .toolbar.compact { padding:6px 10px; gap:6px; margin-bottom:10px; }
+    .toolbar.compact input { flex:0 1 520px; max-width:520px; padding:6px 8px; }
+    .toolbar.compact button { padding:6px 10px; }
     .balances { padding:8px; margin-bottom:10px; display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:8px; }
     .hidden { display:none !important; }
     .bal-card { background:#0f172a; border:1px solid #1f2937; border-radius:10px; padding:8px; }
@@ -6835,7 +6902,7 @@ async def trading_journal_page() -> str:
       <button id="tj-view-cal-btn">P/L calendar</button>
       <button id="tj-view-equity-btn">Equity curve</button>
     </div>
-    <div class="toolbar">
+    <div class="toolbar compact">
       <input id="tj-filter" placeholder="Filter symbol / account / source (e.g. EURUSD, BTCUSDT, oanda, bybit demo)" />
       <button id="tj-filter-btn">Filter</button>
       <button id="tj-clear-btn">Clear</button>
@@ -6883,7 +6950,27 @@ async def trading_journal_page() -> str:
       </div>
       <div id="tj-inst-view" class="table-wrap hidden">
         <table id="tj-inst-table">
-          <thead><tr><th data-sort="symbol">Symbol</th><th data-sort="asset_class">Class</th><th data-sort="total_trades">Trades</th><th data-sort="wins">Wins</th><th data-sort="losses">Losses</th><th data-sort="break_even">Break-even</th><th data-sort="avg_sl_w">Avg stop dist (W)</th><th data-sort="avg_sl_l">Avg stop dist (L)</th><th data-sort="avg_tp_w">Avg target dist (W)</th><th data-sort="avg_tp_l">Avg target dist (L)</th><th data-sort="avg_duration">Avg duration</th></tr></thead>
+          <thead><tr>
+            <th data-sort="symbol">Symbol</th>
+            <th data-sort="asset_class">Class</th>
+            <th data-sort="total_trades">Trades</th>
+            <th data-sort="long_trades">Longs</th>
+            <th data-sort="short_trades">Shorts</th>
+            <th data-sort="wins">Wins</th>
+            <th data-sort="losses">Losses</th>
+            <th data-sort="break_even">Break-even</th>
+            <th data-sort="long_wins">Long wins</th>
+            <th data-sort="long_losses">Long losses</th>
+            <th data-sort="short_wins">Short wins</th>
+            <th data-sort="short_losses">Short losses</th>
+            <th data-sort="avg_sl_w">Avg stop dist (W)</th>
+            <th data-sort="avg_sl_l">Avg stop dist (L)</th>
+            <th data-sort="avg_tp_w">Avg target dist (W)</th>
+            <th data-sort="avg_tp_l">Avg target dist (L)</th>
+            <th data-sort="avg_duration">Avg duration</th>
+            <th data-sort="min_trade_duration_seconds">Shortest</th>
+            <th data-sort="max_trade_duration_seconds">Longest</th>
+          </tr></thead>
           <tbody></tbody>
         </table>
         <div id="tj-inst-empty" class="muted" style="padding:12px; display:none;">No instrument data.</div>
@@ -7174,6 +7261,14 @@ def _compute_journal_stats(
             by_instrument[symbol] = {
                 "symbol": symbol,
                 "total_trades": 0,
+                "long_trades": 0,
+                "short_trades": 0,
+                "long_wins": 0,
+                "long_losses": 0,
+                "long_break_even": 0,
+                "short_wins": 0,
+                "short_losses": 0,
+                "short_break_even": 0,
                 "wins": 0,
                 "losses": 0,
                 "break_even": 0,
@@ -7186,14 +7281,35 @@ def _compute_journal_stats(
             }
         bucket = by_instrument[symbol]
         bucket["total_trades"] += 1
+
+        side_norm = str(row.get("side") or "").strip().upper()
+        is_long_bias = side_norm.startswith("BUY") or side_norm == "LONG"
+        is_short_bias = side_norm.startswith("SELL") or side_norm == "SHORT"
+        if is_long_bias:
+            bucket["long_trades"] += 1
+        elif is_short_bias:
+            bucket["short_trades"] += 1
+
         is_win = _is_win(row)
         is_loss = _is_loss(row)
         if is_win:
             bucket["wins"] += 1
+            if is_long_bias:
+                bucket["long_wins"] += 1
+            elif is_short_bias:
+                bucket["short_wins"] += 1
         elif is_loss:
             bucket["losses"] += 1
+            if is_long_bias:
+                bucket["long_losses"] += 1
+            elif is_short_bias:
+                bucket["short_losses"] += 1
         else:
             bucket["break_even"] += 1
+            if is_long_bias:
+                bucket["long_break_even"] += 1
+            elif is_short_bias:
+                bucket["short_break_even"] += 1
 
         dur = _to_float(row.get("trade_duration_seconds"))
         if dur is not None and dur >= 0:
@@ -7238,7 +7354,10 @@ def _compute_journal_stats(
         item["avg_take_profit"] = _avg(item.pop("take_profits"))
         item["avg_sl_distance"] = _avg(item.pop("sl_distances"))
         item["avg_tp_distance"] = _avg(item.pop("tp_distances"))
-        item["avg_trade_duration_seconds"] = _avg(item.pop("durations", []))
+        dur_vals = item.pop("durations", [])
+        item["avg_trade_duration_seconds"] = _avg(dur_vals)
+        item["min_trade_duration_seconds"] = min(dur_vals) if dur_vals else None
+        item["max_trade_duration_seconds"] = max(dur_vals) if dur_vals else None
         item["avg_sl_distance_pips"] = _avg(item.pop("sl_distances_pips", []))
         item["avg_tp_distance_pips"] = _avg(item.pop("tp_distances_pips", []))
         item["avg_sl_distance_quote"] = _avg(item.pop("sl_distances_quote", []))
@@ -7317,6 +7436,11 @@ def _compute_journal_stats(
     ]
     crypto_trade_durations = [x for x in crypto_trade_durations if x is not None and x >= 0]
 
+    min_fx_trade_duration = min(fx_trade_durations) if fx_trade_durations else None
+    max_fx_trade_duration = max(fx_trade_durations) if fx_trade_durations else None
+    min_crypto_trade_duration = min(crypto_trade_durations) if crypto_trade_durations else None
+    max_crypto_trade_duration = max(crypto_trade_durations) if crypto_trade_durations else None
+
     unique_symbols = sorted(
         {str(r.get("symbol") or "") for r in trade_rows if str(r.get("symbol") or "").strip()}
     )
@@ -7336,6 +7460,23 @@ def _compute_journal_stats(
     total_losses = sum(1 for row in trade_rows if _is_loss(row))
     denom = total_wins + total_losses
     win_rate_pct = (total_wins / denom * 100.0) if denom else None
+
+    def _bias(row: Dict[str, object]) -> str:
+        side_norm = str(row.get("side") or "").strip().upper()
+        if side_norm.startswith("BUY") or side_norm == "LONG":
+            return "long"
+        if side_norm.startswith("SELL") or side_norm == "SHORT":
+            return "short"
+        return ""
+
+    long_trades = sum(1 for row in trade_rows if _bias(row) == "long")
+    short_trades = sum(1 for row in trade_rows if _bias(row) == "short")
+    long_wins = sum(1 for row in trade_rows if _bias(row) == "long" and _is_win(row))
+    long_losses = sum(1 for row in trade_rows if _bias(row) == "long" and _is_loss(row))
+    short_wins = sum(1 for row in trade_rows if _bias(row) == "short" and _is_win(row))
+    short_losses = sum(1 for row in trade_rows if _bias(row) == "short" and _is_loss(row))
+    long_break_even = sum(1 for row in trade_rows if _bias(row) == "long" and _is_be(row))
+    short_break_even = sum(1 for row in trade_rows if _bias(row) == "short" and _is_be(row))
 
     fx_wins = sum(
         1
@@ -7434,6 +7575,14 @@ def _compute_journal_stats(
             "wins": sum(1 for row in trade_rows if _is_win(row)),
             "losses": sum(1 for row in trade_rows if _is_loss(row)),
             "break_even": sum(1 for row in trade_rows if _is_be(row)),
+            "long_trades": long_trades,
+            "short_trades": short_trades,
+            "long_wins": long_wins,
+            "long_losses": long_losses,
+            "long_break_even": long_break_even,
+            "short_wins": short_wins,
+            "short_losses": short_losses,
+            "short_break_even": short_break_even,
             # Express these as % distance from entry, not raw price levels.
             # Keep legacy keys for backward compatibility.
             "avg_stop_pct": _avg(all_sl_pct),
@@ -7447,6 +7596,10 @@ def _compute_journal_stats(
             "avg_loser_duration_seconds": _avg(loser_durations),
             "avg_fx_duration_seconds": _avg(fx_trade_durations),
             "avg_crypto_duration_seconds": _avg(crypto_trade_durations),
+            "min_fx_trade_duration_seconds": min_fx_trade_duration,
+            "max_fx_trade_duration_seconds": max_fx_trade_duration,
+            "min_crypto_trade_duration_seconds": min_crypto_trade_duration,
+            "max_crypto_trade_duration_seconds": max_crypto_trade_duration,
             "min_trade_duration_seconds": min_trade_duration,
             "max_trade_duration_seconds": max_trade_duration,
             "win_rate_pct": win_rate_pct,
@@ -8864,7 +9017,8 @@ app.mount("/static", StaticFiles(directory=BASE_DIR / "render" / "static"), name
 
 @app.get("/api/trading-journal")
 async def trading_journal_items(filter: str = "") -> JSONResponse:
-    items = _get_trading_journal_rows()
+    # Enforce "no Bybit Demo" across all journal outputs.
+    items = [r for r in _get_trading_journal_rows() if isinstance(r, dict) and not _exclude_bybit_demo_row(r)]
 
     def _norm_search_text(value: object) -> str:
         text = str(value or "").lower()
@@ -8900,13 +9054,14 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
 
         items = [r for r in items if match(r)]
 
-    balances = _get_excel_account_balances()
+    balances = [b for b in _get_excel_account_balances() if not _is_bybit_demo_account_label(b.get("label") or b.get("account"))]
     state_meta = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
     source_folder = str(state_meta.get("source_folder") if isinstance(state_meta, dict) else "")
 
     # Pull cashflow rows from the active source folder tracked in journal state.
     trade_items = _enrich_trade_row_metrics(_calc_balance_after_trade(items, balances))
     cashflow_rows = _cashflow_rows_for_journal(source_folder) if source_folder else []
+    cashflow_rows = [r for r in cashflow_rows if isinstance(r, dict) and not _exclude_bybit_demo_row(r)]
     if tokens:
         # Apply the same filter tokens to cashflow rows so symbol filters (e.g. BTCUSDT)
         # do not include deposits/withdrawals.
@@ -8917,13 +9072,14 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
     return JSONResponse({"items": combined_items, "count": len(combined_items), "stats": stats})
 @app.get("/api/trading-journal/balances")
 async def trading_journal_balances() -> JSONResponse:
-    rows = _get_trading_journal_rows()
+    rows = [r for r in _get_trading_journal_rows() if isinstance(r, dict) and not _exclude_bybit_demo_row(r)]
     rows = _enrich_trade_row_metrics(_calc_balance_after_trade(rows, _get_excel_account_balances()))
     state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
     source_folder = str(state.get("source_folder") if isinstance(state, dict) else "")
 
     cashflow_items = _latest_balances_from_cashflows(source_folder) if source_folder else []
-    excel = _get_excel_account_balances()
+    cashflow_items = [b for b in cashflow_items if not _is_bybit_demo_account_label(b.get("label") or b.get("account"))]
+    excel = [b for b in _get_excel_account_balances() if not _is_bybit_demo_account_label(b.get("label") or b.get("account"))]
 
     by_acc: Dict[str, Dict[str, object]] = {}
 
