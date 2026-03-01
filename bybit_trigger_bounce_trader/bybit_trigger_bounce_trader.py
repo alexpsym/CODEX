@@ -106,6 +106,10 @@ ACCOUNT_BALANCE_RAW = (os.getenv("BOUNCE_ACCOUNT_BALANCE", "auto") or "auto").st
 ACCOUNT_TYPE = (os.getenv("BOUNCE_ACCOUNT_TYPE", "UNIFIED") or "UNIFIED").strip()
 ACCOUNT_ASSET = (os.getenv("BOUNCE_ACCOUNT_ASSET", "USDT") or "USDT").strip().upper()
 
+# Position mode selector for /v5/position/trading-stop
+# 0=one-way, 1=hedge buy, 2=hedge sell
+POSITION_IDX = int(os.getenv("BOUNCE_POSITION_IDX", "0") or 0)
+
 # Only amend the conditional order if trigger price changed by >= this many ticks
 MIN_AMEND_TICKS = int(os.getenv("BOUNCE_MIN_AMEND_TICKS", "1"))
 
@@ -568,8 +572,22 @@ def _risk_qty(
     return qty
 
 
-def _has_open_position(symbol: str) -> bool:
-    """Return True when Bybit shows a non-zero open position for symbol."""
+def _position_entry_price(pos: dict) -> float:
+    for key in ("avgPrice", "avgEntryPrice", "entryPrice", "sessionAvgPrice"):
+        raw = pos.get(key)
+        if raw is None:
+            continue
+        try:
+            val = float(raw)
+        except Exception:
+            continue
+        if val > 0:
+            return val
+    return 0.0
+
+
+def _get_open_position(symbol: str) -> Optional[dict]:
+    """Return the first non-zero position payload for symbol (or None)."""
     try:
         payload = _signed_get(
             "/v5/position/list",
@@ -577,7 +595,7 @@ def _has_open_position(symbol: str) -> bool:
             timeout=10,
         )
     except Exception:
-        return False
+        return None
 
     lst = ((payload.get("result") or {}).get("list") or [])
     for pos in lst:
@@ -595,8 +613,67 @@ def _has_open_position(symbol: str) -> bool:
         except Exception:
             size = 0.0
         if abs(size) > 0:
-            return True
-    return False
+            return pos
+    return None
+
+
+def _has_open_position(symbol: str) -> bool:
+    return _get_open_position(symbol) is not None
+
+
+def _set_trading_stop(*, symbol: str, tp: Optional[float], sl: Optional[float]) -> None:
+    body: dict = {
+        "category": CATEGORY,
+        "symbol": symbol,
+        "tpslMode": "Full",
+        "positionIdx": POSITION_IDX,
+        "tpTriggerBy": TRIGGER_BY,
+        "slTriggerBy": TRIGGER_BY,
+    }
+    if tp is not None:
+        body["takeProfit"] = f"{tp:.12f}".rstrip("0").rstrip(".")
+    if sl is not None:
+        body["stopLoss"] = f"{sl:.12f}".rstrip("0").rstrip(".")
+    _signed_post("/v5/position/trading-stop", body, timeout=10)
+
+
+def _apply_trading_stop_from_fill(*, symbol: str, tick: float) -> bool:
+    if SL_TICKS <= 0 and RR_RATIO <= 0:
+        return True
+    if CATEGORY not in {"linear", "inverse"}:
+        return True
+
+    pos: Optional[dict] = None
+    entry = 0.0
+    for _ in range(10):
+        pos = _get_open_position(symbol)
+        if not pos:
+            return False
+        entry = _position_entry_price(pos)
+        if entry > 0:
+            break
+        time.sleep(0.4)
+
+    if not pos or entry <= 0:
+        print(f"[WARN] {symbol} position detected but avg entry price unavailable; TP/SL not adjusted.")
+        return False
+
+    side = (pos.get("side") or "").strip().title()
+    if side not in {"Buy", "Sell"}:
+        raw_size = pos.get("size") or pos.get("qty") or "0"
+        try:
+            size = float(raw_size)
+        except Exception:
+            size = 0.0
+        side = "Buy" if size >= 0 else "Sell"
+
+    tp, sl = _compute_tp_sl(entry, tick, side)
+    if tp is None and sl is None:
+        return True
+
+    _set_trading_stop(symbol=symbol, tp=tp, sl=sl)
+    print(f"[TP/SL] {symbol} set from fill entry={entry} tp={tp} sl={sl} (tick={tick})")
+    return True
 
 
 # Track last trigger price we armed per (symbol,strategy) to avoid spam amends
@@ -696,7 +773,11 @@ def main() -> None:
     while True:
         try:
             for sym in list(active_symbols):
-                if _has_open_position(sym):
+                pos = _get_open_position(sym)
+                if pos is not None:
+                    filters = _get_instrument_filters(sym)
+                    tick = filters.tick_size
+                    _apply_trading_stop_from_fill(symbol=sym, tick=tick)
                     print(f"[AUTO-STOP] {sym} position detected; stopping bounce trader for this instrument.")
                     try:
                         active_symbols.remove(sym)

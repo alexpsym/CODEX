@@ -38,11 +38,18 @@
     instSortDir: localStorage.getItem('tj.instSortDir') || 'desc',
     stats: null,
     view: localStorage.getItem('tj.view') || 'trades',
+    calMonth: localStorage.getItem('tj.calMonth') || new Date().toISOString().slice(0, 7),
   };
   try { filterInput.value = localStorage.getItem('tj.filter') || ''; } catch {}
 
-  const fmtNum = (v, d = 2) => {
+  const asNum = (v) => {
+    if (v === null || v === undefined || v === '') return NaN;
     const n = Number(v);
+    return Number.isFinite(n) ? n : NaN;
+  };
+
+  const fmtNum = (v, d = 2) => {
+    const n = asNum(v);
     if (!Number.isFinite(n)) return '—';
     if (Math.abs(n) > 0 && Math.abs(n) < Math.pow(10, -Math.max(2, d)) && Math.abs(n) < 1e-4) {
       return n.toPrecision(8);
@@ -50,7 +57,7 @@
     return n.toLocaleString(undefined, { maximumFractionDigits: d });
   };
   const fmtQty = (v, row) => {
-    const n = Number(v);
+    const n = asNum(v);
     if (!Number.isFinite(n)) return '—';
     const d = qtyPrecision(row);
     let out = n.toLocaleString(undefined, { maximumFractionDigits: d });
@@ -65,7 +72,7 @@
   };
 
   const fmtDuration = (seconds) => {
-    const n = Number(seconds);
+    const n = asNum(seconds);
     if (!Number.isFinite(n) || n < 0) return '—';
     const total = Math.round(n);
     const d = Math.floor(total / 86400);
@@ -195,6 +202,7 @@
       localStorage.setItem('tj.instSortDir', state.instSortDir || 'desc');
       localStorage.setItem('tj.flags', JSON.stringify(Array.from(activeFlags)));
       localStorage.setItem('tj.view', state.view || 'trades');
+      localStorage.setItem('tj.calMonth', state.calMonth || new Date().toISOString().slice(0, 7));
     } catch {}
   }
 
@@ -203,18 +211,25 @@
     state.sortDir = localStorage.getItem('tj.sortDir') || state.sortDir;
     state.instSortKey = localStorage.getItem('tj.instSortKey') || state.instSortKey;
     state.instSortDir = localStorage.getItem('tj.instSortDir') || state.instSortDir;
+    state.calMonth = localStorage.getItem('tj.calMonth') || state.calMonth;
     const savedFlags = JSON.parse(localStorage.getItem('tj.flags') || '[]');
     if (Array.isArray(savedFlags)) savedFlags.forEach((f) => activeFlags.add(String(f)));
   } catch {}
 
   function fmtProfitPct(v) {
-    const n = Number(v);
+    const n = asNum(v);
     if (!Number.isFinite(n)) return '—';
     return `${fmtNum(n, 4)}%`;
   }
 
+  function fmtPctSmall(v, d = 2) {
+    const n = asNum(v);
+    if (!Number.isFinite(n)) return '—';
+    return `${fmtNum(n, d)}%`;
+  }
+
   function fmtR(v) {
-    const n = Number(v);
+    const n = asNum(v);
     if (!Number.isFinite(n)) return '—';
     return `${fmtNum(n, 3)}R`;
   }
@@ -319,17 +334,226 @@
   function applyView() {
     const tradesWrap = q('#tj-trades-wrap');
     const instWrap = q('#tj-inst-view');
+    const calWrap = q('#tj-cal-view');
+    const equityWrap = q('#tj-equity-view');
     const topScroll = q('#tj-top-scroll');
     const tradesBtn = q('#tj-view-trades-btn');
     const instBtn = q('#tj-view-inst-btn');
+    const calBtn = q('#tj-view-cal-btn');
+    const equityBtn = q('#tj-view-equity-btn');
+    const showTrades = state.view === 'trades';
     const showInst = state.view === 'instrument';
-    tradesWrap?.classList.toggle('hidden', showInst);
-    topScroll?.classList.toggle('hidden', showInst);
+    const showCal = state.view === 'calendar';
+    const showEquity = state.view === 'equity';
+    tradesWrap?.classList.toggle('hidden', !showTrades);
+    topScroll?.classList.toggle('hidden', !showTrades);
     instWrap?.classList.toggle('hidden', !showInst);
-    [tradesBtn, instBtn].forEach((b) => { if (b) { b.style.outline='none'; b.style.opacity='0.8'; }});
-    if (showInst) { if (instBtn) { instBtn.style.outline='1px solid #60a5fa'; instBtn.style.opacity='1'; } }
-    else { if (tradesBtn) { tradesBtn.style.outline='1px solid #60a5fa'; tradesBtn.style.opacity='1'; } }
+    calWrap?.classList.toggle('hidden', !showCal);
+    equityWrap?.classList.toggle('hidden', !showEquity);
+
+    [tradesBtn, instBtn, calBtn, equityBtn].forEach((b) => { if (b) { b.style.outline='none'; b.style.opacity='0.8'; }});
+    if (showInst && instBtn) { instBtn.style.outline='1px solid #60a5fa'; instBtn.style.opacity='1'; }
+    if (showCal && calBtn) { calBtn.style.outline='1px solid #60a5fa'; calBtn.style.opacity='1'; }
+    if (showEquity && equityBtn) { equityBtn.style.outline='1px solid #60a5fa'; equityBtn.style.opacity='1'; }
+    if (showTrades && tradesBtn) { tradesBtn.style.outline='1px solid #60a5fa'; tradesBtn.style.opacity='1'; }
     persistUiState();
+  }
+
+  function _monthBounds(ym) {
+    const m = /^\d{4}-\d{2}$/.test(String(ym || '')) ? ym : new Date().toISOString().slice(0, 7);
+    const [yy, mm] = m.split('-').map(Number);
+    const start = new Date(Date.UTC(yy, mm - 1, 1));
+    const end = new Date(Date.UTC(yy, mm, 1));
+    return { start, end, ym: `${yy.toString().padStart(4, '0')}-${String(mm).padStart(2, '0')}` };
+  }
+
+  function _monthShift(ym, delta) {
+    const b = _monthBounds(ym);
+    const dt = new Date(Date.UTC(b.start.getUTCFullYear(), b.start.getUTCMonth() + delta, 1));
+    return `${dt.getUTCFullYear().toString().padStart(4, '0')}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}`;
+  }
+
+  function renderCalendarView(rows) {
+    const grid = q('#tj-cal-grid');
+    const title = q('#tj-cal-title');
+    if (!grid) return;
+    const { start, end, ym } = _monthBounds(state.calMonth);
+    state.calMonth = ym;
+    if (title) title.textContent = start.toLocaleString('en-AU', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+
+    const daily = new Map();
+    const inMonth = (d) => d >= start && d < end;
+    (rows || []).forEach((r) => {
+      const dtRaw = r?.close_time || r?.open_time;
+      const dt = dtRaw ? new Date(dtRaw) : null;
+      if (!dt || Number.isNaN(dt.getTime()) || !inMonth(dt)) return;
+      const key = dt.toISOString().slice(0, 10);
+      const rowType = String(r?.row_type || 'trade').toLowerCase();
+      const isTrade = rowType !== 'cashflow';
+      if (!daily.has(key)) daily.set(key, { trades: 0, fx: 0, crypto: 0, pnlByCcy: new Map() });
+      const d = daily.get(key);
+      if (isTrade) {
+        d.trades += 1;
+        if (String(r?.asset_class || '').toLowerCase() === 'fx') d.fx += 1;
+        if (String(r?.asset_class || '').toLowerCase() === 'crypto') d.crypto += 1;
+        const pnl = asNum(r?.net_profit ?? r?.realized_pnl);
+        const ccy = String(r?.realized_pnl_currency || r?.currency || '').trim().toUpperCase();
+        if (Number.isFinite(pnl) && ccy) d.pnlByCcy.set(ccy, (d.pnlByCcy.get(ccy) || 0) + pnl);
+      }
+    });
+
+    const firstDow = (start.getUTCDay() + 6) % 7;
+    const daysInMonth = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 0)).getUTCDate();
+    grid.innerHTML = '';
+    ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].forEach((name) => {
+      const hd = document.createElement('div');
+      hd.className = 'cal-dow';
+      hd.textContent = name;
+      grid.appendChild(hd);
+    });
+
+    for (let i = 0; i < firstDow; i += 1) {
+      const pad = document.createElement('div');
+      pad.className = 'cal-day empty';
+      grid.appendChild(pad);
+    }
+
+    for (let day = 1; day <= daysInMonth; day += 1) {
+      const key = `${ym}-${String(day).padStart(2, '0')}`;
+      const d = daily.get(key) || { trades: 0, fx: 0, crypto: 0, pnlByCcy: new Map() };
+      const card = document.createElement('div');
+
+      const pnlEntries = Array.from(d.pnlByCcy.entries()).filter(([, v]) => Number.isFinite(Number(v)));
+      let pnlRef = null;
+      if (pnlEntries.length === 1) {
+        pnlRef = pnlEntries[0][1];
+      } else if (pnlEntries.length > 1) {
+        const aud = pnlEntries.find(([ccy]) => ccy === 'AUD');
+        if (aud) pnlRef = aud[1];
+        else pnlRef = pnlEntries.slice().sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))[0][1];
+      }
+      const pnlClass = pnlRef === null ? '' : (pnlRef > 1e-12 ? 'pnl-pos' : (pnlRef < -1e-12 ? 'pnl-neg' : 'pnl-flat'));
+      card.className = `cal-day ${d.trades > 0 ? 'has-trades' : ''} ${d.trades > 0 && pnlClass ? pnlClass : ''}`.trim();
+
+      const pnlTop = pnlEntries
+        .slice()
+        .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
+        .slice(0, 2);
+
+      card.innerHTML = `
+        <div class="cal-day-num">${day}</div>
+        <div class="cal-lines">
+          ${d.trades > 0 ? `<div>Trades: <b>${d.trades}</b></div>` : '<div class="muted">No trades</div>'}
+          ${d.trades > 0 ? `<div class="muted">FX ${d.fx} · Crypto ${d.crypto}</div>` : ''}
+          ${pnlTop.map(([ccy, v]) => `<div class="${v > 1e-12 ? 'num pos' : (v < -1e-12 ? 'num neg' : 'muted')}">P/L ${fmtNum(v, 2)} ${ccy}</div>`).join('')}
+        </div>
+      `;
+      grid.appendChild(card);
+    }
+  }
+
+  let _equityResizeWired = false;
+  function renderEquityView(rows) {
+    const wrap = q('#tj-equity-wrap');
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    const byAccount = new Map();
+
+    (rows || []).forEach((r) => {
+      const account = String(r?.account_label || r?.account || 'Unknown').trim() || 'Unknown';
+      const dtRaw = r?.close_time || r?.open_time;
+      const ts = dtRaw ? new Date(dtRaw).getTime() : NaN;
+      const bal = asNum(r?.balance_after_trade ?? r?.cashflow_new_balance);
+      if (!Number.isFinite(ts) || !Number.isFinite(bal)) return;
+      if (!byAccount.has(account)) byAccount.set(account, []);
+      byAccount.get(account).push({ ts, bal });
+    });
+
+    if (!byAccount.size) {
+      const empty = document.createElement('div');
+      empty.className = 'muted';
+      empty.textContent = 'No equity data available.';
+      wrap.appendChild(empty);
+      return;
+    }
+
+    const drawCanvas = (canvas, pts) => {
+      const rect = canvas.getBoundingClientRect();
+      const width = Math.max(280, Math.floor(rect.width || canvas.clientWidth || 900));
+      const height = 220;
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.floor(width * dpr);
+      canvas.height = Math.floor(height * dpr);
+      canvas.style.height = `${height}px`;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, width, height);
+
+      const pad = { l: 42, r: 12, t: 12, b: 24 };
+      const minX = pts[0].ts;
+      const maxX = pts[pts.length - 1].ts;
+      const minY = Math.min(...pts.map((p) => p.bal));
+      const maxY = Math.max(...pts.map((p) => p.bal));
+      const spanX = Math.max(1, maxX - minX);
+      const spanY = Math.max(1e-9, maxY - minY);
+
+      const x = (v) => pad.l + ((v - minX) / spanX) * (width - pad.l - pad.r);
+      const y = (v) => height - pad.b - ((v - minY) / spanY) * (height - pad.t - pad.b);
+
+      ctx.strokeStyle = '#334155';
+      ctx.lineWidth = 1;
+      for (let i = 0; i < 4; i += 1) {
+        const gy = pad.t + (i / 3) * (height - pad.t - pad.b);
+        ctx.beginPath();
+        ctx.moveTo(pad.l, gy);
+        ctx.lineTo(width - pad.r, gy);
+        ctx.stroke();
+      }
+
+      ctx.strokeStyle = '#60a5fa';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      pts.forEach((p, i) => {
+        const xx = x(p.ts);
+        const yy = y(p.bal);
+        if (i === 0) ctx.moveTo(xx, yy);
+        else ctx.lineTo(xx, yy);
+      });
+      ctx.stroke();
+
+      const last = pts[pts.length - 1];
+      ctx.fillStyle = '#93c5fd';
+      ctx.beginPath();
+      ctx.arc(x(last.ts), y(last.bal), 3.5, 0, Math.PI * 2);
+      ctx.fill();
+    };
+
+    Array.from(byAccount.entries()).sort((a,b)=>a[0].localeCompare(b[0])).forEach(([account, pts]) => {
+      pts.sort((a, b) => a.ts - b.ts);
+      const card = document.createElement('div');
+      card.className = 'equity-card';
+      const minBal = Math.min(...pts.map((p) => p.bal));
+      const maxBal = Math.max(...pts.map((p) => p.bal));
+      card.innerHTML = `
+        <div class="equity-head">
+          <div><strong>${account}</strong></div>
+          <div class="muted">${pts.length} points · Min ${fmtNum(minBal, 2)} · Max ${fmtNum(maxBal, 2)}</div>
+        </div>
+      `;
+      const canvas = document.createElement('canvas');
+      canvas.className = 'equity-canvas';
+      card.appendChild(canvas);
+      wrap.appendChild(card);
+      drawCanvas(canvas, pts);
+    });
+
+    if (!_equityResizeWired) {
+      _equityResizeWired = true;
+      window.addEventListener('resize', () => {
+        if (state.view === 'equity') renderEquityView(state.rows);
+      });
+    }
   }
 
   function sortRows(rows) {
@@ -375,13 +599,13 @@
     for (const r of sorted) {
       const rowType = String(r.row_type || 'trade').toLowerCase();
       const isCashflow = rowType === 'cashflow';
-      const pnl = Number(r.net_profit ?? r.realized_pnl);
-      const bal = Number(r.balance_after_trade ?? r.cashflow_new_balance);
+      const pnl = asNum(r.net_profit ?? r.realized_pnl);
+      const bal = asNum(r.balance_after_trade ?? r.cashflow_new_balance);
       const ccy = r.balance_after_trade_currency || r.currency || '';
       const tr = document.createElement('tr');
 
       if (isCashflow) {
-        const amt = Number(r.cashflow_amount);
+        const amt = asNum(r.cashflow_amount);
         const flowCls = Number.isFinite(amt) ? (amt > 0 ? 'pos' : (amt < 0 ? 'neg' : '')) : '';
         const baseLabel = r.side || (amt > 0 ? 'DEPOSIT' : (amt < 0 ? 'WITHDRAWAL' : 'CASHFLOW'));
         const amtLabel = Number.isFinite(amt) ? ` (${fmtNum(amt, 2)} ${ccy})` : '';
@@ -424,8 +648,8 @@
         <td>${fmtNum(r.take_profit, 6)}</td>
         <td>${fmtNum(r.commission ?? r.fees, 4)} ${r.commission_currency || r.fee_currency || ''}</td>
         <td class="num ${Number.isFinite(pnl) ? (pnl > 0 ? 'pos' : (pnl < 0 ? 'neg' : '')) : ''}">${fmtNum(pnl, 4)} ${r.realized_pnl_currency || r.currency || ''}</td>
-        <td class="num ${Number(r.profit_pct) > 0 ? 'pos' : (Number(r.profit_pct) < 0 ? 'neg' : '')}">${fmtProfitPct(r.profit_pct)}</td>
-        <td class="num ${Number(r.r_multiple) > 0 ? 'pos' : (Number(r.r_multiple) < 0 ? 'neg' : '')}">${fmtR(r.r_multiple)}</td>
+        <td class="num ${asNum(r.profit_pct) > 0 ? 'pos' : (asNum(r.profit_pct) < 0 ? 'neg' : '')}">${fmtProfitPct(r.profit_pct)}</td>
+        <td class="num ${asNum(r.r_multiple) > 0 ? 'pos' : (asNum(r.r_multiple) < 0 ? 'neg' : '')}">${fmtR(r.r_multiple)}</td>
         <td>${Number.isFinite(bal) ? `${fmtNum(bal, 2)} ${ccy}` : '—'}</td>
         <td>${fmtDuration(r.trade_duration_seconds)}</td>
         <td>${r.breakeven || '—'}</td>
@@ -455,20 +679,37 @@
     wrap.innerHTML = '';
     if (!stats) return;
 
+    const fmtPct = (v) => {
+      const n = asNum(v);
+      return Number.isFinite(n) ? `${fmtNum(n, 4)}%` : '—';
+    };
+
+    const stopPct = stats?.totals?.avg_stop_pct ?? stats?.totals?.avg_stop_loss;
+    const targetPct = stats?.totals?.avg_target_pct ?? stats?.totals?.avg_take_profit;
+
     const cards = [
       ['Total trades', stats?.totals?.trades],
       ['Wins', stats?.totals?.wins],
       ['Losses', stats?.totals?.losses],
       ['Break even', stats?.totals?.break_even],
+      ['Win rate (all)', fmtPctSmall(stats?.totals?.win_rate_pct)],
+      ['Win rate (FX)', fmtPctSmall(stats?.totals?.fx_win_rate_pct)],
+      ['Win rate (crypto)', fmtPctSmall(stats?.totals?.crypto_win_rate_pct)],
       ['Unique instruments', stats?.totals?.unique_instruments],
       ['Crypto instruments', stats?.totals?.crypto_instruments],
       ['Forex instruments', stats?.totals?.fx_instruments],
-      ['Avg stop loss', stats?.totals?.avg_stop_loss],
-      ['Avg target', stats?.totals?.avg_take_profit],
-      ['Avg profit %', stats?.totals?.avg_profit_pct],
+      ['Avg stop %', fmtPct(stopPct)],
+      ['Avg target %', fmtPct(targetPct)],
+      ['Avg profit %', fmtPct(stats?.totals?.avg_profit_pct)],
       ['Avg R', stats?.totals?.avg_r_multiple],
+      ['Max drawdown', fmtPctSmall(stats?.totals?.max_drawdown_pct)],
+      ['Avg drawdown', fmtPctSmall(stats?.totals?.avg_drawdown_pct)],
+      ['Min drawdown', fmtPctSmall(stats?.totals?.min_drawdown_pct)],
+      ['Avg duration', fmtDuration(stats?.totals?.avg_duration_seconds)],
       ['Avg FX duration', fmtDuration(stats?.totals?.avg_fx_duration_seconds)],
       ['Avg crypto duration', fmtDuration(stats?.totals?.avg_crypto_duration_seconds)],
+      ['Longest trade', fmtDuration(stats?.totals?.max_trade_duration_seconds)],
+      ['Shortest trade', fmtDuration(stats?.totals?.min_trade_duration_seconds)],
       ['Most wins instrument', stats?.instrument_with_most_wins?.symbol || '—'],
       ['Most losses instrument', stats?.instrument_with_most_losses?.symbol || '—'],
     ];
@@ -486,6 +727,8 @@
     renderRows(filtered);
     renderSortIndicators();
     renderInstrumentView(state.stats);
+    renderCalendarView(filtered);
+    renderEquityView(filtered);
     applyView();
     syncTopScrollbar();
     persistUiState();
@@ -598,6 +841,10 @@
   q('#tj-filter-btn')?.addEventListener('click', () => { persistUiState(); load(); });
   q('#tj-view-trades-btn')?.addEventListener('click', () => { state.view = 'trades'; applyView(); });
   q('#tj-view-inst-btn')?.addEventListener('click', () => { state.view = 'instrument'; applyView(); });
+  q('#tj-view-cal-btn')?.addEventListener('click', () => { state.view = 'calendar'; applyView(); renderCalendarView(applyFlagFilters(state.rows)); });
+  q('#tj-view-equity-btn')?.addEventListener('click', () => { state.view = 'equity'; applyView(); renderEquityView(applyFlagFilters(state.rows)); });
+  q('#tj-cal-prev')?.addEventListener('click', () => { state.calMonth = _monthShift(state.calMonth, -1); persistUiState(); renderCalendarView(applyFlagFilters(state.rows)); });
+  q('#tj-cal-next')?.addEventListener('click', () => { state.calMonth = _monthShift(state.calMonth, 1); persistUiState(); renderCalendarView(applyFlagFilters(state.rows)); });
   q('#tj-clear-btn')?.addEventListener('click', () => { filterInput.value = ''; persistUiState(); load(); });
   q('#tj-sync-btn')?.addEventListener('click', async () => {
     try {
