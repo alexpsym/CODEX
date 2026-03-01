@@ -237,6 +237,8 @@ TRADING_JOURNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
 _WATCHLIST_CACHE: Optional[List[str]] = None
 _TRADING_JOURNAL_CACHE: Optional[List[Dict[str, object]]] = None
 _DROPBOX_UPLOAD_TASK: Optional[asyncio.Task] = None
+_DROPBOX_UPLOAD_TIMER: Optional[threading.Timer] = None
+_DROPBOX_UPLOAD_TIMER_LOCK = threading.Lock()
 _BYBIT_EXEC_LAST_SEEN: Dict[str, int] = {}
 _OANDA_TX_LAST_SEEN: Dict[str, str] = {}
 
@@ -1021,10 +1023,18 @@ def _load_trading_journal() -> List[Dict[str, object]]:
         payload = json.loads(TRADING_JOURNAL_PATH.read_text(encoding="utf-8"))
     except Exception:  # pragma: no cover - defensive
         return []
-    if not isinstance(payload, list):
+
+    items: object
+    if isinstance(payload, dict):
+        items = payload.get("items")
+    else:
+        items = payload
+
+    if not isinstance(items, list):
         return []
+
     rows: List[Dict[str, object]] = []
-    for entry in payload:
+    for entry in items:
         if isinstance(entry, dict):
             rows.append(entry)
     return rows
@@ -1045,14 +1055,12 @@ def _save_trading_journal(rows: List[Dict[str, object]]) -> None:
         reverse=True,
     )
     _TRADING_JOURNAL_CACHE = [dict(item) for item in sorted_rows]
-    TRADING_JOURNAL_PATH.write_text(
-        json.dumps(sorted_rows, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    _save_json_file(TRADING_JOURNAL_PATH, {"items": sorted_rows, "updated_at": _utc_now_iso()})
+    _schedule_dropbox_upload_state_backup()
 
 
 def _upsert_trading_journal_rows(rows: Iterable[Dict[str, object]]) -> int:
-    existing = _get_trading_journal()
+    existing = _get_trading_journal_rows()
     by_id: Dict[str, Dict[str, object]] = {}
     for row in existing:
         row_id = str(row.get("id") or "").strip()
@@ -1110,7 +1118,9 @@ def _load_json_file(path: Path, default):
 
 def _save_json_file(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _get_trading_journal_rows() -> List[Dict[str, object]]:
@@ -2115,20 +2125,27 @@ def _schedule_dropbox_upload_state_backup() -> None:
     if not DROPBOX_SYNC_ENABLED:
         return
 
-    global _DROPBOX_UPLOAD_TASK
-    if _DROPBOX_UPLOAD_TASK is not None and not _DROPBOX_UPLOAD_TASK.done():
-        return
+    global _DROPBOX_UPLOAD_TIMER
+    with _DROPBOX_UPLOAD_TIMER_LOCK:
+        if _DROPBOX_UPLOAD_TIMER is not None:
+            try:
+                _DROPBOX_UPLOAD_TIMER.cancel()
+            except Exception:
+                pass
+            _DROPBOX_UPLOAD_TIMER = None
 
-    async def _delayed_upload() -> None:
-        await asyncio.sleep(DROPBOX_SYNC_DEBOUNCE_SECONDS)
-        try:
-            payload = _build_state_backup_payload()
-            await asyncio.to_thread(upload_bytes, DROPBOX_BACKUP_PATH, payload)
-            BYBIT_LOGGER.info("Dropbox backup uploaded to %s", DROPBOX_BACKUP_PATH)
-        except Exception as exc:  # pragma: no cover - network failure
-            BYBIT_LOGGER.error("Dropbox backup failed: %s", exc)
+        def _run_upload() -> None:
+            try:
+                payload = _build_state_backup_payload()
+                upload_bytes(DROPBOX_BACKUP_PATH, payload)
+                BYBIT_LOGGER.info("Dropbox backup uploaded to %s", DROPBOX_BACKUP_PATH)
+            except Exception as exc:  # pragma: no cover - network failure
+                BYBIT_LOGGER.error("Dropbox backup failed: %s", exc)
 
-    _DROPBOX_UPLOAD_TASK = asyncio.create_task(_delayed_upload())
+        t = threading.Timer(DROPBOX_SYNC_DEBOUNCE_SECONDS, _run_upload)
+        t.daemon = True
+        _DROPBOX_UPLOAD_TIMER = t
+        t.start()
 
 
 def _restore_alerts_payload(data: Dict[str, object]) -> Dict[str, object]:
@@ -9096,5 +9113,12 @@ async def trading_journal_sync() -> JSONResponse:
         started_at=_utc_now_iso(),
         finished_at=None,
     )
-    asyncio.create_task(_run_trading_journal_sync_job())
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_run_trading_journal_sync_job())
+    except RuntimeError:
+        threading.Thread(
+            target=lambda: asyncio.run(_run_trading_journal_sync_job()),
+            daemon=True,
+        ).start()
     return await trading_journal_sync_status()
