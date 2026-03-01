@@ -6791,12 +6791,15 @@ async def trading_journal_page() -> str:
     .cal-title { font-weight:700; color:#cbd5e1; }
     .cal-grid { display:grid; grid-template-columns:repeat(7, minmax(0, 1fr)); gap:8px; }
     .cal-dow { color:#93c5fd; font-size:12px; padding:4px 6px; text-transform:uppercase; letter-spacing:0.04em; }
-    .cal-day { min-height:114px; background:#0f172a; border:1px solid #1f2937; border-radius:10px; padding:8px; }
+    .cal-day { min-height:128px; background:#0f172a; border:1px solid #1f2937; border-radius:10px; padding:10px; }
     .cal-day.empty { opacity:0.45; }
-    .cal-day.has-trades { border-color:#2563eb; box-shadow:0 0 0 1px rgba(37,99,235,0.2) inset; }
-    .cal-day-num { font-size:12px; color:#cbd5e1; margin-bottom:6px; }
-    .cal-lines { display:flex; flex-direction:column; gap:2px; font-size:12px; }
-    .cal-lines .muted { font-size:11px; }
+    .cal-day.has-trades { border-color:#2563eb; box-shadow:0 0 0 1px rgba(37,99,235,0.20) inset; }
+    .cal-day.pnl-pos { background: rgba(34,197,94,0.10); border-color: rgba(34,197,94,0.55); box-shadow:0 0 0 1px rgba(34,197,94,0.22) inset; }
+    .cal-day.pnl-neg { background: rgba(239,68,68,0.10); border-color: rgba(239,68,68,0.55); box-shadow:0 0 0 1px rgba(239,68,68,0.22) inset; }
+    .cal-day.pnl-flat { background: rgba(148,163,184,0.06); border-color:#334155; box-shadow:0 0 0 1px rgba(148,163,184,0.16) inset; }
+    .cal-day-num { font-size:14px; color:#cbd5e1; margin-bottom:8px; }
+    .cal-lines { display:flex; flex-direction:column; gap:4px; font-size:14px; line-height:1.2; }
+    .cal-lines .muted { font-size:13px; }
     .equity-card { background:#0f172a; border:1px solid #1f2937; border-radius:10px; padding:10px; margin-bottom:10px; }
     .equity-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; }
     .equity-canvas { width:100%; height:220px; display:block; background:#0b1220; border:1px solid #1f2937; border-radius:8px; }

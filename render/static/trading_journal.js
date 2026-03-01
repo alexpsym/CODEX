@@ -396,10 +396,10 @@
         d.trades += 1;
         if (String(r?.asset_class || '').toLowerCase() === 'fx') d.fx += 1;
         if (String(r?.asset_class || '').toLowerCase() === 'crypto') d.crypto += 1;
+        const pnl = asNum(r?.net_profit ?? r?.realized_pnl);
+        const ccy = String(r?.realized_pnl_currency || r?.currency || '').trim().toUpperCase();
+        if (Number.isFinite(pnl) && ccy) d.pnlByCcy.set(ccy, (d.pnlByCcy.get(ccy) || 0) + pnl);
       }
-      const pnl = asNum(r?.net_profit ?? r?.realized_pnl);
-      const ccy = String(r?.realized_pnl_currency || r?.currency || '').trim().toUpperCase();
-      if (Number.isFinite(pnl) && ccy) d.pnlByCcy.set(ccy, (d.pnlByCcy.get(ccy) || 0) + pnl);
     });
 
     const firstDow = (start.getUTCDay() + 6) % 7;
@@ -422,19 +422,30 @@
       const key = `${ym}-${String(day).padStart(2, '0')}`;
       const d = daily.get(key) || { trades: 0, fx: 0, crypto: 0, pnlByCcy: new Map() };
       const card = document.createElement('div');
-      card.className = `cal-day ${d.trades > 0 ? 'has-trades' : ''}`;
 
-      const pnlTop = Array.from(d.pnlByCcy.entries())
+      const pnlEntries = Array.from(d.pnlByCcy.entries()).filter(([, v]) => Number.isFinite(Number(v)));
+      let pnlRef = null;
+      if (pnlEntries.length === 1) {
+        pnlRef = pnlEntries[0][1];
+      } else if (pnlEntries.length > 1) {
+        const aud = pnlEntries.find(([ccy]) => ccy === 'AUD');
+        if (aud) pnlRef = aud[1];
+        else pnlRef = pnlEntries.slice().sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))[0][1];
+      }
+      const pnlClass = pnlRef === null ? '' : (pnlRef > 1e-12 ? 'pnl-pos' : (pnlRef < -1e-12 ? 'pnl-neg' : 'pnl-flat'));
+      card.className = `cal-day ${d.trades > 0 ? 'has-trades' : ''} ${d.trades > 0 && pnlClass ? pnlClass : ''}`.trim();
+
+      const pnlTop = pnlEntries
+        .slice()
         .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
-        .slice(0, 2)
-        .map(([ccy, v]) => `${fmtNum(v, 2)} ${ccy}`);
+        .slice(0, 2);
 
       card.innerHTML = `
         <div class="cal-day-num">${day}</div>
         <div class="cal-lines">
           ${d.trades > 0 ? `<div>Trades: <b>${d.trades}</b></div>` : '<div class="muted">No trades</div>'}
           ${d.trades > 0 ? `<div class="muted">FX ${d.fx} · Crypto ${d.crypto}</div>` : ''}
-          ${pnlTop.map((line) => `<div class="muted">P/L ${line}</div>`).join('')}
+          ${pnlTop.map(([ccy, v]) => `<div class="${v > 1e-12 ? 'num pos' : (v < -1e-12 ? 'num neg' : 'muted')}">P/L ${fmtNum(v, 2)} ${ccy}</div>`).join('')}
         </div>
       `;
       grid.appendChild(card);
