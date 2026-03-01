@@ -162,6 +162,43 @@
     if (activeFlags.has('errors')) {
       out = out.filter((r) => hasAnyKey(r, ['errors', 'error']));
     }
+
+  function applyTextFilter(rows) {
+    const raw = (filterInput?.value || '').trim();
+    if (!raw) return [...rows];
+    const norm = (str) => String(str ?? '')
+      .toLowerCase()
+      .replace(/[_-]+/g, ' ')
+      .replace(/[^a-z0-9 ]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const tokens = norm(raw).split(' ').filter(Boolean);
+    if (!tokens.length) return [...rows];
+    return (rows || []).filter((r) => {
+      const searchable = [
+        r?.symbol,
+        r?.symbol_raw,
+        r?.account_label,
+        r?.account,
+        r?.source,
+        r?.sheet,
+        r?.side,
+        r?.status,
+        r?.setup,
+        r?.notes,
+        r?.pre_trade_comments,
+        r?.entry_comments,
+        r?.trade_management,
+        r?.exit_comments,
+      ];
+      const metrics = r?.metrics;
+      if (metrics && typeof metrics === 'object') {
+        try { searchable.push(...Object.values(metrics)); } catch {}
+      }
+      const hay = norm(searchable.map((x) => String(x ?? '')).join(' '));
+      return tokens.every((t) => hay.includes(t));
+    });
+  }
     if (activeFlags.has('breakeven')) {
       out = out.filter((r) => normYes(r.breakeven));
     }
@@ -273,14 +310,22 @@
       if (key === 'symbol') return String(item?.symbol || '');
       if (key === 'asset_class') return String(item?.asset_class || '');
       if (key === 'total_trades') return Number.isFinite(Number(item?.total_trades)) ? Number(item.total_trades) : null;
+      if (key === 'long_trades') return Number.isFinite(Number(item?.long_trades)) ? Number(item.long_trades) : null;
+      if (key === 'short_trades') return Number.isFinite(Number(item?.short_trades)) ? Number(item.short_trades) : null;
       if (key === 'wins') return Number.isFinite(Number(item?.wins)) ? Number(item.wins) : null;
       if (key === 'losses') return Number.isFinite(Number(item?.losses)) ? Number(item.losses) : null;
       if (key === 'break_even') return Number.isFinite(Number(item?.break_even)) ? Number(item.break_even) : null;
+      if (key === 'long_wins') return Number.isFinite(Number(item?.long_wins)) ? Number(item.long_wins) : null;
+      if (key === 'long_losses') return Number.isFinite(Number(item?.long_losses)) ? Number(item.long_losses) : null;
+      if (key === 'short_wins') return Number.isFinite(Number(item?.short_wins)) ? Number(item.short_wins) : null;
+      if (key === 'short_losses') return Number.isFinite(Number(item?.short_losses)) ? Number(item.short_losses) : null;
       if (key === 'avg_sl_w') return pickNum(item, 'avg_sl_distance_pips_wins', 'avg_sl_distance_quote_wins');
       if (key === 'avg_sl_l') return pickNum(item, 'avg_sl_distance_pips_losses', 'avg_sl_distance_quote_losses');
       if (key === 'avg_tp_w') return pickNum(item, 'avg_tp_distance_pips_wins', 'avg_tp_distance_quote_wins');
       if (key === 'avg_tp_l') return pickNum(item, 'avg_tp_distance_pips_losses', 'avg_tp_distance_quote_losses');
       if (key === 'avg_duration') return Number.isFinite(Number(item?.avg_trade_duration_seconds)) ? Number(item.avg_trade_duration_seconds) : null;
+      if (key === 'min_trade_duration_seconds') return Number.isFinite(Number(item?.min_trade_duration_seconds)) ? Number(item.min_trade_duration_seconds) : null;
+      if (key === 'max_trade_duration_seconds') return Number.isFinite(Number(item?.max_trade_duration_seconds)) ? Number(item.max_trade_duration_seconds) : null;
       return null;
     };
 
@@ -307,14 +352,22 @@
         <td>${item.symbol || '—'}</td>
         <td>${item.asset_class || '—'}</td>
         <td style="text-align:right">${fmtNum(item.total_trades,0)}</td>
+        <td style="text-align:right">${fmtNum(item.long_trades,0)}</td>
+        <td style="text-align:right">${fmtNum(item.short_trades,0)}</td>
         <td style="text-align:right">${fmtNum(item.wins,0)}</td>
         <td style="text-align:right">${fmtNum(item.losses,0)}</td>
         <td style="text-align:right">${fmtNum(item.break_even,0)}</td>
+        <td style="text-align:right">${fmtNum(item.long_wins,0)}</td>
+        <td style="text-align:right">${fmtNum(item.long_losses,0)}</td>
+        <td style="text-align:right">${fmtNum(item.short_wins,0)}</td>
+        <td style="text-align:right">${fmtNum(item.short_losses,0)}</td>
         <td style="text-align:right">${distanceLabel(item,'sl','wins')}</td>
         <td style="text-align:right">${distanceLabel(item,'sl','losses')}</td>
         <td style="text-align:right">${distanceLabel(item,'tp','wins')}</td>
         <td style="text-align:right">${distanceLabel(item,'tp','losses')}</td>
-        <td style="text-align:right">${fmtDuration(item.avg_trade_duration_seconds)}</td>`;
+        <td style="text-align:right">${fmtDuration(item.avg_trade_duration_seconds)}</td>
+        <td style="text-align:right">${fmtDuration(item.min_trade_duration_seconds)}</td>
+        <td style="text-align:right">${fmtDuration(item.max_trade_duration_seconds)}</td>`;
       body.appendChild(tr);
     });
   }
@@ -551,7 +604,7 @@
     if (!_equityResizeWired) {
       _equityResizeWired = true;
       window.addEventListener('resize', () => {
-        if (state.view === 'equity') renderEquityView(state.rows);
+        if (state.view === 'equity') renderEquityView(applyFlagFilters(applyTextFilter(state.rows)));
       });
     }
   }
@@ -689,9 +742,15 @@
 
     const cards = [
       ['Total trades', stats?.totals?.trades],
+      ['Total longs', stats?.totals?.long_trades],
+      ['Total shorts', stats?.totals?.short_trades],
       ['Wins', stats?.totals?.wins],
       ['Losses', stats?.totals?.losses],
       ['Break even', stats?.totals?.break_even],
+      ['Long wins', stats?.totals?.long_wins],
+      ['Long losses', stats?.totals?.long_losses],
+      ['Short wins', stats?.totals?.short_wins],
+      ['Short losses', stats?.totals?.short_losses],
       ['Win rate (all)', fmtPctSmall(stats?.totals?.win_rate_pct)],
       ['Win rate (FX)', fmtPctSmall(stats?.totals?.fx_win_rate_pct)],
       ['Win rate (crypto)', fmtPctSmall(stats?.totals?.crypto_win_rate_pct)],
@@ -708,6 +767,10 @@
       ['Avg duration', fmtDuration(stats?.totals?.avg_duration_seconds)],
       ['Avg FX duration', fmtDuration(stats?.totals?.avg_fx_duration_seconds)],
       ['Avg crypto duration', fmtDuration(stats?.totals?.avg_crypto_duration_seconds)],
+      ['Longest FX trade', fmtDuration(stats?.totals?.max_fx_trade_duration_seconds)],
+      ['Shortest FX trade', fmtDuration(stats?.totals?.min_fx_trade_duration_seconds)],
+      ['Longest crypto trade', fmtDuration(stats?.totals?.max_crypto_trade_duration_seconds)],
+      ['Shortest crypto trade', fmtDuration(stats?.totals?.min_crypto_trade_duration_seconds)],
       ['Longest trade', fmtDuration(stats?.totals?.max_trade_duration_seconds)],
       ['Shortest trade', fmtDuration(stats?.totals?.min_trade_duration_seconds)],
       ['Most wins instrument', stats?.instrument_with_most_wins?.symbol || '—'],
@@ -723,7 +786,7 @@
   }
 
   function renderAll() {
-    const filtered = applyFlagFilters(state.rows);
+    const filtered = applyFlagFilters(applyTextFilter(state.rows));
     renderRows(filtered);
     renderSortIndicators();
     renderInstrumentView(state.stats);
@@ -756,10 +819,10 @@
     try {
       setStatus(silent ? 'Refreshing…' : 'Loading…');
       if (!silent) setLoading(5, 'Loading…');
-      const filter = (filterInput.value || '').trim();
-
       if (!silent) setLoading(15, 'Fetching journal…');
-      let journal = await fetchJson(`/api/trading-journal${filter ? `?filter=${encodeURIComponent(filter)}` : ''}`, { signal });
+      // Always fetch the full journal. Filtering is applied client-side to avoid expensive
+      // backend recomputation (and to prevent "empty journal" states when filtering).
+      let journal = await fetchJson('/api/trading-journal', { signal });
 
       // Auto-sync from Dropbox on load (throttled) so Excel workbooks are picked up even when
       // live webhook trades already exist. This runs in the background and does not block UI load.
@@ -838,14 +901,14 @@
     if (activeAbort) { try { activeAbort.abort(); } catch {} }
   });
 
-  q('#tj-filter-btn')?.addEventListener('click', () => { persistUiState(); load(); });
+  q('#tj-filter-btn')?.addEventListener('click', () => { persistUiState(); renderAll(); });
   q('#tj-view-trades-btn')?.addEventListener('click', () => { state.view = 'trades'; applyView(); });
   q('#tj-view-inst-btn')?.addEventListener('click', () => { state.view = 'instrument'; applyView(); });
-  q('#tj-view-cal-btn')?.addEventListener('click', () => { state.view = 'calendar'; applyView(); renderCalendarView(applyFlagFilters(state.rows)); });
-  q('#tj-view-equity-btn')?.addEventListener('click', () => { state.view = 'equity'; applyView(); renderEquityView(applyFlagFilters(state.rows)); });
-  q('#tj-cal-prev')?.addEventListener('click', () => { state.calMonth = _monthShift(state.calMonth, -1); persistUiState(); renderCalendarView(applyFlagFilters(state.rows)); });
-  q('#tj-cal-next')?.addEventListener('click', () => { state.calMonth = _monthShift(state.calMonth, 1); persistUiState(); renderCalendarView(applyFlagFilters(state.rows)); });
-  q('#tj-clear-btn')?.addEventListener('click', () => { filterInput.value = ''; persistUiState(); load(); });
+  q('#tj-view-cal-btn')?.addEventListener('click', () => { state.view = 'calendar'; applyView(); renderCalendarView(applyFlagFilters(applyTextFilter(state.rows))); });
+  q('#tj-view-equity-btn')?.addEventListener('click', () => { state.view = 'equity'; applyView(); renderEquityView(applyFlagFilters(applyTextFilter(state.rows))); });
+  q('#tj-cal-prev')?.addEventListener('click', () => { state.calMonth = _monthShift(state.calMonth, -1); persistUiState(); renderCalendarView(applyFlagFilters(applyTextFilter(state.rows))); });
+  q('#tj-cal-next')?.addEventListener('click', () => { state.calMonth = _monthShift(state.calMonth, 1); persistUiState(); renderCalendarView(applyFlagFilters(applyTextFilter(state.rows))); });
+  q('#tj-clear-btn')?.addEventListener('click', () => { filterInput.value = ''; persistUiState(); renderAll(); });
   q('#tj-sync-btn')?.addEventListener('click', async () => {
     try {
       setStatus('Syncing…');
@@ -892,7 +955,7 @@
   });
 
   filterInput?.addEventListener('input', persistUiState);
-  filterInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') load(); });
+  filterInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') renderAll(); });
 
   qa('.tj-chip[data-flag]').forEach((btn) => { const on = activeFlags.has(btn.dataset.flag || ''); btn.classList.toggle('active', on); btn.style.opacity = on ? '1' : '0.7'; btn.style.outline = on ? '1px solid #60a5fa' : 'none'; });
   applyView();
