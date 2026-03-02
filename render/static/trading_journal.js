@@ -148,21 +148,6 @@
     }
   }
 
-  function applyFlagFilters(rows) {
-    const hasAnyKey = (record, keys) => {
-      const metrics = record?.metrics || {};
-      const pools = [record || {}, metrics];
-      return pools.some((pool) => keys.some((key) => {
-        const v = pool[key] ?? pool[key.toUpperCase()] ?? pool[key.toLowerCase()];
-        return normYes(v) || (!!v && !['false', '0', 'no', 'n'].includes(String(v).trim().toLowerCase()));
-      }));
-    };
-
-    let out = [...rows];
-    if (activeFlags.has('errors')) {
-      out = out.filter((r) => hasAnyKey(r, ['errors', 'error']));
-    }
-
   function applyTextFilter(rows) {
     const raw = (filterInput?.value || '').trim();
     if (!raw) return [...rows];
@@ -199,6 +184,21 @@
       return tokens.every((t) => hay.includes(t));
     });
   }
+
+  function applyFlagFilters(rows) {
+    const hasAnyKey = (record, keys) => {
+      const metrics = record?.metrics || {};
+      const pools = [record || {}, metrics];
+      return pools.some((pool) => keys.some((key) => {
+        const v = pool[key] ?? pool[key.toUpperCase()] ?? pool[key.toLowerCase()];
+        return normYes(v) || (!!v && !['false', '0', 'no', 'n'].includes(String(v).trim().toLowerCase()));
+      }));
+    };
+
+    let out = [...rows];
+    if (activeFlags.has('errors')) {
+      out = out.filter((r) => hasAnyKey(r, ['errors', 'error']));
+    }
     if (activeFlags.has('breakeven')) {
       out = out.filter((r) => normYes(r.breakeven));
     }

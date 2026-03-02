@@ -48,6 +48,122 @@ _BYBIT_SYMBOL_CACHE: Dict[str, Dict[str, object]] = {
     "spot": {"ts": 0.0, "symbols": []},
 }
 
+_AUDUSD_CACHE_TTL_SECONDS = int(os.getenv("AUDUSD_CACHE_TTL_SECONDS", "30"))
+_AUDUSD_CACHE: Dict[str, object] = {"ts": 0.0, "rate": None, "error": None}
+
+
+def _normalize_oanda_base_url(value: str) -> str:
+    base = (value or "").strip().strip('"').strip("'").rstrip("/")
+    if not base:
+        return ""
+    if base.endswith("/v3"):
+        return base
+    return f"{base}/v3"
+
+
+def _select_oanda_creds() -> Optional[Dict[str, str]]:
+    live_token = (os.getenv("OANDA_API_KEY") or os.getenv("OANDA_TOKEN") or "").strip()
+    live_acct = (os.getenv("OANDA_ACCOUNT_ID") or "").strip()
+    live_base = _normalize_oanda_base_url(
+        os.getenv("OANDA_API_URL_LIVE")
+        or os.getenv("OANDA_BASE_URL_LIVE")
+        or os.getenv("OANDA_URL_LIVE")
+        or os.getenv("OANDA_BASE_URL")
+        or os.getenv("OANDA_URL")
+        or os.getenv("OANDA_API_URL")
+        or "https://api-fxtrade.oanda.com"
+    )
+    if live_token and live_acct and "YOUR_OANDA" not in live_token.upper():
+        return {
+            "mode": "live",
+            "token": live_token,
+            "account_id": live_acct,
+            "base_url": live_base,
+        }
+
+    demo_token = (
+        os.getenv("OANDA_API_KEY_DEMO")
+        or os.getenv("OANDA_TOKEN_DEMO")
+        or os.getenv("OANDA_API_KEY_PRACTICE")
+        or os.getenv("OANDA_TOKEN_PRACTICE")
+        or ""
+    ).strip()
+    demo_acct = (
+        os.getenv("OANDA_ACCOUNT_ID_DEMO")
+        or os.getenv("OANDA_ACCOUNT_ID_PRACTICE")
+        or ""
+    ).strip()
+    demo_base = _normalize_oanda_base_url(
+        os.getenv("OANDA_API_URL_DEMO")
+        or os.getenv("OANDA_BASE_URL_DEMO")
+        or os.getenv("OANDA_URL_DEMO")
+        or os.getenv("OANDA_API_URL_PRACTICE")
+        or os.getenv("OANDA_BASE_URL_PRACTICE")
+        or os.getenv("OANDA_URL_PRACTICE")
+        or "https://api-fxpractice.oanda.com"
+    )
+    if demo_token and demo_acct and "YOUR_OANDA" not in demo_token.upper():
+        return {
+            "mode": "demo",
+            "token": demo_token,
+            "account_id": demo_acct,
+            "base_url": demo_base,
+        }
+    return None
+
+
+def _fetch_oanda_midpoint(instrument: str) -> float:
+    creds = _select_oanda_creds()
+    if not creds:
+        raise ValueError(
+            "OANDA credentials are not configured (need token + account id). "
+            "Set OANDA_API_KEY + OANDA_ACCOUNT_ID (or *_DEMO equivalents)."
+        )
+    url = (
+        f"{creds['base_url']}/accounts/{creds['account_id']}/pricing"
+        f"?instruments={instrument}"
+    )
+    headers = {"Authorization": f"Bearer {creds['token']}"}
+    resp = requests.get(url, headers=headers, timeout=10)
+    resp.raise_for_status()
+    data = resp.json() or {}
+    prices = data.get("prices") or []
+    if not prices:
+        raise ValueError(f"OANDA pricing returned no prices for {instrument}.")
+    first = prices[0] if isinstance(prices[0], dict) else None
+    if not first:
+        raise ValueError("OANDA pricing payload format unexpected (prices[0]).")
+    bids = first.get("bids") or []
+    asks = first.get("asks") or []
+    if not bids or not asks:
+        raise ValueError("OANDA pricing missing bids/asks.")
+    bid = float((bids[0] or {}).get("price") or 0)
+    ask = float((asks[0] or {}).get("price") or 0)
+    if bid <= 0 or ask <= 0:
+        raise ValueError("OANDA pricing returned invalid bid/ask.")
+    return (bid + ask) / 2
+
+
+def _get_audusd_rate_cached(force: bool = False) -> float:
+    now = time.time()
+    ts = float(_AUDUSD_CACHE.get("ts") or 0.0)
+    cached = _AUDUSD_CACHE.get("rate")
+    if (
+        not force
+        and isinstance(cached, (int, float))
+        and (now - ts) <= _AUDUSD_CACHE_TTL_SECONDS
+    ):
+        return float(cached)
+    try:
+        rate = _fetch_oanda_midpoint("AUD_USD")
+        _AUDUSD_CACHE.update({"ts": now, "rate": float(rate), "error": None})
+        return float(rate)
+    except Exception as exc:
+        _AUDUSD_CACHE.update({"ts": now, "error": str(exc)})
+        if isinstance(cached, (int, float)):
+            return float(cached)
+        raise
+
 
 def _norm_symbol(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "", (value or "")).upper()
@@ -190,6 +306,15 @@ def _resolve_crypto_symbol(raw: str, price_source: str) -> Optional[Dict[str, ob
 @app.get("/symbols/bybit")
 def bybit_symbols_placeholder():
     return jsonify({"symbols": [], "detail": "Symbol lookup is disabled."})
+
+
+@app.get("/api/oanda/audusd")
+def api_oanda_audusd():
+    try:
+        rate = _get_audusd_rate_cached(force=False)
+        return jsonify({"instrument": "AUD_USD", "rate": rate, "source": "oanda"})
+    except Exception as exc:
+        return jsonify({"instrument": "AUD_USD", "error": str(exc)}), 503
 
 
 @app.get("/api/resolve-symbol")
@@ -396,12 +521,31 @@ FORM_HTML = """
             <small>Cancel pending limit orders if price moves away by the given distance.</small><br>
           </div>
           <label>Stop loss ticks: <input name="stop_loss_ticks" id="stop_loss_ticks" type="number" step="1"></label><br>
-          <label>Risk %: <input name="risk_percent" id="risk_percent" type="number" step="0.01"></label><br>
+          <div id="risk_mode_row"> 
+            <label>Risk mode:</label>
+            <div class="button-group" data-input="risk_mode">
+              <button type="button" data-value="percent">Percent</button>
+              <button type="button" data-value="fixed_aud">Fixed AUD</button>
+            </div>
+            <input type="hidden" name="risk_mode" id="risk_mode" value="{{ risk_mode }}">
+          </div>
+          <div id="risk_percent_row">
+            <label>Risk %: <input name="risk_percent" id="risk_percent" type="number" step="0.01" value="{{ risk_percent }}"></label><br>
+          </div>
+          <div id="fixed_risk_aud_row" class="hidden">
+            <label>Fixed risk (AUD): <input name="fixed_risk_aud" id="fixed_risk_aud" type="number" step="0.01" min="0" value="{{ fixed_risk_aud }}"></label><br>
+          </div>
           <label>Risk–reward ratio: <input name="rr_ratio" id="rr_ratio" type="number" step="0.1" value="2"></label><br>
-          <label>Price → Execution rate:
-            <input name="price_to_execution_rate" id="price_to_execution_rate" type="number" step="0.0001" min="0" value="{{ price_to_execution_rate }}" placeholder="e.g. 1.55">
-          </label><br>
-          <small>Use this when your price source is quoted in a different currency than your execution exchange.</small><br>
+          <div id="audusd_rate_row">
+            <label>AUD/USD rate:
+              <input name="audusd_rate" id="audusd_rate" type="number" step="0.0001" min="0"
+                     value="{{ audusd_rate or '' }}" placeholder="auto (OANDA)">
+            </label><br>
+            <small>
+              Auto-fetched from OANDA (AUD_USD midpoint). Used when executing on CoinSpot (AUD)
+              with a USD/USDT price source.
+            </small><br>
+          </div>
         </div>
         <div id="options_section" class="trade-section hidden">
           <div id="options_order_type_row">
@@ -732,11 +876,20 @@ def index():
     account_mode = request.form.get("account_mode", "live").strip().lower()
     if account_mode not in {"live", "demo"}:
         account_mode = "live"
-    price_to_execution_rate = request.form.get("price_to_execution_rate", "").strip()
+    audusd_rate = (request.form.get("audusd_rate") or "").strip()
+    if not audusd_rate:
+        audusd_rate = (request.form.get("price_to_execution_rate") or "").strip()
     quantity = request.form.get("quantity", "")
     track_pending = request.form.get("track_pending", "no")
     limit_cancel_offset_raw = request.form.get("limit_cancel_offset", "").strip()
     limit_cancel_offset_pct_raw = request.form.get("limit_cancel_offset_pct", "").strip()
+    risk_mode = request.form.get("risk_mode", "percent").strip().lower()
+    if risk_mode not in {"percent", "fixed_aud"}:
+        risk_mode = "percent"
+    if execution_exchange != "coinspot":
+        risk_mode = "percent"
+    risk_percent_input = request.form.get("risk_percent", "").strip()
+    fixed_risk_aud = request.form.get("fixed_risk_aud", "").strip()
 
     if request.method == "POST":
         try:
@@ -906,13 +1059,24 @@ def index():
                     raise ValueError("Symbol is required for spot/perpetual trades.")
                 entry_price_raw = request.form.get("entry_price")
                 stop_loss_ticks_raw = request.form.get("stop_loss_ticks", "").strip()
-                risk_percent_raw = request.form.get("risk_percent", "").strip()
                 rr_ratio_raw = request.form.get("rr_ratio", "").strip()
-                if not stop_loss_ticks_raw or not risk_percent_raw or not rr_ratio_raw:
-                    raise ValueError("Stop loss ticks, risk %, and RR ratio are required.")
+                if not stop_loss_ticks_raw or not rr_ratio_raw:
+                    raise ValueError("Stop loss ticks and RR ratio are required.")
                 stop_loss_ticks = float(stop_loss_ticks_raw)
-                risk_percent = float(risk_percent_raw)
                 rr_ratio = float(rr_ratio_raw)
+
+                fixed_risk_amount = None
+                if execution_exchange == "coinspot" and risk_mode == "fixed_aud":
+                    if not fixed_risk_aud:
+                        raise ValueError("Fixed risk (AUD) is required in Fixed AUD mode.")
+                    fixed_risk_amount = float(fixed_risk_aud)
+                    if fixed_risk_amount <= 0:
+                        raise ValueError("Fixed risk (AUD) must be greater than zero.")
+                    risk_percent = 0.0
+                else:
+                    if not risk_percent_input:
+                        raise ValueError("Risk % is required.")
+                    risk_percent = float(risk_percent_input)
 
                 config: Dict[str, object] = {
                     "symbol": symbol,
@@ -927,8 +1091,22 @@ def index():
                     "account_mode": account_mode,
                 }
                 config["trade_mode"] = trade_mode
-                if price_to_execution_rate:
-                    config["price_to_execution_rate"] = float(price_to_execution_rate)
+                if execution_exchange == "coinspot":
+                    if not audusd_rate:
+                        try:
+                            audusd_rate = f"{_get_audusd_rate_cached():.6f}"
+                        except Exception:
+                            audusd_rate = ""
+                    if not audusd_rate:
+                        raise ValueError(
+                            "AUD/USD rate is required for CoinSpot execution (auto-fetch failed)."
+                        )
+                    audusd_val = float(audusd_rate)
+                    if audusd_val <= 0:
+                        raise ValueError("AUD/USD rate must be > 0.")
+                    config["price_to_execution_rate"] = 1.0 / audusd_val
+                elif audusd_rate:
+                    config["price_to_execution_rate"] = float(audusd_rate)
                 if order_type == "limit" and entry_price_raw:
                     config["entry_price"] = float(entry_price_raw)
 
@@ -950,6 +1128,8 @@ def index():
                     )
                 if execution_exchange == "coinspot":
                     config.setdefault("account_asset", "AUD")
+                if fixed_risk_amount is not None:
+                    config["fixed_risk_amount"] = fixed_risk_amount
 
                 trade = calculate_trade(config)
                 summary = format_trade(trade)
@@ -1072,10 +1252,13 @@ def index():
         price_source=price_source,
         trade_mode=trade_mode,
         account_mode=account_mode,
-        price_to_execution_rate=price_to_execution_rate,
+        audusd_rate=audusd_rate,
         trade_type=trade_type,
         direction=direction,
         order_type=order_type,
+        risk_mode=risk_mode,
+        risk_percent=risk_percent_input,
+        fixed_risk_aud=fixed_risk_aud,
         symbol=symbol,
         quantity=quantity,
         options_order_type=options_order_type,
