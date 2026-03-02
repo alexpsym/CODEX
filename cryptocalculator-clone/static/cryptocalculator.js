@@ -30,6 +30,49 @@ function getJsonData(datasetKey) {
 const priceModeNotes = getJsonData('priceModeNotes');
 const optionsMinQtyMap = getJsonData('optionsMinQtyMap');
 let optionsMinQtyTimer = null;
+let audusdFetchInFlight = false;
+
+async function ensureAudUsdRate(force = false) {
+  const row = document.getElementById('audusd_rate_row');
+  const exchange = document.getElementById('execution_exchange');
+  const rateInput = document.getElementById('audusd_rate');
+  if (!exchange || !rateInput) {
+    if (row) {
+      row.style.display = 'none';
+    }
+    return;
+  }
+  const isCoinspot = String(exchange.value || '').toLowerCase() === 'coinspot';
+  if (row) {
+    row.style.display = isCoinspot ? 'block' : 'none';
+  }
+  if (!isCoinspot) {
+    return;
+  }
+  const current = parseFloat(rateInput.value || '0');
+  if (!force && current > 0) {
+    return;
+  }
+  if (audusdFetchInFlight) {
+    return;
+  }
+  audusdFetchInFlight = true;
+  try {
+    const resp = await fetch(buildAppUrl('/api/oanda/audusd'), { cache: 'no-store' });
+    const data = await resp.json();
+    if (!resp.ok) {
+      throw new Error(data && data.error ? data.error : 'AUD/USD fetch failed');
+    }
+    const rate = parseFloat(String(data.rate || '0'));
+    if (rate > 0) {
+      rateInput.value = String(rate);
+    }
+  } catch (err) {
+    console.warn('AUD/USD rate fetch failed', err);
+  } finally {
+    audusdFetchInFlight = false;
+  }
+}
 
 const SYMBOL_SUFFIXES = ['USDT', 'USDC', 'USD', 'AUD', 'BTC', 'ETH'];
 const SPECS_PRIMARY_KEYS = [
@@ -606,6 +649,49 @@ function updatePriceMode() {
   note.innerText = priceModeNotes[priceSource.value] || '';
 }
 
+function updateRiskControls() {
+  const exchangeEl = document.getElementById('execution_exchange');
+  const riskModeRow = document.getElementById('risk_mode_row');
+  const riskModeEl = document.getElementById('risk_mode');
+  const riskPercentRow = document.getElementById('risk_percent_row');
+  const riskPercentInput = document.getElementById('risk_percent');
+  const fixedRow = document.getElementById('fixed_risk_aud_row');
+  const fixedInput = document.getElementById('fixed_risk_aud');
+
+  const isCoinspot = !!exchangeEl && exchangeEl.value === 'coinspot';
+  if (riskModeRow) {
+    riskModeRow.classList.toggle('hidden', !isCoinspot);
+  }
+  if (riskModeEl && !isCoinspot) {
+    setButtonGroupValue('risk_mode', 'percent');
+  }
+
+  const riskMode = (riskModeEl ? riskModeEl.value : 'percent').toLowerCase();
+  const useFixed = isCoinspot && riskMode === 'fixed_aud';
+
+  if (riskPercentRow) {
+    riskPercentRow.classList.toggle('hidden', useFixed);
+  }
+  if (fixedRow) {
+    fixedRow.classList.toggle('hidden', !useFixed);
+  }
+
+  if (riskPercentInput) {
+    if (useFixed) {
+      riskPercentInput.removeAttribute('required');
+    } else {
+      riskPercentInput.setAttribute('required', 'required');
+    }
+  }
+  if (fixedInput) {
+    if (useFixed) {
+      fixedInput.setAttribute('required', 'required');
+    } else {
+      fixedInput.removeAttribute('required');
+    }
+  }
+}
+
 function renderOptionsMinQty(base) {
   const note = document.getElementById('options_min_qty_note');
   if (!note) {
@@ -662,7 +748,8 @@ function updateTradeType() {
     setButtonGroupValue('options_order_type', 'market');
     toggleOptionsEntry();
   }
-  const cryptoRequired = ['symbol', 'stop_loss_ticks', 'risk_percent', 'rr_ratio'];
+  updateRiskControls();
+  const cryptoRequired = ['symbol', 'stop_loss_ticks', 'rr_ratio'];
   cryptoRequired.forEach((fieldId) => {
     const el = document.getElementById(fieldId);
     if (!el) {
@@ -785,7 +872,7 @@ function placeLimitOrder() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  ['trade_type', 'account_mode', 'direction', 'order_type', 'options_order_type', 'options_type', 'options_side', 'price_source', 'execution_exchange', 'options_base', 'track_pending'].forEach(bindButtonGroup);
+  ['trade_type', 'account_mode', 'direction', 'order_type', 'options_order_type', 'options_type', 'options_side', 'price_source', 'execution_exchange', 'options_base', 'track_pending', 'risk_mode'].forEach(bindButtonGroup);
   const ot = document.getElementById('order_type');
   if (ot) {
     ot.addEventListener('change', toggleEntry);
@@ -801,6 +888,22 @@ document.addEventListener('DOMContentLoaded', () => {
     ps.addEventListener('change', updatePriceMode);
     updatePriceMode();
   }
+  const ex = document.getElementById('execution_exchange');
+  if (ex) {
+    ex.addEventListener('change', () => {
+      ensureAudUsdRate(true);
+    });
+  }
+  ensureAudUsdRate(false);
+  const executionExchange = document.getElementById('execution_exchange');
+  if (executionExchange) {
+    executionExchange.addEventListener('change', updateRiskControls);
+  }
+  const riskModeEl = document.getElementById('risk_mode');
+  if (riskModeEl) {
+    riskModeEl.addEventListener('change', updateRiskControls);
+  }
+  updateRiskControls();
   const tradeType = document.getElementById('trade_type');
   if (tradeType) {
     tradeType.addEventListener('change', updateTradeType);

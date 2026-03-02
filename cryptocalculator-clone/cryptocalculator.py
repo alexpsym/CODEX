@@ -391,6 +391,8 @@ def _normalise_config(config: Dict[str, Any]) -> Dict[str, Any]:
         data["entry_price"] = float(data["entry_price"])
 
     data["risk_percent"] = float(data.get("risk_percent", 1.0))
+    if data.get("fixed_risk_amount") is not None:
+        data["fixed_risk_amount"] = float(data.get("fixed_risk_amount"))
     data["rr_ratio"] = float(data.get("rr_ratio", 2.0))
     data["stop_loss_ticks"] = float(data.get("stop_loss_ticks", 0.0))
 
@@ -658,7 +660,15 @@ def calculate_trade(
         )
     account_balance = float(account_balance)
 
-    risk_amount = account_balance * (cfg["risk_percent"] / 100)
+    fixed_risk_amount = cfg.get("fixed_risk_amount")
+    if fixed_risk_amount is not None:
+        risk_amount = float(fixed_risk_amount)
+        if risk_amount <= 0:
+            raise ValueError("fixed_risk_amount must be greater than zero")
+        risk_percent = (risk_amount / account_balance * 100) if account_balance > 0 else 0.0
+    else:
+        risk_percent = float(cfg["risk_percent"])
+        risk_amount = account_balance * (risk_percent / 100)
 
     stop_distance = cfg["stop_loss_ticks"] * tick_size
     _validate_tick_multiple(stop_distance, tick_size, "Stop distance")
@@ -757,7 +767,7 @@ def calculate_trade(
         "direction": cfg["direction"],
         "order_type": order_type,
         "account_balance": account_balance,
-        "risk_percent": cfg["risk_percent"],
+        "risk_percent": risk_percent,
         "risk_amount": risk_amount,
         "entry_price": entry_price,
         "entry_price_execution": entry_price_execution,
