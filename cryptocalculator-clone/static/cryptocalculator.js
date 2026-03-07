@@ -31,6 +31,7 @@ const priceModeNotes = getJsonData('priceModeNotes');
 const optionsMinQtyMap = getJsonData('optionsMinQtyMap');
 let optionsMinQtyTimer = null;
 let audusdFetchInFlight = false;
+let isUpdatingRiskControls = false;
 
 async function ensureAudUsdRate(force = false) {
   const row = document.getElementById('audusd_rate_row');
@@ -583,18 +584,25 @@ function exportResult() {
 }
 
 function setButtonGroupValue(inputId, value, dispatchChange = true) {
+  let shouldDispatchChange = dispatchChange;
+  if (typeof dispatchChange === 'object' && dispatchChange !== null) {
+    shouldDispatchChange = dispatchChange.silent !== true;
+  }
   const input = document.getElementById(inputId);
   if (!input) {
     return;
   }
-  input.value = value;
+  const hasValueChanged = input.value !== value;
+  if (hasValueChanged) {
+    input.value = value;
+  }
   const group = document.querySelector('[data-input="' + inputId + '"]');
   if (group) {
     group.querySelectorAll('button[data-value]').forEach((btn) => {
       btn.classList.toggle('active', btn.dataset.value === value);
     });
   }
-  if (dispatchChange) {
+  if (shouldDispatchChange && hasValueChanged) {
     input.dispatchEvent(new Event('change'));
   }
 }
@@ -650,45 +658,53 @@ function updatePriceMode() {
 }
 
 function updateRiskControls() {
-  const exchangeEl = document.getElementById('execution_exchange');
-  const riskModeRow = document.getElementById('risk_mode_row');
-  const riskModeEl = document.getElementById('risk_mode');
-  const riskPercentRow = document.getElementById('risk_percent_row');
-  const riskPercentInput = document.getElementById('risk_percent');
-  const fixedRow = document.getElementById('fixed_risk_aud_row');
-  const fixedInput = document.getElementById('fixed_risk_aud');
-
-  const isCoinspot = !!exchangeEl && exchangeEl.value === 'coinspot';
-  if (riskModeRow) {
-    riskModeRow.classList.toggle('hidden', !isCoinspot);
+  if (isUpdatingRiskControls) {
+    return;
   }
-  if (riskModeEl && !isCoinspot) {
-    setButtonGroupValue('risk_mode', 'percent');
-  }
+  isUpdatingRiskControls = true;
+  try {
+    const exchangeEl = document.getElementById('execution_exchange');
+    const riskModeRow = document.getElementById('risk_mode_row');
+    const riskModeEl = document.getElementById('risk_mode');
+    const riskPercentRow = document.getElementById('risk_percent_row');
+    const riskPercentInput = document.getElementById('risk_percent');
+    const fixedRow = document.getElementById('fixed_risk_aud_row');
+    const fixedInput = document.getElementById('fixed_risk_aud');
 
-  const riskMode = (riskModeEl ? riskModeEl.value : 'percent').toLowerCase();
-  const useFixed = isCoinspot && riskMode === 'fixed_aud';
-
-  if (riskPercentRow) {
-    riskPercentRow.classList.toggle('hidden', useFixed);
-  }
-  if (fixedRow) {
-    fixedRow.classList.toggle('hidden', !useFixed);
-  }
-
-  if (riskPercentInput) {
-    if (useFixed) {
-      riskPercentInput.removeAttribute('required');
-    } else {
-      riskPercentInput.setAttribute('required', 'required');
+    const isCoinspot = !!exchangeEl && exchangeEl.value === 'coinspot';
+    if (riskModeRow) {
+      riskModeRow.classList.toggle('hidden', !isCoinspot);
     }
-  }
-  if (fixedInput) {
-    if (useFixed) {
-      fixedInput.setAttribute('required', 'required');
-    } else {
-      fixedInput.removeAttribute('required');
+    if (riskModeEl && !isCoinspot) {
+      setButtonGroupValue('risk_mode', 'percent', { silent: true });
     }
+
+    const riskMode = (riskModeEl ? riskModeEl.value : 'percent').toLowerCase();
+    const useFixed = isCoinspot && riskMode === 'fixed_aud';
+
+    if (riskPercentRow) {
+      riskPercentRow.classList.toggle('hidden', useFixed);
+    }
+    if (fixedRow) {
+      fixedRow.classList.toggle('hidden', !useFixed);
+    }
+
+    if (riskPercentInput) {
+      if (useFixed) {
+        riskPercentInput.removeAttribute('required');
+      } else {
+        riskPercentInput.setAttribute('required', 'required');
+      }
+    }
+    if (fixedInput) {
+      if (useFixed) {
+        fixedInput.setAttribute('required', 'required');
+      } else {
+        fixedInput.removeAttribute('required');
+      }
+    }
+  } finally {
+    isUpdatingRiskControls = false;
   }
 }
 
