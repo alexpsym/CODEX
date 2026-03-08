@@ -2577,6 +2577,19 @@ MERGED_SCRIPT_BUTTONS: List[Dict[str, object]] = [
     {"id": "bounce-trader", "name": "bounce-trader", "label": "Bounce Trader", "open_url": "/merged/bounce-trader"},
 ]
 
+MERGED_SOURCE_NAMES = {
+    "cryptocalculator-clone",
+    "oanda-calculator-clone",
+    "Crypto-Scanner-clone",
+    "fxscanner-oanda-clone",
+    "bybithistory-clone",
+    "oanda_history-clone",
+    "coinspot-clone",
+    "bybit_monitor",
+    "oanda_monitor",
+    "bybit_trigger_bounce_trader",
+}
+
 _TITLE_UPPER = {"FX", "MT5", "OANDA", "BYBIT", "USDT", "IV"}
 
 
@@ -3341,6 +3354,71 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         #open-orders-table th { background:#0f172a; color:#cbd5e1; position:sticky; top:0; z-index:1; }
         #open-orders-table tr:hover { background:#111827; }
 
+        #recent-trades-table {
+            width: 100%;
+            border-collapse: collapse;
+            min-width: 1280px;
+        }
+        #recent-trades-table th,
+        #recent-trades-table td {
+            text-align: left;
+            padding: 0.72rem 0.85rem;
+            border-bottom: 1px solid #1f2937;
+            font-size: 0.92rem;
+            vertical-align: middle;
+        }
+        #recent-trades-table th {
+            background: #0f172a;
+            color: #cbd5e1;
+            position: sticky;
+            top: 0;
+            z-index: 1;
+        }
+        #recent-trades-table tbody tr:nth-child(odd) {
+            background: rgba(15, 23, 42, 0.32);
+        }
+        #recent-trades-table tbody tr:hover {
+            background: #111827;
+        }
+        #recent-trades-table td.num {
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+        }
+        #recent-trades-table td.pos {
+            color: #86efac;
+            font-weight: 800;
+        }
+        #recent-trades-table td.neg {
+            color: #fca5a5;
+            font-weight: 800;
+        }
+        .rt-pill {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 84px;
+            padding: 0.22rem 0.6rem;
+            border-radius: 999px;
+            font-size: 0.8rem;
+            font-weight: 900;
+            border: 1px solid #334155;
+        }
+        .rt-pill.win {
+            background: rgba(34,197,94,0.16);
+            color: #86efac;
+            border-color: rgba(34,197,94,0.35);
+        }
+        .rt-pill.loss {
+            background: rgba(239,68,68,0.16);
+            color: #fca5a5;
+            border-color: rgba(239,68,68,0.35);
+        }
+        .rt-pill.be {
+            background: rgba(148,163,184,0.16);
+            color: #cbd5e1;
+            border-color: rgba(148,163,184,0.35);
+        }
+
         .action-cell { white-space: nowrap; }
         .action-btn {
             display:inline-flex; align-items:center; justify-content:center;
@@ -3503,8 +3581,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                                 <th>Account</th>
                                 <th>Symbol</th>
                                 <th>Side</th>
-                                <th>Result</th>
+                                <th>Opened</th>
                                 <th>Closed</th>
+                                <th>Stop Loss</th>
+                                <th>Take Profit</th>
+                                <th>Outcome</th>
+                                <th>Result</th>
+                                <th>CCY</th>
+                                <th>Duration</th>
                             </tr>
                         </thead>
                         <tbody></tbody>
@@ -6835,16 +6919,73 @@ async def merged_scanner_page() -> str:
     )
 
 
+HISTORY_PAGE_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Merged History Export</title>
+  <style>
+    body { margin:0; background:#0b1220; color:#e2e8f0; font-family:Inter,system-ui,sans-serif; }
+    .wrap { max-width: 1200px; margin: 0 auto; padding: 18px; }
+    .panel { background:#111827; border:1px solid #1f2937; border-radius:14px; padding:16px; box-shadow:0 10px 30px rgba(0,0,0,0.25); }
+    .row { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin-bottom:12px; }
+    label { display:flex; flex-direction:column; gap:6px; font-weight:700; color:#cbd5e1; }
+    select, button { background:#0f172a; color:#e2e8f0; border:1px solid #334155; border-radius:10px; padding:8px 10px; }
+    button { cursor:pointer; font-weight:800; }
+    .periods { display:grid; grid-template-columns:repeat(auto-fit,minmax(100px,1fr)); gap:8px; margin:12px 0; }
+    .period-btn.active { background:#2563eb; border-color:#3b82f6; }
+    .status { color:#93c5fd; min-height:1.2em; }
+    .muted { color:#94a3b8; font-size:0.9rem; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="panel">
+      <h2 style="margin-top:0">History Export</h2>
+      <p class="muted">Unified quick-range history exporter for Bybit, OANDA, and CoinSpot.</p>
+
+      <div class="row">
+        <label>Broker
+          <select id="history-broker">
+            <option value="bybit">Bybit</option>
+            <option value="oanda">OANDA</option>
+            <option value="coinspot">CoinSpot</option>
+          </select>
+        </label>
+        <label id="history-account-wrap">Account
+          <select id="history-account">
+            <option value="demo">Demo</option>
+            <option value="live">Live</option>
+          </select>
+        </label>
+        <button id="history-export" type="button">Export Selected Period</button>
+        <button id="history-home" type="button">Back</button>
+      </div>
+
+      <div class="periods" id="history-periods">
+        <button class="period-btn" type="button" data-kind="days" data-value="7">7D</button>
+        <button class="period-btn active" type="button" data-kind="days" data-value="30">30D</button>
+        <button class="period-btn" type="button" data-kind="days" data-value="60">60D</button>
+        <button class="period-btn" type="button" data-kind="days" data-value="90">90D</button>
+        <button class="period-btn" type="button" data-kind="days" data-value="180">180D</button>
+        <button class="period-btn" type="button" data-kind="days" data-value="365">365D</button>
+        <button class="period-btn" type="button" data-kind="period" data-value="3y">3Y</button>
+        <button class="period-btn" type="button" data-kind="complete" data-value="1">Complete</button>
+      </div>
+
+      <div class="status" id="history-status">Select broker/account/period and press Export.</div>
+      <div class="muted" id="history-result"></div>
+    </div>
+  </div>
+  <script src="/static/history_page.js"></script>
+</body>
+</html>"""
+
+
 @app.get("/merged/history", response_class=HTMLResponse)
 async def merged_history_page() -> str:
-    return _merged_shell(
-        "History",
-        [
-            ("Bybit", "/apps/bybithistory-clone"),
-            ("OANDA", "/scripts/view/oanda_history-clone"),
-            ("CoinSpot", "/scripts/view/coinspot-clone"),
-        ],
-    )
+    return HISTORY_PAGE_TEMPLATE
 
 
 @app.get("/merged/monitor", response_class=HTMLResponse)
@@ -6855,12 +6996,9 @@ async def merged_monitor_page() -> str:
     )
 
 
-@app.get("/merged/bounce-trader", response_class=HTMLResponse)
-async def merged_bounce_page() -> str:
-    return _merged_shell(
-        "Bounce Trader",
-        [("Bybit", "/apps/bybit_trigger_bounce_trader"), ("OANDA", "/scripts/view/oanda_monitor")],
-    )
+@app.get("/merged/bounce-trader")
+async def merged_bounce_page() -> Response:
+    return RedirectResponse(url="/apps/bybit_trigger_bounce_trader", status_code=307)
 
 @app.get("/scripts/view/{script_name:path}", response_class=HTMLResponse)
 async def script_view_page(script_name: str) -> str:
@@ -6891,22 +7029,25 @@ async def legacy_payslip_audit(request: Request) -> Response:
 @app.get("/bybit-history")
 @app.get("/bybit-history/")
 async def legacy_bybit_history(request: Request) -> Response:
-    suffix = f"?{request.url.query}" if request.url.query else ""
-    return RedirectResponse(url=f"/apps/bybithistory-clone/{suffix}", status_code=307)
+    query = request.url.query
+    suffix = f"&{query}" if query else ""
+    return RedirectResponse(url=f"/merged/history?broker=bybit{suffix}", status_code=307)
 
 
 @app.get("/oanda-history")
 @app.get("/oanda-history/")
 async def legacy_oanda_history(request: Request) -> Response:
-    suffix = f"?{request.url.query}" if request.url.query else ""
-    return RedirectResponse(url=f"/scripts/view/oanda_history-clone{suffix}", status_code=307)
+    query = request.url.query
+    suffix = f"&{query}" if query else ""
+    return RedirectResponse(url=f"/merged/history?broker=oanda{suffix}", status_code=307)
 
 
 @app.get("/coinspot-history")
 @app.get("/coinspot-history/")
 async def legacy_coinspot_history(request: Request) -> Response:
-    suffix = f"?{request.url.query}" if request.url.query else ""
-    return RedirectResponse(url=f"/scripts/view/coinspot-clone{suffix}", status_code=307)
+    query = request.url.query
+    suffix = f"&{query}" if query else ""
+    return RedirectResponse(url=f"/merged/history?broker=coinspot{suffix}", status_code=307)
 
 
 @app.get("/trading-journal", response_class=HTMLResponse)
@@ -8137,11 +8278,12 @@ async def _background_start(script: ManagedScript) -> None:
 
 @app.get("/scripts")
 async def list_scripts() -> JSONResponse:
-    scripts = script_manager.list_scripts()
-    by_name = {str(s.get("name")): s for s in scripts}
-    merged = []
+    raw = script_manager.list_scripts()
+    by_name = {str(s.get("name")): s for s in raw}
+
+    merged: List[Dict[str, object]] = []
     for btn in MERGED_SCRIPT_BUTTONS:
-        row = {
+        row: Dict[str, object] = {
             "id": btn["id"],
             "name": btn["name"],
             "label": btn["label"],
@@ -8151,17 +8293,34 @@ async def list_scripts() -> JSONResponse:
             "standalone": True,
         }
         if btn["name"] == "calculator":
-            row["running"] = bool(by_name.get("cryptocalculator-clone", {}).get("running") or by_name.get("oanda-calculator-clone", {}).get("running"))
+            row["running"] = bool(
+                by_name.get("cryptocalculator-clone", {}).get("running")
+                or by_name.get("oanda-calculator-clone", {}).get("running")
+            )
         elif btn["name"] == "scanner":
-            row["running"] = bool(by_name.get("Crypto-Scanner-clone", {}).get("running") or by_name.get("fxscanner-oanda-clone", {}).get("running"))
+            row["running"] = bool(
+                by_name.get("Crypto-Scanner-clone", {}).get("running")
+                or by_name.get("fxscanner-oanda-clone", {}).get("running")
+            )
         elif btn["name"] == "history":
-            row["running"] = bool(by_name.get("bybithistory-clone", {}).get("running") or by_name.get("oanda_history-clone", {}).get("running") or by_name.get("coinspot-clone", {}).get("running"))
+            row["running"] = bool(
+                by_name.get("bybithistory-clone", {}).get("running")
+                or by_name.get("oanda_history-clone", {}).get("running")
+                or by_name.get("coinspot-clone", {}).get("running")
+            )
         elif btn["name"] == "monitor":
-            row["running"] = bool(by_name.get("bybit_monitor", {}).get("running") or by_name.get("oanda_monitor", {}).get("running"))
+            row["running"] = bool(
+                by_name.get("bybit_monitor", {}).get("running")
+                or by_name.get("oanda_monitor", {}).get("running")
+            )
         elif btn["name"] == "bounce-trader":
             row["running"] = bool(by_name.get("bybit_trigger_bounce_trader", {}).get("running"))
         merged.append(row)
-    return JSONResponse(merged)
+
+    extras = [s for s in raw if str(s.get("name")) not in MERGED_SOURCE_NAMES]
+    extras.sort(key=lambda s: str(s.get("label") or s.get("name")).lower())
+
+    return JSONResponse(merged + extras)
 
 
 def _safe_float(value: object) -> Optional[float]:
@@ -8347,47 +8506,83 @@ async def list_open_orders() -> JSONResponse:
         bybit_orders = [
             row
             for row in items
-            if str(row.get("broker", "")).lower() == "bybit"
-            and str(row.get("type", "")).lower() == "order"
+            if str(row.get("broker", "")).strip().lower() == "bybit"
+            and str(row.get("type", "")).strip().lower() == "order"
         ]
         bybit_positions = [
             row
             for row in items
-            if str(row.get("broker", "")).lower() == "bybit"
-            and str(row.get("type", "")).lower() == "position"
+            if str(row.get("broker", "")).strip().lower() == "bybit"
+            and str(row.get("type", "")).strip().lower() == "position"
+        ]
+        oanda_orders = [
+            row
+            for row in items
+            if str(row.get("broker", "")).strip().lower() == "oanda"
+            and str(row.get("type", "")).strip().lower() == "order"
+        ]
+        oanda_positions = [
+            row
+            for row in items
+            if str(row.get("broker", "")).strip().lower() == "oanda"
+            and str(row.get("type", "")).strip().lower() in {"position", "trade"}
         ]
 
         for session in sessions:
             if not bool(session.get("running")):
                 continue
 
+            broker = str(session.get("broker") or "").strip().lower()
+            market = str(session.get("market") or "").strip().lower()
+            if broker not in {"bybit", "oanda"}:
+                broker = "oanda" if market == "fx" else "bybit"
+
             instrument = str(session.get("instrument") or "").strip().upper()
             side = str(session.get("side") or "").strip().title()
             account = str(session.get("account") or "").strip().lower() or "demo"
-            category = str(session.get("category") or "").strip().lower() or "linear"
+            category = str(session.get("category") or "").strip().lower() or ("forex" if broker == "oanda" else "linear")
             order_link_id = str(session.get("order_link_id") or "").strip()
 
-            if order_link_id:
-                if any(
-                    str(row.get("order_link_id") or "").strip() == order_link_id
+            seen_order = bool(session.get("seen_order"))
+            if broker == "bybit":
+                if order_link_id:
+                    if any(
+                        str(row.get("order_link_id") or "").strip() == order_link_id
+                        and str(row.get("account") or "").strip().lower() == account
+                        and str(row.get("category") or "").strip().lower() == category
+                        for row in bybit_orders
+                    ) and not seen_order:
+                        session["seen_order"] = True
+                        changed = True
+                        seen_order = True
+
+                has_position = any(
+                    str(row.get("instrument") or "").strip().upper() == instrument
+                    and str(row.get("side") or "").strip().title() == side
                     and str(row.get("account") or "").strip().lower() == account
                     and str(row.get("category") or "").strip().lower() == category
-                    for row in bybit_orders
-                ) and not bool(session.get("seen_order")):
+                    for row in bybit_positions
+                )
+            else:
+                if any(
+                    str(row.get("instrument") or "").strip().upper() == instrument
+                    and str(row.get("account") or "").strip().lower() == account
+                    for row in oanda_orders
+                ) and not seen_order:
                     session["seen_order"] = True
                     changed = True
+                    seen_order = True
 
-            has_position = any(
-                str(row.get("instrument") or "").strip().upper() == instrument
-                and str(row.get("side") or "").strip().title() == side
-                and str(row.get("account") or "").strip().lower() == account
-                and str(row.get("category") or "").strip().lower() == category
-                for row in bybit_positions
-            )
+                target_side = "Long" if side == "Buy" else "Short"
+                has_position = any(
+                    str(row.get("instrument") or "").strip().upper() == instrument
+                    and str(row.get("account") or "").strip().lower() == account
+                    and str(row.get("side") or "").strip().title() == target_side
+                    for row in oanda_positions
+                )
 
             started_at = _to_dt_utc(session.get("started_at"))
             age_seconds = (now - started_at).total_seconds() if started_at else 0.0
-            seen_order = bool(session.get("seen_order"))
 
             if has_position and (seen_order or age_seconds >= 30):
                 if bool(session.get("show_in_open_orders", True)):
@@ -8425,46 +8620,142 @@ async def list_open_orders() -> JSONResponse:
         if changed:
             _save_bounce_traders(sessions)
 
-    hierarchical: List[Dict[str, object]] = []
-    for item in items:
-        row = dict(item)
-        children: List[Dict[str, object]] = []
-        sl = row.get("stop_loss")
-        tp = row.get("take_profit")
-        if sl not in (None, ""):
-            children.append({"kind": "SL", "price": sl})
-        if tp not in (None, ""):
-            children.append({"kind": "TP", "price": tp})
-        row["children"] = children
-        hierarchical.append(row)
+    def _same_price(a: object, b: object, tol: float = 1e-9) -> bool:
+        try:
+            return abs(float(a) - float(b)) <= tol
+        except (TypeError, ValueError):
+            return False
 
-    return JSONResponse({"items": hierarchical, "errors": errors})
+    def _is_child_exit_order(parent: Dict[str, object], child: Dict[str, object]) -> bool:
+        if str(parent.get("broker", "")).strip().lower() != "bybit":
+            return False
+        if str(parent.get("type", "")).strip().lower() != "position":
+            return False
+        if str(child.get("type", "")).strip().lower() != "order":
+            return False
+        if str(child.get("broker", "")).strip().lower() != "bybit":
+            return False
+        if str(parent.get("account", "")).strip().lower() != str(child.get("account", "")).strip().lower():
+            return False
+        if str(parent.get("category", "")).strip().lower() != str(child.get("category", "")).strip().lower():
+            return False
+        if str(parent.get("instrument", "")).strip().upper() != str(child.get("instrument", "")).strip().upper():
+            return False
+
+        child_status = str(child.get("status", "")).strip().upper()
+        if child_status not in {"UNTRIGGERED", "OPEN", "NEW", "CREATED"}:
+            return False
+
+        parent_side = str(parent.get("side", "")).strip().lower()
+        child_side = str(child.get("side", "")).strip().lower()
+        if parent_side in {"buy", "long"} and child_side not in {"sell", "short"}:
+            return False
+        if parent_side in {"sell", "short"} and child_side not in {"buy", "long"}:
+            return False
+
+        child_price = child.get("current_price") or child.get("order_price")
+        return (
+            _same_price(child_price, parent.get("stop_loss"))
+            or _same_price(child_price, parent.get("take_profit"))
+        )
+
+    grouped: List[Dict[str, object]] = []
+    used_child_indices: Set[int] = set()
+
+    for parent_idx, item in enumerate(items):
+        if str(item.get("type", "")).strip().lower() != "position":
+            continue
+        parent = dict(item)
+        parent["children"] = []
+        for child_idx, child in enumerate(items):
+            if child_idx in used_child_indices:
+                continue
+            if _is_child_exit_order(parent, child):
+                parent["children"].append(dict(child))
+                used_child_indices.add(child_idx)
+        grouped.append(parent)
+
+    for idx, item in enumerate(items):
+        if idx in used_child_indices:
+            continue
+        if str(item.get("type", "")).strip().lower() == "position":
+            continue
+        row = dict(item)
+        row["children"] = []
+        grouped.append(row)
+
+    return JSONResponse({"items": grouped, "errors": errors})
 
 
 @app.get("/api/recent-trades")
 async def recent_trades(limit: int = 25) -> JSONResponse:
-    rows = [r for r in _get_trading_journal_rows() if isinstance(r, dict)]
-    closed: List[Dict[str, object]] = []
+    rows = [
+        r
+        for r in _get_trading_journal_rows()
+        if isinstance(r, dict) and not _exclude_bybit_demo_row(r)
+    ]
+    rows = _enrich_trade_row_metrics(
+        _calc_balance_after_trade(rows, _get_excel_account_balances())
+    )
+
+    items: List[Dict[str, object]] = []
     for row in rows:
+        if _row_type(row) != "trade":
+            continue
+
         status = str(row.get("status") or row.get("state") or "").strip().lower()
         event = str(row.get("event") or row.get("type") or row.get("transaction_type") or "").strip().lower()
         if any(x in event for x in ("deposit", "withdraw")):
             continue
         if status and status not in {"closed", "close", "filled", "complete", "completed"}:
             continue
-        if not (row.get("closed_at") or row.get("close_time") or row.get("exit_time") or row.get("date")):
+
+        closed_at = (
+            row.get("close_time")
+            or row.get("closed_at")
+            or row.get("exit_time")
+            or row.get("date")
+        )
+        if not closed_at:
             continue
-        closed.append(
+
+        result = (
+            row.get("realized_pnl")
+            if row.get("realized_pnl") is not None
+            else row.get("net_profit")
+        )
+        pnl_num = _to_float(result)
+        outcome = "Breakeven"
+        if pnl_num is not None:
+            if pnl_num > 0:
+                outcome = "Win"
+            elif pnl_num < 0:
+                outcome = "Loss"
+
+        items.append(
             {
                 "account": row.get("account_label") or row.get("account") or row.get("source"),
                 "symbol": row.get("symbol") or row.get("instrument") or row.get("symbol_raw"),
                 "side": row.get("side") or row.get("direction"),
-                "result": row.get("realized_pnl") or row.get("pnl") or row.get("profit") or row.get("net"),
-                "closed_at": row.get("closed_at") or row.get("close_time") or row.get("exit_time") or row.get("date"),
+                "opened_at": row.get("open_time") or row.get("opened_at") or row.get("entry_time"),
+                "closed_at": closed_at,
+                "stop_loss": row.get("stop_loss"),
+                "take_profit": row.get("take_profit"),
+                "result": result,
+                "result_ccy": row.get("realized_pnl_currency") or row.get("currency"),
+                "outcome": outcome,
+                "duration_seconds": row.get("trade_duration_seconds"),
             }
         )
-    closed = sorted(closed, key=lambda r: str(r.get("closed_at") or ""), reverse=True)
-    return JSONResponse({"items": closed[: max(1, min(limit, 200))]})
+
+    def _sort_ts(value: object) -> float:
+        try:
+            return float(pd.to_datetime(value).timestamp())
+        except Exception:
+            return float("-inf")
+
+    items.sort(key=lambda r: _sort_ts(r.get("closed_at")), reverse=True)
+    return JSONResponse({"items": items[: max(1, min(limit, 200))]})
 
 
 @app.post("/api/open-orders/close")
@@ -8776,7 +9067,7 @@ async def start_oanda_history_export(request: Request) -> JSONResponse:
             complete = True
             period = None
 
-    params: Dict[str, object] = {"account": account}
+    params: Dict[str, object] = {}
     if complete:
         params.update({"complete": True})
     elif period is not None:
@@ -8849,7 +9140,7 @@ async def start_coinspot_history_export(request: Request) -> JSONResponse:
             complete = True
             period = None
 
-    params: Dict[str, object] = {"account": account}
+    params: Dict[str, object] = {}
     if complete:
         params.update({"complete": True})
     elif period is not None:
@@ -8929,7 +9220,7 @@ async def start_bybit_history_export(request: Request) -> JSONResponse:
             complete = True
             period = None
 
-    params: Dict[str, object] = {"account": account}
+    params: Dict[str, object] = {}
     if complete:
         params.update({"complete": True})
     elif period is not None:

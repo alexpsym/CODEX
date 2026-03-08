@@ -19,6 +19,10 @@
   let ooInFlight = null;
 
   const fmt = (v) => (v === null || v === undefined || v === '' ? '—' : v);
+  const fmtNum = (v, dp = 4) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n.toFixed(dp) : '—';
+  };
   const fmtTime = (v) => {
     if (!v) return '—';
     const n = Number(v);
@@ -30,6 +34,18 @@
     const d = new Date(v);
     if (!Number.isNaN(d.getTime())) return d.toLocaleString();
     return String(v);
+  };
+  const fmtDuration = (secs) => {
+    const n = Number(secs);
+    if (!Number.isFinite(n) || n < 0) return '—';
+    const s = Math.floor(n % 60);
+    const m = Math.floor((n / 60) % 60);
+    const h = Math.floor((n / 3600) % 24);
+    const d = Math.floor(n / 86400);
+    if (d > 0) return `${d}d ${h}h ${m}m ${s}s`;
+    if (h > 0) return `${h}h ${m}m ${s}s`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
   };
 
   const setStatus = (msg, isErr = false) => {
@@ -151,15 +167,37 @@
         const cRow = document.createElement('tr');
         cRow.dataset.parent = String(idx);
         cRow.style.display = 'none';
-        const c0 = document.createElement('td');
-        c0.textContent = '';
-        cRow.appendChild(c0);
-        const text = `${child.kind}: ${fmt(child.price)}`;
-        const c1 = document.createElement('td');
-        c1.colSpan = 15;
-        c1.textContent = text;
-        c1.style.color = '#94a3b8';
-        cRow.appendChild(c1);
+
+        const cExp = document.createElement('td');
+        cExp.textContent = '';
+        cRow.appendChild(cExp);
+
+        [
+          child.broker,
+          child.account,
+          child.category,
+          child.instrument,
+          child.type,
+          child.side,
+          child.size,
+          child.entry_price || child.order_price,
+          child.current_price,
+          child.stop_loss,
+          child.take_profit,
+          child.leverage,
+          fmtTime(child.opened_at),
+          child.status,
+        ].forEach((c) => {
+          const td = document.createElement('td');
+          td.textContent = fmt(c);
+          cRow.appendChild(td);
+        });
+
+        const actionTd = document.createElement('td');
+        actionTd.className = 'action-cell';
+        actionTd.textContent = '—';
+        cRow.appendChild(actionTd);
+
         ooTbody.appendChild(cRow);
       });
     });
@@ -193,11 +231,47 @@
       rtBody.innerHTML = '';
       items.forEach((item) => {
         const tr = document.createElement('tr');
-        [item.account, item.symbol, item.side, item.result, fmtTime(item.closed_at)].forEach((c) => {
+
+        const pnl = Number(item.result);
+        const pnlCls = Number.isFinite(pnl) ? (pnl > 0 ? 'pos' : (pnl < 0 ? 'neg' : '')) : '';
+        const outcome = String(item.outcome || '—');
+        const outcomeCls =
+          outcome === 'Win' ? 'win' :
+          outcome === 'Loss' ? 'loss' : 'be';
+
+        const cells = [
+          item.account,
+          item.symbol,
+          item.side,
+          fmtTime(item.opened_at),
+          fmtTime(item.closed_at),
+          fmtNum(item.stop_loss, 6),
+          fmtNum(item.take_profit, 6),
+        ];
+
+        cells.forEach((c) => {
           const td = document.createElement('td');
           td.textContent = fmt(c);
           tr.appendChild(td);
         });
+
+        const outcomeTd = document.createElement('td');
+        outcomeTd.innerHTML = `<span class="rt-pill ${outcomeCls}">${outcome}</span>`;
+        tr.appendChild(outcomeTd);
+
+        const resultTd = document.createElement('td');
+        resultTd.className = `num ${pnlCls}`;
+        resultTd.textContent = fmtNum(item.result, 2);
+        tr.appendChild(resultTd);
+
+        const ccyTd = document.createElement('td');
+        ccyTd.textContent = fmt(item.result_ccy);
+        tr.appendChild(ccyTd);
+
+        const durTd = document.createElement('td');
+        durTd.textContent = fmtDuration(item.duration_seconds);
+        tr.appendChild(durTd);
+
         rtBody.appendChild(tr);
       });
       if (rtEmpty) rtEmpty.style.display = items.length ? 'none' : 'block';

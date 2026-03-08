@@ -73,10 +73,40 @@
       tbody.appendChild(row);
 
       children.forEach((child) => {
-        const cr = document.createElement('tr'); cr.dataset.parent = String(idx); cr.style.display='none';
-        const td1 = document.createElement('td'); cr.appendChild(td1);
-        const td2 = document.createElement('td'); td2.colSpan = 15; td2.textContent = `${child.kind}: ${fmt(child.price)}`; cr.appendChild(td2);
-        tbody.appendChild(cr);
+        const cRow = document.createElement('tr');
+        cRow.dataset.parent = String(idx);
+        cRow.style.display = 'none';
+
+        const cExp = document.createElement('td');
+        cExp.textContent = '';
+        cRow.appendChild(cExp);
+
+        [
+          child.broker,
+          child.account,
+          child.category,
+          child.instrument,
+          child.type,
+          child.side,
+          child.size,
+          child.entry_price || child.order_price,
+          child.current_price,
+          child.stop_loss,
+          child.take_profit,
+          child.leverage,
+          formatTimestamp(child.opened_at),
+          child.status,
+        ].forEach((v) => {
+          const td = document.createElement('td');
+          td.textContent = fmt(v);
+          cRow.appendChild(td);
+        });
+
+        const actionTd = document.createElement('td');
+        actionTd.textContent = '—';
+        cRow.appendChild(actionTd);
+
+        tbody.appendChild(cRow);
       });
     });
   };

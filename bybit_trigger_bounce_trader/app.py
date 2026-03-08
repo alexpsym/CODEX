@@ -1,4 +1,4 @@
-"""Web UI wrapper for the Bybit trigger bounce trader."""
+"""Web UI wrapper for the unified bounce trader (Bybit + OANDA)."""
 from __future__ import annotations
 
 import atexit
@@ -22,12 +22,15 @@ SESSION_LOG_DIR = BASE_DIR / "session_logs"
 APP_BASE_PATH = os.getenv("APP_BASE_PATH", "")
 
 DEFAULT_CONFIG: Dict[str, str] = {
+    "market": "crypto",  # crypto|fx
     "account_mode": "demo",
     "symbols": "BTCUSDT",
     "strategy": "EMA",
     "side": "Buy",
+    # Bybit-only
     "category": "linear",
     "trigger_by": "LastPrice",
+    # Shared
     "interval": "1",
     "poll_seconds": "2",
     "ema_len": "9",
@@ -51,11 +54,11 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _normalize_symbols(raw_symbols: str) -> List[str]:
+def _normalize_symbols(raw_symbols: str, *, market: str) -> List[str]:
     seen = set()
     symbols: List[str] = []
     for token in str(raw_symbols or "").split(","):
-        symbol = token.strip().upper()
+        symbol = token.strip().upper().replace("/", "_")
         if not symbol or symbol in seen:
             continue
         seen.add(symbol)
@@ -70,7 +73,7 @@ def _session_token(session_id: str) -> str:
 
 def _session_order_link_id(*, session_id: str, symbol: str, strategy: str, interval: str) -> str:
     strategy_token = (strategy or "ema").strip().lower()
-    raw = f"BB{_session_token(session_id)}_{symbol}_{strategy_token}_{interval}"
+    raw = f"BT{_session_token(session_id)}_{symbol}_{strategy_token}_{interval}"
     return raw[:36]
 
 
@@ -83,11 +86,7 @@ def _load_bounce_traders() -> List[Dict[str, object]]:
         return []
     if not isinstance(payload, list):
         return []
-    rows: List[Dict[str, object]] = []
-    for entry in payload:
-        if isinstance(entry, dict):
-            rows.append(dict(entry))
-    return rows
+    return [dict(entry) for entry in payload if isinstance(entry, dict)]
 
 
 def _save_bounce_traders(items: List[Dict[str, object]]) -> None:
@@ -101,17 +100,15 @@ def _upsert_bounce_session(session: Dict[str, object]) -> None:
         sid = str(session.get("id") or "").strip()
         if not sid:
             return
-        updated = False
         for idx, row in enumerate(rows):
             if str(row.get("id") or "").strip() == sid:
                 rows[idx] = {**row, **session, "updated_at": _utc_now_iso()}
-                updated = True
-                break
-        if not updated:
-            session = dict(session)
-            session.setdefault("created_at", _utc_now_iso())
-            session["updated_at"] = _utc_now_iso()
-            rows.append(session)
+                _save_bounce_traders(rows)
+                return
+        session = dict(session)
+        session.setdefault("created_at", _utc_now_iso())
+        session["updated_at"] = _utc_now_iso()
+        rows.append(session)
         _save_bounce_traders(rows)
 
 
@@ -143,35 +140,8 @@ def _load_config() -> Dict[str, str]:
     config = dict(DEFAULT_CONFIG)
     if isinstance(payload, dict):
         config.update({k: str(v) for k, v in payload.items()})
-
-    if not config.get("strategy"):
-        strategies = str(config.get("strategies") or "").strip().lower()
-        config["strategy"] = "VWAP" if "vwap" in strategies and "ema" not in strategies else "EMA"
-    if not config.get("vwap_anchor"):
-        config["vwap_anchor"] = "session"
-    if not config.get("risk_mode"):
-        config["risk_mode"] = "fixed_qty"
-    if not config.get("sl_ticks"):
-        config["sl_ticks"] = str(config.get("sl_pct") or "0")
-    # Migrate legacy tp_ticks -> rr_ratio (best-effort)
-    rr_raw = str(config.get("rr_ratio") or "").strip()
-    if not rr_raw:
-        rr_val = None
-        try:
-            sl = float(str(config.get("sl_ticks") or "0"))
-            tp = float(str(config.get("tp_ticks") or "0"))
-            if sl > 0 and tp > 0:
-                rr_val = tp / sl
-        except Exception:
-            rr_val = None
-        config["rr_ratio"] = str(rr_val if rr_val is not None else DEFAULT_CONFIG["rr_ratio"])
-    else:
-        try:
-            rr = float(rr_raw)
-            if rr <= 0:
-                config["rr_ratio"] = "0"
-        except Exception:
-            config["rr_ratio"] = DEFAULT_CONFIG["rr_ratio"]
+    market = (config.get("market") or "crypto").strip().lower()
+    config["market"] = "fx" if market == "fx" else "crypto"
     side = (config.get("side") or "Buy").strip().title()
     config["side"] = side if side in {"Buy", "Sell"} else "Buy"
     return config
@@ -181,7 +151,7 @@ def _save_config(config: Dict[str, str]) -> None:
     CONFIG_PATH.write_text(json.dumps(config, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def _build_env(config: Dict[str, str], *, symbol: str, session_id: str) -> Dict[str, str]:
+def _build_bybit_env(config: Dict[str, str], *, symbol: str, session_id: str) -> Dict[str, str]:
     env = os.environ.copy()
     env["BYBIT_ENV"] = "demo" if config["account_mode"] == "demo" else "live"
     env["BYBIT_CATEGORY"] = config["category"]
@@ -190,25 +160,43 @@ def _build_env(config: Dict[str, str], *, symbol: str, session_id: str) -> Dict[
     env["BOUNCE_POLL_SECONDS"] = config["poll_seconds"]
     env["BOUNCE_SYMBOLS"] = symbol
     env["BOUNCE_SESSION_ID"] = session_id
-
-    strategy_ui = (config.get("strategy") or "EMA").strip().upper()
-    env["BOUNCE_STRATEGIES"] = "ema" if strategy_ui == "EMA" else "vwap"
+    env["BOUNCE_STRATEGIES"] = "ema" if (config.get("strategy") or "EMA").upper() == "EMA" else "vwap"
     env["BOUNCE_SIDE"] = (config.get("side") or "Buy").strip().title()
     env["EMA_LEN"] = config["ema_len"]
     env["BOUNCE_VWAP_ANCHOR"] = config.get("vwap_anchor", "session")
-
     env["BOUNCE_RISK_MODE"] = config.get("risk_mode", "fixed_qty")
     env["BOUNCE_RISK_PCT"] = config.get("risk_pct", "0")
     env["BOUNCE_ACCOUNT_BALANCE"] = "auto"
     env["BOUNCE_ACCOUNT_TYPE"] = "UNIFIED"
     env["BOUNCE_ACCOUNT_ASSET"] = "USDT"
-
     env["BOUNCE_DEFAULT_QTY"] = config["default_qty"]
     env["BOUNCE_QTY_MAP"] = config["qty_map"]
     env["BOUNCE_RR_RATIO"] = config.get("rr_ratio", "0")
     env["BOUNCE_SL_TICKS"] = config.get("sl_ticks", "0")
     env["BOUNCE_MIN_AMEND_TICKS"] = config["min_amend_ticks"]
     env["BOUNCE_MIN_GAP_TICKS"] = config["min_gap_ticks"]
+    return env
+
+
+def _build_oanda_env(config: Dict[str, str], *, instrument: str, session_id: str) -> Dict[str, str]:
+    env = os.environ.copy()
+    env["OANDA_MODE"] = "demo" if config["account_mode"] == "demo" else "live"
+    env["BOUNCE_POLL_SECONDS"] = config["poll_seconds"]
+    env["BOUNCE_SYMBOLS"] = instrument
+    env["BOUNCE_SESSION_ID"] = session_id
+    env["BOUNCE_STRATEGIES"] = "ema" if (config.get("strategy") or "EMA").upper() == "EMA" else "vwap"
+    env["BOUNCE_SIDE"] = (config.get("side") or "Buy").strip().title()
+    env["EMA_LEN"] = config["ema_len"]
+    env["BOUNCE_VWAP_ANCHOR"] = config.get("vwap_anchor", "session")
+    env["BOUNCE_RISK_MODE"] = config.get("risk_mode", "fixed_qty")
+    env["BOUNCE_RISK_PCT"] = config.get("risk_pct", "0")
+    env["BOUNCE_DEFAULT_QTY"] = config["default_qty"]
+    env["BOUNCE_QTY_MAP"] = config["qty_map"]
+    env["BOUNCE_RR_RATIO"] = config.get("rr_ratio", "0")
+    env["BOUNCE_SL_TICKS"] = config.get("sl_ticks", "0")
+    env["BOUNCE_MIN_AMEND_TICKS"] = config["min_amend_ticks"]
+    env["BOUNCE_MIN_GAP_TICKS"] = config["min_gap_ticks"]
+    env["BOUNCE_OANDA_INSTRUMENT"] = instrument
     return env
 
 
@@ -237,11 +225,29 @@ def _running_sessions() -> List[Dict[str, object]]:
     return sorted(active, key=lambda r: str(r.get("started_at") or ""), reverse=True)
 
 
-def _start_session(config: Dict[str, str], symbol: str) -> str:
+def _start_bybit_session(config: Dict[str, str], symbol: str) -> str:
     session_id = f"bb-{uuid4().hex[:12]}"
-    env = _build_env(config, symbol=symbol, session_id=session_id)
-    cmd = [os.getenv("PYTHON", "python"), "-u", "bybit_trigger_bounce_trader.py"]
+    env = _build_bybit_env(config, symbol=symbol, session_id=session_id)
+    cmd = [os.getenv("PYTHON", "python3"), "-u", "bybit_trigger_bounce_trader.py"]
+    return _spawn_session(config, symbol, session_id, env, cmd, broker="bybit")
 
+
+def _start_oanda_session(config: Dict[str, str], instrument: str) -> str:
+    session_id = f"oa-{uuid4().hex[:12]}"
+    env = _build_oanda_env(config, instrument=instrument, session_id=session_id)
+    cmd = [os.getenv("PYTHON", "python3"), "-u", "oanda_trigger_bounce_trader.py"]
+    return _spawn_session(config, instrument, session_id, env, cmd, broker="oanda")
+
+
+def _spawn_session(
+    config: Dict[str, str],
+    symbol: str,
+    session_id: str,
+    env: Dict[str, str],
+    cmd: List[str],
+    *,
+    broker: str,
+) -> str:
     SESSION_LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = SESSION_LOG_DIR / f"{session_id}.log"
     log_file = log_path.open("a", encoding="utf-8")
@@ -264,10 +270,12 @@ def _start_session(config: Dict[str, str], symbol: str) -> str:
     account = "demo" if config.get("account_mode") == "demo" else "live"
     session_row: Dict[str, object] = {
         "id": session_id,
+        "broker": broker,
+        "market": "fx" if broker == "oanda" else "crypto",
         "instrument": symbol,
         "side": side,
         "account": account,
-        "category": config.get("category", "linear"),
+        "category": "forex" if broker == "oanda" else config.get("category", "linear"),
         "strategy": strategy_token,
         "interval": config.get("interval", "1"),
         "order_link_id": _session_order_link_id(
@@ -285,6 +293,13 @@ def _start_session(config: Dict[str, str], symbol: str) -> str:
     }
     _upsert_bounce_session(session_row)
     return session_id
+
+
+def _start_session(config: Dict[str, str], symbol: str) -> str:
+    market = (config.get("market") or "crypto").strip().lower()
+    if market == "fx":
+        return _start_oanda_session(config, symbol)
+    return _start_bybit_session(config, symbol)
 
 
 def _stop_session(session_id: str) -> bool:
@@ -322,6 +337,7 @@ def index() -> str:
     if request.method == "POST":
         action = request.form.get("action")
         config = {
+            "market": request.form.get("market", DEFAULT_CONFIG["market"]).strip().lower(),
             "account_mode": request.form.get("account_mode", "demo"),
             "symbols": request.form.get("symbols", DEFAULT_CONFIG["symbols"]).strip(),
             "strategy": request.form.get("strategy", DEFAULT_CONFIG["strategy"]).strip(),
@@ -341,6 +357,7 @@ def index() -> str:
             "min_amend_ticks": request.form.get("min_amend_ticks", DEFAULT_CONFIG["min_amend_ticks"]).strip(),
             "min_gap_ticks": request.form.get("min_gap_ticks", DEFAULT_CONFIG["min_gap_ticks"]).strip(),
         }
+        config["market"] = "fx" if config["market"] == "fx" else "crypto"
         side = (config.get("side") or "Buy").strip().title()
         config["side"] = side if side in {"Buy", "Sell"} else "Buy"
         _save_config(config)
@@ -353,14 +370,13 @@ def index() -> str:
             elif config["account_mode"] == "live" and not confirm_live:
                 error = "Live mode requires the additional confirmation checkbox."
             else:
-                symbols = _normalize_symbols(config.get("symbols", ""))
+                symbols = _normalize_symbols(config.get("symbols", ""), market=config["market"])
                 if not symbols:
-                    error = "Please provide at least one valid symbol."
+                    error = "Please provide at least one valid symbol/instrument."
                 else:
-                    started: List[str] = []
                     for symbol in symbols:
-                        started.append(_start_session(config, symbol))
-                    message = f"Started {len(started)} bounce trader session(s)."
+                        _start_session(config, symbol)
+                    message = f"Started {len(symbols)} bounce trader session(s)."
         elif action == "stop":
             stopped = _stop_all_sessions()
             message = f"Stopped {stopped} running session(s)."
@@ -394,6 +410,7 @@ def status() -> Dict[str, object]:
         "running": bool(sessions),
         "running_count": len(sessions),
         "sessions": sessions,
+        "market": config.get("market", "crypto"),
         "account_mode": config.get("account_mode", "demo"),
         "symbols": config.get("symbols", ""),
         "strategy": config.get("strategy", ""),
@@ -412,86 +429,81 @@ FORM_HTML = """
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Bybit Trigger Bounce Trader</title>
+    <title>Bounce Trader</title>
     <style>
       :root { color-scheme: light dark; }
       body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
       h1 { margin-top: 0; }
-      .card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; padding: 1.5rem; max-width: 1100px; margin: 0 auto; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); }
+      .card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; padding: 1.5rem; max-width: 1100px; margin: 0 auto; }
       .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; margin-top: 1rem; }
       label { display: flex; flex-direction: column; gap: 0.35rem; font-weight: 600; }
       input, select, textarea { padding: 0.55rem 0.65rem; border-radius: 10px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0; }
       textarea { min-height: 80px; }
-      .actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1.5rem; }
+      .actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1.25rem; }
       button { padding: 0.7rem 1.2rem; border-radius: 12px; border: none; cursor: pointer; font-weight: 700; }
       .primary { background: #22c55e; color: #052e16; }
       .secondary { background: #334155; color: #e2e8f0; }
       .danger { background: #ef4444; color: #fff; }
-      .status-pill { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.35rem 0.75rem; border-radius: 999px; font-size: 0.85rem; font-weight: 700; }
-      .status-running { background: rgba(34, 197, 94, 0.2); color: #86efac; }
-      .status-stopped { background: rgba(239, 68, 68, 0.2); color: #fca5a5; }
       .notice { margin-top: 1rem; padding: 0.75rem 0.9rem; border-radius: 10px; font-weight: 600; }
       .notice.error { background: rgba(239, 68, 68, 0.2); border: 1px solid rgba(239, 68, 68, 0.4); color: #fecaca; }
-      .notice.success { background: rgba(34, 197, 94, 0.2); border: 1px solid rgba(34, 197, 94, 0.4); color: #bbf7d0; }
-      .checkbox-row { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.8rem; }
-      .checkbox-row input { width: auto; }
-      .warning { margin-top: 1rem; color: #fbbf24; }
-      .session-table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
-      .session-table th, .session-table td { border-bottom: 1px solid #253046; padding: 0.55rem 0.4rem; text-align: left; font-size: 0.92rem; }
-      .session-table th { color: #93c5fd; }
-      .inline-form { margin: 0; }
+      .notice.ok { background: rgba(34, 197, 94, 0.18); border: 1px solid rgba(34, 197, 94, 0.4); color: #bbf7d0; }
+      table { width:100%; border-collapse: collapse; margin-top: 0.8rem; }
+      th, td { text-align:left; border-bottom:1px solid #1f2937; padding:0.5rem 0.4rem; font-size:0.9rem; }
+      .checkbox-row { display:flex; align-items:center; gap:0.55rem; margin-top: 0.6rem; }
+      .checkbox-row input { width: 1rem; height: 1rem; }
+      .warning { color:#facc15; font-size:0.9rem; margin-top: 0.85rem; }
+      .fx-only, .crypto-only { display: none; }
     </style>
   </head>
   <body>
     <div class="card">
-      <h1>Bybit Trigger Bounce Trader</h1>
-      <p>
-        Status:
-        <span class="status-pill {{ 'status-running' if running else 'status-stopped' }}">
-          {{ 'RUNNING' if running else 'STOPPED' }}
-        </span>
-      </p>
-
+      <h1>Bounce Trader</h1>
       {% if error %}<div class="notice error">{{ error }}</div>{% endif %}
-      {% if message %}<div class="notice success">{{ message }}</div>{% endif %}
+      {% if message %}<div class="notice ok">{{ message }}</div>{% endif %}
 
-      <form method="post" action="{{ app_root }}/">
+      <form method="post">
         <div class="grid">
           <label>
+            Market
+            <select name="market" id="market">
+              <option value="crypto" {% if config.market == "crypto" %}selected{% endif %}>Crypto</option>
+              <option value="fx" {% if config.market == "fx" %}selected{% endif %}>FX</option>
+            </select>
+          </label>
+          <label>
             Account Mode
-            <select name="account_mode" id="account_mode">
+            <select name="account_mode">
               <option value="demo" {% if config.account_mode == "demo" %}selected{% endif %}>Demo</option>
               <option value="live" {% if config.account_mode == "live" %}selected{% endif %}>Live</option>
             </select>
           </label>
           <label>
-            Symbols (comma separated)
-            <input name="symbols" value="{{ config.symbols }}" placeholder="BTCUSDT,ETHUSDT" />
-          </label>
-          <label>
-            Strategy
-            <select name="strategy" id="strategy">
-              <option value="EMA" {% if config.strategy|upper == "EMA" %}selected{% endif %}>EMA</option>
-              <option value="VWAP" {% if config.strategy|upper == "VWAP" %}selected{% endif %}>VWAP</option>
-            </select>
+            Symbols / Instruments (comma separated)
+            <input name="symbols" value="{{ config.symbols }}" />
           </label>
           <label>
             Side
-            <select name="side" id="side">
+            <select name="side">
               <option value="Buy" {% if config.side == "Buy" %}selected{% endif %}>Buy</option>
               <option value="Sell" {% if config.side == "Sell" %}selected{% endif %}>Sell</option>
             </select>
           </label>
           <label>
+            Strategy
+            <select name="strategy" id="strategy">
+              <option value="EMA" {% if config.strategy == "EMA" %}selected{% endif %}>EMA</option>
+              <option value="VWAP" {% if config.strategy == "VWAP" %}selected{% endif %}>VWAP</option>
+            </select>
+          </label>
+          <label class="crypto-only">
             Category
             <select name="category">
               <option value="linear" {% if config.category == "linear" %}selected{% endif %}>Linear</option>
               <option value="inverse" {% if config.category == "inverse" %}selected{% endif %}>Inverse</option>
               <option value="spot" {% if config.category == "spot" %}selected{% endif %}>Spot</option>
-              <option value="option" {% if config.category == "option" %}selected{% endif %}>Option</option>
             </select>
           </label>
-          <label>
+          <label class="crypto-only">
             Trigger By
             <select name="trigger_by">
               <option value="LastPrice" {% if config.trigger_by == "LastPrice" %}selected{% endif %}>LastPrice</option>
@@ -500,29 +512,22 @@ FORM_HTML = """
             </select>
           </label>
           <label>
-            Kline Interval
+            Interval
             <select name="interval">
-              <option value="1" {% if config.interval == "1" %}selected{% endif %}>1m</option>
-              <option value="3" {% if config.interval == "3" %}selected{% endif %}>3m</option>
-              <option value="5" {% if config.interval == "5" %}selected{% endif %}>5m</option>
-              <option value="15" {% if config.interval == "15" %}selected{% endif %}>15m</option>
-              <option value="30" {% if config.interval == "30" %}selected{% endif %}>30m</option>
-              <option value="60" {% if config.interval == "60" %}selected{% endif %}>1h</option>
-              <option value="240" {% if config.interval == "240" %}selected{% endif %}>4h</option>
-              <option value="D" {% if config.interval == "D" %}selected{% endif %}>Daily</option>
-              <option value="W" {% if config.interval == "W" %}selected{% endif %}>Weekly</option>
-              <option value="M" {% if config.interval == "M" %}selected{% endif %}>Monthly</option>
+              {% for i in ["1","3","5","15","30","60","240","D"] %}
+                <option value="{{ i }}" {% if config.interval == i %}selected{% endif %}>{{ i }}</option>
+              {% endfor %}
             </select>
           </label>
           <label>
             Poll Seconds
             <input name="poll_seconds" value="{{ config.poll_seconds }}" />
           </label>
-          <label>
+          <label id="ema_len_wrap">
             EMA Length
             <input name="ema_len" id="ema_len" value="{{ config.ema_len }}" />
           </label>
-          <label>
+          <label id="vwap_anchor_wrap">
             VWAP Anchor
             <select name="vwap_anchor" id="vwap_anchor">
               <option value="session" {% if config.vwap_anchor == "session" %}selected{% endif %}>Session (UTC day)</option>
@@ -540,16 +545,16 @@ FORM_HTML = """
             Risk %
             <input name="risk_pct" id="risk_pct" value="{{ config.risk_pct }}" />
           </label>
-          <label>
-            Default Qty
+          <label id="default_qty_wrap">
+            Default Qty / Units
             <input name="default_qty" id="default_qty" value="{{ config.default_qty }}" />
           </label>
           <label>
-            Risk Reward (RR) (0 to disable TP)
+            Risk Reward (RR)
             <input name="rr_ratio" value="{{ config.rr_ratio }}" />
           </label>
           <label>
-            SL Ticks (0 to disable)
+            SL Ticks / Pips
             <input name="sl_ticks" value="{{ config.sl_ticks }}" />
           </label>
         </div>
@@ -558,7 +563,7 @@ FORM_HTML = """
           <summary style="cursor:pointer; font-weight: 700;">Advanced</summary>
           <div class="grid" style="margin-top: 1rem;">
             <label>
-              Qty Map (JSON) - optional per-symbol override (only used in Fixed Qty mode)
+              Qty Map (JSON)
               <textarea name="qty_map">{{ config.qty_map }}</textarea>
             </label>
             <label>
@@ -571,6 +576,7 @@ FORM_HTML = """
             </label>
           </div>
         </details>
+
         <div class="actions">
           <button class="secondary" type="submit" name="action" value="save">Save</button>
           <button class="primary" type="submit" name="action" value="arm">ARM / START</button>
@@ -584,39 +590,17 @@ FORM_HTML = """
           <input type="checkbox" name="confirm_live" id="confirm_live" />
           <label for="confirm_live">I confirm LIVE trading and accept the risk.</label>
         </div>
-        <p class="warning">Tip: Keep account mode on demo until you intentionally switch to live.</p>
       </form>
 
-      <h2 style="margin-top:1.75rem;">Running bounce traders</h2>
+      <h2 style="margin-top:1.6rem;">Running bounce traders</h2>
       {% if running_sessions %}
-      <table class="session-table">
-        <thead>
-          <tr>
-            <th>Session</th>
-            <th>Instrument</th>
-            <th>Side</th>
-            <th>Strategy</th>
-            <th>Account</th>
-            <th>Category</th>
-            <th>Started</th>
-            <th>Action</th>
-          </tr>
-        </thead>
+      <table>
+        <thead><tr><th>Session</th><th>Broker</th><th>Instrument</th><th>Side</th><th>Strategy</th><th>Account</th><th>Started</th><th>Action</th></tr></thead>
         <tbody>
           {% for s in running_sessions %}
           <tr>
-            <td>{{ s.id }}</td>
-            <td>{{ s.instrument }}</td>
-            <td>{{ s.side }}</td>
-            <td>{{ s.strategy }}</td>
-            <td>{{ s.account }}</td>
-            <td>{{ s.category }}</td>
-            <td>{{ s.started_at }}</td>
-            <td>
-              <form class="inline-form" method="post" action="{{ app_root }}/sessions/{{ s.id }}/stop">
-                <button class="danger" type="submit">Stop</button>
-              </form>
-            </td>
+            <td>{{ s.id }}</td><td>{{ s.broker or s.market }}</td><td>{{ s.instrument }}</td><td>{{ s.side }}</td><td>{{ s.strategy }}</td><td>{{ s.account }}</td><td>{{ s.started_at }}</td>
+            <td><form method="post" action="{{ app_root }}/sessions/{{ s.id }}/stop"><button class="danger" type="submit">Stop</button></form></td>
           </tr>
           {% endfor %}
         </tbody>
@@ -628,22 +612,25 @@ FORM_HTML = """
       <script>
         function syncVisibility() {
           const strat = (document.getElementById('strategy') || {}).value || 'EMA';
+          const market = (document.getElementById('market') || {}).value || 'crypto';
           const riskMode = (document.getElementById('risk_mode') || {}).value || 'fixed_qty';
 
-          const emaLen = document.getElementById('ema_len');
-          const vwapAnchor = document.getElementById('vwap_anchor');
-          if (emaLen) emaLen.closest('label').style.display = (strat === 'EMA') ? '' : 'none';
-          if (vwapAnchor) vwapAnchor.closest('label').style.display = (strat === 'VWAP') ? '' : 'none';
+          document.querySelectorAll('.crypto-only').forEach((el) => el.style.display = market === 'crypto' ? '' : 'none');
+          document.querySelectorAll('.fx-only').forEach((el) => el.style.display = market === 'fx' ? '' : 'none');
+
+          const emaLenWrap = document.getElementById('ema_len_wrap');
+          const vwapAnchorWrap = document.getElementById('vwap_anchor_wrap');
+          if (emaLenWrap) emaLenWrap.style.display = (strat === 'EMA') ? '' : 'none';
+          if (vwapAnchorWrap) vwapAnchorWrap.style.display = (strat === 'VWAP') ? '' : 'none';
 
           const showRisk = riskMode === 'percent';
-          for (const id of ['risk_pct_label']) {
-            const el = document.getElementById(id);
-            if (el) el.style.display = showRisk ? '' : 'none';
-          }
-          const defaultQty = document.getElementById('default_qty');
-          if (defaultQty) defaultQty.closest('label').style.display = showRisk ? 'none' : '';
+          const riskPctLabel = document.getElementById('risk_pct_label');
+          const defaultQtyWrap = document.getElementById('default_qty_wrap');
+          if (riskPctLabel) riskPctLabel.style.display = showRisk ? '' : 'none';
+          if (defaultQtyWrap) defaultQtyWrap.style.display = showRisk ? 'none' : '';
         }
         document.getElementById('strategy')?.addEventListener('change', syncVisibility);
+        document.getElementById('market')?.addEventListener('change', syncVisibility);
         document.getElementById('risk_mode')?.addEventListener('change', syncVisibility);
         syncVisibility();
       </script>
