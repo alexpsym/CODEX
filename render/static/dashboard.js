@@ -232,8 +232,10 @@
       items.forEach((item) => {
         const tr = document.createElement('tr');
 
-        const pnl = Number(item.result);
-        const pnlCls = Number.isFinite(pnl) ? (pnl > 0 ? 'pos' : (pnl < 0 ? 'neg' : '')) : '';
+        const resultPct = Number(item.result_pct);
+        const pnlCls = Number.isFinite(resultPct)
+          ? (resultPct > 0 ? 'pos' : (resultPct < 0 ? 'neg' : ''))
+          : '';
         const outcome = String(item.outcome || '—');
         const outcomeCls =
           outcome === 'Win' ? 'win' :
@@ -261,12 +263,8 @@
 
         const resultTd = document.createElement('td');
         resultTd.className = `num ${pnlCls}`;
-        resultTd.textContent = fmtNum(item.result, 2);
+        resultTd.textContent = Number.isFinite(resultPct) ? `${resultPct.toFixed(2)}%` : '—';
         tr.appendChild(resultTd);
-
-        const ccyTd = document.createElement('td');
-        ccyTd.textContent = fmt(item.result_ccy);
-        tr.appendChild(ccyTd);
 
         const durTd = document.createElement('td');
         durTd.textContent = fmtDuration(item.duration_seconds);

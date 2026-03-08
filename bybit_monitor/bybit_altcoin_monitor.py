@@ -237,17 +237,28 @@ def set_custom_alert_enabled(alert_id: str, enabled: bool) -> dict:
     raise ValueError("Unknown alert id")
 
 
-def replace_custom_alerts(alerts_payload: object) -> list[dict]:
+def replace_custom_alerts(alerts_payload: object, *, strict: bool = True) -> list[dict]:
     """Replace ALL custom alerts with the provided list (used for backup/restore)."""
     if not isinstance(alerts_payload, list):
         raise ValueError("alerts must be a list")
     replaced: list[dict] = []
+    skipped: list[dict] = []
     for item in alerts_payload:
         if not isinstance(item, dict):
             continue
-        replaced.append(_coerce_alert(item))
+        try:
+            replaced.append(_coerce_alert(item))
+        except ValueError:
+            if strict:
+                raise
+            skipped.append(item)
     _save_custom_alerts(replaced)
     get_custom_alerts(force=True)
+    if skipped:
+        log(
+            "Skipped invalid restored Bybit alerts: "
+            f"removed={len(skipped)} kept={len(replaced)}"
+        )
     return list(replaced)
 
 

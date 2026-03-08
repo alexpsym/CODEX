@@ -2250,11 +2250,13 @@ def _restore_alerts_payload(data: Dict[str, object]) -> Dict[str, object]:
     if "trading_journal_import_cache" in data and isinstance(data["trading_journal_import_cache"], dict):
         _save_json_file(TRADING_JOURNAL_IMPORT_CACHE_PATH, data["trading_journal_import_cache"])
 
-    bybit_restored = bybit_monitor.replace_custom_alerts(bybit_block["alerts"])
+    bybit_restored = bybit_monitor.replace_custom_alerts(bybit_block["alerts"], strict=False)
     oanda_restored = oanda_monitor.replace_custom_alerts(oanda_block["alerts"])
+    invalid_bybit_restored = max(0, len(bybit_block["alerts"]) - len(bybit_restored))
     _set_watchlist(watchlist_items)
     return {
         "bybit_restored": len(bybit_restored),
+        "bybit_invalid_skipped": invalid_bybit_restored,
         "oanda_restored": len(oanda_restored),
         "watchlist_restored": len(watchlist_items),
         "pending_webhooks_restored": len(pending_restored),
@@ -2270,8 +2272,9 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
         data = json.loads(payload.decode("utf-8"))
         restored = _restore_alerts_payload(data)
         BYBIT_LOGGER.info(
-            "Dropbox restore complete: bybit=%s oanda=%s watchlist=%s pending=%s journal_rows=%s",
+            "Dropbox restore complete: bybit=%s skipped_invalid_bybit=%s oanda=%s watchlist=%s pending=%s journal_rows=%s",
             restored["bybit_restored"],
+            restored.get("bybit_invalid_skipped", 0),
             restored["oanda_restored"],
             restored["watchlist_restored"],
             restored["pending_webhooks_restored"],
@@ -3586,8 +3589,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                                 <th>Stop Loss</th>
                                 <th>Take Profit</th>
                                 <th>Outcome</th>
-                                <th>Result</th>
-                                <th>CCY</th>
+                                <th>Result %</th>
                                 <th>Duration</th>
                             </tr>
                         </thead>
@@ -8719,14 +8721,28 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
         if not closed_at:
             continue
 
-        result = (
+        result_cash = (
             row.get("realized_pnl")
             if row.get("realized_pnl") is not None
             else row.get("net_profit")
         )
-        pnl_num = _to_float(result)
+        pnl_num = _to_float(result_cash)
+        balance_after = _to_float(row.get("balance_after_trade"))
+        balance_before = None
+        if balance_after is not None and pnl_num is not None:
+            balance_before = balance_after - pnl_num
+
+        result_pct = None
+        if balance_before not in (None, 0) and pnl_num is not None:
+            result_pct = (pnl_num / balance_before) * 100.0
+
         outcome = "Breakeven"
-        if pnl_num is not None:
+        if result_pct is not None:
+            if result_pct > 0:
+                outcome = "Win"
+            elif result_pct < 0:
+                outcome = "Loss"
+        elif pnl_num is not None:
             if pnl_num > 0:
                 outcome = "Win"
             elif pnl_num < 0:
@@ -8741,8 +8757,7 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
                 "closed_at": closed_at,
                 "stop_loss": row.get("stop_loss"),
                 "take_profit": row.get("take_profit"),
-                "result": result,
-                "result_ccy": row.get("realized_pnl_currency") or row.get("currency"),
+                "result_pct": result_pct,
                 "outcome": outcome,
                 "duration_seconds": row.get("trade_duration_seconds"),
             }
