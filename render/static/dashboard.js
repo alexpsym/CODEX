@@ -249,6 +249,7 @@
           fmtTime(item.closed_at),
           fmtNum(item.stop_loss, 6),
           fmtNum(item.take_profit, 6),
+          fmtNum(item.fees, 2),
         ];
 
         cells.forEach((c) => {

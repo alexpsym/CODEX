@@ -3588,6 +3588,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                                 <th>Closed</th>
                                 <th>Stop Loss</th>
                                 <th>Take Profit</th>
+                                <th>Fees</th>
                                 <th>Outcome</th>
                                 <th>Result %</th>
                                 <th>Duration</th>
@@ -8435,14 +8436,14 @@ async def list_open_orders() -> JSONResponse:
     for account in ("live", "demo"):
         try:
             cfg = _get_oanda_config(account)
-            items.extend(
-                await _collect_oanda_open_items(
-                    base_url=cfg["base_url"],
-                    account_id=cfg["account_id"],
-                    api_key=cfg["token"],
-                    account_context=account,
-                )
+            oanda_items = await _collect_oanda_open_items(
+                base_url=cfg["base_url"],
+                account_id=cfg["account_id"],
+                api_key=cfg["token"],
+                account_context=account,
             )
+            items.extend(oanda_items)
+            BYBIT_LOGGER.info("OPEN_ORDERS oanda account=%s items=%s", account, len(oanda_items))
         except Exception as exc:
             errors.append(
                 {
@@ -8468,6 +8469,12 @@ async def list_open_orders() -> JSONResponse:
             )
             items.extend(result.get("items", []))
             errors.extend(result.get("errors", []))
+            BYBIT_LOGGER.info(
+                "OPEN_ORDERS bybit account=%s items=%s errors=%s",
+                account,
+                len(result.get("items", [])),
+                len(result.get("errors", [])),
+            )
         except Exception as exc:
             errors.append(
                 {
@@ -8686,6 +8693,9 @@ async def list_open_orders() -> JSONResponse:
         row["children"] = []
         grouped.append(row)
 
+    if not grouped and errors:
+        raise HTTPException(status_code=502, detail={"errors": errors})
+
     return JSONResponse({"items": grouped, "errors": errors})
 
 
@@ -8757,6 +8767,7 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
                 "closed_at": closed_at,
                 "stop_loss": row.get("stop_loss"),
                 "take_profit": row.get("take_profit"),
+                "fees": row.get("fees") if row.get("fees") is not None else row.get("commission"),
                 "result_pct": result_pct,
                 "outcome": outcome,
                 "duration_seconds": row.get("trade_duration_seconds"),
