@@ -4502,20 +4502,35 @@ async def _collect_oanda_open_items(
         api_key=api_key,
         mode=account_context,
     )
-    trades_payload = await _fetch_oanda_json(
-        base_url=base_url,
-        account_id=account_id,
-        api_key=api_key,
-        endpoint="/accounts/{account_id}/openTrades",
-        mode=account_context,
-    )
-    orders_payload = await _fetch_oanda_json(
-        base_url=base_url,
-        account_id=account_id,
-        api_key=api_key,
-        endpoint="/accounts/{account_id}/pendingOrders",
-        mode=account_context,
-    )
+
+    trades_payload: Dict[str, object] = {}
+    orders_payload: Dict[str, object] = {}
+    fetch_errors: List[str] = []
+
+    try:
+        trades_payload = await _fetch_oanda_json(
+            base_url=base_url,
+            account_id=account_id,
+            api_key=api_key,
+            endpoint="/accounts/{account_id}/openTrades",
+            mode=account_context,
+        )
+    except Exception as exc:
+        fetch_errors.append(f"openTrades: {exc}")
+
+    try:
+        orders_payload = await _fetch_oanda_json(
+            base_url=base_url,
+            account_id=account_id,
+            api_key=api_key,
+            endpoint="/accounts/{account_id}/pendingOrders",
+            mode=account_context,
+        )
+    except Exception as exc:
+        fetch_errors.append(f"pendingOrders: {exc}")
+
+    if not trades_payload and not orders_payload and fetch_errors:
+        raise ValueError("; ".join(fetch_errors))
 
     items: List[Dict[str, object]] = []
     for trade in trades_payload.get("trades", []):
@@ -4582,6 +4597,20 @@ async def _collect_oanda_open_items(
             }
         )
     return items
+
+
+async def _list_oanda_accounts(*, base_url: str, api_key: str) -> List[Dict[str, object]]:
+    token = (api_key or "").strip().strip('"').strip("'")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    url = f"{base_url.rstrip('/')}/v3/accounts"
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+        resp = await client.get(url, headers=headers)
+        resp.raise_for_status()
+    payload = resp.json()
+    return payload.get("accounts", []) or []
 
 
 async def _place_oanda_order(
@@ -6687,12 +6716,15 @@ async def _fetch_oanda_transactions(
 ) -> List[Dict[str, object]]:
     token = cfg["token"]
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    url = f"{cfg['base_url'].rstrip('/')}/v3/accounts/{cfg['account_id']}/transactions"
-    params: Dict[str, str] = {}
     if since_id:
-        params["sinceID"] = since_id
+        url = (
+            f"{cfg['base_url'].rstrip('/')}"
+            f"/v3/accounts/{cfg['account_id']}/transactions/sinceid"
+        )
+        params: Dict[str, str] = {"id": since_id}
     else:
-        params["pageSize"] = "1"
+        url = f"{cfg['base_url'].rstrip('/')}/v3/accounts/{cfg['account_id']}/transactions"
+        params = {"pageSize": "1"}
     async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
         resp = await client.get(url, headers=headers, params=params)
     if resp.status_code >= 400:
@@ -8436,11 +8468,51 @@ async def list_open_orders() -> JSONResponse:
     for account in ("live", "demo"):
         try:
             cfg = _get_oanda_config(account)
-            oanda_items = await _collect_oanda_open_items(
+            owned_accounts = await _list_oanda_accounts(
                 base_url=cfg["base_url"],
-                account_id=cfg["account_id"],
                 api_key=cfg["token"],
-                account_context=account,
+            )
+
+            oanda_items: List[Dict[str, object]] = []
+            oanda_errors: List[Dict[str, str]] = []
+            if not owned_accounts:
+                owned_accounts = [{"id": cfg.get("account_id")}] if cfg.get("account_id") else []
+
+            for acct in owned_accounts:
+                acct_id = str(acct.get("id") or "").strip()
+                if not acct_id:
+                    continue
+                try:
+                    rows = await _collect_oanda_open_items(
+                        base_url=cfg["base_url"],
+                        account_id=acct_id,
+                        api_key=cfg["token"],
+                        account_context=account,
+                    )
+                    tags = [str(t).upper() for t in (acct.get("tags") or [])]
+                    for row in rows:
+                        row["account_id"] = acct_id
+                        if "MT4" in tags:
+                            row["account_label_suffix"] = "MT4"
+                    oanda_items.extend(rows)
+                except Exception as exc:
+                    oanda_errors.append(
+                        {
+                            "broker": "OANDA",
+                            "account": account,
+                            "category": "forex",
+                            "message": f"{acct_id}: {exc}",
+                        }
+                    )
+
+            items.extend(oanda_items)
+            errors.extend(oanda_errors)
+            BYBIT_LOGGER.info(
+                "OPEN_ORDERS oanda account=%s owner_accounts=%s items=%s errors=%s",
+                account,
+                len(owned_accounts),
+                len(oanda_items),
+                len(oanda_errors),
             )
             items.extend(oanda_items)
             BYBIT_LOGGER.info("OPEN_ORDERS oanda account=%s items=%s", account, len(oanda_items))
