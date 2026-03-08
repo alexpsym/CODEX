@@ -2547,27 +2547,35 @@ def script_logs_url(script_name: str) -> str:
 
 
 FRIENDLY_SCRIPT_LABELS: Dict[str, str] = {
-    "Crypto-Scanner-clone": "Crypto Scanner",
+    "Crypto-Scanner-clone": "Scanner",
     "PUSH": "Push",
-    "bybit_monitor": "Bybit Monitor",
-    "bybit_trigger_bounce_trader": "Bybit Bounce Trader",
-    "bybithistory-clone": "Bybit History",
-    "coinspot-clone": "CoinSpot History",
-    "cryptocalculator-clone": "Bybit Calculator",
+    "bybit_monitor": "Monitor",
+    "bybit_trigger_bounce_trader": "Bounce Trader",
+    "bybithistory-clone": "History",
+    "coinspot-clone": "History",
+    "cryptocalculator-clone": "Calculator",
     "download_video": "Video Downloader",
     "extractor": "Extractor",
     "forextester": "Forex Tester",
-    "fxscanner-oanda-clone": "OANDA Scanner",
+    "fxscanner-oanda-clone": "Scanner",
     "fxweekend-clone": "FX Weekend",
     "ivindicator-clone": "IV Indicator",
     "journal": "Journal",
-    "oanda-calculator-clone": "OANDA Calculator",
-    "oanda_history-clone": "OANDA History",
-    "oanda_monitor": "OANDA Monitor",
+    "oanda-calculator-clone": "Calculator",
+    "oanda_history-clone": "History",
+    "oanda_monitor": "Monitor",
     "payslip_audit": "Payslip Audit",
     "pinescripts": "Pine Scripts",
     "trading-journal": "Trading Journal",
 }
+
+MERGED_SCRIPT_BUTTONS: List[Dict[str, object]] = [
+    {"id": "calculator", "name": "calculator", "label": "Calculator", "open_url": "/merged/calculator"},
+    {"id": "scanner", "name": "scanner", "label": "Scanner", "open_url": "/merged/scanner"},
+    {"id": "history", "name": "history", "label": "History", "open_url": "/merged/history"},
+    {"id": "monitor", "name": "monitor", "label": "Monitor", "open_url": "/merged/monitor"},
+    {"id": "bounce-trader", "name": "bounce-trader", "label": "Bounce Trader", "open_url": "/merged/bounce-trader"},
+]
 
 _TITLE_UPPER = {"FX", "MT5", "OANDA", "BYBIT", "USDT", "IV"}
 
@@ -3252,9 +3260,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             color: #e2e8f0;
         }
         .script-stack{
-            display: flex;
-            flex-direction: column;
-            gap: 0.65rem;
+            display:grid;
+            grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+            gap:0.65rem;
         }
         
         .script-btn {
@@ -3328,7 +3336,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .empty-state { color: #94a3b8; margin-top: 0.9rem; }
 
         .table-wrap { overflow-x: auto; border-radius: 12px; border: 1px solid #1f2937; background: #0b1220; }
-        #open-orders-table { width: 100%; border-collapse: collapse; min-width: 920px; }
+        #open-orders-table { width: 100%; border-collapse: collapse; min-width: 980px; }
         #open-orders-table th, #open-orders-table td { text-align:left; padding:0.6rem 0.75rem; border-bottom:1px solid #1f2937; font-size:0.9rem; }
         #open-orders-table th { background:#0f172a; color:#cbd5e1; position:sticky; top:0; z-index:1; }
         #open-orders-table tr:hover { background:#111827; }
@@ -3426,14 +3434,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div class=\"home\">
         <div class="layout">
             <aside class="panel sidebar">
-                <div class="category-title">Forex</div>
-                <div id="forex-scripts" class="script-stack"></div>
-
-                <div class="category-title" style="margin-top:1rem">Crypto</div>
-                <div id="crypto-scripts" class="script-stack"></div>
-
-                <div class="category-title" style="margin-top:1rem">Other</div>
-                <div id="other-scripts" class="script-stack"></div>
+                <div class="category-title">Scripts</div>
+                <div id="scripts-grid" class="script-stack"></div>
             </aside>
 
             <main>
@@ -3484,7 +3486,33 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
                 <p class=\"meta\" id=\"watchlist-empty\" style=\"display:none;\">No items yet.</p>
             </section>
-            <section class=\"panel top-panel\" id=\"open-orders-panel\">
+                        <section class="panel top-panel" id="recent-trades-panel">
+                <div class="panel-header">
+                    <div>
+                        <h2>Recent Trades</h2>
+                        <div class="panel-sub">Latest closed trades across all connected accounts.</div>
+                    </div>
+                    <div class="oo-toolbar">
+                        <span class="status-pill" id="recent-trades-status">Loading...</span>
+                    </div>
+                </div>
+                <div class="table-wrap">
+                    <table id="recent-trades-table">
+                        <thead>
+                            <tr>
+                                <th>Account</th>
+                                <th>Symbol</th>
+                                <th>Side</th>
+                                <th>Result</th>
+                                <th>Closed</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+                <p class="meta" id="recent-trades-empty" style="display:none;">No closed trades yet.</p>
+            </section>
+<section class=\"panel top-panel\" id=\"open-orders-panel\">
                 <div class=\"panel-header\">
                     <div>
                         <h2>Open Orders / Positions</h2>
@@ -3500,6 +3528,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <table id=\"open-orders-table\">
                         <thead>
                             <tr>
+                                <th></th>
                                 <th>Broker</th>
                                 <th>Account</th>
                                 <th>Category</th>
@@ -3513,7 +3542,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                                 <th>Take Profit</th>
                                 <th>Leverage / Margin</th>
                                 <th>Opened</th>
-                                <th>ID</th>
                                 <th>Status</th>
                                 <th>Action</th>
                             </tr>
@@ -6780,6 +6808,60 @@ async def api_instrument_specs_jpg(
     return Response(content=blob, media_type="image/jpeg", headers=headers)
 
 
+
+
+def _merged_shell(title: str, options: List[Tuple[str, str]]) -> str:
+    opts = "".join(f'<option value="{html.escape(url)}">{html.escape(label)}</option>' for label, url in options)
+    first = options[0][1] if options else "/"
+    return f"""<!doctype html><html><head><meta charset='utf-8'/><meta name='viewport' content='width=device-width,initial-scale=1'/><title>{html.escape(title)}</title>
+<style>body{{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}}.wrap{{padding:16px;max-width:1800px;margin:0 auto}}.toolbar{{display:flex;gap:10px;align-items:center;background:#111827;border:1px solid #1f2937;border-radius:12px;padding:12px;margin-bottom:12px}}select,button{{background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:8px;padding:8px 10px}}iframe{{width:100%;height:calc(100vh - 110px);border:1px solid #1f2937;border-radius:12px;background:#0f172a}}</style>
+</head><body><div class='wrap'><div class='toolbar'><strong>{html.escape(title)}</strong><select id='sel'>{opts}</select><button onclick='location.href="/"'>Back</button></div><iframe id='frame' src='{html.escape(first)}'></iframe></div>
+<script>const sel=document.getElementById('sel');const frame=document.getElementById('frame');sel.addEventListener('change',()=>frame.src=sel.value);</script></body></html>"""
+
+
+@app.get("/merged/calculator", response_class=HTMLResponse)
+async def merged_calculator_page() -> str:
+    return _merged_shell(
+        "Calculator",
+        [("Crypto", "/apps/cryptocalculator-clone"), ("FX", "/apps/oanda-calculator-clone")],
+    )
+
+
+@app.get("/merged/scanner", response_class=HTMLResponse)
+async def merged_scanner_page() -> str:
+    return _merged_shell(
+        "Scanner",
+        [("Crypto", "/scripts/view/Crypto-Scanner-clone"), ("FX", "/scripts/view/fxscanner-oanda-clone")],
+    )
+
+
+@app.get("/merged/history", response_class=HTMLResponse)
+async def merged_history_page() -> str:
+    return _merged_shell(
+        "History",
+        [
+            ("Bybit", "/apps/bybithistory-clone"),
+            ("OANDA", "/scripts/view/oanda_history-clone"),
+            ("CoinSpot", "/scripts/view/coinspot-clone"),
+        ],
+    )
+
+
+@app.get("/merged/monitor", response_class=HTMLResponse)
+async def merged_monitor_page() -> str:
+    return _merged_shell(
+        "Monitor",
+        [("Bybit", "/scripts/view/bybit_monitor"), ("OANDA", "/scripts/view/oanda_monitor")],
+    )
+
+
+@app.get("/merged/bounce-trader", response_class=HTMLResponse)
+async def merged_bounce_page() -> str:
+    return _merged_shell(
+        "Bounce Trader",
+        [("Bybit", "/apps/bybit_trigger_bounce_trader"), ("OANDA", "/scripts/view/oanda_monitor")],
+    )
+
 @app.get("/scripts/view/{script_name:path}", response_class=HTMLResponse)
 async def script_view_page(script_name: str) -> str:
     try:
@@ -8055,7 +8137,31 @@ async def _background_start(script: ManagedScript) -> None:
 
 @app.get("/scripts")
 async def list_scripts() -> JSONResponse:
-    return JSONResponse(script_manager.list_scripts())
+    scripts = script_manager.list_scripts()
+    by_name = {str(s.get("name")): s for s in scripts}
+    merged = []
+    for btn in MERGED_SCRIPT_BUTTONS:
+        row = {
+            "id": btn["id"],
+            "name": btn["name"],
+            "label": btn["label"],
+            "category": "Merged",
+            "running": False,
+            "open_url": btn["open_url"],
+            "standalone": True,
+        }
+        if btn["name"] == "calculator":
+            row["running"] = bool(by_name.get("cryptocalculator-clone", {}).get("running") or by_name.get("oanda-calculator-clone", {}).get("running"))
+        elif btn["name"] == "scanner":
+            row["running"] = bool(by_name.get("Crypto-Scanner-clone", {}).get("running") or by_name.get("fxscanner-oanda-clone", {}).get("running"))
+        elif btn["name"] == "history":
+            row["running"] = bool(by_name.get("bybithistory-clone", {}).get("running") or by_name.get("oanda_history-clone", {}).get("running") or by_name.get("coinspot-clone", {}).get("running"))
+        elif btn["name"] == "monitor":
+            row["running"] = bool(by_name.get("bybit_monitor", {}).get("running") or by_name.get("oanda_monitor", {}).get("running"))
+        elif btn["name"] == "bounce-trader":
+            row["running"] = bool(by_name.get("bybit_trigger_bounce_trader", {}).get("running"))
+        merged.append(row)
+    return JSONResponse(merged)
 
 
 def _safe_float(value: object) -> Optional[float]:
@@ -8319,7 +8425,46 @@ async def list_open_orders() -> JSONResponse:
         if changed:
             _save_bounce_traders(sessions)
 
-    return JSONResponse({"items": items, "errors": errors})
+    hierarchical: List[Dict[str, object]] = []
+    for item in items:
+        row = dict(item)
+        children: List[Dict[str, object]] = []
+        sl = row.get("stop_loss")
+        tp = row.get("take_profit")
+        if sl not in (None, ""):
+            children.append({"kind": "SL", "price": sl})
+        if tp not in (None, ""):
+            children.append({"kind": "TP", "price": tp})
+        row["children"] = children
+        hierarchical.append(row)
+
+    return JSONResponse({"items": hierarchical, "errors": errors})
+
+
+@app.get("/api/recent-trades")
+async def recent_trades(limit: int = 25) -> JSONResponse:
+    rows = [r for r in _get_trading_journal_rows() if isinstance(r, dict)]
+    closed: List[Dict[str, object]] = []
+    for row in rows:
+        status = str(row.get("status") or row.get("state") or "").strip().lower()
+        event = str(row.get("event") or row.get("type") or row.get("transaction_type") or "").strip().lower()
+        if any(x in event for x in ("deposit", "withdraw")):
+            continue
+        if status and status not in {"closed", "close", "filled", "complete", "completed"}:
+            continue
+        if not (row.get("closed_at") or row.get("close_time") or row.get("exit_time") or row.get("date")):
+            continue
+        closed.append(
+            {
+                "account": row.get("account_label") or row.get("account") or row.get("source"),
+                "symbol": row.get("symbol") or row.get("instrument") or row.get("symbol_raw"),
+                "side": row.get("side") or row.get("direction"),
+                "result": row.get("realized_pnl") or row.get("pnl") or row.get("profit") or row.get("net"),
+                "closed_at": row.get("closed_at") or row.get("close_time") or row.get("exit_time") or row.get("date"),
+            }
+        )
+    closed = sorted(closed, key=lambda r: str(r.get("closed_at") or ""), reverse=True)
+    return JSONResponse({"items": closed[: max(1, min(limit, 200))]})
 
 
 @app.post("/api/open-orders/close")
