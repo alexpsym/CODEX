@@ -8514,6 +8514,8 @@ async def list_open_orders() -> JSONResponse:
                 len(oanda_items),
                 len(oanda_errors),
             )
+            items.extend(oanda_items)
+            BYBIT_LOGGER.info("OPEN_ORDERS oanda account=%s items=%s", account, len(oanda_items))
         except Exception as exc:
             errors.append(
                 {
