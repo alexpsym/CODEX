@@ -46,6 +46,7 @@ API_BASES = [
 ]
 API_PATH = "/v5/market/tickers"
 KLINE_PATH = "/v5/market/kline"
+INSTRUMENTS_PATH = "/v5/market/instruments-info"
 DEFAULT_WAIT_SECONDS = int(os.getenv("BYBIT_WAIT_SECONDS", "300"))
 ERROR_WAIT_SECONDS = 60
 BLOCK_BACKOFFS = [60, 120, 300, 900, 1800]  # 1m, 2m, 5m, 15m, 30m
@@ -73,6 +74,9 @@ _push_failure_logged = False
 _push_config_logged = False
 _alerts_cache: list[dict] | None = None
 _alerts_mtime: float | None = None
+_perp_symbols_cache: set[str] | None = None
+_perp_symbols_cache_at: float = 0.0
+_PERP_SYMBOLS_TTL_SECONDS = 900
 
 def _get_telegram_credentials() -> tuple[str, str]:
     """Return Telegram credentials from environment variables."""
@@ -130,6 +134,10 @@ def _coerce_alert(payload: dict) -> dict:
     symbol = str(payload.get("symbol") or "").strip().upper()
     if not symbol:
         raise ValueError("symbol is required")
+
+    allowed = _get_linear_perpetual_symbols()
+    if symbol not in allowed:
+        raise ValueError("Only Bybit linear perpetual symbols are allowed in this monitor.")
 
     kind = str(payload.get("kind") or "").strip().lower()
     if kind not in _ALLOWED_ALERT_KINDS:
@@ -229,17 +237,28 @@ def set_custom_alert_enabled(alert_id: str, enabled: bool) -> dict:
     raise ValueError("Unknown alert id")
 
 
-def replace_custom_alerts(alerts_payload: object) -> list[dict]:
+def replace_custom_alerts(alerts_payload: object, *, strict: bool = True) -> list[dict]:
     """Replace ALL custom alerts with the provided list (used for backup/restore)."""
     if not isinstance(alerts_payload, list):
         raise ValueError("alerts must be a list")
     replaced: list[dict] = []
+    skipped: list[dict] = []
     for item in alerts_payload:
         if not isinstance(item, dict):
             continue
-        replaced.append(_coerce_alert(item))
+        try:
+            replaced.append(_coerce_alert(item))
+        except ValueError:
+            if strict:
+                raise
+            skipped.append(item)
     _save_custom_alerts(replaced)
     get_custom_alerts(force=True)
+    if skipped:
+        log(
+            "Skipped invalid restored Bybit alerts: "
+            f"removed={len(skipped)} kept={len(replaced)}"
+        )
     return list(replaced)
 
 
@@ -676,22 +695,82 @@ def _auth_headers(params: Dict[str, str]) -> Dict[str, str]:
     }
 
 
+def _fetch_linear_perpetual_symbols() -> set[str]:
+    session = _get_session()
+    headers = _build_headers()
+    timeout = float(os.getenv("BYBIT_API_TIMEOUT", "20"))
+    symbols: set[str] = set()
+
+    for api_base in _iter_api_bases():
+        cursor: str | None = None
+        while True:
+            params: Dict[str, object] = {"category": "linear", "limit": 1000}
+            if cursor:
+                params["cursor"] = cursor
+            url = f"{api_base}{INSTRUMENTS_PATH}"
+            resp = session.get(url, params=params, headers=headers, timeout=timeout)
+            resp.raise_for_status()
+            payload = resp.json()
+            if payload.get("retCode") != 0:
+                raise RuntimeError(f"instruments-info failed: {payload.get('retMsg')}")
+            result = payload.get("result") or {}
+            rows = result.get("list") or []
+            for row in rows:
+                symbol = str(row.get("symbol") or "").upper()
+                contract_type = str(row.get("contractType") or "")
+                status = str(row.get("status") or "")
+                delivery_time = str(row.get("deliveryTime") or "")
+                if (
+                    symbol
+                    and status == "Trading"
+                    and contract_type == "LinearPerpetual"
+                    and delivery_time in {"", "0"}
+                ):
+                    symbols.add(symbol)
+            cursor = result.get("nextPageCursor")
+            if not cursor:
+                break
+        if symbols:
+            return symbols
+    return symbols
+
+
+def _get_linear_perpetual_symbols(force: bool = False) -> set[str]:
+    global _perp_symbols_cache, _perp_symbols_cache_at
+    now = time.time()
+    if (
+        force
+        or _perp_symbols_cache is None
+        or (now - _perp_symbols_cache_at) > _PERP_SYMBOLS_TTL_SECONDS
+    ):
+        try:
+            _perp_symbols_cache = _fetch_linear_perpetual_symbols()
+            _perp_symbols_cache_at = now
+        except Exception as exc:
+            log(f"Failed to refresh linear perpetual symbol cache: {exc}")
+            if _perp_symbols_cache is None:
+                _perp_symbols_cache = set()
+    return set(_perp_symbols_cache or set())
+
+
 def _coalesce_prices(tickers: Iterable[Dict[str, object]]) -> Dict[str, float]:
     prices: Dict[str, float] = {}
+    allowed = _get_linear_perpetual_symbols()
+    if not allowed:
+        return prices
+
     for entry in tickers:
-        symbol = entry.get("symbol")
+        symbol = str(entry.get("symbol") or "").upper()
         last_price = entry.get("lastPrice")
         if not symbol or last_price in (None, "", "0"):
             continue
-
-        base_symbol = extract_base_symbol(str(symbol))
-
-        try:
-            price = float(last_price)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
+        if symbol not in allowed:
             continue
 
-        prices[str(symbol).upper()] = price
+        try:
+            prices[symbol] = float(last_price)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            continue
     return prices
 
 
@@ -1079,6 +1158,19 @@ def backfill_baselines(
     return changed
 
 
+def prune_non_perpetual_custom_alerts() -> None:
+    allowed = _get_linear_perpetual_symbols(force=True)
+    alerts = get_custom_alerts(force=True)
+    kept = [a for a in alerts if str(a.get("symbol") or "").upper() in allowed]
+    if len(kept) != len(alerts):
+        _save_custom_alerts(kept)
+        get_custom_alerts(force=True)
+        log(
+            "Pruned non-perpetual custom alerts: "
+            f"removed={len(alerts) - len(kept)} kept={len(kept)}"
+        )
+
+
 def run_monitor() -> None:
     """Continuous monitoring loop."""
     previous_prices: Dict[str, float] = {}
@@ -1253,6 +1345,7 @@ def main() -> None:
         log(f"Bybit auth disabled: missing KEY/SECRET for selected mode={BYBIT_MODE}.")
     if _plyer_notification is None:
         log("Desktop alerts need the 'plyer' package. Install it with: pip install plyer")
+    prune_non_perpetual_custom_alerts()
     run_monitor()
 
 
