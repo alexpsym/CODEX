@@ -1,12 +1,8 @@
 (() => {
   const refreshBtn = document.getElementById('refresh-btn');
   const status = document.getElementById('status');
+  const scriptsGrid = document.getElementById('scripts-grid');
 
-  const forexList = document.getElementById('forex-scripts');
-  const cryptoList = document.getElementById('crypto-scripts');
-  const otherList = document.getElementById('other-scripts');
-
-  // Open Orders (inline)
   const ooRefreshBtn = document.getElementById('oo-refresh-btn');
   const ooStatus = document.getElementById('oo-status');
   const ooTable = document.getElementById('open-orders-table');
@@ -15,20 +11,42 @@
   const ooErrorsBox = document.getElementById('open-orders-errors');
   const ooErrorsList = ooErrorsBox?.querySelector('ul');
 
-  const watchlistWidget = document.getElementById('watchlist-widget');
-  const watchlistInput = document.getElementById('watchlist-input');
-  const watchlistAddBtn = document.getElementById('watchlist-add-btn');
-  const watchlistList = document.getElementById('watchlist-items');
-  const watchlistEmpty = document.getElementById('watchlist-empty');
-  const watchlistStatus = document.getElementById('watchlist-status');
-  const watchlistCount = document.getElementById('watchlist-count');
-
-  const instrumentSpecsInput = document.getElementById('instrument-specs-input');
-  const instrumentSpecsForm = document.getElementById('instrument-specs-form');
+  const rtStatus = document.getElementById('recent-trades-status');
+  const rtBody = document.querySelector('#recent-trades-table tbody');
+  const rtEmpty = document.getElementById('recent-trades-empty');
 
   let scriptsInFlight = null;
   let ooInFlight = null;
-  let watchlistItems = [];
+
+  const fmt = (v) => (v === null || v === undefined || v === '' ? '—' : v);
+  const fmtNum = (v, dp = 4) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n.toFixed(dp) : '—';
+  };
+  const fmtTime = (v) => {
+    if (!v) return '—';
+    const n = Number(v);
+    if (!Number.isNaN(n)) {
+      const ms = n < 1_000_000_000_000 ? n * 1000 : n;
+      const d = new Date(ms);
+      if (!Number.isNaN(d.getTime())) return d.toLocaleString();
+    }
+    const d = new Date(v);
+    if (!Number.isNaN(d.getTime())) return d.toLocaleString();
+    return String(v);
+  };
+  const fmtDuration = (secs) => {
+    const n = Number(secs);
+    if (!Number.isFinite(n) || n < 0) return '—';
+    const s = Math.floor(n % 60);
+    const m = Math.floor((n / 60) % 60);
+    const h = Math.floor((n / 3600) % 24);
+    const d = Math.floor(n / 86400);
+    if (d > 0) return `${d}d ${h}h ${m}m ${s}s`;
+    if (h > 0) return `${h}h ${m}m ${s}s`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  };
 
   const setStatus = (msg, isErr = false) => {
     if (!status) return;
@@ -45,145 +63,10 @@
     return res.json();
   };
 
-  const normalizeSymbol = (value) => {
-    const trimmed = String(value || '').trim().toUpperCase();
-    if (!trimmed) return '';
-    if (trimmed.length === 6 && /^[A-Z]+$/.test(trimmed)) {
-      return `${trimmed.slice(0, 3)}_${trimmed.slice(3)}`;
-    }
-    return trimmed;
-  };
-
-  const normalizeWatchlist = (items) => {
-    const unique = new Set();
-    const normalized = [];
-    items.forEach((item) => {
-      const symbol = normalizeSymbol(item);
-      if (!symbol || unique.has(symbol)) return;
-      unique.add(symbol);
-      normalized.push(symbol);
-    });
-    return normalized.slice(0, 50);
-  };
-
-  const setWatchlistStatus = (message) => {
-    if (!watchlistStatus) return;
-    watchlistStatus.textContent = message;
-  };
-
-  const renderWatchlist = () => {
-    if (!watchlistList || !watchlistEmpty) return;
-
-    watchlistList.innerHTML = '';
-    watchlistEmpty.style.display = watchlistItems.length ? 'none' : 'block';
-    if (watchlistCount) watchlistCount.textContent = String(watchlistItems.length);
-
-    watchlistItems.forEach((symbol, index) => {
-      const row = document.createElement('tr');
-
-      const symbolCell = document.createElement('td');
-      symbolCell.textContent = symbol;
-      symbolCell.style.cursor = 'pointer';
-      symbolCell.title = 'Click to copy';
-      symbolCell.addEventListener('click', async () => {
-        try {
-          await navigator.clipboard.writeText(symbol);
-          setWatchlistStatus(`Copied ${symbol}`);
-        } catch (err) {
-          console.error(err);
-          setWatchlistStatus('Clipboard unavailable');
-        }
-      });
-
-      const actionCell = document.createElement('td');
-      actionCell.className = 'action-cell';
-
-      const removeBtn = document.createElement('button');
-      removeBtn.className = 'action-btn';
-      removeBtn.type = 'button';
-      removeBtn.textContent = 'Remove';
-      removeBtn.addEventListener('click', () => {
-        watchlistItems.splice(index, 1);
-        saveWatchlist(watchlistItems);
-        renderWatchlist();
-      });
-
-      actionCell.appendChild(removeBtn);
-      row.appendChild(symbolCell);
-      row.appendChild(actionCell);
-      watchlistList.appendChild(row);
-    });
-  };
-
-  const saveWatchlist = async (items) => {
-    const normalized = normalizeWatchlist(items);
-    watchlistItems = normalized;
-    renderWatchlist();
-    try {
-      await fetchJson('/api/watchlist', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items: normalized }),
-      });
-      setWatchlistStatus(`Saved ${normalized.length} item${normalized.length === 1 ? '' : 's'}`);
-    } catch (err) {
-      console.error(err);
-      setWatchlistStatus('Failed to save watchlist');
-    }
-  };
-
-  const loadWatchlist = async () => {
-    if (!watchlistWidget) return;
-    try {
-      const data = await fetchJson('/api/watchlist');
-      watchlistItems = normalizeWatchlist(Array.isArray(data?.items) ? data.items : []);
-      renderWatchlist();
-      if (watchlistItems.length) {
-        setWatchlistStatus(`Loaded ${watchlistItems.length} item${watchlistItems.length === 1 ? '' : 's'}`);
-      } else {
-        setWatchlistStatus('');
-      }
-    } catch (err) {
-      console.error(err);
-      setWatchlistStatus('Failed to load watchlist');
-    }
-  };
-
-  watchlistAddBtn?.addEventListener('click', () => {
-    if (!watchlistInput) return;
-    const raw = watchlistInput.value || '';
-    const tokens = raw.split(/[\s,]+/).filter(Boolean);
-    if (!tokens.length) return;
-    const merged = normalizeWatchlist([...watchlistItems, ...tokens]);
-    if (merged.length === watchlistItems.length) {
-      watchlistInput.value = '';
-      return;
-    }
-    if (merged.length >= 50 && watchlistItems.length < merged.length) {
-      setWatchlistStatus('Max 50 symbols');
-    }
-    saveWatchlist(merged);
-    watchlistInput.value = '';
-  });
-
-  watchlistInput?.addEventListener('keydown', (event) => {
-    if (event.key !== 'Enter') return;
-    event.preventDefault();
-    watchlistAddBtn?.click();
-  });
-
-  // Normalize /scripts category values (prevents empty lists)
-  const normCategory = (cat) => {
-    const c = String(cat || '').trim().toLowerCase();
-    if (c === 'forex' || c.includes('oanda') || c.includes('fx')) return 'Forex';
-    if (c === 'crypto' || c.includes('bybit') || c.includes('coinspot')) return 'Crypto';
-    return 'Other';
-  };
-
-  const makeScriptButton = (script, compact = false) => {
+  const makeScriptButton = (script) => {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = `script-btn${compact ? ' compact' : ''}`;
+    btn.className = 'script-btn';
 
     const name = document.createElement('div');
     name.className = 'script-name';
@@ -191,46 +74,28 @@
 
     const dot = document.createElement('span');
     dot.className = `status-dot ${script.running ? 'running' : 'stopped'}`;
-    dot.title = script.running ? 'Running' : 'Stopped';
-    dot.setAttribute('aria-label', script.running ? 'Running' : 'Stopped');
 
     btn.appendChild(name);
     btn.appendChild(dot);
 
     btn.addEventListener('click', () => {
-      const target = script.open_url || `/scripts/view/${encodeURIComponent(script.name)}`;
-      if (script.standalone || target === '/trading-journal') {
-        window.open(target, '_blank', 'noopener');
-        return;
-      }
+      const target = script.open_url || '/';
       window.location.href = target;
     });
 
     return btn;
   };
 
-  const renderList = (container, scripts, compact = false) => {
-    if (!container) return;
-    container.innerHTML = '';
-    scripts
-      .slice()
-      .sort((a, b) => String(a.name).localeCompare(String(b.name)))
-      .forEach((s) => container.appendChild(makeScriptButton(s, compact)));
-  };
-
   const refreshScripts = async () => {
     if (scriptsInFlight) return scriptsInFlight;
-
     scriptsInFlight = (async () => {
       try {
         setStatus('Loading scripts...');
         const scripts = await fetchJson('/scripts');
-        const mapped = scripts.map((s) => ({ ...s, _cat: normCategory(s.category) }));
-
-        renderList(forexList, mapped.filter((s) => s._cat === 'Forex'), false);
-        renderList(cryptoList, mapped.filter((s) => s._cat === 'Crypto'), false);
-        renderList(otherList, mapped.filter((s) => s._cat === 'Other'), false);
-
+        if (scriptsGrid) {
+          scriptsGrid.innerHTML = '';
+          scripts.forEach((s) => scriptsGrid.appendChild(makeScriptButton(s)));
+        }
         setStatus(`Updated ${new Date().toLocaleTimeString()}`);
       } catch (e) {
         console.error(e);
@@ -239,46 +104,11 @@
         scriptsInFlight = null;
       }
     })();
-
     return scriptsInFlight;
-  };
-
-  // -------- Open Orders / Positions (unchanged endpoints) --------
-  const fmt = (v) => (v === null || v === undefined || v === '' ? '—' : v);
-  const toNumber = (v) => {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : null;
-  };
-  const formatDistance = (value, entryValue) => {
-    const numeric = toNumber(value);
-    const entry = toNumber(entryValue);
-    if (numeric === null || entry === null) return value;
-    return Math.abs(numeric - entry);
-  };
-  const fmtTime = (v) => {
-    if (!v) return '—';
-    const n = Number(v);
-    if (!Number.isNaN(n)) {
-      const ms = n < 1_000_000_000_000 ? n * 1000 : n;
-      const d = new Date(ms);
-      if (!Number.isNaN(d.getTime())) return d.toLocaleString();
-    }
-    const d = new Date(v);
-    if (!Number.isNaN(d.getTime())) return d.toLocaleString();
-    return String(v);
-  };
-
-  const setOoPill = (text, tone) => {
-    if (!ooStatus) return;
-    ooStatus.textContent = text;
-    ooStatus.classList.remove('running', 'stopped');
-    if (tone === 'ok') ooStatus.classList.add('running');
-    if (tone === 'bad') ooStatus.classList.add('stopped');
   };
 
   const renderOpenOrders = (items, errors) => {
     if (!ooTbody) return;
-
     ooTbody.innerHTML = '';
 
     if (ooErrorsBox) ooErrorsBox.style.display = errors?.length ? 'block' : 'none';
@@ -297,37 +127,31 @@
     }
     if (ooEmpty) ooEmpty.style.display = 'none';
 
-    items.forEach((item) => {
+    items.forEach((item, idx) => {
       const tr = document.createElement('tr');
+      const children = Array.isArray(item.children) ? item.children : [];
 
-      const t = String(item.type || '').toLowerCase();
-      const isWebhook = t === 'webhook';
-      const status = String(item.status || '').trim().toUpperCase();
-      const entryPrice = item.entry_price || item.order_price;
-      const stopLoss =
-        isWebhook && status === 'WAITING' ? formatDistance(item.stop_loss, entryPrice) : item.stop_loss;
-      const takeProfit =
-        isWebhook && status === 'WAITING' ? formatDistance(item.take_profit, entryPrice) : item.take_profit;
+      const expTd = document.createElement('td');
+      if (children.length) {
+        const exp = document.createElement('button');
+        exp.type = 'button';
+        exp.className = 'action-btn';
+        exp.textContent = '▸';
+        exp.style.minWidth = '30px';
+        exp.addEventListener('click', () => {
+          const open = exp.textContent === '▾';
+          exp.textContent = open ? '▸' : '▾';
+          document.querySelectorAll(`tr[data-parent="${idx}"]`).forEach((row) => {
+            row.style.display = open ? 'none' : '';
+          });
+        });
+        expTd.appendChild(exp);
+      } else {
+        expTd.textContent = '—';
+      }
+      tr.appendChild(expTd);
 
-      const cols = [
-        item.broker,
-        item.account,
-        item.category,
-        item.instrument,
-        item.type,
-        item.side,
-        item.size,
-        entryPrice,
-        item.current_price,
-        stopLoss,
-        takeProfit,
-        item.leverage,
-        fmtTime(item.opened_at),
-        item.id,
-        item.status,
-      ];
-
-      cols.forEach((c) => {
+      [item.broker, item.account, item.category, item.instrument, item.type, item.side, item.size, item.entry_price || item.order_price, item.current_price, item.stop_loss, item.take_profit, item.leverage, fmtTime(item.opened_at), item.status].forEach((c) => {
         const td = document.createElement('td');
         td.textContent = fmt(c);
         tr.appendChild(td);
@@ -335,131 +159,134 @@
 
       const actionTd = document.createElement('td');
       actionTd.className = 'action-cell';
-
-      const isOrder = t === 'order';
-      const isPosition = t === 'position' || t === 'trade';
-
-      if (isOrder || isPosition) {
-        const label = isOrder ? 'Cancel' : 'Close';
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = 'action-btn';
-        btn.textContent = label;
-
-        btn.addEventListener('click', async () => {
-          btn.disabled = true;
-          const old = btn.textContent;
-          btn.textContent = '...';
-          try {
-            await fetchJson('/api/open-orders/close', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(item),
-            });
-            await refreshOpenOrders();
-          } catch (e) {
-            console.error(e);
-            setOoPill(e?.message || 'Action failed', 'bad');
-          } finally {
-            btn.disabled = false;
-            btn.textContent = old;
-          }
-        });
-
-        actionTd.appendChild(btn);
-      } else if (isWebhook) {
-        const enabled = item.enabled !== false;
-
-        const toggleBtn = document.createElement('button');
-        toggleBtn.type = 'button';
-        toggleBtn.className = 'action-btn';
-        toggleBtn.textContent = enabled ? 'Disable' : 'Enable';
-        toggleBtn.addEventListener('click', async () => {
-          toggleBtn.disabled = true;
-          const old = toggleBtn.textContent;
-          toggleBtn.textContent = '...';
-          try {
-            await fetchJson(`/api/pending-webhooks/${encodeURIComponent(item.id)}/enabled`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ enabled: !enabled }),
-            });
-            await refreshOpenOrders();
-          } catch (e) {
-            console.error(e);
-            setOoPill(e?.message || 'Action failed', 'bad');
-          } finally {
-            toggleBtn.disabled = false;
-            toggleBtn.textContent = old;
-          }
-        });
-        actionTd.appendChild(toggleBtn);
-
-        const removeBtn = document.createElement('button');
-        removeBtn.type = 'button';
-        removeBtn.className = 'action-btn';
-        removeBtn.textContent = 'Remove';
-        removeBtn.style.marginLeft = '0.4rem';
-        removeBtn.addEventListener('click', async () => {
-          removeBtn.disabled = true;
-          const old = removeBtn.textContent;
-          removeBtn.textContent = '...';
-          try {
-            await fetchJson(`/api/pending-webhooks/${encodeURIComponent(item.id)}`, {
-              method: 'DELETE',
-            });
-            await refreshOpenOrders();
-          } catch (e) {
-            console.error(e);
-            setOoPill(e?.message || 'Action failed', 'bad');
-          } finally {
-            removeBtn.disabled = false;
-            removeBtn.textContent = old;
-          }
-        });
-        actionTd.appendChild(removeBtn);
-      } else {
-        actionTd.textContent = '—';
-      }
-
+      actionTd.textContent = '—';
       tr.appendChild(actionTd);
       ooTbody.appendChild(tr);
+
+      children.forEach((child) => {
+        const cRow = document.createElement('tr');
+        cRow.dataset.parent = String(idx);
+        cRow.style.display = 'none';
+
+        const cExp = document.createElement('td');
+        cExp.textContent = '';
+        cRow.appendChild(cExp);
+
+        [
+          child.broker,
+          child.account,
+          child.category,
+          child.instrument,
+          child.type,
+          child.side,
+          child.size,
+          child.entry_price || child.order_price,
+          child.current_price,
+          child.stop_loss,
+          child.take_profit,
+          child.leverage,
+          fmtTime(child.opened_at),
+          child.status,
+        ].forEach((c) => {
+          const td = document.createElement('td');
+          td.textContent = fmt(c);
+          cRow.appendChild(td);
+        });
+
+        const actionTd = document.createElement('td');
+        actionTd.className = 'action-cell';
+        actionTd.textContent = '—';
+        cRow.appendChild(actionTd);
+
+        ooTbody.appendChild(cRow);
+      });
     });
   };
 
   const refreshOpenOrders = async () => {
     if (ooInFlight) return ooInFlight;
-
     ooInFlight = (async () => {
       try {
-        setOoPill('Loading...', 'ok');
+        if (ooStatus) ooStatus.textContent = 'Loading...';
         const payload = await fetchJson('/api/open-orders');
         renderOpenOrders(payload.items || [], payload.errors || []);
-        setOoPill((payload.errors || []).length ? 'Updated (issues)' : 'Updated', (payload.errors || []).length ? 'bad' : 'ok');
+        if (ooStatus) ooStatus.textContent = 'Updated';
       } catch (e) {
         console.error(e);
         renderOpenOrders([], [{ message: e.message }]);
-        setOoPill('Failed', 'bad');
+        if (ooStatus) ooStatus.textContent = 'Failed';
       } finally {
         ooInFlight = null;
       }
     })();
-
     return ooInFlight;
   };
 
-  refreshBtn?.addEventListener('click', () => { refreshScripts(); refreshOpenOrders(); });
+  const refreshRecentTrades = async () => {
+    if (!rtBody) return;
+    try {
+      if (rtStatus) rtStatus.textContent = 'Loading...';
+      const payload = await fetchJson('/api/recent-trades?limit=20');
+      const items = payload.items || [];
+      rtBody.innerHTML = '';
+      items.forEach((item) => {
+        const tr = document.createElement('tr');
+
+        const resultPct = Number(item.result_pct);
+        const pnlCls = Number.isFinite(resultPct)
+          ? (resultPct > 0 ? 'pos' : (resultPct < 0 ? 'neg' : ''))
+          : '';
+        const outcome = String(item.outcome || '—');
+        const outcomeCls =
+          outcome === 'Win' ? 'win' :
+          outcome === 'Loss' ? 'loss' : 'be';
+
+        const cells = [
+          item.account,
+          item.symbol,
+          item.side,
+          fmtTime(item.opened_at),
+          fmtTime(item.closed_at),
+          fmtNum(item.stop_loss, 6),
+          fmtNum(item.take_profit, 6),
+          fmtNum(item.fees, 2),
+        ];
+
+        cells.forEach((c) => {
+          const td = document.createElement('td');
+          td.textContent = fmt(c);
+          tr.appendChild(td);
+        });
+
+        const outcomeTd = document.createElement('td');
+        outcomeTd.innerHTML = `<span class="rt-pill ${outcomeCls}">${outcome}</span>`;
+        tr.appendChild(outcomeTd);
+
+        const resultTd = document.createElement('td');
+        resultTd.className = `num ${pnlCls}`;
+        resultTd.textContent = Number.isFinite(resultPct) ? `${resultPct.toFixed(2)}%` : '—';
+        tr.appendChild(resultTd);
+
+        const durTd = document.createElement('td');
+        durTd.textContent = fmtDuration(item.duration_seconds);
+        tr.appendChild(durTd);
+
+        rtBody.appendChild(tr);
+      });
+      if (rtEmpty) rtEmpty.style.display = items.length ? 'none' : 'block';
+      if (rtStatus) rtStatus.textContent = 'Updated';
+    } catch (e) {
+      console.error(e);
+      if (rtStatus) rtStatus.textContent = 'Failed';
+    }
+  };
+
+  refreshBtn?.addEventListener('click', () => { refreshScripts(); refreshOpenOrders(); refreshRecentTrades(); });
   ooRefreshBtn?.addEventListener('click', () => refreshOpenOrders());
 
-  instrumentSpecsForm?.addEventListener('submit', (event) => {
-    const q = String(instrumentSpecsInput?.value || '').trim();
-    if (!q) event.preventDefault();
-  });
-
-
-  setInterval(() => { refreshScripts(); refreshOpenOrders(); }, 5000);
+  setInterval(() => { refreshScripts(); refreshOpenOrders(); refreshRecentTrades(); }, 5000);
 
   refreshScripts();
   refreshOpenOrders();
-  loadWatchlist();
+  refreshRecentTrades();
 })();

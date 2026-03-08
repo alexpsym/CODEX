@@ -21,6 +21,7 @@
     'source',
     'status',
     'scannerVolume24h',
+    'openInterest',
     '_units',
   ]);
 
@@ -31,9 +32,7 @@
     fundingRate: 'fundingRate (%)',
     nextFundingTime: 'nextFundingTime (Brisbane time)',
     launchTime: 'launchTime (Brisbane time)',
-    openInterest: 'openInterest (contracts)',
     openInterestValue: 'openInterestValue (USD)',
-    volume24h: 'volume24h (contracts/base units)',
     turnover24h: 'turnover24h (USD)',
     avg7dTurnoverUsd: 'avg7dVolume (USD)',
   };
@@ -93,12 +92,8 @@
       return formatPercentFromFraction(value);
     }
 
-    if (/^(turnover24h|openInterestValue|avg7dTurnoverUsd)$/i.test(key)) {
+    if (/^(turnover24h|openInterestValue|avg7dTurnoverUsd|volume24h)$/i.test(key)) {
       return `$${compactNumber(value)}`;
-    }
-
-    if (/^(volume24h|openInterest)$/i.test(key)) {
-      return compactNumber(value);
     }
 
     if (typeof value === 'object' && value !== null) return JSON.stringify(value);
