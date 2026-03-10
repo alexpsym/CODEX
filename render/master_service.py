@@ -241,6 +241,12 @@ _DROPBOX_UPLOAD_TIMER: Optional[threading.Timer] = None
 _DROPBOX_UPLOAD_TIMER_LOCK = threading.Lock()
 _BYBIT_EXEC_LAST_SEEN: Dict[str, int] = {}
 _OANDA_TX_LAST_SEEN: Dict[str, str] = {}
+_OANDA_FILL_BACKOFF_UNTIL: Dict[str, float] = {}
+_OANDA_FILL_FAILURES: Dict[str, int] = {}
+_OANDA_ACCOUNTS_CACHE: Dict[str, Tuple[float, List[Dict[str, object]]]] = {}
+_OANDA_ACCOUNTS_CACHE_TTL_SECONDS = 20.0
+_OANDA_SPECS_CACHE: Dict[str, Tuple[float, Dict[str, object]]] = {}
+_OANDA_SPECS_CACHE_TTL_SECONDS = 30.0
 
 
 def _normalize_watchlist(items: Iterable[object]) -> List[str]:
@@ -423,22 +429,28 @@ def _oanda_specs_mode() -> str:
 
 async def _oanda_resolve_and_fetch_specs(query: str) -> Optional[Dict[str, object]]:
     try:
-        cfg = _get_oanda_config(_oanda_specs_mode())
-    except ValueError:
-        return None
-
-    try:
         normalized_query = _normalize_oanda_symbol_query(query)
     except ValueError:
         return None
 
-    payload = await _fetch_oanda_json(
-        base_url=cfg["base_url"],
-        account_id=cfg["account_id"],
-        api_key=cfg["token"],
-        endpoint=f"/accounts/{{account_id}}/instruments?instruments={normalized_query}",
-        mode=cfg["mode"],
-    )
+    cache_key = normalized_query.upper()
+    now = time.time()
+    cached = _OANDA_SPECS_CACHE.get(cache_key)
+    if cached and cached[0] > now:
+        return dict(cached[1])
+
+    try:
+        cfg = _get_oanda_config(_oanda_specs_mode())
+        payload = await _fetch_oanda_json(
+            base_url=cfg["base_url"],
+            account_id=cfg["account_id"],
+            api_key=cfg["token"],
+            endpoint=f"/accounts/{{account_id}}/instruments?instruments={normalized_query}",
+            mode=cfg["mode"],
+            timeout_s=4.0,
+        )
+    except ValueError:
+        return None
 
     instruments = payload.get("instruments") or []
     if not isinstance(instruments, list) or not instruments:
@@ -449,7 +461,7 @@ async def _oanda_resolve_and_fetch_specs(query: str) -> Optional[Dict[str, objec
         return None
 
     financing = matched.get("financing") or {}
-    return {
+    result = {
         "source": "oanda",
         "query": query,
         "resolved_symbol": matched.get("name"),
@@ -465,6 +477,8 @@ async def _oanda_resolve_and_fetch_specs(query: str) -> Optional[Dict[str, objec
         "financing.shortRate": financing.get("shortRate"),
         "financing.financingDaysOfWeek": financing.get("financingDaysOfWeek"),
     }
+    _OANDA_SPECS_CACHE[cache_key] = (now + _OANDA_SPECS_CACHE_TTL_SECONDS, result)
+    return dict(result)
 
 
 async def _bybit_resolve_and_fetch_specs(query: str) -> Optional[Dict[str, object]]:
@@ -2849,10 +2863,10 @@ def _compute_autostart_scripts() -> List[str]:
 
 @app.on_event("startup")
 async def _autostart_scripts() -> None:
-    await _dropbox_restore_state_backup_on_startup()
+    asyncio.create_task(_dropbox_restore_state_backup_on_startup())
     _purge_bybit_demo_journal_state()
     asyncio.create_task(_poll_bybit_fills())
-    asyncio.create_task(_poll_oanda_fills())
+    asyncio.create_task(_start_oanda_fill_poll_after_delay())
     for name in _compute_autostart_scripts():
         try:
             script = script_manager.get(name)
@@ -2866,6 +2880,11 @@ async def _autostart_scripts() -> None:
             script.port = _allocate_port()
 
         asyncio.create_task(_background_start(script))
+
+
+async def _start_oanda_fill_poll_after_delay() -> None:
+    await asyncio.sleep(5)
+    await _poll_oanda_fills()
 
 
 async def _fetch_oanda_transactions_window(
@@ -4347,7 +4366,13 @@ def _oanda_account_context(base_url: str) -> str:
 
 
 async def _fetch_oanda_json(
-    *, base_url: str, account_id: str, api_key: str, endpoint: str, mode: str
+    *,
+    base_url: str,
+    account_id: str,
+    api_key: str,
+    endpoint: str,
+    mode: str,
+    timeout_s: float = 6.0,
 ) -> Dict[str, object]:
     token = (api_key or "").strip().strip('"').strip("'")
     headers = {
@@ -4371,7 +4396,8 @@ async def _fetch_oanda_json(
         token_last4,
         url,
     )
-    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+    timeout = httpx.Timeout(timeout_s, connect=min(3.0, timeout_s), read=timeout_s, write=timeout_s, pool=2.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         try:
             resp = await client.get(url, headers=headers)
             BYBIT_LOGGER.info(
@@ -4390,6 +4416,12 @@ async def _fetch_oanda_json(
                     resp.headers.get("location"),
                 )
             resp.raise_for_status()
+        except httpx.TimeoutException as exc:
+            BYBIT_LOGGER.error("OANDA_TIMEOUT mode=%s url=%s timeout_s=%s err=%s", mode, url, timeout_s, exc)
+            raise ValueError(f"OANDA request timed out after {timeout_s:.1f}s") from exc
+        except httpx.RequestError as exc:
+            BYBIT_LOGGER.error("OANDA_REQUEST_ERR mode=%s url=%s err=%s", mode, url, exc)
+            raise ValueError(f"OANDA transport error: {exc}") from exc
         except httpx.HTTPStatusError as exc:
             BYBIT_LOGGER.error(
                 "OANDA_HTTP_ERR mode=%s status=%s url=%s body=%s",
@@ -4500,38 +4532,42 @@ async def _oanda_preflight(
 async def _collect_oanda_open_items(
     *, base_url: str, account_id: str, api_key: str, account_context: str
 ) -> List[Dict[str, object]]:
-    await _oanda_preflight(
+    trades_task = _fetch_oanda_json(
         base_url=base_url,
         account_id=account_id,
         api_key=api_key,
+        endpoint="/accounts/{account_id}/openTrades",
         mode=account_context,
+        timeout_s=5.0,
+    )
+    orders_task = _fetch_oanda_json(
+        base_url=base_url,
+        account_id=account_id,
+        api_key=api_key,
+        endpoint="/accounts/{account_id}/pendingOrders",
+        mode=account_context,
+        timeout_s=5.0,
+    )
+
+    trades_result, orders_result = await asyncio.gather(
+        trades_task,
+        orders_task,
+        return_exceptions=True,
     )
 
     trades_payload: Dict[str, object] = {}
     orders_payload: Dict[str, object] = {}
     fetch_errors: List[str] = []
 
-    try:
-        trades_payload = await _fetch_oanda_json(
-            base_url=base_url,
-            account_id=account_id,
-            api_key=api_key,
-            endpoint="/accounts/{account_id}/openTrades",
-            mode=account_context,
-        )
-    except Exception as exc:
-        fetch_errors.append(f"openTrades: {exc}")
+    if isinstance(trades_result, Exception):
+        fetch_errors.append(f"openTrades: {trades_result}")
+    else:
+        trades_payload = trades_result
 
-    try:
-        orders_payload = await _fetch_oanda_json(
-            base_url=base_url,
-            account_id=account_id,
-            api_key=api_key,
-            endpoint="/accounts/{account_id}/pendingOrders",
-            mode=account_context,
-        )
-    except Exception as exc:
-        fetch_errors.append(f"pendingOrders: {exc}")
+    if isinstance(orders_result, Exception):
+        fetch_errors.append(f"pendingOrders: {orders_result}")
+    else:
+        orders_payload = orders_result
 
     if not trades_payload and not orders_payload and fetch_errors:
         raise ValueError("; ".join(fetch_errors))
@@ -4617,6 +4653,19 @@ async def _list_oanda_accounts(*, base_url: str, api_key: str) -> List[Dict[str,
     return payload.get("accounts", []) or []
 
 
+async def _get_cached_oanda_accounts(*, base_url: str, api_key: str) -> List[Dict[str, object]]:
+    token = (api_key or "").strip().strip('"').strip("'")
+    cache_key = f"{base_url.rstrip('/')}:...{token[-6:]}"
+    now = time.time()
+    cached = _OANDA_ACCOUNTS_CACHE.get(cache_key)
+    if cached and cached[0] > now:
+        return list(cached[1])
+
+    accounts = await _list_oanda_accounts(base_url=base_url, api_key=api_key)
+    _OANDA_ACCOUNTS_CACHE[cache_key] = (now + _OANDA_ACCOUNTS_CACHE_TTL_SECONDS, accounts)
+    return list(accounts)
+
+
 async def _place_oanda_order(
     payload: Dict[str, object], *, request_id: str
 ) -> Dict[str, object]:
@@ -4693,6 +4742,7 @@ async def _place_oanda_order(
         account_id=cfg["account_id"],
         api_key=cfg["token"],
         mode=cfg["mode"],
+        timeout_s=4.0,
     )
     meta = await _fetch_oanda_instrument_meta(
         base_url=cfg["base_url"],
@@ -6694,6 +6744,7 @@ async def _fetch_oanda_last_transaction_id(cfg: Dict[str, str]) -> str:
         api_key=cfg["token"],
         endpoint="/accounts/{account_id}/summary",
         mode=cfg["mode"],
+        timeout_s=4.0,
     )
     last_id = str(payload.get("lastTransactionID") or "").strip()
     if not last_id:
@@ -6731,8 +6782,14 @@ async def _poll_oanda_fills() -> None:
                 continue
             try:
                 last_seen = _OANDA_TX_LAST_SEEN.get(account)
+                backoff_until = _OANDA_FILL_BACKOFF_UNTIL.get(account, 0.0)
+                if backoff_until > time.time():
+                    continue
+
                 if last_seen is None:
                     _OANDA_TX_LAST_SEEN[account] = await _fetch_oanda_last_transaction_id(cfg)
+                    _OANDA_FILL_FAILURES.pop(account, None)
+                    _OANDA_FILL_BACKOFF_UNTIL.pop(account, None)
                     continue
 
                 transactions, last_transaction_id = await _fetch_oanda_transactions(
@@ -6760,8 +6817,20 @@ async def _poll_oanda_fills() -> None:
                     _OANDA_TX_LAST_SEEN[account] = last_transaction_id
                 else:
                     _OANDA_TX_LAST_SEEN[account] = str(max_seen)
+
+                _OANDA_FILL_FAILURES.pop(account, None)
+                _OANDA_FILL_BACKOFF_UNTIL.pop(account, None)
             except Exception:  # pragma: no cover - background task
-                BYBIT_LOGGER.exception("OANDA fill poll error account=%s", account)
+                failures = _OANDA_FILL_FAILURES.get(account, 0) + 1
+                _OANDA_FILL_FAILURES[account] = failures
+                delay_s = min(120.0, float(2 ** min(failures, 6)))
+                _OANDA_FILL_BACKOFF_UNTIL[account] = time.time() + delay_s
+                BYBIT_LOGGER.exception(
+                    "OANDA fill poll error account=%s failures=%s next_retry_in=%.1fs",
+                    account,
+                    failures,
+                    delay_s,
+                )
 
 
 @app.get("/api/bybit/balance")
@@ -8457,54 +8526,64 @@ async def list_open_orders() -> JSONResponse:
     for account in ("live", "demo"):
         try:
             cfg = _get_oanda_config(account)
-            owned_accounts = await _list_oanda_accounts(
+            owned_accounts = await _get_cached_oanda_accounts(
                 base_url=cfg["base_url"],
                 api_key=cfg["token"],
             )
 
-            oanda_items: List[Dict[str, object]] = []
-            oanda_errors: List[Dict[str, str]] = []
             if not owned_accounts:
                 owned_accounts = [{"id": cfg.get("account_id")}] if cfg.get("account_id") else []
 
+            account_ids: List[str] = []
+            account_tags: Dict[str, List[str]] = {}
             for acct in owned_accounts:
                 acct_id = str(acct.get("id") or "").strip()
                 if not acct_id:
                     continue
-                try:
-                    rows = await _collect_oanda_open_items(
-                        base_url=cfg["base_url"],
-                        account_id=acct_id,
-                        api_key=cfg["token"],
-                        account_context=account,
-                    )
-                    tags = [str(t).upper() for t in (acct.get("tags") or [])]
-                    for row in rows:
-                        row["account_id"] = acct_id
-                        if "MT4" in tags:
-                            row["account_label_suffix"] = "MT4"
-                    oanda_items.extend(rows)
-                except Exception as exc:
+                account_ids.append(acct_id)
+                account_tags[acct_id] = [str(t).upper() for t in (acct.get("tags") or [])]
+
+            tasks = [
+                _collect_oanda_open_items(
+                    base_url=cfg["base_url"],
+                    account_id=acct_id,
+                    api_key=cfg["token"],
+                    account_context=account,
+                )
+                for acct_id in account_ids
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            oanda_items: List[Dict[str, object]] = []
+            oanda_errors: List[Dict[str, str]] = []
+            for acct_id, result in zip(account_ids, results):
+                if isinstance(result, Exception):
                     oanda_errors.append(
                         {
                             "broker": "OANDA",
                             "account": account,
                             "category": "forex",
-                            "message": f"{acct_id}: {exc}",
+                            "message": f"{acct_id}: {result}",
                         }
                     )
+                    continue
+
+                tags = account_tags.get(acct_id, [])
+                for row in result:
+                    row["account_id"] = acct_id
+                    if "MT4" in tags:
+                        row["account_label_suffix"] = "MT4"
+                oanda_items.extend(result)
 
             items.extend(oanda_items)
             errors.extend(oanda_errors)
             BYBIT_LOGGER.info(
                 "OPEN_ORDERS oanda account=%s owner_accounts=%s items=%s errors=%s",
                 account,
-                len(owned_accounts),
+                len(account_ids),
                 len(oanda_items),
                 len(oanda_errors),
             )
-            items.extend(oanda_items)
-            BYBIT_LOGGER.info("OPEN_ORDERS oanda account=%s items=%s", account, len(oanda_items))
         except Exception as exc:
             errors.append(
                 {
