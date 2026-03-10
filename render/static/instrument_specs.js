@@ -105,6 +105,12 @@
     err.textContent = message || '';
   }
 
+
+  function isLikelyFxPair(q) {
+    const s = String(q || '').trim().toUpperCase();
+    return /^[A-Z]{6}$/.test(s) || /^[A-Z]{3}_[A-Z]{3}$/.test(s);
+  }
+
   function renderSpecsTable(specs) {
     if (!rows) return;
     rows.innerHTML = '';
@@ -125,7 +131,28 @@
   }
 
   async function loadSpecs(q) {
-    const res = await fetch(`/api/instrument-specs?query=${encodeURIComponent(q)}`);
+    const prefer = isLikelyFxPair(q) ? "&prefer=oanda" : "";
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 12000);
+    setErr('Loading…');
+
+    let res;
+    try {
+      res = await fetch(`/api/instrument-specs?query=${encodeURIComponent(q)}${prefer}`, {
+        signal: controller.signal,
+      });
+    } catch (e) {
+      if (e?.name === 'AbortError') {
+        setErr('Lookup timed out');
+      } else {
+        setErr(e?.message || 'Lookup failed');
+      }
+      renderSpecsTable({});
+      return;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
     let data = null;
     try {
       data = await res.json();
@@ -148,7 +175,8 @@
     if (!q) return;
     try {
       await loadSpecs(q);
-      if (dl) dl.href = `/api/instrument-specs.jpg?query=${encodeURIComponent(q)}`;
+      const prefer = isLikelyFxPair(q) ? '&prefer=oanda' : '';
+      if (dl) dl.href = `/api/instrument-specs.jpg?query=${encodeURIComponent(q)}${prefer}`;
       history.replaceState(null, '', `/instrument-specs?q=${encodeURIComponent(q)}`);
     } catch (e) {
       setErr(e?.message || String(e));
@@ -165,6 +193,7 @@
 
   const initial = (qs.get('q') || '').trim();
   if (qInput) qInput.value = initial;
-  if (dl) dl.href = `/api/instrument-specs.jpg?query=${encodeURIComponent(initial || '')}`;
+  const initialPrefer = isLikelyFxPair(initial || '') ? '&prefer=oanda' : '';
+  if (dl) dl.href = `/api/instrument-specs.jpg?query=${encodeURIComponent(initial || '')}${initialPrefer}`;
   if (initial) load();
 })();
