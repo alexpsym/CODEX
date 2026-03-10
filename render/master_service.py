@@ -385,16 +385,34 @@ def _oanda_account_id_for_specs() -> str:
 BYBIT_BASE = "https://api.bybit.com"
 
 
-def _bybit_get(path: str, params: Dict[str, object]) -> Dict[str, object]:
-    response = requests.get(f"{BYBIT_BASE}{path}", params=params, timeout=10)
-    response.raise_for_status()
-    return response.json()
+def _is_likely_bybit_symbol(value: str) -> bool:
+    s = str(value or "").strip().upper()
+    if not s:
+        return False
+    return (
+        s.endswith("USDT")
+        or s.endswith("USDC")
+        or s.endswith("USD")
+        or s.endswith("PERP")
+        or s.endswith("USDT.P")
+    )
 
 
-def _bybit_avg_7d_turnover_usd(symbol: str, category: str = "linear") -> Optional[float]:
+async def _bybit_get_async(base_url: str, path: str, params: Dict[str, object]) -> Dict[str, object]:
+    timeout = httpx.Timeout(6.0, connect=2.0, read=6.0, write=6.0, pool=2.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        res = await client.get(f"{base_url}{path}", params=params)
+    res.raise_for_status()
+    return res.json()
+
+
+async def _bybit_avg_7d_turnover_usd_async(
+    base_url: str, symbol: str, category: str = "linear"
+) -> Optional[float]:
     try:
         end_ms = int(time.time() * 1000)
-        data = _bybit_get(
+        data = await _bybit_get_async(
+            base_url,
             "/v5/market/kline",
             {
                 "category": category,
@@ -405,21 +423,39 @@ def _bybit_avg_7d_turnover_usd(symbol: str, category: str = "linear") -> Optiona
             },
         )
         rows = (data.get("result") or {}).get("list") or []
-        if not rows:
-            return None
-
         turnovers: List[float] = []
         for row in rows[:7]:
             if isinstance(row, list) and len(row) >= 7:
                 try:
                     turnovers.append(float(row[6]))
                 except Exception:
-                    continue
-        if not turnovers:
-            return None
-        return sum(turnovers) / len(turnovers)
+                    pass
+        return (sum(turnovers) / len(turnovers)) if turnovers else None
     except Exception:
         return None
+
+
+async def _bybit_lookup_symbol(base_url: str, symbol: str) -> Optional[Dict[str, object]]:
+    normalized_symbol = str(symbol or "").strip().upper()
+    if not normalized_symbol:
+        return None
+
+    for category in ("linear", "spot", "inverse"):
+        try:
+            payload = await _bybit_get_async(
+                base_url,
+                "/v5/market/instruments-info",
+                {"category": category, "symbol": normalized_symbol},
+            )
+        except Exception:
+            continue
+
+        items = (payload.get("result") or {}).get("list") or []
+        if isinstance(items, list) and items and isinstance(items[0], dict):
+            inst = dict(items[0])
+            inst["_category"] = category
+            return inst
+    return None
 
 
 def _oanda_specs_mode() -> str:
@@ -490,42 +526,7 @@ async def _bybit_resolve_and_fetch_specs(query: str) -> Optional[Dict[str, objec
     base_url = creds.get("base_url") if isinstance(creds, dict) else None
     base_url = base_url or BYBIT_BASE
 
-    async def _get(path: str, params: Dict[str, object]) -> Dict[str, object]:
-        async with httpx.AsyncClient(timeout=20) as client:
-            res = await client.get(f"{base_url}{path}", params=params)
-        res.raise_for_status()
-        return res.json()
-
-    async def _find_symbol_in_instruments(category: str) -> Optional[Dict[str, object]]:
-        cursor: Optional[str] = None
-        for _ in range(4):
-            params: Dict[str, object] = {"category": category, "limit": 1000}
-            if cursor:
-                params["cursor"] = cursor
-            payload = await _get("/v5/market/instruments-info", params)
-            result = payload.get("result") or {}
-            items = result.get("list") or []
-            if isinstance(items, list):
-                for inst in items:
-                    if not isinstance(inst, dict):
-                        continue
-                    if _normalize_instrument_key(inst.get("symbol")) == want_key:
-                        inst = dict(inst)
-                        inst["_category"] = category
-                        return inst
-            cursor = result.get("nextPageCursor")
-            if not cursor:
-                break
-        return None
-
-    resolved_inst = None
-    for cat in ("linear", "inverse", "spot"):
-        try:
-            resolved_inst = await _find_symbol_in_instruments(cat)
-        except Exception:
-            continue
-        if resolved_inst:
-            break
+    resolved_inst = await _bybit_lookup_symbol(base_url, want_key)
     if not resolved_inst:
         return None
 
@@ -534,7 +535,11 @@ async def _bybit_resolve_and_fetch_specs(query: str) -> Optional[Dict[str, objec
 
     ticker = None
     try:
-        payload = await _get("/v5/market/tickers", {"category": category, "symbol": symbol})
+        payload = await _bybit_get_async(
+            base_url,
+            "/v5/market/tickers",
+            {"category": category, "symbol": symbol},
+        )
         items = (payload.get("result") or {}).get("list") or []
         if isinstance(items, list) and items and isinstance(items[0], dict):
             ticker = items[0]
@@ -556,7 +561,11 @@ async def _bybit_resolve_and_fetch_specs(query: str) -> Optional[Dict[str, objec
         "turnover24h": (ticker or {}).get("turnover24h"),
     }
 
-    avg7d = _bybit_avg_7d_turnover_usd(str((ticker or {}).get("symbol") or symbol), category)
+    avg7d = await _bybit_avg_7d_turnover_usd_async(
+        base_url,
+        str((ticker or {}).get("symbol") or symbol),
+        category,
+    )
     if avg7d is not None:
         specs["avg7dTurnoverUsd"] = avg7d
 
@@ -591,6 +600,10 @@ async def _fetch_instrument_specs(
         specs = await _bybit_resolve_and_fetch_specs(q)
     elif pref in {"oanda", "fx", "forex"}:
         specs = await _oanda_resolve_and_fetch_specs(q)
+    elif _is_likely_fx_pair(q):
+        specs = await _oanda_resolve_and_fetch_specs(q)
+    elif _is_likely_bybit_symbol(q):
+        specs = await _bybit_resolve_and_fetch_specs(q)
     else:
         specs = await _oanda_resolve_and_fetch_specs(q)
         if not specs and not _is_likely_fx_pair(q):
