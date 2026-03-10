@@ -269,6 +269,11 @@ def _normalize_instrument_key(value: object) -> str:
     return _norm_symbol(str(value or ""))
 
 
+def _is_likely_fx_pair(value: str) -> bool:
+    raw = str(value or "").strip().upper()
+    return bool(re.fullmatch(r"[A-Z]{6}", raw) or re.fullmatch(r"[A-Z]{3}_[A-Z]{3}", raw))
+
+
 def _oanda_aliases(name: str, display_name: Optional[str] = None) -> set[str]:
     aliases = set()
     if name:
@@ -575,7 +580,7 @@ async def _fetch_instrument_specs(
         specs = await _oanda_resolve_and_fetch_specs(q)
     else:
         specs = await _oanda_resolve_and_fetch_specs(q)
-        if not specs:
+        if not specs and not _is_likely_fx_pair(q):
             specs = await _bybit_resolve_and_fetch_specs(q)
 
     if not specs:
@@ -5743,32 +5748,6 @@ async def _round_option_price_to_tick(
     return max(rounded, tick)
 
 
-def _get_oanda_config(account: Optional[str]) -> Dict[str, str]:
-    acct = (account or "").strip().lower()
-    if acct in ("demo", "practice"):
-        token = os.getenv("OANDA_API_KEY_DEMO") or os.getenv("OANDA_API_KEY")
-        account_id = os.getenv("OANDA_ACCOUNT_ID_DEMO")
-        base_url = os.getenv("OANDA_API_URL_DEMO") or "https://api-fxpractice.oanda.com"
-        missing = []
-        if not token:
-            missing.append("OANDA_API_KEY_DEMO (or OANDA_API_KEY fallback)")
-        if not account_id:
-            missing.append("OANDA_ACCOUNT_ID_DEMO")
-        if missing:
-            raise ValueError(f"OANDA demo credentials missing: {', '.join(missing)}")
-        return {"token": token, "account_id": account_id, "base_url": base_url}
-
-    token = os.getenv("OANDA_API_KEY")
-    account_id = os.getenv("OANDA_ACCOUNT_ID")
-    base_url = os.getenv("OANDA_API_URL_LIVE") or "https://api-fxtrade.oanda.com"
-    missing = []
-    if not token:
-        missing.append("OANDA_API_KEY")
-    if not account_id:
-        missing.append("OANDA_ACCOUNT_ID")
-    if missing:
-        raise ValueError(f"OANDA live credentials missing: {', '.join(missing)}")
-    return {"token": token, "account_id": account_id, "base_url": base_url}
 
 
 async def _place_bybit_order(
@@ -6713,24 +6692,30 @@ async def _fetch_oanda_transactions(
     *,
     cfg: Dict[str, str],
     since_id: Optional[str],
-) -> List[Dict[str, object]]:
-    token = cfg["token"]
+) -> tuple[List[Dict[str, object]], Optional[str]]:
+    token = cfg["token"].strip().strip('"').strip("'")
+    base_url = cfg["base_url"].strip().rstrip("/")
+    if base_url.endswith("/v3"):
+        base_url = base_url[:-3].rstrip("/")
+
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
     if since_id:
-        url = (
-            f"{cfg['base_url'].rstrip('/')}"
-            f"/v3/accounts/{cfg['account_id']}/transactions/sinceid"
-        )
+        url = f"{base_url}/v3/accounts/{cfg['account_id']}/transactions/sinceid"
         params: Dict[str, str] = {"id": since_id}
     else:
-        url = f"{cfg['base_url'].rstrip('/')}/v3/accounts/{cfg['account_id']}/transactions"
+        url = f"{base_url}/v3/accounts/{cfg['account_id']}/transactions"
         params = {"pageSize": "1"}
+
     async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
         resp = await client.get(url, headers=headers, params=params)
-    if resp.status_code >= 400:
-        raise ValueError(f"OANDA transactions failed ({resp.status_code}): {resp.text}")
-    payload = resp.json()
-    return payload.get("transactions", []) or []
+    resp.raise_for_status()
+
+    payload = resp.json() or {}
+    return (
+        payload.get("transactions") or [],
+        str(payload.get("lastTransactionID") or "").strip() or None,
+    )
 
 
 async def _poll_oanda_fills() -> None:
@@ -6743,11 +6728,12 @@ async def _poll_oanda_fills() -> None:
                 continue
             try:
                 last_seen = _OANDA_TX_LAST_SEEN.get(account)
-                transactions = await _fetch_oanda_transactions(cfg=cfg, since_id=last_seen)
-                if not transactions:
-                    continue
+                transactions, last_transaction_id = await _fetch_oanda_transactions(cfg=cfg, since_id=last_seen)
                 if last_seen is None:
-                    _OANDA_TX_LAST_SEEN[account] = str(transactions[-1].get("id", ""))
+                    if last_transaction_id:
+                        _OANDA_TX_LAST_SEEN[account] = last_transaction_id
+                    continue
+                if not transactions:
                     continue
                 max_seen = int(last_seen or 0)
                 for entry in transactions:
@@ -6771,8 +6757,8 @@ async def _poll_oanda_fills() -> None:
                         _upsert_trading_journal_rows(journal_rows)
                     await _send_telegram_alert(_format_oanda_fill_alert(entry_payload))
                 _OANDA_TX_LAST_SEEN[account] = str(max_seen)
-            except Exception as exc:  # pragma: no cover - background task
-                BYBIT_LOGGER.error("OANDA fill poll error: %s", exc)
+            except Exception:  # pragma: no cover - background task
+                BYBIT_LOGGER.exception("OANDA fill poll error")
 
 
 @app.get("/api/bybit/balance")
