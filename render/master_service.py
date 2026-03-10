@@ -606,7 +606,7 @@ async def _fetch_instrument_specs(
         specs = await _bybit_resolve_and_fetch_specs(q)
     else:
         specs = await _oanda_resolve_and_fetch_specs(q)
-        if not specs:
+        if not specs and not _is_likely_fx_pair(q):
             specs = await _bybit_resolve_and_fetch_specs(q)
 
     if not specs:
