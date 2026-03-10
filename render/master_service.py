@@ -2836,8 +2836,7 @@ COINSPOT_HISTORY_JOBS: Dict[str, CoinspotHistoryJob] = {}
 
 _AUTOSTART_ENV = os.getenv("AUTOSTART_SCRIPTS")
 if _AUTOSTART_ENV is None:
-    # Default autostart set for Render deploys (override by setting AUTOSTART_SCRIPTS).
-    _AUTOSTART_ENV = "bybit_monitor,oanda_monitor,fxweekend-clone"
+    _AUTOSTART_ENV = ""
 
 # AUTOSTART_SCRIPTS supports:
 #   - comma-separated script names
@@ -2878,8 +2877,10 @@ def _compute_autostart_scripts() -> List[str]:
 async def _autostart_scripts() -> None:
     asyncio.create_task(_dropbox_restore_state_backup_on_startup())
     _purge_bybit_demo_journal_state()
-    asyncio.create_task(_poll_bybit_fills())
-    asyncio.create_task(_start_oanda_fill_poll_after_delay())
+    if os.getenv("ENABLE_BYBIT_FILL_POLL", "0") == "1":
+        asyncio.create_task(_poll_bybit_fills())
+    if os.getenv("ENABLE_OANDA_FILL_POLL", "0") == "1":
+        asyncio.create_task(_start_oanda_fill_poll_after_delay())
     for name in _compute_autostart_scripts():
         try:
             script = script_manager.get(name)
@@ -4393,41 +4394,10 @@ async def _fetch_oanda_json(
         "Content-Type": "application/json",
     }
     url = f"{base_url.rstrip('/')}/v3{endpoint.format(account_id=account_id)}"
-    token_last4 = token[-4:] if token else None
-    BYBIT_LOGGER.info(
-        "OANDA_CFG mode=%s base=%s account_id=%s token_last4=%s",
-        mode,
-        base_url,
-        account_id,
-        token_last4,
-    )
-    BYBIT_LOGGER.info(
-        "OANDA_CALL mode=%s base=%s account_id=%s token_last4=%s url=%s",
-        mode,
-        base_url,
-        account_id,
-        token_last4,
-        url,
-    )
     timeout = httpx.Timeout(timeout_s, connect=min(3.0, timeout_s), read=timeout_s, write=timeout_s, pool=2.0)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         try:
             resp = await client.get(url, headers=headers)
-            BYBIT_LOGGER.info(
-                "OANDA_RESP mode=%s status=%s url=%s body=%s",
-                mode,
-                resp.status_code,
-                url,
-                resp.text[:200],
-            )
-            if 300 <= resp.status_code < 400:
-                BYBIT_LOGGER.info(
-                    "OANDA_REDIRECT mode=%s status=%s url=%s location=%s",
-                    mode,
-                    resp.status_code,
-                    url,
-                    resp.headers.get("location"),
-                )
             resp.raise_for_status()
         except httpx.TimeoutException as exc:
             BYBIT_LOGGER.error("OANDA_TIMEOUT mode=%s url=%s timeout_s=%s err=%s", mode, url, timeout_s, exc)
