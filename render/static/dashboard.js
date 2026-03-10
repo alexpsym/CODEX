@@ -284,9 +284,7 @@
   refreshBtn?.addEventListener('click', () => { refreshScripts(); refreshOpenOrders(); refreshRecentTrades(); });
   ooRefreshBtn?.addEventListener('click', () => refreshOpenOrders());
 
-  setInterval(() => { refreshScripts(); refreshOpenOrders(); refreshRecentTrades(); }, 5000);
-
   refreshScripts();
-  refreshOpenOrders();
-  refreshRecentTrades();
+  // Do not auto-load open orders / recent trades during stabilization.
+  // Use the refresh buttons to load these views manually.
 })();

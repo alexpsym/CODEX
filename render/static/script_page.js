@@ -846,10 +846,7 @@
     });
 
     const init = async () => {
-        const running = await refreshStatus();
-        if (!running && hasUi) {
-            await startScript(true);
-        }
+        await refreshStatus();
         pollLogs();
         pollTimer = setInterval(pollLogs, 2000);
         loadBybitSettings();
