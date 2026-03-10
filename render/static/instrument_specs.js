@@ -105,6 +105,12 @@
     err.textContent = message || '';
   }
 
+
+  function isLikelyFxPair(q) {
+    const s = String(q || '').trim().toUpperCase();
+    return /^[A-Z]{6}$/.test(s) || /^[A-Z]{3}_[A-Z]{3}$/.test(s);
+  }
+
   function renderSpecsTable(specs) {
     if (!rows) return;
     rows.innerHTML = '';
@@ -125,7 +131,8 @@
   }
 
   async function loadSpecs(q) {
-    const res = await fetch(`/api/instrument-specs?query=${encodeURIComponent(q)}`);
+    const prefer = isLikelyFxPair(q) ? "&prefer=oanda" : "";
+    const res = await fetch(`/api/instrument-specs?query=${encodeURIComponent(q)}${prefer}`);
     let data = null;
     try {
       data = await res.json();
