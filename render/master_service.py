@@ -247,6 +247,13 @@ _OANDA_ACCOUNTS_CACHE: Dict[str, Tuple[float, List[Dict[str, object]]]] = {}
 _OANDA_ACCOUNTS_CACHE_TTL_SECONDS = 20.0
 _OANDA_SPECS_CACHE: Dict[str, Tuple[float, Dict[str, object]]] = {}
 _OANDA_SPECS_CACHE_TTL_SECONDS = 30.0
+_OPEN_ORDERS_CACHE_LOCK = asyncio.Lock()
+_OPEN_ORDERS_CACHE_TTL_SECONDS = 6.0
+_OPEN_ORDERS_CACHE: Dict[str, object] = {
+    "expires_at": 0.0,
+    "last_success_at": None,
+    "payload": None,
+}
 
 
 def _normalize_watchlist(items: Iterable[object]) -> List[str]:
@@ -4395,27 +4402,69 @@ async def _fetch_oanda_json(
     }
     url = f"{base_url.rstrip('/')}/v3{endpoint.format(account_id=account_id)}"
     timeout = httpx.Timeout(timeout_s, connect=min(3.0, timeout_s), read=timeout_s, write=timeout_s, pool=2.0)
+    max_attempts = 3
+    transient_statuses = {429, 502, 503, 504}
+    resp: Optional[httpx.Response] = None
+
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        try:
-            resp = await client.get(url, headers=headers)
-            resp.raise_for_status()
-        except httpx.TimeoutException as exc:
-            BYBIT_LOGGER.error("OANDA_TIMEOUT mode=%s url=%s timeout_s=%s err=%s", mode, url, timeout_s, exc)
-            raise ValueError(f"OANDA request timed out after {timeout_s:.1f}s") from exc
-        except httpx.RequestError as exc:
-            BYBIT_LOGGER.error("OANDA_REQUEST_ERR mode=%s url=%s err=%s", mode, url, exc)
-            raise ValueError(f"OANDA transport error: {exc}") from exc
-        except httpx.HTTPStatusError as exc:
-            BYBIT_LOGGER.error(
-                "OANDA_HTTP_ERR mode=%s status=%s url=%s body=%s",
-                mode,
-                exc.response.status_code,
-                str(exc.request.url),
-                exc.response.text[:500],
-            )
-            raise ValueError(
-                f"OANDA request failed ({exc.response.status_code}): {exc.response.text}"
-            ) from exc
+        for attempt in range(1, max_attempts + 1):
+            try:
+                resp = await client.get(url, headers=headers)
+                resp.raise_for_status()
+                break
+            except httpx.TimeoutException as exc:
+                should_retry = attempt < max_attempts
+                BYBIT_LOGGER.warning(
+                    "OANDA_TIMEOUT mode=%s account=%s endpoint=%s attempt=%s/%s retry=%s err=%s",
+                    mode,
+                    account_id,
+                    endpoint,
+                    attempt,
+                    max_attempts,
+                    should_retry,
+                    exc,
+                )
+                if not should_retry:
+                    raise ValueError(f"OANDA request timed out after {timeout_s:.1f}s") from exc
+            except httpx.RequestError as exc:
+                should_retry = attempt < max_attempts
+                BYBIT_LOGGER.warning(
+                    "OANDA_REQUEST_ERR mode=%s account=%s endpoint=%s attempt=%s/%s retry=%s err=%s",
+                    mode,
+                    account_id,
+                    endpoint,
+                    attempt,
+                    max_attempts,
+                    should_retry,
+                    exc,
+                )
+                if not should_retry:
+                    raise ValueError(f"OANDA transport error: {exc}") from exc
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                body = exc.response.text[:500]
+                should_retry = status in transient_statuses and attempt < max_attempts
+                BYBIT_LOGGER.error(
+                    "OANDA_HTTP_ERR mode=%s account=%s endpoint=%s status=%s attempt=%s/%s retry=%s body=%s",
+                    mode,
+                    account_id,
+                    endpoint,
+                    status,
+                    attempt,
+                    max_attempts,
+                    should_retry,
+                    body,
+                )
+                if not should_retry:
+                    raise ValueError(f"OANDA request failed ({status}): {exc.response.text}") from exc
+
+            backoff = min(0.2 * (2 ** (attempt - 1)), 0.8) + (0.05 * attempt)
+            await asyncio.sleep(backoff)
+        else:
+            raise ValueError("OANDA request failed after retries")
+
+    if resp is None:
+        raise ValueError("OANDA request failed with no response")
     return resp.json()
 
 
@@ -4514,7 +4563,7 @@ async def _oanda_preflight(
 
 async def _collect_oanda_open_items(
     *, base_url: str, account_id: str, api_key: str, account_context: str
-) -> List[Dict[str, object]]:
+) -> Dict[str, object]:
     trades_task = _fetch_oanda_json(
         base_url=base_url,
         account_id=account_id,
@@ -4552,7 +4601,7 @@ async def _collect_oanda_open_items(
     else:
         orders_payload = orders_result
 
-    if not trades_payload and not orders_payload and fetch_errors:
+    if fetch_errors and not trades_payload and not orders_payload:
         raise ValueError("; ".join(fetch_errors))
 
     items: List[Dict[str, object]] = []
@@ -4619,7 +4668,7 @@ async def _collect_oanda_open_items(
                 "status": order.get("state") or "PENDING",
             }
         )
-    return items
+    return {"items": items, "errors": fetch_errors}
 
 
 async def _list_oanda_accounts(*, base_url: str, api_key: str) -> List[Dict[str, object]]:
@@ -8503,323 +8552,376 @@ def _filter_pending_webhooks(
 
 @app.get("/api/open-orders")
 async def list_open_orders() -> JSONResponse:
-    items: List[Dict[str, object]] = []
-    errors: List[Dict[str, str]] = []
+    now = time.time()
+    cached_payload = _OPEN_ORDERS_CACHE.get("payload")
+    expires_at = float(_OPEN_ORDERS_CACHE.get("expires_at") or 0.0)
+    if isinstance(cached_payload, dict) and now < expires_at:
+        fresh = dict(cached_payload)
+        fresh["stale"] = False
+        fresh.setdefault("updated_at", _utc_now_iso())
+        fresh.setdefault("last_success_at", _OPEN_ORDERS_CACHE.get("last_success_at"))
+        return JSONResponse(fresh)
 
-    for account in ("live", "demo"):
-        try:
-            cfg = _get_oanda_config(account)
-            owned_accounts = await _get_cached_oanda_accounts(
-                base_url=cfg["base_url"],
-                api_key=cfg["token"],
-            )
+    async with _OPEN_ORDERS_CACHE_LOCK:
+        now = time.time()
+        cached_payload = _OPEN_ORDERS_CACHE.get("payload")
+        expires_at = float(_OPEN_ORDERS_CACHE.get("expires_at") or 0.0)
+        if isinstance(cached_payload, dict) and now < expires_at:
+            fresh = dict(cached_payload)
+            fresh["stale"] = False
+            fresh.setdefault("updated_at", _utc_now_iso())
+            fresh.setdefault("last_success_at", _OPEN_ORDERS_CACHE.get("last_success_at"))
+            return JSONResponse(fresh)
 
-            if not owned_accounts:
-                owned_accounts = [{"id": cfg.get("account_id")}] if cfg.get("account_id") else []
+        items: List[Dict[str, object]] = []
+        errors: List[Dict[str, str]] = []
 
-            account_ids: List[str] = []
-            account_tags: Dict[str, List[str]] = {}
-            for acct in owned_accounts:
-                acct_id = str(acct.get("id") or "").strip()
-                if not acct_id:
-                    continue
-                account_ids.append(acct_id)
-                account_tags[acct_id] = [str(t).upper() for t in (acct.get("tags") or [])]
-
-            tasks = [
-                _collect_oanda_open_items(
+        for account in ("live", "demo"):
+            try:
+                cfg = _get_oanda_config(account)
+                owned_accounts = await _get_cached_oanda_accounts(
                     base_url=cfg["base_url"],
-                    account_id=acct_id,
                     api_key=cfg["token"],
+                )
+
+                if not owned_accounts:
+                    owned_accounts = [{"id": cfg.get("account_id")}] if cfg.get("account_id") else []
+
+                account_ids: List[str] = []
+                account_tags: Dict[str, List[str]] = {}
+                for acct in owned_accounts:
+                    acct_id = str(acct.get("id") or "").strip()
+                    if not acct_id:
+                        continue
+                    account_ids.append(acct_id)
+                    account_tags[acct_id] = [str(t).upper() for t in (acct.get("tags") or [])]
+
+                tasks = [
+                    _collect_oanda_open_items(
+                        base_url=cfg["base_url"],
+                        account_id=acct_id,
+                        api_key=cfg["token"],
+                        account_context=account,
+                    )
+                    for acct_id in account_ids
+                ]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                oanda_items: List[Dict[str, object]] = []
+                oanda_errors: List[Dict[str, str]] = []
+                for acct_id, result in zip(account_ids, results):
+                    if isinstance(result, Exception):
+                        oanda_errors.append(
+                            {
+                                "broker": "OANDA",
+                                "account": account,
+                                "category": "forex",
+                                "message": f"{acct_id}: {result}",
+                            }
+                        )
+                        continue
+
+                    result_items = result.get("items", []) if isinstance(result, dict) else []
+                    result_errors = result.get("errors", []) if isinstance(result, dict) else []
+
+                    for endpoint_error in result_errors:
+                        oanda_errors.append(
+                            {
+                                "broker": "OANDA",
+                                "account": account,
+                                "category": "forex",
+                                "message": f"{acct_id}: {endpoint_error}",
+                            }
+                        )
+
+                    tags = account_tags.get(acct_id, [])
+                    for row in result_items:
+                        row["account_id"] = acct_id
+                        if "MT4" in tags:
+                            row["account_label_suffix"] = "MT4"
+                    oanda_items.extend(result_items)
+
+                items.extend(oanda_items)
+                errors.extend(oanda_errors)
+                BYBIT_LOGGER.info(
+                    "OPEN_ORDERS oanda account=%s owner_accounts=%s items=%s errors=%s",
+                    account,
+                    len(account_ids),
+                    len(oanda_items),
+                    len(oanda_errors),
+                )
+            except Exception as exc:
+                errors.append(
+                    {
+                        "broker": "OANDA",
+                        "account": account,
+                        "category": "forex",
+                        "message": str(exc),
+                    }
+                )
+
+        for account in ("live", "demo"):
+            try:
+                _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for(
+                    account
+                )
+                if not api_key or not api_secret:
+                    raise ValueError("Bybit API credentials are not configured.")
+                result = await _collect_bybit_open_items(
+                    base_url=base_url,
+                    api_key=api_key,
+                    api_secret=api_secret,
                     account_context=account,
                 )
-                for acct_id in account_ids
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+                items.extend(result.get("items", []))
+                errors.extend(result.get("errors", []))
+                BYBIT_LOGGER.info(
+                    "OPEN_ORDERS bybit account=%s items=%s errors=%s",
+                    account,
+                    len(result.get("items", [])),
+                    len(result.get("errors", [])),
+                )
+            except Exception as exc:
+                errors.append(
+                    {
+                        "broker": "Bybit",
+                        "account": account,
+                        "category": "unknown",
+                        "message": str(exc),
+                    }
+                )
 
-            oanda_items: List[Dict[str, object]] = []
-            oanda_errors: List[Dict[str, str]] = []
-            for acct_id, result in zip(account_ids, results):
-                if isinstance(result, Exception):
-                    oanda_errors.append(
-                        {
-                            "broker": "OANDA",
-                            "account": account,
-                            "category": "forex",
-                            "message": f"{acct_id}: {result}",
-                        }
-                    )
+        pending = _load_pending_webhooks()
+        if pending:
+            terminal = [p for p in pending if _pending_webhook_is_terminal(p.get("status"))]
+            if terminal:
+                pending = [
+                    p for p in pending if not _pending_webhook_is_terminal(p.get("status"))
+                ]
+                _save_pending_webhooks(pending)
+                _schedule_dropbox_upload_state_backup()
+
+            pending = _filter_pending_webhooks(pending, items)
+            items.extend(pending)
+
+        try:
+            bounce_script_running = script_manager.get("bybit_trigger_bounce_trader").is_running
+        except Exception:
+            bounce_script_running = False
+
+        if bounce_script_running:
+            sessions = _load_bounce_traders()
+            changed = False
+            now_dt = datetime.now(timezone.utc)
+
+            bybit_orders = [
+                row
+                for row in items
+                if str(row.get("broker", "")).strip().lower() == "bybit"
+                and str(row.get("type", "")).strip().lower() == "order"
+            ]
+            bybit_positions = [
+                row
+                for row in items
+                if str(row.get("broker", "")).strip().lower() == "bybit"
+                and str(row.get("type", "")).strip().lower() == "position"
+            ]
+            oanda_orders = [
+                row
+                for row in items
+                if str(row.get("broker", "")).strip().lower() == "oanda"
+                and str(row.get("type", "")).strip().lower() == "order"
+            ]
+            oanda_positions = [
+                row
+                for row in items
+                if str(row.get("broker", "")).strip().lower() == "oanda"
+                and str(row.get("type", "")).strip().lower() in {"position", "trade"}
+            ]
+
+            for session in sessions:
+                if not bool(session.get("running")):
                     continue
 
-                tags = account_tags.get(acct_id, [])
-                for row in result:
-                    row["account_id"] = acct_id
-                    if "MT4" in tags:
-                        row["account_label_suffix"] = "MT4"
-                oanda_items.extend(result)
+                broker = str(session.get("broker") or "").strip().lower()
+                market = str(session.get("market") or "").strip().lower()
+                if broker not in {"bybit", "oanda"}:
+                    broker = "oanda" if market == "fx" else "bybit"
 
-            items.extend(oanda_items)
-            errors.extend(oanda_errors)
-            BYBIT_LOGGER.info(
-                "OPEN_ORDERS oanda account=%s owner_accounts=%s items=%s errors=%s",
-                account,
-                len(account_ids),
-                len(oanda_items),
-                len(oanda_errors),
-            )
-        except Exception as exc:
-            errors.append(
-                {
-                    "broker": "OANDA",
-                    "account": account,
-                    "category": "forex",
-                    "message": str(exc),
-                }
-            )
+                instrument = str(session.get("instrument") or "").strip().upper()
+                side = str(session.get("side") or "").strip().title()
+                account = str(session.get("account") or "").strip().lower() or "demo"
+                category = str(session.get("category") or "").strip().lower() or ("forex" if broker == "oanda" else "linear")
+                order_link_id = str(session.get("order_link_id") or "").strip()
 
-    for account in ("live", "demo"):
-        try:
-            _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for(
-                account
-            )
-            if not api_key or not api_secret:
-                raise ValueError("Bybit API credentials are not configured.")
-            result = await _collect_bybit_open_items(
-                base_url=base_url,
-                api_key=api_key,
-                api_secret=api_secret,
-                account_context=account,
-            )
-            items.extend(result.get("items", []))
-            errors.extend(result.get("errors", []))
-            BYBIT_LOGGER.info(
-                "OPEN_ORDERS bybit account=%s items=%s errors=%s",
-                account,
-                len(result.get("items", [])),
-                len(result.get("errors", [])),
-            )
-        except Exception as exc:
-            errors.append(
-                {
-                    "broker": "Bybit",
-                    "account": account,
-                    "category": "unknown",
-                    "message": str(exc),
-                }
-            )
+                seen_order = bool(session.get("seen_order"))
+                if broker == "bybit":
+                    if order_link_id:
+                        if any(
+                            str(row.get("order_link_id") or "").strip() == order_link_id
+                            and str(row.get("account") or "").strip().lower() == account
+                            and str(row.get("category") or "").strip().lower() == category
+                            for row in bybit_orders
+                        ) and not seen_order:
+                            session["seen_order"] = True
+                            changed = True
+                            seen_order = True
 
-    pending = _load_pending_webhooks()
-    if pending:
-        # Once a pending-webhook has fired (or otherwise reached a terminal state),
-        # it must disappear from the Open Orders / Positions table immediately.
-        terminal = [p for p in pending if _pending_webhook_is_terminal(p.get("status"))]
-        if terminal:
-            pending = [
-                p for p in pending if not _pending_webhook_is_terminal(p.get("status"))
-            ]
-            _save_pending_webhooks(pending)
-            _schedule_dropbox_upload_state_backup()
-
-        pending = _filter_pending_webhooks(pending, items)
-        items.extend(pending)
-
-    # Surface active bounce-trader sessions as pending rows and retire those rows
-    # immediately after entry fills (mirrors webhook pending row behavior).
-    try:
-        bounce_script_running = script_manager.get("bybit_trigger_bounce_trader").is_running
-    except Exception:
-        bounce_script_running = False
-
-    if bounce_script_running:
-        sessions = _load_bounce_traders()
-        changed = False
-        now = datetime.now(timezone.utc)
-
-        bybit_orders = [
-            row
-            for row in items
-            if str(row.get("broker", "")).strip().lower() == "bybit"
-            and str(row.get("type", "")).strip().lower() == "order"
-        ]
-        bybit_positions = [
-            row
-            for row in items
-            if str(row.get("broker", "")).strip().lower() == "bybit"
-            and str(row.get("type", "")).strip().lower() == "position"
-        ]
-        oanda_orders = [
-            row
-            for row in items
-            if str(row.get("broker", "")).strip().lower() == "oanda"
-            and str(row.get("type", "")).strip().lower() == "order"
-        ]
-        oanda_positions = [
-            row
-            for row in items
-            if str(row.get("broker", "")).strip().lower() == "oanda"
-            and str(row.get("type", "")).strip().lower() in {"position", "trade"}
-        ]
-
-        for session in sessions:
-            if not bool(session.get("running")):
-                continue
-
-            broker = str(session.get("broker") or "").strip().lower()
-            market = str(session.get("market") or "").strip().lower()
-            if broker not in {"bybit", "oanda"}:
-                broker = "oanda" if market == "fx" else "bybit"
-
-            instrument = str(session.get("instrument") or "").strip().upper()
-            side = str(session.get("side") or "").strip().title()
-            account = str(session.get("account") or "").strip().lower() or "demo"
-            category = str(session.get("category") or "").strip().lower() or ("forex" if broker == "oanda" else "linear")
-            order_link_id = str(session.get("order_link_id") or "").strip()
-
-            seen_order = bool(session.get("seen_order"))
-            if broker == "bybit":
-                if order_link_id:
-                    if any(
-                        str(row.get("order_link_id") or "").strip() == order_link_id
+                    has_position = any(
+                        str(row.get("instrument") or "").strip().upper() == instrument
+                        and str(row.get("side") or "").strip().title() == side
                         and str(row.get("account") or "").strip().lower() == account
                         and str(row.get("category") or "").strip().lower() == category
-                        for row in bybit_orders
+                        for row in bybit_positions
+                    )
+                else:
+                    if any(
+                        str(row.get("instrument") or "").strip().upper() == instrument
+                        and str(row.get("account") or "").strip().lower() == account
+                        for row in oanda_orders
                     ) and not seen_order:
                         session["seen_order"] = True
                         changed = True
                         seen_order = True
 
-                has_position = any(
-                    str(row.get("instrument") or "").strip().upper() == instrument
-                    and str(row.get("side") or "").strip().title() == side
-                    and str(row.get("account") or "").strip().lower() == account
-                    and str(row.get("category") or "").strip().lower() == category
-                    for row in bybit_positions
+                    target_side = "Long" if side == "Buy" else "Short"
+                    has_position = any(
+                        str(row.get("instrument") or "").strip().upper() == instrument
+                        and str(row.get("account") or "").strip().lower() == account
+                        and str(row.get("side") or "").strip().title() == target_side
+                        for row in oanda_positions
+                    )
+
+                started_at = _to_dt_utc(session.get("started_at"))
+                age_seconds = (now_dt - started_at).total_seconds() if started_at else 0.0
+
+                if has_position and (seen_order or age_seconds >= 30):
+                    if bool(session.get("show_in_open_orders", True)):
+                        session["show_in_open_orders"] = False
+                        session["status"] = "filled"
+                        session["updated_at"] = now_dt.isoformat()
+                        changed = True
+                    continue
+
+                if not bool(session.get("show_in_open_orders", True)):
+                    continue
+
+                items.append(
+                    {
+                        "broker": "BOUNCE",
+                        "account": account,
+                        "category": category,
+                        "instrument": instrument,
+                        "type": "Bounce",
+                        "side": side,
+                        "size": "—",
+                        "entry_price": None,
+                        "order_price": None,
+                        "current_price": None,
+                        "stop_loss": None,
+                        "take_profit": None,
+                        "leverage": None,
+                        "opened_at": session.get("started_at"),
+                        "id": session.get("id"),
+                        "order_link_id": order_link_id,
+                        "status": "WAITING",
+                    }
                 )
-            else:
-                if any(
-                    str(row.get("instrument") or "").strip().upper() == instrument
-                    and str(row.get("account") or "").strip().lower() == account
-                    for row in oanda_orders
-                ) and not seen_order:
-                    session["seen_order"] = True
-                    changed = True
-                    seen_order = True
 
-                target_side = "Long" if side == "Buy" else "Short"
-                has_position = any(
-                    str(row.get("instrument") or "").strip().upper() == instrument
-                    and str(row.get("account") or "").strip().lower() == account
-                    and str(row.get("side") or "").strip().title() == target_side
-                    for row in oanda_positions
-                )
+            if changed:
+                _save_bounce_traders(sessions)
 
-            started_at = _to_dt_utc(session.get("started_at"))
-            age_seconds = (now - started_at).total_seconds() if started_at else 0.0
+        def _same_price(a: object, b: object, tol: float = 1e-9) -> bool:
+            try:
+                return abs(float(a) - float(b)) <= tol
+            except (TypeError, ValueError):
+                return False
 
-            if has_position and (seen_order or age_seconds >= 30):
-                if bool(session.get("show_in_open_orders", True)):
-                    session["show_in_open_orders"] = False
-                    session["status"] = "filled"
-                    session["updated_at"] = now.isoformat()
-                    changed = True
-                continue
+        def _is_child_exit_order(parent: Dict[str, object], child: Dict[str, object]) -> bool:
+            if str(parent.get("broker", "")).strip().lower() != "bybit":
+                return False
+            if str(parent.get("type", "")).strip().lower() != "position":
+                return False
+            if str(child.get("type", "")).strip().lower() != "order":
+                return False
+            if str(child.get("broker", "")).strip().lower() != "bybit":
+                return False
+            if str(parent.get("account", "")).strip().lower() != str(child.get("account", "")).strip().lower():
+                return False
+            if str(parent.get("category", "")).strip().lower() != str(child.get("category", "")).strip().lower():
+                return False
+            if str(parent.get("instrument", "")).strip().upper() != str(child.get("instrument", "")).strip().upper():
+                return False
 
-            if not bool(session.get("show_in_open_orders", True)):
-                continue
+            child_status = str(child.get("status", "")).strip().upper()
+            if child_status not in {"UNTRIGGERED", "OPEN", "NEW", "CREATED"}:
+                return False
 
-            items.append(
-                {
-                    "broker": "BOUNCE",
-                    "account": account,
-                    "category": category,
-                    "instrument": instrument,
-                    "type": "Bounce",
-                    "side": side,
-                    "size": "—",
-                    "entry_price": None,
-                    "order_price": None,
-                    "current_price": None,
-                    "stop_loss": None,
-                    "take_profit": None,
-                    "leverage": None,
-                    "opened_at": session.get("started_at"),
-                    "id": session.get("id"),
-                    "order_link_id": order_link_id,
-                    "status": "WAITING",
-                }
+            parent_side = str(parent.get("side", "")).strip().lower()
+            child_side = str(child.get("side", "")).strip().lower()
+            if parent_side in {"buy", "long"} and child_side not in {"sell", "short"}:
+                return False
+            if parent_side in {"sell", "short"} and child_side not in {"buy", "long"}:
+                return False
+
+            child_price = child.get("current_price") or child.get("order_price")
+            return (
+                _same_price(child_price, parent.get("stop_loss"))
+                or _same_price(child_price, parent.get("take_profit"))
             )
 
-        if changed:
-            _save_bounce_traders(sessions)
+        grouped: List[Dict[str, object]] = []
+        used_child_indices: Set[int] = set()
 
-    def _same_price(a: object, b: object, tol: float = 1e-9) -> bool:
-        try:
-            return abs(float(a) - float(b)) <= tol
-        except (TypeError, ValueError):
-            return False
-
-    def _is_child_exit_order(parent: Dict[str, object], child: Dict[str, object]) -> bool:
-        if str(parent.get("broker", "")).strip().lower() != "bybit":
-            return False
-        if str(parent.get("type", "")).strip().lower() != "position":
-            return False
-        if str(child.get("type", "")).strip().lower() != "order":
-            return False
-        if str(child.get("broker", "")).strip().lower() != "bybit":
-            return False
-        if str(parent.get("account", "")).strip().lower() != str(child.get("account", "")).strip().lower():
-            return False
-        if str(parent.get("category", "")).strip().lower() != str(child.get("category", "")).strip().lower():
-            return False
-        if str(parent.get("instrument", "")).strip().upper() != str(child.get("instrument", "")).strip().upper():
-            return False
-
-        child_status = str(child.get("status", "")).strip().upper()
-        if child_status not in {"UNTRIGGERED", "OPEN", "NEW", "CREATED"}:
-            return False
-
-        parent_side = str(parent.get("side", "")).strip().lower()
-        child_side = str(child.get("side", "")).strip().lower()
-        if parent_side in {"buy", "long"} and child_side not in {"sell", "short"}:
-            return False
-        if parent_side in {"sell", "short"} and child_side not in {"buy", "long"}:
-            return False
-
-        child_price = child.get("current_price") or child.get("order_price")
-        return (
-            _same_price(child_price, parent.get("stop_loss"))
-            or _same_price(child_price, parent.get("take_profit"))
-        )
-
-    grouped: List[Dict[str, object]] = []
-    used_child_indices: Set[int] = set()
-
-    for parent_idx, item in enumerate(items):
-        if str(item.get("type", "")).strip().lower() != "position":
-            continue
-        parent = dict(item)
-        parent["children"] = []
-        for child_idx, child in enumerate(items):
-            if child_idx in used_child_indices:
+        for _parent_idx, item in enumerate(items):
+            if str(item.get("type", "")).strip().lower() != "position":
                 continue
-            if _is_child_exit_order(parent, child):
-                parent["children"].append(dict(child))
-                used_child_indices.add(child_idx)
-        grouped.append(parent)
+            parent = dict(item)
+            parent["children"] = []
+            for child_idx, child in enumerate(items):
+                if child_idx in used_child_indices:
+                    continue
+                if _is_child_exit_order(parent, child):
+                    parent["children"].append(dict(child))
+                    used_child_indices.add(child_idx)
+            grouped.append(parent)
 
-    for idx, item in enumerate(items):
-        if idx in used_child_indices:
-            continue
-        if str(item.get("type", "")).strip().lower() == "position":
-            continue
-        row = dict(item)
-        row["children"] = []
-        grouped.append(row)
+        for idx, item in enumerate(items):
+            if idx in used_child_indices:
+                continue
+            if str(item.get("type", "")).strip().lower() == "position":
+                continue
+            row = dict(item)
+            row["children"] = []
+            grouped.append(row)
 
-    if not grouped and errors:
-        raise HTTPException(status_code=502, detail={"errors": errors})
+        if not grouped and errors:
+            stale_cached = _OPEN_ORDERS_CACHE.get("payload")
+            if isinstance(stale_cached, dict):
+                stale_payload = dict(stale_cached)
+                stale_payload["stale"] = True
+                stale_payload["errors"] = [*stale_payload.get("errors", []), *errors]
+                stale_payload["updated_at"] = _utc_now_iso()
+                stale_payload["last_success_at"] = _OPEN_ORDERS_CACHE.get("last_success_at")
+                return JSONResponse(stale_payload)
+            raise HTTPException(status_code=502, detail={"errors": errors})
 
-    return JSONResponse({"items": grouped, "errors": errors})
+        updated_at = _utc_now_iso()
+        payload: Dict[str, object] = {
+            "items": grouped,
+            "errors": errors,
+            "stale": bool(errors),
+            "updated_at": updated_at,
+            "last_success_at": _OPEN_ORDERS_CACHE.get("last_success_at"),
+        }
+
+        if grouped:
+            _OPEN_ORDERS_CACHE["payload"] = dict(payload)
+            _OPEN_ORDERS_CACHE["expires_at"] = time.time() + _OPEN_ORDERS_CACHE_TTL_SECONDS
+            _OPEN_ORDERS_CACHE["last_success_at"] = updated_at
+            payload["last_success_at"] = updated_at
+
+        return JSONResponse(payload)
 
 
 @app.get("/api/recent-trades")

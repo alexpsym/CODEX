@@ -6,6 +6,11 @@
   const emptyState = document.getElementById('open-orders-empty');
   const errorsBox = document.getElementById('open-orders-errors');
   const errorsList = errorsBox?.querySelector('ul');
+  const POLL_MS = 10_000;
+  const HIDDEN_MULTIPLIER = 3;
+  let refreshInFlight = null;
+  let pollTimer = null;
+  let hasData = false;
 
   const fmt = (v) => (v === null || v === undefined || v === '' ? '—' : v);
   const formatTimestamp = (value) => {
@@ -31,6 +36,7 @@
   const render = (items, errors = []) => {
     if (!tbody) return;
     tbody.innerHTML = '';
+    hasData = Boolean(items.length);
     if (errorsBox) errorsBox.style.display = errors.length ? 'block' : 'none';
     if (errorsList) {
       errorsList.innerHTML = '';
@@ -112,17 +118,48 @@
   };
 
   const refresh = async () => {
-    try {
-      setBadge('Loading...');
-      const payload = await fetchJson('/api/open-orders');
-      render(payload.items || [], payload.errors || []);
-      setBadge('Updated');
-    } catch (err) {
-      render([], [{ message: err.message }]);
-      setBadge('Failed');
-    }
+    if (refreshInFlight) return refreshInFlight;
+    refreshInFlight = (async () => {
+      try {
+        setBadge('Loading...');
+        const payload = await fetchJson('/api/open-orders');
+        render(payload.items || [], payload.errors || []);
+        const stale = Boolean(payload.stale);
+        const errCount = Array.isArray(payload.errors) ? payload.errors.length : 0;
+        if (stale) {
+          setBadge(`Stale${errCount ? ` (${errCount} errors)` : ''}`);
+        } else {
+          setBadge(`Updated${errCount ? ` (${errCount} errors)` : ''}`);
+        }
+      } catch (err) {
+        if (!hasData) {
+          render([], [{ message: err.message }]);
+        } else if (errorsBox) {
+          errorsBox.style.display = 'block';
+          if (errorsList) {
+            errorsList.innerHTML = '';
+            const li = document.createElement('li');
+            li.textContent = err.message || 'Refresh failed';
+            errorsList.appendChild(li);
+          }
+        }
+        setBadge('Stale (refresh failed)');
+      } finally {
+        refreshInFlight = null;
+      }
+    })();
+    return refreshInFlight;
+  };
+
+  const restartPolling = () => {
+    if (pollTimer) clearInterval(pollTimer);
+    const multiplier = document.visibilityState === 'hidden' ? HIDDEN_MULTIPLIER : 1;
+    pollTimer = setInterval(() => { refresh(); }, POLL_MS * multiplier);
   };
 
   refreshBtn?.addEventListener('click', refresh);
   refresh();
+  restartPolling();
+  document.addEventListener('visibilitychange', restartPolling);
+  window.addEventListener('beforeunload', () => { if (pollTimer) clearInterval(pollTimer); });
 })();
