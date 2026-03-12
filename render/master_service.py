@@ -4306,7 +4306,10 @@ def _get_oanda_config(account: Optional[str]) -> Dict[str, str]:
         token = _clean_env("OANDA_API_KEY_DEMO")
         account_id = _clean_env("OANDA_ACCOUNT_ID_DEMO")
         base_url = _normalize_oanda_base_url(
-            _clean_env("OANDA_API_URL_DEMO") or "https://api-fxpractice.oanda.com"
+            _clean_env("OANDA_API_URL_DEMO")
+            or _clean_env("OANDA_BASE_URL_DEMO")
+            or _clean_env("OANDA_BASE_URL")
+            or "https://api-fxpractice.oanda.com"
         )
         missing = []
         if not token:
@@ -4325,7 +4328,10 @@ def _get_oanda_config(account: Optional[str]) -> Dict[str, str]:
     token = _clean_env("OANDA_API_KEY")
     account_id = _clean_env("OANDA_ACCOUNT_ID")
     base_url = _normalize_oanda_base_url(
-        _clean_env("OANDA_API_URL_LIVE") or "https://api-fxtrade.oanda.com"
+        _clean_env("OANDA_API_URL_LIVE")
+        or _clean_env("OANDA_BASE_URL_LIVE")
+        or _clean_env("OANDA_BASE_URL")
+        or "https://api-fxtrade.oanda.com"
     )
     missing = []
     if not token:
@@ -4343,7 +4349,10 @@ def _get_oanda_history_config(mode: str = "live") -> Dict[str, str]:
         account_id = _clean_env("OANDA_ACCOUNT_ID_DEMO")
         api_key = _clean_env("OANDA_API_KEY_DEMO")
         base_url = _normalize_oanda_base_url(
-            _clean_env("OANDA_API_URL_DEMO") or "https://api-fxpractice.oanda.com"
+            _clean_env("OANDA_API_URL_DEMO")
+            or _clean_env("OANDA_BASE_URL_DEMO")
+            or _clean_env("OANDA_BASE_URL")
+            or "https://api-fxpractice.oanda.com"
         )
         missing = []
         if not api_key:
@@ -4384,6 +4393,48 @@ def _oanda_account_context(base_url: str) -> str:
     if "fxpractice" in lowered or "practice" in lowered or "sandbox" in lowered:
         return "demo"
     return "live"
+
+
+def _format_source_exception(
+    exc: Exception,
+    *,
+    broker: str,
+    account: str,
+    endpoint: Optional[str] = None,
+    account_id: Optional[str] = None,
+) -> str:
+    endpoint_label = endpoint or "endpoint"
+    account_label = account or "unknown"
+    account_id_label = account_id or "unknown"
+    broker_label = broker or "source"
+
+    if isinstance(exc, httpx.TimeoutException):
+        return (
+            f"Timeout contacting {broker_label} {endpoint_label} "
+            f"for {account_label}/{account_id_label}"
+        )
+
+    if isinstance(exc, httpx.RequestError):
+        req_url = str(exc.request.url) if getattr(exc, "request", None) is not None else None
+        detail = req_url or endpoint_label
+        return (
+            f"{exc.__class__.__name__} contacting {broker_label} {detail} "
+            f"for {account_label}/{account_id_label}"
+        )
+
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code if exc.response is not None else "unknown"
+        body = (exc.response.text if exc.response is not None else "")[:300].strip()
+        suffix = f": {body}" if body else ""
+        return (
+            f"{broker_label} {endpoint_label} failed with HTTP {status} "
+            f"for {account_label}/{account_id_label}{suffix}"
+        )
+
+    text = str(exc).strip()
+    if not text:
+        return f"{exc.__class__.__name__} with empty message"
+    return text
 
 
 async def _fetch_oanda_json(
@@ -4678,9 +4729,86 @@ async def _list_oanda_accounts(*, base_url: str, api_key: str) -> List[Dict[str,
         "Content-Type": "application/json",
     }
     url = f"{base_url.rstrip('/')}/v3/accounts"
-    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-        resp = await client.get(url, headers=headers)
-        resp.raise_for_status()
+    timeout_s = 6.0
+    timeout = httpx.Timeout(timeout_s, connect=min(3.0, timeout_s), read=timeout_s, write=timeout_s, pool=2.0)
+    max_attempts = 3
+    transient_statuses = {429, 502, 503, 504}
+    account_context = _oanda_account_context(base_url)
+
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        for attempt in range(1, max_attempts + 1):
+            try:
+                resp = await client.get(url, headers=headers)
+                resp.raise_for_status()
+                break
+            except httpx.TimeoutException as exc:
+                should_retry = attempt < max_attempts
+                BYBIT_LOGGER.warning(
+                    "OANDA_ACCOUNTS_TIMEOUT account=%s endpoint=%s attempt=%s/%s retry=%s err=%s",
+                    account_context,
+                    "/v3/accounts",
+                    attempt,
+                    max_attempts,
+                    should_retry,
+                    exc,
+                )
+                if not should_retry:
+                    message = _format_source_exception(
+                        exc,
+                        broker="OANDA",
+                        account=account_context,
+                        endpoint="/v3/accounts",
+                        account_id="discovery",
+                    )
+                    raise ValueError(message) from exc
+            except httpx.RequestError as exc:
+                should_retry = attempt < max_attempts
+                BYBIT_LOGGER.warning(
+                    "OANDA_ACCOUNTS_REQUEST_ERR account=%s endpoint=%s attempt=%s/%s retry=%s err=%s",
+                    account_context,
+                    "/v3/accounts",
+                    attempt,
+                    max_attempts,
+                    should_retry,
+                    exc,
+                )
+                if not should_retry:
+                    message = _format_source_exception(
+                        exc,
+                        broker="OANDA",
+                        account=account_context,
+                        endpoint="/v3/accounts",
+                        account_id="discovery",
+                    )
+                    raise ValueError(message) from exc
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                should_retry = status in transient_statuses and attempt < max_attempts
+                BYBIT_LOGGER.error(
+                    "OANDA_ACCOUNTS_HTTP_ERR account=%s endpoint=%s status=%s attempt=%s/%s retry=%s body=%s",
+                    account_context,
+                    "/v3/accounts",
+                    status,
+                    attempt,
+                    max_attempts,
+                    should_retry,
+                    exc.response.text[:500],
+                )
+                if not should_retry:
+                    message = _format_source_exception(
+                        exc,
+                        broker="OANDA",
+                        account=account_context,
+                        endpoint="/v3/accounts",
+                        account_id="discovery",
+                    )
+                    raise ValueError(message) from exc
+
+            backoff = min(0.2 * (2 ** (attempt - 1)), 0.8) + (0.05 * attempt)
+            await asyncio.sleep(backoff)
+        else:
+            raise ValueError("OANDA account discovery failed after retries")
+
     payload = resp.json()
     return payload.get("accounts", []) or []
 
@@ -8579,22 +8707,49 @@ async def list_open_orders() -> JSONResponse:
         for account in ("live", "demo"):
             try:
                 cfg = _get_oanda_config(account)
-                owned_accounts = await _get_cached_oanda_accounts(
-                    base_url=cfg["base_url"],
-                    api_key=cfg["token"],
-                )
-
-                if not owned_accounts:
-                    owned_accounts = [{"id": cfg.get("account_id")}] if cfg.get("account_id") else []
-
                 account_ids: List[str] = []
+                configured_account_id = str(cfg.get("account_id") or "").strip()
+                if configured_account_id:
+                    account_ids.append(configured_account_id)
+
+                owned_accounts: List[Dict[str, object]] = []
                 account_tags: Dict[str, List[str]] = {}
+                try:
+                    owned_accounts = await _get_cached_oanda_accounts(
+                        base_url=cfg["base_url"],
+                        api_key=cfg["token"],
+                    )
+                except Exception as discovery_exc:
+                    errors.append(
+                        {
+                            "broker": "OANDA",
+                            "account": account,
+                            "category": "forex",
+                            "message": _format_source_exception(
+                                discovery_exc,
+                                broker="OANDA",
+                                account=account,
+                                endpoint="/v3/accounts",
+                                account_id="discovery",
+                            ),
+                        }
+                    )
+
                 for acct in owned_accounts:
                     acct_id = str(acct.get("id") or "").strip()
                     if not acct_id:
                         continue
                     account_ids.append(acct_id)
                     account_tags[acct_id] = [str(t).upper() for t in (acct.get("tags") or [])]
+
+                deduped_ids: List[str] = []
+                seen_account_ids: Set[str] = set()
+                for acct_id in account_ids:
+                    if acct_id in seen_account_ids:
+                        continue
+                    deduped_ids.append(acct_id)
+                    seen_account_ids.add(acct_id)
+                account_ids = deduped_ids
 
                 tasks = [
                     _collect_oanda_open_items(
@@ -8616,7 +8771,13 @@ async def list_open_orders() -> JSONResponse:
                                 "broker": "OANDA",
                                 "account": account,
                                 "category": "forex",
-                                "message": f"{acct_id}: {result}",
+                                "message": _format_source_exception(
+                                    result,
+                                    broker="OANDA",
+                                    account=account,
+                                    endpoint="/v3/accounts/{accountID}/openItems",
+                                    account_id=acct_id,
+                                ),
                             }
                         )
                         continue
@@ -8630,7 +8791,7 @@ async def list_open_orders() -> JSONResponse:
                                 "broker": "OANDA",
                                 "account": account,
                                 "category": "forex",
-                                "message": f"{acct_id}: {endpoint_error}",
+                                "message": f"{acct_id}: {str(endpoint_error).strip() or 'Unknown OANDA endpoint error'}",
                             }
                         )
 
@@ -8656,7 +8817,13 @@ async def list_open_orders() -> JSONResponse:
                         "broker": "OANDA",
                         "account": account,
                         "category": "forex",
-                        "message": str(exc),
+                        "message": _format_source_exception(
+                            exc,
+                            broker="OANDA",
+                            account=account,
+                            endpoint="open-orders",
+                            account_id="unknown",
+                        ),
                     }
                 )
 
@@ -8895,17 +9062,6 @@ async def list_open_orders() -> JSONResponse:
             row["children"] = []
             grouped.append(row)
 
-        if not grouped and errors:
-            stale_cached = _OPEN_ORDERS_CACHE.get("payload")
-            if isinstance(stale_cached, dict):
-                stale_payload = dict(stale_cached)
-                stale_payload["stale"] = True
-                stale_payload["errors"] = [*stale_payload.get("errors", []), *errors]
-                stale_payload["updated_at"] = _utc_now_iso()
-                stale_payload["last_success_at"] = _OPEN_ORDERS_CACHE.get("last_success_at")
-                return JSONResponse(stale_payload)
-            raise HTTPException(status_code=502, detail={"errors": errors})
-
         updated_at = _utc_now_iso()
         payload: Dict[str, object] = {
             "items": grouped,
@@ -8915,11 +9071,10 @@ async def list_open_orders() -> JSONResponse:
             "last_success_at": _OPEN_ORDERS_CACHE.get("last_success_at"),
         }
 
-        if grouped:
-            _OPEN_ORDERS_CACHE["payload"] = dict(payload)
-            _OPEN_ORDERS_CACHE["expires_at"] = time.time() + _OPEN_ORDERS_CACHE_TTL_SECONDS
-            _OPEN_ORDERS_CACHE["last_success_at"] = updated_at
-            payload["last_success_at"] = updated_at
+        _OPEN_ORDERS_CACHE["payload"] = dict(payload)
+        _OPEN_ORDERS_CACHE["expires_at"] = time.time() + _OPEN_ORDERS_CACHE_TTL_SECONDS
+        _OPEN_ORDERS_CACHE["last_success_at"] = updated_at
+        payload["last_success_at"] = updated_at
 
         return JSONResponse(payload)
 

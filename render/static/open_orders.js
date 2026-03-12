@@ -27,10 +27,43 @@
 
   const setBadge = (message) => { if (statusBadge) statusBadge.textContent = message; };
 
+  const formatSourceErrors = (errors = []) => {
+    if (!Array.isArray(errors)) return [];
+    return errors
+      .map((entry) => {
+        if (!entry || typeof entry !== 'object') return null;
+        const broker = String(entry.broker || 'Source').trim();
+        const account = String(entry.account || '').trim();
+        const category = String(entry.category || '').trim();
+        const message = String(entry.message || '').trim() || 'Unknown source error';
+        return [broker, account, category].filter(Boolean).join(' ') + `: ${message}`;
+      })
+      .filter(Boolean);
+  };
+
+  const buildFetchError = (url, status, statusText, bodyText, bodyJson) => {
+    const detailErrors = bodyJson?.detail?.errors || bodyJson?.errors;
+    const flattened = formatSourceErrors(detailErrors);
+    if (flattened.length) {
+      return new Error(flattened.join(' | '));
+    }
+    const body = (bodyText || '').trim();
+    return new Error(`GET ${url} failed: ${status} ${body || statusText}`);
+  };
+
   const fetchJson = async (url) => {
     const response = await fetch(url);
-    if (!response.ok) throw new Error(await response.text());
-    return response.json();
+    let bodyText = '';
+    let bodyJson = null;
+    try {
+      bodyText = await response.text();
+      bodyJson = bodyText ? JSON.parse(bodyText) : null;
+    } catch (_err) {
+      bodyJson = null;
+    }
+    if (!response.ok) throw buildFetchError(url, response.status, response.statusText, bodyText, bodyJson);
+    if (bodyJson !== null) return bodyJson;
+    return bodyText ? JSON.parse(bodyText) : {};
   };
 
   const render = (items, errors = []) => {
@@ -42,7 +75,7 @@
       errorsList.innerHTML = '';
       errors.forEach((entry) => {
         const li = document.createElement('li');
-        li.textContent = entry.message || 'Unknown error';
+        li.textContent = formatSourceErrors([entry])[0] || entry.message || 'Unknown error';
         errorsList.appendChild(li);
       });
     }
