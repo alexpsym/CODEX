@@ -70,13 +70,45 @@
     status.style.color = isErr ? '#fca5a5' : '#94a3b8';
   };
 
+  const formatSourceErrors = (errors = []) => {
+    if (!Array.isArray(errors)) return [];
+    return errors
+      .map((entry) => {
+        if (!entry || typeof entry !== 'object') return null;
+        const broker = String(entry.broker || 'Source').trim();
+        const account = String(entry.account || '').trim();
+        const category = String(entry.category || '').trim();
+        const message = String(entry.message || '').trim() || 'Unknown source error';
+        return [broker, account, category].filter(Boolean).join(' ') + `: ${message}`;
+      })
+      .filter(Boolean);
+  };
+
+  const buildFetchError = (url, method, status, statusText, bodyText, bodyJson) => {
+    const detailErrors = bodyJson?.detail?.errors || bodyJson?.errors;
+    const flattened = formatSourceErrors(detailErrors);
+    if (flattened.length) {
+      return new Error(flattened.join(' | '));
+    }
+    const body = (bodyText || '').trim();
+    return new Error(`${method || 'GET'} ${url} failed: ${status} ${body || statusText}`);
+  };
+
   const fetchJson = async (url, options = {}) => {
     const res = await fetch(url, options);
-    if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`${options.method || 'GET'} ${url} failed: ${res.status} ${body || res.statusText}`);
+    let bodyText = '';
+    let bodyJson = null;
+    try {
+      bodyText = await res.text();
+      bodyJson = bodyText ? JSON.parse(bodyText) : null;
+    } catch (_err) {
+      bodyJson = null;
     }
-    return res.json();
+    if (!res.ok) {
+      throw buildFetchError(url, options.method || 'GET', res.status, res.statusText, bodyText, bodyJson);
+    }
+    if (bodyJson !== null) return bodyJson;
+    return bodyText ? JSON.parse(bodyText) : {};
   };
 
   const makeScriptButton = (script) => {
@@ -133,7 +165,7 @@
       ooErrorsList.innerHTML = '';
       (errors || []).forEach((err) => {
         const li = document.createElement('li');
-        li.textContent = err.message || String(err);
+        li.textContent = formatSourceErrors([err])[0] || err.message || String(err);
         ooErrorsList.appendChild(li);
       });
     }
