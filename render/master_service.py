@@ -3336,7 +3336,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <head>
     <meta charset=\"UTF-8\" />
     <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-    <title>Render Master Control</title>
+    <title>RenderWebService</title>
     <style>
         :root { color-scheme: light dark; }
         body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
@@ -7415,12 +7415,101 @@ def _merged_shell(title: str, options: List[Tuple[str, str]]) -> str:
 <script>const sel=document.getElementById('sel');const frame=document.getElementById('frame');sel.addEventListener('change',()=>frame.src=sel.value);</script></body></html>"""
 
 
+CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Position Size Calculator</title>
+  <style>
+    body { margin: 0; background: #000; color: #fff; font-family: Arial, sans-serif; }
+    .wrap { max-width: 1800px; margin: 0 auto; padding: 16px; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+    .toolbar-main { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+    h1 { margin: 0; font-size: 28px; }
+    .button-group { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0; }
+    .button-group button, .back-link {
+      background: #1f2937;
+      color: #e2e8f0;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 6px 12px;
+      font-weight: 700;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    .button-group button.active { background: #2563eb; color: #fff; border-color: #60a5fa; }
+    .frame-shell { border: 1px solid #1f2937; border-radius: 12px; overflow: hidden; background: #0f172a; }
+    iframe { display: block; width: 100%; height: calc(100vh - 120px); min-height: 720px; border: 0; background: #000; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="toolbar">
+      <div class="toolbar-main">
+        <h1>Position Size Calculator</h1>
+        <div class="button-group" role="group" aria-label="Asset selection">
+          <button type="button" data-asset="crypto">Crypto</button>
+          <button type="button" data-asset="fx">FX</button>
+        </div>
+      </div>
+      <a class="back-link" href="/">Back</a>
+    </div>
+    <div class="frame-shell">
+      <iframe id="calculator-frame" title="Position Size Calculator" loading="eager"></iframe>
+    </div>
+  </div>
+  <script>
+    (() => {
+      const STORAGE_KEY = 'merged_calculator_asset';
+      const DEFAULT_ASSET = 'crypto';
+      const ASSET_URLS = {
+        crypto: '/apps/cryptocalculator-clone/?embedded=1&title=Position+Size+Calculator',
+        fx: '/apps/oanda-calculator-clone/?embedded=1&title=Position+Size+Calculator',
+      };
+      const buttons = Array.from(document.querySelectorAll('[data-asset]'));
+      const frame = document.getElementById('calculator-frame');
+      const currentUrl = new URL(window.location.href);
+      const queryAsset = (currentUrl.searchParams.get('asset') || '').toLowerCase();
+      const storedAsset = (window.localStorage.getItem(STORAGE_KEY) || '').toLowerCase();
+      const normalizeAsset = (value) => (value in ASSET_URLS ? value : DEFAULT_ASSET);
+
+      const setActive = (asset) => {
+        buttons.forEach((button) => {
+          button.classList.toggle('active', button.dataset.asset === asset);
+          button.setAttribute('aria-pressed', button.dataset.asset === asset ? 'true' : 'false');
+        });
+      };
+
+      const updateAsset = (asset, { replace = false } = {}) => {
+        const nextAsset = normalizeAsset(asset);
+        setActive(nextAsset);
+        frame.src = ASSET_URLS[nextAsset];
+        currentUrl.searchParams.set('asset', nextAsset);
+        const nextUrl = `${currentUrl.pathname}?${currentUrl.searchParams.toString()}`;
+        window.history[replace ? 'replaceState' : 'pushState']({}, '', nextUrl);
+        window.localStorage.setItem(STORAGE_KEY, nextAsset);
+      };
+
+      const initialAsset = normalizeAsset(queryAsset || storedAsset || DEFAULT_ASSET);
+      updateAsset(initialAsset, { replace: true });
+      buttons.forEach((button) => {
+        button.addEventListener('click', () => updateAsset(button.dataset.asset));
+      });
+      window.addEventListener('popstate', () => {
+        const asset = normalizeAsset(new URL(window.location.href).searchParams.get('asset') || DEFAULT_ASSET);
+        updateAsset(asset, { replace: true });
+      });
+    })();
+  </script>
+</body>
+</html>
+"""
+
+
 @app.get("/merged/calculator", response_class=HTMLResponse)
 async def merged_calculator_page() -> str:
-    return _merged_shell(
-        "Calculator",
-        [("Crypto", "/apps/cryptocalculator-clone"), ("FX", "/apps/oanda-calculator-clone")],
-    )
+    return CALCULATOR_PAGE_TEMPLATE
 
 
 @app.get("/merged/scanner", response_class=HTMLResponse)

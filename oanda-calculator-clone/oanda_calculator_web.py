@@ -192,7 +192,7 @@ FORM_HTML = """
 <!doctype html>
 <html>
 <head>
-<title>OANDA Position Size Calculator</title>
+<title>{{ page_title }}</title>
 <style>
   body {background:black; color:white; font-family:Arial, sans-serif;}
   input, select, button {margin:4px 0;}
@@ -221,10 +221,10 @@ FORM_HTML = """
 </style>
 </head>
 <body data-app-root="{{ app_root }}">
-<h1>OANDA Position Size Calculator</h1>
+{% if not embedded %}<h1>OANDA Position Size Calculator</h1>{% endif %}
 <div class="container">
   <div class="form">
-    <form method="post">
+    <form method="post" action="{{ form_action }}">
       <div class="trade-section">
         <label>Account:</label>
         <div class="button-group" data-input="account_mode">
@@ -364,6 +364,11 @@ def index():
     global last_trade_specs
     app_root = (request.headers.get("x-forwarded-prefix", "").rstrip("/") or "")
     webhook_url = PUBLIC_WEBHOOK_URL
+    embedded = str(request.args.get("embedded", "")).strip().lower() in {"1", "true", "yes", "on"}
+    page_title = (request.args.get("title") or "").strip() or "OANDA Position Size Calculator"
+    form_action = request.full_path if embedded and request.query_string else request.path
+    if form_action.endswith("?"):
+        form_action = form_action[:-1]
     download_url = f"{app_root}/download_specs" if app_root else "/download_specs"
     last_trade_specs = None
     account_mode = request.form.get("account_mode", "live")
@@ -734,6 +739,9 @@ def index():
         limit_cancel_offset=limit_cancel_offset,
         limit_cancel_offset_pct=limit_cancel_offset_pct,
         track_pending=track_pending,
+        embedded=embedded,
+        page_title=page_title,
+        form_action=form_action,
     )
 
 

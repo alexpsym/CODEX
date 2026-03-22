@@ -407,7 +407,7 @@ FORM_HTML = """
 <!doctype html>
 <html>
 <head>
-  <title>Crypto Position Size Calculator</title>
+  <title>{{ page_title }}</title>
   <style>
     body {background:black; color:white; font-family:Arial, sans-serif;}
     input, select, button {margin:4px 0;}
@@ -450,14 +450,14 @@ FORM_HTML = """
   </style>
 </head>
 <body data-app-root="{{ app_root }}">
-  <h1>Crypto Position Size Calculator</h1>
+  {% if not embedded %}<h1>Crypto Position Size Calculator</h1>{% endif %}
   <div id="js_data"
        data-price-mode-notes='{{ price_mode_notes|tojson|e }}'
        data-options-min-qty-map='{{ options_min_qty_map|tojson|e }}'
        style="display:none;"></div>
   <div class="container">
     <div class="form">
-      <form method="post">
+      <form method="post" action="{{ form_action }}">
         <label>Trade Type:</label>
         <div class="button-group" data-input="trade_type">
           <button type="button" data-value="perpetual">Perpetual Futures</button>
@@ -810,6 +810,12 @@ def index():
     export_json = None
     trade = None
     options_output = None
+
+    embedded = str(request.args.get("embedded", "")).strip().lower() in {"1", "true", "yes", "on"}
+    page_title = (request.args.get("title") or "").strip() or "Crypto Position Size Calculator"
+    form_action = request.full_path if embedded and request.query_string else request.path
+    if form_action.endswith("?"):
+        form_action = form_action[:-1]
 
     trade_type = request.form.get("trade_type", "perpetual").strip().lower()
     if trade_type not in {"perpetual", "spot", "options", "trendline_options"}:
@@ -1287,6 +1293,9 @@ def index():
         options_min_qty_map=HARD_CODED_OPTIONS_MIN_QTY,
         track_pending=track_pending,
         limit_cancel_offset=limit_cancel_offset_raw,
+        embedded=embedded,
+        page_title=page_title,
+        form_action=form_action,
         limit_cancel_offset_pct=limit_cancel_offset_pct_raw,
     )
 
