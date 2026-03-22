@@ -8,7 +8,7 @@ import hashlib
 import hmac
 import urllib.parse
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, Generator, List, Tuple
+from typing import Any, Dict, Generator, IO, List, Tuple
 
 import requests
 
@@ -324,6 +324,18 @@ def _write_csv(filename: str, rows: List[Dict[str, Any]]) -> None:
             writer.writerows(rows)
         else:
             csvfile.write("")
+
+
+def write_blank_trade_history_template(path: str | os.PathLike[str] | IO[str]) -> str | IO[str]:
+    """Write a header-only CSV matching Bybit's trade history export template."""
+    if hasattr(path, "write"):
+        writer = csv.DictWriter(path, fieldnames=TEMPLATE_HEADERS)
+        writer.writeheader()
+        return path
+    with open(path, "w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=TEMPLATE_HEADERS)
+        writer.writeheader()
+    return path
 
 
 def _convert_exec_time(row: Dict[str, Any], template: bool = False) -> None:

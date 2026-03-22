@@ -133,6 +133,32 @@ TRADING_JOURNAL_SYNC_STATE: Dict[str, object] = {
     "updated_at": None,
 }
 TRADING_JOURNAL_SYNC_LOCK = threading.Lock()
+BYBIT_DEMO_TEMPLATE_NAME = "Bybit-UM-USDTPerp-TradeHistory-template.csv"
+BYBIT_DEMO_WORKBOOK_NAME = "Bybit Demo.xlsx"
+BYBIT_DEMO_WORKBOOK_SHEET = "Trades"
+BYBIT_DEMO_WORKBOOK_COLUMNS = [
+    "opening_time",
+    "closing_time",
+    "type_buy_sell",
+    "symbol",
+    "size_quantity",
+    "entry_price",
+    "closing_price",
+    "commission",
+    "net_profit",
+    "balance_after_trade",
+    "currency",
+    "notes",
+    "order_id",
+    "fill_count",
+    "source",
+]
+ENABLE_BYBIT_DEMO_JOURNAL = os.getenv("ENABLE_BYBIT_DEMO_JOURNAL", "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 def _sync_state_snapshot() -> Dict[str, object]:
@@ -151,6 +177,16 @@ def _set_trading_journal_sync_state(**updates: object) -> None:
         merged["updated_at"] = _utc_now_iso()
         TRADING_JOURNAL_SYNC_STATE.update(merged)
         _save_json_file(TRADING_JOURNAL_SYNC_STATE_PATH, merged)
+
+
+def _record_bybit_demo_sync_status(**updates: object) -> None:
+    state = _load_trading_journal_state()
+    demo_state = state.get("bybit_demo_sync")
+    merged = demo_state if isinstance(demo_state, dict) else {}
+    merged.update(updates)
+    merged["updated_at"] = _utc_now_iso()
+    state["bybit_demo_sync"] = merged
+    _save_trading_journal_state(state)
 
 
 TRADING_JOURNAL_DROPBOX_RECURSIVE = os.getenv(
@@ -232,6 +268,8 @@ _DROPBOX_UPLOAD_TASK: Optional[asyncio.Task] = None
 _DROPBOX_UPLOAD_TIMER: Optional[threading.Timer] = None
 _DROPBOX_UPLOAD_TIMER_LOCK = threading.Lock()
 _BYBIT_EXEC_LAST_SEEN: Dict[str, int] = {}
+_BYBIT_DEMO_CLOSED_PNL_LAST_SEEN: Optional[int] = None
+_BYBIT_DEMO_WORKBOOK_LOCK = threading.Lock()
 _OANDA_TX_LAST_SEEN: Dict[str, str] = {}
 _OANDA_FILL_BACKOFF_UNTIL: Dict[str, float] = {}
 _OANDA_FILL_FAILURES: Dict[str, int] = {}
@@ -1168,6 +1206,8 @@ def _set_trading_journal_rows(rows: List[Dict[str, object]]) -> None:
 
 def _exclude_bybit_demo_row(row: Dict[str, object]) -> bool:
     """Return True if this journal row should be excluded (Bybit Demo)."""
+    if ENABLE_BYBIT_DEMO_JOURNAL:
+        return False
 
     src = str(row.get("source") or "").strip().lower()
     acc = str(row.get("account") or "").strip().lower()
@@ -1179,6 +1219,8 @@ def _exclude_bybit_demo_row(row: Dict[str, object]) -> bool:
 
 def _purge_bybit_demo_journal_state() -> int:
     """Remove any Bybit Demo rows/balances already persisted on disk."""
+    if ENABLE_BYBIT_DEMO_JOURNAL:
+        return 0
 
     removed = 0
     try:
@@ -1438,10 +1480,6 @@ def _parse_excel_account_workbook(
     all_rows: List[Dict[str, object]] = []
     account_balance: Optional[Dict[str, object]] = None
     account_label = Path(file_name).stem.strip() or file_name
-
-    # User preference: never import/journal Bybit Demo workbook content.
-    if _is_bybit_demo_account_label(account_label):
-        return [], None
 
     for sheet in xls.sheet_names:
         df = pd.read_excel(xls, sheet_name=sheet)
@@ -1712,6 +1750,51 @@ def _cashflow_template_bytes() -> bytes:
     return buffer.getvalue()
 
 
+def _bybit_demo_workbook_bytes() -> bytes:
+    buffer = io.BytesIO()
+    template = pd.DataFrame(columns=BYBIT_DEMO_WORKBOOK_COLUMNS)
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        template.to_excel(writer, sheet_name=BYBIT_DEMO_WORKBOOK_SHEET, index=False)
+    return buffer.getvalue()
+
+
+def _ensure_bybit_demo_dropbox_files(active_folder: str) -> Dict[str, bool]:
+    created = {
+        "trade_history_template_created": False,
+        "demo_workbook_created": False,
+    }
+
+    template_path = _join_dropbox_path(active_folder, BYBIT_DEMO_TEMPLATE_NAME)
+    try:
+        download_bytes(template_path)
+    except FileNotFoundError:
+        if bybit_history_fetcher is None:
+            raise RuntimeError("Bybit history exporter module not available.")
+        buffer = io.StringIO()
+        bybit_history_fetcher.write_blank_trade_history_template(buffer)
+        upload_bytes(template_path, buffer.getvalue().encode("utf-8"))
+        created["trade_history_template_created"] = True
+
+    workbook_path = _join_dropbox_path(active_folder, BYBIT_DEMO_WORKBOOK_NAME)
+    try:
+        download_bytes(workbook_path)
+    except FileNotFoundError:
+        upload_bytes(workbook_path, _bybit_demo_workbook_bytes())
+        created["demo_workbook_created"] = True
+
+    return created
+
+
+async def _ensure_trading_journal_dropbox_templates() -> None:
+    try:
+        active_folder, _entries = await asyncio.to_thread(_resolve_trading_journal_dropbox_folder)
+        await asyncio.to_thread(_ensure_cashflow_template, active_folder)
+        await asyncio.to_thread(_ensure_bybit_demo_dropbox_files, active_folder)
+    except Exception as exc:  # pragma: no cover - startup safeguard
+        _record_bybit_demo_sync_status(last_checked_at=_utc_now_iso(), last_error=str(exc))
+        BYBIT_LOGGER.error("Dropbox journal template ensure failed: %s", exc)
+
+
 def _ensure_cashflow_template(active_folder: str) -> bool:
     cashflow_path = _join_dropbox_path(active_folder, "account_cashflows.xlsx")
     try:
@@ -1900,12 +1983,33 @@ def _import_trading_journal_from_dropbox_excel(
     active_folder, entries = _resolve_trading_journal_dropbox_folder()
     configured = TRADING_JOURNAL_DROPBOX_FOLDER.strip()
     cashflow_template_created = False
+    bybit_demo_templates = {
+        "trade_history_template_created": False,
+        "demo_workbook_created": False,
+    }
     if progress_cb:
         progress_cb(6, "Checking cashflow template…")
     try:
         cashflow_template_created = _ensure_cashflow_template(active_folder)
     except Exception:
         cashflow_template_created = False
+    try:
+        bybit_demo_templates = _ensure_bybit_demo_dropbox_files(active_folder)
+    except Exception as exc:
+        errors = [{"file": BYBIT_DEMO_WORKBOOK_NAME, "path": active_folder, "error": str(exc)}]
+        _save_json_file(
+            TRADING_JOURNAL_STATE_PATH,
+            {
+                "updated_at": _utc_now_iso(),
+                "excel_account_balances": [],
+                "source_folder": active_folder,
+                "configured_folder": configured,
+                "cashflow_template_created": cashflow_template_created,
+                **bybit_demo_templates,
+                "errors": errors,
+            },
+        )
+        raise
 
     # Refresh entries after possibly creating the cashflow template.
     # Exclude the cashflow ledger file itself from workbook imports.
@@ -1956,6 +2060,7 @@ def _import_trading_journal_from_dropbox_excel(
                 "source_folder": active_folder,
                 "configured_folder": configured,
                 "cashflow_template_created": cashflow_template_created,
+                **bybit_demo_templates,
                 "workbooks_seen": 0,
                 "used_recursive_fallback": used_recursive_fallback,
                 "errors": [{"file": "", "path": active_folder, "error": msg}],
@@ -1967,6 +2072,7 @@ def _import_trading_journal_from_dropbox_excel(
             "source_folder": active_folder,
             "configured_folder": configured,
             "cashflow_template_created": cashflow_template_created,
+            **bybit_demo_templates,
             "workbooks_seen": 0,
             "rows_imported": 0,
             "balances_found": 0,
@@ -2061,6 +2167,7 @@ def _import_trading_journal_from_dropbox_excel(
             "source_folder": active_folder,
             "configured_folder": configured,
             "cashflow_template_created": cashflow_template_created,
+            **bybit_demo_templates,
             "workbooks_seen": workbook_count,
             "workbooks_reused": reused_count,
             "used_recursive_fallback": used_recursive_fallback,
@@ -2082,6 +2189,7 @@ def _import_trading_journal_from_dropbox_excel(
         "source_folder": active_folder,
         "configured_folder": configured,
         "cashflow_template_created": cashflow_template_created,
+        **bybit_demo_templates,
         "workbooks_seen": workbook_count,
         "workbooks_reused": reused_count,
         "rows_imported": len(final_rows),
@@ -2104,11 +2212,18 @@ def _to_float(value: object) -> Optional[float]:
         return None
 
 
+def _ms_to_iso(value: object) -> Optional[str]:
+    try:
+        ms = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    if ms <= 0:
+        return None
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
+
+
 def _journal_rows_from_bybit_execution(entry: Dict[str, object]) -> List[Dict[str, object]]:
     account = str(entry.get("account") or "unknown").strip().lower()
-    # User preference: do not journal Bybit Demo fills.
-    if account == "demo":
-        return []
     category = str(entry.get("category") or "").strip().lower()
     symbol = str(entry.get("symbol") or "").strip().upper()
     order_id = str(entry.get("orderId") or "")
@@ -2822,9 +2937,13 @@ def _compute_autostart_scripts() -> List[str]:
 @app.on_event("startup")
 async def _autostart_scripts() -> None:
     asyncio.create_task(_dropbox_restore_state_backup_on_startup())
-    _purge_bybit_demo_journal_state()
+    asyncio.create_task(_ensure_trading_journal_dropbox_templates())
+    if not ENABLE_BYBIT_DEMO_JOURNAL:
+        _purge_bybit_demo_journal_state()
     if os.getenv("ENABLE_BYBIT_FILL_POLL", "0") == "1":
         asyncio.create_task(_poll_bybit_fills())
+    if ENABLE_BYBIT_DEMO_JOURNAL:
+        asyncio.create_task(_poll_bybit_demo_closed_pnl())
     if os.getenv("ENABLE_OANDA_FILL_POLL", "0") == "1":
         asyncio.create_task(_start_oanda_fill_poll_after_delay())
     for name in _compute_autostart_scripts():
@@ -6734,6 +6853,234 @@ async def _fetch_bybit_executions(
     return (payload.get("result") or {}).get("list", []) or []
 
 
+async def _fetch_bybit_closed_pnl(
+    *,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+    start_time: int,
+    end_time: int,
+    cursor: Optional[str] = None,
+) -> Dict[str, object]:
+    params = {
+        "category": "linear",
+        "startTime": str(start_time),
+        "endTime": str(end_time),
+        "limit": "50",
+    }
+    if cursor:
+        params["cursor"] = cursor
+    return await _bybit_signed_get(
+        base_url=base_url,
+        api_key=api_key,
+        api_secret=api_secret,
+        path="/v5/position/closed-pnl",
+        params=params,
+    )
+
+
+async def _fetch_bybit_transaction_log(
+    *,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+    start_time: int,
+    end_time: int,
+    cursor: Optional[str] = None,
+) -> Dict[str, object]:
+    params = {
+        "accountType": "UNIFIED",
+        "startTime": str(start_time),
+        "endTime": str(end_time),
+        "limit": "50",
+    }
+    if cursor:
+        params["cursor"] = cursor
+    return await _bybit_signed_get(
+        base_url=base_url,
+        api_key=api_key,
+        api_secret=api_secret,
+        path="/v5/account/transaction-log",
+        params=params,
+    )
+
+
+def _normalize_bybit_demo_closed_pnl_row(
+    entry: Dict[str, object],
+    *,
+    balance_after_trade: Optional[float],
+) -> Optional[Dict[str, object]]:
+    symbol = str(entry.get("symbol") or "").strip().upper()
+    order_id = str(entry.get("orderId") or "").strip()
+    if not symbol or not order_id:
+        return None
+    open_fee = _to_float(entry.get("openFee")) or 0.0
+    close_fee = _to_float(entry.get("closeFee")) or 0.0
+    fees = open_fee + close_fee
+    fill_count = int(_to_float(entry.get("fillCount")) or 0)
+    notes = "" if balance_after_trade is not None else "Balance unavailable from transaction log"
+    return {
+        "id": f"bybit:demo:closedpnl:{symbol}:{order_id}",
+        "source": "bybit",
+        "account": "demo",
+        "account_label": "Bybit Demo",
+        "asset_class": "crypto",
+        "symbol": symbol,
+        "side": str(entry.get("side") or "").title(),
+        "status": "closed",
+        "open_time": _ms_to_iso(entry.get("createdTime")),
+        "close_time": _ms_to_iso(entry.get("updatedTime")),
+        "entry_price": _to_float(entry.get("avgEntryPrice")),
+        "exit_price": _to_float(entry.get("avgExitPrice")),
+        "qty": _to_float(entry.get("closedSize")),
+        "qty_unit": "native",
+        "commission": fees,
+        "commission_currency": "USDT",
+        "fees": fees,
+        "fee_currency": "USDT",
+        "realized_pnl": _to_float(entry.get("closedPnl")),
+        "realized_pnl_currency": "USDT",
+        "balance_after_trade": balance_after_trade,
+        "notes": notes,
+        "raw_refs": {"orderId": order_id, "fillCount": fill_count, "source": "closed_pnl"},
+    }
+
+
+def _bybit_demo_workbook_row(row: Dict[str, object]) -> Dict[str, object]:
+    refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+    return {
+        "opening_time": row.get("open_time"),
+        "closing_time": row.get("close_time"),
+        "type_buy_sell": row.get("side"),
+        "symbol": row.get("symbol"),
+        "size_quantity": row.get("qty"),
+        "entry_price": row.get("entry_price"),
+        "closing_price": row.get("exit_price"),
+        "commission": row.get("commission"),
+        "net_profit": row.get("realized_pnl"),
+        "balance_after_trade": row.get("balance_after_trade"),
+        "currency": row.get("realized_pnl_currency") or "USDT",
+        "notes": row.get("notes") or "",
+        "order_id": refs.get("orderId"),
+        "fill_count": refs.get("fillCount"),
+        "source": refs.get("source") or "closed_pnl",
+    }
+
+
+def _append_bybit_demo_rows_to_workbook(active_folder: str, rows: List[Dict[str, object]]) -> int:
+    if not rows:
+        return 0
+    workbook_path = _join_dropbox_path(active_folder, BYBIT_DEMO_WORKBOOK_NAME)
+    with _BYBIT_DEMO_WORKBOOK_LOCK:
+        payload = download_bytes(workbook_path)
+        bio = io.BytesIO(payload)
+        try:
+            existing = pd.read_excel(bio, sheet_name=BYBIT_DEMO_WORKBOOK_SHEET)
+        except Exception:
+            existing = pd.DataFrame(columns=BYBIT_DEMO_WORKBOOK_COLUMNS)
+        if existing is None or existing.empty:
+            existing = pd.DataFrame(columns=BYBIT_DEMO_WORKBOOK_COLUMNS)
+        existing = existing.reindex(columns=BYBIT_DEMO_WORKBOOK_COLUMNS)
+        known = {str(v).strip() for v in existing.get("order_id", pd.Series(dtype=str)).tolist() if str(v).strip()}
+        to_add = []
+        for row in rows:
+            workbook_row = _bybit_demo_workbook_row(row)
+            order_id = str(workbook_row.get("order_id") or "").strip()
+            if not order_id or order_id in known:
+                continue
+            known.add(order_id)
+            to_add.append(workbook_row)
+        if not to_add:
+            return 0
+        updated = pd.concat([existing, pd.DataFrame(to_add)], ignore_index=True)
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            updated.to_excel(writer, sheet_name=BYBIT_DEMO_WORKBOOK_SHEET, index=False)
+        upload_bytes(workbook_path, buffer.getvalue())
+        return len(to_add)
+
+
+async def _sync_bybit_demo_closed_pnl_window(
+    *,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+    start_time: int,
+    end_time: int,
+) -> int:
+    active_folder, _entries = await asyncio.to_thread(_resolve_trading_journal_dropbox_folder)
+    await asyncio.to_thread(_ensure_bybit_demo_dropbox_files, active_folder)
+
+    tx_by_order: Dict[str, Dict[str, object]] = {}
+    tx_cursor: Optional[str] = None
+    while True:
+        tx_payload = await _fetch_bybit_transaction_log(
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            start_time=start_time,
+            end_time=end_time,
+            cursor=tx_cursor,
+        )
+        tx_result = (tx_payload.get("result") or {})
+        for item in tx_result.get("list") or []:
+            if not isinstance(item, dict):
+                continue
+            order_id = str(item.get("orderId") or "").strip()
+            if order_id and order_id not in tx_by_order:
+                tx_by_order[order_id] = item
+        tx_cursor = str(tx_result.get("nextPageCursor") or "").strip() or None
+        if not tx_cursor:
+            break
+
+    rows: List[Dict[str, object]] = []
+    cursor: Optional[str] = None
+    max_seen = start_time
+    while True:
+        payload = await _fetch_bybit_closed_pnl(
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            start_time=start_time,
+            end_time=end_time,
+            cursor=cursor,
+        )
+        result = (payload.get("result") or {})
+        for entry in result.get("list") or []:
+            if not isinstance(entry, dict):
+                continue
+            updated_ms = int(_to_float(entry.get("updatedTime")) or 0)
+            if updated_ms <= start_time:
+                continue
+            max_seen = max(max_seen, updated_ms)
+            tx_match = tx_by_order.get(str(entry.get("orderId") or "").strip(), {})
+            balance_after_trade = _to_float(tx_match.get("cashBalance"))
+            row = _normalize_bybit_demo_closed_pnl_row(
+                entry,
+                balance_after_trade=balance_after_trade,
+            )
+            if row:
+                rows.append(row)
+        cursor = str(result.get("nextPageCursor") or "").strip() or None
+        if not cursor:
+            break
+
+    if not rows:
+        _record_bybit_demo_sync_status(last_checked_at=_utc_now_iso(), last_error=None)
+        return max_seen
+
+    changed = _upsert_trading_journal_rows(rows)
+    await asyncio.to_thread(_append_bybit_demo_rows_to_workbook, active_folder, rows)
+    _record_bybit_demo_sync_status(
+        last_checked_at=_utc_now_iso(),
+        last_success_at=_utc_now_iso(),
+        last_error=None,
+        last_rows_seen=len(rows),
+        last_rows_upserted=changed,
+    )
+    return max_seen
+
+
 async def _poll_bybit_fills() -> None:
     lookback_seconds = int(os.getenv("BYBIT_EXEC_LOOKBACK_SECONDS", "60"))
     categories = ["linear", "spot", "option", "inverse"]
@@ -6778,6 +7125,35 @@ async def _poll_bybit_fills() -> None:
                 _BYBIT_EXEC_LAST_SEEN[account] = max_seen
             except Exception as exc:  # pragma: no cover - background task
                 BYBIT_LOGGER.error("Bybit fill poll error: %s", exc)
+
+
+async def _poll_bybit_demo_closed_pnl() -> None:
+    global _BYBIT_DEMO_CLOSED_PNL_LAST_SEEN
+    lookback_seconds = int(os.getenv("BYBIT_DEMO_CLOSED_PNL_LOOKBACK_SECONDS", "900"))
+    while True:
+        await asyncio.sleep(FILL_ALERT_POLL_SECONDS)
+        try:
+            _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for("demo")
+            if not api_key or not api_secret:
+                continue
+            now_ms = int(time.time() * 1000)
+            last_seen = _BYBIT_DEMO_CLOSED_PNL_LAST_SEEN
+            if last_seen is None:
+                last_seen = max(0, now_ms - (lookback_seconds * 1000))
+            earliest = now_ms - (7 * 24 * 60 * 60 * 1000) + 60000
+            start_time = max(last_seen, earliest)
+            end_time = now_ms
+            max_seen = await _sync_bybit_demo_closed_pnl_window(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                start_time=start_time,
+                end_time=end_time,
+            )
+            _BYBIT_DEMO_CLOSED_PNL_LAST_SEEN = max(max_seen, start_time)
+        except Exception as exc:  # pragma: no cover - background task
+            _record_bybit_demo_sync_status(last_checked_at=_utc_now_iso(), last_error=str(exc))
+            BYBIT_LOGGER.exception("Bybit demo closed PnL poll error: %s", exc)
 
 
 async def _fetch_oanda_last_transaction_id(cfg: Dict[str, str]) -> str:
