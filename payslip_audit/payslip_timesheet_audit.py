@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
-import shutil
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -74,6 +75,10 @@ DATE_FORMATS = [
 # File discovery patterns
 PAYSLIP_GLOB = "*.pdf"
 TIMESHEET_GLOBS = ("*.jpg", "*.jpeg", "*.png")
+ARCHIVE_DIR = Path(r"C:\Users\User\Documents\MEDIPORT")
+ARCHIVE_STEM_RE = re.compile(r"^(?P<number>\d+)(?P<suffix>A)?$")
+SERVER_GUARD_ENV_VARS = {"RENDER", "RENDER_EXTERNAL_URL", "PORT"}
+
 
 @dataclass
 class PayslipItem:
@@ -886,22 +891,17 @@ def discover_files(
     payslip_arg: Optional[Path],
     timesheet_args: Optional[List[Path]],
 ) -> Tuple[Path, List[Path]]:
-    """Resolve payslip and timesheet paths from explicit inputs.
-
-    The audit now runs in a controlled environment with uploaded files, so a
-    payslip PDF and at least one timesheet image must be provided directly via
-    command-line arguments or API uploads.
-    """
+    """Resolve payslip and timesheet paths from explicit local CLI inputs."""
 
     if payslip_arg is None:
-        raise SystemExit("Payslip PDF is required. Provide --payslip or upload a PDF.")
+        raise SystemExit("Payslip PDF is required. Provide --payslip <path-to-pdf>.")
 
     payslip_path = payslip_arg.expanduser().resolve()
     if not payslip_path.exists():
         raise SystemExit(f"Payslip PDF not found: {payslip_path}")
 
     if not timesheet_args:
-        raise SystemExit("At least one timesheet image (JPG/PNG) is required via --timesheet or upload.")
+        raise SystemExit("At least one timesheet image (JPG/PNG) is required via --timesheet <path ...>.")
 
     timesheet_paths: List[Path] = []
     for path in timesheet_args:
@@ -1309,72 +1309,152 @@ def cleanup_sidecars(sidecars: Iterable[Path]) -> None:
             print(f"Warning: failed to delete {sidecar}: {exc}", file=sys.stderr)
 
 
+def ensure_local_only_execution() -> None:
+    """Refuse to run inside server-style environments such as Render."""
+
+    present = sorted(name for name in SERVER_GUARD_ENV_VARS if os.getenv(name))
+    if present:
+        joined = ", ".join(present)
+        raise SystemExit(
+            f"Local-only script refusal: detected server environment variable(s) {joined}. "
+            f"Run this audit locally so output can be archived to {ARCHIVE_DIR}."
+        )
+
+
+def get_archive_dir() -> Path:
+    return ARCHIVE_DIR
+
+
+def ensure_archive_dir(path: Path) -> Path:
+    if not path.exists():
+        raise SystemExit(f"Archive directory does not exist: {path}")
+    if not path.is_dir():
+        raise SystemExit(f"Archive path is not a directory: {path}")
+    if not os.access(path, os.W_OK):
+        raise SystemExit(f"Archive directory is not writable: {path}")
+    return path
+
+
+def scan_next_sequence(path: Path) -> int:
+    highest = 0
+    for candidate in path.iterdir():
+        if not candidate.is_file() or candidate.suffix.lower() != ".pdf":
+            continue
+        match = ARCHIVE_STEM_RE.fullmatch(candidate.stem)
+        if not match:
+            continue
+        highest = max(highest, int(match.group("number")))
+    return highest + 1
+
+
+def build_final_archive_paths(path: Path, next_number: int) -> Tuple[Path, Path]:
+    final_payslip = path / f"{next_number}.pdf"
+    final_report = path / f"{next_number}A.pdf"
+    return final_report, final_payslip
+
+
+def _ensure_targets_absent(paths: Iterable[Path]) -> None:
+    for target in paths:
+        if target.exists():
+            raise SystemExit(f"Archive collision detected; refusing to overwrite existing file: {target}")
+
+
+def finalize_archive(report_temp: Path, source_payslip: Path, final_report: Path, final_payslip: Path) -> None:
+    _ensure_targets_absent((final_report, final_payslip))
+
+    try:
+        report_temp.replace(final_report)
+    except Exception as exc:  # noqa: BLE001
+        raise SystemExit(
+            f"Failed to move audit report into archive at {final_report}: {exc}"
+        ) from exc
+
+    try:
+        source_payslip.replace(final_payslip)
+    except Exception as exc:  # noqa: BLE001
+        try:
+            if final_report.exists() and not report_temp.exists():
+                final_report.replace(report_temp)
+        except Exception as rollback_exc:  # noqa: BLE001
+            raise SystemExit(
+                f"Failed to move source payslip into archive at {final_payslip}: {exc}. "
+                f"Rollback of report also failed: {rollback_exc}"
+            ) from exc
+        raise SystemExit(
+            f"Failed to move source payslip into archive at {final_payslip}: {exc}"
+        ) from exc
+
+
 def main(argv: Optional[List[str]] = None) -> None:
     parser = argparse.ArgumentParser(
-        description="Compare a payslip PDF against timesheet screenshots and produce an audit report.",
+        description="Compare a payslip PDF against timesheet screenshots and archive the finished audit locally.",
     )
     parser.add_argument(
         "--payslip",
         type=Path,
         required=False,
-        help="Payslip PDF path (required unless provided by the upload API).",
+        help="Payslip PDF path.",
     )
     parser.add_argument(
         "--timesheet",
         nargs="*",
         type=Path,
-        help="Timesheet screenshots (JPG/PNG). At least one is required unless provided by the upload API.",
-    )
-    parser.add_argument(
-        "--output",
-        type=Path,
-        default=Path("audit_report.pdf"),
-        help="Destination PDF for the audit summary.",
+        help="Timesheet screenshots (JPG/PNG). At least one is required.",
     )
     args = parser.parse_args(argv)
 
-    working_dir = Path.cwd()
+    ensure_local_only_execution()
     ensure_tesseract_available()
+    archive_dir = ensure_archive_dir(get_archive_dir())
     payslip_path, timesheet_paths = discover_files(args.payslip, args.timesheet)
-
-    output_path = args.output
-    if not output_path.is_absolute():
-        output_path = (working_dir / output_path).resolve()
-
     generated_sidecars: List[Path] = []
+    temp_report_path: Optional[Path] = None
 
-    payslip = parse_payslip(payslip_path, generated_sidecars)
-    pay_period = (payslip.start, payslip.end)
+    try:
+        payslip = parse_payslip(payslip_path, generated_sidecars)
+        pay_period = (payslip.start, payslip.end)
 
-    timesheet_entries = parse_timesheets(timesheet_paths, pay_period, generated_sidecars)
-    payslip_totals, aggregated_label = summarise_payslip(payslip.items, pay_period)
-    timesheet_totals = summarise_timesheet(timesheet_entries, aggregated_label)
+        timesheet_entries = parse_timesheets(timesheet_paths, pay_period, generated_sidecars)
+        payslip_totals, aggregated_label = summarise_payslip(payslip.items, pay_period)
+        timesheet_totals = summarise_timesheet(timesheet_entries, aggregated_label)
 
-    if not payslip_totals:
-        raise SystemExit("No work entries were found on the payslip; comparison cannot proceed.")
+        if not payslip_totals:
+            raise SystemExit("No work entries were found on the payslip; comparison cannot proceed.")
 
-    compare_dates(payslip_totals, timesheet_totals, aggregated_label)
+        compare_dates(payslip_totals, timesheet_totals, aggregated_label)
 
-    rows_pdf, rows_console = build_rows(payslip_totals, timesheet_totals, payslip.hourly_rate, aggregated_label)
+        rows_pdf, rows_console = build_rows(payslip_totals, timesheet_totals, payslip.hourly_rate, aggregated_label)
 
-    payslip_hours, timesheet_hours = build_totals(payslip, timesheet_totals)
-    hours_diff = timesheet_hours - payslip_hours
-    status, aud_diff = determine_status(hours_diff, payslip.hourly_rate)
+        payslip_hours, timesheet_hours = build_totals(payslip, timesheet_totals)
+        hours_diff = timesheet_hours - payslip_hours
+        status, aud_diff = determine_status(hours_diff, payslip.hourly_rate)
 
-    totals = {
-        "payslip_hours": fmt_hours(payslip_hours),
-        "timesheet_hours": fmt_hours(timesheet_hours),
-        "hours_diff": fmt_signed_hours(hours_diff),
-        "hourly_rate": fmt_currency(payslip.hourly_rate) + " AUD",
-        "aud_diff": fmt_signed_currency(aud_diff) + " AUD",
-    }
-    undated = collect_undated(payslip.items)
+        totals = {
+            "payslip_hours": fmt_hours(payslip_hours),
+            "timesheet_hours": fmt_hours(timesheet_hours),
+            "hours_diff": fmt_signed_hours(hours_diff),
+            "hourly_rate": fmt_currency(payslip.hourly_rate) + " AUD",
+            "aud_diff": fmt_signed_currency(aud_diff) + " AUD",
+        }
+        undated = collect_undated(payslip.items)
 
-    print_console(payslip, rows_console, totals, status, undated, aggregated_label)
-    make_pdf(output_path, payslip, rows_pdf, totals, status, undated, aggregated_label)
-    print(f"\nAudit PDF saved to: {output_path}")
+        print_console(payslip, rows_console, totals, status, undated, aggregated_label)
 
-    cleanup_sidecars(generated_sidecars)
+        with tempfile.NamedTemporaryFile(prefix="payslip_audit_", suffix=".pdf", delete=False) as handle:
+            temp_report_path = Path(handle.name).resolve()
+
+        make_pdf(temp_report_path, payslip, rows_pdf, totals, status, undated, aggregated_label)
+
+        next_number = scan_next_sequence(archive_dir)
+        final_report, final_payslip = build_final_archive_paths(archive_dir, next_number)
+        finalize_archive(temp_report_path, payslip_path, final_report, final_payslip)
+
+        print(f"\nAudit PDF archived to: {final_report}")
+        print(f"Payslip PDF archived to: {final_payslip}")
+    finally:
+        cleanup_sidecars(generated_sidecars)
+        if temp_report_path is not None and temp_report_path.exists():
+            temp_report_path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

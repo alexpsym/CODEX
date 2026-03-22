@@ -25,9 +25,8 @@ This folder contains a lightweight FastAPI app (`render/master_service.py`) that
 1. Push this repository to GitHub or GitLab so Render can import it.
 2. In the Render dashboard, create a **Web Service** and point it to your repo.
 3. Use these settings (Docker deploy recommended):
-   - **Runtime**: Docker. Render will build from the root `Dockerfile`, which installs `tesseract-ocr`, `libtesseract-dev`, and `ffmpeg` so the payslip OCR flow and the YouTube mp3 conversion both work. Leave the Build/Start command fields blank so Render honors the Dockerfile (it already runs `uvicorn render.master_service:app --host 0.0.0.0 --port ${PORT:-10000}`).
+   - **Runtime**: Docker. Render will build from the root `Dockerfile`, which installs `ffmpeg` for the YouTube mp3 conversion flow. Leave the Build/Start command fields blank so Render honors the Dockerfile (it already runs `uvicorn render.master_service:app --host 0.0.0.0 --port ${PORT:-10000}`).
    - **Instance type**: Starter ($7/mo). This keeps one always-on worker.
-   - **Binary checks**: After a deploy, open the Render shell and run `which tesseract` to confirm it is on `PATH`.
 4. Add environment variables in the Render dashboard (or create an **Environment Group** and attach it). These are injected into every managed script, so your TradingView credentials, Bybit keys, and OANDA keys are available without committing them to Git.
 5. Click **Create Web Service**. Once live, Render will expose a public URL like `https://your-app.onrender.com`. Point your TradingView webhooks to `https://your-app.onrender.com/webhook/<script-name>`.
 
@@ -46,7 +45,6 @@ Place these in your Render dashboard or a local `.env` file at the repo root. Ad
 - Clicking **Stop** sends a graceful terminate signal, escalating to a kill if the script does not exit within 10 seconds.
 - The webhook endpoint records the payload to the script log and starts the script if it is not already running.
   
-For the payslip audit flow, Tesseract must be present at build time. The Dockerfile installs it alongside `ffmpeg`; after deployment you can confirm readiness by running `which tesseract` in the Render shell (the UI error about missing OCR is raised before uploads run if the binary is absent).
 
 ## 5) TradingView webhook routing
 Use the script path shown in the UI (for example `bybit_monitor/bybit_altcoin_monitor.py`) as the `<script-name>` in your TradingView webhook URL:
