@@ -115,7 +115,7 @@
 
     const downloadLog = () => {
         const header = [
-            'Render Master Control Log Export',
+            'RenderWebService Log Export',
             `Script: ${scriptName}`,
             `Exported: ${new Date().toISOString()}`,
             `Total lines: ${cachedLines.length}`,
