@@ -38,11 +38,6 @@ from starlette.responses import RedirectResponse
 
 from bybit_credentials import resolve_bybit_credentials_for
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
-from payslip_audit.tesseract import (
-    TESSERACT_MISSING_MESSAGE,
-    _resolve_tesseract_binary,
-    is_tesseract_available,
-)
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 
@@ -96,6 +91,7 @@ HIDDEN_SCRIPTS = {
     "swap-rates-oanda",
     "swap_rates",
     "swap-rates",
+    "payslip_audit",
 }
 RETIRED_SCRIPT_NAMES = {
     "oanda_swap_rates",
@@ -108,12 +104,10 @@ RETIRED_SCRIPT_NAMES = {
     "swap-rates-oanda",
     "swap_rates",
     "swap-rates",
+    "payslip_audit",
 }
 
 MAX_LOG_LINES = 400
-PAYSLIP_REPORT_NAME = "audit_report.pdf"
-PAYSLIP_UPLOAD_ROOT = BASE_DIR / "render" / "uploads" / "payslip"
-PAYSLIP_ALLOWED_IMAGES = {".jpg", ".jpeg", ".png"}
 OANDA_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "oanda-history"
 BYBIT_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "bybit-history"
 COINSPOT_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "coinspot-history"
@@ -217,7 +211,6 @@ ENTRY_OVERRIDES = {
     "oanda-calculator-clone": ["oanda_calculator_web.py", "oanda_api.py"],
     "oanda_monitor": ["oanda_forex_monitor.py"],
     "oanda_history-clone": ["oanda_history.py"],
-    "payslip_audit": ["payslip_timesheet_audit.py"],
 }
 
 LOG_FILE_OVERRIDES: Dict[str, Path] = {
@@ -226,7 +219,6 @@ LOG_FILE_OVERRIDES: Dict[str, Path] = {
 
 BYBIT_SETTINGS_PATH = bybit_monitor.SETTINGS_PATH
 
-PAYSLIP_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 OANDA_HISTORY_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
 BYBIT_HISTORY_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
 COINSPOT_HISTORY_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -2545,8 +2537,6 @@ def categorize_script(script_path: Path) -> str:
     filename = script_path.name.lower()
     full = f"{folder}/{filename}"
 
-    other_explicit = {"payslip_audit"}
-
     if any(keyword in folder for keyword in ("fx", "oanda", "forex")):
         return "Forex"
 
@@ -2558,9 +2548,6 @@ def categorize_script(script_path: Path) -> str:
     )
     if any(keyword in folder or keyword in filename for keyword in crypto_keywords):
         return "Crypto"
-
-    if folder in other_explicit:
-        return "Other"
 
     return "Other"
 
@@ -2605,7 +2592,6 @@ FRIENDLY_SCRIPT_LABELS: Dict[str, str] = {
     "oanda-calculator-clone": "Calculator",
     "oanda_history-clone": "History",
     "oanda_monitor": "Monitor",
-    "payslip_audit": "Payslip Audit",
     "pinescripts": "Pine Scripts",
     "trading-journal": "Trading Journal",
 }
@@ -2659,58 +2645,11 @@ def friendly_script_label(name: str) -> str:
     return " ".join(parts)
 
 
-def _payslip_session_dir(session_id: str) -> Path:
-    return PAYSLIP_UPLOAD_ROOT / session_id
-
 
 def _allocate_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
-
-
-TESSERACT_MISSING_DETAIL = TESSERACT_MISSING_MESSAGE
-
-
-def ensure_tesseract_available() -> None:
-    """Raise an HTTP 500 with clear guidance when Tesseract is absent."""
-
-    if not is_tesseract_available():
-        raise HTTPException(status_code=500, detail=TESSERACT_MISSING_DETAIL)
-
-
-async def _execute_payslip_audit(payslip: Path, timesheets: List[Path], output_path: Path) -> str:
-    script_path = BASE_DIR / "payslip_audit" / "payslip_timesheet_audit.py"
-
-    ensure_tesseract_available()
-
-    command = [
-        os.getenv("PYTHON", "python"),
-        str(script_path),
-        "--payslip",
-        str(payslip),
-        "--timesheet",
-    ] + [str(path) for path in timesheets] + ["--output", str(output_path)]
-
-    process = await asyncio.create_subprocess_exec(
-        *command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        cwd=str(script_path.parent),
-    )
-    stdout, _ = await process.communicate()
-    log_output = stdout.decode("utf-8", errors="replace") if stdout else ""
-
-    if process.returncode != 0:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Audit failed with exit code {process.returncode}.\n{log_output}",
-        )
-
-    if not output_path.exists():
-        raise HTTPException(status_code=500, detail="Audit completed but no report was produced.")
-
-    return log_output
 
 
 def discover_scripts() -> List[ManagedScript]:
@@ -3880,62 +3819,6 @@ SCRIPT_PAGE_TEMPLATE = """<!DOCTYPE html>
         <iframe id=\"app-frame\" title=\"Script UI\"></iframe>
     </div>
     <script src=\"/static/script_page.js\"></script>
-</body>
-</html>"""
-
-PAYSLIP_AUDIT_PAGE_TEMPLATE = """<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Payslip Audit</title>
-    <style>
-        :root { color-scheme: light dark; }
-        body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
-        h1 { margin: 0 0 0.5rem; }
-        .meta { color: #94a3b8; margin: 0.5rem 0 1rem; line-height: 1.5; }
-        .nav-bar { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
-        .secondary { padding: 0.55rem 0.9rem; border-radius: 10px; border: none; cursor: pointer; font-weight: 800; background: #1f2937; color: #cbd5e1; text-decoration: none; display: inline-block; }
-        .start { padding: 0.55rem 0.9rem; border-radius: 10px; border: none; cursor: pointer; font-weight: 900; background: #22c55e; color: #052e12; }
-        .panel { background: #111827; border: 1px solid #1f2937; border-radius: 16px; padding: 1.25rem; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35); max-width: 980px; }
-        #drop-zone { margin-top: 0.75rem; border: 2px dashed #334155; border-radius: 14px; padding: 1.5rem; text-align: center; background: #0a0f1b; }
-        #drop-zone.dragover { border-color: #60a5fa; background: #0b1a33; }
-        .actions { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-top: 1rem; }
-        #file-list { margin: 0.75rem 0 0; padding-left: 1.1rem; color: #cbd5e1; }
-        #log { margin-top: 1rem; background: #0a0f1b; border: 1px solid #1f2937; border-radius: 12px; padding: 0.9rem; white-space: pre-wrap; overflow-wrap: anywhere; min-height: 160px; }
-    </style>
-</head>
-<body>
-    <div class="nav-bar">
-        <a class="secondary" href="/">Home</a>
-        <a class="secondary" href="/scripts/view/payslip_audit">Reload</a>
-    </div>
-
-    <div class="panel">
-        <h1>Payslip Audit</h1>
-        <p class="meta">Upload exactly 1 payslip PDF and 1+ timesheet screenshots (JPG/PNG). The report downloads automatically after processing.</p>
-
-        <div id="drop-zone">Drop files here</div>
-        <input id="file-input" type="file" multiple accept=".pdf,image/*" style="display:none" />
-
-        <div class="actions">
-            <button class="secondary" id="pick-btn" type="button">Pick files</button>
-            <button class="secondary" id="clear-btn" type="button">Clear</button>
-            <button class="start" id="upload-btn" type="button">Upload & Start Audit</button>
-        </div>
-
-        <p class="meta" id="status"></p>
-        <ul id="file-list"></ul>
-        <pre id="log">Awaiting upload...</pre>
-    </div>
-
-    <script>
-        window.PAYSLIP_AUDIT_CONFIG = {
-            uploadEndpoint: "/api/payslip-audit/run",
-            reportBase: "/api/payslip-audit/report/",
-        };
-    </script>
-    <script src="/static/payslip_audit.js"></script>
 </body>
 </html>"""
 
@@ -7262,21 +7145,12 @@ async def script_view_page(script_name: str) -> str:
             raise HTTPException(status_code=404, detail="Script not found") from exc
         raise
 
-    if script.name == "payslip_audit":
-        return PAYSLIP_AUDIT_PAGE_TEMPLATE
-
     return (
         SCRIPT_PAGE_TEMPLATE.replace("{script_name}", html.escape(script.name))
         .replace("{has_ui}", "true" if script.name in WEB_APPS else "false")
         .replace("{log_url}", f"/logs/view/{_encoded_script_name(script.name)}")
     )
 
-
-@app.get("/payslip-audit")
-@app.get("/payslip-audit/")
-async def legacy_payslip_audit(request: Request) -> Response:
-    suffix = f"?{request.url.query}" if request.url.query else ""
-    return RedirectResponse(url=f"/scripts/view/payslip_audit{suffix}", status_code=307)
 
 
 @app.get("/bybit-history")
@@ -9251,16 +9125,6 @@ async def close_open_order(item: Dict[str, Any] = Body(...)) -> JSONResponse:
 
 @app.post("/scripts/{script_name:path}/start")
 async def start_script(script_name: str) -> JSONResponse:
-    # Never launch the payslip audit script directly; force users to the upload flow
-    # so the required files can be provided first.
-    if script_name == "payslip_audit":
-        return JSONResponse(
-            {
-                "redirect": "/payslip-audit",
-                "detail": "Upload your payslip PDF and timesheets to begin the audit.",
-            }
-        )
-
     script = script_manager.get(script_name)
 
     if script.is_running:
@@ -9405,52 +9269,6 @@ async def read_script_results(script_name: str, result_path: str) -> FileRespons
     if not str(resolved).startswith(str(base_resolved)):
         raise HTTPException(status_code=403, detail="Access denied.")
     return FileResponse(resolved)
-
-
-@app.post("/api/payslip-audit/run")
-async def upload_and_run_payslip_audit(files: List[UploadFile] = File(...)) -> JSONResponse:
-    if not files:
-        raise HTTPException(status_code=400, detail="Please upload a payslip PDF and at least one timesheet image.")
-
-    ensure_tesseract_available()
-
-    session_id = uuid4().hex
-    session_dir = _payslip_session_dir(session_id)
-    session_dir.mkdir(parents=True, exist_ok=True)
-
-    saved_files: List[Path] = []
-    for upload in files:
-        filename = Path(upload.filename or "upload").name
-        destination = session_dir / filename
-        destination.write_bytes(await upload.read())
-        saved_files.append(destination)
-
-    payslips = [path for path in saved_files if path.suffix.lower() == ".pdf"]
-    timesheets = [path for path in saved_files if path.suffix.lower() in PAYSLIP_ALLOWED_IMAGES]
-
-    if not payslips:
-        raise HTTPException(status_code=400, detail="A payslip PDF is required.")
-    if not timesheets:
-        raise HTTPException(status_code=400, detail="At least one timesheet image (JPG/PNG) is required.")
-
-    output_path = session_dir / PAYSLIP_REPORT_NAME
-    log_output = await _execute_payslip_audit(payslips[0], sorted(timesheets), output_path)
-
-    return JSONResponse(
-        {
-            "session_id": session_id,
-            "download_url": f"/api/payslip-audit/report/{session_id}",
-            "log": log_output,
-        }
-    )
-
-
-@app.get("/api/payslip-audit/report/{session_id}")
-async def download_payslip_report(session_id: str) -> FileResponse:
-    report_path = _payslip_session_dir(session_id) / PAYSLIP_REPORT_NAME
-    if not report_path.exists():
-        raise HTTPException(status_code=404, detail="Report not found. Please rerun the audit.")
-    return FileResponse(report_path, filename=PAYSLIP_REPORT_NAME, media_type="application/pdf")
 
 
 @app.post("/api/oanda-history/export")
@@ -9698,15 +9516,6 @@ async def webhook(script_name: str, request: Request) -> JSONResponse:
         {"script_name": script_name, "path": "/webhook/{script_name}"},
     )
 
-    if script.name == "payslip_audit":
-        script.add_log("Webhook ignored: upload flow required via /payslip-audit")
-        return JSONResponse(
-            {
-                "status": "payslip_audit requires upload flow",
-                "redirect": "/payslip-audit",
-            }
-        )
-
     if script.name not in {"cryptocalculator-clone", "oanda-calculator-clone"}:
         return JSONResponse({"status": "ok", "script": script_name})
 
@@ -9831,20 +9640,6 @@ async def default_webhook(request: Request) -> JSONResponse:
 @app.get("/health")
 async def healthcheck() -> PlainTextResponse:
     return PlainTextResponse("ok")
-
-
-@app.get("/debug/tesseract")
-def debug_tesseract() -> JSONResponse:
-    import shutil
-
-    return JSONResponse(
-        {
-            "PATH": os.environ.get("PATH"),
-            "which_tesseract": shutil.which("tesseract"),
-            "resolved": _resolve_tesseract_binary(),
-            "available": is_tesseract_available(),
-        }
-    )
 
 
 @app.get("/favicon.ico")
