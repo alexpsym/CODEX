@@ -37,10 +37,13 @@ Place these in your Render dashboard or a local `.env` file at the repo root. Ad
 - `OANDA_API_KEY`, `OANDA_ACCOUNT_ID`, and `OANDA_BASE_URL` for OANDA strategies.
 - Any Telegram/Discord/API tokens needed by alerting code.
 - `PORT` (Render sets this automatically; only override for local testing).
+- `AUTOSTART_SCRIPTS` to override which scripts boot automatically. By default, the service autostarts `bybit_monitor` when this variable is unset; set it to a comma-separated list such as `oanda_monitor`, `ALL`, or `*` to change startup behavior, or set it to a blank value to disable autostart entirely.
+- `AUTOSTART_EXCLUDE` to skip specific scripts from the resolved autostart list without changing the main `AUTOSTART_SCRIPTS` value.
 - Any other variables referenced by the individual scripts. Because the manager runs each script in its own subprocess with the shared environment, they will read the same `.env`/dashboard values.
 
 ## 4) How the master service works
 - On startup it scans the repository for `*.py` files (skipping `mt5-clone`, virtualenv folders, `LEDGER-clone`, and the `render` folder itself) and exposes each remaining entrypoint in the UI.
+- If `AUTOSTART_SCRIPTS` is unset, the service defaults to autostarting `bybit_monitor`. Explicit `AUTOSTART_SCRIPTS` values override that default exactly, and `AUTOSTART_EXCLUDE` still removes matching scripts from the final startup queue.
 - Clicking **Start** launches the chosen script as a background subprocess with unbuffered stdout; logs stream into the UI. Multiple scripts can run concurrently.
 - Clicking **Stop** sends a graceful terminate signal, escalating to a kill if the script does not exit within 10 seconds.
 - The webhook endpoint records the payload to the script log and starts the script if it is not already running.
