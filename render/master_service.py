@@ -2896,10 +2896,12 @@ app = FastAPI(title="Render Master Script", version="1.0")
 OANDA_HISTORY_JOBS: Dict[str, OandaHistoryJob] = {}
 BYBIT_HISTORY_JOBS: Dict[str, BybitHistoryJob] = {}
 COINSPOT_HISTORY_JOBS: Dict[str, CoinspotHistoryJob] = {}
+AUTOSTART_LOGGER = logging.getLogger("uvicorn.error")
+DEFAULT_AUTOSTART_SCRIPTS = "bybit_monitor"
 
 _AUTOSTART_ENV = os.getenv("AUTOSTART_SCRIPTS")
 if _AUTOSTART_ENV is None:
-    _AUTOSTART_ENV = ""
+    _AUTOSTART_ENV = DEFAULT_AUTOSTART_SCRIPTS
 
 # AUTOSTART_SCRIPTS supports:
 #   - comma-separated script names
@@ -2948,7 +2950,12 @@ async def _autostart_scripts() -> None:
         asyncio.create_task(_poll_bybit_demo_closed_pnl())
     if os.getenv("ENABLE_OANDA_FILL_POLL", "0") == "1":
         asyncio.create_task(_start_oanda_fill_poll_after_delay())
-    for name in _compute_autostart_scripts():
+    autostart_targets = _compute_autostart_scripts()
+    AUTOSTART_LOGGER.info(
+        "Resolved autostart scripts: %s",
+        ", ".join(autostart_targets) if autostart_targets else "(none)",
+    )
+    for name in autostart_targets:
         try:
             script = script_manager.get(name)
         except HTTPException:
