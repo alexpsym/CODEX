@@ -144,6 +144,8 @@ BYBIT_DEMO_WORKBOOK_COLUMNS = [
     "size_quantity",
     "entry_price",
     "closing_price",
+    "stop_loss",
+    "take_profit",
     "commission",
     "net_profit",
     "balance_after_trade",
@@ -6905,10 +6907,49 @@ async def _fetch_bybit_transaction_log(
     )
 
 
+async def _fetch_bybit_order_history(
+    *,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+    category: str,
+    start_time: int,
+    end_time: int,
+    cursor: Optional[str] = None,
+    settle_coin: Optional[str] = None,
+) -> Dict[str, object]:
+    params = {
+        "category": category,
+        "startTime": str(start_time),
+        "endTime": str(end_time),
+        "limit": "50",
+    }
+    if cursor:
+        params["cursor"] = cursor
+    if settle_coin:
+        params["settleCoin"] = settle_coin
+    return await _bybit_signed_get(
+        base_url=base_url,
+        api_key=api_key,
+        api_secret=api_secret,
+        path="/v5/order/history",
+        params=params,
+    )
+
+
+def _parse_bybit_price_level(value: object) -> Optional[float]:
+    parsed = _to_float(value)
+    if parsed is None or parsed <= 0:
+        return None
+    return parsed
+
+
 def _normalize_bybit_demo_closed_pnl_row(
     entry: Dict[str, object],
     *,
     balance_after_trade: Optional[float],
+    stop_loss: Optional[float] = None,
+    take_profit: Optional[float] = None,
 ) -> Optional[Dict[str, object]]:
     symbol = str(entry.get("symbol") or "").strip().upper()
     order_id = str(entry.get("orderId") or "").strip()
@@ -6934,6 +6975,8 @@ def _normalize_bybit_demo_closed_pnl_row(
         "exit_price": _to_float(entry.get("avgExitPrice")),
         "qty": _to_float(entry.get("closedSize")),
         "qty_unit": "native",
+        "stop_loss": stop_loss,
+        "take_profit": take_profit,
         "commission": fees,
         "commission_currency": "USDT",
         "fees": fees,
@@ -6956,6 +6999,8 @@ def _bybit_demo_workbook_row(row: Dict[str, object]) -> Dict[str, object]:
         "size_quantity": row.get("qty"),
         "entry_price": row.get("entry_price"),
         "closing_price": row.get("exit_price"),
+        "stop_loss": row.get("stop_loss"),
+        "take_profit": row.get("take_profit"),
         "commission": row.get("commission"),
         "net_profit": row.get("realized_pnl"),
         "balance_after_trade": row.get("balance_after_trade"),
@@ -6981,23 +7026,31 @@ def _append_bybit_demo_rows_to_workbook(active_folder: str, rows: List[Dict[str,
         if existing is None or existing.empty:
             existing = pd.DataFrame(columns=BYBIT_DEMO_WORKBOOK_COLUMNS)
         existing = existing.reindex(columns=BYBIT_DEMO_WORKBOOK_COLUMNS)
-        known = {str(v).strip() for v in existing.get("order_id", pd.Series(dtype=str)).tolist() if str(v).strip()}
-        to_add = []
+
+        changed = 0
+        order_ids = existing.get("order_id", pd.Series(dtype=str)).fillna("").astype(str).str.strip()
+        order_index = {order_id: idx for idx, order_id in order_ids.items() if order_id}
         for row in rows:
             workbook_row = _bybit_demo_workbook_row(row)
             order_id = str(workbook_row.get("order_id") or "").strip()
-            if not order_id or order_id in known:
+            if not order_id:
                 continue
-            known.add(order_id)
-            to_add.append(workbook_row)
-        if not to_add:
+            if order_id in order_index:
+                idx = order_index[order_id]
+                for column, value in workbook_row.items():
+                    existing.at[idx, column] = value
+                changed += 1
+                continue
+            existing = pd.concat([existing, pd.DataFrame([workbook_row], columns=BYBIT_DEMO_WORKBOOK_COLUMNS)], ignore_index=True)
+            order_index[order_id] = len(existing) - 1
+            changed += 1
+        if not changed:
             return 0
-        updated = pd.concat([existing, pd.DataFrame(to_add)], ignore_index=True)
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-            updated.to_excel(writer, sheet_name=BYBIT_DEMO_WORKBOOK_SHEET, index=False)
+            existing.to_excel(writer, sheet_name=BYBIT_DEMO_WORKBOOK_SHEET, index=False)
         upload_bytes(workbook_path, buffer.getvalue())
-        return len(to_add)
+        return changed
 
 
 async def _sync_bybit_demo_closed_pnl_window(
@@ -7010,6 +7063,31 @@ async def _sync_bybit_demo_closed_pnl_window(
 ) -> int:
     active_folder, _entries = await asyncio.to_thread(_resolve_trading_journal_dropbox_folder)
     await asyncio.to_thread(_ensure_bybit_demo_dropbox_files, active_folder)
+
+    orders_by_id: Dict[str, Dict[str, object]] = {}
+    for settle_coin in ("USDT", "USDC"):
+        order_cursor: Optional[str] = None
+        while True:
+            order_payload = await _fetch_bybit_order_history(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                category="linear",
+                start_time=start_time,
+                end_time=end_time,
+                cursor=order_cursor,
+                settle_coin=settle_coin,
+            )
+            order_result = order_payload.get("result") or {}
+            for item in order_result.get("list") or []:
+                if not isinstance(item, dict):
+                    continue
+                order_id = str(item.get("orderId") or "").strip()
+                if order_id and order_id not in orders_by_id:
+                    orders_by_id[order_id] = item
+            order_cursor = str(order_result.get("nextPageCursor") or "").strip() or None
+            if not order_cursor:
+                break
 
     tx_by_order: Dict[str, Dict[str, object]] = {}
     tx_cursor: Optional[str] = None
@@ -7053,11 +7131,15 @@ async def _sync_bybit_demo_closed_pnl_window(
             if updated_ms <= start_time:
                 continue
             max_seen = max(max_seen, updated_ms)
-            tx_match = tx_by_order.get(str(entry.get("orderId") or "").strip(), {})
+            order_id = str(entry.get("orderId") or "").strip()
+            tx_match = tx_by_order.get(order_id, {})
+            order_match = orders_by_id.get(order_id, {})
             balance_after_trade = _to_float(tx_match.get("cashBalance"))
             row = _normalize_bybit_demo_closed_pnl_row(
                 entry,
                 balance_after_trade=balance_after_trade,
+                stop_loss=_parse_bybit_price_level(order_match.get("stopLoss")),
+                take_profit=_parse_bybit_price_level(order_match.get("takeProfit")),
             )
             if row:
                 rows.append(row)

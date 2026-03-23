@@ -39,6 +39,11 @@
     const n = Number(v);
     return Number.isFinite(n) ? n.toFixed(dp) : '—';
   };
+  const fmtNullableNum = (v, dp = 4) => {
+    if (v === null || v === undefined || v === '') return '—';
+    const n = Number(v);
+    return Number.isFinite(n) ? n.toFixed(dp) : '—';
+  };
   const fmtTime = (v) => {
     if (!v) return '—';
     const n = Number(v);
@@ -316,8 +321,8 @@
           item.side,
           fmtTime(item.opened_at),
           fmtTime(item.closed_at),
-          fmtNum(item.stop_loss, 6),
-          fmtNum(item.take_profit, 6),
+          fmtNullableNum(item.stop_loss, 6),
+          fmtNullableNum(item.take_profit, 6),
           fmtNum(item.fees, 2),
         ];
 
