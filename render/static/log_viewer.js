@@ -115,7 +115,7 @@
 
     const downloadLog = () => {
         const header = [
-            'RenderWebService Log Export',
+            'TradingTools Log Export',
             `Script: ${scriptName}`,
             `Exported: ${new Date().toISOString()}`,
             `Total lines: ${cachedLines.length}`,
