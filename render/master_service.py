@@ -1147,13 +1147,32 @@ def _upsert_trading_journal_rows(rows: Iterable[Dict[str, object]]) -> int:
         row["id"] = row_id
         row["updated_at"] = datetime.now(timezone.utc).isoformat()
         if row_id in by_id:
-            by_id[row_id].update(row)
+            by_id[row_id] = _merge_trading_journal_row(by_id[row_id], row)
         else:
             by_id[row_id] = row
         changed += 1
     if changed:
         _save_trading_journal(list(by_id.values()))
     return changed
+
+
+def _merge_trading_journal_row(
+    existing: Dict[str, object], incoming: Dict[str, object]
+) -> Dict[str, object]:
+    merged = dict(existing)
+    preserve_when_incoming_null = {
+        "stop_loss",
+        "take_profit",
+        "open_time",
+        "entry_price",
+        "balance_after_trade",
+    }
+    for key, value in incoming.items():
+        if key in preserve_when_incoming_null:
+            if value is None and merged.get(key) is not None:
+                continue
+        merged[key] = value
+    return merged
 
 
 def _load_trading_journal_state() -> Dict[str, object]:
@@ -2892,15 +2911,15 @@ class ScriptManager:
 
 
 script_manager = ScriptManager(discover_scripts())
-app = FastAPI(title="Render Master Script", version="1.0")
+app = FastAPI(title="TradingTools", version="1.0")
 OANDA_HISTORY_JOBS: Dict[str, OandaHistoryJob] = {}
 BYBIT_HISTORY_JOBS: Dict[str, BybitHistoryJob] = {}
 COINSPOT_HISTORY_JOBS: Dict[str, CoinspotHistoryJob] = {}
 AUTOSTART_LOGGER = logging.getLogger("uvicorn.error")
-DEFAULT_AUTOSTART_SCRIPTS = "bybit_monitor"
+DEFAULT_AUTOSTART_SCRIPTS = "bybit_monitor,fxweekend-clone"
 
 _AUTOSTART_ENV = os.getenv("AUTOSTART_SCRIPTS")
-if _AUTOSTART_ENV is None:
+if _AUTOSTART_ENV is None or not _AUTOSTART_ENV.strip():
     _AUTOSTART_ENV = DEFAULT_AUTOSTART_SCRIPTS
 
 # AUTOSTART_SCRIPTS supports:
@@ -2916,6 +2935,34 @@ AUTOSTART_EXCLUDE = {
 AUTOSTART_SCRIPTS_RAW = [
     name.strip() for name in _AUTOSTART_ENV.split(",") if name.strip()
 ]
+
+FXWEEKEND_SETTINGS_PATH = BASE_DIR / "fxweekend-clone" / "settings.json"
+FXWEEKEND_DEFAULT_SETTINGS: Dict[str, object] = {
+    "enabled": True,
+    "trigger_weekday": 5,
+    "cutoff_hour_dst": 5,
+    "cutoff_hour_standard": 6,
+    "check_interval_seconds": 60,
+    "close_method": "positions",
+    "dry_run": False,
+    "instrument_allowlist": [],
+}
+
+
+def _force_fxweekend_enabled_on_startup() -> None:
+    payload = dict(FXWEEKEND_DEFAULT_SETTINGS)
+    try:
+        existing = _load_json_file(FXWEEKEND_SETTINGS_PATH, {})
+        if isinstance(existing, dict):
+            payload.update(existing)
+    except Exception:
+        pass
+    payload["enabled"] = True
+    FXWEEKEND_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    FXWEEKEND_SETTINGS_PATH.write_text(
+        json.dumps(payload, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
 
 
 def _compute_autostart_scripts() -> List[str]:
@@ -2950,6 +2997,7 @@ async def _autostart_scripts() -> None:
         asyncio.create_task(_poll_bybit_demo_closed_pnl())
     if os.getenv("ENABLE_OANDA_FILL_POLL", "0") == "1":
         asyncio.create_task(_start_oanda_fill_poll_after_delay())
+    _force_fxweekend_enabled_on_startup()
     autostart_targets = _compute_autostart_scripts()
     AUTOSTART_LOGGER.info(
         "Resolved autostart scripts: %s",
@@ -3345,7 +3393,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <head>
     <meta charset=\"UTF-8\" />
     <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-    <title>RenderWebService</title>
+    <title>TradingTools</title>
     <style>
         :root { color-scheme: light dark; }
         body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
@@ -6173,6 +6221,14 @@ async def _place_bybit_order(
         raise ValueError(f"Bybit order failed: {data.get('retMsg')}")
     order_result = data.get("result", {}) or {}
     order_id = order_result.get("orderId")
+    if account == "demo" and category == "linear":
+        _cache_bybit_demo_tpsl_request(
+            order_link_id=str(body.get("orderLinkId") or ""),
+            symbol=symbol,
+            side=side,
+            take_profit=_parse_bybit_price_level(body.get("takeProfit")),
+            stop_loss=_parse_bybit_price_level(body.get("stopLoss")),
+        )
     pending_id = str(payload.get("pending_webhook_id") or "").strip()
     if pending_id:
         # Once the webhook has fired, remove it immediately so it doesn't linger
@@ -6924,6 +6980,7 @@ async def _fetch_bybit_order_history(
     end_time: int,
     cursor: Optional[str] = None,
     settle_coin: Optional[str] = None,
+    order_filter: Optional[str] = None,
 ) -> Dict[str, object]:
     params = {
         "category": category,
@@ -6935,6 +6992,8 @@ async def _fetch_bybit_order_history(
         params["cursor"] = cursor
     if settle_coin:
         params["settleCoin"] = settle_coin
+    if order_filter:
+        params["orderFilter"] = order_filter
     return await _bybit_signed_get(
         base_url=base_url,
         api_key=api_key,
@@ -6951,12 +7010,97 @@ def _parse_bybit_price_level(value: object) -> Optional[float]:
     return parsed
 
 
+def _load_bybit_demo_tpsl_cache() -> Dict[str, Dict[str, object]]:
+    state = _load_trading_journal_state()
+    cache = state.get("bybit_demo_tpsl_cache")
+    if not isinstance(cache, dict):
+        return {}
+    normalized: Dict[str, Dict[str, object]] = {}
+    for key, value in cache.items():
+        cache_key = str(key or "").strip()
+        if cache_key and isinstance(value, dict):
+            normalized[cache_key] = dict(value)
+    return normalized
+
+
+def _save_bybit_demo_tpsl_cache(cache: Dict[str, Dict[str, object]]) -> None:
+    state = _load_trading_journal_state()
+    state["bybit_demo_tpsl_cache"] = cache
+    _save_trading_journal_state(state)
+
+
+def _cache_bybit_demo_tpsl_request(
+    *,
+    order_link_id: Optional[str],
+    symbol: str,
+    side: str,
+    take_profit: Optional[float],
+    stop_loss: Optional[float],
+) -> None:
+    cache_key = str(order_link_id or "").strip()
+    if not cache_key:
+        return
+    cache = _load_bybit_demo_tpsl_cache()
+    cache[cache_key] = {
+        "symbol": str(symbol or "").upper(),
+        "side": str(side or ""),
+        "take_profit": take_profit,
+        "stop_loss": stop_loss,
+        "updated_at": _utc_now_iso(),
+    }
+    if len(cache) > 400:
+        sorted_items = sorted(
+            cache.items(),
+            key=lambda item: str((item[1] or {}).get("updated_at") or ""),
+            reverse=True,
+        )
+        cache = dict(sorted_items[:400])
+    _save_bybit_demo_tpsl_cache(cache)
+
+
+def _resolve_bybit_demo_tpsl(
+    *,
+    order_match: Dict[str, object],
+    linked_orders: List[Dict[str, object]],
+    cache_entry: Optional[Dict[str, object]],
+) -> Tuple[Optional[float], Optional[float], str]:
+    stop_loss = _parse_bybit_price_level(order_match.get("stopLoss"))
+    take_profit = _parse_bybit_price_level(order_match.get("takeProfit"))
+    if stop_loss is not None or take_profit is not None:
+        return stop_loss, take_profit, "parent_order"
+
+    stop_loss = None
+    take_profit = None
+    for linked in linked_orders:
+        trigger_price = _parse_bybit_price_level(linked.get("triggerPrice"))
+        stop_order_type = str(linked.get("stopOrderType") or "").strip().lower()
+        linked_sl = _parse_bybit_price_level(linked.get("stopLoss"))
+        linked_tp = _parse_bybit_price_level(linked.get("takeProfit"))
+        if stop_order_type == "stoploss":
+            stop_loss = linked_sl or trigger_price or stop_loss
+        elif stop_order_type == "takeprofit":
+            take_profit = linked_tp or trigger_price or take_profit
+        stop_loss = stop_loss or linked_sl
+        take_profit = take_profit or linked_tp
+    if stop_loss is not None or take_profit is not None:
+        return stop_loss, take_profit, "linked_stop_order"
+
+    if isinstance(cache_entry, dict):
+        stop_loss = _parse_bybit_price_level(cache_entry.get("stop_loss"))
+        take_profit = _parse_bybit_price_level(cache_entry.get("take_profit"))
+        if stop_loss is not None or take_profit is not None:
+            return stop_loss, take_profit, "cached_request"
+
+    return None, None, "unresolved"
+
+
 def _normalize_bybit_demo_closed_pnl_row(
     entry: Dict[str, object],
     *,
     balance_after_trade: Optional[float],
     stop_loss: Optional[float] = None,
     take_profit: Optional[float] = None,
+    raw_refs_extra: Optional[Dict[str, object]] = None,
 ) -> Optional[Dict[str, object]]:
     symbol = str(entry.get("symbol") or "").strip().upper()
     order_id = str(entry.get("orderId") or "").strip()
@@ -6967,6 +7111,9 @@ def _normalize_bybit_demo_closed_pnl_row(
     fees = open_fee + close_fee
     fill_count = int(_to_float(entry.get("fillCount")) or 0)
     notes = "" if balance_after_trade is not None else "Balance unavailable from transaction log"
+    raw_refs = {"orderId": order_id, "fillCount": fill_count, "source": "closed_pnl"}
+    if isinstance(raw_refs_extra, dict):
+        raw_refs.update(raw_refs_extra)
     return {
         "id": f"bybit:demo:closedpnl:{symbol}:{order_id}",
         "source": "bybit",
@@ -6992,7 +7139,7 @@ def _normalize_bybit_demo_closed_pnl_row(
         "realized_pnl_currency": "USDT",
         "balance_after_trade": balance_after_trade,
         "notes": notes,
-        "raw_refs": {"orderId": order_id, "fillCount": fill_count, "source": "closed_pnl"},
+        "raw_refs": raw_refs,
     }
 
 
@@ -7072,29 +7219,39 @@ async def _sync_bybit_demo_closed_pnl_window(
     await asyncio.to_thread(_ensure_bybit_demo_dropbox_files, active_folder)
 
     orders_by_id: Dict[str, Dict[str, object]] = {}
+    orders_by_link_id: Dict[str, Dict[str, object]] = {}
+    orders_by_parent_link_id: Dict[str, List[Dict[str, object]]] = defaultdict(list)
     for settle_coin in ("USDT", "USDC"):
-        order_cursor: Optional[str] = None
-        while True:
-            order_payload = await _fetch_bybit_order_history(
-                base_url=base_url,
-                api_key=api_key,
-                api_secret=api_secret,
-                category="linear",
-                start_time=start_time,
-                end_time=end_time,
-                cursor=order_cursor,
-                settle_coin=settle_coin,
-            )
-            order_result = order_payload.get("result") or {}
-            for item in order_result.get("list") or []:
-                if not isinstance(item, dict):
-                    continue
-                order_id = str(item.get("orderId") or "").strip()
-                if order_id and order_id not in orders_by_id:
-                    orders_by_id[order_id] = item
-            order_cursor = str(order_result.get("nextPageCursor") or "").strip() or None
-            if not order_cursor:
-                break
+        for order_filter in (None, "StopOrder"):
+            order_cursor: Optional[str] = None
+            while True:
+                order_payload = await _fetch_bybit_order_history(
+                    base_url=base_url,
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    category="linear",
+                    start_time=start_time,
+                    end_time=end_time,
+                    cursor=order_cursor,
+                    settle_coin=settle_coin,
+                    order_filter=order_filter,
+                )
+                order_result = order_payload.get("result") or {}
+                for item in order_result.get("list") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    order_id = str(item.get("orderId") or "").strip()
+                    order_link_id = str(item.get("orderLinkId") or "").strip()
+                    parent_link_id = str(item.get("parentOrderLinkId") or "").strip()
+                    if order_id and order_id not in orders_by_id:
+                        orders_by_id[order_id] = item
+                    if order_link_id and order_link_id not in orders_by_link_id:
+                        orders_by_link_id[order_link_id] = item
+                    if parent_link_id:
+                        orders_by_parent_link_id[parent_link_id].append(item)
+                order_cursor = str(order_result.get("nextPageCursor") or "").strip() or None
+                if not order_cursor:
+                    break
 
     tx_by_order: Dict[str, Dict[str, object]] = {}
     tx_cursor: Optional[str] = None
@@ -7119,6 +7276,7 @@ async def _sync_bybit_demo_closed_pnl_window(
             break
 
     rows: List[Dict[str, object]] = []
+    tpsl_cache = _load_bybit_demo_tpsl_cache()
     cursor: Optional[str] = None
     max_seen = start_time
     while True:
@@ -7135,18 +7293,34 @@ async def _sync_bybit_demo_closed_pnl_window(
             if not isinstance(entry, dict):
                 continue
             updated_ms = int(_to_float(entry.get("updatedTime")) or 0)
-            if updated_ms <= start_time:
+            if updated_ms < start_time:
                 continue
             max_seen = max(max_seen, updated_ms)
             order_id = str(entry.get("orderId") or "").strip()
+            order_link_id = str(entry.get("orderLinkId") or "").strip()
             tx_match = tx_by_order.get(order_id, {})
             order_match = orders_by_id.get(order_id, {})
+            if not order_match and order_link_id:
+                order_match = orders_by_link_id.get(order_link_id, {})
+            parent_link_id = str(order_match.get("orderLinkId") or order_link_id).strip()
+            linked_orders = orders_by_parent_link_id.get(parent_link_id, [])
+            cache_entry = tpsl_cache.get(parent_link_id) or tpsl_cache.get(order_link_id)
+            stop_loss, take_profit, tpsl_source = _resolve_bybit_demo_tpsl(
+                order_match=order_match,
+                linked_orders=linked_orders,
+                cache_entry=cache_entry,
+            )
             balance_after_trade = _to_float(tx_match.get("cashBalance"))
             row = _normalize_bybit_demo_closed_pnl_row(
                 entry,
                 balance_after_trade=balance_after_trade,
-                stop_loss=_parse_bybit_price_level(order_match.get("stopLoss")),
-                take_profit=_parse_bybit_price_level(order_match.get("takeProfit")),
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                raw_refs_extra={
+                    "orderLinkId": order_link_id or order_match.get("orderLinkId"),
+                    "parentOrderLinkId": order_match.get("parentOrderLinkId"),
+                    "tpsl_source": tpsl_source,
+                },
             )
             if row:
                 rows.append(row)
@@ -7219,6 +7393,7 @@ async def _poll_bybit_fills() -> None:
 async def _poll_bybit_demo_closed_pnl() -> None:
     global _BYBIT_DEMO_CLOSED_PNL_LAST_SEEN
     lookback_seconds = int(os.getenv("BYBIT_DEMO_CLOSED_PNL_LOOKBACK_SECONDS", "900"))
+    backfill_seconds = int(os.getenv("BYBIT_DEMO_CLOSED_PNL_BACKFILL_SECONDS", "3600"))
     while True:
         await asyncio.sleep(FILL_ALERT_POLL_SECONDS)
         try:
@@ -7230,7 +7405,7 @@ async def _poll_bybit_demo_closed_pnl() -> None:
             if last_seen is None:
                 last_seen = max(0, now_ms - (lookback_seconds * 1000))
             earliest = now_ms - (7 * 24 * 60 * 60 * 1000) + 60000
-            start_time = max(last_seen, earliest)
+            start_time = max(last_seen - (backfill_seconds * 1000), earliest)
             end_time = now_ms
             max_seen = await _sync_bybit_demo_closed_pnl_window(
                 base_url=base_url,
@@ -7239,7 +7414,7 @@ async def _poll_bybit_demo_closed_pnl() -> None:
                 start_time=start_time,
                 end_time=end_time,
             )
-            _BYBIT_DEMO_CLOSED_PNL_LAST_SEEN = max(max_seen, start_time)
+            _BYBIT_DEMO_CLOSED_PNL_LAST_SEEN = max(max_seen, last_seen)
         except Exception as exc:  # pragma: no cover - background task
             _record_bybit_demo_sync_status(last_checked_at=_utc_now_iso(), last_error=str(exc))
             BYBIT_LOGGER.exception("Bybit demo closed PnL poll error: %s", exc)
