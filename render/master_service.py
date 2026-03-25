@@ -6223,6 +6223,7 @@ async def _place_bybit_order(
     order_id = order_result.get("orderId")
     if account == "demo" and category == "linear":
         _cache_bybit_demo_tpsl_request(
+            order_id=str(order_id or ""),
             order_link_id=str(body.get("orderLinkId") or ""),
             symbol=symbol,
             side=side,
@@ -6312,6 +6313,16 @@ async def _place_bybit_order(
                 position_idx=position_idx,
                 request_id=request_id,
             )
+            if account == "demo" and tpsl_result is not None:
+                _cache_bybit_demo_tpsl_request(
+                    order_id=str(order_id or ""),
+                    order_link_id=str(body.get("orderLinkId") or ""),
+                    symbol=symbol,
+                    side=side,
+                    take_profit=_parse_bybit_price_level(tp_target),
+                    stop_loss=_parse_bybit_price_level(sl_target),
+                    source="trading_stop_computed",
+                )
         except Exception as exc:
             tpsl_error = str(exc)
             BYBIT_LOGGER.exception(
@@ -7031,23 +7042,31 @@ def _save_bybit_demo_tpsl_cache(cache: Dict[str, Dict[str, object]]) -> None:
 
 def _cache_bybit_demo_tpsl_request(
     *,
+    order_id: Optional[str],
     order_link_id: Optional[str],
     symbol: str,
     side: str,
     take_profit: Optional[float],
     stop_loss: Optional[float],
+    source: str = "order_create_request",
 ) -> None:
-    cache_key = str(order_link_id or "").strip()
-    if not cache_key:
+    order_id_key = str(order_id or "").strip()
+    order_link_key = str(order_link_id or "").strip()
+    if not order_id_key and not order_link_key:
         return
     cache = _load_bybit_demo_tpsl_cache()
-    cache[cache_key] = {
+    payload = {
         "symbol": str(symbol or "").upper(),
         "side": str(side or ""),
         "take_profit": take_profit,
         "stop_loss": stop_loss,
+        "source": str(source or "").strip() or "order_create_request",
         "updated_at": _utc_now_iso(),
     }
+    if order_id_key:
+        cache[f"order_id:{order_id_key}"] = dict(payload)
+    if order_link_key:
+        cache[f"order_link_id:{order_link_key}"] = dict(payload)
     if len(cache) > 400:
         sorted_items = sorted(
             cache.items(),
@@ -7304,12 +7323,42 @@ async def _sync_bybit_demo_closed_pnl_window(
                 order_match = orders_by_link_id.get(order_link_id, {})
             parent_link_id = str(order_match.get("orderLinkId") or order_link_id).strip()
             linked_orders = orders_by_parent_link_id.get(parent_link_id, [])
-            cache_entry = tpsl_cache.get(parent_link_id) or tpsl_cache.get(order_link_id)
+            cache_key_order_id = f"order_id:{order_id}" if order_id else ""
+            cache_key_parent_link_id = (
+                f"order_link_id:{parent_link_id}" if parent_link_id else ""
+            )
+            cache_key_order_link_id = (
+                f"order_link_id:{order_link_id}" if order_link_id else ""
+            )
+            cache_entry = (
+                tpsl_cache.get(cache_key_order_id)
+                or tpsl_cache.get(cache_key_parent_link_id)
+                or tpsl_cache.get(cache_key_order_link_id)
+            )
             stop_loss, take_profit, tpsl_source = _resolve_bybit_demo_tpsl(
                 order_match=order_match,
                 linked_orders=linked_orders,
                 cache_entry=cache_entry,
             )
+            cache_hit_order_id = bool(cache_key_order_id and tpsl_cache.get(cache_key_order_id))
+            cache_hit_parent_link_id = bool(
+                cache_key_parent_link_id and tpsl_cache.get(cache_key_parent_link_id)
+            )
+            cache_hit_order_link_id = bool(
+                cache_key_order_link_id and tpsl_cache.get(cache_key_order_link_id)
+            )
+            if tpsl_source == "unresolved":
+                BYBIT_LOGGER.warning(
+                    "BYBIT_DEMO_TPSL unresolved order_id=%s order_link_id=%s parent_link_id=%s order_match_found=%s linked_orders_count=%s cache_hit_order_id=%s cache_hit_parent_link_id=%s cache_hit_order_link_id=%s",
+                    order_id,
+                    order_link_id,
+                    parent_link_id,
+                    bool(order_match),
+                    len(linked_orders),
+                    cache_hit_order_id,
+                    cache_hit_parent_link_id,
+                    cache_hit_order_link_id,
+                )
             balance_after_trade = _to_float(tx_match.get("cashBalance"))
             row = _normalize_bybit_demo_closed_pnl_row(
                 entry,
@@ -7320,6 +7369,16 @@ async def _sync_bybit_demo_closed_pnl_window(
                     "orderLinkId": order_link_id or order_match.get("orderLinkId"),
                     "parentOrderLinkId": order_match.get("parentOrderLinkId"),
                     "tpsl_source": tpsl_source,
+                    "tpsl_unresolved_context": {
+                        "order_id": order_id,
+                        "order_link_id": order_link_id,
+                        "parent_link_id": parent_link_id,
+                        "order_match_found": bool(order_match),
+                        "linked_orders_count": len(linked_orders),
+                        "cache_hit_order_id": cache_hit_order_id,
+                        "cache_hit_parent_link_id": cache_hit_parent_link_id,
+                        "cache_hit_order_link_id": cache_hit_order_link_id,
+                    },
                 },
             )
             if row:
