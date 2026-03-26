@@ -40,6 +40,11 @@ from bybit_credentials import resolve_bybit_credentials_for
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
+from bybit_demo_tpsl_cache import (
+    cache_bybit_demo_tpsl_request,
+    load_bybit_demo_tpsl_cache,
+    resolve_cached_bybit_demo_tpsl,
+)
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 load_dotenv(BASE_DIR / ".env")
@@ -1624,7 +1629,12 @@ def _parse_excel_account_workbook(
                         continue
                     metrics.setdefault(norm_name, value)
 
+                workbook_is_bybit_demo = file_name.strip().lower() == BYBIT_DEMO_WORKBOOK_NAME.lower()
+                order_id_col = _first_present(df, ["order_id", "orderid"])
+                order_id_raw = _safe_str_from_row(row, order_id_col)
                 row_id = f"excel:{account_label}:{sheet}:{idx}:{symbol_canon}:{close_time_iso or ''}"
+                if workbook_is_bybit_demo and order_id_raw:
+                    row_id = _journal_id_for_bybit_demo_row(symbol_canon, order_id_raw)
                 side_txt = _safe_str_from_row(row, side_col).upper()
                 setup_txt = _safe_str_from_row(row, setup_col)
                 breakeven_txt = _boolish_text(_safe_str_from_row(row, breakeven_col))
@@ -1676,7 +1686,12 @@ def _parse_excel_account_workbook(
                     "status": status,
                     "metrics": metrics,
                     "raw_excel": raw_excel,
-                    "raw_refs": {"dropbox_path": dbx_path, "sheet": sheet, "row_index": int(idx)},
+                    "raw_refs": {
+                        "dropbox_path": dbx_path,
+                        "sheet": sheet,
+                        "row_index": int(idx),
+                        "orderId": order_id_raw or None,
+                    },
                     "updated_at": _utc_now_iso(),
                 })
 
@@ -6222,13 +6237,15 @@ async def _place_bybit_order(
     order_result = data.get("result", {}) or {}
     order_id = order_result.get("orderId")
     if account == "demo" and category == "linear":
-        _cache_bybit_demo_tpsl_request(
+        cache_bybit_demo_tpsl_request(
             order_id=str(order_id or ""),
             order_link_id=str(body.get("orderLinkId") or ""),
+            parent_order_link_id=None,
             symbol=symbol,
             side=side,
             take_profit=_parse_bybit_price_level(body.get("takeProfit")),
             stop_loss=_parse_bybit_price_level(body.get("stopLoss")),
+            source="order_create_request",
         )
     pending_id = str(payload.get("pending_webhook_id") or "").strip()
     if pending_id:
@@ -6314,9 +6331,10 @@ async def _place_bybit_order(
                 request_id=request_id,
             )
             if account == "demo" and tpsl_result is not None:
-                _cache_bybit_demo_tpsl_request(
+                cache_bybit_demo_tpsl_request(
                     order_id=str(order_id or ""),
                     order_link_id=str(body.get("orderLinkId") or ""),
+                    parent_order_link_id=None,
                     symbol=symbol,
                     side=side,
                     take_profit=_parse_bybit_price_level(tp_target),
@@ -7021,62 +7039,6 @@ def _parse_bybit_price_level(value: object) -> Optional[float]:
     return parsed
 
 
-def _load_bybit_demo_tpsl_cache() -> Dict[str, Dict[str, object]]:
-    state = _load_trading_journal_state()
-    cache = state.get("bybit_demo_tpsl_cache")
-    if not isinstance(cache, dict):
-        return {}
-    normalized: Dict[str, Dict[str, object]] = {}
-    for key, value in cache.items():
-        cache_key = str(key or "").strip()
-        if cache_key and isinstance(value, dict):
-            normalized[cache_key] = dict(value)
-    return normalized
-
-
-def _save_bybit_demo_tpsl_cache(cache: Dict[str, Dict[str, object]]) -> None:
-    state = _load_trading_journal_state()
-    state["bybit_demo_tpsl_cache"] = cache
-    _save_trading_journal_state(state)
-
-
-def _cache_bybit_demo_tpsl_request(
-    *,
-    order_id: Optional[str],
-    order_link_id: Optional[str],
-    symbol: str,
-    side: str,
-    take_profit: Optional[float],
-    stop_loss: Optional[float],
-    source: str = "order_create_request",
-) -> None:
-    order_id_key = str(order_id or "").strip()
-    order_link_key = str(order_link_id or "").strip()
-    if not order_id_key and not order_link_key:
-        return
-    cache = _load_bybit_demo_tpsl_cache()
-    payload = {
-        "symbol": str(symbol or "").upper(),
-        "side": str(side or ""),
-        "take_profit": take_profit,
-        "stop_loss": stop_loss,
-        "source": str(source or "").strip() or "order_create_request",
-        "updated_at": _utc_now_iso(),
-    }
-    if order_id_key:
-        cache[f"order_id:{order_id_key}"] = dict(payload)
-    if order_link_key:
-        cache[f"order_link_id:{order_link_key}"] = dict(payload)
-    if len(cache) > 400:
-        sorted_items = sorted(
-            cache.items(),
-            key=lambda item: str((item[1] or {}).get("updated_at") or ""),
-            reverse=True,
-        )
-        cache = dict(sorted_items[:400])
-    _save_bybit_demo_tpsl_cache(cache)
-
-
 def _resolve_bybit_demo_tpsl(
     *,
     order_match: Dict[str, object],
@@ -7108,9 +7070,15 @@ def _resolve_bybit_demo_tpsl(
         stop_loss = _parse_bybit_price_level(cache_entry.get("stop_loss"))
         take_profit = _parse_bybit_price_level(cache_entry.get("take_profit"))
         if stop_loss is not None or take_profit is not None:
-            return stop_loss, take_profit, "cached_request"
+            return stop_loss, take_profit, f"cached_request:{cache_entry.get('source') or 'unknown'}"
 
     return None, None, "unresolved"
+
+
+def _journal_id_for_bybit_demo_row(symbol: str, order_id: str) -> str:
+    symbol_norm = str(symbol or "").strip().upper()
+    order_norm = str(order_id or "").strip()
+    return f"bybit:demo:closedpnl:{symbol_norm}:{order_norm}"
 
 
 def _normalize_bybit_demo_closed_pnl_row(
@@ -7295,7 +7263,7 @@ async def _sync_bybit_demo_closed_pnl_window(
             break
 
     rows: List[Dict[str, object]] = []
-    tpsl_cache = _load_bybit_demo_tpsl_cache()
+    tpsl_cache = load_bybit_demo_tpsl_cache()
     cursor: Optional[str] = None
     max_seen = start_time
     while True:
@@ -7321,43 +7289,40 @@ async def _sync_bybit_demo_closed_pnl_window(
             order_match = orders_by_id.get(order_id, {})
             if not order_match and order_link_id:
                 order_match = orders_by_link_id.get(order_link_id, {})
-            parent_link_id = str(order_match.get("orderLinkId") or order_link_id).strip()
+            parent_link_id = str(
+                order_match.get("parentOrderLinkId")
+                or order_match.get("orderLinkId")
+                or order_link_id
+            ).strip()
             linked_orders = orders_by_parent_link_id.get(parent_link_id, [])
-            cache_key_order_id = f"order_id:{order_id}" if order_id else ""
-            cache_key_parent_link_id = (
-                f"order_link_id:{parent_link_id}" if parent_link_id else ""
+            cache_entry, cache_match_type = resolve_cached_bybit_demo_tpsl(
+                cache=tpsl_cache,
+                order_id=order_id,
+                order_link_id=order_link_id,
+                parent_order_link_id=parent_link_id,
+                symbol=str(entry.get("symbol") or "").strip().upper(),
+                side=str(entry.get("side") or "").strip().title(),
+                open_time_ms=int(_to_float(entry.get("createdTime")) or 0) or None,
+                close_time_ms=updated_ms or None,
             )
-            cache_key_order_link_id = (
-                f"order_link_id:{order_link_id}" if order_link_id else ""
-            )
-            cache_entry = (
-                tpsl_cache.get(cache_key_order_id)
-                or tpsl_cache.get(cache_key_parent_link_id)
-                or tpsl_cache.get(cache_key_order_link_id)
-            )
-            stop_loss, take_profit, tpsl_source = _resolve_bybit_demo_tpsl(
+            stop_loss, take_profit, tpsl_source_raw = _resolve_bybit_demo_tpsl(
                 order_match=order_match,
                 linked_orders=linked_orders,
                 cache_entry=cache_entry,
             )
-            cache_hit_order_id = bool(cache_key_order_id and tpsl_cache.get(cache_key_order_id))
-            cache_hit_parent_link_id = bool(
-                cache_key_parent_link_id and tpsl_cache.get(cache_key_parent_link_id)
-            )
-            cache_hit_order_link_id = bool(
-                cache_key_order_link_id and tpsl_cache.get(cache_key_order_link_id)
-            )
+            tpsl_source = tpsl_source_raw
+            if tpsl_source_raw.startswith("cached_request:"):
+                tpsl_source = f"{tpsl_source_raw}:{cache_match_type}"
+            cache_hit = cache_entry is not None
             if tpsl_source == "unresolved":
                 BYBIT_LOGGER.warning(
-                    "BYBIT_DEMO_TPSL unresolved order_id=%s order_link_id=%s parent_link_id=%s order_match_found=%s linked_orders_count=%s cache_hit_order_id=%s cache_hit_parent_link_id=%s cache_hit_order_link_id=%s",
+                    "BYBIT_DEMO_TPSL unresolved order_id=%s order_link_id=%s parent_order_link_id=%s stop_order_type=%s cache_hit=%s cache_match_type=%s",
                     order_id,
                     order_link_id,
                     parent_link_id,
-                    bool(order_match),
-                    len(linked_orders),
-                    cache_hit_order_id,
-                    cache_hit_parent_link_id,
-                    cache_hit_order_link_id,
+                    str(order_match.get("stopOrderType") or entry.get("stopOrderType") or ""),
+                    cache_hit,
+                    cache_match_type,
                 )
             balance_after_trade = _to_float(tx_match.get("cashBalance"))
             row = _normalize_bybit_demo_closed_pnl_row(
@@ -7372,12 +7337,11 @@ async def _sync_bybit_demo_closed_pnl_window(
                     "tpsl_unresolved_context": {
                         "order_id": order_id,
                         "order_link_id": order_link_id,
-                        "parent_link_id": parent_link_id,
+                        "parent_order_link_id": parent_link_id,
                         "order_match_found": bool(order_match),
                         "linked_orders_count": len(linked_orders),
-                        "cache_hit_order_id": cache_hit_order_id,
-                        "cache_hit_parent_link_id": cache_hit_parent_link_id,
-                        "cache_hit_order_link_id": cache_hit_order_link_id,
+                        "cache_hit": cache_hit,
+                        "cache_match_type": cache_match_type,
                     },
                 },
             )
@@ -9800,8 +9764,12 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
             elif pnl_num < 0:
                 outcome = "Loss"
 
+        refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
         items.append(
             {
+                "_row_id": row.get("id"),
+                "_row_source": row.get("source"),
+                "_row_order_id": refs.get("orderId"),
                 "account": row.get("account_label") or row.get("account") or row.get("source"),
                 "symbol": row.get("symbol") or row.get("instrument") or row.get("symbol_raw"),
                 "side": row.get("side") or row.get("direction"),
@@ -9811,10 +9779,40 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
                 "take_profit": row.get("take_profit"),
                 "fees": row.get("fees") if row.get("fees") is not None else row.get("commission"),
                 "result_pct": result_pct,
+                "_row_balance_after_trade": row.get("balance_after_trade"),
                 "outcome": outcome,
                 "duration_seconds": row.get("trade_duration_seconds"),
             }
         )
+
+    def _trade_key(item: Dict[str, object]) -> str:
+        order_id = str(item.get("_row_order_id") or "").strip()
+        if order_id:
+            return f"order:{order_id}"
+        return "|".join(
+            [
+                str(item.get("account") or "").strip().lower(),
+                str(item.get("symbol") or "").strip().upper(),
+                str(item.get("side") or "").strip().upper(),
+                str(item.get("opened_at") or "").strip(),
+                str(item.get("closed_at") or "").strip(),
+            ]
+        )
+
+    def _trade_score(item: Dict[str, object]) -> Tuple[int, int, int]:
+        has_tpsl = int(item.get("stop_loss") is not None or item.get("take_profit") is not None)
+        has_balance = int(item.get("_row_balance_after_trade") is not None)
+        src = str(item.get("_row_source") or "").strip().lower()
+        source_rank = 1 if src == "bybit" else 0
+        return has_tpsl, has_balance, source_rank
+
+    deduped: Dict[str, Dict[str, object]] = {}
+    for item in items:
+        key = _trade_key(item)
+        prev = deduped.get(key)
+        if prev is None or _trade_score(item) > _trade_score(prev):
+            deduped[key] = item
+    items = list(deduped.values())
 
     def _sort_ts(value: object) -> float:
         try:
@@ -9823,7 +9821,15 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
             return float("-inf")
 
     items.sort(key=lambda r: _sort_ts(r.get("closed_at")), reverse=True)
-    return JSONResponse({"items": items[: max(1, min(limit, 200))]})
+    public_items = []
+    for item in items[: max(1, min(limit, 200))]:
+        copy = dict(item)
+        copy.pop("_row_id", None)
+        copy.pop("_row_source", None)
+        copy.pop("_row_order_id", None)
+        copy.pop("_row_balance_after_trade", None)
+        public_items.append(copy)
+    return JSONResponse({"items": public_items})
 
 
 @app.post("/api/open-orders/close")

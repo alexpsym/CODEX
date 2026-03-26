@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import requests
+from bybit_demo_tpsl_cache import cache_bybit_demo_tpsl_request
 
 # Reuse your repo credential resolver if present.
 # If you run this inside CODEX, keep this import.
@@ -418,7 +419,18 @@ def _place_or_amend_conditional_market(
     }
 
     try:
-        _signed_post("/v5/order/amend", body_amend, timeout=10)
+        amend_resp = _signed_post("/v5/order/amend", body_amend, timeout=10)
+        amend_result = amend_resp.get("result") if isinstance(amend_resp, dict) else {}
+        cache_bybit_demo_tpsl_request(
+            order_id=str((amend_result or {}).get("orderId") or ""),
+            order_link_id=order_link_id,
+            parent_order_link_id=None,
+            symbol=symbol,
+            side=side,
+            take_profit=tp,
+            stop_loss=sl,
+            source="bounce_conditional_amend",
+        )
         print(f"[AMEND] {symbol} {order_link_id} trigger={trigger_price}")
         return
     except Exception:
@@ -443,7 +455,19 @@ def _place_or_amend_conditional_market(
     if sl is not None:
         body_create["stopLoss"] = f"{sl:.12f}".rstrip("0").rstrip(".")
 
-    _signed_post("/v5/order/create", body_create, timeout=10)
+    create_resp = _signed_post("/v5/order/create", body_create, timeout=10)
+    create_result = create_resp.get("result") if isinstance(create_resp, dict) else {}
+    cache_bybit_demo_tpsl_request(
+        order_id=str((create_result or {}).get("orderId") or ""),
+        order_link_id=order_link_id,
+        parent_order_link_id=None,
+        symbol=symbol,
+        side=side,
+        take_profit=tp,
+        stop_loss=sl,
+        source="bounce_conditional_create",
+    )
+    _last_order_link_by_symbol[symbol] = order_link_id
     print(f"[CREATE] {symbol} {order_link_id} side={side} trigger={trigger_price} qty={qty}")
 
 
@@ -512,6 +536,8 @@ def _signed_get(path: str, params: dict, timeout: float = 10.0) -> dict:
 
 
 _balance_cache: Tuple[float, float] = (0.0, 0.0)
+_last_order_link_by_symbol: Dict[str, str] = {}
+_constraint_failure: Optional[str] = None
 
 
 def _get_account_balance() -> float:
@@ -565,11 +591,32 @@ def _risk_qty(
         return None
 
     raw_qty = risk_amount / net_per_unit_loss
-    steps = max(1, round(raw_qty / qty_step))
+    steps = max(1, math.ceil(raw_qty / qty_step))
     qty = steps * qty_step
     if qty < min_qty:
         return None
     return qty
+
+
+def _evaluate_constraints(
+    *,
+    balance: float,
+    qty: float,
+    entry: float,
+    tp: Optional[float],
+    sl: Optional[float],
+    side: str,
+    fee_rate: float,
+) -> Tuple[Optional[float], Optional[float]]:
+    if balance <= 0 or qty <= 0 or sl is None or tp is None:
+        return None, None
+    stop_move = abs(entry - sl)
+    tp_move = abs(tp - entry)
+    stop_net_per_unit = stop_move + fee_rate * (entry + sl)
+    tp_net_per_unit = tp_move - fee_rate * (entry + tp)
+    risk_pct = (qty * stop_net_per_unit / balance) * 100 if stop_net_per_unit > 0 else None
+    reward_pct = (qty * tp_net_per_unit / balance) * 100 if tp_net_per_unit > 0 else None
+    return risk_pct, reward_pct
 
 
 def _position_entry_price(pos: dict) -> float:
@@ -638,6 +685,7 @@ def _set_trading_stop(*, symbol: str, tp: Optional[float], sl: Optional[float]) 
 
 
 def _apply_trading_stop_from_fill(*, symbol: str, tick: float) -> bool:
+    global _constraint_failure
     if SL_TICKS <= 0 and RR_RATIO <= 0:
         return True
     if CATEGORY not in {"linear", "inverse"}:
@@ -671,7 +719,48 @@ def _apply_trading_stop_from_fill(*, symbol: str, tick: float) -> bool:
     if tp is None and sl is None:
         return True
 
+    qty_raw = pos.get("size") or pos.get("qty") or "0"
+    try:
+        qty = abs(float(qty_raw))
+    except Exception:
+        qty = 0.0
+
+    fee_rate = _fee_rate_for_category(CATEGORY)
+    balance = _get_account_balance() if (RISK_MODE == "percent" and RISK_PCT > 0) else 0.0
+    risk_pct, reward_pct = _evaluate_constraints(
+        balance=balance,
+        qty=qty,
+        entry=entry,
+        tp=tp,
+        sl=sl,
+        side=side,
+        fee_rate=fee_rate,
+    )
+    min_reward_pct = RISK_PCT * RR_RATIO
+    if (
+        RISK_MODE == "percent"
+        and RISK_PCT > 0
+        and RR_RATIO > 0
+        and (risk_pct is None or reward_pct is None or risk_pct < RISK_PCT or reward_pct < min_reward_pct)
+    ):
+        _constraint_failure = (
+            f"failed-to-meet-constraints symbol={symbol} risk_pct={risk_pct} reward_pct={reward_pct} "
+            f"required_risk_pct>={RISK_PCT} required_reward_pct>={min_reward_pct}"
+        )
+        print(f"[CONSTRAINT_FAIL] {_constraint_failure}")
+        return False
+
     _set_trading_stop(symbol=symbol, tp=tp, sl=sl)
+    cache_bybit_demo_tpsl_request(
+        order_id="",
+        order_link_id=_last_order_link_by_symbol.get(symbol, ""),
+        parent_order_link_id=None,
+        symbol=symbol,
+        side=side,
+        take_profit=tp,
+        stop_loss=sl,
+        source="bounce_fill_recomputed",
+    )
     print(f"[TP/SL] {symbol} set from fill entry={entry} tp={tp} sl={sl} (tick={tick})")
     return True
 
@@ -777,7 +866,10 @@ def main() -> None:
                 if pos is not None:
                     filters = _get_instrument_filters(sym)
                     tick = filters.tick_size
-                    _apply_trading_stop_from_fill(symbol=sym, tick=tick)
+                    applied = _apply_trading_stop_from_fill(symbol=sym, tick=tick)
+                    if not applied and _constraint_failure:
+                        print(f"[SESSION_STOP] {_constraint_failure}")
+                        return
                     print(f"[AUTO-STOP] {sym} position detected; stopping bounce trader for this instrument.")
                     try:
                         active_symbols.remove(sym)
@@ -830,7 +922,7 @@ def main() -> None:
                             qty_f = float(DEFAULT_QTY)
                         qty_f = _round_qty_step(qty_f, filters.qty_step)
                     else:
-                        qty_f = _round_qty_step(risk_qty, filters.qty_step)
+                        qty_f = max(filters.min_qty, risk_qty)
 
                     if qty_f < filters.min_qty:
                         continue
@@ -838,8 +930,32 @@ def main() -> None:
                     qty = f"{qty_f:.12f}".rstrip("0").rstrip(".")
 
                     tp, sl = _compute_tp_sl(trigger, tick, side)
+                    if RISK_MODE == "percent" and RISK_PCT > 0 and RR_RATIO > 0:
+                        balance = _get_account_balance()
+                        risk_pct, reward_pct = _evaluate_constraints(
+                            balance=balance,
+                            qty=qty_f,
+                            entry=trigger,
+                            tp=tp,
+                            sl=sl,
+                            side=side,
+                            fee_rate=fee_rate,
+                        )
+                        min_reward_pct = RISK_PCT * RR_RATIO
+                        if (
+                            risk_pct is None
+                            or reward_pct is None
+                            or risk_pct < RISK_PCT
+                            or reward_pct < min_reward_pct
+                        ):
+                            print(
+                                "[CONSTRAINT_REJECT] symbol=%s strategy=%s risk_pct=%s reward_pct=%s required_risk_pct>=%s required_reward_pct>=%s"
+                                % (sym, strat, risk_pct, reward_pct, RISK_PCT, min_reward_pct)
+                            )
+                            continue
 
                     order_link_id = _make_order_link_id(sym, strat)
+                    _last_order_link_by_symbol[sym] = order_link_id
 
                     _place_or_amend_conditional_market(
                         symbol=sym,
