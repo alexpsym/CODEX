@@ -9,7 +9,9 @@
   const resultEl = document.getElementById('history-result');
 
   const PERIOD_DEFAULT = { kind: 'days', value: '30' };
+  const PERIOD_COMPLETE = { kind: 'complete', value: '1' };
   let selectedPeriod = { ...PERIOD_DEFAULT };
+  let forceCompleteMode = false;
 
   const API_MAP = {
     bybit: {
@@ -40,6 +42,7 @@
   };
 
   const setActivePeriod = (btn) => {
+    if (!btn || btn.style.display === 'none') return;
     periodWrap?.querySelectorAll('.period-btn').forEach((b) => b.classList.remove('active'));
     btn.classList.add('active');
     selectedPeriod = {
@@ -50,8 +53,28 @@
 
   const syncBrokerUi = () => {
     const broker = (brokerSel?.value || 'bybit').toLowerCase();
+    const account = (accountSel?.value || 'demo').toLowerCase();
     const showAccount = broker === 'bybit' || broker === 'oanda';
     if (accountWrap) accountWrap.style.display = showAccount ? '' : 'none';
+
+    forceCompleteMode = broker === 'bybit' && account === 'demo';
+    const periodButtons = Array.from(periodWrap?.querySelectorAll('.period-btn') || []);
+    const completeBtn = periodButtons.find((btn) => btn.dataset.kind === 'complete');
+    periodButtons.forEach((btn) => {
+      if (!forceCompleteMode) {
+        btn.style.display = '';
+        return;
+      }
+      btn.style.display = btn.dataset.kind === 'complete' ? '' : 'none';
+      btn.classList.remove('active');
+    });
+    if (forceCompleteMode && completeBtn) {
+      selectedPeriod = { ...PERIOD_COMPLETE };
+      setActivePeriod(completeBtn);
+    } else if (!periodButtons.some((btn) => btn.classList.contains('active') && btn.style.display !== 'none')) {
+      const fallback = periodButtons.find((btn) => btn.style.display !== 'none') || periodButtons[0];
+      if (fallback) setActivePeriod(fallback);
+    }
   };
 
   const buildPayload = () => {
@@ -59,6 +82,11 @@
     const payload = {};
     if (broker === 'bybit' || broker === 'oanda') {
       payload.account = (accountSel?.value || 'demo').toLowerCase();
+    }
+
+    if (broker === 'bybit' && payload.account === 'demo') {
+      payload.complete = true;
+      return { broker, payload };
     }
 
     if (selectedPeriod.kind === 'complete') {
@@ -135,6 +163,7 @@
   });
 
   brokerSel?.addEventListener('change', syncBrokerUi);
+  accountSel?.addEventListener('change', syncBrokerUi);
   exportBtn?.addEventListener('click', async () => {
     try {
       await runExport();
