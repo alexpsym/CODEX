@@ -73,7 +73,7 @@ DATE_FORMATS = [
 ]
 
 # File discovery patterns
-PAYSLIP_GLOB = "*.pdf"
+PAYSLIP_FILENAME = "payslip.pdf"
 TIMESHEET_GLOBS = ("*.jpg", "*.jpeg", "*.png")
 DOWNLOADS_DIR = Path(r"C:\Users\User\Downloads")
 ARCHIVE_DIR = Path(r"C:\Users\User\Documents\MEDIPORT\payslip_audit")
@@ -919,17 +919,20 @@ def discover_files(
     if not downloads_dir.is_dir():
         raise SystemExit(f"Downloads path is not a directory: {downloads_dir}")
 
-    payslip_candidates = sorted(path.resolve() for path in downloads_dir.glob(PAYSLIP_GLOB) if path.is_file())
+    payslip_candidates = sorted(
+        path.resolve()
+        for path in downloads_dir.iterdir()
+        if path.is_file() and path.name.lower() == PAYSLIP_FILENAME
+    )
     if not payslip_candidates:
         raise SystemExit(
-            f"No payslip PDF found in {downloads_dir}. "
-            "Provide --payslip <path-to-pdf> or place exactly one PDF in Downloads."
+            f"Expected payslip PDF named exactly '{PAYSLIP_FILENAME}' in {downloads_dir}, but none was found."
         )
     if len(payslip_candidates) > 1:
         candidates = ", ".join(path.name for path in payslip_candidates)
         raise SystemExit(
-            f"Expected exactly one payslip PDF in {downloads_dir}, found {len(payslip_candidates)}: {candidates}. "
-            "Provide --payslip <path-to-pdf> to choose explicitly."
+            f"Found multiple files matching '{PAYSLIP_FILENAME}' case-insensitively in {downloads_dir}: {candidates}. "
+            "Remove duplicates or provide --payslip <path-to-pdf>."
         )
 
     timesheet_candidates: List[Path] = []
