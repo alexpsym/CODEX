@@ -8,7 +8,8 @@ from typing import Optional
 
 TESSERACT_MISSING_MESSAGE = (
     "Tesseract OCR is required to process timesheet images. "
-    "Install the 'tesseract-ocr' system package or add 'tesseract' to your PATH."
+    "Install Tesseract (for Windows: install to 'C:\\Program Files\\Tesseract-OCR\\tesseract.exe' "
+    "or 'C:\\Program Files (x86)\\Tesseract-OCR\\tesseract.exe') and/or add 'tesseract' to your PATH."
 )
 
 
@@ -26,7 +27,13 @@ def _resolve_tesseract_binary() -> Optional[str]:
     if resolved:
         return resolved
 
-    for candidate in ("/usr/bin/tesseract", "/usr/local/bin/tesseract", "/opt/homebrew/bin/tesseract"):
+    for candidate in (
+        "/usr/bin/tesseract",
+        "/usr/local/bin/tesseract",
+        "/opt/homebrew/bin/tesseract",
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+    ):
         if Path(candidate).is_file():
             return candidate
 
