@@ -73,7 +73,7 @@ DATE_FORMATS = [
 ]
 
 # File discovery patterns
-PAYSLIP_FILENAME = "payslip.pdf"
+PAYSLIP_FILENAME = "PaySlipPdf.pdf"
 TIMESHEET_GLOBS = ("*.jpg", "*.jpeg", "*.png")
 DOWNLOADS_DIR = Path(r"C:\Users\User\Downloads")
 ARCHIVE_DIR = Path(r"C:\Users\User\Documents\MEDIPORT\payslip_audit")
@@ -922,7 +922,7 @@ def discover_files(
     payslip_candidates = sorted(
         path.resolve()
         for path in downloads_dir.iterdir()
-        if path.is_file() and path.name.lower() == PAYSLIP_FILENAME
+        if path.is_file() and path.name.lower() == PAYSLIP_FILENAME.lower()
     )
     if not payslip_candidates:
         raise SystemExit(
