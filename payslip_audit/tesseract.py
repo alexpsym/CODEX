@@ -8,8 +8,9 @@ from typing import Optional
 
 TESSERACT_MISSING_MESSAGE = (
     "Tesseract OCR is required to process timesheet images. "
-    "Install Tesseract (for Windows: install to 'C:\\Program Files\\Tesseract-OCR\\tesseract.exe' "
-    "or 'C:\\Program Files (x86)\\Tesseract-OCR\\tesseract.exe') and/or add 'tesseract' to your PATH."
+    "On Windows, install Tesseract OCR so 'tesseract.exe' exists at "
+    "'C:\\Program Files\\Tesseract-OCR\\tesseract.exe' or "
+    "'C:\\Program Files (x86)\\Tesseract-OCR\\tesseract.exe', then add it to PATH."
 )
 
 
