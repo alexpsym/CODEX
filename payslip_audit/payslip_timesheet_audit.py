@@ -76,7 +76,7 @@ DATE_FORMATS = [
 PAYSLIP_FILENAME = "PaySlipPdf.pdf"
 TIMESHEET_GLOBS = ("*.jpg", "*.jpeg", "*.png")
 DOWNLOADS_DIR = Path(r"C:\Users\User\Downloads")
-ARCHIVE_DIR = Path(r"C:\Users\User\Documents\MEDIPORT\payslip_audit")
+ARCHIVE_DIR = Path(r"C:\Users\User\Documents\MEDIPORT")
 ARCHIVE_STEM_RE = re.compile(r"^(?P<number>\d+)(?P<suffix>A)?$")
 SERVER_GUARD_ENV_VARS = {"RENDER", "RENDER_EXTERNAL_URL", "PORT"}
 
