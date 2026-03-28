@@ -73,9 +73,10 @@ DATE_FORMATS = [
 ]
 
 # File discovery patterns
-PAYSLIP_GLOB = "*.pdf"
+PAYSLIP_FILENAME = "PaySlipPdf.pdf"
 TIMESHEET_GLOBS = ("*.jpg", "*.jpeg", "*.png")
-ARCHIVE_DIR = Path(r"C:\Users\User\Documents\MEDIPORT")
+DOWNLOADS_DIR = Path(r"C:\Users\User\Downloads")
+ARCHIVE_DIR = Path(r"C:\Users\User\Documents\MEDIPORT\payslip_audit")
 ARCHIVE_STEM_RE = re.compile(r"^(?P<number>\d+)(?P<suffix>A)?$")
 SERVER_GUARD_ENV_VARS = {"RENDER", "RENDER_EXTERNAL_URL", "PORT"}
 
@@ -891,26 +892,61 @@ def discover_files(
     payslip_arg: Optional[Path],
     timesheet_args: Optional[List[Path]],
 ) -> Tuple[Path, List[Path]]:
-    """Resolve payslip and timesheet paths from explicit local CLI inputs."""
+    """Resolve payslip and timesheet paths from explicit CLI args or Downloads auto-discovery."""
 
-    if payslip_arg is None:
-        raise SystemExit("Payslip PDF is required. Provide --payslip <path-to-pdf>.")
+    if payslip_arg is not None or timesheet_args:
+        if payslip_arg is None:
+            raise SystemExit("Payslip PDF is required. Provide --payslip <path-to-pdf>.")
 
-    payslip_path = payslip_arg.expanduser().resolve()
-    if not payslip_path.exists():
-        raise SystemExit(f"Payslip PDF not found: {payslip_path}")
+        payslip_path = payslip_arg.expanduser().resolve()
+        if not payslip_path.exists():
+            raise SystemExit(f"Payslip PDF not found: {payslip_path}")
 
-    if not timesheet_args:
-        raise SystemExit("At least one timesheet image (JPG/PNG) is required via --timesheet <path ...>.")
+        if not timesheet_args:
+            raise SystemExit("At least one timesheet image (JPG/PNG) is required via --timesheet <path ...>.")
 
-    timesheet_paths: List[Path] = []
-    for path in timesheet_args:
-        resolved = path.expanduser().resolve()
-        if not resolved.exists():
-            raise SystemExit(f"Timesheet image not found: {resolved}")
-        timesheet_paths.append(resolved)
+        timesheet_paths: List[Path] = []
+        for path in timesheet_args:
+            resolved = path.expanduser().resolve()
+            if not resolved.exists():
+                raise SystemExit(f"Timesheet image not found: {resolved}")
+            timesheet_paths.append(resolved)
+        return payslip_path, timesheet_paths
 
-    return payslip_path, timesheet_paths
+    downloads_dir = DOWNLOADS_DIR.expanduser().resolve()
+    if not downloads_dir.exists():
+        raise SystemExit(f"Downloads directory does not exist: {downloads_dir}")
+    if not downloads_dir.is_dir():
+        raise SystemExit(f"Downloads path is not a directory: {downloads_dir}")
+
+    payslip_candidates = sorted(
+        path.resolve()
+        for path in downloads_dir.iterdir()
+        if path.is_file() and path.name.lower() == PAYSLIP_FILENAME.lower()
+    )
+    if not payslip_candidates:
+        raise SystemExit(
+            f"Expected payslip PDF named exactly '{PAYSLIP_FILENAME}' in {downloads_dir}, but none was found."
+        )
+    if len(payslip_candidates) > 1:
+        candidates = ", ".join(path.name for path in payslip_candidates)
+        raise SystemExit(
+            f"Found multiple files matching '{PAYSLIP_FILENAME}' case-insensitively in {downloads_dir}: {candidates}. "
+            "Remove duplicates or provide --payslip <path-to-pdf>."
+        )
+
+    timesheet_candidates: List[Path] = []
+    for pattern in TIMESHEET_GLOBS:
+        timesheet_candidates.extend(path.resolve() for path in downloads_dir.glob(pattern) if path.is_file())
+    timesheet_paths = sorted({path for path in timesheet_candidates})
+    if not timesheet_paths:
+        globs = ", ".join(TIMESHEET_GLOBS)
+        raise SystemExit(
+            f"No timesheet screenshots found in {downloads_dir}. "
+            f"Expected at least one file matching: {globs}."
+        )
+
+    return payslip_candidates[0], timesheet_paths
 
 
 # ---------------------------------------------------------------------------
@@ -1309,6 +1345,14 @@ def cleanup_sidecars(sidecars: Iterable[Path]) -> None:
             print(f"Warning: failed to delete {sidecar}: {exc}", file=sys.stderr)
 
 
+def cleanup_input_timesheets(timesheet_paths: Iterable[Path]) -> None:
+    for timesheet in {path.resolve() for path in timesheet_paths}:
+        try:
+            timesheet.unlink(missing_ok=True)
+        except Exception as exc:  # noqa: BLE001 - warn but do not halt
+            print(f"Warning: failed to delete input timesheet {timesheet}: {exc}", file=sys.stderr)
+
+
 def ensure_local_only_execution() -> None:
     """Refuse to run inside server-style environments such as Render."""
 
@@ -1448,6 +1492,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         next_number = scan_next_sequence(archive_dir)
         final_report, final_payslip = build_final_archive_paths(archive_dir, next_number)
         finalize_archive(temp_report_path, payslip_path, final_report, final_payslip)
+        cleanup_input_timesheets(timesheet_paths)
 
         print(f"\nAudit PDF archived to: {final_report}")
         print(f"Payslip PDF archived to: {final_payslip}")
