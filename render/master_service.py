@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import calendar
 import asyncio
 import threading
 import base64
@@ -25,6 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Callable
 from urllib.parse import quote, unquote, urlparse
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from fastapi import Body, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
@@ -110,6 +112,13 @@ RETIRED_SCRIPT_NAMES = {
     "swap_rates",
     "swap-rates",
     "payslip_audit",
+    "crypto-scanner-clone",
+    "cryptoscanner-clone",
+    "crypto_scanner_clone",
+    "fxscanner-oanda-clone",
+    "fxscanner_oanda_clone",
+    "fx-scanner-oanda-clone",
+    "scanner",
 }
 
 MAX_LOG_LINES = 400
@@ -227,7 +236,6 @@ WEB_APPS = {
     "fxweekend-clone",
 }
 STANDALONE_SCRIPTS = {
-    "Crypto-Scanner-clone",
     "bybit-alert-clone",
     "bybit_monitor",
     "oanda_monitor",
@@ -235,20 +243,17 @@ STANDALONE_SCRIPTS = {
     "coinspot-clone",
     "cryptocalculator-clone",
     "ivindicator-clone",
-    "fxscanner-oanda-clone",
     "fxweekend-clone",
     "oanda-calculator-clone",
     "oanda_history-clone",
 }
 
 ENTRY_OVERRIDES = {
-    "Crypto-Scanner-clone": ["continuous_scan.py", "scan.py"],
     "LEDGER-clone": ["process_entries.py"],
     "bybit_monitor": ["bybit_altcoin_monitor.py"],
     "bybithistory-clone": ["app.py"],
     "coinspot-clone": ["coinspot_history.py"],
     "cryptocalculator-clone": ["cryptocalculator_web.py", "cryptocalculator.py"],
-    "fxscanner-oanda-clone": ["forex_scanner.py"],
     "fxweekend-clone": ["liquidate.py"],
     "ivindicator-clone": ["ivweb.py", "ivapp.py", "ivindicator.py"],
     "oanda-calculator-clone": ["oanda_calculator_web.py", "oanda_api.py"],
@@ -284,6 +289,11 @@ _OANDA_ACCOUNTS_CACHE: Dict[str, Tuple[float, List[Dict[str, object]]]] = {}
 _OANDA_ACCOUNTS_CACHE_TTL_SECONDS = 20.0
 _OANDA_SPECS_CACHE: Dict[str, Tuple[float, Dict[str, object]]] = {}
 _OANDA_SPECS_CACHE_TTL_SECONDS = 30.0
+_OANDA_INACTIVITY_CACHE: Dict[str, object] = {
+    "expires_at": 0.0,
+    "payload": None,
+}
+_OANDA_INACTIVITY_CACHE_TTL_SECONDS = 45.0
 _OPEN_ORDERS_CACHE_LOCK = asyncio.Lock()
 _OPEN_ORDERS_CACHE_TTL_SECONDS = 6.0
 _OPEN_ORDERS_CACHE: Dict[str, object] = {
@@ -2726,7 +2736,6 @@ def script_logs_url(script_name: str) -> str:
 
 
 FRIENDLY_SCRIPT_LABELS: Dict[str, str] = {
-    "Crypto-Scanner-clone": "Scanner",
     "PUSH": "Push",
     "bybit_monitor": "Monitor",
     "bybit_trigger_bounce_trader": "Bounce Trader",
@@ -2736,7 +2745,6 @@ FRIENDLY_SCRIPT_LABELS: Dict[str, str] = {
     "download_video": "Video Downloader",
     "extractor": "Extractor",
     "forextester": "Forex Tester",
-    "fxscanner-oanda-clone": "Scanner",
     "fxweekend-clone": "FX Weekend",
     "ivindicator-clone": "IV Indicator",
     "journal": "Journal",
@@ -2749,7 +2757,6 @@ FRIENDLY_SCRIPT_LABELS: Dict[str, str] = {
 
 MERGED_SCRIPT_BUTTONS: List[Dict[str, object]] = [
     {"id": "calculator", "name": "calculator", "label": "Calculator", "open_url": "/merged/calculator"},
-    {"id": "scanner", "name": "scanner", "label": "Scanner", "open_url": "/merged/scanner"},
     {"id": "history", "name": "history", "label": "History", "open_url": "/merged/history"},
     {"id": "monitor", "name": "monitor", "label": "Monitor", "open_url": "/merged/monitor"},
     {"id": "bounce-trader", "name": "bounce-trader", "label": "Bounce Trader", "open_url": "/merged/bounce-trader"},
@@ -2758,8 +2765,6 @@ MERGED_SCRIPT_BUTTONS: List[Dict[str, object]] = [
 MERGED_SOURCE_NAMES = {
     "cryptocalculator-clone",
     "oanda-calculator-clone",
-    "Crypto-Scanner-clone",
-    "fxscanner-oanda-clone",
     "bybithistory-clone",
     "oanda_history-clone",
     "coinspot-clone",
@@ -3611,7 +3616,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         .top-stack {
             display: grid;
-            grid-template-columns: 1fr;
+            grid-template-columns: minmax(260px, 420px) minmax(260px, 420px) minmax(320px, 1fr);
             gap: 1rem;
             align-items: start;
             margin-bottom: 1rem;
@@ -3627,7 +3632,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             flex: 1;
             overflow: auto;
         }
-        @media (max-width: 1100px) {
+        #recent-trades-panel,
+        #open-orders-panel {
+            grid-column: 1 / -1;
+        }
+
+        @media (max-width: 1180px) {
             .top-stack { grid-template-columns: 1fr; }
         }
 
@@ -3682,6 +3692,36 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             color: #94a3b8;
             font-size: 0.85rem;
             min-height: 1em;
+        }
+        #oanda-inactivity-widget .meta-grid {
+            display: grid;
+            grid-template-columns: max-content 1fr;
+            gap: 0.45rem 0.75rem;
+            font-size: 0.9rem;
+            margin-top: 0.6rem;
+        }
+        #oanda-inactivity-widget .meta-grid dt {
+            color: #94a3b8;
+            margin: 0;
+            font-weight: 600;
+        }
+        #oanda-inactivity-widget .meta-grid dd {
+            margin: 0;
+            color: #e2e8f0;
+        }
+        #oanda-inactivity-widget .status-headline {
+            margin-top: 0.9rem;
+            font-size: 1.1rem;
+            font-weight: 900;
+            color: #93c5fd;
+            min-height: 1.5em;
+        }
+        #oanda-inactivity-widget .status-detail {
+            margin-top: 0.25rem;
+            color: #cbd5e1;
+            font-size: 0.9rem;
+            min-height: 1.2em;
+            line-height: 1.35;
         }
     </style>
 </head>
@@ -3741,7 +3781,27 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
                 <p class=\"meta\" id=\"watchlist-empty\" style=\"display:none;\">No items yet.</p>
             </section>
-                        <section class="panel top-panel" id="recent-trades-panel">
+            <section class="panel top-panel" id="oanda-inactivity-widget">
+                <div class="panel-header">
+                    <div>
+                        <h2>OANDA Inactivity</h2>
+                        <div class="panel-sub">Live account inactivity fee warning (Australia policy).</div>
+                    </div>
+                    <div class="oo-toolbar">
+                        <span class="status-pill" id="oanda-inactivity-updated">Loading...</span>
+                    </div>
+                </div>
+                <dl class="meta-grid">
+                    <dt>Last live trade</dt><dd id="oanda-inactivity-last-trade">—</dd>
+                    <dt>Open OANDA trades</dt><dd id="oanda-inactivity-open-trades">—</dd>
+                    <dt>12-month inactivity threshold</dt><dd id="oanda-inactivity-threshold">—</dd>
+                    <dt>Earliest fee date</dt><dd id="oanda-inactivity-fee-date">—</dd>
+                    <dt>Monthly fee</dt><dd id="oanda-inactivity-monthly-fee">Up to AUD 10</dd>
+                </dl>
+                <div class="status-headline" id="oanda-inactivity-headline">Loading...</div>
+                <div class="status-detail" id="oanda-inactivity-detail"></div>
+            </section>
+            <section class="panel top-panel" id="recent-trades-panel">
                 <div class="panel-header">
                     <div>
                         <h2>Recent Trades</h2>
@@ -7032,6 +7092,34 @@ async def _fetch_bybit_order_history(
     )
 
 
+async def _fetch_bybit_order_realtime(
+    *,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+    category: str,
+    settle_coin: Optional[str] = None,
+    order_filter: Optional[str] = None,
+    open_only: int = 1,
+) -> Dict[str, object]:
+    params: Dict[str, str] = {
+        "category": category,
+        "openOnly": str(open_only),
+        "limit": "50",
+    }
+    if settle_coin:
+        params["settleCoin"] = settle_coin
+    if order_filter:
+        params["orderFilter"] = order_filter
+    return await _bybit_signed_get(
+        base_url=base_url,
+        api_key=api_key,
+        api_secret=api_secret,
+        path="/v5/order/realtime",
+        params=params,
+    )
+
+
 def _parse_bybit_price_level(value: object) -> Optional[float]:
     parsed = _to_float(value)
     if parsed is None or parsed <= 0:
@@ -7041,38 +7129,96 @@ def _parse_bybit_price_level(value: object) -> Optional[float]:
 
 def _resolve_bybit_demo_tpsl(
     *,
+    entry: Dict[str, object],
     order_match: Dict[str, object],
     linked_orders: List[Dict[str, object]],
+    orders_by_link_id: Dict[str, Dict[str, object]],
+    orders_by_parent_link_id: Dict[str, List[Dict[str, object]]],
+    fallback_candidates: List[Dict[str, object]],
     cache_entry: Optional[Dict[str, object]],
-) -> Tuple[Optional[float], Optional[float], str]:
+) -> Tuple[Optional[float], Optional[float], str, Dict[str, object]]:
+    debug: Dict[str, object] = {
+        "order_match_found": bool(order_match),
+        "linked_orders_count": len(linked_orders),
+        "fallback_candidates_count": len(fallback_candidates),
+    }
+
+    def _is_tpsl_order(item: Dict[str, object]) -> bool:
+        t = str(item.get("stopOrderType") or "").strip().lower()
+        return t in {"stoploss", "takeprofit", "partialstoploss", "partialtakeprofit"}
+
+    def _extract_from_children(children: List[Dict[str, object]], source: str) -> Tuple[Optional[float], Optional[float], Optional[str]]:
+        sl: Optional[float] = None
+        tp: Optional[float] = None
+        for linked in children:
+            trigger_price = _parse_bybit_price_level(linked.get("triggerPrice"))
+            stop_order_type = str(linked.get("stopOrderType") or "").strip().lower()
+            linked_sl = _parse_bybit_price_level(linked.get("stopLoss"))
+            linked_tp = _parse_bybit_price_level(linked.get("takeProfit"))
+            if stop_order_type in {"stoploss", "partialstoploss"}:
+                sl = linked_sl or trigger_price or sl
+            elif stop_order_type in {"takeprofit", "partialtakeprofit"}:
+                tp = linked_tp or trigger_price or tp
+            sl = sl or linked_sl
+            tp = tp or linked_tp
+        if sl is not None or tp is not None:
+            return sl, tp, source
+        return None, None, None
+
     stop_loss = _parse_bybit_price_level(order_match.get("stopLoss"))
     take_profit = _parse_bybit_price_level(order_match.get("takeProfit"))
     if stop_loss is not None or take_profit is not None:
-        return stop_loss, take_profit, "parent_order"
+        return stop_loss, take_profit, "parent_order", debug
 
-    stop_loss = None
-    take_profit = None
-    for linked in linked_orders:
-        trigger_price = _parse_bybit_price_level(linked.get("triggerPrice"))
-        stop_order_type = str(linked.get("stopOrderType") or "").strip().lower()
-        linked_sl = _parse_bybit_price_level(linked.get("stopLoss"))
-        linked_tp = _parse_bybit_price_level(linked.get("takeProfit"))
-        if stop_order_type == "stoploss":
-            stop_loss = linked_sl or trigger_price or stop_loss
-        elif stop_order_type == "takeprofit":
-            take_profit = linked_tp or trigger_price or take_profit
-        stop_loss = stop_loss or linked_sl
-        take_profit = take_profit or linked_tp
-    if stop_loss is not None or take_profit is not None:
-        return stop_loss, take_profit, "linked_stop_order"
+    stop_loss, take_profit, source = _extract_from_children(linked_orders, "linked_parent_order")
+    if source:
+        return stop_loss, take_profit, source, debug
+
+    order_link_id = str(entry.get("orderLinkId") or order_match.get("orderLinkId") or "").strip()
+    parent_link_id = str(entry.get("parentOrderLinkId") or order_match.get("parentOrderLinkId") or "").strip()
+    cross_linked: List[Dict[str, object]] = []
+    for key in {order_link_id, parent_link_id}:
+        if not key:
+            continue
+        linked = orders_by_link_id.get(key)
+        if isinstance(linked, dict):
+            cross_linked.append(linked)
+        cross_linked.extend(orders_by_parent_link_id.get(key, []))
+    cross_linked = [item for item in cross_linked if isinstance(item, dict) and _is_tpsl_order(item)]
+    debug["cross_linked_count"] = len(cross_linked)
+    stop_loss, take_profit, source = _extract_from_children(cross_linked, "cross_linked_order")
+    if source:
+        return stop_loss, take_profit, source, debug
+
+    symbol = str(entry.get("symbol") or "").strip().upper()
+    side = str(entry.get("side") or "").strip().lower()
+    expected_child_side = "sell" if side in {"buy", "long"} else "buy"
+    close_ms = int(_to_float(entry.get("updatedTime")) or 0)
+    heuristic_matches: List[Dict[str, object]] = []
+    for candidate in fallback_candidates:
+        if str(candidate.get("symbol") or "").strip().upper() != symbol:
+            continue
+        candidate_side = str(candidate.get("side") or "").strip().lower()
+        if expected_child_side and candidate_side and candidate_side != expected_child_side:
+            continue
+        if not _is_tpsl_order(candidate):
+            continue
+        ts = int(_to_float(candidate.get("createdTime")) or _to_float(candidate.get("updatedTime")) or 0)
+        if close_ms and ts and abs(ts - close_ms) > 30 * 60 * 1000:
+            continue
+        heuristic_matches.append(candidate)
+    debug["heuristic_match_count"] = len(heuristic_matches)
+    stop_loss, take_profit, source = _extract_from_children(heuristic_matches, "heuristic_fallback")
+    if source:
+        return stop_loss, take_profit, source, debug
 
     if isinstance(cache_entry, dict):
         stop_loss = _parse_bybit_price_level(cache_entry.get("stop_loss"))
         take_profit = _parse_bybit_price_level(cache_entry.get("take_profit"))
         if stop_loss is not None or take_profit is not None:
-            return stop_loss, take_profit, f"cached_request:{cache_entry.get('source') or 'unknown'}"
+            return stop_loss, take_profit, f"cached_request:{cache_entry.get('source') or 'unknown'}", debug
 
-    return None, None, "unresolved"
+    return None, None, "unresolved", debug
 
 
 def _journal_id_for_bybit_demo_row(symbol: str, order_id: str) -> str:
@@ -7208,8 +7354,41 @@ async def _sync_bybit_demo_closed_pnl_window(
     orders_by_id: Dict[str, Dict[str, object]] = {}
     orders_by_link_id: Dict[str, Dict[str, object]] = {}
     orders_by_parent_link_id: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    fallback_order_buckets: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+
+    def _register_order(item: Dict[str, object]) -> None:
+        if not isinstance(item, dict):
+            return
+        order_id = str(item.get("orderId") or "").strip()
+        order_link_id = str(item.get("orderLinkId") or "").strip()
+        parent_link_id = str(item.get("parentOrderLinkId") or "").strip()
+        symbol = str(item.get("symbol") or "").strip().upper()
+        side = str(item.get("side") or "").strip().lower()
+        bucket_ts = int(_to_float(item.get("createdTime")) or _to_float(item.get("updatedTime")) or 0)
+        bucket = str(bucket_ts // 60000) if bucket_ts else "na"
+        stop_order_type = str(item.get("stopOrderType") or "").strip().lower()
+        key = f"{symbol}|{side}|{bucket}|{stop_order_type}"
+        fallback_order_buckets[key].append(item)
+        if order_id and order_id not in orders_by_id:
+            orders_by_id[order_id] = item
+        if order_link_id and order_link_id not in orders_by_link_id:
+            orders_by_link_id[order_link_id] = item
+        if parent_link_id:
+            orders_by_parent_link_id[parent_link_id].append(item)
+
+    def _candidate_buckets(symbol: str, opposite_side: str, close_ms: int) -> List[Dict[str, object]]:
+        symbol_norm = str(symbol or "").strip().upper()
+        bucket = str(close_ms // 60000) if close_ms else "na"
+        results: List[Dict[str, object]] = []
+        for bucket_key in {bucket, str(int(bucket) - 1) if bucket.isdigit() else bucket, str(int(bucket) + 1) if bucket.isdigit() else bucket}:
+            prefix = f"{symbol_norm}|{opposite_side}|{bucket_key}|"
+            for key, values in fallback_order_buckets.items():
+                if key.startswith(prefix):
+                    results.extend(values)
+        return results
+
     for settle_coin in ("USDT", "USDC"):
-        for order_filter in (None, "StopOrder"):
+        for order_filter in (None, "StopOrder", "BidirectionalTpslOrder"):
             order_cursor: Optional[str] = None
             while True:
                 order_payload = await _fetch_bybit_order_history(
@@ -7225,20 +7404,30 @@ async def _sync_bybit_demo_closed_pnl_window(
                 )
                 order_result = order_payload.get("result") or {}
                 for item in order_result.get("list") or []:
-                    if not isinstance(item, dict):
-                        continue
-                    order_id = str(item.get("orderId") or "").strip()
-                    order_link_id = str(item.get("orderLinkId") or "").strip()
-                    parent_link_id = str(item.get("parentOrderLinkId") or "").strip()
-                    if order_id and order_id not in orders_by_id:
-                        orders_by_id[order_id] = item
-                    if order_link_id and order_link_id not in orders_by_link_id:
-                        orders_by_link_id[order_link_id] = item
-                    if parent_link_id:
-                        orders_by_parent_link_id[parent_link_id].append(item)
+                    _register_order(item)
                 order_cursor = str(order_result.get("nextPageCursor") or "").strip() or None
                 if not order_cursor:
                     break
+            try:
+                realtime_payload = await _fetch_bybit_order_realtime(
+                    base_url=base_url,
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    category="linear",
+                    settle_coin=settle_coin,
+                    order_filter=order_filter,
+                    open_only=1,
+                )
+                realtime_result = realtime_payload.get("result") or {}
+                for item in realtime_result.get("list") or []:
+                    _register_order(item)
+            except Exception as exc:
+                BYBIT_LOGGER.warning(
+                    "BYBIT_DEMO_TPSL realtime_fetch_failed settle_coin=%s order_filter=%s err=%s",
+                    settle_coin,
+                    order_filter or "None",
+                    exc,
+                )
 
     tx_by_order: Dict[str, Dict[str, object]] = {}
     tx_cursor: Optional[str] = None
@@ -7295,6 +7484,13 @@ async def _sync_bybit_demo_closed_pnl_window(
                 or order_link_id
             ).strip()
             linked_orders = orders_by_parent_link_id.get(parent_link_id, [])
+            entry_side = str(entry.get("side") or "").strip().lower()
+            opposite_side = "sell" if entry_side in {"buy", "long"} else "buy"
+            fallback_candidates = _candidate_buckets(
+                str(entry.get("symbol") or ""),
+                opposite_side,
+                updated_ms,
+            )
             cache_entry, cache_match_type = resolve_cached_bybit_demo_tpsl(
                 cache=tpsl_cache,
                 order_id=order_id,
@@ -7305,9 +7501,13 @@ async def _sync_bybit_demo_closed_pnl_window(
                 open_time_ms=int(_to_float(entry.get("createdTime")) or 0) or None,
                 close_time_ms=updated_ms or None,
             )
-            stop_loss, take_profit, tpsl_source_raw = _resolve_bybit_demo_tpsl(
+            stop_loss, take_profit, tpsl_source_raw, tpsl_debug = _resolve_bybit_demo_tpsl(
+                entry=entry,
                 order_match=order_match,
                 linked_orders=linked_orders,
+                orders_by_link_id=orders_by_link_id,
+                orders_by_parent_link_id=orders_by_parent_link_id,
+                fallback_candidates=fallback_candidates,
                 cache_entry=cache_entry,
             )
             tpsl_source = tpsl_source_raw
@@ -7338,8 +7538,7 @@ async def _sync_bybit_demo_closed_pnl_window(
                         "order_id": order_id,
                         "order_link_id": order_link_id,
                         "parent_order_link_id": parent_link_id,
-                        "order_match_found": bool(order_match),
-                        "linked_orders_count": len(linked_orders),
+                        **tpsl_debug,
                         "cache_hit": cache_hit,
                         "cache_match_type": cache_match_type,
                     },
@@ -7476,6 +7675,136 @@ async def _fetch_oanda_transactions(
         payload.get("transactions") or [],
         str(payload.get("lastTransactionID") or "").strip() or None,
     )
+
+
+def _third_last_weekday(year: int, month: int, tz_name: str = "Australia/Brisbane") -> datetime:
+    zone = ZoneInfo(tz_name)
+    _, days_in_month = calendar.monthrange(year, month)
+    weekdays: List[int] = []
+    for day in range(1, days_in_month + 1):
+        dt = datetime(year, month, day)
+        if dt.weekday() < 5:
+            weekdays.append(day)
+    if len(weekdays) < 3:
+        raise ValueError(f"Unable to determine third-last weekday for {year}-{month:02d}")
+    return datetime(year, month, weekdays[-3], tzinfo=zone).astimezone(timezone.utc)
+
+
+def _fee_charge_date_on_or_after(
+    threshold_dt: datetime, tz_name: str = "Australia/Brisbane"
+) -> datetime:
+    zone = ZoneInfo(tz_name)
+    current = threshold_dt.astimezone(zone)
+    while True:
+        candidate_local_utc = _third_last_weekday(current.year, current.month, tz_name=tz_name)
+        candidate_local = candidate_local_utc.astimezone(zone)
+        if candidate_local >= current:
+            return candidate_local.astimezone(timezone.utc)
+        if current.month == 12:
+            current = current.replace(year=current.year + 1, month=1, day=1)
+        else:
+            current = current.replace(month=current.month + 1, day=1)
+
+
+async def _fetch_oanda_last_live_fill_time(cfg: Dict[str, str]) -> Optional[datetime]:
+    summary = await _fetch_oanda_json(
+        base_url=cfg["base_url"],
+        account_id=cfg["account_id"],
+        api_key=cfg["token"],
+        endpoint="/accounts/{account_id}/summary",
+        mode=cfg["mode"],
+    )
+    last_tx_id = str(summary.get("lastTransactionID") or "").strip()
+    if not last_tx_id:
+        raise ValueError("OANDA live summary missing lastTransactionID")
+    try:
+        current_id = int(last_tx_id)
+    except ValueError as exc:
+        raise ValueError(f"OANDA live summary returned invalid lastTransactionID: {last_tx_id}") from exc
+    min_id = max(0, current_id - 20000)
+    endpoint = (
+        f"/accounts/{{account_id}}/transactions/idrange?from={min_id}&to={current_id}&type=ORDER_FILL"
+    )
+    payload = await _fetch_oanda_json(
+        base_url=cfg["base_url"],
+        account_id=cfg["account_id"],
+        api_key=cfg["token"],
+        endpoint=endpoint,
+        mode=cfg["mode"],
+        timeout_s=8.0,
+    )
+    transactions = payload.get("transactions") if isinstance(payload.get("transactions"), list) else []
+    latest_fill: Optional[datetime] = None
+    for tx in transactions:
+        if not isinstance(tx, dict):
+            continue
+        tx_type = str(tx.get("type") or "").strip().upper()
+        if tx_type != "ORDER_FILL":
+            continue
+        tx_time = str(tx.get("time") or "").strip()
+        if not tx_time:
+            continue
+        parsed = _parse_oanda_timestamp(tx_time).astimezone(timezone.utc)
+        if latest_fill is None or parsed > latest_fill:
+            latest_fill = parsed
+    return latest_fill
+
+
+async def _build_oanda_inactivity_status() -> Dict[str, object]:
+    now = datetime.now(timezone.utc)
+    cfg = _get_oanda_config("live")
+    summary_payload = await _fetch_oanda_json(
+        base_url=cfg["base_url"],
+        account_id=cfg["account_id"],
+        api_key=cfg["token"],
+        endpoint="/accounts/{account_id}/summary",
+        mode=cfg["mode"],
+    )
+    account_summary = summary_payload.get("account") if isinstance(summary_payload.get("account"), dict) else {}
+    open_trade_count = int(_to_float(account_summary.get("openTradeCount")) or 0)
+    open_position_count = int(_to_float(account_summary.get("openPositionCount")) or 0)
+    has_open_positions = open_trade_count > 0 or open_position_count > 0
+
+    last_fill_at = await _fetch_oanda_last_live_fill_time(cfg)
+    base_payload: Dict[str, object] = {
+        "ok": True,
+        "mode": "live",
+        "last_live_fill_at": _format_oanda_timestamp(last_fill_at) if last_fill_at else None,
+        "open_trade_count": open_trade_count,
+        "open_position_count": open_position_count,
+        "has_open_positions": has_open_positions,
+        "policy_months_without_trade": 12,
+        "monthly_fee_aud": 10,
+        "updated_at": _utc_now_iso(),
+    }
+
+    if last_fill_at is None:
+        return {
+            **base_payload,
+            "ok": False,
+            "status": "unavailable",
+            "error": "Unable to confirm a live ORDER_FILL transaction within query window.",
+            "inactivity_threshold_at": None,
+            "earliest_fee_date": None,
+            "seconds_until_threshold": None,
+        }
+
+    threshold_at = (last_fill_at + relativedelta(months=12)).astimezone(timezone.utc)
+    earliest_fee_date = _fee_charge_date_on_or_after(threshold_at)
+    seconds_until_threshold = max(0, int((threshold_at - now).total_seconds()))
+    status = "countdown"
+    if has_open_positions:
+        status = "paused_open_position"
+    elif now >= threshold_at:
+        status = "fee_eligible"
+
+    return {
+        **base_payload,
+        "status": status,
+        "inactivity_threshold_at": _format_oanda_timestamp(threshold_at),
+        "earliest_fee_date": _format_oanda_timestamp(earliest_fee_date),
+        "seconds_until_threshold": seconds_until_threshold,
+    }
 
 
 async def _poll_oanda_fills() -> None:
@@ -7799,12 +8128,9 @@ async def merged_calculator_page() -> str:
     return CALCULATOR_PAGE_TEMPLATE
 
 
-@app.get("/merged/scanner", response_class=HTMLResponse)
-async def merged_scanner_page() -> str:
-    return _merged_shell(
-        "Scanner",
-        [("Crypto", "/scripts/view/Crypto-Scanner-clone"), ("FX", "/scripts/view/fxscanner-oanda-clone")],
-    )
+@app.get("/merged/scanner")
+async def merged_scanner_retired() -> JSONResponse:
+    raise HTTPException(status_code=410, detail="Scanner has been retired.")
 
 
 HISTORY_PAGE_TEMPLATE = """<!doctype html>
@@ -9176,11 +9502,6 @@ async def list_scripts() -> JSONResponse:
                 by_name.get("cryptocalculator-clone", {}).get("running")
                 or by_name.get("oanda-calculator-clone", {}).get("running")
             )
-        elif btn["name"] == "scanner":
-            row["running"] = bool(
-                by_name.get("Crypto-Scanner-clone", {}).get("running")
-                or by_name.get("fxscanner-oanda-clone", {}).get("running")
-            )
         elif btn["name"] == "history":
             row["running"] = bool(
                 by_name.get("bybithistory-clone", {}).get("running")
@@ -9780,10 +10101,41 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
                 "fees": row.get("fees") if row.get("fees") is not None else row.get("commission"),
                 "result_pct": result_pct,
                 "_row_balance_after_trade": row.get("balance_after_trade"),
+                "_row_entry_price": row.get("entry_price"),
+                "_row_exit_price": row.get("exit_price"),
+                "_row_realized_pnl": row.get("realized_pnl")
+                if row.get("realized_pnl") is not None
+                else row.get("net_profit"),
                 "outcome": outcome,
                 "duration_seconds": row.get("trade_duration_seconds"),
             }
         )
+
+    def _canonical_seconds(value: object) -> Optional[int]:
+        if value in (None, ""):
+            return None
+        try:
+            ts = pd.to_datetime(value, utc=True).timestamp()
+            return int(round(float(ts)))
+        except Exception:
+            return None
+
+    def _norm_account(value: object) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+    def _norm_side(value: object) -> str:
+        raw = str(value or "").strip().lower()
+        if raw in {"buy", "long"}:
+            return "buy"
+        if raw in {"sell", "short"}:
+            return "sell"
+        return raw
+
+    def _rounded_num(value: object, dp: int = 8) -> str:
+        num = _to_float(value)
+        if num is None:
+            return ""
+        return f"{num:.{dp}f}"
 
     def _trade_key(item: Dict[str, object]) -> str:
         order_id = str(item.get("_row_order_id") or "").strip()
@@ -9791,20 +10143,25 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
             return f"order:{order_id}"
         return "|".join(
             [
-                str(item.get("account") or "").strip().lower(),
+                _norm_account(item.get("account")),
                 str(item.get("symbol") or "").strip().upper(),
-                str(item.get("side") or "").strip().upper(),
-                str(item.get("opened_at") or "").strip(),
-                str(item.get("closed_at") or "").strip(),
+                _norm_side(item.get("side")),
+                str(_canonical_seconds(item.get("opened_at")) or ""),
+                str(_canonical_seconds(item.get("closed_at")) or ""),
+                _rounded_num(item.get("_row_entry_price")),
+                _rounded_num(item.get("_row_exit_price")),
+                _rounded_num(item.get("fees"), 6),
+                _rounded_num(item.get("_row_realized_pnl"), 6),
             ]
         )
 
-    def _trade_score(item: Dict[str, object]) -> Tuple[int, int, int]:
+    def _trade_score(item: Dict[str, object]) -> Tuple[int, int, int, int]:
         has_tpsl = int(item.get("stop_loss") is not None or item.get("take_profit") is not None)
+        has_order_id = int(bool(str(item.get("_row_order_id") or "").strip()))
         has_balance = int(item.get("_row_balance_after_trade") is not None)
         src = str(item.get("_row_source") or "").strip().lower()
         source_rank = 1 if src == "bybit" else 0
-        return has_tpsl, has_balance, source_rank
+        return has_tpsl, has_order_id, has_balance, source_rank
 
     deduped: Dict[str, Dict[str, object]] = {}
     for item in items:
@@ -9828,8 +10185,45 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
         copy.pop("_row_source", None)
         copy.pop("_row_order_id", None)
         copy.pop("_row_balance_after_trade", None)
+        copy.pop("_row_entry_price", None)
+        copy.pop("_row_exit_price", None)
+        copy.pop("_row_realized_pnl", None)
         public_items.append(copy)
     return JSONResponse({"items": public_items})
+
+
+@app.get("/api/oanda-inactivity-status")
+async def oanda_inactivity_status() -> JSONResponse:
+    now = time.time()
+    cached = _OANDA_INACTIVITY_CACHE.get("payload")
+    if (
+        isinstance(cached, dict)
+        and float(_OANDA_INACTIVITY_CACHE.get("expires_at") or 0.0) > now
+    ):
+        return JSONResponse(cached)
+
+    try:
+        payload = await _build_oanda_inactivity_status()
+    except Exception as exc:
+        payload = {
+            "ok": False,
+            "mode": "live",
+            "status": "unavailable",
+            "error": str(exc),
+            "last_live_fill_at": None,
+            "open_trade_count": None,
+            "open_position_count": None,
+            "has_open_positions": None,
+            "inactivity_threshold_at": None,
+            "earliest_fee_date": None,
+            "policy_months_without_trade": 12,
+            "monthly_fee_aud": 10,
+            "seconds_until_threshold": None,
+            "updated_at": _utc_now_iso(),
+        }
+    _OANDA_INACTIVITY_CACHE["payload"] = payload
+    _OANDA_INACTIVITY_CACHE["expires_at"] = now + _OANDA_INACTIVITY_CACHE_TTL_SECONDS
+    return JSONResponse(payload)
 
 
 @app.post("/api/open-orders/close")

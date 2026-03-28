@@ -14,25 +14,38 @@
   const rtStatus = document.getElementById('recent-trades-status');
   const rtBody = document.querySelector('#recent-trades-table tbody');
   const rtEmpty = document.getElementById('recent-trades-empty');
+  const oandaUpdated = document.getElementById('oanda-inactivity-updated');
+  const oandaHeadline = document.getElementById('oanda-inactivity-headline');
+  const oandaDetail = document.getElementById('oanda-inactivity-detail');
+  const oandaLastTrade = document.getElementById('oanda-inactivity-last-trade');
+  const oandaOpenTrades = document.getElementById('oanda-inactivity-open-trades');
+  const oandaThreshold = document.getElementById('oanda-inactivity-threshold');
+  const oandaFeeDate = document.getElementById('oanda-inactivity-fee-date');
+  const oandaMonthlyFee = document.getElementById('oanda-inactivity-monthly-fee');
 
   let scriptsInFlight = null;
   let ooInFlight = null;
   let rtInFlight = null;
+  let oandaInFlight = null;
 
   let scriptsTimer = null;
   let ooTimer = null;
   let rtTimer = null;
+  let oandaTimer = null;
+  let oandaSecondTimer = null;
 
   const POLL_MS = {
     scripts: 15_000,
     openOrders: 10_000,
     recentTrades: 15_000,
+    oandaInactivity: 30_000,
     // Slow polling while tab is hidden to reduce background load.
     hiddenMultiplier: 3,
   };
 
   let hasOpenOrdersData = false;
   let hasRecentTradesData = false;
+  let oandaState = null;
 
   const fmt = (v) => (v === null || v === undefined || v === '' ? '—' : v);
   const fmtNum = (v, dp = 4) => {
@@ -67,6 +80,17 @@
     if (h > 0) return `${h}h ${m}m ${s}s`;
     if (m > 0) return `${m}m ${s}s`;
     return `${s}s`;
+  };
+  const fmtCountdown = (secs) => {
+    const n = Number(secs);
+    if (!Number.isFinite(n) || n < 0) return '—';
+    const days = Math.floor(n / 86400);
+    const hours = Math.floor((n % 86400) / 3600);
+    const mins = Math.floor((n % 3600) / 60);
+    const rem = Math.floor(n % 60);
+    if (days > 0) return `${days}d ${hours}h ${mins}m ${rem}s`;
+    if (hours > 0) return `${hours}h ${mins}m ${rem}s`;
+    return `${mins}m ${rem}s`;
   };
 
   const setStatus = (msg, isErr = false) => {
@@ -361,26 +385,97 @@
     return rtInFlight;
   };
 
+  const renderOandaInactivity = (payload) => {
+    oandaState = payload && typeof payload === 'object' ? { ...payload } : null;
+    if (oandaLastTrade) oandaLastTrade.textContent = fmtTime(payload?.last_live_fill_at);
+    if (oandaOpenTrades) {
+      const ot = payload?.open_trade_count;
+      const op = payload?.open_position_count;
+      oandaOpenTrades.textContent = (ot === null || ot === undefined) ? '—' : `${ot} trades / ${op ?? '—'} positions`;
+    }
+    if (oandaThreshold) oandaThreshold.textContent = fmtTime(payload?.inactivity_threshold_at);
+    if (oandaFeeDate) oandaFeeDate.textContent = fmtTime(payload?.earliest_fee_date);
+    if (oandaMonthlyFee) oandaMonthlyFee.textContent = `Up to AUD ${payload?.monthly_fee_aud ?? 10}`;
+    if (oandaUpdated) oandaUpdated.textContent = payload?.updated_at ? `Updated ${fmtTime(payload.updated_at)}` : 'Status unavailable';
+    tickOandaCountdown();
+  };
+
+  const tickOandaCountdown = () => {
+    const payload = oandaState || {};
+    const statusValue = String(payload.status || '').toLowerCase();
+    if (!oandaHeadline || !oandaDetail) return;
+    if (!payload.ok || statusValue === 'unavailable') {
+      oandaHeadline.textContent = 'Status unavailable';
+      oandaDetail.textContent = payload.error || 'Unable to confirm live inactivity state.';
+      return;
+    }
+    if (payload.has_open_positions || statusValue === 'paused_open_position') {
+      oandaHeadline.textContent = 'Protected while an OANDA trade is open';
+      oandaDetail.textContent = 'Inactivity fee does not apply while open positions/trades exist.';
+      return;
+    }
+    if (statusValue === 'fee_eligible') {
+      oandaHeadline.textContent = `Fee eligible; next charge date ${fmtTime(payload.earliest_fee_date)}`;
+      oandaDetail.textContent = 'Threshold has passed. Charge timing follows the third-last weekday monthly rule.';
+      return;
+    }
+    const secs = Number(payload.seconds_until_threshold);
+    if (Number.isFinite(secs)) {
+      oandaHeadline.textContent = `${fmtCountdown(secs)} until 12-month inactivity threshold`;
+      oandaDetail.textContent = `Earliest fee date: ${fmtTime(payload.earliest_fee_date)}`;
+      payload.seconds_until_threshold = Math.max(0, Math.floor(secs - 1));
+      return;
+    }
+    oandaHeadline.textContent = 'Status unavailable';
+    oandaDetail.textContent = 'Unable to compute inactivity countdown.';
+  };
+
+  const refreshOandaInactivity = async () => {
+    if (oandaInFlight) return oandaInFlight;
+    oandaInFlight = (async () => {
+      try {
+        const payload = await fetchJson('/api/oanda-inactivity-status');
+        renderOandaInactivity(payload);
+      } catch (e) {
+        console.error(e);
+        renderOandaInactivity({
+          ok: false,
+          status: 'unavailable',
+          error: e.message || 'Request failed',
+          updated_at: new Date().toISOString(),
+          monthly_fee_aud: 10,
+        });
+      } finally {
+        oandaInFlight = null;
+      }
+    })();
+    return oandaInFlight;
+  };
+
   const restartPolling = () => {
-    [scriptsTimer, ooTimer, rtTimer].forEach((id) => {
+    [scriptsTimer, ooTimer, rtTimer, oandaTimer].forEach((id) => {
       if (id) clearInterval(id);
     });
+    if (oandaSecondTimer) clearInterval(oandaSecondTimer);
     const multiplier = document.visibilityState === 'hidden' ? POLL_MS.hiddenMultiplier : 1;
     scriptsTimer = setInterval(() => { refreshScripts(); }, POLL_MS.scripts * multiplier);
     ooTimer = setInterval(() => { refreshOpenOrders(); }, POLL_MS.openOrders * multiplier);
     rtTimer = setInterval(() => { refreshRecentTrades(); }, POLL_MS.recentTrades * multiplier);
+    oandaTimer = setInterval(() => { refreshOandaInactivity(); }, POLL_MS.oandaInactivity * multiplier);
+    oandaSecondTimer = setInterval(() => { tickOandaCountdown(); }, 1000);
   };
 
-  refreshBtn?.addEventListener('click', () => { refreshScripts(); refreshOpenOrders(); refreshRecentTrades(); });
+  refreshBtn?.addEventListener('click', () => { refreshScripts(); refreshOpenOrders(); refreshRecentTrades(); refreshOandaInactivity(); });
   ooRefreshBtn?.addEventListener('click', () => refreshOpenOrders());
 
   refreshScripts();
   refreshOpenOrders();
   refreshRecentTrades();
+  refreshOandaInactivity();
   restartPolling();
   document.addEventListener('visibilitychange', restartPolling);
   window.addEventListener('beforeunload', () => {
-    [scriptsTimer, ooTimer, rtTimer].forEach((id) => {
+    [scriptsTimer, ooTimer, rtTimer, oandaTimer, oandaSecondTimer].forEach((id) => {
       if (id) clearInterval(id);
     });
   });
