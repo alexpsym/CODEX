@@ -66,6 +66,66 @@
     return bodyText ? JSON.parse(bodyText) : {};
   };
 
+  const isActionableRow = (row) => {
+    if (!row || typeof row !== 'object') return false;
+    if (row.parent_id || row.parent_order_id) return false;
+    const status = String(row.status || '').toLowerCase();
+    if (status.includes('bounce waiting')) return false;
+    const type = String(row.type || '').toLowerCase();
+    return type === 'order' || type === 'position' || type === 'trade';
+  };
+
+  const actionLabelFor = (row) => {
+    const type = String(row?.type || '').toLowerCase();
+    if (type === 'order') return 'Cancel';
+    if (type === 'position' || type === 'trade') return 'Close';
+    return null;
+  };
+
+  const postClose = async (row, btn) => {
+    btn.disabled = true;
+    const prev = btn.textContent;
+    btn.textContent = 'Working...';
+    try {
+      const response = await fetch('/api/open-orders/close', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(row),
+      });
+      const text = await response.text();
+      const data = text ? JSON.parse(text) : {};
+      if (!response.ok) {
+        throw new Error(data?.detail || `${response.status} ${response.statusText}`);
+      }
+      await refresh();
+      setBadge('Updated');
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = prev;
+      setBadge(err?.message || 'Action failed');
+    }
+  };
+
+  const renderActionCell = (row, cell, { allowAction = true } = {}) => {
+    const label = actionLabelFor(row);
+    if (!allowAction || !label || !isActionableRow(row)) {
+      cell.textContent = '—';
+      return;
+    }
+    const required = ['broker', 'account', 'category', 'instrument', 'id', 'type'];
+    const missing = required.some((key) => !String(row[key] ?? '').trim());
+    if (missing) {
+      cell.textContent = '—';
+      return;
+    }
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'action-btn';
+    btn.textContent = label;
+    btn.addEventListener('click', () => postClose(row, btn));
+    cell.appendChild(btn);
+  };
+
   const render = (items, errors = []) => {
     if (!tbody) return;
     tbody.innerHTML = '';
@@ -108,7 +168,9 @@
         td.textContent = fmt(v);
         row.appendChild(td);
       });
-      const actionTd = document.createElement('td'); actionTd.textContent='—'; row.appendChild(actionTd);
+      const actionTd = document.createElement('td');
+      renderActionCell(item, actionTd, { allowAction: true });
+      row.appendChild(actionTd);
       tbody.appendChild(row);
 
       children.forEach((child) => {
@@ -142,7 +204,7 @@
         });
 
         const actionTd = document.createElement('td');
-        actionTd.textContent = '—';
+        renderActionCell(child, actionTd, { allowAction: false });
         cRow.appendChild(actionTd);
 
         tbody.appendChild(cRow);

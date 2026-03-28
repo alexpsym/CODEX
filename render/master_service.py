@@ -1759,6 +1759,18 @@ def _parse_excel_account_workbook(
                 if workbook_is_bybit_demo and order_id_raw:
                     row_id = _journal_id_for_bybit_demo_row(symbol_canon, order_id_raw)
                 side_txt = _safe_str_from_row(row, side_col).upper()
+                if workbook_is_bybit_demo:
+                    corrected = _infer_side_from_tpsl_geometry(
+                        entry_price=entry_price,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                    ) or _infer_side_from_exit_and_pnl(
+                        entry_price=entry_price,
+                        exit_price=exit_price,
+                        realized_pnl=net_profit,
+                    )
+                    if corrected:
+                        side_txt = corrected.upper()
                 setup_txt = _safe_str_from_row(row, setup_col)
                 breakeven_txt = _boolish_text(_safe_str_from_row(row, breakeven_col))
                 status = "closed" if exit_price is not None else "unknown"
@@ -3255,7 +3267,9 @@ async def _run_oanda_history_export(job: OandaHistoryJob) -> None:
     try:
         if oanda_history_exporter is None:
             raise RuntimeError("OANDA history exporter module not available.")
-        account_mode = str(job.params.get("account") or "live").strip().lower()
+        account_mode = str(job.params.get("account") or "").strip().lower()
+        if account_mode not in {"live", "demo"}:
+            raise ValueError("Bybit export requires explicit account=live|demo.")
         config = _get_oanda_history_config(account_mode)
 
         period = _normalize_period(job.params.get("period"))
@@ -3383,7 +3397,9 @@ async def _run_bybit_history_export(job: BybitHistoryJob) -> None:
         if bybit_history_fetcher is None:
             raise RuntimeError("Bybit history exporter module not available.")
 
-        account_mode = str(job.params.get("account") or "live").strip().lower()
+        account_mode = str(job.params.get("account") or "").strip().lower()
+        if account_mode not in {"live", "demo"}:
+            raise ValueError("Bybit export requires explicit account=live|demo.")
         period = _normalize_period(job.params.get("period"))
         complete = bool(job.params.get("complete")) or period == "complete"
 
@@ -3812,13 +3828,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         #oanda-inactivity-widget .meta-grid {
             display: grid;
             grid-template-columns: max-content 1fr;
-            gap: 0.45rem 0.75rem;
+            gap: 0.35rem 0.65rem;
             font-size: 0.9rem;
-            margin-top: 0.6rem;
+            margin-top: 0.35rem;
         }
         #oanda-inactivity-widget {
             height: auto;
-            min-height: 0;
+            margin-top: 0;
         }
         #oanda-inactivity-widget .toggle-btn {
             border-radius: 8px;
@@ -3842,21 +3858,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             color: #e2e8f0;
         }
         #oanda-inactivity-widget .status-headline {
-            margin-top: 0.9rem;
-            font-size: 1.1rem;
+            margin-top: 0.45rem;
+            font-size: 1rem;
             font-weight: 900;
             color: #93c5fd;
-            min-height: 1.5em;
         }
         #oanda-inactivity-widget .status-detail {
-            margin-top: 0.25rem;
+            margin-top: 0.15rem;
             color: #cbd5e1;
-            font-size: 0.9rem;
-            min-height: 1.2em;
+            font-size: 0.85rem;
             line-height: 1.35;
         }
         #oanda-inactivity-widget .details-wrap {
-            margin-top: 0.5rem;
+            margin-top: 0.35rem;
         }
         #oanda-inactivity-widget .details-wrap[hidden] {
             display: none;
@@ -3923,7 +3937,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <div class="panel-header">
                     <div>
                         <h2>OANDA Inactivity</h2>
-                        <div class="panel-sub">Live account inactivity fee warning (Australia policy).</div>
                     </div>
                     <div class="oo-toolbar">
                         <span class="status-pill" id="oanda-inactivity-updated">Loading...</span>
@@ -7465,6 +7478,7 @@ def _normalize_bybit_demo_closed_pnl_row(
     entry: Dict[str, object],
     *,
     balance_after_trade: Optional[float],
+    display_side: Optional[str] = None,
     stop_loss: Optional[float] = None,
     take_profit: Optional[float] = None,
     raw_refs_extra: Optional[Dict[str, object]] = None,
@@ -7478,7 +7492,14 @@ def _normalize_bybit_demo_closed_pnl_row(
     fees = open_fee + close_fee
     fill_count = int(_to_float(entry.get("fillCount")) or 0)
     notes = "" if balance_after_trade is not None else "Balance unavailable from transaction log"
-    raw_refs = {"orderId": order_id, "fillCount": fill_count, "source": "closed_pnl"}
+    raw_side = str(entry.get("side") or "").strip()
+    side_value = str(display_side or raw_side).strip()
+    raw_refs = {
+        "orderId": order_id,
+        "fillCount": fill_count,
+        "source": "closed_pnl",
+        "raw_closed_pnl_side": raw_side or None,
+    }
     if isinstance(raw_refs_extra, dict):
         raw_refs.update(raw_refs_extra)
     return {
@@ -7488,7 +7509,7 @@ def _normalize_bybit_demo_closed_pnl_row(
         "account_label": "Bybit Demo",
         "asset_class": "crypto",
         "symbol": symbol,
-        "side": str(entry.get("side") or "").title(),
+        "side": side_value.title(),
         "status": "closed",
         "open_time": _ms_to_iso(entry.get("createdTime")),
         "close_time": _ms_to_iso(entry.get("updatedTime")),
@@ -7508,6 +7529,97 @@ def _normalize_bybit_demo_closed_pnl_row(
         "notes": notes,
         "raw_refs": raw_refs,
     }
+
+
+def _normalize_side_for_comparison(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"buy", "long"}:
+        return "buy"
+    if text in {"sell", "short"}:
+        return "sell"
+    return ""
+
+
+def _infer_side_from_tpsl_geometry(
+    *,
+    entry_price: Optional[float],
+    stop_loss: Optional[float],
+    take_profit: Optional[float],
+) -> Optional[str]:
+    if entry_price is None or stop_loss is None or take_profit is None:
+        return None
+    if stop_loss < entry_price < take_profit:
+        return "Buy"
+    if take_profit < entry_price < stop_loss:
+        return "Sell"
+    return None
+
+
+def _infer_side_from_exit_and_pnl(
+    *,
+    entry_price: Optional[float],
+    exit_price: Optional[float],
+    realized_pnl: Optional[float],
+) -> Optional[str]:
+    if entry_price is None or exit_price is None or realized_pnl is None:
+        return None
+    move = exit_price - entry_price
+    if move == 0 or realized_pnl == 0:
+        return None
+    if move > 0 and realized_pnl > 0:
+        return "Buy"
+    if move < 0 and realized_pnl > 0:
+        return "Sell"
+    if move > 0 and realized_pnl < 0:
+        return "Sell"
+    if move < 0 and realized_pnl < 0:
+        return "Buy"
+    return None
+
+
+def _resolve_bybit_demo_display_side(
+    *,
+    entry: Dict[str, object],
+    order_match: Dict[str, object],
+    stop_loss: Optional[float],
+    take_profit: Optional[float],
+) -> tuple[Optional[str], str]:
+    raw_side_norm = _normalize_side_for_comparison(entry.get("side"))
+    entry_order_id = str(entry.get("orderId") or "").strip()
+    entry_order_link_id = str(entry.get("orderLinkId") or "").strip()
+    candidate_norm = _normalize_side_for_comparison(order_match.get("side"))
+    if candidate_norm:
+        is_reduce_only = bool(order_match.get("reduceOnly"))
+        stop_order_type = str(order_match.get("stopOrderType") or "").strip().lower()
+        candidate_order_id = str(order_match.get("orderId") or "").strip()
+        candidate_link_id = str(order_match.get("orderLinkId") or "").strip()
+        high_confidence = (
+            (candidate_order_id and candidate_order_id == entry_order_id)
+            or (candidate_link_id and entry_order_link_id and candidate_link_id == entry_order_link_id)
+            or (not is_reduce_only and stop_order_type in {"", "unknown"})
+        )
+        if high_confidence:
+            return candidate_norm.title(), "opening_order_match"
+
+    geometry_side = _infer_side_from_tpsl_geometry(
+        entry_price=_to_float(entry.get("avgEntryPrice")),
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+    )
+    if geometry_side:
+        return geometry_side, "tpsl_geometry"
+
+    movement_side = _infer_side_from_exit_and_pnl(
+        entry_price=_to_float(entry.get("avgEntryPrice")),
+        exit_price=_to_float(entry.get("avgExitPrice")),
+        realized_pnl=_to_float(entry.get("closedPnl")),
+    )
+    if movement_side:
+        return movement_side, "price_move_vs_pnl"
+
+    if raw_side_norm:
+        return raw_side_norm.title(), "closed_pnl_raw"
+    return None, "unresolved"
 
 
 def _bybit_demo_workbook_row(row: Dict[str, object]) -> Dict[str, object]:
@@ -7761,15 +7873,23 @@ async def _sync_bybit_demo_closed_pnl_window(
                     cache_match_type,
                 )
             balance_after_trade = _to_float(tx_match.get("cashBalance"))
+            resolved_side, side_source = _resolve_bybit_demo_display_side(
+                entry=entry,
+                order_match=order_match,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+            )
             row = _normalize_bybit_demo_closed_pnl_row(
                 entry,
                 balance_after_trade=balance_after_trade,
+                display_side=resolved_side,
                 stop_loss=stop_loss,
                 take_profit=take_profit,
                 raw_refs_extra={
                     "orderLinkId": order_link_id or order_match.get("orderLinkId"),
                     "parentOrderLinkId": order_match.get("parentOrderLinkId"),
                     "tpsl_source": tpsl_source,
+                    "side_source": side_source,
                     "tpsl_unresolved_context": {
                         "order_id": order_id,
                         "order_link_id": order_link_id,
@@ -7949,9 +8069,25 @@ async def _fetch_oanda_last_live_fill_time(cfg: Dict[str, str]) -> Optional[date
         account_id=cfg["account_id"],
         api_key=cfg["token"],
     )
-    window = timedelta(days=180)
+    window = timedelta(days=120)
     end_dt = datetime.now(timezone.utc)
     cursor_end = end_dt
+
+    def _endpoint_from_page_url(page_url: str, account_id: str) -> Optional[str]:
+        try:
+            parsed = urlparse(page_url)
+        except Exception:
+            return None
+        path = parsed.path or ""
+        marker = f"/v3/accounts/{account_id}"
+        idx = path.find(marker)
+        if idx >= 0:
+            endpoint = path[idx + len("/v3") :]
+        else:
+            endpoint = path
+        if not endpoint.startswith("/accounts/"):
+            return None
+        return f"{endpoint}?{parsed.query}" if parsed.query else endpoint
 
     while cursor_end > account_created:
         cursor_start = max(account_created, cursor_end - window)
@@ -7969,10 +8105,26 @@ async def _fetch_oanda_last_live_fill_time(cfg: Dict[str, str]) -> Optional[date
             mode=cfg["mode"],
             timeout_s=8.0,
         )
-        transactions = payload.get("transactions") if isinstance(payload.get("transactions"), list) else []
+        page_urls = payload.get("pages") if isinstance(payload.get("pages"), list) else []
+        transactions: List[Dict[str, object]] = []
+        for page_url in reversed(page_urls):
+            page_endpoint = _endpoint_from_page_url(str(page_url), cfg["account_id"])
+            if not page_endpoint:
+                continue
+            page_payload = await _fetch_oanda_json(
+                base_url=cfg["base_url"],
+                account_id=cfg["account_id"],
+                api_key=cfg["token"],
+                endpoint=page_endpoint,
+                mode=cfg["mode"],
+                timeout_s=8.0,
+            )
+            page_items = page_payload.get("transactions")
+            if isinstance(page_items, list):
+                transactions.extend(item for item in page_items if isinstance(item, dict))
         latest_fill: Optional[datetime] = None
         for tx in transactions:
-            if not isinstance(tx, dict):
+            if str(tx.get("type") or "").strip().upper() != "ORDER_FILL":
                 continue
             tx_time = str(tx.get("time") or "").strip()
             if not tx_time:
@@ -8019,7 +8171,18 @@ async def _build_oanda_inactivity_status() -> Dict[str, object]:
         "updated_at": _utc_now_iso(),
     }
 
-    threshold_anchor = last_fill_at or account_created
+    if last_fill_at is None:
+        return {
+            **base_payload,
+            "ok": False,
+            "status": "unavailable",
+            "error": "Could not resolve last ORDER_FILL transaction from OANDA history pages.",
+            "inactivity_threshold_at": None,
+            "earliest_fee_date": None,
+            "seconds_until_threshold": None,
+        }
+
+    threshold_anchor = last_fill_at
     threshold_at = (threshold_anchor + relativedelta(months=12)).astimezone(timezone.utc)
     earliest_fee_date = _fee_charge_date_on_or_after(threshold_at)
     seconds_until_threshold = max(0, int((threshold_at - now).total_seconds()))
@@ -8304,7 +8467,7 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
       <a class="back-link" href="/">Back</a>
     </div>
     <div class="frame-shell">
-      <iframe id="calculator-frame" title="Position Size Calculator" loading="eager"></iframe>
+      <iframe id="calculator-frame" title="Position Size Calculator" loading="eager" src="/apps/cryptocalculator-clone/?embedded=1&shell=merged&title=Position+Size+Calculator"></iframe>
     </div>
   </div>
   <script>
@@ -8312,8 +8475,8 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
       const STORAGE_KEY = 'merged_calculator_asset';
       const DEFAULT_ASSET = 'crypto';
       const ASSET_URLS = {
-        crypto: '/apps/cryptocalculator-clone/?embedded=1&title=Position+Size+Calculator',
-        fx: '/apps/oanda-calculator-clone/?embedded=1&title=Position+Size+Calculator',
+        crypto: '/apps/cryptocalculator-clone/?embedded=1&shell=merged&title=Position+Size+Calculator',
+        fx: '/apps/oanda-calculator-clone/?embedded=1&shell=merged&title=Position+Size+Calculator',
       };
       const buttons = Array.from(document.querySelectorAll('[data-asset]'));
       const frame = document.getElementById('calculator-frame');
@@ -8332,7 +8495,9 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
       const updateAsset = (asset, { replace = false } = {}) => {
         const nextAsset = normalizeAsset(asset);
         setActive(nextAsset);
-        frame.src = ASSET_URLS[nextAsset];
+        if (frame.src !== ASSET_URLS[nextAsset]) {
+          frame.src = ASSET_URLS[nextAsset];
+        }
         currentUrl.searchParams.set('asset', nextAsset);
         const nextUrl = `${currentUrl.pathname}?${currentUrl.searchParams.toString()}`;
         window.history[replace ? 'replaceState' : 'pushState']({}, '', nextUrl);
@@ -8343,6 +8508,24 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
       updateAsset(initialAsset, { replace: true });
       buttons.forEach((button) => {
         button.addEventListener('click', () => updateAsset(button.dataset.asset));
+      });
+      frame.addEventListener('load', () => {
+        const expectedAsset = normalizeAsset(new URL(window.location.href).searchParams.get('asset') || DEFAULT_ASSET);
+        const expected = ASSET_URLS[expectedAsset];
+        let current = '';
+        try {
+          current = frame.contentWindow?.location?.href || frame.src || '';
+        } catch (_err) {
+          current = frame.src || '';
+        }
+        if (!current) return;
+        const currentUrl = new URL(current, window.location.origin);
+        const isCalculatorApp = currentUrl.pathname.includes('/apps/cryptocalculator-clone/') || currentUrl.pathname.includes('/apps/oanda-calculator-clone/');
+        const embedded = currentUrl.searchParams.get('embedded') === '1';
+        const shellMode = currentUrl.searchParams.get('shell') === 'merged';
+        if (isCalculatorApp && (!embedded || !shellMode || current !== expected)) {
+          frame.contentWindow?.location.replace(expected);
+        }
       });
       window.addEventListener('popstate', () => {
         const asset = normalizeAsset(new URL(window.location.href).searchParams.get('asset') || DEFAULT_ASSET);
@@ -10716,9 +10899,9 @@ async def start_oanda_history_export(request: Request) -> JSONResponse:
         raise HTTPException(status_code=500, detail="OANDA history exporter not available.")
     payload = await request.json()
 
-    account = str(payload.get("account") or "demo").strip().lower()
+    account = str(payload.get("account") or "").strip().lower()
     if account not in {"live", "demo"}:
-        account = "live"
+        raise HTTPException(status_code=400, detail="account must be live or demo.")
     period = _normalize_period(payload.get("period"))
     days = payload.get("days")
     complete = payload.get("complete")
@@ -10730,7 +10913,7 @@ async def start_oanda_history_export(request: Request) -> JSONResponse:
             complete = True
             period = None
 
-    params: Dict[str, object] = {}
+    params: Dict[str, object] = {"account": account}
     if complete:
         params.update({"complete": True})
     elif period is not None:
@@ -10869,9 +11052,9 @@ async def start_bybit_history_export(request: Request) -> JSONResponse:
         raise HTTPException(status_code=500, detail="Bybit history exporter not available.")
     payload = await request.json()
 
-    account = str(payload.get("account") or "demo").strip().lower()
+    account = str(payload.get("account") or "").strip().lower()
     if account not in {"live", "demo"}:
-        account = "live"
+        raise HTTPException(status_code=400, detail="account must be live or demo.")
     period = _normalize_period(payload.get("period"))
     days = payload.get("days")
     complete = payload.get("complete")
@@ -10883,7 +11066,7 @@ async def start_bybit_history_export(request: Request) -> JSONResponse:
             complete = True
             period = None
 
-    params: Dict[str, object] = {}
+    params: Dict[str, object] = {"account": account}
     if complete:
         params.update({"complete": True})
     elif period is not None:

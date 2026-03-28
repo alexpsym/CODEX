@@ -145,6 +145,65 @@
     return bodyText ? JSON.parse(bodyText) : {};
   };
 
+  const isActionableRow = (row) => {
+    if (!row || typeof row !== 'object') return false;
+    if (row.parent_id || row.parent_order_id) return false;
+    const status = String(row.status || '').toLowerCase();
+    if (status.includes('bounce waiting')) return false;
+    const type = String(row.type || '').toLowerCase();
+    if (type === 'order') return true;
+    return type === 'position' || type === 'trade';
+  };
+
+  const actionLabelFor = (row) => {
+    const type = String(row?.type || '').toLowerCase();
+    if (type === 'order') return 'Cancel';
+    if (type === 'position' || type === 'trade') return 'Close';
+    return null;
+  };
+
+  const closeOpenOrder = async (row, button) => {
+    if (!row || !button) return;
+    button.disabled = true;
+    const previous = button.textContent;
+    button.textContent = 'Working...';
+    try {
+      await fetchJson('/api/open-orders/close', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(row),
+      });
+      await refreshOpenOrders();
+      if (ooStatus) ooStatus.textContent = 'Updated';
+    } catch (err) {
+      console.error(err);
+      if (ooStatus) ooStatus.textContent = err?.message || 'Action failed';
+      button.disabled = false;
+      button.textContent = previous;
+    }
+  };
+
+  const renderActionCell = (row, actionTd, { allowAction = true } = {}) => {
+    actionTd.className = 'action-cell';
+    const label = actionLabelFor(row);
+    if (!allowAction || !label || !isActionableRow(row)) {
+      actionTd.textContent = '—';
+      return;
+    }
+    const required = ['broker', 'account', 'category', 'instrument', 'id', 'type'];
+    const missing = required.some((key) => !String(row[key] ?? '').trim());
+    if (missing) {
+      actionTd.textContent = '—';
+      return;
+    }
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'action-btn';
+    btn.textContent = label;
+    btn.addEventListener('click', () => closeOpenOrder(row, btn));
+    actionTd.appendChild(btn);
+  };
+
   const makeScriptButton = (script) => {
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -241,8 +300,7 @@
       });
 
       const actionTd = document.createElement('td');
-      actionTd.className = 'action-cell';
-      actionTd.textContent = '—';
+      renderActionCell(item, actionTd, { allowAction: true });
       tr.appendChild(actionTd);
       ooTbody.appendChild(tr);
 
@@ -277,8 +335,7 @@
         });
 
         const actionTd = document.createElement('td');
-        actionTd.className = 'action-cell';
-        actionTd.textContent = '—';
+        renderActionCell(child, actionTd, { allowAction: false });
         cRow.appendChild(actionTd);
 
         ooTbody.appendChild(cRow);
@@ -415,19 +472,19 @@
     if (!oandaHeadline || !oandaDetail) return;
     if (!payload.ok || statusValue === 'unavailable') {
       oandaHeadline.textContent = 'Status unavailable';
-      oandaDetail.textContent = 'Unable to confirm inactivity state.';
+      oandaDetail.textContent = oandaExpanded ? 'Unable to confirm inactivity state.' : '';
       if (oandaCountdown) oandaCountdown.textContent = 'Unavailable';
       return;
     }
     if (payload.has_open_positions || statusValue === 'paused_open_position') {
       oandaHeadline.textContent = 'Protected while an OANDA trade is open';
-      oandaDetail.textContent = 'Inactivity fee does not apply while open positions/trades exist.';
+      oandaDetail.textContent = oandaExpanded ? 'Inactivity fee does not apply while open positions/trades exist.' : '';
       if (oandaCountdown) oandaCountdown.textContent = 'Protected';
       return;
     }
     if (statusValue === 'fee_eligible') {
-      oandaHeadline.textContent = `Fee eligible; next charge date ${fmtTime(payload.earliest_fee_date)}`;
-      oandaDetail.textContent = 'Threshold has passed. Charge timing follows the third-last weekday monthly rule.';
+      oandaHeadline.textContent = 'Fee eligibility reached';
+      oandaDetail.textContent = oandaExpanded ? 'Threshold has passed. Charge timing follows the third-last weekday monthly rule.' : '';
       if (oandaCountdown) oandaCountdown.textContent = 'Fee eligible';
       return;
     }
@@ -435,13 +492,13 @@
     if (Number.isFinite(secs)) {
       const pretty = fmtCountdown(secs);
       oandaHeadline.textContent = `${pretty} until 12-month inactivity threshold`;
-      oandaDetail.textContent = `Earliest fee date: ${fmtTime(payload.earliest_fee_date)}`;
+      oandaDetail.textContent = oandaExpanded ? `Earliest fee date: ${fmtTime(payload.earliest_fee_date)}` : '';
       if (oandaCountdown) oandaCountdown.textContent = pretty;
       payload.seconds_until_threshold = Math.max(0, Math.floor(secs - 1));
       return;
     }
     oandaHeadline.textContent = 'Status unavailable';
-    oandaDetail.textContent = 'Unable to compute inactivity countdown.';
+    oandaDetail.textContent = oandaExpanded ? 'Unable to compute inactivity countdown.' : '';
     if (oandaCountdown) oandaCountdown.textContent = 'Unavailable';
   };
 
