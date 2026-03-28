@@ -18,10 +18,14 @@
   const oandaHeadline = document.getElementById('oanda-inactivity-headline');
   const oandaDetail = document.getElementById('oanda-inactivity-detail');
   const oandaLastTrade = document.getElementById('oanda-inactivity-last-trade');
+  const oandaCountdown = document.getElementById('oanda-inactivity-countdown');
   const oandaOpenTrades = document.getElementById('oanda-inactivity-open-trades');
   const oandaThreshold = document.getElementById('oanda-inactivity-threshold');
   const oandaFeeDate = document.getElementById('oanda-inactivity-fee-date');
   const oandaMonthlyFee = document.getElementById('oanda-inactivity-monthly-fee');
+  const oandaDetailsWrap = document.getElementById('oanda-inactivity-details');
+  const oandaErrorDetail = document.getElementById('oanda-inactivity-error-detail');
+  const oandaToggleBtn = document.getElementById('oanda-inactivity-toggle');
 
   let scriptsInFlight = null;
   let ooInFlight = null;
@@ -46,6 +50,7 @@
   let hasOpenOrdersData = false;
   let hasRecentTradesData = false;
   let oandaState = null;
+  let oandaExpanded = false;
 
   const fmt = (v) => (v === null || v === undefined || v === '' ? '—' : v);
   const fmtNum = (v, dp = 4) => {
@@ -397,6 +402,10 @@
     if (oandaFeeDate) oandaFeeDate.textContent = fmtTime(payload?.earliest_fee_date);
     if (oandaMonthlyFee) oandaMonthlyFee.textContent = `Up to AUD ${payload?.monthly_fee_aud ?? 10}`;
     if (oandaUpdated) oandaUpdated.textContent = payload?.updated_at ? `Updated ${fmtTime(payload.updated_at)}` : 'Status unavailable';
+    if (oandaErrorDetail) {
+      const err = String(payload?.error || '').trim();
+      oandaErrorDetail.textContent = err ? `Backend detail: ${err}` : '';
+    }
     tickOandaCountdown();
   };
 
@@ -406,28 +415,48 @@
     if (!oandaHeadline || !oandaDetail) return;
     if (!payload.ok || statusValue === 'unavailable') {
       oandaHeadline.textContent = 'Status unavailable';
-      oandaDetail.textContent = payload.error || 'Unable to confirm live inactivity state.';
+      oandaDetail.textContent = 'Unable to confirm inactivity state.';
+      if (oandaCountdown) oandaCountdown.textContent = 'Unavailable';
       return;
     }
     if (payload.has_open_positions || statusValue === 'paused_open_position') {
       oandaHeadline.textContent = 'Protected while an OANDA trade is open';
       oandaDetail.textContent = 'Inactivity fee does not apply while open positions/trades exist.';
+      if (oandaCountdown) oandaCountdown.textContent = 'Protected';
       return;
     }
     if (statusValue === 'fee_eligible') {
       oandaHeadline.textContent = `Fee eligible; next charge date ${fmtTime(payload.earliest_fee_date)}`;
       oandaDetail.textContent = 'Threshold has passed. Charge timing follows the third-last weekday monthly rule.';
+      if (oandaCountdown) oandaCountdown.textContent = 'Fee eligible';
       return;
     }
     const secs = Number(payload.seconds_until_threshold);
     if (Number.isFinite(secs)) {
-      oandaHeadline.textContent = `${fmtCountdown(secs)} until 12-month inactivity threshold`;
+      const pretty = fmtCountdown(secs);
+      oandaHeadline.textContent = `${pretty} until 12-month inactivity threshold`;
       oandaDetail.textContent = `Earliest fee date: ${fmtTime(payload.earliest_fee_date)}`;
+      if (oandaCountdown) oandaCountdown.textContent = pretty;
       payload.seconds_until_threshold = Math.max(0, Math.floor(secs - 1));
       return;
     }
     oandaHeadline.textContent = 'Status unavailable';
     oandaDetail.textContent = 'Unable to compute inactivity countdown.';
+    if (oandaCountdown) oandaCountdown.textContent = 'Unavailable';
+  };
+
+  const syncOandaDetailsVisibility = () => {
+    if (oandaDetailsWrap) oandaDetailsWrap.hidden = !oandaExpanded;
+    if (oandaToggleBtn) {
+      oandaToggleBtn.textContent = oandaExpanded ? '▴' : '▾';
+      oandaToggleBtn.setAttribute('aria-expanded', oandaExpanded ? 'true' : 'false');
+      oandaToggleBtn.title = oandaExpanded ? 'Hide details' : 'Show details';
+    }
+    if (oandaErrorDetail && !oandaExpanded) oandaErrorDetail.textContent = '';
+    if (oandaState && oandaExpanded && oandaErrorDetail) {
+      const err = String(oandaState.error || '').trim();
+      oandaErrorDetail.textContent = err ? `Backend detail: ${err}` : '';
+    }
   };
 
   const refreshOandaInactivity = async () => {
@@ -467,11 +496,16 @@
 
   refreshBtn?.addEventListener('click', () => { refreshScripts(); refreshOpenOrders(); refreshRecentTrades(); refreshOandaInactivity(); });
   ooRefreshBtn?.addEventListener('click', () => refreshOpenOrders());
+  oandaToggleBtn?.addEventListener('click', () => {
+    oandaExpanded = !oandaExpanded;
+    syncOandaDetailsVisibility();
+  });
 
   refreshScripts();
   refreshOpenOrders();
   refreshRecentTrades();
   refreshOandaInactivity();
+  syncOandaDetailsVisibility();
   restartPolling();
   document.addEventListener('visibilitychange', restartPolling);
   window.addEventListener('beforeunload', () => {
