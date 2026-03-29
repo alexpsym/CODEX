@@ -1236,6 +1236,8 @@ def _get_trading_journal_rows() -> List[Dict[str, object]]:
 
 
 def _set_trading_journal_rows(rows: List[Dict[str, object]]) -> None:
+    global _TRADING_JOURNAL_CACHE
+    _TRADING_JOURNAL_CACHE = [dict(item) for item in rows if isinstance(item, dict)]
     _save_json_file(TRADING_JOURNAL_PATH, {"items": rows, "updated_at": _utc_now_iso()})
     _schedule_dropbox_upload_state_backup()
 
@@ -1351,6 +1353,70 @@ def _dedupe_legacy_bybit_demo_rows() -> int:
     if removed:
         _set_trading_journal_rows(cleaned)
     return removed
+
+
+def _repair_persisted_bybit_demo_sides(rows: List[Dict[str, object]]) -> tuple[List[Dict[str, object]], int]:
+    repaired: List[Dict[str, object]] = []
+    change_count = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            repaired.append(row)
+            continue
+        source = str(row.get("source") or "").strip().lower()
+        account = str(row.get("account") or "").strip().lower()
+        account_label = str(row.get("account_label") or row.get("account") or "").strip().lower()
+        status = str(row.get("status") or row.get("state") or "").strip().lower()
+        if (
+            source != "bybit"
+            or (account not in {"demo", "practice"} and "demo" not in account_label)
+            or _row_type(row) != "trade"
+            or (status and status not in {"closed", "close", "filled", "complete", "completed"})
+        ):
+            repaired.append(row)
+            continue
+
+        inferred_side = _infer_side_from_tpsl_geometry(
+            entry_price=_to_float(row.get("entry_price")),
+            stop_loss=_to_float(row.get("stop_loss")),
+            take_profit=_to_float(row.get("take_profit")),
+        )
+        backfill_source = "tpsl_geometry"
+        if not inferred_side:
+            inferred_side = _infer_side_from_exit_and_pnl(
+                entry_price=_to_float(row.get("entry_price")),
+                exit_price=_to_float(row.get("exit_price")),
+                realized_pnl=_to_float(row.get("realized_pnl"))
+                if row.get("realized_pnl") is not None
+                else _to_float(row.get("net_profit")),
+            )
+            backfill_source = "price_move_vs_pnl"
+
+        current_side_norm = _normalize_side_for_comparison(row.get("side") or row.get("direction"))
+        inferred_norm = _normalize_side_for_comparison(inferred_side)
+        if not inferred_norm or inferred_norm == current_side_norm:
+            repaired.append(row)
+            continue
+
+        updated = dict(row)
+        updated["side"] = inferred_side
+        refs = updated.get("raw_refs") if isinstance(updated.get("raw_refs"), dict) else {}
+        next_refs = dict(refs)
+        next_refs["side_backfill_source"] = backfill_source
+        updated["raw_refs"] = next_refs
+        repaired.append(updated)
+        change_count += 1
+
+    return repaired, change_count
+
+
+def _repair_persisted_bybit_demo_journal_sides() -> int:
+    rows = _get_trading_journal_rows()
+    if not rows:
+        return 0
+    repaired_rows, changed = _repair_persisted_bybit_demo_sides(rows)
+    if changed:
+        _set_trading_journal_rows(repaired_rows)
+    return changed
 
 
 def _exclude_bybit_demo_row(row: Dict[str, object]) -> bool:
@@ -3137,6 +3203,7 @@ async def _autostart_scripts() -> None:
     asyncio.create_task(_dropbox_restore_state_backup_on_startup())
     asyncio.create_task(_ensure_trading_journal_dropbox_templates())
     _dedupe_legacy_bybit_demo_rows()
+    _repair_persisted_bybit_demo_journal_sides()
     if not ENABLE_BYBIT_DEMO_JOURNAL:
         _purge_bybit_demo_journal_state()
     if os.getenv("ENABLE_BYBIT_FILL_POLL", "0") == "1":
@@ -3748,7 +3815,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         .top-stack {
             display: grid;
-            grid-template-columns: minmax(260px, 420px) minmax(260px, 420px) minmax(240px, 320px);
+            grid-template-columns: minmax(320px, 520px) minmax(320px, 1fr);
             gap: 1rem;
             align-items: start;
             margin-bottom: 1rem;
@@ -3764,10 +3831,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             flex: 1;
             overflow: auto;
         }
-        #recent-trades-panel,
-        #open-orders-panel {
-            grid-column: 1 / -1;
-        }
+        #instrument-specs-widget { grid-column: 1; grid-row: 1; }
+        #oanda-inactivity-widget { grid-column: 2; grid-row: 1; }
+        #watchlist-widget { grid-column: 1; grid-row: 2; height: 300px; }
+        #recent-trades-panel { grid-column: 1 / -1; grid-row: 3; }
+        #open-orders-panel { grid-column: 1 / -1; grid-row: 4; }
 
         @media (max-width: 1180px) {
             .top-stack { grid-template-columns: 1fr; }
@@ -3909,6 +3977,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     </div>
                     <div class=\"oo-toolbar\">
                         <span class=\"status-pill\" id=\"watchlist-count\">0</span>
+                        <button type=\"button\" id=\"watchlist-clear-btn\">Clear</button>
                     </div>
                 </div>
 
@@ -3939,7 +4008,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         <h2>OANDA Inactivity</h2>
                     </div>
                     <div class="oo-toolbar">
-                        <span class="status-pill" id="oanda-inactivity-updated">Loading...</span>
                         <button type="button" class="toggle-btn" id="oanda-inactivity-toggle" aria-expanded="false" title="Show details">▾</button>
                     </div>
                 </div>
@@ -3978,6 +4046,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                                 <th>Side</th>
                                 <th>Opened</th>
                                 <th>Closed</th>
+                                <th>Entry</th>
+                                <th>Exit</th>
                                 <th>Stop Loss</th>
                                 <th>Take Profit</th>
                                 <th>Fees</th>
@@ -8484,6 +8554,18 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
       const queryAsset = (currentUrl.searchParams.get('asset') || '').toLowerCase();
       const storedAsset = (window.localStorage.getItem(STORAGE_KEY) || '').toLowerCase();
       const normalizeAsset = (value) => (value in ASSET_URLS ? value : DEFAULT_ASSET);
+      const canonicalCalcUrl = (value) => {
+        try {
+          const parsed = new URL(value, window.location.origin);
+          const normalized = new URL(parsed.pathname, window.location.origin);
+          normalized.searchParams.set('embedded', parsed.searchParams.get('embedded') || '1');
+          normalized.searchParams.set('shell', parsed.searchParams.get('shell') || 'merged');
+          normalized.searchParams.set('title', parsed.searchParams.get('title') || 'Position Size Calculator');
+          return normalized.toString();
+        } catch (_err) {
+          return '';
+        }
+      };
 
       const setActive = (asset) => {
         buttons.forEach((button) => {
@@ -8495,8 +8577,10 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
       const updateAsset = (asset, { replace = false } = {}) => {
         const nextAsset = normalizeAsset(asset);
         setActive(nextAsset);
-        if (frame.src !== ASSET_URLS[nextAsset]) {
-          frame.src = ASSET_URLS[nextAsset];
+        const expectedUrl = canonicalCalcUrl(ASSET_URLS[nextAsset]);
+        const frameUrl = canonicalCalcUrl(frame.src);
+        if (expectedUrl && frameUrl !== expectedUrl) {
+          frame.src = expectedUrl;
         }
         currentUrl.searchParams.set('asset', nextAsset);
         const nextUrl = `${currentUrl.pathname}?${currentUrl.searchParams.toString()}`;
@@ -8511,7 +8595,7 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
       });
       frame.addEventListener('load', () => {
         const expectedAsset = normalizeAsset(new URL(window.location.href).searchParams.get('asset') || DEFAULT_ASSET);
-        const expected = ASSET_URLS[expectedAsset];
+        const expected = canonicalCalcUrl(ASSET_URLS[expectedAsset]);
         let current = '';
         try {
           current = frame.contentWindow?.location?.href || frame.src || '';
@@ -8519,12 +8603,12 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
           current = frame.src || '';
         }
         if (!current) return;
+        const normalizedCurrent = canonicalCalcUrl(current);
+        if (!expected || !normalizedCurrent || normalizedCurrent === expected) return;
         const currentUrl = new URL(current, window.location.origin);
         const isCalculatorApp = currentUrl.pathname.includes('/apps/cryptocalculator-clone/') || currentUrl.pathname.includes('/apps/oanda-calculator-clone/');
-        const embedded = currentUrl.searchParams.get('embedded') === '1';
-        const shellMode = currentUrl.searchParams.get('shell') === 'merged';
-        if (isCalculatorApp && (!embedded || !shellMode || current !== expected)) {
-          frame.contentWindow?.location.replace(expected);
+        if (isCalculatorApp && frame.contentWindow?.location) {
+          frame.contentWindow.location.replace(expected);
         }
       });
       window.addEventListener('popstate', () => {
@@ -10443,6 +10527,7 @@ async def list_open_orders() -> JSONResponse:
 
 @app.get("/api/recent-trades")
 async def recent_trades(limit: int = 25) -> JSONResponse:
+    _repair_persisted_bybit_demo_journal_sides()
     rows = [
         r
         for r in _get_trading_journal_rows()
@@ -10513,6 +10598,8 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
                 "closed_at": closed_at,
                 "stop_loss": row.get("stop_loss"),
                 "take_profit": row.get("take_profit"),
+                "entry_price": row.get("entry_price"),
+                "exit_price": row.get("exit_price"),
                 "fees": row.get("fees") if row.get("fees") is not None else row.get("commission"),
                 "result_pct": result_pct,
                 "_row_balance_after_trade": row.get("balance_after_trade"),
@@ -10618,8 +10705,6 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
         copy.pop("_row_source", None)
         copy.pop("_row_order_id", None)
         copy.pop("_row_balance_after_trade", None)
-        copy.pop("_row_entry_price", None)
-        copy.pop("_row_exit_price", None)
         copy.pop("_row_realized_pnl", None)
         copy.pop("_row_updated_at", None)
         public_items.append(copy)
