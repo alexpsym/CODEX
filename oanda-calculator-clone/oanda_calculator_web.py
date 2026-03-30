@@ -362,13 +362,17 @@ def index():
     instrument_input = None
     available_instruments = None
     global last_trade_specs
-    app_root = (request.headers.get("x-forwarded-prefix", "").rstrip("/") or "")
+    app_root = (
+        request.headers.get("x-forwarded-prefix", "").rstrip("/")
+        or request.script_root.rstrip("/")
+    )
     webhook_url = PUBLIC_WEBHOOK_URL
     embedded = str(request.args.get("embedded", "")).strip().lower() in {"1", "true", "yes", "on"}
     page_title = (request.args.get("title") or "").strip() or "OANDA Position Size Calculator"
-    form_action = request.full_path if embedded and request.query_string else request.path
-    if form_action.endswith("?"):
-        form_action = form_action[:-1]
+    form_target = request.full_path if embedded and request.query_string else request.path
+    if form_target.endswith("?"):
+        form_target = form_target[:-1]
+    form_action = f"{app_root}{form_target}" if app_root else form_target
     download_url = f"{app_root}/download_specs" if app_root else "/download_specs"
     last_trade_specs = None
     account_mode = request.form.get("account_mode", "live")

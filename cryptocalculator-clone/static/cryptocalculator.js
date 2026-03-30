@@ -37,10 +37,17 @@ async function ensureAudUsdRate(force = false) {
   const row = document.getElementById('audusd_rate_row');
   const exchange = document.getElementById('execution_exchange');
   const rateInput = document.getElementById('audusd_rate');
+  const status = document.getElementById('audusd_fetch_status');
+  const setStatus = (message) => {
+    if (status) {
+      status.textContent = message || '';
+    }
+  };
   if (!exchange || !rateInput) {
     if (row) {
       row.style.display = 'none';
     }
+    setStatus('');
     return;
   }
   const isCoinspot = String(exchange.value || '').toLowerCase() === 'coinspot';
@@ -48,10 +55,12 @@ async function ensureAudUsdRate(force = false) {
     row.style.display = isCoinspot ? 'block' : 'none';
   }
   if (!isCoinspot) {
+    setStatus('');
     return;
   }
   const current = parseFloat(rateInput.value || '0');
   if (!force && current > 0) {
+    setStatus('');
     return;
   }
   if (audusdFetchInFlight) {
@@ -66,10 +75,12 @@ async function ensureAudUsdRate(force = false) {
     }
     const rate = parseFloat(String(data.rate || '0'));
     if (rate > 0) {
-      rateInput.value = String(rate);
+      rateInput.value = rate.toFixed(6);
+      setStatus('');
     }
   } catch (err) {
     console.warn('AUD/USD rate fetch failed', err);
+    setStatus('AUD/USD auto-fetch failed. Enter rate manually.');
   } finally {
     audusdFetchInFlight = false;
   }
