@@ -1254,12 +1254,7 @@ def _canonical_trade_epoch_second(value: object) -> Optional[int]:
 def _canonical_bybit_demo_trade_signature(row: Dict[str, object]) -> Optional[str]:
     if not isinstance(row, dict):
         return None
-    src = str(row.get("source") or "").strip().lower()
-    account = str(row.get("account") or "").strip().lower()
-    account_label = str(row.get("account_label") or row.get("account") or "").strip().lower()
-    if src != "bybit":
-        return None
-    if account not in {"demo", "practice"} and "demo" not in account_label:
+    if not _is_bybit_demo_trade_row(row):
         return None
     if _row_type(row) != "trade":
         return None
@@ -1270,13 +1265,7 @@ def _canonical_bybit_demo_trade_signature(row: Dict[str, object]) -> Optional[st
     opened = row.get("open_time") or row.get("opened_at") or row.get("entry_time")
     closed = row.get("close_time") or row.get("closed_at") or row.get("exit_time") or row.get("date")
     symbol = str(row.get("symbol") or row.get("instrument") or row.get("symbol_raw") or "").strip().upper()
-    side_raw = str(row.get("side") or row.get("direction") or "").strip().lower()
-    if side_raw in {"long", "buy"}:
-        side = "buy"
-    elif side_raw in {"short", "sell"}:
-        side = "sell"
-    else:
-        side = side_raw
+    qty = row.get("qty") if row.get("qty") is not None else row.get("qty_raw")
 
     if not symbol or not opened or not closed:
         return None
@@ -1289,14 +1278,15 @@ def _canonical_bybit_demo_trade_signature(row: Dict[str, object]) -> Optional[st
 
     fees = row.get("fees") if row.get("fees") is not None else row.get("commission")
     realized_pnl = row.get("realized_pnl") if row.get("realized_pnl") is not None else row.get("net_profit")
-    account_norm = re.sub(r"\s+", " ", account_label or account)
+    account_label = str(row.get("account_label") or row.get("account") or "").strip().lower()
+    account_norm = re.sub(r"\s+", " ", account_label)
     return "|".join(
         [
             account_norm,
             symbol,
-            side,
             str(_canonical_trade_epoch_second(opened) or ""),
             str(_canonical_trade_epoch_second(closed) or ""),
+            _rounded_num(qty, 8),
             _rounded_num(row.get("entry_price")),
             _rounded_num(row.get("exit_price")),
             _rounded_num(fees, 6),
@@ -1305,53 +1295,123 @@ def _canonical_bybit_demo_trade_signature(row: Dict[str, object]) -> Optional[st
     )
 
 
+def _is_bybit_demo_trade_row(row: Dict[str, object]) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if _row_type(row) != "trade":
+        return False
+    status = str(row.get("status") or row.get("state") or "").strip().lower()
+    if status and status not in {"closed", "close", "filled", "complete", "completed"}:
+        return False
+
+    source = str(row.get("source") or "").strip().lower()
+    account = str(row.get("account") or "").strip().lower()
+    account_label = str(row.get("account_label") or row.get("account") or "").strip()
+    if source == "bybit":
+        return account in {"demo", "practice"} or _is_bybit_demo_account_label(account_label)
+    if source == "excel":
+        if _is_bybit_demo_account_label(account_label):
+            return True
+        refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+        dbx_path = str(refs.get("dropbox_path") or refs.get("workbook_path") or "").strip().lower()
+        return dbx_path.endswith(f"/{BYBIT_DEMO_WORKBOOK_NAME.lower()}") or dbx_path == BYBIT_DEMO_WORKBOOK_NAME.lower()
+    return False
+
+
+def _merge_row_notes_comments(target: Dict[str, object], incoming: Dict[str, object]) -> Dict[str, object]:
+    merged = dict(target)
+    text_fields = ["notes", "pre_trade_comments", "entry_comments", "trade_management", "exit_comments"]
+    for field in text_fields:
+        left = str(merged.get(field) or "").strip()
+        right = str(incoming.get(field) or "").strip()
+        if left and right and right not in left:
+            merged[field] = f"{left}\n{right}"
+        elif (not left) and right:
+            merged[field] = right
+    return merged
+
+
+def _bybit_demo_order_identity(row: Dict[str, object]) -> str:
+    refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+    return str(refs.get("orderId") or row.get("order_id") or "").strip()
+
+
+def _bybit_demo_trade_score(row: Dict[str, object]) -> Tuple[int, int, int, int, int, int]:
+    refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+    has_order_id = int(bool(_bybit_demo_order_identity(row)))
+    side_norm = _normalize_side_for_comparison(row.get("side") or row.get("direction"))
+    side_source = str(refs.get("side_backfill_source") or refs.get("side_source") or "").strip().lower()
+    has_corrected_side = int(bool(side_norm and side_source and side_source not in {"unresolved"}))
+    has_tpsl = int(row.get("stop_loss") is not None or row.get("take_profit") is not None)
+    has_balance = int(row.get("balance_after_trade") is not None)
+    has_notes = int(any(str(row.get(f) or "").strip() for f in ["notes", "pre_trade_comments", "entry_comments", "trade_management", "exit_comments"]))
+    updated = _canonical_trade_epoch_second(row.get("updated_at")) or -1
+    return has_order_id, has_corrected_side, has_tpsl, has_balance, has_notes, updated
+
+
+def _sanitize_bybit_demo_rows(rows: List[Dict[str, object]]) -> tuple[List[Dict[str, object]], Dict[str, int]]:
+    if not rows:
+        return [], {"repaired_sides": 0, "deduped_by_order_id": 0, "deduped_by_fingerprint": 0, "changed": 0}
+
+    repaired_rows, repaired_count = _repair_persisted_bybit_demo_sides(rows)
+    passthrough: List[Dict[str, object]] = []
+    bybit_rows: List[Dict[str, object]] = []
+    for row in repaired_rows:
+        if isinstance(row, dict) and _is_bybit_demo_trade_row(row):
+            bybit_rows.append(dict(row))
+        else:
+            passthrough.append(row)
+
+    dedup_order: Dict[str, Dict[str, object]] = {}
+    order_dropped = 0
+    orderless: List[Dict[str, object]] = []
+    for row in bybit_rows:
+        order_id = _bybit_demo_order_identity(row)
+        if not order_id:
+            orderless.append(row)
+            continue
+        prev = dedup_order.get(order_id)
+        if prev is None:
+            dedup_order[order_id] = row
+            continue
+        winner, loser = (row, prev) if _bybit_demo_trade_score(row) > _bybit_demo_trade_score(prev) else (prev, row)
+        dedup_order[order_id] = _merge_row_notes_comments(winner, loser)
+        order_dropped += 1
+
+    after_order = list(dedup_order.values()) + orderless
+    dedup_fallback: Dict[str, Dict[str, object]] = {}
+    fallback_dropped = 0
+    for row in after_order:
+        key = _canonical_bybit_demo_trade_signature(row)
+        if not key:
+            key = f"rowid:{str(row.get('id') or '')}"
+        prev = dedup_fallback.get(key)
+        if prev is None:
+            dedup_fallback[key] = row
+            continue
+        winner, loser = (row, prev) if _bybit_demo_trade_score(row) > _bybit_demo_trade_score(prev) else (prev, row)
+        dedup_fallback[key] = _merge_row_notes_comments(winner, loser)
+        fallback_dropped += 1
+
+    sanitized_rows = sorted(list(dedup_fallback.values()) + passthrough, key=_row_sort_dt, reverse=True)
+    changed_total = int(repaired_count > 0 or order_dropped > 0 or fallback_dropped > 0 or len(sanitized_rows) != len(rows))
+    stats = {
+        "repaired_sides": repaired_count,
+        "deduped_by_order_id": order_dropped,
+        "deduped_by_fingerprint": fallback_dropped,
+        "changed": changed_total,
+    }
+    return sanitized_rows, stats
+
+
 def _dedupe_legacy_bybit_demo_rows() -> int:
     rows = _get_trading_journal_rows()
     if not rows:
         return 0
-
-    removed = 0
-    best_by_sig: Dict[str, Dict[str, object]] = {}
-    keep_row_ids: Set[str] = set()
-
-    def _score(row: Dict[str, object]) -> Tuple[int, int, int, int, float]:
-        refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
-        has_tpsl = int(row.get("stop_loss") is not None or row.get("take_profit") is not None)
-        has_order_id = int(bool(str(refs.get("orderId") or "").strip()))
-        has_balance = int(row.get("balance_after_trade") is not None)
-        is_bybit_source = int(str(row.get("source") or "").strip().lower() == "bybit")
-        updated = _canonical_trade_epoch_second(row.get("updated_at")) or -1
-        return has_tpsl, has_order_id, has_balance, is_bybit_source, float(updated)
-
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        signature = _canonical_bybit_demo_trade_signature(row)
-        row_id = str(row.get("id") or "").strip()
-        if not signature:
-            if row_id:
-                keep_row_ids.add(row_id)
-            continue
-        prev = best_by_sig.get(signature)
-        if prev is None or _score(row) > _score(prev):
-            best_by_sig[signature] = row
-
-    for row in best_by_sig.values():
-        row_id = str(row.get("id") or "").strip()
-        if row_id:
-            keep_row_ids.add(row_id)
-
-    cleaned: List[Dict[str, object]] = []
-    for row in rows:
-        row_id = str(row.get("id") or "").strip()
-        signature = _canonical_bybit_demo_trade_signature(row) if isinstance(row, dict) else None
-        if signature and row_id and row_id not in keep_row_ids:
-            removed += 1
-            continue
-        cleaned.append(row)
-
-    if removed:
-        _set_trading_journal_rows(cleaned)
+    sanitized, stats = _sanitize_bybit_demo_rows(rows)
+    removed = int(stats.get("deduped_by_order_id", 0)) + int(stats.get("deduped_by_fingerprint", 0))
+    if int(stats.get("changed", 0)):
+        _set_trading_journal_rows(sanitized)
     return removed
 
 
@@ -1362,16 +1422,7 @@ def _repair_persisted_bybit_demo_sides(rows: List[Dict[str, object]]) -> tuple[L
         if not isinstance(row, dict):
             repaired.append(row)
             continue
-        source = str(row.get("source") or "").strip().lower()
-        account = str(row.get("account") or "").strip().lower()
-        account_label = str(row.get("account_label") or row.get("account") or "").strip().lower()
-        status = str(row.get("status") or row.get("state") or "").strip().lower()
-        if (
-            source != "bybit"
-            or (account not in {"demo", "practice"} and "demo" not in account_label)
-            or _row_type(row) != "trade"
-            or (status and status not in {"closed", "close", "filled", "complete", "completed"})
-        ):
+        if not _is_bybit_demo_trade_row(row):
             repaired.append(row)
             continue
 
@@ -2418,7 +2469,10 @@ def _import_trading_journal_from_dropbox_excel(
             "files": next_files_cache,
         }
     )
-    removed_duplicates = _dedupe_legacy_bybit_demo_rows()
+    sanitized_rows, sanitize_stats = _sanitize_bybit_demo_rows(_get_trading_journal_rows())
+    if int(sanitize_stats.get("changed", 0)):
+        _set_trading_journal_rows(sanitized_rows)
+    workbook_stats = _sanitize_bybit_demo_workbook(active_folder)
     _schedule_dropbox_upload_state_backup()
 
     return {
@@ -2431,7 +2485,8 @@ def _import_trading_journal_from_dropbox_excel(
         "workbooks_seen": workbook_count,
         "workbooks_reused": reused_count,
         "rows_imported": len(final_rows),
-        "rows_deduped": removed_duplicates,
+        "rows_deduped": int(sanitize_stats.get("deduped_by_order_id", 0)) + int(sanitize_stats.get("deduped_by_fingerprint", 0)),
+        "workbook_rows_deduped": int(workbook_stats.get("deduped_by_order_id", 0)) + int(workbook_stats.get("deduped_by_fingerprint", 0)),
         "balances_found": len(balances),
         "used_recursive_fallback": used_recursive_fallback,
         "errors": errors,
@@ -2623,10 +2678,17 @@ def _restore_alerts_payload(data: Dict[str, object]) -> Dict[str, object]:
         pending_restored = _replace_pending_webhooks(data["pending_webhooks"])
 
     journal_restored = 0
+    journal_sanitized = 0
     if "trading_journal" in data and isinstance(data["trading_journal"], (dict, list)):
         _save_json_file(TRADING_JOURNAL_PATH, data["trading_journal"])
         rows = _get_trading_journal_rows()
         journal_restored = len(rows)
+        sanitized_rows, sanitize_stats = _sanitize_bybit_demo_rows(rows)
+        if int(sanitize_stats.get("changed", 0)):
+            _set_trading_journal_rows(sanitized_rows)
+            journal_sanitized = int(sanitize_stats.get("deduped_by_order_id", 0)) + int(
+                sanitize_stats.get("deduped_by_fingerprint", 0)
+            )
 
     if "trading_journal_state" in data and isinstance(data["trading_journal_state"], dict):
         _save_json_file(TRADING_JOURNAL_STATE_PATH, data["trading_journal_state"])
@@ -2645,6 +2707,7 @@ def _restore_alerts_payload(data: Dict[str, object]) -> Dict[str, object]:
         "watchlist_restored": len(watchlist_items),
         "pending_webhooks_restored": len(pending_restored),
         "journal_rows_restored": journal_restored,
+        "journal_rows_sanitized": journal_sanitized,
     }
 
 
@@ -2655,14 +2718,19 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
         payload = await asyncio.to_thread(download_bytes, DROPBOX_BACKUP_PATH)
         data = json.loads(payload.decode("utf-8"))
         restored = _restore_alerts_payload(data)
+        active_folder, _ = await asyncio.to_thread(_resolve_trading_journal_dropbox_folder)
+        workbook_stats = await asyncio.to_thread(_sanitize_bybit_demo_workbook, active_folder)
+        _schedule_dropbox_upload_state_backup()
         BYBIT_LOGGER.info(
-            "Dropbox restore complete: bybit=%s skipped_invalid_bybit=%s oanda=%s watchlist=%s pending=%s journal_rows=%s",
+            "Dropbox restore complete: bybit=%s skipped_invalid_bybit=%s oanda=%s watchlist=%s pending=%s journal_rows=%s journal_sanitized=%s workbook_deduped=%s",
             restored["bybit_restored"],
             restored.get("bybit_invalid_skipped", 0),
             restored["oanda_restored"],
             restored["watchlist_restored"],
             restored["pending_webhooks_restored"],
             restored.get("journal_rows_restored", 0),
+            restored.get("journal_rows_sanitized", 0),
+            int(workbook_stats.get("deduped_by_order_id", 0)) + int(workbook_stats.get("deduped_by_fingerprint", 0)),
         )
     except FileNotFoundError:
         BYBIT_LOGGER.info("Dropbox restore skipped; no backup found at %s", DROPBOX_BACKUP_PATH)
@@ -3202,8 +3270,6 @@ def _compute_autostart_scripts() -> List[str]:
 async def _autostart_scripts() -> None:
     asyncio.create_task(_dropbox_restore_state_backup_on_startup())
     asyncio.create_task(_ensure_trading_journal_dropbox_templates())
-    _dedupe_legacy_bybit_demo_rows()
-    _repair_persisted_bybit_demo_journal_sides()
     if not ENABLE_BYBIT_DEMO_JOURNAL:
         _purge_bybit_demo_journal_state()
     if os.getenv("ENABLE_BYBIT_FILL_POLL", "0") == "1":
@@ -7715,6 +7781,69 @@ def _bybit_demo_workbook_row(row: Dict[str, object]) -> Dict[str, object]:
     }
 
 
+def _sanitize_bybit_demo_workbook(active_folder: str) -> Dict[str, int]:
+    workbook_path = _join_dropbox_path(active_folder, BYBIT_DEMO_WORKBOOK_NAME)
+    try:
+        payload = download_bytes(workbook_path)
+        bio = io.BytesIO(payload)
+        try:
+            existing = pd.read_excel(bio, sheet_name=BYBIT_DEMO_WORKBOOK_SHEET)
+        except Exception:
+            existing = pd.DataFrame(columns=BYBIT_DEMO_WORKBOOK_COLUMNS)
+        if existing is None:
+            existing = pd.DataFrame(columns=BYBIT_DEMO_WORKBOOK_COLUMNS)
+        existing = existing.reindex(columns=BYBIT_DEMO_WORKBOOK_COLUMNS)
+        if existing.empty:
+            return {"changed": 0, "repaired_sides": 0, "deduped_by_order_id": 0, "deduped_by_fingerprint": 0}
+
+        workbook_rows: List[Dict[str, object]] = []
+        for _, wb_row in existing.iterrows():
+            row = {
+                "id": "",
+                "source": "excel",
+                "account": "Bybit Demo",
+                "account_label": "Bybit Demo",
+                "symbol": _excel_cell_to_python(wb_row.get("symbol")),
+                "side": _excel_cell_to_python(wb_row.get("type_buy_sell")),
+                "open_time": _excel_cell_to_python(wb_row.get("opening_time")),
+                "close_time": _excel_cell_to_python(wb_row.get("closing_time")),
+                "qty": _excel_cell_to_python(wb_row.get("size_quantity")),
+                "entry_price": _excel_cell_to_python(wb_row.get("entry_price")),
+                "exit_price": _excel_cell_to_python(wb_row.get("closing_price")),
+                "stop_loss": _excel_cell_to_python(wb_row.get("stop_loss")),
+                "take_profit": _excel_cell_to_python(wb_row.get("take_profit")),
+                "commission": _excel_cell_to_python(wb_row.get("commission")),
+                "fees": _excel_cell_to_python(wb_row.get("commission")),
+                "realized_pnl": _excel_cell_to_python(wb_row.get("net_profit")),
+                "net_profit": _excel_cell_to_python(wb_row.get("net_profit")),
+                "balance_after_trade": _excel_cell_to_python(wb_row.get("balance_after_trade")),
+                "notes": _excel_cell_to_python(wb_row.get("notes")),
+                "status": "closed",
+                "raw_refs": {
+                    "dropbox_path": workbook_path,
+                    "orderId": _excel_cell_to_python(wb_row.get("order_id")),
+                },
+                "updated_at": _utc_now_iso(),
+            }
+            workbook_rows.append(row)
+
+        sanitized_rows, stats = _sanitize_bybit_demo_rows(workbook_rows)
+        if not int(stats.get("changed", 0)):
+            return stats
+
+        output_rows = [_bybit_demo_workbook_row(row) for row in sanitized_rows if _is_bybit_demo_trade_row(row)]
+        output = pd.DataFrame(output_rows, columns=BYBIT_DEMO_WORKBOOK_COLUMNS)
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            output.to_excel(writer, sheet_name=BYBIT_DEMO_WORKBOOK_SHEET, index=False)
+        upload_bytes(workbook_path, buffer.getvalue())
+        return stats
+    except Exception as exc:
+        _record_bybit_demo_sync_status(last_error=f"Bybit Demo workbook sanitize failed: {exc}")
+        BYBIT_LOGGER.error("Bybit Demo workbook sanitize failed for %s: %s", workbook_path, exc)
+        raise
+
+
 def _append_bybit_demo_rows_to_workbook(active_folder: str, rows: List[Dict[str, object]]) -> int:
     if not rows:
         return 0
@@ -7753,6 +7882,7 @@ def _append_bybit_demo_rows_to_workbook(active_folder: str, rows: List[Dict[str,
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
             existing.to_excel(writer, sheet_name=BYBIT_DEMO_WORKBOOK_SHEET, index=False)
         upload_bytes(workbook_path, buffer.getvalue())
+        _sanitize_bybit_demo_workbook(active_folder)
         return changed
 
 
@@ -7981,14 +8111,22 @@ async def _sync_bybit_demo_closed_pnl_window(
         return max_seen
 
     changed = _upsert_trading_journal_rows(rows)
-    _dedupe_legacy_bybit_demo_rows()
+    sanitized_rows, sanitize_stats = _sanitize_bybit_demo_rows(_get_trading_journal_rows())
+    if int(sanitize_stats.get("changed", 0)):
+        _set_trading_journal_rows(sanitized_rows)
     await asyncio.to_thread(_append_bybit_demo_rows_to_workbook, active_folder, rows)
+    workbook_stats = await asyncio.to_thread(_sanitize_bybit_demo_workbook, active_folder)
+    _schedule_dropbox_upload_state_backup()
     _record_bybit_demo_sync_status(
         last_checked_at=_utc_now_iso(),
         last_success_at=_utc_now_iso(),
         last_error=None,
         last_rows_seen=len(rows),
         last_rows_upserted=changed,
+        last_rows_deduped=int(sanitize_stats.get("deduped_by_order_id", 0))
+        + int(sanitize_stats.get("deduped_by_fingerprint", 0)),
+        last_workbook_rows_deduped=int(workbook_stats.get("deduped_by_order_id", 0))
+        + int(workbook_stats.get("deduped_by_fingerprint", 0)),
     )
     return max_seen
 
@@ -10527,10 +10665,12 @@ async def list_open_orders() -> JSONResponse:
 
 @app.get("/api/recent-trades")
 async def recent_trades(limit: int = 25) -> JSONResponse:
-    _repair_persisted_bybit_demo_journal_sides()
+    sanitized_rows, sanitize_stats = _sanitize_bybit_demo_rows(_get_trading_journal_rows())
+    if int(sanitize_stats.get("changed", 0)):
+        _set_trading_journal_rows(sanitized_rows)
     rows = [
         r
-        for r in _get_trading_journal_rows()
+        for r in sanitized_rows
         if isinstance(r, dict) and not _exclude_bybit_demo_row(r)
     ]
     rows = _enrich_trade_row_metrics(
@@ -10588,6 +10728,7 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
         refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
         items.append(
             {
+                "_row": row,
                 "_row_id": row.get("id"),
                 "_row_source": row.get("source"),
                 "_row_order_id": refs.get("orderId"),
@@ -10633,15 +10774,16 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
 
     def _trade_key(item: Dict[str, object]) -> str:
         order_id = str(item.get("_row_order_id") or "").strip()
-        if order_id:
+        row_data = item.get("_row") if isinstance(item.get("_row"), dict) else {}
+        if order_id and _is_bybit_demo_trade_row(row_data):
             return f"order:{order_id}"
         return "|".join(
             [
                 _norm_account(item.get("account")),
                 str(item.get("symbol") or "").strip().upper(),
-                _norm_side(item.get("side")),
                 str(_canonical_trade_epoch_second(item.get("opened_at")) or ""),
                 str(_canonical_trade_epoch_second(item.get("closed_at")) or ""),
+                _rounded_num(row_data.get("qty"), 8),
                 _rounded_num(item.get("_row_entry_price")),
                 _rounded_num(item.get("_row_exit_price")),
                 _rounded_num(item.get("fees"), 6),
@@ -10668,16 +10810,15 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
 
     second_pass: Dict[str, Dict[str, object]] = {}
     for item in first_pass:
-        src = str(item.get("_row_source") or "").strip().lower()
-        account_norm = _norm_account(item.get("account"))
-        if src == "bybit" and "demo" in account_norm:
+        row_data = item.get("_row") if isinstance(item.get("_row"), dict) else {}
+        if _is_bybit_demo_trade_row(row_data):
             key = "|".join(
                 [
-                    account_norm,
+                    _norm_account(item.get("account")),
                     str(item.get("symbol") or "").strip().upper(),
-                    _norm_side(item.get("side")),
                     str(_canonical_trade_epoch_second(item.get("opened_at")) or ""),
                     str(_canonical_trade_epoch_second(item.get("closed_at")) or ""),
+                    _rounded_num(row_data.get("qty"), 8),
                     _rounded_num(item.get("_row_entry_price")),
                     _rounded_num(item.get("_row_exit_price")),
                     _rounded_num(item.get("fees"), 6),
@@ -10707,6 +10848,7 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
         copy.pop("_row_balance_after_trade", None)
         copy.pop("_row_realized_pnl", None)
         copy.pop("_row_updated_at", None)
+        copy.pop("_row", None)
         public_items.append(copy)
     return JSONResponse({"items": public_items})
 
