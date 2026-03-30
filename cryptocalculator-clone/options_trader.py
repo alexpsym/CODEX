@@ -255,6 +255,8 @@ def fetch_option_instruments(
 
 _tick_size_cache: dict[str, float] = {}
 _min_qty_cache: dict[str, float] = {}
+_lot_size_cache: dict[str, tuple[float, dict[str, float]]] = {}
+_lot_size_cache_ttl_seconds = 120.0
 _option_bases_cache: tuple[float, list[str]] | None = None
 _option_bases_cache_ttl_seconds = 6 * 60 * 60
 _option_bases_cache_last_log: float | None = None
@@ -301,12 +303,50 @@ def get_tick_size(symbol: str, base_url: str | None = None) -> float:
 def get_min_order_qty(symbol: str, base_url: str | None = None) -> float:
     """Return the minimum order quantity for ``symbol``."""
 
-    if symbol in _min_qty_cache:
-        return _min_qty_cache[symbol]
+    lot = get_lot_size_filter(symbol, base_url=base_url)
+    min_qty = float(lot.get("minOrderQty") or 0)
+    if min_qty > 0:
+        return min_qty
     base = symbol.split("-")[0].strip().upper() if symbol else ""
-    min_qty = OPTIONS_MIN_QTY_BY_BASE.get(base, MIN_ORDER_QTY)
+    return OPTIONS_MIN_QTY_BY_BASE.get(base, MIN_ORDER_QTY)
+
+
+def get_lot_size_filter(symbol: str, base_url: str | None = None) -> dict[str, float]:
+    """Return ``minOrderQty/qtyStep/maxOrderQty`` for an option symbol."""
+
+    if not symbol:
+        return {"minOrderQty": MIN_ORDER_QTY, "qtyStep": MIN_ORDER_QTY, "maxOrderQty": 0.0}
+    now = time.time()
+    cached = _lot_size_cache.get(symbol)
+    if cached and cached[0] > now:
+        return dict(cached[1])
+
+    base_url = base_url or get_base_url()
+    endpoint = "/v5/market/instruments-info"
+    params = {"category": "option", "symbol": symbol}
+    qs = urlencode(params)
+    url = f"{base_url}{endpoint}?{qs}"
+    resp = requests.get(url, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("retCode") != 0:
+        raise RuntimeError(f"API Error {data['retCode']}: {data.get('retMsg')}")
+    lst = data.get("result", {}).get("list", [])
+    if not lst:
+        raise RuntimeError(f"No instrument data for symbol: {symbol}")
+    lot = lst[0].get("lotSizeFilter", {}) or {}
+    min_qty = float(lot.get("minOrderQty", 0) or 0)
+    qty_step = float(lot.get("qtyStep", min_qty) or min_qty or 0)
+    max_qty = float(lot.get("maxOrderQty", 0) or 0)
+    if min_qty <= 0:
+        base = symbol.split("-")[0].strip().upper() if symbol else ""
+        min_qty = OPTIONS_MIN_QTY_BY_BASE.get(base, MIN_ORDER_QTY)
+    if qty_step <= 0:
+        qty_step = min_qty
+    payload = {"minOrderQty": min_qty, "qtyStep": qty_step, "maxOrderQty": max_qty}
+    _lot_size_cache[symbol] = (now + _lot_size_cache_ttl_seconds, payload)
     _min_qty_cache[symbol] = min_qty
-    return min_qty
+    return dict(payload)
 
 
 def get_supported_option_bases(base_url: str | None = None) -> list[str]:

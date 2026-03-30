@@ -457,7 +457,7 @@ async function resolveSymbol(force = false) {
     return null;
   }
   const tradeType = (tradeTypeEl ? tradeTypeEl.value : '').toLowerCase();
-  if (tradeType === 'options' || tradeType === 'trendline_options') {
+  if (tradeType === 'options') {
     return null;
   }
 
@@ -717,6 +717,11 @@ function renderOptionsMinQty(base) {
   const baseKey = base ? base.toUpperCase() : '';
   const minQty = optionsMinQtyMap[baseKey];
   const labelBase = baseKey ? baseKey + quote : quote;
+  const qtyMode = document.getElementById('options_quantity_mode');
+  if (qtyMode && qtyMode.value === 'auto') {
+    note.innerText = 'Qty auto mode: lot-size constraints are resolved from live instruments metadata.';
+    return;
+  }
   if (typeof minQty === 'number') {
     note.innerText = 'Min qty (' + labelBase + ' options): ' + minQty;
   } else {
@@ -737,32 +742,42 @@ function updateOptionsMinQty() {
   renderOptionsMinQty(base);
 }
 
+function updateOptionsFieldModes() {
+  const expiryMode = document.getElementById('options_expiry_mode');
+  const strikeMode = document.getElementById('options_strike_mode');
+  const qtyMode = document.getElementById('options_quantity_mode');
+  const expiryManual = document.getElementById('options_expiry_manual_row');
+  const strikeManual = document.getElementById('options_strike_manual_row');
+  const qtyInput = document.getElementById('options_quantity');
+  if (expiryMode && expiryManual) {
+    expiryManual.classList.toggle('hidden', expiryMode.value !== 'manual');
+  }
+  if (strikeMode && strikeManual) {
+    strikeManual.classList.toggle('hidden', strikeMode.value !== 'manual');
+  }
+  if (qtyMode && qtyInput) {
+    qtyInput.disabled = qtyMode.value !== 'manual';
+  }
+  updateOptionsMinQty();
+}
+
 function updateTradeType() {
   const selector = document.getElementById('trade_type');
   const optionsSection = document.getElementById('options_section');
   const cryptoSection = document.getElementById('crypto_section');
   const manual = document.getElementById('options_manual_fields');
-  const trend = document.getElementById('options_trendline_fields');
   const orderTypeRow = document.getElementById('options_order_type_row');
   if (!selector || !optionsSection || !cryptoSection) {
     return;
   }
-  const isOptions = selector.value === 'options' || selector.value === 'trendline_options';
-  const isTrendline = selector.value === 'trendline_options';
+  const isOptions = selector.value === 'options';
   optionsSection.classList.toggle('hidden', !isOptions);
   cryptoSection.classList.toggle('hidden', isOptions);
   if (manual) {
-    manual.classList.toggle('hidden', isTrendline);
-  }
-  if (trend) {
-    trend.classList.toggle('hidden', !isTrendline);
+    manual.classList.toggle('hidden', !isOptions);
   }
   if (orderTypeRow) {
-    orderTypeRow.classList.toggle('hidden', isTrendline);
-  }
-  if (isTrendline) {
-    setButtonGroupValue('options_order_type', 'market');
-    toggleOptionsEntry();
+    orderTypeRow.classList.toggle('hidden', !isOptions);
   }
   updateRiskControls();
   const cryptoRequired = ['symbol', 'stop_loss_ticks', 'rr_ratio'];
@@ -825,7 +840,7 @@ function updateExecuteButtons() {
   }
 
   const tradeType = (meta.dataset.tradeType || '').toLowerCase();
-  const raw = tradeType === 'options' || tradeType === 'trendline_options'
+  const raw = tradeType === 'options'
     ? (meta.dataset.optionsOrderType || 'market')
     : (meta.dataset.orderType || 'market');
 
@@ -888,7 +903,7 @@ function placeLimitOrder() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  ['trade_type', 'account_mode', 'direction', 'order_type', 'options_order_type', 'options_type', 'options_side', 'price_source', 'execution_exchange', 'options_base', 'track_pending', 'risk_mode'].forEach(bindButtonGroup);
+  ['trade_type', 'account_mode', 'direction', 'order_type', 'options_order_type', 'options_type', 'options_side', 'price_source', 'execution_exchange', 'options_base', 'track_pending', 'risk_mode', 'options_expiry_mode', 'options_strike_mode', 'options_quantity_mode'].forEach(bindButtonGroup);
   const ot = document.getElementById('order_type');
   if (ot) {
     ot.addEventListener('change', toggleEntry);
@@ -929,6 +944,13 @@ document.addEventListener('DOMContentLoaded', () => {
   if (optionsBaseInput) {
     optionsBaseInput.addEventListener('change', scheduleOptionsMinQty);
   }
+  ['options_expiry_mode', 'options_strike_mode', 'options_quantity_mode'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.addEventListener('change', updateOptionsFieldModes);
+    }
+  });
+  updateOptionsFieldModes();
   scheduleOptionsMinQty();
   try {
     updateExecuteButtons();
@@ -961,7 +983,34 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       const tradeTypeEl = document.getElementById('trade_type');
       const tradeType = (tradeTypeEl ? tradeTypeEl.value : '').toLowerCase();
-      if (tradeType === 'options' || tradeType === 'trendline_options') {
+      if (tradeType === 'options') {
+        const expiryMode = document.getElementById('options_expiry_mode');
+        const strikeMode = document.getElementById('options_strike_mode');
+        const qtyMode = document.getElementById('options_quantity_mode');
+        const side = document.getElementById('options_side');
+        const expiry = document.getElementById('options_expiry');
+        const strike = document.getElementById('options_strike');
+        const qty = document.getElementById('options_quantity');
+        if (side && side.value === 'Sell' && ((expiryMode && expiryMode.value === 'auto') || (strikeMode && strikeMode.value === 'auto') || (qtyMode && qtyMode.value === 'auto'))) {
+          e.preventDefault();
+          alert('Auto risk-based contract selection is only supported for Buy in single-leg options.');
+          return;
+        }
+        if (expiryMode && expiryMode.value === 'manual' && (!expiry || !expiry.value.trim())) {
+          e.preventDefault();
+          alert('Manual expiry mode requires Expiry (D/M/YY).');
+          return;
+        }
+        if (strikeMode && strikeMode.value === 'manual' && (!strike || !strike.value.trim())) {
+          e.preventDefault();
+          alert('Manual strike mode requires Strike.');
+          return;
+        }
+        if (qtyMode && qtyMode.value === 'manual' && (!qty || !qty.value.trim())) {
+          e.preventDefault();
+          alert('Manual quantity mode requires Quantity.');
+          return;
+        }
         return;
       }
       e.preventDefault();

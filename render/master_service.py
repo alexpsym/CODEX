@@ -39,6 +39,7 @@ from PIL import Image, ImageDraw, ImageFont
 from starlette.responses import RedirectResponse
 
 from bybit_credentials import resolve_bybit_credentials_for
+from shared.bybit_option_resolver import resolve_option_by_target_risk
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
@@ -6131,105 +6132,34 @@ async def _resolve_trendline_option_order(
     fee_mode: str,
     request_id: str,
 ) -> Dict[str, object]:
-    if not base_coin:
-        raise ValueError("base_coin is required for trendline options.")
-    if risk_usdt <= 0:
-        raise ValueError("risk_usdt must be > 0.")
-
-    exp_date = _expiry_to_bybit_expdate(expiry)
-    opt = str(option_type).strip().capitalize()
-    if opt not in {"Call", "Put"}:
-        raise ValueError("option_type must be Call or Put.")
-
-    inst = await _bybit_public_get(
-        base_url,
-        "/v5/market/instruments-info",
-        {"category": "option", "baseCoin": base_coin, "expDate": exp_date, "optionType": opt},
+    resolved = await asyncio.to_thread(
+        resolve_option_by_target_risk,
+        base_url=base_url,
+        account_mode="live",
+        base_coin=base_coin,
+        side="Buy",
+        option_type=option_type,
+        order_type=order_type,
+        target_risk_usdt=risk_usdt,
+        tolerance_usdt=tolerance_usdt,
+        expiry_mode="manual",
+        manual_expiry=expiry,
+        strike_mode="auto",
+        manual_strike="",
+        quantity_mode="auto",
+        manual_quantity=0.0,
+        manual_limit_price=None,
+        fee_mode=fee_mode,
     )
-    inst_list = inst.get("result", {}).get("list", []) or []
-    inst_map = {item.get("symbol"): item for item in inst_list if item.get("symbol")}
-
-    tks = await _bybit_public_get(
-        base_url,
-        "/v5/market/tickers",
-        {"category": "option", "baseCoin": base_coin, "expDate": exp_date, "symbol": ""},
-    )
-    tk_list = tks.get("result", {}).get("list", []) or []
-
-    sides = 2 if fee_mode == "roundtrip" else 1
-    fee_rate = (
-        BYBIT_OPTIONS_TAKER_FEE_RATE
-        if order_type == "market"
-        else BYBIT_OPTIONS_MAKER_FEE_RATE
-    )
-
-    target_min = risk_usdt
-    target_max = risk_usdt + max(0.0, tolerance_usdt)
-
-    best: Optional[Dict[str, object]] = None
-    best_score = float("inf")
-
-    for tk in tk_list:
-        sym = tk.get("symbol")
-        if not sym or sym not in inst_map:
-            continue
-
-        parts = str(sym).split("-")
-        if len(parts) < 4:
-            continue
-        sym_opt = parts[3].upper()
-        if (opt == "Call" and sym_opt != "C") or (opt == "Put" and sym_opt != "P"):
-            continue
-
-        ask = float(tk.get("ask1Price") or 0)
-        bid = float(tk.get("bid1Price") or 0)
-        lastp = float(tk.get("lastPrice") or 0)
-        mark = float(tk.get("markPrice") or 0)
-
-        price = ask or lastp or mark or bid
-        if price <= 0:
-            continue
-
-        inst_info = inst_map[sym]
-        lot = inst_info.get("lotSizeFilter", {}) or {}
-        min_qty = float(lot.get("minOrderQty") or 0)
-        step = float(lot.get("qtyStep") or min_qty or 0)
-        max_qty = float(lot.get("maxOrderQty") or 0)
-
-        if min_qty <= 0 or step <= 0:
-            continue
-
-        per_unit = price * (1.0 + fee_rate * sides)
-        if per_unit <= 0:
-            continue
-
-        qty_floor = _round_step(target_max / per_unit, step)
-        if qty_floor < min_qty:
-            qty_floor = min_qty
-        if max_qty > 0 and qty_floor > max_qty:
-            continue
-
-        total = per_unit * qty_floor
-        if total > target_max:
-            continue
-
-        penalty = 0.0 if total >= target_min else (target_min - total) * 10.0
-        score = abs(total - target_min) + penalty
-
-        if score < best_score:
-            best_score = score
-            best = {
-                "symbol": sym,
-                "qty": round(qty_floor, 8),
-                "limit_price": round(price, 8),
-                "total_est": total,
-            }
-
-    if not best:
-        raise ValueError("No option found that fits the requested risk/tolerance.")
-
-    _log_webhook_event(request_id, "trendline_option_resolved", best)
-    return best
+    result = {
+        "symbol": resolved["resolved_symbol"],
+        "qty": resolved["resolved_qty"],
+        "limit_price": resolved["entry_price_used"],
+        "total_est": resolved["estimated_total_cost"],
+        "resolved_option": resolved,
+    }
+    _log_webhook_event(request_id, "trendline_option_resolved", result)
+    return result
 
 
 async def _fetch_bybit_positions(
