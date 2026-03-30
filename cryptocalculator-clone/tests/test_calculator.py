@@ -233,6 +233,35 @@ def test_web_form_includes_exchange_fields():
     assert 'value="coinspot_spot"' in html
     assert 'id="price_mode_note"' in html
     assert 'name="price_to_execution_rate"' in html
+    assert 'name="audusd_rate"' in html
+    assert 'step="any"' in html
+
+
+def test_embedded_form_action_includes_forwarded_prefix():
+    import cryptocalculator_web as web_app
+
+    client = web_app.app.test_client()
+    resp = client.get(
+        "/?embedded=1&shell=merged&title=Position+Size+Calculator",
+        headers={"X-Forwarded-Prefix": "/apps/cryptocalculator-clone"},
+    )
+    html = resp.get_data(as_text=True)
+    assert resp.status_code == 200
+    assert (
+        'action="/apps/cryptocalculator-clone/?embedded=1&amp;shell=merged&amp;title=Position+Size+Calculator"'
+        in html
+    )
+
+
+def test_audusd_rate_fetch_uses_fixed_decimal_precision():
+    with open(
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "cryptocalculator.js"),
+        "r",
+        encoding="utf-8",
+    ) as f:
+        js = f.read()
+    assert "rate.toFixed(6)" in js
+    assert "AUD/USD auto-fetch failed. Enter rate manually." in js
 
 
 def test_web_post_uses_exchange_and_price_source(monkeypatch):

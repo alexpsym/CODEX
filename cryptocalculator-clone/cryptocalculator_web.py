@@ -538,13 +538,14 @@ FORM_HTML = """
           <label>Risk–reward ratio: <input name="rr_ratio" id="rr_ratio" type="number" step="0.1" value="2"></label><br>
           <div id="audusd_rate_row">
             <label>AUD/USD rate:
-              <input name="audusd_rate" id="audusd_rate" type="number" step="0.0001" min="0"
+              <input name="audusd_rate" id="audusd_rate" type="number" step="any" min="0"
                      value="{{ audusd_rate or '' }}" placeholder="auto (OANDA)">
             </label><br>
             <small>
               Auto-fetched from OANDA (AUD_USD midpoint). Used when executing on CoinSpot (AUD)
               with a USD/USDT price source.
             </small><br>
+            <small id="audusd_fetch_status" class="copy-status"></small><br>
           </div>
         </div>
         <div id="options_section" class="trade-section hidden">
@@ -829,9 +830,14 @@ def index():
 
     embedded = str(request.args.get("embedded", "")).strip().lower() in {"1", "true", "yes", "on"}
     page_title = (request.args.get("title") or "").strip() or "Crypto Position Size Calculator"
-    form_action = request.full_path if embedded and request.query_string else request.path
-    if form_action.endswith("?"):
-        form_action = form_action[:-1]
+    app_root = (
+        request.headers.get("x-forwarded-prefix", "").rstrip("/")
+        or request.script_root.rstrip("/")
+    )
+    form_target = request.full_path if embedded and request.query_string else request.path
+    if form_target.endswith("?"):
+        form_target = form_target[:-1]
+    form_action = f"{app_root}{form_target}" if app_root else form_target
 
     trade_type = request.form.get("trade_type", "perpetual").strip().lower()
     if trade_type not in {"perpetual", "spot", "options"}:
@@ -1225,10 +1231,7 @@ def index():
         export_json=export_json,
         build_sha=BUILD_SHA,
         build_timestamp=BUILD_TIMESTAMP,
-        app_root=(
-            request.headers.get("x-forwarded-prefix", "").rstrip("/")
-            or request.script_root.rstrip("/")
-        ),
+        app_root=app_root,
         options_min_qty_map=HARD_CODED_OPTIONS_MIN_QTY,
         track_pending=track_pending,
         limit_cancel_offset=limit_cancel_offset_raw,
