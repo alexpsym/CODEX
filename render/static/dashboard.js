@@ -400,8 +400,14 @@
         items.forEach((item) => {
         const tr = document.createElement('tr');
 
-        const resultPct = Number(item.result_pct);
-        const pnlCls = Number.isFinite(resultPct)
+        const rawResultPct = item.result_pct;
+        const hasResultPct =
+          rawResultPct !== null &&
+          rawResultPct !== undefined &&
+          rawResultPct !== '' &&
+          Number.isFinite(Number(rawResultPct));
+        const resultPct = hasResultPct ? Number(rawResultPct) : null;
+        const pnlCls = hasResultPct
           ? (resultPct > 0 ? 'pos' : (resultPct < 0 ? 'neg' : ''))
           : '';
         const outcome = String(item.outcome || '—');
@@ -434,7 +440,12 @@
 
         const resultTd = document.createElement('td');
         resultTd.className = `num ${pnlCls}`;
-        resultTd.textContent = Number.isFinite(resultPct) ? `${resultPct.toFixed(2)}%` : '—';
+        if (!hasResultPct) {
+          resultTd.textContent = '—';
+        } else {
+          const dp = Math.abs(resultPct) > 0 && Math.abs(resultPct) < 0.01 ? 4 : 2;
+          resultTd.textContent = `${resultPct.toFixed(dp)}%`;
+        }
         tr.appendChild(resultTd);
 
         const durTd = document.createElement('td');
