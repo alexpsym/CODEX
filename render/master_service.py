@@ -76,6 +76,7 @@ finally:
 
 SKIP_DIRS = {
     "render",
+    "shared",
     "mt5-clone",
     ".venv",
     "venv",
@@ -89,6 +90,8 @@ SKIP_DIRS = {
 SKIP_DIRS_NORMALIZED = {name.casefold() for name in SKIP_DIRS}
 SKIP_FILES = {"__init__.py"}
 HIDDEN_SCRIPTS = {
+    "render",
+    "shared",
     "oanda_swap_rates",
     "oanda_swaprates",
     "oanda-swaprates",
@@ -3088,15 +3091,6 @@ def discover_scripts() -> List[ManagedScript]:
             if candidate.exists() and candidate.is_file():
                 entry_path = candidate
                 break
-
-        if entry_path is None:
-            py_files = sorted(
-                p
-                for p in app_dir.glob("*.py")
-                if p.name not in SKIP_FILES and not p.name.startswith("test_")
-            )
-            if py_files:
-                entry_path = py_files[0]
 
         if entry_path is not None:
             scripts.append(
