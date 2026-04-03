@@ -9,7 +9,8 @@ CTrade trade;
 enum StrategyMode
 {
    STRAT_TRENDLINE_LIMIT = 0,
-   STRAT_EMA_BOUNCE      = 1
+   STRAT_EMA_BOUNCE      = 1,
+   STRAT_STANDARD_LIMIT  = 2
 };
 
 input group "Strategy"
@@ -44,6 +45,12 @@ input TL_Direction Direction           = TL_BUY_LIMIT;
 input string       TrendlineObjectName = "";     // Auto-arm key: valid name => ON, empty/invalid => OFF
 input int          PendingCancelAfterMinutes  = 60;
 
+// -------------------- Inputs (Standard limit strategy only) --------------------
+input group "Standard limit strategy"
+enum StandardLimitDirection { STD_BUY_LIMIT=0, STD_SELL_LIMIT=1 };
+input StandardLimitDirection StandardLimitSide = STD_BUY_LIMIT;
+input double StandardLimitEntryPrice = 0.0;
+
 // -------------------- Inputs (EMA bounce strategy only) --------------------
 input group "EMA bounce strategy (derived from Backtest)"
 input bool   UseDualEMA       = true;
@@ -73,6 +80,10 @@ int hTrend = INVALID_HANDLE;
 string EA_COMMENT = "Trader";
 
 void Dbg(const string msg){ if(Debug) Print(EA_COMMENT, ": ", msg); }
+bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
+                                       const double rawEntry,
+                                       const bool allowReplace,
+                                       string &why);
 
 bool IsNewBar()
 {
@@ -225,8 +236,29 @@ bool IsLimitPriceValid(double entry, bool isBuyLimit, string &why)
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    if(ask <= 0 || bid <= 0){ why="Bid/Ask not available."; return false; }
 
-   if(isBuyLimit && !(entry < ask)){ why="Buy Limit entry is not below current Ask."; return false; }
-   if(!isBuyLimit && !(entry > bid)){ why="Sell Limit entry is not above current Bid."; return false; }
+   int stopsLevel  = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+   int freezeLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+   int minDistancePoints = MathMax(stopsLevel, freezeLevel);
+   double minDistance = (double)minDistancePoints * _Point;
+
+   if(isBuyLimit)
+   {
+      if(!(entry < ask)){ why="Buy Limit entry is not below current Ask."; return false; }
+      if(minDistancePoints > 0 && (ask - entry) < minDistance)
+      {
+         why = "Buy Limit entry is too close to current Ask for broker stops/freeze distance.";
+         return false;
+      }
+   }
+   else
+   {
+      if(!(entry > bid)){ why="Sell Limit entry is not above current Bid."; return false; }
+      if(minDistancePoints > 0 && (entry - bid) < minDistance)
+      {
+         why = "Sell Limit entry is too close to current Bid for broker stops/freeze distance.";
+         return false;
+      }
+   }
 
    why = "";
    return true;
@@ -351,7 +383,12 @@ void CancelAllPendingByMagic()
       long type = OrderGetInteger(ORDER_TYPE);
       if(type == ORDER_TYPE_BUY_LIMIT || type == ORDER_TYPE_SELL_LIMIT)
       {
-         trade.OrderDelete(ticket); // deletes pending by ticket
+         if(!trade.OrderDelete(ticket))
+         {
+            Print(EA_COMMENT, ": Failed to delete pending order #", ticket,
+                  ". retcode=", trade.ResultRetcode(),
+                  " (", trade.ResultRetcodeDescription(), ")");
+         }
       }
    }
 
@@ -464,35 +501,86 @@ bool PlaceMarketEmaBounce()
 bool PlaceOrReplacePendingTrendline()
 {
    bool isBuyLimit = (Direction == TL_BUY_LIMIT);
-
    datetime barTime = iTime(_Symbol, _Period, 0);
    double entry = GetTrendlinePriceAtTime(g_trendName, barTime);
-   if(entry <= 0.0) return false;
-   entry = NormalizePrice(entry);
+   if(entry <= 0.0)
+   {
+      Print(EA_COMMENT, ": Trendline entry is invalid/non-positive.");
+      return false;
+   }
 
    string why="";
-   double sl=0, tp=0;
+   return PlaceOrReplacePendingLimitAtEntry(isBuyLimit, entry, true, why);
+}
 
-   if(!BuildSLFromDistance(entry, isBuyLimit, sl, why)) return false;
-   if(!IsLimitPriceValid(entry, isBuyLimit, why)) return false;
+bool IsTradePlacementAccepted(const uint retcode)
+{
+   return (retcode == TRADE_RETCODE_DONE || retcode == TRADE_RETCODE_PLACED);
+}
 
-   double vol=0, riskRounded=0;
-   if(!ComputeVolumeFromRisk(entry, sl, vol, riskRounded, why)) return false;
+bool PlaceOrReplacePendingLimitAtEntry(const bool isBuyLimit,
+                                       const double rawEntry,
+                                       const bool allowReplace,
+                                       string &why)
+{
+   if(rawEntry <= 0.0)
+   {
+      why = "Invalid manual entry price (must be > 0).";
+      Print(EA_COMMENT, ": ", why, " rawEntry=", DoubleToString(rawEntry, 8));
+      return false;
+   }
+
+   double entry = NormalizePrice(rawEntry);
+   if(entry <= 0.0)
+   {
+      why = "Normalized entry price is invalid/non-positive.";
+      Print(EA_COMMENT, ": ", why);
+      return false;
+   }
+
+   if(!allowReplace && g_ticket > 0) return true;
+
+   double sl=0.0, tp=0.0, vol=0.0, riskRounded=0.0;
+
+   if(!IsLimitPriceValid(entry, isBuyLimit, why))
+   {
+      Print(EA_COMMENT, ": Wrong-side/too-close limit price. ", why,
+            " entry=", DoubleToString(entry, (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS)));
+      return false;
+   }
+
+   if(!BuildSLFromDistance(entry, isBuyLimit, sl, why))
+   {
+      Print(EA_COMMENT, ": Failed to build SL. ", why);
+      return false;
+   }
+
+   if(!ComputeVolumeFromRisk(entry, sl, vol, riskRounded, why))
+   {
+      Print(EA_COMMENT, ": Risk sizing failure. ", why);
+      return false;
+   }
 
    int autoTpPts=0;
    double effNetRR=0.0;
-
    if(AutoTP_NetRR_Enabled)
    {
-      if(!ComputeAutoTP_NetRR(entry, isBuyLimit, vol, riskRounded, tp, autoTpPts, effNetRR, why)) return false;
+      if(!ComputeAutoTP_NetRR(entry, isBuyLimit, vol, riskRounded, tp, autoTpPts, effNetRR, why))
+      {
+         Print(EA_COMMENT, ": Failed to build AutoTP. ", why);
+         return false;
+      }
    }
    else
    {
-      if(!BuildTPManualFromDistance(entry, isBuyLimit, tp, why)) return false;
+      if(!BuildTPManualFromDistance(entry, isBuyLimit, tp, why))
+      {
+         Print(EA_COMMENT, ": Failed to build manual TP (possibly too close). ", why);
+         return false;
+      }
    }
 
-   // always delete existing EA pending(s) first, then recreate to match updated trendline price / sizing
-   CancelAllPendingByMagic();
+   if(allowReplace) CancelAllPendingByMagic();
 
    ENUM_ORDER_TYPE_TIME tt = ORDER_TIME_GTC;
    datetime exp = 0;
@@ -504,12 +592,32 @@ bool PlaceOrReplacePendingTrendline()
       exp = g_expireAt;
    }
 
-   bool ok=false;
-   if(isBuyLimit) ok = trade.BuyLimit(vol, entry, _Symbol, sl, tp, tt, exp, EA_COMMENT);
-   else           ok = trade.SellLimit(vol, entry, _Symbol, sl, tp, tt, exp, EA_COMMENT);
+   bool sendOk=false;
+   if(isBuyLimit) sendOk = trade.BuyLimit(vol, entry, _Symbol, sl, tp, tt, exp, EA_COMMENT);
+   else           sendOk = trade.SellLimit(vol, entry, _Symbol, sl, tp, tt, exp, EA_COMMENT);
 
-   g_ticket = (ulong)trade.ResultOrder();
-   return ok;
+   uint retcode = trade.ResultRetcode();
+   ulong orderTicket = (ulong)trade.ResultOrder();
+   bool accepted = IsTradePlacementAccepted(retcode) && orderTicket > 0;
+   if(!sendOk || !accepted)
+   {
+      why = "Broker/server rejected pending placement.";
+      Print(EA_COMMENT, ": Pending limit placement failed. retcode=", retcode,
+            " (", trade.ResultRetcodeDescription(), ")",
+            ", order=", (string)orderTicket,
+            ", sendOk=", (sendOk ? "true" : "false"));
+      return false;
+   }
+
+   g_ticket = orderTicket;
+   return true;
+}
+
+bool PlacePendingStandardLimit()
+{
+   bool isBuyLimit = (StandardLimitSide == STD_BUY_LIMIT);
+   string why="";
+   return PlaceOrReplacePendingLimitAtEntry(isBuyLimit, StandardLimitEntryPrice, false, why);
 }
 
 void RefreshTrendlineNameFromInputs()
@@ -526,6 +634,14 @@ bool TrendlineShouldBeActive()
    if(Strategy != STRAT_TRENDLINE_LIMIT) return false;
    if(g_trendName == "") return false;
    if(!TrendlineExists(g_trendName)) return false;
+   return true;
+}
+
+bool StandardLimitShouldBeActive()
+{
+   if(!OrdersEnabled) return false;
+   if(Strategy != STRAT_STANDARD_LIMIT) return false;
+   if(StandardLimitEntryPrice <= 0.0) return false;
    return true;
 }
 
@@ -572,6 +688,19 @@ int OnInit()
          PlaceOrReplacePendingTrendline();
       }
    }
+   else if(Strategy == STRAT_STANDARD_LIMIT)
+   {
+      if(!StandardLimitShouldBeActive())
+      {
+         Print(EA_COMMENT, ": Standard limit strategy inactive/invalid on init. Cancelling pending orders.");
+         CancelAllPendingByMagic();
+      }
+      else
+      {
+         if(!PlacePendingStandardLimit())
+            Print(EA_COMMENT, ": Failed to place standard limit order on init.");
+      }
+   }
    else
    {
       // EMA strategy: nothing to place on init; it triggers on new-bar signal
@@ -594,7 +723,7 @@ void OnTick()
    // If orders are disabled at any time, make sure trendline pendings are gone.
    if(!OrdersEnabled)
    {
-      if(Strategy == STRAT_TRENDLINE_LIMIT) CancelAllPendingByMagic();
+      if(Strategy == STRAT_TRENDLINE_LIMIT || Strategy == STRAT_STANDARD_LIMIT) CancelAllPendingByMagic();
       return;
    }
 
@@ -639,6 +768,30 @@ void OnTick()
       return;
    }
 
+   if(Strategy == STRAT_STANDARD_LIMIT)
+   {
+      if(!StandardLimitShouldBeActive())
+      {
+         Print(EA_COMMENT, ": Standard limit strategy inactive/invalid. Cancelling pending orders.");
+         CancelAllPendingByMagic();
+         return;
+      }
+
+      if(InPosition())
+      {
+         CancelAllPendingByMagic();
+         return;
+      }
+
+      if(PendingAgeExpired())
+      {
+         CancelAllPendingByMagic();
+         return;
+      }
+
+      return;
+   }
+
    // EMA bounce strategy
    if(Strategy == STRAT_EMA_BOUNCE)
    {
@@ -651,6 +804,28 @@ void OnTick()
 void OnTimer()
 {
    // Mirrors OnTick gating so cancel happens even with no ticks
+   if(Strategy == STRAT_STANDARD_LIMIT)
+   {
+      if(!OrdersEnabled || !StandardLimitShouldBeActive())
+      {
+         CancelAllPendingByMagic();
+         return;
+      }
+
+      if(InPosition())
+      {
+         CancelAllPendingByMagic();
+         return;
+      }
+
+      if(PendingAgeExpired())
+      {
+         CancelAllPendingByMagic();
+         return;
+      }
+      return;
+   }
+
    if(Strategy != STRAT_TRENDLINE_LIMIT) return;
 
    RefreshTrendlineNameFromInputs();
