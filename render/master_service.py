@@ -173,7 +173,7 @@ BYBIT_DEMO_WORKBOOK_COLUMNS = [
     "fill_count",
     "source",
 ]
-ENABLE_BYBIT_DEMO_JOURNAL = os.getenv("ENABLE_BYBIT_DEMO_JOURNAL", "1").strip().lower() in {
+ENABLE_BYBIT_DEMO_JOURNAL = os.getenv("ENABLE_BYBIT_DEMO_JOURNAL", "0").strip().lower() in {
     "1",
     "true",
     "yes",
@@ -230,6 +230,12 @@ LIMIT_CANCEL_POLL_SECONDS = float(
 )
 FILL_ALERT_POLL_SECONDS = float(
     os.getenv("FILL_ALERT_POLL_SECONDS", "8")
+)
+BYBIT_DEMO_CLOSED_PNL_POLL_SECONDS = float(
+    os.getenv("BYBIT_DEMO_CLOSED_PNL_POLL_SECONDS", "120")
+)
+OUTBOUND_METRICS_LOG_SECONDS = float(
+    os.getenv("OUTBOUND_METRICS_LOG_SECONDS", "300")
 )
 WEB_APPS = {
     "bybit_trigger_bounce_trader",
@@ -2058,20 +2064,20 @@ def _ensure_bybit_demo_dropbox_files(active_folder: str) -> Dict[str, bool]:
 
     template_path = _join_dropbox_path(active_folder, BYBIT_DEMO_TEMPLATE_NAME)
     try:
-        download_bytes(template_path)
+        _dropbox_download_bytes(template_path)
     except FileNotFoundError:
         if bybit_history_fetcher is None:
             raise RuntimeError("Bybit history exporter module not available.")
         buffer = io.StringIO()
         bybit_history_fetcher.write_blank_trade_history_template(buffer)
-        upload_bytes(template_path, buffer.getvalue().encode("utf-8"))
+        _dropbox_upload_bytes(template_path, buffer.getvalue().encode("utf-8"))
         created["trade_history_template_created"] = True
 
     workbook_path = _join_dropbox_path(active_folder, BYBIT_DEMO_WORKBOOK_NAME)
     try:
-        download_bytes(workbook_path)
+        _dropbox_download_bytes(workbook_path)
     except FileNotFoundError:
-        upload_bytes(workbook_path, _bybit_demo_workbook_bytes())
+        _dropbox_upload_bytes(workbook_path, _bybit_demo_workbook_bytes())
         created["demo_workbook_created"] = True
 
     return created
@@ -2090,11 +2096,11 @@ async def _ensure_trading_journal_dropbox_templates() -> None:
 def _ensure_cashflow_template(active_folder: str) -> bool:
     cashflow_path = _join_dropbox_path(active_folder, "account_cashflows.xlsx")
     try:
-        download_bytes(cashflow_path)
+        _dropbox_download_bytes(cashflow_path)
         return False
     except Exception:
         pass
-    upload_bytes(cashflow_path, _cashflow_template_bytes())
+    _dropbox_upload_bytes(cashflow_path, _cashflow_template_bytes())
     return True
 
 
@@ -2125,7 +2131,7 @@ def _load_cashflows_from_dropbox(active_folder: str) -> Dict[str, List[Dict[str,
 
     cashflow_path = _join_dropbox_path(active_folder, "account_cashflows.xlsx")
     try:
-        payload = download_bytes(cashflow_path)
+        payload = _dropbox_download_bytes(cashflow_path)
     except Exception:
         return _cache_and_return()
     bio = io.BytesIO(payload)
@@ -2392,7 +2398,7 @@ def _import_trading_journal_from_dropbox_excel(
                 parsed_balance = cached_balance if isinstance(cached_balance, dict) else None
                 reused_count += 1
             else:
-                payload = download_bytes(dbx_path)
+                payload = _dropbox_download_bytes(dbx_path)
                 parsed_rows, parsed_balance = _parse_excel_account_workbook(name, dbx_path, payload)
 
             rows.extend(parsed_rows)
@@ -2627,6 +2633,27 @@ def _build_state_backup_payload() -> bytes:
     return json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
 
 
+def _dropbox_download_bytes(path: str) -> bytes:
+    payload = download_bytes(path)
+    _record_outbound_traffic(
+        "dropbox",
+        bytes_sent=len(path),
+        bytes_received=len(payload),
+        context=f"download:{path}",
+    )
+    return payload
+
+
+def _dropbox_upload_bytes(path: str, payload: bytes) -> None:
+    upload_bytes(path, payload)
+    _record_outbound_traffic(
+        "dropbox",
+        bytes_sent=len(path) + len(payload),
+        bytes_received=0,
+        context=f"upload:{path}",
+    )
+
+
 def _schedule_dropbox_upload_state_backup() -> None:
     if not DROPBOX_SYNC_ENABLED:
         return
@@ -2643,7 +2670,7 @@ def _schedule_dropbox_upload_state_backup() -> None:
         def _run_upload() -> None:
             try:
                 payload = _build_state_backup_payload()
-                upload_bytes(DROPBOX_BACKUP_PATH, payload)
+                _dropbox_upload_bytes(DROPBOX_BACKUP_PATH, payload)
                 BYBIT_LOGGER.info("Dropbox backup uploaded to %s", DROPBOX_BACKUP_PATH)
             except Exception as exc:  # pragma: no cover - network failure
                 BYBIT_LOGGER.error("Dropbox backup failed: %s", exc)
@@ -3192,7 +3219,7 @@ OANDA_HISTORY_JOBS: Dict[str, OandaHistoryJob] = {}
 BYBIT_HISTORY_JOBS: Dict[str, BybitHistoryJob] = {}
 COINSPOT_HISTORY_JOBS: Dict[str, CoinspotHistoryJob] = {}
 AUTOSTART_LOGGER = logging.getLogger("uvicorn.error")
-DEFAULT_AUTOSTART_SCRIPTS = "bybit_monitor,fxweekend-clone"
+DEFAULT_AUTOSTART_SCRIPTS = "fxweekend-clone"
 
 _AUTOSTART_ENV = os.getenv("AUTOSTART_SCRIPTS")
 if _AUTOSTART_ENV is None or not _AUTOSTART_ENV.strip():
@@ -3265,6 +3292,7 @@ def _compute_autostart_scripts() -> List[str]:
 async def _autostart_scripts() -> None:
     asyncio.create_task(_dropbox_restore_state_backup_on_startup())
     asyncio.create_task(_ensure_trading_journal_dropbox_templates())
+    asyncio.create_task(_log_outbound_traffic_summary())
     if not ENABLE_BYBIT_DEMO_JOURNAL:
         _purge_bybit_demo_journal_state()
     if os.getenv("ENABLE_BYBIT_FILL_POLL", "0") == "1":
@@ -4885,6 +4913,12 @@ async def _fetch_oanda_json(
             try:
                 resp = await client.get(url, headers=headers)
                 resp.raise_for_status()
+                _record_outbound_traffic(
+                    "oanda",
+                    bytes_sent=len(url) + sum(len(str(v)) for v in headers.values()),
+                    bytes_received=len(resp.content),
+                    context=endpoint,
+                )
                 break
             except httpx.TimeoutException as exc:
                 should_retry = attempt < max_attempts
@@ -5456,6 +5490,12 @@ async def _bybit_signed_get(
         url = f"{url}?{query}"
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.get(url, headers=headers)
+    _record_outbound_traffic(
+        "bybit",
+        bytes_sent=len(url) + sum(len(str(v)) for v in headers.values()),
+        bytes_received=len(resp.content),
+        context=path,
+    )
     resp.raise_for_status()
     payload = resp.json()
     ret_code = payload.get("retCode")
@@ -5481,6 +5521,12 @@ async def _bybit_signed_post(
     url = f"{base_url}{path}"
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(url, headers=headers, content=body_json)
+    _record_outbound_traffic(
+        "bybit",
+        bytes_sent=len(url) + len(body_json) + sum(len(str(v)) for v in headers.values()),
+        bytes_received=len(resp.content),
+        context=path,
+    )
     resp.raise_for_status()
     payload = resp.json()
     ret_code = payload.get("retCode")
@@ -5905,6 +5951,69 @@ def _oanda_credentials(mode: str) -> Dict[str, str]:
     }
 BALANCE_LOGGER = logging.getLogger("uvicorn.error")
 BYBIT_LOGGER = logging.getLogger("uvicorn.error")
+_OUTBOUND_METRICS_LOCK = threading.Lock()
+_OUTBOUND_METRICS: Dict[str, Dict[str, object]] = {}
+
+
+def _record_outbound_traffic(
+    destination: str,
+    *,
+    request_count: int = 1,
+    bytes_sent: int = 0,
+    bytes_received: int = 0,
+    context: Optional[str] = None,
+) -> None:
+    now = _utc_now_iso()
+    with _OUTBOUND_METRICS_LOCK:
+        node = _OUTBOUND_METRICS.setdefault(
+            destination,
+            {
+                "requests": 0,
+                "bytes_sent": 0,
+                "bytes_received": 0,
+                "last_context": None,
+                "last_seen": None,
+            },
+        )
+        node["requests"] = int(node.get("requests", 0)) + max(0, int(request_count))
+        node["bytes_sent"] = int(node.get("bytes_sent", 0)) + max(0, int(bytes_sent))
+        node["bytes_received"] = int(node.get("bytes_received", 0)) + max(0, int(bytes_received))
+        if context:
+            node["last_context"] = context
+        node["last_seen"] = now
+
+
+def _snapshot_outbound_traffic() -> Dict[str, Dict[str, object]]:
+    with _OUTBOUND_METRICS_LOCK:
+        return {
+            key: {
+                "requests": int(value.get("requests", 0)),
+                "bytes_sent": int(value.get("bytes_sent", 0)),
+                "bytes_received": int(value.get("bytes_received", 0)),
+                "last_context": value.get("last_context"),
+                "last_seen": value.get("last_seen"),
+            }
+            for key, value in _OUTBOUND_METRICS.items()
+        }
+
+
+async def _log_outbound_traffic_summary() -> None:
+    while True:
+        await asyncio.sleep(max(30.0, OUTBOUND_METRICS_LOG_SECONDS))
+        snapshot = _snapshot_outbound_traffic()
+        if not snapshot:
+            BYBIT_LOGGER.info("OUTBOUND_TRAFFIC no outbound traffic recorded yet.")
+            continue
+        top_entries = sorted(
+            snapshot.items(),
+            key=lambda item: int(item[1].get("bytes_sent", 0)) + int(item[1].get("bytes_received", 0)),
+            reverse=True,
+        )[:8]
+        summary = ", ".join(
+            f"{dest}:req={vals['requests']} tx={vals['bytes_sent']} rx={vals['bytes_received']}"
+            for dest, vals in top_entries
+        )
+        BYBIT_LOGGER.info("OUTBOUND_TRAFFIC %s", summary)
 
 
 def _get_telegram_credentials() -> tuple[str, str]:
@@ -5920,9 +6029,16 @@ async def _send_telegram_alert(message: str) -> None:
         return
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": message}
+    payload_raw = json.dumps(payload, separators=(",", ":"))
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            await client.post(url, json=payload)
+            resp = await client.post(url, json=payload)
+        _record_outbound_traffic(
+            "telegram",
+            bytes_sent=len(url) + len(payload_raw),
+            bytes_received=len(resp.content),
+            context="/sendMessage",
+        )
     except Exception as exc:  # pragma: no cover - network failure
         BYBIT_LOGGER.error("Telegram alert failed: %s", exc)
 
@@ -7708,7 +7824,7 @@ def _bybit_demo_workbook_row(row: Dict[str, object]) -> Dict[str, object]:
 def _sanitize_bybit_demo_workbook(active_folder: str) -> Dict[str, int]:
     workbook_path = _join_dropbox_path(active_folder, BYBIT_DEMO_WORKBOOK_NAME)
     try:
-        payload = download_bytes(workbook_path)
+        payload = _dropbox_download_bytes(workbook_path)
         bio = io.BytesIO(payload)
         try:
             existing = pd.read_excel(bio, sheet_name=BYBIT_DEMO_WORKBOOK_SHEET)
@@ -7760,7 +7876,7 @@ def _sanitize_bybit_demo_workbook(active_folder: str) -> Dict[str, int]:
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
             output.to_excel(writer, sheet_name=BYBIT_DEMO_WORKBOOK_SHEET, index=False)
-        upload_bytes(workbook_path, buffer.getvalue())
+        _dropbox_upload_bytes(workbook_path, buffer.getvalue())
         return stats
     except Exception as exc:
         _record_bybit_demo_sync_status(last_error=f"Bybit Demo workbook sanitize failed: {exc}")
@@ -7773,7 +7889,7 @@ def _append_bybit_demo_rows_to_workbook(active_folder: str, rows: List[Dict[str,
         return 0
     workbook_path = _join_dropbox_path(active_folder, BYBIT_DEMO_WORKBOOK_NAME)
     with _BYBIT_DEMO_WORKBOOK_LOCK:
-        payload = download_bytes(workbook_path)
+        payload = _dropbox_download_bytes(workbook_path)
         bio = io.BytesIO(payload)
         try:
             existing = pd.read_excel(bio, sheet_name=BYBIT_DEMO_WORKBOOK_SHEET)
@@ -7805,7 +7921,7 @@ def _append_bybit_demo_rows_to_workbook(active_folder: str, rows: List[Dict[str,
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
             existing.to_excel(writer, sheet_name=BYBIT_DEMO_WORKBOOK_SHEET, index=False)
-        upload_bytes(workbook_path, buffer.getvalue())
+        _dropbox_upload_bytes(workbook_path, buffer.getvalue())
         _sanitize_bybit_demo_workbook(active_folder)
         return changed
 
@@ -8106,7 +8222,7 @@ async def _poll_bybit_demo_closed_pnl() -> None:
     lookback_seconds = int(os.getenv("BYBIT_DEMO_CLOSED_PNL_LOOKBACK_SECONDS", "900"))
     backfill_seconds = int(os.getenv("BYBIT_DEMO_CLOSED_PNL_BACKFILL_SECONDS", "3600"))
     while True:
-        await asyncio.sleep(FILL_ALERT_POLL_SECONDS)
+        await asyncio.sleep(BYBIT_DEMO_CLOSED_PNL_POLL_SECONDS)
         try:
             _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for("demo")
             if not api_key or not api_secret:
@@ -9918,6 +10034,23 @@ async def set_oanda_monitor_custom_alert_enabled(
     alert = oanda_monitor.set_custom_alert_enabled(alert_id, enabled)
     _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "alert": alert})
+
+
+@app.get("/api/admin/outbound-traffic")
+async def api_admin_outbound_traffic() -> JSONResponse:
+    snapshot = _snapshot_outbound_traffic()
+    totals = {
+        "requests": sum(int(item.get("requests", 0)) for item in snapshot.values()),
+        "bytes_sent": sum(int(item.get("bytes_sent", 0)) for item in snapshot.values()),
+        "bytes_received": sum(int(item.get("bytes_received", 0)) for item in snapshot.values()),
+    }
+    return JSONResponse(
+        {
+            "generated_at": _utc_now_iso(),
+            "totals": totals,
+            "destinations": snapshot,
+        }
+    )
 
 
 @app.get("/api/pending-webhooks")

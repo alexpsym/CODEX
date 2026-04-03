@@ -50,6 +50,17 @@ _settings_cache: Dict[str, float] | None = None
 _settings_mtime: float | None = None
 _alerts_cache: list[dict] | None = None
 _alerts_mtime: float | None = None
+_traffic_totals = {"requests": 0, "bytes_sent": 0, "bytes_received": 0}
+
+
+def _track_traffic(label: str, *, bytes_sent: int = 0, bytes_received: int = 0) -> None:
+    _traffic_totals["requests"] += 1
+    _traffic_totals["bytes_sent"] += max(0, int(bytes_sent))
+    _traffic_totals["bytes_received"] += max(0, int(bytes_received))
+    log(
+        f"Outbound traffic [{label}] req={_traffic_totals['requests']} "
+        f"tx={_traffic_totals['bytes_sent']}B rx={_traffic_totals['bytes_received']}B"
+    )
 
 _ALLOWED_ALERT_KINDS = {"price", "move"}
 _ALLOWED_PRICE_DIRECTIONS = {"above", "below"}
@@ -227,6 +238,7 @@ def fetch_pip_locations(base_url: str, token: str, account_id: str) -> Dict[str,
     session = _get_session()
     url = f"{base_url}{API_PATH_INSTRUMENTS.format(accountID=account_id)}"
     response = session.get(url, headers=_oanda_headers(token), timeout=15)
+    _track_traffic("oanda", bytes_sent=len(url), bytes_received=len(response.content))
     response.raise_for_status()
     data = response.json() or {}
     instruments = data.get("instruments") or []
@@ -421,6 +433,7 @@ def send_push_notification(title: str, message: str) -> bool:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         payload = {"chat_id": chat_id, "text": f"{title}\n{message}"}
         response = _get_session().post(url, json=payload, timeout=10)
+        _track_traffic("telegram", bytes_sent=len(url) + len(json.dumps(payload)), bytes_received=len(response.content))
         response.raise_for_status()
         return True
     except Exception as exc:
@@ -606,6 +619,7 @@ def fetch_prices(
     if since:
         params["since"] = since
     response = session.get(url, headers=_oanda_headers(token), params=params, timeout=15)
+    _track_traffic("oanda", bytes_sent=len(url), bytes_received=len(response.content))
     response.raise_for_status()
     data = response.json()
     out: Dict[str, float] = {}
@@ -625,6 +639,7 @@ def fetch_account_instruments(base_url: str, token: str, account_id: str) -> Lis
     session = _get_session()
     url = f"{base_url}{API_PATH_INSTRUMENTS.format(accountID=account_id)}"
     response = session.get(url, headers=_oanda_headers(token), timeout=15)
+    _track_traffic("oanda", bytes_sent=len(url), bytes_received=len(response.content))
     response.raise_for_status()
     data = response.json()
     instruments = data.get("instruments", []) or []
@@ -697,6 +712,7 @@ def fetch_historical_baseline(
         if to_param:
             params["to"] = to_param
         response = session.get(url, headers=_oanda_headers(token), params=params, timeout=20)
+        _track_traffic("oanda_history", bytes_sent=len(url), bytes_received=len(response.content))
         response.raise_for_status()
         data = response.json()
         candles = data.get("candles") or []

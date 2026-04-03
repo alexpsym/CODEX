@@ -77,6 +77,17 @@ _alerts_mtime: float | None = None
 _perp_symbols_cache: set[str] | None = None
 _perp_symbols_cache_at: float = 0.0
 _PERP_SYMBOLS_TTL_SECONDS = 900
+_traffic_totals = {"requests": 0, "bytes_sent": 0, "bytes_received": 0}
+
+
+def _track_traffic(label: str, *, bytes_sent: int = 0, bytes_received: int = 0) -> None:
+    _traffic_totals["requests"] += 1
+    _traffic_totals["bytes_sent"] += max(0, int(bytes_sent))
+    _traffic_totals["bytes_received"] += max(0, int(bytes_received))
+    log(
+        f"Outbound traffic [{label}] req={_traffic_totals['requests']} "
+        f"tx={_traffic_totals['bytes_sent']}B rx={_traffic_totals['bytes_received']}B"
+    )
 
 def _get_telegram_credentials() -> tuple[str, str]:
     """Return Telegram credentials from environment variables."""
@@ -534,6 +545,7 @@ def send_push_notification(title: str, message: str) -> bool:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         payload = {"chat_id": chat_id, "text": f"{title}\n{message}"}
         response = _get_session().post(url, json=payload, timeout=10)
+        _track_traffic("telegram", bytes_sent=len(url) + len(json.dumps(payload)), bytes_received=len(response.content))
         response.raise_for_status()
         if not _push_success_logged:
             _push_success_logged = True
@@ -709,6 +721,7 @@ def _fetch_linear_perpetual_symbols() -> set[str]:
                 params["cursor"] = cursor
             url = f"{api_base}{INSTRUMENTS_PATH}"
             resp = session.get(url, params=params, headers=headers, timeout=timeout)
+            _track_traffic("bybit", bytes_sent=len(url), bytes_received=len(resp.content))
             resp.raise_for_status()
             payload = resp.json()
             if payload.get("retCode") != 0:
@@ -786,6 +799,7 @@ def _fetch_fallback_prices() -> Dict[str, float]:
     }
 
     response = session.get(url, timeout=timeout, headers=headers)
+    _track_traffic("fallback_market", bytes_sent=len(url), bytes_received=len(response.content))
     content_type = response.headers.get("Content-Type", "")
     body_preview = response.text[:200]
 
@@ -886,6 +900,7 @@ def fetch_altcoin_prices() -> Dict[str, float]:
 
             try:
                 response = session.send(prepared, timeout=timeout)
+                _track_traffic("bybit", bytes_sent=len(prepared.url or url), bytes_received=len(response.content))
             except requests.RequestException as exc:  # pragma: no cover - network dependent
                 errors.append(f"{api_base} connection error: {exc}")
                 continue
