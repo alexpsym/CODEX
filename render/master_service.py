@@ -173,7 +173,7 @@ BYBIT_DEMO_WORKBOOK_COLUMNS = [
     "fill_count",
     "source",
 ]
-ENABLE_BYBIT_DEMO_JOURNAL = os.getenv("ENABLE_BYBIT_DEMO_JOURNAL", "0").strip().lower() in {
+ENABLE_BYBIT_DEMO_JOURNAL = os.getenv("ENABLE_BYBIT_DEMO_JOURNAL", "1").strip().lower() in {
     "1",
     "true",
     "yes",
@@ -253,9 +253,6 @@ DAILY_TRADE_SYNC_ENABLED = os.getenv("DAILY_TRADE_SYNC_ENABLED", "1").strip().lo
 DAILY_TRADE_SYNC_HOUR = max(0, min(23, int(os.getenv("DAILY_TRADE_SYNC_HOUR", "0"))))
 DAILY_TRADE_SYNC_MINUTE = max(0, min(59, int(os.getenv("DAILY_TRADE_SYNC_MINUTE", "10"))))
 DAILY_TRADE_SYNC_TIMEZONE = os.getenv("DAILY_TRADE_SYNC_TIMEZONE", "Australia/Brisbane").strip() or "Australia/Brisbane"
-DAILY_TRADE_SYNC_STARTUP_STALE_HOURS = float(
-    os.getenv("DAILY_TRADE_SYNC_STARTUP_STALE_HOURS", "18")
-)
 OUTBOUND_METRICS_LOG_SECONDS = float(
     os.getenv("OUTBOUND_METRICS_LOG_SECONDS", "300")
 )
@@ -3316,29 +3313,7 @@ def _compute_autostart_scripts() -> List[str]:
     return names
 
 
-def _should_run_startup_recovery_import() -> bool:
-    rows = _get_trading_journal_rows()
-    if not rows:
-        return True
-
-    state = _load_trading_journal_state()
-    daily_state = state.get("daily_trade_sync") if isinstance(state, dict) else {}
-    if not isinstance(daily_state, dict):
-        return True
-
-    last_success_at = daily_state.get("last_success_at")
-    last_success_dt = _to_dt_utc(last_success_at)
-    if not last_success_dt:
-        return True
-
-    age_seconds = (datetime.now(timezone.utc) - last_success_dt).total_seconds()
-    stale_after_seconds = max(3600.0, DAILY_TRADE_SYNC_STARTUP_STALE_HOURS * 3600.0)
-    return age_seconds > stale_after_seconds
-
-
 async def _run_startup_recovery_import_if_needed() -> None:
-    if not _should_run_startup_recovery_import():
-        return
     try:
         result = await asyncio.to_thread(_import_trading_journal_from_dropbox_excel)
         ok_flag = bool(result.get("ok", False)) if isinstance(result, dict) else False
