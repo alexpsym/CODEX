@@ -1,0 +1,26 @@
+name: Render Dashboard Guard
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  no-bybit-demo-sync-button:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pytest
+        run: python -m pip install --upgrade pip pytest
+
+      - name: Run dashboard guard test
+        run: python -m pytest -q render/tests/test_dashboard_no_bybit_demo_sync_button.py
