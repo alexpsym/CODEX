@@ -232,7 +232,7 @@ FILL_ALERT_POLL_SECONDS = float(
     os.getenv("FILL_ALERT_POLL_SECONDS", "8")
 )
 BYBIT_DEMO_CLOSED_PNL_POLL_SECONDS = float(
-    os.getenv("BYBIT_DEMO_CLOSED_PNL_POLL_SECONDS", "120")
+    os.getenv("BYBIT_DEMO_CLOSED_PNL_POLL_SECONDS", "21600")
 )
 OUTBOUND_METRICS_LOG_SECONDS = float(
     os.getenv("OUTBOUND_METRICS_LOG_SECONDS", "300")
@@ -291,6 +291,11 @@ _DROPBOX_UPLOAD_TIMER: Optional[threading.Timer] = None
 _DROPBOX_UPLOAD_TIMER_LOCK = threading.Lock()
 _BYBIT_EXEC_LAST_SEEN: Dict[str, int] = {}
 _BYBIT_DEMO_CLOSED_PNL_LAST_SEEN: Optional[int] = None
+_BYBIT_DEMO_SYNC_LOCK = asyncio.Lock()
+_BYBIT_DEMO_SYNC_LAST_RUN_AT = 0.0
+_BYBIT_DEMO_SYNC_MANUAL_COOLDOWN_SECONDS = float(
+    os.getenv("BYBIT_DEMO_SYNC_MANUAL_COOLDOWN_SECONDS", "30")
+)
 _BYBIT_DEMO_WORKBOOK_LOCK = threading.Lock()
 _OANDA_TX_LAST_SEEN: Dict[str, str] = {}
 _OANDA_FILL_BACKOFF_UNTIL: Dict[str, float] = {}
@@ -305,7 +310,7 @@ _OANDA_INACTIVITY_CACHE: Dict[str, object] = {
 }
 _OANDA_INACTIVITY_CACHE_TTL_SECONDS = 45.0
 _OPEN_ORDERS_CACHE_LOCK = asyncio.Lock()
-_OPEN_ORDERS_CACHE_TTL_SECONDS = 6.0
+_OPEN_ORDERS_CACHE_TTL_SECONDS = 60.0
 _OPEN_ORDERS_CACHE: Dict[str, object] = {
     "expires_at": 0.0,
     "last_success_at": None,
@@ -4123,6 +4128,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         <div class="panel-sub">Latest closed trades across all connected accounts.</div>
                     </div>
                     <div class="oo-toolbar">
+                        <button class="secondary" id="bybit-demo-sync-btn">Sync Bybit Demo</button>
                         <span class="status-pill" id="recent-trades-status">Loading...</span>
                     </div>
                 </div>
@@ -8218,33 +8224,92 @@ async def _poll_bybit_fills() -> None:
 
 
 async def _poll_bybit_demo_closed_pnl() -> None:
-    global _BYBIT_DEMO_CLOSED_PNL_LAST_SEEN
-    lookback_seconds = int(os.getenv("BYBIT_DEMO_CLOSED_PNL_LOOKBACK_SECONDS", "900"))
-    backfill_seconds = int(os.getenv("BYBIT_DEMO_CLOSED_PNL_BACKFILL_SECONDS", "3600"))
     while True:
-        await asyncio.sleep(BYBIT_DEMO_CLOSED_PNL_POLL_SECONDS)
         try:
-            _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for("demo")
-            if not api_key or not api_secret:
-                continue
-            now_ms = int(time.time() * 1000)
-            last_seen = _BYBIT_DEMO_CLOSED_PNL_LAST_SEEN
-            if last_seen is None:
-                last_seen = max(0, now_ms - (lookback_seconds * 1000))
-            earliest = now_ms - (7 * 24 * 60 * 60 * 1000) + 60000
-            start_time = max(last_seen - (backfill_seconds * 1000), earliest)
-            end_time = now_ms
-            max_seen = await _sync_bybit_demo_closed_pnl_window(
-                base_url=base_url,
-                api_key=api_key,
-                api_secret=api_secret,
-                start_time=start_time,
-                end_time=end_time,
-            )
-            _BYBIT_DEMO_CLOSED_PNL_LAST_SEEN = max(max_seen, last_seen)
+            await _run_bybit_demo_closed_pnl_sync(reason="scheduled")
         except Exception as exc:  # pragma: no cover - background task
             _record_bybit_demo_sync_status(last_checked_at=_utc_now_iso(), last_error=str(exc))
             BYBIT_LOGGER.exception("Bybit demo closed PnL poll error: %s", exc)
+        await asyncio.sleep(BYBIT_DEMO_CLOSED_PNL_POLL_SECONDS)
+
+
+async def _run_bybit_demo_closed_pnl_sync(
+    *,
+    reason: str,
+    enforce_manual_cooldown: bool = False,
+) -> Dict[str, object]:
+    global _BYBIT_DEMO_CLOSED_PNL_LAST_SEEN
+    global _BYBIT_DEMO_SYNC_LAST_RUN_AT
+    lookback_seconds = int(os.getenv("BYBIT_DEMO_CLOSED_PNL_LOOKBACK_SECONDS", "900"))
+    backfill_seconds = int(os.getenv("BYBIT_DEMO_CLOSED_PNL_BACKFILL_SECONDS", "3600"))
+    now = time.time()
+    if (
+        enforce_manual_cooldown
+        and _BYBIT_DEMO_SYNC_LAST_RUN_AT > 0
+        and (now - _BYBIT_DEMO_SYNC_LAST_RUN_AT) < _BYBIT_DEMO_SYNC_MANUAL_COOLDOWN_SECONDS
+    ):
+        retry_after = _BYBIT_DEMO_SYNC_MANUAL_COOLDOWN_SECONDS - (
+            now - _BYBIT_DEMO_SYNC_LAST_RUN_AT
+        )
+        return {
+            "ok": False,
+            "message": (
+                "Bybit demo sync is cooling down. "
+                f"Retry in {max(1, int(math.ceil(retry_after)))}s."
+            ),
+            "cooldown_active": True,
+            "retry_after_seconds": max(0, retry_after),
+        }
+
+    async with _BYBIT_DEMO_SYNC_LOCK:
+        now = time.time()
+        if (
+            enforce_manual_cooldown
+            and _BYBIT_DEMO_SYNC_LAST_RUN_AT > 0
+            and (now - _BYBIT_DEMO_SYNC_LAST_RUN_AT) < _BYBIT_DEMO_SYNC_MANUAL_COOLDOWN_SECONDS
+        ):
+            retry_after = _BYBIT_DEMO_SYNC_MANUAL_COOLDOWN_SECONDS - (
+                now - _BYBIT_DEMO_SYNC_LAST_RUN_AT
+            )
+            return {
+                "ok": False,
+                "message": (
+                    "Bybit demo sync is cooling down. "
+                    f"Retry in {max(1, int(math.ceil(retry_after)))}s."
+                ),
+                "cooldown_active": True,
+                "retry_after_seconds": max(0, retry_after),
+            }
+
+        _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for("demo")
+        if not api_key or not api_secret:
+            raise ValueError("Bybit demo API credentials are not configured.")
+
+        now_ms = int(time.time() * 1000)
+        last_seen = _BYBIT_DEMO_CLOSED_PNL_LAST_SEEN
+        if last_seen is None:
+            last_seen = max(0, now_ms - (lookback_seconds * 1000))
+        earliest = now_ms - (7 * 24 * 60 * 60 * 1000) + 60000
+        start_time = max(last_seen - (backfill_seconds * 1000), earliest)
+        end_time = now_ms
+        max_seen = await _sync_bybit_demo_closed_pnl_window(
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        _BYBIT_DEMO_CLOSED_PNL_LAST_SEEN = max(max_seen, last_seen)
+        _BYBIT_DEMO_SYNC_LAST_RUN_AT = time.time()
+
+    return {
+        "ok": True,
+        "reason": reason,
+        "message": "Bybit demo sync completed.",
+        "start_time": start_time,
+        "end_time": end_time,
+        "max_seen": max_seen,
+    }
 
 
 async def _fetch_oanda_last_transaction_id(cfg: Dict[str, str]) -> str:
@@ -8611,6 +8676,25 @@ async def fetch_bybit_balance(
             "retMsg": ret_msg,
         }
     )
+
+
+@app.post("/api/bybit-demo/sync")
+async def sync_bybit_demo_now() -> JSONResponse:
+    if not ENABLE_BYBIT_DEMO_JOURNAL:
+        raise HTTPException(
+            status_code=400,
+            detail="Bybit demo journal sync is disabled (ENABLE_BYBIT_DEMO_JOURNAL=0).",
+        )
+    try:
+        payload = await _run_bybit_demo_closed_pnl_sync(
+            reason="manual",
+            enforce_manual_cooldown=True,
+        )
+    except Exception as exc:
+        _record_bybit_demo_sync_status(last_checked_at=_utc_now_iso(), last_error=str(exc))
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    status_code = 429 if payload.get("cooldown_active") else 200
+    return JSONResponse(payload, status_code=status_code)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -10714,8 +10798,9 @@ async def list_open_orders() -> JSONResponse:
 
         _OPEN_ORDERS_CACHE["payload"] = dict(payload)
         _OPEN_ORDERS_CACHE["expires_at"] = time.time() + _OPEN_ORDERS_CACHE_TTL_SECONDS
-        _OPEN_ORDERS_CACHE["last_success_at"] = updated_at
-        payload["last_success_at"] = updated_at
+        if not errors:
+            _OPEN_ORDERS_CACHE["last_success_at"] = updated_at
+            payload["last_success_at"] = updated_at
 
         return JSONResponse(payload)
 
