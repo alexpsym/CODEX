@@ -41,13 +41,19 @@
             };
             if (script.running) {
                 button.classList.add('running');
+            } else if (script.starting) {
+                button.classList.add('starting');
             }
 
             const status = document.createElement('span');
             status.className = 'status-pill';
-            status.textContent = script.running ? 'Running' : 'Stopped';
+            status.textContent = script.running ? 'Running' : (script.starting ? 'Starting...' : 'Stopped');
             if (script.running) {
                 status.classList.add('running');
+            } else if (script.starting) {
+                status.classList.add('starting');
+            } else {
+                status.classList.add('stopped');
             }
 
             card.appendChild(button);

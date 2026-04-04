@@ -2829,12 +2829,18 @@ class ManagedScript:
     last_exit_reason: Optional[str] = None
     last_spawn_command: Optional[List[str]] = None
     last_spawn_cwd: Optional[str] = None
+    is_starting: bool = False
+    startup_started_at: Optional[float] = None
+    startup_completed_at: Optional[float] = None
+    pid: Optional[int] = None
+    startup_task: Optional[asyncio.Task] = field(default=None, repr=False, compare=False)
 
     @property
     def is_running(self) -> bool:
         return self.process is not None and self.process.returncode is None
 
     def to_summary(self) -> Dict[str, object]:
+        startup_pending = bool(self.startup_task is not None and not self.startup_task.done())
         return {
             "id": self.name,
             "name": self.name,
@@ -2842,7 +2848,9 @@ class ManagedScript:
             "path": str(self.path),
             "category": self.category,
             "running": self.is_running,
+            "starting": self.is_starting or startup_pending,
             "port": self.port,
+            "pid": self.pid,
             "return_code": None if self.process is None else self.process.returncode,
             "open_url": script_open_url(self),
             "logs_url": script_logs_url(self.name),
@@ -2853,6 +2861,8 @@ class ManagedScript:
             "last_exit_reason": self.last_exit_reason,
             "last_spawn_command": self.last_spawn_command,
             "last_spawn_cwd": self.last_spawn_cwd,
+            "startup_started_at": self.startup_started_at,
+            "startup_completed_at": self.startup_completed_at,
             "standalone": self.name in STANDALONE_SCRIPTS,
         }
 
@@ -2890,8 +2900,10 @@ class ManagedScript:
             "last_output_at": self.last_output_at,
         }
 
-    async def start(self) -> None:
+    async def start(self, *, ignore_starting: bool = False) -> None:
         if self.is_running:
+            return
+        if self.is_starting and not ignore_starting:
             return
         if not self.path.exists():
             raise FileNotFoundError(f"Script not found: {self.path}")
@@ -2900,7 +2912,12 @@ class ManagedScript:
         self.last_start_error = None
         self.last_exit_code = None
         self.last_exit_reason = None
+        self.is_starting = True
+        self.startup_started_at = self.last_start_attempt_at
+        self.startup_completed_at = None
+        self.pid = None
         self.add_log("Starting script...")
+        self.add_log("Spawning subprocess...")
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
         current_pythonpath = env.get("PYTHONPATH", "")
@@ -2917,19 +2934,34 @@ class ManagedScript:
         command = [os.getenv("PYTHON", "python"), "-u", str(self.path)]
         self.last_spawn_command = command
         self.last_spawn_cwd = str(self.path.parent)
+        self.add_log(f"Command: {' '.join(command)}")
+        self.add_log(f"Working directory: {self.last_spawn_cwd}")
         try:
-            self.process = await asyncio.create_subprocess_exec(
-                *command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                cwd=self.last_spawn_cwd,
-                env=env,
+            self.process = await asyncio.wait_for(
+                asyncio.create_subprocess_exec(
+                    *command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    cwd=self.last_spawn_cwd,
+                    env=env,
+                ),
+                timeout=30,
             )
+        except asyncio.TimeoutError as exc:
+            self.last_start_error = "Timed out waiting for subprocess spawn."
+            self.is_starting = False
+            self.startup_completed_at = time.time()
+            self.add_log(self.last_start_error)
+            raise RuntimeError(self.last_start_error) from exc
         except Exception as exc:
             self.last_start_error = str(exc)
+            self.is_starting = False
+            self.startup_completed_at = time.time()
             self.add_log(f"Failed to start: {exc}")
             raise
 
+        self.pid = self.process.pid
+        self.add_log(f"Spawned PID {self.pid}. Waiting for monitor output...")
         asyncio.create_task(self._capture_output())
 
     async def _capture_output(self) -> None:
@@ -2937,19 +2969,32 @@ class ManagedScript:
         if self.process.stdout is None:
             return
 
+        saw_output = False
         try:
             while True:
                 line = await self.process.stdout.readline()
                 if not line:
                     break
+                if not saw_output:
+                    saw_output = True
+                    self.is_starting = False
+                    self.startup_completed_at = time.time()
                 self.add_log(line.decode("utf-8", errors="replace"))
         finally:
             await self.process.wait()
             self.last_exit_code = self.process.returncode
-            if self.last_exit_reason is None:
+            if not saw_output and self.process.returncode is not None:
+                self.last_exit_reason = "Process exited before producing startup output."
+                self.add_log(
+                    f"Process exited before producing startup output (exit code {self.process.returncode})."
+                )
+            elif self.last_exit_reason is None:
                 self.last_exit_reason = (
                     "Process exited unexpectedly." if self.process.returncode else None
                 )
+            self.is_starting = False
+            self.startup_completed_at = self.startup_completed_at or time.time()
+            self.pid = None
             self.port = None
 
     async def stop(self) -> None:
@@ -2962,6 +3007,9 @@ class ManagedScript:
         except asyncio.TimeoutError:
             self.process.kill()
             await self.process.wait()
+        self.is_starting = False
+        self.startup_completed_at = time.time()
+        self.pid = None
 
 
 @dataclass
@@ -3218,7 +3266,9 @@ class ScriptManager:
                 "path": str(BASE_DIR / "render" / "master_service.py"),
                 "category": "Other",
                 "running": True,
+                "starting": False,
                 "port": None,
+                "pid": None,
                 "return_code": None,
                 "open_url": "/trading-journal",
                 "logs_url": None,
@@ -3229,6 +3279,8 @@ class ScriptManager:
                 "last_exit_reason": None,
                 "last_spawn_command": None,
                 "last_spawn_cwd": None,
+                "startup_started_at": None,
+                "startup_completed_at": None,
                 "standalone": False,
             }
         )
@@ -3467,7 +3519,8 @@ async def _autostart_scripts() -> None:
         if script.name in WEB_APPS and script.port is None:
             script.port = _allocate_port()
 
-        asyncio.create_task(_background_start(script))
+        if script.startup_task is None or script.startup_task.done():
+            script.startup_task = asyncio.create_task(_background_start(script))
 
 
 async def _start_oanda_fill_poll_after_delay() -> None:
@@ -3952,6 +4005,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             white-space: nowrap;
         }
         .status-pill.running { background: #14532d; color: #bbf7d0; border-color: #22c55e55; }
+        .status-pill.starting { background: #78350f; color: #fde68a; border-color: #f59e0b55; }
         .status-pill.stopped { background: #7f1d1d; color: #fecdd3; border-color: #ef444455; }
         .status-dot {
             width: 10px;
@@ -3963,6 +4017,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             box-shadow: 0 0 0 1px rgba(255,255,255,0.12) inset;
         }
         .status-dot.running { background: #22c55e; }
+        .status-dot.starting { background: #f59e0b; }
         .status-dot.stopped { background: #ef4444; }
         .empty-state { color: #94a3b8; margin-top: 0.9rem; }
 
@@ -4416,8 +4471,11 @@ CATEGORY_TEMPLATE = """<!DOCTYPE html>
         .card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 1rem; display: flex; flex-direction: column; gap: 0.75rem; text-align: center; min-height: 96px; }
         .script-btn { width: 100%; padding: 0.8rem 1rem; border-radius: 10px; border: none; font-weight: 700; background: #1f2937; color: #e2e8f0; cursor: pointer; }
         .script-btn.running { background: #22c55e22; color: #86efac; border: 1px solid #22c55e55; }
+        .script-btn.starting { background: #f59e0b22; color: #fde68a; border: 1px solid #f59e0b55; }
         .status-pill { display: inline-flex; align-items: center; justify-content: center; padding: 0.25rem 0.65rem; border-radius: 999px; font-size: 0.85rem; font-weight: 700; background: #1f2937; color: #cbd5e1; }
         .status-pill.running { background: #14532d; color: #bbf7d0; }
+        .status-pill.starting { background: #78350f; color: #fde68a; }
+        .status-pill.stopped { background: #7f1d1d; color: #fecdd3; }
         .nav-bar { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
         button { padding: 0.55rem 0.9rem; border-radius: 10px; border: none; cursor: pointer; font-weight: 700; }
         .secondary { background: #1f2937; color: #cbd5e1; }
@@ -10021,7 +10079,8 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
             if script.port is None:
                 script.port = _allocate_port()
             if not script.last_start_attempt_at or script.last_start_error:
-                asyncio.create_task(_background_start(script))
+                if script.startup_task is None or script.startup_task.done():
+                    script.startup_task = asyncio.create_task(_background_start(script))
             if wants_html:
                 target_url = f"/apps/{_encoded_script_name(script.name)}"
                 return HTMLResponse(
@@ -10379,10 +10438,13 @@ async def _background_start(script: ManagedScript) -> None:
     """Start a script without tying its output or failures to the HTTP response."""
 
     try:
-        await script.start()
+        await script.start(ignore_starting=True)
     except Exception as exc:  # pragma: no cover - runtime protection
         # Capture failures in the per-script log instead of surfacing them to the caller.
         script.add_log(f"Failed to start: {exc}")
+    finally:
+        if script.startup_task is asyncio.current_task():
+            script.startup_task = None
 
 
 @app.get("/scripts")
@@ -10398,26 +10460,41 @@ async def list_scripts() -> JSONResponse:
             "label": btn["label"],
             "category": "Merged",
             "running": False,
+            "starting": False,
             "open_url": btn["open_url"],
             "standalone": True,
         }
         if btn["name"] == "calculator":
+            row["starting"] = bool(
+                by_name.get("cryptocalculator-clone", {}).get("starting")
+                or by_name.get("oanda-calculator-clone", {}).get("starting")
+            )
             row["running"] = bool(
                 by_name.get("cryptocalculator-clone", {}).get("running")
                 or by_name.get("oanda-calculator-clone", {}).get("running")
             )
         elif btn["name"] == "history":
+            row["starting"] = bool(
+                by_name.get("bybithistory-clone", {}).get("starting")
+                or by_name.get("oanda_history-clone", {}).get("starting")
+                or by_name.get("coinspot-clone", {}).get("starting")
+            )
             row["running"] = bool(
                 by_name.get("bybithistory-clone", {}).get("running")
                 or by_name.get("oanda_history-clone", {}).get("running")
                 or by_name.get("coinspot-clone", {}).get("running")
             )
         elif btn["name"] == "monitor":
+            row["starting"] = bool(
+                by_name.get("bybit_monitor", {}).get("starting")
+                or by_name.get("oanda_monitor", {}).get("starting")
+            )
             row["running"] = bool(
                 by_name.get("bybit_monitor", {}).get("running")
                 or by_name.get("oanda_monitor", {}).get("running")
             )
         elif btn["name"] == "bounce-trader":
+            row["starting"] = bool(by_name.get("bybit_trigger_bounce_trader", {}).get("starting"))
             row["running"] = bool(by_name.get("bybit_trigger_bounce_trader", {}).get("running"))
         merged.append(row)
 
@@ -10425,6 +10502,12 @@ async def list_scripts() -> JSONResponse:
     extras.sort(key=lambda s: str(s.get("label") or s.get("name")).lower())
 
     return JSONResponse(merged + extras)
+
+
+@app.get("/api/scripts/{script_name:path}")
+async def script_status(script_name: str) -> JSONResponse:
+    script = script_manager.get(script_name)
+    return JSONResponse(script.to_summary())
 
 
 def _safe_float(value: object) -> Optional[float]:
@@ -11246,11 +11329,13 @@ async def start_script(script_name: str) -> JSONResponse:
 
     if script.is_running:
         return JSONResponse({"status": "already_running", **script.to_summary()})
+    if script.is_starting or (script.startup_task is not None and not script.startup_task.done()):
+        return JSONResponse({"status": "already_starting", **script.to_summary()}, status_code=202)
 
     if script.name in WEB_APPS and script.port is None:
         script.port = _allocate_port()
 
-    asyncio.create_task(_background_start(script))
+    script.startup_task = asyncio.create_task(_background_start(script))
 
     # Respond immediately so no script output can leak into the HTTP response cycle.
     return JSONResponse({"status": "starting", **script.to_summary()}, status_code=202)
