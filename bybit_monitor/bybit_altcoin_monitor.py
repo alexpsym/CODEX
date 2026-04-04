@@ -20,6 +20,7 @@ from collections import deque
 from pathlib import Path
 from hashlib import sha256
 from typing import Dict, Iterable, Tuple
+from zoneinfo import ZoneInfo
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -78,6 +79,14 @@ _perp_symbols_cache: set[str] | None = None
 _perp_symbols_cache_at: float = 0.0
 _PERP_SYMBOLS_TTL_SECONDS = 900
 _traffic_totals = {"requests": 0, "bytes_sent": 0, "bytes_received": 0}
+APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Australia/Brisbane").strip() or "Australia/Brisbane"
+
+
+def _app_now() -> _dt.datetime:
+    try:
+        return _dt.datetime.now(ZoneInfo(APP_TIMEZONE))
+    except Exception:
+        return _dt.datetime.now(ZoneInfo("Australia/Brisbane"))
 
 
 def _track_traffic(label: str, *, bytes_sent: int = 0, bytes_received: int = 0) -> None:
@@ -483,7 +492,7 @@ def update_runtime_settings(
 
 def log(message: str) -> None:
     """Print a time-stamped log message."""
-    now = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = _app_now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{now}] {message}", flush=True)
 
 

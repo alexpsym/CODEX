@@ -254,6 +254,7 @@ DAILY_TRADE_SYNC_ENABLED = os.getenv("DAILY_TRADE_SYNC_ENABLED", "1").strip().lo
 DAILY_TRADE_SYNC_HOUR = max(0, min(23, int(os.getenv("DAILY_TRADE_SYNC_HOUR", "0"))))
 DAILY_TRADE_SYNC_MINUTE = max(0, min(59, int(os.getenv("DAILY_TRADE_SYNC_MINUTE", "10"))))
 DAILY_TRADE_SYNC_TIMEZONE = os.getenv("DAILY_TRADE_SYNC_TIMEZONE", "Australia/Brisbane").strip() or "Australia/Brisbane"
+APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Australia/Brisbane").strip() or "Australia/Brisbane"
 OUTBOUND_METRICS_LOG_SECONDS = float(
     os.getenv("OUTBOUND_METRICS_LOG_SECONDS", "300")
 )
@@ -2869,6 +2870,12 @@ class ManagedScript:
     def add_log(self, line: str) -> None:
         cleaned = line.rstrip("\n")
         if cleaned:
+            if not re.match(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\s", cleaned):
+                try:
+                    now = datetime.now(ZoneInfo(APP_TIMEZONE))
+                except Exception:
+                    now = datetime.now(ZoneInfo("Australia/Brisbane"))
+                cleaned = f"[{now.strftime('%Y-%m-%d %H:%M:%S')}] {cleaned}"
             self._log_lines.append(cleaned)
             if len(self._log_lines) > MAX_LOG_LINES:
                 self._log_lines = self._log_lines[-MAX_LOG_LINES :]
