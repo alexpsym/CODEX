@@ -136,6 +136,7 @@ TRADING_JOURNAL_PATH = BASE_DIR / "render" / "data" / "trading_journal.json"
 TRADING_JOURNAL_STATE_PATH = BASE_DIR / "render" / "data" / "trading_journal_state.json"
 TRADING_JOURNAL_SYNC_STATE_PATH = BASE_DIR / "render" / "data" / "trading_journal_sync_state.json"
 TRADING_JOURNAL_IMPORT_CACHE_PATH = BASE_DIR / "render" / "data" / "trading_journal_import_cache.json"
+TRADING_JOURNAL_IMPORT_CACHE_VERSION = 2
 TRADING_JOURNAL_DROPBOX_FOLDER = os.getenv(
     "TRADING_JOURNAL_DROPBOX_FOLDER", "/master_control"
 ).strip()
@@ -2368,8 +2369,16 @@ def _import_trading_journal_from_dropbox_excel(
     balances: List[Dict[str, object]] = []
     errors: List[Dict[str, str]] = []
     cache = _load_trading_journal_import_cache()
+    cache_version = 0
+    if isinstance(cache, dict):
+        try:
+            cache_version = int(cache.get("version") or 0)
+        except Exception:
+            cache_version = 0
     files_cache_raw = cache.get("files") if isinstance(cache, dict) else None
     files_cache: Dict[str, Dict[str, object]] = files_cache_raw if isinstance(files_cache_raw, dict) else {}
+    if cache_version != TRADING_JOURNAL_IMPORT_CACHE_VERSION:
+        files_cache = {}
     next_files_cache: Dict[str, Dict[str, object]] = {}
 
     total_files = len(entries)
@@ -2506,6 +2515,7 @@ def _import_trading_journal_from_dropbox_excel(
     )
     _save_trading_journal_import_cache(
         {
+            "version": TRADING_JOURNAL_IMPORT_CACHE_VERSION,
             "updated_at": _utc_now_iso(),
             "source_folder": active_folder,
             "files": next_files_cache,
