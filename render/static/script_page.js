@@ -35,6 +35,7 @@
     let appLoadTimer = null;
     let appFrameLoaded = false;
     let autoStartInFlight = false;
+    let startInFlight = false;
     const resultTabs = new Map();
     const resultExportPattern = /Exporting data to HTML:\s*(.+)$/i;
 
@@ -156,8 +157,7 @@
 
     const refreshStatus = async () => {
         try {
-            const scripts = await fetchJson('/scripts');
-            const script = scripts.find((item) => item.name === scriptName);
+            const script = await fetchJson(`/api/scripts/${buildScriptPath(scriptName)}`);
             const running = Boolean(script && script.running);
             const starting = Boolean(script && script.starting);
             const state = running ? 'running' : (starting ? 'starting' : 'stopped');
@@ -180,13 +180,21 @@
             const starting = Boolean(script?.starting);
             if (running) return true;
             if (!starting) {
-                const reason = script?.last_start_error || script?.last_exit_reason;
-                if (reason) {
-                    appendLogs([`Startup failed: ${reason}`]);
-                }
+                const reason = script?.last_start_error || script?.last_exit_reason || 'Startup failed.';
+                appendLogs([`Startup failed: ${reason}`]);
                 return false;
             }
             await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+    };
+
+    const prepareLogTailForNewStart = async () => {
+        try {
+            const snapshot = await fetchJson(`/api/logs/${buildScriptPath(scriptName)}?cursor=0`);
+            const total = Number(snapshot?.total);
+            logCursor = Number.isFinite(total) ? total : Number(snapshot?.cursor ?? logCursor);
+        } catch (err) {
+            console.error(err);
         }
     };
 
@@ -194,10 +202,17 @@
         if (autoStartInFlight && isAuto) {
             return;
         }
+        if (startInFlight) {
+            return;
+        }
         autoStartInFlight = isAuto;
+        startInFlight = true;
         setRunningState('starting');
-        appendLogs(['Starting script...']);
         try {
+            await prepareLogTailForNewStart();
+            if (!isAuto) {
+                logBox.textContent = '';
+            }
             const payload = await fetchJson(`/scripts/${buildScriptPath(scriptName)}/start`, { method: 'POST' });
             if (payload?.redirect) {
                 window.location.href = payload.redirect;
@@ -214,6 +229,7 @@
             setRunningState('stopped');
         } finally {
             autoStartInFlight = false;
+            startInFlight = false;
         }
     };
 

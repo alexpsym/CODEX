@@ -10504,6 +10504,12 @@ async def list_scripts() -> JSONResponse:
     return JSONResponse(merged + extras)
 
 
+@app.get("/api/scripts/{script_name:path}")
+async def script_status(script_name: str) -> JSONResponse:
+    script = script_manager.get(script_name)
+    return JSONResponse(script.to_summary())
+
+
 def _safe_float(value: object) -> Optional[float]:
     if value is None:
         return None
