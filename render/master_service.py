@@ -209,6 +209,16 @@ def _record_bybit_demo_sync_status(**updates: object) -> None:
     _save_trading_journal_state(state)
 
 
+def _record_daily_trade_sync_status(**updates: object) -> None:
+    state = _load_trading_journal_state()
+    daily_state = state.get("daily_trade_sync")
+    merged = daily_state if isinstance(daily_state, dict) else {}
+    merged.update(updates)
+    merged["updated_at"] = _utc_now_iso()
+    state["daily_trade_sync"] = merged
+    _save_trading_journal_state(state)
+
+
 TRADING_JOURNAL_DROPBOX_RECURSIVE = os.getenv(
     "TRADING_JOURNAL_DROPBOX_RECURSIVE", "0"
 ).strip().lower() in {"1", "true", "yes", "on"}
@@ -232,7 +242,19 @@ FILL_ALERT_POLL_SECONDS = float(
     os.getenv("FILL_ALERT_POLL_SECONDS", "8")
 )
 BYBIT_DEMO_CLOSED_PNL_POLL_SECONDS = float(
-    os.getenv("BYBIT_DEMO_CLOSED_PNL_POLL_SECONDS", "120")
+    os.getenv("BYBIT_DEMO_CLOSED_PNL_POLL_SECONDS", "21600")
+)
+DAILY_TRADE_SYNC_ENABLED = os.getenv("DAILY_TRADE_SYNC_ENABLED", "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+DAILY_TRADE_SYNC_HOUR = max(0, min(23, int(os.getenv("DAILY_TRADE_SYNC_HOUR", "0"))))
+DAILY_TRADE_SYNC_MINUTE = max(0, min(59, int(os.getenv("DAILY_TRADE_SYNC_MINUTE", "10"))))
+DAILY_TRADE_SYNC_TIMEZONE = os.getenv("DAILY_TRADE_SYNC_TIMEZONE", "Australia/Brisbane").strip() or "Australia/Brisbane"
+DAILY_TRADE_SYNC_STARTUP_STALE_HOURS = float(
+    os.getenv("DAILY_TRADE_SYNC_STARTUP_STALE_HOURS", "18")
 )
 OUTBOUND_METRICS_LOG_SECONDS = float(
     os.getenv("OUTBOUND_METRICS_LOG_SECONDS", "300")
@@ -291,6 +313,12 @@ _DROPBOX_UPLOAD_TIMER: Optional[threading.Timer] = None
 _DROPBOX_UPLOAD_TIMER_LOCK = threading.Lock()
 _BYBIT_EXEC_LAST_SEEN: Dict[str, int] = {}
 _BYBIT_DEMO_CLOSED_PNL_LAST_SEEN: Optional[int] = None
+_BYBIT_DEMO_SYNC_LOCK = asyncio.Lock()
+_BYBIT_DEMO_SYNC_LAST_RUN_AT = 0.0
+_BYBIT_DEMO_SYNC_MANUAL_COOLDOWN_SECONDS = float(
+    os.getenv("BYBIT_DEMO_SYNC_MANUAL_COOLDOWN_SECONDS", "30")
+)
+_DAILY_TRADE_SYNC_LOCK = asyncio.Lock()
 _BYBIT_DEMO_WORKBOOK_LOCK = threading.Lock()
 _OANDA_TX_LAST_SEEN: Dict[str, str] = {}
 _OANDA_FILL_BACKOFF_UNTIL: Dict[str, float] = {}
@@ -305,7 +333,7 @@ _OANDA_INACTIVITY_CACHE: Dict[str, object] = {
 }
 _OANDA_INACTIVITY_CACHE_TTL_SECONDS = 45.0
 _OPEN_ORDERS_CACHE_LOCK = asyncio.Lock()
-_OPEN_ORDERS_CACHE_TTL_SECONDS = 6.0
+_OPEN_ORDERS_CACHE_TTL_SECONDS = 60.0
 _OPEN_ORDERS_CACHE: Dict[str, object] = {
     "expires_at": 0.0,
     "last_success_at": None,
@@ -3288,17 +3316,145 @@ def _compute_autostart_scripts() -> List[str]:
     return names
 
 
+def _should_run_startup_recovery_import() -> bool:
+    rows = _get_trading_journal_rows()
+    if not rows:
+        return True
+
+    state = _load_trading_journal_state()
+    daily_state = state.get("daily_trade_sync") if isinstance(state, dict) else {}
+    if not isinstance(daily_state, dict):
+        return True
+
+    last_success_at = daily_state.get("last_success_at")
+    last_success_dt = _to_dt_utc(last_success_at)
+    if not last_success_dt:
+        return True
+
+    age_seconds = (datetime.now(timezone.utc) - last_success_dt).total_seconds()
+    stale_after_seconds = max(3600.0, DAILY_TRADE_SYNC_STARTUP_STALE_HOURS * 3600.0)
+    return age_seconds > stale_after_seconds
+
+
+async def _run_startup_recovery_import_if_needed() -> None:
+    if not _should_run_startup_recovery_import():
+        return
+    try:
+        result = await asyncio.to_thread(_import_trading_journal_from_dropbox_excel)
+        ok_flag = bool(result.get("ok", False)) if isinstance(result, dict) else False
+        _record_daily_trade_sync_status(
+            last_attempt_at=_utc_now_iso(),
+            last_success_at=_utc_now_iso() if ok_flag else None,
+            last_error=None if ok_flag else str((result or {}).get("message") or "Startup import failed."),
+            last_reason="startup_recovery",
+            last_result=result,
+        )
+    except Exception as exc:
+        _record_daily_trade_sync_status(
+            last_attempt_at=_utc_now_iso(),
+            last_error=f"Startup import failed: {exc}",
+            last_reason="startup_recovery",
+        )
+
+
+async def _run_daily_trade_history_sync(*, reason: str) -> Dict[str, object]:
+    async with _DAILY_TRADE_SYNC_LOCK:
+        started_at = _utc_now_iso()
+        bybit_result: Optional[Dict[str, object]] = None
+        import_result: Optional[Dict[str, object]] = None
+        errors: List[str] = []
+        _record_daily_trade_sync_status(
+            running=True,
+            last_attempt_at=started_at,
+            last_reason=reason,
+            last_error=None,
+        )
+
+        if ENABLE_BYBIT_DEMO_JOURNAL:
+            try:
+                bybit_result = await _run_bybit_demo_closed_pnl_sync(reason=reason)
+            except Exception as exc:
+                errors.append(f"Bybit demo sync failed: {exc}")
+                bybit_result = {"ok": False, "error": str(exc)}
+
+        try:
+            import_result = await asyncio.to_thread(_import_trading_journal_from_dropbox_excel)
+        except Exception as exc:
+            errors.append(f"Dropbox workbook import failed: {exc}")
+            import_result = {"ok": False, "error": str(exc)}
+
+        import_ok = bool(import_result.get("ok", False)) if isinstance(import_result, dict) else False
+        bybit_ok = True
+        if ENABLE_BYBIT_DEMO_JOURNAL:
+            bybit_ok = bool(bybit_result and bybit_result.get("ok", False))
+        ok_flag = import_ok and bybit_ok and not errors
+        finished_at = _utc_now_iso()
+        _record_daily_trade_sync_status(
+            running=False,
+            last_reason=reason,
+            last_attempt_at=started_at,
+            last_success_at=finished_at if ok_flag else None,
+            last_error="; ".join(errors) if errors else None,
+            last_result={
+                "ok": ok_flag,
+                "bybit": bybit_result,
+                "import": import_result,
+                "errors": errors,
+                "started_at": started_at,
+                "finished_at": finished_at,
+            },
+        )
+        return {
+            "ok": ok_flag,
+            "bybit": bybit_result,
+            "import": import_result,
+            "errors": errors,
+            "started_at": started_at,
+            "finished_at": finished_at,
+        }
+
+
+async def _schedule_daily_trade_history_sync() -> None:
+    if not DAILY_TRADE_SYNC_ENABLED:
+        _record_daily_trade_sync_status(running=False, last_reason="disabled")
+        return
+    while True:
+        try:
+            now_local = datetime.now(ZoneInfo(DAILY_TRADE_SYNC_TIMEZONE))
+        except Exception:
+            now_local = datetime.now(ZoneInfo("Australia/Brisbane"))
+        target_local = now_local.replace(
+            hour=DAILY_TRADE_SYNC_HOUR,
+            minute=DAILY_TRADE_SYNC_MINUTE,
+            second=0,
+            microsecond=0,
+        )
+        if target_local <= now_local:
+            target_local = target_local + timedelta(days=1)
+        sleep_seconds = max(5.0, (target_local - now_local).total_seconds())
+        await asyncio.sleep(sleep_seconds)
+        try:
+            await _run_daily_trade_history_sync(reason="daily")
+        except Exception as exc:
+            _record_daily_trade_sync_status(
+                running=False,
+                last_attempt_at=_utc_now_iso(),
+                last_error=f"Daily sync failed: {exc}",
+                last_reason="daily",
+            )
+
+
 @app.on_event("startup")
 async def _autostart_scripts() -> None:
     asyncio.create_task(_dropbox_restore_state_backup_on_startup())
     asyncio.create_task(_ensure_trading_journal_dropbox_templates())
     asyncio.create_task(_log_outbound_traffic_summary())
+    asyncio.create_task(_run_startup_recovery_import_if_needed())
+    asyncio.create_task(_schedule_daily_trade_history_sync())
     if not ENABLE_BYBIT_DEMO_JOURNAL:
         _purge_bybit_demo_journal_state()
     if os.getenv("ENABLE_BYBIT_FILL_POLL", "0") == "1":
         asyncio.create_task(_poll_bybit_fills())
-    if ENABLE_BYBIT_DEMO_JOURNAL:
-        asyncio.create_task(_poll_bybit_demo_closed_pnl())
     if os.getenv("ENABLE_OANDA_FILL_POLL", "0") == "1":
         asyncio.create_task(_start_oanda_fill_poll_after_delay())
     _force_fxweekend_enabled_on_startup()
@@ -8218,33 +8374,92 @@ async def _poll_bybit_fills() -> None:
 
 
 async def _poll_bybit_demo_closed_pnl() -> None:
-    global _BYBIT_DEMO_CLOSED_PNL_LAST_SEEN
-    lookback_seconds = int(os.getenv("BYBIT_DEMO_CLOSED_PNL_LOOKBACK_SECONDS", "900"))
-    backfill_seconds = int(os.getenv("BYBIT_DEMO_CLOSED_PNL_BACKFILL_SECONDS", "3600"))
     while True:
-        await asyncio.sleep(BYBIT_DEMO_CLOSED_PNL_POLL_SECONDS)
         try:
-            _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for("demo")
-            if not api_key or not api_secret:
-                continue
-            now_ms = int(time.time() * 1000)
-            last_seen = _BYBIT_DEMO_CLOSED_PNL_LAST_SEEN
-            if last_seen is None:
-                last_seen = max(0, now_ms - (lookback_seconds * 1000))
-            earliest = now_ms - (7 * 24 * 60 * 60 * 1000) + 60000
-            start_time = max(last_seen - (backfill_seconds * 1000), earliest)
-            end_time = now_ms
-            max_seen = await _sync_bybit_demo_closed_pnl_window(
-                base_url=base_url,
-                api_key=api_key,
-                api_secret=api_secret,
-                start_time=start_time,
-                end_time=end_time,
-            )
-            _BYBIT_DEMO_CLOSED_PNL_LAST_SEEN = max(max_seen, last_seen)
+            await _run_bybit_demo_closed_pnl_sync(reason="scheduled")
         except Exception as exc:  # pragma: no cover - background task
             _record_bybit_demo_sync_status(last_checked_at=_utc_now_iso(), last_error=str(exc))
             BYBIT_LOGGER.exception("Bybit demo closed PnL poll error: %s", exc)
+        await asyncio.sleep(BYBIT_DEMO_CLOSED_PNL_POLL_SECONDS)
+
+
+async def _run_bybit_demo_closed_pnl_sync(
+    *,
+    reason: str,
+    enforce_manual_cooldown: bool = False,
+) -> Dict[str, object]:
+    global _BYBIT_DEMO_CLOSED_PNL_LAST_SEEN
+    global _BYBIT_DEMO_SYNC_LAST_RUN_AT
+    lookback_seconds = int(os.getenv("BYBIT_DEMO_CLOSED_PNL_LOOKBACK_SECONDS", "900"))
+    backfill_seconds = int(os.getenv("BYBIT_DEMO_CLOSED_PNL_BACKFILL_SECONDS", "3600"))
+    now = time.time()
+    if (
+        enforce_manual_cooldown
+        and _BYBIT_DEMO_SYNC_LAST_RUN_AT > 0
+        and (now - _BYBIT_DEMO_SYNC_LAST_RUN_AT) < _BYBIT_DEMO_SYNC_MANUAL_COOLDOWN_SECONDS
+    ):
+        retry_after = _BYBIT_DEMO_SYNC_MANUAL_COOLDOWN_SECONDS - (
+            now - _BYBIT_DEMO_SYNC_LAST_RUN_AT
+        )
+        return {
+            "ok": False,
+            "message": (
+                "Bybit demo sync is cooling down. "
+                f"Retry in {max(1, int(math.ceil(retry_after)))}s."
+            ),
+            "cooldown_active": True,
+            "retry_after_seconds": max(0, retry_after),
+        }
+
+    async with _BYBIT_DEMO_SYNC_LOCK:
+        now = time.time()
+        if (
+            enforce_manual_cooldown
+            and _BYBIT_DEMO_SYNC_LAST_RUN_AT > 0
+            and (now - _BYBIT_DEMO_SYNC_LAST_RUN_AT) < _BYBIT_DEMO_SYNC_MANUAL_COOLDOWN_SECONDS
+        ):
+            retry_after = _BYBIT_DEMO_SYNC_MANUAL_COOLDOWN_SECONDS - (
+                now - _BYBIT_DEMO_SYNC_LAST_RUN_AT
+            )
+            return {
+                "ok": False,
+                "message": (
+                    "Bybit demo sync is cooling down. "
+                    f"Retry in {max(1, int(math.ceil(retry_after)))}s."
+                ),
+                "cooldown_active": True,
+                "retry_after_seconds": max(0, retry_after),
+            }
+
+        _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for("demo")
+        if not api_key or not api_secret:
+            raise ValueError("Bybit demo API credentials are not configured.")
+
+        now_ms = int(time.time() * 1000)
+        last_seen = _BYBIT_DEMO_CLOSED_PNL_LAST_SEEN
+        if last_seen is None:
+            last_seen = max(0, now_ms - (lookback_seconds * 1000))
+        earliest = now_ms - (7 * 24 * 60 * 60 * 1000) + 60000
+        start_time = max(last_seen - (backfill_seconds * 1000), earliest)
+        end_time = now_ms
+        max_seen = await _sync_bybit_demo_closed_pnl_window(
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        _BYBIT_DEMO_CLOSED_PNL_LAST_SEEN = max(max_seen, last_seen)
+        _BYBIT_DEMO_SYNC_LAST_RUN_AT = time.time()
+
+    return {
+        "ok": True,
+        "reason": reason,
+        "message": "Bybit demo sync completed.",
+        "start_time": start_time,
+        "end_time": end_time,
+        "max_seen": max_seen,
+    }
 
 
 async def _fetch_oanda_last_transaction_id(cfg: Dict[str, str]) -> str:
@@ -10714,8 +10929,9 @@ async def list_open_orders() -> JSONResponse:
 
         _OPEN_ORDERS_CACHE["payload"] = dict(payload)
         _OPEN_ORDERS_CACHE["expires_at"] = time.time() + _OPEN_ORDERS_CACHE_TTL_SECONDS
-        _OPEN_ORDERS_CACHE["last_success_at"] = updated_at
-        payload["last_success_at"] = updated_at
+        if not errors:
+            _OPEN_ORDERS_CACHE["last_success_at"] = updated_at
+            payload["last_success_at"] = updated_at
 
         return JSONResponse(payload)
 
