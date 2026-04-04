@@ -1800,6 +1800,10 @@ def _parse_excel_account_workbook(
         swap_col = _first_present(df, ["swap"])
         commission_col = _first_present(df, ["commission", "fee", "fees", "cost"])
         pnl_col = _first_present(df, ["net_profit", "realized_pnl", "pnl", "profit", "pl", "net_pnl"])
+        balance_after_trade_col = _first_present(
+            df,
+            ["balance_after_trade", "bal_after_trade", "balance_after", "bal_after"],
+        )
         sl_col = _first_present(df, ["stop_loss_optional", "stop_loss", "sl"])
         tp_col = _first_present(df, ["take_profit_optional", "take_profit", "tp"])
         high_col = _first_present(df, ["highest_price_optional", "highest_price"])
@@ -1865,6 +1869,7 @@ def _parse_excel_account_workbook(
                 commission = _safe_float_from_row(row, commission_col)
                 swap = _safe_float_from_row(row, swap_col)
                 net_profit = _safe_float_from_row(row, pnl_col)
+                balance_after_trade = _safe_float_from_row(row, balance_after_trade_col)
                 stop_loss = _safe_float_from_row(row, sl_col)
                 take_profit = _safe_float_from_row(row, tp_col)
                 highest_price = _safe_float_from_row(row, high_col)
@@ -1890,7 +1895,7 @@ def _parse_excel_account_workbook(
                     _norm_col(x)
                     for x in [
                         open_time_col, close_time_col, side_col, symbol_col, setup_col, qty_col,
-                        entry_col, exit_col, swap_col, commission_col, pnl_col, sl_col, tp_col,
+                        entry_col, exit_col, swap_col, commission_col, pnl_col, balance_after_trade_col, sl_col, tp_col,
                         high_col, low_col, notes_col, pre_trade_col, entry_comments_col,
                         trade_mgmt_col, exit_comments_col, breakeven_col,
                     ] if x
@@ -1959,6 +1964,8 @@ def _parse_excel_account_workbook(
                     "realized_pnl": net_profit,
                     "realized_pnl_currency": account_currency,
                     "net_profit": net_profit,
+                    "balance_after_trade": balance_after_trade,
+                    "balance_after_trade_currency": account_currency,
                     "stop_loss": stop_loss,
                     "take_profit": take_profit,
                     "highest_price": highest_price,
@@ -9451,10 +9458,12 @@ def _calc_balance_after_trade(
             if pnl is not None:
                 segment_running[anchor] += pnl
 
-            row["balance_after_trade"] = segment_running[anchor]
-            row["balance_after_trade_currency"] = str(
-                events_sorted[anchor].get("currency") or row.get("currency") or ""
-            )
+            if _to_float(row.get("balance_after_trade")) is None:
+                row["balance_after_trade"] = segment_running[anchor]
+            if not str(row.get("balance_after_trade_currency") or "").strip():
+                row["balance_after_trade_currency"] = str(
+                    events_sorted[anchor].get("currency") or row.get("currency") or ""
+                )
 
     return out_rows
 
