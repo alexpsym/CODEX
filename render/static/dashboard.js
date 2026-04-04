@@ -47,8 +47,8 @@
 
   const POLL_MS = {
     scripts: 15_000,
-    openOrders: 10_000,
-    recentTrades: 15_000,
+    openOrders: 60_000,
+    recentTrades: 60_000,
     oandaInactivity: 30_000,
     // Slow polling while tab is hidden to reduce background load.
     hiddenMultiplier: 3,
@@ -666,7 +666,9 @@
     if (oandaSecondTimer) clearInterval(oandaSecondTimer);
     const multiplier = document.visibilityState === 'hidden' ? POLL_MS.hiddenMultiplier : 1;
     scriptsTimer = setInterval(() => { refreshScripts(); }, POLL_MS.scripts * multiplier);
-    ooTimer = setInterval(() => { refreshOpenOrders(); }, POLL_MS.openOrders * multiplier);
+    if (document.visibilityState !== 'hidden') {
+      ooTimer = setInterval(() => { refreshOpenOrders(); }, POLL_MS.openOrders);
+    }
     rtTimer = setInterval(() => { refreshRecentTrades(); }, POLL_MS.recentTrades * multiplier);
     oandaTimer = setInterval(() => { refreshOandaInactivity(); }, POLL_MS.oandaInactivity * multiplier);
     oandaSecondTimer = setInterval(() => { tickOandaCountdown(); }, 1000);
