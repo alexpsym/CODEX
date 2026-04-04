@@ -4254,6 +4254,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         <div class="panel-sub">Latest closed trades across all connected accounts.</div>
                     </div>
                     <div class="oo-toolbar">
+                        <button class="secondary" id="bybit-demo-sync-btn">Sync Bybit Demo</button>
                         <span class="status-pill" id="recent-trades-status">Loading...</span>
                     </div>
                 </div>
@@ -8801,6 +8802,25 @@ async def fetch_bybit_balance(
             "retMsg": ret_msg,
         }
     )
+
+
+@app.post("/api/bybit-demo/sync")
+async def sync_bybit_demo_now() -> JSONResponse:
+    if not ENABLE_BYBIT_DEMO_JOURNAL:
+        raise HTTPException(
+            status_code=400,
+            detail="Bybit demo journal sync is disabled (ENABLE_BYBIT_DEMO_JOURNAL=0).",
+        )
+    try:
+        payload = await _run_bybit_demo_closed_pnl_sync(
+            reason="manual",
+            enforce_manual_cooldown=True,
+        )
+    except Exception as exc:
+        _record_bybit_demo_sync_status(last_checked_at=_utc_now_iso(), last_error=str(exc))
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    status_code = 429 if payload.get("cooldown_active") else 200
+    return JSONResponse(payload, status_code=status_code)
 
 
 @app.get("/", response_class=HTMLResponse)

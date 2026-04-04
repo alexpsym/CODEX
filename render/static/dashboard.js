@@ -12,6 +12,7 @@
   const ooErrorsList = ooErrorsBox?.querySelector('ul');
 
   const rtStatus = document.getElementById('recent-trades-status');
+  const bybitDemoSyncBtn = document.getElementById('bybit-demo-sync-btn');
   const rtBody = document.querySelector('#recent-trades-table tbody');
   const rtEmpty = document.getElementById('recent-trades-empty');
   const watchlistCount = document.getElementById('watchlist-count');
@@ -468,6 +469,28 @@
     return rtInFlight;
   };
 
+  const syncBybitDemoNow = async () => {
+    if (!bybitDemoSyncBtn) return;
+    bybitDemoSyncBtn.disabled = true;
+    const previous = rtStatus?.textContent || '';
+    if (rtStatus) rtStatus.textContent = 'Syncing Bybit Demo...';
+    try {
+      const payload = await fetchJson('/api/bybit-demo/sync', { method: 'POST' });
+      await refreshRecentTrades();
+      if (rtStatus) rtStatus.textContent = payload?.message || 'Bybit demo sync completed.';
+    } catch (err) {
+      console.error(err);
+      if (rtStatus) rtStatus.textContent = err?.message || 'Bybit demo sync failed.';
+      return;
+    } finally {
+      bybitDemoSyncBtn.disabled = false;
+      window.setTimeout(() => {
+        if (rtStatus && rtStatus.textContent === (previous || '')) return;
+        refreshRecentTrades();
+      }, 1500);
+    }
+  };
+
   const renderOandaInactivity = (payload) => {
     oandaState = payload && typeof payload === 'object' ? { ...payload } : null;
     if (oandaLastTrade) oandaLastTrade.textContent = fmtTime(payload?.last_live_fill_at);
@@ -676,6 +699,7 @@
 
   refreshBtn?.addEventListener('click', () => { refreshScripts(); refreshOpenOrders(); refreshRecentTrades(); refreshOandaInactivity(); });
   ooRefreshBtn?.addEventListener('click', () => refreshOpenOrders());
+  bybitDemoSyncBtn?.addEventListener('click', () => syncBybitDemoNow());
   watchlistAddBtn?.addEventListener('click', () => addWatchlistItems());
   watchlistInput?.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
