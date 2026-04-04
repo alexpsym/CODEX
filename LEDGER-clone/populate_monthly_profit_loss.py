@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, MutableMapping, Set, Tuple
 
 import xlwings as xw
-from openpyxl.styles import PatternFill
 from tqdm import tqdm
 
 def resolve_data_dir() -> Path:
@@ -41,6 +40,9 @@ BASE_DIR = resolve_data_dir()
 ENTRY_FILE = BASE_DIR / "ENTRIES.xlsx"
 
 CURRENCY_FORMAT = "_-\"$\"* #,##0.00_-;\\-\"$\"* #,##0.00_-;_-\"$\"* \"-\"??_-;_-@_-"
+POSITIVE_FILL_RGB = (198, 239, 206)  # light green
+NEGATIVE_FILL_RGB = (230, 230, 250)  # lavender
+NEUTRAL_FILL_RGB = (255, 255, 255)  # white
 
 # Some categories in MASTER differ from the headers used in MONTHLY PROFIT LOSS.
 # Map them to the header spelling so that data lands in the correct column.
@@ -49,6 +51,35 @@ CATEGORY_ALIASES: Dict[Tuple[str, str], Tuple[str, str]] = {
     ("EXP", "MISC EXPENSE"): ("EXP", "MISC"),
     ("REV", "MISC REVENUE"): ("REV", "MISC"),
 }
+
+
+def _pick_fill_color(value: float) -> tuple[int, int, int]:
+    if value > 0:
+        return POSITIVE_FILL_RGB
+    if value < 0:
+        return NEGATIVE_FILL_RGB
+    return NEUTRAL_FILL_RGB
+
+
+def _apply_cell_fill_safe(cell, fill_rgb: tuple[int, int, int]) -> None:
+    try:
+        cell.color = fill_rgb
+    except Exception:
+        pass
+
+
+def _reset_monthly_numeric_fills(ws, start_row: int, end_row: int, last_col: int) -> None:
+    if end_row < start_row:
+        return
+    try:
+        ws.range((start_row, 2), (end_row, 2)).color = NEUTRAL_FILL_RGB
+    except Exception:
+        pass
+    if last_col >= 5:
+        try:
+            ws.range((start_row, 5), (end_row, last_col)).color = NEUTRAL_FILL_RGB
+        except Exception:
+            pass
 
 
 def _format_currency_text(value: float) -> str:
@@ -248,8 +279,10 @@ def populate_monthly_profit_loss(wb):
         last_col = used_range.last_cell.column
         if last_row > 2 and last_col >= 1:
             ws_target.range((3, 1), (last_row, last_col)).clear_contents()
+            _reset_monthly_numeric_fills(ws_target, 3, last_row, last_col)
 
     start_row = 3
+    row_idx = start_row - 1
     for idx, month in enumerate(tqdm(months, desc="Populating")):
         row_idx = idx + start_row
         cell = ws_target.cells(row_idx, 1)
@@ -275,11 +308,13 @@ def populate_monthly_profit_loss(wb):
             tgt_cell = ws_target.cells(row_idx, col_idx)
             tgt_cell.value = value
             tgt_cell.number_format = CURRENCY_FORMAT
+            _apply_cell_fill_safe(tgt_cell, _pick_fill_color(value))
             total += value
         if total:
             tot_cell = ws_target.cells(row_idx, 2)
             tot_cell.value = total
             tot_cell.number_format = CURRENCY_FORMAT
+            _apply_cell_fill_safe(tot_cell, _pick_fill_color(total))
     end_row = row_idx if months else start_row - 1
 
     # Remove any conditional formatting from the "HIGHEST EXPENSE" / "LOWEST EXPENSE" columns
