@@ -222,7 +222,8 @@
     name.textContent = script.label || script.name;
 
     const dot = document.createElement('span');
-    dot.className = `status-dot ${script.running ? 'running' : 'stopped'}`;
+    const dotState = script.running ? 'running' : (script.starting ? 'starting' : 'stopped');
+    dot.className = `status-dot ${dotState}`;
 
     btn.appendChild(name);
     btn.appendChild(dot);

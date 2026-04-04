@@ -108,9 +108,11 @@
         }
     };
 
-    const setRunningState = (running) => {
-        statusEl.textContent = running ? 'Running' : 'Stopped';
-        startBtn.disabled = running;
+    const setRunningState = (state) => {
+        const running = state === 'running';
+        const starting = state === 'starting';
+        statusEl.textContent = running ? 'Running' : (starting ? 'Starting...' : 'Stopped');
+        startBtn.disabled = running || starting;
         stopBtn.disabled = !running;
 
         if (hasUi) {
@@ -157,16 +159,35 @@
             const scripts = await fetchJson('/scripts');
             const script = scripts.find((item) => item.name === scriptName);
             const running = Boolean(script && script.running);
-            setRunningState(running);
+            const starting = Boolean(script && script.starting);
+            const state = running ? 'running' : (starting ? 'starting' : 'stopped');
+            setRunningState(state);
             if (running) {
                 scheduleAppLoad();
             }
-            return running;
+            return script || { running: false, starting: false };
         } catch (err) {
             console.error(err);
             statusEl.textContent = 'Unable to load status.';
         }
-        return false;
+        return { running: false, starting: false };
+    };
+
+    const waitForStartResolution = async () => {
+        while (true) {
+            const script = await refreshStatus();
+            const running = Boolean(script?.running);
+            const starting = Boolean(script?.starting);
+            if (running) return true;
+            if (!starting) {
+                const reason = script?.last_start_error || script?.last_exit_reason;
+                if (reason) {
+                    appendLogs([`Startup failed: ${reason}`]);
+                }
+                return false;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 500));
+        }
     };
 
     const startScript = async (isAuto = false) => {
@@ -174,28 +195,23 @@
             return;
         }
         autoStartInFlight = isAuto;
-        startBtn.disabled = true;
-        logBox.textContent = 'Starting script...\n';
+        setRunningState('starting');
+        appendLogs(['Starting script...']);
         try {
             const payload = await fetchJson(`/scripts/${buildScriptPath(scriptName)}/start`, { method: 'POST' });
             if (payload?.redirect) {
                 window.location.href = payload.redirect;
                 return;
             }
-            let running = await refreshStatus();
-            let attempts = 0;
-            while (!running && attempts < 10) {
-                await new Promise((resolve) => setTimeout(resolve, 500));
-                running = await refreshStatus();
-                attempts += 1;
-            }
             if (!pollTimer) {
                 pollTimer = setInterval(pollLogs, 2000);
             }
+            await pollLogs();
+            await waitForStartResolution();
         } catch (err) {
             console.error(err);
             alert(err.message || 'Failed to start script');
-            startBtn.disabled = false;
+            setRunningState('stopped');
         } finally {
             autoStartInFlight = false;
         }
