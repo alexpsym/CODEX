@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, MutableMapping, Set, Tuple
 
 import xlwings as xw
-from openpyxl.styles import PatternFill
 from tqdm import tqdm
 
 def resolve_data_dir() -> Path:
@@ -41,6 +40,9 @@ BASE_DIR = resolve_data_dir()
 ENTRY_FILE = BASE_DIR / "ENTRIES.xlsx"
 
 CURRENCY_FORMAT = "_-\"$\"* #,##0.00_-;\\-\"$\"* #,##0.00_-;_-\"$\"* \"-\"??_-;_-@_-"
+POSITIVE_FILL_RGB = (198, 239, 206)  # light green
+NEGATIVE_FILL_RGB = (230, 230, 250)  # fallback lavender
+NEUTRAL_FILL_RGB = (255, 255, 255)  # white
 
 # Some categories in MASTER differ from the headers used in MONTHLY PROFIT LOSS.
 # Map them to the header spelling so that data lands in the correct column.
@@ -49,6 +51,117 @@ CATEGORY_ALIASES: Dict[Tuple[str, str], Tuple[str, str]] = {
     ("EXP", "MISC EXPENSE"): ("EXP", "MISC"),
     ("REV", "MISC REVENUE"): ("REV", "MISC"),
 }
+
+
+def _pick_fill_color(
+    value: float,
+    positive_fill_rgb: tuple[int, int, int],
+    negative_fill_rgb: tuple[int, int, int],
+) -> tuple[int, int, int]:
+    if value > 0:
+        return positive_fill_rgb
+    if value < 0:
+        return negative_fill_rgb
+    return NEUTRAL_FILL_RGB
+
+
+def _apply_cell_fill_safe(cell, fill_rgb: tuple[int, int, int]) -> None:
+    try:
+        cell.color = fill_rgb
+    except Exception:
+        pass
+
+
+def _reset_monthly_numeric_fills(ws, start_row: int, end_row: int, last_col: int) -> None:
+    if end_row < start_row:
+        return
+    try:
+        ws.range((start_row, 2), (end_row, 2)).color = NEUTRAL_FILL_RGB
+    except Exception:
+        pass
+    if last_col >= 5:
+        try:
+            ws.range((start_row, 5), (end_row, last_col)).color = NEUTRAL_FILL_RGB
+        except Exception:
+            pass
+
+
+def _excel_ole_color_to_rgb(ole_color: int | float | None) -> tuple[int, int, int] | None:
+    if ole_color is None:
+        return None
+    try:
+        value = int(ole_color)
+    except Exception:
+        return None
+    red = value & 255
+    green = (value >> 8) & 255
+    blue = (value >> 16) & 255
+    return red, green, blue
+
+
+def _read_display_fill_rgb(cell) -> tuple[int, int, int] | None:
+    try:
+        ole_color = cell.api.DisplayFormat.Interior.Color
+    except Exception:
+        return None
+    return _excel_ole_color_to_rgb(ole_color)
+
+
+def _detect_display_palette(
+    ws,
+    start_row: int,
+    end_row: int,
+    last_col: int,
+) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+    positive_rgb = POSITIVE_FILL_RGB
+    negative_rgb = NEGATIVE_FILL_RGB
+    found_positive = False
+    found_negative = False
+
+    if end_row < start_row:
+        return positive_rgb, negative_rgb
+
+    column_indexes = [2]
+    if last_col >= 5:
+        column_indexes.extend(range(5, last_col + 1))
+
+    for row_idx in range(start_row, end_row + 1):
+        for col_idx in column_indexes:
+            cell = ws.cells(row_idx, col_idx)
+            numeric_value = _parse_float(cell.value)
+            if numeric_value == 0.0:
+                continue
+            fill_rgb = _read_display_fill_rgb(cell)
+            if fill_rgb is None:
+                continue
+            if numeric_value > 0 and not found_positive:
+                positive_rgb = fill_rgb
+                found_positive = True
+            elif numeric_value < 0 and not found_negative:
+                negative_rgb = fill_rgb
+                found_negative = True
+            if found_positive and found_negative:
+                return positive_rgb, negative_rgb
+    return positive_rgb, negative_rgb
+
+
+def _clear_monthly_numeric_conditional_formatting(
+    ws,
+    start_row: int,
+    end_row: int,
+    last_col: int,
+) -> None:
+    if end_row < start_row:
+        return
+    try:
+        ws.range((start_row, 2), (end_row, 2)).api.FormatConditions.Delete()
+    except Exception:
+        pass
+    if last_col >= 5:
+        try:
+            ws.range((start_row, 5), (end_row, last_col)).api.FormatConditions.Delete()
+        except Exception:
+            pass
 
 
 def _format_currency_text(value: float) -> str:
@@ -242,14 +355,23 @@ def populate_monthly_profit_loss(wb):
     aggregated = read_master(ws_master, header_map)
     months = sorted(aggregated.keys())
 
+    positive_fill_rgb = POSITIVE_FILL_RGB
+    negative_fill_rgb = NEGATIVE_FILL_RGB
+
     used_range = ws_target.used_range
     if used_range is not None:
         last_row = used_range.last_cell.row
         last_col = used_range.last_cell.column
         if last_row > 2 and last_col >= 1:
+            positive_fill_rgb, negative_fill_rgb = _detect_display_palette(
+                ws_target, 3, last_row, last_col
+            )
             ws_target.range((3, 1), (last_row, last_col)).clear_contents()
+            _clear_monthly_numeric_conditional_formatting(ws_target, 3, last_row, last_col)
+            _reset_monthly_numeric_fills(ws_target, 3, last_row, last_col)
 
     start_row = 3
+    row_idx = start_row - 1
     for idx, month in enumerate(tqdm(months, desc="Populating")):
         row_idx = idx + start_row
         cell = ws_target.cells(row_idx, 1)
@@ -275,11 +397,19 @@ def populate_monthly_profit_loss(wb):
             tgt_cell = ws_target.cells(row_idx, col_idx)
             tgt_cell.value = value
             tgt_cell.number_format = CURRENCY_FORMAT
+            _apply_cell_fill_safe(
+                tgt_cell,
+                _pick_fill_color(value, positive_fill_rgb, negative_fill_rgb),
+            )
             total += value
         if total:
             tot_cell = ws_target.cells(row_idx, 2)
             tot_cell.value = total
             tot_cell.number_format = CURRENCY_FORMAT
+            _apply_cell_fill_safe(
+                tot_cell,
+                _pick_fill_color(total, positive_fill_rgb, negative_fill_rgb),
+            )
     end_row = row_idx if months else start_row - 1
 
     # Remove any conditional formatting from the "HIGHEST EXPENSE" / "LOWEST EXPENSE" columns
