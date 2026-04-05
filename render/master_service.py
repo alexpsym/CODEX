@@ -39,6 +39,7 @@ from PIL import Image, ImageDraw, ImageFont
 from starlette.responses import RedirectResponse
 
 from bybit_credentials import resolve_bybit_credentials_for
+from render.monthly_aud_revaluation import MonthlyAudRevalError, sync_monthly_aud_revaluation
 from shared.bybit_option_resolver import resolve_option_by_target_risk
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
@@ -136,6 +137,8 @@ TRADING_JOURNAL_PATH = BASE_DIR / "render" / "data" / "trading_journal.json"
 TRADING_JOURNAL_STATE_PATH = BASE_DIR / "render" / "data" / "trading_journal_state.json"
 TRADING_JOURNAL_SYNC_STATE_PATH = BASE_DIR / "render" / "data" / "trading_journal_sync_state.json"
 TRADING_JOURNAL_IMPORT_CACHE_PATH = BASE_DIR / "render" / "data" / "trading_journal_import_cache.json"
+MONTHLY_AUD_REVALUATION_PATH = BASE_DIR / "render" / "data" / "monthly_aud_revaluation.json"
+MONTHLY_AUD_REVALUATION_STATE_PATH = BASE_DIR / "render" / "data" / "monthly_aud_revaluation_state.json"
 TRADING_JOURNAL_IMPORT_CACHE_VERSION = 2
 TRADING_JOURNAL_DROPBOX_FOLDER = os.getenv(
     "TRADING_JOURNAL_DROPBOX_FOLDER", "/master_control"
@@ -304,9 +307,11 @@ COINSPOT_HISTORY_EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
 PENDING_WEBHOOKS_PATH.parent.mkdir(parents=True, exist_ok=True)
 WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
 TRADING_JOURNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+MONTHLY_AUD_REVALUATION_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 _WATCHLIST_CACHE: Optional[List[str]] = None
 _TRADING_JOURNAL_CACHE: Optional[List[Dict[str, object]]] = None
+_STARTUP_STATE_RESTORE_DONE = asyncio.Event()
 _DROPBOX_UPLOAD_TASK: Optional[asyncio.Task] = None
 _DROPBOX_UPLOAD_TIMER: Optional[threading.Timer] = None
 _DROPBOX_UPLOAD_TIMER_LOCK = threading.Lock()
@@ -1276,6 +1281,19 @@ def _set_trading_journal_rows(rows: List[Dict[str, object]]) -> None:
     global _TRADING_JOURNAL_CACHE
     _TRADING_JOURNAL_CACHE = [dict(item) for item in rows if isinstance(item, dict)]
     _save_json_file(TRADING_JOURNAL_PATH, {"items": rows, "updated_at": _utc_now_iso()})
+    _schedule_dropbox_upload_state_backup()
+
+
+def _get_monthly_aud_revaluation_rows() -> List[Dict[str, object]]:
+    data = _load_json_file(MONTHLY_AUD_REVALUATION_PATH, {"items": []})
+    if isinstance(data, list):
+        return [row for row in data if isinstance(row, dict)]
+    items = data.get("items") if isinstance(data, dict) else []
+    return items if isinstance(items, list) else []
+
+
+def _set_monthly_aud_revaluation_rows(rows: List[Dict[str, object]]) -> None:
+    _save_json_file(MONTHLY_AUD_REVALUATION_PATH, {"items": rows, "updated_at": _utc_now_iso()})
     _schedule_dropbox_upload_state_backup()
 
 
@@ -2672,6 +2690,8 @@ def _build_state_backup_payload() -> bytes:
         "trading_journal": _load_json_file(TRADING_JOURNAL_PATH, {"items": []}),
         "trading_journal_state": _load_json_file(TRADING_JOURNAL_STATE_PATH, {}),
         "trading_journal_import_cache": _load_json_file(TRADING_JOURNAL_IMPORT_CACHE_PATH, {}),
+        "monthly_aud_revaluation": _load_json_file(MONTHLY_AUD_REVALUATION_PATH, {"items": []}),
+        "monthly_aud_revaluation_state": _load_json_file(MONTHLY_AUD_REVALUATION_STATE_PATH, {}),
     }
     return json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
 
@@ -2770,6 +2790,13 @@ def _restore_alerts_payload(data: Dict[str, object]) -> Dict[str, object]:
     if "trading_journal_import_cache" in data and isinstance(data["trading_journal_import_cache"], dict):
         _save_json_file(TRADING_JOURNAL_IMPORT_CACHE_PATH, data["trading_journal_import_cache"])
 
+    monthly_rows_restored = 0
+    if "monthly_aud_revaluation" in data and isinstance(data["monthly_aud_revaluation"], (dict, list)):
+        _save_json_file(MONTHLY_AUD_REVALUATION_PATH, data["monthly_aud_revaluation"])
+        monthly_rows_restored = len(_get_monthly_aud_revaluation_rows())
+    if "monthly_aud_revaluation_state" in data and isinstance(data["monthly_aud_revaluation_state"], dict):
+        _save_json_file(MONTHLY_AUD_REVALUATION_STATE_PATH, data["monthly_aud_revaluation_state"])
+
     bybit_restored = bybit_monitor.replace_custom_alerts(bybit_block["alerts"], strict=False)
     oanda_restored = oanda_monitor.replace_custom_alerts(oanda_block["alerts"])
     invalid_bybit_restored = max(0, len(bybit_block["alerts"]) - len(bybit_restored))
@@ -2782,11 +2809,13 @@ def _restore_alerts_payload(data: Dict[str, object]) -> Dict[str, object]:
         "pending_webhooks_restored": len(pending_restored),
         "journal_rows_restored": journal_restored,
         "journal_rows_sanitized": journal_sanitized,
+        "monthly_aud_revaluation_rows_restored": monthly_rows_restored,
     }
 
 
 async def _dropbox_restore_state_backup_on_startup() -> None:
     if not DROPBOX_SYNC_ENABLED:
+        _STARTUP_STATE_RESTORE_DONE.set()
         return
     try:
         payload = await asyncio.to_thread(download_bytes, DROPBOX_BACKUP_PATH)
@@ -2810,6 +2839,8 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
         BYBIT_LOGGER.info("Dropbox restore skipped; no backup found at %s", DROPBOX_BACKUP_PATH)
     except Exception as exc:  # pragma: no cover - startup failure
         BYBIT_LOGGER.error("Dropbox restore failed: %s", exc)
+    finally:
+        _STARTUP_STATE_RESTORE_DONE.set()
 
 
 @dataclass
@@ -3408,6 +3439,61 @@ async def _run_startup_recovery_import_if_needed() -> None:
         )
 
 
+MONTHLY_AUD_REVAL_SYNC_INTERVAL_SECONDS = max(300, int(os.getenv("MONTHLY_AUD_REVAL_SYNC_INTERVAL_SECONDS", "3600") or "3600"))
+
+
+async def _run_monthly_aud_revaluation_sync(*, reason: str) -> Dict[str, object]:
+    started_at = _utc_now_iso()
+    try:
+        result = await sync_monthly_aud_revaluation(
+            data_path=MONTHLY_AUD_REVALUATION_PATH,
+            state_path=MONTHLY_AUD_REVALUATION_STATE_PATH,
+            bybit_live_credentials=resolve_bybit_credentials_for("live"),
+            oanda_config_provider=_get_oanda_config,
+            logger=BYBIT_LOGGER,
+        )
+        if result.get("changed"):
+            _schedule_dropbox_upload_state_backup()
+        state_snapshot = _load_json_file(MONTHLY_AUD_REVALUATION_STATE_PATH, {})
+        return {"ok": True, "reason": reason, "started_at": started_at, "finished_at": _utc_now_iso(), "state": state_snapshot, **result}
+    except MonthlyAudRevalError as exc:
+        state_snapshot = _load_json_file(MONTHLY_AUD_REVALUATION_STATE_PATH, {})
+        BYBIT_LOGGER.error("%s reason=%s stage=%s detail=%s", exc.code, reason, getattr(exc, "stage", None), exc)
+        return {
+            "ok": False,
+            "reason": reason,
+            "code": exc.code,
+            "stage": getattr(exc, "stage", None),
+            "error": str(exc),
+            "state": state_snapshot,
+            "started_at": started_at,
+            "finished_at": _utc_now_iso(),
+        }
+    except Exception as exc:
+        state_snapshot = _load_json_file(MONTHLY_AUD_REVALUATION_STATE_PATH, {})
+        BYBIT_LOGGER.error("MONTHLY_AUD_REVAL_BYBIT_BALANCE_ERROR reason=%s detail=%s", reason, exc)
+        return {
+            "ok": False,
+            "reason": reason,
+            "code": "MONTHLY_AUD_REVAL_BYBIT_BALANCE_ERROR",
+            "error": str(exc),
+            "state": state_snapshot,
+            "started_at": started_at,
+            "finished_at": _utc_now_iso(),
+        }
+
+
+async def _schedule_monthly_aud_revaluation_sync() -> None:
+    try:
+        await asyncio.wait_for(_STARTUP_STATE_RESTORE_DONE.wait(), timeout=120.0)
+    except asyncio.TimeoutError:
+        BYBIT_LOGGER.warning("MONTHLY_AUD_REVAL_STARTUP_WAIT_TIMEOUT proceeding without restore signal")
+    await _run_monthly_aud_revaluation_sync(reason="startup")
+    while True:
+        await asyncio.sleep(MONTHLY_AUD_REVAL_SYNC_INTERVAL_SECONDS)
+        await _run_monthly_aud_revaluation_sync(reason="hourly")
+
+
 async def _run_daily_trade_history_sync(*, reason: str) -> Dict[str, object]:
     async with _DAILY_TRADE_SYNC_LOCK:
         started_at = _utc_now_iso()
@@ -3439,6 +3525,8 @@ async def _run_daily_trade_history_sync(*, reason: str) -> Dict[str, object]:
         if ENABLE_BYBIT_DEMO_JOURNAL:
             bybit_ok = bool(bybit_result and bybit_result.get("ok", False))
         ok_flag = import_ok and bybit_ok and not errors
+        monthly_result = await _run_monthly_aud_revaluation_sync(reason=f"daily:{reason}")
+
         finished_at = _utc_now_iso()
         _record_daily_trade_sync_status(
             running=False,
@@ -3451,6 +3539,7 @@ async def _run_daily_trade_history_sync(*, reason: str) -> Dict[str, object]:
                 "bybit": bybit_result,
                 "import": import_result,
                 "errors": errors,
+                "monthly_aud_revaluation": monthly_result,
                 "started_at": started_at,
                 "finished_at": finished_at,
             },
@@ -3502,6 +3591,7 @@ async def _autostart_scripts() -> None:
     asyncio.create_task(_log_outbound_traffic_summary())
     asyncio.create_task(_run_startup_recovery_import_if_needed())
     asyncio.create_task(_schedule_daily_trade_history_sync())
+    asyncio.create_task(_schedule_monthly_aud_revaluation_sync())
     if not ENABLE_BYBIT_DEMO_JOURNAL:
         _purge_bybit_demo_journal_state()
     if os.getenv("ENABLE_BYBIT_FILL_POLL", "0") == "1":
@@ -4351,6 +4441,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                                 <th>Take Profit</th>
                                 <th>Fees</th>
                                 <th>Outcome</th>
+                                <th>P/L</th>
                                 <th>Result %</th>
                                 <th>Duration</th>
                             </tr>
@@ -11100,6 +11191,8 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
                 "entry_price": row.get("entry_price"),
                 "exit_price": row.get("exit_price"),
                 "fees": row.get("fees") if row.get("fees") is not None else row.get("commission"),
+                "result_cash": pnl_num,
+                "result_currency": row.get("realized_pnl_currency") or row.get("currency") or row.get("account_currency") or "USD",
                 "result_pct": result_pct,
                 "_row_balance_after_trade": row.get("balance_after_trade"),
                 "_row_entry_price": row.get("entry_price"),
@@ -11112,6 +11205,46 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
                 "duration_seconds": row.get("trade_duration_seconds"),
             }
         )
+
+    for row in _get_monthly_aud_revaluation_rows():
+        if not isinstance(row, dict):
+            continue
+        closed_at = row.get("close_time") or row.get("closed_at")
+        if not closed_at:
+            continue
+        result_cash = _to_float(row.get("result_cash"))
+        items.append(
+            {
+                "_row": row,
+                "_row_id": row.get("id"),
+                "_row_source": row.get("source"),
+                "_row_order_id": None,
+                "row_type": row.get("row_type"),
+                "account": row.get("account_label") or "Bybit Live",
+                "symbol": row.get("symbol") or "MONTHLY AUD P/L",
+                "side": row.get("side"),
+                "opened_at": row.get("open_time") or row.get("opened_at"),
+                "closed_at": closed_at,
+                "stop_loss": row.get("stop_loss"),
+                "take_profit": row.get("take_profit"),
+                "entry_price": row.get("entry_price"),
+                "exit_price": row.get("exit_price"),
+                "fees": row.get("fees"),
+                "result_cash": result_cash,
+                "result_currency": row.get("result_currency") or "AUD",
+                "result_pct": row.get("result_pct"),
+                "_row_balance_after_trade": None,
+                "_row_entry_price": row.get("entry_price"),
+                "_row_exit_price": row.get("exit_price"),
+                "_row_realized_pnl": result_cash,
+                "_row_updated_at": row.get("updated_at"),
+                "outcome": row.get("outcome"),
+                "duration_seconds": row.get("duration_seconds"),
+            }
+        )
+
+    trade_items = [item for item in items if _row_type(item.get("_row") if isinstance(item.get("_row"), dict) else {}) == "trade"]
+    non_trade_items = [item for item in items if item not in trade_items]
 
     def _norm_account(value: object) -> str:
         return re.sub(r"\s+", " ", str(value or "").strip().lower())
@@ -11159,7 +11292,7 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
         return has_tpsl, has_order_id, has_balance, source_rank, updated_rank
 
     deduped: Dict[str, Dict[str, object]] = {}
-    for item in items:
+    for item in trade_items:
         key = _trade_key(item)
         prev = deduped.get(key)
         if prev is None or _trade_score(item) > _trade_score(prev):
@@ -11188,7 +11321,7 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
         prev = second_pass.get(key)
         if prev is None or _trade_score(item) > _trade_score(prev):
             second_pass[key] = item
-    items = list(second_pass.values())
+    items = list(second_pass.values()) + non_trade_items
 
     def _sort_ts(value: object) -> float:
         try:
@@ -11209,6 +11342,53 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
         copy.pop("_row", None)
         public_items.append(copy)
     return JSONResponse({"items": public_items})
+
+
+@app.get("/api/diagnostics/monthly-aud-reval")
+async def diagnostics_monthly_aud_reval() -> JSONResponse:
+    rows = _get_monthly_aud_revaluation_rows()
+    state = _load_json_file(MONTHLY_AUD_REVALUATION_STATE_PATH, {})
+    latest = rows[0] if rows else None
+    march_id = "monthly_aud_reval:bybit_live:2026-03"
+    march_row = next(
+        (row for row in rows if isinstance(row, dict) and str(row.get("id") or "") == march_id),
+        None,
+    )
+    last_boundary = state.get("last_boundary_resolution") if isinstance(state, dict) else {}
+    last_oanda_window = state.get("last_oanda_window") if isinstance(state, dict) else {}
+    start_boundary = last_boundary.get("start") if isinstance(last_boundary, dict) else {}
+    end_boundary = last_boundary.get("end") if isinstance(last_boundary, dict) else {}
+    start_window = (last_oanda_window.get("start_window") if isinstance(last_oanda_window, dict) else {}) or {}
+    end_window = (last_oanda_window.get("end_window") if isinstance(last_oanda_window, dict) else {}) or {}
+    return JSONResponse(
+        {
+            "ok": True,
+            "rows_count": len(rows),
+            "row_count": len(rows),
+            "march_2026_exists": isinstance(march_row, dict),
+            "march_2026_row_id": march_row.get("id") if isinstance(march_row, dict) else None,
+            "latest_row_id": latest.get("id") if isinstance(latest, dict) else None,
+            "latest_period_month": ((latest or {}).get("raw_refs") or {}).get("period_month") if isinstance(latest, dict) else None,
+            "last_sync_result": (state or {}).get("last_result") if isinstance(state, dict) else None,
+            "last_error_code": (state or {}).get("last_error_code") if isinstance(state, dict) else None,
+            "last_error": (state or {}).get("last_error") if isinstance(state, dict) else None,
+            "last_stage": (state or {}).get("stage") if isinstance(state, dict) else None,
+            "month_key": (state or {}).get("month_key") if isinstance(state, dict) else None,
+            "traceback": (state or {}).get("traceback") if isinstance(state, dict) else None,
+            "last_resolved_start_balance": start_boundary.get("resolved_balance") if isinstance(start_boundary, dict) else None,
+            "last_resolved_end_balance": end_boundary.get("resolved_balance") if isinstance(end_boundary, dict) else None,
+            "last_start_balance_source": start_boundary.get("balance_source") if isinstance(start_boundary, dict) else None,
+            "last_end_balance_source": end_boundary.get("balance_source") if isinstance(end_boundary, dict) else None,
+            "last_boundary_resolution": last_boundary if isinstance(last_boundary, dict) else None,
+            "last_oanda_request_window": last_oanda_window if isinstance(last_oanda_window, dict) else None,
+            "request_start_utc": end_window.get("request_start_utc") or start_window.get("request_start_utc"),
+            "request_end_utc": end_window.get("request_end_utc") or start_window.get("request_end_utc"),
+            "clamped_end_utc": end_window.get("clamped_end_utc") or start_window.get("clamped_end_utc"),
+            "now_utc": end_window.get("now_utc") or start_window.get("now_utc"),
+            "rows": rows[:12],
+            "updated_at": _utc_now_iso(),
+        }
+    )
 
 
 @app.get("/api/oanda-inactivity-status")
