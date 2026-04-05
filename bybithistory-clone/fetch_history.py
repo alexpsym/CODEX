@@ -398,6 +398,35 @@ def _execution_match_key(row: Dict[str, Any]) -> tuple[str, Any, ...]:
     )
 
 
+def _execution_sort_key(row: Dict[str, Any], original_index: int) -> tuple[Any, ...]:
+    """Return deterministic oldest-first sort key for execution rows."""
+    exec_time = _to_int(row.get("execTime"))
+    exec_id = str(row.get("execId", "")).strip()
+    order_id = str(row.get("orderId", "")).strip()
+    leaves_qty = _to_decimal(row.get("leavesQty"))
+    leaves_qty_rank = 1 if leaves_qty is None else 0
+    leaves_qty_value = leaves_qty if leaves_qty is not None else Decimal("0")
+    # Invalid timestamps are preserved but sorted to the end.
+    invalid_time_rank = 1 if exec_time is None else 0
+    exec_time_value = exec_time if exec_time is not None else 0
+    return (
+        invalid_time_rank,
+        exec_time_value,
+        exec_id,
+        order_id,
+        leaves_qty_rank,
+        leaves_qty_value,
+        original_index,
+    )
+
+
+def _sort_execution_rows_oldest_first(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Sort execution rows chronologically with deterministic tie-breaking."""
+    indexed = list(enumerate(rows))
+    indexed.sort(key=lambda pair: _execution_sort_key(pair[1], pair[0]))
+    return [row for _, row in indexed]
+
+
 def _transaction_match_key(row: Dict[str, Any]) -> tuple[str, Any, ...]:
     return (
         str(row.get("type", "")).strip().upper(),
@@ -984,6 +1013,8 @@ def download_history(
             end_ms=end_ms,
             rows=rows,
         )
+
+    rows = _sort_execution_rows_oldest_first(rows)
 
     for row in rows:
         _convert_exec_time(row, bool(template))

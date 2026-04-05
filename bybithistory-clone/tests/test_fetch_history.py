@@ -169,6 +169,73 @@ def test_download_history_limits_dates(monkeypatch):
     assert params["startTime"] == earliest
 
 
+def test_download_history_sorts_rows_oldest_to_newest_before_write(monkeypatch):
+    """Rows are sorted oldest->newest before formatting/writing."""
+    monkeypatch.setenv("BYBIT_API_KEY", "k")
+    monkeypatch.setenv("BYBIT_API_SECRET", "s")
+    monkeypatch.setattr(fetch_history, "HTTP", MagicMock(return_value=MagicMock()))
+
+    page = [
+        {"execTime": "3000", "execId": "e3", "orderId": "o3"},
+        {"execTime": "1000", "execId": "e1", "orderId": "o1"},
+        {"execTime": "2000", "execId": "e2", "orderId": "o2"},
+    ]
+    monkeypatch.setattr(fetch_history, "_fetch_pages", lambda *args, **kwargs: [page])
+    captured: list[dict[str, Any]] = []
+    monkeypatch.setattr(fetch_history, "_write_csv", lambda _n, rows: captured.extend(rows))
+
+    fetch_history.download_history("linear", "2024-01-01", "2024-01-01", template=False)
+
+    assert [row["execTime"] for row in captured] == [
+        "1970-01-01T10:00:01",
+        "1970-01-01T10:00:02",
+        "1970-01-01T10:00:03",
+    ]
+
+
+def test_download_history_sorts_equal_exec_time_with_tiebreak_fields(monkeypatch):
+    """Rows with same execTime use execId/orderId/leavesQty tie-breakers."""
+    monkeypatch.setenv("BYBIT_API_KEY", "k")
+    monkeypatch.setenv("BYBIT_API_SECRET", "s")
+    monkeypatch.setattr(fetch_history, "HTTP", MagicMock(return_value=MagicMock()))
+    page = [
+        {"execTime": "1000", "execId": "B", "orderId": "z", "leavesQty": "0.2"},
+        {"execTime": "1000", "execId": "A", "orderId": "z", "leavesQty": "0.1"},
+        {"execTime": "1000", "execId": "A", "orderId": "a", "leavesQty": "0.3"},
+    ]
+    monkeypatch.setattr(fetch_history, "_fetch_pages", lambda *args, **kwargs: [page])
+    captured: list[dict[str, Any]] = []
+    monkeypatch.setattr(fetch_history, "_write_csv", lambda _n, rows: captured.extend(rows))
+
+    fetch_history.download_history("linear", "2024-01-01", "2024-01-01", template=False)
+
+    assert [(r["execId"], r["orderId"], r["leavesQty"]) for r in captured] == [
+        ("A", "a", "0.3"),
+        ("A", "z", "0.1"),
+        ("B", "z", "0.2"),
+    ]
+
+
+def test_download_history_bad_exec_time_rows_are_last_and_preserved(monkeypatch):
+    """Invalid execTime rows are kept and placed after valid rows."""
+    monkeypatch.setenv("BYBIT_API_KEY", "k")
+    monkeypatch.setenv("BYBIT_API_SECRET", "s")
+    monkeypatch.setattr(fetch_history, "HTTP", MagicMock(return_value=MagicMock()))
+    page = [
+        {"execTime": "bad", "execId": "bad-1", "orderId": "x"},
+        {"execTime": "1000", "execId": "ok", "orderId": "a"},
+    ]
+    monkeypatch.setattr(fetch_history, "_fetch_pages", lambda *args, **kwargs: [page])
+    captured: list[dict[str, Any]] = []
+    monkeypatch.setattr(fetch_history, "_write_csv", lambda _n, rows: captured.extend(rows))
+
+    fetch_history.download_history("linear", "2024-01-01", "2024-01-01", template=False)
+
+    assert captured[0]["execId"] == "ok"
+    assert captured[1]["execId"] == "bad-1"
+    assert captured[1]["execTime"] == "bad"
+
+
 @_enable_live_enrichment
 def test_live_trade_row_gets_final_balance_from_transaction_log(monkeypatch):
     """Matched TRADE transaction supplies Final Balance (USDT)."""
