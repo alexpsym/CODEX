@@ -38,6 +38,7 @@ from cryptocalculator import (
 )
 import options_trader
 from shared.bybit_option_resolver import resolve_option_by_target_risk
+from shared.symbol_resolution import norm_symbol, resolve_bybit_symbol_from_choices
 
 app = Flask(__name__)
 
@@ -167,7 +168,7 @@ def _get_audusd_rate_cached(force: bool = False) -> float:
 
 
 def _norm_symbol(value: str) -> str:
-    return re.sub(r"[^A-Za-z0-9]", "", (value or "")).upper()
+    return norm_symbol(value)
 
 
 def _bybit_category_for_price_source(price_source: str) -> str:
@@ -238,53 +239,17 @@ def _resolve_crypto_symbol(raw: str, price_source: str) -> Optional[Dict[str, ob
 
     if exchange == "bybit":
         symbols = _get_bybit_symbols_cached(category)
-        symbol_set = set(symbols)
-
-        if want in symbol_set:
-            return {
-                "input": raw,
-                "normalized": want,
-                "resolved_symbol": want,
-                "source": "bybit",
-            }
-
         preferred_quotes = (
-            ["USDT", "USDC", "USD"]
+            ("USDT", "USDC", "USD")
             if category != "spot"
-            else ["USDT", "USDC", "USD", "BTC", "ETH"]
+            else ("USDT", "USDC", "USD", "BTC", "ETH")
         )
-        for quote in preferred_quotes:
-            cand = want + quote
-            if cand in symbol_set:
-                return {
-                    "input": raw,
-                    "normalized": want,
-                    "resolved_symbol": cand,
-                    "source": "bybit",
-                }
-
-        starts = [s for s in symbols if s.startswith(want)]
-        if starts:
-            starts.sort(key=lambda s: (0 if s.endswith("USDT") else 1, len(s), s))
-            return {
-                "input": raw,
-                "normalized": want,
-                "resolved_symbol": starts[0],
-                "source": "bybit",
-                "candidates": starts[:10],
-            }
-
-        contains = [s for s in symbols if want in s]
-        if contains:
-            contains.sort(key=lambda s: (0 if s.endswith("USDT") else 1, len(s), s))
-            return {
-                "input": raw,
-                "normalized": want,
-                "resolved_symbol": contains[0],
-                "source": "bybit",
-                "candidates": contains[:10],
-            }
-        return None
+        return resolve_bybit_symbol_from_choices(
+            raw,
+            symbols,
+            preferred_quotes=preferred_quotes,
+            exact_first=True,
+        )
 
     if exchange == "coinspot":
         if want.endswith(("USDT", "AUD", "USD", "BTC", "ETH")) and len(want) > 3:

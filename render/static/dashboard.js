@@ -629,6 +629,19 @@
       .filter(Boolean);
   };
 
+  const isLikelyFxPair = (value) => /^[A-Z]{6}$/.test(String(value || '').trim().toUpperCase()) || /^[A-Z]{3}_[A-Z]{3}$/.test(String(value || '').trim().toUpperCase());
+
+  const resolveBybitSymbol = async (symbol) => {
+    const token = String(symbol || '').trim().toUpperCase();
+    if (!token || isLikelyFxPair(token)) return token;
+    try {
+      const payload = await fetchJson(`/api/resolve-symbol?symbol=${encodeURIComponent(token)}&prefer=bybit&scope=linear`);
+      return String(payload?.resolved_symbol || token).trim().toUpperCase();
+    } catch {
+      return token;
+    }
+  };
+
   const saveWatchlist = async (items, successMessage = '') => {
     if (watchlistInFlight) return watchlistInFlight;
     const payloadItems = Array.isArray(items) ? items : [];
@@ -668,7 +681,11 @@
   };
 
   const addWatchlistItems = async () => {
-    const additions = normalizeWatchlistInput(watchlistInput?.value);
+    const rawAdditions = normalizeWatchlistInput(watchlistInput?.value);
+    const additions = [];
+    for (const symbol of rawAdditions) {
+      additions.push(await resolveBybitSymbol(symbol));
+    }
     if (!additions.length) {
       setWatchlistStatus('Enter at least one symbol.', true);
       return;

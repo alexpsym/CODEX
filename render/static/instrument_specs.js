@@ -111,6 +111,18 @@
     return /^[A-Z]{6}$/.test(s) || /^[A-Z]{3}_[A-Z]{3}$/.test(s);
   }
 
+  async function resolveBybitSymbol(q) {
+    const value = String(q || '').trim();
+    if (!value || isLikelyFxPair(value)) return value;
+    const resp = await fetch(`/api/resolve-symbol?symbol=${encodeURIComponent(value)}&prefer=bybit&scope=all`, {
+      cache: 'no-store',
+    });
+    if (!resp.ok) return value;
+    const data = await resp.json().catch(() => null);
+    const resolved = String(data?.resolved_symbol || '').trim();
+    return resolved || value;
+  }
+
   function renderSpecsTable(specs) {
     if (!rows) return;
     rows.innerHTML = '';
@@ -171,9 +183,11 @@
   }
 
   async function load() {
-    const q = String(qInput?.value || '').trim();
-    if (!q) return;
+    const raw = String(qInput?.value || '').trim();
+    if (!raw) return;
     try {
+      const q = await resolveBybitSymbol(raw);
+      if (qInput && q && q !== raw) qInput.value = q;
       await loadSpecs(q);
       const prefer = isLikelyFxPair(q) ? '&prefer=oanda' : '';
       if (dl) dl.href = `/api/instrument-specs.jpg?query=${encodeURIComponent(q)}${prefer}`;
