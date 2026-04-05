@@ -6,10 +6,28 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import csv
 from datetime import datetime, timezone, timedelta
+from typing import Any
 import pytest
 from unittest.mock import MagicMock, patch
 
 import fetch_history
+
+
+def _enable_live_enrichment(func):
+    setattr(func, "_use_live_enrichment", True)
+    return func
+
+
+@pytest.fixture(autouse=True)
+def _disable_enrichment_by_default(monkeypatch, request):
+    """Keep legacy tests focused on existing behaviors unless explicitly enabled."""
+    if getattr(request.function, "_use_live_enrichment", False):
+        return
+    monkeypatch.setattr(
+        fetch_history,
+        "_enrich_live_linear_final_balances",
+        lambda **kwargs: None,
+    )
 
 
 def test_parse_date_start():
@@ -149,6 +167,275 @@ def test_download_history_limits_dates(monkeypatch):
     params = mock_pages.call_args_list[0].kwargs
     earliest = int((fixed_now - timedelta(days=730)).timestamp() * 1000) + 60000
     assert params["startTime"] == earliest
+
+
+def test_download_history_sorts_rows_oldest_to_newest_before_write(monkeypatch):
+    """Rows are sorted oldest->newest before formatting/writing."""
+    monkeypatch.setenv("BYBIT_API_KEY", "k")
+    monkeypatch.setenv("BYBIT_API_SECRET", "s")
+    monkeypatch.setattr(fetch_history, "HTTP", MagicMock(return_value=MagicMock()))
+
+    page = [
+        {"execTime": "3000", "execId": "e3", "orderId": "o3"},
+        {"execTime": "1000", "execId": "e1", "orderId": "o1"},
+        {"execTime": "2000", "execId": "e2", "orderId": "o2"},
+    ]
+    monkeypatch.setattr(fetch_history, "_fetch_pages", lambda *args, **kwargs: [page])
+    captured: list[dict[str, Any]] = []
+    monkeypatch.setattr(fetch_history, "_write_csv", lambda _n, rows: captured.extend(rows))
+
+    fetch_history.download_history("linear", "2024-01-01", "2024-01-01", template=False)
+
+    assert [row["execTime"] for row in captured] == [
+        "1970-01-01T10:00:01",
+        "1970-01-01T10:00:02",
+        "1970-01-01T10:00:03",
+    ]
+
+
+def test_download_history_sorts_equal_exec_time_with_tiebreak_fields(monkeypatch):
+    """Rows with same execTime use execId/orderId/leavesQty tie-breakers."""
+    monkeypatch.setenv("BYBIT_API_KEY", "k")
+    monkeypatch.setenv("BYBIT_API_SECRET", "s")
+    monkeypatch.setattr(fetch_history, "HTTP", MagicMock(return_value=MagicMock()))
+    page = [
+        {"execTime": "1000", "execId": "B", "orderId": "z", "leavesQty": "0.2"},
+        {"execTime": "1000", "execId": "A", "orderId": "z", "leavesQty": "0.1"},
+        {"execTime": "1000", "execId": "A", "orderId": "a", "leavesQty": "0.3"},
+    ]
+    monkeypatch.setattr(fetch_history, "_fetch_pages", lambda *args, **kwargs: [page])
+    captured: list[dict[str, Any]] = []
+    monkeypatch.setattr(fetch_history, "_write_csv", lambda _n, rows: captured.extend(rows))
+
+    fetch_history.download_history("linear", "2024-01-01", "2024-01-01", template=False)
+
+    assert [(r["execId"], r["orderId"], r["leavesQty"]) for r in captured] == [
+        ("A", "a", "0.3"),
+        ("A", "z", "0.1"),
+        ("B", "z", "0.2"),
+    ]
+
+
+def test_download_history_bad_exec_time_rows_are_last_and_preserved(monkeypatch):
+    """Invalid execTime rows are kept and placed after valid rows."""
+    monkeypatch.setenv("BYBIT_API_KEY", "k")
+    monkeypatch.setenv("BYBIT_API_SECRET", "s")
+    monkeypatch.setattr(fetch_history, "HTTP", MagicMock(return_value=MagicMock()))
+    page = [
+        {"execTime": "bad", "execId": "bad-1", "orderId": "x"},
+        {"execTime": "1000", "execId": "ok", "orderId": "a"},
+    ]
+    monkeypatch.setattr(fetch_history, "_fetch_pages", lambda *args, **kwargs: [page])
+    captured: list[dict[str, Any]] = []
+    monkeypatch.setattr(fetch_history, "_write_csv", lambda _n, rows: captured.extend(rows))
+
+    fetch_history.download_history("linear", "2024-01-01", "2024-01-01", template=False)
+
+    assert captured[0]["execId"] == "ok"
+    assert captured[1]["execId"] == "bad-1"
+    assert captured[1]["execTime"] == "bad"
+
+
+@_enable_live_enrichment
+def test_live_trade_row_gets_final_balance_from_transaction_log(monkeypatch):
+    """Matched TRADE transaction supplies Final Balance (USDT)."""
+    monkeypatch.setenv("BYBIT_API_KEY", "k")
+    monkeypatch.setenv("BYBIT_API_SECRET", "s")
+    monkeypatch.setattr(fetch_history, "HTTP", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(
+        fetch_history,
+        "_fetch_pages",
+        lambda *args, **kwargs: [[{
+            "execTime": "1710000000000",
+            "orderId": "order-1",
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "execQty": "0.10",
+            "execPrice": "65000",
+            "execType": "Trade",
+            "orderType": "Market",
+            "execId": "exec-1",
+        }]],
+    )
+    monkeypatch.setattr(
+        fetch_history,
+        "_fetch_transaction_logs_for_window",
+        lambda *args, **kwargs: [{
+            "type": "TRADE",
+            "transactionTime": "1710000000000",
+            "orderId": "order-1",
+            "symbol": "BTCUSDT",
+            "side": "BUY",
+            "qty": "0.10",
+            "tradePrice": "65000",
+            "cashBalance": "123.4567",
+        }],
+    )
+
+    captured: list[dict[str, Any]] = []
+    monkeypatch.setattr(fetch_history, "_write_csv", lambda _n, rows: captured.extend(rows))
+    fetch_history.download_history("linear", "2024-03-09", "2024-03-09", template=True)
+
+    assert captured[0]["Final Balance (USDT)"] == "123.4567"
+
+
+@_enable_live_enrichment
+def test_live_funding_row_gets_settlement_balance(monkeypatch):
+    """Funding execution rows map to SETTLEMENT transaction log rows."""
+    monkeypatch.setenv("BYBIT_API_KEY", "k")
+    monkeypatch.setenv("BYBIT_API_SECRET", "s")
+    monkeypatch.setattr(fetch_history, "HTTP", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(
+        fetch_history,
+        "_fetch_pages",
+        lambda *args, **kwargs: [[{
+            "execTime": "1710000000001",
+            "orderId": "",
+            "symbol": "BTCUSDT",
+            "side": "Sell",
+            "execQty": "1",
+            "execPrice": "0",
+            "execType": "Funding",
+            "orderType": "Market",
+            "execId": "exec-f",
+        }]],
+    )
+    monkeypatch.setattr(
+        fetch_history,
+        "_fetch_transaction_logs_for_window",
+        lambda *args, **kwargs: [{
+            "type": "SETTLEMENT",
+            "transactionTime": "1710000000001",
+            "orderId": "",
+            "symbol": "BTCUSDT",
+            "side": "SELL",
+            "qty": "1",
+            "tradePrice": "0",
+            "cashBalance": "95.00",
+        }],
+    )
+    captured: list[dict[str, Any]] = []
+    monkeypatch.setattr(fetch_history, "_write_csv", lambda _n, rows: captured.extend(rows))
+    fetch_history.download_history("linear", "2024-03-09", "2024-03-09", template=True)
+    assert captured[0]["Final Balance (USDT)"] == "95.00"
+
+
+@_enable_live_enrichment
+def test_partial_fills_with_same_timestamp_consume_distinct_matches():
+    """Same key rows consume transaction log matches one-by-one."""
+    rows = [
+        {
+            "execTime": "1000",
+            "orderId": "o1",
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "execQty": "0.1",
+            "execPrice": "50000",
+            "execType": "Trade",
+        },
+        {
+            "execTime": "1000",
+            "orderId": "o1",
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "execQty": "0.1",
+            "execPrice": "50000",
+            "execType": "Trade",
+        },
+    ]
+    logs = [
+        {
+            "type": "TRADE",
+            "transactionTime": "1000",
+            "orderId": "o1",
+            "symbol": "BTCUSDT",
+            "side": "BUY",
+            "qty": "0.1",
+            "tradePrice": "50000",
+            "cashBalance": "100",
+        },
+        {
+            "type": "TRADE",
+            "transactionTime": "1000",
+            "orderId": "o1",
+            "symbol": "BTCUSDT",
+            "side": "BUY",
+            "qty": "0.1",
+            "tradePrice": "50000",
+            "cashBalance": "99",
+        },
+    ]
+    with patch.object(fetch_history, "_fetch_transaction_logs_for_window", return_value=logs):
+        fetch_history._enrich_live_linear_final_balances(
+            session=MagicMock(),
+            base_url="https://api.bybit.com",
+            api_key="k",
+            api_secret="s",
+            start_ms=0,
+            end_ms=2000,
+            rows=rows,
+        )
+    assert rows[0]["finalBalanceUsdt"] == "100"
+    assert rows[1]["finalBalanceUsdt"] == "99"
+
+
+@_enable_live_enrichment
+def test_unresolved_rows_abort_export(monkeypatch):
+    """Unresolved balances should fail export loudly."""
+    monkeypatch.setenv("BYBIT_API_KEY", "k")
+    monkeypatch.setenv("BYBIT_API_SECRET", "s")
+    monkeypatch.setattr(fetch_history, "HTTP", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(
+        fetch_history,
+        "_fetch_pages",
+        lambda *args, **kwargs: [[{
+            "execTime": "1000",
+            "orderId": "o1",
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "execQty": "1",
+            "execPrice": "10",
+            "execType": "Trade",
+        }]],
+    )
+    monkeypatch.setattr(fetch_history, "_fetch_transaction_logs_for_window", lambda *a, **k: [])
+    monkeypatch.setattr(fetch_history, "_fetch_current_usdt_wallet_balance", lambda **k: None)
+    with pytest.raises(RuntimeError, match="Could not reconcile Final Balance"):
+        fetch_history.download_history("linear", "2024-01-01", "2024-01-01")
+
+
+@_enable_live_enrichment
+def test_current_balance_fallback_requires_no_later_cash_movements(monkeypatch):
+    """Fallback only applies when no later USDT transfers/deposits/withdrawals exist."""
+    monkeypatch.setenv("BYBIT_API_KEY", "k")
+    monkeypatch.setenv("BYBIT_API_SECRET", "s")
+    monkeypatch.setattr(fetch_history, "HTTP", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(
+        fetch_history,
+        "_fetch_pages",
+        lambda *args, **kwargs: [[{
+            "execTime": "1000",
+            "orderId": "o1",
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "execQty": "1",
+            "execPrice": "10",
+            "execType": "Trade",
+            "orderType": "Market",
+            "execId": "x",
+        }]],
+    )
+    monkeypatch.setattr(fetch_history, "_fetch_transaction_logs_for_window", lambda *a, **k: [])
+    monkeypatch.setattr(fetch_history, "_fetch_current_usdt_wallet_balance", lambda **k: fetch_history.Decimal("7.5"))
+    monkeypatch.setattr(fetch_history, "_has_later_usdt_cash_movements", lambda **k: False)
+    captured: list[dict[str, Any]] = []
+    monkeypatch.setattr(fetch_history, "_write_csv", lambda _n, rows: captured.extend(rows))
+    fetch_history.download_history("linear", "2024-01-01", "2024-01-01", template=True)
+    assert captured[0]["Final Balance (USDT)"] == "7.5"
+
+    monkeypatch.setattr(fetch_history, "_has_later_usdt_cash_movements", lambda **k: True)
+    with pytest.raises(RuntimeError, match="Could not reconcile Final Balance"):
+        fetch_history.download_history("linear", "2024-01-01", "2024-01-01", template=True)
 
 
 def test_exec_time_formatted(monkeypatch):
@@ -734,4 +1021,3 @@ def test_export_balance_csv_uses_cashflow(monkeypatch):
     with open(fname, newline="", encoding="utf-8") as f:
         rows = list(csv.reader(f))
     assert rows[1][1] == "15.0"
-

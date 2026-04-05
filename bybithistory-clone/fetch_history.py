@@ -7,6 +7,7 @@ import time
 import hashlib
 import hmac
 import urllib.parse
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Generator, IO, List, Tuple
 
@@ -90,6 +91,7 @@ TEMPLATE_HEADERS = [
     "Fees Paid",
     "Trasaction ID",
     "Transaction Time(UTC+10)",
+    "Final Balance (USDT)",
 ]
 
 HEADER_MAPPING = {
@@ -105,6 +107,7 @@ HEADER_MAPPING = {
     "Fees Paid": "execFee",
     "Trasaction ID": "execId",
     "Transaction Time(UTC+10)": "execTime",
+    "Final Balance (USDT)": "finalBalanceUsdt",
 }
 
 
@@ -313,6 +316,332 @@ def _fetch_transaction_pages(
         cursor = result.get("nextPageCursor")
         if not cursor:
             break
+
+
+def _fetch_transaction_pages_demo(
+    *,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+    **params: Any,
+) -> Generator[List[Dict[str, Any]], None, None]:
+    """Yield pages of transaction logs using signed V5 requests."""
+    cursor = None
+    while True:
+        query_params = dict(params)
+        if cursor:
+            query_params["cursor"] = cursor
+        payload = _bybit_signed_get_v5(
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            path="/v5/account/transaction-log",
+            params=query_params,
+        )
+        result = (payload.get("result") or {}) if isinstance(payload, dict) else {}
+        page = (result.get("list") or []) if isinstance(result, dict) else []
+        if not isinstance(page, list):
+            page = []
+        yield [row for row in page if isinstance(row, dict)]
+        cursor = result.get("nextPageCursor") if isinstance(result, dict) else None
+        if not cursor:
+            break
+
+
+def _to_decimal(value: Any) -> Decimal | None:
+    """Convert API values to Decimal without introducing float drift."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if value == "":
+            return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
+def _normalize_decimal_text(value: Any) -> str:
+    """Preserve precision text while normalizing basic numeric formatting."""
+    dec = _to_decimal(value)
+    if dec is None:
+        return ""
+    return format(dec, "f")
+
+
+def _to_int(value: Any) -> int | None:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_funding_exec(row: Dict[str, Any]) -> bool:
+    return str(row.get("execType", "")).strip().upper() == "FUNDING"
+
+
+def _execution_txn_type(row: Dict[str, Any]) -> str:
+    return "SETTLEMENT" if _is_funding_exec(row) else "TRADE"
+
+
+def _execution_match_key(row: Dict[str, Any]) -> tuple[str, Any, ...]:
+    """Deterministic key for matching execution rows to transaction logs."""
+    return (
+        _execution_txn_type(row),
+        _to_int(row.get("execTime")),
+        str(row.get("orderId", "")).strip(),
+        str(row.get("symbol", "")).strip().upper(),
+        str(row.get("side", "")).strip().upper(),
+        _to_decimal(row.get("execQty")),
+        _to_decimal(row.get("execPrice")),
+    )
+
+
+def _execution_sort_key(row: Dict[str, Any], original_index: int) -> tuple[Any, ...]:
+    """Return deterministic oldest-first sort key for execution rows."""
+    exec_time = _to_int(row.get("execTime"))
+    exec_id = str(row.get("execId", "")).strip()
+    order_id = str(row.get("orderId", "")).strip()
+    leaves_qty = _to_decimal(row.get("leavesQty"))
+    leaves_qty_rank = 1 if leaves_qty is None else 0
+    leaves_qty_value = leaves_qty if leaves_qty is not None else Decimal("0")
+    # Invalid timestamps are preserved but sorted to the end.
+    invalid_time_rank = 1 if exec_time is None else 0
+    exec_time_value = exec_time if exec_time is not None else 0
+    return (
+        invalid_time_rank,
+        exec_time_value,
+        exec_id,
+        order_id,
+        leaves_qty_rank,
+        leaves_qty_value,
+        original_index,
+    )
+
+
+def _sort_execution_rows_oldest_first(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Sort execution rows chronologically with deterministic tie-breaking."""
+    indexed = list(enumerate(rows))
+    indexed.sort(key=lambda pair: _execution_sort_key(pair[1], pair[0]))
+    return [row for _, row in indexed]
+
+
+def _transaction_match_key(row: Dict[str, Any]) -> tuple[str, Any, ...]:
+    return (
+        str(row.get("type", "")).strip().upper(),
+        _to_int(row.get("transactionTime")),
+        str(row.get("orderId", "")).strip(),
+        str(row.get("symbol", "")).strip().upper(),
+        str(row.get("side", "")).strip().upper(),
+        _to_decimal(row.get("qty")),
+        _to_decimal(row.get("tradePrice")),
+    )
+
+
+def _fetch_transaction_logs_for_window(
+    session: HTTP,
+    start_ms: int,
+    end_ms: int,
+) -> List[Dict[str, Any]]:
+    """Fetch transaction logs for the export range, keeping Bybit 7-day chunking."""
+    logs: List[Dict[str, Any]] = []
+    for chunk_start, chunk_end in _date_range_chunks(start_ms, end_ms, SEVEN_DAYS_MS):
+        params = {
+            "accountType": "UNIFIED",
+            "category": "linear",
+            "currency": "USDT",
+            "startTime": chunk_start,
+            "endTime": chunk_end,
+        }
+        for page in _fetch_transaction_pages(session, **params):
+            logs.extend([row for row in page if isinstance(row, dict)])
+    return logs
+
+
+def _fetch_current_usdt_wallet_balance(
+    *,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+) -> Decimal | None:
+    """Fetch coin-level USDT wallet balance."""
+    payload = _bybit_signed_get_v5(
+        base_url=base_url,
+        api_key=api_key,
+        api_secret=api_secret,
+        path="/v5/account/wallet-balance",
+        params={"accountType": "UNIFIED", "coin": "USDT"},
+    )
+    coin_list = (
+        (payload.get("result") or {}).get("list") or [{}]
+    )[0].get("coin", [])
+    if not isinstance(coin_list, list):
+        return None
+    for coin in coin_list:
+        if str(coin.get("coin", "")).upper() != "USDT":
+            continue
+        val = _to_decimal(coin.get("walletBalance"))
+        if val is not None:
+            return val
+    return None
+
+
+def _fetch_v5_records(
+    *,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+    path: str,
+    start_ms: int,
+    end_ms: int,
+    chunk_ms: int,
+    base_params: Dict[str, Any] | None = None,
+    list_key: str = "rows",
+) -> List[Dict[str, Any]]:
+    """Fetch records from generic V5 endpoints with cursor pagination."""
+    records: List[Dict[str, Any]] = []
+    params = dict(base_params or {})
+    for chunk_start, chunk_end in _date_range_chunks(start_ms, end_ms, chunk_ms):
+        cursor = None
+        while True:
+            query = dict(params)
+            query["startTime"] = chunk_start
+            query["endTime"] = chunk_end
+            if cursor:
+                query["cursor"] = cursor
+            payload = _bybit_signed_get_v5(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                path=path,
+                params=query,
+            )
+            result = (payload.get("result") or {}) if isinstance(payload, dict) else {}
+            page = result.get(list_key) if isinstance(result, dict) else []
+            if page is None:
+                page = result.get("list", []) if isinstance(result, dict) else []
+            if not isinstance(page, list):
+                page = []
+            records.extend([row for row in page if isinstance(row, dict)])
+            cursor = result.get("nextPageCursor") if isinstance(result, dict) else None
+            if not cursor:
+                break
+    return records
+
+
+def _has_later_usdt_cash_movements(
+    *,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+    last_exec_time_ms: int,
+) -> bool:
+    """Return True if a later USDT cash movement exists, False if none are found."""
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    start_ms = last_exec_time_ms + 1
+    if start_ms > now_ms:
+        return False
+
+    checks: list[tuple[str, int, Dict[str, Any], str]] = [
+        ("/v5/asset/deposit/query-record", 30 * 24 * 60 * 60 * 1000, {"coin": "USDT"}, "rows"),
+        ("/v5/asset/deposit/query-sub-member-record", 30 * 24 * 60 * 60 * 1000, {"coin": "USDT"}, "rows"),
+        ("/v5/asset/withdraw/query-record", 30 * 24 * 60 * 60 * 1000, {"coin": "USDT"}, "rows"),
+        ("/v5/asset/transfer/query-inter-transfer-list", SEVEN_DAYS_MS, {"coin": "USDT"}, "list"),
+        ("/v5/asset/transfer/query-universal-transfer-list", SEVEN_DAYS_MS, {"coin": "USDT"}, "list"),
+    ]
+    for path, chunk_ms, base_params, list_key in checks:
+        records = _fetch_v5_records(
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            path=path,
+            start_ms=start_ms,
+            end_ms=now_ms,
+            chunk_ms=chunk_ms,
+            base_params=base_params,
+            list_key=list_key,
+        )
+        if records:
+            return True
+    return False
+
+
+def _enrich_live_linear_final_balances(
+    *,
+    session: HTTP,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+    start_ms: int,
+    end_ms: int,
+    rows: List[Dict[str, Any]],
+) -> None:
+    """Attach Final Balance (USDT) to each trade/funding row."""
+    if not rows:
+        return
+
+    logs = _fetch_transaction_logs_for_window(session, start_ms, end_ms)
+    bucket: Dict[tuple[str, Any, ...], List[Dict[str, Any]]] = {}
+    for log in logs:
+        key = _transaction_match_key(log)
+        bucket.setdefault(key, []).append(log)
+
+    unresolved: List[int] = []
+    for idx, row in enumerate(rows):
+        key = _execution_match_key(row)
+        matches = bucket.get(key) or []
+        if matches:
+            match = matches.pop(0)
+            cash_balance = match.get("cashBalance")
+            if cash_balance is not None and str(cash_balance).strip() != "":
+                row["finalBalanceUsdt"] = _normalize_decimal_text(cash_balance)
+            else:
+                unresolved.append(idx)
+        else:
+            unresolved.append(idx)
+
+    if not unresolved:
+        return
+
+    unresolved_with_time = [
+        (index, _to_int(rows[index].get("execTime")) or -1)
+        for index in unresolved
+    ]
+    unresolved_with_time.sort(key=lambda item: (item[1], item[0]))
+    final_index, final_time = unresolved_with_time[-1]
+    if len(unresolved_with_time) > 1:
+        raise RuntimeError(
+            f"Could not reconcile Final Balance (USDT) for {len(unresolved)} rows. "
+            "Export aborted to avoid misleading balances."
+        )
+    if final_time < 0:
+        raise RuntimeError(
+            "Could not reconcile Final Balance (USDT) for 1 rows. "
+            "Export aborted to avoid misleading balances."
+        )
+
+    wallet_balance = _fetch_current_usdt_wallet_balance(
+        base_url=base_url,
+        api_key=api_key,
+        api_secret=api_secret,
+    )
+    if wallet_balance is None:
+        raise RuntimeError(
+            "Could not reconcile Final Balance (USDT) for 1 rows. "
+            "Export aborted to avoid misleading balances."
+        )
+    if _has_later_usdt_cash_movements(
+        base_url=base_url,
+        api_key=api_key,
+        api_secret=api_secret,
+        last_exec_time_ms=final_time,
+    ):
+        raise RuntimeError(
+            "Could not reconcile Final Balance (USDT) for 1 rows. "
+            "Export aborted to avoid misleading balances."
+        )
+    rows[final_index]["finalBalanceUsdt"] = _normalize_decimal_text(wallet_balance)
 
 
 def _write_csv(filename: str, rows: List[Dict[str, Any]]) -> None:
@@ -656,8 +985,6 @@ def download_history(
             else:
                 pages = _fetch_pages(session, **chunk_params)
             for page in pages:
-                for row in page:
-                    _convert_exec_time(row, bool(template))
                 rows.extend(page)
     else:
         if start_ms is not None:
@@ -674,9 +1001,23 @@ def download_history(
         else:
             pages = _fetch_pages(session, **params)
         for page in pages:
-            for row in page:
-                _convert_exec_time(row, bool(template))
             rows.extend(page)
+
+    if mode == "live" and category == "linear":
+        _enrich_live_linear_final_balances(
+            session=session,
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            rows=rows,
+        )
+
+    rows = _sort_execution_rows_oldest_first(rows)
+
+    for row in rows:
+        _convert_exec_time(row, bool(template))
 
     if template:
         rows = _apply_template(rows)
