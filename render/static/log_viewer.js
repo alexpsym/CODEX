@@ -191,7 +191,7 @@
         });
 
         const symbolInput = el('input', {
-            placeholder: monitor === 'oanda' ? 'EUR_USD' : 'BTCUSDT',
+            placeholder: monitor === 'oanda' ? 'EUR_USD' : 'BTC or BTCUSDT',
             style: 'width:180px;',
         });
         const kindSelect = el('select', {}, [
@@ -367,7 +367,7 @@
         };
 
         const createAlert = async () => {
-            const symbol =
+            let symbol =
                 monitor === 'oanda'
                     ? normalizeOandaSymbol(symbolInput.value)
                     : (symbolInput.value || '').trim().toUpperCase();
@@ -375,6 +375,8 @@
                 status.textContent = 'symbol required';
                 return;
             }
+            symbol = await resolveBybitSymbol(symbol);
+            symbolInput.value = symbol;
             const kind = kindSelect.value;
             const payload = { symbol, kind, enabled: true };
             if (kind === 'price') {
@@ -558,3 +560,19 @@
         }
     });
 })();
+        const resolveBybitSymbol = async (raw) => {
+            const symbol = String(raw || '').trim().toUpperCase();
+            if (!symbol || monitor !== 'bybit') return symbol;
+            const resp = await fetch(`/api/resolve-symbol?symbol=${encodeURIComponent(symbol)}&prefer=bybit&scope=linear`, {
+                cache: 'no-store',
+            });
+            if (!resp.ok) {
+                throw new Error(`Unable to resolve symbol: ${symbol}`);
+            }
+            const data = await resp.json().catch(() => null);
+            const resolved = String(data?.resolved_symbol || '').trim().toUpperCase();
+            if (!resolved) {
+                throw new Error(`Unable to resolve symbol: ${symbol}`);
+            }
+            return resolved;
+        };

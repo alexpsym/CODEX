@@ -294,9 +294,28 @@
             return label;
         };
 
+        const resolveBybitSymbol = async (raw) => {
+            const symbol = String(raw || '').trim().toUpperCase();
+            if (!symbol || monitor !== 'bybit') {
+                return symbol;
+            }
+            const resp = await fetch(`/api/resolve-symbol?symbol=${encodeURIComponent(symbol)}&prefer=bybit&scope=linear`, {
+                cache: 'no-store',
+            });
+            if (!resp.ok) {
+                throw new Error(`Unable to resolve symbol: ${symbol}`);
+            }
+            const data = await resp.json().catch(() => null);
+            const resolved = String(data?.resolved_symbol || '').trim().toUpperCase();
+            if (!resolved) {
+                throw new Error(`Unable to resolve symbol: ${symbol}`);
+            }
+            return resolved;
+        };
+
         const symbolInput = document.createElement('input');
         symbolInput.type = 'text';
-        symbolInput.placeholder = isBybit ? 'BTCUSDT' : 'EUR_USD';
+        symbolInput.placeholder = isBybit ? 'BTC or BTCUSDT' : 'EUR_USD';
 
         const kindSelect = document.createElement('select');
         ['price', 'move'].forEach((kind) => {
@@ -606,10 +625,12 @@
             saveBtn.disabled = true;
             clearBtn.disabled = true;
             try {
-                const symbol = symbolInput.value.trim().toUpperCase();
+                let symbol = symbolInput.value.trim().toUpperCase();
                 if (!symbol) {
                     throw new Error('Symbol is required');
                 }
+                symbol = await resolveBybitSymbol(symbol);
+                symbolInput.value = symbol;
                 const kind = kindSelect.value;
                 const payload = {
                     id: editingId || undefined,

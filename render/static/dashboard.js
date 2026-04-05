@@ -629,6 +629,32 @@
       .filter(Boolean);
   };
 
+  const FX_CODES = new Set(['AUD', 'CAD', 'CHF', 'EUR', 'GBP', 'HKD', 'JPY', 'NZD', 'SGD', 'TRY', 'USD', 'ZAR', 'XAU', 'XAG']);
+  const isLikelyFxPair = (value) => {
+    const token = String(value || '').trim().toUpperCase();
+    if (/^[A-Z]{3}_[A-Z]{3}$/.test(token)) {
+      const [base, quote] = token.split('_');
+      return FX_CODES.has(base) && FX_CODES.has(quote);
+    }
+    if (/^[A-Z]{6}$/.test(token)) {
+      const base = token.slice(0, 3);
+      const quote = token.slice(3);
+      return FX_CODES.has(base) && FX_CODES.has(quote);
+    }
+    return false;
+  };
+
+  const resolveBybitSymbol = async (symbol) => {
+    const token = String(symbol || '').trim().toUpperCase();
+    if (!token || isLikelyFxPair(token)) return token;
+    try {
+      const payload = await fetchJson(`/api/resolve-symbol?symbol=${encodeURIComponent(token)}&prefer=bybit&scope=linear`);
+      return String(payload?.resolved_symbol || token).trim().toUpperCase();
+    } catch {
+      return token;
+    }
+  };
+
   const saveWatchlist = async (items, successMessage = '') => {
     if (watchlistInFlight) return watchlistInFlight;
     const payloadItems = Array.isArray(items) ? items : [];
@@ -668,7 +694,11 @@
   };
 
   const addWatchlistItems = async () => {
-    const additions = normalizeWatchlistInput(watchlistInput?.value);
+    const rawAdditions = normalizeWatchlistInput(watchlistInput?.value);
+    const additions = [];
+    for (const symbol of rawAdditions) {
+      additions.push(await resolveBybitSymbol(symbol));
+    }
     if (!additions.length) {
       setWatchlistStatus('Enter at least one symbol.', true);
       return;

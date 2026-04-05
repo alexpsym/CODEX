@@ -41,6 +41,12 @@ from starlette.responses import RedirectResponse
 from bybit_credentials import resolve_bybit_credentials_for
 from render.monthly_aud_revaluation import MonthlyAudRevalError, sync_monthly_aud_revaluation
 from shared.bybit_option_resolver import resolve_option_by_target_risk
+from shared.symbol_resolution import (
+    is_likely_oanda_pair,
+    norm_symbol,
+    normalize_oanda_symbol_query,
+    resolve_bybit_symbol_from_choices,
+)
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
@@ -343,6 +349,14 @@ _OPEN_ORDERS_CACHE: Dict[str, object] = {
     "last_success_at": None,
     "payload": None,
 }
+_BYBIT_SYMBOL_LIST_CACHE: Dict[str, Dict[str, object]] = {
+    "linear": {"ts": 0.0, "symbols": []},
+    "spot": {"ts": 0.0, "symbols": []},
+    "inverse": {"ts": 0.0, "symbols": []},
+}
+_BYBIT_SYMBOL_LIST_CACHE_TTL_SECONDS = float(
+    os.getenv("BYBIT_SYMBOL_LIST_CACHE_TTL_SECONDS", "900")
+)
 
 
 def _normalize_watchlist(items: Iterable[object]) -> List[str]:
@@ -352,7 +366,7 @@ def _normalize_watchlist(items: Iterable[object]) -> List[str]:
         symbol = str(item or "").strip().upper()
         if not symbol:
             continue
-        if len(symbol) == 6 and symbol.isalpha():
+        if len(symbol) == 6 and symbol.isalpha() and is_likely_oanda_pair(symbol):
             symbol = f"{symbol[:3]}_{symbol[3:]}"
         if symbol in seen:
             continue
@@ -364,7 +378,7 @@ def _normalize_watchlist(items: Iterable[object]) -> List[str]:
 
 
 def _norm_symbol(s: str) -> str:
-    return re.sub(r"[^A-Za-z0-9]", "", (s or "")).upper()
+    return norm_symbol(s)
 
 
 def _normalize_instrument_key(value: object) -> str:
@@ -372,8 +386,7 @@ def _normalize_instrument_key(value: object) -> str:
 
 
 def _is_likely_fx_pair(value: str) -> bool:
-    raw = str(value or "").strip().upper()
-    return bool(re.fullmatch(r"[A-Z]{6}", raw) or re.fullmatch(r"[A-Z]{3}_[A-Z]{3}", raw))
+    return is_likely_oanda_pair(value)
 
 
 def _oanda_aliases(name: str, display_name: Optional[str] = None) -> set[str]:
@@ -416,22 +429,7 @@ def _instrument_lookup_key(value: str) -> str:
 
 
 def _normalize_oanda_symbol_query(user_value: str, available_instruments: Optional[List[str]] = None) -> str:
-    if not user_value or not user_value.strip():
-        raise ValueError("Instrument is required")
-
-    raw = user_value.strip().upper()
-    if "_" in raw and len(raw) >= 7:
-        return raw
-
-    lookup = _instrument_lookup_key(raw)
-    if available_instruments:
-        mapping = {_instrument_lookup_key(inst): inst for inst in available_instruments if inst}
-        if lookup in mapping:
-            return mapping[lookup]
-
-    if len(lookup) == 6 and lookup.isalpha():
-        return f"{lookup[:3]}_{lookup[3:]}"
-    return raw
+    return normalize_oanda_symbol_query(user_value, available_instruments)
 
 
 def _oanda_base_url() -> str:
@@ -531,17 +529,72 @@ async def _bybit_avg_7d_turnover_usd_async(
         return None
 
 
+async def _bybit_fetch_symbols_by_category(base_url: str, category: str) -> List[str]:
+    symbols: List[str] = []
+    cursor: Optional[str] = None
+    for _ in range(10):
+        params: Dict[str, object] = {"category": category, "limit": 1000}
+        if cursor:
+            params["cursor"] = cursor
+        payload = await _bybit_get_async(base_url, "/v5/market/instruments-info", params)
+        rows = (payload.get("result") or {}).get("list") or []
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                symbol = str(row.get("symbol") or "").upper()
+                if symbol:
+                    symbols.append(symbol)
+        cursor = (payload.get("result") or {}).get("nextPageCursor")
+        if not cursor:
+            break
+    return sorted(set(symbols))
+
+
+async def _bybit_get_symbols_by_category_cached(base_url: str, category: str) -> List[str]:
+    category_key = category if category in {"linear", "spot", "inverse"} else "linear"
+    entry = _BYBIT_SYMBOL_LIST_CACHE.get(category_key) or {"ts": 0.0, "symbols": []}
+    now = time.time()
+    cached = entry.get("symbols")
+    ts = float(entry.get("ts") or 0.0)
+    if isinstance(cached, list) and cached and (now - ts) <= _BYBIT_SYMBOL_LIST_CACHE_TTL_SECONDS:
+        return list(cached)
+
+    try:
+        symbols = await _bybit_fetch_symbols_by_category(base_url, category_key)
+    except Exception:
+        if isinstance(cached, list) and cached:
+            return list(cached)
+        raise
+
+    _BYBIT_SYMBOL_LIST_CACHE[category_key] = {"ts": now, "symbols": symbols}
+    return list(symbols)
+
+
 async def _bybit_lookup_symbol(base_url: str, symbol: str) -> Optional[Dict[str, object]]:
-    normalized_symbol = str(symbol or "").strip().upper()
+    normalized_symbol = _norm_symbol(symbol)
     if not normalized_symbol:
         return None
 
     for category in ("linear", "spot", "inverse"):
         try:
+            choices = await _bybit_get_symbols_by_category_cached(base_url, category)
+        except Exception:
+            choices = []
+        resolved = resolve_bybit_symbol_from_choices(
+            normalized_symbol,
+            choices,
+            preferred_quotes=("USDT", "USDC", "USD"),
+            exact_first=True,
+        )
+        resolved_symbol = str((resolved or {}).get("resolved_symbol") or "").upper()
+        if not resolved_symbol:
+            continue
+        try:
             payload = await _bybit_get_async(
                 base_url,
                 "/v5/market/instruments-info",
-                {"category": category, "symbol": normalized_symbol},
+                {"category": category, "symbol": resolved_symbol},
             )
         except Exception:
             continue
@@ -715,6 +768,48 @@ async def _fetch_instrument_specs(
             pass
 
     return specs
+
+
+async def _resolve_symbol_payload(
+    raw_symbol: str, prefer: str = "bybit", scope: str = "all"
+) -> Optional[Dict[str, object]]:
+    raw = str(raw_symbol or "")
+    normalized = _norm_symbol(raw)
+    if not normalized:
+        return None
+
+    pref = str(prefer or "bybit").strip().lower()
+    selected_scope = str(scope or "all").strip().lower()
+
+    if pref == "oanda":
+        resolved = normalize_oanda_symbol_query(raw)
+        return {
+            "input": raw,
+            "normalized": normalized,
+            "resolved_symbol": resolved,
+            "source": "oanda",
+        }
+
+    if pref != "bybit":
+        return None
+
+    creds = resolve_bybit_credentials_for("default")
+    base_url = (creds.get("base_url") if isinstance(creds, dict) else None) or BYBIT_BASE
+    categories = ("linear",) if selected_scope == "linear" else ("linear", "spot", "inverse")
+    for category in categories:
+        try:
+            symbols = await _bybit_get_symbols_by_category_cached(base_url, category)
+        except Exception:
+            symbols = []
+        resolved = resolve_bybit_symbol_from_choices(
+            raw,
+            symbols,
+            preferred_quotes=("USDT", "USDC", "USD"),
+            exact_first=True,
+        )
+        if resolved and resolved.get("resolved_symbol"):
+            return resolved
+    return None
 
 
 def _truthy_query_param(value: Optional[str]) -> bool:
@@ -4353,7 +4448,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     </div>
                 </div>
                 <form id="instrument-specs-form" class="instrument-specs-row" action="/instrument-specs" method="get" target="_blank">
-                    <input id="instrument-specs-input" name="q" type="text" placeholder="eurusd / BTCUSDT" />
+                    <input id="instrument-specs-input" name="q" type="text" placeholder="eurusd / BTC" />
                     <button id="instrument-specs-go" type="submit">Confirm</button>
                 </form>
             </section>
@@ -4371,7 +4466,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 </div>
 
                 <div class=\"watchlist-input\">
-                    <input id=\"watchlist-input\" type=\"text\" placeholder=\"BTCUSDT, EURUSD\" />
+                    <input id=\"watchlist-input\" type=\"text\" placeholder=\"BTC, ETH, EURUSD\" />
                     <button type=\"button\" id=\"watchlist-add-btn\">Add</button>
                 </div>
 
@@ -4534,7 +4629,7 @@ INSTRUMENT_SPECS_TEMPLATE = """<!DOCTYPE html>
     <p class="meta">Type a symbol (e.g. eurusd, BTCUSDT). The tool auto-detects OANDA/Bybit and returns available specs.</p>
 
     <div class="bar">
-      <input id="q" type="text" placeholder="eurusd" />
+      <input id="q" type="text" placeholder="eurusd / BTC" />
       <button id="load" type="button">Load</button>
       <a class="btn" id="download" href="#">Download JPG</a>
       <a class="btn" href="/">Back</a>
@@ -9004,6 +9099,18 @@ async def api_instrument_specs(
     return JSONResponse(specs)
 
 
+@app.get("/api/resolve-symbol")
+async def api_resolve_symbol(
+    symbol: str,
+    prefer: Optional[str] = "bybit",
+    scope: Optional[str] = "all",
+) -> JSONResponse:
+    resolved = await _resolve_symbol_payload(symbol, prefer or "bybit", scope or "all")
+    if not resolved or not resolved.get("resolved_symbol"):
+        raise HTTPException(status_code=404, detail=f"No match for '{symbol}'")
+    return JSONResponse(resolved)
+
+
 @app.get("/api/instrument-specs.jpg")
 async def api_instrument_specs_jpg(
     query: Optional[str] = None,
@@ -10470,7 +10577,21 @@ async def set_watchlist(request: Request) -> JSONResponse:
     items = payload.get("items", [])
     if not isinstance(items, list):
         raise HTTPException(status_code=400, detail="Watchlist items must be a list.")
-    normalized = _set_watchlist(items)
+    preliminary = _normalize_watchlist(items)
+    resolved_items: List[str] = []
+    for item in preliminary:
+        token = str(item or "").strip()
+        if not token:
+            continue
+        if _is_likely_fx_pair(token):
+            resolved_items.append(_normalize_oanda_symbol_query(token))
+            continue
+        resolved = await _resolve_symbol_payload(token, "bybit", "linear")
+        resolved_symbol = str((resolved or {}).get("resolved_symbol") or "").upper()
+        if not resolved_symbol:
+            raise HTTPException(status_code=400, detail=f"Unable to resolve watchlist symbol: {token}")
+        resolved_items.append(resolved_symbol)
+    normalized = _set_watchlist(resolved_items)
     _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "items": normalized})
 
