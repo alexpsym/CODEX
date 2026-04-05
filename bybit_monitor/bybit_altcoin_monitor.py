@@ -27,6 +27,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from bybit_credentials import resolve_bybit_credentials
+from shared.symbol_resolution import norm_symbol, resolve_bybit_symbol_from_choices
 
 # Credential + endpoint resolution -------------------------------------------------
 
@@ -151,13 +152,21 @@ def _coerce_alert(payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise ValueError("Alert payload must be an object.")
     alert_id = str(payload.get("id") or "").strip() or uuid.uuid4().hex
-    symbol = str(payload.get("symbol") or "").strip().upper()
+    raw_symbol = str(payload.get("symbol") or "").strip()
+    symbol = norm_symbol(raw_symbol)
     if not symbol:
         raise ValueError("symbol is required")
 
     allowed = _get_linear_perpetual_symbols()
-    if symbol not in allowed:
-        raise ValueError("Only Bybit linear perpetual symbols are allowed in this monitor.")
+    resolved = resolve_bybit_symbol_from_choices(
+        symbol,
+        allowed,
+        preferred_quotes=("USDT", "USDC", "USD"),
+        exact_first=True,
+    )
+    resolved_symbol = str((resolved or {}).get("resolved_symbol") or "").upper()
+    if not resolved_symbol or resolved_symbol not in allowed:
+        raise ValueError(f"Unable to resolve '{raw_symbol}' to a Bybit linear perpetual symbol.")
 
     kind = str(payload.get("kind") or "").strip().lower()
     if kind not in _ALLOWED_ALERT_KINDS:
@@ -171,7 +180,7 @@ def _coerce_alert(payload: dict) -> dict:
 
     alert: dict = {
         "id": alert_id,
-        "symbol": symbol,
+        "symbol": resolved_symbol,
         "kind": kind,
         "enabled": enabled,
         "cooldown_seconds": cooldown_seconds,
