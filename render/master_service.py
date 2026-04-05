@@ -311,6 +311,7 @@ MONTHLY_AUD_REVALUATION_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 _WATCHLIST_CACHE: Optional[List[str]] = None
 _TRADING_JOURNAL_CACHE: Optional[List[Dict[str, object]]] = None
+_STARTUP_STATE_RESTORE_DONE = asyncio.Event()
 _DROPBOX_UPLOAD_TASK: Optional[asyncio.Task] = None
 _DROPBOX_UPLOAD_TIMER: Optional[threading.Timer] = None
 _DROPBOX_UPLOAD_TIMER_LOCK = threading.Lock()
@@ -2814,6 +2815,7 @@ def _restore_alerts_payload(data: Dict[str, object]) -> Dict[str, object]:
 
 async def _dropbox_restore_state_backup_on_startup() -> None:
     if not DROPBOX_SYNC_ENABLED:
+        _STARTUP_STATE_RESTORE_DONE.set()
         return
     try:
         payload = await asyncio.to_thread(download_bytes, DROPBOX_BACKUP_PATH)
@@ -2837,6 +2839,8 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
         BYBIT_LOGGER.info("Dropbox restore skipped; no backup found at %s", DROPBOX_BACKUP_PATH)
     except Exception as exc:  # pragma: no cover - startup failure
         BYBIT_LOGGER.error("Dropbox restore failed: %s", exc)
+    finally:
+        _STARTUP_STATE_RESTORE_DONE.set()
 
 
 @dataclass
@@ -3450,30 +3454,40 @@ async def _run_monthly_aud_revaluation_sync(*, reason: str) -> Dict[str, object]
         )
         if result.get("changed"):
             _schedule_dropbox_upload_state_backup()
-        return {"ok": True, "reason": reason, "started_at": started_at, "finished_at": _utc_now_iso(), **result}
+        state_snapshot = _load_json_file(MONTHLY_AUD_REVALUATION_STATE_PATH, {})
+        return {"ok": True, "reason": reason, "started_at": started_at, "finished_at": _utc_now_iso(), "state": state_snapshot, **result}
     except MonthlyAudRevalError as exc:
-        BYBIT_LOGGER.error("%s reason=%s detail=%s", exc.code, reason, exc)
+        state_snapshot = _load_json_file(MONTHLY_AUD_REVALUATION_STATE_PATH, {})
+        BYBIT_LOGGER.error("%s reason=%s stage=%s detail=%s", exc.code, reason, getattr(exc, "stage", None), exc)
         return {
             "ok": False,
             "reason": reason,
             "code": exc.code,
+            "stage": getattr(exc, "stage", None),
             "error": str(exc),
+            "state": state_snapshot,
             "started_at": started_at,
             "finished_at": _utc_now_iso(),
         }
     except Exception as exc:
+        state_snapshot = _load_json_file(MONTHLY_AUD_REVALUATION_STATE_PATH, {})
         BYBIT_LOGGER.error("MONTHLY_AUD_REVAL_BYBIT_BALANCE_ERROR reason=%s detail=%s", reason, exc)
         return {
             "ok": False,
             "reason": reason,
             "code": "MONTHLY_AUD_REVAL_BYBIT_BALANCE_ERROR",
             "error": str(exc),
+            "state": state_snapshot,
             "started_at": started_at,
             "finished_at": _utc_now_iso(),
         }
 
 
 async def _schedule_monthly_aud_revaluation_sync() -> None:
+    try:
+        await asyncio.wait_for(_STARTUP_STATE_RESTORE_DONE.wait(), timeout=120.0)
+    except asyncio.TimeoutError:
+        BYBIT_LOGGER.warning("MONTHLY_AUD_REVAL_STARTUP_WAIT_TIMEOUT proceeding without restore signal")
     await _run_monthly_aud_revaluation_sync(reason="startup")
     while True:
         await asyncio.sleep(MONTHLY_AUD_REVAL_SYNC_INTERVAL_SECONDS)
@@ -11336,6 +11350,29 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
         copy.pop("_row", None)
         public_items.append(copy)
     return JSONResponse({"items": public_items})
+
+
+@app.get("/api/diagnostics/monthly-aud-reval")
+async def diagnostics_monthly_aud_reval() -> JSONResponse:
+    rows = _get_monthly_aud_revaluation_rows()
+    state = _load_json_file(MONTHLY_AUD_REVALUATION_STATE_PATH, {})
+    latest = rows[0] if rows else None
+    return JSONResponse(
+        {
+            "ok": True,
+            "rows_count": len(rows),
+            "latest_row_id": latest.get("id") if isinstance(latest, dict) else None,
+            "latest_period_month": ((latest or {}).get("raw_refs") or {}).get("period_month") if isinstance(latest, dict) else None,
+            "last_sync_result": (state or {}).get("last_result") if isinstance(state, dict) else None,
+            "last_error_code": (state or {}).get("last_error_code") if isinstance(state, dict) else None,
+            "last_error": (state or {}).get("last_error") if isinstance(state, dict) else None,
+            "last_stage": (state or {}).get("stage") if isinstance(state, dict) else None,
+            "month_key": (state or {}).get("month_key") if isinstance(state, dict) else None,
+            "traceback": (state or {}).get("traceback") if isinstance(state, dict) else None,
+            "rows": rows[:12],
+            "updated_at": _utc_now_iso(),
+        }
+    )
 
 
 @app.get("/api/oanda-inactivity-status")
