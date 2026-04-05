@@ -11213,24 +11213,16 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
         if not closed_at:
             continue
         result_cash = _to_float(row.get("result_cash"))
-        result_pct = _to_float(row.get("result_pct"))
-        outcome = str(row.get("outcome") or "Breakeven")
-        if outcome not in {"Win", "Loss", "Breakeven"}:
-            if result_cash is not None and result_cash > 0:
-                outcome = "Win"
-            elif result_cash is not None and result_cash < 0:
-                outcome = "Loss"
-            else:
-                outcome = "Breakeven"
         items.append(
             {
                 "_row": row,
                 "_row_id": row.get("id"),
                 "_row_source": row.get("source"),
                 "_row_order_id": None,
+                "row_type": row.get("row_type"),
                 "account": row.get("account_label") or "Bybit Live",
                 "symbol": row.get("symbol") or "MONTHLY AUD P/L",
-                "side": row.get("side") or "FX Reval",
+                "side": row.get("side"),
                 "opened_at": row.get("open_time") or row.get("opened_at"),
                 "closed_at": closed_at,
                 "stop_loss": row.get("stop_loss"),
@@ -11240,13 +11232,13 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
                 "fees": row.get("fees"),
                 "result_cash": result_cash,
                 "result_currency": row.get("result_currency") or "AUD",
-                "result_pct": result_pct,
+                "result_pct": row.get("result_pct"),
                 "_row_balance_after_trade": None,
                 "_row_entry_price": row.get("entry_price"),
                 "_row_exit_price": row.get("exit_price"),
                 "_row_realized_pnl": result_cash,
                 "_row_updated_at": row.get("updated_at"),
-                "outcome": outcome,
+                "outcome": row.get("outcome"),
                 "duration_seconds": row.get("duration_seconds"),
             }
         )

@@ -400,6 +400,7 @@
         rtBody.innerHTML = '';
         items.forEach((item) => {
         const tr = document.createElement('tr');
+        const isMonthlyAudRow = item.row_type === 'monthly_aud_reval';
 
         const rawResultPct = item.result_pct;
         const hasResultPct =
@@ -430,24 +431,28 @@
         const cells = [
           item.account,
           item.symbol,
-          item.side,
+          isMonthlyAudRow ? '' : item.side,
           fmtTime(item.opened_at),
           fmtTime(item.closed_at),
           fmtNullableNum(item.entry_price, 6),
           fmtNullableNum(item.exit_price, 6),
-          fmtNullableNum(item.stop_loss, 6),
-          fmtNullableNum(item.take_profit, 6),
-          fmtNum(item.fees, 2),
+          isMonthlyAudRow ? '' : fmtNullableNum(item.stop_loss, 6),
+          isMonthlyAudRow ? '' : fmtNullableNum(item.take_profit, 6),
+          isMonthlyAudRow ? '' : fmtNum(item.fees, 2),
         ];
 
         cells.forEach((c) => {
           const td = document.createElement('td');
-          td.textContent = fmt(c);
+          td.textContent = isMonthlyAudRow && c === '' ? '' : fmt(c);
           tr.appendChild(td);
         });
 
         const outcomeTd = document.createElement('td');
-        outcomeTd.innerHTML = `<span class="rt-pill ${outcomeCls}">${outcome}</span>`;
+        if (isMonthlyAudRow) {
+          outcomeTd.textContent = '';
+        } else {
+          outcomeTd.innerHTML = `<span class="rt-pill ${outcomeCls}">${outcome}</span>`;
+        }
         tr.appendChild(outcomeTd);
 
         const cashTd = document.createElement('td');
@@ -463,7 +468,9 @@
 
         const resultTd = document.createElement('td');
         resultTd.className = `num ${pctCls}`;
-        if (!hasResultPct) {
+        if (isMonthlyAudRow) {
+          resultTd.textContent = '';
+        } else if (!hasResultPct) {
           resultTd.textContent = '—';
         } else {
           const dp = Math.abs(resultPct) > 0 && Math.abs(resultPct) < 0.01 ? 4 : 2;
@@ -472,7 +479,7 @@
         tr.appendChild(resultTd);
 
         const durTd = document.createElement('td');
-        durTd.textContent = fmtDuration(item.duration_seconds);
+        durTd.textContent = isMonthlyAudRow ? '' : fmtDuration(item.duration_seconds);
         tr.appendChild(durTd);
 
           rtBody.appendChild(tr);

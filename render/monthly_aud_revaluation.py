@@ -721,7 +721,6 @@ async def sync_monthly_aud_revaluation(
             delta_aud = end_aud - start_aud
             result_cash = _roundup_away_from_zero(delta_aud, 2)
             result_pct = (delta_aud / start_aud) * 100.0 if start_aud else None
-            outcome = "Win" if result_cash > 0 else ("Loss" if result_cash < 0 else "Breakeven")
 
             row_id = f"monthly_aud_reval:bybit_live:{month_key}"
             close_local = next_local - timedelta(seconds=1)
@@ -732,18 +731,20 @@ async def sync_monthly_aud_revaluation(
                 "account": "live",
                 "account_label": "Bybit Live",
                 "symbol": "MONTHLY AUD P/L",
-                "side": "FX Reval",
+                "side": "",
                 "status": "closed",
                 "open_time": start_local.isoformat(),
                 "close_time": close_local.isoformat(),
-                "entry_price": start_balance,
-                "exit_price": end_balance,
-                "fees": None,
+                "entry_price": start_rate,
+                "exit_price": end_rate,
+                "stop_loss": "",
+                "take_profit": "",
+                "fees": "",
                 "result_cash": result_cash,
                 "result_currency": "AUD",
-                "result_pct": result_pct,
-                "outcome": outcome,
-                "duration_seconds": int((close_local - start_local).total_seconds()),
+                "result_pct": "",
+                "outcome": "",
+                "duration_seconds": "",
                 "raw_refs": {
                     "period_month": month_key,
                     "start_rate": start_rate,
@@ -756,6 +757,7 @@ async def sync_monthly_aud_revaluation(
                     "end_balance_usdt": end_balance,
                     "start_balance_source": start_source,
                     "end_balance_source": end_source,
+                    "computed_result_pct": result_pct,
                 },
                 "updated_at": _utc_now_iso(),
             }
