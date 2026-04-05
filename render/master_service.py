@@ -11357,10 +11357,21 @@ async def diagnostics_monthly_aud_reval() -> JSONResponse:
     rows = _get_monthly_aud_revaluation_rows()
     state = _load_json_file(MONTHLY_AUD_REVALUATION_STATE_PATH, {})
     latest = rows[0] if rows else None
+    march_id = "monthly_aud_reval:bybit_live:2026-03"
+    march_row = next(
+        (row for row in rows if isinstance(row, dict) and str(row.get("id") or "") == march_id),
+        None,
+    )
+    last_boundary = state.get("last_boundary_resolution") if isinstance(state, dict) else {}
+    start_boundary = last_boundary.get("start") if isinstance(last_boundary, dict) else {}
+    end_boundary = last_boundary.get("end") if isinstance(last_boundary, dict) else {}
     return JSONResponse(
         {
             "ok": True,
             "rows_count": len(rows),
+            "row_count": len(rows),
+            "march_2026_exists": isinstance(march_row, dict),
+            "march_2026_row_id": march_row.get("id") if isinstance(march_row, dict) else None,
             "latest_row_id": latest.get("id") if isinstance(latest, dict) else None,
             "latest_period_month": ((latest or {}).get("raw_refs") or {}).get("period_month") if isinstance(latest, dict) else None,
             "last_sync_result": (state or {}).get("last_result") if isinstance(state, dict) else None,
@@ -11369,6 +11380,11 @@ async def diagnostics_monthly_aud_reval() -> JSONResponse:
             "last_stage": (state or {}).get("stage") if isinstance(state, dict) else None,
             "month_key": (state or {}).get("month_key") if isinstance(state, dict) else None,
             "traceback": (state or {}).get("traceback") if isinstance(state, dict) else None,
+            "last_resolved_start_balance": start_boundary.get("resolved_balance") if isinstance(start_boundary, dict) else None,
+            "last_resolved_end_balance": end_boundary.get("resolved_balance") if isinstance(end_boundary, dict) else None,
+            "last_start_balance_source": start_boundary.get("balance_source") if isinstance(start_boundary, dict) else None,
+            "last_end_balance_source": end_boundary.get("balance_source") if isinstance(end_boundary, dict) else None,
+            "last_boundary_resolution": last_boundary if isinstance(last_boundary, dict) else None,
             "rows": rows[:12],
             "updated_at": _utc_now_iso(),
         }
