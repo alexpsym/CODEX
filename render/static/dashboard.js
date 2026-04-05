@@ -629,7 +629,20 @@
       .filter(Boolean);
   };
 
-  const isLikelyFxPair = (value) => /^[A-Z]{6}$/.test(String(value || '').trim().toUpperCase()) || /^[A-Z]{3}_[A-Z]{3}$/.test(String(value || '').trim().toUpperCase());
+  const FX_CODES = new Set(['AUD', 'CAD', 'CHF', 'EUR', 'GBP', 'HKD', 'JPY', 'NZD', 'SGD', 'TRY', 'USD', 'ZAR', 'XAU', 'XAG']);
+  const isLikelyFxPair = (value) => {
+    const token = String(value || '').trim().toUpperCase();
+    if (/^[A-Z]{3}_[A-Z]{3}$/.test(token)) {
+      const [base, quote] = token.split('_');
+      return FX_CODES.has(base) && FX_CODES.has(quote);
+    }
+    if (/^[A-Z]{6}$/.test(token)) {
+      const base = token.slice(0, 3);
+      const quote = token.slice(3);
+      return FX_CODES.has(base) && FX_CODES.has(quote);
+    }
+    return false;
+  };
 
   const resolveBybitSymbol = async (symbol) => {
     const token = String(symbol || '').trim().toUpperCase();

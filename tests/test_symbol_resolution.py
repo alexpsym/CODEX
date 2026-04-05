@@ -11,6 +11,7 @@ sys.modules[SPEC.name] = mod
 SPEC.loader.exec_module(mod)
 
 resolve_bybit_symbol_from_choices = mod.resolve_bybit_symbol_from_choices
+is_likely_oanda_pair = mod.is_likely_oanda_pair
 
 
 def test_resolve_bybit_shorthand_usdt_preferred() -> None:
@@ -30,3 +31,9 @@ def test_resolve_bybit_full_symbol_pass_through() -> None:
 def test_resolve_bybit_unknown_returns_none() -> None:
     symbols = ["BTCUSDT", "ETHUSDT"]
     assert resolve_bybit_symbol_from_choices("UNKNOWN", symbols) is None
+
+
+def test_is_likely_oanda_pair_strict() -> None:
+    assert is_likely_oanda_pair("EURUSD") is True
+    assert is_likely_oanda_pair("XAUUSD") is True
+    assert is_likely_oanda_pair("BRUSDT") is False

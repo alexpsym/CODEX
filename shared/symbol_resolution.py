@@ -3,6 +3,23 @@ from __future__ import annotations
 import re
 from typing import Iterable, Optional
 
+_KNOWN_OANDA_CODES = {
+    "AUD",
+    "CAD",
+    "CHF",
+    "EUR",
+    "GBP",
+    "HKD",
+    "JPY",
+    "NZD",
+    "SGD",
+    "TRY",
+    "USD",
+    "ZAR",
+    "XAU",
+    "XAG",
+}
+
 
 def norm_symbol(raw: str) -> str:
     """Uppercase alnum-only symbol key."""
@@ -27,6 +44,21 @@ def normalize_oanda_symbol_query(raw: str, available: list[str] | None = None) -
     if len(lookup) == 6 and lookup.isalpha():
         return f"{lookup[:3]}_{lookup[3:]}"
     return value
+
+
+def is_likely_oanda_pair(raw: str) -> bool:
+    value = str(raw or "").strip().upper()
+    if not value:
+        return False
+    if re.fullmatch(r"[A-Z]{3}_[A-Z]{3}", value):
+        base, quote = value.split("_", 1)
+        return base in _KNOWN_OANDA_CODES and quote in _KNOWN_OANDA_CODES
+    compact = norm_symbol(value)
+    if re.fullmatch(r"[A-Z]{6}", compact):
+        base = compact[:3]
+        quote = compact[3:]
+        return base in _KNOWN_OANDA_CODES and quote in _KNOWN_OANDA_CODES
+    return False
 
 
 def _sorted_candidates(candidates: Iterable[str], preferred_quotes: tuple[str, ...]) -> list[str]:

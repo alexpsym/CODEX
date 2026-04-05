@@ -42,6 +42,7 @@ from bybit_credentials import resolve_bybit_credentials_for
 from render.monthly_aud_revaluation import MonthlyAudRevalError, sync_monthly_aud_revaluation
 from shared.bybit_option_resolver import resolve_option_by_target_risk
 from shared.symbol_resolution import (
+    is_likely_oanda_pair,
     norm_symbol,
     normalize_oanda_symbol_query,
     resolve_bybit_symbol_from_choices,
@@ -365,7 +366,7 @@ def _normalize_watchlist(items: Iterable[object]) -> List[str]:
         symbol = str(item or "").strip().upper()
         if not symbol:
             continue
-        if len(symbol) == 6 and symbol.isalpha():
+        if len(symbol) == 6 and symbol.isalpha() and is_likely_oanda_pair(symbol):
             symbol = f"{symbol[:3]}_{symbol[3:]}"
         if symbol in seen:
             continue
@@ -385,8 +386,7 @@ def _normalize_instrument_key(value: object) -> str:
 
 
 def _is_likely_fx_pair(value: str) -> bool:
-    raw = str(value or "").strip().upper()
-    return bool(re.fullmatch(r"[A-Z]{6}", raw) or re.fullmatch(r"[A-Z]{3}_[A-Z]{3}", raw))
+    return is_likely_oanda_pair(value)
 
 
 def _oanda_aliases(name: str, display_name: Optional[str] = None) -> set[str]:
