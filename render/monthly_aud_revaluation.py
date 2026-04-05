@@ -507,6 +507,14 @@ def _is_finite(value: Any) -> bool:
     return val is not None and math.isfinite(val)
 
 
+def _is_close(a: Any, b: Any, tol: float = 1e-9) -> bool:
+    av = _coerce_float(a)
+    bv = _coerce_float(b)
+    if av is None or bv is None:
+        return False
+    return abs(av - bv) <= tol
+
+
 def _row_is_valid_month_row(row: Dict[str, Any], month_key: str) -> bool:
     if str(row.get("id") or "") != f"monthly_aud_reval:bybit_live:{month_key}":
         return False
@@ -517,6 +525,10 @@ def _row_is_valid_month_row(row: Dict[str, Any], month_key: str) -> bool:
         and _is_finite(refs.get("start_rate"))
         and _is_finite(refs.get("end_rate"))
         and _is_finite(row.get("result_cash"))
+        and _is_finite(row.get("entry_price"))
+        and _is_finite(row.get("exit_price"))
+        and _is_close(row.get("entry_price"), refs.get("start_rate"))
+        and _is_close(row.get("exit_price"), refs.get("end_rate"))
     )
 
 
@@ -651,6 +663,37 @@ async def sync_monthly_aud_revaluation(
         )
         raise MonthlyAudRevalError("MONTHLY_AUD_REVAL_OANDA_RATE_ERROR", str(exc), stage="credentials") from exc
 
+    changed = 0
+    for idx, existing in enumerate(rows):
+        if not isinstance(existing, dict):
+            continue
+        if str(existing.get("row_type") or "") != "monthly_aud_reval":
+            continue
+        refs = existing.get("raw_refs") if isinstance(existing.get("raw_refs"), dict) else {}
+        start_rate = _coerce_float(refs.get("start_rate"))
+        end_rate = _coerce_float(refs.get("end_rate"))
+        if start_rate is None or end_rate is None:
+            continue
+        needs_repair = (
+            not _is_close(existing.get("entry_price"), start_rate)
+            or not _is_close(existing.get("exit_price"), end_rate)
+        )
+        if not needs_repair:
+            continue
+        repaired = dict(existing)
+        repaired["entry_price"] = start_rate
+        repaired["exit_price"] = end_rate
+        repaired["side"] = ""
+        repaired["stop_loss"] = ""
+        repaired["take_profit"] = ""
+        repaired["fees"] = ""
+        repaired["outcome"] = ""
+        repaired["result_pct"] = ""
+        repaired["duration_seconds"] = ""
+        repaired["updated_at"] = _utc_now_iso()
+        rows[idx] = repaired
+        changed += 1
+
     valid_months: List[str] = []
     for r in rows:
         if not isinstance(r, dict):
@@ -661,7 +704,6 @@ async def sync_monthly_aud_revaluation(
     target_months = _iter_target_months(valid_months, now_local=datetime.now(BRISBANE_TZ))
 
     by_id = {str(r.get("id") or ""): dict(r) for r in rows if isinstance(r, dict) and str(r.get("id") or "").strip()}
-    changed = 0
     last_boundary_meta: Dict[str, Any] = {}
     last_oanda_window: Dict[str, Any] = {}
 
