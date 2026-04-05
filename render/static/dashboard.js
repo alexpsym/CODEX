@@ -408,7 +408,18 @@
           rawResultPct !== '' &&
           Number.isFinite(Number(rawResultPct));
         const resultPct = hasResultPct ? Number(rawResultPct) : null;
-        const pnlCls = hasResultPct
+
+        const rawResultCash = item.result_cash;
+        const hasResultCash =
+          rawResultCash !== null &&
+          rawResultCash !== undefined &&
+          rawResultCash !== '' &&
+          Number.isFinite(Number(rawResultCash));
+        const resultCash = hasResultCash ? Number(rawResultCash) : null;
+        const cashCls = hasResultCash
+          ? (resultCash > 0 ? 'pos' : (resultCash < 0 ? 'neg' : ''))
+          : '';
+        const pctCls = hasResultPct
           ? (resultPct > 0 ? 'pos' : (resultPct < 0 ? 'neg' : ''))
           : '';
         const outcome = String(item.outcome || '—');
@@ -439,8 +450,19 @@
         outcomeTd.innerHTML = `<span class="rt-pill ${outcomeCls}">${outcome}</span>`;
         tr.appendChild(outcomeTd);
 
+        const cashTd = document.createElement('td');
+        cashTd.className = `num ${cashCls}`;
+        if (!hasResultCash) {
+          cashTd.textContent = '—';
+        } else {
+          const cashText = fmtNum(resultCash, 2);
+          const ccy = String(item.result_currency || '').trim();
+          cashTd.textContent = ccy ? `${cashText} ${ccy}` : cashText;
+        }
+        tr.appendChild(cashTd);
+
         const resultTd = document.createElement('td');
-        resultTd.className = `num ${pnlCls}`;
+        resultTd.className = `num ${pctCls}`;
         if (!hasResultPct) {
           resultTd.textContent = '—';
         } else {
