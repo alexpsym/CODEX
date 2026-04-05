@@ -364,7 +364,21 @@ async def _fetch_oanda_candles(
     api_key: str,
     start_utc: datetime,
     end_utc: datetime,
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
+    now_utc = datetime.now(timezone.utc)
+    safe_now = now_utc - timedelta(seconds=5)
+    safe_end_utc = min(end_utc, safe_now)
+    if safe_end_utc <= start_utc:
+        raise MonthlyAudRevalError(
+            "MONTHLY_AUD_REVAL_PENDING_NEXT_OPEN",
+            (
+                "OANDA window not yet available: "
+                f"start={start_utc.isoformat()} end={end_utc.isoformat()} "
+                f"safe_end={safe_end_utc.isoformat()} now={now_utc.isoformat()}"
+            ),
+            stage="oanda_candles_window",
+        )
+
     token = (api_key or "").strip().strip('"').strip("'")
     url = f"{base_url.rstrip('/')}/v3/instruments/AUD_USD/candles"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -372,7 +386,7 @@ async def _fetch_oanda_candles(
         "price": "M",
         "granularity": "D",
         "from": start_utc.isoformat().replace("+00:00", "Z"),
-        "to": end_utc.isoformat().replace("+00:00", "Z"),
+        "to": safe_end_utc.isoformat().replace("+00:00", "Z"),
         "includeFirst": "true",
         "dailyAlignment": "0",
         "alignmentTimezone": "Australia/Brisbane",
@@ -387,7 +401,14 @@ async def _fetch_oanda_candles(
         )
     payload = resp.json()
     candles = payload.get("candles") if isinstance(payload, dict) else []
-    return [c for c in candles if isinstance(c, dict)] if isinstance(candles, list) else []
+    window = {
+        "request_start_utc": start_utc.isoformat(),
+        "request_end_utc": end_utc.isoformat(),
+        "clamped_end_utc": safe_end_utc.isoformat(),
+        "now_utc": now_utc.isoformat(),
+        "request_clamped": str(safe_end_utc != end_utc).lower(),
+    }
+    return ([c for c in candles if isinstance(c, dict)] if isinstance(candles, list) else []), window
 
 
 async def _resolve_boundary_rate(
@@ -395,18 +416,31 @@ async def _resolve_boundary_rate(
     month_key: str,
     base_url: str,
     api_key: str,
+    logger,
 ) -> Dict[str, float]:
-    start_local, _ = _month_bounds(month_key)
-    candles = await _fetch_oanda_candles(
+    boundary_local, _ = _month_bounds(month_key)
+    request_start_utc = (boundary_local - timedelta(days=10)).astimezone(timezone.utc)
+    request_end_utc = (boundary_local + timedelta(days=10)).astimezone(timezone.utc)
+    candles, window = await _fetch_oanda_candles(
         base_url=base_url,
         api_key=api_key,
-        start_utc=(start_local - timedelta(days=10)).astimezone(timezone.utc),
-        end_utc=(start_local + timedelta(days=10)).astimezone(timezone.utc),
+        start_utc=request_start_utc,
+        end_utc=request_end_utc,
+    )
+    logger.info(
+        "MONTHLY_AUD_REVAL_OANDA_WINDOW month=%s boundary_local=%s request_start_utc=%s request_end_utc=%s clamped_end_utc=%s now_utc=%s clamped=%s",
+        month_key,
+        boundary_local.isoformat(),
+        window.get("request_start_utc"),
+        window.get("request_end_utc"),
+        window.get("clamped_end_utc"),
+        window.get("now_utc"),
+        window.get("request_clamped"),
     )
 
     prev_close: Optional[float] = None
     next_open: Optional[float] = None
-    start_date = start_local.date()
+    start_date = boundary_local.date()
     for candle in candles:
         mid = candle.get("mid") if isinstance(candle.get("mid"), dict) else {}
         candle_date = _parse_oanda_time(str(candle.get("time") or "")).astimezone(BRISBANE_TZ).date()
@@ -424,7 +458,12 @@ async def _resolve_boundary_rate(
         raise MonthlyAudRevalError("MONTHLY_AUD_REVAL_OANDA_RATE_ERROR", f"Missing previous close for {month_key}", stage="boundary_prev_close")
     if next_open is None:
         raise MonthlyAudRevalError("MONTHLY_AUD_REVAL_PENDING_NEXT_OPEN", f"Missing next open for {month_key}", stage="boundary_next_open")
-    return {"rate": (prev_close + next_open) / 2.0, "fx_close": prev_close, "fx_next_open": next_open}
+    return {
+        "rate": (prev_close + next_open) / 2.0,
+        "fx_close": prev_close,
+        "fx_next_open": next_open,
+        "window": window,
+    }
 
 
 def _load_rows(path: Path) -> List[Dict[str, Any]]:
@@ -624,6 +663,7 @@ async def sync_monthly_aud_revaluation(
     by_id = {str(r.get("id") or ""): dict(r) for r in rows if isinstance(r, dict) and str(r.get("id") or "").strip()}
     changed = 0
     last_boundary_meta: Dict[str, Any] = {}
+    last_oanda_window: Dict[str, Any] = {}
 
     for month_key in target_months:
         start_local, next_local = _month_bounds(month_key)
@@ -654,13 +694,22 @@ async def sync_monthly_aud_revaluation(
                 month_key=month_key,
                 base_url=oanda_cfg["base_url"],
                 api_key=oanda_cfg["token"],
+                logger=logger,
             )
             end_month_key = f"{next_local.year:04d}-{next_local.month:02d}"
             end_rate_info = await _resolve_boundary_rate(
                 month_key=end_month_key,
                 base_url=oanda_cfg["base_url"],
                 api_key=oanda_cfg["token"],
+                logger=logger,
             )
+            last_oanda_window = {
+                "month_key": month_key,
+                "start_boundary_month": month_key,
+                "end_boundary_month": end_month_key,
+                "start_window": start_rate_info.get("window"),
+                "end_window": end_rate_info.get("window"),
+            }
 
             start_rate = _coerce_float(start_rate_info.get("rate"))
             end_rate = _coerce_float(end_rate_info.get("rate"))
@@ -739,6 +788,10 @@ async def sync_monthly_aud_revaluation(
                 error_detail=detail,
                 tb=tb,
             )
+            if last_oanda_window:
+                state = _load_state(state_path)
+                state["last_oanda_window"] = last_oanda_window
+                _save_state(state_path, state)
             raise MonthlyAudRevalError(code, detail, stage=stage) from exc
 
     rows_out = list(by_id.values())
@@ -770,6 +823,7 @@ async def sync_monthly_aud_revaluation(
             "error_detail": None,
             "traceback": None,
             "last_boundary_resolution": last_boundary_meta,
+            "last_oanda_window": last_oanda_window,
             "last_synced_at": _utc_now_iso(),
             "updated_at": _utc_now_iso(),
             "last_result": {

@@ -11363,8 +11363,11 @@ async def diagnostics_monthly_aud_reval() -> JSONResponse:
         None,
     )
     last_boundary = state.get("last_boundary_resolution") if isinstance(state, dict) else {}
+    last_oanda_window = state.get("last_oanda_window") if isinstance(state, dict) else {}
     start_boundary = last_boundary.get("start") if isinstance(last_boundary, dict) else {}
     end_boundary = last_boundary.get("end") if isinstance(last_boundary, dict) else {}
+    start_window = (last_oanda_window.get("start_window") if isinstance(last_oanda_window, dict) else {}) or {}
+    end_window = (last_oanda_window.get("end_window") if isinstance(last_oanda_window, dict) else {}) or {}
     return JSONResponse(
         {
             "ok": True,
@@ -11385,6 +11388,11 @@ async def diagnostics_monthly_aud_reval() -> JSONResponse:
             "last_start_balance_source": start_boundary.get("balance_source") if isinstance(start_boundary, dict) else None,
             "last_end_balance_source": end_boundary.get("balance_source") if isinstance(end_boundary, dict) else None,
             "last_boundary_resolution": last_boundary if isinstance(last_boundary, dict) else None,
+            "last_oanda_request_window": last_oanda_window if isinstance(last_oanda_window, dict) else None,
+            "request_start_utc": end_window.get("request_start_utc") or start_window.get("request_start_utc"),
+            "request_end_utc": end_window.get("request_end_utc") or start_window.get("request_end_utc"),
+            "clamped_end_utc": end_window.get("clamped_end_utc") or start_window.get("clamped_end_utc"),
+            "now_utc": end_window.get("now_utc") or start_window.get("now_utc"),
             "rows": rows[:12],
             "updated_at": _utc_now_iso(),
         }
