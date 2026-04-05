@@ -133,6 +133,18 @@
     return resolved || value;
   }
 
+  async function resolveBybitSymbol(q) {
+    const value = String(q || '').trim();
+    if (!value || isLikelyFxPair(value)) return value;
+    const resp = await fetch(`/api/resolve-symbol?symbol=${encodeURIComponent(value)}&prefer=bybit&scope=all`, {
+      cache: 'no-store',
+    });
+    if (!resp.ok) return value;
+    const data = await resp.json().catch(() => null);
+    const resolved = String(data?.resolved_symbol || '').trim();
+    return resolved || value;
+  }
+
   function renderSpecsTable(specs) {
     if (!rows) return;
     rows.innerHTML = '';
