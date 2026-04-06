@@ -73,11 +73,6 @@
         }
     };
 
-    const backBtn = document.getElementById('nav-back');
-    const forwardBtn = document.getElementById('nav-forward');
-    backBtn?.addEventListener('click', () => window.history.back());
-    forwardBtn?.addEventListener('click', () => window.history.forward());
-
     load();
     setInterval(load, 5000);
 })();

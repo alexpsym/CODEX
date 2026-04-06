@@ -866,11 +866,6 @@
         }
     };
 
-    const backBtn = document.getElementById('nav-back');
-    const forwardBtn = document.getElementById('nav-forward');
-    backBtn?.addEventListener('click', () => window.history.back());
-    forwardBtn?.addEventListener('click', () => window.history.forward());
-
     startBtn?.addEventListener('click', startScript);
     stopBtn?.addEventListener('click', stopScript);
     saveSettingsBtn?.addEventListener('click', (event) => {

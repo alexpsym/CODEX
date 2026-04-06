@@ -4,7 +4,6 @@
   const accountSel = document.getElementById('history-account');
   const periodWrap = document.getElementById('history-periods');
   const exportBtn = document.getElementById('history-export');
-  const homeBtn = document.getElementById('history-home');
   const statusEl = document.getElementById('history-status');
   const resultEl = document.getElementById('history-result');
 
@@ -172,7 +171,6 @@
       setStatus(err?.message || String(err), true);
     }
   });
-  homeBtn?.addEventListener('click', () => { window.location.href = '/'; });
 
   const qs = new URLSearchParams(window.location.search);
   const broker = (qs.get('broker') || '').toLowerCase();

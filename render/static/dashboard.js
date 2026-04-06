@@ -230,7 +230,7 @@
 
     btn.addEventListener('click', () => {
       const target = script.open_url || '/';
-      window.location.href = target;
+      window.open(target, '_blank', 'noopener');
     });
 
     return btn;
