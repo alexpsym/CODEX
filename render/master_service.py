@@ -322,9 +322,9 @@ _DROPBOX_UPLOAD_TASK: Optional[asyncio.Task] = None
 _DROPBOX_UPLOAD_TIMER: Optional[threading.Timer] = None
 _DROPBOX_UPLOAD_TIMER_LOCK = threading.Lock()
 _BYBIT_EXEC_LAST_SEEN: Dict[str, int] = {}
-_BYBIT_DEMO_CLOSED_PNL_LAST_SEEN: Optional[int] = None
-_BYBIT_DEMO_SYNC_LOCK = asyncio.Lock()
-_BYBIT_DEMO_SYNC_LAST_RUN_AT = 0.0
+_BYBIT_CLOSED_PNL_LAST_SEEN: Dict[str, Optional[int]] = {"demo": None, "live": None}
+_BYBIT_CLOSED_PNL_SYNC_LOCK: Dict[str, asyncio.Lock] = {"demo": asyncio.Lock(), "live": asyncio.Lock()}
+_BYBIT_CLOSED_PNL_SYNC_LAST_RUN_AT: Dict[str, float] = {"demo": 0.0, "live": 0.0}
 _BYBIT_DEMO_SYNC_MANUAL_COOLDOWN_SECONDS = float(
     os.getenv("BYBIT_DEMO_SYNC_MANUAL_COOLDOWN_SECONDS", "30")
 )
@@ -3252,7 +3252,7 @@ def script_logs_url(script_name: str) -> str:
 
 FRIENDLY_SCRIPT_LABELS: Dict[str, str] = {
     "PUSH": "Push",
-    "bybit_monitor": "Monitor",
+    "bybit_monitor": "Scanner",
     "bybit_trigger_bounce_trader": "Bounce Trader",
     "bybithistory-clone": "History",
     "coinspot-clone": "History",
@@ -3265,7 +3265,7 @@ FRIENDLY_SCRIPT_LABELS: Dict[str, str] = {
     "journal": "Journal",
     "oanda-calculator-clone": "Calculator",
     "oanda_history-clone": "History",
-    "oanda_monitor": "Monitor",
+    "oanda_monitor": "Scanner",
     "pinescripts": "Pine Scripts",
     "trading-journal": "Trading Journal",
 }
@@ -3273,7 +3273,7 @@ FRIENDLY_SCRIPT_LABELS: Dict[str, str] = {
 MERGED_SCRIPT_BUTTONS: List[Dict[str, object]] = [
     {"id": "calculator", "name": "calculator", "label": "Calculator", "open_url": "/merged/calculator"},
     {"id": "history", "name": "history", "label": "History", "open_url": "/merged/history"},
-    {"id": "monitor", "name": "monitor", "label": "Monitor", "open_url": "/merged/monitor"},
+    {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor"},
     {"id": "bounce-trader", "name": "bounce-trader", "label": "Bounce Trader", "open_url": "/merged/bounce-trader"},
 ]
 
@@ -3592,7 +3592,7 @@ async def _schedule_monthly_aud_revaluation_sync() -> None:
 async def _run_daily_trade_history_sync(*, reason: str) -> Dict[str, object]:
     async with _DAILY_TRADE_SYNC_LOCK:
         started_at = _utc_now_iso()
-        bybit_result: Optional[Dict[str, object]] = None
+        bybit_result: Dict[str, object] = {}
         import_result: Optional[Dict[str, object]] = None
         errors: List[str] = []
         _record_daily_trade_sync_status(
@@ -3604,10 +3604,15 @@ async def _run_daily_trade_history_sync(*, reason: str) -> Dict[str, object]:
 
         if ENABLE_BYBIT_DEMO_JOURNAL:
             try:
-                bybit_result = await _run_bybit_demo_closed_pnl_sync(reason=reason)
+                bybit_result["demo"] = await _run_bybit_closed_pnl_sync(account_mode="demo", reason=reason)
             except Exception as exc:
                 errors.append(f"Bybit demo sync failed: {exc}")
-                bybit_result = {"ok": False, "error": str(exc)}
+                bybit_result["demo"] = {"ok": False, "error": str(exc)}
+        try:
+            bybit_result["live"] = await _run_bybit_closed_pnl_sync(account_mode="live", reason=reason)
+        except Exception as exc:
+            errors.append(f"Bybit live sync failed: {exc}")
+            bybit_result["live"] = {"ok": False, "error": str(exc)}
 
         try:
             import_result = await asyncio.to_thread(_import_trading_journal_from_dropbox_excel)
@@ -3616,9 +3621,7 @@ async def _run_daily_trade_history_sync(*, reason: str) -> Dict[str, object]:
             import_result = {"ok": False, "error": str(exc)}
 
         import_ok = bool(import_result.get("ok", False)) if isinstance(import_result, dict) else False
-        bybit_ok = True
-        if ENABLE_BYBIT_DEMO_JOURNAL:
-            bybit_ok = bool(bybit_result and bybit_result.get("ok", False))
+        bybit_ok = all(bool(v.get("ok", False)) for v in bybit_result.values() if isinstance(v, dict))
         ok_flag = import_ok and bybit_ok and not errors
         monthly_result = await _run_monthly_aud_revaluation_sync(reason=f"daily:{reason}")
 
@@ -4632,7 +4635,6 @@ INSTRUMENT_SPECS_TEMPLATE = """<!DOCTYPE html>
       <input id="q" type="text" placeholder="eurusd / BTC" />
       <button id="load" type="button">Load</button>
       <a class="btn" id="download" href="#">Download JPG</a>
-      <a class="btn" href="/">Back</a>
     </div>
 
     <section class="panel">
@@ -4675,10 +4677,6 @@ CATEGORY_TEMPLATE = """<!DOCTYPE html>
     </style>
 </head>
 <body data-category=\"{category}\">
-    <div class=\"nav-bar\">
-        <button class=\"secondary\" id=\"nav-back\">Back</button>
-        <button class=\"secondary\" id=\"nav-forward\">Forward</button>
-    </div>
     <h1>{category} scripts</h1>
     <p class=\"meta\">Select a script to view its page.</p>
     <div id=\"grid\" class=\"grid\"></div>
@@ -4720,10 +4718,6 @@ SCRIPT_PAGE_TEMPLATE = """<!DOCTYPE html>
     </style>
 </head>
 <body data-script-name=\"{script_name}\" data-has-ui=\"{has_ui}\">
-    <div class=\"nav-bar\">
-        <button class=\"secondary\" id=\"nav-back\">Back</button>
-        <button class=\"secondary\" id=\"nav-forward\">Forward</button>
-    </div>
     <h1>{script_name}</h1>
     <p class=\"meta\" id=\"script-status\">Loading status...</p>
     <div class=\"actions\">
@@ -7941,7 +7935,7 @@ def _score_bybit_tpsl_candidate(item: Dict[str, object]) -> Tuple[int, int, int,
     return stop_loss + take_profit, tpsl_hint, has_trigger, has_parent, closed_status, updated_time
 
 
-def _resolve_bybit_demo_tpsl(
+def _resolve_bybit_tpsl(
     *,
     entry: Dict[str, object],
     order_candidates: List[Dict[str, object]],
@@ -8049,9 +8043,10 @@ def _journal_id_for_bybit_demo_row(symbol: str, order_id: str) -> str:
     return f"bybit:demo:closedpnl:{symbol_norm}:{order_norm}"
 
 
-def _normalize_bybit_demo_closed_pnl_row(
+def _normalize_bybit_closed_pnl_row(
     entry: Dict[str, object],
     *,
+    account_mode: str = "demo",
     balance_after_trade: Optional[float],
     display_side: Optional[str] = None,
     stop_loss: Optional[float] = None,
@@ -8077,11 +8072,12 @@ def _normalize_bybit_demo_closed_pnl_row(
     }
     if isinstance(raw_refs_extra, dict):
         raw_refs.update(raw_refs_extra)
+    mode = "demo" if str(account_mode).strip().lower() == "demo" else "live"
     return {
-        "id": f"bybit:demo:closedpnl:{symbol}:{order_id}",
+        "id": f"bybit:{mode}:closedpnl:{symbol}:{order_id}",
         "source": "bybit",
-        "account": "demo",
-        "account_label": "Bybit Demo",
+        "account": mode,
+        "account_label": "Bybit Demo" if mode == "demo" else "Bybit Live",
         "asset_class": "crypto",
         "symbol": symbol,
         "side": side_value.title(),
@@ -8325,16 +8321,20 @@ def _append_bybit_demo_rows_to_workbook(active_folder: str, rows: List[Dict[str,
         return changed
 
 
-async def _sync_bybit_demo_closed_pnl_window(
+async def _sync_bybit_closed_pnl_window(
     *,
+    account_mode: str,
     base_url: str,
     api_key: str,
     api_secret: str,
     start_time: int,
     end_time: int,
 ) -> int:
-    active_folder, _entries = await asyncio.to_thread(_resolve_trading_journal_dropbox_folder)
-    await asyncio.to_thread(_ensure_bybit_demo_dropbox_files, active_folder)
+    mode = "demo" if str(account_mode).strip().lower() == "demo" else "live"
+    active_folder: Optional[str] = None
+    if mode == "demo":
+        active_folder, _entries = await asyncio.to_thread(_resolve_trading_journal_dropbox_folder)
+        await asyncio.to_thread(_ensure_bybit_demo_dropbox_files, active_folder)
 
     orders_by_id: Dict[str, List[Dict[str, object]]] = defaultdict(list)
     orders_by_link_id: Dict[str, List[Dict[str, object]]] = defaultdict(list)
@@ -8437,7 +8437,7 @@ async def _sync_bybit_demo_closed_pnl_window(
             break
 
     rows: List[Dict[str, object]] = []
-    tpsl_cache = load_bybit_demo_tpsl_cache()
+    tpsl_cache = load_bybit_demo_tpsl_cache() if mode == "demo" else {}
     cursor: Optional[str] = None
     max_seen = start_time
     while True:
@@ -8477,17 +8477,20 @@ async def _sync_bybit_demo_closed_pnl_window(
                 opposite_side,
                 updated_ms,
             )
-            cache_entry, cache_match_type = resolve_cached_bybit_demo_tpsl(
-                cache=tpsl_cache,
-                order_id=order_id,
-                order_link_id=order_link_id,
-                parent_order_link_id=parent_link_id,
-                symbol=str(entry.get("symbol") or "").strip().upper(),
-                side=str(entry.get("side") or "").strip().title(),
-                open_time_ms=int(_to_float(entry.get("createdTime")) or 0) or None,
-                close_time_ms=updated_ms or None,
-            )
-            stop_loss, take_profit, tpsl_source_raw, tpsl_debug = _resolve_bybit_demo_tpsl(
+            cache_entry: Optional[Dict[str, object]] = None
+            cache_match_type = "none"
+            if mode == "demo":
+                cache_entry, cache_match_type = resolve_cached_bybit_demo_tpsl(
+                    cache=tpsl_cache,
+                    order_id=order_id,
+                    order_link_id=order_link_id,
+                    parent_order_link_id=parent_link_id,
+                    symbol=str(entry.get("symbol") or "").strip().upper(),
+                    side=str(entry.get("side") or "").strip().title(),
+                    open_time_ms=int(_to_float(entry.get("createdTime")) or 0) or None,
+                    close_time_ms=updated_ms or None,
+                )
+            stop_loss, take_profit, tpsl_source_raw, tpsl_debug = _resolve_bybit_tpsl(
                 entry=entry,
                 order_candidates=order_candidates,
                 order_match=order_match,
@@ -8518,8 +8521,9 @@ async def _sync_bybit_demo_closed_pnl_window(
                 stop_loss=stop_loss,
                 take_profit=take_profit,
             )
-            row = _normalize_bybit_demo_closed_pnl_row(
+            row = _normalize_bybit_closed_pnl_row(
                 entry,
+                account_mode=mode,
                 balance_after_trade=balance_after_trade,
                 display_side=resolved_side,
                 stop_loss=stop_loss,
@@ -8550,11 +8554,15 @@ async def _sync_bybit_demo_closed_pnl_window(
         return max_seen
 
     changed = _upsert_trading_journal_rows(rows)
-    sanitized_rows, sanitize_stats = _sanitize_bybit_demo_rows(_get_trading_journal_rows())
-    if int(sanitize_stats.get("changed", 0)):
-        _set_trading_journal_rows(sanitized_rows)
-    await asyncio.to_thread(_append_bybit_demo_rows_to_workbook, active_folder, rows)
-    workbook_stats = await asyncio.to_thread(_sanitize_bybit_demo_workbook, active_folder)
+    sanitize_stats: Dict[str, int] = {"deduped_by_order_id": 0, "deduped_by_fingerprint": 0}
+    workbook_stats: Dict[str, int] = {"deduped_by_order_id": 0, "deduped_by_fingerprint": 0}
+    if mode == "demo":
+        sanitized_rows, sanitize_stats = _sanitize_bybit_demo_rows(_get_trading_journal_rows())
+        if int(sanitize_stats.get("changed", 0)):
+            _set_trading_journal_rows(sanitized_rows)
+        if active_folder:
+            await asyncio.to_thread(_append_bybit_demo_rows_to_workbook, active_folder, rows)
+            workbook_stats = await asyncio.to_thread(_sanitize_bybit_demo_workbook, active_folder)
     _schedule_dropbox_upload_state_backup()
     _record_bybit_demo_sync_status(
         last_checked_at=_utc_now_iso(),
@@ -8607,9 +8615,6 @@ async def _poll_bybit_fills() -> None:
                             "account": account,
                             "category": category,
                         }
-                        journal_rows = _journal_rows_from_bybit_execution(entry_payload)
-                        if journal_rows:
-                            _upsert_trading_journal_rows(journal_rows)
                         await _send_telegram_alert(_format_bybit_fill_alert(entry_payload))
                 _BYBIT_EXEC_LAST_SEEN[account] = max_seen
             except Exception as exc:  # pragma: no cover - background task
@@ -8619,30 +8624,30 @@ async def _poll_bybit_fills() -> None:
 async def _poll_bybit_demo_closed_pnl() -> None:
     while True:
         try:
-            await _run_bybit_demo_closed_pnl_sync(reason="scheduled")
+            await _run_bybit_closed_pnl_sync(account_mode="demo", reason="scheduled")
         except Exception as exc:  # pragma: no cover - background task
             _record_bybit_demo_sync_status(last_checked_at=_utc_now_iso(), last_error=str(exc))
             BYBIT_LOGGER.exception("Bybit demo closed PnL poll error: %s", exc)
         await asyncio.sleep(BYBIT_DEMO_CLOSED_PNL_POLL_SECONDS)
 
 
-async def _run_bybit_demo_closed_pnl_sync(
+async def _run_bybit_closed_pnl_sync(
     *,
+    account_mode: str = "demo",
     reason: str,
     enforce_manual_cooldown: bool = False,
 ) -> Dict[str, object]:
-    global _BYBIT_DEMO_CLOSED_PNL_LAST_SEEN
-    global _BYBIT_DEMO_SYNC_LAST_RUN_AT
-    lookback_seconds = int(os.getenv("BYBIT_DEMO_CLOSED_PNL_LOOKBACK_SECONDS", "900"))
-    backfill_seconds = int(os.getenv("BYBIT_DEMO_CLOSED_PNL_BACKFILL_SECONDS", "3600"))
+    mode = "demo" if str(account_mode).strip().lower() == "demo" else "live"
+    lookback_seconds = int(os.getenv(f"BYBIT_{mode.upper()}_CLOSED_PNL_LOOKBACK_SECONDS", "900"))
+    backfill_seconds = int(os.getenv(f"BYBIT_{mode.upper()}_CLOSED_PNL_BACKFILL_SECONDS", "3600"))
     now = time.time()
     if (
         enforce_manual_cooldown
-        and _BYBIT_DEMO_SYNC_LAST_RUN_AT > 0
-        and (now - _BYBIT_DEMO_SYNC_LAST_RUN_AT) < _BYBIT_DEMO_SYNC_MANUAL_COOLDOWN_SECONDS
+        and _BYBIT_CLOSED_PNL_SYNC_LAST_RUN_AT.get(mode, 0.0) > 0
+        and (now - _BYBIT_CLOSED_PNL_SYNC_LAST_RUN_AT.get(mode, 0.0)) < _BYBIT_DEMO_SYNC_MANUAL_COOLDOWN_SECONDS
     ):
         retry_after = _BYBIT_DEMO_SYNC_MANUAL_COOLDOWN_SECONDS - (
-            now - _BYBIT_DEMO_SYNC_LAST_RUN_AT
+            now - _BYBIT_CLOSED_PNL_SYNC_LAST_RUN_AT.get(mode, 0.0)
         )
         return {
             "ok": False,
@@ -8654,15 +8659,15 @@ async def _run_bybit_demo_closed_pnl_sync(
             "retry_after_seconds": max(0, retry_after),
         }
 
-    async with _BYBIT_DEMO_SYNC_LOCK:
+    async with _BYBIT_CLOSED_PNL_SYNC_LOCK[mode]:
         now = time.time()
         if (
             enforce_manual_cooldown
-            and _BYBIT_DEMO_SYNC_LAST_RUN_AT > 0
-            and (now - _BYBIT_DEMO_SYNC_LAST_RUN_AT) < _BYBIT_DEMO_SYNC_MANUAL_COOLDOWN_SECONDS
+            and _BYBIT_CLOSED_PNL_SYNC_LAST_RUN_AT.get(mode, 0.0) > 0
+            and (now - _BYBIT_CLOSED_PNL_SYNC_LAST_RUN_AT.get(mode, 0.0)) < _BYBIT_DEMO_SYNC_MANUAL_COOLDOWN_SECONDS
         ):
             retry_after = _BYBIT_DEMO_SYNC_MANUAL_COOLDOWN_SECONDS - (
-                now - _BYBIT_DEMO_SYNC_LAST_RUN_AT
+                now - _BYBIT_CLOSED_PNL_SYNC_LAST_RUN_AT.get(mode, 0.0)
             )
             return {
                 "ok": False,
@@ -8674,31 +8679,33 @@ async def _run_bybit_demo_closed_pnl_sync(
                 "retry_after_seconds": max(0, retry_after),
             }
 
-        _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for("demo")
+        _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for(mode)
         if not api_key or not api_secret:
-            raise ValueError("Bybit demo API credentials are not configured.")
+            raise ValueError(f"Bybit {mode} API credentials are not configured.")
 
         now_ms = int(time.time() * 1000)
-        last_seen = _BYBIT_DEMO_CLOSED_PNL_LAST_SEEN
+        last_seen = _BYBIT_CLOSED_PNL_LAST_SEEN.get(mode)
         if last_seen is None:
             last_seen = max(0, now_ms - (lookback_seconds * 1000))
         earliest = now_ms - (7 * 24 * 60 * 60 * 1000) + 60000
         start_time = max(last_seen - (backfill_seconds * 1000), earliest)
         end_time = now_ms
-        max_seen = await _sync_bybit_demo_closed_pnl_window(
+        max_seen = await _sync_bybit_closed_pnl_window(
+            account_mode=mode,
             base_url=base_url,
             api_key=api_key,
             api_secret=api_secret,
             start_time=start_time,
             end_time=end_time,
         )
-        _BYBIT_DEMO_CLOSED_PNL_LAST_SEEN = max(max_seen, last_seen)
-        _BYBIT_DEMO_SYNC_LAST_RUN_AT = time.time()
+        _BYBIT_CLOSED_PNL_LAST_SEEN[mode] = max(max_seen, last_seen)
+        _BYBIT_CLOSED_PNL_SYNC_LAST_RUN_AT[mode] = time.time()
 
     return {
         "ok": True,
+        "account_mode": mode,
         "reason": reason,
-        "message": "Bybit demo sync completed.",
+        "message": f"Bybit {mode} sync completed.",
         "start_time": start_time,
         "end_time": end_time,
         "max_seen": max_seen,
@@ -9141,7 +9148,7 @@ def _merged_shell(title: str, options: List[Tuple[str, str]]) -> str:
     first = options[0][1] if options else "/"
     return f"""<!doctype html><html><head><meta charset='utf-8'/><meta name='viewport' content='width=device-width,initial-scale=1'/><title>{html.escape(title)}</title>
 <style>body{{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}}.wrap{{padding:16px;max-width:1800px;margin:0 auto}}.toolbar{{display:flex;gap:10px;align-items:center;background:#111827;border:1px solid #1f2937;border-radius:12px;padding:12px;margin-bottom:12px}}select,button{{background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:8px;padding:8px 10px}}iframe{{width:100%;height:calc(100vh - 110px);border:1px solid #1f2937;border-radius:12px;background:#0f172a}}</style>
-</head><body><div class='wrap'><div class='toolbar'><strong>{html.escape(title)}</strong><select id='sel'>{opts}</select><button onclick='location.href="/"'>Back</button></div><iframe id='frame' src='{html.escape(first)}'></iframe></div>
+</head><body><div class='wrap'><div class='toolbar'><strong>{html.escape(title)}</strong><select id='sel'>{opts}</select></div><iframe id='frame' src='{html.escape(first)}'></iframe></div>
 <script>const sel=document.getElementById('sel');const frame=document.getElementById('frame');sel.addEventListener('change',()=>frame.src=sel.value);</script></body></html>"""
 
 
@@ -9158,7 +9165,7 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
     .toolbar-main { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
     h1 { margin: 0; font-size: 28px; }
     .button-group { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0; }
-    .button-group button, .back-link {
+    .button-group button {
       background: #1f2937;
       color: #e2e8f0;
       border: 1px solid #334155;
@@ -9183,7 +9190,6 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
           <button type="button" data-asset="fx">FX</button>
         </div>
       </div>
-      <a class="back-link" href="/">Back</a>
     </div>
     <div class="frame-shell">
       <iframe id="calculator-frame" title="Position Size Calculator" loading="eager" src="/apps/cryptocalculator-clone/?embedded=1&shell=merged&title=Position+Size+Calculator"></iframe>
@@ -9277,8 +9283,8 @@ async def merged_calculator_page() -> str:
 
 
 @app.get("/merged/scanner")
-async def merged_scanner_retired() -> JSONResponse:
-    raise HTTPException(status_code=410, detail="Scanner has been retired.")
+async def merged_scanner_redirect() -> Response:
+    return RedirectResponse(url="/merged/monitor", status_code=307)
 
 
 HISTORY_PAGE_TEMPLATE = """<!doctype html>
@@ -9322,7 +9328,6 @@ HISTORY_PAGE_TEMPLATE = """<!doctype html>
           </select>
         </label>
         <button id="history-export" type="button">Export Selected Period</button>
-        <button id="history-home" type="button">Back</button>
       </div>
 
       <div class="periods" id="history-periods">
@@ -9353,7 +9358,7 @@ async def merged_history_page() -> str:
 @app.get("/merged/monitor", response_class=HTMLResponse)
 async def merged_monitor_page() -> str:
     return _merged_shell(
-        "Monitor",
+        "Scanner",
         [("Bybit", "/scripts/view/bybit_monitor"), ("OANDA", "/scripts/view/oanda_monitor")],
     )
 
@@ -9752,6 +9757,8 @@ def _enrich_trade_row_metrics(rows: List[Dict[str, object]]) -> List[Dict[str, o
         r["row_type"] = _row_type(r)
 
         if not _is_trade_row(r):
+            r.setdefault("result_pct", None)
+            r.setdefault("price_move_pct", None)
             r.setdefault("profit_pct", None)
             r.setdefault("r_multiple", None)
             r["trade_duration_seconds"] = None
@@ -9763,27 +9770,39 @@ def _enrich_trade_row_metrics(rows: List[Dict[str, object]]) -> List[Dict[str, o
         pnl = _to_float(r.get("net_profit"))
         move = _signed_price_move(r)
 
-        profit_pct = None
+        price_move_pct = None
         if move is not None and entry not in (None, 0):
-            profit_pct = (move / entry) * 100.0
+            price_move_pct = (move / entry) * 100.0
 
-        risk_dist = None
-        if entry is not None and sl is not None:
-            risk_dist = abs(entry - sl)
+        metrics = r.get("metrics") if isinstance(r.get("metrics"), dict) else {}
+        risk_amount = None
+        for k in ("risk_amount", "risk", "risk_aud", "risk_usd"):
+            rv = _to_float(metrics.get(k) if k in metrics else r.get(k))
+            if rv and rv > 0:
+                risk_amount = rv
+                break
+
+        result_pct = None
+        balance_after = _to_float(r.get("balance_after_trade"))
+        if pnl is not None:
+            if balance_after is not None:
+                balance_before = balance_after - pnl
+                if math.isfinite(balance_before) and balance_before > 0:
+                    result_pct = (pnl / balance_before) * 100.0
+            if result_pct is None and risk_amount is not None:
+                result_pct = (pnl / risk_amount) * 100.0
 
         r_multiple = None
-        if move is not None and risk_dist and risk_dist > 0:
-            r_multiple = move / risk_dist
+        if pnl is not None and risk_amount is not None:
+            r_multiple = pnl / risk_amount
+        if r_multiple is None and move is not None and entry is not None and sl is not None:
+            risk_dist = abs(entry - sl)
+            if risk_dist > 0:
+                r_multiple = move / risk_dist
 
-        if r_multiple is None and pnl is not None:
-            metrics = r.get("metrics") if isinstance(r.get("metrics"), dict) else {}
-            for k in ("risk_amount", "risk", "risk_aud", "risk_usd"):
-                rv = _to_float(metrics.get(k))
-                if rv and rv > 0:
-                    r_multiple = pnl / rv
-                    break
-
-        r["profit_pct"] = profit_pct
+        r["result_pct"] = result_pct
+        r["price_move_pct"] = price_move_pct
+        r["profit_pct"] = result_pct
         r["r_multiple"] = r_multiple
         r["trade_duration_seconds"] = _trade_duration_seconds(r)
         out.append(r)
@@ -9987,8 +10006,8 @@ def _compute_journal_stats(
         dur = _to_float(row.get("trade_duration_seconds"))
         if dur is not None and dur >= 0:
             all_durations.append(dur)
-    profit_pct_vals = [_to_float(row.get("profit_pct")) for row in trade_rows]
-    profit_pct_vals = [x for x in profit_pct_vals if x is not None]
+    result_pct_vals = [_to_float(row.get("result_pct")) for row in trade_rows]
+    result_pct_vals = [x for x in result_pct_vals if x is not None]
     r_mult_vals = [_to_float(row.get("r_multiple")) for row in trade_rows]
     r_mult_vals = [x for x in r_mult_vals if x is not None]
     winner_durations = [
@@ -10147,8 +10166,7 @@ def _compute_journal_stats(
         min_drawdown_pct = 0.0
         avg_drawdown_pct = 0.0
 
-    return {
-        "totals": {
+    totals = {
             "trades": len(trade_rows),
             "wins": sum(1 for row in trade_rows if _is_win(row)),
             "losses": sum(1 for row in trade_rows if _is_loss(row)),
@@ -10167,7 +10185,8 @@ def _compute_journal_stats(
             "avg_target_pct": _avg(all_tp_pct),
             "avg_stop_loss": _avg(all_sl_pct),
             "avg_take_profit": _avg(all_tp_pct),
-            "avg_profit_pct": _avg(profit_pct_vals),
+            "avg_profit_pct": _avg(result_pct_vals),
+            "avg_result_pct": _avg(result_pct_vals),
             "avg_r_multiple": _avg(r_mult_vals),
             "avg_duration_seconds": _avg(all_durations),
             "avg_winner_duration_seconds": _avg(winner_durations),
@@ -10189,11 +10208,88 @@ def _compute_journal_stats(
             "unique_instruments": len(unique_symbols),
             "crypto_instruments": len(crypto_symbols),
             "fx_instruments": len(fx_symbols),
-        },
+        }
+
+    def _market_bucket(rows_subset: List[Dict[str, object]], label: str) -> Dict[str, object]:
+        durations = [
+            _to_float(r.get("trade_duration_seconds"))
+            for r in rows_subset
+            if _to_float(r.get("trade_duration_seconds")) is not None
+        ]
+        durations = [d for d in durations if d is not None and d >= 0]
+        wins = sum(1 for r in rows_subset if _is_win(r))
+        losses = sum(1 for r in rows_subset if _is_loss(r))
+        denom_local = wins + losses
+        return {
+            "label": label,
+            "trades": len(rows_subset),
+            "wins": wins,
+            "losses": losses,
+            "win_rate_pct": (wins / denom_local * 100.0) if denom_local else None,
+            "avg_result_pct": _avg([_to_float(r.get("result_pct")) for r in rows_subset if _to_float(r.get("result_pct")) is not None]),
+            "avg_r_multiple": _avg([_to_float(r.get("r_multiple")) for r in rows_subset if _to_float(r.get("r_multiple")) is not None]),
+            "avg_duration_seconds": _avg(durations),
+            "longest_duration_seconds": max(durations) if durations else None,
+            "shortest_duration_seconds": min(durations) if durations else None,
+            "instruments": len({str(r.get("symbol") or "").strip() for r in rows_subset if str(r.get("symbol") or "").strip()}),
+        }
+
+    fx_rows = [r for r in trade_rows if _is_fx_asset_class(r.get("asset_class"))]
+    crypto_rows = [r for r in trade_rows if _is_crypto_asset_class(r.get("asset_class"))]
+
+    return {
+        "totals": totals,
         "balances": balance_by_account,
         "by_instrument": out_by_instrument,
         "instrument_with_most_wins": most_wins if most_wins["symbol"] else None,
         "instrument_with_most_losses": most_losses if most_losses["symbol"] else None,
+        "groups": {
+            "overview": {
+                "trades": totals.get("trades"),
+                "wins": totals.get("wins"),
+                "losses": totals.get("losses"),
+                "break_even": totals.get("break_even"),
+                "win_rate_pct": totals.get("win_rate_pct"),
+                "avg_result_pct": totals.get("avg_result_pct"),
+                "avg_r_multiple": totals.get("avg_r_multiple"),
+                "max_drawdown_pct": totals.get("max_drawdown_pct"),
+            },
+            "direction": {
+                "long_trades": totals.get("long_trades"),
+                "short_trades": totals.get("short_trades"),
+                "long_win_rate_pct": (long_wins / (long_wins + long_losses) * 100.0) if (long_wins + long_losses) else None,
+                "short_win_rate_pct": (short_wins / (short_wins + short_losses) * 100.0) if (short_wins + short_losses) else None,
+            },
+            "market_breakdown": [
+                _market_bucket(trade_rows, "Overall"),
+                _market_bucket(fx_rows, "Forex"),
+                _market_bucket(crypto_rows, "Crypto"),
+            ],
+            "risk_expectancy": {
+                "avg_stop_pct": totals.get("avg_stop_pct"),
+                "avg_target_pct": totals.get("avg_target_pct"),
+                "avg_result_pct": totals.get("avg_result_pct"),
+                "avg_r_multiple": totals.get("avg_r_multiple"),
+                "max_drawdown_pct": totals.get("max_drawdown_pct"),
+                "avg_drawdown_pct": totals.get("avg_drawdown_pct"),
+                "min_drawdown_pct": totals.get("min_drawdown_pct"),
+            },
+            "duration": {
+                "overall_avg_seconds": totals.get("avg_duration_seconds"),
+                "overall_shortest_seconds": totals.get("min_trade_duration_seconds"),
+                "overall_longest_seconds": totals.get("max_trade_duration_seconds"),
+                "fx_avg_seconds": totals.get("avg_fx_duration_seconds"),
+                "fx_shortest_seconds": totals.get("min_fx_trade_duration_seconds"),
+                "fx_longest_seconds": totals.get("max_fx_trade_duration_seconds"),
+                "crypto_avg_seconds": totals.get("avg_crypto_duration_seconds"),
+                "crypto_shortest_seconds": totals.get("min_crypto_trade_duration_seconds"),
+                "crypto_longest_seconds": totals.get("max_crypto_trade_duration_seconds"),
+            },
+            "leaders": {
+                "most_wins_instrument": most_wins if most_wins["symbol"] else None,
+                "most_losses_instrument": most_losses if most_losses["symbol"] else None,
+            },
+        },
         "balance_after_trade_note": "Approximate unless cashflow ledger fully captures deposits/withdrawals/transfers.",
     }
 
@@ -12378,7 +12474,28 @@ async def _run_trading_journal_sync_job() -> None:
     )
 
     try:
+        bybit_demo = None
+        bybit_live = None
+        try:
+            bybit_demo = await _run_bybit_closed_pnl_sync(
+                account_mode="demo",
+                reason="manual",
+                enforce_manual_cooldown=True,
+            )
+        except Exception as exc:
+            bybit_demo = {"ok": False, "error": str(exc)}
+        try:
+            bybit_live = await _run_bybit_closed_pnl_sync(
+                account_mode="live",
+                reason="manual",
+                enforce_manual_cooldown=True,
+            )
+        except Exception as exc:
+            bybit_live = {"ok": False, "error": str(exc)}
+
         result = await asyncio.to_thread(_import_trading_journal_from_dropbox_excel, progress_cb=_cb)
+        if isinstance(result, dict):
+            result["bybit"] = {"demo": bybit_demo, "live": bybit_live}
         ok_flag = bool(result.get("ok", True)) if isinstance(result, dict) else True
         msg = "Done" if ok_flag else str((result or {}).get("message") or (result or {}).get("error") or "Failed")
         _set_trading_journal_sync_state(
