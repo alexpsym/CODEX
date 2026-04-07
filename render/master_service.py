@@ -189,6 +189,14 @@ ENABLE_BYBIT_DEMO_JOURNAL = os.getenv("ENABLE_BYBIT_DEMO_JOURNAL", "1").strip().
     "yes",
     "on",
 }
+ENABLE_BYBIT_DEMO_CLOSED_PNL_POLL = os.getenv(
+    "ENABLE_BYBIT_DEMO_CLOSED_PNL_POLL", "1"
+).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 def _sync_state_snapshot() -> Dict[str, object]:
@@ -252,7 +260,7 @@ FILL_ALERT_POLL_SECONDS = float(
     os.getenv("FILL_ALERT_POLL_SECONDS", "8")
 )
 BYBIT_DEMO_CLOSED_PNL_POLL_SECONDS = float(
-    os.getenv("BYBIT_DEMO_CLOSED_PNL_POLL_SECONDS", "21600")
+    os.getenv("BYBIT_DEMO_CLOSED_PNL_POLL_SECONDS", "300")
 )
 DAILY_TRADE_SYNC_ENABLED = os.getenv("DAILY_TRADE_SYNC_ENABLED", "1").strip().lower() in {
     "1",
@@ -3516,6 +3524,18 @@ def _compute_autostart_scripts() -> List[str]:
 
 
 async def _run_startup_recovery_import_if_needed() -> None:
+    if ENABLE_BYBIT_DEMO_JOURNAL:
+        try:
+            await _run_bybit_closed_pnl_sync(
+                account_mode="demo",
+                reason="startup_recovery",
+            )
+        except Exception as exc:
+            _record_bybit_demo_sync_status(
+                last_checked_at=_utc_now_iso(),
+                last_error=f"Startup recovery demo sync failed: {exc}",
+            )
+            BYBIT_LOGGER.exception("Bybit demo startup recovery sync error: %s", exc)
     try:
         result = await asyncio.to_thread(_import_trading_journal_from_dropbox_excel)
         ok_flag = bool(result.get("ok", False)) if isinstance(result, dict) else False
@@ -3690,6 +3710,8 @@ async def _autostart_scripts() -> None:
     asyncio.create_task(_run_startup_recovery_import_if_needed())
     asyncio.create_task(_schedule_daily_trade_history_sync())
     asyncio.create_task(_schedule_monthly_aud_revaluation_sync())
+    if ENABLE_BYBIT_DEMO_JOURNAL and ENABLE_BYBIT_DEMO_CLOSED_PNL_POLL:
+        asyncio.create_task(_poll_bybit_demo_closed_pnl())
     if not ENABLE_BYBIT_DEMO_JOURNAL:
         _purge_bybit_demo_journal_state()
     if os.getenv("ENABLE_BYBIT_FILL_POLL", "0") == "1":
@@ -12448,6 +12470,9 @@ async def trading_journal_sync_status() -> JSONResponse:
     with TRADING_JOURNAL_SYNC_LOCK:
         snapshot = _sync_state_snapshot()
         TRADING_JOURNAL_SYNC_STATE.update(snapshot)
+    state = _load_trading_journal_state()
+    bybit_demo_sync = state.get("bybit_demo_sync")
+    snapshot["bybit_demo_sync"] = bybit_demo_sync if isinstance(bybit_demo_sync, dict) else {}
     return JSONResponse(snapshot)
 
 
