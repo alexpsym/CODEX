@@ -282,6 +282,7 @@ def test_web_post_uses_exchange_and_price_source(monkeypatch):
         }
 
     monkeypatch.setattr(web_app, "calculate_trade", fake_calculate_trade)
+    monkeypatch.setattr(web_app, "format_trade", lambda _trade: "ok")
     monkeypatch.setattr(web_app, "format_trade", lambda trade: "summary text")
     monkeypatch.setattr(web_app, "build_webhook_payload", lambda trade: {"ok": True})
 
@@ -615,3 +616,73 @@ def test_open_in_edge_returns_false_when_edge_missing(monkeypatch):
     monkeypatch.setattr(web_app.shutil, "which", lambda _name: None)
 
     assert web_app.open_in_edge("http://example.com") is False
+
+
+def test_web_form_includes_timeframe_field():
+    import cryptocalculator_web as web_app
+
+    client = web_app.app.test_client()
+    resp = client.get("/")
+    html = resp.get_data(as_text=True)
+    assert resp.status_code == 200
+    assert 'name="timeframe"' in html
+    assert 'list="timeframe_suggestions"' in html
+
+
+def test_post_includes_timeframe_in_payload_and_pending(monkeypatch):
+    import cryptocalculator_web as web_app
+
+    pending_payload = {}
+
+    def fake_calculate_trade(_cfg):
+        return {
+            "symbol": "BTCUSDT",
+            "direction": "long",
+            "order_type": "market",
+            "quantity": 0.1,
+            "entry_price_execution": 100.0,
+            "stop_price_execution": 95.0,
+            "target_price_execution": 110.0,
+        }
+
+    def fake_build_webhook_payload(_trade):
+        return {"symbol": "BTCUSDT", "action": "buy", "quantity": 0.1}
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"item": {"id": "wh_1"}}
+
+    def fake_post(_url, json=None, timeout=10):
+        pending_payload.update(json or {})
+        return DummyResponse()
+
+    monkeypatch.setattr(web_app, "calculate_trade", fake_calculate_trade)
+    monkeypatch.setattr(web_app, "build_webhook_payload", fake_build_webhook_payload)
+    monkeypatch.setattr(web_app, "_fetch_master_balance", lambda *args, **kwargs: 1000.0)
+    monkeypatch.setattr(web_app.requests, "post", fake_post)
+
+    client = web_app.app.test_client()
+    resp = client.post(
+        "/",
+        data={
+            "trade_type": "perpetual",
+            "direction": "long",
+            "order_type": "market",
+            "symbol": "BTCUSDT",
+            "execution_exchange": "bybit",
+            "price_source": "bybit_linear",
+            "risk_percent": "1",
+            "stop_loss_ticks": "10",
+            "rr_ratio": "2",
+            "account_mode": "demo",
+            "track_pending": "yes",
+            "timeframe": "5-minute",
+        },
+    )
+    html = resp.get_data(as_text=True)
+    assert resp.status_code == 200
+    assert '"timeframe": "5-minute"' in html
+    assert pending_payload.get("timeframe") == "5-minute"

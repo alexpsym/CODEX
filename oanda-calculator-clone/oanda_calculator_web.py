@@ -19,6 +19,13 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL") or PUBLIC_WEBHOOK_URL.rsplit("/",
 LOGGER = logging.getLogger(__name__)
 
 
+def _normalize_timeframe(value: object, *, max_length: int = 64) -> str:
+    text = " ".join(str(value or "").strip().split())
+    if len(text) > max_length:
+        text = text[:max_length].strip()
+    return text
+
+
 def _open_edge(url: str) -> None:
     """Open ``url`` in Microsoft Edge or raise an error if unavailable."""
 
@@ -256,6 +263,18 @@ FORM_HTML = """
           <button type="button" data-value="no">No</button>
         </div>
         <input type="hidden" name="track_pending" id="track_pending" value="{{ track_pending }}">
+        <label for="timeframe">Timeframe:</label>
+        <input name="timeframe" id="timeframe" value="{{ timeframe or '' }}" list="timeframe_suggestions" placeholder="e.g. 5-minute" required>
+        <datalist id="timeframe_suggestions">
+          <option value="1-minute"></option>
+          <option value="3-minute"></option>
+          <option value="5-minute"></option>
+          <option value="15-minute"></option>
+          <option value="30-minute"></option>
+          <option value="1-hour"></option>
+          <option value="4-hour"></option>
+          <option value="1-day"></option>
+        </datalist>
         <div id="entry_price_row" style="{% if order_type == 'market' %}display:none;{% endif %}">
           <label>Entry Price:
             <input name="entry_price" id="entry_price" type="number" step="0.0001" value="{{ entry_price or '' }}" {% if order_type == 'limit' %}required{% endif %}>
@@ -379,6 +398,7 @@ def index():
     side = request.form.get("side", "buy")
     order_type = request.form.get("order_type", "market")
     track_pending = request.form.get("track_pending", "no")
+    timeframe = _normalize_timeframe((request.form.get("timeframe") or "").strip())
     risk_mode = request.form.get("risk_mode", "percent")
     stop_ticks = request.form.get("stop_ticks", "")
     risk_pct = request.form.get("risk_pct", "")
@@ -612,6 +632,8 @@ def index():
                     "take_profit_price_value": tp_price_str,
                     "stop_loss_price_value": sl_price_str,
                 }
+            if timeframe:
+                alert["timeframe"] = timeframe
 
             if entry_price_value is not None:
                 alert["entry_price"] = entry_price_value
@@ -652,6 +674,8 @@ def index():
                 risk_info["Limit cancel offset"] = cancel_offset_value
             if cancel_offset_pct_value is not None:
                 risk_info["Limit cancel offset %"] = cancel_offset_pct_value
+            if timeframe:
+                risk_info["Timeframe"] = timeframe
 
             # Optionally register this as a pending webhook so it appears in the dashboard.
             if str(track_pending).lower() == "yes":
@@ -673,6 +697,7 @@ def index():
                     "category": "OANDA",
                     "instrument": instrument,
                     "type": "webhook",
+                    "order_type": order_type,
                     "side": side,
                     "size": str(alert_qty),
                     "entry_price": (
@@ -695,6 +720,7 @@ def index():
                     "source": "oanda-calculator-clone",
                     "limit_cancel_offset": cancel_offset_value,
                     "limit_cancel_offset_pct": cancel_offset_pct_value,
+                    "timeframe": timeframe or None,
                 }
 
                 try:
@@ -743,6 +769,7 @@ def index():
         limit_cancel_offset=limit_cancel_offset,
         limit_cancel_offset_pct=limit_cancel_offset_pct,
         track_pending=track_pending,
+        timeframe=timeframe,
         embedded=embedded,
         page_title=page_title,
         form_action=form_action,

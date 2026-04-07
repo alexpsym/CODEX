@@ -999,6 +999,10 @@ def build_webhook_payload(trade: Dict[str, Any]) -> Dict[str, Any]:
     if str(payload["order_type"]).lower() == "limit":
         payload["price"] = round(float(trade["entry_price"]), 8)
 
+    timeframe = str(trade.get("timeframe") or "").strip()
+    if timeframe:
+        payload["timeframe"] = timeframe
+
     return payload
 
 
