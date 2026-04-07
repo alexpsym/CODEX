@@ -682,6 +682,7 @@
           <td>${Number.isFinite(bal) ? `${fmtNum(bal, 2)} ${ccy}` : '—'}</td>
           <td>—</td>
           <td>—</td>
+          <td></td>
         `;
         tbody.appendChild(tr);
         continue;
@@ -706,6 +707,7 @@
         <td>${Number.isFinite(bal) ? `${fmtNum(bal, 2)} ${ccy}` : '—'}</td>
         <td>${fmtDuration(r.trade_duration_seconds)}</td>
         <td>${r.breakeven || '—'}</td>
+        <td>${r.id ? `<a href="/trade-chart/${encodeURIComponent(r.id)}" target="_blank" rel="noopener">Chart</a>` : ''}</td>
       `;
       tbody.appendChild(tr);
     }

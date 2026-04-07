@@ -482,6 +482,19 @@
         durTd.textContent = isMonthlyAudRow ? '' : fmtDuration(item.duration_seconds);
         tr.appendChild(durTd);
 
+        const chartTd = document.createElement('td');
+        if (item.chart_available && item.chart_row_id) {
+          const link = document.createElement('a');
+          link.href = `/trade-chart/${encodeURIComponent(item.chart_row_id)}`;
+          link.target = '_blank';
+          link.rel = 'noopener';
+          link.textContent = 'Chart';
+          chartTd.appendChild(link);
+        } else {
+          chartTd.textContent = '';
+        }
+        tr.appendChild(chartTd);
+
           rtBody.appendChild(tr);
         });
         hasRecentTradesData = Boolean(items.length);
