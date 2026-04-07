@@ -28,6 +28,15 @@ from urllib.parse import quote, unquote, urlparse
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
+except Exception:  # pragma: no cover - optional in test envs
+    matplotlib = None
+    mdates = None
+    plt = None
 from fastapi import Body, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -198,6 +207,9 @@ ENABLE_BYBIT_DEMO_CLOSED_PNL_POLL = os.getenv(
     "yes",
     "on",
 }
+
+_TRADE_CHART_CACHE: Dict[str, Dict[str, object]] = {}
+_TRADE_CHART_CACHE_TTL_SECONDS = float(os.getenv("TRADE_CHART_CACHE_TTL_SECONDS", "600") or 600)
 
 
 def _sync_state_snapshot() -> Dict[str, object]:
@@ -4612,6 +4624,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                                 <th>P/L</th>
                                 <th>Result %</th>
                                 <th>Duration</th>
+                                <th>Chart</th>
                             </tr>
                         </thead>
                         <tbody></tbody>
@@ -9862,6 +9875,7 @@ async def trading_journal_page() -> str:
             <th data-sort="balance_after_trade">Balance After</th>
             <th data-sort="trade_duration_seconds">Trade Duration</th>
             <th data-sort="breakeven">Breakeven</th>
+            <th>Chart</th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -9929,6 +9943,123 @@ def _trading_journal_filter_rows(rows: List[Dict[str, object]], query: str) -> L
     return matched
 
 
+def _trade_chart_error_page(row_id: str, message: str, status_code: int) -> HTMLResponse:
+    safe_message = html.escape(message or "Unknown trade chart error.")
+    safe_row = html.escape(row_id)
+    body = f"""<!doctype html>
+<html><head><meta charset="utf-8"/><title>Trade Chart Error</title></head>
+<body style="font-family:system-ui,sans-serif;background:#fff;color:#111;padding:20px;">
+<h1>Trade chart unavailable</h1>
+<p><strong>Row ID:</strong> {safe_row}</p>
+<div style="border:1px solid #ef4444;background:#fef2f2;padding:12px;border-radius:8px;">{safe_message}</div>
+</body></html>"""
+    return HTMLResponse(body, status_code=status_code)
+
+
+@app.get("/trade-chart/{row_id}", response_class=HTMLResponse)
+async def trade_chart_page(row_id: str) -> HTMLResponse:
+    row = _find_trade_row_by_id(unquote(row_id))
+    if row is None:
+        return _trade_chart_error_page(row_id, "Trade row not found.", 404)
+    if _row_type(row) != "trade" or str(row.get("row_type") or "").lower() == "monthly_aud_reval":
+        return _trade_chart_error_page(row_id, "Chart is only available for real trade rows.", 422)
+
+    symbol_raw = str(row.get("symbol") or row.get("instrument") or row.get("symbol_raw") or "").strip()
+    if not symbol_raw:
+        return _trade_chart_error_page(row_id, "Trade row is missing symbol data.", 422)
+
+    preferred_tf = _extract_trade_timeframe(row)
+    chosen_tf, upscaled = _choose_readable_interval(row, preferred_tf)
+    provider = _infer_trade_chart_source(row)
+    interval_value, interval_seconds = _interval_for_provider(provider, chosen_tf)
+    try:
+        win_start, win_end = _build_trade_chart_window(row, interval_seconds, pad_candles=5)
+    except HTTPException as exc:
+        return _trade_chart_error_page(row_id, str(exc.detail), exc.status_code)
+
+    cache_key = "|".join(
+        [
+            str(row.get("id") or row_id),
+            provider,
+            interval_value,
+            str(int(win_start.timestamp())),
+            str(int(win_end.timestamp())),
+        ]
+    )
+    cache_now = time.time()
+    cached = _TRADE_CHART_CACHE.get(cache_key)
+    if isinstance(cached, dict) and float(cached.get("expires_at") or 0) > cache_now:
+        chart_b64 = str(cached.get("chart_b64") or "")
+        meta = dict(cached.get("meta") or {})
+    else:
+        try:
+            if provider == "oanda":
+                normalized_instrument = normalize_oanda_symbol_query(symbol_raw)
+                account_mode = "demo" if "demo" in str(row.get("account") or "").lower() else "live"
+                candles = await _fetch_oanda_trade_candles(
+                    normalized_instrument,
+                    account_mode,
+                    interval_value,
+                    win_start.isoformat().replace("+00:00", "Z"),
+                    win_end.isoformat().replace("+00:00", "Z"),
+                )
+            else:
+                creds = resolve_bybit_credentials_for("default")
+                base_url = (creds.get("base_url") if isinstance(creds, dict) else None) or BYBIT_BASE
+                resolved = await _bybit_lookup_symbol(base_url, symbol_raw)
+                if not resolved:
+                    return _trade_chart_error_page(row_id, "Unable to resolve Bybit symbol/category for this row.", 422)
+                resolved_symbol = str(resolved.get("symbol") or "").upper()
+                resolved_category = str(resolved.get("_category") or "linear")
+                candles = await _fetch_bybit_trade_candles(
+                    resolved_symbol,
+                    resolved_category,
+                    interval_value,
+                    int(win_start.timestamp() * 1000),
+                    int(win_end.timestamp() * 1000),
+                )
+        except HTTPException as exc:
+            return _trade_chart_error_page(row_id, str(exc.detail), exc.status_code)
+        except Exception as exc:
+            return _trade_chart_error_page(row_id, f"Broker data fetch failed: {exc}", 502)
+
+        if not candles:
+            return _trade_chart_error_page(row_id, "No candles available for the selected window.", 422)
+        try:
+            png = _render_trade_chart_png(row, candles, {"provider": provider, "interval": interval_value})
+        except Exception as exc:
+            return _trade_chart_error_page(row_id, f"Chart render failed: {exc}", 500)
+        chart_b64 = base64.b64encode(png).decode("ascii")
+        meta = {"provider": provider, "interval_value": interval_value, "candles": len(candles)}
+        _TRADE_CHART_CACHE[cache_key] = {
+            "expires_at": cache_now + _TRADE_CHART_CACHE_TTL_SECONDS,
+            "chart_b64": chart_b64,
+            "meta": meta,
+        }
+
+    panel = [
+        ("Account", str(row.get("account_label") or row.get("account") or "—")),
+        ("Symbol", symbol_raw),
+        ("Side", str(row.get("side") or "—")),
+        ("Timeframe requested", _normalize_trade_timeframe(preferred_tf)),
+        ("Timeframe rendered", chosen_tf),
+        ("Entry time", str(row.get("open_time") or row.get("opened_at") or row.get("entry_time") or "—")),
+        ("Exit time", str(row.get("close_time") or row.get("closed_at") or row.get("exit_time") or "—")),
+        ("Entry / SL / TP / Exit", f"{row.get('entry_price')} / {row.get('stop_loss')} / {row.get('take_profit')} / {row.get('exit_price')}"),
+    ]
+    panel_html = "".join(f"<dt>{html.escape(k)}</dt><dd>{html.escape(v)}</dd>" for k, v in panel)
+    upscale_note = "<p style='color:#92400e;'>Requested timeframe was automatically stepped up for readability.</p>" if upscaled else ""
+    body = f"""<!doctype html>
+<html><head><meta charset="utf-8"/><title>Trade Chart</title></head>
+<body style="font-family:system-ui,sans-serif;background:#fff;color:#111;padding:16px;">
+<h1>Trade Chart</h1>
+<dl style="display:grid;grid-template-columns:180px 1fr;gap:6px 12px;">{panel_html}</dl>
+{upscale_note}
+<img alt="trade chart" style="width:100%;max-width:1400px;border:1px solid #ddd;" src="data:image/png;base64,{chart_b64}" />
+</body></html>"""
+    return HTMLResponse(body, status_code=200)
+
+
 async def _fetch_oanda_account_summary(account: str) -> Dict[str, object]:
     cfg = _get_oanda_config(account)
     payload = await _fetch_oanda_json(
@@ -9980,6 +10111,288 @@ def _trade_duration_seconds(row: Dict[str, object]) -> Optional[int]:
     except Exception:
         return None
 
+
+def _find_trade_row_by_id(row_id: str) -> Optional[Dict[str, object]]:
+    want = str(row_id or "").strip()
+    if not want:
+        return None
+    for row in _get_trading_journal_rows():
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("id") or "").strip() == want:
+            return row
+    for row in _get_monthly_aud_revaluation_rows():
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("id") or "").strip() == want:
+            return row
+    return None
+
+
+def _extract_trade_timeframe(row: Dict[str, object]) -> str:
+    candidates = [
+        row.get("timeframe"),
+        (row.get("metrics") or {}).get("timeframe") if isinstance(row.get("metrics"), dict) else None,
+        (row.get("raw_excel") or {}).get("timeframe") if isinstance(row.get("raw_excel"), dict) else None,
+    ]
+    for value in candidates:
+        text = str(value or "").strip().lower()
+        if text:
+            return text
+
+    duration = _trade_duration_seconds(row)
+    if duration is None:
+        return "15m"
+    if duration <= 2 * 3600:
+        return "5m"
+    if duration <= 12 * 3600:
+        return "15m"
+    if duration <= 48 * 3600:
+        return "1h"
+    if duration <= 7 * 86400:
+        return "4h"
+    return "1d"
+
+
+def _normalize_trade_timeframe(raw: object) -> str:
+    text = str(raw or "").strip().lower().replace(" ", "")
+    aliases = {
+        "1": "1m",
+        "1m": "1m",
+        "m1": "1m",
+        "5": "5m",
+        "5m": "5m",
+        "m5": "5m",
+        "15": "15m",
+        "15m": "15m",
+        "m15": "15m",
+        "30": "30m",
+        "30m": "30m",
+        "m30": "30m",
+        "60": "1h",
+        "1h": "1h",
+        "h1": "1h",
+        "240": "4h",
+        "4h": "4h",
+        "h4": "4h",
+        "d": "1d",
+        "1d": "1d",
+    }
+    return aliases.get(text, "15m")
+
+
+def _trade_interval_sequence() -> List[Tuple[str, int]]:
+    return [("1m", 60), ("5m", 300), ("15m", 900), ("30m", 1800), ("1h", 3600), ("4h", 14400), ("1d", 86400)]
+
+
+def _build_trade_chart_window(row: Dict[str, object], interval_seconds: int, pad_candles: int = 5) -> Tuple[datetime, datetime]:
+    open_time = _to_dt_utc(row.get("open_time") or row.get("opened_at") or row.get("entry_time"))
+    close_time = _to_dt_utc(row.get("close_time") or row.get("closed_at") or row.get("exit_time"))
+    if open_time is None or close_time is None:
+        raise HTTPException(
+            status_code=422,
+            detail="This row does not contain enough timing data to reconstruct a full entry-to-exit candle window.",
+        )
+    if close_time < open_time:
+        open_time, close_time = close_time, open_time
+    pad = timedelta(seconds=max(1, int(interval_seconds)) * max(0, int(pad_candles)))
+    return open_time - pad, close_time + pad
+
+
+def _choose_readable_interval(row: Dict[str, object], preferred_timeframe: str) -> Tuple[str, bool]:
+    normalized = _normalize_trade_timeframe(preferred_timeframe)
+    sequence = _trade_interval_sequence()
+    open_time = _to_dt_utc(row.get("open_time") or row.get("opened_at") or row.get("entry_time"))
+    close_time = _to_dt_utc(row.get("close_time") or row.get("closed_at") or row.get("exit_time"))
+    if open_time is None or close_time is None:
+        return normalized, False
+    if close_time < open_time:
+        open_time, close_time = close_time, open_time
+    span_seconds = max(1.0, (close_time - open_time).total_seconds())
+    target_max_candles = 380
+    cur_idx = next((idx for idx, pair in enumerate(sequence) if pair[0] == normalized), 2)
+    chosen_idx = cur_idx
+    while chosen_idx < len(sequence):
+        interval_s = sequence[chosen_idx][1]
+        estimate = math.ceil(span_seconds / interval_s) + 10
+        if estimate <= target_max_candles:
+            break
+        chosen_idx += 1
+    if chosen_idx >= len(sequence):
+        chosen_idx = len(sequence) - 1
+    return sequence[chosen_idx][0], chosen_idx != cur_idx
+
+
+def _infer_trade_chart_source(row: Dict[str, object]) -> str:
+    source = str(row.get("source") or "").strip().lower()
+    account = str(row.get("account") or row.get("account_label") or "").strip().lower()
+    symbol = str(row.get("symbol") or row.get("symbol_raw") or row.get("instrument") or "").strip()
+    if source == "bybit" or "bybit" in account:
+        return "bybit"
+    if source == "oanda" or "oanda" in account:
+        return "oanda"
+    if is_likely_oanda_pair(symbol):
+        return "oanda"
+    return "bybit"
+
+
+def _interval_for_provider(provider: str, timeframe: str) -> Tuple[str, int]:
+    tf = _normalize_trade_timeframe(timeframe)
+    mapping = {
+        "1m": ("1", 60),
+        "5m": ("5", 300),
+        "15m": ("15", 900),
+        "30m": ("30", 1800),
+        "1h": ("60", 3600),
+        "4h": ("240", 14400),
+        "1d": ("D", 86400),
+    }
+    bybit_interval, seconds = mapping[tf]
+    if provider == "oanda":
+        oanda_map = {"1": "M1", "5": "M5", "15": "M15", "30": "M30", "60": "H1", "240": "H4", "D": "D"}
+        return oanda_map[bybit_interval], seconds
+    return bybit_interval, seconds
+
+
+async def _fetch_bybit_trade_candles(symbol: str, category: str, interval: str, start_ms: int, end_ms: int) -> List[Dict[str, object]]:
+    creds = resolve_bybit_credentials_for("default")
+    base_url = (creds.get("base_url") if isinstance(creds, dict) else None) or BYBIT_BASE
+    rows: List[List[str]] = []
+    cursor_start = int(start_ms)
+    while cursor_start <= end_ms:
+        payload = await _bybit_public_get_json(
+            base_url,
+            "/v5/market/kline",
+            {
+                "category": category,
+                "symbol": symbol,
+                "interval": interval,
+                "start": cursor_start,
+                "end": end_ms,
+                "limit": 1000,
+            },
+        )
+        parsed = _bybit_parse_kline_rows((payload.get("result") or {}).get("list"))
+        if not parsed:
+            break
+        rows.extend(parsed)
+        last_ms = int(float(parsed[-1][0]))
+        if last_ms >= end_ms:
+            break
+        cursor_start = last_ms + 1
+        if len(parsed) < 1000:
+            break
+    candles: List[Dict[str, object]] = []
+    for item in rows:
+        ts = int(float(item[0]))
+        if ts < start_ms or ts > end_ms:
+            continue
+        candles.append(
+            {
+                "time": datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc),
+                "open": _to_float(item[1]),
+                "high": _to_float(item[2]),
+                "low": _to_float(item[3]),
+                "close": _to_float(item[4]),
+            }
+        )
+    return [c for c in candles if all(c.get(k) is not None for k in ("open", "high", "low", "close"))]
+
+
+async def _fetch_oanda_trade_candles(
+    instrument: str,
+    account_mode: str,
+    granularity: str,
+    from_iso: str,
+    to_iso: str,
+) -> List[Dict[str, object]]:
+    cfg = _get_oanda_config(account_mode)
+    endpoint = (
+        f"/instruments/{instrument}/candles?price=M&granularity={granularity}"
+        f"&from={quote(from_iso)}&to={quote(to_iso)}"
+    )
+    payload = await _fetch_oanda_json(
+        base_url=cfg["base_url"],
+        account_id=cfg["account_id"],
+        api_key=cfg["token"],
+        endpoint=endpoint,
+        mode=cfg["mode"],
+    )
+    candles: List[Dict[str, object]] = []
+    for row in (payload.get("candles") or []):
+        if not isinstance(row, dict) or not row.get("complete"):
+            continue
+        mid = row.get("mid") or {}
+        if not isinstance(mid, dict):
+            continue
+        ts = _to_dt_utc(row.get("time"))
+        if ts is None:
+            continue
+        candles.append(
+            {
+                "time": ts,
+                "open": _to_float(mid.get("o")),
+                "high": _to_float(mid.get("h")),
+                "low": _to_float(mid.get("l")),
+                "close": _to_float(mid.get("c")),
+            }
+        )
+    return [c for c in candles if all(c.get(k) is not None for k in ("open", "high", "low", "close"))]
+
+
+def _render_trade_chart_png(row: Dict[str, object], candles: List[Dict[str, object]], meta: Dict[str, object]) -> bytes:
+    if plt is None or mdates is None:
+        raise ValueError("matplotlib is unavailable in this runtime.")
+    if not candles:
+        raise ValueError("No candles returned for selected window.")
+    fig, ax = plt.subplots(figsize=(14, 6), dpi=140)
+    ax.set_facecolor("white")
+    fig.patch.set_facecolor("white")
+    x = mdates.date2num([c["time"].astimezone(ZoneInfo(APP_TIMEZONE)) for c in candles])
+    width = max(0.0005, (x[1] - x[0]) * 0.7) if len(x) > 1 else 0.001
+    for idx, c in enumerate(candles):
+        xi = x[idx]
+        o = float(c["open"])
+        h = float(c["high"])
+        l = float(c["low"])
+        cl = float(c["close"])
+        color = "#2e7d32" if cl >= o else "#c62828"
+        ax.vlines(xi, l, h, color=color, linewidth=0.7, alpha=0.9)
+        low = min(o, cl)
+        body_h = max(abs(cl - o), 1e-9)
+        ax.add_patch(plt.Rectangle((xi - width / 2, low), width, body_h, facecolor=color, edgecolor=color, linewidth=0.8))
+
+    entry_time = _to_dt_utc(row.get("open_time") or row.get("opened_at") or row.get("entry_time"))
+    exit_time = _to_dt_utc(row.get("close_time") or row.get("closed_at") or row.get("exit_time"))
+    if entry_time and exit_time:
+        ax.axvspan(
+            mdates.date2num(entry_time.astimezone(ZoneInfo(APP_TIMEZONE))),
+            mdates.date2num(exit_time.astimezone(ZoneInfo(APP_TIMEZONE))),
+            color="#90caf9",
+            alpha=0.18,
+        )
+    for label, key, color in [
+        ("Entry", "entry_price", "#1565c0"),
+        ("SL", "stop_loss", "#ad1457"),
+        ("TP", "take_profit", "#2e7d32"),
+        ("Exit", "exit_price", "#ef6c00"),
+    ]:
+        value = _to_float(row.get(key))
+        if value is None:
+            continue
+        ax.axhline(value, color=color, linewidth=1.0, alpha=0.9)
+        ax.text(x[-1], value, f" {label}: {value:.6f}", color=color, va="center", ha="left", fontsize=8)
+
+    ax.grid(True, linewidth=0.4, alpha=0.35)
+    ax.tick_params(axis="both", colors="black")
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d %H:%M", tz=ZoneInfo(APP_TIMEZONE)))
+    fig.autofmt_xdate()
+    ax.set_title(f"{row.get('symbol') or row.get('instrument') or ''} trade replay", color="black")
+    buf = io.BytesIO()
+    plt.tight_layout()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    return buf.getvalue()
 
 def _is_win(row: Dict[str, object]) -> bool:
     pnl = _to_float(row.get("net_profit"))
@@ -11764,6 +12177,8 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
                 "_row_updated_at": row.get("updated_at"),
                 "outcome": outcome,
                 "duration_seconds": row.get("trade_duration_seconds"),
+                "chart_row_id": row.get("id"),
+                "chart_available": True,
             }
         )
 
@@ -11801,6 +12216,8 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
                 "_row_updated_at": row.get("updated_at"),
                 "outcome": row.get("outcome"),
                 "duration_seconds": row.get("duration_seconds"),
+                "chart_row_id": row.get("id"),
+                "chart_available": False,
             }
         )
 
@@ -11894,6 +12311,9 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
     public_items = []
     for item in items[: max(1, min(limit, 200))]:
         copy = dict(item)
+        copy["chart_row_id"] = item.get("_row_id")
+        if item.get("chart_available") is None:
+            copy["chart_available"] = _row_type(item.get("_row") if isinstance(item.get("_row"), dict) else {}) == "trade"
         copy.pop("_row_id", None)
         copy.pop("_row_source", None)
         copy.pop("_row_order_id", None)
