@@ -163,7 +163,7 @@
       } else expTd.textContent = '—';
       row.appendChild(expTd);
 
-      [item.broker, item.account, item.category, item.instrument, item.type, item.side, item.size, item.entry_price || item.order_price, item.current_price, item.stop_loss, item.take_profit, item.leverage, formatTimestamp(item.opened_at), item.status].forEach((v) => {
+      [item.broker, item.account, item.category, item.instrument, item.timeframe, item.type, item.side, item.size, item.entry_price || item.order_price, item.current_price, item.stop_loss, item.take_profit, item.leverage, formatTimestamp(item.opened_at), item.status].forEach((v) => {
         const td = document.createElement('td');
         td.textContent = fmt(v);
         row.appendChild(td);
@@ -187,6 +187,7 @@
           child.account,
           child.category,
           child.instrument,
+          child.timeframe,
           child.type,
           child.side,
           child.size,

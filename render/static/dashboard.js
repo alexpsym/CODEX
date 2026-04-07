@@ -302,7 +302,7 @@
       }
       tr.appendChild(expTd);
 
-      [item.broker, item.account, item.category, item.instrument, item.type, item.side, item.size, item.entry_price || item.order_price, item.current_price, item.stop_loss, item.take_profit, item.leverage, fmtTime(item.opened_at), item.status].forEach((c) => {
+      [item.broker, item.account, item.category, item.instrument, item.timeframe, item.type, item.side, item.size, item.entry_price || item.order_price, item.current_price, item.stop_loss, item.take_profit, item.leverage, fmtTime(item.opened_at), item.status].forEach((c) => {
         const td = document.createElement('td');
         td.textContent = fmt(c);
         tr.appendChild(td);
@@ -327,6 +327,7 @@
           child.account,
           child.category,
           child.instrument,
+          child.timeframe,
           child.type,
           child.side,
           child.size,
@@ -432,6 +433,7 @@
           item.account,
           item.symbol,
           isMonthlyAudRow ? '' : item.side,
+          isMonthlyAudRow ? '' : item.timeframe,
           fmtTime(item.opened_at),
           fmtTime(item.closed_at),
           fmtNullableNum(item.entry_price, 6),

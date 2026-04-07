@@ -137,6 +137,7 @@ OANDA_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "oanda-history"
 BYBIT_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "bybit-history"
 COINSPOT_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "coinspot-history"
 PENDING_WEBHOOKS_PATH = BASE_DIR / "render" / "data" / "pending_webhooks.json"
+TRADE_CONTEXTS_PATH = BASE_DIR / "render" / "data" / "trade_contexts.json"
 BOUNCE_TRADERS_PATH = BASE_DIR / "render" / "data" / "bounce_traders.json"
 WATCHLIST_PATH = BASE_DIR / "render" / "data" / "watchlist.json"
 TRADING_JOURNAL_PATH = BASE_DIR / "render" / "data" / "trading_journal.json"
@@ -1310,6 +1311,14 @@ def _upsert_trading_journal_rows(rows: Iterable[Dict[str, object]]) -> int:
             by_id[row_id] = _merge_trading_journal_row(by_id[row_id], row)
         else:
             by_id[row_id] = row
+        refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+        status = str(row.get("status") or "").strip().lower()
+        if status in {"closed", "filled", "complete", "completed"}:
+            _mark_trade_context_closed_or_cancelled(
+                order_id=str(refs.get("orderId") or refs.get("orderID") or "").strip() or None,
+                trade_id=str(refs.get("tradeId") or refs.get("tradeID") or "").strip() or None,
+                status="CLOSED",
+            )
         changed += 1
     if changed:
         _save_trading_journal(list(by_id.values()))
@@ -1326,8 +1335,16 @@ def _merge_trading_journal_row(
         "open_time",
         "entry_price",
         "balance_after_trade",
+        "timeframe",
     }
     for key, value in incoming.items():
+        if key == "metrics" and isinstance(value, dict):
+            existing_metrics = merged.get("metrics") if isinstance(merged.get("metrics"), dict) else {}
+            incoming_metrics = dict(value)
+            if not _normalize_timeframe(incoming_metrics.get("timeframe")) and _normalize_timeframe(existing_metrics.get("timeframe")):
+                incoming_metrics["timeframe"] = existing_metrics.get("timeframe")
+            merged[key] = {**existing_metrics, **incoming_metrics}
+            continue
         if key in preserve_when_incoming_null:
             if value is None and merged.get(key) is not None:
                 continue
@@ -2013,6 +2030,9 @@ def _parse_excel_account_workbook(
                     if value is None or (isinstance(value, str) and not str(value).strip()):
                         continue
                     metrics[key] = value
+                timeframe = _normalize_timeframe(metrics.get("timeframe"))
+                if timeframe:
+                    metrics["timeframe"] = timeframe
 
                 used_norm = {
                     _norm_col(x)
@@ -2072,6 +2092,7 @@ def _parse_excel_account_workbook(
                     "symbol_raw": symbol_raw,
                     "side": side_txt,
                     "setup": setup_txt,
+                    "timeframe": timeframe,
                     "open_time": open_time_iso,
                     "close_time": close_time_iso,
                     "qty": qty_display,
@@ -2707,6 +2728,13 @@ def _journal_rows_from_bybit_execution(entry: Dict[str, object]) -> List[Dict[st
     if exec_time_raw:
         close_time = datetime.fromtimestamp(exec_time_raw / 1000, tz=timezone.utc).isoformat()
     side = str(entry.get("side") or "")
+    timeframe = _normalize_timeframe(entry.get("timeframe"))
+    if not timeframe:
+        ctx = _lookup_trade_context_for_journal_row(
+            {"raw_refs": {"orderId": order_id, "orderLinkId": entry.get("orderLinkId")}}
+        )
+        if isinstance(ctx, dict):
+            timeframe = _normalize_timeframe(ctx.get("timeframe"))
     return [
         {
             "id": f"bybit:{account}:{category}:{symbol}:{order_id}:{exec_id}",
@@ -2732,6 +2760,8 @@ def _journal_rows_from_bybit_execution(entry: Dict[str, object]) -> List[Dict[st
             "realized_pnl_currency": str(entry.get("currency") or "USDT"),
             "strategy_tag": "",
             "notes": "",
+            "timeframe": timeframe,
+            "metrics": {"timeframe": timeframe} if timeframe else {},
             "raw_refs": {"orderId": order_id, "execIds": [exec_id]},
         }
     ]
@@ -2750,6 +2780,13 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
     realized_pnl = (_to_float(entry.get("pl")) or 0.0) + (_to_float(entry.get("financing")) or 0.0)
     fees = abs(_to_float(entry.get("halfSpreadCost")) or 0.0)
     close_time = str(entry.get("time") or "")
+    timeframe = _normalize_timeframe(entry.get("timeframe"))
+    if not timeframe:
+        ctx = _lookup_trade_context_for_journal_row(
+            {"raw_refs": {"orderId": entry.get("orderID"), "transactionId": tx_id}}
+        )
+        if isinstance(ctx, dict):
+            timeframe = _normalize_timeframe(ctx.get("timeframe"))
     return [
         {
             "id": f"oanda:{account}:{symbol}:{tx_id}",
@@ -2776,6 +2813,8 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             "realized_pnl_currency": str(entry.get("accountCurrency") or ""),
             "strategy_tag": "",
             "notes": "",
+            "timeframe": timeframe,
+            "metrics": {"timeframe": timeframe} if timeframe else {},
             "raw_refs": {"transactionId": tx_id, "orderId": entry.get("orderID")},
         }
     ]
@@ -2790,6 +2829,7 @@ def _build_state_backup_payload() -> bytes:
         "alerts": alerts_payload,
         "watchlist": _get_watchlist(),
         "pending_webhooks": _load_pending_webhooks(),
+        "trade_contexts": _load_trade_contexts(),
         "trading_journal": _load_json_file(TRADING_JOURNAL_PATH, {"items": []}),
         "trading_journal_state": _load_json_file(TRADING_JOURNAL_STATE_PATH, {}),
         "trading_journal_import_cache": _load_json_file(TRADING_JOURNAL_IMPORT_CACHE_PATH, {}),
@@ -2873,6 +2913,13 @@ def _restore_alerts_payload(data: Dict[str, object]) -> Dict[str, object]:
     pending_restored: List[Dict[str, object]] = []
     if "pending_webhooks" in data:
         pending_restored = _replace_pending_webhooks(data["pending_webhooks"])
+    if "trade_contexts" in data and isinstance(data["trade_contexts"], (list, dict)):
+        trade_context_items = data["trade_contexts"]
+        if isinstance(trade_context_items, dict):
+            trade_context_items = trade_context_items.get("items", [])
+        if isinstance(trade_context_items, list):
+            cleaned = [dict(entry) for entry in trade_context_items if isinstance(entry, dict)]
+            _save_trade_contexts(_prune_trade_contexts(cleaned))
 
     journal_restored = 0
     journal_sanitized = 0
@@ -4553,6 +4600,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                                 <th>Account</th>
                                 <th>Symbol</th>
                                 <th>Side</th>
+                                <th>Timeframe</th>
                                 <th>Opened</th>
                                 <th>Closed</th>
                                 <th>Entry</th>
@@ -4592,6 +4640,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                                 <th>Account</th>
                                 <th>Category</th>
                                 <th>Instrument</th>
+                                <th>Timeframe</th>
                                 <th>Type</th>
                                 <th>Side</th>
                                 <th>Size</th>
@@ -5556,6 +5605,7 @@ async def _collect_oanda_open_items(
                 "leverage": trade.get("marginUsed"),
                 "opened_at": trade.get("openTime"),
                 "id": trade.get("id"),
+                "trade_id": trade.get("id"),
                 "status": trade.get("state") or "OPEN",
             }
         )
@@ -5591,6 +5641,12 @@ async def _collect_oanda_open_items(
                 "status": order.get("state") or "PENDING",
             }
         )
+    for item in items:
+        ctx = _lookup_trade_context_for_open_item(item)
+        timeframe = _normalize_timeframe(item.get("timeframe"))
+        if not timeframe and isinstance(ctx, dict):
+            timeframe = _normalize_timeframe(ctx.get("timeframe"))
+        item["timeframe"] = timeframe
     return {"items": items, "errors": fetch_errors}
 
 
@@ -6192,6 +6248,12 @@ async def _collect_bybit_open_items(
                     "status": status or "OPEN",
                 }
             )
+    for item in items:
+        ctx = _lookup_trade_context_for_open_item(item)
+        timeframe = _normalize_timeframe(item.get("timeframe"))
+        if not timeframe and isinstance(ctx, dict):
+            timeframe = _normalize_timeframe(ctx.get("timeframe"))
+        item["timeframe"] = timeframe
     return {"items": items, "errors": errors}
 
 
@@ -6274,6 +6336,7 @@ def _normalize_pending_webhooks(items: object) -> List[Dict[str, object]]:
         payload.setdefault("enabled", True)
         payload.setdefault("created_at", now_ts)
         payload["updated_at"] = now_ts
+        payload["timeframe"] = _normalize_timeframe(payload.get("timeframe"))
         cleaned.append(payload)
     return cleaned
 
@@ -6302,6 +6365,7 @@ def _upsert_pending_webhook(payload: Dict[str, object]) -> Dict[str, object]:
     entry.setdefault("enabled", True)
     entry.setdefault("created_at", now_ts)
     entry["updated_at"] = now_ts
+    entry["timeframe"] = _normalize_timeframe(entry.get("timeframe"))
 
     replaced = False
     for idx, existing in enumerate(items):
@@ -6313,6 +6377,19 @@ def _upsert_pending_webhook(payload: Dict[str, object]) -> Dict[str, object]:
         items.append(entry)
 
     _save_pending_webhooks(items)
+    _upsert_trade_context(
+        {
+            "pending_webhook_id": webhook_id,
+            "broker": str(entry.get("category") or entry.get("broker") or "").strip().lower(),
+            "account": str(entry.get("account") or "").strip().lower(),
+            "category": str(entry.get("category") or "").strip().lower(),
+            "instrument": str(entry.get("instrument") or "").strip().upper(),
+            "side": str(entry.get("side") or "").strip().lower(),
+            "order_type": str(entry.get("order_type") or "").strip().lower(),
+            "timeframe": entry.get("timeframe"),
+            "status": "ACTIVE",
+        }
+    )
     return entry
 
 
@@ -6347,6 +6424,185 @@ def _delete_pending_webhook(webhook_id: str) -> bool:
         return False
     _save_pending_webhooks(remaining)
     return True
+
+
+def _normalize_timeframe(value: object, *, max_length: int = 64) -> str:
+    text = " ".join(str(value or "").strip().split())
+    if len(text) > max_length:
+        text = text[:max_length].strip()
+    return text
+
+
+def _load_trade_contexts() -> List[Dict[str, object]]:
+    payload = _load_json_file(TRADE_CONTEXTS_PATH, [])
+    if isinstance(payload, dict):
+        payload = payload.get("items", [])
+    if not isinstance(payload, list):
+        return []
+    return [dict(entry) for entry in payload if isinstance(entry, dict)]
+
+
+def _save_trade_contexts(items: List[Dict[str, object]]) -> None:
+    _save_json_file(TRADE_CONTEXTS_PATH, {"items": items, "updated_at": _utc_now_iso()})
+
+
+def _prune_trade_contexts(items: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+    kept: List[Dict[str, object]] = []
+    for entry in items:
+        status = str(entry.get("status") or "").strip().upper()
+        updated_at = _parse_iso_datetime(entry.get("updated_at") or entry.get("closed_at"))
+        if status in {"CLOSED", "CANCELLED"} and updated_at and updated_at < cutoff:
+            continue
+        kept.append(entry)
+    return kept
+
+
+def _upsert_trade_context(payload: Dict[str, object]) -> Dict[str, object]:
+    items = _load_trade_contexts()
+    now_iso = _utc_now_iso()
+    pending_id = str(payload.get("pending_webhook_id") or "").strip()
+    order_id = str(payload.get("order_id") or "").strip()
+    order_link_id = str(payload.get("order_link_id") or "").strip()
+    trade_id = str(payload.get("trade_id") or "").strip()
+    key = next(
+        (
+            str(entry.get("pending_webhook_id") or "").strip()
+            for entry in items
+            if pending_id and str(entry.get("pending_webhook_id") or "").strip() == pending_id
+        ),
+        "",
+    ) or next(
+        (
+            str(entry.get("order_id") or "").strip()
+            for entry in items
+            if order_id and str(entry.get("order_id") or "").strip() == order_id
+        ),
+        "",
+    ) or next(
+        (
+            str(entry.get("order_link_id") or "").strip()
+            for entry in items
+            if order_link_id and str(entry.get("order_link_id") or "").strip() == order_link_id
+        ),
+        "",
+    ) or next(
+        (
+            str(entry.get("trade_id") or "").strip()
+            for entry in items
+            if trade_id and str(entry.get("trade_id") or "").strip() == trade_id
+        ),
+        "",
+    )
+
+    merged_payload = dict(payload)
+    if "timeframe" in merged_payload:
+        merged_payload["timeframe"] = _normalize_timeframe(merged_payload.get("timeframe"))
+    merged_payload["updated_at"] = now_iso
+    merged_payload.setdefault("created_at", now_iso)
+    if not merged_payload.get("status"):
+        merged_payload["status"] = "ACTIVE"
+
+    updated = False
+    for idx, entry in enumerate(items):
+        if key and key in {
+            str(entry.get("pending_webhook_id") or "").strip(),
+            str(entry.get("order_id") or "").strip(),
+            str(entry.get("order_link_id") or "").strip(),
+            str(entry.get("trade_id") or "").strip(),
+        }:
+            merged = dict(entry)
+            for k, v in merged_payload.items():
+                if k == "timeframe" and not v and merged.get("timeframe"):
+                    continue
+                if v in (None, "") and k in {"order_id", "order_link_id", "trade_id"}:
+                    continue
+                merged[k] = v
+            items[idx] = merged
+            merged_payload = merged
+            updated = True
+            break
+    if not updated:
+        items.append(merged_payload)
+
+    pruned = _prune_trade_contexts(items)
+    _save_trade_contexts(pruned)
+    return merged_payload
+
+
+def _mark_trade_context_closed_or_cancelled(*, pending_webhook_id: Optional[str] = None, order_id: Optional[str] = None, trade_id: Optional[str] = None, status: str = "CLOSED") -> None:
+    items = _load_trade_contexts()
+    now_iso = _utc_now_iso()
+    changed = False
+    for idx, entry in enumerate(items):
+        matches = False
+        if pending_webhook_id and str(entry.get("pending_webhook_id") or "").strip() == str(pending_webhook_id).strip():
+            matches = True
+        if order_id and str(entry.get("order_id") or "").strip() == str(order_id).strip():
+            matches = True
+        if trade_id and str(entry.get("trade_id") or "").strip() == str(trade_id).strip():
+            matches = True
+        if matches:
+            entry = dict(entry)
+            entry["status"] = status
+            entry["closed_at"] = now_iso
+            entry["updated_at"] = now_iso
+            items[idx] = entry
+            changed = True
+    if changed:
+        _save_trade_contexts(_prune_trade_contexts(items))
+
+
+def _lookup_trade_context_for_open_item(item: Dict[str, object]) -> Optional[Dict[str, object]]:
+    contexts = _load_trade_contexts()
+    broker = str(item.get("broker") or "").strip().lower()
+    account = str(item.get("account") or "").strip().lower()
+    instrument = str(item.get("instrument") or "").strip().upper()
+    side = _normalize_side_for_comparison(item.get("side"))
+    order_id = str(item.get("id") or "").strip()
+    order_link_id = str(item.get("order_link_id") or "").strip()
+    trade_id = str(item.get("trade_id") or "").strip()
+
+    for ctx in contexts:
+        if order_id and str(ctx.get("order_id") or "").strip() == order_id:
+            return ctx
+    for ctx in contexts:
+        if order_link_id and str(ctx.get("order_link_id") or "").strip() == order_link_id:
+            return ctx
+    for ctx in contexts:
+        if trade_id and str(ctx.get("trade_id") or "").strip() == trade_id:
+            return ctx
+
+    candidates = [
+        ctx
+        for ctx in contexts
+        if str(ctx.get("broker") or "").strip().lower() == broker
+        and str(ctx.get("account") or "").strip().lower() == account
+        and str(ctx.get("instrument") or "").strip().upper() == instrument
+        and _normalize_side_for_comparison(ctx.get("side")) == side
+        and str(ctx.get("status") or "ACTIVE").strip().upper() == "ACTIVE"
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def _lookup_trade_context_for_journal_row(row: Dict[str, object]) -> Optional[Dict[str, object]]:
+    contexts = _load_trade_contexts()
+    refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+    order_id = str(refs.get("orderId") or refs.get("orderID") or "").strip()
+    trade_id = str(refs.get("tradeId") or refs.get("tradeID") or "").strip()
+    order_link_id = str(refs.get("orderLinkId") or "").strip()
+    for ctx in contexts:
+        if order_id and str(ctx.get("order_id") or "").strip() == order_id:
+            return ctx
+    for ctx in contexts:
+        if order_link_id and str(ctx.get("order_link_id") or "").strip() == order_link_id:
+            return ctx
+    for ctx in contexts:
+        if trade_id and str(ctx.get("trade_id") or "").strip() == trade_id:
+            return ctx
+    return None
 
 
 def _oanda_credentials(mode: str) -> Dict[str, str]:
@@ -7113,6 +7369,21 @@ async def _place_bybit_order(
         raise ValueError(f"Bybit order failed: {data.get('retMsg')}")
     order_result = data.get("result", {}) or {}
     order_id = order_result.get("orderId")
+    _upsert_trade_context(
+        {
+            "pending_webhook_id": str(payload.get("pending_webhook_id") or "").strip(),
+            "broker": "bybit",
+            "account": account,
+            "category": category,
+            "instrument": symbol,
+            "side": side,
+            "order_type": order_type,
+            "timeframe": payload.get("timeframe"),
+            "order_id": str(order_id or "").strip(),
+            "order_link_id": str(order_result.get("orderLinkId") or body.get("orderLinkId") or "").strip(),
+            "status": "ACTIVE",
+        }
+    )
     if account == "demo" and category == "linear":
         cache_bybit_demo_tpsl_request(
             order_id=str(order_id or ""),
@@ -7461,6 +7732,27 @@ async def _place_oanda_order(
         {"result": result},
     )
     order_id = _extract_oanda_order_id(result)
+    fill_tx = result.get("orderFillTransaction")
+    trade_id = None
+    if isinstance(fill_tx, dict):
+        trade_opened = fill_tx.get("tradeOpened")
+        if isinstance(trade_opened, dict):
+            trade_id = trade_opened.get("tradeID")
+    _upsert_trade_context(
+        {
+            "pending_webhook_id": str(payload.get("pending_webhook_id") or "").strip() or None,
+            "broker": "oanda",
+            "account": account,
+            "category": "forex",
+            "instrument": symbol,
+            "side": action,
+            "order_type": order_type,
+            "timeframe": payload.get("timeframe"),
+            "order_id": str(order_id or "").strip(),
+            "trade_id": str(trade_id or "").strip(),
+            "status": "ACTIVE",
+        }
+    )
     limit_cancel_offset, limit_cancel_pct = _parse_limit_cancel_settings(payload)
     pending_id = str(payload.get("pending_webhook_id") or "").strip()
     if not pending_id:
@@ -7655,6 +7947,11 @@ async def _monitor_bybit_limit_cancel(
                         pending_webhook_id,
                         {"status": "CLOSED", "limit_cancel_reason": "filled"},
                     )
+                    _mark_trade_context_closed_or_cancelled(
+                        pending_webhook_id=pending_webhook_id,
+                        order_id=order_id,
+                        status="CLOSED",
+                    )
                 break
             current_price = await _fetch_bybit_market_price(
                 base_url=base_url,
@@ -7679,6 +7976,11 @@ async def _monitor_bybit_limit_cancel(
                     _update_pending_webhook(
                         pending_webhook_id,
                         {"status": "CANCELLED", "limit_cancel_reason": "price_moved"},
+                    )
+                    _mark_trade_context_closed_or_cancelled(
+                        pending_webhook_id=pending_webhook_id,
+                        order_id=order_id,
+                        status="CANCELLED",
                     )
                 _schedule_dropbox_upload_state_backup()
                 break
@@ -7779,6 +8081,11 @@ async def _monitor_oanda_limit_cancel(
                         pending_webhook_id,
                         {"status": "CLOSED", "limit_cancel_reason": "filled"},
                     )
+                    _mark_trade_context_closed_or_cancelled(
+                        pending_webhook_id=pending_webhook_id,
+                        order_id=order_id,
+                        status="CLOSED",
+                    )
                 break
             current_price = await _fetch_oanda_mid_price(
                 cfg=cfg, instrument=instrument, mode=mode
@@ -7794,6 +8101,11 @@ async def _monitor_oanda_limit_cancel(
                     _update_pending_webhook(
                         pending_webhook_id,
                         {"status": "CANCELLED", "limit_cancel_reason": "price_moved"},
+                    )
+                    _mark_trade_context_closed_or_cancelled(
+                        pending_webhook_id=pending_webhook_id,
+                        order_id=order_id,
+                        status="CANCELLED",
                     )
                 _schedule_dropbox_upload_state_backup()
                 break
@@ -8095,6 +8407,8 @@ def _normalize_bybit_closed_pnl_row(
     if isinstance(raw_refs_extra, dict):
         raw_refs.update(raw_refs_extra)
     mode = "demo" if str(account_mode).strip().lower() == "demo" else "live"
+    ctx = _lookup_trade_context_for_journal_row({"raw_refs": {"orderId": order_id}})
+    timeframe = _normalize_timeframe(ctx.get("timeframe")) if isinstance(ctx, dict) else ""
     return {
         "id": f"bybit:{mode}:closedpnl:{symbol}:{order_id}",
         "source": "bybit",
@@ -8120,6 +8434,8 @@ def _normalize_bybit_closed_pnl_row(
         "realized_pnl_currency": "USDT",
         "balance_after_trade": balance_after_trade,
         "notes": notes,
+        "timeframe": timeframe,
+        "metrics": {"timeframe": timeframe} if timeframe else {},
         "raw_refs": raw_refs,
     }
 
@@ -9532,6 +9848,7 @@ async def trading_journal_page() -> str:
             <th data-sort="account_label">Account</th>
             <th data-sort="symbol">Symbol</th>
             <th data-sort="side">Side</th>
+            <th data-sort="timeframe">Timeframe</th>
             <th data-sort="setup">Setup</th>
             <th data-sort="qty">Qty</th>
             <th data-sort="entry_price">Entry</th>
@@ -9776,6 +10093,8 @@ def _enrich_trade_row_metrics(rows: List[Dict[str, object]]) -> List[Dict[str, o
     out: List[Dict[str, object]] = []
     for row in rows:
         r = dict(row)
+        metrics = r.get("metrics") if isinstance(r.get("metrics"), dict) else {}
+        r["timeframe"] = _normalize_timeframe(r.get("timeframe") or metrics.get("timeframe"))
         r["row_type"] = _row_type(r)
 
         if not _is_trade_row(r):
@@ -9796,7 +10115,6 @@ def _enrich_trade_row_metrics(rows: List[Dict[str, object]]) -> List[Dict[str, o
         if move is not None and entry not in (None, 0):
             price_move_pct = (move / entry) * 100.0
 
-        metrics = r.get("metrics") if isinstance(r.get("metrics"), dict) else {}
         risk_amount = None
         for k in ("risk_amount", "risk", "risk_aud", "risk_usd"):
             rv = _to_float(metrics.get(k) if k in metrics else r.get(k))
@@ -11423,6 +11741,10 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
                 "account": row.get("account_label") or row.get("account") or row.get("source"),
                 "symbol": row.get("symbol") or row.get("instrument") or row.get("symbol_raw"),
                 "side": row.get("side") or row.get("direction"),
+                "timeframe": _normalize_timeframe(
+                    row.get("timeframe")
+                    or ((row.get("metrics") or {}).get("timeframe") if isinstance(row.get("metrics"), dict) else "")
+                ),
                 "opened_at": row.get("open_time") or row.get("opened_at") or row.get("entry_time"),
                 "closed_at": closed_at,
                 "stop_loss": row.get("stop_loss"),
@@ -12303,6 +12625,7 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
                 row.get("account"),
                 row.get("source"),
                 row.get("sheet"),
+                row.get("timeframe"),
                 row.get("setup"),
                 row.get("breakeven"),
                 row.get("notes"),

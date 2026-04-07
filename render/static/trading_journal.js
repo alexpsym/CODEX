@@ -170,6 +170,7 @@
         r?.side,
         r?.status,
         r?.setup,
+        r?.timeframe,
         r?.notes,
         r?.pre_trade_comments,
         r?.entry_comments,
@@ -669,6 +670,7 @@
           <td>${r.account_label || r.account || '—'}</td>
           <td>${r.symbol || 'CASHFLOW'}</td>
           <td class="num ${flowCls}">${flowLabel}</td>
+          <td>—</td>
           <td title="${r.cashflow_reason || ''}">${r.cashflow_reason || r.setup || '—'}</td>
           <td>—</td>
           <td>—</td>
@@ -693,6 +695,7 @@
         <td>${r.account_label || r.account || '—'}</td>
         <td title="${r.symbol_raw || r.symbol || ''}">${r.symbol || '—'}</td>
         <td>${r.side || '—'}</td>
+        <td>${r.timeframe || r.metrics?.timeframe || '—'}</td>
         <td>${r.setup || '—'}</td>
         <td>${fmtQty(r.qty, r)}${r.qty_unit === 'lots' ? ' lot' : ''}</td>
         <td>${fmtNum(r.entry_price, 6)}</td>

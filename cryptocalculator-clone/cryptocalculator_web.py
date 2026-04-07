@@ -54,6 +54,13 @@ _AUDUSD_CACHE_TTL_SECONDS = int(os.getenv("AUDUSD_CACHE_TTL_SECONDS", "30"))
 _AUDUSD_CACHE: Dict[str, object] = {"ts": 0.0, "rate": None, "error": None}
 
 
+def _normalize_timeframe(value: object, *, max_length: int = 64) -> str:
+    text = " ".join(str(value or "").strip().split())
+    if len(text) > max_length:
+        text = text[:max_length].strip()
+    return text
+
+
 def _normalize_oanda_base_url(value: str) -> str:
     base = (value or "").strip().strip('"').strip("'").rstrip("/")
     if not base:
@@ -477,6 +484,18 @@ FORM_HTML = """
             <button type="button" data-value="no">No</button>
           </div>
           <input type="hidden" name="track_pending" id="track_pending" value="{{ track_pending }}">
+          <label for="timeframe">Timeframe:</label>
+          <input name="timeframe" id="timeframe" value="{{ timeframe or '' }}" list="timeframe_suggestions" placeholder="e.g. 5-minute" required>
+          <datalist id="timeframe_suggestions">
+            <option value="1-minute"></option>
+            <option value="3-minute"></option>
+            <option value="5-minute"></option>
+            <option value="15-minute"></option>
+            <option value="30-minute"></option>
+            <option value="1-hour"></option>
+            <option value="4-hour"></option>
+            <option value="1-day"></option>
+          </datalist>
           <div id="entry_price_row">
             <label>Entry Price: <input name="entry_price" type="number" step="0.0001"></label><br>
           </div>
@@ -881,6 +900,7 @@ def index():
         audusd_rate = (request.form.get("price_to_execution_rate") or "").strip()
     quantity = request.form.get("quantity", "")
     track_pending = request.form.get("track_pending", "no")
+    timeframe = _normalize_timeframe((request.form.get("timeframe") or "").strip())
     limit_cancel_offset_raw = request.form.get("limit_cancel_offset", "").strip()
     limit_cancel_offset_pct_raw = request.form.get("limit_cancel_offset_pct", "").strip()
     risk_mode = request.form.get("risk_mode", "percent").strip().lower()
@@ -951,6 +971,8 @@ def index():
                     "tp_multiplier": tp_multiplier,
                     "resolved_option": resolution,
                 }
+                if timeframe:
+                    payload["timeframe"] = timeframe
                 payload_json = json.dumps(payload, indent=2)
                 options_output = "\n".join(
                     [
@@ -1041,11 +1063,16 @@ def index():
                     config.setdefault("account_asset", "AUD")
                 if fixed_risk_amount is not None:
                     config["fixed_risk_amount"] = fixed_risk_amount
+                if timeframe:
+                    config["timeframe"] = timeframe
 
                 trade = calculate_trade(config)
                 summary = format_trade(trade)
                 risk_info = {k.replace("_", " ").title(): v for k, v in trade.items()}
                 payload = build_webhook_payload(trade)
+                if timeframe:
+                    payload["timeframe"] = timeframe
+                    risk_info["Timeframe"] = timeframe
 
                 limit_cancel_offset = (
                     float(limit_cancel_offset_raw) if limit_cancel_offset_raw else None
@@ -1095,6 +1122,7 @@ def index():
                         ).upper(),
                         "instrument": str(trade["symbol"]),
                         "type": "webhook",
+                        "order_type": str(trade.get("order_type", order_type)),
                         "side": side,
                         "size": str(trade.get("quantity")),
                         "entry_price": trade.get("entry_price_execution"),
@@ -1109,6 +1137,7 @@ def index():
                         "source": "cryptocalculator-clone",
                         "limit_cancel_offset": limit_cancel_offset,
                         "limit_cancel_offset_pct": limit_cancel_offset_pct,
+                        "timeframe": timeframe or None,
                     }
 
                     try:
@@ -1199,6 +1228,7 @@ def index():
         app_root=app_root,
         options_min_qty_map=HARD_CODED_OPTIONS_MIN_QTY,
         track_pending=track_pending,
+        timeframe=timeframe,
         limit_cancel_offset=limit_cancel_offset_raw,
         embedded=embedded,
         page_title=page_title,
