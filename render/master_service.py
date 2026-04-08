@@ -7766,6 +7766,8 @@ async def _place_oanda_order(
             f"OANDA order failed ({response.status_code}): {response.text}"
         )
     result = response.json()
+    if not isinstance(result, dict):
+        result = {"raw": result}
     _log_webhook_event(
         request_id,
         "oanda_order_response",
@@ -7778,54 +7780,76 @@ async def _place_oanda_order(
         trade_opened = fill_tx.get("tradeOpened")
         if isinstance(trade_opened, dict):
             trade_id = trade_opened.get("tradeID")
-    _upsert_trade_context(
-        {
-            "pending_webhook_id": str(payload.get("pending_webhook_id") or "").strip() or None,
-            "broker": "oanda",
-            "account": account,
-            "category": "forex",
-            "instrument": symbol,
-            "side": action,
-            "order_type": order_type,
-            "timeframe": payload.get("timeframe"),
-            "order_id": str(order_id or "").strip(),
-            "trade_id": str(trade_id or "").strip(),
-            "status": "ACTIVE",
-        }
-    )
     limit_cancel_offset, limit_cancel_pct = _parse_limit_cancel_settings(payload)
     pending_id = str(payload.get("pending_webhook_id") or "").strip()
-    if not pending_id:
-        # Backwards compatibility: older TradingView alerts may not include
-        # pending_webhook_id. Infer the deterministic id used by
-        # oanda-calculator-clone when track_pending=yes.
-        safe_symbol = "".join(ch for ch in instrument if ch.isalnum() or ch in "_-")
-        safe_side = "".join(ch for ch in action if ch.isalnum() or ch in "_-")
-        safe_ot = "".join(ch for ch in order_type if ch.isalnum() or ch in "_-")
-        pending_id = f"calc_oanda_{account}_{safe_symbol}_{safe_side}_{safe_ot}"
-    if pending_id:
-        # Once the webhook has fired, remove it immediately so it doesn't linger
-        # in the Open Orders / Positions table.
-        if _delete_pending_webhook(pending_id):
-            _schedule_dropbox_upload_state_backup()
-
-    if (
-        order_type == "limit"
-        and (limit_cancel_offset is not None or limit_cancel_pct is not None)
-        and order_id
-        and entry_price is not None
-    ):
-        asyncio.create_task(
-            _monitor_oanda_limit_cancel(
-                cfg=cfg,
-                instrument=symbol,
-                order_id=order_id,
-                limit_price=entry_price,
-                limit_cancel_offset=limit_cancel_offset,
-                limit_cancel_offset_pct=limit_cancel_pct,
-                pending_webhook_id=pending_id or None,
-            )
+    post_submit_warnings: List[str] = []
+    try:
+        _upsert_trade_context(
+            {
+                "pending_webhook_id": pending_id or None,
+                "broker": "oanda",
+                "account": account,
+                "category": "forex",
+                "instrument": symbol,
+                "side": action,
+                "order_type": order_type,
+                "timeframe": payload.get("timeframe"),
+                "order_id": str(order_id or "").strip(),
+                "trade_id": str(trade_id or "").strip(),
+                "status": "ACTIVE",
+            }
         )
+        if not pending_id:
+            # Backwards compatibility: older TradingView alerts may not include
+            # pending_webhook_id. Infer the deterministic id used by
+            # oanda-calculator-clone when track_pending=yes.
+            safe_symbol = "".join(ch for ch in symbol if ch.isalnum() or ch in "_-")
+            safe_side = "".join(ch for ch in action if ch.isalnum() or ch in "_-")
+            safe_ot = "".join(ch for ch in order_type if ch.isalnum() or ch in "_-")
+            pending_id = f"calc_oanda_{account}_{safe_symbol}_{safe_side}_{safe_ot}"
+        if pending_id:
+            # Once the webhook has fired, remove it immediately so it doesn't linger
+            # in the Open Orders / Positions table.
+            if _delete_pending_webhook(pending_id):
+                _schedule_dropbox_upload_state_backup()
+    except Exception:
+        warning = "Order accepted by OANDA, but post-submit bookkeeping failed."
+        post_submit_warnings.append(warning)
+        BYBIT_LOGGER.exception(
+            "OANDA post-submit bookkeeping failed request_id=%s order_id=%s",
+            request_id,
+            order_id,
+        )
+
+    try:
+        if (
+            order_type == "limit"
+            and (limit_cancel_offset is not None or limit_cancel_pct is not None)
+            and order_id
+            and entry_price is not None
+        ):
+            asyncio.create_task(
+                _monitor_oanda_limit_cancel(
+                    cfg=cfg,
+                    instrument=symbol,
+                    order_id=order_id,
+                    limit_price=entry_price,
+                    limit_cancel_offset=limit_cancel_offset,
+                    limit_cancel_offset_pct=limit_cancel_pct,
+                    pending_webhook_id=pending_id or None,
+                )
+            )
+    except Exception:
+        warning = "Order accepted by OANDA, but limit-order monitor setup failed."
+        post_submit_warnings.append(warning)
+        BYBIT_LOGGER.exception(
+            "OANDA limit monitor setup failed request_id=%s order_id=%s",
+            request_id,
+            order_id,
+        )
+
+    if post_submit_warnings:
+        result["warnings"] = post_submit_warnings
 
     return result
 

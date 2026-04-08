@@ -803,7 +803,18 @@ def execute_now():
             data = response.json()
         except ValueError:
             data = {"raw": response.text}
-        return jsonify({"status": "ok", "response": data})
+        return jsonify({"status": "ok", "response": data, "upstream_status": response.status_code}), response.status_code
+    except requests.HTTPError as exc:
+        resp = exc.response
+        status = 502
+        detail = str(exc)
+        if resp is not None:
+            status = int(resp.status_code or 502)
+            try:
+                detail = resp.json()
+            except ValueError:
+                detail = resp.text or str(exc)
+        return jsonify({"status": "error", "detail": detail, "upstream_status": status}), status
     except Exception as exc:  # pylint: disable=broad-except
         return jsonify({"status": "error", "detail": str(exc)}), 400
 
