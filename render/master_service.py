@@ -210,6 +210,7 @@ ENABLE_BYBIT_DEMO_CLOSED_PNL_POLL = os.getenv(
 
 _TRADE_CHART_CACHE: Dict[str, Dict[str, object]] = {}
 _TRADE_CHART_CACHE_TTL_SECONDS = float(os.getenv("TRADE_CHART_CACHE_TTL_SECONDS", "600") or 600)
+_TRADE_CHART_CACHE_VERSION = "v2"
 
 
 def _sync_state_snapshot() -> Dict[str, object]:
@@ -378,6 +379,8 @@ _BYBIT_SYMBOL_LIST_CACHE: Dict[str, Dict[str, object]] = {
 _BYBIT_SYMBOL_LIST_CACHE_TTL_SECONDS = float(
     os.getenv("BYBIT_SYMBOL_LIST_CACHE_TTL_SECONDS", "900")
 )
+_BYBIT_CLOSED_PNL_RECOVERY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+_BYBIT_CLOSED_PNL_RECOVERY_SAFETY_MARGIN_MS = 60_000
 
 
 def _normalize_watchlist(items: Iterable[object]) -> List[str]:
@@ -1379,6 +1382,29 @@ def _save_trading_journal_state(state: Dict[str, object]) -> None:
         json.dumps(state, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+
+
+def _restore_bybit_closed_pnl_last_seen_from_state() -> None:
+    state = _load_trading_journal_state()
+    persisted = state.get("bybit_closed_pnl_last_seen") if isinstance(state, dict) else None
+    if not isinstance(persisted, dict):
+        return
+    for mode in ("demo", "live"):
+        value = persisted.get(mode)
+        if value in (None, ""):
+            continue
+        parsed = int(_to_float(value) or 0)
+        if parsed > 0:
+            _BYBIT_CLOSED_PNL_LAST_SEEN[mode] = parsed
+
+
+def _persist_bybit_closed_pnl_last_seen() -> None:
+    state = _load_trading_journal_state()
+    state["bybit_closed_pnl_last_seen"] = {
+        "demo": int(_BYBIT_CLOSED_PNL_LAST_SEEN.get("demo") or 0) or None,
+        "live": int(_BYBIT_CLOSED_PNL_LAST_SEEN.get("live") or 0) or None,
+    }
+    _save_trading_journal_state(state)
 
 
 def _utc_now_iso() -> str:
@@ -3763,6 +3789,7 @@ async def _schedule_daily_trade_history_sync() -> None:
 
 @app.on_event("startup")
 async def _autostart_scripts() -> None:
+    _restore_bybit_closed_pnl_last_seen_from_state()
     asyncio.create_task(_dropbox_restore_state_backup_on_startup())
     asyncio.create_task(_ensure_trading_journal_dropbox_templates())
     asyncio.create_task(_log_outbound_traffic_summary())
@@ -9036,10 +9063,17 @@ async def _run_bybit_closed_pnl_sync(
 
         now_ms = int(time.time() * 1000)
         last_seen = _BYBIT_CLOSED_PNL_LAST_SEEN.get(mode)
-        if last_seen is None:
-            last_seen = max(0, now_ms - (lookback_seconds * 1000))
-        earliest = now_ms - (7 * 24 * 60 * 60 * 1000) + 60000
-        start_time = max(last_seen - (backfill_seconds * 1000), earliest)
+        earliest = now_ms - _BYBIT_CLOSED_PNL_RECOVERY_WINDOW_MS + _BYBIT_CLOSED_PNL_RECOVERY_SAFETY_MARGIN_MS
+        force_demo_recovery = (
+            mode == "demo"
+            and (reason in {"manual", "startup_recovery"} or last_seen is None)
+        )
+        if force_demo_recovery:
+            start_time = max(0, earliest)
+        else:
+            if last_seen is None:
+                last_seen = max(0, now_ms - (lookback_seconds * 1000))
+            start_time = max(last_seen - (backfill_seconds * 1000), earliest)
         end_time = now_ms
         max_seen = await _sync_bybit_closed_pnl_window(
             account_mode=mode,
@@ -9049,7 +9083,9 @@ async def _run_bybit_closed_pnl_sync(
             start_time=start_time,
             end_time=end_time,
         )
-        _BYBIT_CLOSED_PNL_LAST_SEEN[mode] = max(max_seen, last_seen)
+        previous_seen = int(last_seen or 0)
+        _BYBIT_CLOSED_PNL_LAST_SEEN[mode] = max(max_seen, previous_seen)
+        _persist_bybit_closed_pnl_last_seen()
         _BYBIT_CLOSED_PNL_SYNC_LAST_RUN_AT[mode] = time.time()
 
     return {
@@ -9969,7 +10005,7 @@ async def trade_chart_page(row_id: str) -> HTMLResponse:
         return _trade_chart_error_page(row_id, "Trade row is missing symbol data.", 422)
 
     preferred_tf = _extract_trade_timeframe(row)
-    chosen_tf, upscaled = _choose_readable_interval(row, preferred_tf)
+    chosen_tf, _upscaled = _choose_readable_interval(row, preferred_tf)
     provider = _infer_trade_chart_source(row)
     interval_value, interval_seconds = _interval_for_provider(provider, chosen_tf)
     try:
@@ -9979,6 +10015,7 @@ async def trade_chart_page(row_id: str) -> HTMLResponse:
 
     cache_key = "|".join(
         [
+            _TRADE_CHART_CACHE_VERSION,
             str(row.get("id") or row_id),
             provider,
             interval_value,
@@ -10037,25 +10074,10 @@ async def trade_chart_page(row_id: str) -> HTMLResponse:
             "meta": meta,
         }
 
-    panel = [
-        ("Account", str(row.get("account_label") or row.get("account") or "—")),
-        ("Symbol", symbol_raw),
-        ("Side", str(row.get("side") or "—")),
-        ("Timeframe requested", _normalize_trade_timeframe(preferred_tf)),
-        ("Timeframe rendered", chosen_tf),
-        ("Entry time", str(row.get("open_time") or row.get("opened_at") or row.get("entry_time") or "—")),
-        ("Exit time", str(row.get("close_time") or row.get("closed_at") or row.get("exit_time") or "—")),
-        ("Entry / SL / TP / Exit", f"{row.get('entry_price')} / {row.get('stop_loss')} / {row.get('take_profit')} / {row.get('exit_price')}"),
-    ]
-    panel_html = "".join(f"<dt>{html.escape(k)}</dt><dd>{html.escape(v)}</dd>" for k, v in panel)
-    upscale_note = "<p style='color:#92400e;'>Requested timeframe was automatically stepped up for readability.</p>" if upscaled else ""
     body = f"""<!doctype html>
 <html><head><meta charset="utf-8"/><title>Trade Chart</title></head>
-<body style="font-family:system-ui,sans-serif;background:#fff;color:#111;padding:16px;">
-<h1>Trade Chart</h1>
-<dl style="display:grid;grid-template-columns:180px 1fr;gap:6px 12px;">{panel_html}</dl>
-{upscale_note}
-<img alt="trade chart" style="width:100%;max-width:1400px;border:1px solid #ddd;" src="data:image/png;base64,{chart_b64}" />
+<body style="margin:0;background:#fff;">
+<img alt="trade chart" style="display:block;width:100vw;height:auto;max-width:none;border:0;" src="data:image/png;base64,{chart_b64}" />
 </body></html>"""
     return HTMLResponse(body, status_code=200)
 
@@ -10340,12 +10362,29 @@ async def _fetch_oanda_trade_candles(
     return [c for c in candles if all(c.get(k) is not None for k in ("open", "high", "low", "close"))]
 
 
+def _locate_trade_event_candle_index(candles: List[Dict[str, object]], event_time: Optional[datetime]) -> Optional[int]:
+    if event_time is None or not candles:
+        return None
+    target = event_time.astimezone(timezone.utc)
+    for idx, candle in enumerate(candles):
+        start = _to_dt_utc(candle.get("time"))
+        if start is None:
+            continue
+        if idx + 1 < len(candles):
+            next_start = _to_dt_utc(candles[idx + 1].get("time"))
+            if next_start and start <= target < next_start:
+                return idx
+        elif target >= start:
+            return idx
+    return None
+
+
 def _render_trade_chart_png(row: Dict[str, object], candles: List[Dict[str, object]], meta: Dict[str, object]) -> bytes:
     if plt is None or mdates is None:
         raise ValueError("matplotlib is unavailable in this runtime.")
     if not candles:
         raise ValueError("No candles returned for selected window.")
-    fig, ax = plt.subplots(figsize=(14, 6), dpi=140)
+    fig, ax = plt.subplots(figsize=(18, 9), dpi=150)
     ax.set_facecolor("white")
     fig.patch.set_facecolor("white")
     x = mdates.date2num([c["time"].astimezone(ZoneInfo(APP_TIMEZONE)) for c in candles])
@@ -10371,6 +10410,7 @@ def _render_trade_chart_png(row: Dict[str, object], candles: List[Dict[str, obje
             color="#90caf9",
             alpha=0.18,
         )
+    line_labels: List[Tuple[str, float, str]] = []
     for label, key, color in [
         ("Entry", "entry_price", "#1565c0"),
         ("SL", "stop_loss", "#ad1457"),
@@ -10381,13 +10421,69 @@ def _render_trade_chart_png(row: Dict[str, object], candles: List[Dict[str, obje
         if value is None:
             continue
         ax.axhline(value, color=color, linewidth=1.0, alpha=0.9)
-        ax.text(x[-1], value, f" {label}: {value:.6f}", color=color, va="center", ha="left", fontsize=8)
+        line_labels.append((label, value, color))
+
+    y_span = max((max(float(c["high"]) for c in candles) - min(float(c["low"]) for c in candles)), 1e-9)
+    min_gap = y_span * 0.018
+    placed_ys: List[float] = []
+    sorted_labels = sorted(line_labels, key=lambda item: item[1], reverse=True)
+    for label, value, color in sorted_labels:
+        label_y = value + (y_span * 0.008)
+        for existing in placed_ys:
+            if abs(label_y - existing) < min_gap:
+                label_y = existing + min_gap
+        placed_ys.append(label_y)
+        ax.text(
+            x[-1],
+            label_y,
+            f" {label}: {value:.6f}",
+            color=color,
+            va="bottom",
+            ha="left",
+            fontsize=9,
+            bbox={"boxstyle": "round,pad=0.18", "facecolor": "white", "edgecolor": "none", "alpha": 0.88},
+        )
+
+    def _mark_event(event_idx: Optional[int], event_price: Optional[float], title: str, color: str) -> None:
+        if event_idx is None:
+            return
+        event_x = x[event_idx]
+        left = event_x - (width * 0.9)
+        right = event_x + (width * 0.9)
+        ax.axvline(event_x, color=color, linestyle="--", linewidth=1.2, alpha=0.85)
+        ax.axvspan(left, right, color=color, alpha=0.12)
+        if event_price is not None:
+            ax.scatter([event_x], [event_price], color=color, s=54, zorder=5, edgecolors="white", linewidths=0.8)
+        y_top = max(float(c["high"]) for c in candles) + (y_span * 0.015)
+        ax.text(
+            event_x,
+            y_top,
+            title,
+            color=color,
+            fontsize=8,
+            ha="center",
+            va="bottom",
+            bbox={"boxstyle": "round,pad=0.18", "facecolor": "white", "edgecolor": "none", "alpha": 0.9},
+        )
+
+    _mark_event(
+        _locate_trade_event_candle_index(candles, entry_time),
+        _to_float(row.get("entry_price")),
+        "Entry candle",
+        "#1565c0",
+    )
+    _mark_event(
+        _locate_trade_event_candle_index(candles, exit_time),
+        _to_float(row.get("exit_price")),
+        "Exit candle",
+        "#ef6c00",
+    )
 
     ax.grid(True, linewidth=0.4, alpha=0.35)
     ax.tick_params(axis="both", colors="black")
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d %H:%M", tz=ZoneInfo(APP_TIMEZONE)))
+    ax.set_xlim(min(x), max(x) + max(0.002, (max(x) - min(x)) * 0.08))
     fig.autofmt_xdate()
-    ax.set_title(f"{row.get('symbol') or row.get('instrument') or ''} trade replay", color="black")
     buf = io.BytesIO()
     plt.tight_layout()
     fig.savefig(buf, format="png")
