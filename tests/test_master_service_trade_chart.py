@@ -111,3 +111,48 @@ def test_oanda_candle_window_selection(monkeypatch) -> None:
     )
     assert len(candles) == 1
     assert candles[0]["close"] == 1.15
+
+
+def test_trade_chart_html_is_image_only(monkeypatch) -> None:
+    row = {
+        "id": "trade-1",
+        "row_type": "trade",
+        "source": "bybit",
+        "account": "demo",
+        "symbol": "BTCUSDT",
+        "open_time": "2026-01-01T00:00:00Z",
+        "close_time": "2026-01-01T01:00:00Z",
+        "entry_price": 1.0,
+        "stop_loss": 0.9,
+        "take_profit": 1.2,
+        "exit_price": 1.1,
+    }
+    monkeypatch.setattr(master_service, "_find_trade_row_by_id", lambda _row_id: row)
+    monkeypatch.setattr(master_service, "_infer_trade_chart_source", lambda _row: "bybit")
+    monkeypatch.setattr(master_service, "_interval_for_provider", lambda _provider, _tf: ("1", 60))
+    monkeypatch.setattr(
+        master_service,
+        "_build_trade_chart_window",
+        lambda _row, _interval_seconds, pad_candles=5: (
+            master_service.datetime(2026, 1, 1, tzinfo=master_service.timezone.utc),
+            master_service.datetime(2026, 1, 1, 1, tzinfo=master_service.timezone.utc),
+        ),
+    )
+
+    async def fake_candles(*_args, **_kwargs):
+        return [{"time": master_service.datetime(2026, 1, 1, tzinfo=master_service.timezone.utc), "open": 1.0, "high": 1.1, "low": 0.95, "close": 1.05}]
+
+    monkeypatch.setattr(master_service, "_fetch_bybit_trade_candles", fake_candles)
+    async def fake_lookup(_base, _symbol):
+        return {"symbol": "BTCUSDT", "_category": "linear"}
+    monkeypatch.setattr(master_service, "_bybit_lookup_symbol", fake_lookup)
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _mode: {"base_url": "https://api.bybit.com"})
+    monkeypatch.setattr(master_service, "_render_trade_chart_png", lambda _row, _candles, _meta: b"png")
+    response = asyncio.run(master_service.trade_chart_page("trade-1"))
+    html = response.body.decode("utf-8")
+    assert response.status_code == 200
+    assert "<img" in html
+    assert "Account" not in html
+    assert "Symbol" not in html
+    assert "Timeframe requested" not in html
+    assert "Timeframe rendered" not in html
