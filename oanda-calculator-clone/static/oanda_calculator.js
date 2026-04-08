@@ -299,6 +299,9 @@ async function loadEmbeddedSpecs() {
 }
 
 async function enterNow() {
+  if (enterNow.inFlight) {
+    return;
+  }
   const payloadEl = document.getElementById('alert_json');
   if (!payloadEl || !payloadEl.innerText.trim()) {
     alert('Calculate a trade first to enable immediate entry.');
@@ -315,6 +318,11 @@ async function enterNow() {
     alert('Could not parse the current payload. Recalculate and try again.');
     return;
   }
+  const enterBtn = document.getElementById('execute_market_btn');
+  enterNow.inFlight = true;
+  if (enterBtn) {
+    enterBtn.disabled = true;
+  }
   const resultBox = document.getElementById('execute_result');
   if (resultBox) {
     resultBox.classList.remove('hidden');
@@ -326,13 +334,18 @@ async function enterNow() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    const data = await resp.json();
+    const data = await resp.json().catch(async () => ({ raw: await resp.text() }));
     if (resultBox) {
-      resultBox.innerText = JSON.stringify(data, null, 2);
+      resultBox.innerText = `HTTP ${resp.status}\n${JSON.stringify(data, null, 2)}`;
     }
   } catch (err) {
     if (resultBox) {
       resultBox.innerText = 'Error: ' + err;
+    }
+  } finally {
+    enterNow.inFlight = false;
+    if (enterBtn) {
+      enterBtn.disabled = false;
     }
   }
 }
