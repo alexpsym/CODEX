@@ -136,6 +136,20 @@ def test_normalize_date() -> None:
     )
 
 
+def test_resolve_api_url_adds_v3_suffix() -> None:
+    assert (
+        oanda_history._resolve_api_url("https://api-fxpractice.oanda.com")
+        == "https://api-fxpractice.oanda.com/v3"
+    )
+
+
+def test_resolve_api_url_preserves_existing_v3() -> None:
+    assert (
+        oanda_history._resolve_api_url("https://api-fxpractice.oanda.com/v3")
+        == "https://api-fxpractice.oanda.com/v3"
+    )
+
+
 def test_fetch_transactions_handles_pagination(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -179,9 +193,7 @@ def test_fetch_transactions_handles_pagination(
         "requests",
         types.SimpleNamespace(get=fake_get),
     )
-    monkeypatch.setattr(oanda_history, "API_URL", "https://api.example.com/v3")
-
-    data = oanda_history.fetch_transactions("acc", "key")
+    data = oanda_history.fetch_transactions("acc", "key", base_url="https://api.example.com/v3")
 
     assert [item["id"] for item in data] == ["base", "extra", "third"]
     assert len(calls) == 3
@@ -221,9 +233,7 @@ def test_fetch_transactions_uses_link_header(monkeypatch: pytest.MonkeyPatch) ->
         "requests",
         types.SimpleNamespace(get=fake_get),
     )
-    monkeypatch.setattr(oanda_history, "API_URL", "https://api.example.com/v3")
-
-    data = oanda_history.fetch_transactions("acc", "key")
+    data = oanda_history.fetch_transactions("acc", "key", base_url="https://api.example.com/v3")
 
     assert [item["id"] for item in data] == ["first", "second"]
     assert len(calls) == 2
@@ -278,9 +288,7 @@ def test_fetch_transactions_handles_dict_pages(
         "requests",
         types.SimpleNamespace(get=fake_get),
     )
-    monkeypatch.setattr(oanda_history, "API_URL", "https://api.example.com/v3")
-
-    data = oanda_history.fetch_transactions("acc", "key")
+    data = oanda_history.fetch_transactions("acc", "key", base_url="https://api.example.com/v3")
 
     assert [item["id"] for item in data] == ["base", "extra", "third"]
     assert len(calls) == 3
@@ -333,9 +341,7 @@ def test_fetch_transactions_reads_raw_link_header(
         "requests",
         types.SimpleNamespace(get=fake_get),
     )
-    monkeypatch.setattr(oanda_history, "API_URL", "https://api.example.com/v3")
-
-    data = oanda_history.fetch_transactions("acc", "key")
+    data = oanda_history.fetch_transactions("acc", "key", base_url="https://api.example.com/v3")
 
     assert [item["id"] for item in data] == ["first", "second", "third"]
     assert len(calls) == 3

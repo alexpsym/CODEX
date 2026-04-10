@@ -28,10 +28,18 @@
   };
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const sanitizeStatusMessage = (value) => {
+    const msg = String(value || '').trim();
+    if (!msg) return '';
+    const containsHtml = /<[^>]+>/.test(msg) || /<!doctype html/i.test(msg);
+    const scrubbed = containsHtml ? 'Upstream service returned an HTML error page. Check credentials and API base URL.' : msg;
+    const compact = scrubbed.replace(/\s+/g, ' ').trim();
+    return compact.length > 280 ? `${compact.slice(0, 277)}...` : compact;
+  };
 
   const setStatus = (msg, isErr = false) => {
     if (!statusEl) return;
-    statusEl.textContent = msg;
+    statusEl.textContent = sanitizeStatusMessage(msg);
     statusEl.style.color = isErr ? '#fca5a5' : '#93c5fd';
   };
 
@@ -109,7 +117,7 @@
       data = { detail: text };
     }
     if (!res.ok) {
-      throw new Error(data?.detail || `${res.status} ${res.statusText}`);
+      throw new Error(sanitizeStatusMessage(data?.detail || `${res.status} ${res.statusText}`));
     }
     return data;
   };
