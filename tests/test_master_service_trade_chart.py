@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import inspect
 import json
 import sys
 from pathlib import Path
@@ -27,6 +28,12 @@ def test_choose_readable_interval_upscales() -> None:
     chosen, upscaled = master_service._choose_readable_interval(row, "1m")
     assert chosen in {"4h", "1d"}
     assert upscaled is True
+
+
+def test_trade_chart_marker_does_not_use_event_axvspan() -> None:
+    source = inspect.getsource(master_service._render_trade_chart_png)
+    assert "ax.axvspan(left, right" not in source
+    assert "ax.annotate(" in source
 
 
 def test_trade_chart_route_404_unknown_row() -> None:
@@ -156,3 +163,11 @@ def test_trade_chart_html_is_image_only(monkeypatch) -> None:
     assert "Symbol" not in html
     assert "Timeframe requested" not in html
     assert "Timeframe rendered" not in html
+
+
+def test_merged_calculator_has_single_heading_and_no_iframe() -> None:
+    html = master_service.CALCULATOR_PAGE_TEMPLATE
+    assert html.count("Position Size Calculator") >= 2
+    assert "iframe" not in html.lower()
+    assert "merged_calculator_asset" not in html
+    assert "Asset:" in html

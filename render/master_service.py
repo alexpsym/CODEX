@@ -1733,6 +1733,69 @@ def _repair_persisted_bybit_demo_journal_sides() -> int:
     return changed
 
 
+def _repair_persisted_oanda_trade_rows() -> int:
+    rows = _get_trading_journal_rows()
+    if not rows:
+        return 0
+    contexts = _load_trade_contexts()
+    changed = 0
+    repaired: List[Dict[str, object]] = []
+    for row in rows:
+        if not isinstance(row, dict) or str(row.get("source") or "").strip().lower() != "oanda":
+            repaired.append(row)
+            continue
+        missing = not row.get("stop_loss") or not row.get("take_profit") or not _normalize_timeframe(row.get("timeframe"))
+        if not missing:
+            repaired.append(row)
+            continue
+        refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+        candidates = [
+            ctx
+            for ctx in contexts
+            if (
+                str(refs.get("tradeId") or "").strip()
+                and str(ctx.get("trade_id") or "").strip() == str(refs.get("tradeId") or "").strip()
+            )
+            or (
+                str(refs.get("orderId") or "").strip()
+                and str(ctx.get("order_id") or "").strip() == str(refs.get("orderId") or "").strip()
+            )
+            or (
+                str(refs.get("transactionId") or "").strip()
+                and str(ctx.get("transaction_id") or "").strip() == str(refs.get("transactionId") or "").strip()
+            )
+        ]
+        if len(candidates) != 1:
+            if len(candidates) > 1:
+                BYBIT_LOGGER.warning("OANDA_ROW_REPAIR_AMBIGUOUS row_id=%s candidates=%s", row.get("id"), len(candidates))
+            else:
+                BYBIT_LOGGER.info("OANDA_ROW_REPAIR_SKIPPED row_id=%s reason=no_context_match", row.get("id"))
+            repaired.append(row)
+            continue
+        ctx = candidates[0]
+        updated = dict(row)
+        if not updated.get("stop_loss") and ctx.get("stop_loss"):
+            updated["stop_loss"] = ctx.get("stop_loss")
+        if not updated.get("take_profit") and ctx.get("take_profit"):
+            updated["take_profit"] = ctx.get("take_profit")
+        tf = _normalize_timeframe(updated.get("timeframe"))
+        if not tf:
+            tf = _normalize_timeframe(ctx.get("timeframe"))
+            if tf:
+                updated["timeframe"] = tf
+        if tf:
+            metrics = updated.get("metrics") if isinstance(updated.get("metrics"), dict) else {}
+            metrics = dict(metrics)
+            metrics["timeframe"] = tf
+            updated["metrics"] = metrics
+        if updated != row:
+            changed += 1
+        repaired.append(updated)
+    if changed:
+        _set_trading_journal_rows(repaired)
+    return changed
+
+
 def _exclude_bybit_demo_row(row: Dict[str, object]) -> bool:
     """Return True if this journal row should be excluded (Bybit Demo)."""
     if ENABLE_BYBIT_DEMO_JOURNAL:
@@ -2863,10 +2926,53 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
         return []
     legs = _OANDA_OPEN_TRADE_LEGS.setdefault(account, {})
     close_time = str(entry.get("time") or "")
+    tx_order_id = str(entry.get("orderID") or "").strip()
+    tx_id = str(entry.get("id") or "").strip()
+
+    def _resolve_context_for_fill(trade_id: Optional[str] = None) -> Optional[Dict[str, object]]:
+        refs = {"orderId": tx_order_id, "transactionId": tx_id}
+        if trade_id:
+            refs["tradeId"] = trade_id
+        ctx = _lookup_trade_context_for_journal_row({"raw_refs": refs})
+        if isinstance(ctx, dict):
+            return ctx
+        candidates = [
+            item
+            for item in _load_trade_contexts()
+            if str(item.get("broker") or "").strip().lower() == "oanda"
+            and str(item.get("account") or "").strip().lower() == account
+            and str(item.get("instrument") or "").strip().upper() == symbol
+            and _normalize_side_for_comparison(item.get("side"))
+            == _normalize_side_for_comparison("buy" if (_to_float(entry.get("units")) or 0.0) >= 0 else "sell")
+            and str(item.get("status") or "ACTIVE").strip().upper() == "ACTIVE"
+        ]
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            BYBIT_LOGGER.warning(
+                "OANDA_CONTEXT_AMBIGUOUS account=%s symbol=%s side=%s tx_id=%s order_id=%s candidates=%s",
+                account,
+                symbol,
+                "buy" if (_to_float(entry.get("units")) or 0.0) >= 0 else "sell",
+                tx_id,
+                tx_order_id,
+                len(candidates),
+            )
+        else:
+            BYBIT_LOGGER.warning(
+                "OANDA_CONTEXT_MISSING account=%s symbol=%s tx_id=%s order_id=%s",
+                account,
+                symbol,
+                tx_id,
+                tx_order_id,
+            )
+        return None
+
     trade_opened = entry.get("tradeOpened") if isinstance(entry.get("tradeOpened"), dict) else None
     if isinstance(trade_opened, dict):
         trade_id = str(trade_opened.get("tradeID") or "").strip()
         opened_units = _to_float(trade_opened.get("units"))
+        trade_ctx = _resolve_context_for_fill(trade_id)
         if trade_id and opened_units not in (None, 0):
             legs[trade_id] = {
                 "open_time": close_time,
@@ -2875,6 +2981,11 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
                 "side": "Buy" if opened_units >= 0 else "Sell",
                 "symbol": symbol,
                 "account": account,
+                "timeframe": _normalize_timeframe((trade_ctx or {}).get("timeframe")),
+                "stop_loss": (trade_ctx or {}).get("stop_loss"),
+                "take_profit": (trade_ctx or {}).get("take_profit"),
+                "order_id": tx_order_id,
+                "transaction_id": tx_id,
             }
 
     close_legs: List[Dict[str, object]] = []
@@ -2888,21 +2999,22 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
         _persist_oanda_fill_state()
         return []
 
-    timeframe = _normalize_timeframe(entry.get("timeframe"))
-    if not timeframe:
-        ctx = _lookup_trade_context_for_journal_row(
-            {"raw_refs": {"orderId": entry.get("orderID"), "transactionId": tx_id}}
-        )
-        if isinstance(ctx, dict):
-            timeframe = _normalize_timeframe(ctx.get("timeframe"))
+    base_ctx = _resolve_context_for_fill()
+    timeframe = _normalize_timeframe(entry.get("timeframe")) or _normalize_timeframe((base_ctx or {}).get("timeframe"))
+    stop_loss = (base_ctx or {}).get("stop_loss")
+    take_profit = (base_ctx or {}).get("take_profit")
     rows: List[Dict[str, object]] = []
     for idx, close_leg in enumerate(close_legs):
         trade_id = str(close_leg.get("tradeID") or "").strip()
         leg_units = abs(_to_float(close_leg.get("units")) or 0.0)
         open_leg = legs.get(trade_id) if trade_id else None
+        leg_ctx = _resolve_context_for_fill(trade_id) or base_ctx
         entry_price = _to_float((open_leg or {}).get("entry_price"))
         open_time = str((open_leg or {}).get("open_time") or "") or None
         side = str((open_leg or {}).get("side") or ("Buy" if (_to_float(entry.get("units")) or 0.0) >= 0 else "Sell"))
+        row_timeframe = _normalize_timeframe((open_leg or {}).get("timeframe")) or timeframe or _normalize_timeframe((leg_ctx or {}).get("timeframe"))
+        row_stop_loss = (open_leg or {}).get("stop_loss") or stop_loss or (leg_ctx or {}).get("stop_loss")
+        row_take_profit = (open_leg or {}).get("take_profit") or take_profit or (leg_ctx or {}).get("take_profit")
         exit_price = _to_float(close_leg.get("price")) or _to_float(entry.get("price"))
         realized_pnl = (_to_float(close_leg.get("realizedPL")) or 0.0) + (_to_float(close_leg.get("financing")) or 0.0)
         fees = (
@@ -2937,8 +3049,10 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             "balance_after_trade": _to_float(entry.get("accountBalance")),
             "strategy_tag": "",
             "notes": "" if entry_price is not None and open_time else "partial_oanda_close_missing_open_leg",
-            "timeframe": timeframe,
-            "metrics": {"timeframe": timeframe} if timeframe else {},
+            "timeframe": row_timeframe,
+            "stop_loss": row_stop_loss,
+            "take_profit": row_take_profit,
+            "metrics": {"timeframe": row_timeframe} if row_timeframe else {},
             "raw_refs": {"transactionId": tx_id, "orderId": entry.get("orderID"), "tradeId": trade_id},
         }
         rows.append(row)
@@ -6596,6 +6710,9 @@ def _upsert_pending_webhook(payload: Dict[str, object]) -> Dict[str, object]:
             "instrument": str(entry.get("instrument") or "").strip().upper(),
             "side": str(entry.get("side") or "").strip().lower(),
             "order_type": str(entry.get("order_type") or "").strip().lower(),
+            "entry_price": entry.get("entry_price"),
+            "stop_loss": entry.get("stop_loss"),
+            "take_profit": entry.get("take_profit"),
             "timeframe": entry.get("timeframe"),
             "status": "ACTIVE",
         }
@@ -6641,6 +6758,15 @@ def _normalize_timeframe(value: object, *, max_length: int = 64) -> str:
     if len(text) > max_length:
         text = text[:max_length].strip()
     return text
+
+
+def _normalize_optional_price(value: object) -> Optional[str]:
+    if value in (None, ""):
+        return None
+    parsed = _to_float(value)
+    if parsed is None:
+        return str(value).strip() or None
+    return str(value).strip() or f"{parsed}"
 
 
 def _load_trade_contexts() -> List[Dict[str, object]]:
@@ -6708,6 +6834,12 @@ def _upsert_trade_context(payload: Dict[str, object]) -> Dict[str, object]:
     merged_payload = dict(payload)
     if "timeframe" in merged_payload:
         merged_payload["timeframe"] = _normalize_timeframe(merged_payload.get("timeframe"))
+    for key in ("entry_price", "stop_loss", "take_profit"):
+        if key in merged_payload:
+            merged_payload[key] = _normalize_optional_price(merged_payload.get(key))
+    for key in ("broker", "account", "instrument", "side", "order_type", "pending_webhook_id", "order_id", "trade_id"):
+        if key in merged_payload and merged_payload.get(key) is not None:
+            merged_payload[key] = str(merged_payload.get(key)).strip()
     merged_payload["updated_at"] = now_iso
     merged_payload.setdefault("created_at", now_iso)
     if not merged_payload.get("status"):
@@ -6802,6 +6934,7 @@ def _lookup_trade_context_for_journal_row(row: Dict[str, object]) -> Optional[Di
     refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
     order_id = str(refs.get("orderId") or refs.get("orderID") or "").strip()
     trade_id = str(refs.get("tradeId") or refs.get("tradeID") or "").strip()
+    transaction_id = str(refs.get("transactionId") or refs.get("transactionID") or "").strip()
     order_link_id = str(refs.get("orderLinkId") or "").strip()
     for ctx in contexts:
         if order_id and str(ctx.get("order_id") or "").strip() == order_id:
@@ -6811,6 +6944,9 @@ def _lookup_trade_context_for_journal_row(row: Dict[str, object]) -> Optional[Di
             return ctx
     for ctx in contexts:
         if trade_id and str(ctx.get("trade_id") or "").strip() == trade_id:
+            return ctx
+    for ctx in contexts:
+        if transaction_id and str(ctx.get("transaction_id") or "").strip() == transaction_id:
             return ctx
     return None
 
@@ -7945,6 +8081,7 @@ async def _place_oanda_order(
     )
     order_id = _extract_oanda_order_id(result)
     fill_tx = result.get("orderFillTransaction")
+    fill_tx_id = str(fill_tx.get("id") or "").strip() if isinstance(fill_tx, dict) else ""
     trade_id = None
     if isinstance(fill_tx, dict):
         trade_opened = fill_tx.get("tradeOpened")
@@ -7963,9 +8100,13 @@ async def _place_oanda_order(
                 "instrument": symbol,
                 "side": action,
                 "order_type": order_type,
+                "entry_price": order_payload.get("price") or entry_price,
+                "stop_loss": (order_payload.get("stopLossOnFill") or {}).get("price"),
+                "take_profit": (order_payload.get("takeProfitOnFill") or {}).get("price"),
                 "timeframe": payload.get("timeframe"),
                 "order_id": str(order_id or "").strip(),
                 "trade_id": str(trade_id or "").strip(),
+                "transaction_id": fill_tx_id or str(result.get("lastTransactionID") or "").strip(),
                 "status": "ACTIVE",
             }
         )
@@ -9888,116 +10029,60 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
   <title>Position Size Calculator</title>
   <style>
     body { margin: 0; background: #000; color: #fff; font-family: Arial, sans-serif; }
-    .wrap { max-width: 1800px; margin: 0 auto; padding: 16px; }
-    .toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 12px; }
-    .toolbar-main { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
-    h1 { margin: 0; font-size: 28px; }
-    .button-group { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0; }
-    .button-group button {
-      background: #1f2937;
-      color: #e2e8f0;
-      border: 1px solid #334155;
-      border-radius: 8px;
-      padding: 6px 12px;
-      font-weight: 700;
-      text-decoration: none;
-      cursor: pointer;
+    .wrap { max-width: 960px; margin: 0 auto; padding: 16px; }
+    h1 { margin: 0 0 16px 0; font-size: 30px; }
+    .panel { background: #0f172a; border: 1px solid #1f2937; border-radius: 12px; padding: 16px; }
+    .stack { display: flex; flex-direction: column; gap: 12px; }
+    .button-group { display: flex; flex-wrap: wrap; gap: 8px; }
+    .button-group button, .button-group a {
+      background: #1f2937; color: #e2e8f0; border: 1px solid #334155; border-radius: 8px;
+      padding: 8px 14px; font-weight: 700; text-decoration: none; cursor: pointer;
     }
     .button-group button.active { background: #2563eb; color: #fff; border-color: #60a5fa; }
-    .frame-shell { border: 1px solid #1f2937; border-radius: 12px; overflow: hidden; background: #0f172a; }
-    iframe { display: block; width: 100%; height: calc(100vh - 120px); min-height: 720px; border: 0; background: #000; }
+    .asset-panel { display: none; }
+    .asset-panel.active { display: block; }
+    .muted { color: #94a3b8; font-size: 13px; }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <div class="toolbar">
-      <div class="toolbar-main">
-        <h1>Position Size Calculator</h1>
+    <h1>Position Size Calculator</h1>
+    <div class="panel stack">
+      <div>
+        <div style="font-weight:700;margin-bottom:6px;">Asset:</div>
         <div class="button-group" role="group" aria-label="Asset selection">
-          <button type="button" data-asset="crypto">Crypto</button>
+          <button type="button" data-asset="crypto" class="active">Crypto</button>
           <button type="button" data-asset="fx">FX</button>
         </div>
       </div>
-    </div>
-    <div class="frame-shell">
-      <iframe id="calculator-frame" title="Position Size Calculator" loading="eager" src="/apps/cryptocalculator-clone/?embedded=1&shell=merged&title=Position+Size+Calculator"></iframe>
+
+      <section class="asset-panel active" data-panel="crypto">
+        <div style="font-weight:700;margin-bottom:8px;">Crypto Position Size</div>
+        <p class="muted">Use the crypto calculator UI for symbol/risk sizing and webhook output.</p>
+        <div class="button-group">
+          <a href="/apps/cryptocalculator-clone/" target="_self" rel="noopener">Open Crypto Calculator</a>
+        </div>
+      </section>
+
+      <section class="asset-panel" data-panel="fx">
+        <div style="font-weight:700;margin-bottom:8px;">FX Position Size</div>
+        <p class="muted">Use the OANDA calculator UI for instrument/risk sizing and webhook output.</p>
+        <div class="button-group">
+          <a href="/apps/oanda-calculator-clone/" target="_self" rel="noopener">Open FX Calculator</a>
+        </div>
+      </section>
     </div>
   </div>
   <script>
     (() => {
-      const STORAGE_KEY = 'merged_calculator_asset';
-      const DEFAULT_ASSET = 'crypto';
-      const ASSET_URLS = {
-        crypto: '/apps/cryptocalculator-clone/?embedded=1&shell=merged&title=Position+Size+Calculator',
-        fx: '/apps/oanda-calculator-clone/?embedded=1&shell=merged&title=Position+Size+Calculator',
-      };
       const buttons = Array.from(document.querySelectorAll('[data-asset]'));
-      const frame = document.getElementById('calculator-frame');
-      const currentUrl = new URL(window.location.href);
-      const queryAsset = (currentUrl.searchParams.get('asset') || '').toLowerCase();
-      const storedAsset = (window.localStorage.getItem(STORAGE_KEY) || '').toLowerCase();
-      const normalizeAsset = (value) => (value in ASSET_URLS ? value : DEFAULT_ASSET);
-      const canonicalCalcUrl = (value) => {
-        try {
-          const parsed = new URL(value, window.location.origin);
-          const normalized = new URL(parsed.pathname, window.location.origin);
-          normalized.searchParams.set('embedded', parsed.searchParams.get('embedded') || '1');
-          normalized.searchParams.set('shell', parsed.searchParams.get('shell') || 'merged');
-          normalized.searchParams.set('title', parsed.searchParams.get('title') || 'Position Size Calculator');
-          return normalized.toString();
-        } catch (_err) {
-          return '';
-        }
+      const panels = Array.from(document.querySelectorAll('[data-panel]'));
+      const setAsset = (asset) => {
+        buttons.forEach((button) => button.classList.toggle('active', button.dataset.asset === asset));
+        panels.forEach((panel) => panel.classList.toggle('active', panel.dataset.panel === asset));
       };
-
-      const setActive = (asset) => {
-        buttons.forEach((button) => {
-          button.classList.toggle('active', button.dataset.asset === asset);
-          button.setAttribute('aria-pressed', button.dataset.asset === asset ? 'true' : 'false');
-        });
-      };
-
-      const updateAsset = (asset, { replace = false } = {}) => {
-        const nextAsset = normalizeAsset(asset);
-        setActive(nextAsset);
-        const expectedUrl = canonicalCalcUrl(ASSET_URLS[nextAsset]);
-        const frameUrl = canonicalCalcUrl(frame.src);
-        if (expectedUrl && frameUrl !== expectedUrl) {
-          frame.src = expectedUrl;
-        }
-        currentUrl.searchParams.set('asset', nextAsset);
-        const nextUrl = `${currentUrl.pathname}?${currentUrl.searchParams.toString()}`;
-        window.history[replace ? 'replaceState' : 'pushState']({}, '', nextUrl);
-        window.localStorage.setItem(STORAGE_KEY, nextAsset);
-      };
-
-      const initialAsset = normalizeAsset(queryAsset || storedAsset || DEFAULT_ASSET);
-      updateAsset(initialAsset, { replace: true });
-      buttons.forEach((button) => {
-        button.addEventListener('click', () => updateAsset(button.dataset.asset));
-      });
-      frame.addEventListener('load', () => {
-        const expectedAsset = normalizeAsset(new URL(window.location.href).searchParams.get('asset') || DEFAULT_ASSET);
-        const expected = canonicalCalcUrl(ASSET_URLS[expectedAsset]);
-        let current = '';
-        try {
-          current = frame.contentWindow?.location?.href || frame.src || '';
-        } catch (_err) {
-          current = frame.src || '';
-        }
-        if (!current) return;
-        const normalizedCurrent = canonicalCalcUrl(current);
-        if (!expected || !normalizedCurrent || normalizedCurrent === expected) return;
-        const currentUrl = new URL(current, window.location.origin);
-        const isCalculatorApp = currentUrl.pathname.includes('/apps/cryptocalculator-clone/') || currentUrl.pathname.includes('/apps/oanda-calculator-clone/');
-        if (isCalculatorApp && frame.contentWindow?.location) {
-          frame.contentWindow.location.replace(expected);
-        }
-      });
-      window.addEventListener('popstate', () => {
-        const asset = normalizeAsset(new URL(window.location.href).searchParams.get('asset') || DEFAULT_ASSET);
-        updateAsset(asset, { replace: true });
-      });
+      buttons.forEach((button) => button.addEventListener('click', () => setAsset(button.dataset.asset)));
+      setAsset('crypto');
     })();
   </script>
 </body>
@@ -10744,13 +10829,6 @@ def _render_trade_chart_png(row: Dict[str, object], candles: List[Dict[str, obje
 
     entry_time = _to_dt_utc(row.get("open_time") or row.get("opened_at") or row.get("entry_time"))
     exit_time = _to_dt_utc(row.get("close_time") or row.get("closed_at") or row.get("exit_time"))
-    if entry_time and exit_time:
-        ax.axvspan(
-            mdates.date2num(entry_time.astimezone(ZoneInfo(APP_TIMEZONE))),
-            mdates.date2num(exit_time.astimezone(ZoneInfo(APP_TIMEZONE))),
-            color="#90caf9",
-            alpha=0.18,
-        )
     line_labels: List[Tuple[str, float, str]] = []
     for label, key, color in [
         ("Entry", "entry_price", "#1565c0"),
@@ -10789,22 +10867,19 @@ def _render_trade_chart_png(row: Dict[str, object], candles: List[Dict[str, obje
         if event_idx is None:
             return
         event_x = x[event_idx]
-        left = event_x - (width * 0.9)
-        right = event_x + (width * 0.9)
-        ax.axvline(event_x, color=color, linestyle="--", linewidth=1.2, alpha=0.85)
-        ax.axvspan(left, right, color=color, alpha=0.12)
-        if event_price is not None:
-            ax.scatter([event_x], [event_price], color=color, s=54, zorder=5, edgecolors="white", linewidths=0.8)
-        y_top = max(float(c["high"]) for c in candles) + (y_span * 0.015)
-        ax.text(
-            event_x,
-            y_top,
+        candle_high = float(candles[event_idx]["high"])
+        arrow_target_y = candle_high + (y_span * 0.006)
+        text_y = candle_high + (y_span * 0.055)
+        ax.annotate(
             title,
-            color=color,
-            fontsize=8,
+            xy=(event_x, arrow_target_y),
+            xytext=(event_x, text_y),
             ha="center",
             va="bottom",
-            bbox={"boxstyle": "round,pad=0.18", "facecolor": "white", "edgecolor": "none", "alpha": 0.9},
+            fontsize=8,
+            color=color,
+            bbox={"boxstyle": "round,pad=0.2", "facecolor": "white", "edgecolor": color, "alpha": 0.95},
+            arrowprops={"arrowstyle": "-|>", "color": color, "lw": 1.1, "shrinkA": 0, "shrinkB": 0},
         )
 
     _mark_event(
@@ -10824,6 +10899,9 @@ def _render_trade_chart_png(row: Dict[str, object], candles: List[Dict[str, obje
     ax.tick_params(axis="both", colors="black")
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d %H:%M", tz=ZoneInfo(APP_TIMEZONE)))
     ax.set_xlim(min(x), max(x) + max(0.002, (max(x) - min(x)) * 0.08))
+    candle_low = min(float(c["low"]) for c in candles)
+    candle_high = max(float(c["high"]) for c in candles)
+    ax.set_ylim(candle_low - (y_span * 0.03), candle_high + (y_span * 0.14))
     fig.autofmt_xdate()
     buf = io.BytesIO()
     plt.tight_layout()
@@ -12521,6 +12599,7 @@ async def list_open_orders() -> JSONResponse:
 
 @app.get("/api/recent-trades")
 async def recent_trades(limit: int = 25) -> JSONResponse:
+    _repair_persisted_oanda_trade_rows()
     sanitized_rows, sanitize_stats = _sanitize_bybit_demo_rows(_get_trading_journal_rows())
     if int(sanitize_stats.get("changed", 0)):
         _set_trading_journal_rows(sanitized_rows)

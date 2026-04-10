@@ -43,11 +43,26 @@ def test_journal_rows_from_oanda_open_fill_only_returns_empty():
 
 
 def test_journal_rows_from_oanda_close_fill_uses_cached_open_leg():
+    master_service._upsert_trade_context(
+        {
+            "order_id": "ord1",
+            "trade_id": "t1",
+            "transaction_id": "100",
+            "broker": "oanda",
+            "account": "demo",
+            "instrument": "EUR_USD",
+            "side": "buy",
+            "timeframe": "1-hour",
+            "stop_loss": "1.1900",
+            "take_profit": "1.2200",
+        }
+    )
     master_service._journal_rows_from_oanda_order_fill(
         {
             "account": "demo",
             "id": "100",
             "instrument": "EUR_USD",
+            "orderID": "ord1",
             "time": "2026-04-10T00:00:00Z",
             "tradeOpened": {"tradeID": "t1", "price": "1.2000", "units": "1000"},
         }
@@ -58,6 +73,7 @@ def test_journal_rows_from_oanda_close_fill_uses_cached_open_leg():
             "account": "demo",
             "id": "101",
             "instrument": "EUR_USD",
+            "orderID": "ord1",
             "time": "2026-04-10T01:00:00Z",
             "tradesClosed": [
                 {
@@ -82,6 +98,49 @@ def test_journal_rows_from_oanda_close_fill_uses_cached_open_leg():
     assert row["entry_price"] == 1.2
     assert row["exit_price"] == 1.21
     assert row["notes"] == ""
+    assert row["timeframe"] == "1-hour"
+    assert row["stop_loss"] == "1.1900"
+    assert row["take_profit"] == "1.2200"
+
+
+def test_journal_rows_from_oanda_partial_close_keeps_metadata():
+    master_service._upsert_trade_context(
+        {
+            "order_id": "ord2",
+            "trade_id": "t2",
+            "broker": "oanda",
+            "account": "demo",
+            "instrument": "EUR_USD",
+            "side": "buy",
+            "timeframe": "15-minute",
+            "stop_loss": "1.0900",
+            "take_profit": "1.1300",
+        }
+    )
+    master_service._journal_rows_from_oanda_order_fill(
+        {
+            "account": "demo",
+            "id": "200",
+            "orderID": "ord2",
+            "instrument": "EUR_USD",
+            "time": "2026-04-10T00:00:00Z",
+            "tradeOpened": {"tradeID": "t2", "price": "1.1000", "units": "1000"},
+        }
+    )
+    rows = master_service._journal_rows_from_oanda_order_fill(
+        {
+            "account": "demo",
+            "id": "201",
+            "orderID": "ord2",
+            "instrument": "EUR_USD",
+            "time": "2026-04-10T01:00:00Z",
+            "tradeReduced": {"tradeID": "t2", "units": "-500", "price": "1.1100", "realizedPL": "3.1"},
+            "accountCurrency": "AUD",
+        }
+    )
+    assert rows and rows[0]["timeframe"] == "15-minute"
+    assert rows[0]["stop_loss"] == "1.0900"
+    assert rows[0]["take_profit"] == "1.1300"
 
 
 def test_recover_oanda_recent_fills_sorts_and_dedupes(monkeypatch: pytest.MonkeyPatch):
