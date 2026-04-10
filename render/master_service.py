@@ -2950,12 +2950,19 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
     tx_order_id = str(entry.get("orderID") or "").strip()
     tx_id = str(entry.get("id") or "").strip()
 
+    context_cache: Dict[Tuple[str, str, str, str], Optional[Dict[str, object]]] = {}
+    warned_missing_or_ambiguous: Set[Tuple[str, str, str, str]] = set()
+
     def _resolve_context_for_fill(trade_id: Optional[str] = None) -> Optional[Dict[str, object]]:
+        warning_key = (account, tx_id, tx_order_id, str(trade_id or "").strip())
+        if warning_key in context_cache:
+            return context_cache[warning_key]
         refs = {"orderId": tx_order_id, "transactionId": tx_id}
         if trade_id:
             refs["tradeId"] = trade_id
         ctx = _lookup_trade_context_for_journal_row({"raw_refs": refs})
         if isinstance(ctx, dict):
+            context_cache[warning_key] = ctx
             return ctx
         candidates = [
             item
@@ -2968,25 +2975,33 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             and str(item.get("status") or "ACTIVE").strip().upper() == "ACTIVE"
         ]
         if len(candidates) == 1:
+            context_cache[warning_key] = candidates[0]
             return candidates[0]
         if len(candidates) > 1:
-            BYBIT_LOGGER.warning(
-                "OANDA_CONTEXT_AMBIGUOUS account=%s symbol=%s side=%s tx_id=%s order_id=%s candidates=%s",
-                account,
-                symbol,
-                "buy" if (_to_float(entry.get("units")) or 0.0) >= 0 else "sell",
-                tx_id,
-                tx_order_id,
-                len(candidates),
-            )
+            if warning_key not in warned_missing_or_ambiguous:
+                warned_missing_or_ambiguous.add(warning_key)
+                BYBIT_LOGGER.warning(
+                    "OANDA_CONTEXT_AMBIGUOUS account=%s symbol=%s side=%s tx_id=%s order_id=%s trade_id=%s candidates=%s",
+                    account,
+                    symbol,
+                    "buy" if (_to_float(entry.get("units")) or 0.0) >= 0 else "sell",
+                    tx_id,
+                    tx_order_id,
+                    trade_id or "",
+                    len(candidates),
+                )
         else:
-            BYBIT_LOGGER.warning(
-                "OANDA_CONTEXT_MISSING account=%s symbol=%s tx_id=%s order_id=%s",
-                account,
-                symbol,
-                tx_id,
-                tx_order_id,
-            )
+            if warning_key not in warned_missing_or_ambiguous:
+                warned_missing_or_ambiguous.add(warning_key)
+                BYBIT_LOGGER.warning(
+                    "OANDA_CONTEXT_MISSING account=%s symbol=%s tx_id=%s order_id=%s trade_id=%s",
+                    account,
+                    symbol,
+                    tx_id,
+                    tx_order_id,
+                    trade_id or "",
+                )
+        context_cache[warning_key] = None
         return None
 
     trade_opened = entry.get("tradeOpened") if isinstance(entry.get("tradeOpened"), dict) else None
@@ -3177,13 +3192,16 @@ def _restore_alerts_payload(data: Dict[str, object]) -> Dict[str, object]:
     pending_restored: List[Dict[str, object]] = []
     if "pending_webhooks" in data:
         pending_restored = _replace_pending_webhooks(data["pending_webhooks"])
+    trade_contexts_restored = 0
     if "trade_contexts" in data and isinstance(data["trade_contexts"], (list, dict)):
         trade_context_items = data["trade_contexts"]
         if isinstance(trade_context_items, dict):
             trade_context_items = trade_context_items.get("items", [])
         if isinstance(trade_context_items, list):
             cleaned = [dict(entry) for entry in trade_context_items if isinstance(entry, dict)]
-            _save_trade_contexts(_prune_trade_contexts(cleaned))
+            pruned = _prune_trade_contexts(cleaned)
+            _save_trade_contexts(pruned)
+            trade_contexts_restored = len(pruned)
 
     journal_restored = 0
     journal_sanitized = 0
@@ -3210,9 +3228,11 @@ def _restore_alerts_payload(data: Dict[str, object]) -> Dict[str, object]:
         monthly_rows_restored = len(_get_monthly_aud_revaluation_rows())
     if "monthly_aud_revaluation_state" in data and isinstance(data["monthly_aud_revaluation_state"], dict):
         _save_json_file(MONTHLY_AUD_REVALUATION_STATE_PATH, data["monthly_aud_revaluation_state"])
+    oanda_fill_state_restored = False
     if "oanda_fill_state" in data and isinstance(data["oanda_fill_state"], dict):
         _save_json_file(OANDA_FILL_STATE_PATH, data["oanda_fill_state"])
         _restore_oanda_fill_state_on_startup()
+        oanda_fill_state_restored = True
 
     bybit_restored = bybit_monitor.replace_custom_alerts(bybit_block["alerts"], strict=False)
     oanda_restored = oanda_monitor.replace_custom_alerts(oanda_block["alerts"])
@@ -3224,6 +3244,8 @@ def _restore_alerts_payload(data: Dict[str, object]) -> Dict[str, object]:
         "oanda_restored": len(oanda_restored),
         "watchlist_restored": len(watchlist_items),
         "pending_webhooks_restored": len(pending_restored),
+        "trade_contexts_restored": trade_contexts_restored,
+        "oanda_fill_state_restored": oanda_fill_state_restored,
         "journal_rows_restored": journal_restored,
         "journal_rows_sanitized": journal_sanitized,
         "monthly_aud_revaluation_rows_restored": monthly_rows_restored,
@@ -3240,17 +3262,21 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
         restored = _restore_alerts_payload(data)
         active_folder, _ = await asyncio.to_thread(_resolve_trading_journal_dropbox_folder)
         workbook_stats = await asyncio.to_thread(_sanitize_bybit_demo_workbook, active_folder)
+        oanda_repaired_rows = _repair_persisted_oanda_trade_rows()
         _schedule_dropbox_upload_state_backup()
         BYBIT_LOGGER.info(
-            "Dropbox restore complete: bybit=%s skipped_invalid_bybit=%s oanda=%s watchlist=%s pending=%s journal_rows=%s journal_sanitized=%s workbook_deduped=%s",
+            "Dropbox restore complete: bybit=%s skipped_invalid_bybit=%s oanda=%s watchlist=%s pending=%s trade_contexts_restored=%s oanda_fill_state_restored=%s journal_rows=%s journal_sanitized=%s workbook_deduped=%s oanda_rows_repaired=%s",
             restored["bybit_restored"],
             restored.get("bybit_invalid_skipped", 0),
             restored["oanda_restored"],
             restored["watchlist_restored"],
             restored["pending_webhooks_restored"],
+            restored.get("trade_contexts_restored", 0),
+            restored.get("oanda_fill_state_restored", False),
             restored.get("journal_rows_restored", 0),
             restored.get("journal_rows_sanitized", 0),
             int(workbook_stats.get("deduped_by_order_id", 0)) + int(workbook_stats.get("deduped_by_fingerprint", 0)),
+            oanda_repaired_rows,
         )
     except FileNotFoundError:
         BYBIT_LOGGER.info("Dropbox restore skipped; no backup found at %s", DROPBOX_BACKUP_PATH)
@@ -3882,6 +3908,16 @@ async def _run_startup_recovery_import_if_needed() -> None:
 
 
 MONTHLY_AUD_REVAL_SYNC_INTERVAL_SECONDS = max(300, int(os.getenv("MONTHLY_AUD_REVAL_SYNC_INTERVAL_SECONDS", "3600") or "3600"))
+STARTUP_RESTORE_WAIT_TIMEOUT_SECONDS = 120.0
+
+
+async def _wait_for_startup_restore_signal(*, timeout: float, timeout_warning: str) -> bool:
+    try:
+        await asyncio.wait_for(_STARTUP_STATE_RESTORE_DONE.wait(), timeout=timeout)
+        return True
+    except asyncio.TimeoutError:
+        BYBIT_LOGGER.warning(timeout_warning)
+        return False
 
 
 async def _run_monthly_aud_revaluation_sync(*, reason: str) -> Dict[str, object]:
@@ -3926,10 +3962,10 @@ async def _run_monthly_aud_revaluation_sync(*, reason: str) -> Dict[str, object]
 
 
 async def _schedule_monthly_aud_revaluation_sync() -> None:
-    try:
-        await asyncio.wait_for(_STARTUP_STATE_RESTORE_DONE.wait(), timeout=120.0)
-    except asyncio.TimeoutError:
-        BYBIT_LOGGER.warning("MONTHLY_AUD_REVAL_STARTUP_WAIT_TIMEOUT proceeding without restore signal")
+    await _wait_for_startup_restore_signal(
+        timeout=STARTUP_RESTORE_WAIT_TIMEOUT_SECONDS,
+        timeout_warning="MONTHLY_AUD_REVAL_STARTUP_WAIT_TIMEOUT proceeding without restore signal",
+    )
     await _run_monthly_aud_revaluation_sync(reason="startup")
     while True:
         await asyncio.sleep(MONTHLY_AUD_REVAL_SYNC_INTERVAL_SECONDS)
@@ -3937,11 +3973,19 @@ async def _schedule_monthly_aud_revaluation_sync() -> None:
 
 
 async def _start_bybit_demo_closed_pnl_poll_after_restore() -> None:
-    try:
-        await asyncio.wait_for(_STARTUP_STATE_RESTORE_DONE.wait(), timeout=120.0)
-    except asyncio.TimeoutError:
-        BYBIT_LOGGER.warning("BYBIT_DEMO_CLOSED_PNL_STARTUP_WAIT_TIMEOUT proceeding without restore signal")
+    await _wait_for_startup_restore_signal(
+        timeout=STARTUP_RESTORE_WAIT_TIMEOUT_SECONDS,
+        timeout_warning="BYBIT_DEMO_CLOSED_PNL_STARTUP_WAIT_TIMEOUT proceeding without restore signal",
+    )
     await _poll_bybit_demo_closed_pnl()
+
+
+async def _start_startup_recovery_import_after_restore() -> None:
+    await _wait_for_startup_restore_signal(
+        timeout=STARTUP_RESTORE_WAIT_TIMEOUT_SECONDS,
+        timeout_warning="STARTUP_RECOVERY_WAIT_TIMEOUT proceeding without restore signal",
+    )
+    await _run_startup_recovery_import_if_needed()
 
 
 async def _run_daily_trade_history_sync(*, reason: str) -> Dict[str, object]:
@@ -4054,7 +4098,7 @@ async def _autostart_scripts() -> None:
     asyncio.create_task(_dropbox_restore_state_backup_on_startup())
     asyncio.create_task(_ensure_trading_journal_dropbox_templates())
     asyncio.create_task(_log_outbound_traffic_summary())
-    asyncio.create_task(_run_startup_recovery_import_if_needed())
+    asyncio.create_task(_start_startup_recovery_import_after_restore())
     asyncio.create_task(_schedule_daily_trade_history_sync())
     asyncio.create_task(_schedule_monthly_aud_revaluation_sync())
     if ENABLE_BYBIT_DEMO_JOURNAL and ENABLE_BYBIT_DEMO_CLOSED_PNL_POLL:
@@ -8194,6 +8238,7 @@ async def _place_oanda_order(
                 "status": "ACTIVE",
             }
         )
+        _schedule_dropbox_upload_state_backup()
         if not pending_id:
             # Backwards compatibility: older TradingView alerts may not include
             # pending_webhook_id. Infer the deterministic id used by

@@ -79,3 +79,18 @@ def test_bookkeeping_failure_does_not_convert_success_to_error(oanda_order_mocks
     assert result["orderCreateTransaction"]["id"] == "12345"
     assert "warnings" in result
     assert any("bookkeeping failed" in warning.lower() for warning in result["warnings"])
+
+
+def test_oanda_context_upsert_always_schedules_backup(oanda_order_mocks, monkeypatch: pytest.MonkeyPatch):
+    calls = {"backup": 0}
+    monkeypatch.setattr(master_service, "_delete_pending_webhook", lambda _pid: False)
+    monkeypatch.setattr(
+        master_service,
+        "_schedule_dropbox_upload_state_backup",
+        lambda: calls.__setitem__("backup", calls["backup"] + 1),
+    )
+
+    result = asyncio.run(master_service._place_oanda_order(_base_payload(), request_id="req-3"))
+
+    assert result["orderCreateTransaction"]["id"] == "12345"
+    assert calls["backup"] == 1
