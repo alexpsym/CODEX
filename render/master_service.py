@@ -3915,6 +3915,14 @@ async def _schedule_monthly_aud_revaluation_sync() -> None:
         await _run_monthly_aud_revaluation_sync(reason="hourly")
 
 
+async def _start_bybit_demo_closed_pnl_poll_after_restore() -> None:
+    try:
+        await asyncio.wait_for(_STARTUP_STATE_RESTORE_DONE.wait(), timeout=120.0)
+    except asyncio.TimeoutError:
+        BYBIT_LOGGER.warning("BYBIT_DEMO_CLOSED_PNL_STARTUP_WAIT_TIMEOUT proceeding without restore signal")
+    await _poll_bybit_demo_closed_pnl()
+
+
 async def _run_daily_trade_history_sync(*, reason: str) -> Dict[str, object]:
     async with _DAILY_TRADE_SYNC_LOCK:
         started_at = _utc_now_iso()
@@ -4029,7 +4037,7 @@ async def _autostart_scripts() -> None:
     asyncio.create_task(_schedule_daily_trade_history_sync())
     asyncio.create_task(_schedule_monthly_aud_revaluation_sync())
     if ENABLE_BYBIT_DEMO_JOURNAL and ENABLE_BYBIT_DEMO_CLOSED_PNL_POLL:
-        asyncio.create_task(_poll_bybit_demo_closed_pnl())
+        asyncio.create_task(_start_bybit_demo_closed_pnl_poll_after_restore())
     if not ENABLE_BYBIT_DEMO_JOURNAL:
         _purge_bybit_demo_journal_state()
     if os.getenv("ENABLE_BYBIT_FILL_POLL", "0") == "1":
@@ -6932,10 +6940,23 @@ def _lookup_trade_context_for_open_item(item: Dict[str, object]) -> Optional[Dic
 def _lookup_trade_context_for_journal_row(row: Dict[str, object]) -> Optional[Dict[str, object]]:
     contexts = _load_trade_contexts()
     refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
-    order_id = str(refs.get("orderId") or refs.get("orderID") or "").strip()
+    order_id = str(
+        refs.get("orderId")
+        or refs.get("orderID")
+        or row.get("orderId")
+        or row.get("orderID")
+        or row.get("order_id")
+        or ""
+    ).strip()
     trade_id = str(refs.get("tradeId") or refs.get("tradeID") or "").strip()
     transaction_id = str(refs.get("transactionId") or refs.get("transactionID") or "").strip()
-    order_link_id = str(refs.get("orderLinkId") or "").strip()
+    order_link_id = str(
+        refs.get("orderLinkId")
+        or refs.get("order_link_id")
+        or row.get("orderLinkId")
+        or row.get("order_link_id")
+        or ""
+    ).strip()
     for ctx in contexts:
         if order_id and str(ctx.get("order_id") or "").strip() == order_id:
             return ctx
@@ -8782,8 +8803,26 @@ def _normalize_bybit_closed_pnl_row(
     if isinstance(raw_refs_extra, dict):
         raw_refs.update(raw_refs_extra)
     mode = "demo" if str(account_mode).strip().lower() == "demo" else "live"
-    ctx = _lookup_trade_context_for_journal_row({"raw_refs": {"orderId": order_id}})
+    ctx = _lookup_trade_context_for_journal_row(
+        {
+            "orderId": order_id,
+            "orderLinkId": str(entry.get("orderLinkId") or "").strip(),
+            "raw_refs": {"orderId": order_id, "orderLinkId": str(entry.get("orderLinkId") or "").strip()},
+        }
+    )
     timeframe = _normalize_timeframe(ctx.get("timeframe")) if isinstance(ctx, dict) else ""
+    fallback_attempted = isinstance(ctx, dict)
+    fallback_stop_loss = _to_float(ctx.get("stop_loss")) if isinstance(ctx, dict) else None
+    fallback_take_profit = _to_float(ctx.get("take_profit")) if isinstance(ctx, dict) else None
+    if stop_loss is None and fallback_stop_loss is not None:
+        stop_loss = fallback_stop_loss
+    if take_profit is None and fallback_take_profit is not None:
+        take_profit = fallback_take_profit
+    raw_refs["trade_context_tpsl_fallback_attempted"] = fallback_attempted
+    raw_refs["trade_context_tpsl_fallback_matched"] = bool(
+        (stop_loss is not None and fallback_stop_loss is not None)
+        or (take_profit is not None and fallback_take_profit is not None)
+    )
     return {
         "id": f"bybit:{mode}:closedpnl:{symbol}:{order_id}",
         "source": "bybit",
@@ -9007,18 +9046,69 @@ def _append_bybit_demo_rows_to_workbook(active_folder: str, rows: List[Dict[str,
             existing = pd.DataFrame(columns=BYBIT_DEMO_WORKBOOK_COLUMNS)
         existing = existing.reindex(columns=BYBIT_DEMO_WORKBOOK_COLUMNS)
 
+        numeric_columns = {
+            "size_quantity",
+            "entry_price",
+            "closing_price",
+            "stop_loss",
+            "take_profit",
+            "commission",
+            "net_profit",
+            "balance_after_trade",
+            "fill_count",
+        }
+        text_columns = {
+            "opening_time",
+            "closing_time",
+            "type_buy_sell",
+            "symbol",
+            "currency",
+            "notes",
+            "order_id",
+            "source",
+        }
+
+        def _sanitize_workbook_cell(column: str, value: object) -> object:
+            if column in numeric_columns:
+                if value is None:
+                    return None
+                if isinstance(value, str) and not value.strip():
+                    return None
+                return _to_float(value)
+            if column in text_columns:
+                if value is None:
+                    return ""
+                if isinstance(value, str):
+                    return value
+                return str(value)
+            return value
+
         changed = 0
         order_ids = existing.get("order_id", pd.Series(dtype=str)).fillna("").astype(str).str.strip()
         order_index = {order_id: idx for idx, order_id in order_ids.items() if order_id}
         for row in rows:
             workbook_row = _bybit_demo_workbook_row(row)
+            workbook_row = {
+                column: _sanitize_workbook_cell(column, workbook_row.get(column))
+                for column in BYBIT_DEMO_WORKBOOK_COLUMNS
+            }
             order_id = str(workbook_row.get("order_id") or "").strip()
             if not order_id:
                 continue
             if order_id in order_index:
                 idx = order_index[order_id]
                 for column, value in workbook_row.items():
-                    existing.at[idx, column] = value
+                    try:
+                        existing.at[idx, column] = value
+                    except Exception as exc:
+                        BYBIT_LOGGER.error(
+                            "Bybit Demo workbook update failed column=%s value_type=%s order_id=%s err=%s",
+                            column,
+                            type(value).__name__,
+                            order_id,
+                            exc,
+                        )
+                        raise
                 changed += 1
                 continue
             existing = pd.concat([existing, pd.DataFrame([workbook_row], columns=BYBIT_DEMO_WORKBOOK_COLUMNS)], ignore_index=True)
@@ -9217,16 +9307,6 @@ async def _sync_bybit_closed_pnl_window(
             if tpsl_source_raw.startswith("cached_request:"):
                 tpsl_source = f"{tpsl_source_raw}:{cache_match_type}"
             cache_hit = cache_entry is not None
-            if tpsl_source == "unresolved":
-                BYBIT_LOGGER.warning(
-                    "BYBIT_DEMO_TPSL unresolved order_id=%s order_link_id=%s parent_order_link_id=%s stop_order_type=%s cache_hit=%s cache_match_type=%s",
-                    order_id,
-                    order_link_id,
-                    parent_link_id,
-                    str(order_match.get("stopOrderType") or entry.get("stopOrderType") or ""),
-                    cache_hit,
-                    cache_match_type,
-                )
             balance_after_trade = _to_float(tx_match.get("cashBalance"))
             resolved_side, side_source = _resolve_bybit_demo_display_side(
                 entry=entry,
@@ -9257,6 +9337,19 @@ async def _sync_bybit_closed_pnl_window(
                 },
             )
             if row:
+                refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+                if tpsl_source == "unresolved" and _STARTUP_STATE_RESTORE_DONE.is_set():
+                    BYBIT_LOGGER.warning(
+                        "BYBIT_DEMO_TPSL unresolved order_id=%s order_link_id=%s parent_order_link_id=%s stop_order_type=%s cache_hit=%s cache_match_type=%s context_fallback_attempted=%s context_fallback_matched=%s",
+                        order_id,
+                        order_link_id,
+                        parent_link_id,
+                        str(order_match.get("stopOrderType") or entry.get("stopOrderType") or ""),
+                        cache_hit,
+                        cache_match_type,
+                        bool(refs.get("trade_context_tpsl_fallback_attempted")),
+                        bool(refs.get("trade_context_tpsl_fallback_matched")),
+                    )
                 rows.append(row)
         cursor = str(result.get("nextPageCursor") or "").strip() or None
         if not cursor:
@@ -13529,6 +13622,11 @@ async def default_webhook(request: Request) -> JSONResponse:
 
 @app.get("/health")
 async def healthcheck() -> PlainTextResponse:
+    return PlainTextResponse("ok")
+
+
+@app.head("/")
+async def root_head_health() -> PlainTextResponse:
     return PlainTextResponse("ok")
 
 
