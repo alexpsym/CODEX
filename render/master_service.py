@@ -10134,7 +10134,35 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
     .button-group button.active { background: #2563eb; color: #fff; border-color: #60a5fa; }
     .asset-panel { display: none; }
     .asset-panel.active { display: block; }
-    .muted { color: #94a3b8; font-size: 13px; }
+    .embed-shell {
+      border: 1px solid #1f2937;
+      border-radius: 12px;
+      background: #020617;
+      min-height: 720px;
+      overflow: hidden;
+      position: relative;
+    }
+    .embed-shell iframe {
+      width: 100%;
+      min-height: 720px;
+      border: 0;
+      display: block;
+      background: #020617;
+    }
+    .embed-status {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 16px;
+      color: #cbd5e1;
+      font-size: 14px;
+      background: rgba(2, 6, 23, 0.92);
+    }
+    .embed-status.error { color: #fca5a5; }
+    .embed-status.hidden { display: none; }
   </style>
 </head>
 <body>
@@ -10150,18 +10178,28 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
       </div>
 
       <section class="asset-panel active" data-panel="crypto">
-        <div style="font-weight:700;margin-bottom:8px;">Crypto Position Size</div>
-        <p class="muted">Use the crypto calculator UI for symbol/risk sizing and webhook output.</p>
-        <div class="button-group">
-          <a href="/apps/cryptocalculator-clone/" target="_self" rel="noopener">Open Crypto Calculator</a>
+        <div class="embed-shell">
+          <div class="embed-status" data-status="crypto">Loading crypto calculator…</div>
+          <iframe
+            title="Merged crypto position size calculator"
+            src="/apps/cryptocalculator-clone/?embedded=1&shell=merged&title=Position+Size+Calculator"
+            loading="eager"
+            referrerpolicy="same-origin"
+            data-frame="crypto"
+          ></iframe>
         </div>
       </section>
 
       <section class="asset-panel" data-panel="fx">
-        <div style="font-weight:700;margin-bottom:8px;">FX Position Size</div>
-        <p class="muted">Use the OANDA calculator UI for instrument/risk sizing and webhook output.</p>
-        <div class="button-group">
-          <a href="/apps/oanda-calculator-clone/" target="_self" rel="noopener">Open FX Calculator</a>
+        <div class="embed-shell">
+          <div class="embed-status" data-status="fx">Loading FX calculator…</div>
+          <iframe
+            title="Merged FX position size calculator"
+            src="/apps/oanda-calculator-clone/?embedded=1&shell=merged&title=Position+Size+Calculator"
+            loading="lazy"
+            referrerpolicy="same-origin"
+            data-frame="fx"
+          ></iframe>
         </div>
       </section>
     </div>
@@ -10174,6 +10212,33 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
         buttons.forEach((button) => button.classList.toggle('active', button.dataset.asset === asset));
         panels.forEach((panel) => panel.classList.toggle('active', panel.dataset.panel === asset));
       };
+      const updateStatus = (asset, errorText) => {
+        const status = document.querySelector(`[data-status="${asset}"]`);
+        if (!status) return;
+        if (!errorText) {
+          status.classList.add('hidden');
+          status.classList.remove('error');
+          return;
+        }
+        status.classList.remove('hidden');
+        status.classList.add('error');
+        status.textContent = errorText;
+      };
+      const frames = Array.from(document.querySelectorAll('[data-frame]'));
+      frames.forEach((frame) => {
+        const asset = frame.dataset.frame;
+        const timeout = window.setTimeout(() => {
+          updateStatus(asset, `Unable to load the ${asset.toUpperCase()} calculator. Please refresh and try again.`);
+        }, 15000);
+        frame.addEventListener('load', () => {
+          window.clearTimeout(timeout);
+          updateStatus(asset, null);
+        });
+        frame.addEventListener('error', () => {
+          window.clearTimeout(timeout);
+          updateStatus(asset, `Unable to load the ${asset.toUpperCase()} calculator. Please refresh and try again.`);
+        });
+      });
       buttons.forEach((button) => button.addEventListener('click', () => setAsset(button.dataset.asset)));
       setAsset('crypto');
     })();
