@@ -4,6 +4,8 @@ import json
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 SPEC = importlib.util.spec_from_file_location("render_master_service_bybit_sync", ROOT / "render" / "master_service.py")
@@ -77,3 +79,129 @@ def test_recovered_rows_upsert_without_duplicates(monkeypatch) -> None:
     assert changed1 == 1
     assert changed2 == 1
     assert len(saved["rows"]) == 1
+
+
+def test_bybit_demo_poll_waits_for_restore_signal(monkeypatch) -> None:
+    poll_called = {"value": False}
+    wait_called = {"value": False}
+
+    async def fake_wait_for(awaitable, timeout):
+        wait_called["value"] = True
+        await awaitable
+        return None
+
+    async def fake_poll():
+        poll_called["value"] = True
+
+    event = asyncio.Event()
+    monkeypatch.setattr(master_service, "_STARTUP_STATE_RESTORE_DONE", event)
+    monkeypatch.setattr(master_service.asyncio, "wait_for", fake_wait_for)
+    monkeypatch.setattr(master_service, "_poll_bybit_demo_closed_pnl", fake_poll)
+
+    async def runner():
+        task = asyncio.create_task(master_service._start_bybit_demo_closed_pnl_poll_after_restore())
+        await asyncio.sleep(0)
+        assert wait_called["value"] is True
+        assert poll_called["value"] is False
+        event.set()
+        await task
+
+    asyncio.run(runner())
+
+
+def test_workbook_upsert_normalizes_blank_numeric_values(monkeypatch) -> None:
+    existing = pd.DataFrame(
+        [{"order_id": "oid-1", "entry_price": 100.0, "stop_loss": 95.0, "take_profit": 110.0}],
+        columns=master_service.BYBIT_DEMO_WORKBOOK_COLUMNS,
+    )
+    captured = {"uploaded": None}
+
+    def fake_read_excel(*_args, **_kwargs):
+        return existing.copy()
+
+    class DummyWriter:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(master_service, "_dropbox_download_bytes", lambda _path: b"dummy")
+    monkeypatch.setattr(master_service.pd, "read_excel", fake_read_excel)
+    monkeypatch.setattr(master_service.pd, "ExcelWriter", DummyWriter)
+    monkeypatch.setattr(master_service.pd.DataFrame, "to_excel", lambda self, *args, **kwargs: None)
+    monkeypatch.setattr(master_service, "_dropbox_upload_bytes", lambda _path, payload: captured.update({"uploaded": payload}))
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_workbook", lambda _folder: {"changed": 0})
+    monkeypatch.setattr(
+        master_service,
+        "_bybit_demo_workbook_row",
+        lambda _row: {
+            "opening_time": "2026-01-01",
+            "closing_time": "2026-01-01",
+            "type_buy_sell": "Buy",
+            "symbol": "BTCUSDT",
+            "size_quantity": "",
+            "entry_price": "",
+            "closing_price": "",
+            "stop_loss": "",
+            "take_profit": "",
+            "commission": "",
+            "net_profit": "",
+            "balance_after_trade": "",
+            "currency": "USDT",
+            "notes": "",
+            "fill_count": "",
+            "order_id": "oid-1",
+            "source": "bybit",
+        },
+    )
+
+    changed = master_service._append_bybit_demo_rows_to_workbook("/tmp", [{"id": "x"}])
+    assert changed == 1
+    assert captured["uploaded"] is not None
+
+
+def test_closed_pnl_row_backfills_tpsl_from_context(monkeypatch) -> None:
+    monkeypatch.setattr(
+        master_service,
+        "_lookup_trade_context_for_journal_row",
+        lambda _row: {"timeframe": "1-hour", "stop_loss": "99.5", "take_profit": "110.2"},
+    )
+    row = master_service._normalize_bybit_closed_pnl_row(
+        {
+            "symbol": "BTCUSDT",
+            "orderId": "abc123",
+            "orderLinkId": "link-1",
+            "openFee": "0.1",
+            "closeFee": "0.2",
+            "fillCount": "1",
+            "side": "Buy",
+            "createdTime": 1,
+            "updatedTime": 2,
+            "avgEntryPrice": "100",
+            "avgExitPrice": "105",
+            "closedSize": "0.1",
+            "closedPnl": "1.0",
+        },
+        account_mode="demo",
+        balance_after_trade=1000.0,
+        stop_loss=None,
+        take_profit=None,
+    )
+    assert row is not None
+    assert row["stop_loss"] == 99.5
+    assert row["take_profit"] == 110.2
+    assert row["timeframe"] == "1-hour"
+
+
+def test_health_and_root_head_routes_return_200() -> None:
+    health = asyncio.run(master_service.healthcheck())
+    root_head = asyncio.run(master_service.root_head_health())
+    route_paths = {getattr(route, "path", "") for route in master_service.app.routes}
+    assert health.status_code == 200
+    assert root_head.status_code == 200
+    assert "/health" in route_paths
+    assert "/" in route_paths
