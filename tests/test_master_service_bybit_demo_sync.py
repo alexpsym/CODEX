@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import json
+import warnings
 import sys
 from pathlib import Path
 
@@ -205,3 +206,185 @@ def test_health_and_root_head_routes_return_200() -> None:
     assert root_head.status_code == 200
     assert "/health" in route_paths
     assert "/" in route_paths
+
+
+def test_workbook_upsert_handles_float_text_column_notes(monkeypatch) -> None:
+    existing = pd.DataFrame(
+        [{"order_id": "oid-1", "notes": float("nan")}],
+        columns=master_service.BYBIT_DEMO_WORKBOOK_COLUMNS,
+    )
+    existing["notes"] = pd.to_numeric(existing["notes"], errors="coerce")
+    captured = {"uploaded": None}
+
+    monkeypatch.setattr(master_service, "_dropbox_download_bytes", lambda _path: b"dummy")
+    monkeypatch.setattr(master_service.pd, "read_excel", lambda *_args, **_kwargs: existing.copy())
+
+    class DummyWriter:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(master_service.pd, "ExcelWriter", DummyWriter)
+    monkeypatch.setattr(master_service.pd.DataFrame, "to_excel", lambda self, *args, **kwargs: None)
+    monkeypatch.setattr(master_service, "_dropbox_upload_bytes", lambda _path, payload: captured.update({"uploaded": payload}))
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_workbook", lambda _folder: {"changed": 0})
+    monkeypatch.setattr(
+        master_service,
+        "_bybit_demo_workbook_row",
+        lambda _row: {
+            "opening_time": "2026-01-01",
+            "closing_time": "2026-01-01",
+            "type_buy_sell": "Buy",
+            "symbol": "BTCUSDT",
+            "size_quantity": 0.1,
+            "entry_price": 100.0,
+            "closing_price": 101.0,
+            "stop_loss": "",
+            "take_profit": "",
+            "commission": 0.02,
+            "net_profit": 1.0,
+            "balance_after_trade": "",
+            "currency": "USDT",
+            "notes": "",
+            "fill_count": "",
+            "order_id": "oid-1",
+            "source": "bybit",
+        },
+    )
+
+    changed = master_service._append_bybit_demo_rows_to_workbook("/tmp", [{"id": "x"}])
+    assert changed == 1
+    assert captured["uploaded"] is not None
+
+
+def test_workbook_upsert_handles_multiple_float_text_columns(monkeypatch) -> None:
+    existing = pd.DataFrame(
+        [{"order_id": "oid-1", "notes": float("nan"), "source": float("nan"), "symbol": float("nan")}],
+        columns=master_service.BYBIT_DEMO_WORKBOOK_COLUMNS,
+    )
+    for col in ("notes", "source", "symbol"):
+        existing[col] = pd.to_numeric(existing[col], errors="coerce")
+
+    monkeypatch.setattr(master_service, "_dropbox_download_bytes", lambda _path: b"dummy")
+    monkeypatch.setattr(master_service.pd, "read_excel", lambda *_args, **_kwargs: existing.copy())
+
+    class DummyWriter:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(master_service.pd, "ExcelWriter", DummyWriter)
+    monkeypatch.setattr(master_service.pd.DataFrame, "to_excel", lambda self, *args, **kwargs: None)
+    monkeypatch.setattr(master_service, "_dropbox_upload_bytes", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_workbook", lambda _folder: {"changed": 0})
+    monkeypatch.setattr(
+        master_service,
+        "_bybit_demo_workbook_row",
+        lambda _row: {
+            "opening_time": "2026-01-01",
+            "closing_time": "2026-01-01",
+            "type_buy_sell": "Sell",
+            "symbol": "ETHUSDT",
+            "size_quantity": 0.2,
+            "entry_price": 200.0,
+            "closing_price": 198.0,
+            "stop_loss": "",
+            "take_profit": "",
+            "commission": 0.02,
+            "net_profit": -0.4,
+            "balance_after_trade": "",
+            "currency": "USDT",
+            "notes": "",
+            "fill_count": "",
+            "order_id": "oid-1",
+            "source": "closed_pnl",
+        },
+    )
+
+    changed = master_service._append_bybit_demo_rows_to_workbook("/tmp", [{"id": "x"}])
+    assert changed == 1
+
+
+def test_workbook_upsert_raises_no_future_warning(monkeypatch) -> None:
+    existing = pd.DataFrame(
+        [{"order_id": "oid-1", "notes": float("nan")}],
+        columns=master_service.BYBIT_DEMO_WORKBOOK_COLUMNS,
+    )
+    existing["notes"] = pd.to_numeric(existing["notes"], errors="coerce")
+
+    monkeypatch.setattr(master_service, "_dropbox_download_bytes", lambda _path: b"dummy")
+    monkeypatch.setattr(master_service.pd, "read_excel", lambda *_args, **_kwargs: existing.copy())
+
+    class DummyWriter:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(master_service.pd, "ExcelWriter", DummyWriter)
+    monkeypatch.setattr(master_service.pd.DataFrame, "to_excel", lambda self, *args, **kwargs: None)
+    monkeypatch.setattr(master_service, "_dropbox_upload_bytes", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_workbook", lambda _folder: {"changed": 0})
+    monkeypatch.setattr(master_service, "_bybit_demo_workbook_row", lambda _row: {
+        "opening_time": "2026-01-01", "closing_time": "2026-01-01", "type_buy_sell": "Buy",
+        "symbol": "BTCUSDT", "size_quantity": "", "entry_price": "", "closing_price": "",
+        "stop_loss": "", "take_profit": "", "commission": "", "net_profit": "",
+        "balance_after_trade": "", "currency": "USDT", "notes": "", "order_id": "oid-1",
+        "fill_count": "", "source": "closed_pnl",
+    })
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        changed = master_service._append_bybit_demo_rows_to_workbook("/tmp", [{"id": "x"}])
+    assert changed == 1
+
+
+def test_closed_pnl_row_backfills_tpsl_from_market_window_context(monkeypatch) -> None:
+    monkeypatch.setattr(master_service, "_lookup_trade_context_for_journal_row", lambda _row: None)
+    monkeypatch.setattr(
+        master_service,
+        "_lookup_trade_context_by_market_window",
+        lambda _row, max_window_seconds=5400: {"timeframe": "4-hour", "stop_loss": "90", "take_profit": "130"},
+    )
+
+    row = master_service._normalize_bybit_closed_pnl_row(
+        {
+            "symbol": "BTCUSDT",
+            "orderId": "abc123",
+            "orderLinkId": "",
+            "openFee": "0.1",
+            "closeFee": "0.2",
+            "fillCount": "1",
+            "side": "Buy",
+            "createdTime": 1,
+            "updatedTime": 2,
+            "avgEntryPrice": "100",
+            "avgExitPrice": "105",
+            "closedSize": "0.1",
+            "closedPnl": "1.0",
+        },
+        account_mode="demo",
+        balance_after_trade=1000.0,
+        stop_loss=None,
+        take_profit=None,
+    )
+    assert row is not None
+    assert row["stop_loss"] == 90.0
+    assert row["take_profit"] == 130.0
+    assert row["timeframe"] == "4-hour"
+    refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+    assert refs.get("trade_context_tpsl_fallback_via_window") is True
