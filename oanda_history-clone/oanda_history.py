@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 import argparse
 import re
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 try:
     import requests
@@ -24,16 +24,30 @@ DEFAULT_OANDA_LIVE_URL = "https://api-fxtrade.oanda.com/v3"
 DEFAULT_OANDA_DEMO_URL = "https://api-fxpractice.oanda.com/v3"
 
 
+def _normalize_oanda_api_base(raw_url: str) -> str:
+    candidate = (raw_url or "").strip().rstrip("/")
+    if not candidate:
+        raise ValueError("OANDA API base URL is empty.")
+    parts = urlsplit(candidate)
+    if parts.scheme not in {"http", "https"} or not parts.netloc:
+        raise ValueError(f"Invalid OANDA API base URL: {raw_url}")
+    normalized_path = parts.path.rstrip("/")
+    if normalized_path.endswith("/v3"):
+        normalized_path = normalized_path[: -len("/v3")]
+    normalized = urlunsplit((parts.scheme, parts.netloc, normalized_path, "", ""))
+    return normalized.rstrip("/") + "/v3"
+
+
 def _resolve_api_url(base_url: Optional[str] = None) -> str:
     if base_url:
-        return base_url.rstrip("/")
+        return _normalize_oanda_api_base(base_url)
     env_url = os.getenv("OANDA_API_URL")
     if env_url:
-        return env_url.rstrip("/")
+        return _normalize_oanda_api_base(env_url)
     mode = (os.getenv("OANDA_ENV") or os.getenv("OANDA_MODE") or "live").strip().lower()
     if mode in {"demo", "practice"}:
-        return (os.getenv("OANDA_API_URL_DEMO") or DEFAULT_OANDA_DEMO_URL).rstrip("/")
-    return (os.getenv("OANDA_API_URL_LIVE") or DEFAULT_OANDA_LIVE_URL).rstrip("/")
+        return _normalize_oanda_api_base(os.getenv("OANDA_API_URL_DEMO") or DEFAULT_OANDA_DEMO_URL)
+    return _normalize_oanda_api_base(os.getenv("OANDA_API_URL_LIVE") or DEFAULT_OANDA_LIVE_URL)
 
 CSV_FIELDNAMES = [
     "TICKET",

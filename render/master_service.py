@@ -3888,6 +3888,7 @@ async def _collect_oanda_history_range(
     *,
     account_id: str,
     api_key: str,
+    base_url: str,
     start: datetime,
     end: datetime,
 ) -> List[Dict[str, object]]:
@@ -3965,6 +3966,7 @@ async def _run_oanda_history_export(job: OandaHistoryJob) -> None:
                 transactions = await _collect_oanda_history_range(
                     account_id=config["account_id"],
                     api_key=config["api_key"],
+                    base_url=config["base_url"],
                     start=start_dt,
                     end=end_dt,
                 )
@@ -3979,11 +3981,14 @@ async def _run_oanda_history_export(job: OandaHistoryJob) -> None:
 
         output_path = OANDA_HISTORY_EXPORT_ROOT / f"oanda_history_{job.job_id}.csv"
         await asyncio.to_thread(oanda_history_exporter.save_to_csv, transactions, output_path)
+        if not output_path.exists():
+            raise RuntimeError("OANDA history export failed to write CSV output.")
         job.output_path = output_path
         job.status = "done"
     except Exception as exc:
+        BYBIT_LOGGER.exception("OANDA history export job failed id=%s error=%s", job.job_id, exc)
         job.status = "error"
-        job.error = str(exc)
+        job.error = _sanitize_oanda_history_error(exc)
     finally:
         job.updated_at = time.time()
 
@@ -5126,6 +5131,61 @@ def _normalize_oanda_base_url(value: Optional[str]) -> str:
     return base
 
 
+def _normalize_oanda_v3_base_url(value: Optional[str]) -> tuple[str, bool]:
+    base = _normalize_oanda_base_url(value)
+    parsed = urlparse(base)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"Invalid OANDA API base URL: {value or '(empty)'}")
+    normalized_base = f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}"
+    return f"{normalized_base}/v3", base != normalized_base
+
+
+def _resolve_oanda_api_base_url(mode: str) -> tuple[str, str]:
+    normalized_mode = (mode or "live").strip().lower()
+    if normalized_mode not in {"live", "demo", "practice"}:
+        raise ValueError("OANDA mode must be live or demo.")
+
+    if normalized_mode in {"demo", "practice"}:
+        raw = (
+            _clean_env("OANDA_API_URL_DEMO")
+            or _clean_env("OANDA_BASE_URL_DEMO")
+            or _clean_env("OANDA_BASE_URL")
+            or "https://api-fxpractice.oanda.com"
+        )
+        resolved_mode = "demo"
+    else:
+        raw = (
+            _clean_env("OANDA_API_URL_LIVE")
+            or _clean_env("OANDA_BASE_URL_LIVE")
+            or _clean_env("OANDA_API_URL")
+            or _clean_env("OANDA_BASE_URL")
+            or "https://api-fxtrade.oanda.com"
+        )
+        resolved_mode = "live"
+    base_url_v3, trimmed_path = _normalize_oanda_v3_base_url(raw)
+    parsed = urlparse(base_url_v3)
+    BYBIT_LOGGER.info(
+        "Resolved OANDA history API mode=%s host=%s normalized_to_v3=true trimmed_path=%s",
+        resolved_mode,
+        parsed.netloc,
+        trimmed_path,
+    )
+    return base_url_v3, resolved_mode
+
+
+def _sanitize_oanda_history_error(exc: Exception) -> str:
+    message = str(exc).strip() or exc.__class__.__name__
+    status_match = re.search(r"\b(\d{3})\b", message)
+    status_code = status_match.group(1) if status_match else "unknown"
+    lowered = message.lower()
+    if "<html" in lowered or "cloudflare" in lowered or "attention required" in lowered:
+        return (
+            f"OANDA history export failed with HTTP {status_code} from upstream. "
+            "Check OANDA history base URL and credentials."
+        )
+    return message if len(message) <= 240 else message[:237] + "..."
+
+
 def _format_decimal_value(value: float) -> str:
     text = f"{value:.10f}"
     if "." in text:
@@ -5300,15 +5360,10 @@ def _get_oanda_config(account: Optional[str]) -> Dict[str, str]:
 
 def _get_oanda_history_config(mode: str = "live") -> Dict[str, str]:
     acct = (mode or "live").strip().lower()
-    if acct in ("demo", "practice"):
+    base_url, resolved_mode = _resolve_oanda_api_base_url(acct)
+    if resolved_mode == "demo":
         account_id = _clean_env("OANDA_ACCOUNT_ID_DEMO")
         api_key = _clean_env("OANDA_API_KEY_DEMO")
-        base_url = _normalize_oanda_base_url(
-            _clean_env("OANDA_API_URL_DEMO")
-            or _clean_env("OANDA_BASE_URL_DEMO")
-            or _clean_env("OANDA_BASE_URL")
-            or "https://api-fxpractice.oanda.com"
-        )
         missing = []
         if not api_key:
             missing.append("OANDA_API_KEY_DEMO")
@@ -5325,9 +5380,6 @@ def _get_oanda_history_config(mode: str = "live") -> Dict[str, str]:
 
     account_id = _clean_env("OANDA_ACCOUNT_ID")
     api_key = _clean_env("OANDA_API_KEY")
-    base_url = _normalize_oanda_base_url(
-        _clean_env("OANDA_API_URL") or "https://api-fxtrade.oanda.com"
-    )
     missing = []
     if not api_key:
         missing.append("OANDA_API_KEY")
@@ -12819,7 +12871,11 @@ async def oanda_history_export_status(job_id: str) -> JSONResponse:
         "status": job.status,
         "error": job.error,
     }
-    if job.status == "done" and job.output_path is not None:
+    if (
+        job.status == "done"
+        and job.output_path is not None
+        and job.output_path.exists()
+    ):
         payload["download_url"] = f"/api/oanda-history/export/{job.job_id}/download"
     return JSONResponse(payload)
 
