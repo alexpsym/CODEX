@@ -214,3 +214,35 @@ def test_poll_oanda_fills_runs_recovery_on_cold_start(monkeypatch: pytest.Monkey
 
     assert ("live", 72) in recovery_calls
     assert ("demo", 72) in recovery_calls
+
+
+def test_journal_rows_from_oanda_fill_dedupes_missing_context_warning(monkeypatch: pytest.MonkeyPatch):
+    warnings = []
+
+    class DummyLogger:
+        def warning(self, message, *args):
+            warnings.append(message % args if args else message)
+
+    monkeypatch.setattr(master_service, "BYBIT_LOGGER", DummyLogger())
+    monkeypatch.setattr(master_service, "_load_trade_contexts", lambda: [])
+
+    rows = master_service._journal_rows_from_oanda_order_fill(
+        {
+            "account": "demo",
+            "id": "601",
+            "orderID": "599",
+            "instrument": "NZD_USD",
+            "units": "1000",
+            "time": "2026-04-10T01:00:00Z",
+            "tradesClosed": [
+                {"tradeID": "t1", "units": "-500", "price": "0.6000", "realizedPL": "1"},
+                {"tradeID": "t1", "units": "-500", "price": "0.6010", "realizedPL": "1"},
+            ],
+            "accountCurrency": "AUD",
+        }
+    )
+
+    assert len(rows) == 2
+    assert len([line for line in warnings if "OANDA_CONTEXT_MISSING" in line]) == 2
+    assert any("trade_id=t1" in line for line in warnings)
+    assert any("trade_id=" in line and "trade_id=t1" not in line for line in warnings)

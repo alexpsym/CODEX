@@ -110,6 +110,35 @@ def test_bybit_demo_poll_waits_for_restore_signal(monkeypatch) -> None:
     asyncio.run(runner())
 
 
+def test_startup_recovery_waits_for_restore_signal(monkeypatch) -> None:
+    recovery_called = {"value": False}
+    wait_called = {"value": False}
+
+    async def fake_wait_for(awaitable, timeout):
+        wait_called["value"] = True
+        await awaitable
+        return None
+
+    async def fake_recovery():
+        recovery_called["value"] = True
+
+    event = asyncio.Event()
+    monkeypatch.setattr(master_service, "_STARTUP_STATE_RESTORE_DONE", event)
+    monkeypatch.setattr(master_service.asyncio, "wait_for", fake_wait_for)
+    monkeypatch.setattr(master_service, "_run_startup_recovery_import_if_needed", fake_recovery)
+
+    async def runner():
+        task = asyncio.create_task(master_service._start_startup_recovery_import_after_restore())
+        await asyncio.sleep(0)
+        assert wait_called["value"] is True
+        assert recovery_called["value"] is False
+        event.set()
+        await task
+        assert recovery_called["value"] is True
+
+    asyncio.run(runner())
+
+
 def test_workbook_upsert_normalizes_blank_numeric_values(monkeypatch) -> None:
     existing = pd.DataFrame(
         [{"order_id": "oid-1", "entry_price": 100.0, "stop_loss": 95.0, "take_profit": 110.0}],
