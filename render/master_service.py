@@ -155,6 +155,7 @@ TRADING_JOURNAL_SYNC_STATE_PATH = BASE_DIR / "render" / "data" / "trading_journa
 TRADING_JOURNAL_IMPORT_CACHE_PATH = BASE_DIR / "render" / "data" / "trading_journal_import_cache.json"
 MONTHLY_AUD_REVALUATION_PATH = BASE_DIR / "render" / "data" / "monthly_aud_revaluation.json"
 MONTHLY_AUD_REVALUATION_STATE_PATH = BASE_DIR / "render" / "data" / "monthly_aud_revaluation_state.json"
+OANDA_FILL_STATE_PATH = BASE_DIR / "render" / "data" / "oanda_fill_state.json"
 TRADING_JOURNAL_IMPORT_CACHE_VERSION = 2
 TRADING_JOURNAL_DROPBOX_FOLDER = os.getenv(
     "TRADING_JOURNAL_DROPBOX_FOLDER", "/master_control"
@@ -355,6 +356,8 @@ _BYBIT_DEMO_WORKBOOK_LOCK = threading.Lock()
 _OANDA_TX_LAST_SEEN: Dict[str, str] = {}
 _OANDA_FILL_BACKOFF_UNTIL: Dict[str, float] = {}
 _OANDA_FILL_FAILURES: Dict[str, int] = {}
+_OANDA_OPEN_TRADE_LEGS: Dict[str, Dict[str, Dict[str, object]]] = {"live": {}, "demo": {}}
+_OANDA_FILL_DIAGNOSTICS: Dict[str, Dict[str, object]] = {}
 _OANDA_ACCOUNTS_CACHE: Dict[str, Tuple[float, List[Dict[str, object]]]] = {}
 _OANDA_ACCOUNTS_CACHE_TTL_SECONDS = 20.0
 _OANDA_SPECS_CACHE: Dict[str, Tuple[float, Dict[str, object]]] = {}
@@ -1405,6 +1408,53 @@ def _persist_bybit_closed_pnl_last_seen() -> None:
         "live": int(_BYBIT_CLOSED_PNL_LAST_SEEN.get("live") or 0) or None,
     }
     _save_trading_journal_state(state)
+
+
+def _persist_oanda_fill_state() -> None:
+    payload = {
+        "last_seen_transaction_id": {
+            "live": _OANDA_TX_LAST_SEEN.get("live"),
+            "demo": _OANDA_TX_LAST_SEEN.get("demo"),
+        },
+        "open_trade_legs": _OANDA_OPEN_TRADE_LEGS,
+        "diagnostics": _OANDA_FILL_DIAGNOSTICS,
+        "updated_at": _utc_now_iso(),
+    }
+    _save_json_file(OANDA_FILL_STATE_PATH, payload)
+
+
+def _restore_oanda_fill_state_on_startup() -> None:
+    payload = _load_json_file(OANDA_FILL_STATE_PATH, {})
+    if not isinstance(payload, dict):
+        return
+    last_seen = payload.get("last_seen_transaction_id")
+    if isinstance(last_seen, dict):
+        for account in ("live", "demo"):
+            candidate = str(last_seen.get(account) or "").strip()
+            if candidate:
+                _OANDA_TX_LAST_SEEN[account] = candidate
+    open_legs = payload.get("open_trade_legs")
+    if isinstance(open_legs, dict):
+        for account in ("live", "demo"):
+            legs = open_legs.get(account)
+            if isinstance(legs, dict):
+                _OANDA_OPEN_TRADE_LEGS[account] = {
+                    str(k): dict(v) for k, v in legs.items() if isinstance(v, dict)
+                }
+    diagnostics = payload.get("diagnostics")
+    if isinstance(diagnostics, dict):
+        for account in ("live", "demo"):
+            node = diagnostics.get(account)
+            if isinstance(node, dict):
+                _OANDA_FILL_DIAGNOSTICS[account] = dict(node)
+
+
+def _record_oanda_fill_diagnostic(account: str, **updates: object) -> None:
+    merged = dict(_OANDA_FILL_DIAGNOSTICS.get(account, {}))
+    merged.update(updates)
+    merged["updated_at"] = _utc_now_iso()
+    _OANDA_FILL_DIAGNOSTICS[account] = merged
+    _persist_oanda_fill_state()
 
 
 def _utc_now_iso() -> str:
@@ -2811,13 +2861,33 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
     symbol = str(entry.get("instrument") or "").strip().upper()
     if not tx_id or not symbol:
         return []
-    units = _to_float(entry.get("units")) or 0.0
-    qty = abs(units)
-    side = "Buy" if units >= 0 else "Sell"
-    price = _to_float(entry.get("price"))
-    realized_pnl = (_to_float(entry.get("pl")) or 0.0) + (_to_float(entry.get("financing")) or 0.0)
-    fees = abs(_to_float(entry.get("halfSpreadCost")) or 0.0)
+    legs = _OANDA_OPEN_TRADE_LEGS.setdefault(account, {})
     close_time = str(entry.get("time") or "")
+    trade_opened = entry.get("tradeOpened") if isinstance(entry.get("tradeOpened"), dict) else None
+    if isinstance(trade_opened, dict):
+        trade_id = str(trade_opened.get("tradeID") or "").strip()
+        opened_units = _to_float(trade_opened.get("units"))
+        if trade_id and opened_units not in (None, 0):
+            legs[trade_id] = {
+                "open_time": close_time,
+                "entry_price": _to_float(trade_opened.get("price")) or _to_float(entry.get("price")),
+                "units": opened_units,
+                "side": "Buy" if opened_units >= 0 else "Sell",
+                "symbol": symbol,
+                "account": account,
+            }
+
+    close_legs: List[Dict[str, object]] = []
+    trades_closed = entry.get("tradesClosed")
+    if isinstance(trades_closed, list):
+        close_legs.extend(item for item in trades_closed if isinstance(item, dict))
+    trade_reduced = entry.get("tradeReduced")
+    if isinstance(trade_reduced, dict):
+        close_legs.append(trade_reduced)
+    if not close_legs:
+        _persist_oanda_fill_state()
+        return []
+
     timeframe = _normalize_timeframe(entry.get("timeframe"))
     if not timeframe:
         ctx = _lookup_trade_context_for_journal_row(
@@ -2825,9 +2895,24 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
         )
         if isinstance(ctx, dict):
             timeframe = _normalize_timeframe(ctx.get("timeframe"))
-    return [
-        {
-            "id": f"oanda:{account}:{symbol}:{tx_id}",
+    rows: List[Dict[str, object]] = []
+    for idx, close_leg in enumerate(close_legs):
+        trade_id = str(close_leg.get("tradeID") or "").strip()
+        leg_units = abs(_to_float(close_leg.get("units")) or 0.0)
+        open_leg = legs.get(trade_id) if trade_id else None
+        entry_price = _to_float((open_leg or {}).get("entry_price"))
+        open_time = str((open_leg or {}).get("open_time") or "") or None
+        side = str((open_leg or {}).get("side") or ("Buy" if (_to_float(entry.get("units")) or 0.0) >= 0 else "Sell"))
+        exit_price = _to_float(close_leg.get("price")) or _to_float(entry.get("price"))
+        realized_pnl = (_to_float(close_leg.get("realizedPL")) or 0.0) + (_to_float(close_leg.get("financing")) or 0.0)
+        fees = (
+            abs(_to_float(entry.get("halfSpreadCost")) or 0.0)
+            + abs(_to_float(entry.get("commission")) or 0.0)
+            + abs(_to_float(entry.get("guaranteedExecutionFee")) or 0.0)
+        )
+        row_id_suffix = trade_id or f"{tx_id}:{idx}"
+        row: Dict[str, object] = {
+            "id": f"oanda:{account}:{symbol}:{row_id_suffix}:close",
             "source": "oanda",
             "account": account,
             "account_label": f"OANDA {account.title()}",
@@ -2835,12 +2920,12 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             "symbol": symbol,
             "side": side,
             "status": "closed",
-            "open_time": close_time,
+            "open_time": open_time,
             "close_time": close_time,
-            "entry_price": price,
-            "exit_price": price,
-            "qty": qty / 100000.0,
-            "qty_raw": qty,
+            "entry_price": entry_price,
+            "exit_price": exit_price,
+            "qty": leg_units / 100000.0,
+            "qty_raw": leg_units,
             "qty_unit": "lots",
             "notional_usd": None,
             "commission": fees,
@@ -2849,13 +2934,18 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             "fee_currency": "AUD",
             "realized_pnl": realized_pnl,
             "realized_pnl_currency": str(entry.get("accountCurrency") or ""),
+            "balance_after_trade": _to_float(entry.get("accountBalance")),
             "strategy_tag": "",
-            "notes": "",
+            "notes": "" if entry_price is not None and open_time else "partial_oanda_close_missing_open_leg",
             "timeframe": timeframe,
             "metrics": {"timeframe": timeframe} if timeframe else {},
-            "raw_refs": {"transactionId": tx_id, "orderId": entry.get("orderID")},
+            "raw_refs": {"transactionId": tx_id, "orderId": entry.get("orderID"), "tradeId": trade_id},
         }
-    ]
+        rows.append(row)
+        if trade_id and open_leg and leg_units >= abs(_to_float(open_leg.get("units")) or 0.0):
+            legs.pop(trade_id, None)
+    _persist_oanda_fill_state()
+    return rows
 
 
 def _build_state_backup_payload() -> bytes:
@@ -2873,6 +2963,7 @@ def _build_state_backup_payload() -> bytes:
         "trading_journal_import_cache": _load_json_file(TRADING_JOURNAL_IMPORT_CACHE_PATH, {}),
         "monthly_aud_revaluation": _load_json_file(MONTHLY_AUD_REVALUATION_PATH, {"items": []}),
         "monthly_aud_revaluation_state": _load_json_file(MONTHLY_AUD_REVALUATION_STATE_PATH, {}),
+        "oanda_fill_state": _load_json_file(OANDA_FILL_STATE_PATH, {}),
     }
     return json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
 
@@ -2984,6 +3075,9 @@ def _restore_alerts_payload(data: Dict[str, object]) -> Dict[str, object]:
         monthly_rows_restored = len(_get_monthly_aud_revaluation_rows())
     if "monthly_aud_revaluation_state" in data and isinstance(data["monthly_aud_revaluation_state"], dict):
         _save_json_file(MONTHLY_AUD_REVALUATION_STATE_PATH, data["monthly_aud_revaluation_state"])
+    if "oanda_fill_state" in data and isinstance(data["oanda_fill_state"], dict):
+        _save_json_file(OANDA_FILL_STATE_PATH, data["oanda_fill_state"])
+        _restore_oanda_fill_state_on_startup()
 
     bybit_restored = bybit_monitor.replace_custom_alerts(bybit_block["alerts"], strict=False)
     oanda_restored = oanda_monitor.replace_custom_alerts(oanda_block["alerts"])
@@ -3609,6 +3703,18 @@ def _compute_autostart_scripts() -> List[str]:
 
 
 async def _run_startup_recovery_import_if_needed() -> None:
+    oanda_recovery: Dict[str, object] = {}
+    for account in ("live", "demo"):
+        try:
+            oanda_recovery[account] = await _recover_oanda_recent_fills(account)
+        except Exception as exc:
+            oanda_recovery[account] = {"ok": False, "error": str(exc)}
+            _record_oanda_fill_diagnostic(
+                account,
+                poll_enabled=os.getenv("ENABLE_OANDA_FILL_POLL", "0") == "1",
+                last_error=f"startup recovery failed: {exc}",
+            )
+            BYBIT_LOGGER.exception("OANDA startup recovery sync error account=%s: %s", account, exc)
     if ENABLE_BYBIT_DEMO_JOURNAL:
         try:
             await _run_bybit_closed_pnl_sync(
@@ -3629,13 +3735,14 @@ async def _run_startup_recovery_import_if_needed() -> None:
             last_success_at=_utc_now_iso() if ok_flag else None,
             last_error=None if ok_flag else str((result or {}).get("message") or "Startup import failed."),
             last_reason="startup_recovery",
-            last_result=result,
+            last_result={**(result or {}), "oanda_recovery": oanda_recovery},
         )
     except Exception as exc:
         _record_daily_trade_sync_status(
             last_attempt_at=_utc_now_iso(),
             last_error=f"Startup import failed: {exc}",
             last_reason="startup_recovery",
+            last_result={"oanda_recovery": oanda_recovery},
         )
 
 
@@ -3698,6 +3805,7 @@ async def _run_daily_trade_history_sync(*, reason: str) -> Dict[str, object]:
     async with _DAILY_TRADE_SYNC_LOCK:
         started_at = _utc_now_iso()
         bybit_result: Dict[str, object] = {}
+        oanda_result: Dict[str, object] = {}
         import_result: Optional[Dict[str, object]] = None
         errors: List[str] = []
         _record_daily_trade_sync_status(
@@ -3706,6 +3814,13 @@ async def _run_daily_trade_history_sync(*, reason: str) -> Dict[str, object]:
             last_reason=reason,
             last_error=None,
         )
+
+        for account in ("live", "demo"):
+            try:
+                oanda_result[account] = await _recover_oanda_recent_fills(account)
+            except Exception as exc:
+                errors.append(f"OANDA {account} recovery failed: {exc}")
+                oanda_result[account] = {"ok": False, "error": str(exc)}
 
         if ENABLE_BYBIT_DEMO_JOURNAL:
             try:
@@ -3740,6 +3855,7 @@ async def _run_daily_trade_history_sync(*, reason: str) -> Dict[str, object]:
             last_result={
                 "ok": ok_flag,
                 "bybit": bybit_result,
+                "oanda": oanda_result,
                 "import": import_result,
                 "errors": errors,
                 "monthly_aud_revaluation": monthly_result,
@@ -3750,6 +3866,7 @@ async def _run_daily_trade_history_sync(*, reason: str) -> Dict[str, object]:
         return {
             "ok": ok_flag,
             "bybit": bybit_result,
+            "oanda": oanda_result,
             "import": import_result,
             "errors": errors,
             "started_at": started_at,
@@ -3790,6 +3907,7 @@ async def _schedule_daily_trade_history_sync() -> None:
 @app.on_event("startup")
 async def _autostart_scripts() -> None:
     _restore_bybit_closed_pnl_last_seen_from_state()
+    _restore_oanda_fill_state_on_startup()
     asyncio.create_task(_dropbox_restore_state_backup_on_startup())
     asyncio.create_task(_ensure_trading_journal_dropbox_templates())
     asyncio.create_task(_log_outbound_traffic_summary())
@@ -9193,21 +9311,91 @@ async def _fetch_oanda_last_transaction_id(cfg: Dict[str, str]) -> str:
 async def _fetch_oanda_transactions(
     *,
     cfg: Dict[str, str],
-    since_id: str,
+    since_id: Optional[str] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
+    tx_type: str = "ORDER_FILL",
 ) -> tuple[List[Dict[str, object]], Optional[str]]:
+    if since_id:
+        endpoint = f"/accounts/{{account_id}}/transactions/sinceid?id={since_id}"
+        if tx_type:
+            endpoint = f"{endpoint}&type={tx_type}"
+        payload = await _fetch_oanda_json(
+            base_url=cfg["base_url"],
+            account_id=cfg["account_id"],
+            api_key=cfg["token"],
+            endpoint=endpoint,
+            mode=cfg["mode"],
+        )
+        return (
+            payload.get("transactions") or [],
+            str(payload.get("lastTransactionID") or "").strip() or None,
+        )
+
+    if not start_time or not end_time:
+        raise ValueError("start_time and end_time are required when since_id is not provided.")
+    endpoint = (
+        "/accounts/{account_id}/transactions"
+        f"?from={quote(start_time, safe='')}"
+        f"&to={quote(end_time, safe='')}"
+        + (f"&type={quote(tx_type, safe='')}" if tx_type else "")
+    )
     payload = await _fetch_oanda_json(
         base_url=cfg["base_url"],
         account_id=cfg["account_id"],
         api_key=cfg["token"],
-        endpoint=(
-            f"/accounts/{{account_id}}/transactions/sinceid?id={since_id}&type=ORDER_FILL"
-        ),
+        endpoint=endpoint,
         mode=cfg["mode"],
     )
-    return (
-        payload.get("transactions") or [],
-        str(payload.get("lastTransactionID") or "").strip() or None,
-    )
+    transactions: List[Dict[str, object]] = []
+    seen_ids: set[str] = set()
+
+    def append_items(items: object) -> None:
+        if not isinstance(items, list):
+            return
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            tx_id = str(item.get("id") or "").strip()
+            if tx_id and tx_id in seen_ids:
+                continue
+            if tx_id:
+                seen_ids.add(tx_id)
+            transactions.append(item)
+
+    append_items(payload.get("transactions"))
+    pages = payload.get("pages")
+    if isinstance(pages, list):
+        for page_url in pages:
+            page_endpoint = _oanda_endpoint_from_page_url(str(page_url), cfg["account_id"])
+            if not page_endpoint:
+                continue
+            page_payload = await _fetch_oanda_json(
+                base_url=cfg["base_url"],
+                account_id=cfg["account_id"],
+                api_key=cfg["token"],
+                endpoint=page_endpoint,
+                mode=cfg["mode"],
+            )
+            append_items(page_payload.get("transactions"))
+    return (transactions, str(payload.get("lastTransactionID") or "").strip() or None)
+
+
+def _oanda_endpoint_from_page_url(page_url: str, account_id: str) -> Optional[str]:
+    try:
+        parsed = urlparse(page_url)
+    except Exception:
+        return None
+    path = parsed.path or ""
+    marker = f"/v3/accounts/{account_id}"
+    idx = path.find(marker)
+    if idx >= 0:
+        endpoint = path[idx + len("/v3") :]
+    else:
+        endpoint = path
+    if not endpoint.startswith("/accounts/"):
+        return None
+    return f"{endpoint}?{parsed.query}" if parsed.query else endpoint
 
 
 def _third_last_weekday(year: int, month: int, tz_name: str = "Australia/Brisbane") -> datetime:
@@ -9378,7 +9566,71 @@ async def _build_oanda_inactivity_status() -> Dict[str, object]:
     }
 
 
+async def _recover_oanda_recent_fills(account: str, lookback_hours: int = 72) -> Dict[str, object]:
+    cfg = _get_oanda_config(account)
+    now = datetime.now(timezone.utc)
+    start_dt = now - timedelta(hours=max(1, int(lookback_hours)))
+    transactions, last_transaction_id = await _fetch_oanda_transactions(
+        cfg=cfg,
+        start_time=_format_oanda_timestamp(start_dt),
+        end_time=_format_oanda_timestamp(now),
+        tx_type="ORDER_FILL",
+    )
+    seen: set[str] = set()
+    sorted_transactions = sorted(
+        [tx for tx in transactions if isinstance(tx, dict)],
+        key=lambda tx: (
+            int(_to_float(tx.get("id")) or 0),
+            str(tx.get("time") or ""),
+        ),
+    )
+    recovered_rows = 0
+    skipped_duplicates = 0
+    max_seen = int(_to_float(_OANDA_TX_LAST_SEEN.get(account)) or 0)
+    for entry in sorted_transactions:
+        tx_id = str(entry.get("id") or "").strip()
+        if tx_id and tx_id in seen:
+            skipped_duplicates += 1
+            continue
+        if tx_id:
+            seen.add(tx_id)
+            max_seen = max(max_seen, int(_to_float(tx_id) or 0))
+        journal_rows = _journal_rows_from_oanda_order_fill({**entry, "account": account})
+        if journal_rows:
+            recovered_rows += _upsert_trading_journal_rows(journal_rows)
+    if last_transaction_id:
+        max_seen = max(max_seen, int(_to_float(last_transaction_id) or 0))
+    if max_seen > 0:
+        _OANDA_TX_LAST_SEEN[account] = str(max_seen)
+    _record_oanda_fill_diagnostic(
+        account,
+        last_success_at=_utc_now_iso(),
+        last_error=None,
+        last_seen_transaction_id=_OANDA_TX_LAST_SEEN.get(account),
+        startup_recovered_rows=recovered_rows,
+        startup_skipped_duplicates=skipped_duplicates,
+    )
+    BYBIT_LOGGER.info(
+        "OANDA fill recovery account=%s lookback_hours=%s tx=%s recovered_rows=%s skipped_duplicates=%s last_seen=%s",
+        account,
+        lookback_hours,
+        len(sorted_transactions),
+        recovered_rows,
+        skipped_duplicates,
+        _OANDA_TX_LAST_SEEN.get(account),
+    )
+    return {
+        "ok": True,
+        "account": account,
+        "transactions": len(sorted_transactions),
+        "recovered_rows": recovered_rows,
+        "skipped_duplicates": skipped_duplicates,
+        "last_seen_transaction_id": _OANDA_TX_LAST_SEEN.get(account),
+    }
+
+
 async def _poll_oanda_fills() -> None:
+    lookback_hours = int(os.getenv("OANDA_FILL_RECOVERY_LOOKBACK_HOURS", "72") or "72")
     while True:
         await asyncio.sleep(FILL_ALERT_POLL_SECONDS)
         for account in ("live", "demo"):
@@ -9393,7 +9645,7 @@ async def _poll_oanda_fills() -> None:
                     continue
 
                 if last_seen is None:
-                    _OANDA_TX_LAST_SEEN[account] = await _fetch_oanda_last_transaction_id(cfg)
+                    await _recover_oanda_recent_fills(account, lookback_hours=lookback_hours)
                     _OANDA_FILL_FAILURES.pop(account, None)
                     _OANDA_FILL_BACKOFF_UNTIL.pop(account, None)
                     continue
@@ -9423,6 +9675,13 @@ async def _poll_oanda_fills() -> None:
                     _OANDA_TX_LAST_SEEN[account] = last_transaction_id
                 else:
                     _OANDA_TX_LAST_SEEN[account] = str(max_seen)
+                _record_oanda_fill_diagnostic(
+                    account,
+                    poll_enabled=True,
+                    last_success_at=_utc_now_iso(),
+                    last_error=None,
+                    last_seen_transaction_id=_OANDA_TX_LAST_SEEN.get(account),
+                )
 
                 _OANDA_FILL_FAILURES.pop(account, None)
                 _OANDA_FILL_BACKOFF_UNTIL.pop(account, None)
@@ -9436,6 +9695,12 @@ async def _poll_oanda_fills() -> None:
                     account,
                     failures,
                     delay_s,
+                )
+                _record_oanda_fill_diagnostic(
+                    account,
+                    poll_enabled=True,
+                    last_error=f"poll failed failures={failures}",
+                    last_seen_transaction_id=_OANDA_TX_LAST_SEEN.get(account),
                 )
 
 
@@ -13392,6 +13657,19 @@ async def trading_journal_sync_status() -> JSONResponse:
     state = _load_trading_journal_state()
     bybit_demo_sync = state.get("bybit_demo_sync")
     snapshot["bybit_demo_sync"] = bybit_demo_sync if isinstance(bybit_demo_sync, dict) else {}
+    snapshot["oanda_fill_poll"] = {
+        "enabled": os.getenv("ENABLE_OANDA_FILL_POLL", "0") == "1",
+        "accounts": {
+            "live": {
+                **_OANDA_FILL_DIAGNOSTICS.get("live", {}),
+                "last_seen_transaction_id": _OANDA_TX_LAST_SEEN.get("live"),
+            },
+            "demo": {
+                **_OANDA_FILL_DIAGNOSTICS.get("demo", {}),
+                "last_seen_transaction_id": _OANDA_TX_LAST_SEEN.get("demo"),
+            },
+        },
+    }
     return JSONResponse(snapshot)
 
 
