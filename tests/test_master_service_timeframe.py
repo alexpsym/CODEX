@@ -34,10 +34,14 @@ def temp_state_paths(tmp_path, monkeypatch: pytest.MonkeyPatch):
 
 
 def test_pending_webhook_keeps_timeframe(temp_state_paths):
-    item = master_service._upsert_pending_webhook({"id": "wh1", "instrument": "BTCUSDT", "timeframe": "5-minute"})
+    item = master_service._upsert_pending_webhook(
+        {"id": "wh1", "instrument": "BTCUSDT", "timeframe": "5-minute", "stop_loss": "10", "take_profit": "20"}
+    )
     assert item["timeframe"] == "5-minute"
     contexts = master_service._load_trade_contexts()
     assert contexts and contexts[0].get("timeframe") == "5-minute"
+    assert contexts[0].get("stop_loss") == "10"
+    assert contexts[0].get("take_profit") == "20"
 
 
 def test_context_lookup_attaches_timeframe_and_ambiguous_returns_none(temp_state_paths):
@@ -138,3 +142,24 @@ def test_backup_restore_includes_trade_contexts(temp_state_paths):
     assert isinstance(restored, dict)
     contexts = master_service._load_trade_contexts()
     assert any(c.get("pending_webhook_id") == "p10" for c in contexts)
+
+
+def test_oanda_row_repair_from_context(monkeypatch: pytest.MonkeyPatch):
+    row = {
+        "id": "o1",
+        "source": "oanda",
+        "timeframe": "",
+        "raw_refs": {"orderId": "ord1", "tradeId": "t1"},
+    }
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: [row])
+    monkeypatch.setattr(
+        master_service,
+        "_load_trade_contexts",
+        lambda: [{"order_id": "ord1", "trade_id": "t1", "timeframe": "4-hour", "stop_loss": "1.1", "take_profit": "1.3"}],
+    )
+    stored = {"rows": None}
+    monkeypatch.setattr(master_service, "_set_trading_journal_rows", lambda rows: stored.update({"rows": rows}))
+    changed = master_service._repair_persisted_oanda_trade_rows()
+    assert changed == 1
+    assert stored["rows"][0]["timeframe"] == "4-hour"
+    assert stored["rows"][0]["stop_loss"] == "1.1"
