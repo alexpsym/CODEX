@@ -194,6 +194,27 @@ BYBIT_DEMO_WORKBOOK_COLUMNS = [
     "fill_count",
     "source",
 ]
+BYBIT_DEMO_WORKBOOK_TEXT_COLUMNS = {
+    "opening_time",
+    "closing_time",
+    "type_buy_sell",
+    "symbol",
+    "currency",
+    "notes",
+    "order_id",
+    "source",
+}
+BYBIT_DEMO_WORKBOOK_NUMERIC_COLUMNS = {
+    "size_quantity",
+    "entry_price",
+    "closing_price",
+    "stop_loss",
+    "take_profit",
+    "commission",
+    "net_profit",
+    "balance_after_trade",
+    "fill_count",
+}
 ENABLE_BYBIT_DEMO_JOURNAL = os.getenv("ENABLE_BYBIT_DEMO_JOURNAL", "1").strip().lower() in {
     "1",
     "true",
@@ -6972,6 +6993,48 @@ def _lookup_trade_context_for_journal_row(row: Dict[str, object]) -> Optional[Di
     return None
 
 
+def _lookup_trade_context_by_market_window(
+    row: Dict[str, object],
+    *,
+    max_window_seconds: int = 90 * 60,
+) -> Optional[Dict[str, object]]:
+    contexts = _load_trade_contexts()
+    broker = str(row.get("broker") or row.get("source") or "").strip().lower()
+    account = str(row.get("account") or "").strip().lower()
+    instrument = str(row.get("instrument") or row.get("symbol") or "").strip().upper()
+    side = _normalize_side_for_comparison(row.get("side"))
+    target_sec = _canonical_trade_epoch_second(row.get("close_time") or row.get("open_time"))
+    if not broker or not account or not instrument or not side or target_sec is None:
+        return None
+
+    candidates: List[Tuple[int, Dict[str, object]]] = []
+    for ctx in contexts:
+        if str(ctx.get("broker") or "").strip().lower() != broker:
+            continue
+        if str(ctx.get("account") or "").strip().lower() != account:
+            continue
+        if str(ctx.get("instrument") or "").strip().upper() != instrument:
+            continue
+        if _normalize_side_for_comparison(ctx.get("side")) != side:
+            continue
+        ctx_time_sec = (
+            _canonical_trade_epoch_second(ctx.get("closed_at"))
+            or _canonical_trade_epoch_second(ctx.get("updated_at"))
+            or _canonical_trade_epoch_second(ctx.get("created_at"))
+            or _canonical_trade_epoch_second(ctx.get("open_time"))
+            or _canonical_trade_epoch_second(ctx.get("opened_at"))
+        )
+        if ctx_time_sec is None:
+            continue
+        delta = abs(ctx_time_sec - target_sec)
+        if delta <= max_window_seconds:
+            candidates.append((delta, ctx))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
+
+
 def _oanda_credentials(mode: str) -> Dict[str, str]:
     suffix = "_DEMO" if mode == "demo" else ""
     api_key = os.getenv(f"OANDA_API_KEY{suffix}") or os.getenv(f"OANDA_TOKEN{suffix}")
@@ -8810,6 +8873,19 @@ def _normalize_bybit_closed_pnl_row(
             "raw_refs": {"orderId": order_id, "orderLinkId": str(entry.get("orderLinkId") or "").strip()},
         }
     )
+    market_window_ctx_used = False
+    if not isinstance(ctx, dict):
+        ctx = _lookup_trade_context_by_market_window(
+            {
+                "broker": "bybit",
+                "account": mode,
+                "instrument": symbol,
+                "side": side_value,
+                "open_time": _ms_to_iso(entry.get("createdTime")),
+                "close_time": _ms_to_iso(entry.get("updatedTime")),
+            }
+        )
+        market_window_ctx_used = isinstance(ctx, dict)
     timeframe = _normalize_timeframe(ctx.get("timeframe")) if isinstance(ctx, dict) else ""
     fallback_attempted = isinstance(ctx, dict)
     fallback_stop_loss = _to_float(ctx.get("stop_loss")) if isinstance(ctx, dict) else None
@@ -8819,6 +8895,7 @@ def _normalize_bybit_closed_pnl_row(
     if take_profit is None and fallback_take_profit is not None:
         take_profit = fallback_take_profit
     raw_refs["trade_context_tpsl_fallback_attempted"] = fallback_attempted
+    raw_refs["trade_context_tpsl_fallback_via_window"] = market_window_ctx_used
     raw_refs["trade_context_tpsl_fallback_matched"] = bool(
         (stop_loss is not None and fallback_stop_loss is not None)
         or (take_profit is not None and fallback_take_profit is not None)
@@ -8968,6 +9045,20 @@ def _bybit_demo_workbook_row(row: Dict[str, object]) -> Dict[str, object]:
     }
 
 
+def _coerce_bybit_demo_workbook_frame(df: Optional[pd.DataFrame]) -> pd.DataFrame:
+    frame = df if isinstance(df, pd.DataFrame) else pd.DataFrame()
+    frame = frame.reindex(columns=BYBIT_DEMO_WORKBOOK_COLUMNS).copy()
+    for column in BYBIT_DEMO_WORKBOOK_TEXT_COLUMNS:
+        if column not in frame.columns:
+            continue
+        frame[column] = frame[column].astype(object).where(~pd.isna(frame[column]), "")
+    for column in BYBIT_DEMO_WORKBOOK_NUMERIC_COLUMNS:
+        if column not in frame.columns:
+            continue
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    return frame
+
+
 def _sanitize_bybit_demo_workbook(active_folder: str) -> Dict[str, int]:
     workbook_path = _join_dropbox_path(active_folder, BYBIT_DEMO_WORKBOOK_NAME)
     try:
@@ -8977,9 +9068,7 @@ def _sanitize_bybit_demo_workbook(active_folder: str) -> Dict[str, int]:
             existing = pd.read_excel(bio, sheet_name=BYBIT_DEMO_WORKBOOK_SHEET)
         except Exception:
             existing = pd.DataFrame(columns=BYBIT_DEMO_WORKBOOK_COLUMNS)
-        if existing is None:
-            existing = pd.DataFrame(columns=BYBIT_DEMO_WORKBOOK_COLUMNS)
-        existing = existing.reindex(columns=BYBIT_DEMO_WORKBOOK_COLUMNS)
+        existing = _coerce_bybit_demo_workbook_frame(existing)
         if existing.empty:
             return {"changed": 0, "repaired_sides": 0, "deduped_by_order_id": 0, "deduped_by_fingerprint": 0}
 
@@ -9042,40 +9131,17 @@ def _append_bybit_demo_rows_to_workbook(active_folder: str, rows: List[Dict[str,
             existing = pd.read_excel(bio, sheet_name=BYBIT_DEMO_WORKBOOK_SHEET)
         except Exception:
             existing = pd.DataFrame(columns=BYBIT_DEMO_WORKBOOK_COLUMNS)
-        if existing is None or existing.empty:
-            existing = pd.DataFrame(columns=BYBIT_DEMO_WORKBOOK_COLUMNS)
-        existing = existing.reindex(columns=BYBIT_DEMO_WORKBOOK_COLUMNS)
+        existing = _coerce_bybit_demo_workbook_frame(existing)
 
-        numeric_columns = {
-            "size_quantity",
-            "entry_price",
-            "closing_price",
-            "stop_loss",
-            "take_profit",
-            "commission",
-            "net_profit",
-            "balance_after_trade",
-            "fill_count",
-        }
-        text_columns = {
-            "opening_time",
-            "closing_time",
-            "type_buy_sell",
-            "symbol",
-            "currency",
-            "notes",
-            "order_id",
-            "source",
-        }
 
         def _sanitize_workbook_cell(column: str, value: object) -> object:
-            if column in numeric_columns:
+            if column in BYBIT_DEMO_WORKBOOK_NUMERIC_COLUMNS:
                 if value is None:
                     return None
                 if isinstance(value, str) and not value.strip():
                     return None
                 return _to_float(value)
-            if column in text_columns:
+            if column in BYBIT_DEMO_WORKBOOK_TEXT_COLUMNS:
                 if value is None:
                     return ""
                 if isinstance(value, str):
