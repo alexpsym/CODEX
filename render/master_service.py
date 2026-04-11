@@ -395,6 +395,11 @@ _OPEN_ORDERS_CACHE: Dict[str, object] = {
     "last_success_at": None,
     "payload": None,
 }
+
+
+def _invalidate_open_orders_cache() -> None:
+    _OPEN_ORDERS_CACHE["payload"] = None
+    _OPEN_ORDERS_CACHE["expires_at"] = 0.0
 _BYBIT_SYMBOL_LIST_CACHE: Dict[str, Dict[str, object]] = {
     "linear": {"ts": 0.0, "symbols": []},
     "spot": {"ts": 0.0, "symbols": []},
@@ -6838,6 +6843,7 @@ def _load_bounce_traders() -> List[Dict[str, object]]:
 def _save_bounce_traders(items: List[Dict[str, object]]) -> None:
     BOUNCE_TRADERS_PATH.parent.mkdir(parents=True, exist_ok=True)
     BOUNCE_TRADERS_PATH.write_text(json.dumps(items, indent=2, sort_keys=True), encoding="utf-8")
+    _invalidate_open_orders_cache()
 
 
 def _to_dt_utc(value: object) -> Optional[datetime]:
@@ -6929,6 +6935,7 @@ def _normalize_pending_webhooks(items: object) -> List[Dict[str, object]]:
 def _replace_pending_webhooks(items: object) -> List[Dict[str, object]]:
     normalized = _normalize_pending_webhooks(items)
     _save_pending_webhooks(normalized)
+    _invalidate_open_orders_cache()
     return normalized
 
 
@@ -6962,6 +6969,7 @@ def _upsert_pending_webhook(payload: Dict[str, object]) -> Dict[str, object]:
         items.append(entry)
 
     _save_pending_webhooks(items)
+    _invalidate_open_orders_cache()
     _upsert_trade_context(
         {
             "pending_webhook_id": webhook_id,
@@ -6991,6 +6999,7 @@ def _update_pending_webhook(webhook_id: str, updates: Dict[str, object]) -> Opti
             merged["type"] = "webhook"
             items[idx] = merged
             _save_pending_webhooks(items)
+            _invalidate_open_orders_cache()
             return merged
     return None
 
@@ -7001,6 +7010,7 @@ def _set_pending_webhook_enabled(webhook_id: str, enabled: bool) -> Dict[str, ob
         if str(entry.get("id", "")).strip() == webhook_id:
             items[idx] = {**entry, "enabled": enabled, "updated_at": int(time.time())}
             _save_pending_webhooks(items)
+            _invalidate_open_orders_cache()
             return items[idx]
     raise HTTPException(status_code=404, detail="Pending webhook not found.")
 
@@ -7011,6 +7021,7 @@ def _delete_pending_webhook(webhook_id: str) -> bool:
     if len(remaining) == len(items):
         return False
     _save_pending_webhooks(remaining)
+    _invalidate_open_orders_cache()
     return True
 
 
@@ -12742,17 +12753,48 @@ def _pending_webhook_is_terminal(status: object) -> bool:
 def _pending_webhook_is_superseded(
     pending: Dict[str, object],
     open_items: List[Dict[str, object]],
+    trade_contexts: Optional[List[Dict[str, object]]] = None,
     consumed_open_indices: Optional[Set[int]] = None,
 ) -> bool:
-    status = str(pending.get("status", "")).strip().upper()
-    enabled = pending.get("enabled") is not False
-    if status in {"WAITING", "PENDING", ""} and enabled:
-        return False
-
+    pending_id = str(pending.get("id", "")).strip()
+    pending_broker = str(pending.get("broker", "")).strip().lower()
+    pending_category = str(pending.get("category", "")).strip().lower()
+    pending_account = str(pending.get("account", "")).strip().lower()
     pending_order_id = str(pending.get("order_id", "")).strip()
+    pending_order_link_id = str(pending.get("order_link_id", "")).strip()
+    pending_trade_id = str(pending.get("trade_id", "")).strip()
     pending_instrument = str(pending.get("instrument", "")).strip().upper()
     pending_side = _side_key(pending.get("side"), broker=str(pending.get("broker", "")))
     pending_size = pending.get("size")
+    contexts = trade_contexts if isinstance(trade_contexts, list) else _load_trade_contexts()
+
+    exact_order_ids: Set[str] = set()
+    exact_order_link_ids: Set[str] = set()
+    exact_trade_ids: Set[str] = set()
+    if pending_order_id:
+        exact_order_ids.add(pending_order_id)
+    if pending_order_link_id:
+        exact_order_link_ids.add(pending_order_link_id)
+    if pending_trade_id:
+        exact_trade_ids.add(pending_trade_id)
+    for ctx in contexts:
+        if not isinstance(ctx, dict):
+            continue
+        if pending_id and str(ctx.get("pending_webhook_id") or "").strip() != pending_id:
+            continue
+        ctx_order_id = str(ctx.get("order_id") or "").strip()
+        ctx_order_link_id = str(ctx.get("order_link_id") or "").strip()
+        ctx_parent_order_link_id = str(ctx.get("parent_order_link_id") or "").strip()
+        ctx_trade_id = str(ctx.get("trade_id") or "").strip()
+        if ctx_order_id:
+            exact_order_ids.add(ctx_order_id)
+        if ctx_order_link_id:
+            exact_order_link_ids.add(ctx_order_link_id)
+        if ctx_parent_order_link_id:
+            exact_order_link_ids.add(ctx_parent_order_link_id)
+        if ctx_trade_id:
+            exact_trade_ids.add(ctx_trade_id)
+    has_exact_linkage = bool(exact_order_ids or exact_order_link_ids or exact_trade_ids)
 
     for idx, item in enumerate(open_items):
         if consumed_open_indices and idx in consumed_open_indices:
@@ -12760,15 +12802,39 @@ def _pending_webhook_is_superseded(
         if str(item.get("broker", "")).strip().upper() == "WEBHOOK":
             continue
 
-        open_id = str(item.get("id", "")).strip()
-        if pending_order_id and open_id and pending_order_id == open_id:
+        open_id = str(item.get("id") or "").strip()
+        open_order_link_id = str(item.get("order_link_id") or "").strip()
+        open_trade_id = str(item.get("trade_id") or "").strip()
+        if open_id and open_id in exact_order_ids:
+            if consumed_open_indices is not None:
+                consumed_open_indices.add(idx)
+            return True
+        if open_order_link_id and open_order_link_id in exact_order_link_ids:
+            if consumed_open_indices is not None:
+                consumed_open_indices.add(idx)
+            return True
+        if open_trade_id and open_trade_id in exact_trade_ids:
             if consumed_open_indices is not None:
                 consumed_open_indices.add(idx)
             return True
 
-        if pending_order_id:
-            continue
+    if has_exact_linkage:
+        return False
 
+    matching_indices: List[int] = []
+    pending_family = "oanda" if pending_broker == "oanda" or pending_category == "forex" else "bybit"
+    for idx, item in enumerate(open_items):
+        if consumed_open_indices and idx in consumed_open_indices:
+            continue
+        item_broker = str(item.get("broker") or "").strip().lower()
+        if item_broker == "webhook":
+            continue
+        item_category = str(item.get("category") or "").strip().lower()
+        item_family = "oanda" if item_broker == "oanda" or item_category == "forex" else "bybit"
+        if item_family != pending_family:
+            continue
+        if pending_account and str(item.get("account") or "").strip().lower() != pending_account:
+            continue
         instrument = str(item.get("instrument", "")).strip().upper()
         side = _side_key(item.get("side"), broker=str(item.get("broker", "")))
         size = item.get("size")
@@ -12779,27 +12845,42 @@ def _pending_webhook_is_superseded(
             and side == pending_side
             and _qty_matches(pending_size, size)
         ):
-            if consumed_open_indices is not None:
-                consumed_open_indices.add(idx)
-            return True
+            matching_indices.append(idx)
 
+    if len(matching_indices) == 1:
+        if consumed_open_indices is not None:
+            consumed_open_indices.add(matching_indices[0])
+        return True
     return False
+
+
+def _clean_pending_webhooks_for_open_items(
+    pending_items: List[Dict[str, object]], open_items: List[Dict[str, object]]
+) -> Tuple[List[Dict[str, object]], bool]:
+    contexts = _load_trade_contexts()
+    consumed_open_indices: Set[int] = set()
+    filtered: List[Dict[str, object]] = []
+    changed = False
+    for pending in pending_items:
+        if _pending_webhook_is_terminal(pending.get("status")):
+            changed = True
+            continue
+        if _pending_webhook_is_superseded(
+            pending,
+            open_items,
+            trade_contexts=contexts,
+            consumed_open_indices=consumed_open_indices,
+        ):
+            changed = True
+            continue
+        filtered.append(pending)
+    return filtered, changed
 
 
 def _filter_pending_webhooks(
     pending_items: List[Dict[str, object]], open_items: List[Dict[str, object]]
 ) -> List[Dict[str, object]]:
-    consumed_open_indices: Set[int] = set()
-    filtered: List[Dict[str, object]] = []
-    for pending in pending_items:
-        if _pending_webhook_is_terminal(pending.get("status")):
-            continue
-        if not _pending_webhook_is_superseded(
-            pending,
-            open_items,
-            consumed_open_indices=consumed_open_indices,
-        ):
-            filtered.append(pending)
+    filtered, _changed = _clean_pending_webhooks_for_open_items(pending_items, open_items)
     return filtered
 
 
@@ -12985,15 +13066,11 @@ async def list_open_orders() -> JSONResponse:
 
         pending = _load_pending_webhooks()
         if pending:
-            terminal = [p for p in pending if _pending_webhook_is_terminal(p.get("status"))]
-            if terminal:
-                pending = [
-                    p for p in pending if not _pending_webhook_is_terminal(p.get("status"))
-                ]
+            pending, pending_changed = _clean_pending_webhooks_for_open_items(pending, items)
+            if pending_changed:
                 _save_pending_webhooks(pending)
+                _invalidate_open_orders_cache()
                 _schedule_dropbox_upload_state_backup()
-
-            pending = _filter_pending_webhooks(pending, items)
             items.extend(pending)
 
         try:
