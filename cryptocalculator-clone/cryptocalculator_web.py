@@ -520,6 +520,18 @@ FORM_HTML = """
             <label>Fixed risk (AUD): <input name="fixed_risk_aud" id="fixed_risk_aud" type="number" step="0.01" min="0" value="{{ fixed_risk_aud }}"></label><br>
           </div>
           <label>Risk–reward ratio: <input name="rr_ratio" id="rr_ratio" type="number" step="0.1" value="2"></label><br>
+          <label>Target mode:
+            <select name="target_mode" id="target_mode">
+              <option value="raw_rr" {% if target_mode != "net_rr_after_fees" %}selected{% endif %}>Raw RR</option>
+              <option value="net_rr_after_fees" {% if target_mode == "net_rr_after_fees" %}selected{% endif %}>Net RR after fees</option>
+            </select>
+          </label><br>
+          <label>Level anchor:
+            <select name="level_anchor_mode" id="level_anchor_mode">
+              <option value="planned_entry" {% if level_anchor_mode != "actual_fill" %}selected{% endif %}>Planned entry</option>
+              <option value="actual_fill" {% if level_anchor_mode == "actual_fill" %}selected{% endif %}>Actual fill</option>
+            </select>
+          </label><br>
           <div id="audusd_rate_row">
             <label>AUD/USD rate:
               <input name="audusd_rate" id="audusd_rate" type="number" step="any" min="0"
@@ -838,6 +850,12 @@ def index():
     options_order_type = request.form.get("options_order_type", "market").strip().lower()
     if options_order_type not in {"market", "limit"}:
         options_order_type = "market"
+    target_mode = request.form.get("target_mode", "raw_rr").strip().lower()
+    if target_mode not in {"raw_rr", "net_rr_after_fees"}:
+        target_mode = "raw_rr"
+    level_anchor_mode = request.form.get("level_anchor_mode", "planned_entry").strip().lower()
+    if level_anchor_mode not in {"planned_entry", "actual_fill"}:
+        level_anchor_mode = "planned_entry"
     options_expiry_mode = request.form.get("options_expiry_mode", "manual").strip().lower()
     if options_expiry_mode not in {"manual", "auto"}:
         options_expiry_mode = "manual"
@@ -1018,6 +1036,8 @@ def index():
                     "stop_loss_ticks": stop_loss_ticks,
                     "risk_percent": risk_percent,
                     "rr_ratio": rr_ratio,
+                    "target_mode": target_mode,
+                    "level_anchor_mode": level_anchor_mode,
                     "price_source": price_source,
                     "execution_exchange": execution_exchange,
                     "account_balance": "auto",
@@ -1073,6 +1093,25 @@ def index():
                 if timeframe:
                     payload["timeframe"] = timeframe
                     risk_info["Timeframe"] = timeframe
+                risk_info["Target mode"] = str(trade.get("target_mode", target_mode))
+                risk_info["Level anchor mode"] = str(
+                    trade.get("level_anchor_mode", level_anchor_mode)
+                )
+                risk_info["Tick size used"] = trade.get("tick_size_used")
+                risk_info["Stop ticks requested"] = trade.get("stop_ticks_requested")
+                risk_info["Raw stop distance (price)"] = trade.get("stop_distance_price_raw")
+                risk_info["Raw target distance (price)"] = trade.get("target_distance_price_raw")
+                risk_info["Fee-adjusted target distance (price)"] = trade.get(
+                    "target_distance_price_fee_adjusted"
+                )
+                if str(trade.get("level_anchor_mode", level_anchor_mode)) == "planned_entry":
+                    risk_info["Live level behavior"] = (
+                        "Preserve planned chart stop/target absolute prices."
+                    )
+                else:
+                    risk_info["Live level behavior"] = (
+                        "Rebase stop/target from actual fill price at execution time."
+                    )
 
                 limit_cancel_offset = (
                     float(limit_cancel_offset_raw) if limit_cancel_offset_raw else None
@@ -1202,6 +1241,8 @@ def index():
         symbol=symbol,
         quantity=quantity,
         options_order_type=options_order_type,
+        target_mode=target_mode,
+        level_anchor_mode=level_anchor_mode,
         options_base=options_base,
         options_type=options_type,
         options_side=options_side,
