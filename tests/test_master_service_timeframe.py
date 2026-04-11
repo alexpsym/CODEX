@@ -144,6 +144,120 @@ def test_backup_restore_includes_trade_contexts(temp_state_paths):
     assert any(c.get("pending_webhook_id") == "p10" for c in contexts)
 
 
+def test_trade_context_merge_prevents_duplicate_lifecycle_rows(temp_state_paths):
+    master_service._upsert_trade_context(
+        {
+            "pending_webhook_id": "pw-1",
+            "broker": "bybit",
+            "account": "demo",
+            "category": "linear",
+            "instrument": "BTCUSDT",
+            "side": "buy",
+            "timeframe": "15-minute",
+            "stop_loss": "99.1",
+            "take_profit": "111.5",
+        }
+    )
+    master_service._upsert_trade_context(
+        {
+            "pending_webhook_id": "pw-1",
+            "order_id": "ord-1",
+            "order_link_id": "link-1",
+            "trade_id": "tr-1",
+            "transaction_id": "tx-1",
+            "status": "ACTIVE",
+            "timeframe": "",
+            "stop_loss": "",
+            "take_profit": "",
+        }
+    )
+    master_service._upsert_trade_context(
+        {
+            "order_id": "ord-1",
+            "trade_id": "tr-1",
+            "status": "CLOSED",
+        }
+    )
+    contexts = master_service._load_trade_contexts()
+    assert len(contexts) == 1
+    ctx = contexts[0]
+    assert ctx.get("pending_webhook_id") == "pw-1"
+    assert ctx.get("order_id") == "ord-1"
+    assert ctx.get("order_link_id") == "link-1"
+    assert ctx.get("trade_id") == "tr-1"
+    assert ctx.get("transaction_id") == "tx-1"
+    assert ctx.get("timeframe") == "15-minute"
+    assert ctx.get("stop_loss") == "99.1"
+    assert ctx.get("take_profit") == "111.5"
+
+
+def test_recent_trades_and_journal_backfill_from_trade_context(monkeypatch: pytest.MonkeyPatch):
+    journal_row = {
+        "id": "bybit:demo:closedpnl:BTCUSDT:ord-2",
+        "source": "bybit",
+        "account": "demo",
+        "account_label": "Bybit Demo",
+        "status": "closed",
+        "symbol": "BTCUSDT",
+        "side": "Buy",
+        "open_time": "2026-02-01T00:00:00+00:00",
+        "close_time": "2026-02-01T01:00:00+00:00",
+        "entry_price": 100.0,
+        "exit_price": 104.0,
+        "realized_pnl": 8.0,
+        "fees": 0.2,
+        "balance_after_trade": 1008.0,
+        "raw_refs": {"orderId": "ord-2", "orderLinkId": "link-2"},
+    }
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: [journal_row])
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_rows", lambda rows: (rows, {"changed": 0}))
+    monkeypatch.setattr(master_service, "_enrich_trade_row_metrics", lambda rows: rows)
+    monkeypatch.setattr(master_service, "_calc_balance_after_trade", lambda rows, balances: rows)
+    monkeypatch.setattr(master_service, "_get_excel_account_balances", lambda: [])
+    monkeypatch.setattr(
+        master_service,
+        "_load_trade_contexts",
+        lambda: [
+            {
+                "broker": "bybit",
+                "account": "demo",
+                "instrument": "BTCUSDT",
+                "side": "buy",
+                "order_id": "ord-2",
+                "order_link_id": "link-2",
+                "timeframe": "1-hour",
+                "stop_loss": "97.5",
+                "take_profit": "110.0",
+                "status": "CLOSED",
+            }
+        ],
+    )
+    monkeypatch.setattr(master_service, "_cashflow_rows_for_journal", lambda _folder: [])
+    monkeypatch.setattr(master_service, "_load_json_file", lambda _path, _default: {})
+    monkeypatch.setattr(master_service, "_compute_journal_stats", lambda _rows, _balances: {})
+
+    recent = json.loads(asyncio.run(master_service.recent_trades(limit=5)).body.decode("utf-8"))
+    assert recent["items"][0]["timeframe"] == "1-hour"
+    assert recent["items"][0]["stop_loss"] == 97.5
+    assert recent["items"][0]["take_profit"] == 110.0
+
+    journal = json.loads(asyncio.run(master_service.trading_journal_items()).body.decode("utf-8"))
+    assert journal["items"][0]["timeframe"] == "1-hour"
+    assert journal["items"][0]["stop_loss"] == 97.5
+    assert journal["items"][0]["take_profit"] == 110.0
+
+
+def test_prune_trade_contexts_invalid_timestamps_are_safe(temp_state_paths):
+    pruned = master_service._prune_trade_contexts(
+        [
+            {"pending_webhook_id": "a", "status": "CLOSED", "updated_at": "not-a-time"},
+            {"pending_webhook_id": "b", "status": "CANCELLED", "updated_at": ""},
+            {"pending_webhook_id": "c", "status": "ACTIVE", "updated_at": "also-bad"},
+        ]
+    )
+    assert [item.get("pending_webhook_id") for item in pruned] == ["a", "b", "c"]
+
+
 def test_oanda_row_repair_from_context(monkeypatch: pytest.MonkeyPatch):
     row = {
         "id": "o1",

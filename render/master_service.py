@@ -6690,6 +6690,29 @@ def _to_dt_utc(value: object) -> Optional[datetime]:
         return None
 
 
+def _parse_iso_datetime(value: object) -> Optional[datetime]:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        dt = value
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    try:
+        parsed = pd.to_datetime(value, utc=True, errors="coerce")
+    except Exception:
+        return None
+    if parsed is None or pd.isna(parsed):
+        return None
+    if hasattr(parsed, "to_pydatetime"):
+        dt = parsed.to_pydatetime()
+        if isinstance(dt, datetime):
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+    return None
+
+
 def _load_pending_webhooks() -> List[Dict[str, object]]:
     if not PENDING_WEBHOOKS_PATH.exists():
         return []
@@ -6874,70 +6897,86 @@ def _upsert_trade_context(payload: Dict[str, object]) -> Dict[str, object]:
     order_id = str(payload.get("order_id") or "").strip()
     order_link_id = str(payload.get("order_link_id") or "").strip()
     trade_id = str(payload.get("trade_id") or "").strip()
-    key = next(
-        (
-            str(entry.get("pending_webhook_id") or "").strip()
-            for entry in items
-            if pending_id and str(entry.get("pending_webhook_id") or "").strip() == pending_id
-        ),
-        "",
-    ) or next(
-        (
-            str(entry.get("order_id") or "").strip()
-            for entry in items
-            if order_id and str(entry.get("order_id") or "").strip() == order_id
-        ),
-        "",
-    ) or next(
-        (
-            str(entry.get("order_link_id") or "").strip()
-            for entry in items
-            if order_link_id and str(entry.get("order_link_id") or "").strip() == order_link_id
-        ),
-        "",
-    ) or next(
-        (
-            str(entry.get("trade_id") or "").strip()
-            for entry in items
-            if trade_id and str(entry.get("trade_id") or "").strip() == trade_id
-        ),
-        "",
-    )
+    transaction_id = str(payload.get("transaction_id") or "").strip()
+
+    def _is_blank(value: object) -> bool:
+        return value is None or (isinstance(value, str) and value.strip() == "")
+
+    id_fields = ("pending_webhook_id", "order_id", "order_link_id", "trade_id", "transaction_id")
+    incoming_ids = {
+        "pending_webhook_id": pending_id,
+        "order_id": order_id,
+        "order_link_id": order_link_id,
+        "trade_id": trade_id,
+        "transaction_id": transaction_id,
+    }
 
     merged_payload = dict(payload)
     if "timeframe" in merged_payload:
         merged_payload["timeframe"] = _normalize_timeframe(merged_payload.get("timeframe"))
-    for key in ("entry_price", "stop_loss", "take_profit"):
-        if key in merged_payload:
-            merged_payload[key] = _normalize_optional_price(merged_payload.get(key))
-    for key in ("broker", "account", "instrument", "side", "order_type", "pending_webhook_id", "order_id", "trade_id"):
-        if key in merged_payload and merged_payload.get(key) is not None:
-            merged_payload[key] = str(merged_payload.get(key)).strip()
+    for field in ("entry_price", "stop_loss", "take_profit"):
+        if field in merged_payload:
+            merged_payload[field] = _normalize_optional_price(merged_payload.get(field))
+    for field in (
+        "broker",
+        "account",
+        "category",
+        "instrument",
+        "side",
+        "order_type",
+        "pending_webhook_id",
+        "order_id",
+        "order_link_id",
+        "trade_id",
+        "transaction_id",
+    ):
+        if field in merged_payload and merged_payload.get(field) is not None:
+            merged_payload[field] = str(merged_payload.get(field)).strip()
     merged_payload["updated_at"] = now_iso
     merged_payload.setdefault("created_at", now_iso)
     if not merged_payload.get("status"):
         merged_payload["status"] = "ACTIVE"
 
-    updated = False
+    matched_indices: List[int] = []
     for idx, entry in enumerate(items):
-        if key and key in {
-            str(entry.get("pending_webhook_id") or "").strip(),
-            str(entry.get("order_id") or "").strip(),
-            str(entry.get("order_link_id") or "").strip(),
-            str(entry.get("trade_id") or "").strip(),
-        }:
-            merged = dict(entry)
-            for k, v in merged_payload.items():
-                if k == "timeframe" and not v and merged.get("timeframe"):
+        for id_field in id_fields:
+            incoming_id = incoming_ids.get(id_field, "")
+            if not incoming_id:
+                continue
+            if str(entry.get(id_field) or "").strip() == incoming_id:
+                matched_indices.append(idx)
+                break
+
+    if matched_indices:
+        base_idx = matched_indices[0]
+        merged = dict(items[base_idx])
+        for idx in matched_indices[1:]:
+            for k, v in items[idx].items():
+                if k in {"created_at", "updated_at"}:
                     continue
-                if v in (None, "") and k in {"order_id", "order_link_id", "trade_id"}:
-                    continue
-                merged[k] = v
-            items[idx] = merged
-            merged_payload = merged
-            updated = True
-            break
-    if not updated:
+                if _is_blank(merged.get(k)) and not _is_blank(v):
+                    merged[k] = v
+
+        for k, v in merged_payload.items():
+            if k == "created_at":
+                if _is_blank(merged.get("created_at")):
+                    merged["created_at"] = v
+                continue
+            if _is_blank(v):
+                continue
+            merged[k] = v
+
+        merged["updated_at"] = now_iso
+        merged.setdefault("created_at", now_iso)
+        for field in id_fields:
+            if _is_blank(merged.get(field)) and incoming_ids.get(field):
+                merged[field] = incoming_ids[field]
+
+        deduped_items = [entry for idx, entry in enumerate(items) if idx not in matched_indices]
+        deduped_items.insert(base_idx, merged)
+        items = deduped_items
+        merged_payload = merged
+    else:
         items.append(merged_payload)
 
     pruned = _prune_trade_contexts(items)
@@ -8904,6 +8943,9 @@ def _normalize_bybit_closed_pnl_row(
     side_value = str(display_side or raw_side).strip()
     raw_refs = {
         "orderId": order_id,
+        "orderLinkId": str(entry.get("orderLinkId") or "").strip() or None,
+        "tradeId": str(entry.get("tradeId") or entry.get("execId") or "").strip() or None,
+        "transactionId": str(entry.get("transactionId") or "").strip() or None,
         "fillCount": fill_count,
         "source": "closed_pnl",
         "raw_closed_pnl_side": raw_side or None,
@@ -8974,6 +9016,48 @@ def _normalize_bybit_closed_pnl_row(
         "metrics": {"timeframe": timeframe} if timeframe else {},
         "raw_refs": raw_refs,
     }
+
+
+def _backfill_trade_row_context_fields(row: Dict[str, object]) -> Dict[str, object]:
+    if not isinstance(row, dict):
+        return row
+    current_timeframe = _normalize_timeframe(
+        row.get("timeframe")
+        or ((row.get("metrics") or {}).get("timeframe") if isinstance(row.get("metrics"), dict) else "")
+    )
+    needs_tpsl = row.get("stop_loss") in (None, "") or row.get("take_profit") in (None, "")
+    if current_timeframe and not needs_tpsl:
+        return row
+
+    ctx = _lookup_trade_context_for_journal_row(row)
+    if not isinstance(ctx, dict):
+        ctx = _lookup_trade_context_by_market_window(
+            {
+                "broker": row.get("source"),
+                "account": row.get("account"),
+                "instrument": row.get("symbol") or row.get("instrument"),
+                "side": row.get("side"),
+                "open_time": row.get("open_time") or row.get("opened_at") or row.get("entry_time"),
+                "close_time": row.get("close_time") or row.get("closed_at") or row.get("exit_time") or row.get("date"),
+            }
+        )
+    if not isinstance(ctx, dict):
+        return row
+
+    patched = dict(row)
+    if not current_timeframe:
+        timeframe = _normalize_timeframe(ctx.get("timeframe"))
+        if timeframe:
+            patched["timeframe"] = timeframe
+            metrics = dict(patched.get("metrics") or {}) if isinstance(patched.get("metrics"), dict) else {}
+            metrics["timeframe"] = timeframe
+            patched["metrics"] = metrics
+
+    if patched.get("stop_loss") in (None, "") and ctx.get("stop_loss") not in (None, ""):
+        patched["stop_loss"] = _to_float(ctx.get("stop_loss")) if _to_float(ctx.get("stop_loss")) is not None else ctx.get("stop_loss")
+    if patched.get("take_profit") in (None, "") and ctx.get("take_profit") not in (None, ""):
+        patched["take_profit"] = _to_float(ctx.get("take_profit")) if _to_float(ctx.get("take_profit")) is not None else ctx.get("take_profit")
+    return patched
 
 
 def _normalize_side_for_comparison(value: object) -> str:
@@ -12877,6 +12961,7 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
         for r in sanitized_rows
         if isinstance(r, dict) and not _exclude_bybit_demo_row(r)
     ]
+    rows = [_backfill_trade_row_context_fields(r) for r in rows]
     rows = _enrich_trade_row_metrics(
         _calc_balance_after_trade(rows, _get_excel_account_balances())
     )
@@ -13819,7 +13904,11 @@ app.mount("/static", StaticFiles(directory=BASE_DIR / "render" / "static"), name
 @app.get("/api/trading-journal")
 async def trading_journal_items(filter: str = "") -> JSONResponse:
     # Enforce "no Bybit Demo" across all journal outputs.
-    items = [r for r in _get_trading_journal_rows() if isinstance(r, dict) and not _exclude_bybit_demo_row(r)]
+    items = [
+        _backfill_trade_row_context_fields(r)
+        for r in _get_trading_journal_rows()
+        if isinstance(r, dict) and not _exclude_bybit_demo_row(r)
+    ]
 
     def _norm_search_text(value: object) -> str:
         text = str(value or "").lower()
