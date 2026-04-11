@@ -246,3 +246,113 @@ def test_journal_rows_from_oanda_fill_dedupes_missing_context_warning(monkeypatc
     assert len([line for line in warnings if "OANDA_CONTEXT_MISSING" in line]) == 2
     assert any("trade_id=t1" in line for line in warnings)
     assert any("trade_id=" in line and "trade_id=t1" not in line for line in warnings)
+
+
+def test_oanda_missing_context_warns_once_across_repeated_recovery(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    warnings = []
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_STATE_PATH", tmp_path / "state.json")
+
+    class DummyLogger:
+        def warning(self, message, *args):
+            warnings.append(message % args if args else message)
+
+    monkeypatch.setattr(master_service, "BYBIT_LOGGER", DummyLogger())
+    monkeypatch.setattr(master_service, "_load_trade_contexts", lambda: [])
+
+    payload = {
+        "account": "demo",
+        "id": "999",
+        "orderID": "998",
+        "instrument": "NZD_USD",
+        "units": "1000",
+        "time": "2026-04-10T01:00:00Z",
+        "tradesClosed": [{"tradeID": "t9", "units": "-1000", "price": "0.6010", "realizedPL": "1"}],
+    }
+    master_service._journal_rows_from_oanda_order_fill(payload)
+    master_service._journal_rows_from_oanda_order_fill(payload)
+
+    assert len([line for line in warnings if "OANDA_CONTEXT_MISSING" in line]) == 1
+    state = master_service._load_trading_journal_state()
+    key = "demo|999|998|t9|NZD_USD"
+    entry = state.get("unresolved_registry", {}).get("oanda_context", {}).get(key, {})
+    assert entry.get("count") == 2
+    assert entry.get("resolved") is False
+
+
+def test_oanda_ambiguous_warns_once(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    warnings = []
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_STATE_PATH", tmp_path / "state.json")
+
+    class DummyLogger:
+        def warning(self, message, *args):
+            warnings.append(message % args if args else message)
+
+    monkeypatch.setattr(master_service, "BYBIT_LOGGER", DummyLogger())
+    monkeypatch.setattr(
+        master_service,
+        "_load_trade_contexts",
+        lambda: [
+            {"broker": "oanda", "account": "demo", "instrument": "NZD_USD", "side": "buy", "status": "CLOSED"},
+            {"broker": "oanda", "account": "demo", "instrument": "NZD_USD", "side": "buy", "status": "ACTIVE"},
+        ],
+    )
+
+    payload = {
+        "account": "demo",
+        "id": "2001",
+        "orderID": "2000",
+        "instrument": "NZD_USD",
+        "units": "1000",
+        "time": "2026-04-10T01:00:00Z",
+        "tradesClosed": [{"tradeID": "t2001", "units": "-1000", "price": "0.6010", "realizedPL": "1"}],
+    }
+    master_service._journal_rows_from_oanda_order_fill(payload)
+    master_service._journal_rows_from_oanda_order_fill(payload)
+
+    assert len([line for line in warnings if "OANDA_CONTEXT_AMBIGUOUS" in line]) == 1
+
+
+def test_oanda_fallback_resolution_persists_ids_without_warning(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    warnings = []
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_STATE_PATH", tmp_path / "state.json")
+
+    class DummyLogger:
+        def warning(self, message, *args):
+            warnings.append(message % args if args else message)
+
+    monkeypatch.setattr(master_service, "BYBIT_LOGGER", DummyLogger())
+    monkeypatch.setattr(
+        master_service,
+        "_load_trade_contexts",
+        lambda: [
+            {
+                "broker": "oanda",
+                "account": "demo",
+                "instrument": "NZD_USD",
+                "side": "buy",
+                "status": "CLOSED",
+                "timeframe": "1-hour",
+                "stop_loss": "0.5900",
+                "take_profit": "0.6200",
+                "created_at": "2026-04-10T00:30:00+00:00",
+                "updated_at": "2026-04-10T00:30:00+00:00",
+            }
+        ],
+    )
+    upserts = []
+    monkeypatch.setattr(master_service, "_upsert_trade_context", lambda payload: upserts.append(payload) or payload)
+
+    payload = {
+        "account": "demo",
+        "id": "3001",
+        "orderID": "3000",
+        "instrument": "NZD_USD",
+        "units": "1000",
+        "time": "2026-04-10T01:00:00+00:00",
+        "tradesClosed": [{"tradeID": "t3001", "units": "-1000", "price": "0.6010", "realizedPL": "1"}],
+    }
+    rows = master_service._journal_rows_from_oanda_order_fill(payload)
+
+    assert rows and rows[0]["timeframe"] == "1-hour"
+    assert not [line for line in warnings if "OANDA_CONTEXT_" in line]
+    assert any(item.get("order_id") == "3000" and item.get("trade_id") == "t3001" for item in upserts)

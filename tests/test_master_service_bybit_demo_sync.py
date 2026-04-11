@@ -387,7 +387,7 @@ def test_closed_pnl_row_backfills_tpsl_from_market_window_context(monkeypatch) -
     monkeypatch.setattr(
         master_service,
         "_lookup_trade_context_by_market_window",
-        lambda _row, max_window_seconds=5400: {"timeframe": "4-hour", "stop_loss": "90", "take_profit": "130"},
+        lambda _row, max_window_seconds=5400, include_inactive=False: {"timeframe": "4-hour", "stop_loss": "90", "take_profit": "130"},
     )
 
     row = master_service._normalize_bybit_closed_pnl_row(
@@ -417,3 +417,60 @@ def test_closed_pnl_row_backfills_tpsl_from_market_window_context(monkeypatch) -
     assert row["timeframe"] == "4-hour"
     refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
     assert refs.get("trade_context_tpsl_fallback_via_window") is True
+
+
+def test_bybit_unresolved_tpsl_warns_once_and_persists_registry(tmp_path, monkeypatch) -> None:
+    warnings = []
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_STATE_PATH", tmp_path / "state.json")
+    master_service._STARTUP_STATE_RESTORE_DONE.set()
+
+    class DummyLogger:
+        def warning(self, message, *args):
+            warnings.append(message % args if args else message)
+
+    monkeypatch.setattr(master_service, "BYBIT_LOGGER", DummyLogger())
+    monkeypatch.setattr(master_service, "_resolve_trading_journal_dropbox_folder", lambda: ("/tmp", []))
+    monkeypatch.setattr(master_service, "_ensure_bybit_demo_dropbox_files", lambda _folder: None)
+    async def fake_empty_payload(**_kwargs):
+        return {"result": {"list": []}}
+
+    monkeypatch.setattr(master_service, "_fetch_bybit_order_history", fake_empty_payload)
+    monkeypatch.setattr(master_service, "_fetch_bybit_order_realtime", fake_empty_payload)
+    monkeypatch.setattr(master_service, "_fetch_bybit_transaction_log", fake_empty_payload)
+    monkeypatch.setattr(master_service, "_upsert_trading_journal_rows", lambda rows: len(rows))
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_rows", lambda rows: (rows, {"changed": 0}))
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: [])
+    monkeypatch.setattr(master_service, "_append_bybit_demo_rows_to_workbook", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_workbook", lambda *_args, **_kwargs: {"deduped_by_order_id": 0, "deduped_by_fingerprint": 0})
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setattr(master_service, "_record_bybit_demo_sync_status", lambda **_kwargs: None)
+    monkeypatch.setattr(master_service, "_upsert_trade_context", lambda payload: payload)
+    monkeypatch.setattr(master_service, "load_bybit_demo_tpsl_cache", lambda: {})
+    async def fake_closed_pnl(**_kwargs):
+        return {"result": {"list": [{
+            "symbol": "BTCUSDT", "orderId": "oid-1", "orderLinkId": "", "side": "Buy",
+            "createdTime": 1000, "updatedTime": 2000, "avgEntryPrice": "100", "avgExitPrice": "101",
+            "closedSize": "1", "closedPnl": "1", "openFee": "0", "closeFee": "0",
+        }]}}
+
+    monkeypatch.setattr(master_service, "_fetch_bybit_closed_pnl", fake_closed_pnl)
+
+    asyncio.run(master_service._sync_bybit_closed_pnl_window(account_mode="demo", base_url="u", api_key="k", api_secret="s", start_time=0, end_time=3000))
+    asyncio.run(master_service._sync_bybit_closed_pnl_window(account_mode="demo", base_url="u", api_key="k", api_secret="s", start_time=0, end_time=3000))
+
+    assert len([line for line in warnings if "BYBIT_DEMO_TPSL unresolved" in line]) == 1
+    state = master_service._load_trading_journal_state()
+    key = "demo|oid-1|||BTCUSDT|"
+    entry = state.get("unresolved_registry", {}).get("bybit_demo_tpsl", {}).get(key, {})
+    assert entry.get("count") == 2
+    assert entry.get("resolved") is False
+
+
+def test_parent_order_link_id_lookup_supported(monkeypatch) -> None:
+    monkeypatch.setattr(
+        master_service,
+        "_load_trade_contexts",
+        lambda: [{"parent_order_link_id": "parent-1", "timeframe": "1-hour"}],
+    )
+    row = master_service._lookup_trade_context_for_journal_row({"raw_refs": {"parentOrderLinkId": "parent-1"}})
+    assert row and row.get("timeframe") == "1-hour"
