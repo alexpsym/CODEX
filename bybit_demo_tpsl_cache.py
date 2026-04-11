@@ -107,6 +107,7 @@ def cache_bybit_demo_tpsl_request(
         cache[f"order_link_id:{order_link_key}"] = dict(payload)
     if parent_link_key:
         cache[f"order_link_id:{parent_link_key}"] = dict(payload)
+        cache[f"parent_order_link_id:{parent_link_key}"] = dict(payload)
 
     if len(cache) > 1200:
         sorted_items = sorted(
@@ -138,6 +139,7 @@ def resolve_cached_bybit_demo_tpsl(
         ("order_id", f"order_id:{oid}" if oid else ""),
         ("order_link_id", f"order_link_id:{olid}" if olid else ""),
         ("parent_order_link_id", f"order_link_id:{parent}" if parent else ""),
+        ("parent_order_link_id", f"parent_order_link_id:{parent}" if parent else ""),
     ):
         if key and key in cache:
             return dict(cache[key]), match_type

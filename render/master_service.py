@@ -1408,6 +1408,68 @@ def _save_trading_journal_state(state: Dict[str, object]) -> None:
     )
 
 
+def _stable_registry_key(parts: Iterable[object]) -> str:
+    return "|".join(str(part or "").strip() for part in parts)
+
+
+def _update_unresolved_registry(
+    *,
+    family: str,
+    key: str,
+    details: Optional[Dict[str, object]] = None,
+    resolved: bool,
+    resolution_source: Optional[str] = None,
+) -> Tuple[bool, Dict[str, object]]:
+    if not family or not key:
+        return False, {}
+    state = _load_trading_journal_state()
+    registry = state.get("unresolved_registry")
+    if not isinstance(registry, dict):
+        registry = {}
+    family_map = registry.get(family)
+    if not isinstance(family_map, dict):
+        family_map = {}
+    now_iso = _utc_now_iso()
+    detail_payload = details if isinstance(details, dict) else {}
+    detail_signature = json.dumps(detail_payload, sort_keys=True, default=str)
+    existing = family_map.get(key)
+    should_warn = False
+    if isinstance(existing, dict):
+        entry = dict(existing)
+        entry["last_seen_at"] = now_iso
+        entry["count"] = int(_to_float(entry.get("count")) or 0) + 1
+        was_resolved = bool(entry.get("resolved"))
+        previous_signature = str(entry.get("last_signature") or "")
+        if resolved:
+            entry["resolved"] = True
+            if resolution_source:
+                entry["resolution_source"] = resolution_source
+            if not was_resolved:
+                should_warn = False
+        else:
+            entry["resolved"] = False
+            if was_resolved or previous_signature != detail_signature:
+                should_warn = True
+        entry["last_signature"] = detail_signature
+        entry["details"] = detail_payload
+    else:
+        entry = {
+            "first_seen_at": now_iso,
+            "last_seen_at": now_iso,
+            "count": 1,
+            "resolved": bool(resolved),
+            "resolution_source": resolution_source or None,
+            "last_signature": detail_signature,
+            "details": detail_payload,
+        }
+        should_warn = not resolved
+    family_map[key] = entry
+    registry[family] = family_map
+    state["unresolved_registry"] = registry
+    _save_trading_journal_state(state)
+    return should_warn, entry
+
+
 def _restore_bybit_closed_pnl_last_seen_from_state() -> None:
     state = _load_trading_journal_state()
     persisted = state.get("bybit_closed_pnl_last_seen") if isinstance(state, dict) else None
@@ -2951,7 +3013,7 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
     tx_id = str(entry.get("id") or "").strip()
 
     context_cache: Dict[Tuple[str, str, str, str], Optional[Dict[str, object]]] = {}
-    warned_missing_or_ambiguous: Set[Tuple[str, str, str, str]] = set()
+    contexts = _load_trade_contexts()
 
     def _resolve_context_for_fill(trade_id: Optional[str] = None) -> Optional[Dict[str, object]]:
         warning_key = (account, tx_id, tx_order_id, str(trade_id or "").strip())
@@ -2962,37 +3024,140 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             refs["tradeId"] = trade_id
         ctx = _lookup_trade_context_for_journal_row({"raw_refs": refs})
         if isinstance(ctx, dict):
+            _update_unresolved_registry(
+                family="oanda_context",
+                key=_stable_registry_key([account, tx_id, tx_order_id, trade_id or "", symbol]),
+                details={"status": "resolved"},
+                resolved=True,
+                resolution_source="direct_refs",
+            )
             context_cache[warning_key] = ctx
             return ctx
-        candidates = [
-            item
-            for item in _load_trade_contexts()
-            if str(item.get("broker") or "").strip().lower() == "oanda"
-            and str(item.get("account") or "").strip().lower() == account
-            and str(item.get("instrument") or "").strip().upper() == symbol
-            and _normalize_side_for_comparison(item.get("side"))
-            == _normalize_side_for_comparison("buy" if (_to_float(entry.get("units")) or 0.0) >= 0 else "sell")
-            and str(item.get("status") or "ACTIVE").strip().upper() == "ACTIVE"
-        ]
+        side_hint = _normalize_side_for_comparison("buy" if (_to_float(entry.get("units")) or 0.0) >= 0 else "sell")
+        open_leg = legs.get(str(trade_id or "").strip()) if trade_id else None
+        if isinstance(open_leg, dict):
+            open_refs = {
+                "orderId": open_leg.get("order_id"),
+                "transactionId": open_leg.get("transaction_id"),
+                "tradeId": trade_id,
+            }
+            ctx = _lookup_trade_context_for_journal_row({"raw_refs": open_refs})
+            if isinstance(ctx, dict):
+                _update_unresolved_registry(
+                    family="oanda_context",
+                    key=_stable_registry_key([account, tx_id, tx_order_id, trade_id or "", symbol]),
+                    details={"status": "resolved"},
+                    resolved=True,
+                    resolution_source="open_leg_refs",
+                )
+                context_cache[warning_key] = ctx
+                return ctx
+        ctx = _lookup_trade_context_by_market_window(
+            {
+                "broker": "oanda",
+                "account": account,
+                "instrument": symbol,
+                "side": side_hint,
+                "close_time": close_time,
+            },
+            include_inactive=True,
+            max_window_seconds=6 * 60 * 60,
+        )
+        if isinstance(ctx, dict):
+            persisted = _upsert_trade_context(
+                {
+                    "broker": "oanda",
+                    "account": account,
+                    "instrument": symbol,
+                    "side": ctx.get("side") or side_hint,
+                    "status": ctx.get("status") or "ACTIVE",
+                    "order_id": tx_order_id or ctx.get("order_id"),
+                    "trade_id": trade_id or ctx.get("trade_id"),
+                    "transaction_id": tx_id or ctx.get("transaction_id"),
+                    "timeframe": _normalize_timeframe(ctx.get("timeframe")),
+                    "stop_loss": ctx.get("stop_loss"),
+                    "take_profit": ctx.get("take_profit"),
+                }
+            )
+            _update_unresolved_registry(
+                family="oanda_context",
+                key=_stable_registry_key([account, tx_id, tx_order_id, trade_id or "", symbol]),
+                details={"status": "resolved"},
+                resolved=True,
+                resolution_source="market_window",
+            )
+            context_cache[warning_key] = persisted
+            return persisted
+
+        candidates = []
+        for item in contexts:
+            if str(item.get("broker") or "").strip().lower() != "oanda":
+                continue
+            if str(item.get("account") or "").strip().lower() != account:
+                continue
+            if str(item.get("instrument") or "").strip().upper() != symbol:
+                continue
+            if side_hint and _normalize_side_for_comparison(item.get("side")) not in {"", side_hint}:
+                continue
+            refs_hit = (
+                (tx_order_id and str(item.get("order_id") or "").strip() == tx_order_id)
+                or (trade_id and str(item.get("trade_id") or "").strip() == str(trade_id).strip())
+                or (tx_id and str(item.get("transaction_id") or "").strip() == tx_id)
+            )
+            if refs_hit or not (tx_order_id or trade_id or tx_id):
+                candidates.append(item)
         if len(candidates) == 1:
-            context_cache[warning_key] = candidates[0]
-            return candidates[0]
+            persisted = _upsert_trade_context(
+                {
+                    "broker": "oanda",
+                    "account": account,
+                    "instrument": symbol,
+                    "side": candidates[0].get("side") or side_hint,
+                    "status": candidates[0].get("status") or "ACTIVE",
+                    "order_id": tx_order_id or candidates[0].get("order_id"),
+                    "trade_id": trade_id or candidates[0].get("trade_id"),
+                    "transaction_id": tx_id or candidates[0].get("transaction_id"),
+                    "timeframe": _normalize_timeframe(candidates[0].get("timeframe")),
+                    "stop_loss": candidates[0].get("stop_loss"),
+                    "take_profit": candidates[0].get("take_profit"),
+                }
+            )
+            _update_unresolved_registry(
+                family="oanda_context",
+                key=_stable_registry_key([account, tx_id, tx_order_id, trade_id or "", symbol]),
+                details={"status": "resolved"},
+                resolved=True,
+                resolution_source="cross_link_inference",
+            )
+            context_cache[warning_key] = persisted
+            return persisted
+        unresolved_key = _stable_registry_key([account, tx_id, tx_order_id, trade_id or "", symbol])
         if len(candidates) > 1:
-            if warning_key not in warned_missing_or_ambiguous:
-                warned_missing_or_ambiguous.add(warning_key)
+            should_warn, _ = _update_unresolved_registry(
+                family="oanda_context",
+                key=unresolved_key,
+                details={"reason": "ambiguous", "candidates": len(candidates)},
+                resolved=False,
+            )
+            if should_warn:
                 BYBIT_LOGGER.warning(
                     "OANDA_CONTEXT_AMBIGUOUS account=%s symbol=%s side=%s tx_id=%s order_id=%s trade_id=%s candidates=%s",
                     account,
                     symbol,
-                    "buy" if (_to_float(entry.get("units")) or 0.0) >= 0 else "sell",
+                    side_hint,
                     tx_id,
                     tx_order_id,
                     trade_id or "",
                     len(candidates),
                 )
         else:
-            if warning_key not in warned_missing_or_ambiguous:
-                warned_missing_or_ambiguous.add(warning_key)
+            should_warn, _ = _update_unresolved_registry(
+                family="oanda_context",
+                key=unresolved_key,
+                details={"reason": "missing"},
+                resolved=False,
+            )
+            if should_warn:
                 BYBIT_LOGGER.warning(
                     "OANDA_CONTEXT_MISSING account=%s symbol=%s tx_id=%s order_id=%s trade_id=%s",
                     account,
@@ -6896,17 +7061,19 @@ def _upsert_trade_context(payload: Dict[str, object]) -> Dict[str, object]:
     pending_id = str(payload.get("pending_webhook_id") or "").strip()
     order_id = str(payload.get("order_id") or "").strip()
     order_link_id = str(payload.get("order_link_id") or "").strip()
+    parent_order_link_id = str(payload.get("parent_order_link_id") or "").strip()
     trade_id = str(payload.get("trade_id") or "").strip()
     transaction_id = str(payload.get("transaction_id") or "").strip()
 
     def _is_blank(value: object) -> bool:
         return value is None or (isinstance(value, str) and value.strip() == "")
 
-    id_fields = ("pending_webhook_id", "order_id", "order_link_id", "trade_id", "transaction_id")
+    id_fields = ("pending_webhook_id", "order_id", "order_link_id", "parent_order_link_id", "trade_id", "transaction_id")
     incoming_ids = {
         "pending_webhook_id": pending_id,
         "order_id": order_id,
         "order_link_id": order_link_id,
+        "parent_order_link_id": parent_order_link_id,
         "trade_id": trade_id,
         "transaction_id": transaction_id,
     }
@@ -6927,6 +7094,7 @@ def _upsert_trade_context(payload: Dict[str, object]) -> Dict[str, object]:
         "pending_webhook_id",
         "order_id",
         "order_link_id",
+        "parent_order_link_id",
         "trade_id",
         "transaction_id",
     ):
@@ -7057,10 +7225,20 @@ def _lookup_trade_context_for_journal_row(row: Dict[str, object]) -> Optional[Di
     order_link_id = str(
         refs.get("orderLinkId")
         or refs.get("order_link_id")
+        or refs.get("parentOrderLinkId")
+        or refs.get("parent_order_link_id")
         or row.get("orderLinkId")
         or row.get("order_link_id")
         or ""
     ).strip()
+    parent_order_link_id = str(
+        refs.get("parentOrderLinkId")
+        or refs.get("parent_order_link_id")
+        or row.get("parentOrderLinkId")
+        or row.get("parent_order_link_id")
+        or ""
+    ).strip()
+    pending_webhook_id = str(refs.get("pending_webhook_id") or row.get("pending_webhook_id") or "").strip()
     for ctx in contexts:
         if order_id and str(ctx.get("order_id") or "").strip() == order_id:
             return ctx
@@ -7068,10 +7246,16 @@ def _lookup_trade_context_for_journal_row(row: Dict[str, object]) -> Optional[Di
         if order_link_id and str(ctx.get("order_link_id") or "").strip() == order_link_id:
             return ctx
     for ctx in contexts:
+        if parent_order_link_id and str(ctx.get("parent_order_link_id") or "").strip() == parent_order_link_id:
+            return ctx
+    for ctx in contexts:
         if trade_id and str(ctx.get("trade_id") or "").strip() == trade_id:
             return ctx
     for ctx in contexts:
         if transaction_id and str(ctx.get("transaction_id") or "").strip() == transaction_id:
+            return ctx
+    for ctx in contexts:
+        if pending_webhook_id and str(ctx.get("pending_webhook_id") or "").strip() == pending_webhook_id:
             return ctx
     return None
 
@@ -7080,6 +7264,7 @@ def _lookup_trade_context_by_market_window(
     row: Dict[str, object],
     *,
     max_window_seconds: int = 90 * 60,
+    include_inactive: bool = False,
 ) -> Optional[Dict[str, object]]:
     contexts = _load_trade_contexts()
     broker = str(row.get("broker") or row.get("source") or "").strip().lower()
@@ -7099,6 +7284,8 @@ def _lookup_trade_context_by_market_window(
         if str(ctx.get("instrument") or "").strip().upper() != instrument:
             continue
         if _normalize_side_for_comparison(ctx.get("side")) != side:
+            continue
+        if not include_inactive and str(ctx.get("status") or "ACTIVE").strip().upper() != "ACTIVE":
             continue
         ctx_time_sec = (
             _canonical_trade_epoch_second(ctx.get("closed_at"))
@@ -8944,6 +9131,7 @@ def _normalize_bybit_closed_pnl_row(
     raw_refs = {
         "orderId": order_id,
         "orderLinkId": str(entry.get("orderLinkId") or "").strip() or None,
+        "parentOrderLinkId": str(entry.get("parentOrderLinkId") or "").strip() or None,
         "tradeId": str(entry.get("tradeId") or entry.get("execId") or "").strip() or None,
         "transactionId": str(entry.get("transactionId") or "").strip() or None,
         "fillCount": fill_count,
@@ -8970,7 +9158,8 @@ def _normalize_bybit_closed_pnl_row(
                 "side": side_value,
                 "open_time": _ms_to_iso(entry.get("createdTime")),
                 "close_time": _ms_to_iso(entry.get("updatedTime")),
-            }
+            },
+            include_inactive=True,
         )
         market_window_ctx_used = isinstance(ctx, dict)
     timeframe = _normalize_timeframe(ctx.get("timeframe")) if isinstance(ctx, dict) else ""
@@ -8987,6 +9176,24 @@ def _normalize_bybit_closed_pnl_row(
         (stop_loss is not None and fallback_stop_loss is not None)
         or (take_profit is not None and fallback_take_profit is not None)
     )
+    if isinstance(ctx, dict):
+        _upsert_trade_context(
+            {
+                "broker": "bybit",
+                "account": mode,
+                "instrument": symbol,
+                "side": side_value,
+                "order_id": order_id,
+                "order_link_id": raw_refs.get("orderLinkId"),
+                "parent_order_link_id": raw_refs.get("parentOrderLinkId"),
+                "trade_id": raw_refs.get("tradeId"),
+                "transaction_id": raw_refs.get("transactionId"),
+                "timeframe": timeframe or ctx.get("timeframe"),
+                "stop_loss": stop_loss if stop_loss is not None else ctx.get("stop_loss"),
+                "take_profit": take_profit if take_profit is not None else ctx.get("take_profit"),
+                "status": "CLOSED",
+            }
+        )
     return {
         "id": f"bybit:{mode}:closedpnl:{symbol}:{order_id}",
         "source": "bybit",
@@ -9039,7 +9246,8 @@ def _backfill_trade_row_context_fields(row: Dict[str, object]) -> Dict[str, obje
                 "side": row.get("side"),
                 "open_time": row.get("open_time") or row.get("opened_at") or row.get("entry_time"),
                 "close_time": row.get("close_time") or row.get("closed_at") or row.get("exit_time") or row.get("date"),
-            }
+            },
+            include_inactive=True,
         )
     if not isinstance(ctx, dict):
         return row
@@ -9533,18 +9741,65 @@ async def _sync_bybit_closed_pnl_window(
             )
             if row:
                 refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
-                if tpsl_source == "unresolved" and _STARTUP_STATE_RESTORE_DONE.is_set():
-                    BYBIT_LOGGER.warning(
-                        "BYBIT_DEMO_TPSL unresolved order_id=%s order_link_id=%s parent_order_link_id=%s stop_order_type=%s cache_hit=%s cache_match_type=%s context_fallback_attempted=%s context_fallback_matched=%s",
+                unresolved_key = _stable_registry_key(
+                    [
+                        mode,
                         order_id,
                         order_link_id,
                         parent_link_id,
-                        str(order_match.get("stopOrderType") or entry.get("stopOrderType") or ""),
-                        cache_hit,
-                        cache_match_type,
-                        bool(refs.get("trade_context_tpsl_fallback_attempted")),
-                        bool(refs.get("trade_context_tpsl_fallback_matched")),
+                        str(entry.get("symbol") or "").strip().upper(),
+                        str(order_match.get("stopOrderType") or entry.get("stopOrderType") or "").strip(),
+                    ]
+                )
+                if tpsl_source != "unresolved":
+                    _update_unresolved_registry(
+                        family="bybit_demo_tpsl",
+                        key=unresolved_key,
+                        details={"status": "resolved"},
+                        resolved=True,
+                        resolution_source=tpsl_source,
                     )
+                else:
+                    should_warn, _ = _update_unresolved_registry(
+                        family="bybit_demo_tpsl",
+                        key=unresolved_key,
+                        details={
+                            "cache_hit": cache_hit,
+                            "cache_match_type": cache_match_type,
+                            "context_fallback_attempted": bool(refs.get("trade_context_tpsl_fallback_attempted")),
+                            "context_fallback_matched": bool(refs.get("trade_context_tpsl_fallback_matched")),
+                        },
+                        resolved=False,
+                    )
+                    if _STARTUP_STATE_RESTORE_DONE.is_set() and should_warn:
+                        BYBIT_LOGGER.warning(
+                            "BYBIT_DEMO_TPSL unresolved order_id=%s order_link_id=%s parent_order_link_id=%s stop_order_type=%s cache_hit=%s cache_match_type=%s context_fallback_attempted=%s context_fallback_matched=%s",
+                            order_id,
+                            order_link_id,
+                            parent_link_id,
+                            str(order_match.get("stopOrderType") or entry.get("stopOrderType") or ""),
+                            cache_hit,
+                            cache_match_type,
+                            bool(refs.get("trade_context_tpsl_fallback_attempted")),
+                            bool(refs.get("trade_context_tpsl_fallback_matched")),
+                        )
+                _upsert_trade_context(
+                    {
+                        "broker": "bybit",
+                        "account": mode,
+                        "instrument": str(entry.get("symbol") or "").strip().upper(),
+                        "side": resolved_side,
+                        "order_id": order_id,
+                        "order_link_id": order_link_id or order_match.get("orderLinkId"),
+                        "parent_order_link_id": parent_link_id,
+                        "trade_id": str(entry.get("tradeId") or entry.get("execId") or "").strip() or None,
+                        "transaction_id": str(entry.get("transactionId") or "").strip() or None,
+                        "stop_loss": stop_loss,
+                        "take_profit": take_profit,
+                        "timeframe": row.get("timeframe"),
+                        "status": "CLOSED",
+                    }
+                )
                 rows.append(row)
         cursor = str(result.get("nextPageCursor") or "").strip() or None
         if not cursor:
