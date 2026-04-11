@@ -7937,6 +7937,9 @@ async def _place_bybit_order(
         raise ValueError("Webhook payload order_type must be market or limit.")
     if is_trendline_options:
         order_type = "market"
+    level_anchor_mode = str(payload.get("level_anchor_mode", "actual_fill")).strip().lower()
+    if level_anchor_mode not in {"planned_entry", "actual_fill"}:
+        level_anchor_mode = "actual_fill"
     limit_cancel_offset, limit_cancel_pct = _parse_limit_cancel_settings(payload)
 
     price_val = None
@@ -8047,6 +8050,16 @@ async def _place_bybit_order(
             body["tpOrderType"] = "Market"
             body["slOrderType"] = "Market"
             body.setdefault("positionIdx", 0)
+
+    planned_entry_price = _parse_trigger_price(
+        payload.get("planned_entry_price") or payload.get("entry_price")
+    )
+    planned_stop_price = _parse_trigger_price(
+        payload.get("planned_stop_price") or payload.get("stop_loss_price")
+    )
+    planned_target_price = _parse_trigger_price(
+        payload.get("planned_target_price") or payload.get("take_profit_price")
+    )
     _log_webhook_event(request_id, "order_request", {"payload": body})
 
     body_json = json.dumps(body, separators=(",", ":"))
@@ -8157,20 +8170,32 @@ async def _place_bybit_order(
                     },
                 },
             )
-            tp_target = (
-                entry_price + take_profit_offset
-                if take_profit_offset is not None
-                else take_profit
-            )
-            sl_target = (
-                entry_price + stop_loss_offset
-                if stop_loss_offset is not None
-                else stop_loss
-            )
+            if (
+                level_anchor_mode == "planned_entry"
+                and planned_stop_price is not None
+                and planned_target_price is not None
+            ):
+                tp_target = planned_target_price
+                sl_target = planned_stop_price
+            else:
+                tp_target = (
+                    entry_price + take_profit_offset
+                    if take_profit_offset is not None
+                    else take_profit
+                )
+                sl_target = (
+                    entry_price + stop_loss_offset
+                    if stop_loss_offset is not None
+                    else stop_loss
+                )
             _log_webhook_event(
                 request_id,
                 "tpsl_computed",
                 {
+                    "level_anchor_mode": level_anchor_mode,
+                    "planned_entry_price": planned_entry_price,
+                    "planned_stop_price": planned_stop_price,
+                    "planned_target_price": planned_target_price,
                     "entry_price": entry_price,
                     "take_profit_offset": take_profit_offset,
                     "stop_loss_offset": stop_loss_offset,
@@ -8209,6 +8234,10 @@ async def _place_bybit_order(
                 account,
                 exc,
             )
+    if tpsl_error:
+        raise RuntimeError(
+            f"Bybit order {order_id or ''} created but TP/SL application failed: {tpsl_error}"
+        )
     if category == "option":
         try:
             position = await _wait_for_position_entry(
@@ -8292,6 +8321,10 @@ async def _place_bybit_order(
         "tpsl_error": tpsl_error,
         "tp_order": tp_order,
         "tp_error": tp_error,
+        "level_anchor_mode": level_anchor_mode,
+        "planned_entry_price": planned_entry_price,
+        "planned_stop_price": planned_stop_price,
+        "planned_target_price": planned_target_price,
     }
 
 

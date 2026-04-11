@@ -395,6 +395,15 @@ def _normalise_config(config: Dict[str, Any]) -> Dict[str, Any]:
         data["fixed_risk_amount"] = float(data.get("fixed_risk_amount"))
     data["rr_ratio"] = float(data.get("rr_ratio", 2.0))
     data["stop_loss_ticks"] = float(data.get("stop_loss_ticks", 0.0))
+    target_mode = str(data.get("target_mode", "raw_rr")).strip().lower()
+    if target_mode not in {"raw_rr", "net_rr_after_fees"}:
+        raise ValueError("target_mode must be 'raw_rr' or 'net_rr_after_fees'.")
+    data["target_mode"] = target_mode
+
+    level_anchor_mode = str(data.get("level_anchor_mode", "planned_entry")).strip().lower()
+    if level_anchor_mode not in {"planned_entry", "actual_fill"}:
+        raise ValueError("level_anchor_mode must be 'planned_entry' or 'actual_fill'.")
+    data["level_anchor_mode"] = level_anchor_mode
 
     inferred_quote = _infer_quote_currency(data["symbol"])
 
@@ -720,25 +729,35 @@ def calculate_trade(
         + exit_fee_stop_execution
     )
 
-    if cfg["direction"] == "long":
-        target_base = entry_price + (stop_distance * cfg["rr_ratio"])
-    else:
-        target_base = entry_price - (stop_distance * cfg["rr_ratio"])
-
     interest = 0.0
+    target_distance_raw = stop_distance * cfg["rr_ratio"]
+    target_ticks_raw = target_distance_raw / tick_size
+    _validate_tick_multiple(target_distance_raw, tick_size, "Raw target distance")
+    if cfg["direction"] == "long":
+        target_price_raw = entry_price + target_distance_raw
+    else:
+        target_price_raw = entry_price - target_distance_raw
+    target_price_raw = _round_to_tick(target_price_raw, tick_size)
 
     min_profit_execution = actual_risk_execution * cfg["rr_ratio"]
     diff_required_execution = (
         min_profit_execution + (2 * position_notional_execution * fee_rate) + interest
     ) / (quantity * (1 - fee_rate))
-    diff_required = diff_required_execution / conversion_rate
-    ticks = math.ceil(diff_required / tick_size)
+    target_distance_fee_adjusted = diff_required_execution / conversion_rate
+    target_ticks_fee_adjusted = math.ceil(target_distance_fee_adjusted / tick_size)
     if cfg["direction"] == "long":
-        target_price = entry_price + ticks * tick_size
+        target_price_fee_adjusted = entry_price + target_ticks_fee_adjusted * tick_size
     else:
-        target_price = entry_price - ticks * tick_size
+        target_price_fee_adjusted = entry_price - target_ticks_fee_adjusted * tick_size
+    target_price_fee_adjusted = _round_to_tick(target_price_fee_adjusted, tick_size)
+
+    if cfg["target_mode"] == "raw_rr":
+        target_price = target_price_raw
+    else:
+        target_price = target_price_fee_adjusted
 
     target_price = _round_to_tick(target_price, tick_size)
+    target_distance_final = abs(target_price - entry_price)
 
     target_price_execution = target_price * conversion_rate
 
@@ -754,7 +773,7 @@ def calculate_trade(
         net_profit / conversion_rate if conversion_rate else net_profit
     )
 
-    _validate_tick_multiple(target_price - entry_price, tick_size, "Target distance")
+    _validate_tick_multiple(target_distance_final, tick_size, "Target distance")
 
     alias_price_source = AliasString(
         price_source, PRICE_SOURCE_ALIASES.get(price_source, ())
@@ -777,11 +796,23 @@ def calculate_trade(
         "quantity_step": qty_step,
         "min_quantity": min_qty,
         "stop_loss_ticks": cfg["stop_loss_ticks"],
+        "stop_ticks_requested": cfg["stop_loss_ticks"],
+        "tick_size_used": tick_size,
         "stop_distance": stop_distance,
+        "stop_distance_price_raw": stop_distance,
         "stop_distance_execution": stop_distance_execution,
         "stop_price": stop_price,
         "stop_price_execution": stop_price_execution,
         "target_price": target_price,
+        "target_distance_price_raw": abs(target_price_raw - entry_price),
+        "target_distance_price_fee_adjusted": abs(target_price_fee_adjusted - entry_price),
+        "target_ticks_raw": target_ticks_raw,
+        "target_ticks_fee_adjusted": target_ticks_fee_adjusted,
+        "target_mode": cfg["target_mode"],
+        "level_anchor_mode": cfg["level_anchor_mode"],
+        "planned_entry_price": entry_price,
+        "planned_stop_price": stop_price,
+        "planned_target_price": target_price,
         "target_price_execution": target_price_execution,
         "gross_reward": gross_execution,
         "gross_reward_quote": gross_quote,
@@ -994,6 +1025,11 @@ def build_webhook_payload(trade: Dict[str, Any]) -> Dict[str, Any]:
         "account": trade.get("account_mode", "live"),
         "trade_mode": trade.get("trade_mode", "linear"),
         "order_type": trade.get("order_type", "market"),
+        "planned_entry_price": round(float(trade["planned_entry_price"]), 8),
+        "planned_stop_price": round(float(trade["planned_stop_price"]), 8),
+        "planned_target_price": round(float(trade["planned_target_price"]), 8),
+        "target_mode": trade.get("target_mode", "raw_rr"),
+        "level_anchor_mode": trade.get("level_anchor_mode", "planned_entry"),
     }
 
     if str(payload["order_type"]).lower() == "limit":

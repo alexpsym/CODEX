@@ -235,6 +235,12 @@ def test_web_form_includes_exchange_fields():
     assert 'name="price_to_execution_rate"' in html
     assert 'name="audusd_rate"' in html
     assert 'step="any"' in html
+    assert 'name="target_mode"' in html
+    assert 'value="raw_rr"' in html
+    assert 'value="net_rr_after_fees"' in html
+    assert 'name="level_anchor_mode"' in html
+    assert 'value="planned_entry"' in html
+    assert 'value="actual_fill"' in html
 
 
 def test_embedded_form_action_includes_forwarded_prefix():
@@ -517,6 +523,87 @@ def test_calculate_trade_cross_exchange(monkeypatch):
 
     dummy = DummyCoinspot()
     monkeypatch.setitem(calc.EXCHANGE_ADAPTERS, "coinspot", dummy)
+
+
+def test_tick_parity_and_raw_rr_target_mode(monkeypatch):
+    adapter = DummyAdapter(price=100.0)
+    adapter.instrument = InstrumentInfo(tick_size=0.25, min_qty=0.1, qty_step=0.1)
+    monkeypatch.setattr(calc, "get_exchange_adapter", lambda name: adapter)
+    trade = calc.calculate_trade(
+        {
+            "account_balance": 100,
+            "risk_percent": 1,
+            "rr_ratio": 2,
+            "order_type": "market",
+            "symbol": "DASHUSDT",
+            "stop_loss_ticks": 300,
+            "direction": "long",
+            "trade_mode": "linear",
+            "price_source": "bybit_linear",
+            "execution_exchange": "bybit",
+            "target_mode": "raw_rr",
+            "level_anchor_mode": "planned_entry",
+        }
+    )
+    assert trade["tick_size_used"] == pytest.approx(0.25)
+    assert trade["stop_distance_price_raw"] == pytest.approx(300 * 0.25)
+    assert trade["target_distance_price_raw"] == pytest.approx(
+        trade["stop_distance_price_raw"] * 2
+    )
+    assert trade["target_price"] == pytest.approx(trade["planned_target_price"])
+    assert trade["target_mode"] == "raw_rr"
+
+
+def test_fee_adjusted_target_mode_widens_or_matches_target(monkeypatch):
+    adapter = DummyAdapter(price=100.0, fee_rate=0.001)
+    adapter.instrument = InstrumentInfo(tick_size=0.5, min_qty=0.1, qty_step=0.1)
+    monkeypatch.setattr(calc, "get_exchange_adapter", lambda name: adapter)
+    trade = calc.calculate_trade(
+        {
+            "account_balance": 100,
+            "risk_percent": 1,
+            "rr_ratio": 2,
+            "order_type": "market",
+            "symbol": "TESTUSDT",
+            "stop_loss_ticks": 10,
+            "direction": "long",
+            "trade_mode": "linear",
+            "price_source": "bybit_linear",
+            "execution_exchange": "bybit",
+            "target_mode": "net_rr_after_fees",
+            "level_anchor_mode": "actual_fill",
+        }
+    )
+    assert (
+        trade["target_distance_price_fee_adjusted"]
+        >= trade["target_distance_price_raw"]
+    )
+    assert trade["target_mode"] == "net_rr_after_fees"
+
+
+def test_webhook_payload_includes_planned_prices_and_modes():
+    trade = {
+        "symbol": "BTCUSDT",
+        "direction": "long",
+        "quantity": 1.23456,
+        "stop_distance": 5.0,
+        "target_price": 110.0,
+        "entry_price": 100.0,
+        "account_mode": "demo",
+        "trade_mode": "linear",
+        "order_type": "market",
+        "planned_entry_price": 100.0,
+        "planned_stop_price": 95.0,
+        "planned_target_price": 110.0,
+        "target_mode": "raw_rr",
+        "level_anchor_mode": "planned_entry",
+    }
+    payload = calc.build_webhook_payload(trade)
+    assert payload["planned_entry_price"] == 100.0
+    assert payload["planned_stop_price"] == 95.0
+    assert payload["planned_target_price"] == 110.0
+    assert payload["target_mode"] == "raw_rr"
+    assert payload["level_anchor_mode"] == "planned_entry"
 
     config = {
         "account_balance": 100,
