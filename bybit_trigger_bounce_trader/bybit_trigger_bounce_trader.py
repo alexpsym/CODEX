@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import sys
 import time
 import hmac
 import hashlib
@@ -37,6 +38,12 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 from bybit_demo_tpsl_cache import cache_bybit_demo_tpsl_request
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+from shared.symbol_resolution import resolve_bybit_symbol_from_choices
 
 # Reuse your repo credential resolver if present.
 # If you run this inside CODEX, keep this import.
@@ -200,6 +207,68 @@ class InstrumentFilters:
 
 
 _instrument_cache: Dict[str, InstrumentFilters] = {}
+_symbol_catalog_cache: Dict[str, Dict[str, object]] = {
+    "linear": {"ts": 0.0, "symbols": []},
+    "spot": {"ts": 0.0, "symbols": []},
+    "inverse": {"ts": 0.0, "symbols": []},
+}
+_symbol_catalog_ttl_seconds = float(os.getenv("BYBIT_SYMBOL_CACHE_TTL_SECONDS", "900"))
+
+
+def _fetch_symbols_for_category(category: str) -> List[str]:
+    symbols: List[str] = []
+    cursor: Optional[str] = None
+    for _ in range(10):
+        params: Dict[str, object] = {"category": category, "limit": 1000}
+        if cursor:
+            params["cursor"] = cursor
+        payload = _public_get("/v5/market/instruments-info", params=params, timeout=10)
+        rows = (payload.get("result") or {}).get("list") or []
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                symbol = str(row.get("symbol") or "").strip().upper()
+                if symbol:
+                    symbols.append(symbol)
+        cursor = (payload.get("result") or {}).get("nextPageCursor")
+        if not cursor:
+            break
+    return sorted(set(symbols))
+
+
+def _get_symbols_for_category_cached(category: str) -> List[str]:
+    category_key = category if category in {"linear", "spot", "inverse"} else "linear"
+    now = time.time()
+    entry = _symbol_catalog_cache.get(category_key) or {"ts": 0.0, "symbols": []}
+    cached = entry.get("symbols")
+    ts = float(entry.get("ts") or 0.0)
+    if isinstance(cached, list) and cached and (now - ts) <= _symbol_catalog_ttl_seconds:
+        return list(cached)
+    symbols = _fetch_symbols_for_category(category_key)
+    _symbol_catalog_cache[category_key] = {"ts": now, "symbols": symbols}
+    return symbols
+
+
+def _normalize_runtime_symbols(raw_symbols: List[str]) -> List[str]:
+    normalized: List[str] = []
+    seen: set[str] = set()
+    choices = _get_symbols_for_category_cached(CATEGORY)
+    for raw in raw_symbols:
+        resolved = resolve_bybit_symbol_from_choices(
+            raw,
+            choices,
+            preferred_quotes=("USDT", "USDC", "USD"),
+            exact_first=True,
+        )
+        symbol = str((resolved or {}).get("resolved_symbol") or "").strip().upper()
+        if not symbol:
+            raise SystemExit(f"Unable to resolve Bybit symbol '{raw}' for category '{CATEGORY}'.")
+        if symbol in seen:
+            continue
+        seen.add(symbol)
+        normalized.append(symbol)
+    return normalized
 
 
 def _get_instrument_filters(symbol: str) -> InstrumentFilters:
@@ -844,6 +913,9 @@ def _desired_trigger_for_strategy(symbol: str, strategy: str) -> Optional[Tuple[
         return ("Sell", 1, vwap_val)
 
     return None
+
+
+SYMBOLS = _normalize_runtime_symbols(SYMBOLS)
 
 
 def main() -> None:

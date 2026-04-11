@@ -5,13 +5,22 @@ import atexit
 import json
 import os
 import subprocess
+import sys
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 from uuid import uuid4
 
+import requests
 from flask import Flask, redirect, render_template_string, request
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from shared.symbol_resolution import resolve_bybit_symbol_from_choices
 
 
 APP = Flask(__name__)
@@ -48,19 +57,83 @@ DEFAULT_CONFIG: Dict[str, str] = {
 _process_lock = threading.Lock()
 _session_processes: Dict[str, subprocess.Popen[str]] = {}
 _session_logs: Dict[str, object] = {}
+_BYBIT_SYMBOL_CACHE: Dict[str, Dict[str, object]] = {
+    "linear": {"ts": 0.0, "symbols": []},
+    "spot": {"ts": 0.0, "symbols": []},
+    "inverse": {"ts": 0.0, "symbols": []},
+}
+_BYBIT_SYMBOL_CACHE_TTL_SECONDS = float(os.getenv("BYBIT_SYMBOL_CACHE_TTL_SECONDS", "900"))
 
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _normalize_symbols(raw_symbols: str, *, market: str) -> List[str]:
+def _fetch_bybit_symbols(category: str) -> List[str]:
+    base_url = os.getenv("BYBIT_BASE_URL") or os.getenv("BYBIT_API_BASE") or "https://api.bybit.com"
+    symbols: List[str] = []
+    cursor: Optional[str] = None
+    for _ in range(10):
+        params: Dict[str, object] = {"category": category, "limit": 1000}
+        if cursor:
+            params["cursor"] = cursor
+        resp = requests.get(f"{base_url.rstrip('/')}/v5/market/instruments-info", params=params, timeout=15)
+        resp.raise_for_status()
+        payload = resp.json() or {}
+        result = payload.get("result") or {}
+        rows = result.get("list") or []
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                symbol = str(row.get("symbol") or "").strip().upper()
+                if symbol:
+                    symbols.append(symbol)
+        cursor = result.get("nextPageCursor")
+        if not cursor:
+            break
+    return sorted(set(symbols))
+
+
+def _get_bybit_symbols_cached(category: str) -> List[str]:
+    category_key = category if category in {"linear", "spot", "inverse"} else "linear"
+    now = time.time()
+    entry = _BYBIT_SYMBOL_CACHE.get(category_key) or {"ts": 0.0, "symbols": []}
+    cached = entry.get("symbols")
+    ts = float(entry.get("ts") or 0.0)
+    if isinstance(cached, list) and cached and (now - ts) <= _BYBIT_SYMBOL_CACHE_TTL_SECONDS:
+        return list(cached)
+    symbols = _fetch_bybit_symbols(category_key)
+    _BYBIT_SYMBOL_CACHE[category_key] = {"ts": now, "symbols": symbols}
+    return symbols
+
+
+def _resolve_bybit_symbol(raw: str, *, category: str) -> str:
+    choices = _get_bybit_symbols_cached(category)
+    preferred_quotes = ("USDT", "USDC", "USD") if category != "spot" else ("USDT", "USDC", "USD", "BTC", "ETH")
+    resolved = resolve_bybit_symbol_from_choices(
+        raw,
+        choices,
+        preferred_quotes=preferred_quotes,
+        exact_first=True,
+    )
+    symbol = str((resolved or {}).get("resolved_symbol") or "").strip().upper()
+    if not symbol:
+        raise ValueError(f"Unable to resolve Bybit symbol '{raw.strip()}' in category '{category}'.")
+    return symbol
+
+
+def _normalize_symbols(raw_symbols: str, *, market: str, category: str = "linear") -> List[str]:
     seen = set()
     symbols: List[str] = []
     for token in str(raw_symbols or "").split(","):
         symbol = token.strip().upper().replace("/", "_")
         if not symbol or symbol in seen:
             continue
+        if market == "crypto":
+            symbol = _resolve_bybit_symbol(symbol, category=category)
+            if symbol in seen:
+                continue
         seen.add(symbol)
         symbols.append(symbol)
     return symbols
@@ -263,6 +336,14 @@ def _spawn_session(
     with _process_lock:
         _session_processes[session_id] = proc
         _session_logs[session_id] = log_file
+    time.sleep(0.15)
+    if proc.poll() is not None:
+        with _process_lock:
+            _session_processes.pop(session_id, None)
+            fh = _session_logs.pop(session_id, None)
+            if fh is not None:
+                fh.close()
+        raise RuntimeError(f"Session {session_id} exited immediately. Check session log: {log_path}")
 
     strategy_ui = (config.get("strategy") or "EMA").strip().upper()
     strategy_token = "ema" if strategy_ui == "EMA" else "vwap"
@@ -370,13 +451,28 @@ def index() -> str:
             elif config["account_mode"] == "live" and not confirm_live:
                 error = "Live mode requires the additional confirmation checkbox."
             else:
-                symbols = _normalize_symbols(config.get("symbols", ""), market=config["market"])
-                if not symbols:
+                try:
+                    symbols = _normalize_symbols(
+                        config.get("symbols", ""),
+                        market=config["market"],
+                        category=config.get("category", "linear"),
+                    )
+                except ValueError as exc:
+                    error = str(exc)
+                    symbols = []
+                if not error and not symbols:
                     error = "Please provide at least one valid symbol/instrument."
-                else:
+                if not error:
+                    started = 0
                     for symbol in symbols:
-                        _start_session(config, symbol)
-                    message = f"Started {len(symbols)} bounce trader session(s)."
+                        try:
+                            _start_session(config, symbol)
+                        except RuntimeError as exc:
+                            error = str(exc)
+                            break
+                        started += 1
+                    if not error:
+                        message = f"Started {started} bounce trader session(s)."
         elif action == "stop":
             stopped = _stop_all_sessions()
             message = f"Stopped {stopped} running session(s)."

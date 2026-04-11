@@ -277,3 +277,91 @@ def test_oanda_row_repair_from_context(monkeypatch: pytest.MonkeyPatch):
     assert changed == 1
     assert stored["rows"][0]["timeframe"] == "4-hour"
     assert stored["rows"][0]["stop_loss"] == "1.1"
+
+
+def test_waiting_pending_webhook_hidden_when_matching_live_bybit_position_exists(temp_state_paths):
+    pending = {
+        "id": "wh-1",
+        "status": "WAITING",
+        "enabled": True,
+        "broker": "WEBHOOK",
+        "category": "linear",
+        "account": "demo",
+        "instrument": "DASHUSDT",
+        "side": "Buy",
+        "size": "10",
+    }
+    open_items = [
+        {
+            "broker": "Bybit",
+            "category": "linear",
+            "account": "demo",
+            "type": "position",
+            "instrument": "DASHUSDT",
+            "side": "Buy",
+            "size": "10",
+        }
+    ]
+    filtered, changed = master_service._clean_pending_webhooks_for_open_items([pending], open_items)
+    assert changed is True
+    assert filtered == []
+
+
+def test_trade_context_exact_link_beats_fuzzy_match(temp_state_paths):
+    pending = {
+        "id": "wh-2",
+        "status": "WAITING",
+        "enabled": True,
+        "broker": "WEBHOOK",
+        "category": "linear",
+        "account": "demo",
+        "instrument": "BTCUSDT",
+        "side": "Buy",
+        "size": "0.1",
+    }
+    master_service._upsert_trade_context(
+        {
+            "pending_webhook_id": "wh-2",
+            "order_link_id": "exact-link-id",
+            "broker": "bybit",
+            "account": "demo",
+            "category": "linear",
+            "instrument": "BTCUSDT",
+            "side": "buy",
+            "status": "ACTIVE",
+        }
+    )
+    open_items = [
+        {
+            "broker": "Bybit",
+            "account": "demo",
+            "category": "linear",
+            "instrument": "BTCUSDT",
+            "side": "Buy",
+            "size": "0.1",
+            "order_link_id": "not-the-right-one",
+        }
+    ]
+    filtered, changed = master_service._clean_pending_webhooks_for_open_items([pending], open_items)
+    assert changed is False
+    assert len(filtered) == 1
+
+
+def test_pending_webhook_mutations_invalidate_open_orders_cache(temp_state_paths):
+    master_service._OPEN_ORDERS_CACHE["payload"] = {"items": [{"id": "stale"}]}
+    master_service._OPEN_ORDERS_CACHE["expires_at"] = 12345.0
+    master_service._upsert_pending_webhook({"id": "wh-cache", "instrument": "BTCUSDT"})
+    assert master_service._OPEN_ORDERS_CACHE["payload"] is None
+    assert master_service._OPEN_ORDERS_CACHE["expires_at"] == 0.0
+
+    master_service._OPEN_ORDERS_CACHE["payload"] = {"items": [{"id": "stale"}]}
+    master_service._OPEN_ORDERS_CACHE["expires_at"] = 12345.0
+    master_service._update_pending_webhook("wh-cache", {"status": "PENDING"})
+    assert master_service._OPEN_ORDERS_CACHE["payload"] is None
+    assert master_service._OPEN_ORDERS_CACHE["expires_at"] == 0.0
+
+    master_service._OPEN_ORDERS_CACHE["payload"] = {"items": [{"id": "stale"}]}
+    master_service._OPEN_ORDERS_CACHE["expires_at"] = 12345.0
+    assert master_service._delete_pending_webhook("wh-cache") is True
+    assert master_service._OPEN_ORDERS_CACHE["payload"] is None
+    assert master_service._OPEN_ORDERS_CACHE["expires_at"] == 0.0
