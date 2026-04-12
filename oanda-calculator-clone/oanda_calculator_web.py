@@ -201,11 +201,15 @@ FORM_HTML = """
 <head>
 <title>{{ page_title }}</title>
 <style>
-  body {background:black; color:white; font-family:Arial, sans-serif;}
+  body {background:black; color:white; font-family:Arial, sans-serif; margin:0; padding:16px;}
   input, select, button {margin:4px 0;}
-  .container {display:flex; align-items:flex-start; gap:20px;}
-  .form {flex:0 0 520px; max-width:520px;}
+  .container {display:flex; align-items:flex-start; gap:20px; width:100%;}
+  .form {flex:1 1 640px; max-width:760px;}
   .result {flex:1 1 640px; max-width:980px;}
+  body.embedded {padding:0;}
+  body.embedded .container {display:block;}
+  body.embedded .form,
+  body.embedded .result {max-width:none; width:100%;}
   .copy-row {display:flex; gap:8px; align-items:center; margin:6px 0;}
   .copy-row button {cursor:pointer;}
   .copy-status {font-size:12px; color:#9ca3af;}
@@ -219,6 +223,9 @@ FORM_HTML = """
   .danger-note {color:#fca5a5; font-size:12px;}
   .symbol-row {display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:4px 0 10px;}
   .symbol-row input {min-width: 180px;}
+  .field-row {display:block; margin-bottom:10px;}
+  .field-row > label {display:block; font-weight:700; margin-bottom:4px;}
+  .field-row input[type="number"], .field-row input[type="text"], .field-row input:not([type]), .field-row select {width:100%; max-width:360px;}
   .specs-panel {margin-top: 12px; max-width:980px;}
   .table-wrap { overflow:auto; max-height:70vh; border-radius: 12px; border: 1px solid #1f2937; background: #0b1220; }
   .specs-table { width: 100%; border-collapse: collapse; min-width: 480px; }
@@ -227,88 +234,98 @@ FORM_HTML = """
   .specs-table th { background:#0f172a; color:#cbd5e1; position:sticky; top:0; z-index:1; }
 </style>
 </head>
-<body data-app-root="{{ app_root }}">
-{% if not embedded %}<h1>OANDA Position Size Calculator</h1>{% endif %}
+<body data-app-root="{{ app_root }}" class="{% if embedded %}embedded{% endif %}">
+{% if not embedded %}<h1>Position Size Calculator</h1>{% endif %}
 <div class="container">
   <div class="form">
     <form method="post" action="{{ form_action }}">
       <div class="trade-section">
-        <label>Account:</label>
+        <div class="field-row"><label>Account:</label>
         <div class="button-group" data-input="account_mode">
           <button type="button" data-value="live">Live</button>
           <button type="button" data-value="demo">Demo</button>
         </div>
         <input type="hidden" name="account_mode" id="account_mode" value="{{ account_mode }}">
-        <label>Instrument:</label>
+        </div>
+        <div class="field-row"><label>Instrument:</label>
         <div class="symbol-row">
           <input name="instrument" id="instrument" value="{{ instrument_input or '' }}" required autocomplete="off">
           <button type="button" id="instrument_specs_btn">Specs</button>
           <span class="copy-status" id="instrument_status"></span>
         </div>
-        <label>Side:</label>
+        </div>
+        <div class="field-row"><label>Side:</label>
         <div class="button-group" data-input="side">
           <button type="button" data-value="buy">Buy</button>
           <button type="button" data-value="sell">Sell</button>
         </div>
         <input type="hidden" name="side" id="side" value="{{ side }}">
-        <label>Order Type:</label>
+        </div>
+        <div class="field-row"><label>Order Type:</label>
         <div class="button-group" data-input="order_type">
           <button type="button" data-value="market">Market</button>
           <button type="button" data-value="limit">Limit</button>
         </div>
         <input type="hidden" name="order_type" id="order_type" value="{{ order_type }}">
-        <label>Show in Dashboard Open Orders:</label>
+        </div>
+        <div class="field-row"><label>Webhook:</label>
         <div class="button-group" data-input="track_pending">
           <button type="button" data-value="yes">Yes</button>
           <button type="button" data-value="no">No</button>
         </div>
         <input type="hidden" name="track_pending" id="track_pending" value="{{ track_pending }}">
-        <label for="timeframe">Timeframe:</label>
-        <input name="timeframe" id="timeframe" value="{{ timeframe or '' }}" list="timeframe_suggestions" placeholder="e.g. 5-minute" required>
-        <datalist id="timeframe_suggestions">
-          <option value="1-minute"></option>
-          <option value="3-minute"></option>
-          <option value="5-minute"></option>
-          <option value="15-minute"></option>
-          <option value="30-minute"></option>
-          <option value="1-hour"></option>
-          <option value="4-hour"></option>
-          <option value="1-day"></option>
-        </datalist>
-        <div id="entry_price_row" style="{% if order_type == 'market' %}display:none;{% endif %}">
-          <label>Entry Price:
-            <input name="entry_price" id="entry_price" type="number" step="0.0001" value="{{ entry_price or '' }}" {% if order_type == 'limit' %}required{% endif %}>
-          </label><br>
-          <label>Limit cancel offset (abs):
-            <input name="limit_cancel_offset" id="limit_cancel_offset" type="number" step="0.0001" value="{{ limit_cancel_offset or '' }}">
-          </label><br>
-          <label>Limit cancel offset (%):
-            <input name="limit_cancel_offset_pct" id="limit_cancel_offset_pct" type="number" step="0.01" value="{{ limit_cancel_offset_pct or '' }}">
-          </label><br>
-          <small>Cancel pending limit orders if price moves away by the given distance.</small><br>
         </div>
-        <label>Stop loss (ticks): <input name="stop_ticks" id="stop_ticks" type="number" step="1" value="{{ stop_ticks or '' }}" required></label><br>
-        <label>Risk mode:</label>
+        <div class="field-row"><label>Timeframe:</label>
+          <div class="button-group" data-input="timeframe">
+            <button type="button" data-value="1-minute">1 minute</button>
+            <button type="button" data-value="5-minute">5 minutes</button>
+            <button type="button" data-value="15-minute">15 minutes</button>
+            <button type="button" data-value="30-minute">30 minutes</button>
+            <button type="button" data-value="1-hour">1 hour</button>
+            <button type="button" data-value="4-hour">4 hour</button>
+            <button type="button" data-value="1-day">daily</button>
+            <button type="button" data-value="1-week">weekly</button>
+            <button type="button" data-value="1-month">monthly</button>
+          </div>
+          <input type="hidden" name="timeframe" id="timeframe" value="{{ timeframe or '15-minute' }}">
+        </div>
+        <div id="entry_price_row" style="{% if order_type == 'market' %}display:none;{% endif %}">
+          <div class="field-row"><label>Entry Price:</label>
+            <input name="entry_price" id="entry_price" type="number" step="0.0001" value="{{ entry_price or '' }}" {% if order_type == 'limit' %}required{% endif %}>
+          </div>
+          <div class="field-row"><label>Limit cancel offset (abs):</label>
+            <input name="limit_cancel_offset" id="limit_cancel_offset" type="number" step="0.0001" value="{{ limit_cancel_offset or '' }}">
+          </div>
+          <div class="field-row"><label>Limit cancel offset (%):</label>
+            <input name="limit_cancel_offset_pct" id="limit_cancel_offset_pct" type="number" step="0.01" value="{{ limit_cancel_offset_pct or '' }}">
+          </div>
+          <small>Cancel pending limit orders if price moves away by the given distance.</small>
+        </div>
+        <div class="field-row"><label>Stop loss (ticks):</label><input name="stop_ticks" id="stop_ticks" type="number" step="1" value="{{ stop_ticks or '' }}" required></div>
+        <div class="field-row"><label>Risk mode:</label>
         <div class="button-group" data-input="risk_mode">
           <button type="button" data-value="percent">Percent</button>
           <button type="button" data-value="amount">Fixed Amount</button>
         </div>
         <input type="hidden" name="risk_mode" id="risk_mode" value="{{ risk_mode }}">
-        <div id="risk_percent_row" style="{% if risk_mode != 'percent' %}display:none;{% endif %}">
-          <label>Risk %: <input name="risk_pct" id="risk_pct" type="number" step="0.01" value="{{ risk_pct or '' }}" {% if risk_mode == 'percent' %}required{% endif %}></label><br>
         </div>
-        <div id="risk_amount_row" style="{% if risk_mode != 'amount' %}display:none;{% endif %}">
-          <label>Risk amount AUD: <input name="risk_aud" id="risk_aud" type="number" step="0.01" value="{{ risk_aud or '' }}" {% if risk_mode == 'amount' %}required{% endif %}></label><br>
+        <div id="risk_percent_row" class="field-row" style="{% if risk_mode != 'percent' %}display:none;{% endif %}">
+          <label>Risk %:</label><input name="risk_pct" id="risk_pct" type="number" step="0.01" value="{{ risk_pct or '' }}" {% if risk_mode == 'percent' %}required{% endif %}>
         </div>
-        <label>Risk–reward ratio: <input name="rr_ratio" id="rr_ratio" type="number" step="0.1" value="{{ rr_ratio or '2' }}" required></label><br>
+        <div id="risk_amount_row" class="field-row" style="{% if risk_mode != 'amount' %}display:none;{% endif %}">
+          <label>Risk amount AUD:</label><input name="risk_aud" id="risk_aud" type="number" step="0.01" value="{{ risk_aud or '' }}" {% if risk_mode == 'amount' %}required{% endif %}>
+        </div>
+        <div class="field-row"><label>Risk–reward ratio:</label><input name="rr_ratio" id="rr_ratio" type="number" step="0.1" value="{{ rr_ratio or '2' }}" required></div>
         <button type="submit">Calculate</button>
       </div>
-      <h3>TradingView Webhook</h3>
-      <div class="copy-row">
-        <button type="button" onclick="copyText('{{ webhook_url }}','webhook_status')">Copy Webhook URL</button>
-        <span class="copy-status" id="webhook_status"></span>
+      <div id="webhook_section">
+        <h3>TradingView Webhook</h3>
+        <div class="copy-row">
+          <button type="button" onclick="copyText('{{ webhook_url }}','webhook_status')">Copy Webhook URL</button>
+          <span class="copy-status" id="webhook_status"></span>
+        </div>
+        <div class="copy-box" id="webhook_url">{{ webhook_url }}</div>
       </div>
-      <div class="copy-box" id="webhook_url">{{ webhook_url }}</div>
     </form>
   </div>
   <div class="result">
@@ -366,6 +383,28 @@ FORM_HTML = """
   </div>
 </div>
 <script src="{{ app_root }}/static/oanda_calculator.js"></script>
+<script>
+  (() => {
+    if (window.top === window.self) return;
+    const sendHeight = () => {
+      const h = Math.max(
+        document.documentElement ? document.documentElement.scrollHeight : 0,
+        document.body ? document.body.scrollHeight : 0
+      );
+      window.parent.postMessage({ type: "calculator:height", source: "oanda", height: h }, window.location.origin);
+    };
+    window.addEventListener("load", sendHeight);
+    window.addEventListener("resize", sendHeight);
+    if (window.ResizeObserver) {
+      const ro = new ResizeObserver(() => sendHeight());
+      if (document.body) ro.observe(document.body);
+      if (document.documentElement) ro.observe(document.documentElement);
+    } else {
+      setInterval(sendHeight, 500);
+    }
+    sendHeight();
+  })();
+</script>
 </body>
 </html>
 """

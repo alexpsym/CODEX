@@ -10616,7 +10616,7 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
   <title>Position Size Calculator</title>
   <style>
     body { margin: 0; background: #000; color: #fff; font-family: Arial, sans-serif; }
-    .wrap { max-width: 960px; margin: 0 auto; padding: 16px; }
+    .wrap { margin: 0 auto; padding: 16px; width: min(1600px, calc(100% - 32px)); }
     h1 { margin: 0 0 16px 0; font-size: 30px; }
     .panel { background: #0f172a; border: 1px solid #1f2937; border-radius: 12px; padding: 16px; }
     .stack { display: flex; flex-direction: column; gap: 12px; }
@@ -10628,17 +10628,10 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
     .button-group button.active { background: #2563eb; color: #fff; border-color: #60a5fa; }
     .asset-panel { display: none; }
     .asset-panel.active { display: block; }
-    .embed-shell {
-      border: 1px solid #1f2937;
-      border-radius: 12px;
-      background: #020617;
-      min-height: 720px;
-      overflow: hidden;
-      position: relative;
-    }
+    .embed-shell { border: 1px solid #1f2937; border-radius: 12px; background: #020617; overflow: hidden; position: relative; }
     .embed-shell iframe {
       width: 100%;
-      min-height: 720px;
+      height: 100px;
       border: 0;
       display: block;
       background: #020617;
@@ -10719,6 +10712,12 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
         status.textContent = errorText;
       };
       const frames = Array.from(document.querySelectorAll('[data-frame]'));
+      const setFrameHeight = (asset, height) => {
+        const frame = document.querySelector(`[data-frame="${asset}"]`);
+        if (!frame) return;
+        const nextHeight = Math.max(300, Number(height) || 0);
+        frame.style.height = `${nextHeight}px`;
+      };
       frames.forEach((frame) => {
         const asset = frame.dataset.frame;
         const timeout = window.setTimeout(() => {
@@ -10727,11 +10726,23 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
         frame.addEventListener('load', () => {
           window.clearTimeout(timeout);
           updateStatus(asset, null);
+          try {
+            const body = frame.contentWindow && frame.contentWindow.document && frame.contentWindow.document.body;
+            if (body) {
+              setFrameHeight(asset, body.scrollHeight);
+            }
+          } catch (_err) {}
         });
         frame.addEventListener('error', () => {
           window.clearTimeout(timeout);
           updateStatus(asset, `Unable to load the ${asset.toUpperCase()} calculator. Please refresh and try again.`);
         });
+      });
+      window.addEventListener('message', (event) => {
+        if (!event || event.origin !== window.location.origin) return;
+        const data = event.data || {};
+        if (data.type !== 'calculator:height') return;
+        setFrameHeight(data.source, data.height);
       });
       buttons.forEach((button) => button.addEventListener('click', () => setAsset(button.dataset.asset)));
       setAsset('crypto');
@@ -11277,12 +11288,26 @@ def _normalize_trade_timeframe(raw: object) -> str:
         "h4": "4h",
         "d": "1d",
         "1d": "1d",
+        "1day": "1d",
+        "day": "1d",
+        "daily": "1d",
+        "w": "1w",
+        "1w": "1w",
+        "1week": "1w",
+        "week": "1w",
+        "weekly": "1w",
+        "m": "1mo",
+        "mo": "1mo",
+        "1mo": "1mo",
+        "1month": "1mo",
+        "month": "1mo",
+        "monthly": "1mo",
     }
     return aliases.get(text, "15m")
 
 
 def _trade_interval_sequence() -> List[Tuple[str, int]]:
-    return [("1m", 60), ("5m", 300), ("15m", 900), ("30m", 1800), ("1h", 3600), ("4h", 14400), ("1d", 86400)]
+    return [("1m", 60), ("5m", 300), ("15m", 900), ("30m", 1800), ("1h", 3600), ("4h", 14400), ("1d", 86400), ("1w", 604800), ("1mo", 2592000)]
 
 
 def _build_trade_chart_window(row: Dict[str, object], interval_seconds: int, pad_candles: int = 5) -> Tuple[datetime, datetime]:
@@ -11346,10 +11371,12 @@ def _interval_for_provider(provider: str, timeframe: str) -> Tuple[str, int]:
         "1h": ("60", 3600),
         "4h": ("240", 14400),
         "1d": ("D", 86400),
+        "1w": ("W", 604800),
+        "1mo": ("M", 2592000),
     }
     bybit_interval, seconds = mapping[tf]
     if provider == "oanda":
-        oanda_map = {"1": "M1", "5": "M5", "15": "M15", "30": "M30", "60": "H1", "240": "H4", "D": "D"}
+        oanda_map = {"1": "M1", "5": "M5", "15": "M15", "30": "M30", "60": "H1", "240": "H4", "D": "D", "W": "W", "M": "M"}
         return oanda_map[bybit_interval], seconds
     return bybit_interval, seconds
 

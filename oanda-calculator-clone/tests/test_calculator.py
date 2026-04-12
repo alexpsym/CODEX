@@ -11,7 +11,24 @@ def test_form_includes_timeframe_field():
     html = resp.get_data(as_text=True)
     assert resp.status_code == 200
     assert 'name="timeframe"' in html
-    assert 'list="timeframe_suggestions"' in html
+    assert 'data-input="timeframe"' in html
+    assert 'value="1-week"' in html
+    assert 'value="1-month"' in html
+    assert 'value="3-minute"' not in html
+    assert 'Show in Dashboard Open Orders' not in html
+    assert 'Webhook' in html
+
+
+def test_embedded_form_action_and_heading():
+    client = web_app.app.test_client()
+    resp = client.get(
+        "/?embedded=1&shell=merged&title=Position+Size+Calculator",
+        headers={"X-Forwarded-Prefix": "/apps/oanda-calculator-clone"},
+    )
+    html = resp.get_data(as_text=True)
+    assert resp.status_code == 200
+    assert 'action="/apps/oanda-calculator-clone/?embedded=1&amp;shell=merged&amp;title=Position+Size+Calculator"' in html
+    assert "OANDA Position Size Calculator" not in html
 
 
 def test_post_includes_timeframe_in_alert_and_pending(monkeypatch):
@@ -67,4 +84,3 @@ def test_post_includes_timeframe_in_alert_and_pending(monkeypatch):
     assert resp.status_code == 200
     assert '"timeframe": "15-minute"' in html
     assert captured_pending.get("timeframe") == "15-minute"
-
