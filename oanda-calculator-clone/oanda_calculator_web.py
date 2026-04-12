@@ -235,11 +235,19 @@ FORM_HTML = """
 </style>
 </head>
 <body data-app-root="{{ app_root }}" class="{% if embedded %}embedded{% endif %}">
-{% if not embedded %}<h1>Position Size Calculator</h1>{% endif %}
+{% if not merged_shell and not embedded %}<h1>Position Size Calculator</h1>{% endif %}
 <div class="container">
   <div class="form">
     <form method="post" action="{{ form_action }}">
       <div class="trade-section">
+        {% if merged_shell %}
+        <div class="field-row"><label>Asset:</label>
+        <div class="button-group" data-merged-asset-group>
+          <button type="button" data-merged-switch-asset="crypto">Crypto</button>
+          <button type="button" data-merged-switch-asset="fx" class="active">FX</button>
+        </div>
+        </div>
+        {% endif %}
         <div class="field-row"><label>Account:</label>
         <div class="button-group" data-input="account_mode">
           <button type="button" data-value="live">Live</button>
@@ -426,6 +434,8 @@ def index():
     )
     webhook_url = PUBLIC_WEBHOOK_URL
     embedded = str(request.args.get("embedded", "")).strip().lower() in {"1", "true", "yes", "on"}
+    shell = (request.args.get("shell") or "").strip().lower()
+    merged_shell = embedded and shell == "merged"
     page_title = (request.args.get("title") or "").strip() or "OANDA Position Size Calculator"
     form_target = request.full_path if embedded and request.query_string else request.path
     if form_target.endswith("?"):
@@ -810,6 +820,7 @@ def index():
         track_pending=track_pending,
         timeframe=timeframe,
         embedded=embedded,
+        merged_shell=merged_shell,
         page_title=page_title,
         form_action=form_action,
     )

@@ -134,6 +134,26 @@ function toggleWebhookSection() {
   webhookSection.style.display = trackPending.value === 'yes' ? 'block' : 'none';
 }
 
+function bindMergedAssetSwitch() {
+  const buttons = Array.from(document.querySelectorAll('[data-merged-switch-asset]'));
+  if (!buttons.length) {
+    return;
+  }
+  buttons.forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const asset = btn.dataset.mergedSwitchAsset === 'crypto' ? 'crypto' : 'fx';
+      buttons.forEach((other) => {
+        other.classList.toggle('active', other === btn);
+      });
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({ type: 'calculator:switchAsset', asset }, window.location.origin);
+      }
+    });
+  });
+}
+
 const OANDA_SPECS_HIDE_KEYS = new Set([
   'query',
   '_units',
@@ -424,6 +444,7 @@ function placeLimitOrder() {
 
 document.addEventListener('DOMContentLoaded', () => {
   ['account_mode', 'side', 'order_type', 'risk_mode', 'track_pending', 'timeframe'].forEach(bindButtonGroup);
+  bindMergedAssetSwitch();
   const orderType = document.getElementById('order_type');
   if (orderType) {
     orderType.addEventListener('change', toggleEntry);

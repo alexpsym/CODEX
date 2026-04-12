@@ -259,6 +259,19 @@ def test_embedded_form_action_includes_forwarded_prefix():
     )
 
 
+def test_merged_embedded_mode_renders_asset_row_before_account() -> None:
+    import cryptocalculator_web as web_app
+
+    client = web_app.app.test_client()
+    resp = client.get("/?embedded=1&shell=merged&title=Position+Size+Calculator")
+    html = resp.get_data(as_text=True)
+    assert resp.status_code == 200
+    assert "<h1>Position Size Calculator</h1>" not in html
+    assert 'data-merged-switch-asset="crypto"' in html
+    assert 'data-merged-switch-asset="fx"' in html
+    assert html.index("<label>Asset:</label>") < html.index("<label>Account:</label>")
+
+
 def test_audusd_rate_fetch_uses_fixed_decimal_precision():
     with open(
         os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "cryptocalculator.js"),

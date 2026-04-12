@@ -429,7 +429,7 @@ FORM_HTML = """
   </style>
 </head>
 <body data-app-root="{{ app_root }}" class="{% if embedded %}embedded{% endif %}">
-  {% if not embedded %}<h1>Position Size Calculator</h1>{% endif %}
+  {% if not merged_shell and not embedded %}<h1>Position Size Calculator</h1>{% endif %}
   <div id="js_data"
        data-price-mode-notes='{{ price_mode_notes|tojson|e }}'
        data-options-min-qty-map='{{ options_min_qty_map|tojson|e }}'
@@ -437,6 +437,14 @@ FORM_HTML = """
   <div class="container">
     <div class="form">
       <form method="post" action="{{ form_action }}">
+        {% if merged_shell %}
+        <div class="field-row"><label>Asset:</label>
+          <div class="button-group" data-merged-asset-group>
+            <button type="button" data-merged-switch-asset="crypto" class="active">Crypto</button>
+            <button type="button" data-merged-switch-asset="fx">FX</button>
+          </div>
+        </div>
+        {% endif %}
         <div class="field-row"><label>Trade Type:</label>
         <div class="button-group" data-input="trade_type">
           <button type="button" data-value="perpetual">Perpetual Futures</button>
@@ -865,6 +873,8 @@ def index():
     options_output = None
 
     embedded = str(request.args.get("embedded", "")).strip().lower() in {"1", "true", "yes", "on"}
+    shell = (request.args.get("shell") or "").strip().lower()
+    merged_shell = embedded and shell == "merged"
     page_title = (request.args.get("title") or "").strip() or "Crypto Position Size Calculator"
     app_root = (
         request.headers.get("x-forwarded-prefix", "").rstrip("/")
@@ -1312,6 +1322,7 @@ def index():
         timeframe=timeframe,
         limit_cancel_offset=limit_cancel_offset_raw,
         embedded=embedded,
+        merged_shell=merged_shell,
         page_title=page_title,
         form_action=form_action,
         limit_cancel_offset_pct=limit_cancel_offset_pct_raw,

@@ -167,10 +167,7 @@ def test_trade_chart_html_is_image_only(monkeypatch) -> None:
 
 def test_merged_calculator_contains_embedded_asset_calculators() -> None:
     html = master_service.CALCULATOR_PAGE_TEMPLATE
-    assert html.count("Position Size Calculator") >= 2
-    assert "Asset:" in html
-    assert 'data-asset="crypto"' in html
-    assert 'data-asset="fx"' in html
+    assert html.count("<h1>Position Size Calculator</h1>") == 1
     assert "Open Crypto Calculator" not in html
     assert "Open FX Calculator" not in html
     assert "Crypto Position Size" not in html
@@ -179,6 +176,7 @@ def test_merged_calculator_contains_embedded_asset_calculators() -> None:
     assert "OANDA Position Size Calculator" not in html
     assert "/apps/cryptocalculator-clone/?embedded=1&shell=merged&title=Position+Size+Calculator" in html
     assert "/apps/oanda-calculator-clone/?embedded=1&shell=merged&title=Position+Size+Calculator" in html
+    assert "calculator:switchAsset" in html
     assert "calculator:height" in html
     assert "window.addEventListener('message'" in html
 
@@ -188,6 +186,6 @@ def test_merged_calculator_defaults_to_crypto_with_fx_toggle_wiring() -> None:
     assert '<section class="asset-panel active" data-panel="crypto">' in html
     assert '<section class="asset-panel" data-panel="fx">' in html
     assert "setAsset('crypto')" in html
-    assert "button.dataset.asset" in html
+    assert "setAsset(data.asset === 'fx' ? 'fx' : 'crypto')" in html
     assert "Open Crypto Calculator" not in html
     assert "Open FX Calculator" not in html
