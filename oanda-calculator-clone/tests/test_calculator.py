@@ -29,6 +29,10 @@ def test_embedded_form_action_and_heading():
     assert resp.status_code == 200
     assert 'action="/apps/oanda-calculator-clone/?embedded=1&amp;shell=merged&amp;title=Position+Size+Calculator"' in html
     assert "OANDA Position Size Calculator" not in html
+    assert "<h1>Position Size Calculator</h1>" not in html
+    assert 'data-merged-switch-asset="crypto"' in html
+    assert 'data-merged-switch-asset="fx"' in html
+    assert html.index("<label>Asset:</label>") < html.index("<label>Account:</label>")
 
 
 def test_post_includes_timeframe_in_alert_and_pending(monkeypatch):

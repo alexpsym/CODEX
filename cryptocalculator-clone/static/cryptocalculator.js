@@ -728,6 +728,26 @@ function toggleWebhookSection() {
   webhookSection.style.display = trackPending.value === 'yes' ? 'block' : 'none';
 }
 
+function bindMergedAssetSwitch() {
+  const buttons = Array.from(document.querySelectorAll('[data-merged-switch-asset]'));
+  if (!buttons.length) {
+    return;
+  }
+  buttons.forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const asset = btn.dataset.mergedSwitchAsset === 'fx' ? 'fx' : 'crypto';
+      buttons.forEach((other) => {
+        other.classList.toggle('active', other === btn);
+      });
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({ type: 'calculator:switchAsset', asset }, window.location.origin);
+      }
+    });
+  });
+}
+
 function renderOptionsMinQty(base) {
   const note = document.getElementById('options_min_qty_note');
   if (!note) {
@@ -965,6 +985,7 @@ document.addEventListener('DOMContentLoaded', () => {
     tradeType.addEventListener('change', updateTradeType);
   }
   updateTradeType();
+  bindMergedAssetSwitch();
   const optionsBaseInput = document.getElementById('options_base');
   if (optionsBaseInput) {
     optionsBaseInput.addEventListener('change', scheduleOptionsMinQty);

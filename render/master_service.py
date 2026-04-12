@@ -10618,23 +10618,15 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
     body { margin: 0; background: #000; color: #fff; font-family: Arial, sans-serif; }
     .wrap { margin: 0 auto; padding: 16px; width: min(1600px, calc(100% - 32px)); }
     h1 { margin: 0 0 16px 0; font-size: 30px; }
-    .panel { background: #0f172a; border: 1px solid #1f2937; border-radius: 12px; padding: 16px; }
-    .stack { display: flex; flex-direction: column; gap: 12px; }
-    .button-group { display: flex; flex-wrap: wrap; gap: 8px; }
-    .button-group button, .button-group a {
-      background: #1f2937; color: #e2e8f0; border: 1px solid #334155; border-radius: 8px;
-      padding: 8px 14px; font-weight: 700; text-decoration: none; cursor: pointer;
-    }
-    .button-group button.active { background: #2563eb; color: #fff; border-color: #60a5fa; }
+    .host { position: relative; }
     .asset-panel { display: none; }
     .asset-panel.active { display: block; }
-    .embed-shell { border: 1px solid #1f2937; border-radius: 12px; background: #020617; overflow: hidden; position: relative; }
-    .embed-shell iframe {
+    .asset-panel iframe {
       width: 100%;
       height: 100px;
       border: 0;
       display: block;
-      background: #020617;
+      background: #000;
     }
     .embed-status {
       position: absolute;
@@ -10655,48 +10647,34 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
 <body>
   <div class="wrap">
     <h1>Position Size Calculator</h1>
-    <div class="panel stack">
-      <div>
-        <div style="font-weight:700;margin-bottom:6px;">Asset:</div>
-        <div class="button-group" role="group" aria-label="Asset selection">
-          <button type="button" data-asset="crypto" class="active">Crypto</button>
-          <button type="button" data-asset="fx">FX</button>
-        </div>
-      </div>
-
+    <div class="host">
       <section class="asset-panel active" data-panel="crypto">
-        <div class="embed-shell">
-          <div class="embed-status" data-status="crypto">Loading crypto calculator…</div>
-          <iframe
-            title="Merged crypto position size calculator"
-            src="/apps/cryptocalculator-clone/?embedded=1&shell=merged&title=Position+Size+Calculator"
-            loading="eager"
-            referrerpolicy="same-origin"
-            data-frame="crypto"
-          ></iframe>
-        </div>
+        <div class="embed-status" data-status="crypto">Loading crypto calculator…</div>
+        <iframe
+          title="Merged crypto position size calculator"
+          src="/apps/cryptocalculator-clone/?embedded=1&shell=merged&title=Position+Size+Calculator"
+          loading="eager"
+          referrerpolicy="same-origin"
+          data-frame="crypto"
+        ></iframe>
       </section>
 
       <section class="asset-panel" data-panel="fx">
-        <div class="embed-shell">
-          <div class="embed-status" data-status="fx">Loading FX calculator…</div>
-          <iframe
-            title="Merged FX position size calculator"
-            src="/apps/oanda-calculator-clone/?embedded=1&shell=merged&title=Position+Size+Calculator"
-            loading="lazy"
-            referrerpolicy="same-origin"
-            data-frame="fx"
-          ></iframe>
-        </div>
+        <div class="embed-status" data-status="fx">Loading FX calculator…</div>
+        <iframe
+          title="Merged FX position size calculator"
+          src="/apps/oanda-calculator-clone/?embedded=1&shell=merged&title=Position+Size+Calculator"
+          loading="lazy"
+          referrerpolicy="same-origin"
+          data-frame="fx"
+        ></iframe>
       </section>
     </div>
   </div>
   <script>
     (() => {
-      const buttons = Array.from(document.querySelectorAll('[data-asset]'));
       const panels = Array.from(document.querySelectorAll('[data-panel]'));
       const setAsset = (asset) => {
-        buttons.forEach((button) => button.classList.toggle('active', button.dataset.asset === asset));
         panels.forEach((panel) => panel.classList.toggle('active', panel.dataset.panel === asset));
       };
       const updateStatus = (asset, errorText) => {
@@ -10741,10 +10719,14 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
       window.addEventListener('message', (event) => {
         if (!event || event.origin !== window.location.origin) return;
         const data = event.data || {};
-        if (data.type !== 'calculator:height') return;
-        setFrameHeight(data.source, data.height);
+        if (data.type === 'calculator:height') {
+          setFrameHeight(data.source, data.height);
+          return;
+        }
+        if (data.type === 'calculator:switchAsset') {
+          setAsset(data.asset === 'fx' ? 'fx' : 'crypto');
+        }
       });
-      buttons.forEach((button) => button.addEventListener('click', () => setAsset(button.dataset.asset)));
       setAsset('crypto');
     })();
   </script>
