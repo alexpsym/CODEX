@@ -1884,6 +1884,49 @@ def _repair_persisted_oanda_trade_rows() -> int:
     return changed
 
 
+def _repair_persisted_bybit_open_times(rows: List[Dict[str, object]]) -> tuple[List[Dict[str, object]], int]:
+    contexts = _load_trade_contexts()
+    repaired: List[Dict[str, object]] = []
+    changed = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            repaired.append(row)
+            continue
+        if str(row.get("source") or "").strip().lower() != "bybit":
+            repaired.append(row)
+            continue
+        open_iso = _epoch_or_iso_to_iso(row.get("open_time") or row.get("opened_at") or row.get("entry_time"))
+        close_iso = _epoch_or_iso_to_iso(row.get("close_time") or row.get("closed_at") or row.get("exit_time") or row.get("date"))
+        if open_iso and close_iso and open_iso != close_iso:
+            repaired.append(row)
+            continue
+
+        ctx = _lookup_trade_context_for_journal_row(row)
+        if not isinstance(ctx, dict):
+            ctx = _resolve_bybit_closed_pnl_trade_context(
+                account_mode=str(row.get("account") or "").strip().lower() or "demo",
+                symbol=str(row.get("symbol") or row.get("instrument") or "").strip().upper(),
+                side=row.get("side"),
+                close_time=close_iso,
+            )
+        if not isinstance(ctx, dict):
+            repaired.append(row)
+            continue
+        candidate_open = _epoch_or_iso_to_iso(ctx.get("open_time")) or _epoch_or_iso_to_iso(ctx.get("created_at"))
+        if not candidate_open:
+            repaired.append(row)
+            continue
+        if close_iso and _canonical_trade_epoch_second(candidate_open) is not None and _canonical_trade_epoch_second(close_iso) is not None:
+            if int(_canonical_trade_epoch_second(candidate_open) or 0) >= int(_canonical_trade_epoch_second(close_iso) or 0):
+                repaired.append(row)
+                continue
+        updated = dict(row)
+        updated["open_time"] = candidate_open
+        repaired.append(updated)
+        changed += 1
+    return repaired, changed
+
+
 def _exclude_bybit_demo_row(row: Dict[str, object]) -> bool:
     """Return True if this journal row should be excluded (Bybit Demo)."""
     if ENABLE_BYBIT_DEMO_JOURNAL:
@@ -2948,6 +2991,29 @@ def _ms_to_iso(value: object) -> Optional[str]:
     if ms <= 0:
         return None
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
+
+
+def _epoch_or_iso_to_iso(value: object) -> Optional[str]:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        raw = float(value)
+        if raw <= 0:
+            return None
+        if raw >= 1_000_000_000_000:
+            return datetime.fromtimestamp(raw / 1000.0, tz=timezone.utc).isoformat()
+        if raw >= 1_000_000_000:
+            return datetime.fromtimestamp(raw, tz=timezone.utc).isoformat()
+    text = str(value).strip()
+    if not text:
+        return None
+    numeric = _to_float(text)
+    if numeric is not None:
+        return _epoch_or_iso_to_iso(numeric)
+    try:
+        return pd.to_datetime(text, utc=True).isoformat()
+    except Exception:
+        return None
 
 
 def _journal_rows_from_bybit_execution(entry: Dict[str, object]) -> List[Dict[str, object]]:
@@ -6970,6 +7036,7 @@ def _upsert_pending_webhook(payload: Dict[str, object]) -> Dict[str, object]:
 
     _save_pending_webhooks(items)
     _invalidate_open_orders_cache()
+    opened_at_iso = _epoch_or_iso_to_iso(entry.get("opened_at"))
     _upsert_trade_context(
         {
             "pending_webhook_id": webhook_id,
@@ -6983,6 +7050,7 @@ def _upsert_pending_webhook(payload: Dict[str, object]) -> Dict[str, object]:
             "stop_loss": entry.get("stop_loss"),
             "take_profit": entry.get("take_profit"),
             "timeframe": entry.get("timeframe"),
+            "open_time": opened_at_iso,
             "status": "ACTIVE",
         }
     )
@@ -7314,6 +7382,67 @@ def _lookup_trade_context_by_market_window(
         return None
     candidates.sort(key=lambda item: item[0])
     return candidates[0][1]
+
+
+def _resolve_bybit_closed_pnl_trade_context(
+    *,
+    account_mode: str,
+    symbol: str,
+    side: object,
+    order_id: object = None,
+    order_link_id: object = None,
+    parent_order_link_id: object = None,
+    trade_id: object = None,
+    transaction_id: object = None,
+    close_time: object = None,
+    max_lookback_seconds: int = 7 * 24 * 60 * 60,
+) -> Optional[Dict[str, object]]:
+    refs = {
+        "order_id": str(order_id or "").strip(),
+        "order_link_id": str(order_link_id or "").strip(),
+        "parent_order_link_id": str(parent_order_link_id or "").strip(),
+        "trade_id": str(trade_id or "").strip(),
+        "transaction_id": str(transaction_id or "").strip(),
+    }
+    contexts = _load_trade_contexts()
+    for ref_field in ("order_id", "order_link_id", "parent_order_link_id", "trade_id", "transaction_id"):
+        ref_value = refs[ref_field]
+        if not ref_value:
+            continue
+        for ctx in contexts:
+            if str(ctx.get(ref_field) or "").strip() == ref_value:
+                return ctx
+
+    close_ts = _canonical_trade_epoch_second(close_time)
+    broker = "bybit"
+    account = "demo" if str(account_mode).strip().lower() == "demo" else "live"
+    instrument = str(symbol or "").strip().upper()
+    side_norm = _normalize_side_for_comparison(side)
+    if not close_ts or not instrument or not side_norm:
+        return None
+
+    candidates: List[Tuple[int, int, Dict[str, object]]] = []
+    for ctx in contexts:
+        if str(ctx.get("broker") or "").strip().lower() != broker:
+            continue
+        if str(ctx.get("account") or "").strip().lower() != account:
+            continue
+        if str(ctx.get("instrument") or "").strip().upper() != instrument:
+            continue
+        if _normalize_side_for_comparison(ctx.get("side")) != side_norm:
+            continue
+        ctx_open_ts = _canonical_trade_epoch_second(ctx.get("open_time")) or _canonical_trade_epoch_second(ctx.get("created_at"))
+        if ctx_open_ts is None or ctx_open_ts > close_ts:
+            continue
+        if close_ts - ctx_open_ts > max_lookback_seconds:
+            continue
+        status = str(ctx.get("status") or "").strip().upper()
+        status_boost = 0 if status == "ACTIVE" else 1
+        candidates.append((close_ts - ctx_open_ts, status_boost, ctx))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    return candidates[0][2]
 
 
 def _oanda_credentials(mode: str) -> Dict[str, str]:
@@ -7880,6 +8009,7 @@ async def _round_option_price_to_tick(
 async def _place_bybit_order(
     payload: Dict[str, object], *, request_id: str
 ) -> Dict[str, object]:
+    request_open_time_iso = _utc_now_iso()
     symbol = str(payload.get("symbol", "")).upper()
     action = str(payload.get("action", "")).lower()
     qty = payload.get("quantity")
@@ -8103,6 +8233,7 @@ async def _place_bybit_order(
             "side": side,
             "order_type": order_type,
             "timeframe": payload.get("timeframe"),
+            "open_time": _epoch_or_iso_to_iso(payload.get("opened_at")) or request_open_time_iso,
             "order_id": str(order_id or "").strip(),
             "order_link_id": str(order_result.get("orderLinkId") or body.get("orderLinkId") or "").strip(),
             "status": "ACTIVE",
@@ -9160,6 +9291,7 @@ def _normalize_bybit_closed_pnl_row(
     stop_loss: Optional[float] = None,
     take_profit: Optional[float] = None,
     raw_refs_extra: Optional[Dict[str, object]] = None,
+    resolved_trade_context: Optional[Dict[str, object]] = None,
 ) -> Optional[Dict[str, object]]:
     symbol = str(entry.get("symbol") or "").strip().upper()
     order_id = str(entry.get("orderId") or "").strip()
@@ -9185,27 +9317,16 @@ def _normalize_bybit_closed_pnl_row(
     if isinstance(raw_refs_extra, dict):
         raw_refs.update(raw_refs_extra)
     mode = "demo" if str(account_mode).strip().lower() == "demo" else "live"
-    ctx = _lookup_trade_context_for_journal_row(
-        {
-            "orderId": order_id,
-            "orderLinkId": str(entry.get("orderLinkId") or "").strip(),
-            "raw_refs": {"orderId": order_id, "orderLinkId": str(entry.get("orderLinkId") or "").strip()},
-        }
-    )
+    ctx = resolved_trade_context if isinstance(resolved_trade_context, dict) else None
     market_window_ctx_used = False
     if not isinstance(ctx, dict):
-        ctx = _lookup_trade_context_by_market_window(
+        ctx = _lookup_trade_context_for_journal_row(
             {
-                "broker": "bybit",
-                "account": mode,
-                "instrument": symbol,
-                "side": side_value,
-                "open_time": _ms_to_iso(entry.get("createdTime")),
-                "close_time": _ms_to_iso(entry.get("updatedTime")),
-            },
-            include_inactive=True,
+                "orderId": order_id,
+                "orderLinkId": str(entry.get("orderLinkId") or "").strip(),
+                "raw_refs": {"orderId": order_id, "orderLinkId": str(entry.get("orderLinkId") or "").strip()},
+            }
         )
-        market_window_ctx_used = isinstance(ctx, dict)
     timeframe = _normalize_timeframe(ctx.get("timeframe")) if isinstance(ctx, dict) else ""
     fallback_attempted = isinstance(ctx, dict)
     fallback_stop_loss = _to_float(ctx.get("stop_loss")) if isinstance(ctx, dict) else None
@@ -9221,6 +9342,7 @@ def _normalize_bybit_closed_pnl_row(
         or (take_profit is not None and fallback_take_profit is not None)
     )
     if isinstance(ctx, dict):
+        resolved_open_time = _epoch_or_iso_to_iso(ctx.get("open_time")) or _epoch_or_iso_to_iso(ctx.get("created_at"))
         _upsert_trade_context(
             {
                 "broker": "bybit",
@@ -9233,11 +9355,17 @@ def _normalize_bybit_closed_pnl_row(
                 "trade_id": raw_refs.get("tradeId"),
                 "transaction_id": raw_refs.get("transactionId"),
                 "timeframe": timeframe or ctx.get("timeframe"),
+                "open_time": resolved_open_time,
                 "stop_loss": stop_loss if stop_loss is not None else ctx.get("stop_loss"),
                 "take_profit": take_profit if take_profit is not None else ctx.get("take_profit"),
                 "status": "CLOSED",
             }
         )
+    open_time = (
+        _epoch_or_iso_to_iso(ctx.get("open_time")) if isinstance(ctx, dict) else None
+    ) or (
+        _epoch_or_iso_to_iso(ctx.get("created_at")) if isinstance(ctx, dict) else None
+    ) or _ms_to_iso(entry.get("createdTime"))
     return {
         "id": f"bybit:{mode}:closedpnl:{symbol}:{order_id}",
         "source": "bybit",
@@ -9247,7 +9375,7 @@ def _normalize_bybit_closed_pnl_row(
         "symbol": symbol,
         "side": side_value.title(),
         "status": "closed",
-        "open_time": _ms_to_iso(entry.get("createdTime")),
+        "open_time": open_time,
         "close_time": _ms_to_iso(entry.get("updatedTime")),
         "entry_price": _to_float(entry.get("avgEntryPrice")),
         "exit_price": _to_float(entry.get("avgExitPrice")),
@@ -9761,6 +9889,22 @@ async def _sync_bybit_closed_pnl_window(
                 stop_loss=stop_loss,
                 take_profit=take_profit,
             )
+            resolved_ctx = _resolve_bybit_closed_pnl_trade_context(
+                account_mode=mode,
+                symbol=str(entry.get("symbol") or "").strip().upper(),
+                side=resolved_side,
+                order_id=order_id,
+                order_link_id=order_link_id,
+                parent_order_link_id=parent_link_id,
+                trade_id=str(entry.get("tradeId") or entry.get("execId") or "").strip(),
+                transaction_id=str(entry.get("transactionId") or "").strip(),
+                close_time=_ms_to_iso(entry.get("updatedTime")),
+            )
+            resolved_open_time = (
+                _epoch_or_iso_to_iso(resolved_ctx.get("open_time")) if isinstance(resolved_ctx, dict) else None
+            ) or (
+                _epoch_or_iso_to_iso(resolved_ctx.get("created_at")) if isinstance(resolved_ctx, dict) else None
+            )
             row = _normalize_bybit_closed_pnl_row(
                 entry,
                 account_mode=mode,
@@ -9768,6 +9912,7 @@ async def _sync_bybit_closed_pnl_window(
                 display_side=resolved_side,
                 stop_loss=stop_loss,
                 take_profit=take_profit,
+                resolved_trade_context=resolved_ctx,
                 raw_refs_extra={
                     "orderLinkId": order_link_id or order_match.get("orderLinkId"),
                     "parentOrderLinkId": order_match.get("parentOrderLinkId"),
@@ -9840,6 +9985,7 @@ async def _sync_bybit_closed_pnl_window(
                         "transaction_id": str(entry.get("transactionId") or "").strip() or None,
                         "stop_loss": stop_loss,
                         "take_profit": take_profit,
+                        "open_time": resolved_open_time,
                         "timeframe": row.get("timeframe"),
                         "status": "CLOSED",
                     }
@@ -13345,7 +13491,10 @@ async def list_open_orders() -> JSONResponse:
 @app.get("/api/recent-trades")
 async def recent_trades(limit: int = 25) -> JSONResponse:
     _repair_persisted_oanda_trade_rows()
-    sanitized_rows, sanitize_stats = _sanitize_bybit_demo_rows(_get_trading_journal_rows())
+    repaired_open_rows, repaired_open_count = _repair_persisted_bybit_open_times(_get_trading_journal_rows())
+    if repaired_open_count:
+        _set_trading_journal_rows(repaired_open_rows)
+    sanitized_rows, sanitize_stats = _sanitize_bybit_demo_rows(repaired_open_rows)
     if int(sanitize_stats.get("changed", 0)):
         _set_trading_journal_rows(sanitized_rows)
     rows = [

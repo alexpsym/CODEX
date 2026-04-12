@@ -35,13 +35,21 @@ def temp_state_paths(tmp_path, monkeypatch: pytest.MonkeyPatch):
 
 def test_pending_webhook_keeps_timeframe(temp_state_paths):
     item = master_service._upsert_pending_webhook(
-        {"id": "wh1", "instrument": "BTCUSDT", "timeframe": "5-minute", "stop_loss": "10", "take_profit": "20"}
+        {
+            "id": "wh1",
+            "instrument": "BTCUSDT",
+            "timeframe": "5-minute",
+            "stop_loss": "10",
+            "take_profit": "20",
+            "opened_at": 1_744_334_400,
+        }
     )
     assert item["timeframe"] == "5-minute"
     contexts = master_service._load_trade_contexts()
     assert contexts and contexts[0].get("timeframe") == "5-minute"
     assert contexts[0].get("stop_loss") == "10"
     assert contexts[0].get("take_profit") == "20"
+    assert contexts[0].get("open_time") == "2025-04-21T00:00:00+00:00"
 
 
 def test_context_lookup_attaches_timeframe_and_ambiguous_returns_none(temp_state_paths):
