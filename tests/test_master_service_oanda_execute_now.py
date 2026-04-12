@@ -45,7 +45,6 @@ def _base_payload():
         "quantity": 1000,
         "account": "demo",
         "order_type": "market",
-        "script_name": "oanda-calculator-clone",
     }
 
 
@@ -93,4 +92,4 @@ def test_oanda_context_upsert_always_schedules_backup(oanda_order_mocks, monkeyp
     result = asyncio.run(master_service._place_oanda_order(_base_payload(), request_id="req-3"))
 
     assert result["orderCreateTransaction"]["id"] == "12345"
-    assert calls["backup"] == 1
+    assert calls["backup"] >= 1

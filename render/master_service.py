@@ -121,6 +121,9 @@ HIDDEN_SCRIPTS = {
     "payslip_audit",
 }
 RETIRED_SCRIPT_NAMES = {
+    "cryptocalculator-clone",
+    "oanda-calculator-clone",
+    "calculator",
     "oanda_swap_rates",
     "oanda_swaprates",
     "oanda-swaprates",
@@ -316,8 +319,6 @@ OUTBOUND_METRICS_LOG_SECONDS = float(
 WEB_APPS = {
     "bybit_trigger_bounce_trader",
     "bybithistory-clone",
-    "cryptocalculator-clone",
-    "oanda-calculator-clone",
     "ivindicator-clone",
     "fxweekend-clone",
 }
@@ -327,10 +328,8 @@ STANDALONE_SCRIPTS = {
     "oanda_monitor",
     "bybithistory-clone",
     "coinspot-clone",
-    "cryptocalculator-clone",
     "ivindicator-clone",
     "fxweekend-clone",
-    "oanda-calculator-clone",
     "oanda_history-clone",
 }
 
@@ -339,10 +338,8 @@ ENTRY_OVERRIDES = {
     "bybit_monitor": ["bybit_altcoin_monitor.py"],
     "bybithistory-clone": ["app.py"],
     "coinspot-clone": ["coinspot_history.py"],
-    "cryptocalculator-clone": ["cryptocalculator_web.py", "cryptocalculator.py"],
     "fxweekend-clone": ["liquidate.py"],
     "ivindicator-clone": ["ivweb.py", "ivapp.py", "ivindicator.py"],
-    "oanda-calculator-clone": ["oanda_calculator_web.py", "oanda_api.py"],
     "oanda_monitor": ["oanda_forex_monitor.py"],
     "oanda_history-clone": ["oanda_history.py"],
 }
@@ -3868,14 +3865,12 @@ FRIENDLY_SCRIPT_LABELS: Dict[str, str] = {
     "bybit_trigger_bounce_trader": "Bounce Trader",
     "bybithistory-clone": "History",
     "coinspot-clone": "History",
-    "cryptocalculator-clone": "Calculator",
     "download_video": "Video Downloader",
     "extractor": "Extractor",
     "forextester": "Forex Tester",
     "fxweekend-clone": "FX Weekend",
     "ivindicator-clone": "IV Indicator",
     "journal": "Journal",
-    "oanda-calculator-clone": "Calculator",
     "oanda_history-clone": "History",
     "oanda_monitor": "Scanner",
     "pinescripts": "Pine Scripts",
@@ -3883,15 +3878,12 @@ FRIENDLY_SCRIPT_LABELS: Dict[str, str] = {
 }
 
 MERGED_SCRIPT_BUTTONS: List[Dict[str, object]] = [
-    {"id": "calculator", "name": "calculator", "label": "Calculator", "open_url": "/merged/calculator"},
     {"id": "history", "name": "history", "label": "History", "open_url": "/merged/history"},
     {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor"},
     {"id": "bounce-trader", "name": "bounce-trader", "label": "Bounce Trader", "open_url": "/merged/bounce-trader"},
 ]
 
 MERGED_SOURCE_NAMES = {
-    "cryptocalculator-clone",
-    "oanda-calculator-clone",
     "bybithistory-clone",
     "oanda_history-clone",
     "coinspot-clone",
@@ -8758,7 +8750,7 @@ async def _place_oanda_order(
         if not pending_id:
             # Backwards compatibility: older TradingView alerts may not include
             # pending_webhook_id. Infer the deterministic id used by
-            # oanda-calculator-clone when track_pending=yes.
+            # legacy calculator flow when track_pending=yes.
             safe_symbol = "".join(ch for ch in symbol if ch.isalnum() or ch in "_-")
             safe_side = "".join(ch for ch in action if ch.isalnum() or ch in "_-")
             safe_ot = "".join(ch for ch in order_type if ch.isalnum() or ch in "_-")
@@ -10992,186 +10984,9 @@ def _merged_shell(title: str, options: List[Tuple[str, str]]) -> str:
 <script>const sel=document.getElementById('sel');const frame=document.getElementById('frame');sel.addEventListener('change',()=>frame.src=sel.value);</script></body></html>"""
 
 
-CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Position Size Calculator</title>
-  <style>
-    body { margin: 0; background: #000; color: #fff; font-family: Arial, sans-serif; }
-    .wrap { margin: 0 auto; padding: 16px; width: min(1600px, calc(100% - 32px)); }
-    h1 { margin: 0 0 16px 0; font-size: 30px; }
-    .host { position: relative; width: 100%; }
-    .asset-panel { display: none; position: relative; width: 100%; }
-    .asset-panel.active { display: block; }
-    .asset-panel iframe {
-      width: 100%;
-      min-height: 300px;
-      height: 300px;
-      border: 0;
-      display: block;
-      background: #000;
-    }
-    .embed-status {
-      position: absolute;
-      inset: 0;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      text-align: center;
-      padding: 16px;
-      color: #cbd5e1;
-      font-size: 14px;
-      background: rgba(2, 6, 23, 0.92);
-    }
-    .embed-status.error { color: #fca5a5; }
-    .embed-status.hidden { display: none; }
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <h1>Position Size Calculator</h1>
-    <div class="host">
-      <section class="asset-panel active" data-panel="crypto">
-        <div class="embed-status" data-status="crypto">Loading crypto calculator…</div>
-        <iframe
-          title="Merged crypto position size calculator"
-          src="/apps/cryptocalculator-clone/?embedded=1&shell=merged&title=Position+Size+Calculator&v={CALCULATOR_EMBED_VERSION}"
-          loading="eager"
-          referrerpolicy="same-origin"
-          data-frame="crypto"
-        ></iframe>
-      </section>
-
-      <section class="asset-panel" data-panel="fx">
-        <div class="embed-status" data-status="fx">Loading FX calculator…</div>
-        <iframe
-          title="Merged FX position size calculator"
-          src="/apps/oanda-calculator-clone/?embedded=1&shell=merged&title=Position+Size+Calculator&v={CALCULATOR_EMBED_VERSION}"
-          loading="eager"
-          referrerpolicy="same-origin"
-          data-frame="fx"
-        ></iframe>
-      </section>
-    </div>
-  </div>
-  <script>
-    (() => {
-      const panels = Array.from(document.querySelectorAll('[data-panel]'));
-      const frames = Array.from(document.querySelectorAll('[data-frame]'));
-      const normalizeAssetKey = (value) => {
-        const key = String(value || '').toLowerCase();
-        if (key === 'fx' || key === 'oanda') return 'fx';
-        return 'crypto';
-      };
-      const updateStatus = (asset, errorText) => {
-        const status = document.querySelector(`[data-status="${asset}"]`);
-        if (!status) return;
-        if (!errorText) {
-          status.classList.add('hidden');
-          status.classList.remove('error');
-          return;
-        }
-        status.classList.remove('hidden');
-        status.classList.add('error');
-        status.textContent = errorText;
-      };
-      const setFrameHeight = (asset, height) => {
-        const normalizedAsset = normalizeAssetKey(asset);
-        const frame = document.querySelector(`[data-frame="${normalizedAsset}"]`);
-        if (!frame) return;
-        const nextHeight = Math.max(300, Number(height) || 0);
-        frame.style.height = `${nextHeight}px`;
-      };
-      const requestFrameHeight = (asset) => {
-        const normalizedAsset = normalizeAssetKey(asset);
-        const frame = document.querySelector(`[data-frame="${normalizedAsset}"]`);
-        if (!frame || !frame.contentWindow) return;
-        try {
-          frame.contentWindow.postMessage({ type: 'calculator:requestHeight', asset: normalizedAsset }, window.location.origin);
-        } catch (_err) {}
-      };
-      const measureFrameHeight = (asset) => {
-        const normalizedAsset = normalizeAssetKey(asset);
-        const frame = document.querySelector(`[data-frame="${normalizedAsset}"]`);
-        if (!frame) return;
-        try {
-          const doc = frame.contentWindow && frame.contentWindow.document;
-          if (!doc) return;
-          const bodyHeight = doc.body ? doc.body.scrollHeight : 0;
-          const rootHeight = doc.documentElement ? doc.documentElement.scrollHeight : 0;
-          setFrameHeight(normalizedAsset, Math.max(bodyHeight, rootHeight));
-        } catch (_err) {}
-      };
-      const setAsset = (asset) => {
-        const normalizedAsset = normalizeAssetKey(asset);
-        panels.forEach((panel) => panel.classList.toggle('active', panel.dataset.panel === normalizedAsset));
-        const refreshHeight = () => {
-          measureFrameHeight(normalizedAsset);
-          requestFrameHeight(normalizedAsset);
-        };
-        window.requestAnimationFrame(refreshHeight);
-        window.setTimeout(refreshHeight, 0);
-        window.setTimeout(refreshHeight, 150);
-        window.setTimeout(refreshHeight, 400);
-      };
-      frames.forEach((frame) => {
-        const asset = normalizeAssetKey(frame.dataset.frame);
-        const timeout = window.setTimeout(() => {
-          updateStatus(asset, `Unable to load the ${asset.toUpperCase()} calculator. Please refresh and try again.`);
-        }, 15000);
-        frame.addEventListener('load', () => {
-          window.clearTimeout(timeout);
-          updateStatus(asset, null);
-          measureFrameHeight(asset);
-          requestFrameHeight(asset);
-          window.requestAnimationFrame(() => {
-            measureFrameHeight(asset);
-            requestFrameHeight(asset);
-          });
-          window.setTimeout(() => {
-            measureFrameHeight(asset);
-            requestFrameHeight(asset);
-          }, 150);
-        });
-        frame.addEventListener('error', () => {
-          window.clearTimeout(timeout);
-          updateStatus(asset, `Unable to load the ${asset.toUpperCase()} calculator. Please refresh and try again.`);
-        });
-      });
-      window.addEventListener('message', (event) => {
-        if (!event || event.origin !== window.location.origin) return;
-        const data = event.data || {};
-        if (data.type === 'calculator:height') {
-          setFrameHeight(data.source, data.height);
-          return;
-        }
-        if (data.type === 'calculator:switchAsset') {
-          setAsset(data.asset);
-        }
-      });
-      setAsset('crypto');
-    })();
-  </script>
-</body>
-</html>
-"""
-
-
-CALCULATOR_EMBED_VERSION = os.getenv("RENDER_GIT_COMMIT") or os.getenv("DEPLOY_TIMESTAMP") or "dev"
-
-
-@app.get("/merged/calculator", response_class=HTMLResponse)
-async def merged_calculator_page() -> HTMLResponse:
-    return HTMLResponse(
-        CALCULATOR_PAGE_TEMPLATE,
-        headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-            "Pragma": "no-cache",
-            "Expires": "0",
-        },
-    )
+@app.get("/merged/calculator")
+async def merged_calculator_page() -> JSONResponse:
+    raise HTTPException(status_code=410, detail="Position size calculator has been removed.")
 
 
 @app.get("/merged/scanner")
@@ -12867,14 +12682,6 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
         script.port,
         resp.status_code,
     )
-    if script.name == "cryptocalculator-clone" and resp.status_code >= 500:
-        PROXY_LOGGER.warning(
-            "Proxy upstream error script=%s subpath=%s port=%s status=%s",
-            script.name,
-            path,
-            script.port,
-            resp.status_code,
-        )
     filtered_headers = {
         k: v
         for k, v in resp.headers.items()
@@ -13142,16 +12949,7 @@ async def list_scripts() -> JSONResponse:
             "open_url": btn["open_url"],
             "standalone": True,
         }
-        if btn["name"] == "calculator":
-            row["starting"] = bool(
-                by_name.get("cryptocalculator-clone", {}).get("starting")
-                or by_name.get("oanda-calculator-clone", {}).get("starting")
-            )
-            row["running"] = bool(
-                by_name.get("cryptocalculator-clone", {}).get("running")
-                or by_name.get("oanda-calculator-clone", {}).get("running")
-            )
-        elif btn["name"] == "history":
+        if btn["name"] == "history":
             row["starting"] = bool(
                 by_name.get("bybithistory-clone", {}).get("starting")
                 or by_name.get("oanda_history-clone", {}).get("starting")
@@ -14561,152 +14359,26 @@ async def download_bybit_history_export(job_id: str) -> FileResponse:
 
 @app.post("/webhook/{script_name:path}")
 async def webhook(script_name: str, request: Request) -> JSONResponse:
-    payload_bytes = await request.body()
-    payload_text = payload_bytes.decode("utf-8", errors="replace")
-    script = script_manager.get(script_name)
-    script.add_log(f"Webhook received: {payload_text}")
-    request_id = uuid4().hex
-    _log_webhook_event(
-        request_id,
-        "webhook_received",
-        {"script_name": script_name, "path": "/webhook/{script_name}"},
-    )
+    await request.body()
+    normalized = script_name.strip().strip("/").replace("-", "_").casefold()
+    retired = {name.strip().strip("/").replace("-", "_").casefold() for name in RETIRED_SCRIPT_NAMES}
+    if normalized in retired:
+        raise HTTPException(status_code=410, detail="Position size calculator has been removed.")
 
-    if script.name not in {"cryptocalculator-clone", "oanda-calculator-clone"}:
-        return JSONResponse({"status": "ok", "script": script_name})
-
-    try:
-        payload = json.loads(payload_text)
-    except json.JSONDecodeError as exc:
-        script.add_log(f"Webhook payload invalid JSON: {exc}")
-        raise HTTPException(status_code=400, detail="Webhook payload must be JSON.") from exc
-
-    try:
-        _assert_pending_webhook_executable(payload)
-    except ValueError as exc:
-        message = str(exc)
-        script.add_log(f"Webhook ignored: {message}")
-        await _send_telegram_alert(_format_trade_alert(payload, error=message))
-        raise HTTPException(status_code=409, detail=message) from exc
-
-    try:
-        if script.name == "cryptocalculator-clone":
-            result = await _place_bybit_order(payload, request_id=request_id)
-        else:
-            result = await _place_oanda_order(payload, request_id=request_id)
-        script.add_log(f"Order request sent: {result}")
-        await _send_telegram_alert(_format_trade_alert(payload, result=result))
-        return JSONResponse(
-            {"status": "ok", "script": script_name, "request_id": request_id, "order": result}
-        )
-    except Exception as exc:
-        script.add_log(f"Order placement failed: {exc}")
-        await _send_telegram_alert(
-            _format_trade_alert(payload, error=str(exc))
-        )
-        BYBIT_LOGGER.exception(
-            "WEBHOOK_TPSL %s webhook_failed script=%s error=%s",
-            request_id,
-            script_name,
-            exc,
-        )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    _ = request
+    raise HTTPException(status_code=404, detail=f"Unsupported webhook target: {script_name}")
 
 
 @app.post("/execute_now")
 async def execute_now(request: Request) -> JSONResponse:
-    script_name = "cryptocalculator-clone"
-    script = script_manager.get(script_name)
-    payload = await request.json()
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="Payload must be a JSON object.")
-    request_id = uuid4().hex
-    _log_webhook_event(
-        request_id,
-        "execute_now_received",
-        {"script_name": script_name, "path": "/execute_now"},
-    )
-    try:
-        result = await _place_bybit_order(payload, request_id=request_id)
-        script.add_log(f"Execute-now order sent: {result}")
-        await _send_telegram_alert(_format_trade_alert(payload, result=result))
-        return JSONResponse({"status": "ok", "request_id": request_id, "order": result})
-    except Exception as exc:
-        script.add_log(f"Execute-now order failed: {exc}")
-        await _send_telegram_alert(
-            _format_trade_alert(payload, error=str(exc))
-        )
-        BYBIT_LOGGER.exception(
-            "WEBHOOK_TPSL %s execute_now_failed script=%s error=%s",
-            request_id,
-            script_name,
-            exc,
-        )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    _ = request
+    raise HTTPException(status_code=410, detail="Position size calculator has been removed.")
 
 
 @app.post("/webhook")
 async def default_webhook(request: Request) -> JSONResponse:
-    payload_bytes = await request.body()
-    payload_text = payload_bytes.decode("utf-8", errors="replace")
-    request_id = uuid4().hex
-    try:
-        payload = json.loads(payload_text)
-    except json.JSONDecodeError as exc:
-        script_name = "cryptocalculator-clone"
-        script = script_manager.get(script_name)
-        script.add_log(f"Webhook received: {payload_text}")
-        script.add_log(f"Webhook payload invalid JSON: {exc}")
-        _log_webhook_event(
-            request_id,
-            "webhook_received",
-            {"script_name": script_name, "path": "/webhook"},
-        )
-        raise HTTPException(status_code=400, detail="Webhook payload must be JSON.") from exc
-
-    script_name = str(
-        payload.get("script_name") or payload.get("target_app") or "cryptocalculator-clone"
-    )
-    script = script_manager.get(script_name)
-    script.add_log(f"Webhook received: {payload_text}")
-    _log_webhook_event(
-        request_id,
-        "webhook_received",
-        {"script_name": script_name, "path": "/webhook"},
-    )
-
-    try:
-        _assert_pending_webhook_executable(payload)
-    except ValueError as exc:
-        message = str(exc)
-        script.add_log(f"Webhook ignored: {message}")
-        await _send_telegram_alert(_format_trade_alert(payload, error=message))
-        raise HTTPException(status_code=409, detail=message) from exc
-
-    try:
-        if script.name == "cryptocalculator-clone":
-            result = await _place_bybit_order(payload, request_id=request_id)
-        elif script.name == "oanda-calculator-clone":
-            result = await _place_oanda_order(payload, request_id=request_id)
-        else:
-            return JSONResponse({"status": "ok", "script": script_name})
-        script.add_log(f"Order request sent: {result}")
-        await _send_telegram_alert(_format_trade_alert(payload, result=result))
-        return JSONResponse(
-            {"status": "ok", "script": script_name, "request_id": request_id, "order": result}
-        )
-    except Exception as exc:
-        script.add_log(f"Order placement failed: {exc}")
-        await _send_telegram_alert(
-            _format_trade_alert(payload, error=str(exc))
-        )
-        BYBIT_LOGGER.exception(
-            "WEBHOOK_TPSL %s webhook_failed script=%s error=%s",
-            request_id,
-            script_name,
-            exc,
-        )
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    _ = request
+    raise HTTPException(status_code=410, detail="Position size calculator has been removed.")
 
 
 @app.get("/health")
