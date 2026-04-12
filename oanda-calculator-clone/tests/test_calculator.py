@@ -88,3 +88,8 @@ def test_post_includes_timeframe_in_alert_and_pending(monkeypatch):
     assert resp.status_code == 200
     assert '"timeframe": "15-minute"' in html
     assert captured_pending.get("timeframe") == "15-minute"
+
+
+def test_embedded_template_reports_fx_height_channel():
+    assert 'source: "fx"' in web_app.HTML_TEMPLATE
+    assert 'source: "oanda"' not in web_app.HTML_TEMPLATE

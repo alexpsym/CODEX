@@ -11002,12 +11002,13 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
     body { margin: 0; background: #000; color: #fff; font-family: Arial, sans-serif; }
     .wrap { margin: 0 auto; padding: 16px; width: min(1600px, calc(100% - 32px)); }
     h1 { margin: 0 0 16px 0; font-size: 30px; }
-    .host { position: relative; }
-    .asset-panel { display: none; }
+    .host { position: relative; width: 100%; }
+    .asset-panel { display: none; position: relative; width: 100%; }
     .asset-panel.active { display: block; }
     .asset-panel iframe {
       width: 100%;
-      height: 100px;
+      min-height: 300px;
+      height: 300px;
       border: 0;
       display: block;
       background: #000;
@@ -11048,7 +11049,7 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
         <iframe
           title="Merged FX position size calculator"
           src="/apps/oanda-calculator-clone/?embedded=1&shell=merged&title=Position+Size+Calculator"
-          loading="lazy"
+          loading="eager"
           referrerpolicy="same-origin"
           data-frame="fx"
         ></iframe>
@@ -11058,8 +11059,11 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
   <script>
     (() => {
       const panels = Array.from(document.querySelectorAll('[data-panel]'));
-      const setAsset = (asset) => {
-        panels.forEach((panel) => panel.classList.toggle('active', panel.dataset.panel === asset));
+      const frames = Array.from(document.querySelectorAll('[data-frame]'));
+      const normalizeAssetKey = (value) => {
+        const key = String(value || '').toLowerCase();
+        if (key === 'fx' || key === 'oanda') return 'fx';
+        return 'crypto';
       };
       const updateStatus = (asset, errorText) => {
         const status = document.querySelector(`[data-status="${asset}"]`);
@@ -11073,27 +11077,43 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
         status.classList.add('error');
         status.textContent = errorText;
       };
-      const frames = Array.from(document.querySelectorAll('[data-frame]'));
       const setFrameHeight = (asset, height) => {
-        const frame = document.querySelector(`[data-frame="${asset}"]`);
+        const normalizedAsset = normalizeAssetKey(asset);
+        const frame = document.querySelector(`[data-frame="${normalizedAsset}"]`);
         if (!frame) return;
         const nextHeight = Math.max(300, Number(height) || 0);
         frame.style.height = `${nextHeight}px`;
       };
+      const measureFrameHeight = (asset) => {
+        const normalizedAsset = normalizeAssetKey(asset);
+        const frame = document.querySelector(`[data-frame="${normalizedAsset}"]`);
+        if (!frame) return;
+        try {
+          const doc = frame.contentWindow && frame.contentWindow.document;
+          if (!doc) return;
+          const bodyHeight = doc.body ? doc.body.scrollHeight : 0;
+          const rootHeight = doc.documentElement ? doc.documentElement.scrollHeight : 0;
+          setFrameHeight(normalizedAsset, Math.max(bodyHeight, rootHeight));
+        } catch (_err) {}
+      };
+      const setAsset = (asset) => {
+        const normalizedAsset = normalizeAssetKey(asset);
+        panels.forEach((panel) => panel.classList.toggle('active', panel.dataset.panel === normalizedAsset));
+        window.requestAnimationFrame(() => measureFrameHeight(normalizedAsset));
+        window.setTimeout(() => measureFrameHeight(normalizedAsset), 0);
+        window.setTimeout(() => measureFrameHeight(normalizedAsset), 150);
+      };
       frames.forEach((frame) => {
-        const asset = frame.dataset.frame;
+        const asset = normalizeAssetKey(frame.dataset.frame);
         const timeout = window.setTimeout(() => {
           updateStatus(asset, `Unable to load the ${asset.toUpperCase()} calculator. Please refresh and try again.`);
         }, 15000);
         frame.addEventListener('load', () => {
           window.clearTimeout(timeout);
           updateStatus(asset, null);
-          try {
-            const body = frame.contentWindow && frame.contentWindow.document && frame.contentWindow.document.body;
-            if (body) {
-              setFrameHeight(asset, body.scrollHeight);
-            }
-          } catch (_err) {}
+          measureFrameHeight(asset);
+          window.requestAnimationFrame(() => measureFrameHeight(asset));
+          window.setTimeout(() => measureFrameHeight(asset), 150);
         });
         frame.addEventListener('error', () => {
           window.clearTimeout(timeout);
@@ -11108,7 +11128,7 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
           return;
         }
         if (data.type === 'calculator:switchAsset') {
-          setAsset(data.asset === 'fx' ? 'fx' : 'crypto');
+          setAsset(data.asset);
         }
       });
       setAsset('crypto');

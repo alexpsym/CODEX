@@ -403,7 +403,7 @@ FORM_HTML = """
         document.documentElement ? document.documentElement.scrollHeight : 0,
         document.body ? document.body.scrollHeight : 0
       );
-      window.parent.postMessage({ type: "calculator:height", source: "oanda", height: h }, window.location.origin);
+      window.parent.postMessage({ type: "calculator:height", source: "fx", height: h }, window.location.origin);
     };
     window.addEventListener("load", sendHeight);
     window.addEventListener("resize", sendHeight);

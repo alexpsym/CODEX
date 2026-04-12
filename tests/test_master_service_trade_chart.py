@@ -186,6 +186,9 @@ def test_merged_calculator_defaults_to_crypto_with_fx_toggle_wiring() -> None:
     assert '<section class="asset-panel active" data-panel="crypto">' in html
     assert '<section class="asset-panel" data-panel="fx">' in html
     assert "setAsset('crypto')" in html
-    assert "setAsset(data.asset === 'fx' ? 'fx' : 'crypto')" in html
+    assert "setAsset(data.asset);" in html
+    assert "normalizeAssetKey" in html
+    assert "key === 'fx' || key === 'oanda'" in html
+    assert 'loading="eager"' in html
     assert "Open Crypto Calculator" not in html
     assert "Open FX Calculator" not in html
