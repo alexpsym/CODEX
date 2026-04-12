@@ -49,7 +49,7 @@ def test_pending_webhook_keeps_timeframe(temp_state_paths):
     assert contexts and contexts[0].get("timeframe") == "5-minute"
     assert contexts[0].get("stop_loss") == "10"
     assert contexts[0].get("take_profit") == "20"
-    assert contexts[0].get("open_time") == "2025-04-21T00:00:00+00:00"
+    assert contexts[0].get("open_time") == "2025-04-11T01:20:00+00:00"
 
 
 def test_context_lookup_attaches_timeframe_and_ambiguous_returns_none(temp_state_paths):
@@ -253,6 +253,51 @@ def test_recent_trades_and_journal_backfill_from_trade_context(monkeypatch: pyte
     assert journal["items"][0]["timeframe"] == "1-hour"
     assert journal["items"][0]["stop_loss"] == 97.5
     assert journal["items"][0]["take_profit"] == 110.0
+
+
+def test_merge_row_blank_strings_do_not_wipe_populated_fields():
+    existing = {
+        "timeframe": "15-minute",
+        "stop_loss": 10.5,
+        "take_profit": 12.5,
+        "entry_price": 11.0,
+        "open_time": "2026-02-01T00:00:00+00:00",
+        "balance_after_trade": 1001.0,
+    }
+    merged = master_service._merge_trading_journal_row(
+        existing,
+        {
+            "timeframe": "",
+            "stop_loss": "",
+            "take_profit": "",
+            "entry_price": "",
+            "open_time": "",
+            "balance_after_trade": "",
+        },
+    )
+    assert merged["timeframe"] == "15-minute"
+    assert merged["stop_loss"] == 10.5
+    assert merged["take_profit"] == 12.5
+    assert merged["entry_price"] == 11.0
+    assert merged["open_time"] == "2026-02-01T00:00:00+00:00"
+    assert merged["balance_after_trade"] == 1001.0
+
+
+def test_save_state_helpers_schedule_dropbox_backup(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    pending_path = tmp_path / "pending.json"
+    context_path = tmp_path / "contexts.json"
+    monkeypatch.setattr(master_service, "PENDING_WEBHOOKS_PATH", pending_path)
+    monkeypatch.setattr(master_service, "TRADE_CONTEXTS_PATH", context_path)
+    calls = {"count": 0}
+    monkeypatch.setattr(
+        master_service,
+        "_schedule_dropbox_upload_state_backup",
+        lambda: calls.update({"count": calls["count"] + 1}),
+    )
+
+    master_service._save_pending_webhooks([{"id": "w1"}])
+    master_service._save_trade_contexts([{"order_id": "o1"}])
+    assert calls["count"] == 2
 
 
 def test_prune_trade_contexts_invalid_timestamps_are_safe(temp_state_paths):
