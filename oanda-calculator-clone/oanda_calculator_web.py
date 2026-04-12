@@ -301,13 +301,17 @@ FORM_HTML = """
           <div class="field-row"><label>Entry Price:</label>
             <input name="entry_price" id="entry_price" type="number" step="0.0001" value="{{ entry_price or '' }}" {% if order_type == 'limit' %}required{% endif %}>
           </div>
-          <div class="field-row"><label>Limit cancel offset (abs):</label>
+          <div class="field-row"><label>Broker limit auto-cancel offset (abs):</label>
             <input name="limit_cancel_offset" id="limit_cancel_offset" type="number" step="0.0001" value="{{ limit_cancel_offset or '' }}">
           </div>
-          <div class="field-row"><label>Limit cancel offset (%):</label>
+          <div class="field-row"><label>Broker limit auto-cancel offset (%):</label>
             <input name="limit_cancel_offset_pct" id="limit_cancel_offset_pct" type="number" step="0.01" value="{{ limit_cancel_offset_pct or '' }}">
           </div>
-          <small>Cancel pending limit orders if price moves away by the given distance.</small>
+          <small>Auto-cancel live broker limit orders if price moves away by the given distance.</small>
+        </div>
+        <div id="pending_cancel_touch_row" class="field-row">
+          <label>Cancel pending if price touches:</label>
+          <input name="cancel_if_touched_price" id="cancel_if_touched_price" type="number" step="0.0001" value="{{ cancel_if_touched_price or '' }}">
         </div>
         <div class="field-row"><label>Stop loss (ticks):</label><input name="stop_ticks" id="stop_ticks" type="number" step="1" value="{{ stop_ticks or '' }}" required></div>
         <div class="field-row"><label>Risk mode:</label>
@@ -456,6 +460,7 @@ def index():
     entry_price = request.form.get("entry_price", "")
     limit_cancel_offset = request.form.get("limit_cancel_offset", "")
     limit_cancel_offset_pct = request.form.get("limit_cancel_offset_pct", "")
+    cancel_if_touched_price = request.form.get("cancel_if_touched_price", "")
     if request.method == "POST":
         try:
             instrument_input = request.form["instrument"]
@@ -690,6 +695,22 @@ def index():
                 alert["limit_cancel_offset"] = cancel_offset_value
             if cancel_offset_pct_value is not None:
                 alert["limit_cancel_offset_pct"] = cancel_offset_pct_value
+            cancel_if_touched_value = (
+                float(cancel_if_touched_price)
+                if str(cancel_if_touched_price).strip()
+                else None
+            )
+            cancel_operator = None
+            if cancel_if_touched_value is not None:
+                if abs(cancel_if_touched_value - price) <= max(1e-12, abs(price) * 1e-6):
+                    raise ValueError(
+                        "Cancel pending price must differ from the live setup price."
+                    )
+                cancel_operator = "lte" if cancel_if_touched_value < price else "gte"
+                alert["cancel_if_touched_price"] = cancel_if_touched_value
+                alert["cancel_if_touched_operator"] = cancel_operator
+                alert["setup_reference_price"] = price
+                alert["price_source"] = "oanda_pricing"
             order = build_order(
                 instrument,
                 side,
@@ -720,9 +741,11 @@ def index():
             if entry_price_value is not None:
                 risk_info["Entry Price"] = f"{entry_price_value:.{display_precision}f}"
             if cancel_offset_value is not None:
-                risk_info["Limit cancel offset"] = cancel_offset_value
+                risk_info["Broker limit auto-cancel offset"] = cancel_offset_value
             if cancel_offset_pct_value is not None:
-                risk_info["Limit cancel offset %"] = cancel_offset_pct_value
+                risk_info["Broker limit auto-cancel offset %"] = cancel_offset_pct_value
+            if cancel_if_touched_value is not None:
+                risk_info["Cancel pending if price touches"] = cancel_if_touched_value
             if timeframe:
                 risk_info["Timeframe"] = timeframe
 
@@ -769,6 +792,10 @@ def index():
                     "source": "oanda-calculator-clone",
                     "limit_cancel_offset": cancel_offset_value,
                     "limit_cancel_offset_pct": cancel_offset_pct_value,
+                    "cancel_if_touched_price": cancel_if_touched_value,
+                    "cancel_if_touched_operator": cancel_operator,
+                    "setup_reference_price": price,
+                    "price_source": "oanda_pricing",
                     "timeframe": timeframe or None,
                 }
 
@@ -817,6 +844,7 @@ def index():
         entry_price=entry_price,
         limit_cancel_offset=limit_cancel_offset,
         limit_cancel_offset_pct=limit_cancel_offset_pct,
+        cancel_if_touched_price=cancel_if_touched_price,
         track_pending=track_pending,
         timeframe=timeframe,
         embedded=embedded,
