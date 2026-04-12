@@ -4365,6 +4365,7 @@ async def _autostart_scripts() -> None:
     asyncio.create_task(_start_startup_recovery_import_after_restore())
     asyncio.create_task(_schedule_daily_trade_history_sync())
     asyncio.create_task(_schedule_monthly_aud_revaluation_sync())
+    asyncio.create_task(_poll_pending_webhook_invalidations())
     if ENABLE_BYBIT_DEMO_JOURNAL and ENABLE_BYBIT_DEMO_CLOSED_PNL_POLL:
         asyncio.create_task(_start_bybit_demo_closed_pnl_poll_after_restore())
     if not ENABLE_BYBIT_DEMO_JOURNAL:
@@ -7023,6 +7024,13 @@ def _normalize_pending_webhooks(items: object) -> List[Dict[str, object]]:
         payload.setdefault("created_at", now_ts)
         payload["updated_at"] = now_ts
         payload["timeframe"] = _normalize_timeframe(payload.get("timeframe"))
+        cancel_touch = _parse_pending_cancel_touch_price(payload)
+        payload["cancel_if_touched_price"] = cancel_touch
+        operator = str(payload.get("cancel_if_touched_operator") or "").strip().lower()
+        if operator not in {"lte", "gte"}:
+            payload["cancel_if_touched_operator"] = None
+        else:
+            payload["cancel_if_touched_operator"] = operator
         cleaned.append(payload)
     return cleaned
 
@@ -7053,6 +7061,9 @@ def _upsert_pending_webhook(payload: Dict[str, object]) -> Dict[str, object]:
     entry.setdefault("created_at", now_ts)
     entry["updated_at"] = now_ts
     entry["timeframe"] = _normalize_timeframe(entry.get("timeframe"))
+    entry["cancel_if_touched_price"] = _parse_pending_cancel_touch_price(entry)
+    operator = str(entry.get("cancel_if_touched_operator") or "").strip().lower()
+    entry["cancel_if_touched_operator"] = operator if operator in {"lte", "gte"} else None
 
     replaced = False
     for idx, existing in enumerate(items):
@@ -7081,6 +7092,12 @@ def _upsert_pending_webhook(payload: Dict[str, object]) -> Dict[str, object]:
             "timeframe": entry.get("timeframe"),
             "open_time": opened_at_iso,
             "status": "ACTIVE",
+            "cancel_if_touched_price": entry.get("cancel_if_touched_price"),
+            "cancel_if_touched_operator": entry.get("cancel_if_touched_operator"),
+            "setup_reference_price": entry.get("setup_reference_price"),
+            "price_source": entry.get("price_source"),
+            "cancel_reason": entry.get("cancel_reason"),
+            "cancelled_at": entry.get("cancelled_at"),
         }
     )
     return entry
@@ -7741,6 +7758,51 @@ def _parse_limit_cancel_settings(payload: Dict[str, object]) -> tuple[Optional[f
     if offset is not None and offset <= 0:
         offset = None
     return offset, pct
+
+
+def _parse_pending_cancel_touch_price(payload: Dict[str, object]) -> Optional[float]:
+    raw = (
+        payload.get("cancel_if_touched_price")
+        or payload.get("cancel_touch_price")
+        or payload.get("pending_cancel_price")
+    )
+    value = _to_float(raw)
+    if value is None or value <= 0:
+        return None
+    return value
+
+
+def _pending_cancel_touch_triggered(
+    *, current_price: float, cancel_price: float, operator: str
+) -> bool:
+    op = str(operator or "").strip().lower()
+    if op == "lte":
+        return current_price <= cancel_price
+    if op == "gte":
+        return current_price >= cancel_price
+    return False
+
+
+def _assert_pending_webhook_executable(payload: Dict[str, object]) -> None:
+    pending_id = str(payload.get("pending_webhook_id") or "").strip()
+    if not pending_id:
+        return
+    items = _load_pending_webhooks()
+    found = None
+    for item in items:
+        if str(item.get("id") or "").strip() == pending_id:
+            found = item
+            break
+    if not isinstance(found, dict):
+        raise ValueError("Pending webhook missing or no longer active.")
+    if not bool(found.get("enabled", True)):
+        raise ValueError("Pending webhook cancelled by cancel-touch rule.")
+    status = str(found.get("status") or "").strip().upper()
+    if status in {"CANCELLED", "CLOSED"}:
+        reason = str(found.get("cancel_reason") or "").strip()
+        if reason == "cancel_price_touched":
+            raise ValueError("Pending webhook cancelled by cancel-touch rule.")
+        raise ValueError(f"Pending webhook is not executable (status={status}).")
 
 
 def _expiry_to_bybit_expdate(expiry_dmy: str) -> str:
@@ -8976,6 +9038,124 @@ async def _fetch_oanda_mid_price(
     if ask is not None:
         return ask
     raise ValueError("OANDA pricing missing bid/ask data.")
+
+
+async def _fetch_oanda_mid_prices_batch(
+    *, cfg: Dict[str, str], instruments: List[str]
+) -> Dict[str, float]:
+    unique = sorted({str(item or "").strip().upper() for item in instruments if str(item or "").strip()})
+    if not unique:
+        return {}
+    token = cfg["token"]
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    url = f"{cfg['base_url'].rstrip('/')}/v3/accounts/{cfg['account_id']}/pricing"
+    params = {"instruments": ",".join(unique)}
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+        resp = await client.get(url, headers=headers, params=params)
+    if resp.status_code >= 400:
+        raise ValueError(f"OANDA pricing failed ({resp.status_code}): {resp.text}")
+    payload = resp.json() or {}
+    rows = payload.get("prices") or []
+    out: Dict[str, float] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        instrument = str(row.get("instrument") or "").strip().upper()
+        bids = row.get("bids") or []
+        asks = row.get("asks") or []
+        bid = float(bids[0]["price"]) if bids else None
+        ask = float(asks[0]["price"]) if asks else None
+        if bid is not None and ask is not None:
+            out[instrument] = (bid + ask) / 2
+        elif row.get("closeoutBid") is not None and row.get("closeoutAsk") is not None:
+            out[instrument] = (float(row["closeoutBid"]) + float(row["closeoutAsk"])) / 2
+    return out
+
+
+async def _poll_pending_webhook_invalidations() -> None:
+    while True:
+        await asyncio.sleep(LIMIT_CANCEL_POLL_SECONDS)
+        try:
+            pending_items = _load_pending_webhooks()
+            watch = [
+                item for item in pending_items
+                if isinstance(item, dict)
+                and bool(item.get("enabled", True))
+                and str(item.get("status") or "").strip().upper() == "WAITING"
+                and _parse_pending_cancel_touch_price(item) is not None
+                and str(item.get("cancel_if_touched_operator") or "").strip().lower() in {"lte", "gte"}
+            ]
+            if not watch:
+                continue
+
+            oanda_groups: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+            for item in watch:
+                category = str(item.get("category") or "").strip().lower()
+                instrument = str(item.get("instrument") or "").strip().upper()
+                if category == "oanda" and instrument:
+                    account = str(item.get("account") or "live").strip().lower()
+                    oanda_groups[account].append(item)
+
+            oanda_prices: Dict[Tuple[str, str], float] = {}
+            for account, rows in oanda_groups.items():
+                cfg = _get_oanda_config(account)
+                symbols = [str(r.get("instrument") or "").strip().upper() for r in rows]
+                batch = await _fetch_oanda_mid_prices_batch(cfg=cfg, instruments=symbols)
+                for symbol, price in batch.items():
+                    oanda_prices[(account, symbol)] = price
+
+            for item in watch:
+                pending_id = str(item.get("id") or "").strip()
+                category = str(item.get("category") or "").strip().lower()
+                instrument = str(item.get("instrument") or "").strip().upper()
+                operator = str(item.get("cancel_if_touched_operator") or "").strip().lower()
+                cancel_price = _parse_pending_cancel_touch_price(item)
+                if not pending_id or cancel_price is None or not instrument:
+                    continue
+                current_price: Optional[float] = None
+                if category == "oanda":
+                    account = str(item.get("account") or "live").strip().lower()
+                    current_price = oanda_prices.get((account, instrument))
+                else:
+                    monitor_category = str(
+                        item.get("monitor_category") or item.get("trade_mode") or "linear"
+                    ).strip().lower()
+                    if monitor_category not in {"spot", "linear"}:
+                        monitor_category = "linear"
+                    current_price = await _fetch_bybit_market_price(
+                        base_url=BYBIT_BASE,
+                        category=monitor_category,
+                        symbol=instrument,
+                    )
+                if current_price is None:
+                    continue
+                if _pending_cancel_touch_triggered(
+                    current_price=current_price,
+                    cancel_price=cancel_price,
+                    operator=operator,
+                ):
+                    now_iso = _utc_now_iso()
+                    _update_pending_webhook(
+                        pending_id,
+                        {
+                            "status": "CANCELLED",
+                            "enabled": False,
+                            "cancel_reason": "cancel_price_touched",
+                            "cancelled_at": now_iso,
+                        },
+                    )
+                    _upsert_trade_context(
+                        {
+                            "pending_webhook_id": pending_id,
+                            "status": "CANCELLED",
+                            "cancel_reason": "cancel_price_touched",
+                            "cancelled_at": now_iso,
+                        }
+                    )
+                    _invalidate_open_orders_cache()
+                    _schedule_dropbox_upload_state_backup()
+        except Exception as exc:  # pragma: no cover - background task
+            BYBIT_LOGGER.error("Pending webhook invalidation poller error: %s", exc)
 
 
 async def _is_oanda_order_open(*, cfg: Dict[str, str], order_id: str, mode: str) -> bool:
@@ -14352,6 +14532,14 @@ async def webhook(script_name: str, request: Request) -> JSONResponse:
         raise HTTPException(status_code=400, detail="Webhook payload must be JSON.") from exc
 
     try:
+        _assert_pending_webhook_executable(payload)
+    except ValueError as exc:
+        message = str(exc)
+        script.add_log(f"Webhook ignored: {message}")
+        await _send_telegram_alert(_format_trade_alert(payload, error=message))
+        raise HTTPException(status_code=409, detail=message) from exc
+
+    try:
         if script.name == "cryptocalculator-clone":
             result = await _place_bybit_order(payload, request_id=request_id)
         else:
@@ -14436,6 +14624,14 @@ async def default_webhook(request: Request) -> JSONResponse:
         "webhook_received",
         {"script_name": script_name, "path": "/webhook"},
     )
+
+    try:
+        _assert_pending_webhook_executable(payload)
+    except ValueError as exc:
+        message = str(exc)
+        script.add_log(f"Webhook ignored: {message}")
+        await _send_telegram_alert(_format_trade_alert(payload, error=message))
+        raise HTTPException(status_code=409, detail=message) from exc
 
     try:
         if script.name == "cryptocalculator-clone":

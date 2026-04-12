@@ -418,3 +418,100 @@ def test_pending_webhook_mutations_invalidate_open_orders_cache(temp_state_paths
     assert master_service._delete_pending_webhook("wh-cache") is True
     assert master_service._OPEN_ORDERS_CACHE["payload"] is None
     assert master_service._OPEN_ORDERS_CACHE["expires_at"] == 0.0
+
+
+def test_pending_webhook_persists_cancel_touch_metadata(temp_state_paths):
+    item = master_service._upsert_pending_webhook(
+        {
+            "id": "wh-cancel",
+            "instrument": "BTCUSDT",
+            "category": "linear",
+            "cancel_if_touched_price": "88000.5",
+            "cancel_if_touched_operator": "lte",
+            "setup_reference_price": 90000.0,
+            "price_source": "bybit_linear",
+        }
+    )
+    assert item["cancel_if_touched_price"] == pytest.approx(88000.5)
+    assert item["cancel_if_touched_operator"] == "lte"
+    contexts = master_service._load_trade_contexts()
+    assert contexts and contexts[0].get("cancel_if_touched_operator") == "lte"
+
+
+def test_pending_cancel_touch_trigger_lte_and_gte():
+    assert master_service._pending_cancel_touch_triggered(
+        current_price=100.0, cancel_price=101.0, operator="lte"
+    )
+    assert not master_service._pending_cancel_touch_triggered(
+        current_price=102.0, cancel_price=101.0, operator="lte"
+    )
+    assert master_service._pending_cancel_touch_triggered(
+        current_price=102.0, cancel_price=101.0, operator="gte"
+    )
+    assert not master_service._pending_cancel_touch_triggered(
+        current_price=100.0, cancel_price=101.0, operator="gte"
+    )
+
+
+def test_assert_pending_webhook_executable_blocks_cancelled(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        master_service,
+        "_load_pending_webhooks",
+        lambda: [
+            {"id": "pw-1", "enabled": False, "status": "CANCELLED", "cancel_reason": "cancel_price_touched"}
+        ],
+    )
+    with pytest.raises(ValueError, match="cancel-touch"):
+        master_service._assert_pending_webhook_executable({"pending_webhook_id": "pw-1"})
+
+
+def test_limit_cancel_triggered_regression():
+    assert master_service._limit_cancel_triggered(
+        current_price=103.0, limit_price=100.0, offset=2.0, pct=None
+    )
+    assert master_service._limit_cancel_triggered(
+        current_price=102.0, limit_price=100.0, offset=None, pct=2.0
+    )
+
+
+def test_pending_invalidation_poller_marks_cancelled(monkeypatch: pytest.MonkeyPatch):
+    updates = {"pending": None, "context": None}
+    sleep_calls = {"count": 0}
+
+    async def fake_sleep(_seconds):
+        sleep_calls["count"] += 1
+        if sleep_calls["count"] >= 2:
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(master_service.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(
+        master_service,
+        "_load_pending_webhooks",
+        lambda: [
+            {
+                "id": "wh-1",
+                "enabled": True,
+                "status": "WAITING",
+                "category": "linear",
+                "instrument": "BTCUSDT",
+                "cancel_if_touched_price": 100.0,
+                "cancel_if_touched_operator": "lte",
+            }
+        ],
+    )
+    async def fake_price(**_kwargs):
+        return 99.0
+    monkeypatch.setattr(master_service, "_fetch_bybit_market_price", fake_price)
+    monkeypatch.setattr(master_service, "_update_pending_webhook", lambda wid, payload: updates.update({"pending": (wid, payload)}))
+    monkeypatch.setattr(master_service, "_upsert_trade_context", lambda payload: updates.update({"context": payload}))
+    monkeypatch.setattr(master_service, "_invalidate_open_orders_cache", lambda: None)
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(master_service._poll_pending_webhook_invalidations())
+
+    assert updates["pending"] is not None
+    webhook_id, payload = updates["pending"]
+    assert webhook_id == "wh-1"
+    assert payload["status"] == "CANCELLED"
+    assert updates["context"]["cancel_reason"] == "cancel_price_touched"

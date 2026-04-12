@@ -789,6 +789,8 @@ def calculate_trade(
         "risk_percent": risk_percent,
         "risk_amount": risk_amount,
         "entry_price": entry_price,
+        "setup_reference_price": float(market_price),
+        "market_price_used": float(market_price),
         "entry_price_execution": entry_price_execution,
         "position_usdt": position_notional_quote,
         "position_execution": position_notional_execution,

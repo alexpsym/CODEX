@@ -722,10 +722,15 @@ function updateRiskControls() {
 function toggleWebhookSection() {
   const trackPending = document.getElementById('track_pending');
   const webhookSection = document.getElementById('webhook_section');
+  const pendingCancelRow = document.getElementById('pending_cancel_touch_row');
   if (!trackPending || !webhookSection) {
     return;
   }
-  webhookSection.style.display = trackPending.value === 'yes' ? 'block' : 'none';
+  const isPending = trackPending.value === 'yes';
+  webhookSection.style.display = isPending ? 'block' : 'none';
+  if (pendingCancelRow) {
+    pendingCancelRow.style.display = isPending ? 'block' : 'none';
+  }
 }
 
 function bindMergedAssetSwitch() {

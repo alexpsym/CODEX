@@ -524,9 +524,12 @@ FORM_HTML = """
             <div class="field-row"><label>Entry Price:</label><input name="entry_price" id="entry_price" type="number" step="0.0001"></div>
           </div>
           <div id="limit_cancel_row">
-            <div class="field-row"><label>Limit cancel offset (abs):</label><input name="limit_cancel_offset" type="number" step="0.0001" value="{{ limit_cancel_offset or '' }}"></div>
-            <div class="field-row"><label>Limit cancel offset (%):</label><input name="limit_cancel_offset_pct" type="number" step="0.01" value="{{ limit_cancel_offset_pct or '' }}"></div>
-            <small>Cancel pending limit orders if price moves away by the given distance.</small>
+            <div class="field-row"><label>Broker limit auto-cancel offset (abs):</label><input name="limit_cancel_offset" type="number" step="0.0001" value="{{ limit_cancel_offset or '' }}"></div>
+            <div class="field-row"><label>Broker limit auto-cancel offset (%):</label><input name="limit_cancel_offset_pct" type="number" step="0.01" value="{{ limit_cancel_offset_pct or '' }}"></div>
+            <small>Auto-cancel live broker limit orders if price moves away by the given distance.</small>
+          </div>
+          <div id="pending_cancel_touch_row">
+            <div class="field-row"><label>Cancel pending if price touches:</label><input name="cancel_if_touched_price" id="cancel_if_touched_price" type="number" step="0.0001" value="{{ cancel_if_touched_price or '' }}"></div>
           </div>
           <div class="field-row"><label>Stop loss (ticks):</label><input name="stop_loss_ticks" id="stop_loss_ticks" type="number" step="1"></div>
           <div id="risk_mode_row"> 
@@ -971,6 +974,7 @@ def index():
     timeframe = _normalize_timeframe((request.form.get("timeframe") or "").strip())
     limit_cancel_offset_raw = request.form.get("limit_cancel_offset", "").strip()
     limit_cancel_offset_pct_raw = request.form.get("limit_cancel_offset_pct", "").strip()
+    cancel_if_touched_price_raw = request.form.get("cancel_if_touched_price", "").strip()
     risk_mode = request.form.get("risk_mode", "percent").strip().lower()
     if risk_mode not in {"percent", "fixed_aud"}:
         risk_mode = "percent"
@@ -1171,10 +1175,34 @@ def index():
                 )
                 if limit_cancel_offset is not None:
                     payload["limit_cancel_offset"] = limit_cancel_offset
-                    risk_info["Limit cancel offset"] = limit_cancel_offset
+                    risk_info["Broker limit auto-cancel offset"] = limit_cancel_offset
                 if limit_cancel_offset_pct is not None:
                     payload["limit_cancel_offset_pct"] = limit_cancel_offset_pct
-                    risk_info["Limit cancel offset %"] = limit_cancel_offset_pct
+                    risk_info["Broker limit auto-cancel offset %"] = limit_cancel_offset_pct
+
+                cancel_if_touched_price = (
+                    float(cancel_if_touched_price_raw) if cancel_if_touched_price_raw else None
+                )
+                setup_reference_price = float(
+                    trade.get("setup_reference_price") or trade.get("market_price_used") or trade.get("entry_price")
+                )
+                cancel_operator = None
+                if cancel_if_touched_price is not None:
+                    if abs(cancel_if_touched_price - setup_reference_price) <= max(
+                        1e-12, abs(setup_reference_price) * 1e-6
+                    ):
+                        raise ValueError(
+                            "Cancel pending price must differ from the live setup price."
+                        )
+                    cancel_operator = (
+                        "lte" if cancel_if_touched_price < setup_reference_price else "gte"
+                    )
+                    payload["cancel_if_touched_price"] = cancel_if_touched_price
+                    payload["cancel_if_touched_operator"] = cancel_operator
+                    payload["setup_reference_price"] = setup_reference_price
+                    payload["price_source"] = str(trade.get("price_source", price_source))
+                    payload["trade_mode"] = str(trade.get("trade_mode", trade_mode))
+                    risk_info["Cancel pending if price touches"] = cancel_if_touched_price
 
                 if str(track_pending).lower() == "yes":
                     symbol_safe = "".join(
@@ -1226,6 +1254,12 @@ def index():
                         "source": "cryptocalculator-clone",
                         "limit_cancel_offset": limit_cancel_offset,
                         "limit_cancel_offset_pct": limit_cancel_offset_pct,
+                        "cancel_if_touched_price": cancel_if_touched_price,
+                        "cancel_if_touched_operator": cancel_operator,
+                        "setup_reference_price": setup_reference_price,
+                        "price_source": str(trade.get("price_source", price_source)),
+                        "trade_mode": str(trade.get("trade_mode", trade_mode)),
+                        "monitor_category": "spot" if str(trade.get("trade_mode", "")).lower() == "spot" else "linear",
                         "timeframe": timeframe or None,
                     }
 
@@ -1326,6 +1360,7 @@ def index():
         page_title=page_title,
         form_action=form_action,
         limit_cancel_offset_pct=limit_cancel_offset_pct_raw,
+        cancel_if_touched_price=cancel_if_touched_price_raw,
     )
 
 
