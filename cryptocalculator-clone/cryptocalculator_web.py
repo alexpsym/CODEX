@@ -747,7 +747,7 @@ FORM_HTML = """
   </div>
   <footer>
   </footer>
-  <script src="{{ app_root }}/static/cryptocalculator.js"></script>
+  <script src="{{ app_root }}/static/cryptocalculator.js?v={{ build_version }}"></script>
   <script>
     (() => {
       if (window.top === window.self) return;
@@ -760,6 +760,13 @@ FORM_HTML = """
       };
       window.addEventListener("load", sendHeight);
       window.addEventListener("resize", sendHeight);
+      window.addEventListener("message", (event) => {
+        if (!event || event.origin !== window.location.origin) return;
+        const data = event.data || {};
+        if (data.type === "calculator:requestHeight") {
+          sendHeight();
+        }
+      });
       if (window.ResizeObserver) {
         const ro = new ResizeObserver(() => sendHeight());
         if (document.body) ro.observe(document.body);
@@ -767,6 +774,9 @@ FORM_HTML = """
       } else {
         setInterval(sendHeight, 500);
       }
+      window.requestAnimationFrame(sendHeight);
+      window.setTimeout(sendHeight, 0);
+      window.setTimeout(sendHeight, 150);
       sendHeight();
     })();
   </script>
@@ -1304,7 +1314,7 @@ def index():
         }
         export_json = json.dumps(export_payload, indent=2)
 
-    return render_template_string(
+    html = render_template_string(
         FORM_HTML,
         summary=summary,
         error=error,
@@ -1361,7 +1371,14 @@ def index():
         form_action=form_action,
         limit_cancel_offset_pct=limit_cancel_offset_pct_raw,
         cancel_if_touched_price=cancel_if_touched_price_raw,
+        build_version=BUILD_SHA or BUILD_TIMESTAMP or "dev",
     )
+    response = Response(html)
+    if embedded or merged_shell:
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
 
 
 @app.post("/execute_now")

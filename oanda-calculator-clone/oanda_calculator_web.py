@@ -17,6 +17,7 @@ PUBLIC_WEBHOOK_URL = os.getenv(
 )
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL") or PUBLIC_WEBHOOK_URL.rsplit("/", 1)[0]
 LOGGER = logging.getLogger(__name__)
+BUILD_VERSION = os.getenv("RENDER_GIT_COMMIT") or os.getenv("DEPLOY_TIMESTAMP") or "dev"
 
 
 def _normalize_timeframe(value: object, *, max_length: int = 64) -> str:
@@ -394,7 +395,7 @@ FORM_HTML = """
     {% endif %}
   </div>
 </div>
-<script src="{{ app_root }}/static/oanda_calculator.js"></script>
+<script src="{{ app_root }}/static/oanda_calculator.js?v={{ build_version }}"></script>
 <script>
   (() => {
     if (window.top === window.self) return;
@@ -407,6 +408,13 @@ FORM_HTML = """
     };
     window.addEventListener("load", sendHeight);
     window.addEventListener("resize", sendHeight);
+    window.addEventListener("message", (event) => {
+      if (!event || event.origin !== window.location.origin) return;
+      const data = event.data || {};
+      if (data.type === "calculator:requestHeight") {
+        sendHeight();
+      }
+    });
     if (window.ResizeObserver) {
       const ro = new ResizeObserver(() => sendHeight());
       if (document.body) ro.observe(document.body);
@@ -414,6 +422,9 @@ FORM_HTML = """
     } else {
       setInterval(sendHeight, 500);
     }
+    window.requestAnimationFrame(sendHeight);
+    window.setTimeout(sendHeight, 0);
+    window.setTimeout(sendHeight, 150);
     sendHeight();
   })();
 </script>
@@ -822,7 +833,7 @@ def index():
         except Exception as exc:
             error = str(exc)
 
-    return render_template_string(
+    html = render_template_string(
         FORM_HTML,
         result=result,
         error=error,
@@ -851,7 +862,14 @@ def index():
         merged_shell=merged_shell,
         page_title=page_title,
         form_action=form_action,
+        build_version=BUILD_VERSION,
     )
+    response = make_response(html)
+    if embedded or merged_shell:
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
 
 
 @app.route("/download_specs")

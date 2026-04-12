@@ -11037,7 +11037,7 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
         <div class="embed-status" data-status="crypto">Loading crypto calculator…</div>
         <iframe
           title="Merged crypto position size calculator"
-          src="/apps/cryptocalculator-clone/?embedded=1&shell=merged&title=Position+Size+Calculator"
+          src="/apps/cryptocalculator-clone/?embedded=1&shell=merged&title=Position+Size+Calculator&v={CALCULATOR_EMBED_VERSION}"
           loading="eager"
           referrerpolicy="same-origin"
           data-frame="crypto"
@@ -11048,7 +11048,7 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
         <div class="embed-status" data-status="fx">Loading FX calculator…</div>
         <iframe
           title="Merged FX position size calculator"
-          src="/apps/oanda-calculator-clone/?embedded=1&shell=merged&title=Position+Size+Calculator"
+          src="/apps/oanda-calculator-clone/?embedded=1&shell=merged&title=Position+Size+Calculator&v={CALCULATOR_EMBED_VERSION}"
           loading="eager"
           referrerpolicy="same-origin"
           data-frame="fx"
@@ -11084,6 +11084,14 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
         const nextHeight = Math.max(300, Number(height) || 0);
         frame.style.height = `${nextHeight}px`;
       };
+      const requestFrameHeight = (asset) => {
+        const normalizedAsset = normalizeAssetKey(asset);
+        const frame = document.querySelector(`[data-frame="${normalizedAsset}"]`);
+        if (!frame || !frame.contentWindow) return;
+        try {
+          frame.contentWindow.postMessage({ type: 'calculator:requestHeight', asset: normalizedAsset }, window.location.origin);
+        } catch (_err) {}
+      };
       const measureFrameHeight = (asset) => {
         const normalizedAsset = normalizeAssetKey(asset);
         const frame = document.querySelector(`[data-frame="${normalizedAsset}"]`);
@@ -11099,9 +11107,14 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
       const setAsset = (asset) => {
         const normalizedAsset = normalizeAssetKey(asset);
         panels.forEach((panel) => panel.classList.toggle('active', panel.dataset.panel === normalizedAsset));
-        window.requestAnimationFrame(() => measureFrameHeight(normalizedAsset));
-        window.setTimeout(() => measureFrameHeight(normalizedAsset), 0);
-        window.setTimeout(() => measureFrameHeight(normalizedAsset), 150);
+        const refreshHeight = () => {
+          measureFrameHeight(normalizedAsset);
+          requestFrameHeight(normalizedAsset);
+        };
+        window.requestAnimationFrame(refreshHeight);
+        window.setTimeout(refreshHeight, 0);
+        window.setTimeout(refreshHeight, 150);
+        window.setTimeout(refreshHeight, 400);
       };
       frames.forEach((frame) => {
         const asset = normalizeAssetKey(frame.dataset.frame);
@@ -11112,8 +11125,15 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
           window.clearTimeout(timeout);
           updateStatus(asset, null);
           measureFrameHeight(asset);
-          window.requestAnimationFrame(() => measureFrameHeight(asset));
-          window.setTimeout(() => measureFrameHeight(asset), 150);
+          requestFrameHeight(asset);
+          window.requestAnimationFrame(() => {
+            measureFrameHeight(asset);
+            requestFrameHeight(asset);
+          });
+          window.setTimeout(() => {
+            measureFrameHeight(asset);
+            requestFrameHeight(asset);
+          }, 150);
         });
         frame.addEventListener('error', () => {
           window.clearTimeout(timeout);
@@ -11139,9 +11159,19 @@ CALCULATOR_PAGE_TEMPLATE = """<!doctype html>
 """
 
 
+CALCULATOR_EMBED_VERSION = os.getenv("RENDER_GIT_COMMIT") or os.getenv("DEPLOY_TIMESTAMP") or "dev"
+
+
 @app.get("/merged/calculator", response_class=HTMLResponse)
-async def merged_calculator_page() -> str:
-    return CALCULATOR_PAGE_TEMPLATE
+async def merged_calculator_page() -> HTMLResponse:
+    return HTMLResponse(
+        CALCULATOR_PAGE_TEMPLATE,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @app.get("/merged/scanner")

@@ -33,6 +33,9 @@ def test_embedded_form_action_and_heading():
     assert 'data-merged-switch-asset="crypto"' in html
     assert 'data-merged-switch-asset="fx"' in html
     assert html.index("<label>Asset:</label>") < html.index("<label>Account:</label>")
+    assert "/static/oanda_calculator.js?v=" in html
+    assert "calculator:requestHeight" in html
+    assert resp.headers["Cache-Control"].startswith("no-store")
 
 
 def test_post_includes_timeframe_in_alert_and_pending(monkeypatch):

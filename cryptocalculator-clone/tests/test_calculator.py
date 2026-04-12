@@ -257,6 +257,8 @@ def test_embedded_form_action_includes_forwarded_prefix():
         'action="/apps/cryptocalculator-clone/?embedded=1&amp;shell=merged&amp;title=Position+Size+Calculator"'
         in html
     )
+    assert '/static/cryptocalculator.js?v=' in html
+    assert resp.headers["Cache-Control"].startswith("no-store")
 
 
 def test_merged_embedded_mode_renders_asset_row_before_account() -> None:
@@ -270,6 +272,7 @@ def test_merged_embedded_mode_renders_asset_row_before_account() -> None:
     assert 'data-merged-switch-asset="crypto"' in html
     assert 'data-merged-switch-asset="fx"' in html
     assert html.index("<label>Asset:</label>") < html.index("<label>Account:</label>")
+    assert "calculator:requestHeight" in html
 
 
 def test_audusd_rate_fetch_uses_fixed_decimal_precision():
