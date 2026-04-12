@@ -227,6 +227,68 @@ def test_closed_pnl_row_backfills_tpsl_from_context(monkeypatch) -> None:
     assert row["timeframe"] == "1-hour"
 
 
+def test_closed_pnl_row_prefers_context_open_time(monkeypatch) -> None:
+    resolved_ctx = {
+        "open_time": "2026-04-11T01:20:00+00:00",
+        "created_at": "2026-04-11T01:19:00+00:00",
+        "timeframe": "4-hour",
+    }
+    monkeypatch.setattr(master_service, "_lookup_trade_context_for_journal_row", lambda _row: None)
+    monkeypatch.setattr(master_service, "_upsert_trade_context", lambda _payload: _payload)
+    row = master_service._normalize_bybit_closed_pnl_row(
+        {
+            "symbol": "DASHUSDT",
+            "orderId": "dash-order-1",
+            "createdTime": 1_775_884_246_000,
+            "updatedTime": 1_775_884_246_000,
+            "avgEntryPrice": "22",
+            "avgExitPrice": "23",
+            "closedSize": "10",
+            "closedPnl": "4.2",
+        },
+        account_mode="demo",
+        balance_after_trade=1000.0,
+        resolved_trade_context=resolved_ctx,
+    )
+    assert row is not None
+    assert row["open_time"] == "2026-04-11T01:20:00+00:00"
+    assert row["close_time"] == "2026-04-11T05:10:46+00:00"
+
+
+def test_repair_existing_bybit_row_open_time_from_context(monkeypatch) -> None:
+    bad_row = {
+        "id": "bybit:demo:closedpnl:DASHUSDT:123",
+        "source": "bybit",
+        "account": "demo",
+        "symbol": "DASHUSDT",
+        "side": "Buy",
+        "open_time": "2026-04-11T05:10:46+00:00",
+        "close_time": "2026-04-11T05:10:46+00:00",
+        "raw_refs": {"orderId": "123"},
+    }
+    monkeypatch.setattr(
+        master_service,
+        "_lookup_trade_context_for_journal_row",
+        lambda _row: {"open_time": "2026-04-11T01:20:00+00:00", "created_at": "2026-04-11T01:19:30+00:00"},
+    )
+    monkeypatch.setattr(master_service, "_load_trade_contexts", lambda: [])
+    repaired, changed = master_service._repair_persisted_bybit_open_times([bad_row])
+    assert changed == 1
+    assert repaired[0]["open_time"] == "2026-04-11T01:20:00+00:00"
+    assert repaired[0]["close_time"] == "2026-04-11T05:10:46+00:00"
+
+
+def test_same_id_upsert_overwrites_bad_open_time_without_duplicate(monkeypatch) -> None:
+    saved = {"rows": [{"id": "bybit:demo:closedpnl:DASHUSDT:123", "open_time": "2026-04-11T05:10:46+00:00"}]}
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: list(saved["rows"]))
+    monkeypatch.setattr(master_service, "_save_trading_journal", lambda rows: saved.update({"rows": list(rows)}))
+    master_service._upsert_trading_journal_rows(
+        [{"id": "bybit:demo:closedpnl:DASHUSDT:123", "open_time": "2026-04-11T01:20:00+00:00"}]
+    )
+    assert len(saved["rows"]) == 1
+    assert saved["rows"][0]["open_time"] == "2026-04-11T01:20:00+00:00"
+
+
 def test_health_and_root_head_routes_return_200() -> None:
     health = asyncio.run(master_service.healthcheck())
     root_head = asyncio.run(master_service.root_head_health())
