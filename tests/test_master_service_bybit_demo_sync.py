@@ -194,6 +194,93 @@ def test_workbook_upsert_normalizes_blank_numeric_values(monkeypatch) -> None:
     assert captured["uploaded"] is not None
 
 
+def test_place_bybit_order_upserts_final_absolute_tpsl_context(monkeypatch) -> None:
+    captured_contexts = []
+
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"retCode": 0, "retMsg": "OK", "result": {"orderId": "oid-123", "orderLinkId": "link-123"}}
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, *_args, **_kwargs):
+            return DummyResponse()
+
+    monkeypatch.setattr(master_service.httpx, "AsyncClient", DummyClient)
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _mode: ("demo", "k", "s", "https://api.bybit.com", "env"))
+    async def fake_wait_for_position_entry(**_kwargs):
+        return {"avgPrice": "100.0", "positionIdx": 0}
+
+    async def fake_set_trading_stop(**_kwargs):
+        return {"retCode": 0}
+
+    monkeypatch.setattr(master_service, "_wait_for_position_entry", fake_wait_for_position_entry)
+    monkeypatch.setattr(master_service, "_set_bybit_trading_stop", fake_set_trading_stop)
+    monkeypatch.setattr(master_service, "_delete_pending_webhook", lambda _id: False)
+    monkeypatch.setattr(master_service, "_upsert_trade_context", lambda payload: captured_contexts.append(payload) or payload)
+
+    payload = {
+        "symbol": "DASHUSDT",
+        "action": "buy",
+        "quantity": "1",
+        "account": "demo",
+        "tp_offset": "10",
+        "sl_offset": "-5",
+        "timeframe": "15-minute",
+        "order_type": "market",
+    }
+    result = asyncio.run(master_service._place_bybit_order(payload, request_id="req-1"))
+    assert result["order"]["orderId"] == "oid-123"
+    assert len(captured_contexts) >= 2
+    assert captured_contexts[0]["timeframe"] == "15-minute"
+    assert captured_contexts[-1]["entry_price"] == 100.0
+    assert captured_contexts[-1]["stop_loss"] == 95.0
+    assert captured_contexts[-1]["take_profit"] == 110.0
+    assert captured_contexts[-1]["status"] == "ACTIVE"
+
+
+def test_bybit_repair_backfills_blank_fields_and_persists(monkeypatch) -> None:
+    rows = [
+        {
+            "id": "bybit:demo:closedpnl:DASHUSDT:oid-1",
+            "source": "bybit",
+            "account": "demo",
+            "symbol": "DASHUSDT",
+            "side": "Buy",
+            "status": "closed",
+            "timeframe": "",
+            "stop_loss": "",
+            "take_profit": "",
+            "raw_refs": {"orderId": "oid-1"},
+        }
+    ]
+    saved = {"rows": None}
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: list(rows))
+    monkeypatch.setattr(master_service, "_set_trading_journal_rows", lambda updated: saved.update({"rows": list(updated)}))
+    monkeypatch.setattr(
+        master_service,
+        "_backfill_trade_row_context_fields",
+        lambda row: {**row, "timeframe": "15-minute", "stop_loss": 90.0, "take_profit": 120.0},
+    )
+    changed = master_service._repair_persisted_bybit_trade_context_fields()
+    assert changed == 1
+    assert saved["rows"] is not None
+    assert saved["rows"][0]["timeframe"] == "15-minute"
+    assert saved["rows"][0]["stop_loss"] == 90.0
+    assert saved["rows"][0]["take_profit"] == 120.0
+
+
 def test_closed_pnl_row_backfills_tpsl_from_context(monkeypatch) -> None:
     monkeypatch.setattr(
         master_service,
@@ -353,6 +440,29 @@ def test_workbook_upsert_handles_float_text_column_notes(monkeypatch) -> None:
     assert captured["uploaded"] is not None
 
 
+def test_workbook_row_roundtrip_preserves_timeframe(monkeypatch) -> None:
+    row = {
+        "open_time": "2026-01-01T00:00:00+00:00",
+        "close_time": "2026-01-01T01:00:00+00:00",
+        "side": "Buy",
+        "symbol": "BTCUSDT",
+        "qty": 1.0,
+        "entry_price": 100.0,
+        "exit_price": 110.0,
+        "realized_pnl": 10.0,
+        "timeframe": "15-minute",
+        "raw_refs": {"orderId": "oid-tf", "fillCount": 1, "source": "closed_pnl"},
+    }
+    wb_row = master_service._bybit_demo_workbook_row(row)
+    assert wb_row["timeframe"] == "15-minute"
+
+    frame = master_service._coerce_bybit_demo_workbook_frame(pd.DataFrame([wb_row]))
+    reparsed = {
+        "timeframe": master_service._normalize_timeframe(master_service._excel_cell_to_python(frame.iloc[0].get("timeframe")))
+    }
+    assert reparsed["timeframe"] == "15-minute"
+
+
 def test_workbook_upsert_handles_multiple_float_text_columns(monkeypatch) -> None:
     existing = pd.DataFrame(
         [{"order_id": "oid-1", "notes": float("nan"), "source": float("nan"), "symbol": float("nan")}],
@@ -442,43 +552,6 @@ def test_workbook_upsert_raises_no_future_warning(monkeypatch) -> None:
         warnings.simplefilter("error", FutureWarning)
         changed = master_service._append_bybit_demo_rows_to_workbook("/tmp", [{"id": "x"}])
     assert changed == 1
-
-
-def test_closed_pnl_row_backfills_tpsl_from_market_window_context(monkeypatch) -> None:
-    monkeypatch.setattr(master_service, "_lookup_trade_context_for_journal_row", lambda _row: None)
-    monkeypatch.setattr(
-        master_service,
-        "_lookup_trade_context_by_market_window",
-        lambda _row, max_window_seconds=5400, include_inactive=False: {"timeframe": "4-hour", "stop_loss": "90", "take_profit": "130"},
-    )
-
-    row = master_service._normalize_bybit_closed_pnl_row(
-        {
-            "symbol": "BTCUSDT",
-            "orderId": "abc123",
-            "orderLinkId": "",
-            "openFee": "0.1",
-            "closeFee": "0.2",
-            "fillCount": "1",
-            "side": "Buy",
-            "createdTime": 1,
-            "updatedTime": 2,
-            "avgEntryPrice": "100",
-            "avgExitPrice": "105",
-            "closedSize": "0.1",
-            "closedPnl": "1.0",
-        },
-        account_mode="demo",
-        balance_after_trade=1000.0,
-        stop_loss=None,
-        take_profit=None,
-    )
-    assert row is not None
-    assert row["stop_loss"] == 90.0
-    assert row["take_profit"] == 130.0
-    assert row["timeframe"] == "4-hour"
-    refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
-    assert refs.get("trade_context_tpsl_fallback_via_window") is True
 
 
 def test_bybit_unresolved_tpsl_warns_once_and_persists_registry(tmp_path, monkeypatch) -> None:

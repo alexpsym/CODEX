@@ -188,6 +188,7 @@ BYBIT_DEMO_WORKBOOK_COLUMNS = [
     "commission",
     "net_profit",
     "balance_after_trade",
+    "timeframe",
     "currency",
     "notes",
     "order_id",
@@ -199,6 +200,7 @@ BYBIT_DEMO_WORKBOOK_TEXT_COLUMNS = {
     "closing_time",
     "type_buy_sell",
     "symbol",
+    "timeframe",
     "currency",
     "notes",
     "order_id",
@@ -1390,7 +1392,7 @@ def _merge_trading_journal_row(
             merged[key] = {**existing_metrics, **incoming_metrics}
             continue
         if key in preserve_when_incoming_null:
-            if value is None and merged.get(key) is not None:
+            if (value is None or (isinstance(value, str) and value.strip() == "")) and merged.get(key) is not None:
                 continue
         merged[key] = value
     return merged
@@ -1879,6 +1881,32 @@ def _repair_persisted_oanda_trade_rows() -> int:
         if updated != row:
             changed += 1
         repaired.append(updated)
+    if changed:
+        _set_trading_journal_rows(repaired)
+    return changed
+
+
+def _repair_persisted_bybit_trade_context_fields() -> int:
+    rows = _get_trading_journal_rows()
+    if not rows:
+        return 0
+    changed = 0
+    repaired: List[Dict[str, object]] = []
+    for row in rows:
+        if not isinstance(row, dict) or str(row.get("source") or "").strip().lower() != "bybit":
+            repaired.append(row)
+            continue
+        if (
+            _normalize_timeframe(row.get("timeframe"))
+            and row.get("stop_loss") not in (None, "")
+            and row.get("take_profit") not in (None, "")
+        ):
+            repaired.append(row)
+            continue
+        patched = _backfill_trade_row_context_fields(row)
+        if patched != row:
+            changed += 1
+        repaired.append(patched)
     if changed:
         _set_trading_journal_rows(repaired)
     return changed
@@ -6974,6 +7002,7 @@ def _save_pending_webhooks(items: List[Dict[str, object]]) -> None:
         json.dumps(items, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+    _schedule_dropbox_upload_state_backup()
 
 
 def _normalize_pending_webhooks(items: object) -> List[Dict[str, object]]:
@@ -7120,6 +7149,7 @@ def _load_trade_contexts() -> List[Dict[str, object]]:
 
 def _save_trade_contexts(items: List[Dict[str, object]]) -> None:
     _save_json_file(TRADE_CONTEXTS_PATH, {"items": items, "updated_at": _utc_now_iso()})
+    _schedule_dropbox_upload_state_backup()
 
 
 def _prune_trade_contexts(items: List[Dict[str, object]]) -> List[Dict[str, object]]:
@@ -8232,8 +8262,11 @@ async def _place_bybit_order(
             "instrument": symbol,
             "side": side,
             "order_type": order_type,
+            "entry_price": planned_entry_price if planned_entry_price is not None else price_val,
             "timeframe": payload.get("timeframe"),
+            "created_at": request_open_time_iso,
             "open_time": _epoch_or_iso_to_iso(payload.get("opened_at")) or request_open_time_iso,
+            "opened_at": _epoch_or_iso_to_iso(payload.get("opened_at")) or request_open_time_iso,
             "order_id": str(order_id or "").strip(),
             "order_link_id": str(order_result.get("orderLinkId") or body.get("orderLinkId") or "").strip(),
             "status": "ACTIVE",
@@ -8356,6 +8389,26 @@ async def _place_bybit_order(
                     stop_loss=_parse_bybit_price_level(sl_target),
                     source="trading_stop_computed",
                 )
+            _upsert_trade_context(
+                {
+                    "pending_webhook_id": str(payload.get("pending_webhook_id") or "").strip(),
+                    "broker": "bybit",
+                    "account": account,
+                    "category": category,
+                    "instrument": symbol,
+                    "side": side,
+                    "order_type": order_type,
+                    "entry_price": entry_price,
+                    "stop_loss": sl_target,
+                    "take_profit": tp_target,
+                    "timeframe": payload.get("timeframe"),
+                    "open_time": _epoch_or_iso_to_iso(payload.get("opened_at")) or request_open_time_iso,
+                    "opened_at": _epoch_or_iso_to_iso(payload.get("opened_at")) or request_open_time_iso,
+                    "order_id": str(order_id or "").strip(),
+                    "order_link_id": str(order_result.get("orderLinkId") or body.get("orderLinkId") or "").strip(),
+                    "status": "ACTIVE",
+                }
+            )
         except Exception as exc:
             tpsl_error = str(exc)
             BYBIT_LOGGER.exception(
@@ -9546,6 +9599,10 @@ def _bybit_demo_workbook_row(row: Dict[str, object]) -> Dict[str, object]:
         "commission": row.get("commission"),
         "net_profit": row.get("realized_pnl"),
         "balance_after_trade": row.get("balance_after_trade"),
+        "timeframe": _normalize_timeframe(
+            row.get("timeframe")
+            or ((row.get("metrics") or {}).get("timeframe") if isinstance(row.get("metrics"), dict) else "")
+        ),
         "currency": row.get("realized_pnl_currency") or "USDT",
         "notes": row.get("notes") or "",
         "order_id": refs.get("orderId"),
@@ -9602,6 +9659,7 @@ def _sanitize_bybit_demo_workbook(active_folder: str) -> Dict[str, int]:
                 "realized_pnl": _excel_cell_to_python(wb_row.get("net_profit")),
                 "net_profit": _excel_cell_to_python(wb_row.get("net_profit")),
                 "balance_after_trade": _excel_cell_to_python(wb_row.get("balance_after_trade")),
+                "timeframe": _normalize_timeframe(_excel_cell_to_python(wb_row.get("timeframe"))),
                 "notes": _excel_cell_to_python(wb_row.get("notes")),
                 "status": "closed",
                 "raw_refs": {
@@ -13491,6 +13549,7 @@ async def list_open_orders() -> JSONResponse:
 @app.get("/api/recent-trades")
 async def recent_trades(limit: int = 25) -> JSONResponse:
     _repair_persisted_oanda_trade_rows()
+    _repair_persisted_bybit_trade_context_fields()
     repaired_open_rows, repaired_open_count = _repair_persisted_bybit_open_times(_get_trading_journal_rows())
     if repaired_open_count:
         _set_trading_journal_rows(repaired_open_rows)
