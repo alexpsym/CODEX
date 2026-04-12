@@ -2,6 +2,8 @@ import asyncio
 import importlib.util
 import inspect
 import json
+
+import pytest
 import sys
 from pathlib import Path
 
@@ -165,32 +167,21 @@ def test_trade_chart_html_is_image_only(monkeypatch) -> None:
     assert "Timeframe rendered" not in html
 
 
-def test_merged_calculator_contains_embedded_asset_calculators() -> None:
-    html = master_service.CALCULATOR_PAGE_TEMPLATE
-    assert html.count("<h1>Position Size Calculator</h1>") == 1
-    assert "Open Crypto Calculator" not in html
-    assert "Open FX Calculator" not in html
-    assert "Crypto Position Size" not in html
-    assert "FX Position Size" not in html
-    assert "Crypto Position Size Calculator" not in html
-    assert "OANDA Position Size Calculator" not in html
-    assert "/apps/cryptocalculator-clone/?embedded=1&shell=merged&title=Position+Size+Calculator&v={CALCULATOR_EMBED_VERSION}" in html
-    assert "/apps/oanda-calculator-clone/?embedded=1&shell=merged&title=Position+Size+Calculator&v={CALCULATOR_EMBED_VERSION}" in html
-    assert "calculator:switchAsset" in html
-    assert "calculator:height" in html
-    assert "calculator:requestHeight" in html
-    assert "window.addEventListener('message'" in html
+def test_scripts_listing_excludes_calculator_entries() -> None:
+    payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
+    names = {str(item.get("name")) for item in payload}
+    labels = {str(item.get("label")) for item in payload}
+    open_urls = {str(item.get("open_url") or "") for item in payload}
+
+    assert "calculator" not in names
+    assert "cryptocalculator-clone" not in names
+    assert "oanda-calculator-clone" not in names
+    assert "/merged/calculator" not in open_urls
+    assert "Calculator" not in labels
 
 
-def test_merged_calculator_defaults_to_crypto_with_fx_toggle_wiring() -> None:
-    html = master_service.CALCULATOR_PAGE_TEMPLATE
-    assert '<section class="asset-panel active" data-panel="crypto">' in html
-    assert '<section class="asset-panel" data-panel="fx">' in html
-    assert "setAsset('crypto')" in html
-    assert "setAsset(data.asset);" in html
-    assert "normalizeAssetKey" in html
-    assert "key === 'fx' || key === 'oanda'" in html
-    assert "requestFrameHeight" in html
-    assert 'loading="eager"' in html
-    assert "Open Crypto Calculator" not in html
-    assert "Open FX Calculator" not in html
+def test_merged_calculator_route_returns_gone() -> None:
+    with pytest.raises(master_service.HTTPException) as exc:
+        asyncio.run(master_service.merged_calculator_page())
+    assert exc.value.status_code == 410
+    assert "removed" in str(exc.value.detail).lower()

@@ -5,17 +5,11 @@ import json
 import os
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Dict, List, Optional
 
 import requests
 
-ROOT = Path(__file__).resolve().parents[1]
-OANDA_HELPER_DIR = ROOT / "oanda-calculator-clone"
-import sys
-sys.path.insert(0, str(OANDA_HELPER_DIR))
-import oanda_api  # type: ignore
-sys.path.pop(0)
+from shared import oanda_api
 
 MODE = (os.getenv("OANDA_MODE") or "demo").strip().lower()
 INSTRUMENT = (os.getenv("BOUNCE_OANDA_INSTRUMENT") or os.getenv("BOUNCE_SYMBOLS") or "EUR_USD").strip().upper().replace("/", "_")

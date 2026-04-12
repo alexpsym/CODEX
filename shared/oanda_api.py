@@ -1,8 +1,6 @@
 """Helper functions for interacting with the OANDA REST API.
 
-These utilities were formerly part of the deleted CLI module. They are used by
-``oanda_calculator_web.py`` to fetch account data and build orders without
-requiring the command line script.
+These utilities are shared by OANDA-related services in this repository.
 """
 
 from __future__ import annotations
@@ -13,8 +11,8 @@ import os
 from dotenv import load_dotenv
 from pathlib import Path
 
-# Load environment variables from a dedicated OANDA env file so the calculator
-# picks up credentials without requiring them to be exported in the shell. The
+# Load environment variables from a dedicated OANDA env file so shared helpers
+# pick up credentials without requiring them to be exported in the shell. The
 # path is anchored to this module's directory and can be overridden with the
 # OANDA_ENV_FILE environment variable—for example ``OANDA_ENV_FILE=E:\\ENV\\oanda.env``
 # on Windows. Relative or ``~``-prefixed paths supplied via OANDA_ENV_FILE are
@@ -23,7 +21,7 @@ from pathlib import Path
 MODULE_PATH = Path(__file__).resolve()
 MODULE_DIR = MODULE_PATH.parent
 # The project's ``oanda.env`` file now lives in ``E:\\ENV\\oanda.env``. Use
-# that as the default so Windows users launching the calculator from anywhere
+# that as the default so Windows users launching tools from anywhere
 # still load the credentials without relying on the repo layout.
 DEFAULT_ENV_PATH = Path("E:/ENV/oanda.env")
 
