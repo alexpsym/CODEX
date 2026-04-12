@@ -175,8 +175,12 @@ def test_merged_calculator_contains_embedded_asset_calculators() -> None:
     assert "Open FX Calculator" not in html
     assert "Crypto Position Size" not in html
     assert "FX Position Size" not in html
+    assert "Crypto Position Size Calculator" not in html
+    assert "OANDA Position Size Calculator" not in html
     assert "/apps/cryptocalculator-clone/?embedded=1&shell=merged&title=Position+Size+Calculator" in html
     assert "/apps/oanda-calculator-clone/?embedded=1&shell=merged&title=Position+Size+Calculator" in html
+    assert "calculator:height" in html
+    assert "window.addEventListener('message'" in html
 
 
 def test_merged_calculator_defaults_to_crypto_with_fx_toggle_wiring() -> None:

@@ -125,6 +125,15 @@ function toggleRiskMode() {
   }
 }
 
+function toggleWebhookSection() {
+  const trackPending = document.getElementById('track_pending');
+  const webhookSection = document.getElementById('webhook_section');
+  if (!trackPending || !webhookSection) {
+    return;
+  }
+  webhookSection.style.display = trackPending.value === 'yes' ? 'block' : 'none';
+}
+
 const OANDA_SPECS_HIDE_KEYS = new Set([
   'query',
   '_units',
@@ -414,7 +423,7 @@ function placeLimitOrder() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  ['account_mode', 'side', 'order_type', 'risk_mode', 'track_pending'].forEach(bindButtonGroup);
+  ['account_mode', 'side', 'order_type', 'risk_mode', 'track_pending', 'timeframe'].forEach(bindButtonGroup);
   const orderType = document.getElementById('order_type');
   if (orderType) {
     orderType.addEventListener('change', toggleEntry);
@@ -425,6 +434,11 @@ document.addEventListener('DOMContentLoaded', () => {
     riskMode.addEventListener('change', toggleRiskMode);
     toggleRiskMode();
   }
+  const trackPending = document.getElementById('track_pending');
+  if (trackPending) {
+    trackPending.addEventListener('change', toggleWebhookSection);
+  }
+  toggleWebhookSection();
   updateExecuteButtons();
 
   const instrumentEl = document.getElementById('instrument');

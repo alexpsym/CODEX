@@ -719,6 +719,15 @@ function updateRiskControls() {
   }
 }
 
+function toggleWebhookSection() {
+  const trackPending = document.getElementById('track_pending');
+  const webhookSection = document.getElementById('webhook_section');
+  if (!trackPending || !webhookSection) {
+    return;
+  }
+  webhookSection.style.display = trackPending.value === 'yes' ? 'block' : 'none';
+}
+
 function renderOptionsMinQty(base) {
   const note = document.getElementById('options_min_qty_note');
   if (!note) {
@@ -914,7 +923,7 @@ function placeLimitOrder() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  ['trade_type', 'account_mode', 'direction', 'order_type', 'options_order_type', 'options_type', 'options_side', 'price_source', 'execution_exchange', 'options_base', 'track_pending', 'risk_mode', 'options_expiry_mode', 'options_strike_mode', 'options_quantity_mode'].forEach(bindButtonGroup);
+  ['trade_type', 'account_mode', 'direction', 'order_type', 'options_order_type', 'options_type', 'options_side', 'price_source', 'execution_exchange', 'options_base', 'track_pending', 'risk_mode', 'options_expiry_mode', 'options_strike_mode', 'options_quantity_mode', 'timeframe'].forEach(bindButtonGroup);
   const ot = document.getElementById('order_type');
   if (ot) {
     ot.addEventListener('change', toggleEntry);
@@ -945,7 +954,12 @@ document.addEventListener('DOMContentLoaded', () => {
   if (riskModeEl) {
     riskModeEl.addEventListener('change', updateRiskControls);
   }
+  const trackPending = document.getElementById('track_pending');
+  if (trackPending) {
+    trackPending.addEventListener('change', toggleWebhookSection);
+  }
   updateRiskControls();
+  toggleWebhookSection();
   const tradeType = document.getElementById('trade_type');
   if (tradeType) {
     tradeType.addEventListener('change', updateTradeType);
