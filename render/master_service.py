@@ -19,7 +19,7 @@ import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
 from dateutil.relativedelta import relativedelta
 from pathlib import Path
@@ -123,7 +123,6 @@ HIDDEN_SCRIPTS = {
 RETIRED_SCRIPT_NAMES = {
     "cryptocalculator-clone",
     "oanda-calculator-clone",
-    "calculator",
     "oanda_swap_rates",
     "oanda_swaprates",
     "oanda-swaprates",
@@ -3878,6 +3877,7 @@ FRIENDLY_SCRIPT_LABELS: Dict[str, str] = {
 }
 
 MERGED_SCRIPT_BUTTONS: List[Dict[str, object]] = [
+    {"id": "calculator", "name": "calculator", "label": "Calculator", "open_url": "/merged/calculator"},
     {"id": "history", "name": "history", "label": "History", "open_url": "/merged/history"},
     {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor"},
     {"id": "bounce-trader", "name": "bounce-trader", "label": "Bounce Trader", "open_url": "/merged/bounce-trader"},
@@ -5764,7 +5764,7 @@ def _parse_optional_float(value: object, field_name: str) -> Optional[float]:
         raise ValueError(f"OANDA payload {field_name} must be numeric.") from exc
 
 
-_OANDA_INSTRUMENT_META_CACHE: Dict[tuple[str, str], Dict[str, int]] = {}
+_OANDA_INSTRUMENT_META_CACHE: Dict[tuple[str, str], Dict[str, object]] = {}
 _OANDA_INSTRUMENT_META_CACHE_TS: Dict[tuple[str, str], float] = {}
 _OANDA_INSTRUMENT_META_TTL_SECONDS = 12 * 60 * 60  # 12 hours
 
@@ -5790,7 +5790,7 @@ async def _fetch_oanda_instrument_meta(
     api_key: str,
     symbol: str,
     mode: str,
-) -> Dict[str, int]:
+) -> Dict[str, object]:
     if not symbol:
         raise ValueError("OANDA instrument name missing; cannot determine precision.")
 
@@ -5831,6 +5831,8 @@ async def _fetch_oanda_instrument_meta(
                 meta = {
                     "displayPrecision": int(instrument.get("displayPrecision")),
                     "tradeUnitsPrecision": int(instrument.get("tradeUnitsPrecision", 0)),
+                    "pipLocation": int(instrument.get("pipLocation", 0)),
+                    "minimumTradeSize": str(instrument.get("minimumTradeSize") or "0"),
                 }
                 _OANDA_INSTRUMENT_META_CACHE[cache_key] = meta
                 _OANDA_INSTRUMENT_META_CACHE_TS[cache_key] = now
@@ -10984,14 +10986,408 @@ def _merged_shell(title: str, options: List[Tuple[str, str]]) -> str:
 <script>const sel=document.getElementById('sel');const frame=document.getElementById('frame');sel.addEventListener('change',()=>frame.src=sel.value);</script></body></html>"""
 
 
+CALCULATOR_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Position Size Calculator</title>
+  <style>
+    body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}
+    .wrap{max-width:1100px;margin:0 auto;padding:18px}
+    .panel{background:#111827;border:1px solid #1f2937;border-radius:14px;padding:16px}
+    .row{display:flex;flex-wrap:wrap;gap:10px;align-items:end;margin-bottom:10px}
+    .group{display:flex;gap:8px;flex-wrap:wrap}
+    label{display:flex;flex-direction:column;gap:6px;font-weight:700;color:#cbd5e1}
+    input,select,button{background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:10px;padding:8px 10px}
+    button{cursor:pointer;font-weight:700}
+    .toggle button.active{background:#2563eb;border-color:#3b82f6}
+    .error{color:#fca5a5;min-height:1.2em}
+    .ok{color:#86efac}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px}
+    .card{background:#0f172a;border:1px solid #1f2937;border-radius:10px;padding:10px}
+    .muted{color:#94a3b8;font-size:0.92rem}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="panel">
+      <h2 style="margin-top:0">Position Size Calculator</h2>
+      <div class="row">
+        <div class="group toggle" id="account-toggle"><button data-v="live" class="active">Live</button><button data-v="demo">Demo</button></div>
+        <div class="group toggle" id="asset-toggle"><button data-v="crypto" class="active">Crypto</button><button data-v="fx">FX</button></div>
+        <div class="group toggle" id="side-toggle"><button data-v="buy" class="active">Buy</button><button data-v="sell">Sell</button></div>
+        <div class="group toggle" id="order-toggle"><button data-v="market" class="active">Market</button><button data-v="limit">Limit</button></div>
+        <div class="group toggle" id="risk-toggle"><button data-v="fixed_aud" class="active">Fixed AUD</button><button data-v="percent">%</button></div>
+      </div>
+      <div class="row">
+        <label>Symbol<input id="calc-symbol" placeholder="BTC or EUR_USD"/></label>
+        <label id="limit-wrap" style="display:none">Limit entry price<input id="calc-limit" type="number" step="any"/></label>
+        <label>Stop loss ticks<input id="calc-sl-ticks" type="number" min="1" step="1" value="10"/></label>
+        <label>Take profit ticks<input id="calc-tp-ticks" type="number" min="1" step="1" value="20"/></label>
+        <label>Risk value<input id="calc-risk" type="number" min="0.0001" step="any" value="100"/></label>
+        <label>Timeframe (optional)<input id="calc-timeframe" placeholder="15m"/></label>
+      </div>
+      <div class="row">
+        <button id="calc-quote" type="button">Calculate</button>
+        <button id="calc-submit" type="button">Submit Order</button>
+      </div>
+      <div id="calc-error" class="error"></div>
+      <div id="calc-success" class="ok"></div>
+      <div class="grid" id="calc-results"></div>
+      <p class="muted">10 ticks always means 10 × broker minimum tick size.</p>
+    </div>
+  </div>
+  <script src="/static/calculator.js"></script>
+</body>
+</html>"""
+
+
 @app.get("/merged/calculator")
-async def merged_calculator_page() -> JSONResponse:
-    raise HTTPException(status_code=410, detail="Position size calculator has been removed.")
+async def merged_calculator_page() -> HTMLResponse:
+    return HTMLResponse(CALCULATOR_TEMPLATE)
 
 
 @app.get("/merged/scanner")
 async def merged_scanner_redirect() -> Response:
     return RedirectResponse(url="/merged/monitor", status_code=307)
+
+
+def _dec(value: object, field: str) -> Decimal:
+    try:
+        return Decimal(str(value))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"{field} must be numeric.") from exc
+
+
+def _floor_to_step(value: Decimal, step: Decimal) -> Decimal:
+    if step <= 0:
+        return value
+    return (value / step).to_integral_value(rounding=ROUND_DOWN) * step
+
+
+def _floor_to_precision(value: Decimal, precision: int) -> Decimal:
+    quant = Decimal("1").scaleb(-max(0, int(precision)))
+    return value.quantize(quant, rounding=ROUND_DOWN)
+
+
+def _fmt_dec(value: Decimal) -> str:
+    text = format(value, "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+async def _fetch_bybit_balance_usdt(account: str) -> Decimal:
+    _mode, api_key, api_secret, base_url, _src = resolve_bybit_credentials_for(account)
+    if not api_key or not api_secret:
+        raise HTTPException(status_code=500, detail="Bybit credentials are missing for selected account.")
+    payload = await _bybit_signed_get(
+        base_url=base_url,
+        api_key=api_key,
+        api_secret=api_secret,
+        path="/v5/account/wallet-balance",
+        params={"accountType": "UNIFIED"},
+    )
+    rows = (payload.get("result") or {}).get("list") or []
+    for row in rows:
+        for coin in row.get("coin", []) or []:
+            if str(coin.get("coin") or "").upper() == "USDT":
+                val = coin.get("availableToTrade") or coin.get("walletBalance")
+                if val is not None:
+                    return Decimal(str(val))
+        total = row.get("totalEquity")
+        if total is not None:
+            return Decimal(str(total))
+    raise HTTPException(status_code=502, detail="Bybit balance unavailable.")
+
+
+@app.get("/api/calculator/bootstrap")
+async def calculator_bootstrap() -> JSONResponse:
+    return JSONResponse(
+        {
+            "accounts": ["live", "demo"],
+            "assets": ["crypto", "fx"],
+            "sides": ["buy", "sell"],
+            "order_types": ["market", "limit"],
+            "risk_modes": ["fixed_aud", "percent"],
+        }
+    )
+
+
+@app.get("/api/calculator/instrument")
+async def calculator_instrument(asset: str, account: str, symbol: str) -> JSONResponse:
+    asset_norm = str(asset or "").strip().lower()
+    account_norm = str(account or "live").strip().lower()
+    if asset_norm == "crypto":
+        _mode, _key, _secret, base_url, _src = resolve_bybit_credentials_for(account_norm)
+        choices = await _bybit_get_symbols_by_category_cached(base_url, "linear")
+        resolved = resolve_bybit_symbol_from_choices(symbol, choices)
+        if not resolved or not resolved.get("resolved_symbol"):
+            raise HTTPException(status_code=404, detail=f"Could not resolve Bybit symbol: {symbol}")
+        resolved_symbol = str(resolved["resolved_symbol"]).upper()
+        payload = await _bybit_get_async(
+            base_url,
+            "/v5/market/instruments-info",
+            {"category": "linear", "symbol": resolved_symbol},
+        )
+        rows = (payload.get("result") or {}).get("list") or []
+        if not rows:
+            raise HTTPException(status_code=502, detail=f"Bybit instrument meta unavailable for {resolved_symbol}.")
+        item = rows[0]
+        return JSONResponse(
+            {
+                "broker": "bybit",
+                "account": account_norm,
+                "symbol": resolved_symbol,
+                "tick_size": item.get("priceFilter", {}).get("tickSize"),
+                "qty_step": item.get("lotSizeFilter", {}).get("qtyStep"),
+                "min_qty": item.get("lotSizeFilter", {}).get("minOrderQty"),
+            }
+        )
+
+    if asset_norm == "fx":
+        try:
+            cfg = _get_oanda_config(account_norm)
+            resolved_symbol = normalize_oanda_symbol_query(symbol)
+            meta = await _fetch_oanda_instrument_meta(
+                base_url=cfg["base_url"],
+                account_id=cfg["account_id"],
+                api_key=cfg["token"],
+                symbol=resolved_symbol,
+                mode=account_norm,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(
+            {
+                "broker": "oanda",
+                "account": account_norm,
+                "symbol": resolved_symbol,
+                "displayPrecision": meta.get("displayPrecision"),
+                "tradeUnitsPrecision": meta.get("tradeUnitsPrecision"),
+                "pipLocation": meta.get("pipLocation"),
+                "minimumTradeSize": meta.get("minimumTradeSize"),
+            }
+        )
+    raise HTTPException(status_code=400, detail="asset must be crypto or fx.")
+
+
+@app.post("/api/calculator/quote")
+async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSONResponse:
+    asset = str(payload.get("asset") or "").strip().lower()
+    account = str(payload.get("account") or "live").strip().lower()
+    side = str(payload.get("side") or "buy").strip().lower()
+    order_type = str(payload.get("order_type") or "market").strip().lower()
+    risk_mode = str(payload.get("risk_mode") or "fixed_aud").strip().lower()
+    symbol_in = str(payload.get("symbol") or "").strip()
+    if not symbol_in:
+        raise HTTPException(status_code=400, detail="symbol is required.")
+    if side not in {"buy", "sell"}:
+        raise HTTPException(status_code=400, detail="side must be buy or sell.")
+    if order_type not in {"market", "limit"}:
+        raise HTTPException(status_code=400, detail="order_type must be market or limit.")
+    stop_ticks = _dec(payload.get("stop_loss_ticks"), "stop_loss_ticks")
+    tp_ticks = _dec(payload.get("take_profit_ticks"), "take_profit_ticks")
+    if stop_ticks <= 0 or tp_ticks <= 0:
+        raise HTTPException(status_code=400, detail="stop_loss_ticks and take_profit_ticks must be greater than zero.")
+    risk_val = _dec(payload.get("risk_value"), "risk_value")
+    if risk_val <= 0:
+        raise HTTPException(status_code=400, detail="risk_value must be greater than zero.")
+    limit_entry = payload.get("entry_price")
+    if order_type == "limit" and (limit_entry is None or str(limit_entry).strip() == ""):
+        raise HTTPException(status_code=400, detail="Limit orders require entry_price.")
+
+    if asset == "crypto":
+        _mode, api_key, api_secret, base_url, _src = resolve_bybit_credentials_for(account)
+        if not api_key or not api_secret:
+            raise HTTPException(status_code=500, detail="Bybit credentials are missing for selected account.")
+        choices = await _bybit_get_symbols_by_category_cached(base_url, "linear")
+        resolved = resolve_bybit_symbol_from_choices(symbol_in, choices)
+        resolved_symbol = str((resolved or {}).get("resolved_symbol") or "").upper()
+        if not resolved_symbol:
+            raise HTTPException(status_code=404, detail=f"Could not resolve Bybit symbol: {symbol_in}")
+        inst_payload = await _bybit_get_async(base_url, "/v5/market/instruments-info", {"category": "linear", "symbol": resolved_symbol})
+        inst_rows = (inst_payload.get("result") or {}).get("list") or []
+        if not inst_rows:
+            raise HTTPException(status_code=502, detail="Bybit instrument meta fetch failed.")
+        inst = inst_rows[0]
+        tick_size = Decimal(str(inst.get("priceFilter", {}).get("tickSize") or "0"))
+        qty_step = Decimal(str(inst.get("lotSizeFilter", {}).get("qtyStep") or "0"))
+        min_qty = Decimal(str(inst.get("lotSizeFilter", {}).get("minOrderQty") or "0"))
+        if tick_size <= 0 or qty_step <= 0:
+            raise HTTPException(status_code=502, detail="Bybit instrument constraints are invalid.")
+        tickers = await _bybit_get_async(base_url, "/v5/market/tickers", {"category": "linear", "symbol": resolved_symbol})
+        ticker_rows = (tickers.get("result") or {}).get("list") or []
+        if not ticker_rows:
+            raise HTTPException(status_code=502, detail="Bybit ticker fetch failed.")
+        row = ticker_rows[0]
+        bid = Decimal(str(row.get("bid1Price") or row.get("lastPrice") or "0"))
+        ask = Decimal(str(row.get("ask1Price") or row.get("lastPrice") or "0"))
+        if bid <= 0 or ask <= 0:
+            raise HTTPException(status_code=502, detail="Bybit pricing unavailable.")
+        entry = _dec(limit_entry, "entry_price") if order_type == "limit" else (ask if side == "buy" else bid)
+        if entry <= 0:
+            raise HTTPException(status_code=400, detail="entry_price must be greater than zero.")
+        stop_distance = stop_ticks * tick_size
+        target_distance = tp_ticks * tick_size
+        sl = (entry - stop_distance) if side == "buy" else (entry + stop_distance)
+        tp = (entry + target_distance) if side == "buy" else (entry - target_distance)
+        fee_payload = await _bybit_signed_get(
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            path="/v5/account/fee-rate",
+            params={"category": "linear", "symbol": resolved_symbol},
+        )
+        fee_row = ((fee_payload.get("result") or {}).get("list") or [{}])[0]
+        maker = Decimal(str(fee_row.get("makerFeeRate") or "0"))
+        taker = Decimal(str(fee_row.get("takerFeeRate") or "0"))
+        open_fee = taker if order_type == "market" else max(maker, taker)
+        close_fee = taker
+        aud_usd = Decimal(str((await _fetch_oanda_mid_prices_batch(cfg=_get_oanda_config("live"), instruments=["AUD_USD"])).get("AUD_USD") or 0))
+        if aud_usd <= 0:
+            raise HTTPException(status_code=502, detail="AUD_USD conversion fetch failed.")
+        risk_aud = risk_val
+        if risk_mode == "percent":
+            balance_usdt = await _fetch_bybit_balance_usdt(account)
+            risk_aud = (balance_usdt / aud_usd) * (risk_val / Decimal("100"))
+        risk_usdt = risk_aud * aud_usd
+        loss_per_unit = abs(entry - sl) + (entry * open_fee) + (sl * close_fee)
+        if loss_per_unit <= 0:
+            raise HTTPException(status_code=400, detail="Invalid stop distance produced zero loss per unit.")
+        qty_raw = risk_usdt / loss_per_unit
+        qty = _floor_to_step(qty_raw, qty_step)
+        if qty < min_qty:
+            raise HTTPException(status_code=400, detail="Calculated quantity is below minimum size.")
+        total_loss_usdt = qty * loss_per_unit
+        reward_usdt = qty * (abs(tp - entry) - (entry * open_fee) - (tp * close_fee))
+        return JSONResponse(
+            {
+                "broker": "bybit",
+                "symbol": resolved_symbol,
+                "tick_size": _fmt_dec(tick_size),
+                "entry_price": _fmt_dec(entry),
+                "stop_price": _fmt_dec(sl),
+                "target_price": _fmt_dec(tp),
+                "quantity": _fmt_dec(qty),
+                "notional": _fmt_dec(qty * entry),
+                "estimated_fees_or_spread_aud": _fmt_dec(((qty * entry * open_fee) + (qty * sl * close_fee)) / aud_usd),
+                "estimated_total_loss_aud": _fmt_dec(total_loss_usdt / aud_usd),
+                "estimated_reward_aud": _fmt_dec(max(Decimal("0"), reward_usdt / aud_usd)),
+                "rr": _fmt_dec((abs(tp - entry) / abs(entry - sl)) if abs(entry - sl) > 0 else Decimal("0")),
+            }
+        )
+
+    if asset == "fx":
+        try:
+            cfg = _get_oanda_config(account)
+        except ValueError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        symbol = normalize_oanda_symbol_query(symbol_in)
+        try:
+            meta = await _fetch_oanda_instrument_meta(
+                base_url=cfg["base_url"],
+                account_id=cfg["account_id"],
+                api_key=cfg["token"],
+                symbol=symbol,
+                mode=account,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        display_precision = int(meta["displayPrecision"])
+        units_precision = int(meta.get("tradeUnitsPrecision", 0))
+        min_trade_size = Decimal(str(meta.get("minimumTradeSize") or "0"))
+        tick_size = Decimal("1").scaleb(-display_precision)
+        try:
+            prices = await _fetch_oanda_json(
+                base_url=cfg["base_url"],
+                account_id=cfg["account_id"],
+                api_key=cfg["token"],
+                endpoint=f"/accounts/{{account_id}}/pricing?instruments={symbol}&includeHomeConversions=true",
+                mode=account,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"OANDA pricing/meta fetch failure: {exc}") from exc
+        rows = prices.get("prices") or []
+        if not rows:
+            raise HTTPException(status_code=502, detail="OANDA pricing/meta fetch failure.")
+        row = rows[0]
+        bid = Decimal(str(((row.get("bids") or [{}])[0]).get("price") or "0"))
+        ask = Decimal(str(((row.get("asks") or [{}])[0]).get("price") or "0"))
+        if bid <= 0 or ask <= 0:
+            raise HTTPException(status_code=502, detail="OANDA bid/ask unavailable.")
+        entry = _dec(limit_entry, "entry_price") if order_type == "limit" else (ask if side == "buy" else bid)
+        if entry <= 0:
+            raise HTTPException(status_code=400, detail="Bad limit price.")
+        sl = (entry - stop_ticks * tick_size) if side == "buy" else (entry + stop_ticks * tick_size)
+        tp = (entry + tp_ticks * tick_size) if side == "buy" else (entry - tp_ticks * tick_size)
+        quote_ccy = symbol.split("_", 1)[1]
+        conversions = row.get("homeConversions") or []
+        loss_factor = None
+        for item in conversions:
+            if str(item.get("currency") or "").upper() == quote_ccy:
+                loss_factor = Decimal(str(item.get("accountLoss") or "0"))
+                break
+        if loss_factor is None or loss_factor <= 0:
+            raise HTTPException(status_code=502, detail=f"Missing OANDA home conversion for {quote_ccy}.")
+        risk_aud = risk_val
+        if risk_mode == "percent":
+            summary = await _fetch_oanda_account_summary(account)
+            nav = Decimal(str(summary.get("nav") or "0"))
+            if nav <= 0:
+                raise HTTPException(status_code=502, detail="OANDA NAV unavailable for percent risk.")
+            risk_aud = nav * (risk_val / Decimal("100"))
+        spread_quote = max(Decimal("0"), ask - bid)
+        loss_per_unit_aud = (abs(entry - sl) + spread_quote) * loss_factor
+        if loss_per_unit_aud <= 0:
+            raise HTTPException(status_code=400, detail="Invalid stop distance produced zero loss per unit.")
+        units_raw = risk_aud / loss_per_unit_aud
+        units = _floor_to_precision(units_raw, units_precision)
+        if units < min_trade_size:
+            raise HTTPException(status_code=400, detail="Calculated units are below minimum trade size.")
+        spread_aud = spread_quote * loss_factor * units
+        reward_aud = max(Decimal("0"), (abs(tp - entry) - spread_quote) * loss_factor * units)
+        return JSONResponse(
+            {
+                "broker": "oanda",
+                "symbol": symbol,
+                "tick_size": _fmt_dec(tick_size),
+                "entry_price": _fmt_dec(entry),
+                "stop_price": _fmt_dec(sl),
+                "target_price": _fmt_dec(tp),
+                "quantity": _fmt_dec(units),
+                "notional": _fmt_dec(units * entry),
+                "estimated_fees_or_spread_aud": _fmt_dec(max(Decimal("0"), spread_aud)),
+                "estimated_total_loss_aud": _fmt_dec(loss_per_unit_aud * units),
+                "estimated_reward_aud": _fmt_dec(reward_aud),
+                "rr": _fmt_dec((abs(tp - entry) / abs(entry - sl)) if abs(entry - sl) > 0 else Decimal("0")),
+            }
+        )
+
+    raise HTTPException(status_code=400, detail="asset must be crypto or fx.")
+
+
+@app.post("/api/calculator/submit")
+async def calculator_submit(payload: Dict[str, object] = Body(default={})) -> JSONResponse:
+    asset = str(payload.get("asset") or "").strip().lower()
+    canonical = {
+        "account": payload.get("account"),
+        "symbol": payload.get("symbol"),
+        "action": payload.get("action") or payload.get("side"),
+        "order_type": payload.get("order_type"),
+        "entry_price": payload.get("entry_price"),
+        "stop_loss_price": payload.get("stop_loss_price"),
+        "take_profit_price": payload.get("take_profit_price"),
+        "quantity": payload.get("quantity"),
+        "timeframe": payload.get("timeframe"),
+    }
+    request_id = f"calc-{uuid4().hex[:12]}"
+    if asset == "crypto":
+        result = await _place_bybit_order(canonical, request_id=request_id)
+        return JSONResponse({"ok": True, "broker": "bybit", "result": result})
+    if asset == "fx":
+        result = await _place_oanda_order(canonical, request_id=request_id)
+        return JSONResponse({"ok": True, "broker": "oanda", "result": result})
+    raise HTTPException(status_code=400, detail="asset must be crypto or fx.")
 
 
 HISTORY_PAGE_TEMPLATE = """<!doctype html>
@@ -11405,9 +11801,11 @@ async def trade_chart_page(row_id: str) -> HTMLResponse:
 async def _fetch_oanda_account_summary(account: str) -> Dict[str, object]:
     cfg = _get_oanda_config(account)
     payload = await _fetch_oanda_json(
-        cfg["base_url"],
-        f"/v3/accounts/{cfg['account_id']}/summary",
-        cfg["token"],
+        base_url=cfg["base_url"],
+        account_id=cfg["account_id"],
+        api_key=cfg["token"],
+        endpoint="/accounts/{account_id}/summary",
+        mode=cfg["mode"],
     )
     account_payload = payload.get("account") if isinstance(payload, dict) else {}
     if not isinstance(account_payload, dict):
