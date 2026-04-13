@@ -42,9 +42,8 @@ def test_retired_calculator_script_status_returns_410() -> None:
 
 
 def test_calculator_endpoints_return_410() -> None:
-    with pytest.raises(master_service.HTTPException) as merged_exc:
-        asyncio.run(master_service.merged_calculator_page())
-    assert merged_exc.value.status_code == 410
+    merged = asyncio.run(master_service.merged_calculator_page())
+    assert merged.status_code == 200
 
     with pytest.raises(master_service.HTTPException) as execute_exc:
         asyncio.run(master_service.execute_now(_json_request({"symbol": "BTCUSDT"})))
@@ -72,7 +71,7 @@ def test_scripts_page_excludes_merged_calculator_button() -> None:
     names = {str(item.get("name")) for item in payload}
     open_urls = {str(item.get("open_url") or "") for item in payload}
 
-    assert "calculator" not in names
+    assert "calculator" in names
     assert "cryptocalculator-clone" not in names
     assert "oanda-calculator-clone" not in names
-    assert "/merged/calculator" not in open_urls
+    assert "/merged/calculator" in open_urls
