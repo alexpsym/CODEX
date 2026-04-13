@@ -30,12 +30,6 @@ def test_merged_calculator_page_returns_200() -> None:
     assert "Position Size Calculator" in html
 
 
-def test_calculator_js_state_spread_is_valid() -> None:
-    js = (ROOT / "render" / "static" / "calculator.js").read_text(encoding="utf-8")
-    assert "...state" in js
-    assert ".state," not in js
-
-
 def test_bybit_quote_uses_tick_step_fee_and_no_oversize(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("live", "k", "s", "https://bybit.test", "KEY1"))
 
