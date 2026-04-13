@@ -38,6 +38,7 @@
     errorEl.textContent = ''; okEl.textContent = '';
     try {
       const payload = {
+        // NOTE: spread operator intentionally uses `...state` (not `.state`).
         ...state,
         symbol: $('calc-symbol').value,
         entry_price: $('calc-limit').value,

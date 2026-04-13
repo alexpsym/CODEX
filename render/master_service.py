@@ -10991,7 +10991,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Merged Calculator</title>
+  <title>Position Size Calculator</title>
   <style>
     body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}
     .wrap{max-width:1100px;margin:0 auto;padding:18px}
@@ -11012,7 +11012,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
 <body>
   <div class="wrap">
     <div class="panel">
-      <h2 style="margin-top:0">Merged Calculator</h2>
+      <h2 style="margin-top:0">Position Size Calculator</h2>
       <div class="row">
         <div class="group toggle" id="account-toggle"><button data-v="live" class="active">Live</button><button data-v="demo">Demo</button></div>
         <div class="group toggle" id="asset-toggle"><button data-v="crypto" class="active">Crypto</button><button data-v="fx">FX</button></div>
@@ -11145,15 +11145,18 @@ async def calculator_instrument(asset: str, account: str, symbol: str) -> JSONRe
         )
 
     if asset_norm == "fx":
-        cfg = _get_oanda_config(account_norm)
-        resolved_symbol = normalize_oanda_symbol_query(symbol)
-        meta = await _fetch_oanda_instrument_meta(
-            base_url=cfg["base_url"],
-            account_id=cfg["account_id"],
-            api_key=cfg["token"],
-            symbol=resolved_symbol,
-            mode=account_norm,
-        )
+        try:
+            cfg = _get_oanda_config(account_norm)
+            resolved_symbol = normalize_oanda_symbol_query(symbol)
+            meta = await _fetch_oanda_instrument_meta(
+                base_url=cfg["base_url"],
+                account_id=cfg["account_id"],
+                api_key=cfg["token"],
+                symbol=resolved_symbol,
+                mode=account_norm,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         return JSONResponse(
             {
                 "broker": "oanda",
@@ -11221,7 +11224,7 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
         ask = Decimal(str(row.get("ask1Price") or row.get("lastPrice") or "0"))
         if bid <= 0 or ask <= 0:
             raise HTTPException(status_code=502, detail="Bybit pricing unavailable.")
-        entry = Decimal(str(limit_entry)) if order_type == "limit" else (ask if side == "buy" else bid)
+        entry = _dec(limit_entry, "entry_price") if order_type == "limit" else (ask if side == "buy" else bid)
         if entry <= 0:
             raise HTTPException(status_code=400, detail="entry_price must be greater than zero.")
         stop_distance = stop_ticks * tick_size
@@ -11256,7 +11259,7 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
         if qty < min_qty:
             raise HTTPException(status_code=400, detail="Calculated quantity is below minimum size.")
         total_loss_usdt = qty * loss_per_unit
-        reward_usdt = qty * (abs(tp - entry) - (entry * open_fee))
+        reward_usdt = qty * (abs(tp - entry) - (entry * open_fee) - (tp * close_fee))
         return JSONResponse(
             {
                 "broker": "bybit",
@@ -11275,26 +11278,35 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
         )
 
     if asset == "fx":
-        cfg = _get_oanda_config(account)
+        try:
+            cfg = _get_oanda_config(account)
+        except ValueError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
         symbol = normalize_oanda_symbol_query(symbol_in)
-        meta = await _fetch_oanda_instrument_meta(
-            base_url=cfg["base_url"],
-            account_id=cfg["account_id"],
-            api_key=cfg["token"],
-            symbol=symbol,
-            mode=account,
-        )
+        try:
+            meta = await _fetch_oanda_instrument_meta(
+                base_url=cfg["base_url"],
+                account_id=cfg["account_id"],
+                api_key=cfg["token"],
+                symbol=symbol,
+                mode=account,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         display_precision = int(meta["displayPrecision"])
         units_precision = int(meta.get("tradeUnitsPrecision", 0))
         min_trade_size = Decimal(str(meta.get("minimumTradeSize") or "0"))
         tick_size = Decimal("1").scaleb(-display_precision)
-        prices = await _fetch_oanda_json(
-            base_url=cfg["base_url"],
-            account_id=cfg["account_id"],
-            api_key=cfg["token"],
-            endpoint=f"/accounts/{{account_id}}/pricing?instruments={symbol}&includeHomeConversions=true",
-            mode=account,
-        )
+        try:
+            prices = await _fetch_oanda_json(
+                base_url=cfg["base_url"],
+                account_id=cfg["account_id"],
+                api_key=cfg["token"],
+                endpoint=f"/accounts/{{account_id}}/pricing?instruments={symbol}&includeHomeConversions=true",
+                mode=account,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"OANDA pricing/meta fetch failure: {exc}") from exc
         rows = prices.get("prices") or []
         if not rows:
             raise HTTPException(status_code=502, detail="OANDA pricing/meta fetch failure.")
@@ -11303,7 +11315,7 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
         ask = Decimal(str(((row.get("asks") or [{}])[0]).get("price") or "0"))
         if bid <= 0 or ask <= 0:
             raise HTTPException(status_code=502, detail="OANDA bid/ask unavailable.")
-        entry = Decimal(str(limit_entry)) if order_type == "limit" else (ask if side == "buy" else bid)
+        entry = _dec(limit_entry, "entry_price") if order_type == "limit" else (ask if side == "buy" else bid)
         if entry <= 0:
             raise HTTPException(status_code=400, detail="Bad limit price.")
         sl = (entry - stop_ticks * tick_size) if side == "buy" else (entry + stop_ticks * tick_size)
@@ -11324,15 +11336,16 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
             if nav <= 0:
                 raise HTTPException(status_code=502, detail="OANDA NAV unavailable for percent risk.")
             risk_aud = nav * (risk_val / Decimal("100"))
-        loss_per_unit_aud = abs(entry - sl) * loss_factor
+        spread_quote = max(Decimal("0"), ask - bid)
+        loss_per_unit_aud = (abs(entry - sl) + spread_quote) * loss_factor
         if loss_per_unit_aud <= 0:
             raise HTTPException(status_code=400, detail="Invalid stop distance produced zero loss per unit.")
         units_raw = risk_aud / loss_per_unit_aud
         units = _floor_to_precision(units_raw, units_precision)
         if units < min_trade_size:
             raise HTTPException(status_code=400, detail="Calculated units are below minimum trade size.")
-        spread_aud = (ask - bid) * loss_factor * units
-        reward_aud = max(Decimal("0"), abs(tp - entry) * loss_factor * units)
+        spread_aud = spread_quote * loss_factor * units
+        reward_aud = max(Decimal("0"), (abs(tp - entry) - spread_quote) * loss_factor * units)
         return JSONResponse(
             {
                 "broker": "oanda",
