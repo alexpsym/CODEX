@@ -11508,7 +11508,8 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
         if max_leverage > 0:
             est_margin = notional / max_leverage
             available_for_margin = max(available_usdt, total_equity)
-            if available_for_margin > 0 and est_margin > available_for_margin:
+            margin_tolerance = Decimal("1.05")
+            if available_for_margin > 0 and est_margin > (available_for_margin * margin_tolerance):
                 raise HTTPException(status_code=400, detail="Insufficient Bybit available margin for estimated initial margin")
         total_loss_usdt = qty * loss_per_unit
         reward_usdt = qty * (abs(tp - entry) - spread_quote - (entry * open_fee) - (tp * close_fee))
