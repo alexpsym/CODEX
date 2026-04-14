@@ -11221,6 +11221,8 @@ async def calculator_instrument(asset: str, account: str, symbol: str) -> JSONRe
     if asset_norm == "crypto":
         _mode, _key, _secret, base_url, _src = resolve_bybit_credentials_for(account_norm)
         choices = await _bybit_get_symbols_by_category_cached(base_url, "linear")
+        if not choices:
+            raise HTTPException(status_code=404, detail=f"Could not resolve Bybit symbol: {symbol}")
         resolved = resolve_bybit_symbol_from_choices(symbol, choices)
         if not resolved or not resolved.get("resolved_symbol"):
             try:
@@ -11300,6 +11302,8 @@ async def calculator_journal_summary(asset: str, symbol: str) -> JSONResponse:
         creds = resolve_bybit_credentials_for("live")
         base_url = creds[3] if isinstance(creds, tuple) else (creds.get("base_url") if isinstance(creds, dict) else "")
         choices = await _bybit_get_symbols_by_category_cached(base_url or BYBIT_BASE, "linear")
+        if not choices:
+            return JSONResponse({"status": "unresolved", "canonical_symbol": "", "stats": None}, status_code=404)
         resolved = resolve_bybit_symbol_from_choices(symbol_in, choices)
         if not resolved or not resolved.get("resolved_symbol"):
             try:
@@ -11408,6 +11412,8 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
         if not api_key or not api_secret:
             raise HTTPException(status_code=500, detail="Bybit credentials are missing for selected account.")
         choices = await _bybit_get_symbols_by_category_cached(base_url, "linear")
+        if not choices:
+            raise HTTPException(status_code=404, detail=f"Could not resolve Bybit symbol: {symbol_in}")
         resolved = resolve_bybit_symbol_from_choices(symbol_in, choices)
         if not resolved or not resolved.get("resolved_symbol"):
             try:
@@ -11462,9 +11468,13 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
         open_fee = taker if order_type == "market" else max(maker, taker)
         close_fee = taker
         try:
+            aud_cfg = _get_oanda_config("live")
+        except Exception:
+            aud_cfg = {"base_url": "", "account_id": "", "token": ""}
+        try:
             aud_usd = Decimal(
                 str(
-                    (await _fetch_oanda_mid_prices_batch(cfg=_get_oanda_config("live"), instruments=["AUD_USD"])).get(
+                    (await _fetch_oanda_mid_prices_batch(cfg=aud_cfg, instruments=["AUD_USD"])).get(
                         "AUD_USD"
                     )
                     or 0
@@ -12070,7 +12080,7 @@ async def _fetch_oanda_account_summary(account: str) -> Dict[str, object]:
         account_id=cfg["account_id"],
         api_key=cfg["token"],
         endpoint="/accounts/{account_id}/summary",
-        mode=cfg["mode"],
+        mode=cfg.get("mode") or account,
     )
     account_payload = payload.get("account") if isinstance(payload, dict) else {}
     if not isinstance(account_payload, dict):
