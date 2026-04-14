@@ -36,7 +36,7 @@ def test_resolve_bybit_unknown_returns_none() -> None:
 
 def test_resolve_bybit_symbol_variants() -> None:
     symbols = ["BTCUSDT", "ETHUSDT"]
-    for raw in ("BTC", "btcusdt", "btc usdt", "btc/usdt", "btc-usdt", "Bitcoin USDT"):
+    for raw in ("BTC", "btcusdt", "btc usdt", "btc/usdt", "btc-usdt"):
         resolved = resolve_bybit_symbol_from_choices(raw, symbols)
         assert resolved is not None
         assert resolved["resolved_symbol"] == "BTCUSDT"

@@ -53,9 +53,7 @@
       ? `<details class="card" style="grid-column:1/-1"><summary>Journal trade details (${tradeRows.length})</summary>${tradeRows.map((t, idx) => `
           <div class="card" style="margin-top:8px">
             <div><strong>#${idx + 1}</strong> ${t.symbol ?? '-'}</div>
-            <div class="muted">Side: ${t.side ?? '-'} • Open: ${t.open_time ?? '-'} • Close: ${t.close_time ?? '-'}</div>
-            <div class="muted">Entry: ${t.entry_price ?? '-'} • Exit: ${t.exit_price ?? '-'} • PnL: ${t.net_profit ?? t.realized_pnl ?? '-'}</div>
-            <div class="muted">SL: ${t.stop_loss ?? '-'} • TP: ${t.take_profit ?? '-'} • Timeframe: ${t.timeframe ?? '-'}</div>
+            ${Object.entries(t).map(([k, v]) => `<div class="muted">${k}: ${typeof v === 'object' ? JSON.stringify(v) : (v ?? '-')}</div>`).join('')}
           </div>`).join('')}</details>`
       : '<div class="card" style="grid-column:1/-1"><div class="muted">No detailed journal rows found.</div></div>';
     journalEl.dataset.state = 'ready';

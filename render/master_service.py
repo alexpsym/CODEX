@@ -639,10 +639,7 @@ async def _bybit_lookup_symbol(base_url: str, symbol: str) -> Optional[Dict[str,
             exact_first=True,
         )
         if not resolved or not resolved.get("resolved_symbol"):
-            try:
-                name_aliases = await _bybit_name_aliases_for_choices(base_url, set(choices))
-            except Exception:
-                name_aliases = {}
+            name_aliases = await _bybit_name_aliases_for_choices(base_url, set(choices))
             if name_aliases:
                 resolved = resolve_bybit_symbol_from_choices(
                     normalized_symbol,
@@ -872,10 +869,7 @@ async def _resolve_symbol_payload(
             exact_first=True,
         )
         if not resolved or not resolved.get("resolved_symbol"):
-            try:
-                name_aliases = await _bybit_name_aliases_for_choices(base_url, set(symbols))
-            except Exception:
-                name_aliases = {}
+            name_aliases = await _bybit_name_aliases_for_choices(base_url, set(symbols))
             if name_aliases:
                 resolved = resolve_bybit_symbol_from_choices(
                     raw,
@@ -11467,9 +11461,19 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
         taker = Decimal(str(fee_row.get("takerFeeRate") or "0"))
         open_fee = taker if order_type == "market" else max(maker, taker)
         close_fee = taker
-        aud_usd = Decimal(str((await _fetch_oanda_mid_prices_batch(cfg=_get_oanda_config("live"), instruments=["AUD_USD"])).get("AUD_USD") or 0))
+        try:
+            aud_usd = Decimal(
+                str(
+                    (await _fetch_oanda_mid_prices_batch(cfg=_get_oanda_config("live"), instruments=["AUD_USD"])).get(
+                        "AUD_USD"
+                    )
+                    or 0
+                )
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"AUD_USD conversion unavailable: {exc}") from exc
         if aud_usd <= 0:
-            raise HTTPException(status_code=502, detail="AUD_USD conversion fetch failed.")
+            raise HTTPException(status_code=502, detail="AUD_USD conversion unavailable.")
         balance_snapshot = await _fetch_bybit_balance_usdt(account)
         available_usdt = Decimal(str(balance_snapshot.get("available_usdt") or "0"))
         total_equity = Decimal(str(balance_snapshot.get("total_equity") or "0"))
