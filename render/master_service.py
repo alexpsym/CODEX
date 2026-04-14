@@ -11489,27 +11489,29 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
         total_equity = Decimal(str(balance_snapshot.get("total_equity") or "0"))
         risk_aud = (available_usdt / aud_usd) * (risk_val / Decimal("100"))
         risk_usdt = risk_aud * aud_usd
-        loss_per_unit = abs(entry - sl) + (entry * open_fee) + (sl * close_fee)
+        spread_quote = max(Decimal("0"), ask - bid) if order_type == "market" else Decimal("0")
+        loss_per_unit = abs(entry - sl) + spread_quote + (entry * open_fee) + (sl * close_fee)
         if loss_per_unit <= 0:
             raise HTTPException(status_code=400, detail="Invalid stop distance produced zero loss per unit.")
         qty_raw = risk_usdt / loss_per_unit
+        raw_notional = qty_raw * entry
+        if min_notional > 0 and raw_notional < min_notional:
+            raise HTTPException(status_code=400, detail="Calculated notional is below Bybit minimum notional")
         qty = _floor_to_step(qty_raw, qty_step)
         if qty < min_qty:
             raise HTTPException(status_code=400, detail="Calculated quantity is below minimum order quantity")
         notional = qty * entry
-        if min_notional > 0 and notional < min_notional:
-            raise HTTPException(status_code=400, detail="Calculated notional is below Bybit minimum notional")
         if order_type == "market" and max_mkt_qty > 0 and qty > max_mkt_qty:
             raise HTTPException(status_code=400, detail="Calculated quantity exceeds Bybit max market order quantity")
         if order_type == "limit" and max_qty > 0 and qty > max_qty:
             raise HTTPException(status_code=400, detail="Calculated quantity exceeds Bybit max order quantity")
         if max_leverage > 0:
             est_margin = notional / max_leverage
-            available_for_margin = available_usdt if available_usdt > 0 else total_equity
+            available_for_margin = max(available_usdt, total_equity)
             if available_for_margin > 0 and est_margin > available_for_margin:
                 raise HTTPException(status_code=400, detail="Insufficient Bybit available margin for estimated initial margin")
         total_loss_usdt = qty * loss_per_unit
-        reward_usdt = qty * (abs(tp - entry) - (entry * open_fee) - (tp * close_fee))
+        reward_usdt = qty * (abs(tp - entry) - spread_quote - (entry * open_fee) - (tp * close_fee))
         return JSONResponse(
             {
                 "broker": "bybit",
