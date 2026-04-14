@@ -233,3 +233,12 @@ def compute_snapshot(symbol: str, timeframe: str, expiry: datetime | None = None
         "put_open_interest": put_oi,
         "expiry": expiry_str,
     }
+
+
+def update_scaled_iv(timeframe: str, symbol: str = "BTCUSDT") -> float:
+    """Backward-compatible helper used by tests/legacy callers."""
+    snapshot = compute_snapshot(symbol, timeframe)
+    iv_percent = snapshot.get("iv_percent") if isinstance(snapshot, dict) else None
+    if iv_percent in (None, ""):
+        raise ValueError("Unable to compute scaled IV.")
+    return float(iv_percent)

@@ -3129,6 +3129,8 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
 
     context_cache: Dict[Tuple[str, str, str, str], Optional[Dict[str, object]]] = {}
     contexts = _load_trade_contexts()
+    def _context_registry_key(trade_id: Optional[str] = None) -> str:
+        return _stable_registry_key([account, tx_order_id, trade_id or "", symbol])
 
     def _resolve_context_for_fill(trade_id: Optional[str] = None) -> Optional[Dict[str, object]]:
         warning_key = (account, tx_id, tx_order_id, str(trade_id or "").strip())
@@ -3141,7 +3143,7 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
         if isinstance(ctx, dict):
             _update_unresolved_registry(
                 family="oanda_context",
-                key=_stable_registry_key([account, tx_id, tx_order_id, trade_id or "", symbol]),
+                key=_context_registry_key(trade_id),
                 details={"status": "resolved"},
                 resolved=True,
                 resolution_source="direct_refs",
@@ -3160,7 +3162,7 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             if isinstance(ctx, dict):
                 _update_unresolved_registry(
                     family="oanda_context",
-                    key=_stable_registry_key([account, tx_id, tx_order_id, trade_id or "", symbol]),
+                    key=_context_registry_key(trade_id),
                     details={"status": "resolved"},
                     resolved=True,
                     resolution_source="open_leg_refs",
@@ -3196,7 +3198,7 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             )
             _update_unresolved_registry(
                 family="oanda_context",
-                key=_stable_registry_key([account, tx_id, tx_order_id, trade_id or "", symbol]),
+                key=_context_registry_key(trade_id),
                 details={"status": "resolved"},
                 resolved=True,
                 resolution_source="market_window",
@@ -3219,7 +3221,12 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
                 or (trade_id and str(item.get("trade_id") or "").strip() == str(trade_id).strip())
                 or (tx_id and str(item.get("transaction_id") or "").strip() == tx_id)
             )
-            if refs_hit or not (tx_order_id or trade_id or tx_id):
+            has_ctx_refs = bool(
+                str(item.get("order_id") or "").strip()
+                or str(item.get("trade_id") or "").strip()
+                or str(item.get("transaction_id") or "").strip()
+            )
+            if refs_hit or not has_ctx_refs or not (tx_order_id or trade_id or tx_id):
                 candidates.append(item)
         if len(candidates) == 1:
             persisted = _upsert_trade_context(
@@ -3239,14 +3246,14 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             )
             _update_unresolved_registry(
                 family="oanda_context",
-                key=_stable_registry_key([account, tx_id, tx_order_id, trade_id or "", symbol]),
+                key=_context_registry_key(trade_id),
                 details={"status": "resolved"},
                 resolved=True,
                 resolution_source="cross_link_inference",
             )
             context_cache[warning_key] = persisted
             return persisted
-        unresolved_key = _stable_registry_key([account, tx_id, tx_order_id, trade_id or "", symbol])
+        unresolved_key = _context_registry_key(trade_id)
         if len(candidates) > 1:
             should_warn, _ = _update_unresolved_registry(
                 family="oanda_context",
@@ -8375,7 +8382,14 @@ async def _place_bybit_order(
     tp_error: Optional[str] = None
     if category == "linear" and any(
         item is not None
-        for item in (take_profit_offset, stop_loss_offset, take_profit, stop_loss)
+        for item in (
+            take_profit_offset,
+            stop_loss_offset,
+            take_profit,
+            stop_loss,
+            planned_stop_price,
+            planned_target_price,
+        )
     ):
         try:
             position = await _wait_for_position_entry(
