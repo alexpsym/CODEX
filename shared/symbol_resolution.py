@@ -19,14 +19,7 @@ _KNOWN_OANDA_CODES = {
     "XAU",
     "XAG",
 }
-_CRYPTO_BASE_ALIASES = {
-    "BITCOIN": "BTC",
-    "ETHER": "ETH",
-    "ETHEREUM": "ETH",
-    "SOLANA": "SOL",
-    "RIPPLE": "XRP",
-    "DOGECOIN": "DOGE",
-}
+_CRYPTO_BASE_ALIASES: dict[str, str] = {}
 
 
 def norm_symbol(raw: str) -> str:

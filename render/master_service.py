@@ -639,10 +639,7 @@ async def _bybit_lookup_symbol(base_url: str, symbol: str) -> Optional[Dict[str,
             exact_first=True,
         )
         if not resolved or not resolved.get("resolved_symbol"):
-            try:
-                name_aliases = await _bybit_name_aliases_for_choices(base_url, set(choices))
-            except Exception:
-                name_aliases = {}
+            name_aliases = await _bybit_name_aliases_for_choices(base_url, set(choices))
             if name_aliases:
                 resolved = resolve_bybit_symbol_from_choices(
                     normalized_symbol,
@@ -872,10 +869,7 @@ async def _resolve_symbol_payload(
             exact_first=True,
         )
         if not resolved or not resolved.get("resolved_symbol"):
-            try:
-                name_aliases = await _bybit_name_aliases_for_choices(base_url, set(symbols))
-            except Exception:
-                name_aliases = {}
+            name_aliases = await _bybit_name_aliases_for_choices(base_url, set(symbols))
             if name_aliases:
                 resolved = resolve_bybit_symbol_from_choices(
                     raw,
