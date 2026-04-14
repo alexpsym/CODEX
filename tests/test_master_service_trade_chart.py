@@ -167,21 +167,20 @@ def test_trade_chart_html_is_image_only(monkeypatch) -> None:
     assert "Timeframe rendered" not in html
 
 
-def test_scripts_listing_excludes_calculator_entries() -> None:
+def test_scripts_listing_includes_merged_calculator_entry() -> None:
     payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
     names = {str(item.get("name")) for item in payload}
     labels = {str(item.get("label")) for item in payload}
     open_urls = {str(item.get("open_url") or "") for item in payload}
 
-    assert "calculator" not in names
+    assert "calculator" in names
     assert "cryptocalculator-clone" not in names
     assert "oanda-calculator-clone" not in names
-    assert "/merged/calculator" not in open_urls
-    assert "Calculator" not in labels
+    assert "/merged/calculator" in open_urls
+    assert "Calculator" in labels
 
 
-def test_merged_calculator_route_returns_gone() -> None:
-    with pytest.raises(master_service.HTTPException) as exc:
-        asyncio.run(master_service.merged_calculator_page())
-    assert exc.value.status_code == 410
-    assert "removed" in str(exc.value.detail).lower()
+def test_merged_calculator_route_returns_html() -> None:
+    response = asyncio.run(master_service.merged_calculator_page())
+    assert response.status_code == 200
+    assert "Position Size Calculator" in response.body.decode("utf-8")
