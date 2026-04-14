@@ -12,6 +12,9 @@ def test_calculator_payload_uses_spread_state() -> None:
     assert "const payload = {" in js
     assert "...state," in js
     assert not re.search(r"(?m)^\\s*\\.state,", js)
+    assert "AbortController" in js
+    assert "timeframe-toggle" in js
+    assert "calc-timeframe" not in js
 
 
 def test_calculator_js_parses_with_node() -> None:

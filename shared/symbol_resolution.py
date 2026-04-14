@@ -19,6 +19,14 @@ _KNOWN_OANDA_CODES = {
     "XAU",
     "XAG",
 }
+_CRYPTO_BASE_ALIASES = {
+    "BITCOIN": "BTC",
+    "ETHER": "ETH",
+    "ETHEREUM": "ETH",
+    "SOLANA": "SOL",
+    "RIPPLE": "XRP",
+    "DOGECOIN": "DOGE",
+}
 
 
 def norm_symbol(raw: str) -> str:
@@ -80,9 +88,18 @@ def resolve_bybit_symbol_from_choices(
     symbols: list[str] | set[str],
     preferred_quotes: tuple[str, ...] = ("USDT", "USDC", "USD"),
     exact_first: bool = True,
+    extra_aliases: dict[str, str] | None = None,
 ) -> dict | None:
     """Resolve user symbol to a concrete Bybit symbol from known choices."""
-    normalized = norm_symbol(raw)
+    normalized_raw = norm_symbol(raw)
+    normalized = normalized_raw
+    alias_map = dict(_CRYPTO_BASE_ALIASES)
+    if extra_aliases:
+        alias_map.update({norm_symbol(k): norm_symbol(v) for k, v in extra_aliases.items() if k and v})
+    for alias, code in sorted(alias_map.items(), key=lambda item: len(item[0]), reverse=True):
+        if normalized.startswith(alias):
+            normalized = code + normalized[len(alias):]
+            break
     if not normalized:
         return None
 
