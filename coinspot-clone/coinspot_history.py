@@ -52,8 +52,8 @@ def _parse_date(text: Optional[str]) -> Optional[str]:
 
 
 def fetch_history(
-    start_date: Optional[str],
-    end_date: Optional[str],
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     *,
     api_key: Optional[str] = None,
     api_secret: Optional[str] = None,

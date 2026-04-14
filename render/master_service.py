@@ -638,6 +638,16 @@ async def _bybit_lookup_symbol(base_url: str, symbol: str) -> Optional[Dict[str,
             preferred_quotes=("USDT", "USDC", "USD"),
             exact_first=True,
         )
+        if not resolved or not resolved.get("resolved_symbol"):
+            name_aliases = await _bybit_name_aliases_for_choices(base_url, set(choices))
+            if name_aliases:
+                resolved = resolve_bybit_symbol_from_choices(
+                    normalized_symbol,
+                    choices,
+                    preferred_quotes=("USDT", "USDC", "USD"),
+                    exact_first=True,
+                    extra_aliases=name_aliases,
+                )
         resolved_symbol = str((resolved or {}).get("resolved_symbol") or "").upper()
         if not resolved_symbol:
             continue
@@ -858,6 +868,16 @@ async def _resolve_symbol_payload(
             preferred_quotes=("USDT", "USDC", "USD"),
             exact_first=True,
         )
+        if not resolved or not resolved.get("resolved_symbol"):
+            name_aliases = await _bybit_name_aliases_for_choices(base_url, set(symbols))
+            if name_aliases:
+                resolved = resolve_bybit_symbol_from_choices(
+                    raw,
+                    symbols,
+                    preferred_quotes=("USDT", "USDC", "USD"),
+                    exact_first=True,
+                    extra_aliases=name_aliases,
+                )
         if resolved and resolved.get("resolved_symbol"):
             return resolved
     return None
@@ -3109,6 +3129,8 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
 
     context_cache: Dict[Tuple[str, str, str, str], Optional[Dict[str, object]]] = {}
     contexts = _load_trade_contexts()
+    def _context_registry_key(trade_id: Optional[str] = None) -> str:
+        return _stable_registry_key([account, tx_order_id, trade_id or "", symbol])
 
     def _resolve_context_for_fill(trade_id: Optional[str] = None) -> Optional[Dict[str, object]]:
         warning_key = (account, tx_id, tx_order_id, str(trade_id or "").strip())
@@ -3121,7 +3143,7 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
         if isinstance(ctx, dict):
             _update_unresolved_registry(
                 family="oanda_context",
-                key=_stable_registry_key([account, tx_id, tx_order_id, trade_id or "", symbol]),
+                key=_context_registry_key(trade_id),
                 details={"status": "resolved"},
                 resolved=True,
                 resolution_source="direct_refs",
@@ -3140,7 +3162,7 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             if isinstance(ctx, dict):
                 _update_unresolved_registry(
                     family="oanda_context",
-                    key=_stable_registry_key([account, tx_id, tx_order_id, trade_id or "", symbol]),
+                    key=_context_registry_key(trade_id),
                     details={"status": "resolved"},
                     resolved=True,
                     resolution_source="open_leg_refs",
@@ -3176,7 +3198,7 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             )
             _update_unresolved_registry(
                 family="oanda_context",
-                key=_stable_registry_key([account, tx_id, tx_order_id, trade_id or "", symbol]),
+                key=_context_registry_key(trade_id),
                 details={"status": "resolved"},
                 resolved=True,
                 resolution_source="market_window",
@@ -3199,7 +3221,12 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
                 or (trade_id and str(item.get("trade_id") or "").strip() == str(trade_id).strip())
                 or (tx_id and str(item.get("transaction_id") or "").strip() == tx_id)
             )
-            if refs_hit or not (tx_order_id or trade_id or tx_id):
+            has_ctx_refs = bool(
+                str(item.get("order_id") or "").strip()
+                or str(item.get("trade_id") or "").strip()
+                or str(item.get("transaction_id") or "").strip()
+            )
+            if refs_hit or not has_ctx_refs or not (tx_order_id or trade_id or tx_id):
                 candidates.append(item)
         if len(candidates) == 1:
             persisted = _upsert_trade_context(
@@ -3219,14 +3246,14 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             )
             _update_unresolved_registry(
                 family="oanda_context",
-                key=_stable_registry_key([account, tx_id, tx_order_id, trade_id or "", symbol]),
+                key=_context_registry_key(trade_id),
                 details={"status": "resolved"},
                 resolved=True,
                 resolution_source="cross_link_inference",
             )
             context_cache[warning_key] = persisted
             return persisted
-        unresolved_key = _stable_registry_key([account, tx_id, tx_order_id, trade_id or "", symbol])
+        unresolved_key = _context_registry_key(trade_id)
         if len(candidates) > 1:
             should_warn, _ = _update_unresolved_registry(
                 family="oanda_context",
@@ -5833,6 +5860,9 @@ async def _fetch_oanda_instrument_meta(
                     "tradeUnitsPrecision": int(instrument.get("tradeUnitsPrecision", 0)),
                     "pipLocation": int(instrument.get("pipLocation", 0)),
                     "minimumTradeSize": str(instrument.get("minimumTradeSize") or "0"),
+                    "maximumOrderUnits": str(instrument.get("maximumOrderUnits") or "0"),
+                    "maximumPositionSize": str(instrument.get("maximumPositionSize") or "0"),
+                    "marginRate": str(instrument.get("marginRate") or "0"),
                 }
                 _OANDA_INSTRUMENT_META_CACHE[cache_key] = meta
                 _OANDA_INSTRUMENT_META_CACHE_TS[cache_key] = now
@@ -8352,7 +8382,14 @@ async def _place_bybit_order(
     tp_error: Optional[str] = None
     if category == "linear" and any(
         item is not None
-        for item in (take_profit_offset, stop_loss_offset, take_profit, stop_loss)
+        for item in (
+            take_profit_offset,
+            stop_loss_offset,
+            take_profit,
+            stop_loss,
+            planned_stop_price,
+            planned_target_price,
+        )
     ):
         try:
             position = await _wait_for_position_entry(
@@ -10994,9 +11031,9 @@ CALCULATOR_TEMPLATE = """<!doctype html>
   <title>Position Size Calculator</title>
   <style>
     body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}
-    .wrap{max-width:1100px;margin:0 auto;padding:18px}
+    .wrap{max-width:880px;margin:0 auto;padding:18px}
     .panel{background:#111827;border:1px solid #1f2937;border-radius:14px;padding:16px}
-    .row{display:flex;flex-wrap:wrap;gap:10px;align-items:end;margin-bottom:10px}
+    .row{display:flex;flex-direction:column;gap:6px;align-items:stretch;margin-bottom:12px}
     .group{display:flex;gap:8px;flex-wrap:wrap}
     label{display:flex;flex-direction:column;gap:6px;font-weight:700;color:#cbd5e1}
     input,select,button{background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:10px;padding:8px 10px}
@@ -11014,27 +11051,62 @@ CALCULATOR_TEMPLATE = """<!doctype html>
     <div class="panel">
       <h2 style="margin-top:0">Position Size Calculator</h2>
       <div class="row">
-        <div class="group toggle" id="account-toggle"><button data-v="live" class="active">Live</button><button data-v="demo">Demo</button></div>
-        <div class="group toggle" id="asset-toggle"><button data-v="crypto" class="active">Crypto</button><button data-v="fx">FX</button></div>
-        <div class="group toggle" id="side-toggle"><button data-v="buy" class="active">Buy</button><button data-v="sell">Sell</button></div>
-        <div class="group toggle" id="order-toggle"><button data-v="market" class="active">Market</button><button data-v="limit">Limit</button></div>
-        <div class="group toggle" id="risk-toggle"><button data-v="fixed_aud" class="active">Fixed AUD</button><button data-v="percent">%</button></div>
+        <label>Account</label>
+        <div class="group toggle" id="account-toggle"><button type="button" data-v="live" class="active">Live</button><button type="button" data-v="demo">Demo</button></div>
+      </div>
+      <div class="row">
+        <label>Asset</label>
+        <div class="group toggle" id="asset-toggle"><button type="button" data-v="crypto" class="active">Crypto</button><button type="button" data-v="fx">FX</button></div>
+      </div>
+      <div class="row">
+        <label>Side</label>
+        <div class="group toggle" id="side-toggle"><button type="button" data-v="buy" class="active">Buy</button><button type="button" data-v="sell">Sell</button></div>
+      </div>
+      <div class="row">
+        <label>Order type</label>
+        <div class="group toggle" id="order-toggle"><button type="button" data-v="market" class="active">Market</button><button type="button" data-v="limit">Limit</button></div>
       </div>
       <div class="row">
         <label>Symbol<input id="calc-symbol" placeholder="BTC or EUR_USD"/></label>
-        <label id="limit-wrap" style="display:none">Limit entry price<input id="calc-limit" type="number" step="any"/></label>
-        <label>Stop loss ticks<input id="calc-sl-ticks" type="number" min="1" step="1" value="10"/></label>
-        <label>Take profit ticks<input id="calc-tp-ticks" type="number" min="1" step="1" value="20"/></label>
-        <label>Risk value<input id="calc-risk" type="number" min="0.0001" step="any" value="100"/></label>
-        <label>Timeframe (optional)<input id="calc-timeframe" placeholder="15m"/></label>
+        <div class="muted" id="calc-canonical-symbol"></div>
+      </div>
+      <div class="row" id="limit-wrap" style="display:none">
+        <label>Limit entry price<input id="calc-limit" type="number" step="any"/></label>
       </div>
       <div class="row">
-        <button id="calc-quote" type="button">Calculate</button>
-        <button id="calc-submit" type="button">Submit Order</button>
+        <label>Stop loss ticks<input id="calc-sl-ticks" type="number" min="1" step="1" value="10"/></label>
+      </div>
+      <div class="row">
+        <label>Take profit ticks<input id="calc-tp-ticks" type="number" min="1" step="1" value="20"/></label>
+      </div>
+      <div class="row" id="risk-toggle-wrap">
+        <label>Risk mode</label>
+        <div class="group toggle" id="risk-toggle"><button type="button" data-v="fixed_aud">Fixed AUD</button><button type="button" data-v="percent" class="active">%</button></div>
+      </div>
+      <div class="row">
+        <label id="calc-risk-label">Risk value (%)</label>
+        <input id="calc-risk" type="number" min="0.0001" step="any" value="1"/>
+      </div>
+      <div class="row">
+        <label>Timeframe</label>
+        <div class="group toggle" id="timeframe-toggle"></div>
+      </div>
+      <div class="row">
+        <label>Journal stats</label>
+        <div class="grid" id="calc-journal-summary"></div>
+      </div>
+      <div class="row">
+        <label>Quote results</label>
+        <div class="grid" id="calc-results"></div>
+      </div>
+      <div class="row">
+        <div class="group">
+          <button id="calc-quote" type="button">Calculate</button>
+          <button id="calc-submit" type="button">Submit Order</button>
+        </div>
       </div>
       <div id="calc-error" class="error"></div>
       <div id="calc-success" class="ok"></div>
-      <div class="grid" id="calc-results"></div>
       <p class="muted">10 ticks always means 10 × broker minimum tick size.</p>
     </div>
   </div>
@@ -11076,7 +11148,41 @@ def _fmt_dec(value: Decimal) -> str:
     return text.rstrip("0").rstrip(".") if "." in text else text
 
 
-async def _fetch_bybit_balance_usdt(account: str) -> Decimal:
+_BYBIT_NAME_ALIAS_CACHE: Dict[str, object] = {"expires_at": 0.0, "aliases": {}}
+
+
+async def _bybit_name_aliases_for_choices(base_url: str, symbols: List[str] | Set[str]) -> Dict[str, str]:
+    now = time.time()
+    cached_aliases = _BYBIT_NAME_ALIAS_CACHE.get("aliases")
+    if isinstance(cached_aliases, dict) and now < float(_BYBIT_NAME_ALIAS_CACHE.get("expires_at") or 0):
+        alias_map = cached_aliases
+    else:
+        payload = await _bybit_get_async(base_url, "/v5/market/instruments-info", {"category": "linear", "limit": 1000})
+        rows = (payload.get("result") or {}).get("list") or []
+        alias_map: Dict[str, str] = {}
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            symbol = str(row.get("symbol") or "").upper()
+            base_coin = str(row.get("baseCoin") or "").upper()
+            display_name = norm_symbol(row.get("displayName"))
+            if base_coin:
+                alias_map[base_coin] = base_coin
+            if symbol:
+                alias_map[norm_symbol(symbol)] = base_coin or symbol
+            if display_name and base_coin:
+                alias_map[display_name] = base_coin
+        _BYBIT_NAME_ALIAS_CACHE["aliases"] = alias_map
+        _BYBIT_NAME_ALIAS_CACHE["expires_at"] = now + 6 * 60 * 60
+    choices = {str(s or "").strip().upper() for s in symbols if str(s or "").strip()}
+    out: Dict[str, str] = {}
+    for name_key, ticker in alias_map.items():
+        if ticker and any(f"{ticker}{quote}" in choices for quote in ("USDT", "USDC", "USD")):
+            out[name_key] = ticker
+    return out
+
+
+async def _fetch_bybit_balance_usdt(account: str) -> Dict[str, Decimal]:
     _mode, api_key, api_secret, base_url, _src = resolve_bybit_credentials_for(account)
     if not api_key or not api_secret:
         raise HTTPException(status_code=500, detail="Bybit credentials are missing for selected account.")
@@ -11089,14 +11195,23 @@ async def _fetch_bybit_balance_usdt(account: str) -> Decimal:
     )
     rows = (payload.get("result") or {}).get("list") or []
     for row in rows:
+        total_equity = Decimal(str(row.get("totalEquity") or "0"))
+        total_available_balance = Decimal(str(row.get("totalAvailableBalance") or "0"))
         for coin in row.get("coin", []) or []:
             if str(coin.get("coin") or "").upper() == "USDT":
                 val = coin.get("availableToTrade") or coin.get("walletBalance")
                 if val is not None:
-                    return Decimal(str(val))
-        total = row.get("totalEquity")
-        if total is not None:
-            return Decimal(str(total))
+                    return {
+                        "available_usdt": Decimal(str(val)),
+                        "total_equity": total_equity,
+                        "total_available_balance": total_available_balance,
+                    }
+        if total_equity > 0 or total_available_balance > 0:
+            return {
+                "available_usdt": total_available_balance if total_available_balance > 0 else total_equity,
+                "total_equity": total_equity,
+                "total_available_balance": total_available_balance,
+            }
     raise HTTPException(status_code=502, detail="Bybit balance unavailable.")
 
 
@@ -11120,7 +11235,16 @@ async def calculator_instrument(asset: str, account: str, symbol: str) -> JSONRe
     if asset_norm == "crypto":
         _mode, _key, _secret, base_url, _src = resolve_bybit_credentials_for(account_norm)
         choices = await _bybit_get_symbols_by_category_cached(base_url, "linear")
+        if not choices:
+            raise HTTPException(status_code=404, detail=f"Could not resolve Bybit symbol: {symbol}")
         resolved = resolve_bybit_symbol_from_choices(symbol, choices)
+        if not resolved or not resolved.get("resolved_symbol"):
+            try:
+                name_aliases = await _bybit_name_aliases_for_choices(base_url, set(choices))
+            except Exception as exc:
+                raise HTTPException(status_code=503, detail=f"Bybit alias metadata unavailable: {exc}") from exc
+            if name_aliases:
+                resolved = resolve_bybit_symbol_from_choices(symbol, choices, extra_aliases=name_aliases)
         if not resolved or not resolved.get("resolved_symbol"):
             raise HTTPException(status_code=404, detail=f"Could not resolve Bybit symbol: {symbol}")
         resolved_symbol = str(resolved["resolved_symbol"]).upper()
@@ -11141,6 +11265,10 @@ async def calculator_instrument(asset: str, account: str, symbol: str) -> JSONRe
                 "tick_size": item.get("priceFilter", {}).get("tickSize"),
                 "qty_step": item.get("lotSizeFilter", {}).get("qtyStep"),
                 "min_qty": item.get("lotSizeFilter", {}).get("minOrderQty"),
+                "max_qty": item.get("lotSizeFilter", {}).get("maxOrderQty"),
+                "max_mkt_qty": item.get("lotSizeFilter", {}).get("maxMktOrderQty"),
+                "min_notional": item.get("lotSizeFilter", {}).get("minNotionalValue"),
+                "leverage_filter": item.get("leverageFilter") or {},
             }
         )
 
@@ -11166,9 +11294,102 @@ async def calculator_instrument(asset: str, account: str, symbol: str) -> JSONRe
                 "tradeUnitsPrecision": meta.get("tradeUnitsPrecision"),
                 "pipLocation": meta.get("pipLocation"),
                 "minimumTradeSize": meta.get("minimumTradeSize"),
+                "maximumOrderUnits": meta.get("maximumOrderUnits"),
+                "maximumPositionSize": meta.get("maximumPositionSize"),
+                "marginRate": meta.get("marginRate"),
             }
         )
     raise HTTPException(status_code=400, detail="asset must be crypto or fx.")
+
+
+@app.get("/api/calculator/journal-summary")
+async def calculator_journal_summary(asset: str, symbol: str) -> JSONResponse:
+    asset_norm = str(asset or "").strip().lower()
+    symbol_in = str(symbol or "").strip()
+    if not symbol_in:
+        raise HTTPException(status_code=400, detail="symbol is required.")
+    rows = _enrich_trade_row_metrics(_get_trading_journal_rows())
+    balances = _get_excel_account_balances()
+
+    canonical = ""
+    if asset_norm == "crypto":
+        creds = resolve_bybit_credentials_for("live")
+        base_url = creds[3] if isinstance(creds, tuple) else (creds.get("base_url") if isinstance(creds, dict) else "")
+        choices = await _bybit_get_symbols_by_category_cached(base_url or BYBIT_BASE, "linear")
+        if not choices:
+            return JSONResponse({"status": "unresolved", "canonical_symbol": "", "stats": None}, status_code=404)
+        resolved = resolve_bybit_symbol_from_choices(symbol_in, choices)
+        if not resolved or not resolved.get("resolved_symbol"):
+            try:
+                name_aliases = await _bybit_name_aliases_for_choices(base_url or BYBIT_BASE, set(choices))
+            except Exception as exc:
+                raise HTTPException(status_code=503, detail=f"Bybit alias metadata unavailable: {exc}") from exc
+            if name_aliases:
+                resolved = resolve_bybit_symbol_from_choices(symbol_in, choices, extra_aliases=name_aliases)
+        canonical = str((resolved or {}).get("resolved_symbol") or "").upper()
+    elif asset_norm == "fx":
+        canonical = normalize_oanda_symbol_query(symbol_in)
+    else:
+        raise HTTPException(status_code=400, detail="asset must be crypto or fx.")
+
+    if not canonical:
+        return JSONResponse({"status": "unresolved", "canonical_symbol": "", "stats": None}, status_code=404)
+    canonical_key = norm_symbol(canonical)
+    filtered: List[Dict[str, object]] = []
+    for r in rows:
+        row_symbol = str(r.get("symbol") or "")
+        row_key = norm_symbol(row_symbol)
+        if not row_key:
+            continue
+        if asset_norm == "fx":
+            try:
+                row_fx = normalize_oanda_symbol_query(row_symbol)
+                if norm_symbol(row_fx) == canonical_key:
+                    filtered.append(r)
+            except Exception:
+                if row_key == canonical_key:
+                    filtered.append(r)
+            continue
+        # crypto: include exact normalized key and shorthand-equivalent variants.
+        if row_key == canonical_key or row_key.startswith(canonical_key) or canonical_key.startswith(row_key):
+            filtered.append(r)
+    if not filtered:
+        return JSONResponse({"status": "no_data", "canonical_symbol": canonical, "stats": None, "trades": []})
+    stats = _compute_journal_stats(filtered, balances)
+    totals = stats.get("totals") if isinstance(stats, dict) else {}
+    last_trade_ts = None
+    try:
+        last_trade_ts = max(
+            (str(r.get("close_time") or r.get("open_time") or "") for r in filtered if str(r.get("close_time") or r.get("open_time") or "").strip()),
+            default=None,
+        )
+    except Exception:
+        last_trade_ts = None
+    summary = {
+        "total_trades": totals.get("trades"),
+        "wins": totals.get("wins"),
+        "losses": totals.get("losses"),
+        "break_even": totals.get("break_even"),
+        "long_trades": totals.get("long_trades"),
+        "short_trades": totals.get("short_trades"),
+        "long_wins": totals.get("long_wins"),
+        "long_losses": totals.get("long_losses"),
+        "short_wins": totals.get("short_wins"),
+        "short_losses": totals.get("short_losses"),
+        "win_rate": (f"{float(totals.get('win_rate_pct')):.2f}%" if totals.get("win_rate_pct") is not None else None),
+        "avg_stop_distance": totals.get("avg_stop_pct"),
+        "avg_target_distance": totals.get("avg_target_pct"),
+        "avg_trade_duration": totals.get("avg_duration_seconds"),
+        "last_trade_timestamp": last_trade_ts,
+    }
+    return JSONResponse(
+        {
+            "status": "ok",
+            "canonical_symbol": canonical,
+            "stats": summary,
+            "trades": filtered,
+        }
+    )
 
 
 @app.post("/api/calculator/quote")
@@ -11177,7 +11398,7 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
     account = str(payload.get("account") or "live").strip().lower()
     side = str(payload.get("side") or "buy").strip().lower()
     order_type = str(payload.get("order_type") or "market").strip().lower()
-    risk_mode = str(payload.get("risk_mode") or "fixed_aud").strip().lower()
+    risk_mode = str(payload.get("risk_mode") or "percent").strip().lower()
     symbol_in = str(payload.get("symbol") or "").strip()
     if not symbol_in:
         raise HTTPException(status_code=400, detail="symbol is required.")
@@ -11195,13 +11416,26 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
     limit_entry = payload.get("entry_price")
     if order_type == "limit" and (limit_entry is None or str(limit_entry).strip() == ""):
         raise HTTPException(status_code=400, detail="Limit orders require entry_price.")
+    if risk_mode not in {"fixed_aud", "percent"}:
+        raise HTTPException(status_code=400, detail="risk_mode must be fixed_aud or percent.")
 
     if asset == "crypto":
+        if risk_mode == "fixed_aud":
+            raise HTTPException(status_code=400, detail="fixed_aud risk mode is only supported for FX.")
         _mode, api_key, api_secret, base_url, _src = resolve_bybit_credentials_for(account)
         if not api_key or not api_secret:
             raise HTTPException(status_code=500, detail="Bybit credentials are missing for selected account.")
         choices = await _bybit_get_symbols_by_category_cached(base_url, "linear")
+        if not choices:
+            raise HTTPException(status_code=404, detail=f"Could not resolve Bybit symbol: {symbol_in}")
         resolved = resolve_bybit_symbol_from_choices(symbol_in, choices)
+        if not resolved or not resolved.get("resolved_symbol"):
+            try:
+                name_aliases = await _bybit_name_aliases_for_choices(base_url, set(choices))
+            except Exception as exc:
+                raise HTTPException(status_code=503, detail=f"Bybit alias metadata unavailable: {exc}") from exc
+            if name_aliases:
+                resolved = resolve_bybit_symbol_from_choices(symbol_in, choices, extra_aliases=name_aliases)
         resolved_symbol = str((resolved or {}).get("resolved_symbol") or "").upper()
         if not resolved_symbol:
             raise HTTPException(status_code=404, detail=f"Could not resolve Bybit symbol: {symbol_in}")
@@ -11213,6 +11447,10 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
         tick_size = Decimal(str(inst.get("priceFilter", {}).get("tickSize") or "0"))
         qty_step = Decimal(str(inst.get("lotSizeFilter", {}).get("qtyStep") or "0"))
         min_qty = Decimal(str(inst.get("lotSizeFilter", {}).get("minOrderQty") or "0"))
+        max_qty = Decimal(str(inst.get("lotSizeFilter", {}).get("maxOrderQty") or "0"))
+        max_mkt_qty = Decimal(str(inst.get("lotSizeFilter", {}).get("maxMktOrderQty") or "0"))
+        min_notional = Decimal(str(inst.get("lotSizeFilter", {}).get("minNotionalValue") or "0"))
+        max_leverage = Decimal(str((inst.get("leverageFilter") or {}).get("maxLeverage") or "0"))
         if tick_size <= 0 or qty_step <= 0:
             raise HTTPException(status_code=502, detail="Bybit instrument constraints are invalid.")
         tickers = await _bybit_get_async(base_url, "/v5/market/tickers", {"category": "linear", "symbol": resolved_symbol})
@@ -11243,23 +11481,52 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
         taker = Decimal(str(fee_row.get("takerFeeRate") or "0"))
         open_fee = taker if order_type == "market" else max(maker, taker)
         close_fee = taker
-        aud_usd = Decimal(str((await _fetch_oanda_mid_prices_batch(cfg=_get_oanda_config("live"), instruments=["AUD_USD"])).get("AUD_USD") or 0))
+        try:
+            aud_cfg = _get_oanda_config("live")
+        except Exception:
+            aud_cfg = {"base_url": "", "account_id": "", "token": ""}
+        try:
+            aud_usd = Decimal(
+                str(
+                    (await _fetch_oanda_mid_prices_batch(cfg=aud_cfg, instruments=["AUD_USD"])).get(
+                        "AUD_USD"
+                    )
+                    or 0
+                )
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"AUD_USD conversion unavailable: {exc}") from exc
         if aud_usd <= 0:
-            raise HTTPException(status_code=502, detail="AUD_USD conversion fetch failed.")
-        risk_aud = risk_val
-        if risk_mode == "percent":
-            balance_usdt = await _fetch_bybit_balance_usdt(account)
-            risk_aud = (balance_usdt / aud_usd) * (risk_val / Decimal("100"))
+            raise HTTPException(status_code=502, detail="AUD_USD conversion unavailable.")
+        balance_snapshot = await _fetch_bybit_balance_usdt(account)
+        available_usdt = Decimal(str(balance_snapshot.get("available_usdt") or "0"))
+        total_equity = Decimal(str(balance_snapshot.get("total_equity") or "0"))
+        risk_aud = (available_usdt / aud_usd) * (risk_val / Decimal("100"))
         risk_usdt = risk_aud * aud_usd
-        loss_per_unit = abs(entry - sl) + (entry * open_fee) + (sl * close_fee)
+        spread_quote = max(Decimal("0"), ask - bid) if order_type == "market" else Decimal("0")
+        loss_per_unit = abs(entry - sl) + spread_quote + (entry * open_fee) + (sl * close_fee)
         if loss_per_unit <= 0:
             raise HTTPException(status_code=400, detail="Invalid stop distance produced zero loss per unit.")
         qty_raw = risk_usdt / loss_per_unit
+        raw_notional = qty_raw * entry
+        if min_notional > 0 and raw_notional < min_notional:
+            raise HTTPException(status_code=400, detail="Calculated notional is below Bybit minimum notional")
         qty = _floor_to_step(qty_raw, qty_step)
         if qty < min_qty:
-            raise HTTPException(status_code=400, detail="Calculated quantity is below minimum size.")
+            raise HTTPException(status_code=400, detail="Calculated quantity is below minimum order quantity")
+        notional = qty * entry
+        if order_type == "market" and max_mkt_qty > 0 and qty > max_mkt_qty:
+            raise HTTPException(status_code=400, detail="Calculated quantity exceeds Bybit max market order quantity")
+        if order_type == "limit" and max_qty > 0 and qty > max_qty:
+            raise HTTPException(status_code=400, detail="Calculated quantity exceeds Bybit max order quantity")
+        if max_leverage > 0:
+            est_margin = notional / max_leverage
+            available_for_margin = max(available_usdt, total_equity)
+            margin_tolerance = Decimal("1.05")
+            if available_for_margin > 0 and est_margin > (available_for_margin * margin_tolerance):
+                raise HTTPException(status_code=400, detail="Insufficient Bybit available margin for estimated initial margin")
         total_loss_usdt = qty * loss_per_unit
-        reward_usdt = qty * (abs(tp - entry) - (entry * open_fee) - (tp * close_fee))
+        reward_usdt = qty * (abs(tp - entry) - spread_quote - (entry * open_fee) - (tp * close_fee))
         return JSONResponse(
             {
                 "broker": "bybit",
@@ -11269,7 +11536,7 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                 "stop_price": _fmt_dec(sl),
                 "target_price": _fmt_dec(tp),
                 "quantity": _fmt_dec(qty),
-                "notional": _fmt_dec(qty * entry),
+                "notional": _fmt_dec(notional),
                 "estimated_fees_or_spread_aud": _fmt_dec(((qty * entry * open_fee) + (qty * sl * close_fee)) / aud_usd),
                 "estimated_total_loss_aud": _fmt_dec(total_loss_usdt / aud_usd),
                 "estimated_reward_aud": _fmt_dec(max(Decimal("0"), reward_usdt / aud_usd)),
@@ -11296,6 +11563,9 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
         display_precision = int(meta["displayPrecision"])
         units_precision = int(meta.get("tradeUnitsPrecision", 0))
         min_trade_size = Decimal(str(meta.get("minimumTradeSize") or "0"))
+        max_order_units = Decimal(str(meta.get("maximumOrderUnits") or "0"))
+        max_position_size = Decimal(str(meta.get("maximumPositionSize") or "0"))
+        margin_rate = Decimal(str(meta.get("marginRate") or "0"))
         tick_size = Decimal("1").scaleb(-display_precision)
         try:
             prices = await _fetch_oanda_json(
@@ -11344,6 +11614,28 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
         units = _floor_to_precision(units_raw, units_precision)
         if units < min_trade_size:
             raise HTTPException(status_code=400, detail="Calculated units are below minimum trade size.")
+        if max_order_units > 0 and units > max_order_units:
+            raise HTTPException(status_code=400, detail="Calculated units exceed OANDA maximumOrderUnits.")
+        if max_position_size > 0 and units > max_position_size:
+            raise HTTPException(status_code=400, detail="Calculated units exceed OANDA maximumPositionSize.")
+        summary = await _fetch_oanda_account_summary(account)
+        margin_available = Decimal(str(summary.get("marginAvailable") or "0"))
+        effective_margin_rate = margin_rate if margin_rate > 0 else Decimal(str(summary.get("marginRate") or "0"))
+        if effective_margin_rate > 0 and margin_available > 0:
+            position_value_factor = None
+            for item in conversions:
+                if str(item.get("currency") or "").upper() == quote_ccy:
+                    val = item.get("positionValue")
+                    if val is not None:
+                        position_value_factor = Decimal(str(val))
+                    break
+            if position_value_factor is not None and position_value_factor > 0:
+                required_margin = (units * entry * position_value_factor) * effective_margin_rate
+            else:
+                # Fallback approximation when pricing conversion data omits positionValue.
+                required_margin = (units * entry) * effective_margin_rate
+            if required_margin > margin_available:
+                raise HTTPException(status_code=400, detail="Insufficient OANDA marginAvailable for estimated initial margin.")
         spread_aud = spread_quote * loss_factor * units
         reward_aud = max(Decimal("0"), (abs(tp - entry) - spread_quote) * loss_factor * units)
         return JSONResponse(
@@ -11805,7 +12097,7 @@ async def _fetch_oanda_account_summary(account: str) -> Dict[str, object]:
         account_id=cfg["account_id"],
         api_key=cfg["token"],
         endpoint="/accounts/{account_id}/summary",
-        mode=cfg["mode"],
+        mode=cfg.get("mode") or account,
     )
     account_payload = payload.get("account") if isinstance(payload, dict) else {}
     if not isinstance(account_payload, dict):
@@ -11816,6 +12108,9 @@ async def _fetch_oanda_account_summary(account: str) -> Dict[str, object]:
         "currency": account_payload.get("currency") or "",
         "balance": _to_float(account_payload.get("balance")),
         "nav": _to_float(account_payload.get("NAV")),
+        "marginAvailable": _to_float(account_payload.get("marginAvailable")),
+        "marginUsed": _to_float(account_payload.get("marginUsed")),
+        "marginRate": _to_float(account_payload.get("marginRate")),
     }
 
 

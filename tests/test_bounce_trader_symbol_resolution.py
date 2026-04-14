@@ -6,6 +6,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+pytest.importorskip("flask")
 SPEC = importlib.util.spec_from_file_location(
     "bounce_trader_app",
     ROOT / "bybit_trigger_bounce_trader" / "app.py",
