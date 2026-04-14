@@ -28,6 +28,8 @@ def test_merged_calculator_page_returns_200() -> None:
     assert response.status_code == 200
     html = response.body.decode("utf-8")
     assert "Position Size Calculator" in html
+    assert 'id="calc-timeframe"' not in html
+    assert 'id="timeframe-toggle"' in html
 
 
 def test_bybit_quote_uses_tick_step_fee_and_no_oversize(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -38,13 +40,15 @@ def test_bybit_quote_uses_tick_step_fee_and_no_oversize(monkeypatch: pytest.Monk
 
     async def fake_get(base_url, path, params):
         if path.endswith("instruments-info"):
-            return {"result": {"list": [{"priceFilter": {"tickSize": "0.1"}, "lotSizeFilter": {"qtyStep": "0.001", "minOrderQty": "0.001"}}]}}
+            return {"result": {"list": [{"priceFilter": {"tickSize": "0.1"}, "lotSizeFilter": {"qtyStep": "0.001", "minOrderQty": "0.001", "maxOrderQty": "999999", "maxMktOrderQty": "999999", "minNotionalValue": "5"}, "leverageFilter": {"maxLeverage": "50"}}]}}
         if path.endswith("tickers"):
             return {"result": {"list": [{"bid1Price": "100", "ask1Price": "101", "lastPrice": "100.5"}]}}
         raise AssertionError(path)
 
     async def fake_signed_get(**kwargs):
-        return {"result": {"list": [{"makerFeeRate": "0.001", "takerFeeRate": "0.002"}]}}
+        if kwargs.get("path", "").endswith("fee-rate"):
+            return {"result": {"list": [{"makerFeeRate": "0.001", "takerFeeRate": "0.002"}]}}
+        return {"result": {"list": [{"totalEquity": "1000", "totalAvailableBalance": "600", "coin": [{"coin": "USDT", "availableToTrade": "600"}]}]}}
 
     async def fake_mids(**kwargs):
         return {"AUD_USD": 0.5}
@@ -56,13 +60,13 @@ def test_bybit_quote_uses_tick_step_fee_and_no_oversize(monkeypatch: pytest.Monk
 
     payload = {
         "asset": "crypto", "account": "live", "symbol": "BTC", "side": "buy", "order_type": "market",
-        "risk_mode": "fixed_aud", "risk_value": 100, "stop_loss_ticks": 10, "take_profit_ticks": 20,
+        "risk_mode": "percent", "risk_value": 100, "stop_loss_ticks": 10, "take_profit_ticks": 20,
     }
     response = asyncio.run(master_service.calculator_quote(payload))
     body = json.loads(response.body.decode("utf-8"))
     qty = float(body["quantity"])
     assert qty > 0
-    assert float(body["estimated_total_loss_aud"]) <= 100.0001
+    assert float(body["estimated_total_loss_aud"]) <= 1200.0001
 
 
 def test_bybit_market_uses_side_specific_bid_ask(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -73,13 +77,15 @@ def test_bybit_market_uses_side_specific_bid_ask(monkeypatch: pytest.MonkeyPatch
 
     async def fake_get(base_url, path, params):
         if path.endswith("instruments-info"):
-            return {"result": {"list": [{"priceFilter": {"tickSize": "1"}, "lotSizeFilter": {"qtyStep": "1", "minOrderQty": "1"}}]}}
+            return {"result": {"list": [{"priceFilter": {"tickSize": "1"}, "lotSizeFilter": {"qtyStep": "1", "minOrderQty": "1", "maxOrderQty": "999", "maxMktOrderQty": "999", "minNotionalValue": "1"}, "leverageFilter": {"maxLeverage": "50"}}]}}
         if path.endswith("tickers"):
             return {"result": {"list": [{"bid1Price": "100", "ask1Price": "101", "lastPrice": "100.5"}]}}
         raise AssertionError(path)
 
     async def fake_signed_get(**kwargs):
-        return {"result": {"list": [{"makerFeeRate": "0", "takerFeeRate": "0"}]}}
+        if kwargs.get("path", "").endswith("fee-rate"):
+            return {"result": {"list": [{"makerFeeRate": "0", "takerFeeRate": "0"}]}}
+        return {"result": {"list": [{"totalEquity": "1000", "totalAvailableBalance": "1000", "coin": [{"coin": "USDT", "availableToTrade": "1000"}]}]}}
 
     async def fake_mids(**kwargs):
         return {"AUD_USD": 1}
@@ -90,11 +96,11 @@ def test_bybit_market_uses_side_specific_bid_ask(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(master_service, "_fetch_oanda_mid_prices_batch", fake_mids)
     buy = json.loads(asyncio.run(master_service.calculator_quote({
         "asset": "crypto", "account": "live", "symbol": "BTC", "side": "buy", "order_type": "market",
-        "risk_mode": "fixed_aud", "risk_value": 100, "stop_loss_ticks": 1, "take_profit_ticks": 2,
+        "risk_mode": "percent", "risk_value": 100, "stop_loss_ticks": 1, "take_profit_ticks": 2,
     })).body.decode("utf-8"))
     sell = json.loads(asyncio.run(master_service.calculator_quote({
         "asset": "crypto", "account": "live", "symbol": "BTC", "side": "sell", "order_type": "market",
-        "risk_mode": "fixed_aud", "risk_value": 100, "stop_loss_ticks": 1, "take_profit_ticks": 2,
+        "risk_mode": "percent", "risk_value": 100, "stop_loss_ticks": 1, "take_profit_ticks": 2,
     })).body.decode("utf-8"))
     assert buy["entry_price"] == "101"
     assert sell["entry_price"] == "100"
@@ -165,7 +171,7 @@ def test_missing_env_and_bad_symbols_return_real_errors(monkeypatch: pytest.Monk
     with pytest.raises(master_service.HTTPException) as bybit_exc:
         asyncio.run(master_service.calculator_quote({
             "asset": "crypto", "account": "live", "symbol": "BTC", "side": "buy", "order_type": "market",
-            "risk_mode": "fixed_aud", "risk_value": 100, "stop_loss_ticks": 10, "take_profit_ticks": 20,
+            "risk_mode": "percent", "risk_value": 100, "stop_loss_ticks": 10, "take_profit_ticks": 20,
         }))
     assert bybit_exc.value.status_code == 500
 
@@ -184,9 +190,50 @@ def test_missing_env_and_bad_symbols_return_real_errors(monkeypatch: pytest.Monk
     with pytest.raises(master_service.HTTPException) as bad_symbol_exc:
         asyncio.run(master_service.calculator_quote({
             "asset": "crypto", "account": "live", "symbol": "NOTREAL", "side": "buy", "order_type": "market",
-            "risk_mode": "fixed_aud", "risk_value": 100, "stop_loss_ticks": 10, "take_profit_ticks": 20,
+            "risk_mode": "percent", "risk_value": 100, "stop_loss_ticks": 10, "take_profit_ticks": 20,
         }))
     assert bad_symbol_exc.value.status_code == 404
+
+
+def test_crypto_rejects_fixed_aud() -> None:
+    with pytest.raises(master_service.HTTPException) as exc:
+        asyncio.run(master_service.calculator_quote({
+            "asset": "crypto", "account": "live", "symbol": "BTC", "side": "buy", "order_type": "market",
+            "risk_mode": "fixed_aud", "risk_value": 1, "stop_loss_ticks": 10, "take_profit_ticks": 20,
+        }))
+    assert exc.value.status_code == 400
+
+
+def test_bybit_rejects_min_notional_and_market_max(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("live", "k", "s", "https://bybit.test", "KEY1"))
+    monkeypatch.setattr(master_service, "_fetch_oanda_mid_prices_batch", lambda **_kwargs: asyncio.sleep(0, result={"AUD_USD": 1}))
+    monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["BTCUSDT"]))
+
+    async def fake_signed_get(**kwargs):
+        if kwargs.get("path", "").endswith("fee-rate"):
+            return {"result": {"list": [{"makerFeeRate": "0", "takerFeeRate": "0"}]}}
+        return {"result": {"list": [{"totalEquity": "1000", "totalAvailableBalance": "1", "coin": [{"coin": "USDT", "availableToTrade": "1"}]}]}}
+
+    async def fake_get(_base, path, _params):
+        if path.endswith("instruments-info"):
+            return {"result": {"list": [{"priceFilter": {"tickSize": "1"}, "lotSizeFilter": {"qtyStep": "1", "minOrderQty": "1", "maxOrderQty": "10", "maxMktOrderQty": "2", "minNotionalValue": "1000"}, "leverageFilter": {"maxLeverage": "2"}}]}}
+        return {"result": {"list": [{"bid1Price": "100", "ask1Price": "100", "lastPrice": "100"}]}}
+
+    monkeypatch.setattr(master_service, "_bybit_signed_get", fake_signed_get)
+    monkeypatch.setattr(master_service, "_bybit_get_async", fake_get)
+    with pytest.raises(master_service.HTTPException) as min_notional:
+        asyncio.run(master_service.calculator_quote({"asset": "crypto", "account": "live", "symbol": "BTC", "side": "buy", "order_type": "market", "risk_mode": "percent", "risk_value": 1, "stop_loss_ticks": 1, "take_profit_ticks": 2}))
+    assert "minimum notional" in str(min_notional.value.detail).lower()
+
+
+def test_oanda_rejects_max_units_and_margin(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "_get_oanda_config", lambda _a: {"base_url": "https://oanda.test", "account_id": "acct", "token": "tok"})
+    monkeypatch.setattr(master_service, "_fetch_oanda_account_summary", lambda _a: asyncio.sleep(0, result={"nav": 1000, "marginAvailable": 1, "marginRate": 0.05}))
+    monkeypatch.setattr(master_service, "_fetch_oanda_instrument_meta", lambda **_kwargs: asyncio.sleep(0, result={"displayPrecision": 5, "tradeUnitsPrecision": 0, "pipLocation": -4, "minimumTradeSize": "1", "maximumOrderUnits": "10", "marginRate": "0.05"}))
+    monkeypatch.setattr(master_service, "_fetch_oanda_json", lambda **_kwargs: asyncio.sleep(0, result={"prices": [{"bids": [{"price": "1.1"}], "asks": [{"price": "1.1001"}], "homeConversions": [{"currency": "USD", "accountLoss": "1"}]}]}))
+    with pytest.raises(master_service.HTTPException) as exc:
+        asyncio.run(master_service.calculator_quote({"asset": "fx", "account": "demo", "symbol": "eurusd", "side": "buy", "order_type": "market", "risk_mode": "fixed_aud", "risk_value": 100, "stop_loss_ticks": 1, "take_profit_ticks": 2}))
+    assert exc.value.status_code == 400
 
 
 def test_submit_routes_to_existing_order_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -216,3 +263,32 @@ def test_submit_routes_to_existing_order_helpers(monkeypatch: pytest.MonkeyPatch
         "entry_price": "1.2", "stop_loss_price": "1.3", "take_profit_price": "1.1", "quantity": "1000", "timeframe": "1h",
     }))
     assert calls == {"bybit": 1, "oanda": 1}
+
+
+def test_journal_summary_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        master_service,
+        "_get_trading_journal_rows",
+        lambda: [
+            {
+                "row_type": "trade",
+                "symbol": "EURUSD",
+                "asset_class": "fx",
+                "side": "Buy",
+                "close_time": "2026-01-01T01:00:00Z",
+                "open_time": "2026-01-01T00:00:00Z",
+                "entry_price": 1.1,
+                "stop_loss": 1.0,
+                "take_profit": 1.2,
+                "net_profit": 1,
+                "balance_after_trade": 100,
+            }
+        ],
+    )
+    monkeypatch.setattr(master_service, "_get_excel_account_balances", lambda: [])
+    response = asyncio.run(master_service.calculator_journal_summary(asset="fx", symbol="eurusd"))
+    body = json.loads(response.body.decode("utf-8"))
+    assert body["status"] == "ok"
+    assert body["canonical_symbol"] == "EUR_USD"
+    assert isinstance(body.get("trades"), list)
+    assert len(body["trades"]) == 1

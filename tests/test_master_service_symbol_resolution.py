@@ -91,3 +91,38 @@ def test_watchlist_mixed_crypto_fx_persists_canonical_values(monkeypatch: pytest
     assert "\"BRUSDT\"" in payload
     assert "\"EUR_USD\"" in payload
     assert saved["items"] == ["BRUSDT", "EUR_USD"]
+
+
+def test_calculator_instrument_resolves_oanda_shorthand(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "_get_oanda_config", lambda _a: {"base_url": "x", "account_id": "a", "token": "t"})
+    monkeypatch.setattr(
+        master_service,
+        "_fetch_oanda_instrument_meta",
+        lambda **_kwargs: asyncio.sleep(0, result={"displayPrecision": 5, "tradeUnitsPrecision": 0, "pipLocation": -4, "minimumTradeSize": "1", "maximumOrderUnits": "1000", "marginRate": "0.05"}),
+    )
+    response = asyncio.run(master_service.calculator_instrument(asset="fx", account="demo", symbol="eurusd"))
+    payload = response.body.decode("utf-8")
+    assert "EUR_USD" in payload
+
+
+def test_calculator_instrument_resolves_bybit_full_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("live", "k", "s", "https://bybit.test", "KEY1"))
+    monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["BTCUSDT"]))
+    monkeypatch.setattr(master_service, "_bybit_name_aliases_for_choices", lambda _base_url, _symbols: asyncio.sleep(0, result={"BITCOIN": "BTC"}))
+
+    async def fake_get(_base_url: str, _path: str, _params: dict):
+        return {"result": {"list": [{"priceFilter": {"tickSize": "0.1"}, "lotSizeFilter": {"qtyStep": "0.001", "minOrderQty": "0.001"}}]}}
+
+    monkeypatch.setattr(master_service, "_bybit_get_async", fake_get)
+    response = asyncio.run(master_service.calculator_instrument(asset="crypto", account="live", symbol="Bitcoin USDT"))
+    payload = response.body.decode("utf-8")
+    assert "BTCUSDT" in payload
+
+
+def test_calculator_instrument_full_name_alias_failure_is_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("live", "k", "s", "https://bybit.test", "KEY1"))
+    monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["BTCUSDT"]))
+    monkeypatch.setattr(master_service, "_bybit_name_aliases_for_choices", lambda _base_url, _symbols: (_ for _ in ()).throw(RuntimeError("alias feed down")))
+    with pytest.raises(master_service.HTTPException) as exc:
+        asyncio.run(master_service.calculator_instrument(asset="crypto", account="live", symbol="Bitcoin USDT"))
+    assert exc.value.status_code == 503

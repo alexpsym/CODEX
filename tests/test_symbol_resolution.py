@@ -12,6 +12,7 @@ SPEC.loader.exec_module(mod)
 
 resolve_bybit_symbol_from_choices = mod.resolve_bybit_symbol_from_choices
 is_likely_oanda_pair = mod.is_likely_oanda_pair
+normalize_oanda_symbol_query = mod.normalize_oanda_symbol_query
 
 
 def test_resolve_bybit_shorthand_usdt_preferred() -> None:
@@ -33,7 +34,20 @@ def test_resolve_bybit_unknown_returns_none() -> None:
     assert resolve_bybit_symbol_from_choices("UNKNOWN", symbols) is None
 
 
+def test_resolve_bybit_symbol_variants() -> None:
+    symbols = ["BTCUSDT", "ETHUSDT"]
+    for raw in ("BTC", "btcusdt", "btc usdt", "btc/usdt", "btc-usdt", "Bitcoin USDT"):
+        resolved = resolve_bybit_symbol_from_choices(raw, symbols)
+        assert resolved is not None
+        assert resolved["resolved_symbol"] == "BTCUSDT"
+
+
 def test_is_likely_oanda_pair_strict() -> None:
     assert is_likely_oanda_pair("EURUSD") is True
     assert is_likely_oanda_pair("XAUUSD") is True
     assert is_likely_oanda_pair("BRUSDT") is False
+
+
+def test_normalize_oanda_symbol_variants() -> None:
+    for raw in ("EURUSD", "eurusd", "eur_usd", "eur/usd"):
+        assert normalize_oanda_symbol_query(raw) == "EUR_USD"
