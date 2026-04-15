@@ -6440,159 +6440,6 @@ async def _get_cached_oanda_accounts(*, base_url: str, api_key: str) -> List[Dic
     return list(accounts)
 
 
-async def _place_oanda_order(
-    payload: Dict[str, object], *, request_id: str
-) -> Dict[str, object]:
-    symbol = str(payload.get("symbol", "")).upper()
-    action = str(payload.get("action", "")).lower()
-    qty = payload.get("quantity")
-    account = str(payload.get("account", "live")).lower()
-    order_type_raw = payload.get("order_type") or payload.get("orderType") or "market"
-    order_type = str(order_type_raw).lower().strip()
-
-    _log_webhook_event(
-        request_id,
-        "oanda_payload_parsed",
-        {
-            "symbol": symbol,
-            "action": action,
-            "quantity": qty,
-            "account": account,
-            "order_type": order_type,
-        },
-    )
-
-    if action not in {"buy", "sell"}:
-        raise ValueError("OANDA payload must include action=buy|sell.")
-    if not symbol:
-        raise ValueError("OANDA payload must include a symbol.")
-    if qty is None:
-        raise ValueError("OANDA payload must include quantity.")
-    try:
-        qty_val = float(qty)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("OANDA payload quantity must be numeric.") from exc
-    if qty_val <= 0:
-        raise ValueError("OANDA payload quantity must be greater than zero.")
-    if account not in {"live", "demo"}:
-        raise ValueError("OANDA payload account must be live or demo.")
-    if order_type not in {"market", "limit"}:
-        raise ValueError("OANDA payload order_type must be market or limit.")
-
-    entry_price = None
-    if order_type == "limit":
-        entry_price = _parse_optional_float(
-            payload.get("entry_price")
-            or payload.get("price")
-            or payload.get("limit_price"),
-            "entry_price",
-        )
-        if entry_price is None or entry_price <= 0:
-            raise ValueError("OANDA limit orders require a positive entry price.")
-
-    sl_price = _parse_optional_float(
-        payload.get("stop_loss_price_value")
-        or payload.get("stop_loss_price")
-        or payload.get("sl_price"),
-        "stop_loss_price",
-    )
-    tp_price = _parse_optional_float(
-        payload.get("take_profit_price_value")
-        or payload.get("take_profit_price")
-        or payload.get("tp_price"),
-        "take_profit_price",
-    )
-
-    cfg = _get_oanda_config(account)
-    BYBIT_LOGGER.info(
-        "OANDA_CFG mode=%s base=%s account_id=%s token_last4=%s",
-        cfg["mode"],
-        cfg["base_url"],
-        cfg["account_id"],
-        cfg["token"][-4:],
-    )
-    await _oanda_preflight(
-        base_url=cfg["base_url"],
-        account_id=cfg["account_id"],
-        api_key=cfg["token"],
-        mode=cfg["mode"],
-        timeout_s=4.0,
-    )
-    meta = await _fetch_oanda_instrument_meta(
-        base_url=cfg["base_url"],
-        account_id=cfg["account_id"],
-        api_key=cfg["token"],
-        symbol=symbol,
-        mode=cfg["mode"],
-    )
-    display_precision = int(meta["displayPrecision"])
-    units_precision = int(meta.get("tradeUnitsPrecision", 0))
-
-    if units_precision <= 0 and not math.isclose(
-        qty_val, float(int(qty_val)), rel_tol=0.0, abs_tol=1e-9
-    ):
-        raise ValueError(
-            f"OANDA instrument {symbol} requires whole-number units (tradeUnitsPrecision=0). "
-            f"quantity={qty_val} is not valid."
-        )
-
-    signed_units = qty_val if action == "buy" else -qty_val
-    order_payload: Dict[str, object] = {
-        "type": "MARKET" if order_type == "market" else "LIMIT",
-        "instrument": symbol,
-        "units": _quantize_oanda_units(signed_units, units_precision),
-        "timeInForce": "FOK" if order_type == "market" else "GTC",
-        "positionFill": "DEFAULT",
-    }
-    if entry_price is not None:
-        order_payload["price"] = _quantize_oanda_price(entry_price, display_precision)
-    if sl_price is not None:
-        order_payload["stopLossOnFill"] = {
-            "price": _quantize_oanda_price(sl_price, display_precision)
-        }
-    if tp_price is not None:
-        order_payload["takeProfitOnFill"] = {
-            "price": _quantize_oanda_price(tp_price, display_precision)
-        }
-    BYBIT_LOGGER.info(
-        "OANDA_ORDER_PRECISION symbol=%s displayPrecision=%s tradeUnitsPrecision=%s "
-        "units=%s price=%s sl=%s tp=%s",
-        symbol,
-        display_precision,
-        units_precision,
-        order_payload.get("units"),
-        order_payload.get("price"),
-        (order_payload.get("stopLossOnFill") or {}).get("price"),
-        (order_payload.get("takeProfitOnFill") or {}).get("price"),
-    )
-
-    url = (
-        f"{cfg['base_url'].rstrip('/')}/v3/accounts/{cfg['account_id']}/orders"
-    )
-    headers = {
-        "Authorization": f"Bearer {cfg['token']}",
-        "Content-Type": "application/json",
-    }
-    BYBIT_LOGGER.info(
-        "OANDA_CALL mode=%s base=%s account_id=%s token_last4=%s url=%s",
-        cfg["mode"],
-        cfg["base_url"],
-        cfg["account_id"],
-        cfg["token"][-4:],
-        url,
-    )
-    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-        resp = await client.post(url, headers=headers, json={"order": order_payload})
-    BYBIT_LOGGER.info(
-        "OANDA_RESP mode=%s status=%s url=%s body=%s",
-        cfg["mode"],
-        resp.status_code,
-        url,
-        resp.text[:200],
-    )
-    if resp.status_code >= 400:
-        raise ValueError(f"OANDA order failed ({resp.status_code}): {resp.text}")
-    return resp.json()
 def _build_bybit_query(params: Dict[str, str]) -> str:
     if not params:
         return ""
@@ -11077,6 +10924,13 @@ CALCULATOR_TEMPLATE = """<!doctype html>
         <label>Stop loss ticks<input id="calc-sl-ticks" type="number" min="1" step="1" value="10"/></label>
       </div>
       <div class="row">
+        <label>Target mode</label>
+        <div class="group toggle" id="target-toggle"><button type="button" data-v="rr" class="active">Risk/Reward</button><button type="button" data-v="ticks">TP ticks</button></div>
+      </div>
+      <div class="row" id="rr-wrap">
+        <label>Risk/Reward (net R)<input id="calc-rr" type="number" min="0.1" step="0.1" value="2"/></label>
+      </div>
+      <div class="row" id="tp-ticks-wrap" style="display:none">
         <label>Take profit ticks<input id="calc-tp-ticks" type="number" min="1" step="1" value="20"/></label>
       </div>
       <div class="row" id="risk-toggle-wrap">
@@ -11086,6 +10940,10 @@ CALCULATOR_TEMPLATE = """<!doctype html>
       <div class="row">
         <label id="calc-risk-label">Risk value (%)</label>
         <input id="calc-risk" type="number" min="0.0001" step="any" value="1"/>
+      </div>
+      <div class="row">
+        <label>Webhook</label>
+        <div class="group toggle" id="webhook-toggle"><button type="button" data-v="no" class="active">No</button><button type="button" data-v="yes">Yes</button></div>
       </div>
       <div class="row">
         <label>Timeframe</label>
@@ -11104,6 +10962,11 @@ CALCULATOR_TEMPLATE = """<!doctype html>
           <button id="calc-quote" type="button">Calculate</button>
           <button id="calc-submit" type="button">Submit Order</button>
         </div>
+      </div>
+      <div class="row" id="calc-webhook-panel" style="display:none">
+        <label>TradingView webhook JSON</label>
+        <pre id="calc-webhook-json" class="card" style="white-space:pre-wrap;word-break:break-word;max-height:220px;overflow:auto"></pre>
+        <div class="group"><button id="calc-webhook-copy" type="button">Copy JSON</button></div>
       </div>
       <div id="calc-error" class="error"></div>
       <div id="calc-success" class="ok"></div>
@@ -11394,268 +11257,470 @@ async def calculator_journal_summary(asset: str, symbol: str) -> JSONResponse:
 
 @app.post("/api/calculator/quote")
 async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSONResponse:
-    asset = str(payload.get("asset") or "").strip().lower()
-    account = str(payload.get("account") or "live").strip().lower()
-    side = str(payload.get("side") or "buy").strip().lower()
-    order_type = str(payload.get("order_type") or "market").strip().lower()
-    risk_mode = str(payload.get("risk_mode") or "percent").strip().lower()
-    symbol_in = str(payload.get("symbol") or "").strip()
-    if not symbol_in:
-        raise HTTPException(status_code=400, detail="symbol is required.")
-    if side not in {"buy", "sell"}:
-        raise HTTPException(status_code=400, detail="side must be buy or sell.")
-    if order_type not in {"market", "limit"}:
-        raise HTTPException(status_code=400, detail="order_type must be market or limit.")
-    stop_ticks = _dec(payload.get("stop_loss_ticks"), "stop_loss_ticks")
-    tp_ticks = _dec(payload.get("take_profit_ticks"), "take_profit_ticks")
-    if stop_ticks <= 0 or tp_ticks <= 0:
-        raise HTTPException(status_code=400, detail="stop_loss_ticks and take_profit_ticks must be greater than zero.")
-    risk_val = _dec(payload.get("risk_value"), "risk_value")
-    if risk_val <= 0:
-        raise HTTPException(status_code=400, detail="risk_value must be greater than zero.")
-    limit_entry = payload.get("entry_price")
-    if order_type == "limit" and (limit_entry is None or str(limit_entry).strip() == ""):
-        raise HTTPException(status_code=400, detail="Limit orders require entry_price.")
-    if risk_mode not in {"fixed_aud", "percent"}:
-        raise HTTPException(status_code=400, detail="risk_mode must be fixed_aud or percent.")
+    try:
+        asset = str(payload.get("asset") or "").strip().lower()
+        account = str(payload.get("account") or "live").strip().lower()
+        side = str(payload.get("side") or "buy").strip().lower()
+        order_type = str(payload.get("order_type") or "market").strip().lower()
+        risk_mode = str(payload.get("risk_mode") or "percent").strip().lower()
+        symbol_in = str(payload.get("symbol") or "").strip()
+        target_mode = str(payload.get("target_mode") or "").strip().lower()
+        webhook_mode = str(payload.get("webhook") or payload.get("webhook_mode") or "no").strip().lower()
+        existing_pending_id = str(payload.get("pending_webhook_id") or "").strip()
+        previous_pending_id = str(payload.get("previous_pending_webhook_id") or "").strip()
+        if not symbol_in:
+            raise HTTPException(status_code=400, detail="symbol is required.")
+        if side not in {"buy", "sell"}:
+            raise HTTPException(status_code=400, detail="side must be buy or sell.")
+        if order_type not in {"market", "limit"}:
+            raise HTTPException(status_code=400, detail="order_type must be market or limit.")
+        if risk_mode not in {"fixed_aud", "percent"}:
+            raise HTTPException(status_code=400, detail="risk_mode must be fixed_aud or percent.")
+        if not target_mode:
+            if str(payload.get("risk_reward") or "").strip():
+                target_mode = "rr"
+            else:
+                target_mode = "ticks"
+        if target_mode not in {"rr", "ticks"}:
+            raise HTTPException(status_code=400, detail="target_mode must be rr or ticks.")
+        if webhook_mode not in {"yes", "no", "true", "false", "1", "0"}:
+            raise HTTPException(status_code=400, detail="webhook must be yes or no.")
 
-    if asset == "crypto":
-        if risk_mode == "fixed_aud":
-            raise HTTPException(status_code=400, detail="fixed_aud risk mode is only supported for FX.")
-        _mode, api_key, api_secret, base_url, _src = resolve_bybit_credentials_for(account)
-        if not api_key or not api_secret:
-            raise HTTPException(status_code=500, detail="Bybit credentials are missing for selected account.")
-        choices = await _bybit_get_symbols_by_category_cached(base_url, "linear")
-        if not choices:
-            raise HTTPException(status_code=404, detail=f"Could not resolve Bybit symbol: {symbol_in}")
-        resolved = resolve_bybit_symbol_from_choices(symbol_in, choices)
-        if not resolved or not resolved.get("resolved_symbol"):
-            try:
-                name_aliases = await _bybit_name_aliases_for_choices(base_url, set(choices))
-            except Exception as exc:
-                raise HTTPException(status_code=503, detail=f"Bybit alias metadata unavailable: {exc}") from exc
-            if name_aliases:
-                resolved = resolve_bybit_symbol_from_choices(symbol_in, choices, extra_aliases=name_aliases)
-        resolved_symbol = str((resolved or {}).get("resolved_symbol") or "").upper()
-        if not resolved_symbol:
-            raise HTTPException(status_code=404, detail=f"Could not resolve Bybit symbol: {symbol_in}")
-        inst_payload = await _bybit_get_async(base_url, "/v5/market/instruments-info", {"category": "linear", "symbol": resolved_symbol})
-        inst_rows = (inst_payload.get("result") or {}).get("list") or []
-        if not inst_rows:
-            raise HTTPException(status_code=502, detail="Bybit instrument meta fetch failed.")
-        inst = inst_rows[0]
-        tick_size = Decimal(str(inst.get("priceFilter", {}).get("tickSize") or "0"))
-        qty_step = Decimal(str(inst.get("lotSizeFilter", {}).get("qtyStep") or "0"))
-        min_qty = Decimal(str(inst.get("lotSizeFilter", {}).get("minOrderQty") or "0"))
-        max_qty = Decimal(str(inst.get("lotSizeFilter", {}).get("maxOrderQty") or "0"))
-        max_mkt_qty = Decimal(str(inst.get("lotSizeFilter", {}).get("maxMktOrderQty") or "0"))
-        min_notional = Decimal(str(inst.get("lotSizeFilter", {}).get("minNotionalValue") or "0"))
-        max_leverage = Decimal(str((inst.get("leverageFilter") or {}).get("maxLeverage") or "0"))
-        if tick_size <= 0 or qty_step <= 0:
-            raise HTTPException(status_code=502, detail="Bybit instrument constraints are invalid.")
-        tickers = await _bybit_get_async(base_url, "/v5/market/tickers", {"category": "linear", "symbol": resolved_symbol})
-        ticker_rows = (tickers.get("result") or {}).get("list") or []
-        if not ticker_rows:
-            raise HTTPException(status_code=502, detail="Bybit ticker fetch failed.")
-        row = ticker_rows[0]
-        bid = Decimal(str(row.get("bid1Price") or row.get("lastPrice") or "0"))
-        ask = Decimal(str(row.get("ask1Price") or row.get("lastPrice") or "0"))
-        if bid <= 0 or ask <= 0:
-            raise HTTPException(status_code=502, detail="Bybit pricing unavailable.")
-        entry = _dec(limit_entry, "entry_price") if order_type == "limit" else (ask if side == "buy" else bid)
-        if entry <= 0:
-            raise HTTPException(status_code=400, detail="entry_price must be greater than zero.")
-        stop_distance = stop_ticks * tick_size
-        target_distance = tp_ticks * tick_size
-        sl = (entry - stop_distance) if side == "buy" else (entry + stop_distance)
-        tp = (entry + target_distance) if side == "buy" else (entry - target_distance)
-        fee_payload = await _bybit_signed_get(
-            base_url=base_url,
-            api_key=api_key,
-            api_secret=api_secret,
-            path="/v5/account/fee-rate",
-            params={"category": "linear", "symbol": resolved_symbol},
-        )
-        fee_row = ((fee_payload.get("result") or {}).get("list") or [{}])[0]
-        maker = Decimal(str(fee_row.get("makerFeeRate") or "0"))
-        taker = Decimal(str(fee_row.get("takerFeeRate") or "0"))
-        open_fee = taker if order_type == "market" else max(maker, taker)
-        close_fee = taker
-        try:
-            aud_cfg = _get_oanda_config("live")
-        except Exception:
-            aud_cfg = {"base_url": "", "account_id": "", "token": ""}
-        try:
-            aud_usd = Decimal(
-                str(
-                    (await _fetch_oanda_mid_prices_batch(cfg=aud_cfg, instruments=["AUD_USD"])).get(
-                        "AUD_USD"
-                    )
-                    or 0
-                )
+        stop_ticks = _dec(payload.get("stop_loss_ticks"), "stop_loss_ticks")
+        if stop_ticks <= 0:
+            raise HTTPException(status_code=400, detail="stop_loss_ticks must be greater than zero.")
+
+        risk_val = _dec(payload.get("risk_value"), "risk_value")
+        if risk_val <= 0:
+            raise HTTPException(status_code=400, detail="risk_value must be greater than zero.")
+        limit_entry = payload.get("entry_price")
+        if order_type == "limit" and (limit_entry is None or str(limit_entry).strip() == ""):
+            raise HTTPException(status_code=400, detail="Limit orders require entry_price.")
+
+        rr_requested: Optional[Decimal] = None
+        tp_ticks: Optional[Decimal] = None
+        if target_mode == "rr":
+            rr_requested = _dec(payload.get("risk_reward"), "risk_reward")
+            if rr_requested <= 0:
+                raise HTTPException(status_code=400, detail="risk_reward must be greater than zero when target_mode=rr.")
+        else:
+            tp_ticks = _dec(payload.get("take_profit_ticks"), "take_profit_ticks")
+            if tp_ticks <= 0:
+                raise HTTPException(status_code=400, detail="take_profit_ticks must be greater than zero when target_mode=ticks.")
+
+        webhook_enabled = webhook_mode in {"yes", "true", "1"}
+
+        if asset == "crypto":
+            if risk_mode == "fixed_aud":
+                raise HTTPException(status_code=400, detail="fixed_aud risk mode is only supported for FX.")
+            _mode, api_key, api_secret, base_url, _src = resolve_bybit_credentials_for(account)
+            if not api_key or not api_secret:
+                raise HTTPException(status_code=500, detail="Bybit credentials are missing for selected account.")
+            choices = await _bybit_get_symbols_by_category_cached(base_url, "linear")
+            if not choices:
+                raise HTTPException(status_code=404, detail=f"Could not resolve Bybit symbol: {symbol_in}")
+            resolved = resolve_bybit_symbol_from_choices(symbol_in, choices)
+            if not resolved or not resolved.get("resolved_symbol"):
+                try:
+                    name_aliases = await _bybit_name_aliases_for_choices(base_url, set(choices))
+                except Exception as exc:
+                    raise HTTPException(status_code=503, detail=f"Bybit alias metadata unavailable: {exc}") from exc
+                if name_aliases:
+                    resolved = resolve_bybit_symbol_from_choices(symbol_in, choices, extra_aliases=name_aliases)
+            resolved_symbol = str((resolved or {}).get("resolved_symbol") or "").upper()
+            if not resolved_symbol:
+                raise HTTPException(status_code=404, detail=f"Could not resolve Bybit symbol: {symbol_in}")
+            inst_payload = await _bybit_get_async(base_url, "/v5/market/instruments-info", {"category": "linear", "symbol": resolved_symbol})
+            inst_rows = (inst_payload.get("result") or {}).get("list") or []
+            if not inst_rows:
+                raise HTTPException(status_code=502, detail="Bybit instrument meta fetch failed.")
+            inst = inst_rows[0]
+            tick_size = Decimal(str(inst.get("priceFilter", {}).get("tickSize") or "0"))
+            qty_step = Decimal(str(inst.get("lotSizeFilter", {}).get("qtyStep") or "0"))
+            min_qty = Decimal(str(inst.get("lotSizeFilter", {}).get("minOrderQty") or "0"))
+            max_qty = Decimal(str(inst.get("lotSizeFilter", {}).get("maxOrderQty") or "0"))
+            max_mkt_qty = Decimal(str(inst.get("lotSizeFilter", {}).get("maxMktOrderQty") or "0"))
+            min_notional = Decimal(str(inst.get("lotSizeFilter", {}).get("minNotionalValue") or "0"))
+            max_leverage = Decimal(str((inst.get("leverageFilter") or {}).get("maxLeverage") or "0"))
+            if tick_size <= 0 or qty_step <= 0:
+                raise HTTPException(status_code=502, detail="Bybit instrument constraints are invalid.")
+            tickers = await _bybit_get_async(base_url, "/v5/market/tickers", {"category": "linear", "symbol": resolved_symbol})
+            ticker_rows = (tickers.get("result") or {}).get("list") or []
+            if not ticker_rows:
+                raise HTTPException(status_code=502, detail="Bybit ticker fetch failed.")
+            row = ticker_rows[0]
+            bid = Decimal(str(row.get("bid1Price") or row.get("lastPrice") or "0"))
+            ask = Decimal(str(row.get("ask1Price") or row.get("lastPrice") or "0"))
+            if bid <= 0 or ask <= 0:
+                raise HTTPException(status_code=502, detail="Bybit pricing unavailable.")
+            entry = _dec(limit_entry, "entry_price") if order_type == "limit" else (ask if side == "buy" else bid)
+            if entry <= 0:
+                raise HTTPException(status_code=400, detail="entry_price must be greater than zero.")
+            stop_distance = stop_ticks * tick_size
+            sl = (entry - stop_distance) if side == "buy" else (entry + stop_distance)
+            fee_payload = await _bybit_signed_get(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                path="/v5/account/fee-rate",
+                params={"category": "linear", "symbol": resolved_symbol},
             )
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"AUD_USD conversion unavailable: {exc}") from exc
-        if aud_usd <= 0:
-            raise HTTPException(status_code=502, detail="AUD_USD conversion unavailable.")
-        balance_snapshot = await _fetch_bybit_balance_usdt(account)
-        available_usdt = Decimal(str(balance_snapshot.get("available_usdt") or "0"))
-        total_equity = Decimal(str(balance_snapshot.get("total_equity") or "0"))
-        risk_aud = (available_usdt / aud_usd) * (risk_val / Decimal("100"))
-        risk_usdt = risk_aud * aud_usd
-        spread_quote = max(Decimal("0"), ask - bid) if order_type == "market" else Decimal("0")
-        loss_per_unit = abs(entry - sl) + spread_quote + (entry * open_fee) + (sl * close_fee)
-        if loss_per_unit <= 0:
-            raise HTTPException(status_code=400, detail="Invalid stop distance produced zero loss per unit.")
-        qty_raw = risk_usdt / loss_per_unit
-        raw_notional = qty_raw * entry
-        if min_notional > 0 and raw_notional < min_notional:
-            raise HTTPException(status_code=400, detail="Calculated notional is below Bybit minimum notional")
-        qty = _floor_to_step(qty_raw, qty_step)
-        if qty < min_qty:
-            raise HTTPException(status_code=400, detail="Calculated quantity is below minimum order quantity")
-        notional = qty * entry
-        if order_type == "market" and max_mkt_qty > 0 and qty > max_mkt_qty:
-            raise HTTPException(status_code=400, detail="Calculated quantity exceeds Bybit max market order quantity")
-        if order_type == "limit" and max_qty > 0 and qty > max_qty:
-            raise HTTPException(status_code=400, detail="Calculated quantity exceeds Bybit max order quantity")
-        if max_leverage > 0:
-            est_margin = notional / max_leverage
-            available_for_margin = max(available_usdt, total_equity)
-            margin_tolerance = Decimal("1.05")
-            if available_for_margin > 0 and est_margin > (available_for_margin * margin_tolerance):
-                raise HTTPException(status_code=400, detail="Insufficient Bybit available margin for estimated initial margin")
-        total_loss_usdt = qty * loss_per_unit
-        reward_usdt = qty * (abs(tp - entry) - spread_quote - (entry * open_fee) - (tp * close_fee))
-        return JSONResponse(
-            {
+            fee_row = ((fee_payload.get("result") or {}).get("list") or [{}])[0]
+            maker = Decimal(str(fee_row.get("makerFeeRate") or "0"))
+            taker = Decimal(str(fee_row.get("takerFeeRate") or "0"))
+            open_fee = taker if order_type == "market" else max(maker, taker)
+            close_fee = taker
+            try:
+                aud_cfg = _get_oanda_config("live")
+            except Exception:
+                aud_cfg = {"base_url": "", "account_id": "", "token": ""}
+            try:
+                aud_usd = Decimal(str((await _fetch_oanda_mid_prices_batch(cfg=aud_cfg, instruments=["AUD_USD"])).get("AUD_USD") or 0))
+            except Exception as exc:
+                raise HTTPException(status_code=502, detail=f"AUD_USD conversion unavailable: {exc}") from exc
+            if aud_usd <= 0:
+                raise HTTPException(status_code=502, detail="AUD_USD conversion unavailable.")
+            balance_snapshot = await _fetch_bybit_balance_usdt(account)
+            available_usdt = Decimal(str(balance_snapshot.get("available_usdt") or "0"))
+            total_equity = Decimal(str(balance_snapshot.get("total_equity") or "0"))
+            risk_aud = (available_usdt / aud_usd) * (risk_val / Decimal("100"))
+            risk_usdt = risk_aud * aud_usd
+            spread_quote = max(Decimal("0"), ask - bid) if order_type == "market" else Decimal("0")
+            loss_per_unit = abs(entry - sl) + spread_quote + (entry * open_fee) + (sl * close_fee)
+            if loss_per_unit <= 0:
+                raise HTTPException(status_code=400, detail="Invalid stop distance produced zero loss per unit.")
+
+            requested_rr_net = None
+            effective_rr_net = None
+            fee_buffer_r = None
+            if target_mode == "rr" and rr_requested is not None:
+                desired_net_reward = loss_per_unit * rr_requested
+                target_distance = stop_distance * rr_requested
+                for _ in range(4):
+                    tp_probe = (entry + target_distance) if side == "buy" else (entry - target_distance)
+                    close_fee_cost = abs(tp_probe) * close_fee
+                    fee_buffer = spread_quote + (entry * open_fee) + close_fee_cost
+                    target_distance = desired_net_reward + fee_buffer
+                tp = (entry + target_distance) if side == "buy" else (entry - target_distance)
+                fee_buffer = spread_quote + (entry * open_fee) + (abs(tp) * close_fee)
+                net_reward_per_unit = target_distance - fee_buffer
+                requested_rr_net = rr_requested
+                effective_rr_net = net_reward_per_unit / loss_per_unit if loss_per_unit > 0 else Decimal("0")
+                fee_buffer_r = fee_buffer / loss_per_unit if loss_per_unit > 0 else Decimal("0")
+            else:
+                target_distance = (tp_ticks or Decimal("0")) * tick_size
+                tp = (entry + target_distance) if side == "buy" else (entry - target_distance)
+
+            qty_raw = risk_usdt / loss_per_unit
+            raw_notional = qty_raw * entry
+            if min_notional > 0 and raw_notional < min_notional:
+                raise HTTPException(status_code=400, detail="Calculated notional is below Bybit minimum notional")
+            qty = _floor_to_step(qty_raw, qty_step)
+            if qty < min_qty:
+                raise HTTPException(status_code=400, detail="Calculated quantity is below minimum order quantity")
+            notional = qty * entry
+            if order_type == "market" and max_mkt_qty > 0 and qty > max_mkt_qty:
+                raise HTTPException(status_code=400, detail="Calculated quantity exceeds Bybit max market order quantity")
+            if order_type == "limit" and max_qty > 0 and qty > max_qty:
+                raise HTTPException(status_code=400, detail="Calculated quantity exceeds Bybit max order quantity")
+            if max_leverage > 0:
+                est_margin = notional / max_leverage
+                available_for_margin = max(available_usdt, total_equity)
+                margin_tolerance = Decimal("1.05")
+                if available_for_margin > 0 and est_margin > (available_for_margin * margin_tolerance):
+                    raise HTTPException(status_code=400, detail="Insufficient Bybit available margin for estimated initial margin")
+
+            total_loss_usdt = qty * loss_per_unit
+            reward_usdt = qty * max(Decimal("0"), target_distance - spread_quote - (entry * open_fee) - (abs(tp) * close_fee))
+            response_payload: Dict[str, object] = {
                 "broker": "bybit",
                 "symbol": resolved_symbol,
                 "tick_size": _fmt_dec(tick_size),
                 "entry_price": _fmt_dec(entry),
                 "stop_price": _fmt_dec(sl),
                 "target_price": _fmt_dec(tp),
+                "target_distance": _fmt_dec(target_distance),
                 "quantity": _fmt_dec(qty),
                 "notional": _fmt_dec(notional),
                 "estimated_fees_or_spread_aud": _fmt_dec(((qty * entry * open_fee) + (qty * sl * close_fee)) / aud_usd),
                 "estimated_total_loss_aud": _fmt_dec(total_loss_usdt / aud_usd),
                 "estimated_reward_aud": _fmt_dec(max(Decimal("0"), reward_usdt / aud_usd)),
                 "rr": _fmt_dec((abs(tp - entry) / abs(entry - sl)) if abs(entry - sl) > 0 else Decimal("0")),
+                "target_mode": target_mode,
+                "requested_rr_net": _fmt_dec(requested_rr_net) if requested_rr_net is not None else None,
+                "effective_rr_net": _fmt_dec(effective_rr_net) if effective_rr_net is not None else None,
+                "fee_buffer_r": _fmt_dec(fee_buffer_r) if fee_buffer_r is not None else None,
             }
-        )
 
-    if asset == "fx":
-        try:
-            cfg = _get_oanda_config(account)
-        except ValueError as exc:
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
-        symbol = normalize_oanda_symbol_query(symbol_in)
-        try:
-            meta = await _fetch_oanda_instrument_meta(
-                base_url=cfg["base_url"],
-                account_id=cfg["account_id"],
-                api_key=cfg["token"],
-                symbol=symbol,
-                mode=account,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        display_precision = int(meta["displayPrecision"])
-        units_precision = int(meta.get("tradeUnitsPrecision", 0))
-        min_trade_size = Decimal(str(meta.get("minimumTradeSize") or "0"))
-        max_order_units = Decimal(str(meta.get("maximumOrderUnits") or "0"))
-        max_position_size = Decimal(str(meta.get("maximumPositionSize") or "0"))
-        margin_rate = Decimal(str(meta.get("marginRate") or "0"))
-        tick_size = Decimal("1").scaleb(-display_precision)
-        try:
-            prices = await _fetch_oanda_json(
-                base_url=cfg["base_url"],
-                account_id=cfg["account_id"],
-                api_key=cfg["token"],
-                endpoint=f"/accounts/{{account_id}}/pricing?instruments={symbol}&includeHomeConversions=true",
-                mode=account,
-            )
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"OANDA pricing/meta fetch failure: {exc}") from exc
-        rows = prices.get("prices") or []
-        if not rows:
-            raise HTTPException(status_code=502, detail="OANDA pricing/meta fetch failure.")
-        row = rows[0]
-        bid = Decimal(str(((row.get("bids") or [{}])[0]).get("price") or "0"))
-        ask = Decimal(str(((row.get("asks") or [{}])[0]).get("price") or "0"))
-        if bid <= 0 or ask <= 0:
-            raise HTTPException(status_code=502, detail="OANDA bid/ask unavailable.")
-        entry = _dec(limit_entry, "entry_price") if order_type == "limit" else (ask if side == "buy" else bid)
-        if entry <= 0:
-            raise HTTPException(status_code=400, detail="Bad limit price.")
-        sl = (entry - stop_ticks * tick_size) if side == "buy" else (entry + stop_ticks * tick_size)
-        tp = (entry + tp_ticks * tick_size) if side == "buy" else (entry - tp_ticks * tick_size)
-        quote_ccy = symbol.split("_", 1)[1]
-        conversions = row.get("homeConversions") or []
-        loss_factor = None
-        for item in conversions:
-            if str(item.get("currency") or "").upper() == quote_ccy:
-                loss_factor = Decimal(str(item.get("accountLoss") or "0"))
-                break
-        if loss_factor is None or loss_factor <= 0:
-            raise HTTPException(status_code=502, detail=f"Missing OANDA home conversion for {quote_ccy}.")
-        risk_aud = risk_val
-        if risk_mode == "percent":
-            summary = await _fetch_oanda_account_summary(account)
-            nav = Decimal(str(summary.get("nav") or "0"))
-            if nav <= 0:
-                raise HTTPException(status_code=502, detail="OANDA NAV unavailable for percent risk.")
-            risk_aud = nav * (risk_val / Decimal("100"))
-        spread_quote = max(Decimal("0"), ask - bid)
-        loss_per_unit_aud = (abs(entry - sl) + spread_quote) * loss_factor
-        if loss_per_unit_aud <= 0:
-            raise HTTPException(status_code=400, detail="Invalid stop distance produced zero loss per unit.")
-        units_raw = risk_aud / loss_per_unit_aud
-        units = _floor_to_precision(units_raw, units_precision)
-        if units < min_trade_size:
-            raise HTTPException(status_code=400, detail="Calculated units are below minimum trade size.")
-        if max_order_units > 0 and units > max_order_units:
-            raise HTTPException(status_code=400, detail="Calculated units exceed OANDA maximumOrderUnits.")
-        if max_position_size > 0 and units > max_position_size:
-            raise HTTPException(status_code=400, detail="Calculated units exceed OANDA maximumPositionSize.")
-        summary = await _fetch_oanda_account_summary(account)
-        margin_available = Decimal(str(summary.get("marginAvailable") or "0"))
-        effective_margin_rate = margin_rate if margin_rate > 0 else Decimal(str(summary.get("marginRate") or "0"))
-        if effective_margin_rate > 0 and margin_available > 0:
-            position_value_factor = None
+            if webhook_enabled:
+                pending_id = existing_pending_id or f"calc_bybit_{uuid4().hex[:16]}"
+                webhook_payload = {
+                    "asset": "crypto",
+                    "account": account,
+                    "symbol": resolved_symbol,
+                    "action": side,
+                    "order_type": order_type,
+                    "quantity": _fmt_dec(qty),
+                    "entry_price": _fmt_dec(entry),
+                    "planned_entry_price": _fmt_dec(entry),
+                    "stop_loss_price": _fmt_dec(sl),
+                    "planned_stop_price": _fmt_dec(sl),
+                    "take_profit_price": _fmt_dec(tp),
+                    "planned_target_price": _fmt_dec(tp),
+                    "level_anchor_mode": "actual_fill",
+                    "timeframe": _normalize_timeframe(payload.get("timeframe") or ""),
+                    "pending_webhook_id": pending_id,
+                }
+                pending_item = _upsert_pending_webhook(
+                    {
+                        "id": pending_id,
+                        "category": "bybit",
+                        "account": account,
+                        "instrument": resolved_symbol,
+                        "side": side,
+                        "order_type": order_type,
+                        "entry_price": _fmt_dec(entry),
+                        "stop_loss": _fmt_dec(sl),
+                        "take_profit": _fmt_dec(tp),
+                        "size": _fmt_dec(qty),
+                        "timeframe": webhook_payload.get("timeframe") or "",
+                        "status": "WAITING",
+                        "enabled": True,
+                    }
+                )
+                response_payload["pending_webhook_id"] = pending_item.get("id")
+                response_payload["webhook_endpoint"] = "/api/calculator/webhook"
+                response_payload["webhook_payload_json"] = json.dumps(webhook_payload, separators=(",", ":"))
+                if previous_pending_id and previous_pending_id != pending_id:
+                    _delete_pending_webhook(previous_pending_id)
+            elif previous_pending_id:
+                _delete_pending_webhook(previous_pending_id)
+
+            return JSONResponse(response_payload)
+
+        if asset == "fx":
+            try:
+                cfg = _get_oanda_config(account)
+            except ValueError as exc:
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+            symbol = normalize_oanda_symbol_query(symbol_in)
+            try:
+                meta = await _fetch_oanda_instrument_meta(
+                    base_url=cfg["base_url"],
+                    account_id=cfg["account_id"],
+                    api_key=cfg["token"],
+                    symbol=symbol,
+                    mode=account,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            display_precision = int(meta["displayPrecision"])
+            units_precision = int(meta.get("tradeUnitsPrecision", 0))
+            min_trade_size = Decimal(str(meta.get("minimumTradeSize") or "0"))
+            max_order_units = Decimal(str(meta.get("maximumOrderUnits") or "0"))
+            max_position_size = Decimal(str(meta.get("maximumPositionSize") or "0"))
+            margin_rate = Decimal(str(meta.get("marginRate") or "0"))
+            tick_size = Decimal("1").scaleb(-display_precision)
+            try:
+                prices = await _fetch_oanda_json(
+                    base_url=cfg["base_url"],
+                    account_id=cfg["account_id"],
+                    api_key=cfg["token"],
+                    endpoint=f"/accounts/{{account_id}}/pricing?instruments={symbol}&includeHomeConversions=true",
+                    mode=account,
+                )
+            except Exception as exc:
+                raise HTTPException(status_code=502, detail=f"OANDA pricing/meta fetch failure: {exc}") from exc
+            rows = prices.get("prices") or []
+            if not rows:
+                raise HTTPException(status_code=502, detail="OANDA pricing/meta fetch failure.")
+            row = rows[0]
+            bid = Decimal(str(((row.get("bids") or [{}])[0]).get("price") or "0"))
+            ask = Decimal(str(((row.get("asks") or [{}])[0]).get("price") or "0"))
+            if bid <= 0 or ask <= 0:
+                raise HTTPException(status_code=502, detail="OANDA bid/ask unavailable.")
+            entry = _dec(limit_entry, "entry_price") if order_type == "limit" else (ask if side == "buy" else bid)
+            if entry <= 0:
+                raise HTTPException(status_code=400, detail="Bad limit price.")
+            sl = (entry - stop_ticks * tick_size) if side == "buy" else (entry + stop_ticks * tick_size)
+
+            quote_ccy = symbol.split("_", 1)[1]
+            conversions = row.get("homeConversions") or []
+            loss_factor = None
             for item in conversions:
                 if str(item.get("currency") or "").upper() == quote_ccy:
-                    val = item.get("positionValue")
-                    if val is not None:
-                        position_value_factor = Decimal(str(val))
+                    loss_factor = Decimal(str(item.get("accountLoss") or "0"))
                     break
-            if position_value_factor is not None and position_value_factor > 0:
-                required_margin = (units * entry * position_value_factor) * effective_margin_rate
-            else:
-                # Fallback approximation when pricing conversion data omits positionValue.
-                required_margin = (units * entry) * effective_margin_rate
-            if required_margin > margin_available:
-                raise HTTPException(status_code=400, detail="Insufficient OANDA marginAvailable for estimated initial margin.")
-        spread_aud = spread_quote * loss_factor * units
-        reward_aud = max(Decimal("0"), (abs(tp - entry) - spread_quote) * loss_factor * units)
-        return JSONResponse(
-            {
-                "broker": "oanda",
-                "symbol": symbol,
-                "tick_size": _fmt_dec(tick_size),
-                "entry_price": _fmt_dec(entry),
-                "stop_price": _fmt_dec(sl),
-                "target_price": _fmt_dec(tp),
-                "quantity": _fmt_dec(units),
-                "notional": _fmt_dec(units * entry),
-                "estimated_fees_or_spread_aud": _fmt_dec(max(Decimal("0"), spread_aud)),
-                "estimated_total_loss_aud": _fmt_dec(loss_per_unit_aud * units),
-                "estimated_reward_aud": _fmt_dec(reward_aud),
-                "rr": _fmt_dec((abs(tp - entry) / abs(entry - sl)) if abs(entry - sl) > 0 else Decimal("0")),
-            }
-        )
+            if loss_factor is None or loss_factor <= 0:
+                raise HTTPException(status_code=502, detail=f"Missing OANDA home conversion for {quote_ccy}.")
 
-    raise HTTPException(status_code=400, detail="asset must be crypto or fx.")
+            risk_aud = risk_val
+            if risk_mode == "percent":
+                summary = await _fetch_oanda_account_summary(account)
+                nav = Decimal(str(summary.get("nav") or "0"))
+                if nav <= 0:
+                    raise HTTPException(status_code=502, detail="OANDA NAV unavailable for percent risk.")
+                risk_aud = nav * (risk_val / Decimal("100"))
+            spread_quote = max(Decimal("0"), ask - bid)
+            loss_per_unit_aud = (abs(entry - sl) + spread_quote) * loss_factor
+            if loss_per_unit_aud <= 0:
+                raise HTTPException(status_code=400, detail="Invalid stop distance produced zero loss per unit.")
+
+            requested_rr_net = None
+            effective_rr_net = None
+            fee_buffer_r = None
+            if target_mode == "rr" and rr_requested is not None:
+                desired_net_reward_aud = loss_per_unit_aud * rr_requested
+                target_distance = (desired_net_reward_aud / loss_factor) + spread_quote
+                tp = (entry + target_distance) if side == "buy" else (entry - target_distance)
+                reward_per_unit_aud = max(Decimal("0"), (target_distance - spread_quote) * loss_factor)
+                requested_rr_net = rr_requested
+                effective_rr_net = reward_per_unit_aud / loss_per_unit_aud if loss_per_unit_aud > 0 else Decimal("0")
+                fee_buffer_r = ((spread_quote * loss_factor) / loss_per_unit_aud) if loss_per_unit_aud > 0 else Decimal("0")
+            else:
+                target_distance = (tp_ticks or Decimal("0")) * tick_size
+                tp = (entry + target_distance) if side == "buy" else (entry - target_distance)
+
+            units_raw = risk_aud / loss_per_unit_aud
+            units = _floor_to_precision(units_raw, units_precision)
+            if units < min_trade_size:
+                raise HTTPException(status_code=400, detail="Calculated units are below minimum trade size.")
+            if max_order_units > 0 and units > max_order_units:
+                raise HTTPException(status_code=400, detail="Calculated units exceed OANDA maximumOrderUnits.")
+            if max_position_size > 0 and units > max_position_size:
+                raise HTTPException(status_code=400, detail="Calculated units exceed OANDA maximumPositionSize.")
+            summary = await _fetch_oanda_account_summary(account)
+            margin_available = Decimal(str(summary.get("marginAvailable") or "0"))
+            effective_margin_rate = margin_rate if margin_rate > 0 else Decimal(str(summary.get("marginRate") or "0"))
+            if effective_margin_rate > 0 and margin_available > 0:
+                required_margin = (units * entry) * effective_margin_rate
+                if required_margin > margin_available:
+                    raise HTTPException(status_code=400, detail="Insufficient OANDA marginAvailable for estimated initial margin.")
+            spread_aud = spread_quote * loss_factor * units
+            reward_aud = max(Decimal("0"), (abs(tp - entry) - spread_quote) * loss_factor * units)
+            response_payload = {
+                    "broker": "oanda",
+                    "symbol": symbol,
+                    "tick_size": _fmt_dec(tick_size),
+                    "entry_price": _fmt_dec(entry),
+                    "stop_price": _fmt_dec(sl),
+                    "target_price": _fmt_dec(tp),
+                    "target_distance": _fmt_dec(target_distance),
+                    "quantity": _fmt_dec(units),
+                    "notional": _fmt_dec(units * entry),
+                    "estimated_fees_or_spread_aud": _fmt_dec(max(Decimal("0"), spread_aud)),
+                    "estimated_total_loss_aud": _fmt_dec(loss_per_unit_aud * units),
+                    "estimated_reward_aud": _fmt_dec(reward_aud),
+                    "rr": _fmt_dec((abs(tp - entry) / abs(entry - sl)) if abs(entry - sl) > 0 else Decimal("0")),
+                    "target_mode": target_mode,
+                    "requested_rr_net": _fmt_dec(requested_rr_net) if requested_rr_net is not None else None,
+                    "effective_rr_net": _fmt_dec(effective_rr_net) if effective_rr_net is not None else None,
+                    "fee_buffer_r": _fmt_dec(fee_buffer_r) if fee_buffer_r is not None else None,
+                }
+            if webhook_enabled:
+                pending_id = existing_pending_id or f"calc_oanda_{uuid4().hex[:16]}"
+                webhook_payload = {
+                    "asset": "fx",
+                    "account": account,
+                    "symbol": symbol,
+                    "action": side,
+                    "order_type": order_type,
+                    "quantity": _fmt_dec(units),
+                    "entry_price": _fmt_dec(entry),
+                    "planned_entry_price": _fmt_dec(entry),
+                    "stop_loss_price": _fmt_dec(sl),
+                    "planned_stop_price": _fmt_dec(sl),
+                    "take_profit_price": _fmt_dec(tp),
+                    "planned_target_price": _fmt_dec(tp),
+                    "timeframe": _normalize_timeframe(payload.get("timeframe") or ""),
+                    "pending_webhook_id": pending_id,
+                }
+                pending_item = _upsert_pending_webhook(
+                    {
+                        "id": pending_id,
+                        "category": "oanda",
+                        "account": account,
+                        "instrument": symbol,
+                        "side": side,
+                        "order_type": order_type,
+                        "entry_price": _fmt_dec(entry),
+                        "stop_loss": _fmt_dec(sl),
+                        "take_profit": _fmt_dec(tp),
+                        "size": _fmt_dec(units),
+                        "timeframe": webhook_payload.get("timeframe") or "",
+                        "status": "WAITING",
+                        "enabled": True,
+                    }
+                )
+                response_payload["pending_webhook_id"] = pending_item.get("id")
+                response_payload["webhook_endpoint"] = "/api/calculator/webhook"
+                response_payload["webhook_payload_json"] = json.dumps(webhook_payload, separators=(",", ":"))
+                if previous_pending_id and previous_pending_id != pending_id:
+                    _delete_pending_webhook(previous_pending_id)
+            elif previous_pending_id:
+                _delete_pending_webhook(previous_pending_id)
+            return JSONResponse(response_payload)
+
+        raise HTTPException(status_code=400, detail="asset must be crypto or fx.")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Quote calculation failed: {exc}") from exc
+
+
+
+
+@app.post("/api/calculator/webhook")
+async def calculator_webhook(payload: Dict[str, object] = Body(default={})) -> JSONResponse:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Webhook payload must be a JSON object.")
+    pending_id = str(payload.get("pending_webhook_id") or "").strip()
+    asset = str(payload.get("asset") or "crypto").strip().lower()
+    request_id = f"calc-webhook-{uuid4().hex[:12]}"
+
+    try:
+        _assert_pending_webhook_executable(payload)
+        canonical = {
+            "account": payload.get("account"),
+            "symbol": payload.get("symbol"),
+            "action": payload.get("action") or payload.get("side"),
+            "order_type": payload.get("order_type"),
+            "entry_price": payload.get("entry_price") or payload.get("planned_entry_price"),
+            "stop_loss_price": payload.get("stop_loss_price") or payload.get("planned_stop_price"),
+            "take_profit_price": payload.get("take_profit_price") or payload.get("planned_target_price"),
+            "quantity": payload.get("quantity"),
+            "timeframe": payload.get("timeframe"),
+            "pending_webhook_id": pending_id or None,
+            "level_anchor_mode": payload.get("level_anchor_mode") or "actual_fill",
+            "planned_entry_price": payload.get("planned_entry_price") or payload.get("entry_price"),
+            "planned_stop_price": payload.get("planned_stop_price") or payload.get("stop_loss_price"),
+            "planned_target_price": payload.get("planned_target_price") or payload.get("take_profit_price"),
+        }
+
+        if pending_id:
+            _update_pending_webhook(pending_id, {"status": "TRIGGERING", "last_error": None, "last_attempt_at": _utc_now_iso()})
+
+        if asset == "crypto":
+            result = await _place_bybit_order(canonical, request_id=request_id)
+            return JSONResponse({"ok": True, "broker": "bybit", "result": result})
+        if asset == "fx":
+            result = await _place_oanda_order(canonical, request_id=request_id)
+            return JSONResponse({"ok": True, "broker": "oanda", "result": result})
+
+        raise HTTPException(status_code=400, detail="asset must be crypto or fx.")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        if pending_id:
+            _update_pending_webhook(
+                pending_id,
+                {
+                    "status": "WAITING",
+                    "last_error": str(exc),
+                    "last_attempt_at": _utc_now_iso(),
+                },
+            )
+        raise HTTPException(status_code=400, detail=f"Calculator webhook execution failed: {exc}") from exc
 
 
 @app.post("/api/calculator/submit")
