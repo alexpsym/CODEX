@@ -3,7 +3,7 @@
 This folder contains a lightweight FastAPI app (`render/master_service.py`) that discovers every Python script in this repository—trading bots and anything else except the `mt5-clone` and `LEDGER-clone` folders—and lets you run them concurrently from a single Render starter instance. The app exposes:
 
 - A web UI at `/` for starting/stopping scripts and tailing their logs.
-- Webhook endpoints at `/webhook/<script-name>` so TradingView alerts can kick off a specific strategy.
+- Generic `/webhook` routes are retired for trading execution. The calculator now emits server-authored TradingView payloads that post to `/api/calculator/webhook`.
 - A health check at `/health` for uptime monitoring.
 
 ## 1) Local smoke test
@@ -28,7 +28,7 @@ This folder contains a lightweight FastAPI app (`render/master_service.py`) that
    - **Runtime**: Docker. Render will build from the root `Dockerfile`, which installs `ffmpeg` for the YouTube mp3 conversion flow. Leave the Build/Start command fields blank so Render honors the Dockerfile (it already runs `uvicorn render.master_service:app --host 0.0.0.0 --port ${PORT:-10000}`).
    - **Instance type**: Starter ($7/mo). This keeps one always-on worker.
 4. Add environment variables in the Render dashboard (or create an **Environment Group** and attach it). These are injected into every managed script, so your TradingView credentials, Bybit keys, and OANDA keys are available without committing them to Git.
-5. Click **Create Web Service**. Once live, Render will expose a public URL like `https://your-app.onrender.com`. Point your TradingView webhooks to `https://your-app.onrender.com/webhook/<script-name>`.
+5. Click **Create Web Service**. Once live, Render will expose a public URL like `https://your-app.onrender.com`. For calculator-generated alerts, point TradingView to `https://your-app.onrender.com/api/calculator/webhook`.
 
 ## 3) Environment variables
 Place these in your Render dashboard or a local `.env` file at the repo root. Adjust the names to match the scripts you use (examples below come from the existing projects):
@@ -50,11 +50,12 @@ Place these in your Render dashboard or a local `.env` file at the repo root. Ad
   
 
 ## 5) TradingView webhook routing
-Use the script path shown in the UI (for example `bybit_monitor/bybit_altcoin_monitor.py`) as the `<script-name>` in your TradingView webhook URL:
-```
-https://your-app.onrender.com/webhook/bybit_monitor/bybit_altcoin_monitor.py
-```
-Include any JSON payload your strategy expects. The manager does not modify the payload; it simply logs it and ensures the script is running.
+Use the calculator UI (`/merged/calculator`) to generate the exact JSON payload and copy it directly into TradingView.
+
+- **Endpoint:** `https://your-app.onrender.com/api/calculator/webhook`
+- **Payload source:** always paste the server-authored `webhook_payload_json` from the calculator quote result.
+- The API creates a pending-webhook record when the quote is generated (Webhook = Yes), then removes it automatically after a successful execution so Open Orders/Positions does not show duplicates.
+- If execution fails, the pending row remains with an error field so you can retry or diagnose the issue.
 
 ## 6) Notes and tips
 - The manager intentionally ignores the `mt5-clone` directory per your request.
