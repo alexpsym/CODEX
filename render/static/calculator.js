@@ -7,7 +7,6 @@
     order_type: 'market',
     risk_mode: 'percent',
     timeframe: '15m',
-    target_mode: 'rr',
     webhook_mode: 'no',
     quote: null,
     resolvedSymbol: '',
@@ -21,11 +20,13 @@
   const canonicalEl = $('calc-canonical-symbol');
   const journalEl = $('calc-journal-summary');
   const riskToggleWrap = $('risk-toggle-wrap');
-  const tpTicksWrap = $('tp-ticks-wrap');
-  const rrWrap = $('rr-wrap');
   const webhookPanel = $('calc-webhook-panel');
   const webhookJsonEl = $('calc-webhook-json');
   const webhookCopyBtn = $('calc-webhook-copy');
+  const JOURNAL_COLUMNS = [
+    'Open time', 'Close time', 'Account', 'Symbol', 'Side', 'Timeframe', 'Qty', 'Entry', 'Exit',
+    'Stop', 'Target', 'Fees', 'P/L', 'Result %', 'R', 'Balance after', 'Duration', 'Breakeven', 'Chart',
+  ];
 
   let symbolTimer = null;
   let resolveController = null;
@@ -44,8 +45,12 @@
   const fmtPct = (value) => {
     const n = Number(value);
     if (!Number.isFinite(n)) return '-';
-    const dp = n >= 10 ? 1 : 2;
-    return `${n.toFixed(dp)}%`;
+    return `${n.toFixed(2)}%`;
+  };
+  const fmtNum = (value, dp = 2) => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return '-';
+    return n.toLocaleString(undefined, { maximumFractionDigits: dp });
   };
 
   const fmtDuration = (secs) => {
@@ -94,26 +99,70 @@
     const summaryCards = rows.map(([k, v]) => `<div class="card"><div class="muted">${k}</div><div>${v ?? '-'}</div></div>`).join('');
     const tradeRows = Array.isArray(payload.trades) ? payload.trades : [];
     const details = tradeRows.length
-      ? `<details class="card" style="grid-column:1/-1"><summary>Journal trade details (${tradeRows.length})</summary>${tradeRows.map((t, idx) => `
-          <div class="card" style="margin-top:8px">
-            <div><strong>#${idx + 1}</strong> ${t.symbol ?? '-'}</div>
-            ${Object.entries(t).map(([k, v]) => `<div class="muted">${k}: ${typeof v === 'object' ? JSON.stringify(v) : (v ?? '-')}</div>`).join('')}
-          </div>`).join('')}</details>`
+      ? `<details class="card" style="grid-column:1/-1"><summary>Journal trade details (${tradeRows.length})</summary>
+          <div style="overflow:auto;margin-top:8px">
+            <table style="width:100%;border-collapse:collapse">
+              <thead><tr>${JOURNAL_COLUMNS.map((h) => `<th style="text-align:left;padding:6px;border-bottom:1px solid #1f2937">${h}</th>`).join('')}</tr></thead>
+              <tbody>${tradeRows.map((r) => renderJournalRow(r)).join('')}</tbody>
+            </table>
+          </div>
+        </details>`
       : '<div class="card" style="grid-column:1/-1"><div class="muted">No detailed journal rows found.</div></div>';
     journalEl.dataset.state = 'ready';
     journalEl.innerHTML = summaryCards + details;
   }
 
+  function renderJournalRow(r) {
+    const pnl = Number(r.realized_pnl ?? r.net_profit);
+    const resultPct = Number(r.result_pct ?? r.profit_pct);
+    const rMultiple = Number(r.r_multiple);
+    const bal = Number(r.balance_after_trade);
+    const ccy = r.balance_currency || r.currency || '';
+    const pnlCls = Number.isFinite(pnl) ? (pnl > 0 ? 'color:#86efac' : (pnl < 0 ? 'color:#fca5a5' : '')) : '';
+    const pctCls = Number.isFinite(resultPct) ? (resultPct > 0 ? 'color:#86efac' : (resultPct < 0 ? 'color:#fca5a5' : '')) : '';
+    const rCls = Number.isFinite(rMultiple) ? (rMultiple > 0 ? 'color:#86efac' : (rMultiple < 0 ? 'color:#fca5a5' : '')) : '';
+    const chart = r.id ? `<a href="/trade-chart/${encodeURIComponent(r.id)}" target="_blank" rel="noopener">Chart</a>` : '';
+    return `<tr>
+      <td>${fmtBrisbaneTime(r.open_time)}</td>
+      <td>${fmtBrisbaneTime(r.close_time || r.open_time)}</td>
+      <td>${r.account_label || r.account || '-'}</td>
+      <td>${r.symbol || '-'}</td>
+      <td>${r.side || '-'}</td>
+      <td>${r.timeframe || (r.metrics?.timeframe) || '-'}</td>
+      <td>${fmtNum(r.qty, 8)}</td>
+      <td>${fmtNum(r.entry_price, 6)}</td>
+      <td>${fmtNum(r.exit_price, 6)}</td>
+      <td>${fmtNum(r.stop_loss, 6)}</td>
+      <td>${fmtNum(r.take_profit, 6)}</td>
+      <td>${fmtNum(r.commission ?? r.fees, 4)} ${r.commission_currency || r.fee_currency || ''}</td>
+      <td style="${pnlCls}">${fmtNum(pnl, 4)} ${r.realized_pnl_currency || r.currency || ''}</td>
+      <td style="${pctCls}">${Number.isFinite(resultPct) ? `${fmtNum(resultPct, 4)}%` : '-'}</td>
+      <td style="${rCls}">${Number.isFinite(rMultiple) ? `${fmtNum(rMultiple, 3)}R` : '-'}</td>
+      <td>${Number.isFinite(bal) ? `${fmtNum(bal, 2)} ${ccy}` : '-'}</td>
+      <td>${fmtDuration(r.trade_duration_seconds)}</td>
+      <td>${r.breakeven || '-'}</td>
+      <td>${chart}</td>
+    </tr>`;
+  }
+
   function renderQuote(q) {
+    const currency = q.display_currency || 'AUD';
+    const fee = Number(q.estimated_fees_or_spread);
+    const loss = Number(q.estimated_total_loss);
+    const reward = Number(q.estimated_reward);
     const rows = [
       ['Resolved broker', q.broker], ['Resolved symbol', q.symbol], ['Tick size', q.tick_size],
       ['Entry price', q.entry_price], ['Stop price', q.stop_price], ['Target price', q.target_price],
       ['TP distance', q.target_distance ?? '-'], ['Qty / units', q.quantity], ['Notional', q.notional],
-      ['Estimated fees / spread', q.estimated_fees_or_spread_aud], ['Estimated total loss in AUD', q.estimated_total_loss_aud],
-      ['Estimated reward in AUD', q.estimated_reward_aud], ['R:R', q.rr],
+      ['Estimated fees / spread', `${Number.isFinite(fee) ? fee.toFixed(2) : '-'} ${currency}`],
+      ['Estimated total loss', `${Number.isFinite(loss) ? loss.toFixed(2) : '-'} ${currency}`],
+      ['Estimated reward', `${Number.isFinite(reward) ? reward.toFixed(2) : '-'} ${currency}`], ['R:R', q.rr],
       ['Requested net R', q.requested_rr_net ?? '-'], ['Effective net R', q.effective_rr_net ?? '-'],
       ['Fee buffer (R)', q.fee_buffer_r ?? '-'],
     ];
+    if (Array.isArray(q.warnings) && q.warnings.length) {
+      rows.push(['Warnings', q.warnings.join(' | ')]);
+    }
     resultEl.innerHTML = rows.map(([k, v]) => `<div class="card"><div class="muted">${k}</div><div>${v ?? '-'}</div></div>`).join('');
   }
 
@@ -158,12 +207,6 @@
     }
   }
 
-  function updateTargetModeUi() {
-    const useRr = state.target_mode === 'rr';
-    rrWrap.style.display = useRr ? '' : 'none';
-    tpTicksWrap.style.display = useRr ? 'none' : '';
-  }
-
   function toggleWebhookPanel(show) {
     webhookPanel.style.display = show ? '' : 'none';
     if (!show) {
@@ -189,21 +232,35 @@
     }
   }
 
+  function syncToggleState(id, key) {
+    const root = $(id);
+    if (!root) return;
+    root.querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.v === state[key]));
+  }
+
+  function syncAllToggleStates() {
+    syncToggleState('account-toggle', 'account');
+    syncToggleState('asset-toggle', 'asset');
+    syncToggleState('side-toggle', 'side');
+    syncToggleState('order-toggle', 'order_type');
+    syncToggleState('risk-toggle', 'risk_mode');
+    syncToggleState('webhook-toggle', 'webhook_mode');
+  }
+
   function setToggle(id, key, onChange) {
     const root = $(id);
     root.querySelectorAll('button').forEach((btn) => {
       btn.addEventListener('click', () => {
-        root.querySelectorAll('button').forEach((b) => b.classList.remove('active'));
-        btn.classList.add('active');
         state[key] = btn.dataset.v;
+        syncToggleState(id, key);
         state.quote = null;
         if (key === 'order_type') $('limit-wrap').style.display = state.order_type === 'limit' ? '' : 'none';
-        if (key === 'target_mode') updateTargetModeUi();
         if (key === 'webhook_mode' && state.webhook_mode !== 'yes') {
           toggleWebhookPanel(false);
           cleanupPendingWebhook();
         }
         if (typeof onChange === 'function') onChange();
+        syncAllToggleStates();
       });
     });
   }
@@ -282,8 +339,7 @@
         symbol: $('calc-symbol').value,
         entry_price: $('calc-limit').value,
         stop_loss_ticks: $('calc-sl-ticks').value,
-        take_profit_ticks: state.target_mode === 'ticks' ? $('calc-tp-ticks').value : undefined,
-        risk_reward: state.target_mode === 'rr' ? $('calc-rr').value : undefined,
+        risk_reward: $('calc-rr').value,
         risk_value: $('calc-risk').value,
         webhook: state.webhook_mode,
         pending_webhook_id: state.webhook_mode === 'yes' ? (state.pendingWebhookId || undefined) : undefined,
@@ -339,11 +395,10 @@
   setToggle('side-toggle', 'side');
   setToggle('order-toggle', 'order_type');
   setToggle('risk-toggle', 'risk_mode');
-  setToggle('target-toggle', 'target_mode');
   setToggle('webhook-toggle', 'webhook_mode');
   setTimeframeButtons();
   updateRiskUiForAsset();
-  updateTargetModeUi();
+  syncAllToggleStates();
   toggleWebhookPanel(false);
   setJournalState('idle', 'Type a symbol to load journal summary.');
 })();

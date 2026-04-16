@@ -12,6 +12,12 @@ def test_calculator_payload_uses_spread_state() -> None:
     assert "const payload = {" in js
     assert "...state," in js
     assert not re.search(r"(?m)^\\s*\\.state,", js)
+    assert "risk_reward: $('calc-rr').value" in js
+    assert "take_profit_ticks:" not in js
+    assert "target-toggle" not in js
+    assert "updateTargetModeUi" not in js
+    assert "Estimated total loss in AUD" not in js
+    assert "Estimated reward in AUD" not in js
     assert "AbortController" in js
     assert "timeframe-toggle" in js
     assert "calc-timeframe" not in js
