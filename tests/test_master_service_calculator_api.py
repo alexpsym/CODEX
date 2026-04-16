@@ -28,6 +28,7 @@ def test_merged_calculator_page_returns_200() -> None:
     assert response.status_code == 200
     html = response.body.decode("utf-8")
     assert "Position Size Calculator" in html
+    assert "max-width:880px" not in html
     assert 'target-toggle' not in html
     assert 'tp-ticks-wrap' not in html
     assert 'id="calc-rr"' in html
@@ -369,7 +370,8 @@ def test_fee_rate_failure_falls_back_with_warning(monkeypatch: pytest.MonkeyPatc
     body = json.loads(response.body.decode("utf-8"))
     assert response.status_code == 200
     assert isinstance(body.get("warnings"), list)
-    assert "fee-rate" in body["warnings"][0]
+    assert "conservative fallback fees" in body["warnings"][0].lower()
+    assert "path=/v5/account/fee-rate" not in body["warnings"][0]
 
 
 def test_balance_failure_returns_endpoint_specific_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -398,3 +400,25 @@ def test_balance_failure_returns_endpoint_specific_error(monkeypatch: pytest.Mon
     detail = str(exc.value.detail)
     assert "/v5/account/wallet-balance" in detail
     assert "Bybit request failed" not in detail
+
+
+def test_submit_translates_bybit_errors_to_http_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_bybit(_payload, _request_id):
+        raise ValueError("retCode=10001 request parameter error")
+
+    monkeypatch.setattr(master_service, "_place_bybit_order", fake_bybit)
+    with pytest.raises(master_service.HTTPException) as exc:
+        asyncio.run(master_service.calculator_submit({
+            "asset": "crypto",
+            "account": "live",
+            "symbol": "BTCUSDT",
+            "action": "buy",
+            "order_type": "market",
+            "entry_price": "100",
+            "stop_loss_price": "90",
+            "take_profit_price": "120",
+            "quantity": "0.01",
+            "timeframe": "15m",
+        }))
+    assert exc.value.status_code == 400
+    assert "Order submit failed:" in str(exc.value.detail)

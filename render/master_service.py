@@ -10888,7 +10888,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
   <title>Position Size Calculator</title>
   <style>
     body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}
-    .wrap{max-width:880px;margin:0 auto;padding:18px}
+    .wrap{width:100%;max-width:none;margin:0;padding:18px}
     .panel{background:#111827;border:1px solid #1f2937;border-radius:14px;padding:16px}
     .row{display:flex;flex-direction:column;gap:6px;align-items:stretch;margin-bottom:12px}
     .group{display:flex;gap:8px;flex-wrap:wrap}
@@ -11020,6 +11020,15 @@ def _floor_to_precision(value: Decimal, precision: int) -> Decimal:
 def _fmt_dec(value: Decimal) -> str:
     text = format(value, "f")
     return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def _fmt_dec_by_step(value: Decimal, step: Decimal) -> str:
+    if step and step > 0:
+        try:
+            value = value.quantize(step, rounding=ROUND_HALF_UP)
+        except Exception:
+            pass
+    return _fmt_dec(value)
 
 
 _BYBIT_NAME_ALIAS_CACHE: Dict[str, object] = {"expires_at": 0.0, "aliases": {}}
@@ -11393,7 +11402,12 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                 maker = Decimal(str(fee_row.get("makerFeeRate") or fallback_maker))
                 taker = Decimal(str(fee_row.get("takerFeeRate") or fallback_taker))
             except Exception as exc:
-                warnings.append(f"Fee-rate lookup failed path=/v5/account/fee-rate; using fallback fee defaults ({exc}).")
+                exc_text = str(exc)
+                ret_code_match = re.search(r"retCode=([0-9-]+)", exc_text)
+                ret_code = ret_code_match.group(1) if ret_code_match else "unknown"
+                warnings.append(
+                    f"Bybit fee rate unavailable (retCode {ret_code}). Using conservative fallback fees for this quote."
+                )
             open_fee = taker if order_type == "market" else max(maker, taker)
             close_fee = taker
             try:
@@ -11468,10 +11482,10 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                 "broker": "bybit",
                 "symbol": resolved_symbol,
                 "tick_size": _fmt_dec(tick_size),
-                "entry_price": _fmt_dec(entry),
-                "stop_price": _fmt_dec(sl),
-                "target_price": _fmt_dec(tp),
-                "target_distance": _fmt_dec(target_distance),
+                "entry_price": _fmt_dec_by_step(entry, tick_size),
+                "stop_price": _fmt_dec_by_step(sl, tick_size),
+                "target_price": _fmt_dec_by_step(tp, tick_size),
+                "target_distance": _fmt_dec_by_step(target_distance, tick_size),
                 "quantity": _fmt_dec(qty),
                 "notional": _fmt_dec(notional),
                 "estimated_fees_or_spread_aud": _fmt_dec(((qty * entry * open_fee) + (qty * sl * close_fee)) / aud_usd),
@@ -11481,11 +11495,11 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                 "estimated_fees_or_spread": _fmt_dec((qty * entry * open_fee) + (qty * sl * close_fee)),
                 "estimated_total_loss": _fmt_dec(total_loss_usdt),
                 "estimated_reward": _fmt_dec(max(Decimal("0"), reward_usdt)),
-                "rr": _fmt_dec((abs(tp - entry) / abs(entry - sl)) if abs(entry - sl) > 0 else Decimal("0")),
+                "rr": _fmt_dec_by_step((abs(tp - entry) / abs(entry - sl)) if abs(entry - sl) > 0 else Decimal("0"), Decimal("0.01")),
                 "target_mode": target_mode,
-                "requested_rr_net": _fmt_dec(requested_rr_net) if requested_rr_net is not None else None,
-                "effective_rr_net": _fmt_dec(effective_rr_net) if effective_rr_net is not None else None,
-                "fee_buffer_r": _fmt_dec(fee_buffer_r) if fee_buffer_r is not None else None,
+                "requested_rr_net": _fmt_dec_by_step(requested_rr_net, Decimal("0.01")) if requested_rr_net is not None else None,
+                "effective_rr_net": _fmt_dec_by_step(effective_rr_net, Decimal("0.01")) if effective_rr_net is not None else None,
+                "fee_buffer_r": _fmt_dec_by_step(fee_buffer_r, Decimal("0.01")) if fee_buffer_r is not None else None,
             }
             if warnings:
                 response_payload["warnings"] = warnings
@@ -11640,10 +11654,10 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                     "broker": "oanda",
                     "symbol": symbol,
                     "tick_size": _fmt_dec(tick_size),
-                    "entry_price": _fmt_dec(entry),
-                    "stop_price": _fmt_dec(sl),
-                    "target_price": _fmt_dec(tp),
-                    "target_distance": _fmt_dec(target_distance),
+                    "entry_price": _fmt_dec_by_step(entry, tick_size),
+                    "stop_price": _fmt_dec_by_step(sl, tick_size),
+                    "target_price": _fmt_dec_by_step(tp, tick_size),
+                    "target_distance": _fmt_dec_by_step(target_distance, tick_size),
                     "quantity": _fmt_dec(units),
                     "notional": _fmt_dec(units * entry),
                     "estimated_fees_or_spread_aud": _fmt_dec(max(Decimal("0"), spread_aud)),
@@ -11653,11 +11667,11 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                     "estimated_fees_or_spread": _fmt_dec(max(Decimal("0"), spread_aud)),
                     "estimated_total_loss": _fmt_dec(loss_per_unit_aud * units),
                     "estimated_reward": _fmt_dec(reward_aud),
-                    "rr": _fmt_dec((abs(tp - entry) / abs(entry - sl)) if abs(entry - sl) > 0 else Decimal("0")),
+                    "rr": _fmt_dec_by_step((abs(tp - entry) / abs(entry - sl)) if abs(entry - sl) > 0 else Decimal("0"), Decimal("0.01")),
                     "target_mode": target_mode,
-                    "requested_rr_net": _fmt_dec(requested_rr_net) if requested_rr_net is not None else None,
-                    "effective_rr_net": _fmt_dec(effective_rr_net) if effective_rr_net is not None else None,
-                    "fee_buffer_r": _fmt_dec(fee_buffer_r) if fee_buffer_r is not None else None,
+                    "requested_rr_net": _fmt_dec_by_step(requested_rr_net, Decimal("0.01")) if requested_rr_net is not None else None,
+                    "effective_rr_net": _fmt_dec_by_step(effective_rr_net, Decimal("0.01")) if effective_rr_net is not None else None,
+                    "fee_buffer_r": _fmt_dec_by_step(fee_buffer_r, Decimal("0.01")) if fee_buffer_r is not None else None,
                 }
             if webhook_enabled:
                 pending_id = existing_pending_id or f"calc_oanda_{uuid4().hex[:16]}"
@@ -11780,13 +11794,20 @@ async def calculator_submit(payload: Dict[str, object] = Body(default={})) -> JS
         "timeframe": payload.get("timeframe"),
     }
     request_id = f"calc-{uuid4().hex[:12]}"
-    if asset == "crypto":
-        result = await _place_bybit_order(canonical, request_id=request_id)
-        return JSONResponse({"ok": True, "broker": "bybit", "result": result})
-    if asset == "fx":
-        result = await _place_oanda_order(canonical, request_id=request_id)
-        return JSONResponse({"ok": True, "broker": "oanda", "result": result})
-    raise HTTPException(status_code=400, detail="asset must be crypto or fx.")
+    try:
+        if asset == "crypto":
+            result = await _place_bybit_order(canonical, request_id=request_id)
+            return JSONResponse({"ok": True, "broker": "bybit", "result": result})
+        if asset == "fx":
+            result = await _place_oanda_order(canonical, request_id=request_id)
+            return JSONResponse({"ok": True, "broker": "oanda", "result": result})
+        raise HTTPException(status_code=400, detail="asset must be crypto or fx.")
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Order submit failed: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Order submit failed: {exc}") from exc
 
 
 HISTORY_PAGE_TEMPLATE = """<!doctype html>

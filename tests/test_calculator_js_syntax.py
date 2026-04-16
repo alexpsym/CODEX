@@ -18,6 +18,10 @@ def test_calculator_payload_uses_spread_state() -> None:
     assert "updateTargetModeUi" not in js
     assert "Estimated total loss in AUD" not in js
     assert "Estimated reward in AUD" not in js
+    assert "['Tick size', q.tick_size]" not in js
+    assert "['Notional', q.notional]" not in js
+    assert "fmtPriceLike(q.target_price, tickSize)" in js
+    assert "fmtR(q.effective_rr_net)" in js
     assert "AbortController" in js
     assert "timeframe-toggle" in js
     assert "calc-timeframe" not in js

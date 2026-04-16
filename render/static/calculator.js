@@ -52,6 +52,28 @@
     if (!Number.isFinite(n)) return '-';
     return n.toLocaleString(undefined, { maximumFractionDigits: dp });
   };
+  const tickDecimals = (tickSize) => {
+    const raw = String(tickSize ?? '').trim();
+    if (!raw) return 2;
+    if (/e-/i.test(raw)) {
+      const parts = raw.toLowerCase().split('e-');
+      const exp = Number(parts[1]);
+      return Number.isFinite(exp) ? Math.max(0, Math.min(10, exp)) : 2;
+    }
+    const dot = raw.indexOf('.');
+    if (dot < 0) return 0;
+    return Math.max(0, Math.min(10, raw.length - dot - 1));
+  };
+  const fmtPriceLike = (value, tickSize) => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return '-';
+    return n.toFixed(tickDecimals(tickSize));
+  };
+  const fmtR = (value) => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return '-';
+    return n.toFixed(2);
+  };
 
   const fmtDuration = (secs) => {
     const n = Number(secs);
@@ -150,18 +172,19 @@
     const fee = Number(q.estimated_fees_or_spread);
     const loss = Number(q.estimated_total_loss);
     const reward = Number(q.estimated_reward);
+    const tickSize = q.tick_size;
     const rows = [
-      ['Resolved broker', q.broker], ['Resolved symbol', q.symbol], ['Tick size', q.tick_size],
-      ['Entry price', q.entry_price], ['Stop price', q.stop_price], ['Target price', q.target_price],
-      ['TP distance', q.target_distance ?? '-'], ['Qty / units', q.quantity], ['Notional', q.notional],
+      ['Resolved broker', q.broker], ['Resolved symbol', q.symbol],
+      ['Entry price', fmtPriceLike(q.entry_price, tickSize)], ['Stop price', fmtPriceLike(q.stop_price, tickSize)], ['Target price', fmtPriceLike(q.target_price, tickSize)],
+      ['TP distance', fmtPriceLike(q.target_distance, tickSize)], ['Qty / units', q.quantity],
       ['Estimated fees / spread', `${Number.isFinite(fee) ? fee.toFixed(2) : '-'} ${currency}`],
       ['Estimated total loss', `${Number.isFinite(loss) ? loss.toFixed(2) : '-'} ${currency}`],
-      ['Estimated reward', `${Number.isFinite(reward) ? reward.toFixed(2) : '-'} ${currency}`], ['R:R', q.rr],
-      ['Requested net R', q.requested_rr_net ?? '-'], ['Effective net R', q.effective_rr_net ?? '-'],
-      ['Fee buffer (R)', q.fee_buffer_r ?? '-'],
+      ['Estimated reward', `${Number.isFinite(reward) ? reward.toFixed(2) : '-'} ${currency}`], ['R:R', fmtR(q.rr)],
+      ['Requested net R', fmtR(q.requested_rr_net)], ['Effective net R', fmtR(q.effective_rr_net)],
+      ['Fee buffer (R)', fmtR(q.fee_buffer_r)],
     ];
     if (Array.isArray(q.warnings) && q.warnings.length) {
-      rows.push(['Warnings', q.warnings.join(' | ')]);
+      rows.push(['Warnings', q.warnings.map((w) => String(w || '').replace(/\s+/g, ' ').trim()).join(' | ')]);
     }
     resultEl.innerHTML = rows.map(([k, v]) => `<div class="card"><div class="muted">${k}</div><div>${v ?? '-'}</div></div>`).join('');
   }
