@@ -6500,11 +6500,21 @@ async def _bybit_signed_get(
         bytes_received=len(resp.content),
         context=path,
     )
-    resp.raise_for_status()
-    payload = resp.json()
+    payload: Dict[str, object] = {}
+    try:
+        payload = resp.json()
+    except Exception:
+        payload = {}
+    if resp.status_code >= 400:
+        ret_code = payload.get("retCode")
+        ret_msg = payload.get("retMsg") or resp.text
+        raise ValueError(
+            f"Bybit signed GET failed path={path} http_status={resp.status_code} retCode={ret_code} retMsg={ret_msg}"
+        )
     ret_code = payload.get("retCode")
     if ret_code not in (0, "0"):
-        raise ValueError(payload.get("retMsg") or "Bybit request failed")
+        ret_msg = payload.get("retMsg") or "Bybit request failed"
+        raise ValueError(f"Bybit signed GET failed path={path} retCode={ret_code} retMsg={ret_msg}")
     return payload
 
 
@@ -10884,6 +10894,12 @@ CALCULATOR_TEMPLATE = """<!doctype html>
     .group{display:flex;gap:8px;flex-wrap:wrap}
     label{display:flex;flex-direction:column;gap:6px;font-weight:700;color:#cbd5e1}
     input,select,button{background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:10px;padding:8px 10px}
+    .compact{width:100%}
+    .compact-symbol{max-width:180px}
+    .compact-limit{max-width:160px}
+    .compact-ticks{max-width:90px}
+    .compact-rr{max-width:90px}
+    .compact-risk{max-width:110px}
     button{cursor:pointer;font-weight:700}
     .toggle button.active{background:#2563eb;border-color:#3b82f6}
     .error{color:#fca5a5;min-height:1.2em}
@@ -10914,24 +10930,17 @@ CALCULATOR_TEMPLATE = """<!doctype html>
         <div class="group toggle" id="order-toggle"><button type="button" data-v="market" class="active">Market</button><button type="button" data-v="limit">Limit</button></div>
       </div>
       <div class="row">
-        <label>Symbol<input id="calc-symbol" placeholder="BTC or EUR_USD"/></label>
+        <label>Symbol<input id="calc-symbol" class="compact compact-symbol" placeholder="BTC or EUR_USD"/></label>
         <div class="muted" id="calc-canonical-symbol"></div>
       </div>
       <div class="row" id="limit-wrap" style="display:none">
-        <label>Limit entry price<input id="calc-limit" type="number" step="any"/></label>
+        <label>Limit entry price<input id="calc-limit" class="compact compact-limit" type="number" step="any"/></label>
       </div>
       <div class="row">
-        <label>Stop loss ticks<input id="calc-sl-ticks" type="number" min="1" step="1" value="10"/></label>
-      </div>
-      <div class="row">
-        <label>Target mode</label>
-        <div class="group toggle" id="target-toggle"><button type="button" data-v="rr" class="active">Risk/Reward</button><button type="button" data-v="ticks">TP ticks</button></div>
+        <label>Stop loss ticks<input id="calc-sl-ticks" class="compact compact-ticks" type="number" min="1" step="1" value="10"/></label>
       </div>
       <div class="row" id="rr-wrap">
-        <label>Risk/Reward (net R)<input id="calc-rr" type="number" min="0.1" step="0.1" value="2"/></label>
-      </div>
-      <div class="row" id="tp-ticks-wrap" style="display:none">
-        <label>Take profit ticks<input id="calc-tp-ticks" type="number" min="1" step="1" value="20"/></label>
+        <label>Risk reward<input id="calc-rr" class="compact compact-rr" type="number" min="0.1" step="0.1" value="2"/></label>
       </div>
       <div class="row" id="risk-toggle-wrap">
         <label>Risk mode</label>
@@ -10939,7 +10948,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
       </div>
       <div class="row">
         <label id="calc-risk-label">Risk value (%)</label>
-        <input id="calc-risk" type="number" min="0.0001" step="any" value="1"/>
+        <input id="calc-risk" class="compact compact-risk" type="number" min="0.0001" step="any" value="1"/>
       </div>
       <div class="row">
         <label>Webhook</label>
@@ -10973,14 +10982,16 @@ CALCULATOR_TEMPLATE = """<!doctype html>
       <p class="muted">10 ticks always means 10 × broker minimum tick size.</p>
     </div>
   </div>
-  <script src="/static/calculator.js"></script>
+  <script src="{{CALCULATOR_JS_URL}}"></script>
 </body>
 </html>"""
 
 
 @app.get("/merged/calculator")
 async def merged_calculator_page() -> HTMLResponse:
-    return HTMLResponse(CALCULATOR_TEMPLATE)
+    calc_js_version = quote(str(os.getenv("APP_BUILD_STAMP") or os.getenv("RENDER_GIT_COMMIT") or app.version), safe="")
+    page = CALCULATOR_TEMPLATE.replace("{{CALCULATOR_JS_URL}}", f"/static/calculator.js?v={calc_js_version}")
+    return HTMLResponse(page)
 
 
 @app.get("/merged/scanner")
@@ -11049,13 +11060,17 @@ async def _fetch_bybit_balance_usdt(account: str) -> Dict[str, Decimal]:
     _mode, api_key, api_secret, base_url, _src = resolve_bybit_credentials_for(account)
     if not api_key or not api_secret:
         raise HTTPException(status_code=500, detail="Bybit credentials are missing for selected account.")
-    payload = await _bybit_signed_get(
-        base_url=base_url,
-        api_key=api_key,
-        api_secret=api_secret,
-        path="/v5/account/wallet-balance",
-        params={"accountType": "UNIFIED"},
-    )
+    path = "/v5/account/wallet-balance"
+    try:
+        payload = await _bybit_signed_get(
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            path=path,
+            params={"accountType": "UNIFIED"},
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Bybit balance lookup failed path={path}: {exc}") from exc
     rows = (payload.get("result") or {}).get("list") or []
     for row in rows:
         total_equity = Decimal(str(row.get("totalEquity") or "0"))
@@ -11075,7 +11090,7 @@ async def _fetch_bybit_balance_usdt(account: str) -> Dict[str, Decimal]:
                 "total_equity": total_equity,
                 "total_available_balance": total_available_balance,
             }
-    raise HTTPException(status_code=502, detail="Bybit balance unavailable.")
+    raise HTTPException(status_code=502, detail=f"Bybit balance unavailable path={path}.")
 
 
 @app.get("/api/calculator/bootstrap")
@@ -11171,8 +11186,13 @@ async def calculator_journal_summary(asset: str, symbol: str) -> JSONResponse:
     symbol_in = str(symbol or "").strip()
     if not symbol_in:
         raise HTTPException(status_code=400, detail="symbol is required.")
-    rows = _enrich_trade_row_metrics(_get_trading_journal_rows())
+    base_rows = [
+        _backfill_trade_row_context_fields(r)
+        for r in _get_trading_journal_rows()
+        if isinstance(r, dict) and not _exclude_bybit_demo_row(r)
+    ]
     balances = _get_excel_account_balances()
+    rows = _enrich_trade_row_metrics(_calc_balance_after_trade(base_rows, balances))
 
     canonical = ""
     if asset_norm == "crypto":
@@ -11216,14 +11236,15 @@ async def calculator_journal_summary(asset: str, symbol: str) -> JSONResponse:
         # crypto: include exact normalized key and shorthand-equivalent variants.
         if row_key == canonical_key or row_key.startswith(canonical_key) or canonical_key.startswith(row_key):
             filtered.append(r)
-    if not filtered:
+    filtered_sorted = sorted(filtered, key=_row_sort_dt, reverse=True)
+    if not filtered_sorted:
         return JSONResponse({"status": "no_data", "canonical_symbol": canonical, "stats": None, "trades": []})
-    stats = _compute_journal_stats(filtered, balances)
+    stats = _compute_journal_stats(filtered_sorted, balances)
     totals = stats.get("totals") if isinstance(stats, dict) else {}
     last_trade_ts = None
     try:
         last_trade_ts = max(
-            (str(r.get("close_time") or r.get("open_time") or "") for r in filtered if str(r.get("close_time") or r.get("open_time") or "").strip()),
+            (str(r.get("close_time") or r.get("open_time") or "") for r in filtered_sorted if str(r.get("close_time") or r.get("open_time") or "").strip()),
             default=None,
         )
     except Exception:
@@ -11250,7 +11271,7 @@ async def calculator_journal_summary(asset: str, symbol: str) -> JSONResponse:
             "status": "ok",
             "canonical_symbol": canonical,
             "stats": summary,
-            "trades": filtered,
+            "trades": filtered_sorted,
         }
     )
 
@@ -11277,10 +11298,7 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
         if risk_mode not in {"fixed_aud", "percent"}:
             raise HTTPException(status_code=400, detail="risk_mode must be fixed_aud or percent.")
         if not target_mode:
-            if str(payload.get("risk_reward") or "").strip():
-                target_mode = "rr"
-            else:
-                target_mode = "ticks"
+            target_mode = "rr" if str(payload.get("risk_reward") or "").strip() else "ticks"
         if target_mode not in {"rr", "ticks"}:
             raise HTTPException(status_code=400, detail="target_mode must be rr or ticks.")
         if webhook_mode not in {"yes", "no", "true", "false", "1", "0"}:
@@ -11358,16 +11376,24 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                 raise HTTPException(status_code=400, detail="entry_price must be greater than zero.")
             stop_distance = stop_ticks * tick_size
             sl = (entry - stop_distance) if side == "buy" else (entry + stop_distance)
-            fee_payload = await _bybit_signed_get(
-                base_url=base_url,
-                api_key=api_key,
-                api_secret=api_secret,
-                path="/v5/account/fee-rate",
-                params={"category": "linear", "symbol": resolved_symbol},
-            )
-            fee_row = ((fee_payload.get("result") or {}).get("list") or [{}])[0]
-            maker = Decimal(str(fee_row.get("makerFeeRate") or "0"))
-            taker = Decimal(str(fee_row.get("takerFeeRate") or "0"))
+            warnings: List[str] = []
+            fallback_taker = Decimal(str(os.getenv("CALCULATOR_BYBIT_TAKER_FEE_FALLBACK", "0.0006") or "0.0006"))
+            fallback_maker = Decimal(str(os.getenv("CALCULATOR_BYBIT_MAKER_FEE_FALLBACK", "0.0006") or "0.0006"))
+            maker = fallback_maker
+            taker = fallback_taker
+            try:
+                fee_payload = await _bybit_signed_get(
+                    base_url=base_url,
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    path="/v5/account/fee-rate",
+                    params={"category": "linear", "symbol": resolved_symbol},
+                )
+                fee_row = ((fee_payload.get("result") or {}).get("list") or [{}])[0]
+                maker = Decimal(str(fee_row.get("makerFeeRate") or fallback_maker))
+                taker = Decimal(str(fee_row.get("takerFeeRate") or fallback_taker))
+            except Exception as exc:
+                warnings.append(f"Fee-rate lookup failed path=/v5/account/fee-rate; using fallback fee defaults ({exc}).")
             open_fee = taker if order_type == "market" else max(maker, taker)
             close_fee = taker
             try:
@@ -11380,7 +11406,13 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                 raise HTTPException(status_code=502, detail=f"AUD_USD conversion unavailable: {exc}") from exc
             if aud_usd <= 0:
                 raise HTTPException(status_code=502, detail="AUD_USD conversion unavailable.")
-            balance_snapshot = await _fetch_bybit_balance_usdt(account)
+            try:
+                balance_snapshot = await _fetch_bybit_balance_usdt(account)
+            except HTTPException as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Bybit risk sizing dependency failed path=/v5/account/wallet-balance: {exc.detail}",
+                ) from exc
             available_usdt = Decimal(str(balance_snapshot.get("available_usdt") or "0"))
             total_equity = Decimal(str(balance_snapshot.get("total_equity") or "0"))
             risk_aud = (available_usdt / aud_usd) * (risk_val / Decimal("100"))
@@ -11445,12 +11477,18 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                 "estimated_fees_or_spread_aud": _fmt_dec(((qty * entry * open_fee) + (qty * sl * close_fee)) / aud_usd),
                 "estimated_total_loss_aud": _fmt_dec(total_loss_usdt / aud_usd),
                 "estimated_reward_aud": _fmt_dec(max(Decimal("0"), reward_usdt / aud_usd)),
+                "display_currency": "USDT",
+                "estimated_fees_or_spread": _fmt_dec((qty * entry * open_fee) + (qty * sl * close_fee)),
+                "estimated_total_loss": _fmt_dec(total_loss_usdt),
+                "estimated_reward": _fmt_dec(max(Decimal("0"), reward_usdt)),
                 "rr": _fmt_dec((abs(tp - entry) / abs(entry - sl)) if abs(entry - sl) > 0 else Decimal("0")),
                 "target_mode": target_mode,
                 "requested_rr_net": _fmt_dec(requested_rr_net) if requested_rr_net is not None else None,
                 "effective_rr_net": _fmt_dec(effective_rr_net) if effective_rr_net is not None else None,
                 "fee_buffer_r": _fmt_dec(fee_buffer_r) if fee_buffer_r is not None else None,
             }
+            if warnings:
+                response_payload["warnings"] = warnings
 
             if webhook_enabled:
                 pending_id = existing_pending_id or f"calc_bybit_{uuid4().hex[:16]}"
@@ -11611,6 +11649,10 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                     "estimated_fees_or_spread_aud": _fmt_dec(max(Decimal("0"), spread_aud)),
                     "estimated_total_loss_aud": _fmt_dec(loss_per_unit_aud * units),
                     "estimated_reward_aud": _fmt_dec(reward_aud),
+                    "display_currency": "AUD",
+                    "estimated_fees_or_spread": _fmt_dec(max(Decimal("0"), spread_aud)),
+                    "estimated_total_loss": _fmt_dec(loss_per_unit_aud * units),
+                    "estimated_reward": _fmt_dec(reward_aud),
                     "rr": _fmt_dec((abs(tp - entry) / abs(entry - sl)) if abs(entry - sl) > 0 else Decimal("0")),
                     "target_mode": target_mode,
                     "requested_rr_net": _fmt_dec(requested_rr_net) if requested_rr_net is not None else None,
@@ -11665,7 +11707,7 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Quote calculation failed: {exc}") from exc
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 
