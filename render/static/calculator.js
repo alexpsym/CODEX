@@ -24,10 +24,6 @@
   const webhookPanel = $('calc-webhook-panel');
   const webhookJsonEl = $('calc-webhook-json');
   const webhookCopyBtn = $('calc-webhook-copy');
-  const JOURNAL_COLUMNS = [
-    'Open time', 'Close time', 'Account', 'Symbol', 'Side', 'Timeframe', 'Qty', 'Entry', 'Exit',
-    'Stop', 'Target', 'Fees', 'P/L', 'Result %', 'R', 'Balance after', 'Duration', 'Breakeven', 'Chart',
-  ];
 
   let symbolTimer = null;
   let resolveController = null;
@@ -210,6 +206,7 @@
 
   function renderJournalStats(payload) {
     const s = payload.stats || {};
+    const tradeRows = Array.isArray(payload.trades) ? payload.trades : [];
     const rows = [
       ['Canonical symbol', payload.canonical_symbol],
       ['Total trades', s.total_trades], ['Wins', s.wins], ['Losses', s.losses], ['Break-even', s.break_even],
@@ -221,55 +218,11 @@
       ['Avg target distance', fmtPct(s.avg_target_distance)],
       ['Avg trade duration', fmtDuration(s.avg_trade_duration)],
       ['Last trade', fmtBrisbaneTime(s.last_trade_timestamp)],
+      ['Detailed rows available', tradeRows.length],
     ];
     const summaryCards = rows.map(([k, v]) => `<div class="card"><div class="muted">${k}</div><div>${v ?? '-'}</div></div>`).join('');
-    const tradeRows = Array.isArray(payload.trades) ? payload.trades : [];
-    const details = tradeRows.length
-      ? `<details class="card">
-          <summary>Journal trade details (${tradeRows.length})</summary>
-          <div class="journal-details">
-            <table class="journal-detail-table">
-              <thead><tr>${JOURNAL_COLUMNS.map((h) => `<th style="text-align:left">${h}</th>`).join('')}</tr></thead>
-              <tbody>${tradeRows.map((r) => renderJournalRow(r)).join('')}</tbody>
-            </table>
-          </div>
-        </details>`
-      : '<div class="card"><div class="muted">No detailed journal rows found.</div></div>';
     journalEl.dataset.state = 'ready';
-    journalEl.innerHTML = summaryCards + details;
-  }
-
-  function renderJournalRow(r) {
-    const pnl = Number(r.realized_pnl ?? r.net_profit);
-    const resultPct = Number(r.result_pct ?? r.profit_pct);
-    const rMultiple = Number(r.r_multiple);
-    const bal = Number(r.balance_after_trade);
-    const ccy = r.balance_currency || r.currency || '';
-    const pnlCls = Number.isFinite(pnl) ? (pnl > 0 ? 'color:#86efac' : (pnl < 0 ? 'color:#fca5a5' : '')) : '';
-    const pctCls = Number.isFinite(resultPct) ? (resultPct > 0 ? 'color:#86efac' : (resultPct < 0 ? 'color:#fca5a5' : '')) : '';
-    const rCls = Number.isFinite(rMultiple) ? (rMultiple > 0 ? 'color:#86efac' : (rMultiple < 0 ? 'color:#fca5a5' : '')) : '';
-    const chart = r.id ? `<a href="/trade-chart/${encodeURIComponent(r.id)}" target="_blank" rel="noopener">Chart</a>` : '';
-    return `<tr>
-      <td>${fmtBrisbaneTime(r.open_time)}</td>
-      <td>${fmtBrisbaneTime(r.close_time || r.open_time)}</td>
-      <td>${r.account_label || r.account || '-'}</td>
-      <td>${r.symbol || '-'}</td>
-      <td>${r.side || '-'}</td>
-      <td>${r.timeframe || (r.metrics?.timeframe) || '-'}</td>
-      <td>${fmtNum(r.qty, 8)}</td>
-      <td>${fmtNum(r.entry_price, 6)}</td>
-      <td>${fmtNum(r.exit_price, 6)}</td>
-      <td>${fmtNum(r.stop_loss, 6)}</td>
-      <td>${fmtNum(r.take_profit, 6)}</td>
-      <td>${fmtNum(r.commission ?? r.fees, 4)} ${r.commission_currency || r.fee_currency || ''}</td>
-      <td style="${pnlCls}">${fmtNum(pnl, 4)} ${r.realized_pnl_currency || r.currency || ''}</td>
-      <td style="${pctCls}">${Number.isFinite(resultPct) ? `${fmtNum(resultPct, 4)}%` : '-'}</td>
-      <td style="${rCls}">${Number.isFinite(rMultiple) ? `${fmtNum(rMultiple, 3)}R` : '-'}</td>
-      <td>${Number.isFinite(bal) ? `${fmtNum(bal, 2)} ${ccy}` : '-'}</td>
-      <td>${fmtDuration(r.trade_duration_seconds)}</td>
-      <td>${r.breakeven || '-'}</td>
-      <td>${chart}</td>
-    </tr>`;
+    journalEl.innerHTML = summaryCards;
   }
 
   function renderQuote(q) {
