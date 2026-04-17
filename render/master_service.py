@@ -11177,7 +11177,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
       <div class="calc-col">
         <div class="row">
           <label>Instrument specs</label>
-          <div class="card" id="calc-instrument-specs"></div>
+          <div id="calc-instrument-specs"></div>
         </div>
         <div class="row">
           <label>Quote results</label>

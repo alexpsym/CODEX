@@ -143,7 +143,7 @@
       </tr>
     `).join('');
     specsEl.dataset.state = 'ready';
-    specsEl.innerHTML = `<table style="width:100%;border-collapse:collapse">${rows}</table>`;
+    specsEl.innerHTML = `<div class="card"><table style="width:100%;border-collapse:collapse">${rows}</table></div>`;
   }
 
   const fmtPct = (value) => {
