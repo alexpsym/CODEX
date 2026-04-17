@@ -84,6 +84,34 @@ def test_context_lookup_attaches_timeframe_and_ambiguous_returns_none(temp_state
     assert ambiguous is None
 
 
+def test_context_lookup_position_row_uses_parent_link_id(temp_state_paths):
+    master_service._upsert_trade_context(
+        {
+            "broker": "bybit",
+            "account": "demo",
+            "instrument": "BTCUSDT",
+            "side": "buy",
+            "order_link_id": "link-parent",
+            "parent_order_link_id": "parent-link",
+            "timeframe": "1-hour",
+            "status": "ACTIVE",
+        }
+    )
+    match = master_service._lookup_trade_context_for_open_item(
+        {
+            "broker": "Bybit",
+            "account": "demo",
+            "instrument": "BTCUSDT",
+            "side": "Buy",
+            "id": "position-123",
+            "parentOrderLinkId": "parent-link",
+            "opened_at": "2026-04-11T01:21:00+00:00",
+        }
+    )
+    assert match is not None
+    assert match.get("timeframe") == "1-hour"
+
+
 def test_journal_builder_uses_timeframe_from_context(temp_state_paths):
     master_service._upsert_trade_context(
         {
@@ -135,6 +163,30 @@ def test_recent_trades_includes_timeframe(monkeypatch: pytest.MonkeyPatch):
     response = asyncio.run(master_service.recent_trades(limit=5))
     payload = json.loads(response.body.decode("utf-8"))
     assert payload["items"][0]["timeframe"] == "4-hour"
+
+
+def test_recent_trades_recomputes_duration_from_corrected_times(monkeypatch: pytest.MonkeyPatch):
+    row = {
+        "id": "r-duration",
+        "status": "closed",
+        "close_time": "2026-01-01T00:05:00+00:00",
+        "open_time": "2026-01-01T00:00:00+00:00",
+        "trade_duration_seconds": 0,
+        "source": "bybit",
+        "account_label": "Bybit Demo",
+        "symbol": "BTCUSDT",
+        "side": "Buy",
+        "realized_pnl": 1,
+        "balance_after_trade": 101,
+    }
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: [row])
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_rows", lambda rows: (rows, {"changed": 0}))
+    monkeypatch.setattr(master_service, "_enrich_trade_row_metrics", lambda rows: rows)
+    monkeypatch.setattr(master_service, "_calc_balance_after_trade", lambda rows, balances: rows)
+    monkeypatch.setattr(master_service, "_get_excel_account_balances", lambda: [])
+    response = asyncio.run(master_service.recent_trades(limit=5))
+    payload = json.loads(response.body.decode("utf-8"))
+    assert payload["items"][0]["duration_seconds"] == 300
 
 
 def test_backup_restore_includes_trade_contexts(temp_state_paths):

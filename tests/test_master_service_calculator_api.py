@@ -38,6 +38,101 @@ def test_merged_calculator_page_returns_200() -> None:
     assert '/static/calculator.js?v=' in html
     assert 'id="calc-timeframe"' not in html
     assert 'id="timeframe-toggle"' in html
+    assert 'id="calc-instrument-specs"></div>' in html
+
+
+def test_calculator_js_net_r_only_and_no_idle_specs_placeholder() -> None:
+    script = (ROOT / "render" / "static" / "calculator.js").read_text(encoding="utf-8")
+    assert "Requested net R" in script
+    assert "Effective net R" in script
+    assert "Fee buffer (R)" in script
+    assert "R:R" not in script
+    assert "Type a symbol to load instrument specs." not in script
+
+
+def test_bybit_place_order_not_modified_with_matching_live_tpsl_is_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        master_service,
+        "resolve_bybit_credentials_for",
+        lambda _a: ("demo", "k", "s", "https://bybit.test", "KEY1"),
+    )
+    monkeypatch.setattr(master_service, "_upsert_trade_context", lambda payload: payload)
+    monkeypatch.setattr(master_service, "_delete_pending_webhook", lambda _pid: True)
+    monkeypatch.setattr(master_service, "cache_bybit_demo_tpsl_request", lambda **_kwargs: None)
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setattr(
+        master_service,
+        "_wait_for_position_entry",
+        lambda **_kwargs: asyncio.sleep(
+            0,
+            result={
+                "size": "0.01",
+                "avgPrice": "100",
+                "entryPrice": "100",
+                "positionIdx": 0,
+                "takeProfit": "110",
+                "stopLoss": "95",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_fetch_bybit_positions",
+        lambda **_kwargs: asyncio.sleep(
+            0,
+            result=[{"size": "0.01", "takeProfit": "110", "stopLoss": "95"}],
+        ),
+    )
+    async def fake_trading_stop(**_kwargs):
+        raise ValueError("Bybit trading-stop failed: not modified")
+
+    monkeypatch.setattr(master_service, "_set_bybit_trading_stop", fake_trading_stop)
+    monkeypatch.setattr(
+        master_service,
+        "_bybit_lookup_symbol",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result={"priceFilter": {"tickSize": "0.1"}}),
+    )
+
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+        @staticmethod
+        def json() -> dict:
+            return {"retCode": 0, "result": {"orderId": "oid-1", "orderLinkId": "ol-1"}}
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, *_args, **_kwargs):
+            return _Resp()
+
+    monkeypatch.setattr(master_service.httpx, "AsyncClient", _Client)
+    payload = {
+        "symbol": "BTCUSDT",
+        "action": "buy",
+        "quantity": "0.01",
+        "account": "demo",
+        "trade_mode": "linear",
+        "order_type": "market",
+        "stop_loss_price": "95",
+        "take_profit_price": "110",
+        "timeframe": "1h",
+    }
+    result = asyncio.run(master_service._place_bybit_order(payload, request_id="rid-1"))
+    assert (result.get("order") or {}).get("orderId") == "oid-1"
 
 
 def test_bybit_quote_uses_tick_step_fee_and_no_oversize(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1929,7 +1929,6 @@ def _repair_persisted_bybit_trade_context_fields() -> int:
 
 
 def _repair_persisted_bybit_open_times(rows: List[Dict[str, object]]) -> tuple[List[Dict[str, object]], int]:
-    contexts = _load_trade_contexts()
     repaired: List[Dict[str, object]] = []
     changed = 0
     for row in rows:
@@ -1941,7 +1940,16 @@ def _repair_persisted_bybit_open_times(rows: List[Dict[str, object]]) -> tuple[L
             continue
         open_iso = _epoch_or_iso_to_iso(row.get("open_time") or row.get("opened_at") or row.get("entry_time"))
         close_iso = _epoch_or_iso_to_iso(row.get("close_time") or row.get("closed_at") or row.get("exit_time") or row.get("date"))
-        if open_iso and close_iso and open_iso != close_iso:
+        open_sec = _canonical_trade_epoch_second(open_iso)
+        close_sec = _canonical_trade_epoch_second(close_iso)
+        open_time_valid = bool(
+            open_iso
+            and close_iso
+            and open_sec is not None
+            and close_sec is not None
+            and int(open_sec) < int(close_sec)
+        )
+        if open_time_valid:
             repaired.append(row)
             continue
 
@@ -1966,8 +1974,61 @@ def _repair_persisted_bybit_open_times(rows: List[Dict[str, object]]) -> tuple[L
                 continue
         updated = dict(row)
         updated["open_time"] = candidate_open
+        timeframe = _normalize_timeframe(updated.get("timeframe"))
+        if not timeframe:
+            timeframe = _normalize_timeframe(ctx.get("timeframe"))
+            if timeframe:
+                updated["timeframe"] = timeframe
+        if timeframe:
+            metrics = updated.get("metrics") if isinstance(updated.get("metrics"), dict) else {}
+            metrics = dict(metrics)
+            metrics["timeframe"] = timeframe
+            updated["metrics"] = metrics
+        duration = _trade_duration_seconds(
+            {
+                "row_type": "trade",
+                "open_time": updated.get("open_time"),
+                "close_time": close_iso,
+            }
+        )
+        if duration is not None:
+            updated["trade_duration_seconds"] = duration
         repaired.append(updated)
         changed += 1
+    return repaired, changed
+
+
+def _backfill_persisted_bybit_trade_fields(rows: List[Dict[str, object]]) -> tuple[List[Dict[str, object]], int]:
+    repaired: List[Dict[str, object]] = []
+    changed = 0
+    for row in rows:
+        if not isinstance(row, dict) or str(row.get("source") or "").strip().lower() != "bybit":
+            repaired.append(row)
+            continue
+        updated = dict(row)
+        ctx = _lookup_trade_context_for_journal_row(updated)
+        timeframe = _normalize_timeframe(updated.get("timeframe"))
+        if not timeframe and isinstance(ctx, dict):
+            timeframe = _normalize_timeframe(ctx.get("timeframe"))
+            if timeframe:
+                updated["timeframe"] = timeframe
+        if timeframe:
+            metrics = updated.get("metrics") if isinstance(updated.get("metrics"), dict) else {}
+            metrics = dict(metrics)
+            metrics["timeframe"] = timeframe
+            updated["metrics"] = metrics
+        duration = _trade_duration_seconds(
+            {
+                "row_type": "trade",
+                "open_time": updated.get("open_time") or updated.get("opened_at") or updated.get("entry_time"),
+                "close_time": updated.get("close_time") or updated.get("closed_at") or updated.get("exit_time") or updated.get("date"),
+            }
+        )
+        if duration is not None and duration != updated.get("trade_duration_seconds"):
+            updated["trade_duration_seconds"] = duration
+        if updated != row:
+            changed += 1
+        repaired.append(updated)
     return repaired, changed
 
 
@@ -7188,8 +7249,11 @@ def _lookup_trade_context_for_open_item(item: Dict[str, object]) -> Optional[Dic
     account = str(item.get("account") or "").strip().lower()
     instrument = str(item.get("instrument") or "").strip().upper()
     side = _normalize_side_for_comparison(item.get("side"))
-    order_id = str(item.get("id") or "").strip()
-    order_link_id = str(item.get("order_link_id") or "").strip()
+    order_id = str(item.get("id") or item.get("order_id") or "").strip()
+    order_link_id = str(item.get("order_link_id") or item.get("orderLinkId") or "").strip()
+    parent_order_link_id = str(
+        item.get("parent_order_link_id") or item.get("parentOrderLinkId") or ""
+    ).strip()
     trade_id = str(item.get("trade_id") or "").strip()
 
     for ctx in contexts:
@@ -7197,6 +7261,9 @@ def _lookup_trade_context_for_open_item(item: Dict[str, object]) -> Optional[Dic
             return ctx
     for ctx in contexts:
         if order_link_id and str(ctx.get("order_link_id") or "").strip() == order_link_id:
+            return ctx
+    for ctx in contexts:
+        if parent_order_link_id and str(ctx.get("parent_order_link_id") or "").strip() == parent_order_link_id:
             return ctx
     for ctx in contexts:
         if trade_id and str(ctx.get("trade_id") or "").strip() == trade_id:
@@ -7211,8 +7278,28 @@ def _lookup_trade_context_for_open_item(item: Dict[str, object]) -> Optional[Dic
         and _normalize_side_for_comparison(ctx.get("side")) == side
         and str(ctx.get("status") or "ACTIVE").strip().upper() == "ACTIVE"
     ]
+    if not candidates:
+        return None
     if len(candidates) == 1:
         return candidates[0]
+    opened_ts = _canonical_trade_epoch_second(item.get("opened_at") or item.get("created_at"))
+    if opened_ts is None:
+        return None
+    scored: List[Tuple[int, int, Dict[str, object]]] = []
+    for ctx in candidates:
+        ctx_opened_ts = (
+            _canonical_trade_epoch_second(ctx.get("open_time"))
+            or _canonical_trade_epoch_second(ctx.get("created_at"))
+            or _canonical_trade_epoch_second(ctx.get("opened_at"))
+        )
+        if ctx_opened_ts is None:
+            continue
+        delta = abs(opened_ts - ctx_opened_ts)
+        ctx_status_boost = 0 if str(ctx.get("status") or "").strip().upper() == "ACTIVE" else 1
+        scored.append((delta, ctx_status_boost, ctx))
+    if scored:
+        scored.sort(key=lambda item: (item[0], item[1]))
+        return scored[0][2]
     return None
 
 
@@ -7884,13 +7971,31 @@ async def _set_bybit_trading_stop(
     return payload.get("result", {})
 
 
-def _price_levels_match(lhs: Optional[float], rhs: Optional[float], tolerance: float = 1e-8) -> bool:
+def _price_levels_match(
+    lhs: Optional[float],
+    rhs: Optional[float],
+    tolerance: float = 1e-8,
+    tick_size: Optional[float] = None,
+) -> bool:
     if lhs is None and rhs is None:
         return True
     if lhs is None or rhs is None:
         return False
     scale = max(1.0, abs(lhs), abs(rhs))
-    return abs(lhs - rhs) <= max(tolerance, scale * 1e-8)
+    dynamic_tolerance = max(tolerance, scale * 1e-8)
+    tick_val = _to_float(tick_size)
+    if tick_val and tick_val > 0:
+        dynamic_tolerance = max(dynamic_tolerance, tick_val / 2.0)
+    return abs(lhs - rhs) <= dynamic_tolerance
+
+
+def _extract_position_tpsl_levels(position: Optional[Dict[str, object]]) -> Tuple[Optional[float], Optional[float]]:
+    if not isinstance(position, dict):
+        return None, None
+    return (
+        _parse_bybit_price_level(position.get("takeProfit")),
+        _parse_bybit_price_level(position.get("stopLoss")),
+    )
 
 
 async def _place_bybit_reduce_only_limit(
@@ -8326,9 +8431,16 @@ async def _place_bybit_order(
                     "stop_loss": sl_target,
                 },
             )
+            tick_size = None
+            try:
+                symbol_meta = await _bybit_lookup_symbol(base_url, symbol)
+                tick_size = _to_float((symbol_meta or {}).get("priceFilter", {}).get("tickSize")) if isinstance(symbol_meta, dict) else None
+            except Exception:
+                tick_size = None
+
             existing_tp = _parse_bybit_price_level(body.get("takeProfit"))
             existing_sl = _parse_bybit_price_level(body.get("stopLoss"))
-            if _price_levels_match(existing_tp, tp_target) and _price_levels_match(existing_sl, sl_target):
+            if _price_levels_match(existing_tp, tp_target, tick_size=tick_size) and _price_levels_match(existing_sl, sl_target, tick_size=tick_size):
                 tpsl_result = {"status": "already_applied_on_order_create"}
             else:
                 try:
@@ -8348,7 +8460,66 @@ async def _place_bybit_order(
                     if "not modified" in msg:
                         tpsl_result = {"status": "not_modified", "message": str(exc)}
                     else:
-                        raise
+                        tpsl_error = str(exc)
+            latest_position = position
+            live_state_observed = False
+            try:
+                latest_positions = await _fetch_bybit_positions(
+                    base_url=base_url,
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    category=category,
+                    symbol=symbol,
+                    request_id=request_id,
+                )
+                if isinstance(latest_positions, list):
+                    for candidate in latest_positions:
+                        candidate_size = _to_float(candidate.get("size")) or 0.0
+                        if abs(candidate_size) <= 0:
+                            continue
+                        latest_position = candidate
+                        live_state_observed = True
+                        break
+            except Exception as exc:
+                BYBIT_LOGGER.warning(
+                    "WEBHOOK_TPSL %s post_submit_position_lookup_failed symbol=%s account=%s error=%s",
+                    request_id,
+                    symbol,
+                    account,
+                    exc,
+                )
+            live_tp, live_sl = _extract_position_tpsl_levels(latest_position)
+            if live_tp is not None or live_sl is not None:
+                live_state_observed = True
+            live_matches = _price_levels_match(live_tp, tp_target, tick_size=tick_size) and _price_levels_match(
+                live_sl,
+                sl_target,
+                tick_size=tick_size,
+            )
+            BYBIT_LOGGER.info(
+                "WEBHOOK_TPSL %s verify symbol=%s account=%s intended_tp=%s intended_sl=%s live_tp=%s live_sl=%s result=%s tpsl_status=%s",
+                request_id,
+                symbol,
+                account,
+                tp_target,
+                sl_target,
+                live_tp,
+                live_sl,
+                "matched" if live_matches else "mismatch",
+                (tpsl_result or {}).get("status"),
+            )
+            if live_matches:
+                if tpsl_result is None:
+                    tpsl_result = {"status": "live_state_matched"}
+                tpsl_error = None
+            elif (tpsl_result is not None) and not live_state_observed:
+                # Trading-stop call succeeded but the follow-up read path was unavailable.
+                # Preserve success to avoid false negatives from transient reads.
+                tpsl_error = None
+            elif not tpsl_error:
+                tpsl_error = (
+                    f"TP/SL live state mismatch (tp={live_tp}, sl={live_sl}, expected_tp={tp_target}, expected_sl={sl_target})"
+                )
             if account == "demo" and tpsl_result is not None:
                 cache_bybit_demo_tpsl_request(
                     order_id=str(order_id or ""),
@@ -8381,7 +8552,7 @@ async def _place_bybit_order(
                 }
             )
         except Exception as exc:
-            tpsl_error = str(exc)
+            tpsl_error = tpsl_error or str(exc)
             BYBIT_LOGGER.exception(
                 "WEBHOOK_TPSL %s tpsl_failed symbol=%s account=%s error=%s",
                 request_id,
@@ -14434,6 +14605,10 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
     repaired_open_rows, repaired_open_count = _repair_persisted_bybit_open_times(_get_trading_journal_rows())
     if repaired_open_count:
         _set_trading_journal_rows(repaired_open_rows)
+    backfilled_rows, backfilled_count = _backfill_persisted_bybit_trade_fields(repaired_open_rows)
+    if backfilled_count:
+        _set_trading_journal_rows(backfilled_rows)
+    repaired_open_rows = backfilled_rows
     sanitized_rows, sanitize_stats = _sanitize_bybit_demo_rows(repaired_open_rows)
     if int(sanitize_stats.get("changed", 0)):
         _set_trading_journal_rows(sanitized_rows)
@@ -14496,6 +14671,14 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
                 outcome = "Loss"
 
         refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+        opened_at = row.get("open_time") or row.get("opened_at") or row.get("entry_time")
+        duration_seconds = _trade_duration_seconds(
+            {
+                "row_type": "trade",
+                "open_time": opened_at,
+                "close_time": closed_at,
+            }
+        )
         items.append(
             {
                 "_row": row,
@@ -14509,7 +14692,7 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
                     row.get("timeframe")
                     or ((row.get("metrics") or {}).get("timeframe") if isinstance(row.get("metrics"), dict) else "")
                 ),
-                "opened_at": row.get("open_time") or row.get("opened_at") or row.get("entry_time"),
+                "opened_at": opened_at,
                 "closed_at": closed_at,
                 "stop_loss": row.get("stop_loss"),
                 "take_profit": row.get("take_profit"),
@@ -14527,7 +14710,7 @@ async def recent_trades(limit: int = 25) -> JSONResponse:
                 else row.get("net_profit"),
                 "_row_updated_at": row.get("updated_at"),
                 "outcome": outcome,
-                "duration_seconds": row.get("trade_duration_seconds"),
+                "duration_seconds": duration_seconds,
                 "chart_row_id": row.get("id"),
                 "chart_available": True,
             }
