@@ -19,6 +19,7 @@
   const resultEl = $('calc-results');
   const canonicalEl = $('calc-canonical-symbol');
   const journalEl = $('calc-journal-summary');
+  const specsEl = $('calc-instrument-specs');
   const riskToggleWrap = $('risk-toggle-wrap');
   const webhookPanel = $('calc-webhook-panel');
   const webhookJsonEl = $('calc-webhook-json');
@@ -40,6 +41,30 @@
   function setJournalState(kind, text) {
     journalEl.dataset.state = kind;
     journalEl.innerHTML = `<div class="muted">${text}</div>`;
+  }
+
+  function setSpecsState(kind, text) {
+    specsEl.dataset.state = kind;
+    specsEl.innerHTML = `<div class="muted">${text}</div>`;
+  }
+
+  function renderSpecs(specs) {
+    const hidden = new Set(['_units', 'query']);
+    const entries = Object.entries(specs || {})
+      .filter(([k]) => !hidden.has(k))
+      .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+    if (!entries.length) {
+      setSpecsState('empty', 'No instrument specs found.');
+      return;
+    }
+    const rows = entries.map(([k, v]) => `
+      <tr>
+        <td style="padding:6px;border-bottom:1px solid #1f2937;white-space:nowrap">${k}</td>
+        <td style="padding:6px;border-bottom:1px solid #1f2937">${typeof v === 'object' ? JSON.stringify(v) : String(v ?? '-')}</td>
+      </tr>
+    `).join('');
+    specsEl.dataset.state = 'ready';
+    specsEl.innerHTML = `<div style="max-height:340px;overflow:auto"><table style="width:100%;border-collapse:collapse">${rows}</table></div>`;
   }
 
   const fmtPct = (value) => {
@@ -307,6 +332,7 @@
     canonicalEl.textContent = '';
     if (!symbol) {
       setJournalState('idle', 'Type a symbol to load journal summary.');
+      setSpecsState('idle', 'Type a symbol to load instrument specs.');
       return;
     }
     if (resolveController) resolveController.abort();
@@ -315,6 +341,10 @@
       const instrument = await request(`/api/calculator/instrument?asset=${encodeURIComponent(state.asset)}&account=${encodeURIComponent(state.account)}&symbol=${encodeURIComponent(symbol)}`, { signal: resolveController.signal });
       state.resolvedSymbol = instrument.symbol;
       canonicalEl.textContent = `Canonical symbol: ${instrument.symbol}`;
+      setSpecsState('loading', 'Loading instrument specs...');
+      const prefer = state.asset === 'fx' ? '&prefer=oanda' : '';
+      const specs = await request(`/api/instrument-specs?query=${encodeURIComponent(instrument.symbol)}${prefer}`, { signal: resolveController.signal });
+      renderSpecs(specs);
       setJournalState('loading', 'Loading journal summary...');
       if (journalController) journalController.abort();
       journalController = new AbortController();
@@ -328,6 +358,7 @@
       if (e.name === 'AbortError') return;
       state.resolvedSymbol = '';
       setJournalState('unresolved', `Unresolved symbol: ${symbol}`);
+      setSpecsState('unresolved', `Instrument specs unavailable for: ${symbol}`);
       canonicalEl.textContent = '';
     }
   }
@@ -424,4 +455,5 @@
   syncAllToggleStates();
   toggleWebhookPanel(false);
   setJournalState('idle', 'Type a symbol to load journal summary.');
+  setSpecsState('idle', 'Type a symbol to load instrument specs.');
 })();

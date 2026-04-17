@@ -22,6 +22,8 @@ def test_calculator_payload_uses_spread_state() -> None:
     assert "['Notional', q.notional]" not in js
     assert "fmtPriceLike(q.target_price, tickSize)" in js
     assert "fmtR(q.effective_rr_net)" in js
+    assert "/api/instrument-specs?query=" in js
+    assert "calc-instrument-specs" in js
     assert "AbortController" in js
     assert "timeframe-toggle" in js
     assert "calc-timeframe" not in js

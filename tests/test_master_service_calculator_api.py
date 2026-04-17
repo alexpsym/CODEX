@@ -32,6 +32,8 @@ def test_merged_calculator_page_returns_200() -> None:
     assert 'target-toggle' not in html
     assert 'tp-ticks-wrap' not in html
     assert 'id="calc-rr"' in html
+    assert 'id="calc-instrument-specs"' in html
+    assert "calc-grid" in html
     assert '/static/calculator.js?v=' in html
     assert 'id="calc-timeframe"' not in html
     assert 'id="timeframe-toggle"' in html
@@ -248,14 +250,14 @@ def test_oanda_rejects_max_units_and_margin(monkeypatch: pytest.MonkeyPatch) -> 
 def test_submit_routes_to_existing_order_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = {"bybit": 0, "oanda": 0}
 
-    async def fake_bybit(payload, request_id):
+    async def fake_bybit(payload, *, request_id):
         calls["bybit"] += 1
         assert payload["timeframe"] == "15m"
         assert payload["stop_loss_price"] == "1"
         assert payload["take_profit_price"] == "2"
         return {"ok": True}
 
-    async def fake_oanda(payload, request_id):
+    async def fake_oanda(payload, *, request_id):
         calls["oanda"] += 1
         assert payload["timeframe"] == "1h"
         return {"ok": True}
@@ -403,7 +405,8 @@ def test_balance_failure_returns_endpoint_specific_error(monkeypatch: pytest.Mon
 
 
 def test_submit_translates_bybit_errors_to_http_exception(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_bybit(_payload, _request_id):
+    async def fake_bybit(_payload, *, request_id):
+        assert request_id
         raise ValueError("retCode=10001 request parameter error")
 
     monkeypatch.setattr(master_service, "_place_bybit_order", fake_bybit)
@@ -422,3 +425,27 @@ def test_submit_translates_bybit_errors_to_http_exception(monkeypatch: pytest.Mo
         }))
     assert exc.value.status_code == 400
     assert "Order submit failed:" in str(exc.value.detail)
+
+
+def test_crypto_demo_skips_fee_rate_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("demo", "k", "s", "https://bybit.test", "KEY1"))
+    monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["BTCUSDT"]))
+    monkeypatch.setattr(master_service, "_fetch_oanda_mid_prices_batch", lambda **_kwargs: asyncio.sleep(0, result={"AUD_USD": 1}))
+
+    async def fake_get(_base, path, _params):
+        if path.endswith("instruments-info"):
+            return {"result": {"list": [{"priceFilter": {"tickSize": "1"}, "lotSizeFilter": {"qtyStep": "1", "minOrderQty": "1", "maxOrderQty": "999", "maxMktOrderQty": "999", "minNotionalValue": "1"}, "leverageFilter": {"maxLeverage": "50"}}]}}
+        return {"result": {"list": [{"bid1Price": "100", "ask1Price": "101", "lastPrice": "100.5"}]}}
+
+    async def fake_signed_get(**kwargs):
+        if kwargs.get("path", "").endswith("fee-rate"):
+            raise AssertionError("fee-rate should be skipped for demo calculator quotes")
+        return {"result": {"list": [{"totalEquity": "1000", "totalAvailableBalance": "1000", "coin": [{"coin": "USDT", "availableToTrade": "1000"}]}]}}
+
+    monkeypatch.setattr(master_service, "_bybit_get_async", fake_get)
+    monkeypatch.setattr(master_service, "_bybit_signed_get", fake_signed_get)
+    body = json.loads(asyncio.run(master_service.calculator_quote({
+        "asset": "crypto", "account": "demo", "symbol": "BTC", "side": "buy", "order_type": "market",
+        "risk_mode": "percent", "risk_value": 1, "stop_loss_ticks": 5, "risk_reward": 2,
+    })).body.decode("utf-8"))
+    assert "warnings" not in body

@@ -10890,6 +10890,8 @@ CALCULATOR_TEMPLATE = """<!doctype html>
     body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}
     .wrap{width:100%;max-width:none;margin:0;padding:18px}
     .panel{background:#111827;border:1px solid #1f2937;border-radius:14px;padding:16px}
+    .calc-grid{display:grid;grid-template-columns:minmax(380px,1.1fr) minmax(360px,1fr);gap:14px;align-items:start}
+    .calc-col{display:flex;flex-direction:column;gap:12px}
     .row{display:flex;flex-direction:column;gap:6px;align-items:stretch;margin-bottom:12px}
     .group{display:flex;gap:8px;flex-wrap:wrap}
     label{display:flex;flex-direction:column;gap:6px;font-weight:700;color:#cbd5e1}
@@ -10907,12 +10909,15 @@ CALCULATOR_TEMPLATE = """<!doctype html>
     .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px}
     .card{background:#0f172a;border:1px solid #1f2937;border-radius:10px;padding:10px}
     .muted{color:#94a3b8;font-size:0.92rem}
+    @media (max-width:1100px){.calc-grid{grid-template-columns:1fr}}
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="panel">
       <h2 style="margin-top:0">Position Size Calculator</h2>
+      <div class="calc-grid">
+      <div class="calc-col">
       <div class="row">
         <label>Account</label>
         <div class="group toggle" id="account-toggle"><button type="button" data-v="live" class="active">Live</button><button type="button" data-v="demo">Demo</button></div>
@@ -10963,10 +10968,6 @@ CALCULATOR_TEMPLATE = """<!doctype html>
         <div class="grid" id="calc-journal-summary"></div>
       </div>
       <div class="row">
-        <label>Quote results</label>
-        <div class="grid" id="calc-results"></div>
-      </div>
-      <div class="row">
         <div class="group">
           <button id="calc-quote" type="button">Calculate</button>
           <button id="calc-submit" type="button">Submit Order</button>
@@ -10980,6 +10981,18 @@ CALCULATOR_TEMPLATE = """<!doctype html>
       <div id="calc-error" class="error"></div>
       <div id="calc-success" class="ok"></div>
       <p class="muted">10 ticks always means 10 × broker minimum tick size.</p>
+      </div>
+      <div class="calc-col">
+        <div class="row">
+          <label>Instrument specs</label>
+          <div class="card" id="calc-instrument-specs"><div class="muted">Type a symbol to load instrument specs.</div></div>
+        </div>
+        <div class="row">
+          <label>Quote results</label>
+          <div class="grid" id="calc-results"></div>
+        </div>
+      </div>
+      </div>
     </div>
   </div>
   <script src="{{CALCULATOR_JS_URL}}"></script>
@@ -11390,24 +11403,28 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
             fallback_maker = Decimal(str(os.getenv("CALCULATOR_BYBIT_MAKER_FEE_FALLBACK", "0.0006") or "0.0006"))
             maker = fallback_maker
             taker = fallback_taker
-            try:
-                fee_payload = await _bybit_signed_get(
-                    base_url=base_url,
-                    api_key=api_key,
-                    api_secret=api_secret,
-                    path="/v5/account/fee-rate",
-                    params={"category": "linear", "symbol": resolved_symbol},
-                )
-                fee_row = ((fee_payload.get("result") or {}).get("list") or [{}])[0]
-                maker = Decimal(str(fee_row.get("makerFeeRate") or fallback_maker))
-                taker = Decimal(str(fee_row.get("takerFeeRate") or fallback_taker))
-            except Exception as exc:
-                exc_text = str(exc)
-                ret_code_match = re.search(r"retCode=([0-9-]+)", exc_text)
-                ret_code = ret_code_match.group(1) if ret_code_match else "unknown"
-                warnings.append(
-                    f"Bybit fee rate unavailable (retCode {ret_code}). Using conservative fallback fees for this quote."
-                )
+            if account == "demo":
+                maker = fallback_maker
+                taker = fallback_taker
+            else:
+                try:
+                    fee_payload = await _bybit_signed_get(
+                        base_url=base_url,
+                        api_key=api_key,
+                        api_secret=api_secret,
+                        path="/v5/account/fee-rate",
+                        params={"category": "linear", "symbol": resolved_symbol},
+                    )
+                    fee_row = ((fee_payload.get("result") or {}).get("list") or [{}])[0]
+                    maker = Decimal(str(fee_row.get("makerFeeRate") or fallback_maker))
+                    taker = Decimal(str(fee_row.get("takerFeeRate") or fallback_taker))
+                except Exception as exc:
+                    exc_text = str(exc)
+                    ret_code_match = re.search(r"retCode=([0-9-]+)", exc_text)
+                    ret_code = ret_code_match.group(1) if ret_code_match else "unknown"
+                    warnings.append(
+                        f"Bybit fee rate unavailable (retCode {ret_code}). Using conservative fallback fees for this quote."
+                    )
             open_fee = taker if order_type == "market" else max(maker, taker)
             close_fee = taker
             try:
@@ -11796,10 +11813,10 @@ async def calculator_submit(payload: Dict[str, object] = Body(default={})) -> JS
     request_id = f"calc-{uuid4().hex[:12]}"
     try:
         if asset == "crypto":
-            result = await _place_bybit_order(canonical, request_id)
+            result = await _place_bybit_order(canonical, request_id=request_id)
             return JSONResponse({"ok": True, "broker": "bybit", "result": result})
         if asset == "fx":
-            result = await _place_oanda_order(canonical, request_id)
+            result = await _place_oanda_order(canonical, request_id=request_id)
             return JSONResponse({"ok": True, "broker": "oanda", "result": result})
         raise HTTPException(status_code=400, detail="asset must be crypto or fx.")
     except HTTPException:
