@@ -23,6 +23,17 @@ def test_scripts_page_contains_calculator_row() -> None:
     assert calc["open_url"] == "/merged/calculator"
 
 
+def test_scripts_page_marks_merged_dashboard_views_non_standalone() -> None:
+    response = asyncio.run(master_service.list_scripts())
+    payload = json.loads(response.body.decode("utf-8"))
+    merged_names = {"calculator", "history", "monitor", "bounce-trader"}
+    merged_rows = [row for row in payload if row.get("name") in merged_names]
+    assert len(merged_rows) == len(merged_names)
+    for row in merged_rows:
+        assert row.get("standalone") is False
+        assert row.get("dashboard_main_view") is True
+
+
 def test_merged_calculator_page_returns_200() -> None:
     response = asyncio.run(master_service.merged_calculator_page())
     assert response.status_code == 200

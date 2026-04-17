@@ -3965,10 +3965,10 @@ FRIENDLY_SCRIPT_LABELS: Dict[str, str] = {
 }
 
 MERGED_SCRIPT_BUTTONS: List[Dict[str, object]] = [
-    {"id": "calculator", "name": "calculator", "label": "Calculator", "open_url": "/merged/calculator"},
-    {"id": "history", "name": "history", "label": "History", "open_url": "/merged/history"},
-    {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor"},
-    {"id": "bounce-trader", "name": "bounce-trader", "label": "Bounce Trader", "open_url": "/merged/bounce-trader"},
+    {"id": "calculator", "name": "calculator", "label": "Calculator", "open_url": "/merged/calculator", "dashboard_main_view": True},
+    {"id": "history", "name": "history", "label": "History", "open_url": "/merged/history", "dashboard_main_view": True},
+    {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor", "dashboard_main_view": True},
+    {"id": "bounce-trader", "name": "bounce-trader", "label": "Bounce Trader", "open_url": "/merged/bounce-trader", "dashboard_main_view": True},
 ]
 
 MERGED_SOURCE_NAMES = {
@@ -4878,19 +4878,61 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         .layout{
             margin-top: 1.25rem;
+            display: grid;
+            grid-template-columns: 260px minmax(0, 1fr);
+            gap: 1rem;
+            align-items: start;
         }
         .dashboard-rail{
             display: flex;
             flex-direction: column;
             gap: 1rem;
-            width: 260px;
-            max-width: 100%;
         }
         .sidebar{
             padding: 1rem;
         }
+        #dashboard-workspace{
+            min-height: 720px;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+        #dashboard-workspace .panel-header{
+            margin-bottom: 0.2rem;
+        }
+        #dashboard-workspace-title{
+            font-size: 1.05rem;
+            font-weight: 900;
+            color: #e2e8f0;
+        }
+        #dashboard-workspace-status{
+            font-size: 0.9rem;
+            color: #94a3b8;
+            margin: 0;
+        }
+        #dashboard-workspace-empty{
+            color: #94a3b8;
+            font-size: 0.95rem;
+            margin: 0;
+            padding: 0.65rem 0.1rem;
+        }
+        #dashboard-workspace-frame{
+            width: 100%;
+            height: calc(100vh - 14rem);
+            min-height: 560px;
+            border: 1px solid #1f2937;
+            border-radius: 12px;
+            background: #0b1220;
+        }
         @media (max-width: 980px){
-            .dashboard-rail{ width: 100%; }
+            .layout{ grid-template-columns: 1fr; }
+            #dashboard-workspace{
+                min-height: 420px;
+            }
+            #dashboard-workspace-frame{
+                height: 70vh;
+                min-height: 420px;
+            }
         }
         .category-title{
             margin: 0.6rem 0 0.5rem;
@@ -5136,6 +5178,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     </div>
                 </section>
             </div>
+            <section class="panel" id="dashboard-workspace">
+                <div class="panel-header">
+                    <div>
+                        <div id="dashboard-workspace-title">Workspace</div>
+                        <p id="dashboard-workspace-status">Select a script from the left to load it here.</p>
+                    </div>
+                </div>
+                <p id="dashboard-workspace-empty">No script selected yet.</p>
+                <iframe
+                    id="dashboard-workspace-frame"
+                    title="Dashboard script workspace"
+                    src="about:blank"
+                    hidden
+                ></iframe>
+            </section>
         </div>
     </div>
 
@@ -13764,7 +13821,8 @@ async def list_scripts() -> JSONResponse:
             "running": False,
             "starting": False,
             "open_url": btn["open_url"],
-            "standalone": True,
+            "standalone": False,
+            "dashboard_main_view": bool(btn.get("dashboard_main_view")),
         }
         if btn["name"] == "history":
             row["starting"] = bool(

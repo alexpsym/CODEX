@@ -22,6 +22,11 @@ def test_dashboard_home_removes_instrument_specs_recent_trades_open_orders() -> 
     assert 'Scripts' in html
     assert 'Watchlist' in html
     assert 'OANDA Inactivity' in html
+    assert 'id="dashboard-workspace"' in html
+    assert 'id="dashboard-workspace-title"' in html
+    assert 'id="dashboard-workspace-status"' in html
+    assert 'id="dashboard-workspace-empty"' in html
+    assert 'id="dashboard-workspace-frame"' in html
 
     scripts_idx = html.find('Scripts')
     watchlist_idx = html.find('Watchlist')

@@ -3,6 +3,11 @@
   const status = document.getElementById('status');
   const scriptsGrid = document.getElementById('scripts-grid');
 
+  const workspaceTitle = document.getElementById('dashboard-workspace-title');
+  const workspaceStatus = document.getElementById('dashboard-workspace-status');
+  const workspaceEmpty = document.getElementById('dashboard-workspace-empty');
+  const workspaceFrame = document.getElementById('dashboard-workspace-frame');
+
   const watchlistCount = document.getElementById('watchlist-count');
   const watchlistInput = document.getElementById('watchlist-input');
   const watchlistAddBtn = document.getElementById('watchlist-add-btn');
@@ -23,6 +28,8 @@
   const oandaErrorDetail = document.getElementById('oanda-inactivity-error-detail');
   const oandaToggleBtn = document.getElementById('oanda-inactivity-toggle');
 
+  const WORKSPACE_STORAGE_KEY = 'dashboard.active_main_script';
+
   let scriptsInFlight = null;
   let oandaInFlight = null;
   let watchlistInFlight = null;
@@ -40,6 +47,9 @@
   let oandaState = null;
   let oandaExpanded = false;
   let watchlistState = [];
+  let scriptsState = [];
+  let activeMainScriptName = '';
+  let activeMainScriptUrl = '';
 
   const fmtTime = (v) => {
     if (!v) return '—';
@@ -93,6 +103,128 @@
     return bodyText ? JSON.parse(bodyText) : {};
   };
 
+  const persistActiveWorkspace = () => {
+    const payload = activeMainScriptName && activeMainScriptUrl
+      ? JSON.stringify({ name: activeMainScriptName, url: activeMainScriptUrl })
+      : '';
+    if (!payload) {
+      sessionStorage.removeItem(WORKSPACE_STORAGE_KEY);
+      return;
+    }
+    sessionStorage.setItem(WORKSPACE_STORAGE_KEY, payload);
+  };
+
+  const restoreActiveWorkspace = () => {
+    try {
+      const raw = sessionStorage.getItem(WORKSPACE_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      activeMainScriptName = String(parsed?.name || '');
+      activeMainScriptUrl = String(parsed?.url || '');
+    } catch {
+      activeMainScriptName = '';
+      activeMainScriptUrl = '';
+    }
+  };
+
+  const setWorkspaceMeta = (title, message, isErr = false) => {
+    if (workspaceTitle) workspaceTitle.textContent = title || 'Workspace';
+    if (workspaceStatus) {
+      workspaceStatus.textContent = message || '';
+      workspaceStatus.style.color = isErr ? '#fca5a5' : '#94a3b8';
+    }
+  };
+
+  const showWorkspaceEmpty = (message) => {
+    if (workspaceFrame) {
+      workspaceFrame.hidden = true;
+      workspaceFrame.removeAttribute('src');
+    }
+    if (workspaceEmpty) {
+      workspaceEmpty.hidden = false;
+      workspaceEmpty.textContent = message || 'No script selected yet.';
+    }
+  };
+
+  const showWorkspaceFrame = () => {
+    if (workspaceEmpty) workspaceEmpty.hidden = true;
+    if (workspaceFrame) workspaceFrame.hidden = false;
+  };
+
+  const renderScripts = () => {
+    if (!scriptsGrid) return;
+    scriptsGrid.innerHTML = '';
+    scriptsState.forEach((item) => scriptsGrid.appendChild(makeScriptButton(item)));
+  };
+
+  const activateWorkspaceScript = (script) => {
+    const name = String(script?.name || '').trim();
+    const targetBase = String(script?.open_url || '').trim() || '/';
+    if (!name || !workspaceFrame) return;
+
+    activeMainScriptName = name;
+    activeMainScriptUrl = targetBase;
+    persistActiveWorkspace();
+    renderScripts();
+
+    const glue = targetBase.includes('?') ? '&' : '?';
+    const target = `${targetBase}${glue}_dash_ts=${Date.now()}`;
+
+    showWorkspaceFrame();
+    setWorkspaceMeta(script.label || name, 'Loading...', false);
+
+    workspaceFrame.onload = () => {
+      setWorkspaceMeta(script.label || name, `Loaded ${new Date().toLocaleTimeString()}`, false);
+    };
+    workspaceFrame.onerror = () => {
+      setWorkspaceMeta(script.label || name, `Failed to load ${targetBase}`, true);
+      showWorkspaceEmpty(`Unable to load ${script.label || name}.`);
+    };
+    workspaceFrame.src = target;
+  };
+
+  const syncWorkspaceSelectionFromScripts = () => {
+    if (!scriptsState.length) {
+      activeMainScriptName = '';
+      activeMainScriptUrl = '';
+      persistActiveWorkspace();
+      showWorkspaceEmpty('No scripts available.');
+      return;
+    }
+
+    const allByName = new Map(scriptsState.map((s) => [String(s.name), s]));
+    if (!allByName.has(activeMainScriptName) || !activeMainScriptName) {
+      activeMainScriptName = '';
+      activeMainScriptUrl = '';
+      showWorkspaceEmpty('Select a script from the left to load it here.');
+      persistActiveWorkspace();
+      return;
+    }
+
+    const selected = allByName.get(activeMainScriptName);
+    const selectedOpenUrl = String(selected?.open_url || '');
+    if (!selectedOpenUrl) {
+      showWorkspaceEmpty('Selected script does not provide a dashboard URL.');
+      setWorkspaceMeta(selected?.label || selected?.name || 'Workspace', 'Script URL unavailable.', true);
+      return;
+    }
+
+    if (activeMainScriptUrl !== selectedOpenUrl) {
+      activeMainScriptUrl = selectedOpenUrl;
+      persistActiveWorkspace();
+    }
+
+    const currentSrc = String(workspaceFrame?.getAttribute('src') || '');
+    if (!currentSrc || workspaceFrame?.hidden) {
+      activateWorkspaceScript(selected);
+      return;
+    }
+    showWorkspaceFrame();
+    setWorkspaceMeta(selected?.label || selected?.name || 'Workspace', 'Ready.', false);
+  };
+
+  const isDashboardMainView = (script) => Boolean(script?.dashboard_main_view);
+
   const makeScriptButton = (script) => {
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -103,15 +235,17 @@
     name.textContent = script.label || script.name;
 
     const dot = document.createElement('span');
-    const dotState = script.running ? 'running' : (script.starting ? 'starting' : 'stopped');
+    let dotState = script.running ? 'running' : (script.starting ? 'starting' : 'stopped');
+    if (isDashboardMainView(script)) {
+      dotState = String(script.name) === activeMainScriptName ? 'running' : 'stopped';
+    }
     dot.className = `status-dot ${dotState}`;
 
     btn.appendChild(name);
     btn.appendChild(dot);
 
     btn.addEventListener('click', () => {
-      const target = script.open_url || '/';
-      window.open(target, '_blank', 'noopener');
+      activateWorkspaceScript(script);
     });
 
     return btn;
@@ -123,10 +257,9 @@
       try {
         setStatus('Loading scripts...');
         const scripts = await fetchJson('/scripts');
-        if (scriptsGrid) {
-          scriptsGrid.innerHTML = '';
-          scripts.forEach((item) => scriptsGrid.appendChild(makeScriptButton(item)));
-        }
+        scriptsState = Array.isArray(scripts) ? scripts : [];
+        renderScripts();
+        syncWorkspaceSelectionFromScripts();
         setStatus(`Updated ${new Date().toLocaleTimeString()}`);
       } catch (err) {
         console.error(err);
@@ -385,6 +518,7 @@
     syncOandaDetailsVisibility();
   });
 
+  restoreActiveWorkspace();
   refreshScripts();
   refreshWatchlist();
   refreshOandaInactivity();
