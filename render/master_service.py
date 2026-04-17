@@ -4877,21 +4877,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .oo-toolbar { display:flex; gap:0.6rem; align-items:center; }
 
         .layout{
-            display: grid;
-            grid-template-columns: 260px 1fr;
-            gap: 1.25rem;
             margin-top: 1.25rem;
-            align-items: start;
         }
-        @media (max-width: 980px){
-            .layout{ grid-template-columns: 1fr; }
+        .dashboard-rail{
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            width: 260px;
+            max-width: 100%;
         }
         .sidebar{
-            position: sticky;
-            top: 1rem;
-            max-height: calc(100vh - 2rem);
-            overflow: auto;
             padding: 1rem;
+        }
+        @media (max-width: 980px){
+            .dashboard-rail{ width: 100%; }
         }
         .category-title{
             margin: 0.6rem 0 0.5rem;
@@ -4922,32 +4921,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         .script-btn:hover { background: #0f172a; }
         .script-btn.compact { width: auto; min-width: 190px; padding: 0.75rem 0.9rem; }
-        #instrument-specs-widget .instrument-specs-row{
-            display: flex;
-            gap: 0.65rem;
-            align-items: center;
-            flex-wrap: wrap;
-        }
-        #instrument-specs-widget input{
-            flex: 1;
-            min-width: 200px;
-            border-radius: 10px;
-            border: 1px solid #334155;
-            background: #0b1220;
-            color: #e2e8f0;
-            padding: 8px 10px;
-            font-size: 0.95rem;
-        }
-        #instrument-specs-widget button{
-            border-radius: 10px;
-            border: 1px solid #334155;
-            background: #1f2937;
-            color: #e2e8f0;
-            font-weight: 900;
-            padding: 8px 12px;
-            cursor: pointer;
-        }
-        #instrument-specs-widget button:hover{ background: #334155; }
         .script-name { font-weight: 900; }
         .status-pill {
             display: inline-flex;
@@ -4980,77 +4953,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .empty-state { color: #94a3b8; margin-top: 0.9rem; }
 
         .table-wrap { overflow-x: auto; border-radius: 12px; border: 1px solid #1f2937; background: #0b1220; }
-        #open-orders-table { width: 100%; border-collapse: collapse; min-width: 980px; }
-        #open-orders-table th, #open-orders-table td { text-align:left; padding:0.6rem 0.75rem; border-bottom:1px solid #1f2937; font-size:0.9rem; }
-        #open-orders-table th { background:#0f172a; color:#cbd5e1; position:sticky; top:0; z-index:1; }
-        #open-orders-table tr:hover { background:#111827; }
 
-        #recent-trades-table {
-            width: 100%;
-            border-collapse: collapse;
-            min-width: 1280px;
-        }
-        #recent-trades-table th,
-        #recent-trades-table td {
-            text-align: left;
-            padding: 0.72rem 0.85rem;
-            border-bottom: 1px solid #1f2937;
-            font-size: 0.92rem;
-            vertical-align: middle;
-        }
-        #recent-trades-table th {
-            background: #0f172a;
-            color: #cbd5e1;
-            position: sticky;
-            top: 0;
-            z-index: 1;
-        }
-        #recent-trades-table tbody tr:nth-child(odd) {
-            background: rgba(15, 23, 42, 0.32);
-        }
-        #recent-trades-table tbody tr:hover {
-            background: #111827;
-        }
-        #recent-trades-table td.num {
-            text-align: right;
-            font-variant-numeric: tabular-nums;
-        }
-        #recent-trades-table td.pos {
-            color: #86efac;
-            font-weight: 800;
-        }
-        #recent-trades-table td.neg {
-            color: #fca5a5;
-            font-weight: 800;
-        }
-        .rt-pill {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            min-width: 84px;
-            padding: 0.22rem 0.6rem;
-            border-radius: 999px;
-            font-size: 0.8rem;
-            font-weight: 900;
-            border: 1px solid #334155;
-        }
-        .rt-pill.win {
-            background: rgba(34,197,94,0.16);
-            color: #86efac;
-            border-color: rgba(34,197,94,0.35);
-        }
-        .rt-pill.loss {
-            background: rgba(239,68,68,0.16);
-            color: #fca5a5;
-            border-color: rgba(239,68,68,0.35);
-        }
-        .rt-pill.be {
-            background: rgba(148,163,184,0.16);
-            color: #cbd5e1;
-            border-color: rgba(148,163,184,0.35);
-        }
-
-        .action-cell { white-space: nowrap; }
         .action-btn {
             display:inline-flex; align-items:center; justify-content:center;
             min-width:72px; height:30px; padding:0 10px;
@@ -5059,37 +4962,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         .action-btn:hover { background:#334155; }
         .action-btn:disabled { opacity:0.6; cursor:not-allowed; }
-
-        .error-list { margin-top:0.75rem; color:#fca5a5; font-size:0.9rem; }
-        .error-list ul { margin:0.4rem 0 0; padding-left:1.25rem; }
-
-        .top-stack {
-            display: grid;
-            grid-template-columns: minmax(320px, 520px) minmax(320px, 1fr);
-            gap: 1rem;
-            align-items: start;
-            margin-bottom: 1rem;
-        }
-
-        .top-panel {
-            height: 420px;
-            display: flex;
-            flex-direction: column;
-        }
-
-        .top-panel .table-wrap {
-            flex: 1;
-            overflow: auto;
-        }
-        #instrument-specs-widget { grid-column: 1; grid-row: 1; }
-        #oanda-inactivity-widget { grid-column: 2; grid-row: 1; }
-        #watchlist-widget { grid-column: 1; grid-row: 2; height: 300px; }
-        #recent-trades-panel { grid-column: 1 / -1; grid-row: 3; }
-        #open-orders-panel { grid-column: 1 / -1; grid-row: 4; }
-
-        @media (max-width: 1180px) {
-            .top-stack { grid-template-columns: 1fr; }
-        }
 
         .watchlist-sub {
             color: #94a3b8;
@@ -5198,169 +5070,72 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <body>
     <div class=\"home\">
         <div class="layout">
-            <aside class="panel sidebar">
-                <div class="category-title">Scripts</div>
-                <div id="scripts-grid" class="script-stack"></div>
-            </aside>
+            <div class="dashboard-rail">
+                <aside class="panel sidebar">
+                    <div class="category-title">Scripts</div>
+                    <div id="scripts-grid" class="script-stack"></div>
+                </aside>
 
-            <main>
-            <div class="top-stack">
-
-            <section class="panel" id="instrument-specs-widget">
-                <div class="panel-header">
-                    <div>
-                        <h2>Instrument Specs</h2>
-                        <div class="panel-sub">Type a symbol (e.g. eurusd, BTCUSDT) and load full specs in a new tab.</div>
+                <section class="panel" id="watchlist-widget">
+                    <div class="panel-header">
+                        <div>
+                            <h2>Watchlist</h2>
+                            <div class="watchlist-sub">Saved locally</div>
+                        </div>
+                        <div class="oo-toolbar">
+                            <span class="status-pill" id="watchlist-count">0</span>
+                            <button type="button" id="watchlist-clear-btn">Clear</button>
+                        </div>
                     </div>
-                </div>
-                <form id="instrument-specs-form" class="instrument-specs-row" action="/instrument-specs" method="get" target="_blank">
-                    <input id="instrument-specs-input" name="q" type="text" placeholder="eurusd / BTC" />
-                    <button id="instrument-specs-go" type="submit">Confirm</button>
-                </form>
-            </section>
 
-            <section class=\"panel top-panel\" id=\"watchlist-widget\">
-                <div class=\"panel-header\">
-                    <div>
-                        <h2>Watchlist</h2>
-                        <div class=\"watchlist-sub\">Saved locally</div>
+                    <div class="watchlist-input">
+                        <input id="watchlist-input" type="text" placeholder="BTC, ETH, EURUSD" />
+                        <button type="button" id="watchlist-add-btn">Add</button>
                     </div>
-                    <div class=\"oo-toolbar\">
-                        <span class=\"status-pill\" id=\"watchlist-count\">0</span>
-                        <button type=\"button\" id=\"watchlist-clear-btn\">Clear</button>
+
+                    <div class="watchlist-status" id="watchlist-status"></div>
+
+                    <div class="table-wrap">
+                        <table id="watchlist-table">
+                            <thead>
+                                <tr>
+                                    <th>Instrument</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="watchlist-items"></tbody>
+                        </table>
                     </div>
-                </div>
 
-                <div class=\"watchlist-input\">
-                    <input id=\"watchlist-input\" type=\"text\" placeholder=\"BTC, ETH, EURUSD\" />
-                    <button type=\"button\" id=\"watchlist-add-btn\">Add</button>
-                </div>
+                    <p class="meta" id="watchlist-empty" style="display:none;">No items yet.</p>
+                </section>
 
-                <div class=\"watchlist-status\" id=\"watchlist-status\"></div>
-
-                <div class=\"table-wrap\">
-                    <table id=\"watchlist-table\">
-                        <thead>
-                            <tr>
-                                <th>Instrument</th>
-                                <th>Action</th>
-                            </tr>
-                        </thead>
-                        <tbody id=\"watchlist-items\"></tbody>
-                    </table>
-                </div>
-
-                <p class=\"meta\" id=\"watchlist-empty\" style=\"display:none;\">No items yet.</p>
-            </section>
-            <section class="panel" id="oanda-inactivity-widget">
-                <div class="panel-header">
-                    <div>
-                        <h2>OANDA Inactivity</h2>
+                <section class="panel" id="oanda-inactivity-widget">
+                    <div class="panel-header">
+                        <div>
+                            <h2>OANDA Inactivity</h2>
+                        </div>
+                        <div class="oo-toolbar">
+                            <button type="button" class="toggle-btn" id="oanda-inactivity-toggle" aria-expanded="false" title="Show details">▾</button>
+                        </div>
                     </div>
-                    <div class="oo-toolbar">
-                        <button type="button" class="toggle-btn" id="oanda-inactivity-toggle" aria-expanded="false" title="Show details">▾</button>
-                    </div>
-                </div>
-                <dl class="meta-grid">
-                    <dt>Last trade</dt><dd id="oanda-inactivity-last-trade">—</dd>
-                    <dt>Countdown</dt><dd id="oanda-inactivity-countdown">—</dd>
-                </dl>
-                <div class="status-headline" id="oanda-inactivity-headline">Loading...</div>
-                <div class="status-detail" id="oanda-inactivity-detail"></div>
-                <div class="details-wrap" id="oanda-inactivity-details" hidden>
                     <dl class="meta-grid">
-                        <dt>Open OANDA trades</dt><dd id="oanda-inactivity-open-trades">—</dd>
-                        <dt>12-month inactivity threshold</dt><dd id="oanda-inactivity-threshold">—</dd>
-                        <dt>Earliest fee date</dt><dd id="oanda-inactivity-fee-date">—</dd>
-                        <dt>Monthly fee</dt><dd id="oanda-inactivity-monthly-fee">Up to AUD 10</dd>
+                        <dt>Last trade</dt><dd id="oanda-inactivity-last-trade">—</dd>
+                        <dt>Countdown</dt><dd id="oanda-inactivity-countdown">—</dd>
                     </dl>
-                    <div class="status-detail" id="oanda-inactivity-error-detail"></div>
-                </div>
-            </section>
-            <section class="panel top-panel" id="recent-trades-panel">
-                <div class="panel-header">
-                    <div>
-                        <h2>Recent Trades</h2>
-                        <div class="panel-sub">Latest closed trades across all connected accounts.</div>
+                    <div class="status-headline" id="oanda-inactivity-headline">Loading...</div>
+                    <div class="status-detail" id="oanda-inactivity-detail"></div>
+                    <div class="details-wrap" id="oanda-inactivity-details" hidden>
+                        <dl class="meta-grid">
+                            <dt>Open OANDA trades</dt><dd id="oanda-inactivity-open-trades">—</dd>
+                            <dt>12-month inactivity threshold</dt><dd id="oanda-inactivity-threshold">—</dd>
+                            <dt>Earliest fee date</dt><dd id="oanda-inactivity-fee-date">—</dd>
+                            <dt>Monthly fee</dt><dd id="oanda-inactivity-monthly-fee">Up to AUD 10</dd>
+                        </dl>
+                        <div class="status-detail" id="oanda-inactivity-error-detail"></div>
                     </div>
-                    <div class="oo-toolbar">
-                        <span class="status-pill" id="recent-trades-status">Loading...</span>
-                    </div>
-                </div>
-                <div class="table-wrap">
-                    <table id="recent-trades-table">
-                        <thead>
-                            <tr>
-                                <th>Account</th>
-                                <th>Symbol</th>
-                                <th>Side</th>
-                                <th>Timeframe</th>
-                                <th>Opened</th>
-                                <th>Closed</th>
-                                <th>Entry</th>
-                                <th>Exit</th>
-                                <th>Stop Loss</th>
-                                <th>Take Profit</th>
-                                <th>Fees</th>
-                                <th>Outcome</th>
-                                <th>P/L</th>
-                                <th>Result %</th>
-                                <th>Duration</th>
-                                <th>Chart</th>
-                            </tr>
-                        </thead>
-                        <tbody></tbody>
-                    </table>
-                </div>
-                <p class="meta" id="recent-trades-empty" style="display:none;">No closed trades yet.</p>
-            </section>
-<section class=\"panel top-panel\" id=\"open-orders-panel\">
-                <div class=\"panel-header\">
-                    <div>
-                        <h2>Open Orders / Positions</h2>
-                        <div class=\"panel-sub\">Unchanged view, just moved to the top.</div>
-                    </div>
-                    <div class=\"oo-toolbar\">
-                        <button class=\"secondary\" id=\"oo-refresh-btn\">Refresh</button>
-                        <span class=\"status-pill\" id=\"oo-status\">Loading...</span>
-                    </div>
-                </div>
-
-                <div class=\"table-wrap\">
-                    <table id=\"open-orders-table\">
-                        <thead>
-                            <tr>
-                                <th></th>
-                                <th>Broker</th>
-                                <th>Account</th>
-                                <th>Category</th>
-                                <th>Instrument</th>
-                                <th>Timeframe</th>
-                                <th>Type</th>
-                                <th>Side</th>
-                                <th>Size</th>
-                                <th>Entry / Order</th>
-                                <th>Current / Trigger</th>
-                                <th>Stop Loss</th>
-                                <th>Take Profit</th>
-                                <th>Leverage / Margin</th>
-                                <th>Opened</th>
-                                <th>Status</th>
-                                <th>Action</th>
-                            </tr>
-                        </thead>
-                        <tbody></tbody>
-                    </table>
-                </div>
-
-                <p class=\"meta\" id=\"open-orders-empty\" style=\"display:none;\">No open orders or trades.</p>
-
-                <div class=\"error-list\" id=\"open-orders-errors\" style=\"display:none;\">
-                    <strong>Source issues</strong>
-                    <ul></ul>
-                </div>
-            </section></div>
-            </main>
+                </section>
+            </div>
         </div>
     </div>
 
@@ -11177,7 +10952,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
       <div class="calc-col">
         <div class="row">
           <label>Instrument specs</label>
-          <div class="card" id="calc-instrument-specs"></div>
+          <div id="calc-instrument-specs"></div>
         </div>
         <div class="row">
           <label>Quote results</label>

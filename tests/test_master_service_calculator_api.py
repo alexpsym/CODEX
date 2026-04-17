@@ -39,6 +39,7 @@ def test_merged_calculator_page_returns_200() -> None:
     assert 'id="calc-timeframe"' not in html
     assert 'id="timeframe-toggle"' in html
     assert 'id="calc-instrument-specs"></div>' in html
+    assert 'class="card" id="calc-instrument-specs"' not in html
 
 
 def test_calculator_js_net_r_only_and_no_idle_specs_placeholder() -> None:
