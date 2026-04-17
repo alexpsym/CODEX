@@ -11774,10 +11774,10 @@ async def calculator_webhook(payload: Dict[str, object] = Body(default={})) -> J
             _update_pending_webhook(pending_id, {"status": "TRIGGERING", "last_error": None, "last_attempt_at": _utc_now_iso()})
 
         if asset == "crypto":
-            result = await _place_bybit_order(canonical, request_id=request_id)
+            result = await _place_bybit_order(canonical, request_id)
             return JSONResponse({"ok": True, "broker": "bybit", "result": result})
         if asset == "fx":
-            result = await _place_oanda_order(canonical, request_id=request_id)
+            result = await _place_oanda_order(canonical, request_id)
             return JSONResponse({"ok": True, "broker": "oanda", "result": result})
 
         raise HTTPException(status_code=400, detail="asset must be crypto or fx.")
