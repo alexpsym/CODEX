@@ -50,6 +50,7 @@
   let scriptsState = [];
   let activeMainScriptName = '';
   let activeMainScriptUrl = '';
+  let workspaceLoadToken = 0;
 
   const fmtTime = (v) => {
     if (!v) return '—';
@@ -170,13 +171,26 @@
     const glue = targetBase.includes('?') ? '&' : '?';
     const target = `${targetBase}${glue}_dash_ts=${Date.now()}`;
 
-    showWorkspaceFrame();
+    workspaceLoadToken += 1;
+    const token = workspaceLoadToken;
+
+    if (workspaceFrame) {
+      workspaceFrame.removeAttribute('src');
+      workspaceFrame.hidden = true;
+    }
+    if (workspaceEmpty) {
+      workspaceEmpty.hidden = false;
+      workspaceEmpty.textContent = `Loading ${script.label || name}...`;
+    }
     setWorkspaceMeta(script.label || name, 'Loading...', false);
 
     workspaceFrame.onload = () => {
-      setWorkspaceMeta(script.label || name, `Loaded ${new Date().toLocaleTimeString()}`, false);
+      if (token !== workspaceLoadToken) return;
+      showWorkspaceFrame();
+      setWorkspaceMeta(script.label || name, 'Rendering response.', false);
     };
     workspaceFrame.onerror = () => {
+      if (token !== workspaceLoadToken) return;
       setWorkspaceMeta(script.label || name, `Failed to load ${targetBase}`, true);
       showWorkspaceEmpty(`Unable to load ${script.label || name}.`);
     };
