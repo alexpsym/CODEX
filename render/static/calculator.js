@@ -45,26 +45,81 @@
 
   function setSpecsState(kind, text) {
     specsEl.dataset.state = kind;
-    specsEl.innerHTML = `<div class="muted">${text}</div>`;
+    const msg = String(text || '').trim();
+    specsEl.innerHTML = msg ? `<div class="muted">${msg}</div>` : '';
   }
 
   function renderSpecs(specs) {
-    const hidden = new Set(['_units', 'query']);
+    const hidden = new Set([
+      '_units', 'query', 'contractType', 'fundingHistory.fundingRate', 'fundingHistory.fundingRateTimestamp',
+      'indexPrice', 'leverageFilter', 'lotSizeFilter', 'markPrice', 'priceFilter', 'baseCoin', 'quoteCoin', 'source', 'status',
+    ]);
+    const fieldLabels = {
+      resolved_symbol: 'resolved_symbol',
+      category: 'category',
+      lastPrice: 'lastPrice (price)',
+      fundingRate: 'fundingRate (%)',
+      nextFundingTime: 'nextFundingTime (Brisbane time)',
+      launchTime: 'launchTime (Brisbane time)',
+      openInterestValue: 'openInterestValue (USD)',
+      turnover24h: 'turnover24h (USD)',
+      avg7dTurnoverUsd: 'avg7dVolume (USD)',
+    };
+    const compactNumber = (n, decimals = 2) => {
+      const num = Number(n);
+      if (!Number.isFinite(num)) return String(n ?? '—');
+      const abs = Math.abs(num);
+      if (abs >= 1e12) return `${(num / 1e12).toFixed(decimals).replace(/\\.00$/, '')}T`;
+      if (abs >= 1e9) return `${(num / 1e9).toFixed(decimals).replace(/\\.00$/, '')}B`;
+      if (abs >= 1e6) return `${(num / 1e6).toFixed(decimals).replace(/\\.00$/, '')}M`;
+      if (abs >= 1e3) return `${(num / 1e3).toFixed(decimals).replace(/\\.00$/, '')}K`;
+      return num.toFixed(decimals).replace(/\\.00$/, '');
+    };
+    const formatPercentFromFraction = (v, decimals = 4) => {
+      const n = Number(v);
+      if (!Number.isFinite(n)) return String(v ?? '—');
+      return `${(n * 100).toFixed(decimals).replace(/0+$/, '').replace(/\\.$/, '')}%`;
+    };
+    const formatSpecsValue = (key, value) => {
+      if (key === 'launchTime' || key === 'nextFundingTime' || /(time|timestamp)$/i.test(key)) {
+        const maybeNum = Number(value);
+        if (Number.isFinite(maybeNum)) {
+          const ms = maybeNum < 1e12 ? maybeNum * 1000 : maybeNum;
+          const dt = new Date(ms);
+          if (!Number.isNaN(dt.getTime())) {
+            return dt.toLocaleString('en-AU', {
+              timeZone: 'Australia/Brisbane',
+              year: 'numeric',
+              month: '2-digit',
+              day: '2-digit',
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+              hour12: false,
+            });
+          }
+        }
+      }
+      if (key === 'fundingRate' || key.endsWith('.fundingRate')) return formatPercentFromFraction(value);
+      if (/^(turnover24h|openInterestValue|avg7dTurnoverUsd|volume24h)$/i.test(key)) return `$${compactNumber(value)}`;
+      if (typeof value === 'object' && value !== null) return JSON.stringify(value);
+      return String(value ?? '—');
+    };
     const entries = Object.entries(specs || {})
       .filter(([k]) => !hidden.has(k))
       .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
     if (!entries.length) {
-      setSpecsState('empty', 'No instrument specs found.');
+      setSpecsState('empty', '');
       return;
     }
     const rows = entries.map(([k, v]) => `
       <tr>
-        <td style="padding:6px;border-bottom:1px solid #1f2937;white-space:nowrap">${k}</td>
-        <td style="padding:6px;border-bottom:1px solid #1f2937">${typeof v === 'object' ? JSON.stringify(v) : String(v ?? '-')}</td>
+        <td style="padding:6px;border-bottom:1px solid #1f2937;white-space:nowrap">${fieldLabels[k] || k}</td>
+        <td style="padding:6px;border-bottom:1px solid #1f2937">${formatSpecsValue(k, v)}</td>
       </tr>
     `).join('');
     specsEl.dataset.state = 'ready';
-    specsEl.innerHTML = `<div style="max-height:340px;overflow:auto"><table style="width:100%;border-collapse:collapse">${rows}</table></div>`;
+    specsEl.innerHTML = `<table style="width:100%;border-collapse:collapse">${rows}</table>`;
   }
 
   const fmtPct = (value) => {
@@ -204,7 +259,7 @@
       ['TP distance', fmtPriceLike(q.target_distance, tickSize)], ['Qty / units', q.quantity],
       ['Estimated fees / spread', `${Number.isFinite(fee) ? fee.toFixed(2) : '-'} ${currency}`],
       ['Estimated total loss', `${Number.isFinite(loss) ? loss.toFixed(2) : '-'} ${currency}`],
-      ['Estimated reward', `${Number.isFinite(reward) ? reward.toFixed(2) : '-'} ${currency}`], ['R:R', fmtR(q.rr)],
+      ['Estimated reward', `${Number.isFinite(reward) ? reward.toFixed(2) : '-'} ${currency}`],
       ['Requested net R', fmtR(q.requested_rr_net)], ['Effective net R', fmtR(q.effective_rr_net)],
       ['Fee buffer (R)', fmtR(q.fee_buffer_r)],
     ];
@@ -332,7 +387,7 @@
     canonicalEl.textContent = '';
     if (!symbol) {
       setJournalState('idle', 'Type a symbol to load journal summary.');
-      setSpecsState('idle', 'Type a symbol to load instrument specs.');
+      setSpecsState('idle', '');
       return;
     }
     if (resolveController) resolveController.abort();
@@ -358,7 +413,7 @@
       if (e.name === 'AbortError') return;
       state.resolvedSymbol = '';
       setJournalState('unresolved', `Unresolved symbol: ${symbol}`);
-      setSpecsState('unresolved', `Instrument specs unavailable for: ${symbol}`);
+      setSpecsState('unresolved', '');
       canonicalEl.textContent = '';
     }
   }
@@ -455,5 +510,5 @@
   syncAllToggleStates();
   toggleWebhookPanel(false);
   setJournalState('idle', 'Type a symbol to load journal summary.');
-  setSpecsState('idle', 'Type a symbol to load instrument specs.');
+  setSpecsState('idle', '');
 })();

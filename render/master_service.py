@@ -7884,6 +7884,15 @@ async def _set_bybit_trading_stop(
     return payload.get("result", {})
 
 
+def _price_levels_match(lhs: Optional[float], rhs: Optional[float], tolerance: float = 1e-8) -> bool:
+    if lhs is None and rhs is None:
+        return True
+    if lhs is None or rhs is None:
+        return False
+    scale = max(1.0, abs(lhs), abs(rhs))
+    return abs(lhs - rhs) <= max(tolerance, scale * 1e-8)
+
+
 async def _place_bybit_reduce_only_limit(
     *,
     base_url: str,
@@ -8317,17 +8326,29 @@ async def _place_bybit_order(
                     "stop_loss": sl_target,
                 },
             )
-            tpsl_result = await _set_bybit_trading_stop(
-                base_url=base_url,
-                api_key=api_key,
-                api_secret=api_secret,
-                category=category,
-                symbol=symbol,
-                take_profit=tp_target,
-                stop_loss=sl_target,
-                position_idx=position_idx,
-                request_id=request_id,
-            )
+            existing_tp = _parse_bybit_price_level(body.get("takeProfit"))
+            existing_sl = _parse_bybit_price_level(body.get("stopLoss"))
+            if _price_levels_match(existing_tp, tp_target) and _price_levels_match(existing_sl, sl_target):
+                tpsl_result = {"status": "already_applied_on_order_create"}
+            else:
+                try:
+                    tpsl_result = await _set_bybit_trading_stop(
+                        base_url=base_url,
+                        api_key=api_key,
+                        api_secret=api_secret,
+                        category=category,
+                        symbol=symbol,
+                        take_profit=tp_target,
+                        stop_loss=sl_target,
+                        position_idx=position_idx,
+                        request_id=request_id,
+                    )
+                except Exception as exc:
+                    msg = str(exc).lower()
+                    if "not modified" in msg:
+                        tpsl_result = {"status": "not_modified", "message": str(exc)}
+                    else:
+                        raise
             if account == "demo" and tpsl_result is not None:
                 cache_bybit_demo_tpsl_request(
                     order_id=str(order_id or ""),
@@ -10985,7 +11006,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
       <div class="calc-col">
         <div class="row">
           <label>Instrument specs</label>
-          <div class="card" id="calc-instrument-specs"><div class="muted">Type a symbol to load instrument specs.</div></div>
+          <div class="card" id="calc-instrument-specs"></div>
         </div>
         <div class="row">
           <label>Quote results</label>

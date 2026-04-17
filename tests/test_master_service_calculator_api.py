@@ -33,6 +33,7 @@ def test_merged_calculator_page_returns_200() -> None:
     assert 'tp-ticks-wrap' not in html
     assert 'id="calc-rr"' in html
     assert 'id="calc-instrument-specs"' in html
+    assert "Type a symbol to load instrument specs." not in html
     assert "calc-grid" in html
     assert '/static/calculator.js?v=' in html
     assert 'id="calc-timeframe"' not in html
@@ -474,3 +475,11 @@ def test_crypto_demo_skips_fee_rate_warning(monkeypatch: pytest.MonkeyPatch) -> 
         "risk_mode": "percent", "risk_value": 1, "stop_loss_ticks": 5, "risk_reward": 2,
     })).body.decode("utf-8"))
     assert "warnings" not in body
+
+
+def test_price_levels_match_helper() -> None:
+    assert master_service._price_levels_match(100.0, 100.0)
+    assert master_service._price_levels_match(100.0, 100.000000001)
+    assert not master_service._price_levels_match(100.0, 100.1)
+    assert master_service._price_levels_match(None, None)
+    assert not master_service._price_levels_match(None, 100.0)
