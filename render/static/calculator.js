@@ -24,10 +24,6 @@
   const webhookPanel = $('calc-webhook-panel');
   const webhookJsonEl = $('calc-webhook-json');
   const webhookCopyBtn = $('calc-webhook-copy');
-  const JOURNAL_COLUMNS = [
-    'Open time', 'Close time', 'Account', 'Symbol', 'Side', 'Timeframe', 'Qty', 'Entry', 'Exit',
-    'Stop', 'Target', 'Fees', 'P/L', 'Result %', 'R', 'Balance after', 'Duration', 'Breakeven', 'Chart',
-  ];
 
   let symbolTimer = null;
   let resolveController = null;
@@ -138,12 +134,12 @@
     }
     const rows = entries.map(([k, v]) => `
       <tr>
-        <td style="padding:6px;border-bottom:1px solid #1f2937;white-space:nowrap">${SPECS_FIELD_LABELS[k] || k}</td>
-        <td style="padding:6px;border-bottom:1px solid #1f2937">${formatSpecsValue(k, v)}</td>
+        <td>${SPECS_FIELD_LABELS[k] || k}</td>
+        <td>${formatSpecsValue(k, v)}</td>
       </tr>
     `).join('');
     specsEl.dataset.state = 'ready';
-    specsEl.innerHTML = `<div class="card"><table style="width:100%;border-collapse:collapse">${rows}</table></div>`;
+    specsEl.innerHTML = `<div class="card"><table class="specs-table">${rows}</table></div>`;
   }
 
   const fmtPct = (value) => {
@@ -210,6 +206,7 @@
 
   function renderJournalStats(payload) {
     const s = payload.stats || {};
+    const tradeRows = Array.isArray(payload.trades) ? payload.trades : [];
     const rows = [
       ['Canonical symbol', payload.canonical_symbol],
       ['Total trades', s.total_trades], ['Wins', s.wins], ['Losses', s.losses], ['Break-even', s.break_even],
@@ -221,54 +218,11 @@
       ['Avg target distance', fmtPct(s.avg_target_distance)],
       ['Avg trade duration', fmtDuration(s.avg_trade_duration)],
       ['Last trade', fmtBrisbaneTime(s.last_trade_timestamp)],
+      ['Detailed rows available', tradeRows.length],
     ];
     const summaryCards = rows.map(([k, v]) => `<div class="card"><div class="muted">${k}</div><div>${v ?? '-'}</div></div>`).join('');
-    const tradeRows = Array.isArray(payload.trades) ? payload.trades : [];
-    const details = tradeRows.length
-      ? `<details class="card" style="grid-column:1/-1"><summary>Journal trade details (${tradeRows.length})</summary>
-          <div style="overflow:auto;margin-top:8px">
-            <table style="width:100%;border-collapse:collapse">
-              <thead><tr>${JOURNAL_COLUMNS.map((h) => `<th style="text-align:left;padding:6px;border-bottom:1px solid #1f2937">${h}</th>`).join('')}</tr></thead>
-              <tbody>${tradeRows.map((r) => renderJournalRow(r)).join('')}</tbody>
-            </table>
-          </div>
-        </details>`
-      : '<div class="card" style="grid-column:1/-1"><div class="muted">No detailed journal rows found.</div></div>';
     journalEl.dataset.state = 'ready';
-    journalEl.innerHTML = summaryCards + details;
-  }
-
-  function renderJournalRow(r) {
-    const pnl = Number(r.realized_pnl ?? r.net_profit);
-    const resultPct = Number(r.result_pct ?? r.profit_pct);
-    const rMultiple = Number(r.r_multiple);
-    const bal = Number(r.balance_after_trade);
-    const ccy = r.balance_currency || r.currency || '';
-    const pnlCls = Number.isFinite(pnl) ? (pnl > 0 ? 'color:#86efac' : (pnl < 0 ? 'color:#fca5a5' : '')) : '';
-    const pctCls = Number.isFinite(resultPct) ? (resultPct > 0 ? 'color:#86efac' : (resultPct < 0 ? 'color:#fca5a5' : '')) : '';
-    const rCls = Number.isFinite(rMultiple) ? (rMultiple > 0 ? 'color:#86efac' : (rMultiple < 0 ? 'color:#fca5a5' : '')) : '';
-    const chart = r.id ? `<a href="/trade-chart/${encodeURIComponent(r.id)}" target="_blank" rel="noopener">Chart</a>` : '';
-    return `<tr>
-      <td>${fmtBrisbaneTime(r.open_time)}</td>
-      <td>${fmtBrisbaneTime(r.close_time || r.open_time)}</td>
-      <td>${r.account_label || r.account || '-'}</td>
-      <td>${r.symbol || '-'}</td>
-      <td>${r.side || '-'}</td>
-      <td>${r.timeframe || (r.metrics?.timeframe) || '-'}</td>
-      <td>${fmtNum(r.qty, 8)}</td>
-      <td>${fmtNum(r.entry_price, 6)}</td>
-      <td>${fmtNum(r.exit_price, 6)}</td>
-      <td>${fmtNum(r.stop_loss, 6)}</td>
-      <td>${fmtNum(r.take_profit, 6)}</td>
-      <td>${fmtNum(r.commission ?? r.fees, 4)} ${r.commission_currency || r.fee_currency || ''}</td>
-      <td style="${pnlCls}">${fmtNum(pnl, 4)} ${r.realized_pnl_currency || r.currency || ''}</td>
-      <td style="${pctCls}">${Number.isFinite(resultPct) ? `${fmtNum(resultPct, 4)}%` : '-'}</td>
-      <td style="${rCls}">${Number.isFinite(rMultiple) ? `${fmtNum(rMultiple, 3)}R` : '-'}</td>
-      <td>${Number.isFinite(bal) ? `${fmtNum(bal, 2)} ${ccy}` : '-'}</td>
-      <td>${fmtDuration(r.trade_duration_seconds)}</td>
-      <td>${r.breakeven || '-'}</td>
-      <td>${chart}</td>
-    </tr>`;
+    journalEl.innerHTML = summaryCards;
   }
 
   function renderQuote(q) {
@@ -411,7 +365,7 @@
     canonicalEl.textContent = '';
     if (!symbol) {
       setJournalState('idle', 'Type a symbol to load journal summary.');
-      setSpecsState('idle', '');
+      setSpecsState('idle', 'Type a symbol to load instrument specs.');
       return;
     }
     if (resolveController) resolveController.abort();
@@ -422,22 +376,30 @@
       canonicalEl.textContent = `Canonical symbol: ${instrument.symbol}`;
       setSpecsState('loading', 'Loading instrument specs...');
       const prefer = state.asset === 'fx' ? '&prefer=oanda' : '';
-      const specs = await request(`/api/instrument-specs?query=${encodeURIComponent(instrument.symbol)}${prefer}`, { signal: resolveController.signal });
-      renderSpecs(specs);
+      try {
+        const specs = await request(`/api/instrument-specs?query=${encodeURIComponent(instrument.symbol)}${prefer}`, { signal: resolveController.signal });
+        renderSpecs(specs);
+      } catch (_specErr) {
+        setSpecsState('error', `Unable to load instrument specs for ${instrument.symbol}.`);
+      }
       setJournalState('loading', 'Loading journal summary...');
       if (journalController) journalController.abort();
       journalController = new AbortController();
-      const j = await request(`/api/calculator/journal-summary?asset=${encodeURIComponent(state.asset)}&symbol=${encodeURIComponent(symbol)}`, { signal: journalController.signal });
-      if (j.status === 'no_data') {
-        setJournalState('no_data', `No journal data for ${j.canonical_symbol}.`);
-      } else {
-        renderJournalStats(j);
+      try {
+        const j = await request(`/api/calculator/journal-summary?asset=${encodeURIComponent(state.asset)}&symbol=${encodeURIComponent(symbol)}`, { signal: journalController.signal });
+        if (j.status === 'no_data') {
+          setJournalState('no_data', `No journal data for ${j.canonical_symbol}.`);
+        } else {
+          renderJournalStats(j);
+        }
+      } catch (_journalErr) {
+        setJournalState('error', `Unable to load journal summary for ${instrument.symbol}.`);
       }
     } catch (e) {
       if (e.name === 'AbortError') return;
       state.resolvedSymbol = '';
       setJournalState('unresolved', `Unresolved symbol: ${symbol}`);
-      setSpecsState('unresolved', '');
+      setSpecsState('unresolved', `Unresolved symbol: ${symbol}`);
       canonicalEl.textContent = '';
     }
   }
@@ -534,5 +496,5 @@
   syncAllToggleStates();
   toggleWebhookPanel(false);
   setJournalState('idle', 'Type a symbol to load journal summary.');
-  setSpecsState('idle', '');
+  setSpecsState('idle', 'Type a symbol to load instrument specs.');
 })();

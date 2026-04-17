@@ -5013,11 +5013,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
         #watchlist-widget .watchlist-input {
             display: flex;
-            gap: 6px;
+            flex-direction: column;
+            gap: 8px;
             margin: 0.75rem 0 0.5rem;
+            width: 100%;
+            box-sizing: border-box;
         }
         #watchlist-widget .watchlist-input input {
             flex: 1;
+            width: 100%;
+            box-sizing: border-box;
             border-radius: 10px;
             border: 1px solid #334155;
             background: #0b1220;
@@ -5026,6 +5031,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             font-size: 0.9rem;
         }
         #watchlist-widget .watchlist-input button {
+            width: 100%;
+            box-sizing: border-box;
             border-radius: 10px;
             border: 1px solid #334155;
             background: #1f2937;
@@ -5182,10 +5189,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <div class="panel-header">
                     <div>
                         <div id="dashboard-workspace-title">Workspace</div>
-                        <p id="dashboard-workspace-status">Select a script from the left to load it here.</p>
+                        <p id="dashboard-workspace-status">Ready to load a script.</p>
                     </div>
                 </div>
-                <p id="dashboard-workspace-empty">No script selected yet.</p>
+                <p id="dashboard-workspace-empty">Select a script from the left to load it here.</p>
                 <iframe
                     id="dashboard-workspace-frame"
                     title="Dashboard script workspace"
@@ -10914,8 +10921,14 @@ CALCULATOR_TEMPLATE = """<!doctype html>
     body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}
     .wrap{width:100%;max-width:none;margin:0;padding:18px}
     .panel{background:#111827;border:1px solid #1f2937;border-radius:14px;padding:16px}
-    .calc-grid{display:grid;grid-template-columns:minmax(380px,1.1fr) minmax(360px,1fr);gap:14px;align-items:start}
-    .calc-col{display:flex;flex-direction:column;gap:12px}
+    .calc-grid{display:grid;grid-template-columns:minmax(320px,420px) minmax(0,1fr);gap:14px;align-items:start}
+    .calc-col{display:flex;flex-direction:column;gap:12px;min-width:0}
+    .calc-right-rail{
+      min-width:0;
+      width:100%;
+      overflow:hidden;
+      align-self:start;
+    }
     .row{display:flex;flex-direction:column;gap:6px;align-items:stretch;margin-bottom:12px}
     .group{display:flex;gap:8px;flex-wrap:wrap}
     label{display:flex;flex-direction:column;gap:6px;font-weight:700;color:#cbd5e1}
@@ -10931,9 +10944,17 @@ CALCULATOR_TEMPLATE = """<!doctype html>
     .error{color:#fca5a5;min-height:1.2em}
     .ok{color:#86efac}
     .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px}
+    .grid.compact-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
     .card{background:#0f172a;border:1px solid #1f2937;border-radius:10px;padding:10px}
-    .muted{color:#94a3b8;font-size:0.92rem}
-    @media (max-width:1100px){.calc-grid{grid-template-columns:1fr}}
+    .calc-right-rail .card{padding:8px}
+    .muted{color:#94a3b8;font-size:0.9rem}
+    .right-panel-title{margin:0 0 4px;font-size:0.9rem;color:#cbd5e1}
+    .calc-right-rail .row{margin-bottom:10px}
+    .calc-right-rail #calc-instrument-specs,.calc-right-rail #calc-journal-summary{width:100%;min-width:0;overflow:hidden}
+    .specs-table{width:100%;border-collapse:collapse;table-layout:fixed}
+    .specs-table td{border-bottom:1px solid #1f2937;padding:4px 5px;font-size:0.76rem;vertical-align:top;overflow-wrap:anywhere;word-break:break-word;line-height:1.3}
+    @media (max-width:820px){.calc-grid{grid-template-columns:1fr}}
+    @media (max-width:900px){.grid.compact-grid{grid-template-columns:1fr}}
   </style>
 </head>
 <body>
@@ -10988,10 +11009,6 @@ CALCULATOR_TEMPLATE = """<!doctype html>
         <div class="group toggle" id="timeframe-toggle"></div>
       </div>
       <div class="row">
-        <label>Journal stats</label>
-        <div class="grid" id="calc-journal-summary"></div>
-      </div>
-      <div class="row">
         <div class="group">
           <button id="calc-quote" type="button">Calculate</button>
           <button id="calc-submit" type="button">Submit Order</button>
@@ -11005,15 +11022,19 @@ CALCULATOR_TEMPLATE = """<!doctype html>
       <div id="calc-error" class="error"></div>
       <div id="calc-success" class="ok"></div>
       <p class="muted">10 ticks always means 10 × broker minimum tick size.</p>
+      <div class="row">
+        <label>Quote results</label>
+        <div class="grid" id="calc-results"></div>
       </div>
-      <div class="calc-col">
+      </div>
+      <div class="calc-col calc-right-rail">
         <div class="row">
-          <label>Instrument specs</label>
+          <h3 class="right-panel-title">Instrument specs</h3>
           <div id="calc-instrument-specs"></div>
         </div>
         <div class="row">
-          <label>Quote results</label>
-          <div class="grid" id="calc-results"></div>
+          <h3 class="right-panel-title">Journal stats</h3>
+          <div class="grid compact-grid" id="calc-journal-summary"></div>
         </div>
       </div>
       </div>
@@ -13850,6 +13871,9 @@ async def list_scripts() -> JSONResponse:
         merged.append(row)
 
     extras = [s for s in raw if str(s.get("name")) not in MERGED_SOURCE_NAMES]
+    for item in extras:
+        if str(item.get("name")) == "ivindicator-clone":
+            item["dashboard_main_view"] = True
     extras.sort(key=lambda s: str(s.get("label") or s.get("name")).lower())
 
     return JSONResponse(merged + extras)

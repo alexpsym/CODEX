@@ -203,6 +203,7 @@
       activeMainScriptUrl = '';
       persistActiveWorkspace();
       showWorkspaceEmpty('No scripts available.');
+      setWorkspaceMeta('Workspace', 'No scripts detected.', true);
       return;
     }
 
@@ -211,6 +212,7 @@
       activeMainScriptName = '';
       activeMainScriptUrl = '';
       showWorkspaceEmpty('Select a script from the left to load it here.');
+      setWorkspaceMeta('Workspace', 'Ready to load a script.', false);
       persistActiveWorkspace();
       return;
     }
