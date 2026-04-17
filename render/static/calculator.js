@@ -32,6 +32,35 @@
   let symbolTimer = null;
   let resolveController = null;
   let journalController = null;
+  const SPECS_HIDDEN_FIELDS = new Set([
+    'contractType',
+    'fundingHistory.fundingRate',
+    'fundingHistory.fundingRateTimestamp',
+    'indexPrice',
+    'leverageFilter',
+    'lotSizeFilter',
+    'markPrice',
+    'priceFilter',
+    'query',
+    'baseCoin',
+    'quoteCoin',
+    'source',
+    'status',
+    'scannerVolume24h',
+    'openInterest',
+    '_units',
+  ]);
+  const SPECS_FIELD_LABELS = {
+    resolved_symbol: 'resolved_symbol',
+    category: 'category',
+    lastPrice: 'lastPrice (price)',
+    fundingRate: 'fundingRate (%)',
+    nextFundingTime: 'nextFundingTime (Brisbane time)',
+    launchTime: 'launchTime (Brisbane time)',
+    openInterestValue: 'openInterestValue (USD)',
+    turnover24h: 'turnover24h (USD)',
+    avg7dTurnoverUsd: 'avg7dVolume (USD)',
+  };
 
   function clearMessages() {
     errorEl.textContent = '';
@@ -50,55 +79,50 @@
   }
 
   function renderSpecs(specs) {
-    const hidden = new Set([
-      '_units', 'query', 'contractType', 'fundingHistory.fundingRate', 'fundingHistory.fundingRateTimestamp',
-      'indexPrice', 'leverageFilter', 'lotSizeFilter', 'markPrice', 'priceFilter', 'baseCoin', 'quoteCoin', 'source', 'status',
-    ]);
-    const fieldLabels = {
-      resolved_symbol: 'resolved_symbol',
-      category: 'category',
-      lastPrice: 'lastPrice (price)',
-      fundingRate: 'fundingRate (%)',
-      nextFundingTime: 'nextFundingTime (Brisbane time)',
-      launchTime: 'launchTime (Brisbane time)',
-      openInterestValue: 'openInterestValue (USD)',
-      turnover24h: 'turnover24h (USD)',
-      avg7dTurnoverUsd: 'avg7dVolume (USD)',
+    const isNumericLike = (v) => {
+      if (v === null || v === undefined) return false;
+      if (typeof v === 'number') return Number.isFinite(v);
+      if (typeof v !== 'string') return false;
+      const s = v.trim();
+      return s !== '' && /^-?\d+(\.\d+)?$/.test(s);
     };
     const compactNumber = (n, decimals = 2) => {
       const num = Number(n);
       if (!Number.isFinite(num)) return String(n ?? '—');
       const abs = Math.abs(num);
-      if (abs >= 1e12) return `${(num / 1e12).toFixed(decimals).replace(/\\.00$/, '')}T`;
-      if (abs >= 1e9) return `${(num / 1e9).toFixed(decimals).replace(/\\.00$/, '')}B`;
-      if (abs >= 1e6) return `${(num / 1e6).toFixed(decimals).replace(/\\.00$/, '')}M`;
-      if (abs >= 1e3) return `${(num / 1e3).toFixed(decimals).replace(/\\.00$/, '')}K`;
-      return num.toFixed(decimals).replace(/\\.00$/, '');
+      if (abs >= 1e12) return `${(num / 1e12).toFixed(decimals).replace(/\.00$/, '')}T`;
+      if (abs >= 1e9) return `${(num / 1e9).toFixed(decimals).replace(/\.00$/, '')}B`;
+      if (abs >= 1e6) return `${(num / 1e6).toFixed(decimals).replace(/\.00$/, '')}M`;
+      if (abs >= 1e3) return `${(num / 1e3).toFixed(decimals).replace(/\.00$/, '')}K`;
+      return num.toFixed(decimals).replace(/\.00$/, '');
     };
     const formatPercentFromFraction = (v, decimals = 4) => {
       const n = Number(v);
       if (!Number.isFinite(n)) return String(v ?? '—');
-      return `${(n * 100).toFixed(decimals).replace(/0+$/, '').replace(/\\.$/, '')}%`;
+      return `${(n * 100).toFixed(decimals).replace(/0+$/, '').replace(/\.$/, '')}%`;
+    };
+    const formatTimestampBrisbane = (value) => {
+      if (!isNumericLike(value)) return null;
+      const n = Number(value);
+      if (!Number.isFinite(n)) return null;
+      const ms = n < 1e12 ? n * 1000 : n;
+      const d = new Date(ms);
+      if (Number.isNaN(d.getTime())) return null;
+      return new Intl.DateTimeFormat('en-AU', {
+        timeZone: 'Australia/Brisbane',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      }).format(d) + ' (Brisbane)';
     };
     const formatSpecsValue = (key, value) => {
       if (key === 'launchTime' || key === 'nextFundingTime' || /(time|timestamp)$/i.test(key)) {
-        const maybeNum = Number(value);
-        if (Number.isFinite(maybeNum)) {
-          const ms = maybeNum < 1e12 ? maybeNum * 1000 : maybeNum;
-          const dt = new Date(ms);
-          if (!Number.isNaN(dt.getTime())) {
-            return dt.toLocaleString('en-AU', {
-              timeZone: 'Australia/Brisbane',
-              year: 'numeric',
-              month: '2-digit',
-              day: '2-digit',
-              hour: '2-digit',
-              minute: '2-digit',
-              second: '2-digit',
-              hour12: false,
-            });
-          }
-        }
+        const ts = formatTimestampBrisbane(value);
+        if (ts) return ts;
       }
       if (key === 'fundingRate' || key.endsWith('.fundingRate')) return formatPercentFromFraction(value);
       if (/^(turnover24h|openInterestValue|avg7dTurnoverUsd|volume24h)$/i.test(key)) return `$${compactNumber(value)}`;
@@ -106,7 +130,7 @@
       return String(value ?? '—');
     };
     const entries = Object.entries(specs || {})
-      .filter(([k]) => !hidden.has(k))
+      .filter(([k]) => !SPECS_HIDDEN_FIELDS.has(k))
       .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
     if (!entries.length) {
       setSpecsState('empty', '');
@@ -114,7 +138,7 @@
     }
     const rows = entries.map(([k, v]) => `
       <tr>
-        <td style="padding:6px;border-bottom:1px solid #1f2937;white-space:nowrap">${fieldLabels[k] || k}</td>
+        <td style="padding:6px;border-bottom:1px solid #1f2937;white-space:nowrap">${SPECS_FIELD_LABELS[k] || k}</td>
         <td style="padding:6px;border-bottom:1px solid #1f2937">${formatSpecsValue(k, v)}</td>
       </tr>
     `).join('');
