@@ -427,6 +427,31 @@ def test_submit_translates_bybit_errors_to_http_exception(monkeypatch: pytest.Mo
     assert "Order submit failed:" in str(exc.value.detail)
 
 
+def test_webhook_uses_keyword_request_id_for_bybit(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = {"request_id": ""}
+
+    async def fake_bybit(_payload, *, request_id):
+        seen["request_id"] = request_id
+        return {"ok": True}
+
+    monkeypatch.setattr(master_service, "_place_bybit_order", fake_bybit)
+    response = asyncio.run(master_service.calculator_webhook({
+        "asset": "crypto",
+        "account": "live",
+        "symbol": "BTCUSDT",
+        "action": "buy",
+        "order_type": "market",
+        "entry_price": "100",
+        "stop_loss_price": "90",
+        "take_profit_price": "120",
+        "quantity": "0.01",
+        "timeframe": "15m",
+    }))
+    body = json.loads(response.body.decode("utf-8"))
+    assert body["ok"] is True
+    assert seen["request_id"].startswith("calc-webhook-")
+
+
 def test_crypto_demo_skips_fee_rate_warning(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("demo", "k", "s", "https://bybit.test", "KEY1"))
     monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["BTCUSDT"]))
