@@ -9,6 +9,14 @@
   const loadingText = q('#tj-loading-text');
   const loadingBar = q('#tj-loading-bar');
   const loadingPct = q('#tj-loading-pct');
+  const addBtn = q('#tj-add-btn');
+  const syncBtn = q('#tj-sync-btn');
+  const editorModal = q('#tj-editor-modal');
+  const editorForm = q('#tj-editor-form');
+  const editorTitle = q('#tj-editor-title');
+  const editorErr = q('#tj-editor-error');
+  const editorCancelBtn = q('#tj-editor-cancel');
+  const editorSaveBtn = q('#tj-editor-save');
 
   const setLoading = (pct, msg) => {
     if (loadingText) loadingText.textContent = msg || '';
@@ -39,6 +47,11 @@
     stats: null,
     view: localStorage.getItem('tj.view') || 'trades',
     calMonth: localStorage.getItem('tj.calMonth') || new Date().toISOString().slice(0, 7),
+    editorOpen: false,
+    editorDirty: false,
+    saveInFlight: false,
+    editingRowId: null,
+    editingIsCreate: false,
   };
   try { filterInput.value = localStorage.getItem('tj.filter') || ''; } catch {}
 
@@ -88,6 +101,25 @@
   };
 
   const setStatus = (msg) => { status.textContent = msg || ''; };
+  const isoToInput = (v) => {
+    if (!v) return '';
+    const d = new Date(v);
+    if (Number.isNaN(d.getTime())) return '';
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+  const inputToIso = (v) => {
+    const text = String(v || '').trim();
+    if (!text) return '';
+    const d = new Date(text);
+    return Number.isNaN(d.getTime()) ? text : d.toISOString();
+  };
+
+  function syncActionButtons() {
+    if (syncBtn) syncBtn.disabled = state.editorOpen || state.editorDirty || state.saveInFlight;
+    if (addBtn) addBtn.disabled = state.saveInFlight;
+    if (editorSaveBtn) editorSaveBtn.disabled = state.saveInFlight;
+  }
 
   async function fetchJson(url, options = {}) {
     const res = await fetch(url, { cache: 'no-store', ...options });
@@ -641,6 +673,75 @@
     });
   }
 
+  const EDIT_FIELDS = [
+    'open_time', 'close_time', 'symbol', 'side', 'timeframe', 'setup', 'qty', 'qty_unit',
+    'entry_price', 'exit_price', 'stop_loss', 'take_profit', 'commission', 'net_profit',
+    'balance_after_trade', 'breakeven', 'notes', 'account', 'account_label', 'currency',
+  ];
+  const MANUAL_ACCOUNT_FIELDS = new Set(['account', 'account_label', 'currency', 'qty_unit']);
+
+  function setEditorError(msg) {
+    if (editorErr) editorErr.textContent = msg || '';
+  }
+
+  function openEditor(row) {
+    if (!editorForm || !editorModal) return;
+    const creating = !row;
+    const rec = row || {};
+    state.editingIsCreate = creating;
+    state.editingRowId = rec.id || null;
+    state.editorOpen = true;
+    state.editorDirty = false;
+    setEditorError('');
+    if (editorTitle) editorTitle.textContent = creating ? 'Add trade' : 'Edit trade';
+
+    EDIT_FIELDS.forEach((name) => {
+      const el = editorForm.elements.namedItem(name);
+      if (!el) return;
+      const isDate = name === 'open_time' || name === 'close_time';
+      const v = rec?.[name];
+      el.value = isDate ? isoToInput(v) : (v ?? '');
+    });
+
+    const isManual = creating || !!rec?.is_manual || String(rec?.source || '').toLowerCase() === 'manual';
+    EDIT_FIELDS.forEach((name) => {
+      const el = editorForm.elements.namedItem(name);
+      if (!el || !MANUAL_ACCOUNT_FIELDS.has(name)) return;
+      el.disabled = !isManual;
+    });
+
+    editorModal.classList.add('open');
+    editorModal.setAttribute('aria-hidden', 'false');
+    syncActionButtons();
+  }
+
+  function closeEditor() {
+    if (!editorModal || !editorForm) return;
+    editorModal.classList.remove('open');
+    editorModal.setAttribute('aria-hidden', 'true');
+    state.editorOpen = false;
+    state.editorDirty = false;
+    state.editingIsCreate = false;
+    state.editingRowId = null;
+    state.saveInFlight = false;
+    setEditorError('');
+    syncActionButtons();
+  }
+
+  function collectEditorPayload() {
+    if (!editorForm) return {};
+    const payload = {};
+    for (const key of EDIT_FIELDS) {
+      const el = editorForm.elements.namedItem(key);
+      if (!el || el.disabled) continue;
+      const raw = String(el.value ?? '');
+      const trimmed = raw.trim();
+      if (!trimmed) continue;
+      payload[key] = (key === 'open_time' || key === 'close_time') ? inputToIso(trimmed) : trimmed;
+    }
+    return payload;
+  }
+
   function renderRows(rows) {
     const sorted = sortRows(rows);
     tbody.innerHTML = '';
@@ -685,6 +786,7 @@
           <td>—</td>
           <td>—</td>
           <td></td>
+          <td></td>
         `;
         tbody.appendChild(tr);
         continue;
@@ -710,7 +812,11 @@
         <td>${Number.isFinite(bal) ? `${fmtNum(bal, 2)} ${ccy}` : '—'}</td>
         <td>${fmtDuration(r.trade_duration_seconds)}</td>
         <td>${r.breakeven || '—'}</td>
-        <td>${r.id ? `<a href="/trade-chart/${encodeURIComponent(r.id)}" target="_blank" rel="noopener">Chart</a>` : ''}</td>
+        <td>${r.id && String(r.source || '').toLowerCase() !== 'manual' ? `<a href="/trade-chart/${encodeURIComponent(r.id)}" target="_blank" rel="noopener">Chart</a>` : ''}</td>
+        <td>
+          <button type="button" data-action="edit" data-row-id="${String(r.id || '').replace(/"/g, '&quot;')}">Edit</button>
+          ${(r.is_manual || String(r.source || '').toLowerCase() === 'manual') ? `<button type="button" class="btn-danger" data-action="delete" data-row-id="${String(r.id || '').replace(/"/g, '&quot;')}">Delete</button>` : ''}
+        </td>
       `;
       tbody.appendChild(tr);
     }
@@ -873,15 +979,21 @@
 
       if (!silent) setLoading(85, 'Fetching balances…');
       const balances = await fetchJson('/api/trading-journal/balances', { signal });
-      state.rows = Array.isArray(journal.items) ? journal.items : [];
-      state.stats = journal.stats || null;
+      const nextRows = Array.isArray(journal.items) ? journal.items : [];
+      const nextStats = journal.stats || null;
+      if (!state.editorOpen && !state.editorDirty && !state.saveInFlight) {
+        state.rows = nextRows;
+        state.stats = nextStats;
+      }
 
       persistUiState();
       if (!silent) setLoading(95, 'Rendering…');
       renderAll();
       renderBalances(Array.isArray(balances.items) ? balances.items : []);
       renderStats(state.stats);
-      setStatus(`Updated ${new Date().toLocaleTimeString()}`);
+      if (!state.editorOpen && !state.editorDirty) {
+        setStatus(`Updated ${new Date().toLocaleTimeString()}`);
+      }
       if (!silent) { setLoading(100, 'Done'); hideLoading(); }
     } catch (e) {
       if (e && (e.name === 'AbortError' || e.code === 20)) return;
@@ -891,6 +1003,7 @@
     } finally {
       loadInFlight = false;
       scheduleAutoRefresh();
+      syncActionButtons();
     }
   }
 
@@ -903,7 +1016,7 @@
 
   function scheduleAutoRefresh() {
     stopAutoRefresh();
-    if (document.hidden) return;
+    if (document.hidden || state.editorOpen || state.editorDirty || state.saveInFlight) return;
     autoRefreshTimer = setTimeout(() => load({ silent: true }), AUTO_REFRESH_MS);
   }
 
@@ -931,7 +1044,15 @@
   q('#tj-cal-prev')?.addEventListener('click', () => { state.calMonth = _monthShift(state.calMonth, -1); persistUiState(); renderCalendarView(applyFlagFilters(applyTextFilter(state.rows))); });
   q('#tj-cal-next')?.addEventListener('click', () => { state.calMonth = _monthShift(state.calMonth, 1); persistUiState(); renderCalendarView(applyFlagFilters(applyTextFilter(state.rows))); });
   q('#tj-clear-btn')?.addEventListener('click', () => { filterInput.value = ''; persistUiState(); renderAll(); });
+  addBtn?.addEventListener('click', () => {
+    openEditor(null);
+    stopAutoRefresh();
+  });
   q('#tj-sync-btn')?.addEventListener('click', async () => {
+    if (state.editorOpen || state.editorDirty || state.saveInFlight) {
+      setStatus('Close or save the editor before syncing.');
+      return;
+    }
     try {
       setStatus('Syncing…');
       setLoading(10, 'Syncing from Dropbox…');
@@ -941,6 +1062,45 @@
     } catch (e) {
       hideLoading();
       setStatus(`Sync failed: ${e.message}`);
+    }
+  });
+
+  editorCancelBtn?.addEventListener('click', () => {
+    closeEditor();
+    scheduleAutoRefresh();
+  });
+  editorForm?.addEventListener('input', () => {
+    if (!state.editorOpen) return;
+    state.editorDirty = true;
+    syncActionButtons();
+  });
+  editorForm?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (state.saveInFlight) return;
+    state.saveInFlight = true;
+    syncActionButtons();
+    setEditorError('');
+    try {
+      const payload = collectEditorPayload();
+      const isCreate = state.editingIsCreate;
+      const url = isCreate ? '/api/trading-journal/rows' : `/api/trading-journal/rows/${encodeURIComponent(state.editingRowId || '')}`;
+      const method = isCreate ? 'POST' : 'PATCH';
+      await fetchJson(url, {
+        method,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      setStatus(isCreate ? 'Trade added.' : 'Trade updated.');
+      closeEditor();
+      await load({ silent: true, skipAutoSync: true });
+    } catch (err) {
+      const msg = err?.message || String(err || 'Save failed');
+      setEditorError(msg);
+      setStatus(`Save failed: ${msg}`);
+      state.saveInFlight = false;
+      state.editorOpen = true;
+      state.editorDirty = true;
+      syncActionButtons();
     }
   });
 
@@ -975,9 +1135,41 @@
     toggle(flag);
     btn.classList.toggle('active', activeFlags.has(flag));
   });
+  document.addEventListener('click', async (e) => {
+    const actionEl = e.target?.closest ? e.target.closest('[data-action][data-row-id]') : null;
+    if (!actionEl) return;
+    const rowId = actionEl.dataset.rowId || '';
+    const action = actionEl.dataset.action || '';
+    const row = (state.rows || []).find((r) => String(r?.id || '') === rowId);
+    if (!row) {
+      setStatus('Row not found.');
+      return;
+    }
+    if (action === 'edit') {
+      openEditor(row);
+      stopAutoRefresh();
+      return;
+    }
+    if (action === 'delete') {
+      if (!window.confirm('Delete this manual trade?')) return;
+      try {
+        state.saveInFlight = true;
+        syncActionButtons();
+        await fetchJson(`/api/trading-journal/rows/${encodeURIComponent(rowId)}`, { method: 'DELETE' });
+        setStatus('Trade deleted.');
+        await load({ silent: true, skipAutoSync: true });
+      } catch (err) {
+        setStatus(`Delete failed: ${err?.message || err}`);
+      } finally {
+        state.saveInFlight = false;
+        syncActionButtons();
+      }
+    }
+  });
 
   filterInput?.addEventListener('input', persistUiState);
   filterInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') renderAll(); });
+  syncActionButtons();
 
   qa('.tj-chip[data-flag]').forEach((btn) => { const on = activeFlags.has(btn.dataset.flag || ''); btn.classList.toggle('active', on); btn.style.opacity = on ? '1' : '0.7'; btn.style.outline = on ? '1px solid #60a5fa' : 'none'; });
   applyView();
