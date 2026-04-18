@@ -143,6 +143,18 @@ RETIRED_SCRIPT_NAMES = {
     "scanner",
 }
 
+
+LOCAL_ONLY_SCRIPTS = {"bybit_monitor", "oanda_monitor"}
+
+
+def _is_render_env() -> bool:
+    return bool(
+        os.getenv("RENDER")
+        or os.getenv("RENDER_SERVICE_ID")
+        or os.getenv("RENDER_EXTERNAL_URL")
+        or os.getenv("RENDER_EXTERNAL_HOSTNAME")
+    )
+
 MAX_LOG_LINES = 400
 OANDA_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "oanda-history"
 BYBIT_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "bybit-history"
@@ -323,8 +335,6 @@ WEB_APPS = {
 }
 STANDALONE_SCRIPTS = {
     "bybit-alert-clone",
-    "bybit_monitor",
-    "oanda_monitor",
     "bybithistory-clone",
     "coinspot-clone",
     "ivindicator-clone",
@@ -4112,7 +4122,6 @@ def script_logs_url(script_name: str) -> str:
 
 FRIENDLY_SCRIPT_LABELS: Dict[str, str] = {
     "PUSH": "Push",
-    "bybit_monitor": "Scanner",
     "bybit_trigger_bounce_trader": "Bounce Trader",
     "bybithistory-clone": "History",
     "coinspot-clone": "History",
@@ -4123,7 +4132,6 @@ FRIENDLY_SCRIPT_LABELS: Dict[str, str] = {
     "ivindicator-clone": "IV Indicator",
     "journal": "Journal",
     "oanda_history-clone": "History",
-    "oanda_monitor": "Scanner",
     "pinescripts": "Pine Scripts",
     "trading-journal": "Trading Journal",
 }
@@ -4131,7 +4139,6 @@ FRIENDLY_SCRIPT_LABELS: Dict[str, str] = {
 MERGED_SCRIPT_BUTTONS: List[Dict[str, object]] = [
     {"id": "calculator", "name": "calculator", "label": "Calculator", "open_url": "/merged/calculator", "dashboard_main_view": True},
     {"id": "history", "name": "history", "label": "History", "open_url": "/merged/history", "dashboard_main_view": True},
-    {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor", "dashboard_main_view": True},
     {"id": "bounce-trader", "name": "bounce-trader", "label": "Bounce Trader", "open_url": "/merged/bounce-trader", "dashboard_main_view": True},
 ]
 
@@ -4139,8 +4146,6 @@ MERGED_SOURCE_NAMES = {
     "bybithistory-clone",
     "oanda_history-clone",
     "coinspot-clone",
-    "bybit_monitor",
-    "oanda_monitor",
     "bybit_trigger_bounce_trader",
 }
 
@@ -4190,6 +4195,8 @@ def discover_scripts() -> List[ManagedScript]:
         if app_dir.name.casefold() in SKIP_DIRS_NORMALIZED or app_dir.name.startswith("."):
             continue
         if app_dir.name.casefold() in HIDDEN_SCRIPTS:
+            continue
+        if _is_render_env() and app_dir.name in LOCAL_ONLY_SCRIPTS:
             continue
 
         entry_path: Optional[Path] = None
@@ -11218,7 +11225,10 @@ async def merged_calculator_page() -> HTMLResponse:
 
 @app.get("/merged/scanner")
 async def merged_scanner_redirect() -> Response:
-    return RedirectResponse(url="/merged/monitor", status_code=307)
+    return PlainTextResponse(
+        "Scanner is local-only. Run run_scanner_local.bat on your PC.",
+        status_code=410,
+    )
 
 
 def _dec(value: object, field: str) -> Decimal:
@@ -12116,11 +12126,11 @@ async def merged_history_page() -> str:
     return HISTORY_PAGE_TEMPLATE
 
 
-@app.get("/merged/monitor", response_class=HTMLResponse)
-async def merged_monitor_page() -> str:
-    return _merged_shell(
-        "Scanner",
-        [("Bybit", "/scripts/view/bybit_monitor"), ("OANDA", "/scripts/view/oanda_monitor")],
+@app.get("/merged/monitor")
+async def merged_monitor_page() -> Response:
+    return PlainTextResponse(
+        "Scanner is local-only. Run run_scanner_local.bat on your PC.",
+        status_code=410,
     )
 
 
@@ -14066,15 +14076,6 @@ async def list_scripts() -> JSONResponse:
                 by_name.get("bybithistory-clone", {}).get("running")
                 or by_name.get("oanda_history-clone", {}).get("running")
                 or by_name.get("coinspot-clone", {}).get("running")
-            )
-        elif btn["name"] == "monitor":
-            row["starting"] = bool(
-                by_name.get("bybit_monitor", {}).get("starting")
-                or by_name.get("oanda_monitor", {}).get("starting")
-            )
-            row["running"] = bool(
-                by_name.get("bybit_monitor", {}).get("running")
-                or by_name.get("oanda_monitor", {}).get("running")
             )
         elif btn["name"] == "bounce-trader":
             row["starting"] = bool(by_name.get("bybit_trigger_bounce_trader", {}).get("starting"))

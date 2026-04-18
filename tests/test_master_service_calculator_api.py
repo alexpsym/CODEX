@@ -26,12 +26,37 @@ def test_scripts_page_contains_calculator_row() -> None:
 def test_scripts_page_marks_merged_dashboard_views_non_standalone() -> None:
     response = asyncio.run(master_service.list_scripts())
     payload = json.loads(response.body.decode("utf-8"))
-    merged_names = {"calculator", "history", "monitor", "bounce-trader"}
+    merged_names = {"calculator", "history", "bounce-trader"}
     merged_rows = [row for row in payload if row.get("name") in merged_names]
     assert len(merged_rows) == len(merged_names)
+    assert all(row.get("name") != "monitor" for row in payload)
     for row in merged_rows:
         assert row.get("standalone") is False
         assert row.get("dashboard_main_view") is True
+
+
+def test_render_env_hides_local_only_scanner_scripts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RENDER", "1")
+    original_manager = master_service.script_manager
+    try:
+        master_service.script_manager = master_service.ScriptManager(master_service.discover_scripts())
+        response = asyncio.run(master_service.list_scripts())
+        payload = json.loads(response.body.decode("utf-8"))
+        names = {str(row.get("name")) for row in payload}
+        assert "bybit_monitor" not in names
+        assert "oanda_monitor" not in names
+    finally:
+        master_service.script_manager = original_manager
+
+
+def test_scanner_merged_routes_return_gone() -> None:
+    monitor = asyncio.run(master_service.merged_monitor_page())
+    scanner = asyncio.run(master_service.merged_scanner_redirect())
+    assert monitor.status_code == 410
+    assert scanner.status_code == 410
+    message = "Scanner is local-only. Run run_scanner_local.bat on your PC."
+    assert monitor.body.decode("utf-8") == message
+    assert scanner.body.decode("utf-8") == message
 
 
 def test_merged_calculator_page_returns_200() -> None:

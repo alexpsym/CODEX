@@ -54,6 +54,27 @@ _alerts_mtime: float | None = None
 _traffic_totals = {"requests": 0, "bytes_sent": 0, "bytes_received": 0}
 APP_TIMEZONE = os.getenv("APP_TIMEZONE", "Australia/Brisbane").strip() or "Australia/Brisbane"
 
+SERVER_GUARD_ENV_VARS = {
+    "RENDER",
+    "RENDER_SERVICE_ID",
+    "RENDER_EXTERNAL_URL",
+    "RENDER_EXTERNAL_HOSTNAME",
+}
+
+
+def ensure_local_only_execution() -> None:
+    """Refuse to run in Render/server environments."""
+
+    present = sorted(name for name in SERVER_GUARD_ENV_VARS if os.getenv(name))
+    if present:
+        joined = ", ".join(present)
+        raise SystemExit(
+            "Scanner is local-only and cannot run on Render/server env; "
+            f"detected environment variable(s): {joined}. "
+            "Run run_scanner_local.bat on your PC."
+        )
+
+
 
 def _app_now() -> _dt.datetime:
     try:
@@ -949,6 +970,7 @@ def run_monitor() -> None:
 
 
 def main() -> None:
+    ensure_local_only_execution()
     log("OANDA forex monitor started.")
     if not SETTINGS_PATH.exists():
         update_runtime_settings()
