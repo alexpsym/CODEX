@@ -37,13 +37,13 @@ Place these in your Render dashboard or a local `.env` file at the repo root. Ad
 - `OANDA_API_KEY`, `OANDA_ACCOUNT_ID`, and `OANDA_BASE_URL` for OANDA strategies.
 - Any Telegram/Discord/API tokens needed by alerting code.
 - `PORT` (Render sets this automatically; only override for local testing).
-- `AUTOSTART_SCRIPTS` to override which scripts boot automatically. By default, the service autostarts `bybit_monitor` when this variable is unset; set it to a comma-separated list such as `oanda_monitor`, `ALL`, or `*` to change startup behavior, or set it to a blank value to disable autostart entirely.
+- `AUTOSTART_SCRIPTS` to override which scripts boot automatically. By default, the service autostarts `fxweekend-clone` when this variable is unset; set it to a comma-separated list such as `bybit_trigger_bounce_trader`, `ALL`, or `*` to change startup behavior, or set it to a blank value to disable autostart entirely.
 - `AUTOSTART_EXCLUDE` to skip specific scripts from the resolved autostart list without changing the main `AUTOSTART_SCRIPTS` value.
 - Any other variables referenced by the individual scripts. Because the manager runs each script in its own subprocess with the shared environment, they will read the same `.env`/dashboard values.
 
 ## 4) How the master service works
 - On startup it scans the repository for `*.py` files (skipping `mt5-clone`, virtualenv folders, `LEDGER-clone`, and the `render` folder itself) and exposes each remaining entrypoint in the UI.
-- If `AUTOSTART_SCRIPTS` is unset, the service defaults to autostarting `bybit_monitor`. Explicit `AUTOSTART_SCRIPTS` values override that default exactly, and `AUTOSTART_EXCLUDE` still removes matching scripts from the final startup queue.
+- If `AUTOSTART_SCRIPTS` is unset, the service defaults to autostarting `fxweekend-clone`. Explicit `AUTOSTART_SCRIPTS` values override that default exactly, and `AUTOSTART_EXCLUDE` still removes matching scripts from the final startup queue.
 - Clicking **Start** launches the chosen script as a background subprocess with unbuffered stdout; logs stream into the UI. Multiple scripts can run concurrently.
 - Clicking **Stop** sends a graceful terminate signal, escalating to a kill if the script does not exit within 10 seconds.
 - The webhook endpoint records the payload to the script log and starts the script if it is not already running.
@@ -59,6 +59,7 @@ Use the calculator UI (`/merged/calculator`) to generate the exact JSON payload 
 
 ## 6) Notes and tips
 - The manager intentionally ignores the `mt5-clone` directory per your request.
+- Scanner (Bybit/OANDA monitor) is local-only and is not part of the Render-hosted merged dashboard. Run `run_scanner_local.bat` on a local Windows machine when you need scanner windows.
 - Because each script runs as its own Python process, they can block or run forever without stopping the others. Monitor CPU/RAM usage in Render if you run many at once.
 - Logs are kept in-memory (last 400 lines per script) for quick viewing. Persist long-term logs by piping to a file inside each script if needed.
 - If you need to pin a different Python binary, set the `PYTHON` environment variable and the manager will use it when spawning scripts.
