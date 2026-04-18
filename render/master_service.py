@@ -4149,6 +4149,28 @@ MERGED_SOURCE_NAMES = {
     "bybit_trigger_bounce_trader",
 }
 
+
+def get_merged_script_buttons() -> List[Dict[str, object]]:
+    buttons = [dict(btn) for btn in MERGED_SCRIPT_BUTTONS]
+    if not _is_render_env():
+        buttons.append(
+            {
+                "id": "monitor",
+                "name": "monitor",
+                "label": "Scanner",
+                "open_url": "/merged/monitor",
+                "dashboard_main_view": True,
+            }
+        )
+    return buttons
+
+
+def get_merged_source_names() -> Set[str]:
+    names = set(MERGED_SOURCE_NAMES)
+    if not _is_render_env():
+        names.update({"bybit_monitor", "oanda_monitor"})
+    return names
+
 _TITLE_UPPER = {"FX", "MT5", "OANDA", "BYBIT", "USDT", "IV"}
 
 
@@ -11225,10 +11247,12 @@ async def merged_calculator_page() -> HTMLResponse:
 
 @app.get("/merged/scanner")
 async def merged_scanner_redirect() -> Response:
-    return PlainTextResponse(
-        "Scanner is local-only. Run run_scanner_local.bat on your PC.",
-        status_code=410,
-    )
+    if _is_render_env():
+        return PlainTextResponse(
+            "Scanner is local-only. Run run_scanner_local.bat on your PC.",
+            status_code=410,
+        )
+    return RedirectResponse(url="/merged/monitor", status_code=307)
 
 
 def _dec(value: object, field: str) -> Decimal:
@@ -12120,6 +12144,86 @@ HISTORY_PAGE_TEMPLATE = """<!doctype html>
 </body>
 </html>"""
 
+MERGED_MONITOR_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Merged Scanner Monitor</title>
+  <style>
+    body { margin:0; background:#0b1220; color:#e2e8f0; font-family:Inter,system-ui,sans-serif; }
+    .wrap { max-width: 1280px; margin: 0 auto; padding: 18px; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(380px,1fr)); gap:16px; }
+    .panel { background:#111827; border:1px solid #1f2937; border-radius:14px; padding:16px; box-shadow:0 10px 30px rgba(0,0,0,.25); }
+    .row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom:12px; }
+    .badge { display:inline-flex; align-items:center; border-radius:999px; padding:4px 10px; font-size:.85rem; background:#1f2937; color:#cbd5e1; min-height:28px; }
+    label { display:flex; flex-direction:column; gap:6px; color:#cbd5e1; font-weight:700; }
+    input, select, button { background:#0f172a; color:#e2e8f0; border:1px solid #334155; border-radius:10px; padding:8px 10px; }
+    button { font-weight:700; cursor:pointer; }
+    .log-box { width:100%; min-height:210px; max-height:320px; overflow:auto; border:1px solid #334155; border-radius:10px; background:#020617; color:#d1fae5; padding:10px; white-space:pre-wrap; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+    .meta { color:#94a3b8; margin:4px 0 0; font-size:.9rem; }
+    .settings-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:10px; margin-bottom:12px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h2 style="margin-top:0">Scanner Monitor</h2>
+    <p class="meta">Local merged controls for Bybit and OANDA scanners.</p>
+    <div class="grid">
+      <section class="panel" id="bybit-panel">
+        <h3 style="margin-top:0">Bybit monitor controls</h3>
+        <div class="row">
+          <span id="bybit-status" class="badge">Stopped</span>
+          <button id="bybit-start-btn" type="button">Start</button>
+          <button id="bybit-stop-btn" type="button">Stop</button>
+        </div>
+        <div class="settings-grid">
+          <label>Wait between scans (seconds)
+            <input id="bybit-wait-seconds" type="number" min="1" step="1"/>
+          </label>
+          <label>Alert threshold (%)
+            <input id="bybit-threshold" type="number" min="0" step="0.01"/>
+          </label>
+        </div>
+        <div class="row">
+          <button id="bybit-save-settings" type="button">Save</button>
+          <button id="bybit-reload-settings" type="button">Reset / Reload</button>
+          <button id="bybit-test-alert" type="button">Telegram test</button>
+          <span id="bybit-settings-status" class="badge">&nbsp;</span>
+        </div>
+        <div id="bybit-custom-alerts"></div>
+        <pre id="bybit-log-box" class="log-box">Waiting for output...</pre>
+      </section>
+      <section class="panel" id="oanda-panel">
+        <h3 style="margin-top:0">OANDA monitor controls</h3>
+        <div class="row">
+          <span id="oanda-status" class="badge">Stopped</span>
+          <button id="oanda-start-btn" type="button">Start</button>
+          <button id="oanda-stop-btn" type="button">Stop</button>
+        </div>
+        <div class="settings-grid">
+          <label>Wait between scans (seconds)
+            <input id="oanda-wait-seconds" type="number" min="1" step="1"/>
+          </label>
+          <label>Alert threshold (%)
+            <input id="oanda-threshold" type="number" min="0" step="0.01"/>
+          </label>
+        </div>
+        <div class="row">
+          <button id="oanda-save-settings" type="button">Save</button>
+          <button id="oanda-reload-settings" type="button">Reset / Reload</button>
+          <button id="oanda-test-alert" type="button">Telegram test</button>
+          <span id="oanda-settings-status" class="badge">&nbsp;</span>
+        </div>
+        <div id="oanda-custom-alerts"></div>
+        <pre id="oanda-log-box" class="log-box">Waiting for output...</pre>
+      </section>
+    </div>
+  </div>
+  <script src="{{MERGED_MONITOR_JS_URL}}"></script>
+</body>
+</html>"""
+
 
 @app.get("/merged/history", response_class=HTMLResponse)
 async def merged_history_page() -> str:
@@ -12128,10 +12232,14 @@ async def merged_history_page() -> str:
 
 @app.get("/merged/monitor")
 async def merged_monitor_page() -> Response:
-    return PlainTextResponse(
-        "Scanner is local-only. Run run_scanner_local.bat on your PC.",
-        status_code=410,
-    )
+    if _is_render_env():
+        return PlainTextResponse(
+            "Scanner is local-only. Run run_scanner_local.bat on your PC.",
+            status_code=410,
+        )
+    monitor_js_version = quote(str(os.getenv("APP_BUILD_STAMP") or os.getenv("RENDER_GIT_COMMIT") or app.version), safe="")
+    page = MERGED_MONITOR_TEMPLATE.replace("{{MERGED_MONITOR_JS_URL}}", f"/static/merged_monitor.js?v={monitor_js_version}")
+    return HTMLResponse(page)
 
 
 @app.get("/merged/bounce-trader")
@@ -14054,7 +14162,7 @@ async def list_scripts() -> JSONResponse:
     by_name = {str(s.get("name")): s for s in raw}
 
     merged: List[Dict[str, object]] = []
-    for btn in MERGED_SCRIPT_BUTTONS:
+    for btn in get_merged_script_buttons():
         row: Dict[str, object] = {
             "id": btn["id"],
             "name": btn["name"],
@@ -14080,9 +14188,19 @@ async def list_scripts() -> JSONResponse:
         elif btn["name"] == "bounce-trader":
             row["starting"] = bool(by_name.get("bybit_trigger_bounce_trader", {}).get("starting"))
             row["running"] = bool(by_name.get("bybit_trigger_bounce_trader", {}).get("running"))
+        elif btn["name"] == "monitor":
+            row["starting"] = bool(
+                by_name.get("bybit_monitor", {}).get("starting")
+                or by_name.get("oanda_monitor", {}).get("starting")
+            )
+            row["running"] = bool(
+                by_name.get("bybit_monitor", {}).get("running")
+                or by_name.get("oanda_monitor", {}).get("running")
+            )
         merged.append(row)
 
-    extras = [s for s in raw if str(s.get("name")) not in MERGED_SOURCE_NAMES]
+    merged_source_names = get_merged_source_names()
+    extras = [s for s in raw if str(s.get("name")) not in merged_source_names]
     for item in extras:
         if str(item.get("name")) == "ivindicator-clone":
             item["dashboard_main_view"] = True
