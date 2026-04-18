@@ -1352,6 +1352,170 @@ def _save_trading_journal(rows: List[Dict[str, object]]) -> None:
     _schedule_dropbox_upload_state_backup()
 
 
+def _editable_trading_journal_fields() -> Set[str]:
+    return {
+        "open_time",
+        "close_time",
+        "symbol",
+        "side",
+        "timeframe",
+        "setup",
+        "qty",
+        "entry_price",
+        "exit_price",
+        "stop_loss",
+        "take_profit",
+        "commission",
+        "net_profit",
+        "balance_after_trade",
+        "breakeven",
+        "notes",
+        "account",
+        "account_label",
+        "currency",
+        "qty_unit",
+    }
+
+
+def _normalize_trading_journal_edit_payload(
+    payload: object,
+    *,
+    for_create: bool,
+    existing: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="Payload must be a JSON object.")
+    if not payload:
+        raise HTTPException(status_code=422, detail="Payload is empty.")
+
+    allowed = _editable_trading_journal_fields()
+    normalized: Dict[str, object] = {}
+    protected = {"id", "row_type", "raw_refs", "source", "status", "is_manual", "created_at", "updated_at"}
+    protected_identity = {
+        "provider",
+        "provider_account",
+        "provider_trade_id",
+        "provider_order_id",
+        "provider_position_id",
+    }
+    numeric_fields = {
+        "qty",
+        "entry_price",
+        "exit_price",
+        "stop_loss",
+        "take_profit",
+        "commission",
+        "net_profit",
+        "balance_after_trade",
+    }
+    timestamp_fields = {"open_time", "close_time"}
+
+    for key, raw_value in payload.items():
+        field = str(key or "").strip()
+        if not field:
+            continue
+        if field in protected or field in protected_identity:
+            raise HTTPException(status_code=422, detail=f"Field '{field}' cannot be edited.")
+        if field not in allowed:
+            raise HTTPException(status_code=422, detail=f"Field '{field}' is not editable.")
+        value = raw_value
+        if field in timestamp_fields:
+            if value in (None, ""):
+                normalized[field] = None
+            else:
+                parsed = _epoch_or_iso_to_iso(value)
+                if not parsed:
+                    raise HTTPException(status_code=422, detail=f"Invalid timestamp for '{field}'.")
+                normalized[field] = parsed
+            continue
+        if field in numeric_fields:
+            if value in (None, ""):
+                normalized[field] = None
+            else:
+                parsed_num = _to_float(value)
+                if parsed_num is None:
+                    raise HTTPException(status_code=422, detail=f"Invalid number for '{field}'.")
+                normalized[field] = parsed_num
+            continue
+        if field == "timeframe":
+            normalized[field] = _normalize_timeframe(value)
+            continue
+        if field == "symbol":
+            symbol = str(value or "").strip()
+            if symbol:
+                normalized[field] = _norm_symbol(symbol) or symbol.upper()
+            else:
+                normalized[field] = ""
+            continue
+        if field == "side":
+            side_text = str(value or "").strip().lower()
+            if side_text in {"buy", "long"}:
+                normalized[field] = "Buy"
+            elif side_text in {"sell", "short"}:
+                normalized[field] = "Sell"
+            elif side_text:
+                normalized[field] = str(value).strip()
+            else:
+                normalized[field] = ""
+            continue
+        if field == "breakeven":
+            if value in (None, ""):
+                normalized[field] = ""
+            elif isinstance(value, bool):
+                normalized[field] = "Yes" if value else "No"
+            else:
+                lowered = str(value).strip().lower()
+                normalized[field] = "Yes" if lowered in {"1", "true", "yes", "y"} else "No"
+            continue
+        normalized[field] = str(value).strip() if isinstance(value, str) else value
+
+    # Account/currency fields are only editable on manual rows.
+    if not for_create:
+        target = existing if isinstance(existing, dict) else {}
+        is_manual = bool(target.get("is_manual")) or str(target.get("source") or "").lower() == "manual"
+        if not is_manual:
+            forbidden = sorted(
+                set(normalized.keys()).intersection({"account", "account_label", "currency", "qty_unit"})
+            )
+            if forbidden:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Fields {', '.join(forbidden)} can only be edited for manual rows.",
+                )
+    return normalized
+
+
+def _apply_trading_journal_manual_overrides(
+    row: Dict[str, object], overrides: Dict[str, object]
+) -> Dict[str, object]:
+    updated = dict(row)
+    safe_overrides = {k: v for k, v in overrides.items() if k in _editable_trading_journal_fields()}
+    for key, value in safe_overrides.items():
+        updated[key] = value
+    updated["manual_overrides"] = dict(safe_overrides)
+    updated["manual_override_fields"] = sorted(safe_overrides.keys())
+    updated["manual_updated_at"] = _utc_now_iso()
+    return updated
+
+
+def _reapply_trading_journal_manual_overrides(row: Dict[str, object]) -> Dict[str, object]:
+    overrides = row.get("manual_overrides")
+    if not isinstance(overrides, dict) or not overrides:
+        return row
+    return _apply_trading_journal_manual_overrides(row, overrides)
+
+
+def _find_journal_row_index(row_id: str) -> int:
+    want = str(row_id or "").strip()
+    if not want:
+        return -1
+    rows = _get_trading_journal_rows()
+    for idx, row in enumerate(rows):
+        if str((row or {}).get("id") or "").strip() == want:
+            return idx
+    return -1
+
+
 def _upsert_trading_journal_rows(rows: Iterable[Dict[str, object]]) -> int:
     existing = _get_trading_journal_rows()
     by_id: Dict[str, Dict[str, object]] = {}
@@ -1411,7 +1575,7 @@ def _merge_trading_journal_row(
             if (value is None or (isinstance(value, str) and value.strip() == "")) and merged.get(key) is not None:
                 continue
         merged[key] = value
-    return merged
+    return _reapply_trading_journal_manual_overrides(merged)
 
 
 def _load_trading_journal_state() -> Dict[str, object]:
@@ -12027,6 +12191,7 @@ async def trading_journal_page() -> str:
     .toolbar.compact { padding:6px 10px; gap:6px; margin-bottom:10px; }
     .toolbar.compact input { flex:0 1 520px; max-width:520px; padding:6px 8px; }
     .toolbar.compact button { padding:6px 10px; }
+    .toolbar button[disabled] { opacity:0.6; cursor:not-allowed; }
     .balances { padding:8px; margin-bottom:10px; display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:8px; }
     .hidden { display:none !important; }
     .bal-card { background:#0f172a; border:1px solid #1f2937; border-radius:10px; padding:8px; }
@@ -12056,6 +12221,16 @@ async def trading_journal_page() -> str:
     .pill { border:1px solid #334155; border-radius:999px; padding:2px 8px; font-size:12px; }
     .num.pos { color:#86efac; }
     .num.neg { color:#fca5a5; }
+    .btn-danger { background:#b91c1c !important; }
+    .tj-modal { position:fixed; inset:0; display:none; align-items:center; justify-content:center; background:rgba(2,6,23,0.75); z-index:10001; }
+    .tj-modal.open { display:flex; }
+    .tj-modal-card { width:min(920px, calc(100vw - 24px)); max-height:calc(100vh - 24px); overflow:auto; background:#111827; border:1px solid #334155; border-radius:12px; padding:14px; }
+    .tj-form-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:10px; }
+    .tj-form-field { display:flex; flex-direction:column; gap:4px; }
+    .tj-form-field input, .tj-form-field select, .tj-form-field textarea { background:#0f172a; color:#e5e7eb; border:1px solid #334155; border-radius:8px; padding:8px; }
+    .tj-form-field textarea { min-height:90px; resize:vertical; }
+    .tj-form-actions { margin-top:10px; display:flex; gap:8px; justify-content:flex-end; }
+    #tj-editor-error { color:#fca5a5; margin-top:8px; min-height:1.2em; }
 
     .loading-overlay { position:fixed; inset:0; background:rgba(11,18,32,0.92); display:flex; align-items:center; justify-content:center; z-index:9999; }
     .loading-panel { width:min(520px, calc(100% - 32px)); background:#111827; border:1px solid #1f2937; border-radius:14px; padding:16px; }
@@ -12084,6 +12259,7 @@ async def trading_journal_page() -> str:
       <input id="tj-filter" placeholder="Filter symbol / account / source (e.g. EURUSD, BTCUSDT, oanda, bybit demo)" />
       <button id="tj-filter-btn">Filter</button>
       <button id="tj-clear-btn">Clear</button>
+      <button id="tj-add-btn">Add trade</button>
       <button id="tj-sync-btn">Sync now</button>
       <span id="tj-status" class="muted"></span>
     </div>
@@ -12122,6 +12298,7 @@ async def trading_journal_page() -> str:
             <th data-sort="trade_duration_seconds">Trade Duration</th>
             <th data-sort="breakeven">Breakeven</th>
             <th>Chart</th>
+            <th>Actions</th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -12166,6 +12343,40 @@ async def trading_journal_page() -> str:
       <div id="tj-equity-view" class="hidden">
         <div id="tj-equity-wrap"></div>
       </div>
+    </div>
+  </div>
+  <div id="tj-editor-modal" class="tj-modal" aria-hidden="true">
+    <div class="tj-modal-card">
+      <div id="tj-editor-title" style="font-weight:700; margin-bottom:10px;">Edit trade</div>
+      <form id="tj-editor-form">
+        <div class="tj-form-grid">
+          <label class="tj-form-field"><span>Open time *</span><input name="open_time" type="datetime-local"/></label>
+          <label class="tj-form-field"><span>Close time *</span><input name="close_time" type="datetime-local"/></label>
+          <label class="tj-form-field"><span>Symbol</span><input name="symbol" type="text"/></label>
+          <label class="tj-form-field"><span>Side</span><select name="side"><option value="">—</option><option>Buy</option><option>Sell</option></select></label>
+          <label class="tj-form-field"><span>Timeframe</span><input name="timeframe" type="text"/></label>
+          <label class="tj-form-field"><span>Setup</span><input name="setup" type="text"/></label>
+          <label class="tj-form-field"><span>Qty</span><input name="qty" type="number" step="any"/></label>
+          <label class="tj-form-field"><span>Qty unit</span><input name="qty_unit" type="text"/></label>
+          <label class="tj-form-field"><span>Entry price</span><input name="entry_price" type="number" step="any"/></label>
+          <label class="tj-form-field"><span>Exit price</span><input name="exit_price" type="number" step="any"/></label>
+          <label class="tj-form-field"><span>Stop loss</span><input name="stop_loss" type="number" step="any"/></label>
+          <label class="tj-form-field"><span>Take profit</span><input name="take_profit" type="number" step="any"/></label>
+          <label class="tj-form-field"><span>Commission</span><input name="commission" type="number" step="any"/></label>
+          <label class="tj-form-field"><span>Net profit</span><input name="net_profit" type="number" step="any"/></label>
+          <label class="tj-form-field"><span>Balance after trade</span><input name="balance_after_trade" type="number" step="any"/></label>
+          <label class="tj-form-field"><span>Breakeven</span><select name="breakeven"><option value="">—</option><option>Yes</option><option>No</option></select></label>
+          <label class="tj-form-field"><span>Account</span><input name="account" type="text"/></label>
+          <label class="tj-form-field"><span>Account label</span><input name="account_label" type="text"/></label>
+          <label class="tj-form-field"><span>Currency</span><input name="currency" type="text"/></label>
+          <label class="tj-form-field" style="grid-column:1 / span 2;"><span>Notes</span><textarea name="notes"></textarea></label>
+        </div>
+        <div id="tj-editor-error"></div>
+        <div class="tj-form-actions">
+          <button type="button" id="tj-editor-cancel">Cancel</button>
+          <button type="submit" id="tj-editor-save">Save</button>
+        </div>
+      </form>
     </div>
   </div>
   <script src="/static/trading_journal.js"></script>
@@ -15500,6 +15711,85 @@ async def trading_journal_balances() -> JSONResponse:
 
     items = sorted(by_acc.values(), key=lambda x: str(x.get("label") or ""))
     return JSONResponse({"items": items})
+
+
+@app.post("/api/trading-journal/rows")
+async def trading_journal_create_row(payload: Dict[str, object] = Body(...)) -> JSONResponse:
+    normalized = _normalize_trading_journal_edit_payload(payload, for_create=True)
+    open_time = normalized.get("open_time")
+    close_time = normalized.get("close_time")
+    if not open_time or not close_time:
+        raise HTTPException(status_code=422, detail="open_time and close_time are required.")
+    row = {
+        "id": f"manual:{uuid4().hex}",
+        "row_type": "trade",
+        "source": "manual",
+        "status": "closed",
+        "is_manual": True,
+        "created_at": _utc_now_iso(),
+        "updated_at": _utc_now_iso(),
+        **normalized,
+    }
+    row = _apply_trading_journal_manual_overrides(row, normalized)
+    rows = _get_trading_journal_rows()
+    rows.append(row)
+    _set_trading_journal_rows(rows)
+    return JSONResponse({"ok": True, "row": row})
+
+
+@app.patch("/api/trading-journal/rows/{row_id}")
+async def trading_journal_patch_row(row_id: str, payload: Dict[str, object] = Body(...)) -> JSONResponse:
+    idx = _find_journal_row_index(row_id)
+    if idx < 0:
+        raise HTTPException(status_code=404, detail="Journal row not found.")
+    rows = _get_trading_journal_rows()
+    existing = dict(rows[idx])
+    row_type = _row_type(existing)
+    if row_type == "cashflow":
+        raise HTTPException(status_code=409, detail="Cashflow rows are read-only in trading journal.")
+    if row_type != "trade":
+        raise HTTPException(status_code=422, detail="Only trade rows can be edited.")
+    normalized = _normalize_trading_journal_edit_payload(payload, for_create=False, existing=existing)
+    if not normalized:
+        raise HTTPException(status_code=422, detail="No editable fields supplied.")
+
+    is_manual = bool(existing.get("is_manual")) or str(existing.get("source") or "").lower() == "manual"
+    updated = dict(existing)
+    updated.update(normalized)
+    updated["updated_at"] = _utc_now_iso()
+    if is_manual:
+        # Manual rows are source-of-truth and can be updated directly.
+        merged_overrides = dict(updated.get("manual_overrides") or {})
+        merged_overrides.update(normalized)
+        updated = _apply_trading_journal_manual_overrides(updated, merged_overrides)
+    else:
+        # Imported rows keep a manual override layer reapplied after future sync merges.
+        merged_overrides = dict(existing.get("manual_overrides") or {})
+        merged_overrides.update(normalized)
+        updated = _apply_trading_journal_manual_overrides(updated, merged_overrides)
+    rows[idx] = updated
+    _set_trading_journal_rows(rows)
+    return JSONResponse({"ok": True, "row": updated})
+
+
+@app.delete("/api/trading-journal/rows/{row_id}")
+async def trading_journal_delete_row(row_id: str) -> JSONResponse:
+    idx = _find_journal_row_index(row_id)
+    if idx < 0:
+        raise HTTPException(status_code=404, detail="Journal row not found.")
+    rows = _get_trading_journal_rows()
+    row = dict(rows[idx])
+    row_type = _row_type(row)
+    if row_type == "cashflow":
+        raise HTTPException(status_code=409, detail="Cashflow rows are read-only in trading journal.")
+    if row_type != "trade":
+        raise HTTPException(status_code=422, detail="Only trade rows can be deleted.")
+    is_manual = bool(row.get("is_manual")) or str(row.get("source") or "").lower() == "manual"
+    if not is_manual:
+        raise HTTPException(status_code=409, detail="Only manual trade rows can be deleted.")
+    removed = rows.pop(idx)
+    _set_trading_journal_rows(rows)
+    return JSONResponse({"ok": True, "row": removed})
 
 
 @app.get("/api/trading-journal/sync/status")
