@@ -14,13 +14,13 @@ from typing import Dict, List, Optional
 from uuid import uuid4
 
 import requests
-from flask import Flask, redirect, render_template_string, request
+from flask import Flask, jsonify, redirect, render_template_string, request
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from shared.symbol_resolution import resolve_bybit_symbol_from_choices
+from shared.symbol_resolution import normalize_oanda_symbol_query, resolve_bybit_symbol_from_choices
 
 
 APP = Flask(__name__)
@@ -96,7 +96,9 @@ def _fetch_bybit_symbols(category: str) -> List[str]:
 
 
 def _get_bybit_symbols_cached(category: str) -> List[str]:
-    category_key = category if category in {"linear", "spot", "inverse"} else "linear"
+    category_key = str(category or "").strip().lower()
+    if category_key not in {"linear", "spot", "inverse"}:
+        raise ValueError(f"Unsupported Bybit category '{category}'. Expected one of: linear, spot, inverse.")
     now = time.time()
     entry = _BYBIT_SYMBOL_CACHE.get(category_key) or {"ts": 0.0, "symbols": []}
     cached = entry.get("symbols")
@@ -121,6 +123,39 @@ def _resolve_bybit_symbol(raw: str, *, category: str) -> str:
     if not symbol:
         raise ValueError(f"Unable to resolve Bybit symbol '{raw.strip()}' in category '{category}'.")
     return symbol
+
+
+@APP.get("/api/preview-symbol")
+def preview_symbol() -> tuple[object, int] | object:
+    market = (request.args.get("market") or "crypto").strip().lower()
+    category = (request.args.get("category") or "linear").strip().lower()
+    raw_symbols = request.args.get("symbols") or ""
+    tokens = [token.strip() for token in str(raw_symbols).split(",") if token.strip()]
+    if not tokens:
+        return jsonify({"status": "empty"})
+    if len(tokens) > 1:
+        return jsonify({"status": "multi", "message": "Multiple symbols entered; preview unavailable."})
+
+    raw = tokens[0]
+    try:
+        if market == "fx":
+            canonical = normalize_oanda_symbol_query(raw)
+            return jsonify({"status": "resolved", "raw": raw, "canonical": canonical, "prefer": "oanda"})
+        canonical = _resolve_bybit_symbol(raw, category=category)
+        return jsonify(
+            {
+                "status": "resolved",
+                "raw": raw,
+                "canonical": canonical,
+                "category": category,
+                "prefer": "bybit",
+            }
+        )
+    except ValueError as exc:
+        return jsonify({"status": "unresolved", "error": str(exc)}), 422
+    except requests.HTTPError as exc:
+        detail = f"Symbol preview lookup failed: {exc}"
+        return jsonify({"status": "error", "error": detail}), 404
 
 
 def _normalize_symbols(raw_symbols: str, *, market: str, category: str = "linear") -> List[str]:
@@ -444,35 +479,28 @@ def index() -> str:
         _save_config(config)
 
         if action == "arm":
-            confirm_arm = request.form.get("confirm_arm") == "on"
-            confirm_live = request.form.get("confirm_live") == "on"
-            if not confirm_arm:
-                error = "Please confirm ARM before starting."
-            elif config["account_mode"] == "live" and not confirm_live:
-                error = "Live mode requires the additional confirmation checkbox."
-            else:
-                try:
-                    symbols = _normalize_symbols(
-                        config.get("symbols", ""),
-                        market=config["market"],
-                        category=config.get("category", "linear"),
-                    )
-                except ValueError as exc:
-                    error = str(exc)
-                    symbols = []
-                if not error and not symbols:
-                    error = "Please provide at least one valid symbol/instrument."
+            try:
+                symbols = _normalize_symbols(
+                    config.get("symbols", ""),
+                    market=config["market"],
+                    category=config.get("category", "linear"),
+                )
+            except ValueError as exc:
+                error = str(exc)
+                symbols = []
+            if not error and not symbols:
+                error = "Please provide at least one valid symbol/instrument."
+            if not error:
+                started = 0
+                for symbol in symbols:
+                    try:
+                        _start_session(config, symbol)
+                    except RuntimeError as exc:
+                        error = str(exc)
+                        break
+                    started += 1
                 if not error:
-                    started = 0
-                    for symbol in symbols:
-                        try:
-                            _start_session(config, symbol)
-                        except RuntimeError as exc:
-                            error = str(exc)
-                            break
-                        started += 1
-                    if not error:
-                        message = f"Started {started} bounce trader session(s)."
+                    message = f"Started {started} bounce trader session(s)."
         elif action == "stop":
             stopped = _stop_all_sessions()
             message = f"Stopped {stopped} running session(s)."
@@ -530,7 +558,7 @@ FORM_HTML = """
       :root { color-scheme: light dark; }
       body { font-family: 'Inter', system-ui, -apple-system, sans-serif; margin: 0; padding: 2rem; background: #0b1220; color: #e2e8f0; }
       h1 { margin-top: 0; }
-      .card { background: #111827; border: 1px solid #1f2937; border-radius: 14px; padding: 1.5rem; max-width: 1100px; margin: 0 auto; }
+      .panel { background: #111827; border: 1px solid #1f2937; border-radius: 14px; padding: 1.5rem; max-width: 1100px; margin: 0 auto; }
       .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; margin-top: 1rem; }
       label { display: flex; flex-direction: column; gap: 0.35rem; font-weight: 600; }
       input, select, textarea { padding: 0.55rem 0.65rem; border-radius: 10px; border: 1px solid #334155; background: #0f172a; color: #e2e8f0; }
@@ -545,15 +573,19 @@ FORM_HTML = """
       .notice.ok { background: rgba(34, 197, 94, 0.18); border: 1px solid rgba(34, 197, 94, 0.4); color: #bbf7d0; }
       table { width:100%; border-collapse: collapse; margin-top: 0.8rem; }
       th, td { text-align:left; border-bottom:1px solid #1f2937; padding:0.5rem 0.4rem; font-size:0.9rem; }
-      .checkbox-row { display:flex; align-items:center; gap:0.55rem; margin-top: 0.6rem; }
-      .checkbox-row input { width: 1rem; height: 1rem; }
       .warning { color:#facc15; font-size:0.9rem; margin-top: 0.85rem; }
       .fx-only, .crypto-only { display: none; }
+      .card { background:#0f172a;border:1px solid #1f2937;border-radius:10px;padding:10px }
+      .muted{color:#94a3b8;font-size:0.9rem}
+      .specs-table{width:100%;border-collapse:collapse;table-layout:fixed;margin-top:0}
+      .specs-table td{border-bottom:1px solid #1f2937;padding:4px 5px;font-size:0.76rem;vertical-align:top;overflow-wrap:anywhere;word-break:break-word;line-height:1.3}
     </style>
   </head>
   <body>
-    <div class="card">
+    <div class="panel">
       <h1>Bounce Trader</h1>
+      <div class="muted" id="preview-canonical-symbol"></div>
+      <div id="preview-instrument-specs"></div>
       {% if error %}<div class="notice error">{{ error }}</div>{% endif %}
       {% if message %}<div class="notice ok">{{ message }}</div>{% endif %}
 
@@ -674,17 +706,8 @@ FORM_HTML = """
         </details>
 
         <div class="actions">
-          <button class="secondary" type="submit" name="action" value="save">Save</button>
           <button class="primary" type="submit" name="action" value="arm">ARM / START</button>
           <button class="danger" type="submit" name="action" value="stop">Stop All</button>
-        </div>
-        <div class="checkbox-row">
-          <input type="checkbox" name="confirm_arm" id="confirm_arm" />
-          <label for="confirm_arm">I understand this will start placing orders once armed.</label>
-        </div>
-        <div class="checkbox-row">
-          <input type="checkbox" name="confirm_live" id="confirm_live" />
-          <label for="confirm_live">I confirm LIVE trading and accept the risk.</label>
         </div>
       </form>
 
@@ -706,6 +729,156 @@ FORM_HTML = """
       {% endif %}
 
       <script>
+        const previewCanonicalEl = document.getElementById('preview-canonical-symbol');
+        const previewSpecsEl = document.getElementById('preview-instrument-specs');
+        const symbolsInput = document.querySelector('input[name="symbols"]');
+        const marketSelect = document.getElementById('market');
+        const categorySelect = document.querySelector('select[name="category"]');
+        let previewTimer = null;
+        let previewController = null;
+        let specsController = null;
+
+        const SPECS_HIDDEN_FIELDS = new Set([
+          'contractType','fundingHistory.fundingRate','fundingHistory.fundingRateTimestamp','indexPrice','leverageFilter',
+          'lotSizeFilter','markPrice','priceFilter','query','baseCoin','quoteCoin','source','status','scannerVolume24h',
+          'openInterest','_units',
+        ]);
+        const SPECS_FIELD_LABELS = {
+          resolved_symbol: 'resolved_symbol',
+          category: 'category',
+          lastPrice: 'lastPrice (price)',
+          fundingRate: 'fundingRate (%)',
+          nextFundingTime: 'nextFundingTime (Brisbane time)',
+          launchTime: 'launchTime (Brisbane time)',
+          openInterestValue: 'openInterestValue (USD)',
+          turnover24h: 'turnover24h (USD)',
+          volume24h: 'volume24h (base units)',
+          avg7dTurnoverUsd: 'avg7dVolume (USD)',
+        };
+
+        function setSpecsState(text) {
+          const msg = String(text || '').trim();
+          previewSpecsEl.innerHTML = msg ? `<div class="muted">${msg}</div>` : '';
+        }
+        function clearPreview() {
+          previewCanonicalEl.textContent = '';
+          setSpecsState('');
+        }
+        function renderSpecs(specs) {
+          const isNumericLike = (v) => {
+            if (v === null || v === undefined) return false;
+            if (typeof v === 'number') return Number.isFinite(v);
+            if (typeof v !== 'string') return false;
+            const s = v.trim();
+            return s !== '' && /^-?\\d+(\\.\\d+)?$/.test(s);
+          };
+          const compactNumber = (n, decimals = 2) => {
+            const num = Number(n);
+            if (!Number.isFinite(num)) return String(n ?? '—');
+            const abs = Math.abs(num);
+            if (abs >= 1e12) return `${(num / 1e12).toFixed(decimals).replace(/\\.00$/, '')}T`;
+            if (abs >= 1e9) return `${(num / 1e9).toFixed(decimals).replace(/\\.00$/, '')}B`;
+            if (abs >= 1e6) return `${(num / 1e6).toFixed(decimals).replace(/\\.00$/, '')}M`;
+            if (abs >= 1e3) return `${(num / 1e3).toFixed(decimals).replace(/\\.00$/, '')}K`;
+            return num.toFixed(decimals).replace(/\\.00$/, '');
+          };
+          const formatPercentFromFraction = (v, decimals = 4) => {
+            const n = Number(v);
+            if (!Number.isFinite(n)) return String(v ?? '—');
+            return `${(n * 100).toFixed(decimals).replace(/0+$/, '').replace(/\\.$/, '')}%`;
+          };
+          const formatTimestampBrisbane = (value) => {
+            if (!isNumericLike(value)) return null;
+            const n = Number(value);
+            if (!Number.isFinite(n)) return null;
+            const ms = n < 1e12 ? n * 1000 : n;
+            const d = new Date(ms);
+            if (Number.isNaN(d.getTime())) return null;
+            return new Intl.DateTimeFormat('en-AU', {
+              timeZone: 'Australia/Brisbane',
+              year: 'numeric', month: '2-digit', day: '2-digit',
+              hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+            }).format(d) + ' (Brisbane)';
+          };
+          const formatSpecsValue = (key, value) => {
+            if (key === 'launchTime' || key === 'nextFundingTime' || /(time|timestamp)$/i.test(key)) {
+              const ts = formatTimestampBrisbane(value);
+              if (ts) return ts;
+            }
+            if (key === 'fundingRate' || key.endsWith('.fundingRate')) return formatPercentFromFraction(value);
+            if (/^(turnover24h|openInterestValue|avg7dTurnoverUsd)$/i.test(key)) return `$${compactNumber(value)}`;
+            if (/^volume24h$/i.test(key)) return compactNumber(value);
+            if (typeof value === 'object' && value !== null) return JSON.stringify(value);
+            return String(value ?? '—');
+          };
+          const entries = Object.entries(specs || {})
+            .filter(([k]) => !SPECS_HIDDEN_FIELDS.has(k))
+            .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+          if (!entries.length) {
+            setSpecsState('');
+            return;
+          }
+          const rows = entries.map(([k, v]) => `<tr><td>${SPECS_FIELD_LABELS[k] || k}</td><td>${formatSpecsValue(k, v)}</td></tr>`).join('');
+          previewSpecsEl.innerHTML = `<div class="card"><table class="specs-table">${rows}</table></div>`;
+        }
+        async function fetchJson(url, controller) {
+          const response = await fetch(url, { signal: controller.signal });
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            throw new Error(payload.error || payload.detail || `Request failed (${response.status})`);
+          }
+          return payload;
+        }
+        async function refreshPreview() {
+          const symbols = (symbolsInput?.value || '').trim();
+          const market = (marketSelect?.value || 'crypto').trim();
+          const category = (categorySelect?.value || 'linear').trim();
+          if (!symbols) {
+            clearPreview();
+            return;
+          }
+          previewController?.abort();
+          specsController?.abort();
+          previewController = new AbortController();
+          setSpecsState('');
+          try {
+            const query = new URLSearchParams({ market, category, symbols });
+            const preview = await fetchJson(`/api/preview-symbol?${query.toString()}`, previewController);
+            if (preview.status === 'empty') {
+              clearPreview();
+              return;
+            }
+            if (preview.status === 'multi') {
+              previewCanonicalEl.textContent = 'Multiple symbols entered; single-symbol preview disabled.';
+              setSpecsState('');
+              return;
+            }
+            if (preview.status !== 'resolved') {
+              previewCanonicalEl.textContent = 'Unresolved symbol/instrument.';
+              setSpecsState(preview.error || 'Unable to resolve symbol/instrument.');
+              return;
+            }
+            const canonical = String(preview.canonical || '').trim();
+            previewCanonicalEl.textContent = canonical ? `Canonical: ${canonical}` : '';
+            if (!canonical) {
+              setSpecsState('Unable to resolve symbol/instrument.');
+              return;
+            }
+            specsController = new AbortController();
+            const specsQuery = new URLSearchParams({ query: canonical, prefer: preview.prefer || '' });
+            const specsPayload = await fetchJson(`/api/instrument-specs?${specsQuery.toString()}`, specsController);
+            renderSpecs(specsPayload);
+          } catch (err) {
+            if (err?.name === 'AbortError') return;
+            previewCanonicalEl.textContent = 'Unresolved symbol/instrument.';
+            setSpecsState(err?.message || String(err));
+          }
+        }
+        function schedulePreview() {
+          clearTimeout(previewTimer);
+          previewTimer = setTimeout(refreshPreview, 250);
+        }
+
         function syncVisibility() {
           const strat = (document.getElementById('strategy') || {}).value || 'EMA';
           const market = (document.getElementById('market') || {}).value || 'crypto';
@@ -728,7 +901,11 @@ FORM_HTML = """
         document.getElementById('strategy')?.addEventListener('change', syncVisibility);
         document.getElementById('market')?.addEventListener('change', syncVisibility);
         document.getElementById('risk_mode')?.addEventListener('change', syncVisibility);
+        symbolsInput?.addEventListener('input', schedulePreview);
+        marketSelect?.addEventListener('change', schedulePreview);
+        categorySelect?.addEventListener('change', schedulePreview);
         syncVisibility();
+        schedulePreview();
       </script>
     </div>
   </body>
