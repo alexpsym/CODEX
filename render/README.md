@@ -14,7 +14,7 @@ This folder contains a lightweight FastAPI app (`render/master_service.py`) that
    The requirements file now bundles the shared dependencies used across the repo's
    scripts (Flask, pandas, bs4, pybit, etc.) so running anything from the master
    control UI won't fail due to missing modules.
-2. Add your secrets to a local `.env` file in the repository root (see **Environment variables** below).
+2. Add your secrets to `C:\Users\User\Downloads\.env` (or override with `MASTER_ENV_DIR` / `MASTER_ENV_FILE`; see **Environment variables** below). A repo-root `.env` is optional fallback only.
 3. Start the service locally:
    ```bash
    uvicorn render.master_service:app --host 0.0.0.0 --port 8000
@@ -31,7 +31,7 @@ This folder contains a lightweight FastAPI app (`render/master_service.py`) that
 5. Click **Create Web Service**. Once live, Render will expose a public URL like `https://your-app.onrender.com`. For calculator-generated alerts, point TradingView to `https://your-app.onrender.com/api/calculator/webhook`.
 
 ## 3) Environment variables
-Place these in your Render dashboard or a local `.env` file at the repo root. Adjust the names to match the scripts you use (examples below come from the existing projects):
+Place these in your Render dashboard or in your local external env file (`C:\Users\User\Downloads\.env` by default). Adjust the names to match the scripts you use (examples below come from the existing projects):
 
 - `BYBIT_API_KEY`, `BYBIT_API_SECRET`, and any other Bybit settings used by the Bybit automation scripts.
 - `OANDA_API_KEY`, `OANDA_ACCOUNT_ID`, and `OANDA_BASE_URL` for OANDA strategies.

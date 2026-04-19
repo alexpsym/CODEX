@@ -1,6 +1,4 @@
 (() => {
-    const buildScriptPath = (name) => encodeURIComponent(name).replace(/%2F/g, '/');
-
     const fetchJson = async (url, options = {}) => {
         const response = await fetch(url, options);
         if (!response.ok) {
@@ -401,11 +399,7 @@
 
     const createMonitorController = ({
         monitor,
-        scriptName,
         statusId,
-        startId,
-        stopId,
-        logId,
         waitId,
         thresholdId,
         saveId,
@@ -415,9 +409,6 @@
         customAlertsId,
     }) => {
         const statusEl = document.getElementById(statusId);
-        const startBtn = document.getElementById(startId);
-        const stopBtn = document.getElementById(stopId);
-        const logBox = document.getElementById(logId);
         const waitInput = document.getElementById(waitId);
         const thresholdInput = document.getElementById(thresholdId);
         const saveSettingsBtn = document.getElementById(saveId);
@@ -426,108 +417,32 @@
         const settingsStatus = document.getElementById(settingsStatusId);
         const customAlertsContainer = document.getElementById(customAlertsId);
 
-        let logCursor = 0;
-        let startInFlight = false;
-
-        const appendLogs = (lines) => {
-            if (!Array.isArray(lines) || !lines.length || !logBox) return;
-            const text = lines.join('\n') + '\n';
-            if (logBox.textContent === 'Waiting for output...') {
-                logBox.textContent = '';
-            }
-            logBox.textContent += text;
-            logBox.scrollTop = logBox.scrollHeight;
-        };
-
         const setRunningState = (state) => {
             const running = state === 'running';
-            const starting = state === 'starting';
+            const unavailable = state === 'unavailable';
             if (statusEl) {
-                statusEl.textContent = running ? 'Running' : (starting ? 'Starting...' : 'Stopped');
-                statusEl.style.background = running ? '#14532d' : (starting ? '#1e3a8a' : '#1f2937');
+                statusEl.textContent = running ? 'Running' : (unavailable ? 'Status unavailable' : 'Stopped');
+                statusEl.style.background = running ? '#14532d' : (unavailable ? '#7f1d1d' : '#1f2937');
             }
-            if (startBtn) startBtn.disabled = running || starting;
-            if (stopBtn) stopBtn.disabled = !running;
         };
 
         const refreshStatus = async () => {
             try {
-                const script = await fetchJson(`/api/scripts/${buildScriptPath(scriptName)}`);
-                const running = Boolean(script && script.running);
-                const starting = Boolean(script && script.starting);
-                setRunningState(running ? 'running' : (starting ? 'starting' : 'stopped'));
-                return script || { running: false, starting: false };
-            } catch (err) {
-                console.error(err);
-                if (statusEl) statusEl.textContent = 'Status unavailable';
-            }
-            return { running: false, starting: false };
-        };
-
-        const pollLogs = async () => {
-            try {
-                const snapshot = await fetchJson(`/api/logs/${buildScriptPath(scriptName)}?cursor=${logCursor}`);
-                logCursor = snapshot.cursor ?? logCursor;
-                appendLogs(snapshot.lines || []);
-            } catch (err) {
-                console.error(err);
-            }
-        };
-
-        const prepareLogTailForNewStart = async () => {
-            try {
-                const snapshot = await fetchJson(`/api/logs/${buildScriptPath(scriptName)}?cursor=0`);
-                const total = Number(snapshot?.total);
-                logCursor = Number.isFinite(total) ? total : Number(snapshot?.cursor ?? logCursor);
-            } catch (err) {
-                console.error(err);
-            }
-        };
-
-        const waitForStartResolution = async () => {
-            while (true) {
-                const script = await refreshStatus();
-                const running = Boolean(script?.running);
-                const starting = Boolean(script?.starting);
-                if (running) return true;
-                if (!starting) {
-                    const reason = script?.last_start_error || script?.last_exit_reason || 'Startup failed.';
-                    appendLogs([`Startup failed: ${reason}`]);
-                    return false;
+                const payload = await fetchJson(`/api/${monitor}-monitor/status`);
+                const uiStatus = String(payload?.ui_status || '').toLowerCase();
+                if (uiStatus === 'running') {
+                    setRunningState('running');
+                } else if (uiStatus === 'unavailable') {
+                    setRunningState('unavailable');
+                } else {
+                    setRunningState('stopped');
                 }
-                await new Promise((resolve) => setTimeout(resolve, 500));
-            }
-        };
-
-        const startScript = async () => {
-            if (startInFlight) return;
-            startInFlight = true;
-            setRunningState('starting');
-            try {
-                await prepareLogTailForNewStart();
-                await fetchJson(`/scripts/${buildScriptPath(scriptName)}/start`, { method: 'POST' });
-                await pollLogs();
-                await waitForStartResolution();
+                return payload || {};
             } catch (err) {
                 console.error(err);
-                alert(err.message || `Failed to start ${scriptName}`);
-                setRunningState('stopped');
-            } finally {
-                startInFlight = false;
+                setRunningState('unavailable');
             }
-        };
-
-        const stopScript = async () => {
-            if (stopBtn) stopBtn.disabled = true;
-            try {
-                await fetchJson(`/scripts/${buildScriptPath(scriptName)}/stop`, { method: 'POST' });
-                await refreshStatus();
-            } catch (err) {
-                console.error(err);
-                alert(err.message || `Failed to stop ${scriptName}`);
-            } finally {
-                if (stopBtn) stopBtn.disabled = false;
-            }
+            return {};
         };
 
         const loadSettings = async () => {
@@ -601,8 +516,6 @@
             }
         };
 
-        startBtn?.addEventListener('click', startScript);
-        stopBtn?.addEventListener('click', stopScript);
         saveSettingsBtn?.addEventListener('click', (event) => {
             event.preventDefault();
             saveSettings();
@@ -618,17 +531,13 @@
 
         setupCustomAlerts(monitor, customAlertsContainer);
 
-        return { refreshStatus, pollLogs, loadSettings };
+        return { refreshStatus, loadSettings };
     };
 
     const controllers = [
         createMonitorController({
             monitor: 'bybit',
-            scriptName: 'bybit_monitor',
             statusId: 'bybit-status',
-            startId: 'bybit-start-btn',
-            stopId: 'bybit-stop-btn',
-            logId: 'bybit-log-box',
             waitId: 'bybit-wait-seconds',
             thresholdId: 'bybit-threshold',
             saveId: 'bybit-save-settings',
@@ -639,11 +548,7 @@
         }),
         createMonitorController({
             monitor: 'oanda',
-            scriptName: 'oanda_monitor',
             statusId: 'oanda-status',
-            startId: 'oanda-start-btn',
-            stopId: 'oanda-stop-btn',
-            logId: 'oanda-log-box',
             waitId: 'oanda-wait-seconds',
             thresholdId: 'oanda-threshold',
             saveId: 'oanda-save-settings',
@@ -657,13 +562,11 @@
     const init = async () => {
         for (const controller of controllers) {
             await controller.refreshStatus();
-            await controller.pollLogs();
             await controller.loadSettings();
         }
         setInterval(() => {
             controllers.forEach((controller) => {
                 controller.refreshStatus();
-                controller.pollLogs();
             });
         }, 2000);
     };

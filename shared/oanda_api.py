@@ -8,35 +8,11 @@ from __future__ import annotations
 import logging
 import os
 
-from dotenv import load_dotenv
 from pathlib import Path
+from shared.env_bootstrap import load_master_env
 
-# Load environment variables from a dedicated OANDA env file so shared helpers
-# pick up credentials without requiring them to be exported in the shell. The
-# path is anchored to this module's directory and can be overridden with the
-# OANDA_ENV_FILE environment variable—for example ``OANDA_ENV_FILE=E:\\ENV\\oanda.env``
-# on Windows. Relative or ``~``-prefixed paths supplied via OANDA_ENV_FILE are
-# resolved against the module directory to match the old working directory
-# behaviour when launching the web app from elsewhere in the repository.
-MODULE_PATH = Path(__file__).resolve()
-MODULE_DIR = MODULE_PATH.parent
-# The project's ``oanda.env`` file now lives in ``E:\\ENV\\oanda.env``. Use
-# that as the default so Windows users launching tools from anywhere
-# still load the credentials without relying on the repo layout.
-DEFAULT_ENV_PATH = Path("E:/ENV/oanda.env")
-
-custom_env = os.getenv("OANDA_ENV_FILE")
-if custom_env:
-    resolved_env = Path(custom_env).expanduser()
-    if not resolved_env.is_absolute():
-        resolved_env = (MODULE_DIR / resolved_env).resolve()
-    ENV_PATH = resolved_env
-else:
-    ENV_PATH = DEFAULT_ENV_PATH
-# Always override any previously-exported placeholders so the values from
-# the selected env file (for example, ``E:\\ENV\\oanda.env``) take
-# precedence when the web app is reloaded.
-load_dotenv(ENV_PATH, override=True)
+ENV_INFO = load_master_env()
+ENV_PATH = Path(ENV_INFO.get("external_env") or ".env")
 from typing import Any, Dict, Optional
 import requests
 
