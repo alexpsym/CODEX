@@ -41,7 +41,7 @@ except Exception:  # pragma: no cover - optional in test envs
     matplotlib = None
     mdates = None
     plt = None
-from fastapi import Body, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 import httpx
@@ -4242,6 +4242,7 @@ FRIENDLY_SCRIPT_LABELS: Dict[str, str] = {
 MERGED_SCRIPT_BUTTONS: List[Dict[str, object]] = [
     {"id": "calculator", "name": "calculator", "label": "Calculator", "open_url": "/merged/calculator", "dashboard_main_view": True},
     {"id": "history", "name": "history", "label": "History", "open_url": "/merged/history", "dashboard_main_view": True},
+    {"id": "open-orders", "name": "open-orders", "label": "Open Orders and Positions", "open_url": "/merged/open-orders", "dashboard_main_view": True},
     {"id": "bounce-trader", "name": "bounce-trader", "label": "Bounce Trader", "open_url": "/merged/bounce-trader", "dashboard_main_view": True},
 ]
 
@@ -9427,12 +9428,15 @@ async def _is_oanda_order_open(*, cfg: Dict[str, str], order_id: str, mode: str)
     return False
 
 
-async def _cancel_oanda_order(*, cfg: Dict[str, str], order_id: str, mode: str) -> None:
+async def _cancel_oanda_order(*, cfg: Dict[str, str], order_id: str, mode: str, account_id: Optional[str] = None) -> None:
     headers = {
         "Authorization": f"Bearer {cfg['token']}",
         "Content-Type": "application/json",
     }
-    endpoint = f"/v3/accounts/{cfg['account_id']}/orders/{order_id}/cancel"
+    target_account_id = str(account_id or cfg.get("account_id") or "").strip()
+    if not target_account_id:
+        raise ValueError("OANDA account_id is missing.")
+    endpoint = f"/v3/accounts/{target_account_id}/orders/{order_id}/cancel"
     url = f"{cfg['base_url'].rstrip('/')}{endpoint}"
     async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
         resp = await client.put(url, headers=headers)
@@ -9440,12 +9444,15 @@ async def _cancel_oanda_order(*, cfg: Dict[str, str], order_id: str, mode: str) 
         raise ValueError(f"OANDA cancel failed ({resp.status_code}): {resp.text}")
 
 
-async def _close_oanda_trade(*, cfg: Dict[str, str], trade_id: str, mode: str) -> None:
+async def _close_oanda_trade(*, cfg: Dict[str, str], trade_id: str, mode: str, account_id: Optional[str] = None) -> None:
     headers = {
         "Authorization": f"Bearer {cfg['token']}",
         "Content-Type": "application/json",
     }
-    endpoint = f"/v3/accounts/{cfg['account_id']}/trades/{trade_id}/close"
+    target_account_id = str(account_id or cfg.get("account_id") or "").strip()
+    if not target_account_id:
+        raise ValueError("OANDA account_id is missing.")
+    endpoint = f"/v3/accounts/{target_account_id}/trades/{trade_id}/close"
     url = f"{cfg['base_url'].rstrip('/')}{endpoint}"
     async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
         resp = await client.put(url, headers=headers, json={"units": "ALL"})
@@ -12392,6 +12399,79 @@ MERGED_MONITOR_TEMPLATE = """<!doctype html>
 </body>
 </html>"""
 
+OPEN_ORDERS_TEMPLATE = """<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Open Orders and Positions</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; padding: 20px; background: #0b1220; color: #e5e7eb; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    .wrap { max-width: 1500px; margin: 0 auto; }
+    .panel { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 14px; }
+    .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
+    .status { display: inline-flex; align-items: center; border-radius: 999px; border: 1px solid #334155; padding: 3px 10px; font-size: 12px; color: #93c5fd; background: #0f172a; min-height: 24px; }
+    .btn { border: 1px solid #334155; border-radius: 8px; background: #0f172a; color: #e5e7eb; padding: 7px 12px; cursor: pointer; }
+    .btn:hover { background: #1e293b; }
+    .table-wrap { overflow: auto; border: 1px solid #1f2937; border-radius: 10px; background: #0b1220; }
+    table { border-collapse: collapse; width: 100%; min-width: 1400px; }
+    th, td { padding: 8px 10px; border-bottom: 1px solid #1f2937; white-space: nowrap; text-align: left; font-size: 13px; }
+    th { position: sticky; top: 0; z-index: 2; background: #0f172a; color: #93c5fd; }
+    tr:hover td { background: #0f172a; }
+    .muted { color: #94a3b8; font-size: 13px; }
+    .action-btn { border: 1px solid #334155; border-radius: 8px; background: #1f2937; color: #e5e7eb; padding: 5px 10px; cursor: pointer; }
+    .action-btn[disabled] { opacity: .6; cursor: default; }
+    .error-box { display: none; margin-bottom: 10px; border: 1px solid #7f1d1d; background: #3f0d12; color: #fecaca; border-radius: 10px; padding: 10px 12px; }
+    .error-box ul { margin: 8px 0 0; padding-left: 20px; }
+    #open-orders-empty { margin-top: 10px; display: none; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h2 style="margin:0 0 12px 0;">Open Orders and Positions</h2>
+    <div class="panel">
+      <div class="toolbar">
+        <button id="refresh-btn" class="btn" type="button">Refresh</button>
+        <span id="open-orders-status" class="status">Idle</span>
+      </div>
+      <div id="open-orders-errors" class="error-box">
+        <div><strong>Source errors</strong></div>
+        <ul></ul>
+      </div>
+      <div id="open-orders-empty" class="muted">No open orders, positions, or pending webhooks.</div>
+      <div class="table-wrap">
+        <table id="open-orders-table">
+          <thead>
+            <tr>
+              <th></th>
+              <th>Broker</th>
+              <th>Account</th>
+              <th>Category</th>
+              <th>Instrument</th>
+              <th>Timeframe</th>
+              <th>Type</th>
+              <th>Side</th>
+              <th>Size</th>
+              <th>Entry / Order</th>
+              <th>Current / Trigger</th>
+              <th>Stop Loss</th>
+              <th>Take Profit</th>
+              <th>Leverage / Margin</th>
+              <th>Opened</th>
+              <th>Status</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <script src="{{OPEN_ORDERS_JS_URL}}"></script>
+</body>
+</html>"""
+
 
 @app.get("/merged/history", response_class=HTMLResponse)
 async def merged_history_page() -> str:
@@ -12413,6 +12493,13 @@ async def merged_monitor_page() -> Response:
 @app.get("/merged/bounce-trader")
 async def merged_bounce_page() -> Response:
     return RedirectResponse(url="/apps/bybit_trigger_bounce_trader", status_code=307)
+
+
+@app.get("/merged/open-orders", response_class=HTMLResponse)
+async def merged_open_orders_page() -> HTMLResponse:
+    script_version = quote(str(os.getenv("APP_BUILD_STAMP") or os.getenv("RENDER_GIT_COMMIT") or app.version), safe="")
+    page = OPEN_ORDERS_TEMPLATE.replace("{{OPEN_ORDERS_JS_URL}}", f"/static/open_orders.js?v={script_version}")
+    return HTMLResponse(page)
 
 @app.get("/scripts/view/{script_name:path}", response_class=HTMLResponse)
 async def script_view_page(script_name: str) -> str:
@@ -14566,11 +14653,11 @@ def _filter_pending_webhooks(
 
 
 @app.get("/api/open-orders")
-async def list_open_orders() -> JSONResponse:
+async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
     now = time.time()
     cached_payload = _OPEN_ORDERS_CACHE.get("payload")
     expires_at = float(_OPEN_ORDERS_CACHE.get("expires_at") or 0.0)
-    if isinstance(cached_payload, dict) and now < expires_at:
+    if not force and isinstance(cached_payload, dict) and now < expires_at:
         fresh = dict(cached_payload)
         fresh["stale"] = False
         fresh.setdefault("updated_at", _utc_now_iso())
@@ -14581,7 +14668,7 @@ async def list_open_orders() -> JSONResponse:
         now = time.time()
         cached_payload = _OPEN_ORDERS_CACHE.get("payload")
         expires_at = float(_OPEN_ORDERS_CACHE.get("expires_at") or 0.0)
-        if isinstance(cached_payload, dict) and now < expires_at:
+        if not force and isinstance(cached_payload, dict) and now < expires_at:
             fresh = dict(cached_payload)
             fresh["stale"] = False
             fresh.setdefault("updated_at", _utc_now_iso())
@@ -15318,9 +15405,18 @@ async def close_open_order(item: Dict[str, Any] = Body(...)) -> JSONResponse:
         raise HTTPException(status_code=400, detail="Missing broker/type/id in request.")
 
     action = "cancel" if item_type == "order" else "close"
+    action_requested = False
 
     try:
-        if broker == "bybit":
+        if broker == "webhook" or item_type == "webhook":
+            _mark_trade_context_closed_or_cancelled(
+                pending_webhook_id=item_id,
+                status="CANCELLED",
+            )
+            _delete_pending_webhook(item_id)
+            action = "cancel"
+            action_requested = True
+        elif broker == "bybit":
             _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for(
                 "demo" if account in {"demo", "practice"} else "live"
             )
@@ -15371,23 +15467,38 @@ async def close_open_order(item: Dict[str, Any] = Body(...)) -> JSONResponse:
                     position_idx=position_idx,
                     order_link_id=str(item.get("order_link_id", "")).strip() or None,
                 )
+            action_requested = True
 
         elif broker == "oanda":
             cfg = _get_oanda_config(account)
             mode = account if account in {"demo", "practice"} else "live"
+            action_account_id = str(item.get("account_id") or cfg.get("account_id") or "").strip()
             if action == "cancel":
-                await _cancel_oanda_order(cfg=cfg, order_id=item_id, mode=mode)
+                await _cancel_oanda_order(cfg=cfg, order_id=item_id, mode=mode, account_id=action_account_id)
             else:
-                await _close_oanda_trade(cfg=cfg, trade_id=item_id, mode=mode)
+                await _close_oanda_trade(cfg=cfg, trade_id=item_id, mode=mode, account_id=action_account_id)
+            action_requested = True
         else:
             raise ValueError(f"Unsupported broker: {broker}")
+
+        if action_requested:
+            _invalidate_open_orders_cache()
+            _schedule_dropbox_upload_state_backup()
 
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    return JSONResponse({"ok": True, "broker": broker, "action": action, "id": item_id})
+    return JSONResponse(
+        {
+            "ok": True,
+            "broker": broker,
+            "action": action,
+            "id": item_id,
+            "action_requested": action_requested,
+        }
+    )
 
 
 @app.post("/scripts/{script_name:path}/start")
