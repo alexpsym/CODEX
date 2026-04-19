@@ -27,9 +27,11 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from bybit_credentials import resolve_bybit_credentials
+from shared.env_bootstrap import format_env_bootstrap_log, load_master_env
 from shared.symbol_resolution import norm_symbol, resolve_bybit_symbol_from_choices
 
 # Credential + endpoint resolution -------------------------------------------------
+_ENV_BOOTSTRAP_INFO = load_master_env()
 
 
 def get_bybit_creds() -> Tuple[str, str, str, str, str]:
@@ -39,7 +41,6 @@ def get_bybit_creds() -> Tuple[str, str, str, str, str]:
     return mode, key, secret, base_url, key_source
 
 
-BYBIT_MODE, BYBIT_API_KEY, BYBIT_API_SECRET, PRIMARY_API_BASE, BYBIT_KEY_SOURCE = get_bybit_creds()
 API_FALLBACK_BASE = os.getenv("BYBIT_API_FALLBACK_BASE") or "https://api.bytick.com"
 API_BASES = [
     base.strip()
@@ -63,6 +64,7 @@ STABLECOIN_SUFFIXES = ("USDT", "USDC", "USDD", "USD")
 SETTINGS_PATH = Path(__file__).with_name("settings.json")
 STATE_PATH = Path(__file__).with_name("state.json")
 CUSTOM_ALERTS_PATH = Path(__file__).with_name("custom_alerts.json")
+RUNTIME_STATUS_PATH = Path(__file__).with_name("runtime_status.json")
 
 _session: requests.Session | None = None
 _target_logged = False
@@ -137,6 +139,39 @@ _ALLOWED_ALERT_KINDS = {"price", "move"}
 _ALLOWED_PRICE_DIRECTIONS = {"above", "below"}
 _ALLOWED_MOVE_DIRECTIONS = {"up", "down", "either"}
 _ALLOWED_MOVE_UNITS = {"pct", "abs"}
+_runtime_started_at = _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+
+def _utc_now_iso() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+
+def _write_runtime_status(**extra: object) -> None:
+    payload = {
+        "running": False,
+        "pid": os.getpid(),
+        "started_at": _runtime_started_at,
+        "last_heartbeat_at": _utc_now_iso(),
+        "phase": "stopped",
+        "wait_seconds": 0,
+        "last_error": "",
+        "last_exit_reason": "",
+        "heartbeat_timeout_seconds": 120,
+    }
+    payload.update(extra)
+    tmp = RUNTIME_STATUS_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(RUNTIME_STATUS_PATH)
+
+
+def _heartbeat(*, phase: str, wait_seconds: int = 0, last_error: str = "") -> None:
+    _write_runtime_status(
+        running=True,
+        phase=phase,
+        wait_seconds=max(0, int(wait_seconds)),
+        last_error=(last_error or "")[:500],
+        heartbeat_timeout_seconds=max(60, int(wait_seconds) * 2 + 30),
+    )
 
 
 def _load_custom_alerts() -> list[dict]:
@@ -698,7 +733,7 @@ def _iter_api_bases() -> list[str]:
         if normalized and normalized not in bases:
             bases.append(normalized)
 
-    primary = PRIMARY_API_BASE.rstrip("/")
+    primary = get_bybit_creds()[3].rstrip("/")
     if primary and primary not in bases:
         bases.append(primary)
 
@@ -725,8 +760,8 @@ def _build_headers() -> Dict[str, str]:
 
 
 def _auth_headers(params: Dict[str, str]) -> Dict[str, str]:
-    api_key = BYBIT_API_KEY
-    api_secret = BYBIT_API_SECRET
+    _, api_key, api_secret, _primary, _source = get_bybit_creds()
+    
     if not api_key or not api_secret:
         return {}
 
@@ -916,10 +951,11 @@ def fetch_altcoin_prices() -> Dict[str, float]:
     blocked_errors: list[str] = []
     timeout = float(os.getenv("BYBIT_API_TIMEOUT", "20"))
     global _auth_notice_logged
-    have_auth = bool(BYBIT_API_KEY and BYBIT_API_SECRET)
+    mode, api_key, api_secret, _base_url, _key_source = get_bybit_creds()
+    have_auth = bool(api_key and api_secret)
     if not have_auth and not _auth_notice_logged:
         _auth_notice_logged = True
-        log(f"Bybit auth disabled: missing KEY/SECRET for selected mode={BYBIT_MODE}.")
+        log(f"Bybit auth disabled: missing KEY/SECRET for selected mode={mode}.")
 
     for api_base in _iter_api_bases():
         url = f"{api_base}{API_PATH}"
@@ -1069,12 +1105,17 @@ def send_notification(title: str, message: str) -> None:
 
 
 def wait_with_log(total_seconds: int, label: str) -> None:
-    """Wait for the given duration with a single log line."""
+    """Wait while continuously updating heartbeat status."""
     total_seconds = max(0, int(total_seconds))
     if total_seconds == 0:
         return
     log(f"{label}: sleeping for {total_seconds} seconds.")
-    time.sleep(total_seconds)
+    remaining = total_seconds
+    while remaining > 0:
+        _heartbeat(phase="waiting", wait_seconds=total_seconds)
+        chunk = min(5, remaining)
+        time.sleep(chunk)
+        remaining -= chunk
 
 
 def _load_state() -> Dict[str, object]:
@@ -1116,7 +1157,7 @@ def _fetch_klines(symbol: str, interval: str, end_ms: int | None) -> list[list[s
     }
     if end_ms is not None:
         params["end"] = str(end_ms)
-    url = f"{PRIMARY_API_BASE.rstrip('/')}{KLINE_PATH}"
+    url = f"{get_bybit_creds()[3].rstrip('/')}{KLINE_PATH}"
     response = session.get(url, params=params, timeout=20)
     response.raise_for_status()
     payload = response.json()
@@ -1238,9 +1279,10 @@ def run_monitor() -> None:
     api_targets = ", ".join(f"{base}{API_PATH}" for base in _iter_api_bases())
     log(
         "Using Bybit endpoint sequence "
-        f"[{api_targets}]?category=linear (primary from {PRIMARY_API_BASE}; override with BYBIT_BASE_URL/BYBIT_API_BASE/BYBIT_API_BASES)"
+        f"[{api_targets}]?category=linear (primary from {get_bybit_creds()[3]}; override with BYBIT_BASE_URL/BYBIT_API_BASE/BYBIT_API_BASES)"
     )
 
+    _heartbeat(phase="starting", wait_seconds=int(settings["wait_seconds"]))
     while True:
         global _logged_classifications
         _logged_classifications = set()
@@ -1254,6 +1296,7 @@ def run_monitor() -> None:
             )
             last_logged_settings = dict(settings)
         log(f"Starting price check #{iteration}...")
+        _heartbeat(phase="scanning", wait_seconds=int(settings["wait_seconds"]))
 
         try:
             prices = fetch_altcoin_prices()
@@ -1380,6 +1423,7 @@ def run_monitor() -> None:
 def main() -> None:
     """Entry point for the monitor."""
     ensure_local_only_execution()
+    log(format_env_bootstrap_log(_ENV_BOOTSTRAP_INFO))
     log("Bybit perpetual futures monitor started.")
     settings = get_runtime_settings(force=True)
     log(
@@ -1387,26 +1431,49 @@ def main() -> None:
         f"price moves +/-{settings['percent_threshold']:.1f}% compared to the previous reading."
     )
     log("Press Ctrl+C at any time to stop the script safely.")
-    auth_enabled = bool(BYBIT_API_KEY and BYBIT_API_SECRET)
+    mode, api_key, api_secret, base_url, key_source = get_bybit_creds()
+    auth_enabled = bool(api_key and api_secret)
     log(
         "BYBIT mode="
-        f"{BYBIT_MODE} base_url={PRIMARY_API_BASE} auth={'yes' if auth_enabled else 'no'} "
-        f"key_source={BYBIT_KEY_SOURCE}"
+        f"{mode} base_url={base_url} auth={'yes' if auth_enabled else 'no'} "
+        f"key_source={key_source}"
     )
     log_push_state()
     if not auth_enabled:
         global _auth_notice_logged
         _auth_notice_logged = True
-        log(f"Bybit auth disabled: missing KEY/SECRET for selected mode={BYBIT_MODE}.")
+        log(f"Bybit auth disabled: missing KEY/SECRET for selected mode={mode}.")
     if _plyer_notification is None:
         log("Desktop alerts need the 'plyer' package. Install it with: pip install plyer")
     prune_non_perpetual_custom_alerts()
-    run_monitor()
+    try:
+        run_monitor()
+        _write_runtime_status(
+            running=False,
+            phase="stopped",
+            wait_seconds=0,
+            last_exit_reason="clean_exit",
+        )
+    except Exception as exc:
+        _write_runtime_status(
+            running=False,
+            phase="error",
+            wait_seconds=0,
+            last_error=str(exc)[:500],
+            last_exit_reason="uncaught_exception",
+        )
+        raise
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
+        _write_runtime_status(
+            running=False,
+            phase="stopped",
+            wait_seconds=0,
+            last_exit_reason="keyboard_interrupt",
+        )
         log("Stopped by user request. Goodbye!")
         sys.exit(0)
