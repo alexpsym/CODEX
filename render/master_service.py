@@ -8364,6 +8364,25 @@ async def _place_bybit_order(
         if order_type == "limit" and (price_val is None or price_val <= 0):
             raise ValueError("Trendline options resolver returned invalid price.")
 
+    tick_size_dec: Optional[Decimal] = None
+    if category == "linear":
+        try:
+            symbol_meta = await _bybit_lookup_symbol(base_url, symbol)
+            if isinstance(symbol_meta, dict):
+                tick_size_dec = Decimal(str((symbol_meta.get("priceFilter") or {}).get("tickSize") or "0"))
+        except Exception:
+            tick_size_dec = None
+        if tick_size_dec is not None and tick_size_dec <= 0:
+            tick_size_dec = None
+
+    def _normalize_linear_price(value: Optional[float]) -> Optional[float]:
+        if value is None or category != "linear" or tick_size_dec is None:
+            return value
+        snapped = _snap_to_increment(Decimal(str(value)), tick_size_dec)
+        return float(snapped) if snapped is not None else value
+
+    price_val = _normalize_linear_price(price_val)
+
     body: Dict[str, object] = {
         "category": category,
         "symbol": symbol,
@@ -8402,16 +8421,18 @@ async def _place_bybit_order(
             if stop_loss_offset is not None
             else _parse_trigger_price(payload.get("stop_loss_price"))
         )
+    take_profit = _normalize_linear_price(take_profit)
+    stop_loss = _normalize_linear_price(stop_loss)
     if take_profit is not None:
         body["takeProfit"] = str(take_profit)
     if stop_loss is not None:
         body["stopLoss"] = str(stop_loss)
     if order_type == "limit" and category == "linear" and price_val is not None:
         if take_profit_offset is not None:
-            tp_target = price_val + take_profit_offset
+            tp_target = _normalize_linear_price(price_val + take_profit_offset)
             body["takeProfit"] = _format_decimal_value(tp_target)
         if stop_loss_offset is not None:
-            sl_target = price_val + stop_loss_offset
+            sl_target = _normalize_linear_price(price_val + stop_loss_offset)
             body["stopLoss"] = _format_decimal_value(sl_target)
         if "takeProfit" in body or "stopLoss" in body:
             body["tpslMode"] = "Full"
@@ -8428,6 +8449,9 @@ async def _place_bybit_order(
     planned_target_price = _parse_trigger_price(
         payload.get("planned_target_price") or payload.get("take_profit_price")
     )
+    planned_entry_price = _normalize_linear_price(planned_entry_price)
+    planned_stop_price = _normalize_linear_price(planned_stop_price)
+    planned_target_price = _normalize_linear_price(planned_target_price)
     _log_webhook_event(request_id, "order_request", {"payload": body})
 
     body_json = json.dumps(body, separators=(",", ":"))
@@ -8567,6 +8591,8 @@ async def _place_bybit_order(
                     if stop_loss_offset is not None
                     else stop_loss
                 )
+            tp_target = _normalize_linear_price(tp_target)
+            sl_target = _normalize_linear_price(sl_target)
             _log_webhook_event(
                 request_id,
                 "tpsl_computed",
@@ -8582,15 +8608,10 @@ async def _place_bybit_order(
                     "stop_loss": sl_target,
                 },
             )
-            tick_size = None
-            try:
-                symbol_meta = await _bybit_lookup_symbol(base_url, symbol)
-                tick_size = _to_float((symbol_meta or {}).get("priceFilter", {}).get("tickSize")) if isinstance(symbol_meta, dict) else None
-            except Exception:
-                tick_size = None
+            tick_size = _to_float(tick_size_dec)
 
-            existing_tp = _parse_bybit_price_level(body.get("takeProfit"))
-            existing_sl = _parse_bybit_price_level(body.get("stopLoss"))
+            existing_tp = _normalize_linear_price(_parse_bybit_price_level(body.get("takeProfit")))
+            existing_sl = _normalize_linear_price(_parse_bybit_price_level(body.get("stopLoss")))
             if _price_levels_match(existing_tp, tp_target, tick_size=tick_size) and _price_levels_match(existing_sl, sl_target, tick_size=tick_size):
                 tpsl_result = {"status": "already_applied_on_order_create"}
             else:
@@ -8640,6 +8661,8 @@ async def _place_bybit_order(
                     exc,
                 )
             live_tp, live_sl = _extract_position_tpsl_levels(latest_position)
+            live_tp = _normalize_linear_price(live_tp)
+            live_sl = _normalize_linear_price(live_sl)
             if live_tp is not None or live_sl is not None:
                 live_state_observed = True
             live_matches = _price_levels_match(live_tp, tp_target, tick_size=tick_size) and _price_levels_match(
@@ -11399,10 +11422,37 @@ def _fmt_dec(value: Decimal) -> str:
     return text.rstrip("0").rstrip(".") if "." in text else text
 
 
-def _fmt_dec_by_step(value: Decimal, step: Decimal) -> str:
-    if step and step > 0:
+def _snap_to_increment(
+    value: Optional[Decimal],
+    increment: Optional[Decimal],
+    rounding=ROUND_DOWN,
+) -> Optional[Decimal]:
+    if value is None:
+        return None
+    if increment is None or increment <= 0:
+        return value
+    return (value / increment).to_integral_value(rounding=rounding) * increment
+
+
+def _fmt_dec_by_increment(
+    value: Optional[Decimal],
+    increment: Optional[Decimal],
+    rounding=ROUND_DOWN,
+) -> Optional[str]:
+    snapped = _snap_to_increment(value, increment, rounding=rounding)
+    return _fmt_dec(snapped) if snapped is not None else None
+
+
+def _fmt_dec_by_precision(
+    value: Optional[Decimal],
+    precision: Optional[Decimal],
+    rounding=ROUND_HALF_UP,
+) -> Optional[str]:
+    if value is None:
+        return None
+    if precision and precision > 0:
         try:
-            value = value.quantize(step, rounding=ROUND_HALF_UP)
+            value = value.quantize(precision, rounding=rounding)
         except Exception:
             pass
     return _fmt_dec(value)
@@ -11859,14 +11909,18 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
 
             total_loss_usdt = qty * loss_per_unit
             reward_usdt = qty * max(Decimal("0"), target_distance - spread_quote - (entry * open_fee) - (abs(tp) * close_fee))
+            snapped_entry = _snap_to_increment(entry, tick_size) or entry
+            snapped_sl = _snap_to_increment(sl, tick_size) or sl
+            snapped_tp = _snap_to_increment(tp, tick_size) or tp
+            snapped_target_distance = _snap_to_increment(target_distance, tick_size) or target_distance
             response_payload: Dict[str, object] = {
                 "broker": "bybit",
                 "symbol": resolved_symbol,
                 "tick_size": _fmt_dec(tick_size),
-                "entry_price": _fmt_dec_by_step(entry, tick_size),
-                "stop_price": _fmt_dec_by_step(sl, tick_size),
-                "target_price": _fmt_dec_by_step(tp, tick_size),
-                "target_distance": _fmt_dec_by_step(target_distance, tick_size),
+                "entry_price": _fmt_dec(snapped_entry),
+                "stop_price": _fmt_dec(snapped_sl),
+                "target_price": _fmt_dec(snapped_tp),
+                "target_distance": _fmt_dec(snapped_target_distance),
                 "quantity": _fmt_dec(qty),
                 "notional": _fmt_dec(notional),
                 "estimated_fees_or_spread_aud": _fmt_dec(((qty * entry * open_fee) + (qty * sl * close_fee)) / aud_usd),
@@ -11876,11 +11930,11 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                 "estimated_fees_or_spread": _fmt_dec((qty * entry * open_fee) + (qty * sl * close_fee)),
                 "estimated_total_loss": _fmt_dec(total_loss_usdt),
                 "estimated_reward": _fmt_dec(max(Decimal("0"), reward_usdt)),
-                "rr": _fmt_dec_by_step((abs(tp - entry) / abs(entry - sl)) if abs(entry - sl) > 0 else Decimal("0"), Decimal("0.01")),
+                "rr": _fmt_dec_by_precision((abs(tp - entry) / abs(entry - sl)) if abs(entry - sl) > 0 else Decimal("0"), Decimal("0.01")),
                 "target_mode": target_mode,
-                "requested_rr_net": _fmt_dec_by_step(requested_rr_net, Decimal("0.01")) if requested_rr_net is not None else None,
-                "effective_rr_net": _fmt_dec_by_step(effective_rr_net, Decimal("0.01")) if effective_rr_net is not None else None,
-                "fee_buffer_r": _fmt_dec_by_step(fee_buffer_r, Decimal("0.01")) if fee_buffer_r is not None else None,
+                "requested_rr_net": _fmt_dec_by_precision(requested_rr_net, Decimal("0.01")) if requested_rr_net is not None else None,
+                "effective_rr_net": _fmt_dec_by_precision(effective_rr_net, Decimal("0.01")) if effective_rr_net is not None else None,
+                "fee_buffer_r": _fmt_dec_by_precision(fee_buffer_r, Decimal("0.01")) if fee_buffer_r is not None else None,
             }
             if warnings:
                 response_payload["warnings"] = warnings
@@ -11894,12 +11948,12 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                     "action": side,
                     "order_type": order_type,
                     "quantity": _fmt_dec(qty),
-                    "entry_price": _fmt_dec(entry),
-                    "planned_entry_price": _fmt_dec(entry),
-                    "stop_loss_price": _fmt_dec(sl),
-                    "planned_stop_price": _fmt_dec(sl),
-                    "take_profit_price": _fmt_dec(tp),
-                    "planned_target_price": _fmt_dec(tp),
+                    "entry_price": _fmt_dec(snapped_entry),
+                    "planned_entry_price": _fmt_dec(snapped_entry),
+                    "stop_loss_price": _fmt_dec(snapped_sl),
+                    "planned_stop_price": _fmt_dec(snapped_sl),
+                    "take_profit_price": _fmt_dec(snapped_tp),
+                    "planned_target_price": _fmt_dec(snapped_tp),
                     "level_anchor_mode": "actual_fill",
                     "timeframe": _normalize_timeframe(payload.get("timeframe") or ""),
                     "pending_webhook_id": pending_id,
@@ -11912,9 +11966,9 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                         "instrument": resolved_symbol,
                         "side": side,
                         "order_type": order_type,
-                        "entry_price": _fmt_dec(entry),
-                        "stop_loss": _fmt_dec(sl),
-                        "take_profit": _fmt_dec(tp),
+                        "entry_price": _fmt_dec(snapped_entry),
+                        "stop_loss": _fmt_dec(snapped_sl),
+                        "take_profit": _fmt_dec(snapped_tp),
                         "size": _fmt_dec(qty),
                         "timeframe": webhook_payload.get("timeframe") or "",
                         "status": "WAITING",
@@ -12035,10 +12089,10 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                     "broker": "oanda",
                     "symbol": symbol,
                     "tick_size": _fmt_dec(tick_size),
-                    "entry_price": _fmt_dec_by_step(entry, tick_size),
-                    "stop_price": _fmt_dec_by_step(sl, tick_size),
-                    "target_price": _fmt_dec_by_step(tp, tick_size),
-                    "target_distance": _fmt_dec_by_step(target_distance, tick_size),
+                    "entry_price": _fmt_dec_by_precision(entry, tick_size),
+                    "stop_price": _fmt_dec_by_precision(sl, tick_size),
+                    "target_price": _fmt_dec_by_precision(tp, tick_size),
+                    "target_distance": _fmt_dec_by_precision(target_distance, tick_size),
                     "quantity": _fmt_dec(units),
                     "notional": _fmt_dec(units * entry),
                     "estimated_fees_or_spread_aud": _fmt_dec(max(Decimal("0"), spread_aud)),
@@ -12048,11 +12102,11 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                     "estimated_fees_or_spread": _fmt_dec(max(Decimal("0"), spread_aud)),
                     "estimated_total_loss": _fmt_dec(loss_per_unit_aud * units),
                     "estimated_reward": _fmt_dec(reward_aud),
-                    "rr": _fmt_dec_by_step((abs(tp - entry) / abs(entry - sl)) if abs(entry - sl) > 0 else Decimal("0"), Decimal("0.01")),
+                    "rr": _fmt_dec_by_precision((abs(tp - entry) / abs(entry - sl)) if abs(entry - sl) > 0 else Decimal("0"), Decimal("0.01")),
                     "target_mode": target_mode,
-                    "requested_rr_net": _fmt_dec_by_step(requested_rr_net, Decimal("0.01")) if requested_rr_net is not None else None,
-                    "effective_rr_net": _fmt_dec_by_step(effective_rr_net, Decimal("0.01")) if effective_rr_net is not None else None,
-                    "fee_buffer_r": _fmt_dec_by_step(fee_buffer_r, Decimal("0.01")) if fee_buffer_r is not None else None,
+                    "requested_rr_net": _fmt_dec_by_precision(requested_rr_net, Decimal("0.01")) if requested_rr_net is not None else None,
+                    "effective_rr_net": _fmt_dec_by_precision(effective_rr_net, Decimal("0.01")) if effective_rr_net is not None else None,
+                    "fee_buffer_r": _fmt_dec_by_precision(fee_buffer_r, Decimal("0.01")) if fee_buffer_r is not None else None,
                 }
             if webhook_enabled:
                 pending_id = existing_pending_id or f"calc_oanda_{uuid4().hex[:16]}"
