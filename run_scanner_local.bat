@@ -3,25 +3,17 @@ setlocal
 
 set "ROOT=%~dp0"
 set "MASTER_ENV_DIR=C:\Users\User\Downloads"
+set "MASTER_ENV_FILE=C:\Users\User\Downloads\env.env"
 set "SCANNER_LOCAL_UI_MODE=1"
 
-if not defined MASTER_ENV_FILE (
-  if exist "%MASTER_ENV_DIR%\.env" set "MASTER_ENV_FILE=%MASTER_ENV_DIR%\.env"
-)
-if not defined MASTER_ENV_FILE (
-  if exist "%MASTER_ENV_DIR%\scanner.env" set "MASTER_ENV_FILE=%MASTER_ENV_DIR%\scanner.env"
-)
-if not defined MASTER_ENV_FILE (
-  if exist "%MASTER_ENV_DIR%\master.env" set "MASTER_ENV_FILE=%MASTER_ENV_DIR%\master.env"
+if not exist "%MASTER_ENV_FILE%" (
+  echo [scanner-local] ERROR: MASTER_ENV_FILE not found at %MASTER_ENV_FILE%
+  exit /b 1
 )
 
 echo [scanner-local] SCANNER_LOCAL_UI_MODE=%SCANNER_LOCAL_UI_MODE%
 echo [scanner-local] MASTER_ENV_DIR=%MASTER_ENV_DIR%
-if defined MASTER_ENV_FILE (
-  echo [scanner-local] MASTER_ENV_FILE=%MASTER_ENV_FILE%
-) else (
-  echo [scanner-local] MASTER_ENV_FILE not found. Checked .env, scanner.env, master.env in %MASTER_ENV_DIR%
-)
+echo [scanner-local] MASTER_ENV_FILE=%MASTER_ENV_FILE%
 
 set "PYTHON_EXE=python"
 if defined PYTHON set "PYTHON_EXE=%PYTHON%"

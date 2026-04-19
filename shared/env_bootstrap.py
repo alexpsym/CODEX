@@ -29,7 +29,7 @@ except Exception:  # pragma: no cover - fallback in minimal test envs
         return loaded
 
 DEFAULT_MASTER_ENV_DIR = Path(r"C:\Users\User\Downloads")
-DEFAULT_ENV_FILENAMES = (".env", "scanner.env", "master.env")
+DEFAULT_ENV_FILENAMES = ("env.env", ".env", "scanner.env", "master.env")
 
 _ENV_LOADED = False
 _ENV_INFO: dict[str, str] = {}
@@ -42,7 +42,9 @@ def _as_path(raw: str, *, base: Path) -> Path:
     return p
 
 
-def _resolve_paths(base_dir: Path | None = None) -> tuple[Path, Path, list[Path], Path | None]:
+def _resolve_paths(
+    base_dir: Path | None = None,
+) -> tuple[Path, Path, list[Path], Path | None, Path | None]:
     root = Path(base_dir).resolve() if base_dir else Path(__file__).resolve().parents[1]
     env_dir = _as_path(os.getenv("MASTER_ENV_DIR", str(DEFAULT_MASTER_ENV_DIR)), base=root)
     explicit_file_raw = os.getenv("MASTER_ENV_FILE")
@@ -57,7 +59,7 @@ def _resolve_paths(base_dir: Path | None = None) -> tuple[Path, Path, list[Path]
 
     selected = next((p for p in candidates if p.exists()), None)
     repo_fallback = (root / ".env").resolve()
-    return repo_fallback, env_dir, candidates, selected
+    return repo_fallback, env_dir, candidates, selected, explicit_file
 
 
 def _paths_csv(paths: Iterable[Path]) -> str:
@@ -71,10 +73,11 @@ def load_master_env(*, base_dir: Path | None = None, force_reload: bool = False)
     if _ENV_LOADED and not force_reload:
         return dict(_ENV_INFO)
 
-    repo_fallback, env_dir, candidates, external_env = _resolve_paths(base_dir=base_dir)
+    repo_fallback, env_dir, candidates, external_env, explicit_file = _resolve_paths(base_dir=base_dir)
 
     repo_fallback_used = False
-    if repo_fallback.exists():
+    explicit_missing = explicit_file is not None and not explicit_file.exists()
+    if repo_fallback.exists() and not explicit_missing:
         repo_fallback_used = bool(load_dotenv(repo_fallback, override=False))
 
     external_loaded = False
@@ -83,7 +86,7 @@ def load_master_env(*, base_dir: Path | None = None, force_reload: bool = False)
 
     _ENV_INFO = {
         "configured_dir": str(env_dir),
-        "configured_file": os.getenv("MASTER_ENV_FILE", "").strip(),
+        "configured_file": str(explicit_file) if explicit_file is not None else "",
         "loaded_file": str(external_env) if external_env else "",
         "external_loaded": "1" if external_loaded else "0",
         "repo_fallback_used": "1" if repo_fallback_used else "0",

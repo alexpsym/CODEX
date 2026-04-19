@@ -147,16 +147,41 @@ def test_env_bootstrap_candidate_search_order(tmp_path: Path, monkeypatch: pytes
     env_dir = tmp_path / "downloads"
     env_dir.mkdir()
     (env_dir / "scanner.env").write_text("OANDA_API_KEY=scanner_key\n", encoding="utf-8")
+    (env_dir / "env.env").write_text("OANDA_API_KEY=preferred_key\n", encoding="utf-8")
 
     monkeypatch.setenv("MASTER_ENV_DIR", str(env_dir))
     monkeypatch.delenv("MASTER_ENV_FILE", raising=False)
     info = env_bootstrap.load_master_env(base_dir=tmp_path, force_reload=True)
-    assert info["loaded_file"].endswith("scanner.env")
+    assert info["loaded_file"].endswith("env.env")
     assert info["external_loaded"] == "1"
     checked = info["checked_files"]
+    assert str((env_dir / "env.env").resolve()) in checked
     assert str((env_dir / ".env").resolve()) in checked
     assert str((env_dir / "scanner.env").resolve()) in checked
     assert str((env_dir / "master.env").resolve()) in checked
+
+
+def test_env_bootstrap_explicit_file_wins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from shared import env_bootstrap
+
+    env_dir = tmp_path / "downloads"
+    env_dir.mkdir()
+    explicit = env_dir / "env.env"
+    explicit.write_text("BYBIT_API_KEY1=explicit_key\n", encoding="utf-8")
+    (env_dir / ".env").write_text("BYBIT_API_KEY1=fallback_key\n", encoding="utf-8")
+    monkeypatch.setenv("MASTER_ENV_DIR", str(env_dir))
+    monkeypatch.setenv("MASTER_ENV_FILE", str(explicit))
+    info = env_bootstrap.load_master_env(base_dir=tmp_path, force_reload=True)
+    assert info["loaded_file"] == str(explicit.resolve())
+    assert info["configured_file"] == str(explicit.resolve())
+    assert info["external_loaded"] == "1"
+
+
+def test_run_scanner_local_bat_sets_explicit_env_file() -> None:
+    content = (ROOT / "run_scanner_local.bat").read_text(encoding="utf-8")
+    assert 'set "MASTER_ENV_FILE=C:\\Users\\User\\Downloads\\env.env"' in content
+    assert 'if not exist "%MASTER_ENV_FILE%" (' in content
+    assert "exit /b 1" in content
 
 
 def test_compute_autostart_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
