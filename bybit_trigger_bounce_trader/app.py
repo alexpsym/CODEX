@@ -729,6 +729,7 @@ FORM_HTML = """
       {% endif %}
 
       <script>
+        const APP_ROOT = ({{ app_root|tojson }} || '').replace(/\\/$/, '');
         const previewCanonicalEl = document.getElementById('preview-canonical-symbol');
         const previewSpecsEl = document.getElementById('preview-instrument-specs');
         const symbolsInput = document.querySelector('input[name="symbols"]');
@@ -829,6 +830,10 @@ FORM_HTML = """
           }
           return payload;
         }
+        function appApiPath(path) {
+          const normalized = String(path || '').startsWith('/') ? path : `/${path}`;
+          return `${APP_ROOT}${normalized}`;
+        }
         async function refreshPreview() {
           const symbols = (symbolsInput?.value || '').trim();
           const market = (marketSelect?.value || 'crypto').trim();
@@ -841,9 +846,11 @@ FORM_HTML = """
           specsController?.abort();
           previewController = new AbortController();
           setSpecsState('');
+          let canonical = '';
+          let specsPrefer = '';
           try {
             const query = new URLSearchParams({ market, category, symbols });
-            const preview = await fetchJson(`/api/preview-symbol?${query.toString()}`, previewController);
+            const preview = await fetchJson(`${appApiPath('/api/preview-symbol')}?${query.toString()}`, previewController);
             if (preview.status === 'empty') {
               clearPreview();
               return;
@@ -858,20 +865,28 @@ FORM_HTML = """
               setSpecsState(preview.error || 'Unable to resolve symbol/instrument.');
               return;
             }
-            const canonical = String(preview.canonical || '').trim();
+            canonical = String(preview.canonical || '').trim();
+            specsPrefer = String(preview.prefer || '').trim();
             previewCanonicalEl.textContent = canonical ? `Canonical: ${canonical}` : '';
             if (!canonical) {
               setSpecsState('Unable to resolve symbol/instrument.');
               return;
             }
+          } catch (err) {
+            if (err?.name === 'AbortError') return;
+            previewCanonicalEl.textContent = 'Symbol preview lookup failed.';
+            setSpecsState(err?.message || 'Symbol preview lookup failed.');
+            return;
+          }
+
+          try {
             specsController = new AbortController();
-            const specsQuery = new URLSearchParams({ query: canonical, prefer: preview.prefer || '' });
+            const specsQuery = new URLSearchParams({ query: canonical, prefer: specsPrefer });
             const specsPayload = await fetchJson(`/api/instrument-specs?${specsQuery.toString()}`, specsController);
             renderSpecs(specsPayload);
           } catch (err) {
             if (err?.name === 'AbortError') return;
-            previewCanonicalEl.textContent = 'Unresolved symbol/instrument.';
-            setSpecsState(err?.message || String(err));
+            setSpecsState(`Instrument specs lookup failed for ${canonical || 'resolved symbol'}: ${err?.message || String(err)}`);
           }
         }
         function schedulePreview() {
