@@ -29,6 +29,9 @@ from zoneinfo import ZoneInfo
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from shared.env_bootstrap import format_env_bootstrap_log, load_master_env
+
+_ENV_BOOTSTRAP_INFO = load_master_env()
 
 API_PATH_PRICING = "/v3/accounts/{accountID}/pricing"
 API_PATH_INSTRUMENTS = "/v3/accounts/{accountID}/instruments"
@@ -45,6 +48,7 @@ DEFAULT_ATH_ATL_BACKFILL_MAX_PAGES = int(os.getenv("OANDA_ATH_ATL_BACKFILL_MAX_P
 SETTINGS_PATH = Path(__file__).with_name("settings.json")
 STATE_PATH = Path(__file__).with_name("state.json")
 CUSTOM_ALERTS_PATH = Path(__file__).with_name("custom_alerts.json")
+RUNTIME_STATUS_PATH = Path(__file__).with_name("runtime_status.json")
 
 _session: requests.Session | None = None
 _settings_cache: Dict[str, float] | None = None
@@ -96,6 +100,52 @@ _ALLOWED_ALERT_KINDS = {"price", "move"}
 _ALLOWED_PRICE_DIRECTIONS = {"above", "below"}
 _ALLOWED_MOVE_DIRECTIONS = {"up", "down", "either"}
 _ALLOWED_MOVE_UNITS = {"pips", "pct"}
+_runtime_started_at = _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+
+def _utc_now_iso() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).isoformat()
+
+
+def _write_runtime_status(**extra: object) -> None:
+    payload = {
+        "running": False,
+        "pid": os.getpid(),
+        "started_at": _runtime_started_at,
+        "last_heartbeat_at": _utc_now_iso(),
+        "phase": "stopped",
+        "wait_seconds": 0,
+        "last_error": "",
+        "last_exit_reason": "",
+        "heartbeat_timeout_seconds": 120,
+    }
+    payload.update(extra)
+    tmp = RUNTIME_STATUS_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    tmp.replace(RUNTIME_STATUS_PATH)
+
+
+def _heartbeat(*, phase: str, wait_seconds: int = 0, last_error: str = "") -> None:
+    _write_runtime_status(
+        running=True,
+        phase=phase,
+        wait_seconds=max(0, int(wait_seconds)),
+        last_error=(last_error or "")[:500],
+        heartbeat_timeout_seconds=max(60, int(wait_seconds) * 2 + 30),
+    )
+
+
+def wait_with_heartbeat(total_seconds: int, label: str) -> None:
+    total_seconds = max(0, int(total_seconds))
+    if total_seconds <= 0:
+        return
+    log(f"{label}: sleeping for {total_seconds} seconds.")
+    remaining = total_seconds
+    while remaining > 0:
+        _heartbeat(phase="waiting", wait_seconds=total_seconds)
+        chunk = min(5, remaining)
+        time.sleep(chunk)
+        remaining -= chunk
 
 
 def _normalize_oanda_symbol(raw: str) -> str:
@@ -842,7 +892,12 @@ def run_monitor() -> None:
     token = _oanda_token()
     account_id = _oanda_account_id()
     if not token or not account_id:
-        raise SystemExit("Missing OANDA_API_KEY (or OANDA_ACCESS_TOKEN) and/or OANDA_ACCOUNT_ID")
+        checked = _ENV_BOOTSTRAP_INFO.get("checked_files") or "<none>"
+        loaded = _ENV_BOOTSTRAP_INFO.get("loaded_file") or "<none>"
+        raise SystemExit(
+            "Missing OANDA_API_KEY (or OANDA_ACCESS_TOKEN) and/or OANDA_ACCOUNT_ID. "
+            f"Checked external env candidates: {checked}. Loaded file: {loaded}"
+        )
     base_url = _oanda_base_url()
     settings = get_runtime_settings(force=True)
     env_instruments = (os.getenv("OANDA_INSTRUMENTS") or "").strip()
@@ -879,6 +934,7 @@ def run_monitor() -> None:
     last_logged_settings = None
     iteration = 0
     history_keep_s = int(os.getenv("OANDA_PRICE_HISTORY_SECONDS", "3600"))
+    _heartbeat(phase="starting", wait_seconds=int(settings["wait_seconds"]))
 
     while True:
         iteration += 1
@@ -891,6 +947,7 @@ def run_monitor() -> None:
             )
             last_logged_settings = dict(settings)
         log(f"Starting price check #{iteration}...")
+        _heartbeat(phase="scanning", wait_seconds=int(settings["wait_seconds"]))
 
         try:
             prices, next_since = fetch_prices(base_url, token, account_id, instruments, since)
@@ -902,7 +959,7 @@ def run_monitor() -> None:
             traceback.print_exc()
             print("-" * 80)
             log("Waiting 30 seconds before trying again...")
-            time.sleep(30)
+            wait_with_heartbeat(30, "Retry delay")
             continue
 
         log(f"Received {len(prices)} prices from OANDA.")
@@ -966,20 +1023,43 @@ def run_monitor() -> None:
 
         wait_s = int(settings["wait_seconds"])
         log(f"Waiting {wait_s} seconds before the next price check.")
-        time.sleep(wait_s)
+        wait_with_heartbeat(wait_s, "Waiting for the next check")
 
 
 def main() -> None:
     ensure_local_only_execution()
+    log(format_env_bootstrap_log(_ENV_BOOTSTRAP_INFO))
     log("OANDA forex monitor started.")
     if not SETTINGS_PATH.exists():
         update_runtime_settings()
-    run_monitor()
+    try:
+        run_monitor()
+        _write_runtime_status(
+            running=False,
+            phase="stopped",
+            wait_seconds=0,
+            last_exit_reason="clean_exit",
+        )
+    except Exception as exc:
+        _write_runtime_status(
+            running=False,
+            phase="error",
+            wait_seconds=0,
+            last_error=str(exc)[:500],
+            last_exit_reason="uncaught_exception",
+        )
+        raise
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
+        _write_runtime_status(
+            running=False,
+            phase="stopped",
+            wait_seconds=0,
+            last_exit_reason="keyboard_interrupt",
+        )
         log("Stopped by user request. Goodbye!")
         sys.exit(0)
