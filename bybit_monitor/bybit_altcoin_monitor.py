@@ -128,13 +128,6 @@ def _get_telegram_credentials() -> tuple[str, str]:
     chat_id = os.getenv("TELEGRAM_CHAT_ID") or ""
     return token, chat_id
 
-try:  # Optional helper for desktop notifications
-    from plyer import notification as _plyer_notification
-except Exception:  # pragma: no cover - very environment specific
-    _plyer_notification = None
-
-_notification_warning_given = False
-
 _ALLOWED_ALERT_KINDS = {"price", "move"}
 _ALLOWED_PRICE_DIRECTIONS = {"above", "below"}
 _ALLOWED_MOVE_DIRECTIONS = {"up", "down", "either"}
@@ -1061,46 +1054,13 @@ def fetch_altcoin_prices() -> Dict[str, float]:
 
 
 def send_notification(title: str, message: str) -> None:
-    """Send Telegram + desktop notifications, falling back to console beeps."""
+    """Send Telegram notifications, falling back to console logging only."""
 
-    global _notification_warning_given
-    notification_sent = False
-
-    # Push notification (Telegram)
-    push_sent = send_push_notification(title, message)
-    notification_sent = notification_sent or push_sent
-
-    # Desktop notification where supported
-    if _plyer_notification is not None:
-        try:
-            _plyer_notification.notify(
-                title=title,
-                message=message,
-                app_name="Bybit Altcoin Monitor",
-                timeout=15,
-            )
-            notification_sent = True
-            log("Desktop notification sent successfully.")
-        except Exception as exc:  # pragma: no cover - depends on OS desktop support
-            log(f"Desktop notification attempt failed: {exc}")
-
-    if not notification_sent:
-        if not _notification_warning_given:
-            _notification_warning_given = True
-            log(
-                "Desktop/Telegram notifications unavailable. Install 'plyer' for desktop and set TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID env vars for Telegram alerts, then restart this script."
-            )
-        # Audible fallback if possible
-        try:  # pragma: no cover - OS specific
-            if sys.platform.startswith("win"):
-                import winsound
-
-                winsound.MessageBeep()  # type: ignore[attr-defined]
-            else:
-                sys.stdout.write("\a")
-                sys.stdout.flush()
-        except Exception:
-            pass
+    if not send_push_notification(title, message):
+        if _push_configured():
+            log("Telegram alert delivery failed; using console logging fallback only.")
+        else:
+            log("Telegram alert not sent because Telegram is not configured.")
         log("ALERT: " + message)
 
 
@@ -1443,8 +1403,6 @@ def main() -> None:
         global _auth_notice_logged
         _auth_notice_logged = True
         log(f"Bybit auth disabled: missing KEY/SECRET for selected mode={mode}.")
-    if _plyer_notification is None:
-        log("Desktop alerts need the 'plyer' package. Install it with: pip install plyer")
     prune_non_perpetual_custom_alerts()
     try:
         run_monitor()
