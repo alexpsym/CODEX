@@ -6,13 +6,12 @@
   const emptyState = document.getElementById('open-orders-empty');
   const errorsBox = document.getElementById('open-orders-errors');
   const errorsList = errorsBox?.querySelector('ul');
-  const POLL_MS = 10_000;
-  const HIDDEN_MULTIPLIER = 3;
   let refreshInFlight = null;
-  let pollTimer = null;
   let hasData = false;
 
   const fmt = (v) => (v === null || v === undefined || v === '' ? '—' : v);
+  const setBadge = (message) => { if (statusBadge) statusBadge.textContent = message; };
+
   const formatTimestamp = (value) => {
     if (!value) return '—';
     const n = Number(value);
@@ -24,8 +23,6 @@
     const d = new Date(value);
     return Number.isNaN(d.getTime()) ? String(value) : d.toLocaleString();
   };
-
-  const setBadge = (message) => { if (statusBadge) statusBadge.textContent = message; };
 
   const formatSourceErrors = (errors = []) => {
     if (!Array.isArray(errors)) return [];
@@ -66,18 +63,29 @@
     return bodyText ? JSON.parse(bodyText) : {};
   };
 
+  const resolveAccountLabel = (row) => {
+    const parts = [];
+    const account = String(row?.account || '').trim();
+    const accountId = String(row?.account_id || '').trim();
+    const suffix = String(row?.account_label_suffix || '').trim();
+    if (account) parts.push(account);
+    if (accountId) parts.push(accountId);
+    if (suffix) parts.push(suffix);
+    return parts.join(' · ') || '—';
+  };
+
   const isActionableRow = (row) => {
     if (!row || typeof row !== 'object') return false;
     if (row.parent_id || row.parent_order_id) return false;
     const status = String(row.status || '').toLowerCase();
     if (status.includes('bounce waiting')) return false;
     const type = String(row.type || '').toLowerCase();
-    return type === 'order' || type === 'position' || type === 'trade';
+    return type === 'order' || type === 'position' || type === 'trade' || type === 'webhook';
   };
 
   const actionLabelFor = (row) => {
     const type = String(row?.type || '').toLowerCase();
-    if (type === 'order') return 'Cancel';
+    if (type === 'order' || type === 'webhook') return 'Cancel';
     if (type === 'position' || type === 'trade') return 'Close';
     return null;
   };
@@ -97,8 +105,8 @@
       if (!response.ok) {
         throw new Error(data?.detail || `${response.status} ${response.statusText}`);
       }
+      setBadge('Action accepted. Refreshing...');
       await refresh();
-      setBadge('Updated');
     } catch (err) {
       btn.disabled = false;
       btn.textContent = prev;
@@ -157,13 +165,15 @@
         exp.onclick = () => {
           const open = exp.textContent === '▾';
           exp.textContent = open ? '▸' : '▾';
-          document.querySelectorAll(`tr[data-parent="${idx}"]`).forEach((r) => r.style.display = open ? 'none' : '');
+          document.querySelectorAll(`tr[data-parent="${idx}"]`).forEach((r) => { r.style.display = open ? 'none' : ''; });
         };
         expTd.appendChild(exp);
-      } else expTd.textContent = '—';
+      } else {
+        expTd.textContent = '—';
+      }
       row.appendChild(expTd);
 
-      [item.broker, item.account, item.category, item.instrument, item.timeframe, item.type, item.side, item.size, item.entry_price || item.order_price, item.current_price, item.stop_loss, item.take_profit, item.leverage, formatTimestamp(item.opened_at), item.status].forEach((v) => {
+      [item.broker, resolveAccountLabel(item), item.category, item.instrument, item.timeframe, item.type, item.side, item.size, item.entry_price || item.order_price, item.current_price, item.stop_loss, item.take_profit, item.leverage, formatTimestamp(item.opened_at), item.status].forEach((v) => {
         const td = document.createElement('td');
         td.textContent = fmt(v);
         row.appendChild(td);
@@ -182,23 +192,7 @@
         cExp.textContent = '';
         cRow.appendChild(cExp);
 
-        [
-          child.broker,
-          child.account,
-          child.category,
-          child.instrument,
-          child.timeframe,
-          child.type,
-          child.side,
-          child.size,
-          child.entry_price || child.order_price,
-          child.current_price,
-          child.stop_loss,
-          child.take_profit,
-          child.leverage,
-          formatTimestamp(child.opened_at),
-          child.status,
-        ].forEach((v) => {
+        [child.broker, resolveAccountLabel(child), child.category, child.instrument, child.timeframe, child.type, child.side, child.size, child.entry_price || child.order_price, child.current_price, child.stop_loss, child.take_profit, child.leverage, formatTimestamp(child.opened_at), child.status].forEach((v) => {
           const td = document.createElement('td');
           td.textContent = fmt(v);
           cRow.appendChild(td);
@@ -218,7 +212,7 @@
     refreshInFlight = (async () => {
       try {
         setBadge('Loading...');
-        const payload = await fetchJson('/api/open-orders');
+        const payload = await fetchJson('/api/open-orders?force=1');
         render(payload.items || [], payload.errors || []);
         const stale = Boolean(payload.stale);
         const errCount = Array.isArray(payload.errors) ? payload.errors.length : 0;
@@ -247,15 +241,6 @@
     return refreshInFlight;
   };
 
-  const restartPolling = () => {
-    if (pollTimer) clearInterval(pollTimer);
-    const multiplier = document.visibilityState === 'hidden' ? HIDDEN_MULTIPLIER : 1;
-    pollTimer = setInterval(() => { refresh(); }, POLL_MS * multiplier);
-  };
-
   refreshBtn?.addEventListener('click', refresh);
   refresh();
-  restartPolling();
-  document.addEventListener('visibilitychange', restartPolling);
-  window.addEventListener('beforeunload', () => { if (pollTimer) clearInterval(pollTimer); });
 })();
