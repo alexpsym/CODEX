@@ -29,9 +29,9 @@ from zoneinfo import ZoneInfo
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from shared.env_bootstrap import load_master_env
+from shared.env_bootstrap import format_env_bootstrap_log, load_master_env
 
-load_master_env()
+_ENV_BOOTSTRAP_INFO = load_master_env()
 
 API_PATH_PRICING = "/v3/accounts/{accountID}/pricing"
 API_PATH_INSTRUMENTS = "/v3/accounts/{accountID}/instruments"
@@ -892,7 +892,12 @@ def run_monitor() -> None:
     token = _oanda_token()
     account_id = _oanda_account_id()
     if not token or not account_id:
-        raise SystemExit("Missing OANDA_API_KEY (or OANDA_ACCESS_TOKEN) and/or OANDA_ACCOUNT_ID")
+        checked = _ENV_BOOTSTRAP_INFO.get("checked_files") or "<none>"
+        loaded = _ENV_BOOTSTRAP_INFO.get("loaded_file") or "<none>"
+        raise SystemExit(
+            "Missing OANDA_API_KEY (or OANDA_ACCESS_TOKEN) and/or OANDA_ACCOUNT_ID. "
+            f"Checked external env candidates: {checked}. Loaded file: {loaded}"
+        )
     base_url = _oanda_base_url()
     settings = get_runtime_settings(force=True)
     env_instruments = (os.getenv("OANDA_INSTRUMENTS") or "").strip()
@@ -1023,6 +1028,7 @@ def run_monitor() -> None:
 
 def main() -> None:
     ensure_local_only_execution()
+    log(format_env_bootstrap_log(_ENV_BOOTSTRAP_INFO))
     log("OANDA forex monitor started.")
     if not SETTINGS_PATH.exists():
         update_runtime_settings()

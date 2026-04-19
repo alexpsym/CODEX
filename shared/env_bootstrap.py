@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Iterable
+
 try:
     from dotenv import load_dotenv
 except Exception:  # pragma: no cover - fallback in minimal test envs
@@ -27,29 +29,39 @@ except Exception:  # pragma: no cover - fallback in minimal test envs
         return loaded
 
 DEFAULT_MASTER_ENV_DIR = Path(r"C:\Users\User\Downloads")
-DEFAULT_MASTER_ENV_FILENAME = ".env"
+DEFAULT_ENV_FILENAMES = (".env", "scanner.env", "master.env")
 
 _ENV_LOADED = False
 _ENV_INFO: dict[str, str] = {}
 
 
-def _resolve_paths(base_dir: Path | None = None) -> tuple[Path, Path | None]:
+def _as_path(raw: str, *, base: Path) -> Path:
+    p = Path(raw).expanduser()
+    if not p.is_absolute():
+        p = (base / p).resolve()
+    return p
+
+
+def _resolve_paths(base_dir: Path | None = None) -> tuple[Path, Path, list[Path], Path | None]:
     root = Path(base_dir).resolve() if base_dir else Path(__file__).resolve().parents[1]
-    env_dir_raw = os.getenv("MASTER_ENV_DIR", str(DEFAULT_MASTER_ENV_DIR))
-    env_dir = Path(env_dir_raw).expanduser()
-    if not env_dir.is_absolute():
-        env_dir = (root / env_dir).resolve()
+    env_dir = _as_path(os.getenv("MASTER_ENV_DIR", str(DEFAULT_MASTER_ENV_DIR)), base=root)
+    explicit_file_raw = os.getenv("MASTER_ENV_FILE")
+    explicit_file = _as_path(explicit_file_raw, base=env_dir) if explicit_file_raw else None
 
-    env_file_raw = os.getenv("MASTER_ENV_FILE")
-    if env_file_raw:
-        env_file = Path(env_file_raw).expanduser()
-        if not env_file.is_absolute():
-            env_file = (env_dir / env_file).resolve()
+    candidates: list[Path] = []
+    if explicit_file is not None:
+        candidates.append(explicit_file)
     else:
-        env_file = (env_dir / DEFAULT_MASTER_ENV_FILENAME).resolve()
+        for filename in DEFAULT_ENV_FILENAMES:
+            candidates.append((env_dir / filename).resolve())
 
+    selected = next((p for p in candidates if p.exists()), None)
     repo_fallback = (root / ".env").resolve()
-    return repo_fallback, env_file
+    return repo_fallback, env_dir, candidates, selected
+
+
+def _paths_csv(paths: Iterable[Path]) -> str:
+    return ";".join(str(p) for p in paths)
 
 
 def load_master_env(*, base_dir: Path | None = None, force_reload: bool = False) -> dict[str, str]:
@@ -59,21 +71,38 @@ def load_master_env(*, base_dir: Path | None = None, force_reload: bool = False)
     if _ENV_LOADED and not force_reload:
         return dict(_ENV_INFO)
 
-    repo_fallback, external_env = _resolve_paths(base_dir=base_dir)
+    repo_fallback, env_dir, candidates, external_env = _resolve_paths(base_dir=base_dir)
 
-    # Backward-compatible fallback: repo root .env (never required).
+    repo_fallback_used = False
     if repo_fallback.exists():
-        load_dotenv(repo_fallback, override=False)
+        repo_fallback_used = bool(load_dotenv(repo_fallback, override=False))
 
     external_loaded = False
-    if external_env and external_env.exists():
-        load_dotenv(external_env, override=True)
-        external_loaded = True
+    if external_env is not None and external_env.exists():
+        external_loaded = bool(load_dotenv(external_env, override=True))
 
     _ENV_INFO = {
-        "repo_env": str(repo_fallback),
-        "external_env": str(external_env) if external_env else "",
+        "configured_dir": str(env_dir),
+        "configured_file": os.getenv("MASTER_ENV_FILE", "").strip(),
+        "loaded_file": str(external_env) if external_env else "",
         "external_loaded": "1" if external_loaded else "0",
+        "repo_fallback_used": "1" if repo_fallback_used else "0",
+        "repo_env": str(repo_fallback),
+        "checked_files": _paths_csv(candidates),
     }
     _ENV_LOADED = True
     return dict(_ENV_INFO)
+
+
+def format_env_bootstrap_log(info: dict[str, str] | None = None) -> str:
+    payload = info or _ENV_INFO or {}
+    loaded_file = payload.get("loaded_file") or "<none>"
+    return (
+        "MASTER_ENV "
+        f"configured_dir={payload.get('configured_dir', '')} "
+        f"configured_file={payload.get('configured_file', '') or '<auto>'} "
+        f"loaded_file={loaded_file} "
+        f"external_loaded={'yes' if payload.get('external_loaded') == '1' else 'no'} "
+        f"repo_fallback_used={'yes' if payload.get('repo_fallback_used') == '1' else 'no'} "
+        f"checked={payload.get('checked_files', '')}"
+    )

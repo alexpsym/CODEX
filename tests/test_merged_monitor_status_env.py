@@ -139,3 +139,48 @@ def test_wait_helpers_refresh_heartbeat(monkeypatch: pytest.MonkeyPatch) -> None
     oanda_forex_monitor.wait_with_heartbeat(12, "test")
     assert len(oanda_ticks) >= 3
     assert all(phase == "waiting" for phase, _ in oanda_ticks)
+
+
+def test_env_bootstrap_candidate_search_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from shared import env_bootstrap
+
+    env_dir = tmp_path / "downloads"
+    env_dir.mkdir()
+    (env_dir / "scanner.env").write_text("OANDA_API_KEY=scanner_key\n", encoding="utf-8")
+
+    monkeypatch.setenv("MASTER_ENV_DIR", str(env_dir))
+    monkeypatch.delenv("MASTER_ENV_FILE", raising=False)
+    info = env_bootstrap.load_master_env(base_dir=tmp_path, force_reload=True)
+    assert info["loaded_file"].endswith("scanner.env")
+    assert info["external_loaded"] == "1"
+    checked = info["checked_files"]
+    assert str((env_dir / ".env").resolve()) in checked
+    assert str((env_dir / "scanner.env").resolve()) in checked
+    assert str((env_dir / "master.env").resolve()) in checked
+
+
+def test_compute_autostart_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "SCANNER_LOCAL_UI_MODE", False)
+    monkeypatch.delenv("AUTOSTART_SCRIPTS", raising=False)
+    names_default = master_service._compute_autostart_scripts()
+    assert "fxweekend-clone" in names_default
+
+    monkeypatch.setenv("AUTOSTART_SCRIPTS", "  ")
+    assert master_service._compute_autostart_scripts() == []
+
+    monkeypatch.setenv("AUTOSTART_SCRIPTS", "OFF")
+    assert master_service._compute_autostart_scripts() == []
+
+    monkeypatch.setattr(master_service, "SCANNER_LOCAL_UI_MODE", True)
+    monkeypatch.delenv("AUTOSTART_SCRIPTS", raising=False)
+    assert master_service._compute_autostart_scripts() == []
+
+
+def test_oanda_config_error_includes_env_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OANDA_API_KEY", raising=False)
+    monkeypatch.delenv("OANDA_ACCOUNT_ID", raising=False)
+    with pytest.raises(ValueError) as exc:
+        master_service._get_oanda_config("live")
+    message = str(exc.value)
+    assert "env_loaded_file=" in message
+    assert "env_checked=" in message

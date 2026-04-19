@@ -12,7 +12,7 @@ from pathlib import Path
 from shared.env_bootstrap import load_master_env
 
 ENV_INFO = load_master_env()
-ENV_PATH = Path(ENV_INFO.get("external_env") or ".env")
+ENV_PATH = Path(ENV_INFO.get("loaded_file") or ".env")
 from typing import Any, Dict, Optional
 import requests
 

@@ -29,8 +29,8 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-from shared.env_bootstrap import load_master_env
-load_master_env(base_dir=BASE_DIR)
+from shared.env_bootstrap import format_env_bootstrap_log, load_master_env
+_MASTER_ENV_INFO = load_master_env(base_dir=BASE_DIR)
 
 try:
     import matplotlib
@@ -149,6 +149,7 @@ LOCAL_ONLY_SCRIPTS = {"bybit_monitor", "oanda_monitor"}
 BYBIT_RUNTIME_STATUS_PATH = BASE_DIR / "bybit_monitor" / "runtime_status.json"
 OANDA_RUNTIME_STATUS_PATH = BASE_DIR / "oanda_monitor" / "runtime_status.json"
 SCANNER_HEARTBEAT_GRACE_SECONDS = 30
+SCANNER_LOCAL_UI_MODE = os.getenv("SCANNER_LOCAL_UI_MODE", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _is_render_env() -> bool:
@@ -158,6 +159,16 @@ def _is_render_env() -> bool:
         or os.getenv("RENDER_EXTERNAL_URL")
         or os.getenv("RENDER_EXTERNAL_HOSTNAME")
     )
+
+
+def _is_scanner_local_ui_mode() -> bool:
+    return SCANNER_LOCAL_UI_MODE
+
+
+def _env_source_hint() -> str:
+    loaded = _MASTER_ENV_INFO.get("loaded_file") or "<none>"
+    checked = _MASTER_ENV_INFO.get("checked_files") or "<none>"
+    return f"env_loaded_file={loaded}; env_checked={checked}"
 
 
 def _parse_iso_datetime(value: object) -> datetime | None:
@@ -4411,24 +4422,6 @@ COINSPOT_HISTORY_JOBS: Dict[str, CoinspotHistoryJob] = {}
 AUTOSTART_LOGGER = logging.getLogger("uvicorn.error")
 DEFAULT_AUTOSTART_SCRIPTS = "fxweekend-clone"
 
-_AUTOSTART_ENV = os.getenv("AUTOSTART_SCRIPTS")
-if _AUTOSTART_ENV is None or not _AUTOSTART_ENV.strip():
-    _AUTOSTART_ENV = DEFAULT_AUTOSTART_SCRIPTS
-
-# AUTOSTART_SCRIPTS supports:
-#   - comma-separated script names
-#   - ALL or * to start every discovered script
-_AUTOSTART_EXCLUDE_ENV = os.getenv("AUTOSTART_EXCLUDE") or ""
-AUTOSTART_EXCLUDE = {
-    name.strip()
-    for name in _AUTOSTART_EXCLUDE_ENV.split(",")
-    if name.strip()
-}
-
-AUTOSTART_SCRIPTS_RAW = [
-    name.strip() for name in _AUTOSTART_ENV.split(",") if name.strip()
-]
-
 FXWEEKEND_SETTINGS_PATH = BASE_DIR / "fxweekend-clone" / "settings.json"
 FXWEEKEND_DEFAULT_SETTINGS: Dict[str, object] = {
     "enabled": True,
@@ -4443,6 +4436,8 @@ FXWEEKEND_DEFAULT_SETTINGS: Dict[str, object] = {
 
 
 def _force_fxweekend_enabled_on_startup() -> None:
+    if _is_scanner_local_ui_mode():
+        return
     payload = dict(FXWEEKEND_DEFAULT_SETTINGS)
     try:
         existing = _load_json_file(FXWEEKEND_SETTINGS_PATH, {})
@@ -4467,18 +4462,37 @@ def _compute_autostart_scripts() -> List[str]:
     AUTOSTART_EXCLUDE may contain a comma-separated list of script names to skip.
     """
 
-    want_all = any(token.upper() == "ALL" or token == "*" for token in AUTOSTART_SCRIPTS_RAW)
+    raw_value = os.getenv("AUTOSTART_SCRIPTS")
+    if _is_scanner_local_ui_mode():
+        raw_value = ""
+    elif raw_value is None:
+        raw_value = DEFAULT_AUTOSTART_SCRIPTS
+
+    normalized = (raw_value or "").strip()
+    if normalized.upper() in {"NONE", "OFF", "DISABLED"}:
+        normalized = ""
+
+    autostart_raw = [name.strip() for name in normalized.split(",") if name.strip()]
+    autostart_exclude = {
+        name.strip()
+        for name in (os.getenv("AUTOSTART_EXCLUDE") or "").split(",")
+        if name.strip()
+    }
+
+    want_all = any(token.upper() == "ALL" or token == "*" for token in autostart_raw)
     if want_all:
         names = list(script_manager.names)
     else:
-        names = list(AUTOSTART_SCRIPTS_RAW)
+        names = list(autostart_raw)
 
-    if AUTOSTART_EXCLUDE:
-        names = [name for name in names if name not in AUTOSTART_EXCLUDE]
+    if autostart_exclude:
+        names = [name for name in names if name not in autostart_exclude]
     return names
 
 
 async def _run_startup_recovery_import_if_needed() -> None:
+    if _is_scanner_local_ui_mode():
+        return
     oanda_recovery: Dict[str, object] = {}
     for account in ("live", "demo"):
         try:
@@ -4708,6 +4722,15 @@ async def _schedule_daily_trade_history_sync() -> None:
 
 @app.on_event("startup")
 async def _autostart_scripts() -> None:
+    AUTOSTART_LOGGER.info(format_env_bootstrap_log(_MASTER_ENV_INFO))
+    if _is_scanner_local_ui_mode():
+        AUTOSTART_LOGGER.info(
+            "SCANNER_LOCAL_UI_MODE=1: skipping non-scanner startup tasks and script autostart."
+        )
+        asyncio.create_task(_log_outbound_traffic_summary())
+        asyncio.create_task(_poll_pending_webhook_invalidations())
+        return
+
     _restore_bybit_closed_pnl_last_seen_from_state()
     _restore_oanda_fill_state_on_startup()
     asyncio.create_task(_dropbox_restore_state_backup_on_startup())
@@ -6097,7 +6120,9 @@ def _get_oanda_config(account: Optional[str]) -> Dict[str, str]:
         if not account_id:
             missing.append("OANDA_ACCOUNT_ID_DEMO")
         if missing:
-            raise ValueError(f"OANDA demo credentials missing: {', '.join(missing)}")
+            raise ValueError(
+                f"OANDA demo credentials missing: {', '.join(missing)} ({_env_source_hint()})"
+            )
         return {
             "mode": "demo",
             "token": token,
@@ -6119,7 +6144,9 @@ def _get_oanda_config(account: Optional[str]) -> Dict[str, str]:
     if not account_id:
         missing.append("OANDA_ACCOUNT_ID")
     if missing:
-        raise ValueError(f"OANDA live credentials missing: {', '.join(missing)}")
+        raise ValueError(
+            f"OANDA live credentials missing: {', '.join(missing)} ({_env_source_hint()})"
+        )
     return {"mode": "live", "token": token, "account_id": account_id, "base_url": base_url}
 
 
@@ -10555,7 +10582,9 @@ async def _run_bybit_closed_pnl_sync(
 
         _mode, api_key, api_secret, base_url, _key_source = resolve_bybit_credentials_for(mode)
         if not api_key or not api_secret:
-            raise ValueError(f"Bybit {mode} API credentials are not configured.")
+            raise ValueError(
+                f"Bybit {mode} API credentials are not configured. ({_env_source_hint()})"
+            )
 
         now_ms = int(time.time() * 1000)
         last_seen = _BYBIT_CLOSED_PNL_LAST_SEEN.get(mode)

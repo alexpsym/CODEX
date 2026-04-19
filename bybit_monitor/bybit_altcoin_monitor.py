@@ -27,11 +27,11 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from bybit_credentials import resolve_bybit_credentials
-from shared.env_bootstrap import load_master_env
+from shared.env_bootstrap import format_env_bootstrap_log, load_master_env
 from shared.symbol_resolution import norm_symbol, resolve_bybit_symbol_from_choices
 
 # Credential + endpoint resolution -------------------------------------------------
-load_master_env()
+_ENV_BOOTSTRAP_INFO = load_master_env()
 
 
 def get_bybit_creds() -> Tuple[str, str, str, str, str]:
@@ -1423,6 +1423,7 @@ def run_monitor() -> None:
 def main() -> None:
     """Entry point for the monitor."""
     ensure_local_only_execution()
+    log(format_env_bootstrap_log(_ENV_BOOTSTRAP_INFO))
     log("Bybit perpetual futures monitor started.")
     settings = get_runtime_settings(force=True)
     log(
