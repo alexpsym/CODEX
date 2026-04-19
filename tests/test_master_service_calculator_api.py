@@ -262,6 +262,59 @@ def test_bybit_quote_uses_tick_step_fee_and_no_oversize(monkeypatch: pytest.Monk
     assert "estimated_reward" in body
 
 
+def test_bybit_quote_snaps_price_fields_with_trailing_zero_tick(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("live", "k", "s", "https://bybit.test", "KEY1"))
+    monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["BTCUSDT"]))
+    monkeypatch.setattr(master_service, "_fetch_oanda_mid_prices_batch", lambda **_kwargs: asyncio.sleep(0, result={"AUD_USD": 1}))
+
+    async def fake_get(_base, path, _params):
+        if path.endswith("instruments-info"):
+            return {"result": {"list": [{"priceFilter": {"tickSize": "0.10"}, "lotSizeFilter": {"qtyStep": "0.001", "minOrderQty": "0.001", "maxOrderQty": "999999", "maxMktOrderQty": "999999", "minNotionalValue": "5"}, "leverageFilter": {"maxLeverage": "50"}}]}}
+        return {"result": {"list": [{"bid1Price": "78032.90", "ask1Price": "78032.96", "lastPrice": "78032.93"}]}}
+
+    async def fake_signed_get(**kwargs):
+        if kwargs.get("path", "").endswith("fee-rate"):
+            return {"result": {"list": [{"makerFeeRate": "0", "takerFeeRate": "0"}]}}
+        return {"result": {"list": [{"totalEquity": "10000", "totalAvailableBalance": "10000", "coin": [{"coin": "USDT", "availableToTrade": "10000"}]}]}}
+
+    monkeypatch.setattr(master_service, "_bybit_get_async", fake_get)
+    monkeypatch.setattr(master_service, "_bybit_signed_get", fake_signed_get)
+    body = json.loads(asyncio.run(master_service.calculator_quote({
+        "asset": "crypto", "account": "live", "symbol": "BTC", "side": "buy", "order_type": "market",
+        "risk_mode": "percent", "risk_value": 0.001, "stop_loss_ticks": 1, "take_profit_ticks": 1,
+    })).body.decode("utf-8"))
+    assert body["entry_price"] == "78032.9"
+    assert body["stop_price"] == "78032.8"
+    assert body["target_price"] == "78033"
+
+
+def test_bybit_quote_webhook_payload_uses_snapped_prices(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("live", "k", "s", "https://bybit.test", "KEY1"))
+    monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["BTCUSDT"]))
+    monkeypatch.setattr(master_service, "_fetch_oanda_mid_prices_batch", lambda **_kwargs: asyncio.sleep(0, result={"AUD_USD": 1}))
+
+    async def fake_get(_base, path, _params):
+        if path.endswith("instruments-info"):
+            return {"result": {"list": [{"priceFilter": {"tickSize": "0.10"}, "lotSizeFilter": {"qtyStep": "0.001", "minOrderQty": "0.001", "maxOrderQty": "999999", "maxMktOrderQty": "999999", "minNotionalValue": "5"}, "leverageFilter": {"maxLeverage": "50"}}]}}
+        return {"result": {"list": [{"bid1Price": "78032.90", "ask1Price": "78032.96", "lastPrice": "78032.93"}]}}
+
+    async def fake_signed_get(**kwargs):
+        if kwargs.get("path", "").endswith("fee-rate"):
+            return {"result": {"list": [{"makerFeeRate": "0", "takerFeeRate": "0"}]}}
+        return {"result": {"list": [{"totalEquity": "10000", "totalAvailableBalance": "10000", "coin": [{"coin": "USDT", "availableToTrade": "10000"}]}]}}
+
+    monkeypatch.setattr(master_service, "_bybit_get_async", fake_get)
+    monkeypatch.setattr(master_service, "_bybit_signed_get", fake_signed_get)
+    body = json.loads(asyncio.run(master_service.calculator_quote({
+        "asset": "crypto", "account": "live", "symbol": "BTC", "side": "buy", "order_type": "market",
+        "risk_mode": "percent", "risk_value": 0.001, "stop_loss_ticks": 1, "take_profit_ticks": 1, "webhook": "yes",
+    })).body.decode("utf-8"))
+    payload = json.loads(body["webhook_payload_json"])
+    assert payload["entry_price"] == "78032.9"
+    assert payload["stop_loss_price"] == "78032.8"
+    assert payload["take_profit_price"] == "78033"
+
+
 def test_bybit_market_uses_side_specific_bid_ask(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("live", "k", "s", "https://bybit.test", "KEY1"))
 
@@ -664,3 +717,92 @@ def test_price_levels_match_helper() -> None:
     assert not master_service._price_levels_match(100.0, 100.1)
     assert master_service._price_levels_match(None, None)
     assert not master_service._price_levels_match(None, 100.0)
+
+
+def test_snap_to_increment_handles_trailing_zeros_and_milli_ticks() -> None:
+    assert str(master_service._snap_to_increment(master_service.Decimal("78032.96"), master_service.Decimal("0.10"))) == "78032.90"
+    assert str(master_service._snap_to_increment(master_service.Decimal("1.2349"), master_service.Decimal("0.001"))) == "1.234"
+
+
+def test_bybit_place_order_normalizes_tpsl_with_tick_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+    monkeypatch.setattr(
+        master_service,
+        "resolve_bybit_credentials_for",
+        lambda _a: ("demo", "k", "s", "https://bybit.test", "KEY1"),
+    )
+    monkeypatch.setattr(master_service, "_upsert_trade_context", lambda payload: payload)
+    monkeypatch.setattr(master_service, "_delete_pending_webhook", lambda _pid: True)
+    monkeypatch.setattr(master_service, "cache_bybit_demo_tpsl_request", lambda **_kwargs: None)
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setattr(
+        master_service,
+        "_wait_for_position_entry",
+        lambda **_kwargs: asyncio.sleep(
+            0,
+            result={"size": "0.01", "avgPrice": "78032.9", "entryPrice": "78032.9", "positionIdx": 0},
+        ),
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_fetch_bybit_positions",
+        lambda **_kwargs: asyncio.sleep(
+            0,
+            result=[{"size": "0.01", "takeProfit": "78033", "stopLoss": "78032.8"}],
+        ),
+    )
+
+    async def fake_trading_stop(**kwargs):
+        captured["take_profit"] = kwargs.get("take_profit")
+        captured["stop_loss"] = kwargs.get("stop_loss")
+        return {"status": "ok"}
+
+    monkeypatch.setattr(master_service, "_set_bybit_trading_stop", fake_trading_stop)
+    monkeypatch.setattr(
+        master_service,
+        "_bybit_lookup_symbol",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result={"priceFilter": {"tickSize": "0.10"}}),
+    )
+
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+        @staticmethod
+        def json() -> dict:
+            return {"retCode": 0, "result": {"orderId": "oid-2", "orderLinkId": "ol-2"}}
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, *_args, **_kwargs):
+            return _Resp()
+
+    monkeypatch.setattr(master_service.httpx, "AsyncClient", _Client)
+    result = asyncio.run(master_service._place_bybit_order({
+        "symbol": "BTCUSDT",
+        "action": "buy",
+        "quantity": "0.01",
+        "account": "demo",
+        "trade_mode": "linear",
+        "order_type": "market",
+        "entry_price": "78032.96",
+        "level_anchor_mode": "planned_entry",
+        "planned_entry_price": "78032.96",
+        "planned_stop_price": "78032.86",
+        "planned_target_price": "78033.06",
+        "timeframe": "15m",
+    }, request_id="rid-2"))
+    assert (result.get("order") or {}).get("orderId") == "oid-2"
+    assert captured["take_profit"] == 78033.0
+    assert captured["stop_loss"] == 78032.8
