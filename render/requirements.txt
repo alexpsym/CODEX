@@ -15,7 +15,6 @@ matplotlib
 openpyxl
 pandas
 Pillow
-plyer
 pybit
 pylint
 pytest
