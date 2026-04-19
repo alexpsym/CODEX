@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from shared.atomic_json import write_json_file
 from shared.env_bootstrap import format_env_bootstrap_log, load_master_env
 
 _ENV_BOOTSTRAP_INFO = load_master_env()
@@ -120,9 +121,14 @@ def _write_runtime_status(**extra: object) -> None:
         "heartbeat_timeout_seconds": 120,
     }
     payload.update(extra)
-    tmp = RUNTIME_STATUS_PATH.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(RUNTIME_STATUS_PATH)
+    write_json_file(
+        RUNTIME_STATUS_PATH,
+        payload,
+        best_effort=True,
+        retries=20,
+        backoff=0.05,
+        direct_fallback=True,
+    )
 
 
 def _heartbeat(*, phase: str, wait_seconds: int = 0, last_error: str = "") -> None:

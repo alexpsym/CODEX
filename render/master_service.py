@@ -201,14 +201,28 @@ def _pid_is_alive(pid: object) -> bool:
 def _scanner_status_payload(status_path: Path) -> dict[str, object]:
     if not status_path.exists():
         return {"ui_status": "stopped", "display_status": "Stopped", "reason": "missing"}
-    try:
-        payload = json.loads(status_path.read_text(encoding="utf-8"))
-    except Exception as exc:
+    payload: object | None = None
+    read_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            payload = json.loads(status_path.read_text(encoding="utf-8"))
+            read_error = None
+            break
+        except (PermissionError, json.JSONDecodeError) as exc:
+            read_error = exc
+            if attempt < 2:
+                time.sleep(0.02)
+                continue
+            break
+        except Exception as exc:
+            read_error = exc
+            break
+    if read_error is not None:
         return {
             "ui_status": "unavailable",
             "display_status": "Status unavailable",
             "reason": "malformed",
-            "error": str(exc),
+            "error": str(read_error),
         }
     if not isinstance(payload, dict):
         return {
