@@ -73,6 +73,11 @@ def test_scanner_merged_routes_work_locally(monkeypatch: pytest.MonkeyPatch) -> 
     assert "Bybit monitor controls" in html
     assert "OANDA monitor controls" in html
     assert "/static/merged_monitor.js" in html
+    assert 'id="bybit-start-btn"' not in html
+    assert 'id="oanda-start-btn"' not in html
+    assert 'id="bybit-log-box"' not in html
+    assert 'id="oanda-log-box"' not in html
+    assert 'id="bybit-status" class="badge">Checking…</span>' in html
 
 
 def test_scripts_page_local_scanner_merged_and_deduped(monkeypatch: pytest.MonkeyPatch) -> None:

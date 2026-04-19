@@ -28,6 +28,10 @@ from urllib.parse import quote, unquote, urlparse
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+BASE_DIR = Path(__file__).resolve().parents[1]
+from shared.env_bootstrap import load_master_env
+load_master_env(base_dir=BASE_DIR)
+
 try:
     import matplotlib
     matplotlib.use("Agg")
@@ -40,7 +44,6 @@ except Exception:  # pragma: no cover - optional in test envs
 from fastapi import Body, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from dotenv import load_dotenv
 import httpx
 import requests
 import pandas as pd
@@ -65,8 +68,6 @@ from bybit_demo_tpsl_cache import (
     resolve_cached_bybit_demo_tpsl,
 )
 
-BASE_DIR = Path(__file__).resolve().parents[1]
-load_dotenv(BASE_DIR / ".env")
 try:
     sys.path.insert(0, str(BASE_DIR / "oanda_history-clone"))
     import oanda_history as oanda_history_exporter
@@ -145,6 +146,9 @@ RETIRED_SCRIPT_NAMES = {
 
 
 LOCAL_ONLY_SCRIPTS = {"bybit_monitor", "oanda_monitor"}
+BYBIT_RUNTIME_STATUS_PATH = BASE_DIR / "bybit_monitor" / "runtime_status.json"
+OANDA_RUNTIME_STATUS_PATH = BASE_DIR / "oanda_monitor" / "runtime_status.json"
+SCANNER_HEARTBEAT_GRACE_SECONDS = 30
 
 
 def _is_render_env() -> bool:
@@ -154,6 +158,80 @@ def _is_render_env() -> bool:
         or os.getenv("RENDER_EXTERNAL_URL")
         or os.getenv("RENDER_EXTERNAL_HOSTNAME")
     )
+
+
+def _parse_iso_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(text)
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _pid_is_alive(pid: object) -> bool:
+    try:
+        pid_int = int(pid)
+    except Exception:
+        return False
+    if pid_int <= 0:
+        return False
+    try:
+        os.kill(pid_int, 0)
+        return True
+    except Exception:
+        return False
+
+
+def _scanner_status_payload(status_path: Path) -> dict[str, object]:
+    if not status_path.exists():
+        return {"ui_status": "stopped", "display_status": "Stopped", "reason": "missing"}
+    try:
+        payload = json.loads(status_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {
+            "ui_status": "unavailable",
+            "display_status": "Status unavailable",
+            "reason": "malformed",
+            "error": str(exc),
+        }
+    if not isinstance(payload, dict):
+        return {
+            "ui_status": "unavailable",
+            "display_status": "Status unavailable",
+            "reason": "malformed",
+            "error": "Runtime status must be a JSON object.",
+        }
+
+    running = bool(payload.get("running"))
+    wait_seconds = int(payload.get("wait_seconds") or 0)
+    stale_after = int(payload.get("heartbeat_timeout_seconds") or max(60, wait_seconds * 2 + SCANNER_HEARTBEAT_GRACE_SECONDS))
+    hb_dt = _parse_iso_datetime(payload.get("last_heartbeat_at"))
+    now = datetime.now(timezone.utc)
+    heartbeat_fresh = bool(hb_dt and (now - hb_dt).total_seconds() <= stale_after)
+    pid_alive = _pid_is_alive(payload.get("pid")) if payload.get("pid") is not None else True
+
+    if running and heartbeat_fresh and pid_alive:
+        ui_status = "running"
+        display = "Running"
+    else:
+        ui_status = "stopped"
+        display = "Stopped"
+    result = dict(payload)
+    result.update(
+        {
+            "ui_status": ui_status,
+            "display_status": display,
+            "heartbeat_fresh": heartbeat_fresh,
+            "pid_alive": pid_alive,
+            "stale_after_seconds": stale_after,
+        }
+    )
+    return result
 
 MAX_LOG_LINES = 400
 OANDA_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "oanda-history"
@@ -12160,7 +12238,6 @@ MERGED_MONITOR_TEMPLATE = """<!doctype html>
     label { display:flex; flex-direction:column; gap:6px; color:#cbd5e1; font-weight:700; }
     input, select, button { background:#0f172a; color:#e2e8f0; border:1px solid #334155; border-radius:10px; padding:8px 10px; }
     button { font-weight:700; cursor:pointer; }
-    .log-box { width:100%; min-height:210px; max-height:320px; overflow:auto; border:1px solid #334155; border-radius:10px; background:#020617; color:#d1fae5; padding:10px; white-space:pre-wrap; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
     .meta { color:#94a3b8; margin:4px 0 0; font-size:.9rem; }
     .settings-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:10px; margin-bottom:12px; }
   </style>
@@ -12173,9 +12250,7 @@ MERGED_MONITOR_TEMPLATE = """<!doctype html>
       <section class="panel" id="bybit-panel">
         <h3 style="margin-top:0">Bybit monitor controls</h3>
         <div class="row">
-          <span id="bybit-status" class="badge">Stopped</span>
-          <button id="bybit-start-btn" type="button">Start</button>
-          <button id="bybit-stop-btn" type="button">Stop</button>
+          <span id="bybit-status" class="badge">Checking…</span>
         </div>
         <div class="settings-grid">
           <label>Wait between scans (seconds)
@@ -12192,14 +12267,11 @@ MERGED_MONITOR_TEMPLATE = """<!doctype html>
           <span id="bybit-settings-status" class="badge">&nbsp;</span>
         </div>
         <div id="bybit-custom-alerts"></div>
-        <pre id="bybit-log-box" class="log-box">Waiting for output...</pre>
       </section>
       <section class="panel" id="oanda-panel">
         <h3 style="margin-top:0">OANDA monitor controls</h3>
         <div class="row">
-          <span id="oanda-status" class="badge">Stopped</span>
-          <button id="oanda-start-btn" type="button">Start</button>
-          <button id="oanda-stop-btn" type="button">Stop</button>
+          <span id="oanda-status" class="badge">Checking…</span>
         </div>
         <div class="settings-grid">
           <label>Wait between scans (seconds)
@@ -12216,7 +12288,6 @@ MERGED_MONITOR_TEMPLATE = """<!doctype html>
           <span id="oanda-settings-status" class="badge">&nbsp;</span>
         </div>
         <div id="oanda-custom-alerts"></div>
-        <pre id="oanda-log-box" class="log-box">Waiting for output...</pre>
       </section>
     </div>
   </div>
@@ -13936,6 +14007,16 @@ async def oanda_monitor_settings() -> JSONResponse:
 @app.post("/api/oanda-monitor/settings")
 async def update_oanda_monitor_settings(payload: Dict[str, object]) -> JSONResponse:
     return JSONResponse(_update_oanda_settings(payload))
+
+
+@app.get("/api/bybit-monitor/status")
+async def bybit_monitor_runtime_status() -> JSONResponse:
+    return JSONResponse(_scanner_status_payload(BYBIT_RUNTIME_STATUS_PATH))
+
+
+@app.get("/api/oanda-monitor/status")
+async def oanda_monitor_runtime_status() -> JSONResponse:
+    return JSONResponse(_scanner_status_payload(OANDA_RUNTIME_STATUS_PATH))
 
 
 @app.get("/api/bybit-monitor/custom-alerts")
