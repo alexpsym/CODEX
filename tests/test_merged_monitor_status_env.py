@@ -141,6 +141,79 @@ def test_wait_helpers_refresh_heartbeat(monkeypatch: pytest.MonkeyPatch) -> None
     assert all(phase == "waiting" for phase, _ in oanda_ticks)
 
 
+def test_oanda_runtime_status_writer_retries_permission_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from oanda_monitor import oanda_forex_monitor
+    from shared import atomic_json
+
+    status_path = tmp_path / "runtime_status.json"
+    monkeypatch.setattr(oanda_forex_monitor, "RUNTIME_STATUS_PATH", status_path)
+    monkeypatch.setattr(atomic_json.time, "sleep", lambda _n: None)
+    attempts = {"count": 0}
+    real_replace = atomic_json.os.replace
+
+    def flaky_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        attempts["count"] += 1
+        if attempts["count"] < 3:
+            raise PermissionError("[WinError 5] Access is denied")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(atomic_json.os, "replace", flaky_replace)
+    oanda_forex_monitor._write_runtime_status(running=True, phase="waiting", wait_seconds=30)
+    written = json.loads(status_path.read_text(encoding="utf-8"))
+    assert written["running"] is True
+    assert attempts["count"] == 3
+
+
+def test_bybit_runtime_status_writer_best_effort_permanent_replace_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from bybit_monitor import bybit_altcoin_monitor
+    from shared import atomic_json
+
+    status_path = tmp_path / "runtime_status.json"
+    monkeypatch.setattr(bybit_altcoin_monitor, "RUNTIME_STATUS_PATH", status_path)
+    monkeypatch.setattr(atomic_json.time, "sleep", lambda _n: None)
+    monkeypatch.setattr(atomic_json.os, "replace", lambda _src, _dst: (_ for _ in ()).throw(PermissionError("[WinError 32] Sharing violation")))
+    real_write_text = Path.write_text
+
+    def flaky_write_text(path_obj: Path, data: str, *args: object, **kwargs: object) -> int:
+        if path_obj == status_path:
+            raise PermissionError("[WinError 5] Access is denied")
+        return real_write_text(path_obj, data, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", flaky_write_text)
+
+    bybit_altcoin_monitor._write_runtime_status(running=True, phase="waiting", wait_seconds=30)
+    captured = capsys.readouterr()
+    assert "best-effort runtime status write failed" in captured.err
+
+
+def test_scanner_status_payload_retries_transient_malformed_read() -> None:
+    class FlakyStatusPath:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def exists(self) -> bool:
+            return True
+
+        def read_text(self, encoding: str = "utf-8") -> str:
+            _ = encoding
+            self.calls += 1
+            if self.calls < 3:
+                return "{bad json"
+            return json.dumps(
+                {
+                    "running": True,
+                    "pid": os.getpid(),
+                    "last_heartbeat_at": "2999-01-01T00:00:00+00:00",
+                    "wait_seconds": 5,
+                }
+            )
+
+    payload = master_service._scanner_status_payload(FlakyStatusPath())  # type: ignore[arg-type]
+    assert payload["ui_status"] == "running"
+
+
 def test_env_bootstrap_candidate_search_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from shared import env_bootstrap
 
