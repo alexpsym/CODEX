@@ -203,6 +203,7 @@
         r?.status,
         r?.setup,
         r?.timeframe,
+        r?.is_test_trade,
         r?.notes,
         r?.pre_trade_comments,
         r?.entry_comments,
@@ -476,6 +477,8 @@
       const key = dt.toISOString().slice(0, 10);
       const rowType = String(r?.row_type || 'trade').toLowerCase();
       const isTrade = rowType !== 'cashflow';
+      const isTestTrade = isTrade && String(r?.is_test_trade ?? '').toLowerCase() === 'true';
+      if (isTestTrade) return;
       if (!daily.has(key)) daily.set(key, { trades: 0, fx: 0, crypto: 0, pnlByCcy: new Map() });
       const d = daily.get(key);
       if (isTrade) {
@@ -549,7 +552,8 @@
       const account = String(r?.account_label || r?.account || 'Unknown').trim() || 'Unknown';
       const dtRaw = r?.close_time || r?.open_time;
       const ts = dtRaw ? new Date(dtRaw).getTime() : NaN;
-      const bal = asNum(r?.balance_after_trade ?? r?.cashflow_new_balance);
+      if (String(r?.is_test_trade ?? '').toLowerCase() === 'true') return;
+      const bal = asNum(r?.analysis_balance_after_trade ?? r?.balance_after_trade ?? r?.cashflow_new_balance);
       if (!Number.isFinite(ts) || !Number.isFinite(bal)) return;
       if (!byAccount.has(account)) byAccount.set(account, []);
       byAccount.get(account).push({ ts, bal });
@@ -674,7 +678,7 @@
   }
 
   const EDIT_FIELDS = [
-    'open_time', 'close_time', 'symbol', 'side', 'timeframe', 'setup', 'qty', 'qty_unit',
+    'open_time', 'close_time', 'symbol', 'side', 'timeframe', 'is_test_trade', 'setup', 'qty', 'qty_unit',
     'entry_price', 'exit_price', 'stop_loss', 'take_profit', 'commission', 'net_profit',
     'balance_after_trade', 'breakeven', 'notes', 'account', 'account_label', 'currency',
   ];
@@ -755,7 +759,7 @@
       const rowType = String(r.row_type || 'trade').toLowerCase();
       const isCashflow = rowType === 'cashflow';
       const pnl = asNum(r.net_profit ?? r.realized_pnl);
-      const bal = asNum(r.balance_after_trade ?? r.cashflow_new_balance);
+      const bal = asNum(r.analysis_balance_after_trade ?? r.balance_after_trade ?? r.cashflow_new_balance);
       const ccy = r.balance_after_trade_currency || r.currency || '';
       const tr = document.createElement('tr');
 
@@ -771,6 +775,7 @@
           <td>${r.account_label || r.account || '—'}</td>
           <td>${r.symbol || 'CASHFLOW'}</td>
           <td class="num ${flowCls}">${flowLabel}</td>
+          <td>—</td>
           <td>—</td>
           <td title="${r.cashflow_reason || ''}">${r.cashflow_reason || r.setup || '—'}</td>
           <td>—</td>
@@ -799,6 +804,7 @@
         <td title="${r.symbol_raw || r.symbol || ''}">${r.symbol || '—'}</td>
         <td>${r.side || '—'}</td>
         <td>${r.timeframe || r.metrics?.timeframe || '—'}</td>
+        <td>${String(r.is_test_trade) === 'true' ? 'Yes' : (String(r.is_test_trade) === 'false' ? 'No' : '—')}</td>
         <td>${r.setup || '—'}</td>
         <td>${fmtQty(r.qty, r)}${r.qty_unit === 'lots' ? ' lot' : ''}</td>
         <td>${fmtNum(r.entry_price, 6)}</td>

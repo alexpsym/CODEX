@@ -33,6 +33,7 @@ def test_merged_open_orders_route_returns_html() -> None:
     assert 'id="open-orders-errors"' in html
     assert 'id="open-orders-empty"' in html
     assert 'id="open-orders-table"' in html
+    assert "<th>Test</th>" in html
     assert "/static/open_orders.js?v=" in html
 
 
@@ -49,6 +50,7 @@ def test_open_orders_js_treats_webhook_as_cancelable() -> None:
     js = (ROOT / "render" / "static" / "open_orders.js").read_text(encoding="utf-8")
     assert "type === 'webhook'" in js
     assert "type === 'order' || type === 'webhook'" in js
+    assert "item.is_test_trade" in js
 
 
 def test_close_open_order_invalidates_cache_for_webhook(monkeypatch: pytest.MonkeyPatch) -> None:

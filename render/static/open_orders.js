@@ -173,7 +173,7 @@
       }
       row.appendChild(expTd);
 
-      [item.broker, resolveAccountLabel(item), item.category, item.instrument, item.timeframe, item.type, item.side, item.size, item.entry_price || item.order_price, item.current_price, item.stop_loss, item.take_profit, item.leverage, formatTimestamp(item.opened_at), item.status].forEach((v) => {
+      [item.broker, resolveAccountLabel(item), item.category, item.instrument, item.timeframe, item.is_test_trade, item.type, item.side, item.size, item.entry_price || item.order_price, item.current_price, item.stop_loss, item.take_profit, item.leverage, formatTimestamp(item.opened_at), item.status].forEach((v) => {
         const td = document.createElement('td');
         td.textContent = fmt(v);
         row.appendChild(td);
@@ -192,7 +192,7 @@
         cExp.textContent = '';
         cRow.appendChild(cExp);
 
-        [child.broker, resolveAccountLabel(child), child.category, child.instrument, child.timeframe, child.type, child.side, child.size, child.entry_price || child.order_price, child.current_price, child.stop_loss, child.take_profit, child.leverage, formatTimestamp(child.opened_at), child.status].forEach((v) => {
+        [child.broker, resolveAccountLabel(child), child.category, child.instrument, child.timeframe, child.is_test_trade, child.type, child.side, child.size, child.entry_price || child.order_price, child.current_price, child.stop_loss, child.take_profit, child.leverage, formatTimestamp(child.opened_at), child.status].forEach((v) => {
           const td = document.createElement('td');
           td.textContent = fmt(v);
           cRow.appendChild(td);
