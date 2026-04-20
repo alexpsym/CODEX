@@ -306,6 +306,7 @@ BYBIT_DEMO_WORKBOOK_COLUMNS = [
     "net_profit",
     "balance_after_trade",
     "timeframe",
+    "is_test_trade",
     "currency",
     "notes",
     "order_id",
@@ -318,6 +319,7 @@ BYBIT_DEMO_WORKBOOK_TEXT_COLUMNS = {
     "type_buy_sell",
     "symbol",
     "timeframe",
+    "is_test_trade",
     "currency",
     "notes",
     "order_id",
@@ -1472,6 +1474,7 @@ def _editable_trading_journal_fields() -> Set[str]:
         "symbol",
         "side",
         "timeframe",
+        "is_test_trade",
         "setup",
         "qty",
         "entry_price",
@@ -1552,6 +1555,9 @@ def _normalize_trading_journal_edit_payload(
             continue
         if field == "timeframe":
             normalized[field] = _normalize_timeframe(value)
+            continue
+        if field == "is_test_trade":
+            normalized[field] = _normalize_test_trade_flag(value)
             continue
         if field == "symbol":
             symbol = str(value or "").strip()
@@ -1675,6 +1681,7 @@ def _merge_trading_journal_row(
         "entry_price",
         "balance_after_trade",
         "timeframe",
+        "is_test_trade",
     }
     for key, value in incoming.items():
         if key == "metrics" and isinstance(value, dict):
@@ -3416,12 +3423,17 @@ def _journal_rows_from_bybit_execution(entry: Dict[str, object]) -> List[Dict[st
         close_time = datetime.fromtimestamp(exec_time_raw / 1000, tz=timezone.utc).isoformat()
     side = str(entry.get("side") or "")
     timeframe = _normalize_timeframe(entry.get("timeframe"))
+    is_test_trade = _normalize_test_trade_flag(
+        entry.get("is_test_trade", entry.get("test_trade", entry.get("test")))
+    )
     if not timeframe:
         ctx = _lookup_trade_context_for_journal_row(
             {"raw_refs": {"orderId": order_id, "orderLinkId": entry.get("orderLinkId")}}
         )
         if isinstance(ctx, dict):
             timeframe = _normalize_timeframe(ctx.get("timeframe"))
+            if is_test_trade is None:
+                is_test_trade = _normalize_test_trade_flag(ctx.get("is_test_trade"))
     return [
         {
             "id": f"bybit:{account}:{category}:{symbol}:{order_id}:{exec_id}",
@@ -3448,7 +3460,8 @@ def _journal_rows_from_bybit_execution(entry: Dict[str, object]) -> List[Dict[st
             "strategy_tag": "",
             "notes": "",
             "timeframe": timeframe,
-            "metrics": {"timeframe": timeframe} if timeframe else {},
+            "is_test_trade": is_test_trade,
+            "metrics": {k: v for k, v in {"timeframe": timeframe, "is_test_trade": is_test_trade}.items() if v not in ("", None)},
             "raw_refs": {"orderId": order_id, "execIds": [exec_id]},
         }
     ]
@@ -3643,6 +3656,7 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
                 "symbol": symbol,
                 "account": account,
                 "timeframe": _normalize_timeframe((trade_ctx or {}).get("timeframe")),
+                "is_test_trade": _normalize_test_trade_flag((trade_ctx or {}).get("is_test_trade")),
                 "stop_loss": (trade_ctx or {}).get("stop_loss"),
                 "take_profit": (trade_ctx or {}).get("take_profit"),
                 "order_id": tx_order_id,
@@ -3662,6 +3676,11 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
 
     base_ctx = _resolve_context_for_fill()
     timeframe = _normalize_timeframe(entry.get("timeframe")) or _normalize_timeframe((base_ctx or {}).get("timeframe"))
+    base_is_test_trade = _normalize_test_trade_flag(
+        entry.get("is_test_trade", entry.get("test_trade", entry.get("test")))
+    )
+    if base_is_test_trade is None:
+        base_is_test_trade = _normalize_test_trade_flag((base_ctx or {}).get("is_test_trade"))
     stop_loss = (base_ctx or {}).get("stop_loss")
     take_profit = (base_ctx or {}).get("take_profit")
     rows: List[Dict[str, object]] = []
@@ -3676,6 +3695,11 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
         row_timeframe = _normalize_timeframe((open_leg or {}).get("timeframe")) or timeframe or _normalize_timeframe((leg_ctx or {}).get("timeframe"))
         row_stop_loss = (open_leg or {}).get("stop_loss") or stop_loss or (leg_ctx or {}).get("stop_loss")
         row_take_profit = (open_leg or {}).get("take_profit") or take_profit or (leg_ctx or {}).get("take_profit")
+        row_is_test_trade = _normalize_test_trade_flag((open_leg or {}).get("is_test_trade"))
+        if row_is_test_trade is None:
+            row_is_test_trade = _normalize_test_trade_flag((leg_ctx or {}).get("is_test_trade"))
+        if row_is_test_trade is None:
+            row_is_test_trade = base_is_test_trade
         exit_price = _to_float(close_leg.get("price")) or _to_float(entry.get("price"))
         realized_pnl = (_to_float(close_leg.get("realizedPL")) or 0.0) + (_to_float(close_leg.get("financing")) or 0.0)
         fees = (
@@ -3713,7 +3737,8 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             "timeframe": row_timeframe,
             "stop_loss": row_stop_loss,
             "take_profit": row_take_profit,
-            "metrics": {"timeframe": row_timeframe} if row_timeframe else {},
+            "is_test_trade": row_is_test_trade,
+            "metrics": {k: v for k, v in {"timeframe": row_timeframe, "is_test_trade": row_is_test_trade}.items() if v not in ("", None)},
             "raw_refs": {"transactionId": tx_id, "orderId": entry.get("orderID"), "tradeId": trade_id},
         }
         rows.append(row)
@@ -6546,6 +6571,7 @@ async def _collect_oanda_open_items(
         if not timeframe and isinstance(ctx, dict):
             timeframe = _normalize_timeframe(ctx.get("timeframe"))
         item["timeframe"] = timeframe
+        item["is_test_trade"] = _display_test_trade(ctx if isinstance(ctx, dict) else item)
     return {"items": items, "errors": fetch_errors}
 
 
@@ -7010,6 +7036,7 @@ async def _collect_bybit_open_items(
         if not timeframe and isinstance(ctx, dict):
             timeframe = _normalize_timeframe(ctx.get("timeframe"))
         item["timeframe"] = timeframe
+        item["is_test_trade"] = _display_test_trade(ctx if isinstance(ctx, dict) else item)
     return {"items": items, "errors": errors}
 
 
@@ -7118,6 +7145,9 @@ def _normalize_pending_webhooks(items: object) -> List[Dict[str, object]]:
         payload.setdefault("created_at", now_ts)
         payload["updated_at"] = now_ts
         payload["timeframe"] = _normalize_timeframe(payload.get("timeframe"))
+        payload["is_test_trade"] = _normalize_test_trade_flag(
+            payload.get("is_test_trade", payload.get("test_trade", payload.get("test")))
+        )
         cancel_touch = _parse_pending_cancel_touch_price(payload)
         payload["cancel_if_touched_price"] = cancel_touch
         operator = str(payload.get("cancel_if_touched_operator") or "").strip().lower()
@@ -7155,6 +7185,9 @@ def _upsert_pending_webhook(payload: Dict[str, object]) -> Dict[str, object]:
     entry.setdefault("created_at", now_ts)
     entry["updated_at"] = now_ts
     entry["timeframe"] = _normalize_timeframe(entry.get("timeframe"))
+    entry["is_test_trade"] = _normalize_test_trade_flag(
+        entry.get("is_test_trade", entry.get("test_trade", entry.get("test")))
+    )
     entry["cancel_if_touched_price"] = _parse_pending_cancel_touch_price(entry)
     operator = str(entry.get("cancel_if_touched_operator") or "").strip().lower()
     entry["cancel_if_touched_operator"] = operator if operator in {"lte", "gte"} else None
@@ -7184,6 +7217,7 @@ def _upsert_pending_webhook(payload: Dict[str, object]) -> Dict[str, object]:
             "stop_loss": entry.get("stop_loss"),
             "take_profit": entry.get("take_profit"),
             "timeframe": entry.get("timeframe"),
+            "is_test_trade": entry.get("is_test_trade"),
             "open_time": opened_at_iso,
             "status": "ACTIVE",
             "cancel_if_touched_price": entry.get("cancel_if_touched_price"),
@@ -7238,6 +7272,55 @@ def _normalize_timeframe(value: object, *, max_length: int = 64) -> str:
     if len(text) > max_length:
         text = text[:max_length].strip()
     return text
+
+
+def _normalize_test_trade_flag(value: object) -> Optional[bool]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if text in {"yes", "y", "true", "1", "test"}:
+        return True
+    if text in {"no", "n", "false", "0"}:
+        return False
+    return None
+
+
+def _is_test_trade_row(row: Dict[str, object]) -> bool:
+    metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+    for key in ("is_test_trade", "test_trade", "test"):
+        normalized = _normalize_test_trade_flag(row.get(key))
+        if normalized is not None:
+            return normalized
+        normalized = _normalize_test_trade_flag(metrics.get(key))
+        if normalized is not None:
+            return normalized
+    return False
+
+
+def _display_test_trade(row: Dict[str, object]) -> str:
+    metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+    value = (
+        _normalize_test_trade_flag(row.get("is_test_trade"))
+        if isinstance(row, dict)
+        else None
+    )
+    if value is None:
+        value = _normalize_test_trade_flag(metrics.get("is_test_trade"))
+    if value is True:
+        return "Yes"
+    if value is False:
+        return "No"
+    return "—"
 
 
 def _normalize_optional_price(value: object) -> Optional[str]:
@@ -7299,6 +7382,10 @@ def _upsert_trade_context(payload: Dict[str, object]) -> Dict[str, object]:
     }
 
     merged_payload = dict(payload)
+    if "is_test_trade" in merged_payload or "test_trade" in merged_payload or "test" in merged_payload:
+        merged_payload["is_test_trade"] = _normalize_test_trade_flag(
+            merged_payload.get("is_test_trade", merged_payload.get("test_trade", merged_payload.get("test")))
+        )
     if "timeframe" in merged_payload:
         merged_payload["timeframe"] = _normalize_timeframe(merged_payload.get("timeframe"))
     for field in ("entry_price", "stop_loss", "take_profit"):
@@ -7353,6 +7440,10 @@ def _upsert_trade_context(payload: Dict[str, object]) -> Dict[str, object]:
             if _is_blank(v):
                 continue
             merged[k] = v
+        if merged_payload.get("is_test_trade") is None and "is_test_trade" in merged and merged.get("is_test_trade") is not None:
+            pass
+        elif "is_test_trade" in merged_payload:
+            merged["is_test_trade"] = merged_payload.get("is_test_trade")
 
         merged["updated_at"] = now_iso
         merged.setdefault("created_at", now_iso)
@@ -8497,6 +8588,7 @@ async def _place_bybit_order(
             "order_type": order_type,
             "entry_price": planned_entry_price if planned_entry_price is not None else price_val,
             "timeframe": payload.get("timeframe"),
+            "is_test_trade": payload.get("is_test_trade"),
             "created_at": request_open_time_iso,
             "open_time": _epoch_or_iso_to_iso(payload.get("opened_at")) or request_open_time_iso,
             "opened_at": _epoch_or_iso_to_iso(payload.get("opened_at")) or request_open_time_iso,
@@ -8719,6 +8811,7 @@ async def _place_bybit_order(
                     "stop_loss": sl_target,
                     "take_profit": tp_target,
                     "timeframe": payload.get("timeframe"),
+                    "is_test_trade": payload.get("is_test_trade"),
                     "open_time": _epoch_or_iso_to_iso(payload.get("opened_at")) or request_open_time_iso,
                     "opened_at": _epoch_or_iso_to_iso(payload.get("opened_at")) or request_open_time_iso,
                     "order_id": str(order_id or "").strip(),
@@ -9003,6 +9096,7 @@ async def _place_oanda_order(
                 "stop_loss": (order_payload.get("stopLossOnFill") or {}).get("price"),
                 "take_profit": (order_payload.get("takeProfitOnFill") or {}).get("price"),
                 "timeframe": payload.get("timeframe"),
+                "is_test_trade": payload.get("is_test_trade"),
                 "order_id": str(order_id or "").strip(),
                 "trade_id": str(trade_id or "").strip(),
                 "transaction_id": fill_tx_id or str(result.get("lastTransactionID") or "").strip(),
@@ -9822,6 +9916,7 @@ def _normalize_bybit_closed_pnl_row(
             }
         )
     timeframe = _normalize_timeframe(ctx.get("timeframe")) if isinstance(ctx, dict) else ""
+    is_test_trade = _normalize_test_trade_flag(ctx.get("is_test_trade")) if isinstance(ctx, dict) else None
     fallback_attempted = isinstance(ctx, dict)
     fallback_stop_loss = _to_float(ctx.get("stop_loss")) if isinstance(ctx, dict) else None
     fallback_take_profit = _to_float(ctx.get("take_profit")) if isinstance(ctx, dict) else None
@@ -9849,6 +9944,7 @@ def _normalize_bybit_closed_pnl_row(
                 "trade_id": raw_refs.get("tradeId"),
                 "transaction_id": raw_refs.get("transactionId"),
                 "timeframe": timeframe or ctx.get("timeframe"),
+                "is_test_trade": is_test_trade if is_test_trade is not None else ctx.get("is_test_trade"),
                 "open_time": resolved_open_time,
                 "stop_loss": stop_loss if stop_loss is not None else ctx.get("stop_loss"),
                 "take_profit": take_profit if take_profit is not None else ctx.get("take_profit"),
@@ -9886,7 +9982,8 @@ def _normalize_bybit_closed_pnl_row(
         "balance_after_trade": balance_after_trade,
         "notes": notes,
         "timeframe": timeframe,
-        "metrics": {"timeframe": timeframe} if timeframe else {},
+        "is_test_trade": is_test_trade,
+        "metrics": {k: v for k, v in {"timeframe": timeframe, "is_test_trade": is_test_trade}.items() if v not in ("", None)},
         "raw_refs": raw_refs,
     }
 
@@ -9899,7 +9996,12 @@ def _backfill_trade_row_context_fields(row: Dict[str, object]) -> Dict[str, obje
         or ((row.get("metrics") or {}).get("timeframe") if isinstance(row.get("metrics"), dict) else "")
     )
     needs_tpsl = row.get("stop_loss") in (None, "") or row.get("take_profit") in (None, "")
-    if current_timeframe and not needs_tpsl:
+    current_is_test_trade = _normalize_test_trade_flag(
+        row.get("is_test_trade")
+        if isinstance(row, dict)
+        else None
+    )
+    if current_timeframe and not needs_tpsl and current_is_test_trade is not None:
         return row
 
     ctx = _lookup_trade_context_for_journal_row(row)
@@ -9931,6 +10033,13 @@ def _backfill_trade_row_context_fields(row: Dict[str, object]) -> Dict[str, obje
         patched["stop_loss"] = _to_float(ctx.get("stop_loss")) if _to_float(ctx.get("stop_loss")) is not None else ctx.get("stop_loss")
     if patched.get("take_profit") in (None, "") and ctx.get("take_profit") not in (None, ""):
         patched["take_profit"] = _to_float(ctx.get("take_profit")) if _to_float(ctx.get("take_profit")) is not None else ctx.get("take_profit")
+    if current_is_test_trade is None:
+        ctx_test = _normalize_test_trade_flag(ctx.get("is_test_trade"))
+        if ctx_test is not None:
+            patched["is_test_trade"] = ctx_test
+            metrics = dict(patched.get("metrics") or {}) if isinstance(patched.get("metrics"), dict) else {}
+            metrics["is_test_trade"] = ctx_test
+            patched["metrics"] = metrics
     return patched
 
 
@@ -10044,6 +10153,7 @@ def _bybit_demo_workbook_row(row: Dict[str, object]) -> Dict[str, object]:
             row.get("timeframe")
             or ((row.get("metrics") or {}).get("timeframe") if isinstance(row.get("metrics"), dict) else "")
         ),
+        "is_test_trade": _display_test_trade(row),
         "currency": row.get("realized_pnl_currency") or "USDT",
         "notes": row.get("notes") or "",
         "order_id": refs.get("orderId"),
@@ -10101,6 +10211,7 @@ def _sanitize_bybit_demo_workbook(active_folder: str) -> Dict[str, int]:
                 "net_profit": _excel_cell_to_python(wb_row.get("net_profit")),
                 "balance_after_trade": _excel_cell_to_python(wb_row.get("balance_after_trade")),
                 "timeframe": _normalize_timeframe(_excel_cell_to_python(wb_row.get("timeframe"))),
+                "is_test_trade": _normalize_test_trade_flag(_excel_cell_to_python(wb_row.get("is_test_trade"))),
                 "notes": _excel_cell_to_python(wb_row.get("notes")),
                 "status": "closed",
                 "raw_refs": {
@@ -11349,6 +11460,10 @@ CALCULATOR_TEMPLATE = """<!doctype html>
         <div class="group toggle" id="webhook-toggle"><button type="button" data-v="no" class="active">No</button><button type="button" data-v="yes">Yes</button></div>
       </div>
       <div class="row">
+        <label>Test</label>
+        <div class="group toggle" id="test-toggle"><button type="button" data-v="no" class="active">No</button><button type="button" data-v="yes">Yes</button></div>
+      </div>
+      <div class="row">
         <label>Timeframe</label>
         <div class="group toggle" id="timeframe-toggle"></div>
       </div>
@@ -11635,7 +11750,7 @@ async def calculator_journal_summary(asset: str, symbol: str) -> JSONResponse:
         if isinstance(r, dict) and not _exclude_bybit_demo_row(r)
     ]
     balances = _get_excel_account_balances()
-    rows = _enrich_trade_row_metrics(_calc_balance_after_trade(base_rows, balances))
+    rows = _enrich_trade_row_metrics(_apply_analysis_balances(_calc_balance_after_trade(base_rows, balances)))
 
     canonical = ""
     if asset_norm == "crypto":
@@ -11671,14 +11786,17 @@ async def calculator_journal_summary(asset: str, symbol: str) -> JSONResponse:
             try:
                 row_fx = normalize_oanda_symbol_query(row_symbol)
                 if norm_symbol(row_fx) == canonical_key:
-                    filtered.append(r)
+                    if not _is_test_trade_row(r):
+                        filtered.append(r)
             except Exception:
                 if row_key == canonical_key:
-                    filtered.append(r)
+                    if not _is_test_trade_row(r):
+                        filtered.append(r)
             continue
         # crypto: include exact normalized key and shorthand-equivalent variants.
         if row_key == canonical_key or row_key.startswith(canonical_key) or canonical_key.startswith(row_key):
-            filtered.append(r)
+            if not _is_test_trade_row(r):
+                filtered.append(r)
     filtered_sorted = sorted(filtered, key=_row_sort_dt, reverse=True)
     if not filtered_sorted:
         return JSONResponse({"status": "no_data", "canonical_symbol": canonical, "stats": None, "trades": []})
@@ -11730,6 +11848,7 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
         symbol_in = str(payload.get("symbol") or "").strip()
         target_mode = str(payload.get("target_mode") or "").strip().lower()
         webhook_mode = str(payload.get("webhook") or payload.get("webhook_mode") or "no").strip().lower()
+        is_test_trade = _normalize_test_trade_flag(payload.get("test", payload.get("test_trade", payload.get("is_test_trade"))))
         existing_pending_id = str(payload.get("pending_webhook_id") or "").strip()
         previous_pending_id = str(payload.get("previous_pending_webhook_id") or "").strip()
         if not symbol_in:
@@ -11963,6 +12082,7 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                     "planned_target_price": _fmt_dec(snapped_tp),
                     "level_anchor_mode": "actual_fill",
                     "timeframe": _normalize_timeframe(payload.get("timeframe") or ""),
+                    "is_test_trade": is_test_trade,
                     "pending_webhook_id": pending_id,
                 }
                 pending_item = _upsert_pending_webhook(
@@ -11978,6 +12098,7 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                         "take_profit": _fmt_dec(snapped_tp),
                         "size": _fmt_dec(qty),
                         "timeframe": webhook_payload.get("timeframe") or "",
+                        "is_test_trade": is_test_trade,
                         "status": "WAITING",
                         "enabled": True,
                     }
@@ -12131,6 +12252,7 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                     "take_profit_price": _fmt_dec(tp),
                     "planned_target_price": _fmt_dec(tp),
                     "timeframe": _normalize_timeframe(payload.get("timeframe") or ""),
+                    "is_test_trade": is_test_trade,
                     "pending_webhook_id": pending_id,
                 }
                 pending_item = _upsert_pending_webhook(
@@ -12146,6 +12268,7 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                         "take_profit": _fmt_dec(tp),
                         "size": _fmt_dec(units),
                         "timeframe": webhook_payload.get("timeframe") or "",
+                        "is_test_trade": is_test_trade,
                         "status": "WAITING",
                         "enabled": True,
                     }
@@ -12188,6 +12311,9 @@ async def calculator_webhook(payload: Dict[str, object] = Body(default={})) -> J
             "take_profit_price": payload.get("take_profit_price") or payload.get("planned_target_price"),
             "quantity": payload.get("quantity"),
             "timeframe": payload.get("timeframe"),
+            "is_test_trade": _normalize_test_trade_flag(
+                payload.get("is_test_trade", payload.get("test_trade", payload.get("test")))
+            ),
             "pending_webhook_id": pending_id or None,
             "level_anchor_mode": payload.get("level_anchor_mode") or "actual_fill",
             "planned_entry_price": payload.get("planned_entry_price") or payload.get("entry_price"),
@@ -12240,6 +12366,9 @@ async def calculator_submit(payload: Dict[str, object] = Body(default={})) -> JS
         "take_profit_price": payload.get("take_profit_price"),
         "quantity": payload.get("quantity"),
         "timeframe": payload.get("timeframe"),
+        "is_test_trade": _normalize_test_trade_flag(
+            payload.get("is_test_trade", payload.get("test_trade", payload.get("test")))
+        ),
     }
     request_id = f"calc-{uuid4().hex[:12]}"
     try:
@@ -12450,6 +12579,7 @@ OPEN_ORDERS_TEMPLATE = """<!doctype html>
               <th>Category</th>
               <th>Instrument</th>
               <th>Timeframe</th>
+              <th>Test</th>
               <th>Type</th>
               <th>Side</th>
               <th>Size</th>
@@ -12657,6 +12787,7 @@ async def trading_journal_page() -> str:
             <th data-sort="symbol">Symbol</th>
             <th data-sort="side">Side</th>
             <th data-sort="timeframe">Timeframe</th>
+            <th data-sort="is_test_trade">Test</th>
             <th data-sort="setup">Setup</th>
             <th data-sort="qty">Qty</th>
             <th data-sort="entry_price">Entry</th>
@@ -12728,6 +12859,7 @@ async def trading_journal_page() -> str:
           <label class="tj-form-field"><span>Symbol</span><input name="symbol" type="text"/></label>
           <label class="tj-form-field"><span>Side</span><select name="side"><option value="">—</option><option>Buy</option><option>Sell</option></select></label>
           <label class="tj-form-field"><span>Timeframe</span><input name="timeframe" type="text"/></label>
+          <label class="tj-form-field"><span>Test</span><select name="is_test_trade"><option value="">—</option><option value="true">Yes</option><option value="false">No</option></select></label>
           <label class="tj-form-field"><span>Setup</span><input name="setup" type="text"/></label>
           <label class="tj-form-field"><span>Qty</span><input name="qty" type="number" step="any"/></label>
           <label class="tj-form-field"><span>Qty unit</span><input name="qty_unit" type="text"/></label>
@@ -13383,6 +13515,47 @@ def _calc_balance_after_trade(
     return out_rows
 
 
+def _apply_analysis_balances(rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    out_rows = [dict(row) for row in rows]
+    by_account: Dict[str, List[int]] = defaultdict(list)
+
+    def _to_ts(value: object) -> float:
+        if value in (None, ""):
+            return float("-inf")
+        try:
+            return float(pd.to_datetime(value).timestamp())
+        except Exception:
+            return float("-inf")
+
+    for idx, row in enumerate(out_rows):
+        if not _is_trade_row(row):
+            continue
+        account = str(row.get("account_label") or row.get("account") or "")
+        key = _norm_account_key(account)
+        if key:
+            by_account[key].append(idx)
+
+    for indices in by_account.values():
+        running_balance: Optional[float] = None
+        for row_idx in sorted(indices, key=lambda i: _to_ts(out_rows[i].get("close_time") or out_rows[i].get("open_time"))):
+            row = out_rows[row_idx]
+            balance_after = _to_float(row.get("balance_after_trade"))
+            pnl = _to_float(row.get("net_profit"))
+            if running_balance is None:
+                if balance_after is None:
+                    continue
+                if _is_test_trade_row(row) and pnl is not None:
+                    running_balance = balance_after - pnl
+                else:
+                    running_balance = balance_after
+            before_balance = running_balance if pnl is not None else None
+            if not _is_test_trade_row(row) and pnl is not None and before_balance is not None:
+                running_balance = before_balance + pnl
+            row["analysis_balance_before_trade"] = before_balance
+            row["analysis_balance_after_trade"] = running_balance if before_balance is not None else balance_after
+    return out_rows
+
+
 def _avg(values: List[float]) -> Optional[float]:
     return (sum(values) / len(values)) if values else None
 
@@ -13440,10 +13613,14 @@ def _enrich_trade_row_metrics(rows: List[Dict[str, object]]) -> List[Dict[str, o
                 break
 
         result_pct = None
-        balance_after = _to_float(r.get("balance_after_trade"))
+        balance_after = _to_float(r.get("analysis_balance_after_trade"))
+        balance_before = _to_float(r.get("analysis_balance_before_trade"))
+        if balance_after is None:
+            balance_after = _to_float(r.get("balance_after_trade"))
         if pnl is not None:
-            if balance_after is not None:
+            if balance_before is None and balance_after is not None:
                 balance_before = balance_after - pnl
+            if balance_before is not None:
                 if math.isfinite(balance_before) and balance_before > 0:
                     result_pct = (pnl / balance_before) * 100.0
             if result_pct is None and risk_amount is not None:
@@ -13479,7 +13656,7 @@ def _is_crypto_asset_class(value: object) -> bool:
 def _compute_journal_stats(
     rows: List[Dict[str, object]], balances: List[Dict[str, object]]
 ) -> Dict[str, object]:
-    trade_rows = [dict(r) for r in rows if _is_trade_row(r)]
+    trade_rows = [dict(r) for r in rows if _is_trade_row(r) and not _is_test_trade_row(r)]
 
     def _is_valid_price_level(val: Optional[float]) -> bool:
         # Some imports represent missing SL/TP/entry as 0.0, which explodes distance metrics.
@@ -15959,6 +16136,7 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
                 row.get("source"),
                 row.get("sheet"),
                 row.get("timeframe"),
+                _display_test_trade(row),
                 row.get("setup"),
                 row.get("breakeven"),
                 row.get("notes"),
@@ -15980,7 +16158,7 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
     source_folder = str(state_meta.get("source_folder") if isinstance(state_meta, dict) else "")
 
     # Pull cashflow rows from the active source folder tracked in journal state.
-    trade_items = _enrich_trade_row_metrics(_calc_balance_after_trade(items, balances))
+    trade_items = _enrich_trade_row_metrics(_apply_analysis_balances(_calc_balance_after_trade(items, balances)))
     cashflow_rows = _cashflow_rows_for_journal(source_folder) if source_folder else []
     cashflow_rows = [r for r in cashflow_rows if isinstance(r, dict) and not _exclude_bybit_demo_row(r)]
     if tokens:

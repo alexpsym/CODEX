@@ -8,6 +8,7 @@
     risk_mode: 'percent',
     timeframe: '15m',
     webhook_mode: 'no',
+    test_mode: 'no',
     quote: null,
     resolvedSymbol: '',
     pendingWebhookId: '',
@@ -328,6 +329,7 @@
     syncToggleState('order-toggle', 'order_type');
     syncToggleState('risk-toggle', 'risk_mode');
     syncToggleState('webhook-toggle', 'webhook_mode');
+    syncToggleState('test-toggle', 'test_mode');
   }
 
   function setToggle(id, key, onChange) {
@@ -367,7 +369,7 @@
     canonicalEl.textContent = '';
     if (!symbol) {
       setJournalState('idle', 'Type a symbol to load journal summary.');
-      setSpecsState('idle', 'Type a symbol to load instrument specs.');
+      setSpecsState('idle', 'Enter a symbol to load instrument specs.');
       return;
     }
     if (resolveController) resolveController.abort();
@@ -439,6 +441,7 @@
         risk_reward: $('calc-rr').value,
         risk_value: $('calc-risk').value,
         webhook: state.webhook_mode,
+        test: state.test_mode,
         pending_webhook_id: state.webhook_mode === 'yes' ? (state.pendingWebhookId || undefined) : undefined,
         previous_pending_webhook_id: state.webhook_mode === 'yes' ? undefined : (state.pendingWebhookId || undefined),
       };
@@ -479,6 +482,7 @@
         take_profit_price: state.quote.target_price,
         quantity: state.quote.quantity,
         timeframe: state.timeframe,
+        test: state.test_mode,
       };
       await post('/api/calculator/submit', payload);
       okEl.textContent = 'Order submitted successfully.';
@@ -493,10 +497,11 @@
   setToggle('order-toggle', 'order_type');
   setToggle('risk-toggle', 'risk_mode');
   setToggle('webhook-toggle', 'webhook_mode');
+  setToggle('test-toggle', 'test_mode');
   setTimeframeButtons();
   updateRiskUiForAsset();
   syncAllToggleStates();
   toggleWebhookPanel(false);
   setJournalState('idle', 'Type a symbol to load journal summary.');
-  setSpecsState('idle', 'Type a symbol to load instrument specs.');
+  setSpecsState('idle', 'Enter a symbol to load instrument specs.');
 })();

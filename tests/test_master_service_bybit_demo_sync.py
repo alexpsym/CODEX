@@ -493,16 +493,20 @@ def test_workbook_row_roundtrip_preserves_timeframe(monkeypatch) -> None:
         "exit_price": 110.0,
         "realized_pnl": 10.0,
         "timeframe": "15-minute",
+        "is_test_trade": True,
         "raw_refs": {"orderId": "oid-tf", "fillCount": 1, "source": "closed_pnl"},
     }
     wb_row = master_service._bybit_demo_workbook_row(row)
     assert wb_row["timeframe"] == "15-minute"
+    assert wb_row["is_test_trade"] == "Yes"
 
     frame = master_service._coerce_bybit_demo_workbook_frame(pd.DataFrame([wb_row]))
     reparsed = {
-        "timeframe": master_service._normalize_timeframe(master_service._excel_cell_to_python(frame.iloc[0].get("timeframe")))
+        "timeframe": master_service._normalize_timeframe(master_service._excel_cell_to_python(frame.iloc[0].get("timeframe"))),
+        "is_test_trade": master_service._normalize_test_trade_flag(master_service._excel_cell_to_python(frame.iloc[0].get("is_test_trade"))),
     }
     assert reparsed["timeframe"] == "15-minute"
+    assert reparsed["is_test_trade"] is True
 
 
 def test_workbook_upsert_handles_multiple_float_text_columns(monkeypatch) -> None:

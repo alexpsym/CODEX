@@ -42,6 +42,7 @@ def test_create_manual_trade_row(temp_state_paths):
                 "exit_price": "1.2",
                 "net_profit": "12.3",
                 "balance_after_trade": "1012.3",
+                "is_test_trade": "true",
             }
         )
     )
@@ -53,6 +54,7 @@ def test_create_manual_trade_row(temp_state_paths):
     assert row["row_type"] == "trade"
     assert row["is_manual"] is True
     assert row["symbol"] == "EURUSD"
+    assert row["is_test_trade"] is True
     stored = master_service._get_trading_journal_rows()
     assert len(stored) == 1
     assert stored[0]["id"] == row["id"]
@@ -82,6 +84,14 @@ def test_patch_existing_trade_row_stores_manual_overrides(temp_state_paths):
     row = _json(res)["row"]
     assert row["manual_overrides"]["notes"] == "manual note"
     assert row["manual_overrides"]["timeframe"] == "1-hour"
+    asyncio.run(
+        master_service.trading_journal_patch_row(
+            "oanda:live:t1",
+            {"is_test_trade": "false"},
+        )
+    )
+    row2 = master_service._get_trading_journal_rows()[0]
+    assert row2["is_test_trade"] is False
     assert "notes" in row["manual_override_fields"]
 
 

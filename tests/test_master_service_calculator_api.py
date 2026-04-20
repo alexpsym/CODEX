@@ -123,6 +123,7 @@ def test_merged_calculator_page_returns_200() -> None:
     assert '/static/calculator.js?v=' in html
     assert 'id="calc-timeframe"' not in html
     assert 'id="timeframe-toggle"' in html
+    assert 'id="test-toggle"' in html
     assert 'id="calc-instrument-specs"></div>' in html
     assert 'class="card" id="calc-instrument-specs"' not in html
 
@@ -488,6 +489,7 @@ def test_submit_routes_to_existing_order_helpers(monkeypatch: pytest.MonkeyPatch
     async def fake_bybit(payload, *, request_id):
         calls["bybit"] += 1
         assert payload["timeframe"] == "15m"
+        assert payload["is_test_trade"] is True
         assert payload["stop_loss_price"] == "1"
         assert payload["take_profit_price"] == "2"
         return {"ok": True}
@@ -502,7 +504,7 @@ def test_submit_routes_to_existing_order_helpers(monkeypatch: pytest.MonkeyPatch
 
     asyncio.run(master_service.calculator_submit({
         "asset": "crypto", "account": "live", "symbol": "BTCUSDT", "action": "buy", "order_type": "market",
-        "entry_price": "100", "stop_loss_price": "1", "take_profit_price": "2", "quantity": "0.01", "timeframe": "15m",
+        "entry_price": "100", "stop_loss_price": "1", "take_profit_price": "2", "quantity": "0.01", "timeframe": "15m", "test": "yes",
     }))
     asyncio.run(master_service.calculator_submit({
         "asset": "fx", "account": "demo", "symbol": "EUR_USD", "action": "sell", "order_type": "limit",
@@ -528,6 +530,7 @@ def test_journal_summary_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
                 "take_profit": 1.2,
                 "net_profit": 1,
                 "balance_after_trade": 100,
+                "is_test_trade": False,
             },
             {
                 "row_type": "trade",
@@ -541,6 +544,21 @@ def test_journal_summary_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
                 "take_profit": 1.1,
                 "net_profit": -1,
                 "balance_after_trade": 99,
+                "is_test_trade": False,
+            },
+            {
+                "row_type": "trade",
+                "symbol": "EUR_USD",
+                "asset_class": "fx",
+                "side": "Buy",
+                "close_time": "2026-01-03T01:00:00Z",
+                "open_time": "2026-01-03T00:00:00Z",
+                "entry_price": 1.2,
+                "stop_loss": 1.1,
+                "take_profit": 1.3,
+                "net_profit": 2,
+                "balance_after_trade": 101,
+                "is_test_trade": True,
             },
         ],
     )
@@ -663,10 +681,11 @@ def test_submit_translates_bybit_errors_to_http_exception(monkeypatch: pytest.Mo
 
 
 def test_webhook_uses_keyword_request_id_for_bybit(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen = {"request_id": ""}
+    seen = {"request_id": "", "is_test_trade": None}
 
     async def fake_bybit(_payload, *, request_id):
         seen["request_id"] = request_id
+        seen["is_test_trade"] = _payload.get("is_test_trade")
         return {"ok": True}
 
     monkeypatch.setattr(master_service, "_place_bybit_order", fake_bybit)
@@ -681,10 +700,12 @@ def test_webhook_uses_keyword_request_id_for_bybit(monkeypatch: pytest.MonkeyPat
         "take_profit_price": "120",
         "quantity": "0.01",
         "timeframe": "15m",
+        "test": "yes",
     }))
     body = json.loads(response.body.decode("utf-8"))
     assert body["ok"] is True
     assert seen["request_id"].startswith("calc-webhook-")
+    assert seen["is_test_trade"] is True
 
 
 def test_crypto_demo_skips_fee_rate_warning(monkeypatch: pytest.MonkeyPatch) -> None:
