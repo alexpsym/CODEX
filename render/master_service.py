@@ -12150,19 +12150,36 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                 raise HTTPException(status_code=400, detail="Bad limit price.")
             sl = (entry - stop_ticks * tick_size) if side == "buy" else (entry + stop_ticks * tick_size)
 
+            summary = await _fetch_oanda_account_summary(account)
+            account_home_ccy = str(summary.get("currency") or "").strip().upper()
             quote_ccy = symbol.split("_", 1)[1]
-            conversions = row.get("homeConversions") or []
-            loss_factor = None
-            for item in conversions:
-                if str(item.get("currency") or "").upper() == quote_ccy:
-                    loss_factor = Decimal(str(item.get("accountLoss") or "0"))
-                    break
-            if loss_factor is None or loss_factor <= 0:
-                raise HTTPException(status_code=502, detail=f"Missing OANDA home conversion for {quote_ccy}.")
+            try:
+                gain_factor, loss_factor, _position_value_factor = _get_oanda_quote_home_factors(
+                    prices_payload=prices,
+                    row=row,
+                    quote_ccy=quote_ccy,
+                    account_home_ccy=account_home_ccy,
+                )
+            except ValueError as exc:
+                top_level_conversions = prices.get("homeConversions") if isinstance(prices, dict) else []
+                available_top_level = sorted(
+                    {
+                        str(item.get("currency") or "").strip().upper()
+                        for item in (top_level_conversions or [])
+                        if isinstance(item, dict) and str(item.get("currency") or "").strip()
+                    }
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        f"OANDA pricing response missing usable home conversion for {quote_ccy}. "
+                        f"includeHomeConversions=true, top_level_currencies={available_top_level}, "
+                        f"row_keys={sorted(row.keys())}"
+                    ),
+                ) from exc
 
             risk_aud = risk_val
             if risk_mode == "percent":
-                summary = await _fetch_oanda_account_summary(account)
                 nav = Decimal(str(summary.get("nav") or "0"))
                 if nav <= 0:
                     raise HTTPException(status_code=502, detail="OANDA NAV unavailable for percent risk.")
@@ -12179,7 +12196,7 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                 desired_net_reward_aud = loss_per_unit_aud * rr_requested
                 target_distance = (desired_net_reward_aud / loss_factor) + spread_quote
                 tp = (entry + target_distance) if side == "buy" else (entry - target_distance)
-                reward_per_unit_aud = max(Decimal("0"), (target_distance - spread_quote) * loss_factor)
+                reward_per_unit_aud = max(Decimal("0"), (target_distance - spread_quote) * gain_factor)
                 requested_rr_net = rr_requested
                 effective_rr_net = reward_per_unit_aud / loss_per_unit_aud if loss_per_unit_aud > 0 else Decimal("0")
                 fee_buffer_r = ((spread_quote * loss_factor) / loss_per_unit_aud) if loss_per_unit_aud > 0 else Decimal("0")
@@ -12195,7 +12212,6 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                 raise HTTPException(status_code=400, detail="Calculated units exceed OANDA maximumOrderUnits.")
             if max_position_size > 0 and units > max_position_size:
                 raise HTTPException(status_code=400, detail="Calculated units exceed OANDA maximumPositionSize.")
-            summary = await _fetch_oanda_account_summary(account)
             margin_available = Decimal(str(summary.get("marginAvailable") or "0"))
             effective_margin_rate = margin_rate if margin_rate > 0 else Decimal(str(summary.get("marginRate") or "0"))
             if effective_margin_rate > 0 and margin_available > 0:
@@ -12203,7 +12219,7 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                 if required_margin > margin_available:
                     raise HTTPException(status_code=400, detail="Insufficient OANDA marginAvailable for estimated initial margin.")
             spread_aud = spread_quote * loss_factor * units
-            reward_aud = max(Decimal("0"), (abs(tp - entry) - spread_quote) * loss_factor * units)
+            reward_aud = max(Decimal("0"), (abs(tp - entry) - spread_quote) * gain_factor * units)
             response_payload = {
                     "broker": "oanda",
                     "symbol": symbol,
@@ -12278,6 +12294,51 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
         raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+def _get_oanda_quote_home_factors(
+    prices_payload: Dict[str, object],
+    row: Dict[str, object],
+    quote_ccy: str,
+    account_home_ccy: str,
+) -> Tuple[Decimal, Decimal, Decimal]:
+    quote_code = str(quote_ccy or "").strip().upper()
+    home_code = str(account_home_ccy or "").strip().upper()
+    if quote_code and home_code and quote_code == home_code:
+        one = Decimal("1")
+        return one, one, one
+
+    def _pick_from_home_conversions(conversions: object) -> Optional[Tuple[Decimal, Decimal, Decimal]]:
+        if not isinstance(conversions, list):
+            return None
+        for item in conversions:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("currency") or "").strip().upper() != quote_code:
+                continue
+            gain = Decimal(str(item.get("accountGain") or "0"))
+            loss = Decimal(str(item.get("accountLoss") or "0"))
+            position_value = Decimal(str(item.get("positionValue") or "0"))
+            if gain > 0 and loss > 0 and position_value > 0:
+                return gain, loss, position_value
+        return None
+
+    top_level = _pick_from_home_conversions(prices_payload.get("homeConversions"))
+    if top_level is not None:
+        return top_level
+
+    row_level = _pick_from_home_conversions(row.get("homeConversions"))
+    if row_level is not None:
+        return row_level
+
+    deprecated = row.get("quoteHomeConversionFactors")
+    if isinstance(deprecated, dict):
+        gain = Decimal(str(deprecated.get("positiveUnits") or "0"))
+        loss = Decimal(str(deprecated.get("negativeUnits") or "0"))
+        if gain > 0 and loss > 0:
+            return gain, loss, gain
+
+    raise ValueError(f"missing usable conversion factors for {quote_code or quote_ccy}")
 
 
 
