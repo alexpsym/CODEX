@@ -11376,14 +11376,8 @@ CALCULATOR_TEMPLATE = """<!doctype html>
     body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}
     .wrap{width:100%;max-width:none;margin:0;padding:18px}
     .panel{background:#111827;border:1px solid #1f2937;border-radius:14px;padding:16px}
-    .calc-grid{display:grid;grid-template-columns:minmax(320px,420px) minmax(0,1fr);gap:14px;align-items:start}
+    .calc-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;align-items:start}
     .calc-col{display:flex;flex-direction:column;gap:12px;min-width:0}
-    .calc-right-rail{
-      min-width:0;
-      width:100%;
-      overflow:hidden;
-      align-self:start;
-    }
     .row{display:flex;flex-direction:column;gap:6px;align-items:stretch;margin-bottom:12px}
     .group{display:flex;gap:8px;flex-wrap:wrap}
     label{display:flex;flex-direction:column;gap:6px;font-weight:700;color:#cbd5e1}
@@ -11401,11 +11395,10 @@ CALCULATOR_TEMPLATE = """<!doctype html>
     .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px}
     .grid.compact-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
     .card{background:#0f172a;border:1px solid #1f2937;border-radius:10px;padding:10px}
-    .calc-right-rail .card{padding:8px}
+    #calc-instrument-specs .card,#calc-journal-summary .card{padding:8px}
     .muted{color:#94a3b8;font-size:0.9rem}
     .right-panel-title{margin:0 0 4px;font-size:0.9rem;color:#cbd5e1}
-    .calc-right-rail .row{margin-bottom:10px}
-    .calc-right-rail #calc-instrument-specs,.calc-right-rail #calc-journal-summary{width:100%;min-width:0;overflow:hidden}
+    #calc-instrument-specs,#calc-journal-summary{width:100%;min-width:0;overflow:hidden}
     .specs-table{width:100%;border-collapse:collapse;table-layout:fixed}
     .specs-table td{border-bottom:1px solid #1f2937;padding:4px 5px;font-size:0.76rem;vertical-align:top;overflow-wrap:anywhere;word-break:break-word;line-height:1.3}
     @media (max-width:820px){.calc-grid{grid-template-columns:1fr}}
@@ -11437,6 +11430,14 @@ CALCULATOR_TEMPLATE = """<!doctype html>
       <div class="row">
         <label>Symbol<input id="calc-symbol" class="compact compact-symbol" placeholder="BTC or EUR_USD"/></label>
         <div class="muted" id="calc-canonical-symbol"></div>
+      </div>
+      <div class="row">
+        <h3 class="right-panel-title">Instrument specs</h3>
+        <div id="calc-instrument-specs"></div>
+      </div>
+      <div class="row">
+        <h3 class="right-panel-title">Journal stats</h3>
+        <div class="grid compact-grid" id="calc-journal-summary"></div>
       </div>
       <div class="row" id="limit-wrap" style="display:none">
         <label>Limit entry price<input id="calc-limit" class="compact compact-limit" type="number" step="any"/></label>
@@ -11485,16 +11486,6 @@ CALCULATOR_TEMPLATE = """<!doctype html>
         <label>Quote results</label>
         <div class="grid" id="calc-results"></div>
       </div>
-      </div>
-      <div class="calc-col calc-right-rail">
-        <div class="row">
-          <h3 class="right-panel-title">Instrument specs</h3>
-          <div id="calc-instrument-specs"></div>
-        </div>
-        <div class="row">
-          <h3 class="right-panel-title">Journal stats</h3>
-          <div class="grid compact-grid" id="calc-journal-summary"></div>
-        </div>
       </div>
       </div>
     </div>

@@ -126,6 +126,10 @@ def test_merged_calculator_page_returns_200() -> None:
     assert 'id="test-toggle"' in html
     assert 'id="calc-instrument-specs"></div>' in html
     assert 'class="card" id="calc-instrument-specs"' not in html
+    assert html.find('id="calc-symbol"') < html.find('id="calc-instrument-specs"')
+    assert html.find('id="calc-instrument-specs"') < html.find('id="calc-journal-summary"')
+    assert html.find('id="calc-journal-summary"') < html.find('id="calc-sl-ticks"')
+    assert "calc-right-rail" not in html
 
 
 def test_calculator_js_net_r_only_and_no_idle_specs_placeholder() -> None:
