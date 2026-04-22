@@ -194,6 +194,8 @@ def _pid_is_alive(pid: object) -> bool:
     try:
         os.kill(pid_int, 0)
         return True
+    except PermissionError:
+        return True
     except Exception:
         return False
 
@@ -7771,7 +7773,12 @@ async def _log_outbound_traffic_summary() -> None:
         await asyncio.sleep(max(30.0, OUTBOUND_METRICS_LOG_SECONDS))
         snapshot = _snapshot_outbound_traffic()
         if not snapshot:
-            BYBIT_LOGGER.info("OUTBOUND_TRAFFIC no outbound traffic recorded yet.")
+            if _is_scanner_local_ui_mode():
+                BYBIT_LOGGER.info(
+                    "OUTBOUND_TRAFFIC_UI_SERVICE no outbound traffic recorded yet (UI service only; not scanner health)."
+                )
+            else:
+                BYBIT_LOGGER.info("OUTBOUND_TRAFFIC no outbound traffic recorded yet.")
             continue
         top_entries = sorted(
             snapshot.items(),
@@ -12524,6 +12531,7 @@ MERGED_MONITOR_TEMPLATE = """<!doctype html>
     input, select, button { background:#0f172a; color:#e2e8f0; border:1px solid #334155; border-radius:10px; padding:8px 10px; }
     button { font-weight:700; cursor:pointer; }
     .meta { color:#94a3b8; margin:4px 0 0; font-size:.9rem; }
+    .notice { margin: 8px 0 14px; color:#bfdbfe; background:#0f172a; border:1px solid #1e3a8a; border-radius:10px; padding:10px 12px; }
     .settings-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:10px; margin-bottom:12px; }
   </style>
 </head>
@@ -12531,12 +12539,14 @@ MERGED_MONITOR_TEMPLATE = """<!doctype html>
   <div class="wrap">
     <h2 style="margin-top:0">Scanner Monitor</h2>
     <p class="meta">Local merged controls for Bybit and OANDA scanners.</p>
+    <p class="notice">Closing this page does not stop scanners. This page only reads status and saves settings.</p>
     <div class="grid">
       <section class="panel" id="bybit-panel">
         <h3 style="margin-top:0">Bybit monitor controls</h3>
         <div class="row">
           <span id="bybit-status" class="badge">Checking…</span>
         </div>
+        <p class="meta" id="bybit-health">Phase: — | Heartbeat: — | Fresh: — | PID alive: —</p>
         <div class="settings-grid">
           <label>Wait between scans (seconds)
             <input id="bybit-wait-seconds" type="number" min="1" step="1"/>
@@ -12558,6 +12568,7 @@ MERGED_MONITOR_TEMPLATE = """<!doctype html>
         <div class="row">
           <span id="oanda-status" class="badge">Checking…</span>
         </div>
+        <p class="meta" id="oanda-health">Phase: — | Heartbeat: — | Fresh: — | PID alive: —</p>
         <div class="settings-grid">
           <label>Wait between scans (seconds)
             <input id="oanda-wait-seconds" type="number" min="1" step="1"/>
