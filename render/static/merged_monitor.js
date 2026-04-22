@@ -409,6 +409,7 @@
         customAlertsId,
     }) => {
         const statusEl = document.getElementById(statusId);
+        const healthEl = document.getElementById(`${monitor}-health`);
         const waitInput = document.getElementById(waitId);
         const thresholdInput = document.getElementById(thresholdId);
         const saveSettingsBtn = document.getElementById(saveId);
@@ -426,6 +427,17 @@
             }
         };
 
+        const updateHealth = (payload) => {
+            if (!healthEl) return;
+            const phase = String(payload?.phase || 'unknown');
+            const heartbeat = String(payload?.last_heartbeat_at || 'n/a');
+            const heartbeatFresh = payload?.heartbeat_fresh === true ? 'yes' : (payload?.heartbeat_fresh === false ? 'no' : 'unknown');
+            const pidAlive = payload?.pid_alive === true ? 'yes' : (payload?.pid_alive === false ? 'no' : 'unknown');
+            const reason = payload?.reason ? ` | Reason: ${payload.reason}` : '';
+            const error = payload?.error ? ` | Error: ${payload.error}` : '';
+            healthEl.textContent = `Phase: ${phase} | Heartbeat: ${heartbeat} | Fresh: ${heartbeatFresh} | PID alive: ${pidAlive}${reason}${error}`;
+        };
+
         const refreshStatus = async () => {
             try {
                 const payload = await fetchJson(`/api/${monitor}-monitor/status`);
@@ -437,10 +449,12 @@
                 } else {
                     setRunningState('stopped');
                 }
+                updateHealth(payload || {});
                 return payload || {};
             } catch (err) {
                 console.error(err);
                 setRunningState('unavailable');
+                updateHealth({ reason: 'request_failed', error: err?.message || String(err || 'Unknown error') });
             }
             return {};
         };
