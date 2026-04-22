@@ -942,9 +942,11 @@ def test_oanda_margin_uses_position_value_home_conversion(monkeypatch: pytest.Mo
             "risk_mode": "fixed_aud", "risk_value": 100, "stop_loss_ticks": 10, "take_profit_ticks": 20,
         }))
     assert exc.value.status_code == 400
-    detail = str(exc.value.detail)
-    assert "required_margin_home=" in detail
-    assert "position_value_factor=2" in detail
+    detail = exc.value.detail
+    assert isinstance(detail, dict)
+    debug = detail.get("debug") or {}
+    assert debug.get("required_margin_home")
+    assert debug.get("position_value_factor") == "2"
 
 
 def test_oanda_fixed_aud_is_converted_to_home_currency_before_sizing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -992,10 +994,15 @@ def test_oanda_margin_error_includes_required_and_available_values(monkeypatch: 
             "asset": "fx", "account": "demo", "symbol": "eurusd", "side": "buy", "order_type": "market",
             "risk_mode": "fixed_aud", "risk_value": 100, "stop_loss_ticks": 1, "take_profit_ticks": 2,
         }))
-    detail = str(exc.value.detail)
-    assert "required_margin_home=" in detail
-    assert "margin_available_home=" in detail
-    assert "margin_rate=" in detail
+    detail = exc.value.detail
+    assert isinstance(detail, dict)
+    assert detail.get("code") == "oanda_margin_insufficient"
+    debug = detail.get("debug") or {}
+    assert "required_margin_home" in debug
+    assert "margin_available_home" in debug
+    assert "margin_rate" in debug
+    assert debug.get("submitted_risk_mode") == "fixed_aud"
+    assert debug.get("submitted_risk_value") == "100"
 
 
 def test_oanda_nzdusd_35_ticks_fixed_aud_10_demo_flat_account_quotes_successfully(monkeypatch: pytest.MonkeyPatch) -> None:

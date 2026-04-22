@@ -11513,7 +11513,9 @@ CALCULATOR_TEMPLATE = """<!doctype html>
         <div class="group"><button id="calc-webhook-copy" type="button">Copy JSON</button></div>
       </div>
       <div id="calc-error" class="error"></div>
+      <div class="grid" id="calc-error-debug"></div>
       <div id="calc-success" class="ok"></div>
+      <div id="calc-request-summary" class="muted"></div>
       <p class="muted">10 ticks always means 10 × broker minimum tick size. For 5-decimal FX pairs, 35 ticks = 3.5 pips.</p>
       <div class="row">
         <label>Quote results</label>
@@ -12252,24 +12254,40 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                 raise HTTPException(status_code=400, detail="Calculated units exceed OANDA maximumPositionSize.")
             margin_available = Decimal(str(summary.get("marginAvailable") or "0"))
             effective_margin_rate = margin_rate if margin_rate > 0 else Decimal(str(summary.get("marginRate") or "0"))
+            estimated_position_value_home = units * entry * _position_value_factor
+            estimated_initial_margin_home = estimated_position_value_home * max(Decimal("0"), effective_margin_rate)
+            submitted_debug_payload = {
+                "submitted_risk_mode": risk_mode,
+                "submitted_risk_value": _fmt_dec(risk_val),
+                "submitted_stop_loss_ticks": _fmt_dec(stop_ticks),
+                "tick_size": _fmt_dec(tick_size),
+                "entry_price_used": _fmt_dec_by_precision(entry, tick_size),
+                "spread_quote": _fmt_dec(spread_quote),
+                "loss_per_unit_home": _fmt_dec(loss_per_unit_home),
+                "units_raw": _fmt_dec(units_raw),
+                "units_final": _fmt_dec(units),
+                "estimated_position_value_home": _fmt_dec(estimated_position_value_home),
+                "estimated_initial_margin_home": _fmt_dec(estimated_initial_margin_home),
+            }
             if effective_margin_rate > 0 and margin_available > 0:
-                estimated_position_value_home = units * entry * _position_value_factor
-                estimated_initial_margin_home = estimated_position_value_home * effective_margin_rate
                 if estimated_initial_margin_home > margin_available:
                     raise HTTPException(
                         status_code=400,
-                        detail=(
-                            "Insufficient OANDA marginAvailable for estimated initial margin. "
-                            f"required_margin_home={_fmt_dec(estimated_initial_margin_home)}, "
-                            f"margin_available_home={_fmt_dec(margin_available)}, "
-                            f"margin_rate={_fmt_dec(effective_margin_rate)}, "
-                            f"position_value_factor={_fmt_dec(_position_value_factor)}, "
-                            f"account_currency={account_home_ccy}"
-                        ),
+                        detail={
+                            "code": "oanda_margin_insufficient",
+                            "message": "Insufficient OANDA marginAvailable for estimated initial margin.",
+                            "debug": {
+                                **submitted_debug_payload,
+                                "required_margin_home": _fmt_dec(estimated_initial_margin_home),
+                                "margin_available_home": _fmt_dec(margin_available),
+                                "margin_rate": _fmt_dec(effective_margin_rate),
+                                "position_value_factor": _fmt_dec(_position_value_factor),
+                                "account_currency": account_home_ccy,
+                                "risk_input_aud": _fmt_dec(risk_input_aud),
+                                "risk_amount_home": _fmt_dec(risk_amount_home),
+                            },
+                        },
                     )
-            else:
-                estimated_position_value_home = units * entry * _position_value_factor
-                estimated_initial_margin_home = estimated_position_value_home * max(Decimal("0"), effective_margin_rate)
             spread_home = spread_quote * loss_factor * units
             reward_home = max(Decimal("0"), (abs(tp - entry) - spread_quote) * gain_factor * units)
             response_payload = {
@@ -12297,6 +12315,14 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                     "estimated_position_value_home": _fmt_dec(estimated_position_value_home),
                     "estimated_initial_margin_home": _fmt_dec(estimated_initial_margin_home),
                     "margin_available_home": _fmt_dec(margin_available),
+                    "submitted_risk_mode": risk_mode,
+                    "submitted_risk_value": _fmt_dec(risk_val),
+                    "submitted_stop_loss_ticks": _fmt_dec(stop_ticks),
+                    "entry_price_used": _fmt_dec_by_precision(entry, tick_size),
+                    "spread_quote": _fmt_dec(spread_quote),
+                    "loss_per_unit_home": _fmt_dec(loss_per_unit_home),
+                    "units_raw": _fmt_dec(units_raw),
+                    "units_final": _fmt_dec(units),
                     "rr": _fmt_dec_by_precision((abs(tp - entry) / abs(entry - sl)) if abs(entry - sl) > 0 else Decimal("0"), Decimal("0.01")),
                     "target_mode": target_mode,
                     "requested_rr_net": _fmt_dec_by_precision(requested_rr_net, Decimal("0.01")) if requested_rr_net is not None else None,
