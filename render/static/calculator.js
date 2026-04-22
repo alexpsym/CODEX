@@ -229,7 +229,7 @@
   }
 
   function renderQuote(q) {
-    const currency = q.display_currency || 'AUD';
+    const currency = q.display_currency || q.account_currency || 'AUD';
     const fee = Number(q.estimated_fees_or_spread);
     const loss = Number(q.estimated_total_loss);
     const reward = Number(q.estimated_reward);
@@ -241,6 +241,14 @@
       ['Estimated fees / spread', `${Number.isFinite(fee) ? fee.toFixed(2) : '-'} ${currency}`],
       ['Estimated total loss', `${Number.isFinite(loss) ? loss.toFixed(2) : '-'} ${currency}`],
       ['Estimated reward', `${Number.isFinite(reward) ? reward.toFixed(2) : '-'} ${currency}`],
+      ['Account currency', q.account_currency || currency],
+      ['Risk input (AUD)', q.risk_input_aud ?? '-'],
+      ['Risk amount (home)', q.risk_amount_home ?? '-'],
+      ['Margin rate', q.margin_rate ?? '-'],
+      ['Position value factor', q.position_value_factor ?? '-'],
+      ['Estimated position value (home)', q.estimated_position_value_home ?? '-'],
+      ['Estimated initial margin (home)', q.estimated_initial_margin_home ?? '-'],
+      ['Margin available (home)', q.margin_available_home ?? '-'],
       ['Requested net R', fmtR(q.requested_rr_net)], ['Effective net R', fmtR(q.effective_rr_net)],
       ['Fee buffer (R)', fmtR(q.fee_buffer_r)],
     ];

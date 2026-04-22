@@ -9428,6 +9428,32 @@ async def _fetch_oanda_mid_prices_batch(
     return out
 
 
+
+
+async def _convert_aud_to_home_currency(amount_aud: Decimal, account_home_ccy: str, cfg: Dict[str, str]) -> Decimal:
+    home_ccy = str(account_home_ccy or "").strip().upper()
+    if amount_aud <= 0:
+        return amount_aud
+    if not home_ccy:
+        raise ValueError("OANDA account home currency unavailable for AUD conversion.")
+    if home_ccy == "AUD":
+        return amount_aud
+
+    direct_symbol = f"AUD_{home_ccy}"
+    inverse_symbol = f"{home_ccy}_AUD"
+    prices = await _fetch_oanda_mid_prices_batch(cfg=cfg, instruments=[direct_symbol, inverse_symbol])
+
+    direct = Decimal(str(prices.get(direct_symbol) or "0"))
+    if direct > 0:
+        return amount_aud * direct
+
+    inverse = Decimal(str(prices.get(inverse_symbol) or "0"))
+    if inverse > 0:
+        return amount_aud / inverse
+
+    raise ValueError(f"Unable to resolve AUD->{home_ccy} conversion from OANDA pricing.")
+
+
 async def _poll_pending_webhook_invalidations() -> None:
     while True:
         await asyncio.sleep(LIMIT_CANCEL_POLL_SECONDS)
@@ -11488,7 +11514,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
       </div>
       <div id="calc-error" class="error"></div>
       <div id="calc-success" class="ok"></div>
-      <p class="muted">10 ticks always means 10 × broker minimum tick size.</p>
+      <p class="muted">10 ticks always means 10 × broker minimum tick size. For 5-decimal FX pairs, 35 ticks = 3.5 pips.</p>
       <div class="row">
         <label>Quote results</label>
         <div class="grid" id="calc-results"></div>
@@ -12185,33 +12211,38 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                     ),
                 ) from exc
 
-            risk_aud = risk_val
+            risk_input_aud = risk_val
             if risk_mode == "percent":
                 nav = Decimal(str(summary.get("nav") or "0"))
                 if nav <= 0:
                     raise HTTPException(status_code=502, detail="OANDA NAV unavailable for percent risk.")
-                risk_aud = nav * (risk_val / Decimal("100"))
+                risk_amount_home = nav * (risk_val / Decimal("100"))
+            else:
+                try:
+                    risk_amount_home = await _convert_aud_to_home_currency(risk_input_aud, account_home_ccy, cfg)
+                except ValueError as exc:
+                    raise HTTPException(status_code=502, detail=str(exc)) from exc
             spread_quote = max(Decimal("0"), ask - bid)
-            loss_per_unit_aud = (abs(entry - sl) + spread_quote) * loss_factor
-            if loss_per_unit_aud <= 0:
+            loss_per_unit_home = (abs(entry - sl) + spread_quote) * loss_factor
+            if loss_per_unit_home <= 0:
                 raise HTTPException(status_code=400, detail="Invalid stop distance produced zero loss per unit.")
 
             requested_rr_net = None
             effective_rr_net = None
             fee_buffer_r = None
             if target_mode == "rr" and rr_requested is not None:
-                desired_net_reward_aud = loss_per_unit_aud * rr_requested
-                target_distance = (desired_net_reward_aud / loss_factor) + spread_quote
+                desired_net_reward_home = loss_per_unit_home * rr_requested
+                target_distance = (desired_net_reward_home / loss_factor) + spread_quote
                 tp = (entry + target_distance) if side == "buy" else (entry - target_distance)
-                reward_per_unit_aud = max(Decimal("0"), (target_distance - spread_quote) * gain_factor)
+                reward_per_unit_home = max(Decimal("0"), (target_distance - spread_quote) * gain_factor)
                 requested_rr_net = rr_requested
-                effective_rr_net = reward_per_unit_aud / loss_per_unit_aud if loss_per_unit_aud > 0 else Decimal("0")
-                fee_buffer_r = ((spread_quote * loss_factor) / loss_per_unit_aud) if loss_per_unit_aud > 0 else Decimal("0")
+                effective_rr_net = reward_per_unit_home / loss_per_unit_home if loss_per_unit_home > 0 else Decimal("0")
+                fee_buffer_r = ((spread_quote * loss_factor) / loss_per_unit_home) if loss_per_unit_home > 0 else Decimal("0")
             else:
                 target_distance = (tp_ticks or Decimal("0")) * tick_size
                 tp = (entry + target_distance) if side == "buy" else (entry - target_distance)
 
-            units_raw = risk_aud / loss_per_unit_aud
+            units_raw = risk_amount_home / loss_per_unit_home
             units = _floor_to_precision(units_raw, units_precision)
             if units < min_trade_size:
                 raise HTTPException(status_code=400, detail="Calculated units are below minimum trade size.")
@@ -12222,11 +12253,25 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
             margin_available = Decimal(str(summary.get("marginAvailable") or "0"))
             effective_margin_rate = margin_rate if margin_rate > 0 else Decimal(str(summary.get("marginRate") or "0"))
             if effective_margin_rate > 0 and margin_available > 0:
-                required_margin = (units * entry) * effective_margin_rate
-                if required_margin > margin_available:
-                    raise HTTPException(status_code=400, detail="Insufficient OANDA marginAvailable for estimated initial margin.")
-            spread_aud = spread_quote * loss_factor * units
-            reward_aud = max(Decimal("0"), (abs(tp - entry) - spread_quote) * gain_factor * units)
+                estimated_position_value_home = units * entry * _position_value_factor
+                estimated_initial_margin_home = estimated_position_value_home * effective_margin_rate
+                if estimated_initial_margin_home > margin_available:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Insufficient OANDA marginAvailable for estimated initial margin. "
+                            f"required_margin_home={_fmt_dec(estimated_initial_margin_home)}, "
+                            f"margin_available_home={_fmt_dec(margin_available)}, "
+                            f"margin_rate={_fmt_dec(effective_margin_rate)}, "
+                            f"position_value_factor={_fmt_dec(_position_value_factor)}, "
+                            f"account_currency={account_home_ccy}"
+                        ),
+                    )
+            else:
+                estimated_position_value_home = units * entry * _position_value_factor
+                estimated_initial_margin_home = estimated_position_value_home * max(Decimal("0"), effective_margin_rate)
+            spread_home = spread_quote * loss_factor * units
+            reward_home = max(Decimal("0"), (abs(tp - entry) - spread_quote) * gain_factor * units)
             response_payload = {
                     "broker": "oanda",
                     "symbol": symbol,
@@ -12237,13 +12282,21 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                     "target_distance": _fmt_dec_by_precision(target_distance, tick_size),
                     "quantity": _fmt_dec(units),
                     "notional": _fmt_dec(units * entry),
-                    "estimated_fees_or_spread_aud": _fmt_dec(max(Decimal("0"), spread_aud)),
-                    "estimated_total_loss_aud": _fmt_dec(loss_per_unit_aud * units),
-                    "estimated_reward_aud": _fmt_dec(reward_aud),
-                    "display_currency": "AUD",
-                    "estimated_fees_or_spread": _fmt_dec(max(Decimal("0"), spread_aud)),
-                    "estimated_total_loss": _fmt_dec(loss_per_unit_aud * units),
-                    "estimated_reward": _fmt_dec(reward_aud),
+                    "estimated_fees_or_spread_aud": _fmt_dec(max(Decimal("0"), spread_home)),
+                    "estimated_total_loss_aud": _fmt_dec(loss_per_unit_home * units),
+                    "estimated_reward_aud": _fmt_dec(reward_home),
+                    "display_currency": account_home_ccy,
+                    "estimated_fees_or_spread": _fmt_dec(max(Decimal("0"), spread_home)),
+                    "estimated_total_loss": _fmt_dec(loss_per_unit_home * units),
+                    "estimated_reward": _fmt_dec(reward_home),
+                    "account_currency": account_home_ccy,
+                    "risk_input_aud": _fmt_dec(risk_input_aud),
+                    "risk_amount_home": _fmt_dec(risk_amount_home),
+                    "margin_rate": _fmt_dec(effective_margin_rate),
+                    "position_value_factor": _fmt_dec(_position_value_factor),
+                    "estimated_position_value_home": _fmt_dec(estimated_position_value_home),
+                    "estimated_initial_margin_home": _fmt_dec(estimated_initial_margin_home),
+                    "margin_available_home": _fmt_dec(margin_available),
                     "rr": _fmt_dec_by_precision((abs(tp - entry) / abs(entry - sl)) if abs(entry - sl) > 0 else Decimal("0"), Decimal("0.01")),
                     "target_mode": target_mode,
                     "requested_rr_net": _fmt_dec_by_precision(requested_rr_net, Decimal("0.01")) if requested_rr_net is not None else None,
