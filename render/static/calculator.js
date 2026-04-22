@@ -6,6 +6,7 @@
     side: 'buy',
     order_type: 'market',
     risk_mode: 'percent',
+    fx_risk_mode: 'percent',
     timeframe: '15m',
     webhook_mode: 'no',
     test_mode: 'no',
@@ -16,8 +17,10 @@
 
   const $ = (id) => document.getElementById(id);
   const errorEl = $('calc-error');
+  const errorDebugEl = $('calc-error-debug');
   const okEl = $('calc-success');
   const resultEl = $('calc-results');
+  const requestSummaryEl = $('calc-request-summary');
   const canonicalEl = $('calc-canonical-symbol');
   const journalEl = $('calc-journal-summary');
   const specsEl = $('calc-instrument-specs');
@@ -63,6 +66,7 @@
   function clearMessages() {
     errorEl.textContent = '';
     okEl.textContent = '';
+    errorDebugEl.innerHTML = '';
   }
 
   function setJournalState(kind, text) {
@@ -229,7 +233,7 @@
   }
 
   function renderQuote(q) {
-    const currency = q.display_currency || 'AUD';
+    const currency = q.display_currency || q.account_currency || 'AUD';
     const fee = Number(q.estimated_fees_or_spread);
     const loss = Number(q.estimated_total_loss);
     const reward = Number(q.estimated_reward);
@@ -241,6 +245,22 @@
       ['Estimated fees / spread', `${Number.isFinite(fee) ? fee.toFixed(2) : '-'} ${currency}`],
       ['Estimated total loss', `${Number.isFinite(loss) ? loss.toFixed(2) : '-'} ${currency}`],
       ['Estimated reward', `${Number.isFinite(reward) ? reward.toFixed(2) : '-'} ${currency}`],
+      ['Account currency', q.account_currency || currency],
+      ['Submitted risk mode', q.submitted_risk_mode ?? '-'],
+      ['Submitted risk value', q.submitted_risk_value ?? '-'],
+      ['Submitted stop ticks', q.submitted_stop_loss_ticks ?? '-'],
+      ['Risk input (AUD)', q.risk_input_aud ?? '-'],
+      ['Risk amount (home)', q.risk_amount_home ?? '-'],
+      ['Margin rate', q.margin_rate ?? '-'],
+      ['Position value factor', q.position_value_factor ?? '-'],
+      ['Estimated position value (home)', q.estimated_position_value_home ?? '-'],
+      ['Estimated initial margin (home)', q.estimated_initial_margin_home ?? '-'],
+      ['Margin available (home)', q.margin_available_home ?? '-'],
+      ['Entry price used', q.entry_price_used ?? '-'],
+      ['Spread (quote)', q.spread_quote ?? '-'],
+      ['Loss per unit (home)', q.loss_per_unit_home ?? '-'],
+      ['Units raw', q.units_raw ?? '-'],
+      ['Units final', q.units_final ?? '-'],
       ['Requested net R', fmtR(q.requested_rr_net)], ['Effective net R', fmtR(q.effective_rr_net)],
       ['Fee buffer (R)', fmtR(q.fee_buffer_r)],
     ];
@@ -253,10 +273,40 @@
   const buildFetchError = (url, method, status, statusText, bodyText, bodyJson) => {
     const detail = bodyJson?.detail;
     if (typeof detail === 'string' && detail.trim()) return new Error(detail.trim());
-    if (detail && typeof detail === 'object') return new Error(detail.message || detail.error || `${method} ${url} failed: ${status}`);
+    if (detail && typeof detail === 'object') {
+      const err = new Error(detail.message || detail.error || `${method} ${url} failed: ${status}`);
+      err.detail = detail;
+      return err;
+    }
     const body = (bodyText || '').trim();
     return new Error(`${method || 'GET'} ${url} failed: ${status} ${body || statusText}`);
   };
+
+  function renderErrorDebug(detail) {
+    const debug = detail?.debug;
+    if (!debug || typeof debug !== 'object') {
+      errorDebugEl.innerHTML = '';
+      return;
+    }
+    const rows = Object.entries(debug)
+      .map(([k, v]) => `<div class="card"><div class="muted">${k}</div><div>${v ?? '-'}</div></div>`)
+      .join('');
+    errorDebugEl.innerHTML = rows;
+  }
+
+  function renderRequestSummary(payload) {
+    requestSummaryEl.textContent = [
+      `Submitted payload:`,
+      `asset=${payload.asset}`,
+      `account=${payload.account}`,
+      `symbol=${payload.symbol}`,
+      `risk_mode=${payload.risk_mode}`,
+      `risk_value=${payload.risk_value}`,
+      `stop_loss_ticks=${payload.stop_loss_ticks}`,
+      `order_type=${payload.order_type}`,
+      `side=${payload.side}`,
+    ].join(' ');
+  }
 
   async function request(url, opts = {}) {
     const res = await fetch(url, opts);
@@ -284,7 +334,14 @@
   function updateRiskUiForAsset() {
     const isFx = state.asset === 'fx';
     riskToggleWrap.style.display = isFx ? '' : 'none';
-    if (!isFx) state.risk_mode = 'percent';
+    if (isFx) {
+      state.risk_mode = state.fx_risk_mode || state.risk_mode || 'percent';
+    } else {
+      if (state.risk_mode === 'fixed_aud' || state.risk_mode === 'percent') {
+        state.fx_risk_mode = state.risk_mode;
+      }
+      state.risk_mode = 'percent';
+    }
     $('calc-risk-label').textContent = isFx ? 'Risk value (AUD or %)' : 'Risk value (%)';
     if (!isFx) {
       $('risk-toggle').querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.v === 'percent'));
@@ -337,6 +394,9 @@
     root.querySelectorAll('button').forEach((btn) => {
       btn.addEventListener('click', () => {
         state[key] = btn.dataset.v;
+        if (key === 'risk_mode' && state.asset === 'fx') {
+          state.fx_risk_mode = state.risk_mode;
+        }
         syncToggleState(id, key);
         state.quote = null;
         if (key === 'order_type') $('limit-wrap').style.display = state.order_type === 'limit' ? '' : 'none';
@@ -445,6 +505,7 @@
         pending_webhook_id: state.webhook_mode === 'yes' ? (state.pendingWebhookId || undefined) : undefined,
         previous_pending_webhook_id: state.webhook_mode === 'yes' ? undefined : (state.pendingWebhookId || undefined),
       };
+      renderRequestSummary(payload);
       const quote = await post('/api/calculator/quote', payload);
       state.quote = quote;
       renderQuote(quote);
@@ -462,6 +523,7 @@
       resultEl.innerHTML = '';
       toggleWebhookPanel(false);
       errorEl.textContent = String(e.message || e);
+      renderErrorDebug(e.detail || null);
     }
   });
 
