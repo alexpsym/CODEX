@@ -12618,7 +12618,7 @@ MERGED_MONITOR_TEMPLATE = """<!doctype html>
   <div class="wrap">
     <h2 style="margin-top:0">Scanner Monitor</h2>
     <p class="meta">Local merged controls for Bybit and OANDA scanners.</p>
-    <p class="notice">Closing this page does not stop scanners. This page only reads status and saves settings.</p>
+    <p class="notice">This page polls local scanner status every 2 seconds. Closing this tab only stops these status requests/log lines; scanner processes keep running independently.</p>
     <div class="grid">
       <section class="panel" id="bybit-panel">
         <h3 style="margin-top:0">Bybit monitor controls</h3>

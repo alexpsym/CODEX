@@ -62,6 +62,7 @@ DEFAULT_ATH_ATL_GRANULARITY = os.getenv("BYBIT_ATH_ATL_GRANULARITY", "D")
 DEFAULT_ATH_ATL_BACKFILL_BATCH = int(os.getenv("BYBIT_ATH_ATL_BACKFILL_BATCH", "3"))
 DEFAULT_ATH_ATL_BACKFILL_MAX_PAGES = int(os.getenv("BYBIT_ATH_ATL_BACKFILL_MAX_PAGES", "10"))
 STABLECOIN_SUFFIXES = ("USDT", "USDC", "USDD", "USD")
+_NON_USDT_STABLECOIN_SUFFIXES = tuple(s for s in STABLECOIN_SUFFIXES if s != "USDT")
 SETTINGS_PATH = Path(__file__).with_name("settings.json")
 STATE_PATH = Path(__file__).with_name("state.json")
 CUSTOM_ALERTS_PATH = Path(__file__).with_name("custom_alerts.json")
@@ -211,6 +212,8 @@ def _coerce_alert(payload: dict) -> dict:
     symbol = norm_symbol(raw_symbol)
     if not symbol:
         raise ValueError("symbol is required")
+    if any(symbol.endswith(suffix) for suffix in _NON_USDT_STABLECOIN_SUFFIXES):
+        raise ValueError("Bybit monitor supports USDT perpetual symbols only.")
 
     allowed = _get_linear_perpetual_symbols()
     resolved = resolve_bybit_symbol_from_choices(
@@ -806,11 +809,16 @@ def _fetch_linear_perpetual_symbols() -> set[str]:
                 contract_type = str(row.get("contractType") or "")
                 status = str(row.get("status") or "")
                 delivery_time = str(row.get("deliveryTime") or "")
+                quote_coin = str(row.get("quoteCoin") or "").upper()
+                settle_coin = str(row.get("settleCoin") or "").upper()
                 if (
                     symbol
                     and status == "Trading"
                     and contract_type == "LinearPerpetual"
                     and delivery_time in {"", "0"}
+                    and quote_coin == "USDT"
+                    and settle_coin == "USDT"
+                    and symbol.endswith("USDT")
                 ):
                     symbols.add(symbol)
             cursor = result.get("nextPageCursor")
@@ -919,9 +927,9 @@ def _fetch_fallback_prices() -> Dict[str, float]:
         if not symbol or price_val in (None, "", "0"):
             continue
 
-        # Keep only USDT/USDC perps to mirror linear contracts.
+        # Keep only USDT symbols to match supported Bybit USDT linear perpetual contracts.
         symbol_str = str(symbol).upper()
-        if not symbol_str.endswith(("USDT", "USDC")):
+        if not symbol_str.endswith("USDT"):
             continue
 
         base_symbol = extract_base_symbol(symbol_str)
@@ -1227,7 +1235,7 @@ def prune_non_perpetual_custom_alerts() -> None:
         _save_custom_alerts(kept)
         get_custom_alerts(force=True)
         log(
-            "Pruned non-perpetual custom alerts: "
+            "Pruned unsupported custom alerts (non-USDT/non-perpetual): "
             f"removed={len(alerts) - len(kept)} kept={len(kept)}"
         )
 
@@ -1241,6 +1249,7 @@ def run_monitor() -> None:
     blocked_streak = 0
     settings = get_runtime_settings(force=True)
     last_logged_settings = None
+    last_successful_scan_at: float | None = None
 
     api_targets = ", ".join(f"{base}{API_PATH}" for base in _iter_api_bases())
     log(
@@ -1317,6 +1326,25 @@ def run_monitor() -> None:
             continue
 
         log(f"Received {len(prices)} perpetual prices from {source_label}.")
+        now_ts = time.time()
+        resume_reset_after_seconds = max(
+            int(settings["wait_seconds"]) * 3,
+            int(os.getenv("BYBIT_RESUME_RESET_AFTER_SECONDS", "900")),
+        )
+        scanner_gap_seconds = (
+            (now_ts - last_successful_scan_at)
+            if last_successful_scan_at is not None
+            else None
+        )
+        suppress_alerts_for_gap = bool(
+            scanner_gap_seconds is not None and scanner_gap_seconds > resume_reset_after_seconds
+        )
+        if suppress_alerts_for_gap:
+            log(
+                "Detected long scanner gap (sleep/resume). Resetting baseline; "
+                "suppressing alerts for this cycle. "
+                f"gap_seconds={scanner_gap_seconds:.1f}, threshold_seconds={resume_reset_after_seconds}."
+            )
 
         if not prices:
             log(
@@ -1324,6 +1352,24 @@ def run_monitor() -> None:
                 "and try again."
             )
         else:
+            for sym, px in prices.items():
+                dq = price_history.get(sym)
+                if dq is None:
+                    dq = deque()
+                    price_history[sym] = dq
+                dq.append((now_ts, float(px)))
+            if suppress_alerts_for_gap:
+                previous_prices = prices
+                price_history = {sym: deque([(now_ts, float(px))]) for sym, px in prices.items()}
+                last_successful_scan_at = now_ts
+                log("Baseline has been rebuilt after scanner gap; alerts resume on next normal cycle.")
+                log(
+                    "Waiting "
+                    f"{settings['wait_seconds'] // 60} minute(s) ({settings['wait_seconds']} seconds) "
+                    "before the next price check."
+                )
+                wait_with_log(settings["wait_seconds"], "Waiting for the next check")
+                continue
             if previous_prices:
                 triggered_any = False
 
@@ -1378,6 +1424,7 @@ def run_monitor() -> None:
                 traceback.print_exc()
 
         previous_prices = prices
+        last_successful_scan_at = now_ts
         log(
             "Waiting "
             f"{settings['wait_seconds'] // 60} minute(s) ({settings['wait_seconds']} seconds) "

@@ -940,6 +940,7 @@ def run_monitor() -> None:
     last_logged_settings = None
     iteration = 0
     history_keep_s = int(os.getenv("OANDA_PRICE_HISTORY_SECONDS", "3600"))
+    last_successful_scan_at: float | None = None
     _heartbeat(phase="starting", wait_seconds=int(settings["wait_seconds"]))
 
     while True:
@@ -973,6 +974,24 @@ def run_monitor() -> None:
             log("Empty pricing response; waiting and retrying.")
         else:
             now = time.time()
+            resume_reset_after_seconds = max(
+                int(settings["wait_seconds"]) * 3,
+                int(os.getenv("OANDA_RESUME_RESET_AFTER_SECONDS", "900")),
+            )
+            scanner_gap_seconds = (
+                (now - last_successful_scan_at)
+                if last_successful_scan_at is not None
+                else None
+            )
+            suppress_alerts_for_gap = bool(
+                scanner_gap_seconds is not None and scanner_gap_seconds > resume_reset_after_seconds
+            )
+            if suppress_alerts_for_gap:
+                log(
+                    "Detected long scanner gap (sleep/resume). Resetting baseline; "
+                    "suppressing alerts for this cycle. "
+                    f"gap_seconds={scanner_gap_seconds:.1f}, threshold_seconds={resume_reset_after_seconds}."
+                )
             cutoff = now - history_keep_s
             for sym, px in prices.items():
                 dq = price_history.get(sym)
@@ -982,6 +1001,15 @@ def run_monitor() -> None:
                 dq.append((now, float(px)))
                 while dq and dq[0][0] < cutoff:
                     dq.popleft()
+            if suppress_alerts_for_gap:
+                previous_prices = prices
+                price_history = {sym: deque([(now, float(px))]) for sym, px in prices.items()}
+                last_successful_scan_at = now
+                log("Baseline has been rebuilt after scanner gap; alerts resume on next normal cycle.")
+                wait_s = int(settings["wait_seconds"])
+                log(f"Waiting {wait_s} seconds before the next price check.")
+                wait_with_heartbeat(wait_s, "Waiting for the next check")
+                continue
             if previous_prices:
                 triggered_any = False
                 current_symbols = set(prices)
@@ -1026,6 +1054,7 @@ def run_monitor() -> None:
                 log("Custom alert evaluation failed for this cycle.")
                 traceback.print_exc()
             previous_prices = prices
+            last_successful_scan_at = now
 
         wait_s = int(settings["wait_seconds"])
         log(f"Waiting {wait_s} seconds before the next price check.")

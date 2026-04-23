@@ -34,6 +34,7 @@ def test_merged_monitor_html_removed_controls_and_logs(monkeypatch: pytest.Monke
     assert 'id="oanda-log-box"' not in html
     assert 'id="bybit-status" class="badge">Checking…</span>' in html
     assert 'id="oanda-status" class="badge">Checking…</span>' in html
+    assert "polls local scanner status every 2 seconds" in html
 
 
 def test_merged_monitor_js_avoids_script_and_log_endpoints() -> None:
@@ -282,3 +283,96 @@ def test_oanda_config_error_includes_env_hint(monkeypatch: pytest.MonkeyPatch) -
     message = str(exc.value)
     assert "env_loaded_file=" in message
     assert "env_checked=" in message
+
+
+def test_bybit_run_monitor_resets_baseline_after_long_gap(monkeypatch: pytest.MonkeyPatch) -> None:
+    from bybit_monitor import bybit_altcoin_monitor
+
+    monkeypatch.setattr(
+        bybit_altcoin_monitor,
+        "get_runtime_settings",
+        lambda force=False: {"wait_seconds": 10, "percent_threshold": 5.0},
+    )
+    monkeypatch.setattr(bybit_altcoin_monitor, "_iter_api_bases", lambda: ["https://example.test"])
+    monkeypatch.setattr(bybit_altcoin_monitor, "get_bybit_creds", lambda: ("live", "", "", "https://example.test", "env"))
+    monkeypatch.setattr(bybit_altcoin_monitor, "_heartbeat", lambda **kwargs: None)
+    monkeypatch.setattr(bybit_altcoin_monitor, "wait_with_log", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(bybit_altcoin_monitor, "_load_state", lambda: {"symbols": {}})
+    monkeypatch.setattr(bybit_altcoin_monitor, "get_custom_alerts", lambda force=False: [])
+    monkeypatch.setattr(bybit_altcoin_monitor, "evaluate_custom_alerts", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(bybit_altcoin_monitor, "_save_state", lambda *_args, **_kwargs: None)
+
+    alerts: list[str] = []
+    monkeypatch.setattr(bybit_altcoin_monitor, "send_notification", lambda _title, msg: alerts.append(msg))
+
+    prices_sequence = iter(
+        [
+            {"BTCUSDT": 100.0},
+            {"BTCUSDT": 160.0},  # would alert, but must be suppressed after long gap
+            {"BTCUSDT": 180.0},  # normal cycle after reset can alert
+        ]
+    )
+
+    def fake_fetch() -> dict[str, float]:
+        try:
+            return next(prices_sequence)
+        except StopIteration as exc:
+            raise KeyboardInterrupt from exc
+
+    monkeypatch.setattr(bybit_altcoin_monitor, "fetch_altcoin_prices", fake_fetch)
+    timestamps = iter([0.0, 2000.0, 2010.0])
+    monkeypatch.setattr(bybit_altcoin_monitor.time, "time", lambda: next(timestamps))
+
+    with pytest.raises(KeyboardInterrupt):
+        bybit_altcoin_monitor.run_monitor()
+
+    assert len(alerts) == 1
+    assert "180.000000" in alerts[0]
+
+
+def test_oanda_run_monitor_resets_baseline_after_long_gap(monkeypatch: pytest.MonkeyPatch) -> None:
+    from oanda_monitor import oanda_forex_monitor
+
+    monkeypatch.setenv("OANDA_INSTRUMENTS", "EUR_USD")
+    monkeypatch.setattr(oanda_forex_monitor, "_oanda_token", lambda: "token")
+    monkeypatch.setattr(oanda_forex_monitor, "_oanda_account_id", lambda: "account")
+    monkeypatch.setattr(oanda_forex_monitor, "_oanda_base_url", lambda: "https://example.test")
+    monkeypatch.setattr(
+        oanda_forex_monitor,
+        "get_runtime_settings",
+        lambda force=False: {"wait_seconds": 10, "percent_threshold": 0.10},
+    )
+    monkeypatch.setattr(oanda_forex_monitor, "_heartbeat", lambda **kwargs: None)
+    monkeypatch.setattr(oanda_forex_monitor, "wait_with_heartbeat", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(oanda_forex_monitor, "_load_state", lambda: {"symbols": {}})
+    monkeypatch.setattr(oanda_forex_monitor, "fetch_pip_locations", lambda *_args, **_kwargs: {"EUR_USD": 4})
+    monkeypatch.setattr(oanda_forex_monitor, "get_custom_alerts", lambda force=False: [])
+    monkeypatch.setattr(oanda_forex_monitor, "evaluate_custom_alerts", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(oanda_forex_monitor, "_save_state", lambda *_args, **_kwargs: None)
+
+    alerts: list[str] = []
+    monkeypatch.setattr(oanda_forex_monitor, "send_push_notification", lambda _title, msg: alerts.append(msg))
+
+    prices_sequence = iter(
+        [
+            ({"EUR_USD": 1.0000}, None),
+            ({"EUR_USD": 1.0200}, None),  # would alert, but suppressed after long gap
+            ({"EUR_USD": 1.0300}, None),  # should alert on normal cycle
+        ]
+    )
+
+    def fake_fetch_prices(*_args, **_kwargs):
+        try:
+            return next(prices_sequence)
+        except StopIteration as exc:
+            raise KeyboardInterrupt from exc
+
+    monkeypatch.setattr(oanda_forex_monitor, "fetch_prices", fake_fetch_prices)
+    timestamps = iter([0.0, 2000.0, 2010.0])
+    monkeypatch.setattr(oanda_forex_monitor.time, "time", lambda: next(timestamps))
+
+    with pytest.raises(KeyboardInterrupt):
+        oanda_forex_monitor.run_monitor()
+
+    assert len(alerts) == 1
+    assert "1.030000" in alerts[0]
