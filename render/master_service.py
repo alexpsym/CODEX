@@ -2863,8 +2863,11 @@ def _parse_excel_account_workbook(
         }
         extra_cols = {key: _first_present(df, aliases) for key, aliases in extra_aliases.items()}
 
-        trade_signal_count = sum(col is not None for col in [symbol_col, side_col, entry_col, exit_col, pnl_col])
-        if trade_signal_count >= 3:
+        trade_signal_count = sum(
+            col is not None
+            for col in [symbol_col, side_col, entry_col, exit_col, pnl_col, open_time_col, close_time_col]
+        )
+        if symbol_col and trade_signal_count >= 3:
             for idx, row in df.iterrows():
                 symbol_raw = _safe_str_from_row(row, symbol_col)
                 if not symbol_raw or symbol_raw.lower() == "nan":

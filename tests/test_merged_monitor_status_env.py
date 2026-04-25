@@ -282,9 +282,21 @@ def test_run_local_master_control_bat_uses_local_autostart() -> None:
     assert 'set "APP_PROFILE=local"' in content
     assert 'set "AUTOSTART_SCRIPTS=bybit_monitor,oanda_monitor,fxweekend-clone"' in content
     assert 'set "SCANNER_LOCAL_UI_MODE=1"' not in content
+    assert 'if /I "%~1"=="__worker" goto worker' in content
+    assert ":worker" in content
     assert ":restart_master" in content
     assert "goto restart_master" in content
-    assert "uvicorn render.master_service:app" in content
+    assert '"%PYTHON_EXE%" -m uvicorn render.master_service:app --host 127.0.0.1 --port 8000' in content
+    assert "cmd /v:on /k ^" not in content
+    assert '"set APP_PROFILE=%APP_PROFILE% && ^' not in content
+    assert 'cmd /d /v:on /k ""%~f0" __worker"' in content
+    assert content.index('cmd /d /v:on /k ""%~f0" __worker"') < content.index('start "" "http://127.0.0.1:8000"')
+
+
+def test_run_local_master_control_bat_no_caret_continued_quoted_restart_loop() -> None:
+    content = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
+    forbidden_pattern = 'cmd /k ^\n"set '
+    assert forbidden_pattern not in content
 
 
 def test_oanda_config_error_includes_env_hint(monkeypatch: pytest.MonkeyPatch) -> None:
