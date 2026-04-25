@@ -387,6 +387,10 @@ TRADING_JOURNAL_IMPORT_CACHE_VERSION = 2
 TRADING_JOURNAL_DROPBOX_FOLDER = os.getenv(
     "TRADING_JOURNAL_DROPBOX_FOLDER", "/master_control"
 ).strip()
+TRADING_JOURNAL_LOCAL_DIR = Path(
+    os.getenv("TRADING_JOURNAL_LOCAL_DIR", str(BASE_DIR / "journal"))
+).expanduser()
+TRADING_JOURNAL_SOURCE = str(os.getenv("TRADING_JOURNAL_SOURCE", "both") or "both").strip().lower()
 TRADING_JOURNAL_SYNC_STATE: Dict[str, object] = {
     "running": False,
     "progress": 0,
@@ -399,6 +403,15 @@ TRADING_JOURNAL_SYNC_STATE: Dict[str, object] = {
     "updated_at": None,
 }
 TRADING_JOURNAL_SYNC_LOCK = threading.Lock()
+TRADING_JOURNAL_IMPORT_DIAGNOSTICS: Dict[str, object] = {
+    "rows_total": 0,
+    "rows_by_source": {},
+    "rows_by_asset_class": {},
+    "last_sync": {},
+    "local_workbooks_seen": 0,
+    "dropbox_workbooks_seen": 0,
+    "errors": [],
+}
 BYBIT_DEMO_TEMPLATE_NAME = "Bybit-UM-USDTPerp-TradeHistory-template.csv"
 BYBIT_DEMO_WORKBOOK_NAME = "Bybit Demo.xlsx"
 BYBIT_DEMO_WORKBOOK_SHEET = "Trades"
@@ -502,6 +515,26 @@ def _record_daily_trade_sync_status(**updates: object) -> None:
     merged["updated_at"] = _utc_now_iso()
     state["daily_trade_sync"] = merged
     _save_trading_journal_state(state)
+
+
+def _default_journal_diagnostics() -> Dict[str, object]:
+    return {
+        "rows_total": 0,
+        "rows_by_source": {},
+        "rows_by_asset_class": {},
+        "last_sync": {},
+        "local_workbooks_seen": 0,
+        "dropbox_workbooks_seen": 0,
+        "errors": [],
+    }
+
+
+def _set_trading_journal_diagnostics(payload: Optional[Dict[str, object]]) -> None:
+    base = _default_journal_diagnostics()
+    if isinstance(payload, dict):
+        base.update(payload)
+    global TRADING_JOURNAL_IMPORT_DIAGNOSTICS
+    TRADING_JOURNAL_IMPORT_DIAGNOSTICS = base
 
 
 TRADING_JOURNAL_DROPBOX_RECURSIVE = os.getenv(
@@ -2563,7 +2596,41 @@ def _canonical_symbol(symbol: str) -> str:
 
 def _is_fx_account_label(account_label: str) -> bool:
     text = (account_label or "").upper()
-    return ("OANDA" in text) or ("PEPPERSTONE" in text)
+    return any(token in text for token in ("OANDA", "PEPPERSTONE", "FOREX", " FX"))
+
+
+def _infer_asset_class(
+    account_label: str,
+    symbol: str,
+    row: pd.Series,
+    metrics: Dict[str, object],
+) -> str:
+    account_txt = (account_label or "").upper()
+    symbol_txt = _canonical_symbol(symbol or "").upper()
+    if any(token in account_txt for token in ("OANDA", "PEPPERSTONE", "FOREX", " FX")):
+        return "fx"
+    if symbol_txt and (is_likely_oanda_pair(symbol_txt) or bool(re.fullmatch(r"[A-Z]{3}_[A-Z]{3}", str(symbol or "").upper()))):
+        return "fx"
+    if any(token in symbol_txt for token in ("USDT", "USDC", "BTC", "ETH", "PERP")):
+        return "crypto"
+
+    hints: List[str] = []
+    for key, value in (metrics or {}).items():
+        key_txt = str(key or "").lower()
+        if any(k in key_txt for k in ("asset", "class", "market", "instrument", "product", "type", "account", "currency")):
+            hints.append(str(value or "").lower())
+    if isinstance(row, pd.Series):
+        for col_name in row.index:
+            col_txt = str(col_name or "").lower()
+            if any(k in col_txt for k in ("asset", "class", "market", "instrument", "product", "type", "account", "currency")):
+                hints.append(str(row.get(col_name) or "").lower())
+
+    joined = " ".join(hints)
+    if re.search(r"\b(forex|fx|currency)\b", joined):
+        return "fx"
+    if re.search(r"\b(crypto|perp|perpetual)\b", joined):
+        return "crypto"
+    return "fx" if _is_fx_account_label(account_label) else "crypto"
 
 
 def _normalize_fx_qty_for_display(
@@ -2746,6 +2813,8 @@ def _parse_excel_account_workbook(
         close_time_col = _first_present(df, ["closing_time", "close_time", "exit_time", "time_close", "closed_at"])
         side_col = _first_present(df, ["type_buy_sell", "side", "direction", "buy_sell", "type"])
         symbol_col = _first_present(df, ["symbol", "instrument", "pair", "market"])
+        account_col = _first_present(df, ["account", "account_label", "portfolio", "book"])
+        account_ccy_col = _first_present(df, ["account_currency", "currency", "ccy", "deposit_currency"])
         setup_col = _first_present(df, ["setup"])
         qty_col = _first_present(df, ["size_quantity", "qty", "quantity", "size", "units", "volume"])
         entry_col = _first_present(df, ["entry_price", "entry", "open_price", "price_open"])
@@ -2792,7 +2861,8 @@ def _parse_excel_account_workbook(
                 if not symbol_raw or symbol_raw.lower() == "nan":
                     continue
 
-                account_currency = _infer_account_currency(account_label)
+                row_account_label = _safe_str_from_row(row, account_col) or account_label
+                account_currency = _safe_str_from_row(row, account_ccy_col) or _infer_account_currency(row_account_label)
                 symbol_canon = _canonical_symbol(symbol_raw)
 
                 open_time_iso = None
@@ -2816,7 +2886,7 @@ def _parse_excel_account_workbook(
                         close_time_iso = iso
 
                 raw_qty = _safe_float_from_row(row, qty_col)
-                qty_display = _normalize_fx_qty_for_display(account_label, symbol_canon, raw_qty)
+                qty_display = _normalize_fx_qty_for_display(row_account_label, symbol_canon, raw_qty)
                 entry_price = _safe_float_from_row(row, entry_col)
                 exit_price = _safe_float_from_row(row, exit_col)
                 commission = _safe_float_from_row(row, commission_col)
@@ -2846,6 +2916,7 @@ def _parse_excel_account_workbook(
                 timeframe = _normalize_timeframe(metrics.get("timeframe"))
                 if timeframe:
                     metrics["timeframe"] = timeframe
+                asset_class = _infer_asset_class(row_account_label, symbol_canon, row, metrics)
 
                 used_norm = {
                     _norm_col(x)
@@ -2896,10 +2967,10 @@ def _parse_excel_account_workbook(
                 all_rows.append({
                     "id": row_id,
                     "source": "excel",
-                    "account": account_label,
-                    "account_label": account_label,
+                    "account": row_account_label,
+                    "account_label": row_account_label,
                     "sheet": sheet,
-                    "asset_class": "fx" if _is_fx_account_label(account_label) else "crypto",
+                    "asset_class": asset_class,
                     "currency": account_currency,
                     "symbol": symbol_canon,
                     "symbol_raw": symbol_raw,
@@ -2910,14 +2981,14 @@ def _parse_excel_account_workbook(
                     "close_time": close_time_iso,
                     "qty": qty_display,
                     "qty_raw": raw_qty,
-                    "qty_unit": "lots" if _is_fx_account_label(account_label) else "native",
+                    "qty_unit": "lots" if asset_class == "fx" else "native",
                     "entry_price": entry_price,
                     "exit_price": exit_price,
                     "swap": swap,
                     "commission": commission,
-                    "commission_currency": "AUD" if _is_fx_account_label(account_label) else "USDT",
+                    "commission_currency": "AUD" if asset_class == "fx" else "USDT",
                     "fees": commission,
-                    "fee_currency": "AUD" if _is_fx_account_label(account_label) else "USDT",
+                    "fee_currency": "AUD" if asset_class == "fx" else "USDT",
                     "realized_pnl": net_profit,
                     "realized_pnl_currency": account_currency,
                     "net_profit": net_profit,
@@ -3262,6 +3333,31 @@ def _cashflow_rows_for_journal(active_folder: str) -> List[Dict[str, object]]:
     return sorted(rows, key=_row_sort_dt, reverse=True)
 
 
+def _list_local_trading_journal_workbooks() -> List[Path]:
+    root = TRADING_JOURNAL_LOCAL_DIR
+    if not root.exists() or not root.is_dir():
+        return []
+    found: List[Path] = []
+    for candidate in root.iterdir():
+        if not candidate.is_file():
+            continue
+        if candidate.suffix.lower() not in {".xls", ".xlsx", ".xlsm"}:
+            continue
+        found.append(candidate)
+    return sorted(found, key=lambda p: p.name.lower())
+
+
+def _parse_local_trading_journal_workbook(path: Path) -> Tuple[List[Dict[str, object]], Optional[Dict[str, object]]]:
+    payload = path.read_bytes()
+    rows, balance = _parse_excel_account_workbook(path.name, str(path), payload)
+    for row in rows:
+        if isinstance(row, dict):
+            row["source"] = "local_excel"
+    if isinstance(balance, dict):
+        balance["source"] = "local_excel"
+    return rows, balance
+
+
 def _import_trading_journal_from_dropbox_excel(
     progress_cb: Optional[Callable[[int, str], None]] = None,
 ) -> Dict[str, object]:
@@ -3498,6 +3594,107 @@ def _import_trading_journal_from_dropbox_excel(
         "balances_found": len(balances),
         "used_recursive_fallback": used_recursive_fallback,
         "errors": errors,
+    }
+
+
+def _import_trading_journal_from_sources(
+    progress_cb: Optional[Callable[[int, str], None]] = None,
+) -> Dict[str, object]:
+    source_mode = TRADING_JOURNAL_SOURCE if TRADING_JOURNAL_SOURCE in {"dropbox", "local", "both", "auto"} else "both"
+    include_dropbox = source_mode in {"dropbox", "both", "auto"}
+    include_local = source_mode in {"local", "both", "auto"}
+
+    existing_rows = _get_trading_journal_rows()
+    all_rows: Dict[str, Dict[str, object]] = {}
+    for row in existing_rows:
+        if isinstance(row, dict):
+            rid = str(row.get("id") or "")
+            if rid:
+                all_rows[rid] = dict(row)
+
+    diagnostics = _default_journal_diagnostics()
+    errors: List[Dict[str, str]] = []
+    balances: List[Dict[str, object]] = []
+    imported_any = False
+
+    if include_dropbox:
+        try:
+            dropbox_result = _import_trading_journal_from_dropbox_excel(progress_cb=progress_cb)
+            diagnostics["dropbox_workbooks_seen"] = int(dropbox_result.get("workbooks_seen") or 0)
+            errors.extend(dropbox_result.get("errors") or [])
+            imported_any = imported_any or bool(dropbox_result.get("rows_imported"))
+            rows_now = _get_trading_journal_rows()
+            for row in rows_now:
+                if isinstance(row, dict):
+                    rid = str(row.get("id") or "")
+                    if rid:
+                        all_rows[rid] = dict(row)
+            balances = list(_get_excel_account_balances())
+        except Exception as exc:
+            errors.append({"file": "", "path": "dropbox", "error": str(exc)})
+
+    local_files = _list_local_trading_journal_workbooks() if include_local else []
+    diagnostics["local_workbooks_seen"] = len(local_files)
+    local_rows_total = 0
+    local_balances: List[Dict[str, object]] = []
+    for local_file in local_files:
+        try:
+            local_rows, local_balance = _parse_local_trading_journal_workbook(local_file)
+            local_rows_total += len(local_rows)
+            for row in local_rows:
+                rid = str(row.get("id") or "")
+                if rid:
+                    all_rows[rid] = row
+            if local_balance:
+                local_balances.append(local_balance)
+        except Exception as exc:
+            errors.append({"file": local_file.name, "path": str(local_file), "error": str(exc)})
+    imported_any = imported_any or local_rows_total > 0
+
+    final_rows = sorted(all_rows.values(), key=_row_sort_dt, reverse=True)
+    if final_rows:
+        _set_trading_journal_rows(final_rows)
+        if local_balances:
+            state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
+            excel_bal = state.get("excel_account_balances") if isinstance(state, dict) else []
+            merged_balances = [*([b for b in excel_bal if isinstance(b, dict)] if isinstance(excel_bal, list) else []), *local_balances]
+            state["excel_account_balances"] = merged_balances
+            _save_json_file(TRADING_JOURNAL_STATE_PATH, state)
+            balances = merged_balances
+    else:
+        errors.append({"file": "", "path": "sources", "error": "Imported 0 rows; keeping existing journal data."})
+
+    rows_by_source: Dict[str, int] = defaultdict(int)
+    rows_by_asset_class: Dict[str, int] = defaultdict(int)
+    for row in _get_trading_journal_rows():
+        if not isinstance(row, dict):
+            continue
+        rows_by_source[str(row.get("source") or "unknown")] += 1
+        rows_by_asset_class[str(row.get("asset_class") or "unknown")] += 1
+    diagnostics.update(
+        {
+            "rows_total": len(_get_trading_journal_rows()),
+            "rows_by_source": dict(rows_by_source),
+            "rows_by_asset_class": dict(rows_by_asset_class),
+            "errors": errors,
+            "last_sync": {
+                "source_mode": source_mode,
+                "updated_at": _utc_now_iso(),
+                "ok": bool(imported_any),
+                "balances_found": len(balances),
+            },
+        }
+    )
+    _set_trading_journal_diagnostics(diagnostics)
+    return {
+        "ok": bool(imported_any),
+        "message": "Done" if imported_any else "No rows imported from configured sources.",
+        "rows_imported": len(_get_trading_journal_rows()),
+        "balances_found": len(balances),
+        "local_workbooks_seen": diagnostics["local_workbooks_seen"],
+        "dropbox_workbooks_seen": diagnostics["dropbox_workbooks_seen"],
+        "errors": errors,
+        "diagnostics": diagnostics,
     }
 def _get_excel_account_balances() -> List[Dict[str, object]]:
     state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
@@ -4551,6 +4748,10 @@ class ScriptManager:
         resolved = self._resolve_name(name)
         return self._scripts[resolved]
 
+    @property
+    def names(self) -> List[str]:
+        return sorted(self._scripts.keys())
+
     async def start(self, name: str) -> Dict[str, object]:
         script = self.get(name)
         await script.start()
@@ -4583,7 +4784,8 @@ OANDA_HISTORY_JOBS: Dict[str, OandaHistoryJob] = {}
 BYBIT_HISTORY_JOBS: Dict[str, BybitHistoryJob] = {}
 COINSPOT_HISTORY_JOBS: Dict[str, CoinspotHistoryJob] = {}
 AUTOSTART_LOGGER = logging.getLogger("uvicorn.error")
-DEFAULT_AUTOSTART_SCRIPTS = "fxweekend-clone"
+DEFAULT_RENDER_AUTOSTART_SCRIPTS = "fxweekend-clone"
+DEFAULT_LOCAL_AUTOSTART_SCRIPTS = "bybit_monitor,oanda_monitor,fxweekend-clone"
 
 FXWEEKEND_SETTINGS_PATH = BASE_DIR / "fxweekend-clone" / "settings.json"
 FXWEEKEND_DEFAULT_SETTINGS: Dict[str, object] = {
@@ -4627,9 +4829,13 @@ def _compute_autostart_scripts() -> List[str]:
 
     raw_value = os.getenv("AUTOSTART_SCRIPTS")
     if _is_scanner_local_ui_mode():
-        raw_value = ""
-    elif raw_value is None:
-        raw_value = DEFAULT_AUTOSTART_SCRIPTS
+        return []
+    if raw_value is None:
+        raw_value = (
+            DEFAULT_LOCAL_AUTOSTART_SCRIPTS
+            if APP_PROFILE == "local"
+            else DEFAULT_RENDER_AUTOSTART_SCRIPTS
+        )
 
     normalized = (raw_value or "").strip()
     if normalized.upper() in {"NONE", "OFF", "DISABLED"}:
@@ -4643,14 +4849,22 @@ def _compute_autostart_scripts() -> List[str]:
     }
 
     want_all = any(token.upper() == "ALL" or token == "*" for token in autostart_raw)
-    if want_all:
-        names = list(script_manager.names)
-    else:
-        names = list(autostart_raw)
+    names = list(script_manager.names) if want_all else list(autostart_raw)
 
     if autostart_exclude:
         names = [name for name in names if name not in autostart_exclude]
-    return names
+    filtered: List[str] = []
+    seen: Set[str] = set()
+    for name in names:
+        try:
+            script = script_manager.get(name)
+        except HTTPException:
+            continue
+        if script.name in seen:
+            continue
+        seen.add(script.name)
+        filtered.append(script.name)
+    return filtered
 
 
 async def _run_startup_recovery_import_if_needed() -> None:
@@ -4681,7 +4895,7 @@ async def _run_startup_recovery_import_if_needed() -> None:
             )
             BYBIT_LOGGER.exception("Bybit demo startup recovery sync error: %s", exc)
     try:
-        result = await asyncio.to_thread(_import_trading_journal_from_dropbox_excel)
+        result = await asyncio.to_thread(_import_trading_journal_from_sources)
         ok_flag = bool(result.get("ok", False)) if isinstance(result, dict) else False
         _record_daily_trade_sync_status(
             last_attempt_at=_utc_now_iso(),
@@ -4814,7 +5028,7 @@ async def _run_daily_trade_history_sync(*, reason: str) -> Dict[str, object]:
             bybit_result["live"] = {"ok": False, "error": str(exc)}
 
         try:
-            import_result = await asyncio.to_thread(_import_trading_journal_from_dropbox_excel)
+            import_result = await asyncio.to_thread(_import_trading_journal_from_sources)
         except Exception as exc:
             errors.append(f"Dropbox workbook import failed: {exc}")
             import_result = {"ok": False, "error": str(exc)}
@@ -4883,6 +5097,65 @@ async def _schedule_daily_trade_history_sync() -> None:
             )
 
 
+_SCANNER_SUPERVISOR_BACKOFF: Dict[str, float] = {}
+_SCANNER_SUPERVISOR_BACKOFF_WINDOW: Dict[str, float] = {}
+_SCANNER_SUPERVISOR_BASE_SECONDS = float(os.getenv("SCANNER_SUPERVISOR_BASE_SECONDS", "20") or 20)
+_SCANNER_SUPERVISOR_MAX_BACKOFF_SECONDS = float(os.getenv("SCANNER_SUPERVISOR_MAX_BACKOFF_SECONDS", "300") or 300)
+
+
+def _scanner_has_external_live_runtime(script_name: str) -> bool:
+    if script_name == "bybit_monitor":
+        payload = _scanner_status_payload(BYBIT_RUNTIME_STATUS_PATH)
+    elif script_name == "oanda_monitor":
+        payload = _scanner_status_payload(OANDA_RUNTIME_STATUS_PATH)
+    else:
+        return False
+    if str(payload.get("ui_status")) != "running":
+        return False
+    runtime_pid = payload.get("pid")
+    script_pid = None
+    try:
+        script_pid = script_manager.get(script_name).pid
+    except Exception:
+        pass
+    return runtime_pid is not None and runtime_pid != script_pid
+
+
+async def _supervise_autostart_scripts(names: List[str]) -> None:
+    if APP_PROFILE != "local":
+        return
+    scanner_targets = [n for n in names if n in {"bybit_monitor", "oanda_monitor"}]
+    if not scanner_targets:
+        return
+    while True:
+        await asyncio.sleep(max(15.0, _SCANNER_SUPERVISOR_BASE_SECONDS))
+        for name in scanner_targets:
+            try:
+                script = script_manager.get(name)
+            except HTTPException:
+                continue
+            if script.is_running:
+                _SCANNER_SUPERVISOR_BACKOFF.pop(name, None)
+                continue
+            if _scanner_has_external_live_runtime(name):
+                continue
+            now = time.time()
+            retry_after = _SCANNER_SUPERVISOR_BACKOFF.get(name, 0.0)
+            if retry_after and now < retry_after:
+                continue
+            AUTOSTART_LOGGER.warning("Scanner supervisor restarting %s", name)
+            try:
+                await script.start()
+                _SCANNER_SUPERVISOR_BACKOFF.pop(name, None)
+                _SCANNER_SUPERVISOR_BACKOFF_WINDOW.pop(name, None)
+            except Exception as exc:
+                prev_wait = _SCANNER_SUPERVISOR_BACKOFF_WINDOW.get(name, 0.0)
+                current_wait = 15.0 if prev_wait <= 0 else min(_SCANNER_SUPERVISOR_MAX_BACKOFF_SECONDS, prev_wait * 2.0)
+                _SCANNER_SUPERVISOR_BACKOFF_WINDOW[name] = current_wait
+                _SCANNER_SUPERVISOR_BACKOFF[name] = now + current_wait
+                AUTOSTART_LOGGER.error("Scanner supervisor failed to restart %s: %s", name, exc)
+
+
 @app.on_event("startup")
 async def _autostart_scripts() -> None:
     AUTOSTART_LOGGER.info(format_env_bootstrap_log(_MASTER_ENV_INFO))
@@ -4931,6 +5204,8 @@ async def _autostart_scripts() -> None:
 
         if script.startup_task is None or script.startup_task.done():
             script.startup_task = asyncio.create_task(_background_start(script))
+    if APP_PROFILE == "local":
+        asyncio.create_task(_supervise_autostart_scripts(autostart_targets))
 
 
 async def _start_oanda_fill_poll_after_delay() -> None:
@@ -16717,6 +16992,19 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
     combined_items = sorted([*trade_items, *cashflow_rows], key=_row_sort_dt, reverse=True)
     stats = _compute_journal_stats(combined_items, balances)
     return JSONResponse({"items": combined_items, "count": len(combined_items), "stats": stats})
+
+
+@app.get("/api/trading-journal/diagnostics")
+async def trading_journal_diagnostics() -> JSONResponse:
+    payload = dict(TRADING_JOURNAL_IMPORT_DIAGNOSTICS or _default_journal_diagnostics())
+    payload["rows_total"] = int(payload.get("rows_total") or 0)
+    payload["rows_by_source"] = payload.get("rows_by_source") if isinstance(payload.get("rows_by_source"), dict) else {}
+    payload["rows_by_asset_class"] = payload.get("rows_by_asset_class") if isinstance(payload.get("rows_by_asset_class"), dict) else {}
+    payload["last_sync"] = payload.get("last_sync") if isinstance(payload.get("last_sync"), dict) else {}
+    payload["local_workbooks_seen"] = int(payload.get("local_workbooks_seen") or 0)
+    payload["dropbox_workbooks_seen"] = int(payload.get("dropbox_workbooks_seen") or 0)
+    payload["errors"] = payload.get("errors") if isinstance(payload.get("errors"), list) else []
+    return JSONResponse(payload)
 @app.get("/api/trading-journal/balances")
 async def trading_journal_balances() -> JSONResponse:
     rows = [r for r in _get_trading_journal_rows() if isinstance(r, dict) and not _exclude_bybit_demo_row(r)]
@@ -16992,7 +17280,7 @@ async def _run_trading_journal_sync_job() -> None:
         except Exception as exc:
             bybit_live = {"ok": False, "error": str(exc)}
 
-        result = await asyncio.to_thread(_import_trading_journal_from_dropbox_excel, progress_cb=_cb)
+        result = await asyncio.to_thread(_import_trading_journal_from_sources, progress_cb=_cb)
         if isinstance(result, dict):
             result["bybit"] = {"demo": bybit_demo, "live": bybit_live}
         ok_flag = bool(result.get("ok", True)) if isinstance(result, dict) else True

@@ -260,9 +260,12 @@ def test_run_scanner_local_bat_sets_explicit_env_file() -> None:
 
 def test_compute_autostart_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(master_service, "SCANNER_LOCAL_UI_MODE", False)
+    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
     monkeypatch.delenv("AUTOSTART_SCRIPTS", raising=False)
     names_default = master_service._compute_autostart_scripts()
     assert "fxweekend-clone" in names_default
+    assert "bybit_monitor" in names_default
+    assert "oanda_monitor" in names_default
 
     monkeypatch.setenv("AUTOSTART_SCRIPTS", "  ")
     assert master_service._compute_autostart_scripts() == []
@@ -273,6 +276,13 @@ def test_compute_autostart_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(master_service, "SCANNER_LOCAL_UI_MODE", True)
     monkeypatch.delenv("AUTOSTART_SCRIPTS", raising=False)
     assert master_service._compute_autostart_scripts() == []
+
+
+def test_run_local_master_control_bat_uses_local_autostart() -> None:
+    content = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
+    assert 'set "APP_PROFILE=local"' in content
+    assert 'set "AUTOSTART_SCRIPTS=bybit_monitor,oanda_monitor,fxweekend-clone"' in content
+    assert 'set "SCANNER_LOCAL_UI_MODE=1"' not in content
 
 
 def test_oanda_config_error_includes_env_hint(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -376,3 +386,57 @@ def test_oanda_run_monitor_resets_baseline_after_long_gap(monkeypatch: pytest.Mo
 
     assert len(alerts) == 1
     assert "1.030000" in alerts[0]
+
+
+def test_supervisor_restarts_stopped_scanner(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeScript:
+        def __init__(self) -> None:
+            self.is_running = False
+            self.starts = 0
+
+        async def start(self) -> None:
+            self.starts += 1
+            self.is_running = True
+
+    fake = FakeScript()
+    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
+    monkeypatch.setattr(master_service, "_scanner_has_external_live_runtime", lambda _name: False)
+    monkeypatch.setattr(master_service, "_SCANNER_SUPERVISOR_BASE_SECONDS", 0.01)
+    monkeypatch.setattr(master_service.script_manager, "get", lambda _name: fake)
+
+    async def _run() -> None:
+        task = asyncio.create_task(master_service._supervise_autostart_scripts(["bybit_monitor"]))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_run())
+    assert fake.starts >= 1
+
+
+def test_supervisor_skips_restart_when_external_runtime_live(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeScript:
+        def __init__(self) -> None:
+            self.is_running = False
+            self.starts = 0
+
+        async def start(self) -> None:
+            self.starts += 1
+            self.is_running = True
+
+    fake = FakeScript()
+    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
+    monkeypatch.setattr(master_service, "_scanner_has_external_live_runtime", lambda _name: True)
+    monkeypatch.setattr(master_service, "_SCANNER_SUPERVISOR_BASE_SECONDS", 0.01)
+    monkeypatch.setattr(master_service.script_manager, "get", lambda _name: fake)
+
+    async def _run() -> None:
+        task = asyncio.create_task(master_service._supervise_autostart_scripts(["oanda_monitor"]))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_run())
+    assert fake.starts == 0
