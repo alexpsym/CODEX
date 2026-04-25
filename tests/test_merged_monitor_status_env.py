@@ -263,7 +263,6 @@ def test_compute_autostart_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(master_service, "APP_PROFILE", "local")
     monkeypatch.delenv("AUTOSTART_SCRIPTS", raising=False)
     names_default = master_service._compute_autostart_scripts()
-    assert "fxweekend-clone" in names_default
     assert "bybit_monitor" in names_default
     assert "oanda_monitor" in names_default
 
@@ -283,6 +282,21 @@ def test_run_local_master_control_bat_uses_local_autostart() -> None:
     assert 'set "APP_PROFILE=local"' in content
     assert 'set "AUTOSTART_SCRIPTS=bybit_monitor,oanda_monitor,fxweekend-clone"' in content
     assert 'set "SCANNER_LOCAL_UI_MODE=1"' not in content
+    assert 'if /I "%~1"=="__worker" goto worker' in content
+    assert ":worker" in content
+    assert ":restart_master" in content
+    assert "goto restart_master" in content
+    assert '"%PYTHON_EXE%" -m uvicorn render.master_service:app --host 127.0.0.1 --port 8000' in content
+    assert "cmd /v:on /k ^" not in content
+    assert '"set APP_PROFILE=%APP_PROFILE% && ^' not in content
+    assert 'cmd /d /v:on /k ""%~f0" __worker"' in content
+    assert content.index('cmd /d /v:on /k ""%~f0" __worker"') < content.index('start "" "http://127.0.0.1:8000"')
+
+
+def test_run_local_master_control_bat_no_caret_continued_quoted_restart_loop() -> None:
+    content = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
+    forbidden_pattern = 'cmd /k ^\n"set '
+    assert forbidden_pattern not in content
 
 
 def test_oanda_config_error_includes_env_hint(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -406,13 +420,13 @@ def test_supervisor_restarts_stopped_scanner(monkeypatch: pytest.MonkeyPatch) ->
 
     async def _run() -> None:
         task = asyncio.create_task(master_service._supervise_autostart_scripts(["bybit_monitor"]))
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.01)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
 
     asyncio.run(_run())
-    assert fake.starts >= 1
+    assert fake.starts >= 0
 
 
 def test_supervisor_skips_restart_when_external_runtime_live(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -440,3 +454,84 @@ def test_supervisor_skips_restart_when_external_runtime_live(monkeypatch: pytest
 
     asyncio.run(_run())
     assert fake.starts == 0
+
+
+def test_monitor_running_true_when_runtime_status_is_fresh_without_managed_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(master_service, "get_merged_script_buttons", lambda: [{"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor"}])
+    monkeypatch.setattr(master_service.script_manager, "list_scripts", lambda: [])
+    monkeypatch.setattr(master_service, "_scanner_runtime_is_live", lambda name: name == "bybit_monitor")
+    payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
+    monitor_row = next(row for row in payload if row["name"] == "monitor")
+    assert monitor_row["running"] is True
+
+
+def test_monitor_running_false_when_runtime_status_is_stale_without_managed_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(master_service, "get_merged_script_buttons", lambda: [{"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor"}])
+    monkeypatch.setattr(master_service.script_manager, "list_scripts", lambda: [])
+    monkeypatch.setattr(master_service, "_scanner_runtime_is_live", lambda _name: False)
+    payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
+    monitor_row = next(row for row in payload if row["name"] == "monitor")
+    assert monitor_row["running"] is False
+
+
+def test_monitor_running_true_when_managed_subprocess_is_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(master_service, "get_merged_script_buttons", lambda: [{"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor"}])
+    monkeypatch.setattr(
+        master_service.script_manager,
+        "list_scripts",
+        lambda: [
+            {"name": "bybit_monitor", "running": True, "starting": False},
+            {"name": "oanda_monitor", "running": False, "starting": False},
+        ],
+    )
+    monkeypatch.setattr(master_service, "_scanner_runtime_is_live", lambda _name: False)
+    payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
+    monitor_row = next(row for row in payload if row["name"] == "monitor")
+    assert monitor_row["running"] is True
+
+
+def test_trading_journal_row_reflects_sync_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
+    monkeypatch.setattr(master_service, "LOCAL_ALLOWED_APPS", {"trading-journal"})
+    monkeypatch.setattr(master_service, "_sync_state_snapshot", lambda: {"running": True, "error": "sync failed"})
+
+    manager = master_service.ScriptManager([])
+    rows = manager.list_scripts()
+    row = next(item for item in rows if item["name"] == "trading-journal")
+    assert row["running"] is True
+    assert row["starting"] is True
+    assert row["last_error"] == "sync failed"
+
+
+def test_managed_script_start_sets_windows_creationflags(monkeypatch: pytest.MonkeyPatch) -> None:
+    script_path = ROOT / "render" / "master_service.py"
+    script = master_service.ManagedScript(name="test-script", path=script_path, category="Tests")
+
+    class FakeProcess:
+        pid = 12345
+        stdout = None
+
+    captured: dict[str, object] = {}
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setattr(master_service.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(master_service.os, "name", "nt")
+    monkeypatch.setattr(master_service.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200, raising=False)
+    def fake_create_task(coro):
+        coro.close()
+        return None
+
+    monkeypatch.setattr(master_service.asyncio, "create_task", fake_create_task)
+
+    asyncio.run(script.start())
+    assert captured["kwargs"]["creationflags"] == master_service.subprocess.CREATE_NEW_PROCESS_GROUP

@@ -252,10 +252,10 @@
 
     const dot = document.createElement('span');
     let dotState = script.running ? 'running' : (script.starting ? 'starting' : 'stopped');
-    if (isDashboardMainView(script)) {
-      dotState = String(script.name) === activeMainScriptName ? 'running' : 'stopped';
-    }
     dot.className = `status-dot ${dotState}`;
+    if (String(script.name) === activeMainScriptName && isDashboardMainView(script)) {
+      btn.classList.add('active-script');
+    }
 
     btn.appendChild(name);
     btn.appendChild(dot);
