@@ -1,6 +1,8 @@
 import asyncio
 import importlib.util
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -69,6 +71,8 @@ def test_open_orders_js_treats_webhook_as_cancelable() -> None:
     assert "type === 'webhook'" in js
     assert "type === 'order' || type === 'webhook'" in js
     assert "item.is_test_trade" in js
+    assert "Pending webhook — not a live broker order" in js
+    assert "Failed to load webhook attempts:" in js
 
 
 def test_close_open_order_invalidates_cache_for_webhook(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -162,3 +166,31 @@ def test_list_open_orders_force_bypasses_cache() -> None:
         assert "errors" in payload
     finally:
         monkeypatch.undo()
+
+
+def test_open_orders_keeps_failed_pending_webhooks_visible() -> None:
+    pending_items = [
+        {"id": "wh1", "status": "WAITING", "enabled": True},
+        {"id": "wh2", "status": "BYBIT_REJECTED", "enabled": True},
+        {"id": "wh3", "status": "FAILED_BEFORE_SUBMIT", "enabled": True},
+        {"id": "wh4", "status": "CONSUMED", "enabled": True},
+    ]
+    filtered, changed = master_service._clean_pending_webhooks_for_open_items(pending_items, [])
+    statuses = {row["id"]: row["status"] for row in filtered}
+    assert changed is True
+    assert statuses["wh1"] == "WAITING"
+    assert statuses["wh2"] == "BYBIT_REJECTED"
+    assert statuses["wh3"] == "FAILED_BEFORE_SUBMIT"
+    assert "wh4" not in statuses
+
+
+def test_open_orders_attempt_fetch_error_is_not_rendered_as_empty() -> None:
+    js = (ROOT / "render" / "static" / "open_orders.js").read_text(encoding="utf-8")
+    assert "Failed to load webhook attempts:" in js
+    assert "renderWebhookAttempts([], attemptErr?.message" in js
+
+
+def test_open_orders_js_parses_with_node() -> None:
+    node = shutil.which("node")
+    assert node, "node is required for JS syntax check"
+    subprocess.run([node, "--check", str(ROOT / "render" / "static" / "open_orders.js")], check=True)

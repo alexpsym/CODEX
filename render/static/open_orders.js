@@ -8,6 +8,16 @@
   const errorsList = errorsBox?.querySelector('ul');
   const attemptsTable = document.getElementById('webhook-attempts-table');
   const attemptsBody = attemptsTable?.querySelector('tbody');
+  const webhookStatusLabel = (status) => {
+    const key = String(status || '').toUpperCase();
+    if (key === 'WAITING') return 'Waiting for TradingView POST';
+    if (key === 'TRIGGERING') return 'Triggering';
+    if (key === 'BYBIT_REJECTED') return 'Bybit rejected';
+    if (key === 'FAILED_BEFORE_SUBMIT') return 'Failed before submit';
+    if (key === 'ORDER_CREATED_TPSL_FAILED') return 'Order created, TP/SL failed';
+    if (key === 'PENDING_NOT_FOUND') return 'Pending webhook not found on this instance';
+    return status || '—';
+  };
   let refreshInFlight = null;
   let hasData = false;
   let knownVersion = null;
@@ -178,9 +188,36 @@
       }
       row.appendChild(expTd);
 
-      [item.broker, resolveAccountLabel(item), item.category, item.instrument, item.timeframe, item.is_test_trade, item.type, item.side, item.size, item.entry_price || item.order_price, item.current_price, item.stop_loss, item.take_profit, item.leverage, formatTimestamp(item.opened_at), item.status].forEach((v) => {
+      const isWebhook = String(item.broker || '').toUpperCase() === 'WEBHOOK' || String(item.type || '').toLowerCase() === 'webhook';
+      const rowValues = [
+        item.broker,
+        resolveAccountLabel(item),
+        item.category,
+        item.instrument,
+        item.timeframe,
+        item.is_test_trade,
+        item.type,
+        item.side,
+        item.size,
+        item.entry_price || item.order_price,
+        item.current_price,
+        item.stop_loss,
+        item.take_profit,
+        item.leverage,
+        formatTimestamp(item.opened_at),
+        isWebhook ? `Pending webhook — not a live broker order · ${webhookStatusLabel(item.status)}` : item.status,
+      ];
+      rowValues.forEach((v, valueIdx) => {
         const td = document.createElement('td');
         td.textContent = fmt(v);
+        if (isWebhook && valueIdx === rowValues.length - 1) {
+          td.title = [
+            `request_id: ${fmt(item.request_id)}`,
+            `last_error: ${fmt(item.last_error)}`,
+            `bybit_ret_code: ${fmt(item.bybit_ret_code)}`,
+            `bybit_ret_msg: ${fmt(item.bybit_ret_msg)}`,
+          ].join('\n');
+        }
         row.appendChild(td);
       });
       const actionTd = document.createElement('td');
@@ -212,14 +249,24 @@
     });
   };
 
-  const renderWebhookAttempts = (items = []) => {
+  const renderWebhookAttempts = (items = [], fetchError = '') => {
     if (!attemptsBody) return;
     attemptsBody.innerHTML = '';
+    if (fetchError) {
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = 11;
+      td.className = 'muted';
+      td.textContent = `Failed to load webhook attempts: ${fetchError}`;
+      tr.appendChild(td);
+      attemptsBody.appendChild(tr);
+      return;
+    }
     const rows = Array.isArray(items) ? items : [];
     if (!rows.length) {
       const tr = document.createElement('tr');
       const td = document.createElement('td');
-      td.colSpan = 9;
+      td.colSpan = 11;
       td.className = 'muted';
       td.textContent = 'No recent webhook attempts.';
       tr.appendChild(td);
@@ -238,6 +285,8 @@
         item.bybit_ret_msg,
         item.request_id,
         item.pending_webhook_id,
+        item.error || item.last_error,
+        item.request_host || item.payload_origin_host,
       ].forEach((v) => {
         const td = document.createElement('td');
         td.textContent = fmt(v);
@@ -257,8 +306,8 @@
         try {
           const attempts = await fetchJson('/api/calculator/webhook-attempts?limit=20');
           renderWebhookAttempts(attempts.items || []);
-        } catch (_attemptErr) {
-          renderWebhookAttempts([]);
+        } catch (attemptErr) {
+          renderWebhookAttempts([], attemptErr?.message || String(attemptErr));
         }
         const stale = Boolean(payload.stale);
         const errCount = Array.isArray(payload.errors) ? payload.errors.length : 0;

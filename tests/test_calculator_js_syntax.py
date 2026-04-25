@@ -38,3 +38,11 @@ def test_calculator_js_parses_with_node() -> None:
     node = shutil.which("node")
     assert node, "node is required for JS syntax check"
     subprocess.run([node, "--check", str(JS_PATH)], check=True)
+
+
+def test_calculator_js_displays_and_copies_webhook_url() -> None:
+    js = JS_PATH.read_text(encoding="utf-8")
+    assert "calc-webhook-url" in js
+    assert "calc-webhook-copy-url" in js
+    assert "No webhook URL to copy." in js
+    assert "Webhook URL copied." in js

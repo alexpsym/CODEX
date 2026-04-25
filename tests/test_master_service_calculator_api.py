@@ -130,6 +130,8 @@ def test_merged_calculator_page_returns_200() -> None:
     assert html.find('id="calc-instrument-specs"') < html.find('id="calc-journal-summary"')
     assert html.find('id="calc-journal-summary"') < html.find('id="calc-sl-ticks"')
     assert "calc-right-rail" not in html
+    assert 'id="calc-webhook-url"' in html
+    assert 'id="calc-webhook-copy-url"' in html
 
 
 def test_calculator_js_net_r_only_and_no_idle_specs_placeholder() -> None:
@@ -784,6 +786,8 @@ def test_webhook_uses_keyword_request_id_for_bybit(monkeypatch: pytest.MonkeyPat
         return {"ok": True}
 
     monkeypatch.setattr(master_service, "_place_bybit_order", fake_bybit)
+    monkeypatch.setattr(master_service, "list_open_orders", lambda force=False: asyncio.sleep(0, result=master_service.JSONResponse({"items": [{"broker": "bybit", "account": "live", "category": "linear", "instrument": "BTCUSDT", "id": "oid-1", "type": "order"}]})))
+    monkeypatch.setattr(master_service, "_consume_pending_webhook", lambda *_args, **_kwargs: True)
     response = asyncio.run(master_service.calculator_webhook({
         "asset": "crypto",
         "account": "live",
@@ -811,19 +815,21 @@ def test_webhook_consumes_pending_before_order_placement(monkeypatch: pytest.Mon
 
     def fake_consume(webhook_id: str, *, request_id: str, reason: str = "webhook_received") -> bool:
         assert webhook_id == "wh-123"
-        assert reason == "webhook_received"
+        assert reason == "order_accepted"
         seen["consumed"] = True
         seen["request_id"] = request_id
         return True
 
     async def fake_bybit(_payload, *, request_id):
-        assert seen["consumed"] is True
+        assert seen["consumed"] is False
         assert request_id == seen["request_id"]
-        return {"ok": True}
+        return {"ok": True, "order": {"orderId": "oid-1", "orderLinkId": "ol-1"}}
 
     monkeypatch.setattr(master_service, "_assert_pending_webhook_executable", fake_assert)
+    monkeypatch.setattr(master_service, "_update_pending_webhook", lambda _wid, _updates: {"id": _wid})
     monkeypatch.setattr(master_service, "_consume_pending_webhook", fake_consume)
     monkeypatch.setattr(master_service, "_place_bybit_order", fake_bybit)
+    monkeypatch.setattr(master_service, "list_open_orders", lambda force=False: asyncio.sleep(0, result=master_service.JSONResponse({"items": [{"broker": "bybit", "account": "live", "category": "linear", "instrument": "BTCUSDT", "id": "oid-1", "type": "order"}]})))
     response = asyncio.run(
         master_service.calculator_webhook(
             {
@@ -861,7 +867,7 @@ def test_webhook_records_bybit_rejection_attempt(monkeypatch: pytest.MonkeyPatch
     events = {"record": None, "update": []}
 
     monkeypatch.setattr(master_service, "_assert_pending_webhook_executable", lambda _p: None)
-    monkeypatch.setattr(master_service, "_consume_pending_webhook", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(master_service, "_update_pending_webhook", lambda *_args, **_kwargs: {"id": "wh-1"})
     monkeypatch.setattr(master_service, "_upsert_trade_context", lambda payload: payload)
 
     def fake_record(payload):
@@ -908,6 +914,55 @@ def test_webhook_records_bybit_rejection_attempt(monkeypatch: pytest.MonkeyPatch
     assert rejected["bybit_ret_code"] == 10001
     assert rejected["bybit_ret_msg"] == "request parameter error"
     assert rejected["bybit_request"] == {"orderType": "Market"}
+
+
+def test_calculator_quote_returns_absolute_webhook_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PUBLIC_WEBHOOK_BASE_URL", "https://codex-rdqh.onrender.com")
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("live", "k", "s", "https://bybit.test", "KEY1"))
+    monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["BTCUSDT"]))
+    monkeypatch.setattr(master_service, "_fetch_oanda_mid_prices_batch", lambda **_kwargs: asyncio.sleep(0, result={"AUD_USD": 1}))
+    async def fake_get(_base, path, _params):
+        if path.endswith("instruments-info"):
+            return {"result": {"list": [{"priceFilter": {"tickSize": "1"}, "lotSizeFilter": {"qtyStep": "1", "minOrderQty": "1", "maxOrderQty": "999999", "maxMktOrderQty": "999999", "minNotionalValue": "1"}, "leverageFilter": {"maxLeverage": "10"}}]}}
+        return {"result": {"list": [{"bid1Price": "100", "ask1Price": "101", "lastPrice": "100.5"}]}}
+    monkeypatch.setattr(master_service, "_bybit_get_async", fake_get)
+    monkeypatch.setattr(master_service, "_bybit_signed_get", lambda **_kwargs: asyncio.sleep(0, result={"result": {"list": [{"makerFeeRate": "0", "takerFeeRate": "0"}]}}))
+    monkeypatch.setattr(master_service, "_fetch_bybit_balance_usdt", lambda *_args, **_kwargs: asyncio.sleep(0, result={"available_usdt": "1000", "total_equity": "1000"}))
+    body = json.loads(asyncio.run(master_service.calculator_quote({"asset": "crypto", "account": "live", "symbol": "BTC", "side": "buy", "order_type": "market", "risk_mode": "percent", "risk_value": 1, "stop_loss_ticks": 1, "take_profit_ticks": 2, "webhook": "yes"})).body.decode("utf-8"))
+    assert body["webhook_endpoint_url"] == "https://codex-rdqh.onrender.com/api/calculator/webhook"
+
+
+def test_local_calculator_blocks_webhook_without_public_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PUBLIC_WEBHOOK_BASE_URL", raising=False)
+    monkeypatch.delenv("RENDER_EXTERNAL_URL", raising=False)
+    monkeypatch.delenv("ALLOW_LOCAL_TRADINGVIEW_WEBHOOKS", raising=False)
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("live", "k", "s", "https://bybit.test", "KEY1"))
+    monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["BTCUSDT"]))
+    monkeypatch.setattr(master_service, "_fetch_oanda_mid_prices_batch", lambda **_kwargs: asyncio.sleep(0, result={"AUD_USD": 1}))
+    async def fake_get(_base, path, _params):
+        if path.endswith("instruments-info"):
+            return {"result": {"list": [{"priceFilter": {"tickSize": "1"}, "lotSizeFilter": {"qtyStep": "1", "minOrderQty": "1", "maxOrderQty": "999999", "maxMktOrderQty": "999999", "minNotionalValue": "1"}, "leverageFilter": {"maxLeverage": "10"}}]}}
+        return {"result": {"list": [{"bid1Price": "100", "ask1Price": "101", "lastPrice": "100.5"}]}}
+    monkeypatch.setattr(master_service, "_bybit_get_async", fake_get)
+    monkeypatch.setattr(master_service, "_bybit_signed_get", lambda **_kwargs: asyncio.sleep(0, result={"result": {"list": [{"makerFeeRate": "0", "takerFeeRate": "0"}]}}))
+    monkeypatch.setattr(master_service, "_fetch_bybit_balance_usdt", lambda *_args, **_kwargs: asyncio.sleep(0, result={"available_usdt": "1000", "total_equity": "1000"}))
+    with pytest.raises(master_service.HTTPException) as exc:
+        asyncio.run(master_service.calculator_quote({"asset": "crypto", "account": "live", "symbol": "BTC", "side": "buy", "order_type": "market", "risk_mode": "percent", "risk_value": 1, "stop_loss_ticks": 1, "take_profit_ticks": 2, "webhook": "yes"}))
+    assert exc.value.status_code == 400
+    assert "same public instance" in str(exc.value.detail)
+
+
+def test_webhook_missing_pending_id_returns_409_and_attempt_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = {"attempt": None, "update": None}
+    monkeypatch.setattr(master_service, "_assert_pending_webhook_executable", lambda _p: (_ for _ in ()).throw(ValueError("Pending webhook missing or no longer active.")))
+    monkeypatch.setattr(master_service, "_record_webhook_attempt", lambda payload: seen.__setitem__("attempt", dict(payload)) or dict(payload))
+    monkeypatch.setattr(master_service, "_update_webhook_attempt", lambda _rid, updates: seen.__setitem__("update", dict(updates)) or dict(updates))
+    response = asyncio.run(master_service.calculator_webhook({"asset": "crypto", "pending_webhook_id": "bogus", "account": "live", "symbol": "BTCUSDT", "action": "buy", "order_type": "market", "quantity": "0.01"}))
+    body = json.loads(response.body.decode("utf-8"))
+    assert response.status_code == 409
+    assert body["code"] == "PENDING_WEBHOOK_NOT_FOUND"
+    assert seen["attempt"]["status"] == "RECEIVED"
+    assert seen["update"]["status"] == "PENDING_NOT_FOUND"
 
 
 def test_crypto_demo_skips_fee_rate_warning(monkeypatch: pytest.MonkeyPatch) -> None:
