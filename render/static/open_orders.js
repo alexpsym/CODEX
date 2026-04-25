@@ -8,6 +8,9 @@
   const errorsList = errorsBox?.querySelector('ul');
   let refreshInFlight = null;
   let hasData = false;
+  let knownVersion = null;
+  let versionPollTimer = null;
+  const POLL_MS = 2500;
 
   const fmt = (v) => (v === null || v === undefined || v === '' ? '—' : v);
   const setBadge = (message) => { if (statusBadge) statusBadge.textContent = message; };
@@ -241,6 +244,46 @@
     return refreshInFlight;
   };
 
+  const pollVersion = async () => {
+    if (document.hidden) return;
+    try {
+      const payload = await fetchJson('/api/open-orders/version');
+      const nextVersion = Number(payload?.version);
+      if (!Number.isFinite(nextVersion)) return;
+      if (knownVersion === null) {
+        knownVersion = nextVersion;
+        return;
+      }
+      if (nextVersion !== knownVersion) {
+        knownVersion = nextVersion;
+        await refresh();
+      }
+    } catch (_err) {
+      // Keep polling; refresh() already handles user-facing network errors.
+    }
+  };
+
+  const startVersionPolling = () => {
+    if (versionPollTimer) return;
+    versionPollTimer = setInterval(pollVersion, POLL_MS);
+  };
+
+  const stopVersionPolling = () => {
+    if (!versionPollTimer) return;
+    clearInterval(versionPollTimer);
+    versionPollTimer = null;
+  };
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      stopVersionPolling();
+      return;
+    }
+    startVersionPolling();
+    pollVersion();
+  });
+
   refreshBtn?.addEventListener('click', refresh);
-  refresh();
+  refresh().then(pollVersion);
+  if (!document.hidden) startVersionPolling();
 })();

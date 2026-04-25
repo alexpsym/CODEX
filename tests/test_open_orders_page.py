@@ -37,13 +37,21 @@ def test_merged_open_orders_route_returns_html() -> None:
     assert "/static/open_orders.js?v=" in html
 
 
-def test_open_orders_js_is_manual_refresh_and_uses_force_query() -> None:
+def test_open_orders_js_uses_version_polling_and_force_query_refresh() -> None:
     js = (ROOT / "render" / "static" / "open_orders.js").read_text(encoding="utf-8")
-    assert "setInterval(" not in js
-    assert "visibilitychange" not in js
-    assert "POLL_MS" not in js
-    assert "HIDDEN_MULTIPLIER" not in js
+    assert "setInterval(" in js
+    assert "visibilitychange" in js
+    assert "POLL_MS" in js
+    assert "/api/open-orders/version" in js
     assert "/api/open-orders?force=1" in js
+
+
+def test_open_orders_version_endpoint_returns_cache_version() -> None:
+    master_service._OPEN_ORDERS_CACHE["version"] = 7
+    response = asyncio.run(master_service.open_orders_version())
+    payload = json.loads(response.body.decode("utf-8"))
+    assert payload["version"] == 7
+    assert "updated_at" in payload
 
 
 def test_open_orders_js_treats_webhook_as_cancelable() -> None:

@@ -456,23 +456,27 @@ def test_trade_context_exact_link_beats_fuzzy_match(temp_state_paths):
 
 
 def test_pending_webhook_mutations_invalidate_open_orders_cache(temp_state_paths):
+    master_service._OPEN_ORDERS_CACHE["version"] = 0
     master_service._OPEN_ORDERS_CACHE["payload"] = {"items": [{"id": "stale"}]}
     master_service._OPEN_ORDERS_CACHE["expires_at"] = 12345.0
     master_service._upsert_pending_webhook({"id": "wh-cache", "instrument": "BTCUSDT"})
     assert master_service._OPEN_ORDERS_CACHE["payload"] is None
     assert master_service._OPEN_ORDERS_CACHE["expires_at"] == 0.0
+    assert master_service._OPEN_ORDERS_CACHE["version"] == 1
 
     master_service._OPEN_ORDERS_CACHE["payload"] = {"items": [{"id": "stale"}]}
     master_service._OPEN_ORDERS_CACHE["expires_at"] = 12345.0
     master_service._update_pending_webhook("wh-cache", {"status": "PENDING"})
     assert master_service._OPEN_ORDERS_CACHE["payload"] is None
     assert master_service._OPEN_ORDERS_CACHE["expires_at"] == 0.0
+    assert master_service._OPEN_ORDERS_CACHE["version"] == 2
 
     master_service._OPEN_ORDERS_CACHE["payload"] = {"items": [{"id": "stale"}]}
     master_service._OPEN_ORDERS_CACHE["expires_at"] = 12345.0
     assert master_service._delete_pending_webhook("wh-cache") is True
     assert master_service._OPEN_ORDERS_CACHE["payload"] is None
     assert master_service._OPEN_ORDERS_CACHE["expires_at"] == 0.0
+    assert master_service._OPEN_ORDERS_CACHE["version"] == 3
 
 
 def test_pending_webhook_persists_cancel_touch_metadata(temp_state_paths):
@@ -518,6 +522,46 @@ def test_assert_pending_webhook_executable_blocks_cancelled(monkeypatch: pytest.
     )
     with pytest.raises(ValueError, match="cancel-touch"):
         master_service._assert_pending_webhook_executable({"pending_webhook_id": "pw-1"})
+
+
+def test_consume_pending_webhook_deletes_and_updates_context(
+    monkeypatch: pytest.MonkeyPatch, temp_state_paths
+):
+    consumed = master_service._upsert_pending_webhook(
+        {"id": "pw-consume", "instrument": "BTCUSDT", "status": "WAITING", "enabled": True}
+    )
+    assert consumed["id"] == "pw-consume"
+    called = {"backup": 0}
+    monkeypatch.setattr(
+        master_service,
+        "_schedule_dropbox_upload_state_backup",
+        lambda: called.__setitem__("backup", called["backup"] + 1),
+    )
+    assert master_service._consume_pending_webhook(
+        "pw-consume", request_id="req-consume", reason="webhook_received"
+    )
+    assert all(
+        str(item.get("id") or "").strip() != "pw-consume"
+        for item in master_service._load_pending_webhooks()
+    )
+    contexts = master_service._load_trade_contexts()
+    assert contexts
+    assert contexts[0]["pending_webhook_id"] == "pw-consume"
+    assert contexts[0]["status"] in {"CONSUMED", "TRIGGERING"}
+    assert contexts[0]["request_id"] == "req-consume"
+    assert called["backup"] >= 1
+
+
+def test_clean_pending_webhooks_hides_non_waiting_and_consumed() -> None:
+    pending = [
+        {"id": "wh-visible", "status": "WAITING", "enabled": True},
+        {"id": "wh-triggering", "status": "TRIGGERING", "enabled": True},
+        {"id": "wh-disabled", "status": "WAITING", "enabled": False},
+        {"id": "wh-consumed", "status": "WAITING", "enabled": True, "consumed_at": "2026-01-01T00:00:00Z"},
+    ]
+    filtered, changed = master_service._clean_pending_webhooks_for_open_items(pending, [])
+    assert changed is True
+    assert [item["id"] for item in filtered] == ["wh-visible"]
 
 
 def test_limit_cancel_triggered_regression():
