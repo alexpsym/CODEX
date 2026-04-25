@@ -6,6 +6,8 @@
   const emptyState = document.getElementById('open-orders-empty');
   const errorsBox = document.getElementById('open-orders-errors');
   const errorsList = errorsBox?.querySelector('ul');
+  const attemptsTable = document.getElementById('webhook-attempts-table');
+  const attemptsBody = attemptsTable?.querySelector('tbody');
   let refreshInFlight = null;
   let hasData = false;
   let knownVersion = null;
@@ -210,6 +212,41 @@
     });
   };
 
+  const renderWebhookAttempts = (items = []) => {
+    if (!attemptsBody) return;
+    attemptsBody.innerHTML = '';
+    const rows = Array.isArray(items) ? items : [];
+    if (!rows.length) {
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = 9;
+      td.className = 'muted';
+      td.textContent = 'No recent webhook attempts.';
+      tr.appendChild(td);
+      attemptsBody.appendChild(tr);
+      return;
+    }
+    rows.forEach((item) => {
+      const tr = document.createElement('tr');
+      [
+        formatTimestamp(item.updated_at || item.received_at),
+        item.symbol,
+        item.action,
+        item.account,
+        item.status,
+        item.bybit_ret_code,
+        item.bybit_ret_msg,
+        item.request_id,
+        item.pending_webhook_id,
+      ].forEach((v) => {
+        const td = document.createElement('td');
+        td.textContent = fmt(v);
+        tr.appendChild(td);
+      });
+      attemptsBody.appendChild(tr);
+    });
+  };
+
   const refresh = async () => {
     if (refreshInFlight) return refreshInFlight;
     refreshInFlight = (async () => {
@@ -217,6 +254,12 @@
         setBadge('Loading...');
         const payload = await fetchJson('/api/open-orders?force=1');
         render(payload.items || [], payload.errors || []);
+        try {
+          const attempts = await fetchJson('/api/calculator/webhook-attempts?limit=20');
+          renderWebhookAttempts(attempts.items || []);
+        } catch (_attemptErr) {
+          renderWebhookAttempts([]);
+        }
         const stale = Boolean(payload.stale);
         const errCount = Array.isArray(payload.errors) ? payload.errors.length : 0;
         if (stale) {

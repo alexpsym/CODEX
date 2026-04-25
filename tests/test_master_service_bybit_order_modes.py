@@ -147,3 +147,116 @@ async def test_place_bybit_order_surfaces_tpsl_failure(bybit_order_mocks, monkey
 
     with pytest.raises(RuntimeError, match="TP/SL application failed"):
         await master_service._place_bybit_order(payload, request_id="req-3")
+
+
+@pytest.mark.asyncio
+async def test_place_bybit_market_order_uses_ioc_position_idx_and_tpsl(monkeypatch):
+    captured = {"body": None}
+
+    monkeypatch.setattr(master_service, "_log_webhook_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        master_service,
+        "resolve_bybit_credentials_for",
+        lambda mode: (mode, "k", "s", "https://api.test", "env"),
+    )
+    monkeypatch.setattr(master_service, "_upsert_trade_context", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(master_service, "_delete_pending_webhook", lambda _pid: False)
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setattr(master_service, "_bybit_lookup_symbol", lambda *_a, **_k: asyncio.sleep(0, result=None))
+    monkeypatch.setattr(
+        master_service,
+        "_wait_for_position_entry",
+        lambda **_kwargs: asyncio.sleep(0, result={"size": "0.015", "avgPrice": "77343.8", "entryPrice": "77343.8", "positionIdx": 0}),
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_fetch_bybit_positions",
+        lambda **_kwargs: asyncio.sleep(0, result=[{"size": "0.015", "takeProfit": "76771", "stopLoss": "77490.9"}]),
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_set_bybit_trading_stop",
+        lambda **_kwargs: asyncio.sleep(0, result={"status": "ok"}),
+    )
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, *_args, **kwargs):
+            captured["body"] = kwargs.get("content")
+            return _DummyResponse()
+
+    monkeypatch.setattr(master_service.httpx, "AsyncClient", lambda *a, **k: _Client())
+
+    await master_service._place_bybit_order(
+        {
+            "symbol": "BTCUSDT",
+            "action": "sell",
+            "quantity": "0.015",
+            "account": "demo",
+            "trade_mode": "linear",
+            "order_type": "market",
+            "stop_loss_price": "77490.9",
+            "take_profit_price": "76771",
+        },
+        request_id="req-market",
+    )
+    sent = master_service.json.loads(captured["body"])
+    assert sent["timeInForce"] == "IOC"
+    assert sent["positionIdx"] == 0
+    assert sent["tpslMode"] == "Full"
+    assert sent["tpOrderType"] == "Market"
+    assert sent["slOrderType"] == "Market"
+
+
+@pytest.mark.asyncio
+async def test_place_bybit_order_raises_structured_rejection(monkeypatch):
+    monkeypatch.setattr(master_service, "_log_webhook_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        master_service,
+        "resolve_bybit_credentials_for",
+        lambda mode: (mode, "k", "s", "https://api.test", "env"),
+    )
+    monkeypatch.setattr(master_service, "_bybit_lookup_symbol", lambda *_a, **_k: asyncio.sleep(0, result=None))
+
+    class _RejectResponse(_DummyResponse):
+        def __init__(self):
+            super().__init__(
+                {
+                    "retCode": 10001,
+                    "retMsg": "request parameter error",
+                    "retExtInfo": {"hint": "bad positionIdx"},
+                    "result": {},
+                }
+            )
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, *_args, **_kwargs):
+            return _RejectResponse()
+
+    monkeypatch.setattr(master_service.httpx, "AsyncClient", lambda *a, **k: _Client())
+
+    with pytest.raises(master_service.BybitOrderRejected) as exc:
+        await master_service._place_bybit_order(
+            {
+                "symbol": "BTCUSDT",
+                "action": "sell",
+                "quantity": "0.015",
+                "account": "demo",
+                "trade_mode": "linear",
+                "order_type": "market",
+            },
+            request_id="req-reject",
+        )
+    assert exc.value.ret_code == 10001
+    assert "request parameter error" in exc.value.ret_msg

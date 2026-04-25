@@ -33,6 +33,7 @@ def test_merged_open_orders_route_returns_html() -> None:
     assert 'id="open-orders-errors"' in html
     assert 'id="open-orders-empty"' in html
     assert 'id="open-orders-table"' in html
+    assert 'id="webhook-attempts-table"' in html
     assert "<th>Test</th>" in html
     assert "/static/open_orders.js?v=" in html
 
@@ -44,6 +45,15 @@ def test_open_orders_js_uses_version_polling_and_force_query_refresh() -> None:
     assert "POLL_MS" in js
     assert "/api/open-orders/version" in js
     assert "/api/open-orders?force=1" in js
+    assert "/api/calculator/webhook-attempts?limit=20" in js
+
+
+def test_open_orders_version_endpoint_returns_cache_version() -> None:
+    master_service._OPEN_ORDERS_CACHE["version"] = 7
+    response = asyncio.run(master_service.open_orders_version())
+    payload = json.loads(response.body.decode("utf-8"))
+    assert payload["version"] == 7
+    assert "updated_at" in payload
 
 
 def test_open_orders_version_endpoint_returns_cache_version() -> None:

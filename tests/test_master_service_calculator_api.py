@@ -842,6 +842,74 @@ def test_webhook_consumes_pending_before_order_placement(monkeypatch: pytest.Mon
     assert seen["consumed"] is True
 
 
+def test_webhook_attempts_endpoint_returns_recent_items(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        master_service,
+        "_load_webhook_attempts",
+        lambda: [
+            {"request_id": "r-1", "status": "BYBIT_REJECTED"},
+            {"request_id": "r-2", "status": "BYBIT_ACCEPTED"},
+        ],
+    )
+    response = asyncio.run(master_service.calculator_webhook_attempts(limit=1))
+    body = json.loads(response.body.decode("utf-8"))
+    assert len(body["items"]) == 1
+    assert body["items"][0]["request_id"] == "r-2"
+
+
+def test_webhook_records_bybit_rejection_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = {"record": None, "update": []}
+
+    monkeypatch.setattr(master_service, "_assert_pending_webhook_executable", lambda _p: None)
+    monkeypatch.setattr(master_service, "_consume_pending_webhook", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(master_service, "_upsert_trade_context", lambda payload: payload)
+
+    def fake_record(payload):
+        events["record"] = dict(payload)
+        return payload
+
+    def fake_update(request_id, updates):
+        events["update"].append((request_id, dict(updates)))
+        return updates
+
+    async def fake_bybit(_payload, *, request_id):
+        raise master_service.BybitOrderRejected(
+            ret_code=10001,
+            ret_msg="request parameter error",
+            ret_ext_info={"foo": "bar"},
+            result={},
+            request_body={"orderType": "Market"},
+            http_status=200,
+            response_body={"retCode": 10001},
+        )
+
+    monkeypatch.setattr(master_service, "_record_webhook_attempt", fake_record)
+    monkeypatch.setattr(master_service, "_update_webhook_attempt", fake_update)
+    monkeypatch.setattr(master_service, "_place_bybit_order", fake_bybit)
+
+    with pytest.raises(master_service.HTTPException) as exc:
+        asyncio.run(
+            master_service.calculator_webhook(
+                {
+                    "asset": "crypto",
+                    "pending_webhook_id": "wh-1",
+                    "account": "demo",
+                    "symbol": "BTCUSDT",
+                    "action": "sell",
+                    "order_type": "market",
+                    "quantity": "0.01",
+                }
+            )
+        )
+    assert exc.value.status_code == 400
+    assert events["record"]["status"] == "RECEIVED"
+    assert any(update.get("status") == "BYBIT_REJECTED" for _, update in events["update"])
+    rejected = next(update for _, update in events["update"] if update.get("status") == "BYBIT_REJECTED")
+    assert rejected["bybit_ret_code"] == 10001
+    assert rejected["bybit_ret_msg"] == "request parameter error"
+    assert rejected["bybit_request"] == {"orderType": "Market"}
+
+
 def test_crypto_demo_skips_fee_rate_warning(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("demo", "k", "s", "https://bybit.test", "KEY1"))
     monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["BTCUSDT"]))

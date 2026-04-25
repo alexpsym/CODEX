@@ -556,6 +556,7 @@ def test_clean_pending_webhooks_hides_non_waiting_and_consumed() -> None:
     pending = [
         {"id": "wh-visible", "status": "WAITING", "enabled": True},
         {"id": "wh-triggering", "status": "TRIGGERING", "enabled": True},
+        {"id": "wh-failed", "status": "FAILED", "enabled": True},
         {"id": "wh-disabled", "status": "WAITING", "enabled": False},
         {"id": "wh-consumed", "status": "WAITING", "enabled": True, "consumed_at": "2026-01-01T00:00:00Z"},
     ]
