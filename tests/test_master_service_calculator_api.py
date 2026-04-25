@@ -803,6 +803,45 @@ def test_webhook_uses_keyword_request_id_for_bybit(monkeypatch: pytest.MonkeyPat
     assert seen["is_test_trade"] is True
 
 
+def test_webhook_consumes_pending_before_order_placement(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = {"consumed": False, "request_id": ""}
+
+    def fake_assert(_payload):
+        return None
+
+    def fake_consume(webhook_id: str, *, request_id: str, reason: str = "webhook_received") -> bool:
+        assert webhook_id == "wh-123"
+        assert reason == "webhook_received"
+        seen["consumed"] = True
+        seen["request_id"] = request_id
+        return True
+
+    async def fake_bybit(_payload, *, request_id):
+        assert seen["consumed"] is True
+        assert request_id == seen["request_id"]
+        return {"ok": True}
+
+    monkeypatch.setattr(master_service, "_assert_pending_webhook_executable", fake_assert)
+    monkeypatch.setattr(master_service, "_consume_pending_webhook", fake_consume)
+    monkeypatch.setattr(master_service, "_place_bybit_order", fake_bybit)
+    response = asyncio.run(
+        master_service.calculator_webhook(
+            {
+                "asset": "crypto",
+                "pending_webhook_id": "wh-123",
+                "account": "live",
+                "symbol": "BTCUSDT",
+                "action": "buy",
+                "order_type": "market",
+                "quantity": "0.01",
+            }
+        )
+    )
+    body = json.loads(response.body.decode("utf-8"))
+    assert body["ok"] is True
+    assert seen["consumed"] is True
+
+
 def test_crypto_demo_skips_fee_rate_warning(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("demo", "k", "s", "https://bybit.test", "KEY1"))
     monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["BTCUSDT"]))

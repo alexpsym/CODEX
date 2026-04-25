@@ -509,12 +509,14 @@ _OPEN_ORDERS_CACHE: Dict[str, object] = {
     "expires_at": 0.0,
     "last_success_at": None,
     "payload": None,
+    "version": 0,
 }
 
 
 def _invalidate_open_orders_cache() -> None:
     _OPEN_ORDERS_CACHE["payload"] = None
     _OPEN_ORDERS_CACHE["expires_at"] = 0.0
+    _OPEN_ORDERS_CACHE["version"] = int(_OPEN_ORDERS_CACHE.get("version") or 0) + 1
 _BYBIT_SYMBOL_LIST_CACHE: Dict[str, Dict[str, object]] = {
     "linear": {"ts": 0.0, "symbols": []},
     "spot": {"ts": 0.0, "symbols": []},
@@ -7269,6 +7271,37 @@ def _delete_pending_webhook(webhook_id: str) -> bool:
     return True
 
 
+def _consume_pending_webhook(
+    webhook_id: str, *, request_id: str, reason: str = "webhook_received"
+) -> bool:
+    pending_id = str(webhook_id or "").strip()
+    if not pending_id:
+        raise ValueError("pending_webhook_id is required to consume pending webhook.")
+    now_iso = _utc_now_iso()
+    deleted = _delete_pending_webhook(pending_id)
+    BYBIT_LOGGER.info(
+        "PENDING_WEBHOOK_CONSUME request_id=%s pending_webhook_id=%s deleted=%s reason=%s",
+        request_id,
+        pending_id,
+        str(deleted).lower(),
+        reason,
+    )
+    _upsert_trade_context(
+        {
+            "pending_webhook_id": pending_id,
+            "status": "CONSUMED" if deleted else "TRIGGERING",
+            "consumed_at": now_iso,
+            "triggered_at": now_iso,
+            "request_id": request_id,
+            "consume_reason": str(reason or "").strip() or "webhook_received",
+        }
+    )
+    if not deleted:
+        raise ValueError("Pending webhook missing or no longer active.")
+    _schedule_dropbox_upload_state_backup()
+    return True
+
+
 def _normalize_timeframe(value: object, *, max_length: int = 64) -> str:
     text = " ".join(str(value or "").strip().split())
     if len(text) > max_length:
@@ -12439,6 +12472,12 @@ async def calculator_webhook(payload: Dict[str, object] = Body(default={})) -> J
 
     try:
         _assert_pending_webhook_executable(payload)
+        if pending_id:
+            _consume_pending_webhook(
+                pending_id,
+                request_id=request_id,
+                reason="webhook_received",
+            )
         canonical = {
             "account": payload.get("account"),
             "symbol": payload.get("symbol"),
@@ -12459,9 +12498,6 @@ async def calculator_webhook(payload: Dict[str, object] = Body(default={})) -> J
             "planned_target_price": payload.get("planned_target_price") or payload.get("take_profit_price"),
         }
 
-        if pending_id:
-            _update_pending_webhook(pending_id, {"status": "TRIGGERING", "last_error": None, "last_attempt_at": _utc_now_iso()})
-
         if asset == "crypto":
             result = await _place_bybit_order(
                 canonical,
@@ -12480,10 +12516,12 @@ async def calculator_webhook(payload: Dict[str, object] = Body(default={})) -> J
         raise
     except Exception as exc:
         if pending_id:
-            _update_pending_webhook(
-                pending_id,
+            _upsert_trade_context(
                 {
-                    "status": "WAITING",
+                    "pending_webhook_id": pending_id,
+                    "status": "TRIGGERING",
+                    "consume_reason": "webhook_received",
+                    "request_id": request_id,
                     "last_error": str(exc),
                     "last_attempt_at": _utc_now_iso(),
                 },
@@ -14830,7 +14868,16 @@ def _qty_matches(a: object, b: object) -> bool:
     return abs(abs(a_num) - abs(b_num)) <= max(1e-9, abs(a_num), abs(b_num)) * 1e-6
 
 
-PENDING_WEBHOOK_TERMINAL_STATUSES = {"TRIGGERED", "CLOSED", "CANCELLED"}
+PENDING_WEBHOOK_TERMINAL_STATUSES = {
+    "TRIGGERING",
+    "CONSUMED",
+    "TRIGGERED",
+    "SUBMITTED",
+    "FILLED",
+    "CLOSED",
+    "CANCELLED",
+    "FAILED_AFTER_SUBMIT",
+}
 
 
 def _pending_webhook_is_terminal(status: object) -> bool:
@@ -14949,7 +14996,14 @@ def _clean_pending_webhooks_for_open_items(
     filtered: List[Dict[str, object]] = []
     changed = False
     for pending in pending_items:
-        if _pending_webhook_is_terminal(pending.get("status")):
+        status = str(pending.get("status") or "").strip().upper()
+        if status != "WAITING":
+            changed = True
+            continue
+        if not bool(pending.get("enabled", True)):
+            changed = True
+            continue
+        if pending.get("consumed_at") or pending.get("triggered_at"):
             changed = True
             continue
         if _pending_webhook_is_superseded(
@@ -14969,6 +15023,16 @@ def _filter_pending_webhooks(
 ) -> List[Dict[str, object]]:
     filtered, _changed = _clean_pending_webhooks_for_open_items(pending_items, open_items)
     return filtered
+
+
+@app.get("/api/open-orders/version")
+async def open_orders_version() -> JSONResponse:
+    return JSONResponse(
+        {
+            "version": int(_OPEN_ORDERS_CACHE.get("version") or 0),
+            "updated_at": _utc_now_iso(),
+        }
+    )
 
 
 @app.get("/api/open-orders")
@@ -15358,6 +15422,7 @@ async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
             "stale": bool(errors),
             "updated_at": updated_at,
             "last_success_at": _OPEN_ORDERS_CACHE.get("last_success_at"),
+            "version": int(_OPEN_ORDERS_CACHE.get("version") or 0),
         }
 
         _OPEN_ORDERS_CACHE["payload"] = dict(payload)
