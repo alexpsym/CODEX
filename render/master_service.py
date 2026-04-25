@@ -151,6 +151,8 @@ BYBIT_RUNTIME_STATUS_PATH = BASE_DIR / "bybit_monitor" / "runtime_status.json"
 OANDA_RUNTIME_STATUS_PATH = BASE_DIR / "oanda_monitor" / "runtime_status.json"
 SCANNER_HEARTBEAT_GRACE_SECONDS = 30
 SCANNER_LOCAL_UI_MODE = os.getenv("SCANNER_LOCAL_UI_MODE", "0").strip().lower() in {"1", "true", "yes", "on"}
+DEFAULT_RENDER_ALLOWED_APPS = "calculator-webhook,open-orders,pending-webhooks,fxweekend-clone,bybit_trigger_bounce_trader"
+DEFAULT_LOCAL_ALLOWED_APPS = "bybit_monitor,oanda_monitor,bybithistory-clone,oanda_history-clone,coinspot-clone,trading-journal,ivindicator-clone"
 
 
 def _is_render_env() -> bool:
@@ -164,6 +166,110 @@ def _is_render_env() -> bool:
 
 def _is_scanner_local_ui_mode() -> bool:
     return SCANNER_LOCAL_UI_MODE
+
+
+def _parse_allowed_apps(raw: str) -> Set[str]:
+    return {part.strip() for part in str(raw or "").split(",") if part.strip()}
+
+
+def _resolve_app_profile() -> str:
+    requested = str(os.getenv("APP_PROFILE") or "").strip().lower()
+    if requested in {"render", "local"}:
+        return requested
+    return "render" if _is_render_env() else "local"
+
+
+APP_PROFILE = _resolve_app_profile()
+RENDER_ALLOWED_APPS = _parse_allowed_apps(os.getenv("RENDER_ALLOWED_APPS", DEFAULT_RENDER_ALLOWED_APPS))
+LOCAL_ALLOWED_APPS = _parse_allowed_apps(os.getenv("LOCAL_ALLOWED_APPS", DEFAULT_LOCAL_ALLOWED_APPS))
+LOCAL_ONLY_DISABLED_MESSAGE = "This app is local-only to reduce Render bandwidth. Run run_local_master_control.bat."
+LOCAL_ONLY_APP_NAMES = {
+    "bybit_monitor",
+    "oanda_monitor",
+    "bybithistory-clone",
+    "oanda_history-clone",
+    "coinspot-clone",
+    "trading-journal",
+    "ivindicator-clone",
+}
+LOCAL_ONLY_PATH_PREFIXES = (
+    "/merged/history",
+    "/merged/monitor",
+    "/bybit-history",
+    "/oanda-history",
+    "/coinspot-history",
+    "/trading-journal",
+    "/api/bybit-history",
+    "/api/oanda-history",
+    "/api/coinspot-history",
+    "/api/trading-journal",
+)
+
+
+def _profile_allows_script(script_name: str) -> bool:
+    name = str(script_name or "").strip()
+    if not name:
+        return False
+    if APP_PROFILE == "render":
+        return name in RENDER_ALLOWED_APPS
+    return name in LOCAL_ALLOWED_APPS
+
+
+def _profile_main_buttons() -> List[Dict[str, object]]:
+    buttons: List[Dict[str, object]] = [
+        {"id": "calculator", "name": "calculator", "label": "Calculator", "open_url": "/merged/calculator", "dashboard_main_view": True},
+        {"id": "open-orders", "name": "open-orders", "label": "Open Orders and Positions", "open_url": "/merged/open-orders", "dashboard_main_view": True},
+    ]
+    if APP_PROFILE == "render":
+        if "fxweekend-clone" in RENDER_ALLOWED_APPS:
+            buttons.append({"id": "fxweekend", "name": "fxweekend", "label": "FX Weekend", "open_url": "/apps/fxweekend-clone", "dashboard_main_view": True})
+        if "bybit_trigger_bounce_trader" in RENDER_ALLOWED_APPS:
+            buttons.append({"id": "bounce-trader", "name": "bounce-trader", "label": "Bounce Trader", "open_url": "/merged/bounce-trader", "dashboard_main_view": True})
+    else:
+        buttons.extend(
+            [
+                {"id": "history", "name": "history", "label": "History", "open_url": "/merged/history", "dashboard_main_view": True},
+                {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor", "dashboard_main_view": True},
+                {"id": "trading-journal", "name": "trading-journal", "label": "Trading Journal", "open_url": "/trading-journal", "dashboard_main_view": True},
+            ]
+        )
+    return buttons
+
+
+def _profile_merged_source_names() -> Set[str]:
+    names = {"bybit_trigger_bounce_trader", "fxweekend-clone"}
+    if APP_PROFILE == "local":
+        names.update(
+            {
+                "bybithistory-clone",
+                "oanda_history-clone",
+                "coinspot-clone",
+                "bybit_monitor",
+                "oanda_monitor",
+                "trading-journal",
+            }
+        )
+    return names
+
+
+def _local_only_disabled_response(path: str, *, as_json: bool = False) -> Response:
+    detail = f"{LOCAL_ONLY_DISABLED_MESSAGE} (path: {path})"
+    if as_json:
+        return JSONResponse({"detail": detail, "status": "disabled", "path": path}, status_code=410)
+    return PlainTextResponse(detail, status_code=410)
+
+
+def _render_blocks_path(path: str) -> bool:
+    if APP_PROFILE != "render":
+        return False
+    normalized = str(path or "").strip() or "/"
+    if any(normalized == prefix or normalized.startswith(prefix + "/") for prefix in LOCAL_ONLY_PATH_PREFIXES):
+        return True
+    if normalized.startswith("/apps/"):
+        parts = [part for part in normalized.split("/") if part]
+        if len(parts) >= 2 and parts[1] in LOCAL_ONLY_APP_NAMES:
+            return True
+    return False
 
 
 def _env_source_hint() -> str:
@@ -4300,41 +4406,12 @@ FRIENDLY_SCRIPT_LABELS: Dict[str, str] = {
     "trading-journal": "Trading Journal",
 }
 
-MERGED_SCRIPT_BUTTONS: List[Dict[str, object]] = [
-    {"id": "calculator", "name": "calculator", "label": "Calculator", "open_url": "/merged/calculator", "dashboard_main_view": True},
-    {"id": "history", "name": "history", "label": "History", "open_url": "/merged/history", "dashboard_main_view": True},
-    {"id": "open-orders", "name": "open-orders", "label": "Open Orders and Positions", "open_url": "/merged/open-orders", "dashboard_main_view": True},
-    {"id": "bounce-trader", "name": "bounce-trader", "label": "Bounce Trader", "open_url": "/merged/bounce-trader", "dashboard_main_view": True},
-]
-
-MERGED_SOURCE_NAMES = {
-    "bybithistory-clone",
-    "oanda_history-clone",
-    "coinspot-clone",
-    "bybit_trigger_bounce_trader",
-}
-
-
 def get_merged_script_buttons() -> List[Dict[str, object]]:
-    buttons = [dict(btn) for btn in MERGED_SCRIPT_BUTTONS]
-    if not _is_render_env():
-        buttons.append(
-            {
-                "id": "monitor",
-                "name": "monitor",
-                "label": "Scanner",
-                "open_url": "/merged/monitor",
-                "dashboard_main_view": True,
-            }
-        )
-    return buttons
+    return [dict(btn) for btn in _profile_main_buttons()]
 
 
 def get_merged_source_names() -> Set[str]:
-    names = set(MERGED_SOURCE_NAMES)
-    if not _is_render_env():
-        names.update({"bybit_monitor", "oanda_monitor"})
-    return names
+    return _profile_merged_source_names()
 
 _TITLE_UPPER = {"FX", "MT5", "OANDA", "BYBIT", "USDT", "IV"}
 
@@ -4383,7 +4460,7 @@ def discover_scripts() -> List[ManagedScript]:
             continue
         if app_dir.name.casefold() in HIDDEN_SCRIPTS:
             continue
-        if _is_render_env() and app_dir.name in LOCAL_ONLY_SCRIPTS:
+        if not _profile_allows_script(app_dir.name):
             continue
 
         entry_path: Optional[Path] = None
@@ -4441,32 +4518,33 @@ class ScriptManager:
 
     def list_scripts(self) -> List[Dict[str, object]]:
         items = [script.to_summary() for script in self._scripts.values()]
-        items.append(
-            {
-                "id": "trading-journal",
-                "name": "trading-journal",
-                "label": friendly_script_label("trading-journal"),
-                "path": str(BASE_DIR / "render" / "master_service.py"),
-                "category": "Other",
-                "running": True,
-                "starting": False,
-                "port": None,
-                "pid": None,
-                "return_code": None,
-                "open_url": "/trading-journal",
-                "logs_url": None,
-                "last_output_at": None,
-                "last_start_attempt_at": None,
-                "last_start_error": None,
-                "last_exit_code": None,
-                "last_exit_reason": None,
-                "last_spawn_command": None,
-                "last_spawn_cwd": None,
-                "startup_started_at": None,
-                "startup_completed_at": None,
-                "standalone": False,
-            }
-        )
+        if APP_PROFILE == "local" and "trading-journal" in LOCAL_ALLOWED_APPS:
+            items.append(
+                {
+                    "id": "trading-journal",
+                    "name": "trading-journal",
+                    "label": friendly_script_label("trading-journal"),
+                    "path": str(BASE_DIR / "render" / "master_service.py"),
+                    "category": "Other",
+                    "running": True,
+                    "starting": False,
+                    "port": None,
+                    "pid": None,
+                    "return_code": None,
+                    "open_url": "/trading-journal",
+                    "logs_url": None,
+                    "last_output_at": None,
+                    "last_start_attempt_at": None,
+                    "last_start_error": None,
+                    "last_exit_code": None,
+                    "last_exit_reason": None,
+                    "last_spawn_command": None,
+                    "last_spawn_cwd": None,
+                    "startup_started_at": None,
+                    "startup_completed_at": None,
+                    "standalone": False,
+                }
+            )
         return sorted(items, key=lambda s: str(s["name"]).lower())
 
     def get(self, name: str) -> ManagedScript:
@@ -4492,6 +4570,15 @@ class ScriptManager:
 
 script_manager = ScriptManager(discover_scripts())
 app = FastAPI(title="TradingTools", version="1.0")
+
+
+@app.middleware("http")
+async def profile_router_guard(request: Request, call_next: Callable) -> Response:
+    path = request.url.path
+    if _render_blocks_path(path):
+        wants_json = path.startswith("/api/") or "application/json" in str(request.headers.get("accept", "")).lower()
+        return _local_only_disabled_response(path, as_json=wants_json)
+    return await call_next(request)
 OANDA_HISTORY_JOBS: Dict[str, OandaHistoryJob] = {}
 BYBIT_HISTORY_JOBS: Dict[str, BybitHistoryJob] = {}
 COINSPOT_HISTORY_JOBS: Dict[str, CoinspotHistoryJob] = {}
@@ -11693,11 +11780,8 @@ async def merged_calculator_page() -> HTMLResponse:
 
 @app.get("/merged/scanner")
 async def merged_scanner_redirect() -> Response:
-    if _is_render_env():
-        return PlainTextResponse(
-            "Scanner is local-only. Run run_scanner_local.bat on your PC.",
-            status_code=410,
-        )
+    if APP_PROFILE == "render":
+        return _local_only_disabled_response("/merged/scanner")
     return RedirectResponse(url="/merged/monitor", status_code=307)
 
 
@@ -13046,11 +13130,8 @@ async def merged_history_page() -> str:
 
 @app.get("/merged/monitor")
 async def merged_monitor_page() -> Response:
-    if _is_render_env():
-        return PlainTextResponse(
-            "Scanner is local-only. Run run_scanner_local.bat on your PC.",
-            status_code=410,
-        )
+    if APP_PROFILE == "render":
+        return _local_only_disabled_response("/merged/monitor")
     monitor_js_version = quote(str(os.getenv("APP_BUILD_STAMP") or os.getenv("RENDER_GIT_COMMIT") or app.version), safe="")
     page = MERGED_MONITOR_TEMPLATE.replace("{{MERGED_MONITOR_JS_URL}}", f"/static/merged_monitor.js?v={monitor_js_version}")
     return HTMLResponse(page)
@@ -14637,6 +14718,10 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
     if path == "" and not request.url.path.endswith("/"):
         suffix = f"?{request.url.query}" if request.url.query else ""
         return RedirectResponse(url=f"{request.url.path}/{suffix}", status_code=307)
+    if APP_PROFILE == "render" and script_name in LOCAL_ONLY_APP_NAMES:
+        accepts = str(request.headers.get("accept", "")).lower()
+        wants_json = "application/json" in accepts
+        return _local_only_disabled_response(f"/apps/{script_name}", as_json=wants_json)
 
     script = script_manager.get(script_name)
     accept = request.headers.get("accept", "")

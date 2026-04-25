@@ -56,6 +56,14 @@ def test_open_orders_version_endpoint_returns_cache_version() -> None:
     assert "updated_at" in payload
 
 
+def test_open_orders_version_endpoint_returns_cache_version() -> None:
+    master_service._OPEN_ORDERS_CACHE["version"] = 7
+    response = asyncio.run(master_service.open_orders_version())
+    payload = json.loads(response.body.decode("utf-8"))
+    assert payload["version"] == 7
+    assert "updated_at" in payload
+
+
 def test_open_orders_js_treats_webhook_as_cancelable() -> None:
     js = (ROOT / "render" / "static" / "open_orders.js").read_text(encoding="utf-8")
     assert "type === 'webhook'" in js
