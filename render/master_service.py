@@ -17,6 +17,7 @@ import re
 import socket
 import sys
 import time
+import traceback
 from collections import defaultdict
 from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
@@ -266,6 +267,7 @@ BYBIT_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "bybit-history"
 COINSPOT_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "coinspot-history"
 PENDING_WEBHOOKS_PATH = BASE_DIR / "render" / "data" / "pending_webhooks.json"
 TRADE_CONTEXTS_PATH = BASE_DIR / "render" / "data" / "trade_contexts.json"
+WEBHOOK_ATTEMPTS_PATH = BASE_DIR / "render" / "data" / "webhook_attempts.json"
 BOUNCE_TRADERS_PATH = BASE_DIR / "render" / "data" / "bounce_traders.json"
 WATCHLIST_PATH = BASE_DIR / "render" / "data" / "watchlist.json"
 TRADING_JOURNAL_PATH = BASE_DIR / "render" / "data" / "trading_journal.json"
@@ -474,6 +476,8 @@ WATCHLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
 TRADING_JOURNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
 MONTHLY_AUD_REVALUATION_PATH.parent.mkdir(parents=True, exist_ok=True)
 
+WEBHOOK_ATTEMPTS_MAX_ITEMS = int(os.getenv("WEBHOOK_ATTEMPTS_MAX_ITEMS", "300") or "300")
+
 _WATCHLIST_CACHE: Optional[List[str]] = None
 _TRADING_JOURNAL_CACHE: Optional[List[Dict[str, object]]] = None
 _STARTUP_STATE_RESTORE_DONE = asyncio.Event()
@@ -509,12 +513,42 @@ _OPEN_ORDERS_CACHE: Dict[str, object] = {
     "expires_at": 0.0,
     "last_success_at": None,
     "payload": None,
+    "version": 0,
 }
+
+
+class BybitOrderRejected(RuntimeError):
+    def __init__(
+        self,
+        *,
+        ret_code: object,
+        ret_msg: object,
+        ret_ext_info: object,
+        result: object,
+        request_body: Dict[str, object],
+        http_status: Optional[int],
+        response_body: Optional[Dict[str, object]] = None,
+    ) -> None:
+        self.ret_code = ret_code
+        self.ret_msg = str(ret_msg or "").strip() or "Unknown Bybit rejection"
+        self.ret_ext_info = ret_ext_info if isinstance(ret_ext_info, dict) else {}
+        self.result = result if isinstance(result, dict) else {}
+        self.request_body = dict(request_body) if isinstance(request_body, dict) else {}
+        self.http_status = int(http_status) if http_status is not None else None
+        self.response_body = (
+            dict(response_body) if isinstance(response_body, dict) else {}
+        )
+        message = (
+            f"Bybit order rejected retCode={self.ret_code} retMsg={self.ret_msg} "
+            f"http_status={self.http_status}"
+        )
+        super().__init__(message)
 
 
 def _invalidate_open_orders_cache() -> None:
     _OPEN_ORDERS_CACHE["payload"] = None
     _OPEN_ORDERS_CACHE["expires_at"] = 0.0
+    _OPEN_ORDERS_CACHE["version"] = int(_OPEN_ORDERS_CACHE.get("version") or 0) + 1
 _BYBIT_SYMBOL_LIST_CACHE: Dict[str, Dict[str, object]] = {
     "linear": {"ts": 0.0, "symbols": []},
     "spot": {"ts": 0.0, "symbols": []},
@@ -7269,6 +7303,37 @@ def _delete_pending_webhook(webhook_id: str) -> bool:
     return True
 
 
+def _consume_pending_webhook(
+    webhook_id: str, *, request_id: str, reason: str = "webhook_received"
+) -> bool:
+    pending_id = str(webhook_id or "").strip()
+    if not pending_id:
+        raise ValueError("pending_webhook_id is required to consume pending webhook.")
+    now_iso = _utc_now_iso()
+    deleted = _delete_pending_webhook(pending_id)
+    BYBIT_LOGGER.info(
+        "PENDING_WEBHOOK_CONSUME request_id=%s pending_webhook_id=%s deleted=%s reason=%s",
+        request_id,
+        pending_id,
+        str(deleted).lower(),
+        reason,
+    )
+    _upsert_trade_context(
+        {
+            "pending_webhook_id": pending_id,
+            "status": "CONSUMED" if deleted else "TRIGGERING",
+            "consumed_at": now_iso,
+            "triggered_at": now_iso,
+            "request_id": request_id,
+            "consume_reason": str(reason or "").strip() or "webhook_received",
+        }
+    )
+    if not deleted:
+        raise ValueError("Pending webhook missing or no longer active.")
+    _schedule_dropbox_upload_state_backup()
+    return True
+
+
 def _normalize_timeframe(value: object, *, max_length: int = 64) -> str:
     text = " ".join(str(value or "").strip().split())
     if len(text) > max_length:
@@ -7346,6 +7411,54 @@ def _load_trade_contexts() -> List[Dict[str, object]]:
 def _save_trade_contexts(items: List[Dict[str, object]]) -> None:
     _save_json_file(TRADE_CONTEXTS_PATH, {"items": items, "updated_at": _utc_now_iso()})
     _schedule_dropbox_upload_state_backup()
+
+
+def _load_webhook_attempts() -> List[Dict[str, object]]:
+    payload = _load_json_file(WEBHOOK_ATTEMPTS_PATH, [])
+    if isinstance(payload, dict):
+        payload = payload.get("items", [])
+    if not isinstance(payload, list):
+        return []
+    return [dict(entry) for entry in payload if isinstance(entry, dict)]
+
+
+def _save_webhook_attempts(items: List[Dict[str, object]]) -> None:
+    trimmed = [dict(entry) for entry in items if isinstance(entry, dict)][
+        -max(1, WEBHOOK_ATTEMPTS_MAX_ITEMS) :
+    ]
+    _save_json_file(
+        WEBHOOK_ATTEMPTS_PATH, {"items": trimmed, "updated_at": _utc_now_iso()}
+    )
+    _schedule_dropbox_upload_state_backup()
+
+
+def _record_webhook_attempt(payload: Dict[str, object]) -> Dict[str, object]:
+    attempt = dict(payload or {})
+    request_id = str(attempt.get("request_id") or "").strip() or f"wh-attempt-{uuid4().hex[:12]}"
+    now_iso = _utc_now_iso()
+    attempt["request_id"] = request_id
+    attempt.setdefault("received_at", now_iso)
+    attempt["updated_at"] = now_iso
+    items = _load_webhook_attempts()
+    items = [entry for entry in items if str(entry.get("request_id") or "").strip() != request_id]
+    items.append(attempt)
+    _save_webhook_attempts(items)
+    return dict(attempt)
+
+
+def _update_webhook_attempt(request_id: str, updates: Dict[str, object]) -> Optional[Dict[str, object]]:
+    attempt_id = str(request_id or "").strip()
+    if not attempt_id:
+        return None
+    items = _load_webhook_attempts()
+    for idx, item in enumerate(items):
+        if str(item.get("request_id") or "").strip() != attempt_id:
+            continue
+        merged = {**item, **dict(updates or {}), "updated_at": _utc_now_iso()}
+        items[idx] = merged
+        _save_webhook_attempts(items)
+        return dict(merged)
+    return None
 
 
 def _prune_trade_contexts(items: List[Dict[str, object]]) -> List[Dict[str, object]]:
@@ -8001,6 +8114,13 @@ def _pending_cancel_touch_triggered(
     return False
 
 
+def _bybit_position_idx_for_order(*, side: str, configured_mode: str = "") -> int:
+    mode = str(configured_mode or "").strip().lower()
+    if mode == "hedge":
+        return 1 if str(side or "").strip().lower() == "buy" else 2
+    return 0
+
+
 def _assert_pending_webhook_executable(payload: Dict[str, object]) -> None:
     pending_id = str(payload.get("pending_webhook_id") or "").strip()
     if not pending_id:
@@ -8488,11 +8608,18 @@ async def _place_bybit_order(
         "side": side,
         "orderType": "Limit" if order_type == "limit" else "Market",
         "qty": str(qty_val),
-        "timeInForce": "GTC",
         "orderLinkId": uuid4().hex,
     }
     if order_type == "limit":
+        body["timeInForce"] = "GTC"
         body["price"] = str(price_val)
+    else:
+        body["timeInForce"] = "IOC"
+    if category == "linear":
+        body["positionIdx"] = _bybit_position_idx_for_order(
+            side=side,
+            configured_mode=os.getenv("BYBIT_POSITION_MODE", "one_way"),
+        )
 
     take_profit_offset = _parse_offset_value(
         payload.get("take_profit_offset") or payload.get("tp_offset")
@@ -8526,6 +8653,10 @@ async def _place_bybit_order(
         body["takeProfit"] = str(take_profit)
     if stop_loss is not None:
         body["stopLoss"] = str(stop_loss)
+    if category == "linear" and ("takeProfit" in body or "stopLoss" in body):
+        body["tpslMode"] = "Full"
+        body["tpOrderType"] = "Market"
+        body["slOrderType"] = "Market"
     if order_type == "limit" and category == "linear" and price_val is not None:
         if take_profit_offset is not None:
             tp_target = _normalize_linear_price(price_val + take_profit_offset)
@@ -8537,7 +8668,6 @@ async def _place_bybit_order(
             body["tpslMode"] = "Full"
             body["tpOrderType"] = "Market"
             body["slOrderType"] = "Market"
-            body.setdefault("positionIdx", 0)
 
     planned_entry_price = _parse_trigger_price(
         payload.get("planned_entry_price") or payload.get("entry_price")
@@ -8569,8 +8699,24 @@ async def _place_bybit_order(
         response = await client.post(
             f"{base_url}/v5/order/create", headers=headers, content=body_json
         )
-    response.raise_for_status()
-    data = response.json()
+    data: Dict[str, object] = {}
+    response_status = int(getattr(response, "status_code", 200) or 200)
+    try:
+        response_json = response.json()
+        if isinstance(response_json, dict):
+            data = response_json
+    except Exception:
+        data = {}
+    if response_status >= 400:
+        raise BybitOrderRejected(
+            ret_code=data.get("retCode"),
+            ret_msg=data.get("retMsg") or response.text,
+            ret_ext_info=data.get("retExtInfo"),
+            result=data.get("result"),
+            request_body=body,
+            http_status=response_status,
+            response_body=data,
+        )
     _log_webhook_event(
         request_id,
         "order_response",
@@ -8580,8 +8726,16 @@ async def _place_bybit_order(
             "result": data.get("result", {}),
         },
     )
-    if data.get("retCode") != 0:
-        raise ValueError(f"Bybit order failed: {data.get('retMsg')}")
+    if data.get("retCode") not in (0, "0"):
+        raise BybitOrderRejected(
+            ret_code=data.get("retCode"),
+            ret_msg=data.get("retMsg"),
+            ret_ext_info=data.get("retExtInfo"),
+            result=data.get("result"),
+            request_body=body,
+            http_status=response_status,
+            response_body=data,
+        )
     order_result = data.get("result", {}) or {}
     order_id = order_result.get("orderId")
     _upsert_trade_context(
@@ -12436,9 +12590,35 @@ async def calculator_webhook(payload: Dict[str, object] = Body(default={})) -> J
     pending_id = str(payload.get("pending_webhook_id") or "").strip()
     asset = str(payload.get("asset") or "crypto").strip().lower()
     request_id = f"calc-webhook-{uuid4().hex[:12]}"
+    attempt = _record_webhook_attempt(
+        {
+            "request_id": request_id,
+            "pending_webhook_id": pending_id or None,
+            "received_at": _utc_now_iso(),
+            "asset": asset,
+            "broker": "bybit" if asset == "crypto" else ("oanda" if asset == "fx" else None),
+            "account": str(payload.get("account") or "").strip().lower() or None,
+            "symbol": str(payload.get("symbol") or "").strip().upper() or None,
+            "action": str(payload.get("action") or payload.get("side") or "").strip().lower() or None,
+            "status": "RECEIVED",
+            "payload": dict(payload),
+        }
+    )
 
     try:
         _assert_pending_webhook_executable(payload)
+        if pending_id:
+            _consume_pending_webhook(
+                pending_id,
+                request_id=request_id,
+                reason="webhook_received",
+            )
+            _update_webhook_attempt(
+                request_id,
+                {
+                    "status": "CONSUMED",
+                },
+            )
         canonical = {
             "account": payload.get("account"),
             "symbol": payload.get("symbol"),
@@ -12459,13 +12639,25 @@ async def calculator_webhook(payload: Dict[str, object] = Body(default={})) -> J
             "planned_target_price": payload.get("planned_target_price") or payload.get("take_profit_price"),
         }
 
-        if pending_id:
-            _update_pending_webhook(pending_id, {"status": "TRIGGERING", "last_error": None, "last_attempt_at": _utc_now_iso()})
-
         if asset == "crypto":
             result = await _place_bybit_order(
                 canonical,
                 request_id=request_id,
+            )
+            bybit_result = result.get("order") if isinstance(result, dict) else {}
+            _update_webhook_attempt(
+                request_id,
+                {
+                    "status": "BYBIT_ACCEPTED",
+                    "bybit_ret_code": 0,
+                    "bybit_ret_msg": "OK",
+                    "bybit_result": bybit_result if isinstance(bybit_result, dict) else {},
+                    "order_id": str((bybit_result or {}).get("orderId") or "").strip() or None,
+                    "order_link_id": str(
+                        (bybit_result or {}).get("orderLinkId") or ""
+                    ).strip()
+                    or None,
+                },
             )
             return JSONResponse({"ok": True, "broker": "bybit", "result": result})
         if asset == "fx":
@@ -12473,22 +12665,102 @@ async def calculator_webhook(payload: Dict[str, object] = Body(default={})) -> J
                 canonical,
                 request_id=request_id,
             )
+            _update_webhook_attempt(request_id, {"status": "CONSUMED"})
             return JSONResponse({"ok": True, "broker": "oanda", "result": result})
 
         raise HTTPException(status_code=400, detail="asset must be crypto or fx.")
+    except BybitOrderRejected as exc:
+        _update_webhook_attempt(
+            request_id,
+            {
+                "status": "BYBIT_REJECTED",
+                "bybit_request": exc.request_body,
+                "bybit_http_status": exc.http_status,
+                "bybit_ret_code": exc.ret_code,
+                "bybit_ret_msg": exc.ret_msg,
+                "bybit_ret_ext_info": exc.ret_ext_info,
+                "bybit_result": exc.result,
+                "error": str(exc),
+                "stack": traceback.format_exc(),
+            },
+        )
+        if pending_id:
+            _upsert_trade_context(
+                {
+                    "pending_webhook_id": pending_id,
+                    "status": "FAILED",
+                    "failure_stage": "bybit_order_create",
+                    "consume_reason": "webhook_received",
+                    "request_id": request_id,
+                    "last_error": str(exc),
+                    "last_attempt_at": _utc_now_iso(),
+                }
+            )
+        raise HTTPException(status_code=400, detail=f"Calculator webhook execution failed: {exc}") from exc
     except HTTPException:
         raise
-    except Exception as exc:
-        if pending_id:
-            _update_pending_webhook(
-                pending_id,
+    except RuntimeError as exc:
+        message = str(exc)
+        if "created but TP/SL application failed" in message:
+            _update_webhook_attempt(
+                request_id,
                 {
-                    "status": "WAITING",
+                    "status": "ORDER_CREATED_TPSL_FAILED",
+                    "error": message,
+                    "stack": traceback.format_exc(),
+                },
+            )
+        else:
+            _update_webhook_attempt(
+                request_id,
+                {
+                    "status": "FAILED_BEFORE_SUBMIT",
+                    "error": message,
+                    "stack": traceback.format_exc(),
+                },
+            )
+        if pending_id:
+            _upsert_trade_context(
+                {
+                    "pending_webhook_id": pending_id,
+                    "status": "FAILED",
+                    "failure_stage": "bybit_order_create",
+                    "consume_reason": "webhook_received",
+                    "request_id": request_id,
+                    "last_error": message,
+                    "last_attempt_at": _utc_now_iso(),
+                },
+            )
+        raise HTTPException(status_code=400, detail=f"Calculator webhook execution failed: {message}") from exc
+    except Exception as exc:
+        _update_webhook_attempt(
+            request_id,
+            {
+                "status": "FAILED_BEFORE_SUBMIT",
+                "error": str(exc),
+                "stack": traceback.format_exc(),
+            },
+        )
+        if pending_id:
+            _upsert_trade_context(
+                {
+                    "pending_webhook_id": pending_id,
+                    "status": "FAILED",
+                    "failure_stage": "bybit_order_create",
+                    "consume_reason": "webhook_received",
+                    "request_id": request_id,
                     "last_error": str(exc),
                     "last_attempt_at": _utc_now_iso(),
                 },
             )
         raise HTTPException(status_code=400, detail=f"Calculator webhook execution failed: {exc}") from exc
+
+
+@app.get("/api/calculator/webhook-attempts")
+async def calculator_webhook_attempts(limit: int = Query(50, ge=1, le=500)) -> JSONResponse:
+    attempts = _load_webhook_attempts()
+    items = list(reversed(attempts))[: int(limit)]
+    return JSONResponse({"items": items, "updated_at": _utc_now_iso()})
 
 
 @app.post("/api/calculator/submit")
@@ -12696,6 +12968,9 @@ OPEN_ORDERS_TEMPLATE = """<!doctype html>
     .error-box { display: none; margin-bottom: 10px; border: 1px solid #7f1d1d; background: #3f0d12; color: #fecaca; border-radius: 10px; padding: 10px 12px; }
     .error-box ul { margin: 8px 0 0; padding-left: 20px; }
     #open-orders-empty { margin-top: 10px; display: none; }
+    .subpanel-title { margin: 14px 0 8px; color:#93c5fd; font-size: 14px; font-weight: 700; }
+    .mini-table-wrap { overflow: auto; border: 1px solid #1f2937; border-radius: 10px; background: #0b1220; margin-top: 6px; }
+    table.mini { min-width: 1100px; }
   </style>
 </head>
 <body>
@@ -12733,6 +13008,25 @@ OPEN_ORDERS_TEMPLATE = """<!doctype html>
               <th>Opened</th>
               <th>Status</th>
               <th>Action</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="subpanel-title">Recent Webhook Attempts</div>
+      <div class="mini-table-wrap">
+        <table id="webhook-attempts-table" class="mini">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Symbol</th>
+              <th>Side</th>
+              <th>Account</th>
+              <th>Status</th>
+              <th>retCode</th>
+              <th>retMsg</th>
+              <th>Request ID</th>
+              <th>Pending ID</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -14830,7 +15124,16 @@ def _qty_matches(a: object, b: object) -> bool:
     return abs(abs(a_num) - abs(b_num)) <= max(1e-9, abs(a_num), abs(b_num)) * 1e-6
 
 
-PENDING_WEBHOOK_TERMINAL_STATUSES = {"TRIGGERED", "CLOSED", "CANCELLED"}
+PENDING_WEBHOOK_TERMINAL_STATUSES = {
+    "TRIGGERING",
+    "CONSUMED",
+    "TRIGGERED",
+    "SUBMITTED",
+    "FILLED",
+    "CLOSED",
+    "CANCELLED",
+    "FAILED_AFTER_SUBMIT",
+}
 
 
 def _pending_webhook_is_terminal(status: object) -> bool:
@@ -14949,7 +15252,14 @@ def _clean_pending_webhooks_for_open_items(
     filtered: List[Dict[str, object]] = []
     changed = False
     for pending in pending_items:
-        if _pending_webhook_is_terminal(pending.get("status")):
+        status = str(pending.get("status") or "").strip().upper()
+        if status != "WAITING":
+            changed = True
+            continue
+        if not bool(pending.get("enabled", True)):
+            changed = True
+            continue
+        if pending.get("consumed_at") or pending.get("triggered_at"):
             changed = True
             continue
         if _pending_webhook_is_superseded(
@@ -14969,6 +15279,16 @@ def _filter_pending_webhooks(
 ) -> List[Dict[str, object]]:
     filtered, _changed = _clean_pending_webhooks_for_open_items(pending_items, open_items)
     return filtered
+
+
+@app.get("/api/open-orders/version")
+async def open_orders_version() -> JSONResponse:
+    return JSONResponse(
+        {
+            "version": int(_OPEN_ORDERS_CACHE.get("version") or 0),
+            "updated_at": _utc_now_iso(),
+        }
+    )
 
 
 @app.get("/api/open-orders")
@@ -15358,6 +15678,7 @@ async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
             "stale": bool(errors),
             "updated_at": updated_at,
             "last_success_at": _OPEN_ORDERS_CACHE.get("last_success_at"),
+            "version": int(_OPEN_ORDERS_CACHE.get("version") or 0),
         }
 
         _OPEN_ORDERS_CACHE["payload"] = dict(payload)
