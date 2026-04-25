@@ -7823,6 +7823,16 @@ def _update_webhook_attempt(request_id: str, updates: Dict[str, object]) -> Opti
     return None
 
 
+def _public_webhook_base_url(request: Request) -> str:
+    configured = os.getenv("PUBLIC_WEBHOOK_BASE_URL", "").strip().rstrip("/")
+    if configured:
+        return configured
+    render_url = os.getenv("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+    if render_url:
+        return render_url
+    return str(request.base_url).rstrip("/")
+
+
 def _prune_trade_contexts(items: List[Dict[str, object]]) -> List[Dict[str, object]]:
     cutoff = datetime.now(timezone.utc) - timedelta(days=30)
     kept: List[Dict[str, object]] = []
@@ -8486,7 +8496,10 @@ def _bybit_position_idx_for_order(*, side: str, configured_mode: str = "") -> in
 def _assert_pending_webhook_executable(payload: Dict[str, object]) -> None:
     pending_id = str(payload.get("pending_webhook_id") or "").strip()
     if not pending_id:
-        return
+        allow_without_pending = str(os.getenv("ALLOW_EXECUTE_WITHOUT_PENDING_WEBHOOK") or "").strip().lower() in {"1", "true", "yes", "on"}
+        if allow_without_pending:
+            return
+        raise ValueError("pending_webhook_id is required for calculator webhook execution.")
     items = _load_pending_webhooks()
     found = None
     for item in items:
@@ -9131,13 +9144,6 @@ async def _place_bybit_order(
             stop_loss=_parse_bybit_price_level(body.get("stopLoss")),
             source="order_create_request",
         )
-    pending_id = str(payload.get("pending_webhook_id") or "").strip()
-    if pending_id:
-        # Once the webhook has fired, remove it immediately so it doesn't linger
-        # in the Open Orders / Positions table.
-        if _delete_pending_webhook(pending_id):
-            _schedule_dropbox_upload_state_backup()
-
     tpsl_result: Optional[Dict[str, object]] = None
     tpsl_error: Optional[str] = None
     tp_order: Optional[Dict[str, object]] = None
@@ -9426,6 +9432,7 @@ async def _place_bybit_order(
             )
         )
 
+    _invalidate_open_orders_cache()
     return {
         "account": account,
         "category": category,
@@ -12024,7 +12031,10 @@ CALCULATOR_TEMPLATE = """<!doctype html>
         </div>
       </div>
       <div class="row" id="calc-webhook-panel" style="display:none">
-        <label>TradingView webhook JSON</label>
+        <label>TradingView Webhook URL</label>
+        <pre id="calc-webhook-url" class="card" style="white-space:pre-wrap;word-break:break-word;max-height:80px;overflow:auto"></pre>
+        <div class="group"><button id="calc-webhook-copy-url" type="button">Copy URL</button></div>
+        <label>TradingView Message JSON</label>
         <pre id="calc-webhook-json" class="card" style="white-space:pre-wrap;word-break:break-word;max-height:220px;overflow:auto"></pre>
         <div class="group"><button id="calc-webhook-copy" type="button">Copy JSON</button></div>
       </div>
@@ -12377,7 +12387,23 @@ async def calculator_journal_summary(asset: str, symbol: str) -> JSONResponse:
 
 
 @app.post("/api/calculator/quote")
-async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSONResponse:
+async def calculator_quote(request: Request, payload: Dict[str, object] = Body(default={})) -> JSONResponse:
+    if isinstance(request, dict) and (not payload):
+        payload = request
+        request = Request(
+            {
+                "type": "http",
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": "/api/calculator/quote",
+                "raw_path": b"/api/calculator/quote",
+                "query_string": b"",
+                "headers": [],
+                "client": ("127.0.0.1", 0),
+                "server": ("localhost", 80),
+            }
+        )
     try:
         asset = str(payload.get("asset") or "").strip().lower()
         account = str(payload.get("account") or "live").strip().lower()
@@ -12428,6 +12454,28 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                 raise HTTPException(status_code=400, detail="take_profit_ticks must be greater than zero when target_mode=ticks.")
 
         webhook_enabled = webhook_mode in {"yes", "true", "1"}
+        webhook_base_url = _public_webhook_base_url(request)
+        webhook_endpoint_url = f"{webhook_base_url}/api/calculator/webhook"
+        parsed_base = urlparse(webhook_base_url if "://" in webhook_base_url else f"https://{webhook_base_url}")
+        webhook_origin_host = str(parsed_base.hostname or "").strip().lower() or None
+        webhook_origin_profile = APP_PROFILE
+        webhook_origin_instance_id = str(
+            os.getenv("APP_INSTANCE_ID")
+            or os.getenv("RENDER_INSTANCE_ID")
+            or os.getenv("RENDER_SERVICE_ID")
+            or os.getenv("HOSTNAME")
+            or ""
+        ).strip() or None
+        if webhook_enabled and webhook_origin_host in {"localhost", "127.0.0.1"}:
+            local_override = str(os.getenv("ALLOW_LOCAL_TRADINGVIEW_WEBHOOKS") or "").strip().lower() in {"1", "true", "yes", "on"}
+            if not local_override:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "TradingView webhook payload must be generated on the same public instance that receives it. "
+                        "Use the Render calculator page or set PUBLIC_WEBHOOK_BASE_URL to a reachable same-instance URL."
+                    ),
+                )
 
         if asset == "crypto":
             if risk_mode == "fixed_aud":
@@ -12623,6 +12671,10 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                     "timeframe": _normalize_timeframe(payload.get("timeframe") or ""),
                     "is_test_trade": is_test_trade,
                     "pending_webhook_id": pending_id,
+                    "webhook_endpoint_url": webhook_endpoint_url,
+                    "webhook_origin_host": webhook_origin_host,
+                    "webhook_origin_profile": webhook_origin_profile,
+                    "webhook_origin_instance_id": webhook_origin_instance_id,
                 }
                 pending_item = _upsert_pending_webhook(
                     {
@@ -12644,6 +12696,7 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                 )
                 response_payload["pending_webhook_id"] = pending_item.get("id")
                 response_payload["webhook_endpoint"] = "/api/calculator/webhook"
+                response_payload["webhook_endpoint_url"] = webhook_endpoint_url
                 response_payload["webhook_payload_json"] = json.dumps(webhook_payload, separators=(",", ":"))
                 if previous_pending_id and previous_pending_id != pending_id:
                     _delete_pending_webhook(previous_pending_id)
@@ -12860,6 +12913,10 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                     "timeframe": _normalize_timeframe(payload.get("timeframe") or ""),
                     "is_test_trade": is_test_trade,
                     "pending_webhook_id": pending_id,
+                    "webhook_endpoint_url": webhook_endpoint_url,
+                    "webhook_origin_host": webhook_origin_host,
+                    "webhook_origin_profile": webhook_origin_profile,
+                    "webhook_origin_instance_id": webhook_origin_instance_id,
                 }
                 pending_item = _upsert_pending_webhook(
                     {
@@ -12881,6 +12938,7 @@ async def calculator_quote(payload: Dict[str, object] = Body(default={})) -> JSO
                 )
                 response_payload["pending_webhook_id"] = pending_item.get("id")
                 response_payload["webhook_endpoint"] = "/api/calculator/webhook"
+                response_payload["webhook_endpoint_url"] = webhook_endpoint_url
                 response_payload["webhook_payload_json"] = json.dumps(webhook_payload, separators=(",", ":"))
                 if previous_pending_id and previous_pending_id != pending_id:
                     _delete_pending_webhook(previous_pending_id)
@@ -12943,7 +13001,23 @@ def _get_oanda_quote_home_factors(
 
 
 @app.post("/api/calculator/webhook")
-async def calculator_webhook(payload: Dict[str, object] = Body(default={})) -> JSONResponse:
+async def calculator_webhook(request: Request, payload: Dict[str, object] = Body(default={})) -> JSONResponse:
+    if isinstance(request, dict) and (not payload):
+        payload = request
+        request = Request(
+            {
+                "type": "http",
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": "/api/calculator/webhook",
+                "raw_path": b"/api/calculator/webhook",
+                "query_string": b"",
+                "headers": [],
+                "client": ("127.0.0.1", 0),
+                "server": ("localhost", 80),
+            }
+        )
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Webhook payload must be a JSON object.")
     pending_id = str(payload.get("pending_webhook_id") or "").strip()
@@ -12960,6 +13034,11 @@ async def calculator_webhook(payload: Dict[str, object] = Body(default={})) -> J
             "symbol": str(payload.get("symbol") or "").strip().upper() or None,
             "action": str(payload.get("action") or payload.get("side") or "").strip().lower() or None,
             "status": "RECEIVED",
+            "request_host": request.headers.get("host"),
+            "request_url": str(request.url),
+            "client": request.client.host if request.client else None,
+            "payload_origin_host": payload.get("webhook_origin_host"),
+            "payload_endpoint_url": payload.get("webhook_endpoint_url"),
             "payload": dict(payload),
         }
     )
@@ -12967,15 +13046,18 @@ async def calculator_webhook(payload: Dict[str, object] = Body(default={})) -> J
     try:
         _assert_pending_webhook_executable(payload)
         if pending_id:
-            _consume_pending_webhook(
+            _update_pending_webhook(
                 pending_id,
-                request_id=request_id,
-                reason="webhook_received",
+                {
+                    "status": "TRIGGERING",
+                    "triggered_at": _utc_now_iso(),
+                    "request_id": request_id,
+                },
             )
             _update_webhook_attempt(
                 request_id,
                 {
-                    "status": "CONSUMED",
+                    "status": "TRIGGERING",
                 },
             )
         canonical = {
@@ -13004,10 +13086,47 @@ async def calculator_webhook(payload: Dict[str, object] = Body(default={})) -> J
                 request_id=request_id,
             )
             bybit_result = result.get("order") if isinstance(result, dict) else {}
+            _invalidate_open_orders_cache()
+            live_state_present = False
+            try:
+                live_payload = await list_open_orders(force=True)
+                live_body = json.loads(live_payload.body.decode("utf-8"))
+                live_items = live_body.get("items") if isinstance(live_body, dict) else []
+                if isinstance(live_items, list):
+                    order_id = str((bybit_result or {}).get("orderId") or "").strip()
+                    order_link_id = str((bybit_result or {}).get("orderLinkId") or "").strip()
+                    symbol = str(canonical.get("symbol") or "").strip().upper()
+                    account = str(canonical.get("account") or "").strip().lower()
+                    category = "linear"
+                    for row in live_items:
+                        if not isinstance(row, dict):
+                            continue
+                        if str(row.get("broker") or "").strip().lower() != "bybit":
+                            continue
+                        if account and str(row.get("account") or "").strip().lower() != account:
+                            continue
+                        if category and str(row.get("category") or "").strip().lower() != category:
+                            continue
+                        if symbol and str(row.get("instrument") or "").strip().upper() != symbol:
+                            continue
+                        row_order_id = str(row.get("id") or row.get("order_id") or "").strip()
+                        row_order_link_id = str(row.get("order_link_id") or "").strip()
+                        if order_id and row_order_id == order_id:
+                            live_state_present = True
+                            break
+                        if order_link_id and row_order_link_id == order_link_id:
+                            live_state_present = True
+                            break
+                        row_type = str(row.get("type") or "").strip().lower()
+                        if row_type == "position":
+                            live_state_present = True
+                            break
+            except Exception:
+                live_state_present = False
             _update_webhook_attempt(
                 request_id,
                 {
-                    "status": "BYBIT_ACCEPTED",
+                    "status": "BYBIT_ACCEPTED" if live_state_present else "BYBIT_ACCEPTED_NO_LIVE_STATE_YET",
                     "bybit_ret_code": 0,
                     "bybit_ret_msg": "OK",
                     "bybit_result": bybit_result if isinstance(bybit_result, dict) else {},
@@ -13018,6 +13137,12 @@ async def calculator_webhook(payload: Dict[str, object] = Body(default={})) -> J
                     or None,
                 },
             )
+            if pending_id:
+                _consume_pending_webhook(
+                    pending_id,
+                    request_id=request_id,
+                    reason="order_accepted",
+                )
             return JSONResponse({"ok": True, "broker": "bybit", "result": result})
         if asset == "fx":
             result = await _place_oanda_order(
@@ -13028,7 +13153,63 @@ async def calculator_webhook(payload: Dict[str, object] = Body(default={})) -> J
             return JSONResponse({"ok": True, "broker": "oanda", "result": result})
 
         raise HTTPException(status_code=400, detail="asset must be crypto or fx.")
+    except ValueError as exc:
+        if "pending_webhook_id is required" in str(exc):
+            _update_webhook_attempt(
+                request_id,
+                {"status": "PENDING_NOT_FOUND", "error": str(exc)},
+            )
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "code": "PENDING_WEBHOOK_NOT_FOUND",
+                    "message": "Webhook reached this server, but the pending_webhook_id does not exist on this instance.",
+                    "pending_webhook_id": pending_id or None,
+                    "current_host": request.headers.get("host"),
+                    "payload_origin_host": payload.get("webhook_origin_host"),
+                },
+                status_code=409,
+            )
+        if "Pending webhook missing or no longer active." in str(exc):
+            _update_webhook_attempt(
+                request_id,
+                {"status": "PENDING_NOT_FOUND", "error": str(exc)},
+            )
+            if pending_id:
+                _update_pending_webhook(
+                    pending_id,
+                    {
+                        "status": "PENDING_NOT_FOUND",
+                        "last_error": str(exc),
+                        "last_attempt_at": _utc_now_iso(),
+                        "request_id": request_id,
+                    },
+                )
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "code": "PENDING_WEBHOOK_NOT_FOUND",
+                    "message": "Webhook reached this server, but the pending_webhook_id does not exist on this instance.",
+                    "pending_webhook_id": pending_id or None,
+                    "current_host": request.headers.get("host"),
+                    "payload_origin_host": payload.get("webhook_origin_host"),
+                },
+                status_code=409,
+            )
+        raise HTTPException(status_code=400, detail=f"Calculator webhook execution failed: {exc}") from exc
     except BybitOrderRejected as exc:
+        if pending_id:
+            _update_pending_webhook(
+                pending_id,
+                {
+                    "status": "BYBIT_REJECTED",
+                    "last_error": str(exc),
+                    "bybit_ret_code": exc.ret_code,
+                    "bybit_ret_msg": exc.ret_msg,
+                    "last_attempt_at": _utc_now_iso(),
+                    "request_id": request_id,
+                },
+            )
         _update_webhook_attempt(
             request_id,
             {
@@ -13060,6 +13241,16 @@ async def calculator_webhook(payload: Dict[str, object] = Body(default={})) -> J
         raise
     except RuntimeError as exc:
         message = str(exc)
+        if pending_id:
+            _update_pending_webhook(
+                pending_id,
+                {
+                    "status": "ORDER_CREATED_TPSL_FAILED" if "created but TP/SL application failed" in message else "FAILED_BEFORE_SUBMIT",
+                    "last_error": message,
+                    "last_attempt_at": _utc_now_iso(),
+                    "request_id": request_id,
+                },
+            )
         if "created but TP/SL application failed" in message:
             _update_webhook_attempt(
                 request_id,
@@ -13092,6 +13283,16 @@ async def calculator_webhook(payload: Dict[str, object] = Body(default={})) -> J
             )
         raise HTTPException(status_code=400, detail=f"Calculator webhook execution failed: {message}") from exc
     except Exception as exc:
+        if pending_id:
+            _update_pending_webhook(
+                pending_id,
+                {
+                    "status": "FAILED_BEFORE_SUBMIT",
+                    "last_error": str(exc),
+                    "last_attempt_at": _utc_now_iso(),
+                    "request_id": request_id,
+                },
+            )
         _update_webhook_attempt(
             request_id,
             {
@@ -13386,6 +13587,8 @@ OPEN_ORDERS_TEMPLATE = """<!doctype html>
               <th>retMsg</th>
               <th>Request ID</th>
               <th>Pending ID</th>
+              <th>Error</th>
+              <th>Host</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -15611,15 +15814,26 @@ def _clean_pending_webhooks_for_open_items(
     consumed_open_indices: Set[int] = set()
     filtered: List[Dict[str, object]] = []
     changed = False
+    visible_statuses = {
+        "WAITING",
+        "TRIGGERING",
+        "FAILED_BEFORE_SUBMIT",
+        "BYBIT_REJECTED",
+        "ORDER_CREATED_TPSL_FAILED",
+        "PENDING_NOT_FOUND",
+    }
     for pending in pending_items:
         status = str(pending.get("status") or "").strip().upper()
-        if status != "WAITING":
+        if status in {"CONSUMED", "CLOSED", "CANCELLED"}:
             changed = True
             continue
+        if status not in visible_statuses:
+            status = "WAITING"
+            pending = {**pending, "status": status}
         if not bool(pending.get("enabled", True)):
             changed = True
             continue
-        if pending.get("consumed_at") or pending.get("triggered_at"):
+        if status == "WAITING" and (pending.get("consumed_at") or pending.get("triggered_at")):
             changed = True
             continue
         if _pending_webhook_is_superseded(

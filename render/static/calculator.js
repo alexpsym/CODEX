@@ -26,8 +26,10 @@
   const specsEl = $('calc-instrument-specs');
   const riskToggleWrap = $('risk-toggle-wrap');
   const webhookPanel = $('calc-webhook-panel');
+  const webhookUrlEl = $('calc-webhook-url');
   const webhookJsonEl = $('calc-webhook-json');
   const webhookCopyBtn = $('calc-webhook-copy');
+  const webhookCopyUrlBtn = $('calc-webhook-copy-url');
 
   let symbolTimer = null;
   let resolveController = null;
@@ -351,6 +353,7 @@
   function toggleWebhookPanel(show) {
     webhookPanel.style.display = show ? '' : 'none';
     if (!show) {
+      webhookUrlEl.textContent = '';
       webhookJsonEl.textContent = '';
       webhookPanel.dataset.pendingId = '';
       webhookPanel.dataset.endpoint = '';
@@ -486,6 +489,19 @@
       errorEl.textContent = `Copy failed: ${err?.message || err}`;
     }
   });
+  webhookCopyUrlBtn.addEventListener('click', async () => {
+    const text = webhookUrlEl.textContent || '';
+    if (!text.trim()) {
+      errorEl.textContent = 'No webhook URL to copy.';
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      okEl.textContent = 'Webhook URL copied.';
+    } catch (err) {
+      errorEl.textContent = `Copy failed: ${err?.message || err}`;
+    }
+  });
 
   $('calc-symbol').addEventListener('input', debounceSymbolResolve);
 
@@ -511,9 +527,10 @@
       renderQuote(quote);
       if (state.webhook_mode === 'yes' && quote.webhook_payload_json) {
         state.pendingWebhookId = quote.pending_webhook_id || state.pendingWebhookId;
+        webhookUrlEl.textContent = quote.webhook_endpoint_url || quote.webhook_endpoint || '';
         webhookJsonEl.textContent = quote.webhook_payload_json;
         webhookPanel.dataset.pendingId = quote.pending_webhook_id || '';
-        webhookPanel.dataset.endpoint = quote.webhook_endpoint || '';
+        webhookPanel.dataset.endpoint = quote.webhook_endpoint_url || quote.webhook_endpoint || '';
         toggleWebhookPanel(true);
       } else {
         state.pendingWebhookId = '';
