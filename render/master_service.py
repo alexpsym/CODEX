@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import atexit
 import calendar
 import asyncio
 import threading
@@ -15,6 +16,8 @@ import logging
 import os
 import re
 import socket
+import signal
+import subprocess
 import sys
 import time
 import traceback
@@ -366,6 +369,12 @@ def _scanner_status_payload(status_path: Path) -> dict[str, object]:
         }
     )
     return result
+
+
+def _scanner_runtime_is_live(script_name: str) -> bool:
+    path = BYBIT_RUNTIME_STATUS_PATH if script_name == "bybit_monitor" else OANDA_RUNTIME_STATUS_PATH
+    payload = _scanner_status_payload(path)
+    return payload.get("ui_status") == "running"
 
 MAX_LOG_LINES = 400
 OANDA_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "oanda-history"
@@ -4406,6 +4415,9 @@ class ManagedScript:
         self.last_spawn_cwd = str(self.path.parent)
         self.add_log(f"Command: {' '.join(command)}")
         self.add_log(f"Working directory: {self.last_spawn_cwd}")
+        creationflags = 0
+        if os.name == "nt":
+            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
         try:
             self.process = await asyncio.wait_for(
                 asyncio.create_subprocess_exec(
@@ -4414,6 +4426,7 @@ class ManagedScript:
                     stderr=asyncio.subprocess.STDOUT,
                     cwd=self.last_spawn_cwd,
                     env=env,
+                    creationflags=creationflags,
                 ),
                 timeout=30,
             )
@@ -4471,7 +4484,14 @@ class ManagedScript:
         if not self.is_running:
             return
         assert self.process is not None
-        self.process.terminate()
+        if os.name == "nt" and self.process.pid:
+            try:
+                os.kill(self.process.pid, signal.CTRL_BREAK_EVENT)
+                await asyncio.wait_for(self.process.wait(), timeout=10)
+            except Exception:
+                self.process.terminate()
+        else:
+            self.process.terminate()
         try:
             await asyncio.wait_for(self.process.wait(), timeout=10)
         except asyncio.TimeoutError:
@@ -4716,6 +4736,7 @@ class ScriptManager:
     def list_scripts(self) -> List[Dict[str, object]]:
         items = [script.to_summary() for script in self._scripts.values()]
         if APP_PROFILE == "local" and "trading-journal" in LOCAL_ALLOWED_APPS:
+            sync_state = _sync_state_snapshot()
             items.append(
                 {
                     "id": "trading-journal",
@@ -4724,7 +4745,7 @@ class ScriptManager:
                     "path": str(BASE_DIR / "render" / "master_service.py"),
                     "category": "Other",
                     "running": True,
-                    "starting": False,
+                    "starting": bool(sync_state.get("running")),
                     "port": None,
                     "pid": None,
                     "return_code": None,
@@ -4732,9 +4753,10 @@ class ScriptManager:
                     "logs_url": None,
                     "last_output_at": None,
                     "last_start_attempt_at": None,
-                    "last_start_error": None,
+                    "last_start_error": sync_state.get("error"),
                     "last_exit_code": None,
                     "last_exit_reason": None,
+                    "last_error": sync_state.get("error"),
                     "last_spawn_command": None,
                     "last_spawn_cwd": None,
                     "startup_started_at": None,
@@ -4870,6 +4892,14 @@ def _compute_autostart_scripts() -> List[str]:
 async def _run_startup_recovery_import_if_needed() -> None:
     if _is_scanner_local_ui_mode():
         return
+    _set_trading_journal_sync_state(
+        running=True,
+        progress=10,
+        message="Startup journal sync running…",
+        ok=None,
+        error=None,
+        result=None,
+    )
     oanda_recovery: Dict[str, object] = {}
     for account in ("live", "demo"):
         try:
@@ -4897,6 +4927,8 @@ async def _run_startup_recovery_import_if_needed() -> None:
     try:
         result = await asyncio.to_thread(_import_trading_journal_from_sources)
         ok_flag = bool(result.get("ok", False)) if isinstance(result, dict) else False
+        diagnostics = result.get("diagnostics") if isinstance(result, dict) else {}
+        rows_by_asset_class = diagnostics.get("rows_by_asset_class") if isinstance(diagnostics, dict) else {}
         _record_daily_trade_sync_status(
             last_attempt_at=_utc_now_iso(),
             last_success_at=_utc_now_iso() if ok_flag else None,
@@ -4904,12 +4936,38 @@ async def _run_startup_recovery_import_if_needed() -> None:
             last_reason="startup_recovery",
             last_result={**(result or {}), "oanda_recovery": oanda_recovery},
         )
+        _set_trading_journal_sync_state(
+            running=False,
+            progress=100,
+            message="Startup journal sync complete." if ok_flag else str((result or {}).get("message") or "Startup import failed."),
+            ok=ok_flag,
+            error=None if ok_flag else str((result or {}).get("message") or "Startup import failed."),
+            result=result,
+            rows_imported=int((result or {}).get("rows_imported") or 0),
+            rows_by_asset_class=rows_by_asset_class if isinstance(rows_by_asset_class, dict) else {},
+            local_workbooks_seen=int((result or {}).get("local_workbooks_seen") or 0),
+            dropbox_workbooks_seen=int((result or {}).get("dropbox_workbooks_seen") or 0),
+            finished_at=_utc_now_iso(),
+        )
     except Exception as exc:
         _record_daily_trade_sync_status(
             last_attempt_at=_utc_now_iso(),
             last_error=f"Startup import failed: {exc}",
             last_reason="startup_recovery",
             last_result={"oanda_recovery": oanda_recovery},
+        )
+        _set_trading_journal_sync_state(
+            running=False,
+            progress=100,
+            message=f"Failed: {exc}",
+            ok=False,
+            error=str(exc),
+            result={"oanda_recovery": oanda_recovery},
+            rows_imported=0,
+            rows_by_asset_class={},
+            local_workbooks_seen=0,
+            dropbox_workbooks_seen=0,
+            finished_at=_utc_now_iso(),
         )
 
 
@@ -5169,6 +5227,15 @@ async def _autostart_scripts() -> None:
 
     _restore_bybit_closed_pnl_last_seen_from_state()
     _restore_oanda_fill_state_on_startup()
+    _set_trading_journal_sync_state(
+        running=True,
+        progress=0,
+        message="Startup journal sync queued…",
+        ok=None,
+        error=None,
+        started_at=_utc_now_iso(),
+        finished_at=None,
+    )
     asyncio.create_task(_dropbox_restore_state_backup_on_startup())
     asyncio.create_task(_ensure_trading_journal_dropbox_templates())
     asyncio.create_task(_log_outbound_traffic_summary())
@@ -5206,6 +5273,22 @@ async def _autostart_scripts() -> None:
             script.startup_task = asyncio.create_task(_background_start(script))
     if APP_PROFILE == "local":
         asyncio.create_task(_supervise_autostart_scripts(autostart_targets))
+
+
+@app.on_event("shutdown")
+async def _log_local_master_shutdown() -> None:
+    AUTOSTART_LOGGER.error(
+        "LOCAL_MASTER_SHUTDOWN profile=%s scripts=%s",
+        APP_PROFILE,
+        script_manager.list_scripts(),
+    )
+
+
+def _log_local_master_atexit() -> None:
+    AUTOSTART_LOGGER.error("LOCAL_MASTER_ATEXIT profile=%s", APP_PROFILE)
+
+
+atexit.register(_log_local_master_atexit)
 
 
 async def _start_oanda_fill_poll_after_delay() -> None:
@@ -5694,6 +5777,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             color: #e5e7eb;
         }
         .script-btn:hover { background: #0f172a; }
+        .script-btn.active-script { outline: 1px solid rgba(96, 165, 250, 0.8); }
         .script-btn.compact { width: auto; min-width: 190px; padding: 0.75rem 0.9rem; }
         .script-name { font-weight: 900; }
         .status-pill {
@@ -15634,10 +15718,12 @@ async def list_scripts() -> JSONResponse:
                 by_name.get("bybit_monitor", {}).get("starting")
                 or by_name.get("oanda_monitor", {}).get("starting")
             )
-            row["running"] = bool(
+            managed_running = bool(
                 by_name.get("bybit_monitor", {}).get("running")
                 or by_name.get("oanda_monitor", {}).get("running")
             )
+            runtime_running = _scanner_runtime_is_live("bybit_monitor") or _scanner_runtime_is_live("oanda_monitor")
+            row["running"] = managed_running or runtime_running
         merged.append(row)
 
     merged_source_names = get_merged_source_names()
@@ -17497,6 +17583,8 @@ async def _run_trading_journal_sync_job() -> None:
         result = await asyncio.to_thread(_import_trading_journal_from_sources, progress_cb=_cb)
         if isinstance(result, dict):
             result["bybit"] = {"demo": bybit_demo, "live": bybit_live}
+        diagnostics = result.get("diagnostics") if isinstance(result, dict) else {}
+        rows_by_asset_class = diagnostics.get("rows_by_asset_class") if isinstance(diagnostics, dict) else {}
         ok_flag = bool(result.get("ok", True)) if isinstance(result, dict) else True
         msg = "Done" if ok_flag else str((result or {}).get("message") or (result or {}).get("error") or "Failed")
         _set_trading_journal_sync_state(
@@ -17506,6 +17594,10 @@ async def _run_trading_journal_sync_job() -> None:
             ok=ok_flag,
             error=None if ok_flag else msg,
             result=result,
+            rows_imported=int((result or {}).get("rows_imported") or 0),
+            rows_by_asset_class=rows_by_asset_class if isinstance(rows_by_asset_class, dict) else {},
+            local_workbooks_seen=int((result or {}).get("local_workbooks_seen") or 0),
+            dropbox_workbooks_seen=int((result or {}).get("dropbox_workbooks_seen") or 0),
             finished_at=_utc_now_iso(),
         )
     except Exception as exc:
@@ -17516,6 +17608,10 @@ async def _run_trading_journal_sync_job() -> None:
             ok=False,
             error=str(exc),
             result=None,
+            rows_imported=0,
+            rows_by_asset_class={},
+            local_workbooks_seen=0,
+            dropbox_workbooks_seen=0,
             finished_at=_utc_now_iso(),
         )
 
