@@ -52,6 +52,7 @@
     saveInFlight: false,
     editingRowId: null,
     editingIsCreate: false,
+    diagnostics: null,
   };
   try { filterInput.value = localStorage.getItem('tj.filter') || ''; } catch {}
 
@@ -983,13 +984,16 @@
         triggerBackgroundSync();
       }
 
-      if (!silent) setLoading(85, 'Fetching balances…');
+      if (!silent) setLoading(80, 'Fetching diagnostics…');
+      const diagnostics = await fetchJson('/api/trading-journal/diagnostics', { signal });
+      if (!silent) setLoading(88, 'Fetching balances…');
       const balances = await fetchJson('/api/trading-journal/balances', { signal });
       const nextRows = Array.isArray(journal.items) ? journal.items : [];
       const nextStats = journal.stats || null;
       if (!state.editorOpen && !state.editorDirty && !state.saveInFlight) {
         state.rows = nextRows;
         state.stats = nextStats;
+        state.diagnostics = diagnostics || null;
       }
 
       persistUiState();
@@ -997,8 +1001,19 @@
       renderAll();
       renderBalances(Array.isArray(balances.items) ? balances.items : []);
       renderStats(state.stats);
+      const marketRows = Array.isArray(nextStats?.groups?.market_breakdown) ? nextStats.groups.market_breakdown : [];
+      const fxCount = marketRows
+        .filter((m) => String(m?.label || '').toLowerCase().includes('fx') || String(m?.label || '').toLowerCase().includes('forex'))
+        .reduce((acc, m) => acc + (Number(m?.trades) || 0), 0);
+      const rowsTotal = Number(diagnostics?.rows_total || 0);
+      const hasErrors = Array.isArray(diagnostics?.errors) && diagnostics.errors.length > 0;
+      const noSources = Number(diagnostics?.local_workbooks_seen || 0) + Number(diagnostics?.dropbox_workbooks_seen || 0) === 0;
       if (!state.editorOpen && !state.editorDirty) {
-        setStatus(`Updated ${new Date().toLocaleTimeString()}`);
+        if (hasErrors || noSources || rowsTotal < 20 || fxCount === 0) {
+          setStatus(`Warning: journal import may be incomplete (rows=${rowsTotal}, local=${diagnostics?.local_workbooks_seen || 0}, dropbox=${diagnostics?.dropbox_workbooks_seen || 0}).`);
+        } else {
+          setStatus(`Updated ${new Date().toLocaleTimeString()}`);
+        }
       }
       if (!silent) { setLoading(100, 'Done'); hideLoading(); }
     } catch (e) {

@@ -44,5 +44,7 @@ def test_render_profile_scripts_hide_local_only_main_views() -> None:
     assert "history" not in names
     assert "monitor" not in names
     assert "trading-journal" not in names
+    assert "bybit_monitor" not in names
+    assert "oanda_monitor" not in names
     assert "calculator" in names
     assert "open-orders" in names

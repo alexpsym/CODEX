@@ -193,6 +193,65 @@ def test_stats_and_balances_still_compute_after_create_and_edit(temp_state_paths
 def test_trading_journal_js_contains_crud_controls_and_endpoints():
     js = (ROOT / "render" / "static" / "trading_journal.js").read_text(encoding="utf-8")
     assert "/api/trading-journal/rows" in js
+    assert "/api/trading-journal/diagnostics" in js
     assert 'data-action="edit"' in js
     assert 'data-action="delete"' in js
     assert "location.reload" not in js
+
+
+def test_import_from_sources_local_when_dropbox_missing(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    workbook = temp_state_paths / "edgewonk-export-78784.xls"
+    workbook.write_bytes(b"dummy")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_SOURCE", "both")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", temp_state_paths)
+    monkeypatch.setattr(master_service, "_import_trading_journal_from_dropbox_excel", lambda progress_cb=None: {"ok": False, "rows_imported": 0, "workbooks_seen": 0, "errors": []})
+    monkeypatch.setattr(
+        master_service,
+        "_parse_local_trading_journal_workbook",
+        lambda path: (
+            [{
+                "id": f"local:{path.name}:1",
+                "source": "local_excel",
+                "asset_class": "fx",
+                "symbol": "EURUSD",
+                "open_time": "2026-04-01T00:00:00+00:00",
+                "close_time": "2026-04-01T01:00:00+00:00",
+            }],
+            None,
+        ),
+    )
+    result = master_service._import_trading_journal_from_sources()
+    assert result["ok"] is True
+    assert result["local_workbooks_seen"] == 1
+    rows = master_service._get_trading_journal_rows()
+    assert any(str(r.get("source")) == "local_excel" for r in rows)
+
+
+def test_import_from_sources_preserves_existing_rows_on_empty_result(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    master_service._set_trading_journal_rows([{"id": "existing:1", "source": "manual", "open_time": "2026-04-01T00:00:00+00:00"}])
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_SOURCE", "local")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", temp_state_paths)
+    monkeypatch.setattr(master_service, "_list_local_trading_journal_workbooks", lambda: [])
+    result = master_service._import_trading_journal_from_sources()
+    assert result["ok"] is False
+    rows = master_service._get_trading_journal_rows()
+    assert any(str(r.get("id")) == "existing:1" for r in rows)
+
+
+def test_parse_excel_generic_filename_infers_fx_asset_class(monkeypatch: pytest.MonkeyPatch):
+    row = {
+        "symbol": "EUR_USD",
+        "open_time": "2026-04-01",
+        "close_time": "2026-04-01",
+        "net_profit": 1.0,
+    }
+    df = master_service.pd.DataFrame([row])
+
+    class FakeExcel:
+        sheet_names = ["Sheet1"]
+
+    monkeypatch.setattr(master_service.pd, "ExcelFile", lambda *_args, **_kwargs: FakeExcel())
+    monkeypatch.setattr(master_service.pd, "read_excel", lambda *_args, **_kwargs: df)
+    rows, _bal = master_service._parse_excel_account_workbook("edgewonk-export-78784.xls", "/tmp/edgewonk-export-78784.xls", b"x")
+    assert rows
+    assert rows[0]["asset_class"] == "fx"
