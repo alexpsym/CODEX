@@ -28,7 +28,8 @@ except Exception:  # pragma: no cover - fallback in minimal test envs
             loaded = True
         return loaded
 
-DEFAULT_MASTER_ENV_DIR = Path(r"C:\Users\User\Downloads")
+DEFAULT_MASTER_ENV_FILE = Path(r"C:\Users\User\Documents\GPT\env.env")
+DEFAULT_MASTER_ENV_DIR = DEFAULT_MASTER_ENV_FILE.parent
 DEFAULT_ENV_FILENAMES = ("env.env", ".env", "scanner.env", "master.env")
 
 _ENV_LOADED = False

@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import threading
 import time
 from copy import deepcopy
@@ -11,6 +12,14 @@ from typing import Any, Dict, Optional, Tuple
 import pytz
 import requests
 from flask import Flask, jsonify, render_template_string, request
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from shared.env_bootstrap import load_master_env
+
+load_master_env(base_dir=ROOT_DIR)
 
 BASE_URL = os.getenv("OANDA_URL", "https://api-fxtrade.oanda.com/v3")
 LOG_FILE = Path(__file__).with_name("trade_closure.log")

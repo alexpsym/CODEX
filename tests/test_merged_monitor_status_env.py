@@ -251,11 +251,32 @@ def test_env_bootstrap_explicit_file_wins(tmp_path: Path, monkeypatch: pytest.Mo
     assert info["external_loaded"] == "1"
 
 
+def test_env_bootstrap_default_dir_and_checked_files_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    from shared import env_bootstrap
+
+    monkeypatch.delenv("MASTER_ENV_DIR", raising=False)
+    monkeypatch.delenv("MASTER_ENV_FILE", raising=False)
+    info = env_bootstrap.load_master_env(force_reload=True)
+    assert info["configured_dir"] == r"C:\Users\User\Documents\GPT"
+    checked_files = info["checked_files"].split(";")
+    assert checked_files[0] == r"C:\Users\User\Documents\GPT\env.env"
+    assert checked_files[1] == r"C:\Users\User\Documents\GPT\.env"
+    assert checked_files[2] == r"C:\Users\User\Documents\GPT\scanner.env"
+    assert checked_files[3] == r"C:\Users\User\Documents\GPT\master.env"
+
+
 def test_run_scanner_local_bat_sets_explicit_env_file() -> None:
     content = (ROOT / "run_scanner_local.bat").read_text(encoding="utf-8")
-    assert 'set "MASTER_ENV_FILE=C:\\Users\\User\\Downloads\\env.env"' in content
+    assert 'set "MASTER_ENV_FILE=C:\\Users\\User\\Documents\\GPT\\env.env"' in content
     assert 'if not exist "%MASTER_ENV_FILE%" (' in content
     assert "exit /b 1" in content
+
+
+def test_no_legacy_env_default_paths_remain_active() -> None:
+    env_bootstrap_content = (ROOT / "shared" / "env_bootstrap.py").read_text(encoding="utf-8")
+    bybit_history_helper_content = (ROOT / "bybithistory-clone" / "env_helpers.py").read_text(encoding="utf-8")
+    assert r"C:\Users\User\Downloads\env.env" not in env_bootstrap_content
+    assert "E:/ENV/bybit-live.env" not in bybit_history_helper_content
 
 
 def test_compute_autostart_semantics(monkeypatch: pytest.MonkeyPatch) -> None:

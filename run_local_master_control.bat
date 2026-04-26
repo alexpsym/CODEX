@@ -2,8 +2,8 @@
 setlocal EnableExtensions EnableDelayedExpansion
 
 set "ROOT=%~dp0"
-set "MASTER_ENV_DIR=C:\Users\User\Downloads"
-set "MASTER_ENV_FILE=C:\Users\User\Downloads\env.env"
+set "MASTER_ENV_DIR=C:\Users\User\Documents\GPT"
+set "MASTER_ENV_FILE=C:\Users\User\Documents\GPT\env.env"
 set "APP_PROFILE=local"
 set "AUTOSTART_SCRIPTS=bybit_monitor,oanda_monitor,fxweekend-clone"
 set "PYTHONUNBUFFERED=1"

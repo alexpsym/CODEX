@@ -12,8 +12,17 @@ import csv
 from datetime import datetime
 import os
 from pathlib import Path
+import sys
 from typing import Any, Dict, List, Optional, Tuple
 import zipfile
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from shared.env_bootstrap import load_master_env
+
+load_master_env(base_dir=ROOT_DIR)
 
 try:
     from coinspot import ReadOnlyAPIV2  # type: ignore

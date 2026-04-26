@@ -35,6 +35,9 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import requests
+from shared.env_bootstrap import load_master_env
+
+load_master_env()
 
 # Reuse your repo credential resolver if present.
 # If you run this inside CODEX, keep this import.
