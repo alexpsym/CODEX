@@ -509,6 +509,26 @@ def test_trading_journal_row_reflects_sync_state(monkeypatch: pytest.MonkeyPatch
     assert row["last_error"] == "sync failed"
 
 
+def test_scripts_merged_trading_journal_running_for_local_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
+    monkeypatch.setattr(
+        master_service,
+        "get_merged_script_buttons",
+        lambda: [{"id": "trading-journal", "name": "trading-journal", "label": "Trading Journal", "open_url": "/trading-journal"}],
+    )
+    monkeypatch.setattr(
+        master_service.script_manager,
+        "list_scripts",
+        lambda: [{"name": "trading-journal", "running": True, "starting": False, "open_url": "/trading-journal"}],
+    )
+    monkeypatch.setattr(master_service, "_sync_state_snapshot", lambda: {"running": True, "error": "sync err"})
+    payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
+    row = next(item for item in payload if item["name"] == "trading-journal")
+    assert row["running"] is True
+    assert row["starting"] is True
+    assert row["last_error"] == "sync err"
+
+
 def test_managed_script_start_sets_windows_creationflags(monkeypatch: pytest.MonkeyPatch) -> None:
     script_path = ROOT / "render" / "master_service.py"
     script = master_service.ManagedScript(name="test-script", path=script_path, category="Tests")
