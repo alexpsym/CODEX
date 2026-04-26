@@ -38,9 +38,16 @@ def write_json_file(
     retries: int = 10,
     backoff: float = 0.05,
     direct_fallback: bool = False,
+    sort_keys: bool = True,
+    ensure_ascii: bool = True,
 ) -> None:
     target = Path(path)
-    encoded = json.dumps(payload, indent=2, sort_keys=True)
+    encoded = json.dumps(
+        payload,
+        indent=2,
+        sort_keys=sort_keys,
+        ensure_ascii=ensure_ascii,
+    )
     tmp_path = target.with_name(f".{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     attempts = max(0, int(retries))
     sleep_seconds = max(0.0, float(backoff))
