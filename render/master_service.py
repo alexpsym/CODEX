@@ -6761,6 +6761,27 @@ def _format_source_exception(
     return text
 
 
+class OandaUpstreamError(ValueError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        upstream_status: Optional[int],
+        upstream_error_message: str,
+        endpoint: str,
+        mode: str,
+        retry_exhausted: bool,
+        maintenance_detected: bool,
+    ) -> None:
+        super().__init__(message)
+        self.upstream_status = upstream_status
+        self.upstream_error_message = upstream_error_message
+        self.endpoint = endpoint
+        self.mode = mode
+        self.retry_exhausted = retry_exhausted
+        self.maintenance_detected = maintenance_detected
+
+
 async def _fetch_oanda_json(
     *,
     base_url: str,
@@ -6806,7 +6827,15 @@ async def _fetch_oanda_json(
                     exc,
                 )
                 if not should_retry:
-                    raise ValueError(f"OANDA request timed out after {timeout_s:.1f}s") from exc
+                    raise OandaUpstreamError(
+                        f"OANDA request timed out after {timeout_s:.1f}s",
+                        upstream_status=None,
+                        upstream_error_message=str(exc),
+                        endpoint=endpoint,
+                        mode=mode,
+                        retry_exhausted=True,
+                        maintenance_detected=False,
+                    ) from exc
             except httpx.RequestError as exc:
                 should_retry = attempt < max_attempts
                 BYBIT_LOGGER.warning(
@@ -6820,13 +6849,25 @@ async def _fetch_oanda_json(
                     exc,
                 )
                 if not should_retry:
-                    raise ValueError(f"OANDA transport error: {exc}") from exc
+                    raise OandaUpstreamError(
+                        f"OANDA transport error: {exc}",
+                        upstream_status=None,
+                        upstream_error_message=str(exc),
+                        endpoint=endpoint,
+                        mode=mode,
+                        retry_exhausted=True,
+                        maintenance_detected=False,
+                    ) from exc
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
                 body = exc.response.text[:500]
+                maintenance_detected = (
+                    status == 503 and "system under maintenance" in body.lower()
+                )
                 should_retry = status in transient_statuses and attempt < max_attempts
-                BYBIT_LOGGER.error(
-                    "OANDA_HTTP_ERR mode=%s account=%s endpoint=%s status=%s attempt=%s/%s retry=%s body=%s",
+                log_fn = BYBIT_LOGGER.warning if maintenance_detected else BYBIT_LOGGER.error
+                log_fn(
+                    "OANDA_HTTP_ERR mode=%s account=%s endpoint=%s status=%s attempt=%s/%s retry=%s maintenance=%s body=%s",
                     mode,
                     account_id,
                     endpoint,
@@ -6834,15 +6875,33 @@ async def _fetch_oanda_json(
                     attempt,
                     max_attempts,
                     should_retry,
+                    maintenance_detected,
                     body,
                 )
                 if not should_retry:
-                    raise ValueError(f"OANDA request failed ({status}): {exc.response.text}") from exc
+                    upstream_error_message = (exc.response.text or "").strip()
+                    raise OandaUpstreamError(
+                        f"OANDA request failed ({status}): {upstream_error_message}",
+                        upstream_status=status,
+                        upstream_error_message=upstream_error_message,
+                        endpoint=endpoint,
+                        mode=mode,
+                        retry_exhausted=True,
+                        maintenance_detected=maintenance_detected,
+                    ) from exc
 
             backoff = min(0.2 * (2 ** (attempt - 1)), 0.8) + (0.05 * attempt)
             await asyncio.sleep(backoff)
         else:
-            raise ValueError("OANDA request failed after retries")
+            raise OandaUpstreamError(
+                "OANDA request failed after retries",
+                upstream_status=resp.status_code if resp is not None else None,
+                upstream_error_message=(resp.text or "").strip()[:500] if resp is not None else "",
+                endpoint=endpoint,
+                mode=mode,
+                retry_exhausted=True,
+                maintenance_detected=False,
+            )
 
     if resp is None:
         raise ValueError("OANDA request failed with no response")
@@ -16673,12 +16732,45 @@ async def oanda_inactivity_status() -> JSONResponse:
 
     try:
         payload = await _build_oanda_inactivity_status()
+    except OandaUpstreamError as exc:
+        status_value = "maintenance" if exc.maintenance_detected and exc.upstream_status == 503 else "unavailable"
+        user_error = (
+            "OANDA system under maintenance. Try again later."
+            if status_value == "maintenance"
+            else str(exc)
+        )
+        payload = {
+            "ok": False,
+            "mode": "live",
+            "status": status_value,
+            "error": user_error,
+            "upstream_status": exc.upstream_status,
+            "upstream_error_message": exc.upstream_error_message,
+            "endpoint": exc.endpoint,
+            "retry_exhausted": exc.retry_exhausted,
+            "maintenance_detected": exc.maintenance_detected,
+            "last_live_fill_at": None,
+            "open_trade_count": None,
+            "open_position_count": None,
+            "has_open_positions": None,
+            "inactivity_threshold_at": None,
+            "earliest_fee_date": None,
+            "policy_months_without_trade": 12,
+            "monthly_fee_aud": 10,
+            "seconds_until_threshold": None,
+            "updated_at": _utc_now_iso(),
+        }
     except Exception as exc:
         payload = {
             "ok": False,
             "mode": "live",
             "status": "unavailable",
             "error": str(exc),
+            "upstream_status": None,
+            "upstream_error_message": None,
+            "endpoint": None,
+            "retry_exhausted": None,
+            "maintenance_detected": False,
             "last_live_fill_at": None,
             "open_trade_count": None,
             "open_position_count": None,
