@@ -564,6 +564,82 @@ def _set_trading_journal_diagnostics(payload: Optional[Dict[str, object]]) -> No
     TRADING_JOURNAL_IMPORT_DIAGNOSTICS = base
 
 
+def _build_trading_journal_diagnostics_snapshot() -> Dict[str, object]:
+    diagnostics = dict(TRADING_JOURNAL_IMPORT_DIAGNOSTICS or _default_journal_diagnostics())
+    state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
+    sync_state = _sync_state_snapshot()
+    sync_result = sync_state.get("result") if isinstance(sync_state.get("result"), dict) else {}
+    current_rows = [row for row in _get_trading_journal_rows() if isinstance(row, dict)]
+    journal_rows_total = len(current_rows)
+
+    computed_rows_by_source: Dict[str, int] = defaultdict(int)
+    computed_rows_by_asset_class: Dict[str, int] = defaultdict(int)
+    computed_quarantined_rows = 0
+    for row in current_rows:
+        computed_rows_by_source[str(row.get("source") or "unknown")] += 1
+        computed_rows_by_asset_class[str(row.get("asset_class") or "unknown")] += 1
+        if str(row.get("status") or "").strip().lower() == "invalid_time_order":
+            computed_quarantined_rows += 1
+
+    raw_rows_total = int(diagnostics.get("rows_total") or 0)
+    if journal_rows_total > 0 and raw_rows_total <= 0:
+        rows_total = journal_rows_total
+    else:
+        rows_total = max(raw_rows_total, journal_rows_total)
+
+    rows_by_source = diagnostics.get("rows_by_source") if isinstance(diagnostics.get("rows_by_source"), dict) else {}
+    rows_by_asset_class = diagnostics.get("rows_by_asset_class") if isinstance(diagnostics.get("rows_by_asset_class"), dict) else {}
+    rows_by_source_sum = sum(int(v or 0) for v in rows_by_source.values()) if rows_by_source else 0
+    rows_by_asset_sum = sum(int(v or 0) for v in rows_by_asset_class.values()) if rows_by_asset_class else 0
+    if journal_rows_total > 0 and (not rows_by_source or rows_by_source_sum != journal_rows_total):
+        rows_by_source = dict(computed_rows_by_source)
+    if journal_rows_total > 0 and (not rows_by_asset_class or rows_by_asset_sum != journal_rows_total):
+        rows_by_asset_class = dict(computed_rows_by_asset_class)
+
+    local_workbooks_seen = int(diagnostics.get("local_workbooks_seen") or 0)
+    if local_workbooks_seen <= 0:
+        local_workbooks_seen = int((sync_result or {}).get("local_workbooks_seen") or 0)
+    if local_workbooks_seen <= 0:
+        local_workbooks_seen = int(sync_state.get("local_workbooks_seen") or 0)
+    if local_workbooks_seen <= 0 and isinstance(state, dict):
+        local_workbooks_seen = int(state.get("local_workbooks_seen") or 0)
+
+    dropbox_workbooks_seen = int(diagnostics.get("dropbox_workbooks_seen") or 0)
+    if dropbox_workbooks_seen <= 0:
+        dropbox_workbooks_seen = int((sync_result or {}).get("dropbox_workbooks_seen") or 0)
+    if dropbox_workbooks_seen <= 0:
+        dropbox_workbooks_seen = int(sync_state.get("dropbox_workbooks_seen") or 0)
+    if dropbox_workbooks_seen <= 0 and isinstance(state, dict):
+        dropbox_workbooks_seen = int(state.get("workbooks_seen") or state.get("dropbox_workbooks_seen") or 0)
+
+    if journal_rows_total > 0 and raw_rows_total <= 0:
+        diagnostics_source = "derived_from_current_rows"
+    elif rows_total != raw_rows_total:
+        diagnostics_source = "mixed"
+    else:
+        diagnostics_source = "import"
+
+    snapshot = _default_journal_diagnostics()
+    snapshot.update(diagnostics)
+    snapshot["rows_total"] = int(rows_total)
+    snapshot["journal_rows_total"] = int(journal_rows_total)
+    snapshot["has_current_journal_rows"] = journal_rows_total > 0
+    snapshot["rows_by_source"] = rows_by_source if isinstance(rows_by_source, dict) else {}
+    snapshot["rows_by_asset_class"] = rows_by_asset_class if isinstance(rows_by_asset_class, dict) else {}
+    snapshot["last_sync"] = snapshot.get("last_sync") if isinstance(snapshot.get("last_sync"), dict) else {}
+    snapshot["local_workbooks_seen"] = int(local_workbooks_seen)
+    snapshot["dropbox_workbooks_seen"] = int(dropbox_workbooks_seen)
+    snapshot["workbook_sources_seen"] = int(local_workbooks_seen + dropbox_workbooks_seen)
+    snapshot["duplicate_rows_dropped"] = int(snapshot.get("duplicate_rows_dropped") or 0)
+    snapshot["source_duplicate_rows_dropped"] = int(snapshot.get("source_duplicate_rows_dropped") or 0)
+    snapshot["dedupe_groups"] = int(snapshot.get("dedupe_groups") or 0)
+    snapshot["quarantined_rows"] = int(snapshot.get("quarantined_rows") or computed_quarantined_rows)
+    snapshot["ignored_local_workbooks"] = snapshot.get("ignored_local_workbooks") if isinstance(snapshot.get("ignored_local_workbooks"), list) else []
+    snapshot["errors"] = snapshot.get("errors") if isinstance(snapshot.get("errors"), list) else []
+    snapshot["diagnostics_source"] = diagnostics_source
+    return snapshot
+
+
 TRADING_JOURNAL_DROPBOX_RECURSIVE = os.getenv(
     "TRADING_JOURNAL_DROPBOX_RECURSIVE", "0"
 ).strip().lower() in {"1", "true", "yes", "on"}
@@ -3799,6 +3875,7 @@ def _import_trading_journal_from_sources(
     errors: List[Dict[str, str]] = []
     balances: List[Dict[str, object]] = []
     imported_any = False
+    imported_rows_total = 0
 
     if include_dropbox:
         try:
@@ -3806,6 +3883,7 @@ def _import_trading_journal_from_sources(
             diagnostics["dropbox_workbooks_seen"] = int(dropbox_result.get("workbooks_seen") or 0)
             errors.extend(dropbox_result.get("errors") or [])
             imported_any = imported_any or bool(dropbox_result.get("rows_imported"))
+            imported_rows_total += int(dropbox_result.get("rows_imported") or 0)
             rows_now = _get_trading_journal_rows()
             for row in rows_now:
                 if isinstance(row, dict):
@@ -3840,6 +3918,7 @@ def _import_trading_journal_from_sources(
         except Exception as exc:
             errors.append({"file": local_file.name, "path": str(local_file), "error": str(exc)})
     imported_any = imported_any or local_rows_total > 0
+    imported_rows_total += int(local_rows_total)
 
     dedupe_groups = 0
     source_duplicate_rows_dropped = 0
@@ -3913,8 +3992,8 @@ def _import_trading_journal_from_sources(
     _set_trading_journal_diagnostics(diagnostics)
     return {
         "ok": bool(imported_any),
-        "message": "Done" if imported_any else "No rows imported from configured sources.",
-        "rows_imported": len(_get_trading_journal_rows()),
+        "message": "Done" if imported_any else "No rows imported from configured sources; existing journal data was retained.",
+        "rows_imported": imported_rows_total,
         "balances_found": len(balances),
         "local_workbooks_seen": diagnostics["local_workbooks_seen"],
         "dropbox_workbooks_seen": diagnostics["dropbox_workbooks_seen"],
@@ -17662,20 +17741,7 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
 
 @app.get("/api/trading-journal/diagnostics")
 async def trading_journal_diagnostics() -> JSONResponse:
-    payload = dict(TRADING_JOURNAL_IMPORT_DIAGNOSTICS or _default_journal_diagnostics())
-    payload["rows_total"] = int(payload.get("rows_total") or 0)
-    payload["rows_by_source"] = payload.get("rows_by_source") if isinstance(payload.get("rows_by_source"), dict) else {}
-    payload["rows_by_asset_class"] = payload.get("rows_by_asset_class") if isinstance(payload.get("rows_by_asset_class"), dict) else {}
-    payload["last_sync"] = payload.get("last_sync") if isinstance(payload.get("last_sync"), dict) else {}
-    payload["local_workbooks_seen"] = int(payload.get("local_workbooks_seen") or 0)
-    payload["dropbox_workbooks_seen"] = int(payload.get("dropbox_workbooks_seen") or 0)
-    payload["duplicate_rows_dropped"] = int(payload.get("duplicate_rows_dropped") or 0)
-    payload["source_duplicate_rows_dropped"] = int(payload.get("source_duplicate_rows_dropped") or 0)
-    payload["dedupe_groups"] = int(payload.get("dedupe_groups") or 0)
-    payload["quarantined_rows"] = int(payload.get("quarantined_rows") or 0)
-    payload["ignored_local_workbooks"] = payload.get("ignored_local_workbooks") if isinstance(payload.get("ignored_local_workbooks"), list) else []
-    payload["errors"] = payload.get("errors") if isinstance(payload.get("errors"), list) else []
-    return JSONResponse(payload)
+    return JSONResponse(_build_trading_journal_diagnostics_snapshot())
 @app.get("/api/trading-journal/balances")
 async def trading_journal_balances() -> JSONResponse:
     rows = [r for r in _get_trading_journal_rows() if isinstance(r, dict) and not _exclude_bybit_demo_row(r)]
