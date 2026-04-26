@@ -240,7 +240,121 @@ def test_trading_journal_js_contains_crud_controls_and_endpoints():
     assert "Cached data shown, refreshing…" in js
     assert "writeCachedPayload({" in js
     assert "/api/trading-journal/sync/status" in js
-    assert "/api/trading-journal: " in js
+    assert "isAbortError" in js
+    assert "fetchNamedJson" in js
+    assert "manualSyncInFlight" in js
+    assert "skipAutoSync: true" in js
+    assert "new Error(`/api/trading-journal:" not in js
+
+
+def test_diagnostics_derive_rows_total_from_existing_journal_rows(temp_state_paths):
+    rows = []
+    for idx in range(25):
+        rows.append(
+            {
+                "id": f"manual:{idx}",
+                "row_type": "trade",
+                "source": "manual",
+                "asset_class": "crypto",
+                "symbol": "BTCUSDT",
+                "status": "closed",
+                "close_time": f"2026-04-01T00:{idx:02d}:00+00:00",
+            }
+        )
+    master_service._set_trading_journal_rows(rows)
+    master_service.TRADING_JOURNAL_IMPORT_DIAGNOSTICS = master_service._default_journal_diagnostics()
+
+    payload = _json(asyncio.run(master_service.trading_journal_diagnostics()))
+    assert payload["rows_total"] >= 25
+    assert payload["journal_rows_total"] >= 25
+    assert payload["has_current_journal_rows"] is True
+    assert payload["rows_by_source"]
+
+
+def test_diagnostics_does_not_report_zero_when_journal_items_exist(temp_state_paths):
+    master_service._set_trading_journal_rows(
+        [
+            {
+                "id": "manual:1",
+                "row_type": "trade",
+                "source": "manual",
+                "asset_class": "fx",
+                "symbol": "EURUSD",
+                "status": "closed",
+                "close_time": "2026-04-01T00:00:00+00:00",
+            }
+        ]
+    )
+    master_service.TRADING_JOURNAL_IMPORT_DIAGNOSTICS = master_service._default_journal_diagnostics()
+    payload = _json(asyncio.run(master_service.trading_journal_diagnostics()))
+    assert payload["rows_total"] > 0
+    assert payload["journal_rows_total"] > 0
+    assert payload["diagnostics_source"] in {"derived_from_current_rows", "mixed", "import"}
+
+
+def test_diagnostics_counts_visible_rows_not_raw_rows(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "ENABLE_BYBIT_DEMO_JOURNAL", False)
+    rows = []
+    for idx in range(25):
+        rows.append(
+            {
+                "id": f"manual:visible:{idx}",
+                "row_type": "trade",
+                "source": "manual",
+                "asset_class": "fx",
+                "symbol": "EURUSD",
+                "status": "closed",
+                "close_time": f"2026-04-01T00:{idx:02d}:00+00:00",
+            }
+        )
+    rows.append(
+        {
+            "id": "manual:quarantined:1",
+            "row_type": "trade",
+            "source": "manual",
+            "asset_class": "fx",
+            "symbol": "EURUSD",
+            "status": "invalid_time_order",
+            "close_time": "2026-04-01T01:00:00+00:00",
+        }
+    )
+    rows.extend(
+        [
+            {
+                "id": "bybit:demo:hidden:1",
+                "row_type": "trade",
+                "source": "bybit",
+                "account": "demo",
+                "account_label": "Bybit Demo",
+                "asset_class": "crypto",
+                "symbol": "BTCUSDT",
+                "status": "closed",
+                "close_time": "2026-04-01T02:00:00+00:00",
+            },
+            {
+                "id": "bybit:demo:hidden:2",
+                "row_type": "trade",
+                "source": "bybit",
+                "account": "demo",
+                "account_label": "Bybit Demo",
+                "asset_class": "crypto",
+                "symbol": "ETHUSDT",
+                "status": "closed",
+                "close_time": "2026-04-01T03:00:00+00:00",
+            },
+        ]
+    )
+    master_service._set_trading_journal_rows(rows)
+    master_service.TRADING_JOURNAL_IMPORT_DIAGNOSTICS = master_service._default_journal_diagnostics()
+    payload = _json(asyncio.run(master_service.trading_journal_diagnostics()))
+
+    assert payload["rows_total"] == 25
+    assert payload["journal_rows_total"] == 25
+    assert payload["visible_rows_total"] == 25
+    assert payload["raw_rows_total"] == 28
+    assert payload["quarantined_rows"] == 1
+    assert payload["excluded_rows_total"] == 3
+    assert payload["has_current_journal_rows"] is True
 
 
 def test_import_from_sources_local_when_dropbox_missing(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
@@ -331,6 +445,12 @@ def test_import_from_sources_preserves_existing_rows_on_empty_result(temp_state_
     assert result["ok"] is False
     rows = master_service._get_trading_journal_rows()
     assert any(str(r.get("id")) == "existing:1" for r in rows)
+
+
+def test_trading_journal_js_quarantine_is_not_hard_warning():
+    js = (ROOT / "render" / "static" / "trading_journal.js").read_text(encoding="utf-8")
+    assert "|| quarantinedRows > 0" not in js
+    assert "invalid historical" in js
 
 
 def test_parse_excel_generic_filename_infers_fx_asset_class(monkeypatch: pytest.MonkeyPatch):

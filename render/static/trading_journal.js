@@ -56,6 +56,7 @@
     editingIsCreate: false,
     diagnostics: null,
     renderedRows: [],
+    manualSyncInFlight: false,
   };
   try { filterInput.value = localStorage.getItem('tj.filter') || ''; } catch {}
 
@@ -162,6 +163,24 @@
     try { return JSON.parse(text); } catch { return {}; }
   }
 
+  function isAbortError(err, signal) {
+    const msg = String(err?.message || '').toLowerCase();
+    return err?.name === 'AbortError'
+      || err?.cause?.name === 'AbortError'
+      || !!signal?.aborted
+      || msg.includes('aborted')
+      || msg.includes('signal is aborted');
+  }
+
+  async function fetchNamedJson(label, url, options = {}) {
+    try {
+      return await fetchJson(url, options);
+    } catch (err) {
+      if (isAbortError(err, options?.signal)) throw err;
+      throw new Error(`${label}: ${err?.message || err}`);
+    }
+  }
+
   function openCacheDb() {
     return new Promise((resolve, reject) => {
       if (!window.indexedDB) return reject(new Error('IndexedDB unavailable'));
@@ -230,6 +249,10 @@
         syncWatchTimer = null;
         if (st?.ok === false) {
           setStatus(`Background sync failed: ${st?.error || st?.message || 'unknown error'}`);
+          return;
+        }
+        if (state.manualSyncInFlight || loadInFlight) {
+          syncWatchTimer = setTimeout(poll, 900);
           return;
         }
         localStorage.setItem('tj_last_auto_sync_ms', String(Date.now()));
@@ -1047,10 +1070,10 @@
   async function load({ silent = false, skipAutoSync = false } = {}) {
     if (loadInFlight) return;
     loadInFlight = true;
-    // Cancel any prior request chain so rapid manual actions cannot overlap with refresh work.
-    if (activeAbort) { try { activeAbort.abort(); } catch {} }
-    activeAbort = new AbortController();
-    const signal = activeAbort.signal;
+    const controller = new AbortController();
+    activeAbort = controller;
+    const signal = controller.signal;
+    const ownsVisibleOverlay = !silent;
     try {
       setStatus(silent ? 'Refreshing…' : 'Loading…');
       if (!silent) {
@@ -1067,10 +1090,10 @@
       }
       if (!silent) setLoading(5, 'Loading…');
       if (!silent) setLoading(15, 'Fetching journal…');
-      const journalPromise = fetchJson('/api/trading-journal', { signal }).catch((err) => { throw new Error(`/api/trading-journal: ${err.message || err}`); });
-      const diagnosticsPromise = fetchJson('/api/trading-journal/diagnostics', { signal }).catch((err) => { throw new Error(`/api/trading-journal/diagnostics: ${err.message || err}`); });
-      const balancesPromise = fetchJson('/api/trading-journal/balances', { signal }).catch((err) => { throw new Error(`/api/trading-journal/balances: ${err.message || err}`); });
-      const syncStatusPromise = fetchJson('/api/trading-journal/sync/status', { signal }).catch((err) => { throw new Error(`/api/trading-journal/sync/status: ${err.message || err}`); });
+      const journalPromise = fetchNamedJson('/api/trading-journal', '/api/trading-journal', { signal });
+      const diagnosticsPromise = fetchNamedJson('/api/trading-journal/diagnostics', '/api/trading-journal/diagnostics', { signal });
+      const balancesPromise = fetchNamedJson('/api/trading-journal/balances', '/api/trading-journal/balances', { signal });
+      const syncStatusPromise = fetchNamedJson('/api/trading-journal/sync/status', '/api/trading-journal/sync/status', { signal });
       let journal = await journalPromise;
       if (silent || skipAutoSync) {
         await syncStatusPromise;
@@ -1122,20 +1145,33 @@
       const fxCount = marketRows
         .filter((m) => String(m?.label || '').toLowerCase().includes('fx') || String(m?.label || '').toLowerCase().includes('forex'))
         .reduce((acc, m) => acc + (Number(m?.trades) || 0), 0);
-      const rowsTotal = Number(diagnostics?.rows_total || 0);
+      const actualRowsTotal = Number(journal?.count ?? nextRows.length ?? 0);
+      const diagnosticRowsTotal = Number(diagnostics?.rows_total || 0);
+      const rowsTotal = Math.max(actualRowsTotal, diagnosticRowsTotal);
       const hasErrors = Array.isArray(diagnostics?.errors) && diagnostics.errors.length > 0;
-      const noSources = Number(diagnostics?.local_workbooks_seen || 0) + Number(diagnostics?.dropbox_workbooks_seen || 0) === 0;
+      const workbookSourcesSeen = Number(
+        diagnostics?.workbook_sources_seen
+        ?? (Number(diagnostics?.local_workbooks_seen || 0) + Number(diagnostics?.dropbox_workbooks_seen || 0))
+      );
+      const noSources = workbookSourcesSeen === 0;
       const quarantinedRows = Number(diagnostics?.quarantined_rows || 0);
+      const lowRowCount = actualRowsTotal < 20 && rowsTotal < 20;
+      const workbookFxRows = Number(diagnostics?.rows_by_asset_class?.fx || 0);
+      const shouldWarnZeroFx = fxCount === 0 && workbookFxRows > 0;
       if (!state.editorOpen && !state.editorDirty) {
-        if (hasErrors || noSources || rowsTotal < 20 || fxCount === 0 || quarantinedRows > 0) {
+        if (hasErrors || rowsTotal === 0 || lowRowCount || shouldWarnZeroFx) {
           const reasons = [];
           if (hasErrors) reasons.push('parse/sync errors');
-          if (noSources) reasons.push('no workbook sources');
-          if (rowsTotal < 20) reasons.push('suspiciously low row count');
-          if (fxCount === 0) reasons.push('zero FX rows');
-          if (quarantinedRows > 0) reasons.push(`quarantined rows=${quarantinedRows}`);
+          if (rowsTotal === 0) reasons.push('no journal rows loaded');
+          if (lowRowCount) reasons.push('suspiciously low row count');
+          if (shouldWarnZeroFx) reasons.push('zero FX rows');
           const dropped = Number(diagnostics?.duplicate_rows_dropped || 0);
           setStatus(`Warning: Trading Journal diagnostics require attention (${reasons.join(', ')}; rows=${rowsTotal}; duplicates dropped=${dropped}).`);
+        } else if (actualRowsTotal > 0 && quarantinedRows > 0) {
+          const label = quarantinedRows === 1 ? 'row was' : 'rows were';
+          setStatus(`Info: ${actualRowsTotal} journal rows loaded; ${quarantinedRows} invalid historical ${label} excluded.`);
+        } else if (noSources && actualRowsTotal > 0) {
+          setStatus(`Info: ${actualRowsTotal} journal rows loaded; no Excel workbook imports detected.`);
         } else {
           setStatus(`Updated ${new Date().toLocaleTimeString()}`);
         }
@@ -1148,12 +1184,17 @@
         fetched_at: new Date().toISOString(),
       });
     } catch (e) {
-      if (e && (e.name === 'AbortError' || e.code === 20)) return;
+      if (isAbortError(e, signal)) {
+        if (ownsVisibleOverlay && loading?.style?.display === 'flex') hideLoading();
+        if (ownsVisibleOverlay && !silent) setStatus('Refresh cancelled.');
+        return;
+      }
       console.error(e);
-      if (!silent) hideLoading();
+      if (ownsVisibleOverlay && loading?.style?.display === 'flex') hideLoading();
       setStatus(`Load failed: ${e.message}`);
     } finally {
       loadInFlight = false;
+      if (activeAbort === controller) activeAbort = null;
       scheduleAutoRefresh();
       syncActionButtons();
     }
@@ -1206,15 +1247,23 @@
       setStatus('Close or save the editor before syncing.');
       return;
     }
+    stopAutoRefresh();
+    state.manualSyncInFlight = true;
     try {
       setStatus('Syncing…');
       setLoading(10, 'Syncing from Dropbox…');
       await fetchJson('/api/trading-journal/sync', { method: 'POST' });
-      await waitForSync();
-      await load();
+      const syncResult = await waitForSync();
+      if (syncResult?.ok === false) {
+        throw new Error(syncResult?.error || syncResult?.message || 'Sync failed');
+      }
+      await load({ skipAutoSync: true });
     } catch (e) {
       hideLoading();
       setStatus(`Sync failed: ${e.message}`);
+    } finally {
+      state.manualSyncInFlight = false;
+      scheduleAutoRefresh();
     }
   });
 
