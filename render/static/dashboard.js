@@ -309,6 +309,12 @@
     const payload = oandaState || {};
     const statusValue = String(payload.status || '').toLowerCase();
     if (!oandaHeadline || !oandaDetail) return;
+    if (statusValue === 'maintenance') {
+      oandaHeadline.textContent = 'OANDA maintenance';
+      oandaDetail.textContent = oandaExpanded ? 'Account inactivity status temporarily unavailable.' : '';
+      if (oandaCountdown) oandaCountdown.textContent = 'Maintenance';
+      return;
+    }
     if (!payload.ok || statusValue === 'unavailable') {
       oandaHeadline.textContent = 'Status unavailable';
       oandaDetail.textContent = oandaExpanded ? 'Unable to confirm inactivity state.' : '';
