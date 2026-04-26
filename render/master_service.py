@@ -12239,11 +12239,11 @@ async def fetch_bybit_balance(
 
 
 
-@app.get("/", response_class=HTMLResponse)
-async def home_page() -> Response | str:
+@app.get("/", response_class=HTMLResponse, response_model=None)
+async def home_page() -> Response:
     if APP_PROFILE == "journal":
         return RedirectResponse(url="/trading-journal", status_code=307)
-    return HTML_TEMPLATE
+    return HTMLResponse(HTML_TEMPLATE)
 
 
 @app.get("/instrument-specs", response_class=HTMLResponse)
