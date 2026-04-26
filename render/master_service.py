@@ -564,28 +564,38 @@ def _set_trading_journal_diagnostics(payload: Optional[Dict[str, object]]) -> No
     TRADING_JOURNAL_IMPORT_DIAGNOSTICS = base
 
 
+def _is_visible_trading_journal_row(row: object) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if _exclude_bybit_demo_row(row):
+        return False
+    return str(row.get("status") or "").strip().lower() != "invalid_time_order"
+
+
 def _build_trading_journal_diagnostics_snapshot() -> Dict[str, object]:
     diagnostics = dict(TRADING_JOURNAL_IMPORT_DIAGNOSTICS or _default_journal_diagnostics())
     state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
     sync_state = _sync_state_snapshot()
     sync_result = sync_state.get("result") if isinstance(sync_state.get("result"), dict) else {}
-    current_rows = [row for row in _get_trading_journal_rows() if isinstance(row, dict)]
-    journal_rows_total = len(current_rows)
+    raw_rows = [row for row in _get_trading_journal_rows() if isinstance(row, dict)]
+    visible_rows = [row for row in raw_rows if _is_visible_trading_journal_row(row)]
+    raw_rows_total = len(raw_rows)
+    visible_rows_total = len(visible_rows)
+    quarantined_rows = sum(
+        1 for row in raw_rows if str(row.get("status") or "").strip().lower() == "invalid_time_order"
+    )
+    excluded_bybit_demo_rows = sum(1 for row in raw_rows if _exclude_bybit_demo_row(row))
+    excluded_rows_total = max(0, raw_rows_total - visible_rows_total)
+    journal_rows_total = visible_rows_total
 
     computed_rows_by_source: Dict[str, int] = defaultdict(int)
     computed_rows_by_asset_class: Dict[str, int] = defaultdict(int)
-    computed_quarantined_rows = 0
-    for row in current_rows:
+    for row in visible_rows:
         computed_rows_by_source[str(row.get("source") or "unknown")] += 1
         computed_rows_by_asset_class[str(row.get("asset_class") or "unknown")] += 1
-        if str(row.get("status") or "").strip().lower() == "invalid_time_order":
-            computed_quarantined_rows += 1
 
-    raw_rows_total = int(diagnostics.get("rows_total") or 0)
-    if journal_rows_total > 0 and raw_rows_total <= 0:
-        rows_total = journal_rows_total
-    else:
-        rows_total = max(raw_rows_total, journal_rows_total)
+    diagnostics_rows_total = int(diagnostics.get("rows_total") or 0)
+    rows_total = int(journal_rows_total)
 
     rows_by_source = diagnostics.get("rows_by_source") if isinstance(diagnostics.get("rows_by_source"), dict) else {}
     rows_by_asset_class = diagnostics.get("rows_by_asset_class") if isinstance(diagnostics.get("rows_by_asset_class"), dict) else {}
@@ -612,9 +622,9 @@ def _build_trading_journal_diagnostics_snapshot() -> Dict[str, object]:
     if dropbox_workbooks_seen <= 0 and isinstance(state, dict):
         dropbox_workbooks_seen = int(state.get("workbooks_seen") or state.get("dropbox_workbooks_seen") or 0)
 
-    if journal_rows_total > 0 and raw_rows_total <= 0:
+    if journal_rows_total > 0 and diagnostics_rows_total <= 0:
         diagnostics_source = "derived_from_current_rows"
-    elif rows_total != raw_rows_total:
+    elif rows_total != diagnostics_rows_total:
         diagnostics_source = "mixed"
     else:
         diagnostics_source = "import"
@@ -623,6 +633,10 @@ def _build_trading_journal_diagnostics_snapshot() -> Dict[str, object]:
     snapshot.update(diagnostics)
     snapshot["rows_total"] = int(rows_total)
     snapshot["journal_rows_total"] = int(journal_rows_total)
+    snapshot["raw_rows_total"] = int(raw_rows_total)
+    snapshot["visible_rows_total"] = int(visible_rows_total)
+    snapshot["excluded_rows_total"] = int(excluded_rows_total)
+    snapshot["excluded_bybit_demo_rows"] = int(excluded_bybit_demo_rows)
     snapshot["has_current_journal_rows"] = journal_rows_total > 0
     snapshot["rows_by_source"] = rows_by_source if isinstance(rows_by_source, dict) else {}
     snapshot["rows_by_asset_class"] = rows_by_asset_class if isinstance(rows_by_asset_class, dict) else {}
@@ -633,7 +647,7 @@ def _build_trading_journal_diagnostics_snapshot() -> Dict[str, object]:
     snapshot["duplicate_rows_dropped"] = int(snapshot.get("duplicate_rows_dropped") or 0)
     snapshot["source_duplicate_rows_dropped"] = int(snapshot.get("source_duplicate_rows_dropped") or 0)
     snapshot["dedupe_groups"] = int(snapshot.get("dedupe_groups") or 0)
-    snapshot["quarantined_rows"] = int(snapshot.get("quarantined_rows") or computed_quarantined_rows)
+    snapshot["quarantined_rows"] = int(quarantined_rows)
     snapshot["ignored_local_workbooks"] = snapshot.get("ignored_local_workbooks") if isinstance(snapshot.get("ignored_local_workbooks"), list) else []
     snapshot["errors"] = snapshot.get("errors") if isinstance(snapshot.get("errors"), list) else []
     snapshot["diagnostics_source"] = diagnostics_source
@@ -3957,21 +3971,27 @@ def _import_trading_journal_from_sources(
     else:
         errors.append({"file": "", "path": "sources", "error": "Imported 0 rows; keeping existing journal data."})
 
+    persisted_rows = [row for row in _get_trading_journal_rows() if isinstance(row, dict)]
+    visible_rows = [row for row in persisted_rows if _is_visible_trading_journal_row(row)]
     rows_by_source: Dict[str, int] = defaultdict(int)
     rows_by_asset_class: Dict[str, int] = defaultdict(int)
-    for row in _get_trading_journal_rows():
-        if not isinstance(row, dict):
-            continue
+    for row in visible_rows:
         rows_by_source[str(row.get("source") or "unknown")] += 1
         rows_by_asset_class[str(row.get("asset_class") or "unknown")] += 1
     quarantined_rows = sum(
         1
-        for row in _get_trading_journal_rows()
-        if isinstance(row, dict) and str(row.get("status") or "").strip().lower() == "invalid_time_order"
+        for row in persisted_rows
+        if str(row.get("status") or "").strip().lower() == "invalid_time_order"
     )
+    excluded_bybit_demo_rows = sum(1 for row in persisted_rows if _exclude_bybit_demo_row(row))
+    excluded_rows_total = max(0, len(persisted_rows) - len(visible_rows))
     diagnostics.update(
         {
-            "rows_total": len(_get_trading_journal_rows()),
+            "rows_total": len(visible_rows),
+            "raw_rows_total": len(persisted_rows),
+            "visible_rows_total": len(visible_rows),
+            "excluded_rows_total": excluded_rows_total,
+            "excluded_bybit_demo_rows": excluded_bybit_demo_rows,
             "rows_by_source": dict(rows_by_source),
             "rows_by_asset_class": dict(rows_by_asset_class),
             "duplicate_rows_dropped": duplicate_rows_dropped,
@@ -17680,9 +17700,7 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
     items = [
         _backfill_trade_row_context_fields(r)
         for r in _get_trading_journal_rows()
-        if isinstance(r, dict)
-        and not _exclude_bybit_demo_row(r)
-        and str(r.get("status") or "").strip().lower() != "invalid_time_order"
+        if _is_visible_trading_journal_row(r)
     ]
 
     def _norm_search_text(value: object) -> str:

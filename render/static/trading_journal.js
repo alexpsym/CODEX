@@ -1159,15 +1159,17 @@
       const workbookFxRows = Number(diagnostics?.rows_by_asset_class?.fx || 0);
       const shouldWarnZeroFx = fxCount === 0 && workbookFxRows > 0;
       if (!state.editorOpen && !state.editorDirty) {
-        if (hasErrors || rowsTotal === 0 || lowRowCount || shouldWarnZeroFx || quarantinedRows > 0) {
+        if (hasErrors || rowsTotal === 0 || lowRowCount || shouldWarnZeroFx) {
           const reasons = [];
           if (hasErrors) reasons.push('parse/sync errors');
           if (rowsTotal === 0) reasons.push('no journal rows loaded');
           if (lowRowCount) reasons.push('suspiciously low row count');
           if (shouldWarnZeroFx) reasons.push('zero FX rows');
-          if (quarantinedRows > 0) reasons.push(`quarantined rows=${quarantinedRows}`);
           const dropped = Number(diagnostics?.duplicate_rows_dropped || 0);
           setStatus(`Warning: Trading Journal diagnostics require attention (${reasons.join(', ')}; rows=${rowsTotal}; duplicates dropped=${dropped}).`);
+        } else if (actualRowsTotal > 0 && quarantinedRows > 0) {
+          const label = quarantinedRows === 1 ? 'row was' : 'rows were';
+          setStatus(`Info: ${actualRowsTotal} journal rows loaded; ${quarantinedRows} invalid historical ${label} excluded.`);
         } else if (noSources && actualRowsTotal > 0) {
           setStatus(`Info: ${actualRowsTotal} journal rows loaded; no Excel workbook imports detected.`);
         } else {
