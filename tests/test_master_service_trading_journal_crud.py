@@ -2,6 +2,7 @@ import asyncio
 import importlib.util
 import json
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -125,6 +126,43 @@ def test_manual_overrides_survive_later_sync_upsert(temp_state_paths):
     row = master_service._get_trading_journal_rows()[0]
     assert row["notes"] == "edited"
     assert row["timeframe"] == "4-hour"
+
+
+def test_concurrent_upserts_preserve_both_rows(temp_state_paths):
+    start = threading.Barrier(3)
+    errors: list[BaseException] = []
+
+    def worker(row_id: str) -> None:
+        try:
+            start.wait(timeout=2)
+            master_service._upsert_trading_journal_rows(
+                [
+                    {
+                        "id": row_id,
+                        "row_type": "trade",
+                        "source": "bybit",
+                        "status": "closed",
+                        "symbol": "BTCUSDT",
+                        "close_time": "2026-04-01T01:00:00+00:00",
+                    }
+                ]
+            )
+        except BaseException as exc:  # pragma: no cover - diagnostics for thread failures
+            errors.append(exc)
+
+    t1 = threading.Thread(target=worker, args=("bybit:demo:closed:1",))
+    t2 = threading.Thread(target=worker, args=("bybit:demo:closed:2",))
+    t1.start()
+    t2.start()
+    start.wait(timeout=2)
+    t1.join(timeout=2)
+    t2.join(timeout=2)
+
+    assert not errors
+    rows = master_service._get_trading_journal_rows()
+    ids = {str((row or {}).get("id") or "") for row in rows}
+    assert "bybit:demo:closed:1" in ids
+    assert "bybit:demo:closed:2" in ids
 
 
 def test_reject_cashflow_edit(temp_state_paths):

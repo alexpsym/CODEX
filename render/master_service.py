@@ -63,6 +63,7 @@ from shared.symbol_resolution import (
     normalize_oanda_symbol_query,
     resolve_bybit_symbol_from_choices,
 )
+from shared.atomic_json import write_json_file
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
@@ -628,6 +629,7 @@ WEBHOOK_ATTEMPTS_MAX_ITEMS = int(os.getenv("WEBHOOK_ATTEMPTS_MAX_ITEMS", "300") 
 
 _WATCHLIST_CACHE: Optional[List[str]] = None
 _TRADING_JOURNAL_CACHE: Optional[List[Dict[str, object]]] = None
+_TRADING_JOURNAL_ROWS_LOCK = threading.RLock()
 _STARTUP_STATE_RESTORE_DONE = asyncio.Event()
 _DROPBOX_UPLOAD_TASK: Optional[asyncio.Task] = None
 _DROPBOX_UPLOAD_TIMER: Optional[threading.Timer] = None
@@ -1671,13 +1673,14 @@ def _get_trading_journal() -> List[Dict[str, object]]:
 
 def _save_trading_journal(rows: List[Dict[str, object]]) -> None:
     global _TRADING_JOURNAL_CACHE
-    sorted_rows = sorted(
-        rows,
-        key=lambda item: str(item.get("close_time") or item.get("open_time") or ""),
-        reverse=True,
-    )
-    _TRADING_JOURNAL_CACHE = [dict(item) for item in sorted_rows]
-    _save_json_file(TRADING_JOURNAL_PATH, {"items": sorted_rows, "updated_at": _utc_now_iso()})
+    with _TRADING_JOURNAL_ROWS_LOCK:
+        sorted_rows = sorted(
+            rows,
+            key=lambda item: str(item.get("close_time") or item.get("open_time") or ""),
+            reverse=True,
+        )
+        _TRADING_JOURNAL_CACHE = [dict(item) for item in sorted_rows]
+        _save_json_file(TRADING_JOURNAL_PATH, {"items": sorted_rows, "updated_at": _utc_now_iso()})
     _schedule_dropbox_upload_state_backup()
 
 
@@ -1850,37 +1853,38 @@ def _find_journal_row_index(row_id: str) -> int:
 
 
 def _upsert_trading_journal_rows(rows: Iterable[Dict[str, object]]) -> int:
-    existing = _get_trading_journal_rows()
-    by_id: Dict[str, Dict[str, object]] = {}
-    for row in existing:
-        row_id = str(row.get("id") or "").strip()
-        if row_id:
-            by_id[row_id] = row
-    changed = 0
-    for raw in rows:
-        if not isinstance(raw, dict):
-            continue
-        row = dict(raw)
-        row_id = str(row.get("id") or "").strip()
-        if not row_id:
-            continue
-        row["id"] = row_id
-        row["updated_at"] = datetime.now(timezone.utc).isoformat()
-        if row_id in by_id:
-            by_id[row_id] = _merge_trading_journal_row(by_id[row_id], row)
-        else:
-            by_id[row_id] = row
-        refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
-        status = str(row.get("status") or "").strip().lower()
-        if status in {"closed", "filled", "complete", "completed"}:
-            _mark_trade_context_closed_or_cancelled(
-                order_id=str(refs.get("orderId") or refs.get("orderID") or "").strip() or None,
-                trade_id=str(refs.get("tradeId") or refs.get("tradeID") or "").strip() or None,
-                status="CLOSED",
-            )
-        changed += 1
-    if changed:
-        _save_trading_journal(list(by_id.values()))
+    with _TRADING_JOURNAL_ROWS_LOCK:
+        existing = _get_trading_journal_rows()
+        by_id: Dict[str, Dict[str, object]] = {}
+        for row in existing:
+            row_id = str(row.get("id") or "").strip()
+            if row_id:
+                by_id[row_id] = row
+        changed = 0
+        for raw in rows:
+            if not isinstance(raw, dict):
+                continue
+            row = dict(raw)
+            row_id = str(row.get("id") or "").strip()
+            if not row_id:
+                continue
+            row["id"] = row_id
+            row["updated_at"] = datetime.now(timezone.utc).isoformat()
+            if row_id in by_id:
+                by_id[row_id] = _merge_trading_journal_row(by_id[row_id], row)
+            else:
+                by_id[row_id] = row
+            refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+            status = str(row.get("status") or "").strip().lower()
+            if status in {"closed", "filled", "complete", "completed"}:
+                _mark_trade_context_closed_or_cancelled(
+                    order_id=str(refs.get("orderId") or refs.get("orderID") or "").strip() or None,
+                    trade_id=str(refs.get("tradeId") or refs.get("tradeID") or "").strip() or None,
+                    status="CLOSED",
+                )
+            changed += 1
+        if changed:
+            _save_trading_journal(list(by_id.values()))
     return changed
 
 
@@ -2076,23 +2080,30 @@ def _load_json_file(path: Path, default):
 
 def _save_json_file(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, path)
+    write_json_file(
+        path,
+        payload,
+        retries=10,
+        backoff=0.05,
+        sort_keys=False,
+        ensure_ascii=False,
+    )
 
 
 def _get_trading_journal_rows() -> List[Dict[str, object]]:
-    data = _load_json_file(TRADING_JOURNAL_PATH, {"items": []})
-    if isinstance(data, list):
-        return [row for row in data if isinstance(row, dict)]
-    items = data.get("items") if isinstance(data, dict) else []
-    return items if isinstance(items, list) else []
+    with _TRADING_JOURNAL_ROWS_LOCK:
+        data = _load_json_file(TRADING_JOURNAL_PATH, {"items": []})
+        if isinstance(data, list):
+            return [row for row in data if isinstance(row, dict)]
+        items = data.get("items") if isinstance(data, dict) else []
+        return items if isinstance(items, list) else []
 
 
 def _set_trading_journal_rows(rows: List[Dict[str, object]]) -> None:
     global _TRADING_JOURNAL_CACHE
-    _TRADING_JOURNAL_CACHE = [dict(item) for item in rows if isinstance(item, dict)]
-    _save_json_file(TRADING_JOURNAL_PATH, {"items": rows, "updated_at": _utc_now_iso()})
+    with _TRADING_JOURNAL_ROWS_LOCK:
+        _TRADING_JOURNAL_CACHE = [dict(item) for item in rows if isinstance(item, dict)]
+        _save_json_file(TRADING_JOURNAL_PATH, {"items": rows, "updated_at": _utc_now_iso()})
     _schedule_dropbox_upload_state_backup()
 
 

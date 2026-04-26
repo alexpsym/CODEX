@@ -3,9 +3,11 @@ import importlib.util
 import json
 import warnings
 import sys
+import os
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -14,6 +16,47 @@ master_service = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader
 sys.modules[SPEC.name] = master_service
 SPEC.loader.exec_module(master_service)
+
+
+def test_save_json_file_retries_transient_permission_error(tmp_path, monkeypatch) -> None:
+    from shared import atomic_json
+
+    target = tmp_path / "trading_journal.json"
+    attempts = {"count": 0}
+    seen_src: list[str] = []
+    real_replace = atomic_json.os.replace
+
+    def flaky_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        attempts["count"] += 1
+        seen_src.append(Path(src).name)
+        if attempts["count"] < 3:
+            raise PermissionError("[WinError 5] Access is denied")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(atomic_json.time, "sleep", lambda _n: None)
+    monkeypatch.setattr(atomic_json.os, "replace", flaky_replace)
+
+    master_service._save_json_file(target, {"items": [{"id": "r1"}]})
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["items"][0]["id"] == "r1"
+    assert attempts["count"] == 3
+    assert seen_src
+    assert all(name != "trading_journal.json.tmp" for name in seen_src)
+
+
+def test_save_json_file_surfaces_permanent_permission_error(tmp_path, monkeypatch) -> None:
+    from shared import atomic_json
+
+    target = tmp_path / "trading_journal.json"
+    monkeypatch.setattr(atomic_json.time, "sleep", lambda _n: None)
+    monkeypatch.setattr(
+        atomic_json.os,
+        "replace",
+        lambda _src, _dst: (_ for _ in ()).throw(PermissionError("[WinError 5] Access is denied")),
+    )
+
+    with pytest.raises(PermissionError):
+        master_service._save_json_file(target, {"items": []})
 
 
 def test_manual_demo_sync_uses_7_day_recovery_window(monkeypatch) -> None:
