@@ -8519,15 +8519,23 @@ def _resolve_bybit_closed_pnl_trade_context(
         "transaction_id": str(transaction_id or "").strip(),
     }
     contexts = _load_trade_contexts()
+    close_ts = _canonical_trade_epoch_second(close_time)
+
+    def _ctx_time_order_valid(ctx: Dict[str, object]) -> bool:
+        if close_ts is None:
+            return True
+        ctx_open_ts = _canonical_trade_epoch_second(ctx.get("open_time")) or _canonical_trade_epoch_second(ctx.get("created_at"))
+        if ctx_open_ts is None:
+            return True
+        return ctx_open_ts < close_ts
+
     for ref_field in ("order_id", "order_link_id", "parent_order_link_id", "trade_id", "transaction_id"):
         ref_value = refs[ref_field]
         if not ref_value:
             continue
         for ctx in contexts:
-            if str(ctx.get(ref_field) or "").strip() == ref_value:
+            if str(ctx.get(ref_field) or "").strip() == ref_value and _ctx_time_order_valid(ctx):
                 return ctx
-
-    close_ts = _canonical_trade_epoch_second(close_time)
     broker = "bybit"
     account = "demo" if str(account_mode).strip().lower() == "demo" else "live"
     instrument = str(symbol or "").strip().upper()
@@ -10857,6 +10865,14 @@ def _normalize_bybit_closed_pnl_row(
     )
     close_time_iso = _ms_to_iso(entry.get("updatedTime"))
     close_ts = _canonical_trade_epoch_second(close_time_iso)
+    ctx_valid = isinstance(ctx, dict)
+    if ctx_valid:
+        candidate_open = _epoch_or_iso_to_iso(ctx.get("open_time")) or _epoch_or_iso_to_iso(ctx.get("created_at"))
+        if candidate_open and close_ts is not None:
+            candidate_open_ts = _canonical_trade_epoch_second(candidate_open)
+            if candidate_open_ts is not None and candidate_open_ts >= close_ts:
+                ctx = None
+                ctx_valid = False
     if isinstance(ctx, dict):
         candidate_open = _epoch_or_iso_to_iso(ctx.get("open_time")) or _epoch_or_iso_to_iso(ctx.get("created_at"))
         if candidate_open and close_ts is not None:
