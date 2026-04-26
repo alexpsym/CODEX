@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -17,12 +18,42 @@ sys.modules[SPEC.name] = master_service
 SPEC.loader.exec_module(master_service)
 
 
+def _load_master_service(module_name: str, profile: str):
+    old_profile = os.environ.get("APP_PROFILE")
+    try:
+        os.environ["APP_PROFILE"] = profile
+        spec = importlib.util.spec_from_file_location(module_name, ROOT / "render" / "master_service.py")
+        module = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        if old_profile is None:
+            os.environ.pop("APP_PROFILE", None)
+        else:
+            os.environ["APP_PROFILE"] = old_profile
+
+
 def test_scripts_listing_includes_open_orders_button() -> None:
     payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
     row = next((item for item in payload if item.get("name") == "open-orders"), None)
     assert row is not None
     assert row.get("open_url") == "/merged/open-orders"
     assert row.get("dashboard_main_view") is True
+
+
+def test_render_profile_hides_open_orders_and_blocks_routes() -> None:
+    render_service = _load_master_service("render_master_service_open_orders_render", "render")
+    payload = json.loads(asyncio.run(render_service.list_scripts()).body.decode("utf-8"))
+    names = {str(item.get("name")) for item in payload}
+    assert "open-orders" not in names
+    merged = asyncio.run(render_service.merged_open_orders_page())
+    api = asyncio.run(render_service.list_open_orders())
+    version = asyncio.run(render_service.open_orders_version())
+    assert merged.status_code == 410
+    assert api.status_code == 410
+    assert version.status_code == 410
 
 
 def test_merged_open_orders_route_returns_html() -> None:

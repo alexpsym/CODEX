@@ -44,7 +44,27 @@ def test_render_profile_scripts_hide_local_only_main_views() -> None:
     assert "history" not in names
     assert "monitor" not in names
     assert "trading-journal" not in names
+    assert "open-orders" not in names
     assert "bybit_monitor" not in names
     assert "oanda_monitor" not in names
     assert "calculator" in names
+    assert "calculator" in names
+
+
+def test_local_profile_includes_open_orders_but_not_trading_journal() -> None:
+    master_service = _load_master_service("render_master_service_profile_local_scripts", "local")
+    payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
+    names = {str(item.get("name")) for item in payload}
     assert "open-orders" in names
+    assert "trading-journal" not in names
+
+
+def test_journal_profile_redirects_root_and_allows_trading_journal_api() -> None:
+    master_service = _load_master_service("render_master_service_profile_journal", "journal")
+    root_response = asyncio.run(master_service.home_page())
+    assert root_response.status_code == 307
+    assert root_response.headers.get("location") == "/trading-journal"
+    page = asyncio.run(master_service.trading_journal_page())
+    assert "Trading Journal" in page
+    api_response = asyncio.run(master_service.trading_journal_sync_status())
+    assert api_response.status_code == 200

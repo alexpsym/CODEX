@@ -34,6 +34,8 @@
   let loadInFlight = false;
   let activeAbort = null;
   let syncWatchTimer = null;
+  const TJ_CACHE_DB = 'trading_journal_cache_v1';
+  const TJ_CACHE_KEY = 'combined_payload';
 
   function normYes(v) {
     return ['yes', 'y', 'true', '1'].includes(String(v ?? '').trim().toLowerCase());
@@ -158,6 +160,46 @@
     const text = await res.text();
     if (!res.ok) throw new Error(`${res.status} ${text}`);
     try { return JSON.parse(text); } catch { return {}; }
+  }
+
+  function openCacheDb() {
+    return new Promise((resolve, reject) => {
+      if (!window.indexedDB) return reject(new Error('IndexedDB unavailable'));
+      const req = indexedDB.open(TJ_CACHE_DB, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains('payloads')) db.createObjectStore('payloads');
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error || new Error('IndexedDB open failed'));
+    });
+  }
+
+  async function readCachedPayload() {
+    try {
+      const db = await openCacheDb();
+      return await new Promise((resolve) => {
+        const tx = db.transaction('payloads', 'readonly');
+        const req = tx.objectStore('payloads').get(TJ_CACHE_KEY);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => resolve(null);
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  async function writeCachedPayload(payload) {
+    if (!payload || !Array.isArray(payload?.journal?.items)) return;
+    try {
+      const db = await openCacheDb();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction('payloads', 'readwrite');
+        tx.objectStore('payloads').put(payload, TJ_CACHE_KEY);
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => reject(tx.error || new Error('IndexedDB write failed'));
+      });
+    } catch {}
   }
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1011,17 +1053,34 @@
     const signal = activeAbort.signal;
     try {
       setStatus(silent ? 'Refreshing…' : 'Loading…');
+      if (!silent) {
+        const cached = await readCachedPayload();
+        if (cached?.journal && cached?.balances && cached?.diagnostics) {
+          state.rows = Array.isArray(cached.journal.items) ? cached.journal.items : [];
+          state.stats = cached.journal.stats || null;
+          state.diagnostics = cached.diagnostics || null;
+          renderAll();
+          renderBalances(Array.isArray(cached.balances.items) ? cached.balances.items : []);
+          renderStats(state.stats);
+          setStatus('Cached data shown, refreshing…');
+        }
+      }
       if (!silent) setLoading(5, 'Loading…');
       if (!silent) setLoading(15, 'Fetching journal…');
-      // Always fetch the full journal. Filtering is applied client-side to avoid expensive
-      // backend recomputation (and to prevent "empty journal" states when filtering).
-      let journal = await fetchJson('/api/trading-journal', { signal });
+      const journalPromise = fetchJson('/api/trading-journal', { signal }).catch((err) => { throw new Error(`/api/trading-journal: ${err.message || err}`); });
+      const diagnosticsPromise = fetchJson('/api/trading-journal/diagnostics', { signal }).catch((err) => { throw new Error(`/api/trading-journal/diagnostics: ${err.message || err}`); });
+      const balancesPromise = fetchJson('/api/trading-journal/balances', { signal }).catch((err) => { throw new Error(`/api/trading-journal/balances: ${err.message || err}`); });
+      const syncStatusPromise = fetchJson('/api/trading-journal/sync/status', { signal }).catch((err) => { throw new Error(`/api/trading-journal/sync/status: ${err.message || err}`); });
+      let journal = await journalPromise;
+      if (silent || skipAutoSync) {
+        await syncStatusPromise;
+      }
 
       // Auto-sync from Dropbox on load (throttled) so Excel workbooks are picked up even when
       // live webhook trades already exist. This runs in the background and does not block UI load.
       if (!silent && !skipAutoSync) {
         try {
-          const st = await fetchJson('/api/trading-journal/sync/status', { signal });
+          const st = await syncStatusPromise;
           const lastFinished = new Date(st?.finished_at || 0).getTime() || 0;
           const localLast = Number(localStorage.getItem('tj_last_auto_sync_ms') || 0) || 0;
           const now = Date.now();
@@ -1043,9 +1102,9 @@
       }
 
       if (!silent) setLoading(80, 'Fetching diagnostics…');
-      const diagnostics = await fetchJson('/api/trading-journal/diagnostics', { signal });
+      const diagnostics = await diagnosticsPromise;
       if (!silent) setLoading(88, 'Fetching balances…');
-      const balances = await fetchJson('/api/trading-journal/balances', { signal });
+      const balances = await balancesPromise;
       const nextRows = Array.isArray(journal.items) ? journal.items : [];
       const nextStats = journal.stats || null;
       if (!state.editorOpen && !state.editorDirty && !state.saveInFlight) {
@@ -1082,6 +1141,12 @@
         }
       }
       if (!silent) { setLoading(100, 'Done'); hideLoading(); }
+      await writeCachedPayload({
+        journal,
+        diagnostics,
+        balances,
+        fetched_at: new Date().toISOString(),
+      });
     } catch (e) {
       if (e && (e.name === 'AbortError' || e.code === 20)) return;
       console.error(e);

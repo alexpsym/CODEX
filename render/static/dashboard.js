@@ -50,6 +50,7 @@
   let scriptsState = [];
   let activeMainScriptName = '';
   let activeMainScriptUrl = '';
+  let activeMainLoadState = 'idle';
   let workspaceLoadToken = 0;
 
   const fmtTime = (v) => {
@@ -165,6 +166,7 @@
 
     activeMainScriptName = name;
     activeMainScriptUrl = targetBase;
+    activeMainLoadState = 'loading';
     persistActiveWorkspace();
     renderScripts();
 
@@ -186,13 +188,17 @@
 
     workspaceFrame.onload = () => {
       if (token !== workspaceLoadToken) return;
+      activeMainLoadState = 'loaded';
       showWorkspaceFrame();
       setWorkspaceMeta(script.label || name, 'Rendering response.', false);
+      renderScripts();
     };
     workspaceFrame.onerror = () => {
       if (token !== workspaceLoadToken) return;
+      activeMainLoadState = 'error';
       setWorkspaceMeta(script.label || name, `Failed to load ${targetBase}`, true);
       showWorkspaceEmpty(`Unable to load ${script.label || name}.`);
+      renderScripts();
     };
     workspaceFrame.src = target;
   };
@@ -201,6 +207,7 @@
     if (!scriptsState.length) {
       activeMainScriptName = '';
       activeMainScriptUrl = '';
+      activeMainLoadState = 'idle';
       persistActiveWorkspace();
       showWorkspaceEmpty('No scripts available.');
       setWorkspaceMeta('Workspace', 'No scripts detected.', true);
@@ -211,6 +218,7 @@
     if (!allByName.has(activeMainScriptName) || !activeMainScriptName) {
       activeMainScriptName = '';
       activeMainScriptUrl = '';
+      activeMainLoadState = 'idle';
       showWorkspaceEmpty('Select a script from the left to load it here.');
       setWorkspaceMeta('Workspace', 'Ready to load a script.', false);
       persistActiveWorkspace();
@@ -252,10 +260,31 @@
 
     const dot = document.createElement('span');
     let dotState = script.running ? 'running' : (script.starting ? 'starting' : 'stopped');
+    let dotTitle = dotState === 'running' ? 'Process running' : (dotState === 'starting' ? 'Process starting' : 'Process stopped');
+    if (isDashboardMainView(script)) {
+      if (String(script.name) === activeMainScriptName) {
+        if (activeMainLoadState === 'loaded') {
+          dotState = 'running';
+          dotTitle = 'Active view loaded';
+        } else if (activeMainLoadState === 'loading') {
+          dotState = 'starting';
+          dotTitle = 'Active view loading';
+        } else {
+          dotState = 'stopped';
+          dotTitle = 'Active view failed';
+        }
+      } else {
+        dotState = 'stopped';
+        dotTitle = 'Inactive view';
+      }
+    }
     dot.className = `status-dot ${dotState}`;
+    dot.title = dotTitle;
+    dot.setAttribute('aria-label', dotTitle);
     if (String(script.name) === activeMainScriptName && isDashboardMainView(script)) {
       btn.classList.add('active-script');
     }
+    btn.title = isDashboardMainView(script) ? `${script.label || script.name} (${dotTitle})` : `${script.label || script.name} (${dotTitle})`;
 
     btn.appendChild(name);
     btn.appendChild(dot);

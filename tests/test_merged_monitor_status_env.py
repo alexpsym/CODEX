@@ -272,6 +272,11 @@ def test_compute_autostart_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AUTOSTART_SCRIPTS", "OFF")
     assert master_service._compute_autostart_scripts() == []
 
+    monkeypatch.delenv("AUTOSTART_SCRIPTS", raising=False)
+    monkeypatch.setattr(master_service, "APP_PROFILE", "render")
+    names_render = master_service._compute_autostart_scripts()
+    assert "fxweekend-clone" in names_render
+
     monkeypatch.setattr(master_service, "SCANNER_LOCAL_UI_MODE", True)
     monkeypatch.delenv("AUTOSTART_SCRIPTS", raising=False)
     assert master_service._compute_autostart_scripts() == []
@@ -287,10 +292,21 @@ def test_run_local_master_control_bat_uses_local_autostart() -> None:
     assert ":restart_master" in content
     assert "goto restart_master" in content
     assert '"%PYTHON_EXE%" -m uvicorn render.master_service:app --host 127.0.0.1 --port 8000' in content
+    assert '/trading-journal' not in content
     assert "cmd /v:on /k ^" not in content
     assert '"set APP_PROFILE=%APP_PROFILE% && ^' not in content
     assert 'cmd /d /v:on /k ""%~f0" __worker"' in content
     assert content.index('cmd /d /v:on /k ""%~f0" __worker"') < content.index('start "" "http://127.0.0.1:8000"')
+
+
+def test_run_trading_journal_local_bat_profile_and_port() -> None:
+    content = (ROOT / "run_trading_journal_local.bat").read_text(encoding="utf-8")
+    assert 'set "APP_PROFILE=journal"' in content or 'set "TRADING_JOURNAL_ONLY=1"' in content
+    assert 'set "MASTER_ENV_FILE=C:\\Users\\User\\Downloads\\env.env"' in content
+    assert 'set "SCANNER_LOCAL_UI_MODE=1"' not in content
+    assert 'set "AUTOSTART_SCRIPTS=bybit_monitor,oanda_monitor"' not in content
+    assert '"%PYTHON_EXE%" -m uvicorn render.master_service:app --host 127.0.0.1 --port 8010' in content
+    assert 'start "" "http://127.0.0.1:8010/trading-journal"' in content
 
 
 def test_run_local_master_control_bat_no_caret_continued_quoted_restart_loop() -> None:
@@ -496,37 +512,50 @@ def test_monitor_running_true_when_managed_subprocess_is_running(
     assert monitor_row["running"] is True
 
 
-def test_trading_journal_row_reflects_sync_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
-    monkeypatch.setattr(master_service, "LOCAL_ALLOWED_APPS", {"trading-journal"})
-    monkeypatch.setattr(master_service, "_sync_state_snapshot", lambda: {"running": True, "error": "sync failed"})
-
-    manager = master_service.ScriptManager([])
-    rows = manager.list_scripts()
-    row = next(item for item in rows if item["name"] == "trading-journal")
-    assert row["running"] is True
-    assert row["starting"] is True
-    assert row["last_error"] == "sync failed"
-
-
-def test_scripts_merged_trading_journal_running_for_local_profile(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
+def test_scripts_merged_fxweekend_running_from_fxweekend_clone(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "APP_PROFILE", "render")
     monkeypatch.setattr(
         master_service,
         "get_merged_script_buttons",
-        lambda: [{"id": "trading-journal", "name": "trading-journal", "label": "Trading Journal", "open_url": "/trading-journal"}],
+        lambda: [{"id": "fxweekend", "name": "fxweekend", "label": "FX Weekend", "open_url": "/apps/fxweekend-clone"}],
     )
     monkeypatch.setattr(
         master_service.script_manager,
         "list_scripts",
-        lambda: [{"name": "trading-journal", "running": True, "starting": False, "open_url": "/trading-journal"}],
+        lambda: [{"name": "fxweekend-clone", "running": True, "starting": False}],
     )
-    monkeypatch.setattr(master_service, "_sync_state_snapshot", lambda: {"running": True, "error": "sync err"})
     payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
-    row = next(item for item in payload if item["name"] == "trading-journal")
+    row = next(item for item in payload if item["name"] == "fxweekend")
     assert row["running"] is True
+    assert row["starting"] is False
+
+
+def test_scripts_merged_fxweekend_starting_and_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "APP_PROFILE", "render")
+    monkeypatch.setattr(
+        master_service,
+        "get_merged_script_buttons",
+        lambda: [{"id": "fxweekend", "name": "fxweekend", "label": "FX Weekend", "open_url": "/apps/fxweekend-clone"}],
+    )
+    monkeypatch.setattr(
+        master_service.script_manager,
+        "list_scripts",
+        lambda: [{
+            "name": "fxweekend-clone",
+            "running": False,
+            "starting": True,
+            "last_error": "boom",
+            "last_start_error": "start boom",
+            "last_exit_reason": "exit",
+        }],
+    )
+    payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
+    row = next(item for item in payload if item["name"] == "fxweekend")
+    assert row["running"] is False
     assert row["starting"] is True
-    assert row["last_error"] == "sync err"
+    assert row["last_error"] == "boom"
+    assert row["last_start_error"] == "start boom"
+    assert row["last_exit_reason"] == "exit"
 
 
 def test_managed_script_start_sets_windows_creationflags(monkeypatch: pytest.MonkeyPatch) -> None:

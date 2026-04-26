@@ -237,6 +237,10 @@ def test_trading_journal_js_contains_crud_controls_and_endpoints():
     assert 'data-action="edit"' in js
     assert 'data-action="delete"' in js
     assert "location.reload" not in js
+    assert "Cached data shown, refreshing…" in js
+    assert "writeCachedPayload({" in js
+    assert "/api/trading-journal/sync/status" in js
+    assert "/api/trading-journal: " in js
 
 
 def test_import_from_sources_local_when_dropbox_missing(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
