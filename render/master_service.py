@@ -155,8 +155,8 @@ BYBIT_RUNTIME_STATUS_PATH = BASE_DIR / "bybit_monitor" / "runtime_status.json"
 OANDA_RUNTIME_STATUS_PATH = BASE_DIR / "oanda_monitor" / "runtime_status.json"
 SCANNER_HEARTBEAT_GRACE_SECONDS = 30
 SCANNER_LOCAL_UI_MODE = os.getenv("SCANNER_LOCAL_UI_MODE", "0").strip().lower() in {"1", "true", "yes", "on"}
-DEFAULT_RENDER_ALLOWED_APPS = "calculator-webhook,open-orders,pending-webhooks,fxweekend-clone,bybit_trigger_bounce_trader"
-DEFAULT_LOCAL_ALLOWED_APPS = "bybit_monitor,oanda_monitor,bybithistory-clone,oanda_history-clone,coinspot-clone,trading-journal,ivindicator-clone"
+DEFAULT_RENDER_ALLOWED_APPS = "calculator-webhook,pending-webhooks,fxweekend-clone,bybit_trigger_bounce_trader"
+DEFAULT_LOCAL_ALLOWED_APPS = "bybit_monitor,oanda_monitor,bybithistory-clone,oanda_history-clone,coinspot-clone,open-orders,ivindicator-clone"
 
 
 def _is_render_env() -> bool:
@@ -178,6 +178,9 @@ def _parse_allowed_apps(raw: str) -> Set[str]:
 
 def _resolve_app_profile() -> str:
     requested = str(os.getenv("APP_PROFILE") or "").strip().lower()
+    journal_only = str(os.getenv("TRADING_JOURNAL_ONLY") or "").strip().lower() in {"1", "true", "yes", "on"}
+    if requested == "journal" or journal_only:
+        return "journal"
     if requested in {"render", "local"}:
         return requested
     return "render" if _is_render_env() else "local"
@@ -193,7 +196,7 @@ LOCAL_ONLY_APP_NAMES = {
     "bybithistory-clone",
     "oanda_history-clone",
     "coinspot-clone",
-    "trading-journal",
+    "open-orders",
     "ivindicator-clone",
 }
 LOCAL_ONLY_PATH_PREFIXES = (
@@ -203,10 +206,12 @@ LOCAL_ONLY_PATH_PREFIXES = (
     "/oanda-history",
     "/coinspot-history",
     "/trading-journal",
+    "/merged/open-orders",
     "/api/bybit-history",
     "/api/oanda-history",
     "/api/coinspot-history",
     "/api/trading-journal",
+    "/api/open-orders",
 )
 
 
@@ -216,25 +221,26 @@ def _profile_allows_script(script_name: str) -> bool:
         return False
     if APP_PROFILE == "render":
         return name in RENDER_ALLOWED_APPS
+    if APP_PROFILE == "journal":
+        return False
     return name in LOCAL_ALLOWED_APPS
 
 
 def _profile_main_buttons() -> List[Dict[str, object]]:
     buttons: List[Dict[str, object]] = [
         {"id": "calculator", "name": "calculator", "label": "Calculator", "open_url": "/merged/calculator", "dashboard_main_view": True},
-        {"id": "open-orders", "name": "open-orders", "label": "Open Orders and Positions", "open_url": "/merged/open-orders", "dashboard_main_view": True},
     ]
     if APP_PROFILE == "render":
         if "fxweekend-clone" in RENDER_ALLOWED_APPS:
             buttons.append({"id": "fxweekend", "name": "fxweekend", "label": "FX Weekend", "open_url": "/apps/fxweekend-clone", "dashboard_main_view": True})
         if "bybit_trigger_bounce_trader" in RENDER_ALLOWED_APPS:
             buttons.append({"id": "bounce-trader", "name": "bounce-trader", "label": "Bounce Trader", "open_url": "/merged/bounce-trader", "dashboard_main_view": True})
-    else:
+    elif APP_PROFILE == "local":
         buttons.extend(
             [
+                {"id": "open-orders", "name": "open-orders", "label": "Open Orders and Positions", "open_url": "/merged/open-orders", "dashboard_main_view": True},
                 {"id": "history", "name": "history", "label": "History", "open_url": "/merged/history", "dashboard_main_view": True},
                 {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor", "dashboard_main_view": True},
-                {"id": "trading-journal", "name": "trading-journal", "label": "Trading Journal", "open_url": "/trading-journal", "dashboard_main_view": True},
             ]
         )
     return buttons
@@ -250,7 +256,6 @@ def _profile_merged_source_names() -> Set[str]:
                 "coinspot-clone",
                 "bybit_monitor",
                 "oanda_monitor",
-                "trading-journal",
             }
         )
     return names
@@ -4950,35 +4955,6 @@ class ScriptManager:
 
     def list_scripts(self) -> List[Dict[str, object]]:
         items = [script.to_summary() for script in self._scripts.values()]
-        if APP_PROFILE == "local" and "trading-journal" in LOCAL_ALLOWED_APPS:
-            sync_state = _sync_state_snapshot()
-            items.append(
-                {
-                    "id": "trading-journal",
-                    "name": "trading-journal",
-                    "label": friendly_script_label("trading-journal"),
-                    "path": str(BASE_DIR / "render" / "master_service.py"),
-                    "category": "Other",
-                    "running": True,
-                    "starting": bool(sync_state.get("running")),
-                    "port": None,
-                    "pid": None,
-                    "return_code": None,
-                    "open_url": "/trading-journal",
-                    "logs_url": None,
-                    "last_output_at": None,
-                    "last_start_attempt_at": None,
-                    "last_start_error": sync_state.get("error"),
-                    "last_exit_code": None,
-                    "last_exit_reason": None,
-                    "last_error": sync_state.get("error"),
-                    "last_spawn_command": None,
-                    "last_spawn_cwd": None,
-                    "startup_started_at": None,
-                    "startup_completed_at": None,
-                    "standalone": False,
-                }
-            )
         return sorted(items, key=lambda s: str(s["name"]).lower())
 
     def get(self, name: str) -> ManagedScript:
@@ -12264,7 +12240,9 @@ async def fetch_bybit_balance(
 
 
 @app.get("/", response_class=HTMLResponse)
-async def home_page() -> str:
+async def home_page() -> Response | str:
+    if APP_PROFILE == "journal":
+        return RedirectResponse(url="/trading-journal", status_code=307)
     return HTML_TEMPLATE
 
 
@@ -14036,6 +14014,8 @@ async def merged_bounce_page() -> Response:
 
 @app.get("/merged/open-orders", response_class=HTMLResponse)
 async def merged_open_orders_page() -> HTMLResponse:
+    if APP_PROFILE == "render":
+        return _local_only_disabled_response("/merged/open-orders")  # type: ignore[return-value]
     script_version = quote(str(os.getenv("APP_BUILD_STAMP") or os.getenv("RENDER_GIT_COMMIT") or app.version), safe="")
     page = OPEN_ORDERS_TEMPLATE.replace("{{OPEN_ORDERS_JS_URL}}", f"/static/open_orders.js?v={script_version}")
     return HTMLResponse(page)
@@ -16046,6 +16026,13 @@ async def list_scripts() -> JSONResponse:
         elif btn["name"] == "bounce-trader":
             row["starting"] = bool(by_name.get("bybit_trigger_bounce_trader", {}).get("starting"))
             row["running"] = bool(by_name.get("bybit_trigger_bounce_trader", {}).get("running"))
+        elif btn["name"] == "fxweekend":
+            fx_row = by_name.get("fxweekend-clone", {})
+            row["starting"] = bool(fx_row.get("starting"))
+            row["running"] = bool(fx_row.get("running"))
+            row["last_error"] = fx_row.get("last_error")
+            row["last_start_error"] = fx_row.get("last_start_error")
+            row["last_exit_reason"] = fx_row.get("last_exit_reason")
         elif btn["name"] == "monitor":
             row["starting"] = bool(
                 by_name.get("bybit_monitor", {}).get("starting")
@@ -16057,14 +16044,6 @@ async def list_scripts() -> JSONResponse:
             )
             runtime_running = _scanner_runtime_is_live("bybit_monitor") or _scanner_runtime_is_live("oanda_monitor")
             row["running"] = managed_running or runtime_running
-        elif btn["name"] == "trading-journal":
-            sync_state = _sync_state_snapshot()
-            virtual_row = by_name.get("trading-journal", {})
-            row["running"] = True if APP_PROFILE == "local" else bool(virtual_row.get("running"))
-            row["starting"] = bool(sync_state.get("running"))
-            row["last_error"] = sync_state.get("error") or virtual_row.get("last_error")
-            if virtual_row.get("open_url"):
-                row["open_url"] = virtual_row.get("open_url")
         merged.append(row)
 
     merged_source_names = get_merged_source_names()
@@ -16284,6 +16263,8 @@ def _filter_pending_webhooks(
 
 @app.get("/api/open-orders/version")
 async def open_orders_version() -> JSONResponse:
+    if APP_PROFILE == "render":
+        return _local_only_disabled_response("/api/open-orders/version", as_json=True)  # type: ignore[return-value]
     return JSONResponse(
         {
             "version": int(_OPEN_ORDERS_CACHE.get("version") or 0),
@@ -16294,6 +16275,8 @@ async def open_orders_version() -> JSONResponse:
 
 @app.get("/api/open-orders")
 async def list_open_orders(force: bool = Query(False)) -> JSONResponse:
+    if APP_PROFILE == "render":
+        return _local_only_disabled_response("/api/open-orders", as_json=True)  # type: ignore[return-value]
     now = time.time()
     cached_payload = _OPEN_ORDERS_CACHE.get("payload")
     expires_at = float(_OPEN_ORDERS_CACHE.get("expires_at") or 0.0)
@@ -17073,6 +17056,8 @@ async def oanda_inactivity_status() -> JSONResponse:
 
 @app.post("/api/open-orders/close")
 async def close_open_order(item: Dict[str, Any] = Body(...)) -> JSONResponse:
+    if APP_PROFILE == "render":
+        return _local_only_disabled_response("/api/open-orders/close", as_json=True)  # type: ignore[return-value]
     broker = str(item.get("broker", "")).strip().lower()
     account = str(item.get("account", "live")).strip().lower()
     category = str(item.get("category", "")).strip().lower()

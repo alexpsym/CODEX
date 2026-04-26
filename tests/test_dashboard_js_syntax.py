@@ -23,5 +23,10 @@ def test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls() -> No
     assert "document.getElementById('dashboard-workspace-frame')" in js
     assert "document.getElementById('dashboard-workspace-title')" in js
     assert "document.getElementById('dashboard-workspace-status')" in js
-    assert "dotState = String(script.name) === activeMainScriptName" not in js
+    assert "let activeMainLoadState = 'idle';" in js
+    assert "activeMainLoadState = 'loading';" in js
+    assert "activeMainLoadState = 'loaded';" in js
+    assert "activeMainLoadState = 'error';" in js
+    assert "if (isDashboardMainView(script)) {" in js
+    assert "dotTitle = 'Active view loaded';" in js
     assert "active-script" in js
