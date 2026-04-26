@@ -26,6 +26,37 @@ def _load_master_service(module_name: str, profile: str):
             os.environ["APP_PROFILE"] = old_profile
 
 
+def test_import_local_profile_without_fastapi_error() -> None:
+    master_service = _load_master_service("render_master_service_import_local", "local")
+    assert master_service.APP_PROFILE == "local"
+
+
+def test_import_render_profile_without_fastapi_error() -> None:
+    master_service = _load_master_service("render_master_service_import_render", "render")
+    assert master_service.APP_PROFILE == "render"
+
+
+def test_import_journal_profile_without_fastapi_error() -> None:
+    master_service = _load_master_service("render_master_service_import_journal", "journal")
+    assert master_service.APP_PROFILE == "journal"
+
+
+def test_home_page_local_profile_returns_dashboard_html() -> None:
+    master_service = _load_master_service("render_master_service_home_local", "local")
+    response = asyncio.run(master_service.home_page())
+    assert response.status_code == 200
+    assert "text/html" in response.headers.get("content-type", "")
+    assert "Master Control Dashboard" in response.body.decode("utf-8")
+
+
+def test_home_page_render_profile_returns_dashboard_html() -> None:
+    master_service = _load_master_service("render_master_service_home_render", "render")
+    response = asyncio.run(master_service.home_page())
+    assert response.status_code == 200
+    assert "text/html" in response.headers.get("content-type", "")
+    assert "Master Control Dashboard" in response.body.decode("utf-8")
+
+
 def test_render_profile_blocks_local_only_routes() -> None:
     master_service = _load_master_service("render_master_service_profile_render", "render")
     assert master_service._render_blocks_path("/merged/history") is True
