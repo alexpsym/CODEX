@@ -6867,7 +6867,15 @@ async def _fetch_oanda_json(
                     exc,
                 )
                 if not should_retry:
-                    raise ValueError(f"OANDA request timed out after {timeout_s:.1f}s") from exc
+                    raise OandaUpstreamError(
+                        f"OANDA request timed out after {timeout_s:.1f}s",
+                        upstream_status=None,
+                        upstream_error_message=str(exc),
+                        endpoint=endpoint,
+                        mode=mode,
+                        retry_exhausted=True,
+                        maintenance_detected=False,
+                    ) from exc
             except httpx.RequestError as exc:
                 should_retry = attempt < max_attempts
                 BYBIT_LOGGER.warning(
@@ -6881,7 +6889,15 @@ async def _fetch_oanda_json(
                     exc,
                 )
                 if not should_retry:
-                    raise ValueError(f"OANDA transport error: {exc}") from exc
+                    raise OandaUpstreamError(
+                        f"OANDA transport error: {exc}",
+                        upstream_status=None,
+                        upstream_error_message=str(exc),
+                        endpoint=endpoint,
+                        mode=mode,
+                        retry_exhausted=True,
+                        maintenance_detected=False,
+                    ) from exc
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
                 body_summary = _summarize_upstream_body(exc.response.text)
@@ -6911,7 +6927,15 @@ async def _fetch_oanda_json(
             backoff = min(0.2 * (2 ** (attempt - 1)), 0.8) + (0.05 * attempt)
             await asyncio.sleep(backoff)
         else:
-            raise ValueError("OANDA request failed after retries")
+            raise OandaUpstreamError(
+                "OANDA request failed after retries",
+                upstream_status=resp.status_code if resp is not None else None,
+                upstream_error_message=(resp.text or "").strip()[:500] if resp is not None else "",
+                endpoint=endpoint,
+                mode=mode,
+                retry_exhausted=True,
+                maintenance_detected=False,
+            )
 
     if resp is None:
         raise ValueError("OANDA request failed with no response")
@@ -16787,6 +16811,11 @@ async def oanda_inactivity_status() -> JSONResponse:
             "transient": False,
             "body_summary": None,
             "error": str(exc),
+            "upstream_status": None,
+            "upstream_error_message": None,
+            "endpoint": None,
+            "retry_exhausted": None,
+            "maintenance_detected": False,
             "last_live_fill_at": None,
             "open_trade_count": None,
             "open_position_count": None,
