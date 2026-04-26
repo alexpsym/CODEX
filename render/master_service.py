@@ -10874,7 +10874,12 @@ def _normalize_bybit_closed_pnl_row(
                 ctx = None
                 ctx_valid = False
     if isinstance(ctx, dict):
-        resolved_open_time = _epoch_or_iso_to_iso(ctx.get("open_time")) or _epoch_or_iso_to_iso(ctx.get("created_at"))
+        candidate_open = _epoch_or_iso_to_iso(ctx.get("open_time")) or _epoch_or_iso_to_iso(ctx.get("created_at"))
+        if candidate_open and close_ts is not None:
+            candidate_open_ts = _canonical_trade_epoch_second(candidate_open)
+            if candidate_open_ts is not None and candidate_open_ts >= close_ts:
+                ctx = None
+        resolved_open_time = _epoch_or_iso_to_iso(ctx.get("open_time")) or _epoch_or_iso_to_iso(ctx.get("created_at")) if isinstance(ctx, dict) else None
         _upsert_trade_context(
             {
                 "broker": "bybit",
