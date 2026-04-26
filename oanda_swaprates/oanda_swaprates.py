@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +42,14 @@ import requests
 from requests.adapters import HTTPAdapter
 from tabulate import tabulate
 from urllib3.util.retry import Retry
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from shared.env_bootstrap import load_master_env
+
+load_master_env(base_dir=ROOT_DIR)
 
 
 API_PATH_INSTRUMENTS = "/v3/accounts/{accountID}/instruments"

@@ -19,6 +19,14 @@ except ImportError:  # pragma: no cover - fallback for environments without requ
     requests = None  # type: ignore[assignment]
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from shared.env_bootstrap import load_master_env
+
+load_master_env(base_dir=ROOT_DIR)
+
 
 DEFAULT_OANDA_LIVE_URL = "https://api-fxtrade.oanda.com/v3"
 DEFAULT_OANDA_DEMO_URL = "https://api-fxpractice.oanda.com/v3"

@@ -20,7 +20,10 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from shared.env_bootstrap import load_master_env
 from shared.symbol_resolution import normalize_oanda_symbol_query, resolve_bybit_symbol_from_choices
+
+load_master_env(base_dir=ROOT_DIR)
 
 
 APP = Flask(__name__)

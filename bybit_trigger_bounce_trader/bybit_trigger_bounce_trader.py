@@ -34,6 +34,7 @@ import hmac
 import hashlib
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import requests
@@ -43,7 +44,10 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
+from shared.env_bootstrap import load_master_env
 from shared.symbol_resolution import resolve_bybit_symbol_from_choices
+
+load_master_env(base_dir=Path(ROOT_DIR))
 
 # Reuse your repo credential resolver if present.
 # If you run this inside CODEX, keep this import.

@@ -2,8 +2,8 @@
 setlocal
 
 set "ROOT=%~dp0"
-set "MASTER_ENV_DIR=C:\Users\User\Downloads"
-set "MASTER_ENV_FILE=C:\Users\User\Downloads\env.env"
+set "MASTER_ENV_DIR=C:\Users\User\Documents\GPT"
+set "MASTER_ENV_FILE=C:\Users\User\Documents\GPT\env.env"
 set "SCANNER_LOCAL_UI_MODE=1"
 
 if not exist "%MASTER_ENV_FILE%" (

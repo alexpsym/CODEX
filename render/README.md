@@ -14,7 +14,7 @@ This folder contains a lightweight FastAPI app (`render/master_service.py`) that
    The requirements file now bundles the shared dependencies used across the repo's
    scripts (Flask, pandas, bs4, pybit, etc.) so running anything from the master
    control UI won't fail due to missing modules.
-2. Add your secrets to `C:\Users\User\Downloads\.env` (or override with `MASTER_ENV_DIR` / `MASTER_ENV_FILE`; see **Environment variables** below). A repo-root `.env` is optional fallback only.
+2. Add your secrets to `C:\Users\User\Documents\GPT\env.env` (or override with `MASTER_ENV_DIR` / `MASTER_ENV_FILE`; see **Environment variables** below). A repo-root `.env` is optional fallback only.
 3. Start the service locally:
    ```bash
    uvicorn render.master_service:app --host 0.0.0.0 --port 8000
@@ -31,12 +31,14 @@ This folder contains a lightweight FastAPI app (`render/master_service.py`) that
 5. Click **Create Web Service**. Once live, Render will expose a public URL like `https://your-app.onrender.com`. For calculator-generated alerts, point TradingView to `https://your-app.onrender.com/api/calculator/webhook`.
 
 ## 3) Environment variables
-Place these in your Render dashboard or in your local external env file (`C:\Users\User\Downloads\.env` by default). Adjust the names to match the scripts you use (examples below come from the existing projects):
+Place these in your Render dashboard or in your local external env file (`C:\Users\User\Documents\GPT\env.env` by default). Adjust the names to match the scripts you use (examples below come from the existing projects):
 
 - `BYBIT_API_KEY`, `BYBIT_API_SECRET`, and any other Bybit settings used by the Bybit automation scripts.
 - `OANDA_API_KEY`, `OANDA_ACCOUNT_ID`, and `OANDA_BASE_URL` for OANDA strategies.
 - Any Telegram/Discord/API tokens needed by alerting code.
 - `PORT` (Render sets this automatically; only override for local testing).
+- `MASTER_ENV_FILE` overrides the exact local env file path used by `shared.env_bootstrap`.
+- `MASTER_ENV_DIR` overrides the directory searched for `env.env`, `.env`, `scanner.env`, and `master.env` when `MASTER_ENV_FILE` is not explicitly set.
 - `AUTOSTART_SCRIPTS` to override which scripts boot automatically. By default, the service autostarts `fxweekend-clone` when this variable is unset; set it to a comma-separated list such as `bybit_trigger_bounce_trader`, `ALL`, or `*` to change startup behavior, or set it to a blank value to disable autostart entirely.
 - `AUTOSTART_EXCLUDE` to skip specific scripts from the resolved autostart list without changing the main `AUTOSTART_SCRIPTS` value.
 - Any other variables referenced by the individual scripts. Because the manager runs each script in its own subprocess with the shared environment, they will read the same `.env`/dashboard values.
