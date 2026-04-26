@@ -53,6 +53,7 @@
     editingRowId: null,
     editingIsCreate: false,
     diagnostics: null,
+    renderedRows: [],
   };
   try { filterInput.value = localStorage.getItem('tj.filter') || ''; } catch {}
 
@@ -100,6 +101,36 @@
     parts.push(`${s}s`);
     return parts.join(' ');
   };
+  const escapeCsvCell = (value) => {
+    const text = String(value ?? '');
+    if (/[",\n]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
+    return text;
+  };
+
+  const TRADE_COLUMNS = [
+    { key: 'open_time', header: 'Open Time', value: (r) => fmtTime(r.open_time) },
+    { key: 'close_time', header: 'Close Time', value: (r) => fmtTime(r.close_time || r.open_time) },
+    { key: 'account_label', header: 'Account', value: (r) => r.account_label || r.account || '—' },
+    { key: 'symbol', header: 'Symbol', value: (r) => r.symbol || '—' },
+    { key: 'side', header: 'Side', value: (r) => r.side || '—' },
+    { key: 'timeframe', header: 'Timeframe', value: (r) => r.timeframe || r.metrics?.timeframe || '—' },
+    { key: 'is_test_trade', header: 'Test', value: (r) => String(r.is_test_trade) === 'true' ? 'Yes' : (String(r.is_test_trade) === 'false' ? 'No' : '—') },
+    { key: 'setup', header: 'Setup', value: (r) => r.setup || '—' },
+    { key: 'qty', header: 'Qty', value: (r) => `${fmtQty(r.qty, r)}${r.qty_unit === 'lots' ? ' lot' : ''}` },
+    { key: 'entry_price', header: 'Entry', value: (r) => fmtNum(r.entry_price, 6) },
+    { key: 'exit_price', header: 'Exit', value: (r) => fmtNum(r.exit_price, 6) },
+    { key: 'stop_loss', header: 'Stop Loss', value: (r) => fmtNum(r.stop_loss, 6) },
+    { key: 'take_profit', header: 'Target', value: (r) => fmtNum(r.take_profit, 6) },
+    { key: 'commission', header: 'Commission', value: (r) => `${fmtNum(r.commission ?? r.fees, 4)} ${r.commission_currency || r.fee_currency || ''}`.trim() || '—' },
+    { key: 'net_profit', header: 'Net Profit', value: (r) => `${fmtNum(r.net_profit ?? r.realized_pnl, 4)} ${r.realized_pnl_currency || r.currency || ''}`.trim() || '—' },
+    { key: 'profit_pct', header: 'Profit %', value: (r) => fmtProfitPct(r.result_pct ?? r.profit_pct) },
+    { key: 'r_multiple', header: 'R-Multiple', value: (r) => fmtR(r.r_multiple) },
+    { key: 'balance_after_trade', header: 'Balance After', value: (r) => { const bal = asNum(r.analysis_balance_after_trade ?? r.balance_after_trade ?? r.cashflow_new_balance); const ccy = r.balance_after_trade_currency || r.currency || ''; return Number.isFinite(bal) ? `${fmtNum(bal, 2)} ${ccy}` : '—'; } },
+    { key: 'trade_duration_seconds', header: 'Trade Duration', value: (r) => fmtDuration(r.trade_duration_seconds) },
+    { key: 'breakeven', header: 'Breakeven', value: (r) => r.breakeven || '—' },
+    { key: 'chart', header: 'Chart', value: (r) => (r.id && String(r.source || '').toLowerCase() !== 'manual') ? 'Chart' : '' },
+    { key: 'actions', header: 'Actions', value: (r) => (r.is_manual || String(r.source || '').toLowerCase() === 'manual') ? 'Edit / Delete' : 'Edit' },
+  ];
 
   const setStatus = (msg) => { status.textContent = msg || ''; };
   const isoToInput = (v) => {
@@ -922,6 +953,7 @@
 
   function renderAll() {
     const filtered = applyFlagFilters(applyTextFilter(state.rows));
+    state.renderedRows = [...filtered];
     renderRows(filtered);
     renderSortIndicators();
     renderInstrumentView(state.stats);
@@ -930,6 +962,32 @@
     applyView();
     syncTopScrollbar();
     persistUiState();
+  }
+
+  function exportShownTrades() {
+    try {
+      const rows = Array.isArray(state.renderedRows) ? state.renderedRows : [];
+      const headers = TRADE_COLUMNS.map((c) => c.header);
+      const csvRows = [headers.map(escapeCsvCell).join(',')];
+      rows.forEach((row) => {
+        csvRows.push(TRADE_COLUMNS.map((c) => escapeCsvCell(c.value(row))).join(','));
+      });
+      const now = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      const filename = `trading-journal-ui-export-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.csv`;
+      const blob = new Blob(['\uFEFF' + csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setStatus(`Exported ${rows.length} shown trade row(s).`);
+    } catch (err) {
+      setStatus(`Export failed: ${err?.message || err}`);
+    }
   }
 
   function toggle(flag) {
@@ -1008,9 +1066,17 @@
       const rowsTotal = Number(diagnostics?.rows_total || 0);
       const hasErrors = Array.isArray(diagnostics?.errors) && diagnostics.errors.length > 0;
       const noSources = Number(diagnostics?.local_workbooks_seen || 0) + Number(diagnostics?.dropbox_workbooks_seen || 0) === 0;
+      const quarantinedRows = Number(diagnostics?.quarantined_rows || 0);
       if (!state.editorOpen && !state.editorDirty) {
-        if (hasErrors || noSources || rowsTotal < 20 || fxCount === 0) {
-          setStatus(`Warning: journal import may be incomplete (rows=${rowsTotal}, local=${diagnostics?.local_workbooks_seen || 0}, dropbox=${diagnostics?.dropbox_workbooks_seen || 0}).`);
+        if (hasErrors || noSources || rowsTotal < 20 || fxCount === 0 || quarantinedRows > 0) {
+          const reasons = [];
+          if (hasErrors) reasons.push('parse/sync errors');
+          if (noSources) reasons.push('no workbook sources');
+          if (rowsTotal < 20) reasons.push('suspiciously low row count');
+          if (fxCount === 0) reasons.push('zero FX rows');
+          if (quarantinedRows > 0) reasons.push(`quarantined rows=${quarantinedRows}`);
+          const dropped = Number(diagnostics?.duplicate_rows_dropped || 0);
+          setStatus(`Warning: Trading Journal diagnostics require attention (${reasons.join(', ')}; rows=${rowsTotal}; duplicates dropped=${dropped}).`);
         } else {
           setStatus(`Updated ${new Date().toLocaleTimeString()}`);
         }
@@ -1065,6 +1131,7 @@
   q('#tj-cal-prev')?.addEventListener('click', () => { state.calMonth = _monthShift(state.calMonth, -1); persistUiState(); renderCalendarView(applyFlagFilters(applyTextFilter(state.rows))); });
   q('#tj-cal-next')?.addEventListener('click', () => { state.calMonth = _monthShift(state.calMonth, 1); persistUiState(); renderCalendarView(applyFlagFilters(applyTextFilter(state.rows))); });
   q('#tj-clear-btn')?.addEventListener('click', () => { filterInput.value = ''; persistUiState(); renderAll(); });
+  q('#tj-export-btn')?.addEventListener('click', exportShownTrades);
   addBtn?.addEventListener('click', () => {
     openEditor(null);
     stopAutoRefresh();

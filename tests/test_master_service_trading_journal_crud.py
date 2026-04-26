@@ -232,6 +232,8 @@ def test_trading_journal_js_contains_crud_controls_and_endpoints():
     js = (ROOT / "render" / "static" / "trading_journal.js").read_text(encoding="utf-8")
     assert "/api/trading-journal/rows" in js
     assert "/api/trading-journal/diagnostics" in js
+    assert "tj-export-btn" in js
+    assert "exportShownTrades" in js
     assert 'data-action="edit"' in js
     assert 'data-action="delete"' in js
     assert "location.reload" not in js
@@ -242,6 +244,8 @@ def test_import_from_sources_local_when_dropbox_missing(temp_state_paths, monkey
     workbook.write_bytes(b"dummy")
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_SOURCE", "both")
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", temp_state_paths)
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_ENABLE_LOCAL_IMPORT", True)
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR_EXPLICIT", True)
     monkeypatch.setattr(master_service, "_import_trading_journal_from_dropbox_excel", lambda progress_cb=None: {"ok": False, "rows_imported": 0, "workbooks_seen": 0, "errors": []})
     monkeypatch.setattr(
         master_service,
@@ -263,6 +267,55 @@ def test_import_from_sources_local_when_dropbox_missing(temp_state_paths, monkey
     assert result["local_workbooks_seen"] == 1
     rows = master_service._get_trading_journal_rows()
     assert any(str(r.get("source")) == "local_excel" for r in rows)
+
+
+def test_import_from_sources_ignores_default_local_workbooks_when_not_enabled(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    workbook = temp_state_paths / "edgewonk-export-78784.xls"
+    workbook.write_bytes(b"dummy")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_SOURCE", "both")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", temp_state_paths)
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_ENABLE_LOCAL_IMPORT", False)
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR_EXPLICIT", False)
+    monkeypatch.setattr(master_service, "_import_trading_journal_from_dropbox_excel", lambda progress_cb=None: {"ok": False, "rows_imported": 0, "workbooks_seen": 0, "errors": []})
+    result = master_service._import_trading_journal_from_sources()
+    assert result["ok"] is False
+    assert result["ignored_local_workbooks"] == ["edgewonk-export-78784.xls"]
+
+
+def test_bybit_invalid_time_rows_are_quarantined_from_items(temp_state_paths):
+    master_service._set_trading_journal_rows(
+        [
+            {
+                "id": "bybit:demo:closedpnl:HYPERUSDT:bad",
+                "source": "bybit",
+                "account": "demo",
+                "account_label": "Bybit Demo",
+                "asset_class": "crypto",
+                "symbol": "HYPERUSDT",
+                "side": "Buy",
+                "status": "closed",
+                "open_time": "2026-04-26T10:12:25+00:00",
+                "close_time": "2026-04-26T10:11:33+00:00",
+            },
+            {
+                "id": "bybit:demo:closedpnl:HYPERUSDT:good",
+                "source": "bybit",
+                "account": "demo",
+                "account_label": "Bybit Demo",
+                "asset_class": "crypto",
+                "symbol": "HYPERUSDT",
+                "side": "Buy",
+                "status": "closed",
+                "open_time": "2026-04-26T10:12:25+00:00",
+                "close_time": "2026-04-26T12:32:57+00:00",
+            },
+        ]
+    )
+    rows, stats = master_service._sanitize_bybit_demo_rows(master_service._get_trading_journal_rows())
+    assert stats["quarantined_invalid_time"] >= 1
+    master_service._set_trading_journal_rows(rows)
+    payload = _json(asyncio.run(master_service.trading_journal_items()))
+    assert len([r for r in payload["items"] if r.get("symbol") == "HYPERUSDT"]) == 1
 
 
 def test_import_from_sources_preserves_existing_rows_on_empty_result(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
