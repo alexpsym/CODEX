@@ -650,11 +650,18 @@ _OANDA_ACCOUNTS_CACHE: Dict[str, Tuple[float, List[Dict[str, object]]]] = {}
 _OANDA_ACCOUNTS_CACHE_TTL_SECONDS = 20.0
 _OANDA_SPECS_CACHE: Dict[str, Tuple[float, Dict[str, object]]] = {}
 _OANDA_SPECS_CACHE_TTL_SECONDS = 30.0
+_OANDA_TRANSIENT_HTTP_STATUS_CODES = {
+    408, 425, 429,
+    500, 502, 503, 504,
+    520, 521, 522, 523, 524,
+}
 _OANDA_INACTIVITY_CACHE: Dict[str, object] = {
     "expires_at": 0.0,
     "payload": None,
+    "status_code": 200,
 }
 _OANDA_INACTIVITY_CACHE_TTL_SECONDS = 45.0
+_OANDA_INACTIVITY_ERROR_CACHE_TTL_SECONDS = 10.0
 _OPEN_ORDERS_CACHE_LOCK = asyncio.Lock()
 _OPEN_ORDERS_CACHE_TTL_SECONDS = 60.0
 _OPEN_ORDERS_CACHE: Dict[str, object] = {
@@ -691,6 +698,29 @@ class BybitOrderRejected(RuntimeError):
             f"http_status={self.http_status}"
         )
         super().__init__(message)
+
+
+class OandaUpstreamHTTPError(ValueError):
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        mode: str,
+        account_id: str,
+        endpoint: str,
+        body_summary: str,
+        transient: bool,
+    ) -> None:
+        self.status_code = status_code
+        self.mode = mode
+        self.account_id = account_id
+        self.endpoint = endpoint
+        self.body_summary = body_summary
+        self.transient = transient
+        super().__init__(
+            f"OANDA upstream HTTP {status_code} mode={mode} "
+            f"account={account_id} endpoint={endpoint}: {body_summary}"
+        )
 
 
 def _invalidate_open_orders_cache() -> None:
@@ -6732,6 +6762,12 @@ def _format_source_exception(
     account_id_label = account_id or "unknown"
     broker_label = broker or "source"
 
+    if isinstance(exc, OandaUpstreamHTTPError):
+        return (
+            f"{broker_label} {endpoint_label} failed with HTTP {exc.status_code} "
+            f"for {account_label}/{account_id_label}: {exc.body_summary}"
+        )
+
     if isinstance(exc, httpx.TimeoutException):
         return (
             f"Timeout contacting {broker_label} {endpoint_label} "
@@ -6748,7 +6784,7 @@ def _format_source_exception(
 
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code if exc.response is not None else "unknown"
-        body = (exc.response.text if exc.response is not None else "")[:300].strip()
+        body = _summarize_upstream_body(exc.response.text if exc.response is not None else "")
         suffix = f": {body}" if body else ""
         return (
             f"{broker_label} {endpoint_label} failed with HTTP {status} "
@@ -6759,6 +6795,31 @@ def _format_source_exception(
     if not text:
         return f"{exc.__class__.__name__} with empty message"
     return text
+
+
+def _summarize_upstream_body(body: str, *, limit: int = 240) -> str:
+    raw = body or ""
+    collapsed = re.sub(r"\s+", " ", raw).strip()
+    lowered = collapsed.lower()
+
+    if "<html" in lowered or "<!doctype" in lowered:
+        title_match = re.search(
+            r"<title[^>]*>(.*?)</title>",
+            raw,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        title = "HTML error response"
+        if title_match:
+            title = re.sub(r"\s+", " ", html.unescape(title_match.group(1))).strip() or title
+        return f"{title} (HTML response, {len(raw)} bytes)"
+
+    if not collapsed:
+        return "empty response body"
+
+    if len(collapsed) > limit:
+        return f"{collapsed[:limit]}... ({len(raw)} bytes)"
+
+    return collapsed
 
 
 async def _fetch_oanda_json(
@@ -6778,7 +6839,7 @@ async def _fetch_oanda_json(
     url = f"{base_url.rstrip('/')}/v3{endpoint.format(account_id=account_id)}"
     timeout = httpx.Timeout(timeout_s, connect=min(3.0, timeout_s), read=timeout_s, write=timeout_s, pool=2.0)
     max_attempts = 3
-    transient_statuses = {429, 502, 503, 504}
+    transient_statuses = _OANDA_TRANSIENT_HTTP_STATUS_CODES
     resp: Optional[httpx.Response] = None
 
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
@@ -6823,9 +6884,10 @@ async def _fetch_oanda_json(
                     raise ValueError(f"OANDA transport error: {exc}") from exc
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
-                body = exc.response.text[:500]
+                body_summary = _summarize_upstream_body(exc.response.text)
                 should_retry = status in transient_statuses and attempt < max_attempts
-                BYBIT_LOGGER.error(
+                log_fn = BYBIT_LOGGER.warning if should_retry else BYBIT_LOGGER.error
+                log_fn(
                     "OANDA_HTTP_ERR mode=%s account=%s endpoint=%s status=%s attempt=%s/%s retry=%s body=%s",
                     mode,
                     account_id,
@@ -6834,10 +6896,17 @@ async def _fetch_oanda_json(
                     attempt,
                     max_attempts,
                     should_retry,
-                    body,
+                    body_summary,
                 )
                 if not should_retry:
-                    raise ValueError(f"OANDA request failed ({status}): {exc.response.text}") from exc
+                    raise OandaUpstreamHTTPError(
+                        status_code=status,
+                        mode=mode,
+                        account_id=account_id,
+                        endpoint=endpoint,
+                        body_summary=body_summary,
+                        transient=status in transient_statuses,
+                    ) from exc
 
             backoff = min(0.2 * (2 ** (attempt - 1)), 0.8) + (0.05 * attempt)
             await asyncio.sleep(backoff)
@@ -6846,7 +6915,14 @@ async def _fetch_oanda_json(
 
     if resp is None:
         raise ValueError("OANDA request failed with no response")
-    return resp.json()
+    try:
+        return resp.json()
+    except json.JSONDecodeError as exc:
+        body = _summarize_upstream_body(resp.text)
+        raise ValueError(
+            f"OANDA returned non-JSON success response mode={mode} account={account_id} "
+            f"endpoint={endpoint}: {body}"
+        ) from exc
 
 
 def _parse_oanda_timestamp(value: str) -> datetime:
@@ -16665,19 +16741,51 @@ async def diagnostics_monthly_aud_reval() -> JSONResponse:
 async def oanda_inactivity_status() -> JSONResponse:
     now = time.time()
     cached = _OANDA_INACTIVITY_CACHE.get("payload")
+    cached_status = int(_OANDA_INACTIVITY_CACHE.get("status_code") or 200)
     if (
         isinstance(cached, dict)
         and float(_OANDA_INACTIVITY_CACHE.get("expires_at") or 0.0) > now
     ):
-        return JSONResponse(cached)
+        return JSONResponse(cached, status_code=cached_status)
 
+    status_code = 200
+    ttl_seconds = _OANDA_INACTIVITY_CACHE_TTL_SECONDS
     try:
         payload = await _build_oanda_inactivity_status()
-    except Exception as exc:
+    except OandaUpstreamHTTPError as exc:
+        status_code = 503 if exc.transient else 502
+        ttl_seconds = _OANDA_INACTIVITY_ERROR_CACHE_TTL_SECONDS
         payload = {
             "ok": False,
             "mode": "live",
             "status": "unavailable",
+            "detail": str(exc),
+            "upstream_status": exc.status_code,
+            "transient": exc.transient,
+            "body_summary": exc.body_summary,
+            "error": str(exc),
+            "last_live_fill_at": None,
+            "open_trade_count": None,
+            "open_position_count": None,
+            "has_open_positions": None,
+            "inactivity_threshold_at": None,
+            "earliest_fee_date": None,
+            "policy_months_without_trade": 12,
+            "monthly_fee_aud": 10,
+            "seconds_until_threshold": None,
+            "updated_at": _utc_now_iso(),
+        }
+    except Exception as exc:
+        status_code = 500
+        ttl_seconds = _OANDA_INACTIVITY_ERROR_CACHE_TTL_SECONDS
+        payload = {
+            "ok": False,
+            "mode": "live",
+            "status": "unavailable",
+            "detail": str(exc),
+            "upstream_status": None,
+            "transient": False,
+            "body_summary": None,
             "error": str(exc),
             "last_live_fill_at": None,
             "open_trade_count": None,
@@ -16691,8 +16799,9 @@ async def oanda_inactivity_status() -> JSONResponse:
             "updated_at": _utc_now_iso(),
         }
     _OANDA_INACTIVITY_CACHE["payload"] = payload
-    _OANDA_INACTIVITY_CACHE["expires_at"] = now + _OANDA_INACTIVITY_CACHE_TTL_SECONDS
-    return JSONResponse(payload)
+    _OANDA_INACTIVITY_CACHE["status_code"] = status_code
+    _OANDA_INACTIVITY_CACHE["expires_at"] = now + ttl_seconds
+    return JSONResponse(payload, status_code=status_code)
 
 
 @app.post("/api/open-orders/close")
