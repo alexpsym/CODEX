@@ -339,8 +339,8 @@ def test_closed_pnl_row_backfills_tpsl_from_context(monkeypatch) -> None:
             "closeFee": "0.2",
             "fillCount": "1",
             "side": "Buy",
-            "createdTime": 1,
-            "updatedTime": 2,
+            "createdTime": 1_000,
+            "updatedTime": 5_000,
             "avgEntryPrice": "100",
             "avgExitPrice": "105",
             "closedSize": "0.1",
@@ -383,6 +383,138 @@ def test_closed_pnl_row_prefers_context_open_time(monkeypatch) -> None:
     assert row is not None
     assert row["open_time"] == "2026-04-11T01:20:00+00:00"
     assert row["close_time"] == "2026-04-11T05:10:46+00:00"
+
+
+def test_closed_pnl_row_stale_context_falls_back_to_created_time(monkeypatch) -> None:
+    stale_ctx = {
+        "open_time": "2026-04-11T06:10:46+00:00",
+        "created_at": "2026-04-11T06:10:40+00:00",
+        "timeframe": "4-hour",
+        "stop_loss": "20",
+        "take_profit": "30",
+    }
+    monkeypatch.setattr(master_service, "_lookup_trade_context_for_journal_row", lambda _row: None)
+    monkeypatch.setattr(master_service, "_upsert_trade_context", lambda _payload: _payload)
+    row = master_service._normalize_bybit_closed_pnl_row(
+        {
+            "symbol": "HYPERUSDT",
+            "orderId": "hyper-order-1",
+            "createdTime": 1_775_870_000_000,
+            "updatedTime": 1_775_884_246_000,
+            "avgEntryPrice": "22",
+            "avgExitPrice": "23",
+            "closedSize": "10",
+            "closedPnl": "4.2",
+            "side": "Buy",
+        },
+        account_mode="demo",
+        balance_after_trade=1000.0,
+        resolved_trade_context=stale_ctx,
+    )
+    assert row is not None
+    assert row["status"] == "closed"
+    assert row["open_time"] == "2026-04-11T01:13:20+00:00"
+
+
+def test_closed_pnl_row_stale_context_without_valid_created_time_is_quarantined(monkeypatch) -> None:
+    stale_ctx = {
+        "open_time": "2026-04-11T06:10:46+00:00",
+        "timeframe": "4-hour",
+        "stop_loss": "20",
+        "take_profit": "30",
+    }
+    monkeypatch.setattr(master_service, "_lookup_trade_context_for_journal_row", lambda _row: None)
+    row = master_service._normalize_bybit_closed_pnl_row(
+        {
+            "symbol": "HYPERUSDT",
+            "orderId": "hyper-order-2",
+            "createdTime": 1_775_884_246_000,
+            "updatedTime": 1_775_884_246_000,
+            "avgEntryPrice": "22",
+            "avgExitPrice": "23",
+            "closedSize": "10",
+            "closedPnl": "4.2",
+            "side": "Buy",
+        },
+        account_mode="demo",
+        balance_after_trade=1000.0,
+        resolved_trade_context=stale_ctx,
+    )
+    assert row is not None
+    assert row["status"] == "invalid_time_order"
+    assert row["row_type"] == "quarantine"
+
+
+def test_resolve_bybit_closed_pnl_trade_context_prefers_valid_ref_match(monkeypatch) -> None:
+    monkeypatch.setattr(
+        master_service,
+        "_load_trade_contexts",
+        lambda: [
+            {
+                "broker": "bybit",
+                "account": "demo",
+                "instrument": "HYPERUSDT",
+                "side": "Buy",
+                "order_id": "oid-1",
+                "open_time": "2026-04-11T06:10:46+00:00",
+            },
+            {
+                "broker": "bybit",
+                "account": "demo",
+                "instrument": "HYPERUSDT",
+                "side": "Buy",
+                "order_id": "oid-1",
+                "open_time": "2026-04-11T01:10:46+00:00",
+            },
+        ],
+    )
+    ctx = master_service._resolve_bybit_closed_pnl_trade_context(
+        account_mode="demo",
+        symbol="HYPERUSDT",
+        side="Buy",
+        order_id="oid-1",
+        close_time="2026-04-11T05:10:46+00:00",
+    )
+    assert ctx is not None
+    assert ctx["open_time"] == "2026-04-11T01:10:46+00:00"
+
+
+def test_sync_bybit_closed_pnl_window_stale_context_does_not_raise(monkeypatch) -> None:
+    statuses = []
+    monkeypatch.setattr(master_service, "_resolve_trading_journal_dropbox_folder", lambda: ("/tmp", []))
+    monkeypatch.setattr(master_service, "_ensure_bybit_demo_dropbox_files", lambda _folder: None)
+    async def fake_empty_payload(**_kwargs):
+        return {"result": {"list": []}}
+
+    monkeypatch.setattr(master_service, "_fetch_bybit_order_history", fake_empty_payload)
+    monkeypatch.setattr(master_service, "_fetch_bybit_order_realtime", fake_empty_payload)
+    monkeypatch.setattr(master_service, "_fetch_bybit_transaction_log", fake_empty_payload)
+    monkeypatch.setattr(master_service, "_upsert_trading_journal_rows", lambda rows: len(rows))
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_rows", lambda rows: (rows, {"changed": 0}))
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: [])
+    monkeypatch.setattr(master_service, "_append_bybit_demo_rows_to_workbook", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_workbook", lambda *_args, **_kwargs: {"deduped_by_order_id": 0, "deduped_by_fingerprint": 0})
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setattr(master_service, "_record_bybit_demo_sync_status", lambda **kwargs: statuses.append(kwargs))
+    monkeypatch.setattr(master_service, "_upsert_trade_context", lambda payload: payload)
+    monkeypatch.setattr(master_service, "load_bybit_demo_tpsl_cache", lambda: {})
+    monkeypatch.setattr(
+        master_service,
+        "_load_trade_contexts",
+        lambda: [{"order_id": "oid-stale", "open_time": "2026-04-11T06:10:46+00:00"}],
+    )
+    async def fake_closed_pnl(**_kwargs):
+        return {"result": {"list": [{
+            "symbol": "HYPERUSDT", "orderId": "oid-stale", "orderLinkId": "", "side": "Buy",
+            "createdTime": 1_775_884_246_000, "updatedTime": 1_775_884_246_000,
+            "avgEntryPrice": "100", "avgExitPrice": "101", "closedSize": "1",
+            "closedPnl": "1", "openFee": "0", "closeFee": "0",
+        }]}}
+
+    monkeypatch.setattr(master_service, "_fetch_bybit_closed_pnl", fake_closed_pnl)
+    asyncio.run(master_service._sync_bybit_closed_pnl_window(account_mode="demo", base_url="u", api_key="k", api_secret="s", start_time=0, end_time=3000))
+    assert statuses
+    assert statuses[-1].get("last_error") is None
 
 
 def test_repair_existing_bybit_row_open_time_from_context(monkeypatch) -> None:

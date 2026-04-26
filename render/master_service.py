@@ -400,6 +400,13 @@ TRADING_JOURNAL_DROPBOX_FOLDER = os.getenv(
 TRADING_JOURNAL_LOCAL_DIR = Path(
     os.getenv("TRADING_JOURNAL_LOCAL_DIR", str(BASE_DIR / "journal"))
 ).expanduser()
+TRADING_JOURNAL_LOCAL_DIR_EXPLICIT = "TRADING_JOURNAL_LOCAL_DIR" in os.environ
+TRADING_JOURNAL_ENABLE_LOCAL_IMPORT = os.getenv("TRADING_JOURNAL_ENABLE_LOCAL_IMPORT", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 TRADING_JOURNAL_SOURCE = str(os.getenv("TRADING_JOURNAL_SOURCE", "both") or "both").strip().lower()
 TRADING_JOURNAL_SYNC_STATE: Dict[str, object] = {
     "running": False,
@@ -535,6 +542,11 @@ def _default_journal_diagnostics() -> Dict[str, object]:
         "last_sync": {},
         "local_workbooks_seen": 0,
         "dropbox_workbooks_seen": 0,
+        "duplicate_rows_dropped": 0,
+        "source_duplicate_rows_dropped": 0,
+        "dedupe_groups": 0,
+        "ignored_local_workbooks": [],
+        "quarantined_rows": 0,
         "errors": [],
     }
 
@@ -2229,13 +2241,22 @@ def _bybit_demo_trade_score(row: Dict[str, object]) -> Tuple[int, int, int, int,
 
 def _sanitize_bybit_demo_rows(rows: List[Dict[str, object]]) -> tuple[List[Dict[str, object]], Dict[str, int]]:
     if not rows:
-        return [], {"repaired_sides": 0, "deduped_by_order_id": 0, "deduped_by_fingerprint": 0, "changed": 0}
+        return [], {"repaired_sides": 0, "deduped_by_order_id": 0, "deduped_by_fingerprint": 0, "trade_group_merged": 0, "quarantined_invalid_time": 0, "changed": 0}
 
     repaired_rows, repaired_count = _repair_persisted_bybit_demo_sides(rows)
     passthrough: List[Dict[str, object]] = []
     bybit_rows: List[Dict[str, object]] = []
+    quarantined_rows: List[Dict[str, object]] = []
     for row in repaired_rows:
         if isinstance(row, dict) and _is_bybit_demo_trade_row(row):
+            close_ts = _canonical_trade_epoch_second(row.get("close_time"))
+            open_ts = _canonical_trade_epoch_second(row.get("open_time"))
+            if close_ts is not None and open_ts is not None and close_ts <= open_ts:
+                q = dict(row)
+                q["status"] = "invalid_time_order"
+                q["row_type"] = "quarantine"
+                quarantined_rows.append(q)
+                continue
             bybit_rows.append(dict(row))
         else:
             passthrough.append(row)
@@ -2271,12 +2292,41 @@ def _sanitize_bybit_demo_rows(rows: List[Dict[str, object]]) -> tuple[List[Dict[
         dedup_fallback[key] = _merge_row_notes_comments(winner, loser)
         fallback_dropped += 1
 
-    sanitized_rows = sorted(list(dedup_fallback.values()) + passthrough, key=_row_sort_dt, reverse=True)
-    changed_total = int(repaired_count > 0 or order_dropped > 0 or fallback_dropped > 0 or len(sanitized_rows) != len(rows))
+    grouped: Dict[str, Dict[str, object]] = {}
+    trade_group_merged = 0
+    for row in dedup_fallback.values():
+        gk = "|".join(
+            [
+                str(row.get("account") or row.get("account_label") or "").strip().lower(),
+                str(row.get("symbol") or "").strip().upper(),
+                _normalize_side_for_comparison(row.get("side")),
+                str(_canonical_trade_epoch_second(row.get("open_time")) or ""),
+                _num_bucket(row.get("entry_price"), 8),
+                _num_bucket(row.get("qty"), 8),
+            ]
+        )
+        prev = grouped.get(gk)
+        if prev is None:
+            grouped[gk] = row
+            continue
+        merged = _merge_row_notes_comments(prev, row)
+        merged["realized_pnl"] = (_to_float(prev.get("realized_pnl")) or 0.0) + (_to_float(row.get("realized_pnl")) or 0.0)
+        merged["net_profit"] = (_to_float(prev.get("net_profit")) or _to_float(prev.get("realized_pnl")) or 0.0) + (_to_float(row.get("net_profit")) or _to_float(row.get("realized_pnl")) or 0.0)
+        merged["fees"] = (_to_float(prev.get("fees")) or _to_float(prev.get("commission")) or 0.0) + (_to_float(row.get("fees")) or _to_float(row.get("commission")) or 0.0)
+        merged["commission"] = (_to_float(prev.get("commission")) or _to_float(prev.get("fees")) or 0.0) + (_to_float(row.get("commission")) or _to_float(row.get("fees")) or 0.0)
+        merged["open_time"] = min(str(prev.get("open_time") or ""), str(row.get("open_time") or ""))
+        merged["close_time"] = max(str(prev.get("close_time") or ""), str(row.get("close_time") or ""))
+        grouped[gk] = merged
+        trade_group_merged += 1
+
+    sanitized_rows = sorted(list(grouped.values()) + passthrough, key=_row_sort_dt, reverse=True)
+    changed_total = int(repaired_count > 0 or order_dropped > 0 or fallback_dropped > 0 or trade_group_merged > 0 or len(sanitized_rows) != len(rows))
     stats = {
         "repaired_sides": repaired_count,
         "deduped_by_order_id": order_dropped,
         "deduped_by_fingerprint": fallback_dropped,
+        "trade_group_merged": trade_group_merged,
+        "quarantined_invalid_time": len(quarantined_rows),
         "changed": changed_total,
     }
     return sanitized_rows, stats
@@ -3400,6 +3450,80 @@ def _list_local_trading_journal_workbooks() -> List[Path]:
     return sorted(found, key=lambda p: p.name.lower())
 
 
+def _local_journal_import_enabled() -> bool:
+    return TRADING_JOURNAL_ENABLE_LOCAL_IMPORT or TRADING_JOURNAL_LOCAL_DIR_EXPLICIT
+
+
+def _is_default_local_workbook(path: Path) -> bool:
+    try:
+        return path.resolve().parent == (BASE_DIR / "journal").resolve()
+    except Exception:
+        return False
+
+
+def _num_bucket(value: object, digits: int = 6) -> str:
+    num = _to_float(value)
+    if num is None:
+        return ""
+    return f"{num:.{digits}f}"
+
+
+def _workbook_row_dedupe_fingerprint(row: Dict[str, object]) -> Optional[str]:
+    if not isinstance(row, dict) or _row_type(row) != "trade":
+        return None
+    source = str(row.get("source") or "").strip().lower()
+    if source in {"manual", "cashflow_ledger"}:
+        return None
+    if row.get("cashflow_type") or str(row.get("symbol") or "").strip().upper() == "CASHFLOW":
+        return None
+    return "|".join(
+        [
+            str(row.get("asset_class") or "").strip().lower(),
+            str(row.get("symbol") or row.get("symbol_raw") or "").strip().upper(),
+            _normalize_side_for_comparison(row.get("side")),
+            str(_canonical_trade_epoch_second(row.get("open_time")) or ""),
+            str(_canonical_trade_epoch_second(row.get("close_time")) or ""),
+            _num_bucket(row.get("qty") if row.get("qty") is not None else row.get("qty_raw"), 8),
+            _num_bucket(row.get("entry_price"), 8),
+            _num_bucket(row.get("exit_price"), 8),
+            _num_bucket(row.get("stop_loss"), 8),
+            _num_bucket(row.get("take_profit"), 8),
+        ]
+    )
+
+
+def _row_source_rank(row: Dict[str, object]) -> int:
+    source = str(row.get("source") or "").strip().lower()
+    local_kind = str(row.get("_local_import_kind") or "").strip().lower()
+    if source == "excel":
+        return 3
+    if source == "local_excel" and local_kind == "explicit":
+        return 2
+    if source == "local_excel":
+        return 1
+    return 0
+
+
+def _merge_duplicate_import_rows(primary: Dict[str, object], incoming: Dict[str, object]) -> Dict[str, object]:
+    merged = dict(primary)
+    for field in [
+        "manual_overrides",
+        "manual_override_fields",
+        "notes",
+        "pre_trade_comments",
+        "entry_comments",
+        "trade_management",
+        "exit_comments",
+        "flags",
+    ]:
+        if merged.get(field) in (None, "", [], {}) and incoming.get(field) not in (None, "", [], {}):
+            merged[field] = incoming.get(field)
+    for k, v in incoming.items():
+        if merged.get(k) in (None, "") and v not in (None, ""):
+            merged[k] = v
+    return merged
+
+
 def _parse_local_trading_journal_workbook(path: Path) -> Tuple[List[Dict[str, object]], Optional[Dict[str, object]]]:
     payload = path.read_bytes()
     rows, balance = _parse_excel_account_workbook(path.name, str(path), payload)
@@ -3656,6 +3780,7 @@ def _import_trading_journal_from_sources(
     source_mode = TRADING_JOURNAL_SOURCE if TRADING_JOURNAL_SOURCE in {"dropbox", "local", "both", "auto"} else "both"
     include_dropbox = source_mode in {"dropbox", "both", "auto"}
     include_local = source_mode in {"local", "both", "auto"}
+    local_enabled = _local_journal_import_enabled()
 
     existing_rows = _get_trading_journal_rows()
     all_rows: Dict[str, Dict[str, object]] = {}
@@ -3688,15 +3813,22 @@ def _import_trading_journal_from_sources(
 
     local_files = _list_local_trading_journal_workbooks() if include_local else []
     diagnostics["local_workbooks_seen"] = len(local_files)
+    ignored_local_workbooks: List[str] = []
+    if include_local and (not local_enabled) and local_files:
+        ignored_local_workbooks = [p.name for p in local_files]
+        local_files = []
     local_rows_total = 0
     local_balances: List[Dict[str, object]] = []
     for local_file in local_files:
         try:
             local_rows, local_balance = _parse_local_trading_journal_workbook(local_file)
+            local_kind = "explicit" if local_enabled else "default"
             local_rows_total += len(local_rows)
             for row in local_rows:
                 rid = str(row.get("id") or "")
                 if rid:
+                    row["_local_import_kind"] = local_kind
+                    row["_workbook_source"] = str(local_file)
                     all_rows[rid] = row
             if local_balance:
                 local_balances.append(local_balance)
@@ -3704,7 +3836,31 @@ def _import_trading_journal_from_sources(
             errors.append({"file": local_file.name, "path": str(local_file), "error": str(exc)})
     imported_any = imported_any or local_rows_total > 0
 
-    final_rows = sorted(all_rows.values(), key=_row_sort_dt, reverse=True)
+    dedupe_groups = 0
+    source_duplicate_rows_dropped = 0
+    duplicate_rows_dropped = 0
+    canonical_rows: Dict[str, Dict[str, object]] = {}
+    carry_rows: List[Dict[str, object]] = []
+    for row in all_rows.values():
+        key = _workbook_row_dedupe_fingerprint(row)
+        if not key:
+            carry_rows.append(row)
+            continue
+        prev = canonical_rows.get(key)
+        if prev is None:
+            canonical_rows[key] = row
+            continue
+        dedupe_groups += 1
+        duplicate_rows_dropped += 1
+        prev_rank = _row_source_rank(prev)
+        row_rank = _row_source_rank(row)
+        if row_rank > prev_rank:
+            canonical_rows[key] = _merge_duplicate_import_rows(row, prev)
+        else:
+            canonical_rows[key] = _merge_duplicate_import_rows(prev, row)
+        source_duplicate_rows_dropped += 1
+
+    final_rows = sorted([*canonical_rows.values(), *carry_rows], key=_row_sort_dt, reverse=True)
     if final_rows:
         _set_trading_journal_rows(final_rows)
         if local_balances:
@@ -3724,17 +3880,28 @@ def _import_trading_journal_from_sources(
             continue
         rows_by_source[str(row.get("source") or "unknown")] += 1
         rows_by_asset_class[str(row.get("asset_class") or "unknown")] += 1
+    quarantined_rows = sum(
+        1
+        for row in _get_trading_journal_rows()
+        if isinstance(row, dict) and str(row.get("status") or "").strip().lower() == "invalid_time_order"
+    )
     diagnostics.update(
         {
             "rows_total": len(_get_trading_journal_rows()),
             "rows_by_source": dict(rows_by_source),
             "rows_by_asset_class": dict(rows_by_asset_class),
+            "duplicate_rows_dropped": duplicate_rows_dropped,
+            "source_duplicate_rows_dropped": source_duplicate_rows_dropped,
+            "dedupe_groups": dedupe_groups,
+            "ignored_local_workbooks": ignored_local_workbooks,
+            "quarantined_rows": quarantined_rows,
             "errors": errors,
             "last_sync": {
                 "source_mode": source_mode,
                 "updated_at": _utc_now_iso(),
                 "ok": bool(imported_any),
                 "balances_found": len(balances),
+                "local_import_enabled": local_enabled,
             },
         }
     )
@@ -3746,6 +3913,10 @@ def _import_trading_journal_from_sources(
         "balances_found": len(balances),
         "local_workbooks_seen": diagnostics["local_workbooks_seen"],
         "dropbox_workbooks_seen": diagnostics["dropbox_workbooks_seen"],
+        "duplicate_rows_dropped": duplicate_rows_dropped,
+        "source_duplicate_rows_dropped": source_duplicate_rows_dropped,
+        "dedupe_groups": dedupe_groups,
+        "ignored_local_workbooks": ignored_local_workbooks,
         "errors": errors,
         "diagnostics": diagnostics,
     }
@@ -8348,15 +8519,23 @@ def _resolve_bybit_closed_pnl_trade_context(
         "transaction_id": str(transaction_id or "").strip(),
     }
     contexts = _load_trade_contexts()
+    close_ts = _canonical_trade_epoch_second(close_time)
+
+    def _ctx_time_order_valid(ctx: Dict[str, object]) -> bool:
+        if close_ts is None:
+            return True
+        ctx_open_ts = _canonical_trade_epoch_second(ctx.get("open_time")) or _canonical_trade_epoch_second(ctx.get("created_at"))
+        if ctx_open_ts is None:
+            return True
+        return ctx_open_ts < close_ts
+
     for ref_field in ("order_id", "order_link_id", "parent_order_link_id", "trade_id", "transaction_id"):
         ref_value = refs[ref_field]
         if not ref_value:
             continue
         for ctx in contexts:
-            if str(ctx.get(ref_field) or "").strip() == ref_value:
+            if str(ctx.get(ref_field) or "").strip() == ref_value and _ctx_time_order_valid(ctx):
                 return ctx
-
-    close_ts = _canonical_trade_epoch_second(close_time)
     broker = "bybit"
     account = "demo" if str(account_mode).strip().lower() == "demo" else "live"
     instrument = str(symbol or "").strip().upper()
@@ -10684,6 +10863,16 @@ def _normalize_bybit_closed_pnl_row(
         (stop_loss is not None and fallback_stop_loss is not None)
         or (take_profit is not None and fallback_take_profit is not None)
     )
+    close_time_iso = _ms_to_iso(entry.get("updatedTime"))
+    close_ts = _canonical_trade_epoch_second(close_time_iso)
+    ctx_valid = isinstance(ctx, dict)
+    if ctx_valid:
+        candidate_open = _epoch_or_iso_to_iso(ctx.get("open_time")) or _epoch_or_iso_to_iso(ctx.get("created_at"))
+        if candidate_open and close_ts is not None:
+            candidate_open_ts = _canonical_trade_epoch_second(candidate_open)
+            if candidate_open_ts is not None and candidate_open_ts >= close_ts:
+                ctx = None
+                ctx_valid = False
     if isinstance(ctx, dict):
         resolved_open_time = _epoch_or_iso_to_iso(ctx.get("open_time")) or _epoch_or_iso_to_iso(ctx.get("created_at"))
         _upsert_trade_context(
@@ -10709,7 +10898,29 @@ def _normalize_bybit_closed_pnl_row(
         _epoch_or_iso_to_iso(ctx.get("open_time")) if isinstance(ctx, dict) else None
     ) or (
         _epoch_or_iso_to_iso(ctx.get("created_at")) if isinstance(ctx, dict) else None
-    ) or _ms_to_iso(entry.get("createdTime"))
+    )
+    created_fallback = _ms_to_iso(entry.get("createdTime"))
+    if (not open_time) and created_fallback and close_ts is not None:
+        created_ts = _canonical_trade_epoch_second(created_fallback)
+        if created_ts is not None and created_ts < close_ts:
+            open_time = created_fallback
+    open_ts = _canonical_trade_epoch_second(open_time)
+    if close_ts is None or open_ts is None or close_ts <= open_ts:
+        return {
+            "id": f"bybit:{mode}:closedpnl:{symbol}:{order_id}:invalid-time",
+            "source": "bybit",
+            "account": mode,
+            "account_label": "Bybit Demo" if mode == "demo" else "Bybit Live",
+            "asset_class": "crypto",
+            "symbol": symbol,
+            "side": side_value.title(),
+            "status": "invalid_time_order",
+            "row_type": "quarantine",
+            "open_time": open_time,
+            "close_time": close_time_iso,
+            "notes": "Bybit row quarantined: close_time must be after open_time",
+            "raw_refs": raw_refs,
+        }
     return {
         "id": f"bybit:{mode}:closedpnl:{symbol}:{order_id}",
         "source": "bybit",
@@ -10720,7 +10931,7 @@ def _normalize_bybit_closed_pnl_row(
         "side": side_value.title(),
         "status": "closed",
         "open_time": open_time,
-        "close_time": _ms_to_iso(entry.get("updatedTime")),
+        "close_time": close_time_iso,
         "entry_price": _to_float(entry.get("avgEntryPrice")),
         "exit_price": _to_float(entry.get("avgExitPrice")),
         "qty": _to_float(entry.get("closedSize")),
@@ -13969,6 +14180,9 @@ async def trading_journal_page() -> str:
     <div id="tj-stats" class="balances"></div>
     <div id="tj-balances" class="balances"></div>
     <div class="table-shell">
+      <div class="toolbar compact" style="margin:0 0 6px 0; padding:0;">
+        <button id="tj-export-btn">Export shown trades</button>
+      </div>
       <div id="tj-top-scroll" class="hscroll-top"><div></div></div>
       <div id="tj-trades-wrap" class="table-wrap">
       <table id="tj-table">
@@ -15838,6 +16052,14 @@ async def list_scripts() -> JSONResponse:
             )
             runtime_running = _scanner_runtime_is_live("bybit_monitor") or _scanner_runtime_is_live("oanda_monitor")
             row["running"] = managed_running or runtime_running
+        elif btn["name"] == "trading-journal":
+            sync_state = _sync_state_snapshot()
+            virtual_row = by_name.get("trading-journal", {})
+            row["running"] = True if APP_PROFILE == "local" else bool(virtual_row.get("running"))
+            row["starting"] = bool(sync_state.get("running"))
+            row["last_error"] = sync_state.get("error") or virtual_row.get("last_error")
+            if virtual_row.get("open_url"):
+                row["open_url"] = virtual_row.get("open_url")
         merged.append(row)
 
     merged_source_names = get_merged_source_names()
@@ -17389,7 +17611,9 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
     items = [
         _backfill_trade_row_context_fields(r)
         for r in _get_trading_journal_rows()
-        if isinstance(r, dict) and not _exclude_bybit_demo_row(r)
+        if isinstance(r, dict)
+        and not _exclude_bybit_demo_row(r)
+        and str(r.get("status") or "").strip().lower() != "invalid_time_order"
     ]
 
     def _norm_search_text(value: object) -> str:
@@ -17455,6 +17679,11 @@ async def trading_journal_diagnostics() -> JSONResponse:
     payload["last_sync"] = payload.get("last_sync") if isinstance(payload.get("last_sync"), dict) else {}
     payload["local_workbooks_seen"] = int(payload.get("local_workbooks_seen") or 0)
     payload["dropbox_workbooks_seen"] = int(payload.get("dropbox_workbooks_seen") or 0)
+    payload["duplicate_rows_dropped"] = int(payload.get("duplicate_rows_dropped") or 0)
+    payload["source_duplicate_rows_dropped"] = int(payload.get("source_duplicate_rows_dropped") or 0)
+    payload["dedupe_groups"] = int(payload.get("dedupe_groups") or 0)
+    payload["quarantined_rows"] = int(payload.get("quarantined_rows") or 0)
+    payload["ignored_local_workbooks"] = payload.get("ignored_local_workbooks") if isinstance(payload.get("ignored_local_workbooks"), list) else []
     payload["errors"] = payload.get("errors") if isinstance(payload.get("errors"), list) else []
     return JSONResponse(payload)
 @app.get("/api/trading-journal/balances")
