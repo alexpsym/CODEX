@@ -27,6 +27,13 @@ def test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls() -> No
     assert "activeMainLoadState = 'loading';" in js
     assert "activeMainLoadState = 'loaded';" in js
     assert "activeMainLoadState = 'error';" in js
-    assert "if (isDashboardMainView(script)) {" in js
-    assert "dotTitle = 'Active view loaded';" in js
     assert "active-script" in js
+    assert "const processRunning = script.running === true;" in js
+    assert "const processStarting = script.starting === true;" in js
+    assert "let dotState = processRunning ? 'running' : (processStarting ? 'starting' : 'stopped');" in js
+    assert "if (isFxWeekend && processRunning && !fxEnabled) {" in js
+    assert "if (dotState === 'stopped' && stopReason) {" in js
+    assert "const isActiveMainView = isDashboardMainView(script) && String(script.name) === activeMainScriptName;" in js
+    assert "if (isActiveMainView) {" in js
+    assert "dotTitle = 'Inactive view';" not in js
+    assert "dotTitle = 'Active view loaded';" not in js
