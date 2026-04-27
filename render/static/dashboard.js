@@ -280,18 +280,30 @@
       processTitle = script.status_detail.trim();
     }
 
+    const isMonitor = String(script.name || '').trim().toLowerCase() === 'monitor';
     const isActiveMainView = isDashboardMainView(script) && String(script.name) === activeMainScriptName;
     let workspaceTitle = '';
-    if (isActiveMainView) {
-      if (activeMainLoadState === 'loading') workspaceTitle = 'Workspace loading';
-      else if (activeMainLoadState === 'loaded') workspaceTitle = 'Workspace loaded';
-      else if (activeMainLoadState === 'error') workspaceTitle = 'Workspace failed to load';
-      else workspaceTitle = 'Workspace selected';
-    } else if (isDashboardMainView(script)) {
-      workspaceTitle = 'Workspace not selected';
+    let dotTitle = processTitle;
+    if (isMonitor) {
+      dotState = processRunning ? 'running' : (processStarting ? 'starting' : 'stopped');
+      dotTitle = processRunning ? 'Scanner running' : (processStarting ? 'Scanner starting' : 'Scanner stopped');
+      if (!processRunning && stopReason) {
+        dotTitle = `Scanner stopped: ${stopReason}`;
+      }
+      if (typeof script.status_detail === 'string' && script.status_detail.trim()) {
+        dotTitle = script.status_detail.trim();
+      }
+    } else {
+      if (isActiveMainView) {
+        if (activeMainLoadState === 'loading') workspaceTitle = 'Workspace loading';
+        else if (activeMainLoadState === 'loaded') workspaceTitle = 'Workspace loaded';
+        else if (activeMainLoadState === 'error') workspaceTitle = 'Workspace failed to load';
+        else workspaceTitle = 'Workspace selected';
+      } else if (isDashboardMainView(script)) {
+        workspaceTitle = 'Workspace not selected';
+      }
+      dotTitle = workspaceTitle ? `${processTitle}; ${workspaceTitle}` : processTitle;
     }
-
-    const dotTitle = workspaceTitle ? `${processTitle}; ${workspaceTitle}` : processTitle;
     dot.className = `status-dot ${dotState}`;
     dot.title = dotTitle;
     dot.setAttribute('aria-label', dotTitle);

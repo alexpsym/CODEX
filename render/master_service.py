@@ -382,6 +382,66 @@ def _scanner_runtime_is_live(script_name: str) -> bool:
     payload = _scanner_status_payload(path)
     return payload.get("ui_status") == "running"
 
+
+def _merged_monitor_row(
+    by_name: Dict[str, Dict[str, object]],
+    autostart_targets: Set[str],
+) -> Dict[str, object]:
+    scanner_names = ("bybit_monitor", "oanda_monitor")
+    scanner_children: Dict[str, Dict[str, object]] = {}
+    required_children = [name for name in scanner_names if name in autostart_targets]
+    eval_children = required_children or list(scanner_names)
+
+    for child_name in scanner_names:
+        managed = by_name.get(child_name, {}) if isinstance(by_name.get(child_name), dict) else {}
+        runtime_live = _scanner_runtime_is_live(child_name)
+        managed_running = bool(managed.get("running"))
+        managed_starting = bool(managed.get("starting"))
+        child_running = managed_running or runtime_live
+        child_row: Dict[str, object] = {
+            "running": child_running,
+            "starting": managed_starting,
+            "runtime_live": runtime_live,
+            "managed_running": managed_running,
+            "required": child_name in required_children,
+        }
+        for err_field in ("last_start_error", "last_exit_reason", "last_error"):
+            value = managed.get(err_field)
+            if value:
+                child_row[err_field] = value
+        scanner_children[child_name] = child_row
+
+    all_required_running = bool(eval_children) and all(
+        bool(scanner_children[name]["running"]) for name in eval_children
+    )
+    any_required_starting = any(
+        bool(scanner_children[name]["starting"]) for name in eval_children
+    )
+    any_required_running = any(
+        bool(scanner_children[name]["running"]) for name in eval_children
+    )
+    failed_required = [
+        name for name in eval_children if not bool(scanner_children[name]["running"])
+    ]
+    running = all_required_running
+    starting = (not running) and (any_required_starting or any_required_running)
+    if running:
+        detail = "running"
+    elif starting:
+        detail = "starting"
+    else:
+        detail = "stopped"
+    if failed_required:
+        detail = f"{detail}: missing live scanner(s): {', '.join(failed_required)}"
+
+    return {
+        "running": running,
+        "starting": starting,
+        "status_detail": detail,
+        "scanner_children": scanner_children,
+        "scanner_required_targets": eval_children,
+    }
+
 MAX_LOG_LINES = 400
 OANDA_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "oanda-history"
 BYBIT_HISTORY_EXPORT_ROOT = BASE_DIR / "render" / "uploads" / "bybit-history"
@@ -16362,16 +16422,7 @@ async def list_scripts() -> JSONResponse:
                 detail = f"stopped: {stop_reason}" if stop_reason else "stopped"
             row["status_detail"] = detail
         elif btn["name"] == "monitor":
-            row["starting"] = bool(
-                by_name.get("bybit_monitor", {}).get("starting")
-                or by_name.get("oanda_monitor", {}).get("starting")
-            )
-            managed_running = bool(
-                by_name.get("bybit_monitor", {}).get("running")
-                or by_name.get("oanda_monitor", {}).get("running")
-            )
-            runtime_running = _scanner_runtime_is_live("bybit_monitor") or _scanner_runtime_is_live("oanda_monitor")
-            row["running"] = managed_running or runtime_running
+            row.update(_merged_monitor_row(by_name, autostart_targets))
         merged.append(row)
 
     merged_source_names = get_merged_source_names()
