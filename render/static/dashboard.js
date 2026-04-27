@@ -259,32 +259,46 @@
     name.textContent = script.label || script.name;
 
     const dot = document.createElement('span');
-    let dotState = script.running ? 'running' : (script.starting ? 'starting' : 'stopped');
-    let dotTitle = dotState === 'running' ? 'Process running' : (dotState === 'starting' ? 'Process starting' : 'Process stopped');
-    if (isDashboardMainView(script)) {
-      if (String(script.name) === activeMainScriptName) {
-        if (activeMainLoadState === 'loaded') {
-          dotState = 'running';
-          dotTitle = 'Active view loaded';
-        } else if (activeMainLoadState === 'loading') {
-          dotState = 'starting';
-          dotTitle = 'Active view loading';
-        } else {
-          dotState = 'stopped';
-          dotTitle = 'Active view failed';
-        }
-      } else {
-        dotState = 'stopped';
-        dotTitle = 'Inactive view';
-      }
+    const processRunning = script.running === true;
+    const processStarting = script.starting === true;
+    const isFxWeekend = String(script.name || '').trim().toLowerCase() === 'fxweekend';
+    const fxEnabled = script.enabled !== false;
+
+    let dotState = processRunning ? 'running' : (processStarting ? 'starting' : 'stopped');
+    let processTitle = processRunning ? 'Process running' : (processStarting ? 'Process starting' : 'Process stopped');
+
+    if (isFxWeekend && processRunning && !fxEnabled) {
+      dotState = 'stopped';
+      processTitle = 'Process running but FX Weekend disabled';
     }
+
+    const stopReason = String(script.last_start_error || script.last_exit_reason || '').trim();
+    if (dotState === 'stopped' && stopReason) {
+      processTitle = `Process stopped: ${stopReason}`;
+    }
+    if (typeof script.status_detail === 'string' && script.status_detail.trim()) {
+      processTitle = script.status_detail.trim();
+    }
+
+    const isActiveMainView = isDashboardMainView(script) && String(script.name) === activeMainScriptName;
+    let workspaceTitle = '';
+    if (isActiveMainView) {
+      if (activeMainLoadState === 'loading') workspaceTitle = 'Workspace loading';
+      else if (activeMainLoadState === 'loaded') workspaceTitle = 'Workspace loaded';
+      else if (activeMainLoadState === 'error') workspaceTitle = 'Workspace failed to load';
+      else workspaceTitle = 'Workspace selected';
+    } else if (isDashboardMainView(script)) {
+      workspaceTitle = 'Workspace not selected';
+    }
+
+    const dotTitle = workspaceTitle ? `${processTitle}; ${workspaceTitle}` : processTitle;
     dot.className = `status-dot ${dotState}`;
     dot.title = dotTitle;
     dot.setAttribute('aria-label', dotTitle);
-    if (String(script.name) === activeMainScriptName && isDashboardMainView(script)) {
+    if (isActiveMainView) {
       btn.classList.add('active-script');
     }
-    btn.title = isDashboardMainView(script) ? `${script.label || script.name} (${dotTitle})` : `${script.label || script.name} (${dotTitle})`;
+    btn.title = `${script.label || script.name} (${dotTitle})`;
 
     btn.appendChild(name);
     btn.appendChild(dot);

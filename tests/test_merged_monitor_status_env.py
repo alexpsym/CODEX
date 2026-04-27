@@ -581,10 +581,16 @@ def test_scripts_merged_fxweekend_running_from_fxweekend_clone(monkeypatch: pyte
         "list_scripts",
         lambda: [{"name": "fxweekend-clone", "running": True, "starting": False}],
     )
+    monkeypatch.setattr(master_service, "_load_json_file", lambda _p, _d: {"enabled": True})
+    monkeypatch.setattr(master_service, "_compute_autostart_scripts", lambda: ["fxweekend-clone"])
     payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
     row = next(item for item in payload if item["name"] == "fxweekend")
     assert row["running"] is True
     assert row["starting"] is False
+    assert row["enabled"] is True
+    assert row["autostart_expected"] is True
+    assert row["operational"] is True
+    assert row["status_detail"] == "running and enabled"
 
 
 def test_scripts_merged_fxweekend_starting_and_errors(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -606,6 +612,8 @@ def test_scripts_merged_fxweekend_starting_and_errors(monkeypatch: pytest.Monkey
             "last_exit_reason": "exit",
         }],
     )
+    monkeypatch.setattr(master_service, "_load_json_file", lambda _p, _d: {"enabled": True})
+    monkeypatch.setattr(master_service, "_compute_autostart_scripts", lambda: ["fxweekend-clone"])
     payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
     row = next(item for item in payload if item["name"] == "fxweekend")
     assert row["running"] is False
@@ -613,6 +621,8 @@ def test_scripts_merged_fxweekend_starting_and_errors(monkeypatch: pytest.Monkey
     assert row["last_error"] == "boom"
     assert row["last_start_error"] == "start boom"
     assert row["last_exit_reason"] == "exit"
+    assert row["operational"] is False
+    assert row["status_detail"] == "starting"
 
 
 def test_managed_script_start_sets_windows_creationflags(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -641,3 +651,46 @@ def test_managed_script_start_sets_windows_creationflags(monkeypatch: pytest.Mon
 
     asyncio.run(script.start())
     assert captured["kwargs"]["creationflags"] == master_service.subprocess.CREATE_NEW_PROCESS_GROUP
+
+
+def test_scripts_merged_fxweekend_running_but_disabled_not_operational(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "APP_PROFILE", "render")
+    monkeypatch.setattr(
+        master_service,
+        "get_merged_script_buttons",
+        lambda: [{"id": "fxweekend", "name": "fxweekend", "label": "FX Weekend", "open_url": "/apps/fxweekend-clone"}],
+    )
+    monkeypatch.setattr(
+        master_service.script_manager,
+        "list_scripts",
+        lambda: [{"name": "fxweekend-clone", "running": True, "starting": False}],
+    )
+    monkeypatch.setattr(master_service, "_load_json_file", lambda _p, _d: {"enabled": False})
+    monkeypatch.setattr(master_service, "_compute_autostart_scripts", lambda: [])
+    payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
+    row = next(item for item in payload if item["name"] == "fxweekend")
+    assert row["running"] is True
+    assert row["enabled"] is False
+    assert row["operational"] is False
+    assert row["autostart_expected"] is False
+    assert row["status_detail"] == "process running but disabled in settings"
+
+
+def test_scripts_merged_fxweekend_stopped_includes_error_detail(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "APP_PROFILE", "render")
+    monkeypatch.setattr(
+        master_service,
+        "get_merged_script_buttons",
+        lambda: [{"id": "fxweekend", "name": "fxweekend", "label": "FX Weekend", "open_url": "/apps/fxweekend-clone"}],
+    )
+    monkeypatch.setattr(
+        master_service.script_manager,
+        "list_scripts",
+        lambda: [{"name": "fxweekend-clone", "running": False, "starting": False, "last_start_error": "spawn failed"}],
+    )
+    monkeypatch.setattr(master_service, "_load_json_file", lambda _p, _d: {"enabled": True})
+    monkeypatch.setattr(master_service, "_compute_autostart_scripts", lambda: ["calculator-webhook"])
+    payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
+    row = next(item for item in payload if item["name"] == "fxweekend")
+    assert row["status_detail"] == "stopped: spawn failed"
+    assert row["autostart_expected"] is False

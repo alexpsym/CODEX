@@ -16099,6 +16099,8 @@ async def list_scripts() -> JSONResponse:
     by_name = {str(s.get("name")): s for s in raw}
 
     merged: List[Dict[str, object]] = []
+    autostart_targets = set(_compute_autostart_scripts())
+
     for btn in get_merged_script_buttons():
         row: Dict[str, object] = {
             "id": btn["id"],
@@ -16132,6 +16134,28 @@ async def list_scripts() -> JSONResponse:
             row["last_error"] = fx_row.get("last_error")
             row["last_start_error"] = fx_row.get("last_start_error")
             row["last_exit_reason"] = fx_row.get("last_exit_reason")
+
+            fx_settings = _load_json_file(FXWEEKEND_SETTINGS_PATH, FXWEEKEND_DEFAULT_SETTINGS)
+            fx_enabled = True
+            if isinstance(fx_settings, dict):
+                fx_enabled = bool(fx_settings.get("enabled", True))
+            row["enabled"] = fx_enabled
+            row["autostart_expected"] = "fxweekend-clone" in autostart_targets
+
+            running = bool(row["running"])
+            starting = bool(row["starting"])
+            row["operational"] = running and fx_enabled
+
+            if starting:
+                detail = "starting"
+            elif running and fx_enabled:
+                detail = "running and enabled"
+            elif running and not fx_enabled:
+                detail = "process running but disabled in settings"
+            else:
+                stop_reason = str(row.get("last_start_error") or row.get("last_exit_reason") or "").strip()
+                detail = f"stopped: {stop_reason}" if stop_reason else "stopped"
+            row["status_detail"] = detail
         elif btn["name"] == "monitor":
             row["starting"] = bool(
                 by_name.get("bybit_monitor", {}).get("starting")
