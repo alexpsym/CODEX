@@ -317,7 +317,31 @@ def test_run_local_master_control_bat_uses_local_autostart() -> None:
     assert "cmd /v:on /k ^" not in content
     assert '"set APP_PROFILE=%APP_PROFILE% && ^' not in content
     assert 'cmd /d /v:on /k ""%~f0" __worker"' in content
+    assert "http://127.0.0.1:8000/health" in content
+    assert "MASTER_READY_TIMEOUT_SECONDS" in content
+    assert "powershell" in content
+    assert "Invoke-WebRequest" in content
+    assert ":wait_for_master_ready" in content
+    assert ":master_ready" in content
+    assert ":master_not_ready" in content
+    assert "[local-master] ERROR: dashboard was not ready after %MASTER_READY_TIMEOUT_SECONDS% seconds." in content
+    assert '[local-master] Browser was not opened to avoid a dead-page / manual-refresh failure.' in content
     assert content.index('cmd /d /v:on /k ""%~f0" __worker"') < content.index('start "" "http://127.0.0.1:8000"')
+    assert "timeout /t 2 /nobreak >nul\nstart \"\" \"http://127.0.0.1:8000\"" not in content
+
+
+def test_run_local_master_control_waits_for_health_before_opening_browser() -> None:
+    content = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
+    worker_start_idx = content.index('cmd /d /v:on /k ""%~f0" __worker"')
+    wait_idx = content.index(":wait_for_master_ready")
+    ready_idx = content.index(":master_ready")
+    browser_idx = content.index('start "" "http://127.0.0.1:8000"')
+    not_ready_idx = content.index(":master_not_ready")
+
+    assert worker_start_idx < wait_idx < ready_idx < browser_idx
+    assert browser_idx > ready_idx
+    not_ready_block = content[not_ready_idx:]
+    assert 'start "" "http://127.0.0.1:8000"' not in not_ready_block
 
 
 def test_run_trading_journal_local_bat_profile_and_port() -> None:
