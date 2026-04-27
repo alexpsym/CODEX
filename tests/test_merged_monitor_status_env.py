@@ -322,12 +322,19 @@ def test_run_local_master_control_bat_uses_local_autostart() -> None:
     assert "powershell" in content
     assert "Invoke-WebRequest" in content
     assert ":wait_for_master_ready" in content
+    assert ":wait_for_scanner_ready" in content
     assert ":master_ready" in content
+    assert ":scanner_ready" in content
+    assert ":scanner_not_ready" in content
     assert ":master_not_ready" in content
+    assert "MASTER_SCRIPTS_URL" in content
+    assert "SCANNER_READY_TIMEOUT_SECONDS" in content
+    assert "Invoke-RestMethod" in content
     assert "[local-master] ERROR: dashboard was not ready after %MASTER_READY_TIMEOUT_SECONDS% seconds." in content
     assert '[local-master] Browser was not opened to avoid a dead-page / manual-refresh failure.' in content
-    assert content.index('cmd /d /v:on /k ""%~f0" __worker"') < content.index('start "" "http://127.0.0.1:8000"')
-    assert "timeout /t 2 /nobreak >nul\nstart \"\" \"http://127.0.0.1:8000\"" not in content
+    assert "[local-master] ERROR: scanner did not become ready after %SCANNER_READY_TIMEOUT_SECONDS% seconds." in content
+    assert content.index('cmd /d /v:on /k ""%~f0" __worker"') < content.index('start "" "%MASTER_URL%"')
+    assert "timeout /t 2 /nobreak >nul\nstart \"\" \"%MASTER_URL%\"" not in content
 
 
 def test_run_local_master_control_waits_for_health_before_opening_browser() -> None:
@@ -335,13 +342,18 @@ def test_run_local_master_control_waits_for_health_before_opening_browser() -> N
     worker_start_idx = content.index('cmd /d /v:on /k ""%~f0" __worker"')
     wait_idx = content.index(":wait_for_master_ready")
     ready_idx = content.index(":master_ready")
-    browser_idx = content.index('start "" "http://127.0.0.1:8000"')
+    scanner_wait_idx = content.index(":wait_for_scanner_ready")
+    scanner_ready_idx = content.index(":scanner_ready")
+    scanner_not_ready_idx = content.index(":scanner_not_ready")
+    browser_idx = content.index('start "" "%MASTER_URL%"')
     not_ready_idx = content.index(":master_not_ready")
 
-    assert worker_start_idx < wait_idx < ready_idx < browser_idx
-    assert browser_idx > ready_idx
+    assert worker_start_idx < wait_idx < ready_idx < scanner_wait_idx < scanner_ready_idx < browser_idx
+    assert browser_idx > scanner_ready_idx
     not_ready_block = content[not_ready_idx:]
-    assert 'start "" "http://127.0.0.1:8000"' not in not_ready_block
+    assert 'start "" "%MASTER_URL%"' not in not_ready_block
+    scanner_not_ready_block = content[scanner_not_ready_idx:]
+    assert 'start "" "%MASTER_URL%"' not in scanner_not_ready_block
 
 
 def test_run_trading_journal_local_bat_profile_and_port() -> None:
@@ -535,6 +547,7 @@ def test_monitor_running_true_when_runtime_status_is_fresh_without_managed_proce
     monkeypatch.setattr(master_service, "get_merged_script_buttons", lambda: [{"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor"}])
     monkeypatch.setattr(master_service.script_manager, "list_scripts", lambda: [])
     monkeypatch.setattr(master_service, "_scanner_runtime_is_live", lambda name: name == "bybit_monitor")
+    monkeypatch.setattr(master_service, "_compute_autostart_scripts", lambda: ["bybit_monitor"])
     payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
     monitor_row = next(row for row in payload if row["name"] == "monitor")
     assert monitor_row["running"] is True
@@ -546,6 +559,7 @@ def test_monitor_running_false_when_runtime_status_is_stale_without_managed_proc
     monkeypatch.setattr(master_service, "get_merged_script_buttons", lambda: [{"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor"}])
     monkeypatch.setattr(master_service.script_manager, "list_scripts", lambda: [])
     monkeypatch.setattr(master_service, "_scanner_runtime_is_live", lambda _name: False)
+    monkeypatch.setattr(master_service, "_compute_autostart_scripts", lambda: ["bybit_monitor", "oanda_monitor"])
     payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
     monitor_row = next(row for row in payload if row["name"] == "monitor")
     assert monitor_row["running"] is False
@@ -564,9 +578,42 @@ def test_monitor_running_true_when_managed_subprocess_is_running(
         ],
     )
     monkeypatch.setattr(master_service, "_scanner_runtime_is_live", lambda _name: False)
+    monkeypatch.setattr(master_service, "_compute_autostart_scripts", lambda: ["bybit_monitor"])
     payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
     monitor_row = next(row for row in payload if row["name"] == "monitor")
     assert monitor_row["running"] is True
+
+
+def test_monitor_requires_all_configured_scanner_targets_and_exposes_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(master_service, "get_merged_script_buttons", lambda: [{"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor"}])
+    monkeypatch.setattr(
+        master_service.script_manager,
+        "list_scripts",
+        lambda: [
+            {"name": "bybit_monitor", "running": True, "starting": False},
+            {
+                "name": "oanda_monitor",
+                "running": False,
+                "starting": False,
+                "last_start_error": "bad credentials",
+                "last_exit_reason": "exited 1",
+            },
+        ],
+    )
+    monkeypatch.setattr(master_service, "_compute_autostart_scripts", lambda: ["bybit_monitor", "oanda_monitor"])
+    monkeypatch.setattr(master_service, "_scanner_runtime_is_live", lambda name: name == "bybit_monitor")
+    payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
+    monitor_row = next(row for row in payload if row["name"] == "monitor")
+    assert monitor_row["running"] is False
+    assert monitor_row["starting"] is True
+    assert "missing live scanner(s): oanda_monitor" in monitor_row["status_detail"]
+    assert monitor_row["scanner_required_targets"] == ["bybit_monitor", "oanda_monitor"]
+    assert monitor_row["scanner_children"]["bybit_monitor"]["running"] is True
+    assert monitor_row["scanner_children"]["oanda_monitor"]["running"] is False
+    assert monitor_row["scanner_children"]["oanda_monitor"]["last_start_error"] == "bad credentials"
+    assert monitor_row["scanner_children"]["oanda_monitor"]["last_exit_reason"] == "exited 1"
 
 
 def test_scripts_merged_fxweekend_running_from_fxweekend_clone(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -33,7 +33,13 @@ def test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls() -> No
     assert "let dotState = processRunning ? 'running' : (processStarting ? 'starting' : 'stopped');" in js
     assert "if (isFxWeekend && processRunning && !fxEnabled) {" in js
     assert "if (dotState === 'stopped' && stopReason) {" in js
+    assert "const isMonitor = String(script.name || '').trim().toLowerCase() === 'monitor';" in js
+    assert "dotTitle = processRunning ? 'Scanner running' : (processStarting ? 'Scanner starting' : 'Scanner stopped');" in js
+    assert "dotTitle = `Scanner stopped: ${stopReason}`;" in js
+    assert "if (!processRunning && stopReason) {" in js
     assert "const isActiveMainView = isDashboardMainView(script) && String(script.name) === activeMainScriptName;" in js
     assert "if (isActiveMainView) {" in js
+    assert "if (isMonitor) {" in js
     assert "dotTitle = 'Inactive view';" not in js
     assert "dotTitle = 'Active view loaded';" not in js
+    assert "Inactive view" not in js
