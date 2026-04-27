@@ -830,3 +830,253 @@ def test_parent_order_link_id_lookup_supported(monkeypatch) -> None:
     )
     row = master_service._lookup_trade_context_for_journal_row({"raw_refs": {"parentOrderLinkId": "parent-1"}})
     assert row and row.get("timeframe") == "1-hour"
+
+
+def test_bybit_signed_get_retries_after_timestamp_window_error(monkeypatch) -> None:
+    calls: list[tuple[str, dict[str, str]]] = []
+    market_time_calls = {"count": 0}
+    now = {"value": 1_700_000_000.0}
+    master_service._BYBIT_TIME_OFFSET_CACHE.clear()
+    master_service._BYBIT_TIME_OFFSET_CACHE["https://api.bybit.com"] = {
+        "synced_at": int(now["value"] * 1000),
+        "offset_ms": 0,
+        "rtt_ms": 0,
+    }
+
+    class DummyResponse:
+        def __init__(self, status_code: int, payload: dict[str, object]):
+            self.status_code = status_code
+            self._payload = payload
+            self.content = json.dumps(payload).encode("utf-8")
+            self.text = json.dumps(payload)
+
+        def json(self):
+            return self._payload
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url: str, headers=None):
+            headers = headers or {}
+            calls.append((url, headers))
+            if url.endswith("/v5/market/time"):
+                market_time_calls["count"] += 1
+                return DummyResponse(200, {"retCode": 0, "result": {"timeSecond": "1700000010"}})
+            if len([u for u, _ in calls if "/v5/order/history" in u]) == 1:
+                return DummyResponse(
+                    200,
+                    {
+                        "retCode": 10002,
+                        "retMsg": "invalid request, req_timestamp[1700000000000],server_timestamp[1700000006000],recv_window[5000]",
+                    },
+                )
+            return DummyResponse(200, {"retCode": 0, "result": {"list": []}})
+
+    monkeypatch.setattr(master_service.httpx, "AsyncClient", DummyClient)
+    monkeypatch.setattr(master_service.time, "time", lambda: now["value"])
+    payload = asyncio.run(
+        master_service._bybit_signed_get(
+            base_url="https://api.bybit.com",
+            api_key="k",
+            api_secret="s",
+            path="/v5/order/history",
+            params={"category": "linear"},
+        )
+    )
+    order_headers = [headers for url, headers in calls if "/v5/order/history" in url]
+    assert payload["retCode"] == 0
+    assert market_time_calls["count"] >= 1
+    assert len(order_headers) == 2
+    assert int(order_headers[1]["X-BAPI-TIMESTAMP"]) >= int(order_headers[0]["X-BAPI-TIMESTAMP"])
+
+
+def test_bybit_signed_get_persistent_timestamp_error_raises(monkeypatch) -> None:
+    class DummyResponse:
+        status_code = 200
+        content = b"{}"
+        text = "{}"
+
+        def json(self):
+            return {"retCode": 10002, "retMsg": "invalid request, recv_window[5000]"}
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, *_args, **_kwargs):
+            return DummyResponse()
+
+    monkeypatch.setattr(master_service.httpx, "AsyncClient", DummyClient)
+    with pytest.raises(ValueError, match="path=/v5/order/history"):
+        asyncio.run(
+            master_service._bybit_signed_get(
+                base_url="https://api.bybit.com",
+                api_key="k",
+                api_secret="s",
+                path="/v5/order/history",
+                params={"category": "linear"},
+            )
+        )
+
+
+def test_bybit_signed_get_non_timestamp_error_does_not_retry(monkeypatch) -> None:
+    requests = {"count": 0}
+
+    class DummyResponse:
+        status_code = 200
+        content = b"{}"
+        text = "{}"
+
+        def json(self):
+            return {"retCode": 10004, "retMsg": "signature error"}
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, *_args, **_kwargs):
+            requests["count"] += 1
+            return DummyResponse()
+
+    monkeypatch.setattr(master_service.httpx, "AsyncClient", DummyClient)
+    with pytest.raises(ValueError, match="retCode=10004"):
+        asyncio.run(
+            master_service._bybit_signed_get(
+                base_url="https://api.bybit.com",
+                api_key="k",
+                api_secret="s",
+                path="/v5/order/history",
+                params={"category": "linear"},
+            )
+        )
+    assert requests["count"] == 1
+
+
+def test_bybit_signed_post_uses_consistent_recv_window_and_body_on_retry(monkeypatch) -> None:
+    sent_headers: list[dict[str, str]] = []
+    sent_bodies: list[str] = []
+    master_service._BYBIT_TIME_OFFSET_CACHE.clear()
+
+    class DummyResponse:
+        def __init__(self, payload: dict[str, object]):
+            self.status_code = 200
+            self.content = json.dumps(payload).encode("utf-8")
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, _url, headers=None, content=None):
+            sent_headers.append(dict(headers or {}))
+            sent_bodies.append(str(content))
+            if len(sent_bodies) == 1:
+                return DummyResponse({"retCode": 10002, "retMsg": "timestamp expired recv_window[5000]"})
+            return DummyResponse({"retCode": 0, "result": {"ok": True}})
+
+        async def get(self, _url, headers=None):
+            return DummyResponse({"retCode": 0, "result": {"timeSecond": "1700000010"}})
+
+    monkeypatch.setattr(master_service.httpx, "AsyncClient", DummyClient)
+    monkeypatch.setattr(master_service, "BYBIT_RECV_WINDOW_MS", 15000)
+    body = {"category": "linear", "orderLinkId": "same-link-id"}
+    payload = asyncio.run(
+        master_service._bybit_signed_post(
+            base_url="https://api.bybit.com",
+            api_key="k",
+            api_secret="s",
+            path="/v5/order/create",
+            body=body,
+        )
+    )
+    assert payload["retCode"] == 0
+    assert len(sent_bodies) == 2
+    assert sent_bodies[0] == sent_bodies[1]
+    assert sent_headers[0]["X-BAPI-RECV-WINDOW"] == "15000"
+    expected_signature = master_service._bybit_sign_request(
+        sent_headers[0]["X-BAPI-TIMESTAMP"],
+        "k",
+        "s",
+        sent_bodies[0],
+        recv_window="15000",
+    )
+    assert sent_headers[0]["X-BAPI-SIGN"] == expected_signature
+
+
+def test_bybit_signed_post_timeout_not_retried(monkeypatch) -> None:
+    calls = {"count": 0}
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, *_args, **_kwargs):
+            calls["count"] += 1
+            raise master_service.httpx.TimeoutException("timeout")
+
+    monkeypatch.setattr(master_service.httpx, "AsyncClient", DummyClient)
+    with pytest.raises(master_service.httpx.TimeoutException):
+        asyncio.run(
+            master_service._bybit_signed_post(
+                base_url="https://api.bybit.com",
+                api_key="k",
+                api_secret="s",
+                path="/v5/order/create",
+                body={"category": "linear", "orderLinkId": "timeout-link"},
+            )
+        )
+    assert calls["count"] == 1
+
+
+def test_run_closed_pnl_sync_records_error_details(monkeypatch) -> None:
+    statuses = []
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _mode: ("demo", "k", "s", "https://api.bybit.com", "env"))
+    monkeypatch.setattr(master_service.time, "time", lambda: 1_700_000_000.0)
+    monkeypatch.setattr(master_service, "_record_bybit_demo_sync_status", lambda **kwargs: statuses.append(kwargs))
+
+    async def failing_sync(**_kwargs):
+        raise ValueError("Bybit signed GET failed path=/v5/order/history retCode=10002 retMsg=invalid request recv_window[5000]")
+
+    monkeypatch.setattr(master_service, "_sync_bybit_closed_pnl_window", failing_sync)
+    with pytest.raises(ValueError):
+        asyncio.run(master_service._run_bybit_closed_pnl_sync(account_mode="demo", reason="scheduled"))
+    assert statuses
+    assert "retCode=10002" in str(statuses[-1].get("last_error"))
+    assert "path=/v5/order/history" in str(statuses[-1].get("last_error"))

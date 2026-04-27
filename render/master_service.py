@@ -6675,7 +6675,34 @@ PROXY_HOP_HEADERS = {
 }
 PROXY_STRIP_HEADERS = {"content-encoding", "content-length"}
 PROXY_LOGGER = logging.getLogger("uvicorn.error")
-BYBIT_RECV_WINDOW = "5000"
+
+
+def _normalize_bybit_recv_window_ms(raw_value: Optional[str]) -> int:
+    fallback = 15000
+    try:
+        parsed = int(str(raw_value or fallback).strip())
+    except (TypeError, ValueError):
+        parsed = fallback
+    return max(1000, min(60000, parsed))
+
+
+def _safe_int_env(raw_value: Optional[str], default: int) -> int:
+    try:
+        return int(str(raw_value or default).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+BYBIT_RECV_WINDOW_MS = _normalize_bybit_recv_window_ms(os.getenv("BYBIT_RECV_WINDOW", "15000"))
+BYBIT_SIGNED_REQUEST_MAX_RETRIES = max(
+    1,
+    min(3, _safe_int_env(os.getenv("BYBIT_SIGNED_REQUEST_MAX_RETRIES", "2"), 2)),
+)
+BYBIT_TIME_OFFSET_TTL_SECONDS = max(
+    10,
+    _safe_int_env(os.getenv("BYBIT_TIME_OFFSET_TTL_SECONDS", "300"), 300),
+)
+_BYBIT_TIME_OFFSET_CACHE: Dict[str, Dict[str, int]] = {}
 BYBIT_OPTIONS_TAKER_FEE_RATE = float(os.getenv("BYBIT_OPTIONS_TAKER_FEE_RATE", "0.0003"))
 BYBIT_OPTIONS_MAKER_FEE_RATE = float(os.getenv("BYBIT_OPTIONS_MAKER_FEE_RATE", "0.0002"))
 
@@ -7527,6 +7554,151 @@ def _build_bybit_query(params: Dict[str, str]) -> str:
     return "&".join(f"{key}={value}" for key, value in sorted(params.items()))
 
 
+def _normalize_bybit_base_url(base_url: str) -> str:
+    return str(base_url or "").strip().rstrip("/")
+
+
+def _bybit_recv_window_str() -> str:
+    return str(BYBIT_RECV_WINDOW_MS)
+
+
+def _bybit_timestamp_window_error(ret_code: object, ret_msg: object) -> bool:
+    code = str(ret_code).strip()
+    msg = str(ret_msg or "").lower()
+    return code == "10002" or "timestamp" in msg or "recv_window" in msg
+
+
+def _extract_bybit_timestamp_diag(ret_msg: object) -> str:
+    msg = str(ret_msg or "")
+    req_match = re.search(r"req_timestamp\[(\d+)\]", msg)
+    server_match = re.search(r"server_timestamp\[(\d+)\]", msg)
+    recv_match = re.search(r"recv_window\[(\d+)\]", msg)
+    if not req_match and not server_match and not recv_match:
+        return ""
+    req_ts = int(req_match.group(1)) if req_match else None
+    server_ts = int(server_match.group(1)) if server_match else None
+    recv_window = recv_match.group(1) if recv_match else _bybit_recv_window_str()
+    delta = None
+    if req_ts is not None and server_ts is not None:
+        delta = req_ts - server_ts
+    diag_parts = [f"recv_window={recv_window}"]
+    if delta is not None:
+        diag_parts.append(f"server_delta_ms={delta}")
+    return " ".join(diag_parts)
+
+
+def _build_bybit_error_diagnostic(*, base_url: str, path: str, error_text: str) -> str:
+    ret_code_match = re.search(r"retCode=([^\s]+)", error_text)
+    ret_msg_match = re.search(r"retMsg=(.+)$", error_text)
+    ret_code = ret_code_match.group(1) if ret_code_match else "unknown"
+    ret_msg = ret_msg_match.group(1) if ret_msg_match else error_text
+    diag = _extract_bybit_timestamp_diag(ret_msg)
+    offset_ms = 0
+    cached = _BYBIT_TIME_OFFSET_CACHE.get(_normalize_bybit_base_url(base_url))
+    if isinstance(cached, dict):
+        offset_ms = int(cached.get("offset_ms", 0) or 0)
+    return (
+        f"Bybit sync failed path={path} retCode={ret_code} retMsg={ret_msg} "
+        f"recv_window={_bybit_recv_window_str()} offset_ms={offset_ms}"
+        + (f" {diag}" if diag else "")
+    )
+
+
+async def _fetch_bybit_server_time_ms(base_url: str) -> int:
+    normalized_base = _normalize_bybit_base_url(base_url)
+    url = f"{normalized_base}/v5/market/time"
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(url)
+    _record_outbound_traffic(
+        "bybit",
+        bytes_sent=len(url),
+        bytes_received=len(resp.content),
+        context="/v5/market/time",
+    )
+    payload: Dict[str, object] = {}
+    try:
+        payload = resp.json()
+    except Exception:
+        payload = {}
+    if resp.status_code >= 400:
+        raise ValueError(
+            f"Bybit server time request failed http_status={resp.status_code} retCode={payload.get('retCode')} retMsg={payload.get('retMsg') or resp.text}"
+        )
+    if payload.get("retCode") not in (0, "0", None):
+        raise ValueError(
+            f"Bybit server time request failed retCode={payload.get('retCode')} retMsg={payload.get('retMsg')}"
+        )
+    result = payload.get("result")
+    server_ms: Optional[int] = None
+    if isinstance(result, dict):
+        time_nano = _to_float(result.get("timeNano"))
+        if time_nano:
+            server_ms = int(time_nano / 1_000_000)
+        if server_ms is None:
+            time_second = _to_float(result.get("timeSecond"))
+            if time_second:
+                server_ms = int(time_second * 1000)
+    if server_ms is None:
+        top_time = _to_float(payload.get("time"))
+        if top_time:
+            server_ms = int(top_time)
+    if not server_ms or server_ms <= 0:
+        raise ValueError("Bybit server time response is unparseable.")
+    return server_ms
+
+
+async def _refresh_bybit_time_offset_ms(base_url: str) -> int:
+    normalized_base = _normalize_bybit_base_url(base_url)
+    local_before = int(time.time() * 1000)
+    server_ms = await _fetch_bybit_server_time_ms(normalized_base)
+    local_after = int(time.time() * 1000)
+    local_midpoint = (local_before + local_after) // 2
+    rtt_ms = max(0, local_after - local_before)
+    offset_ms = int(server_ms - local_midpoint)
+    _BYBIT_TIME_OFFSET_CACHE[normalized_base] = {
+        "synced_at": local_after,
+        "offset_ms": offset_ms,
+        "rtt_ms": rtt_ms,
+    }
+    BYBIT_LOGGER.info(
+        "BYBIT_TIME_SYNC base_url=%s offset_ms=%s rtt_ms=%s",
+        normalized_base,
+        offset_ms,
+        rtt_ms,
+    )
+    if abs(offset_ms) > 3000:
+        BYBIT_LOGGER.warning(
+            "BYBIT_TIME_SYNC offset drift detected base_url=%s offset_ms=%s",
+            normalized_base,
+            offset_ms,
+        )
+    return offset_ms
+
+
+async def _get_bybit_time_offset_ms(base_url: str, force_refresh: bool = False) -> int:
+    normalized_base = _normalize_bybit_base_url(base_url)
+    now_ms = int(time.time() * 1000)
+    cached = _BYBIT_TIME_OFFSET_CACHE.get(normalized_base)
+    if (
+        not force_refresh
+        and isinstance(cached, dict)
+        and now_ms - int(cached.get("synced_at", 0) or 0) <= (BYBIT_TIME_OFFSET_TTL_SECONDS * 1000)
+    ):
+        return int(cached.get("offset_ms", 0) or 0)
+    try:
+        return await _refresh_bybit_time_offset_ms(normalized_base)
+    except Exception as exc:
+        BYBIT_LOGGER.warning("BYBIT_TIME_SYNC refresh failed base_url=%s err=%s", normalized_base, exc)
+        if isinstance(cached, dict):
+            return int(cached.get("offset_ms", 0) or 0)
+        return 0
+
+
+async def _bybit_timestamp_ms(base_url: str, force_time_sync: bool = False) -> str:
+    offset_ms = await _get_bybit_time_offset_ms(base_url, force_refresh=force_time_sync)
+    return str(int(time.time() * 1000) + int(offset_ms))
+
+
 def _is_bybit_open_order(status: Optional[str]) -> bool:
     if not status:
         return True
@@ -7561,73 +7733,117 @@ async def _bybit_signed_get(
     *, base_url: str, api_key: str, api_secret: str, path: str, params: Dict[str, str]
 ) -> Dict[str, object]:
     query = _build_bybit_query(params)
-    timestamp = str(int(time.time() * 1000))
-    signature = _bybit_sign_request(timestamp, api_key, api_secret, query)
-    headers = {
-        "X-BAPI-API-KEY": api_key,
-        "X-BAPI-SIGN": signature,
-        "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-RECV-WINDOW": BYBIT_RECV_WINDOW,
-        "X-BAPI-SIGN-TYPE": "2",
-    }
-    url = f"{base_url}{path}"
+    normalized_base = _normalize_bybit_base_url(base_url)
+    recv_window = _bybit_recv_window_str()
+    url = f"{normalized_base}{path}"
     if query:
         url = f"{url}?{query}"
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(url, headers=headers)
-    _record_outbound_traffic(
-        "bybit",
-        bytes_sent=len(url) + sum(len(str(v)) for v in headers.values()),
-        bytes_received=len(resp.content),
-        context=path,
-    )
-    payload: Dict[str, object] = {}
-    try:
-        payload = resp.json()
-    except Exception:
-        payload = {}
-    if resp.status_code >= 400:
+    for attempt in range(1, BYBIT_SIGNED_REQUEST_MAX_RETRIES + 1):
+        timestamp = await _bybit_timestamp_ms(
+            normalized_base, force_time_sync=(attempt > 1)
+        )
+        signature = _bybit_sign_request(
+            timestamp, api_key, api_secret, query, recv_window=recv_window
+        )
+        headers = {
+            "X-BAPI-API-KEY": api_key,
+            "X-BAPI-SIGN": signature,
+            "X-BAPI-TIMESTAMP": timestamp,
+            "X-BAPI-RECV-WINDOW": recv_window,
+            "X-BAPI-SIGN-TYPE": "2",
+        }
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url, headers=headers)
+        _record_outbound_traffic(
+            "bybit",
+            bytes_sent=len(url) + sum(len(str(v)) for v in headers.values()),
+            bytes_received=len(resp.content),
+            context=path,
+        )
+        payload: Dict[str, object] = {}
+        try:
+            payload = resp.json()
+        except Exception:
+            payload = {}
         ret_code = payload.get("retCode")
         ret_msg = payload.get("retMsg") or resp.text
+        if resp.status_code >= 400:
+            raise ValueError(
+                f"Bybit signed GET failed path={path} http_status={resp.status_code} retCode={ret_code} retMsg={ret_msg}"
+            )
+        if ret_code in (0, "0"):
+            return payload
+        if _bybit_timestamp_window_error(ret_code, ret_msg) and attempt < BYBIT_SIGNED_REQUEST_MAX_RETRIES:
+            BYBIT_LOGGER.warning(
+                "BYBIT_SIGNED_RETRY path=%s attempt=%s/%s reason=timestamp_window recv_window=%s",
+                path,
+                attempt,
+                BYBIT_SIGNED_REQUEST_MAX_RETRIES,
+                recv_window,
+            )
+            continue
+        diag = _extract_bybit_timestamp_diag(ret_msg)
         raise ValueError(
-            f"Bybit signed GET failed path={path} http_status={resp.status_code} retCode={ret_code} retMsg={ret_msg}"
+            f"Bybit signed GET failed path={path} retCode={ret_code} retMsg={ret_msg} recv_window={recv_window}"
+            + (f" {diag}" if diag else "")
         )
-    ret_code = payload.get("retCode")
-    if ret_code not in (0, "0"):
-        ret_msg = payload.get("retMsg") or "Bybit request failed"
-        raise ValueError(f"Bybit signed GET failed path={path} retCode={ret_code} retMsg={ret_msg}")
-    return payload
+    raise ValueError(f"Bybit signed GET failed path={path} retCode=unknown retMsg=unknown")
 
 
 async def _bybit_signed_post(
     *, base_url: str, api_key: str, api_secret: str, path: str, body: Dict[str, object]
 ) -> Dict[str, object]:
     body_json = json.dumps(body, separators=(",", ":"))
-    timestamp = str(int(time.time() * 1000))
-    signature = _bybit_sign_request(timestamp, api_key, api_secret, body_json)
-    headers = {
-        "Content-Type": "application/json",
-        "X-BAPI-API-KEY": api_key,
-        "X-BAPI-SIGN": signature,
-        "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-RECV-WINDOW": BYBIT_RECV_WINDOW,
-        "X-BAPI-SIGN-TYPE": "2",
-    }
-    url = f"{base_url}{path}"
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.post(url, headers=headers, content=body_json)
-    _record_outbound_traffic(
-        "bybit",
-        bytes_sent=len(url) + len(body_json) + sum(len(str(v)) for v in headers.values()),
-        bytes_received=len(resp.content),
-        context=path,
-    )
-    resp.raise_for_status()
-    payload = resp.json()
-    ret_code = payload.get("retCode")
-    if ret_code not in (0, "0"):
-        raise ValueError(payload.get("retMsg") or "Bybit request failed")
-    return payload
+    normalized_base = _normalize_bybit_base_url(base_url)
+    recv_window = _bybit_recv_window_str()
+    url = f"{normalized_base}{path}"
+    for attempt in range(1, BYBIT_SIGNED_REQUEST_MAX_RETRIES + 1):
+        timestamp = await _bybit_timestamp_ms(
+            normalized_base, force_time_sync=(attempt > 1)
+        )
+        signature = _bybit_sign_request(
+            timestamp, api_key, api_secret, body_json, recv_window=recv_window
+        )
+        headers = {
+            "Content-Type": "application/json",
+            "X-BAPI-API-KEY": api_key,
+            "X-BAPI-SIGN": signature,
+            "X-BAPI-TIMESTAMP": timestamp,
+            "X-BAPI-RECV-WINDOW": recv_window,
+            "X-BAPI-SIGN-TYPE": "2",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(url, headers=headers, content=body_json)
+        except httpx.TimeoutException:
+            raise
+        _record_outbound_traffic(
+            "bybit",
+            bytes_sent=len(url) + len(body_json) + sum(len(str(v)) for v in headers.values()),
+            bytes_received=len(resp.content),
+            context=path,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+        ret_code = payload.get("retCode")
+        ret_msg = payload.get("retMsg") or "Bybit request failed"
+        if ret_code in (0, "0"):
+            return payload
+        if _bybit_timestamp_window_error(ret_code, ret_msg) and attempt < BYBIT_SIGNED_REQUEST_MAX_RETRIES:
+            BYBIT_LOGGER.warning(
+                "BYBIT_SIGNED_RETRY path=%s attempt=%s/%s reason=timestamp_window recv_window=%s",
+                path,
+                attempt,
+                BYBIT_SIGNED_REQUEST_MAX_RETRIES,
+                recv_window,
+            )
+            continue
+        diag = _extract_bybit_timestamp_diag(ret_msg)
+        raise ValueError(
+            f"Bybit signed POST failed path={path} retCode={ret_code} retMsg={ret_msg} recv_window={recv_window}"
+            + (f" {diag}" if diag else "")
+        )
+    raise ValueError(f"Bybit signed POST failed path={path} retCode=unknown retMsg=unknown")
 
 
 async def _fetch_bybit_positions_for_category(
@@ -8839,8 +9055,15 @@ def _log_webhook_event(request_id: str, stage: str, details: Dict[str, object]) 
     )
 
 
-def _bybit_sign_request(timestamp: str, api_key: str, api_secret: str, body: str) -> str:
-    payload = f"{timestamp}{api_key}{BYBIT_RECV_WINDOW}{body}"
+def _bybit_sign_request(
+    timestamp: str,
+    api_key: str,
+    api_secret: str,
+    body: str,
+    recv_window: Optional[str] = None,
+) -> str:
+    recv_window_value = str(recv_window or _bybit_recv_window_str())
+    payload = f"{timestamp}{api_key}{recv_window_value}{body}"
     return hmac.new(api_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
 
@@ -9049,23 +9272,13 @@ async def _fetch_bybit_positions(
     symbol: str,
     request_id: str,
 ) -> List[Dict[str, object]]:
-    params = {"category": category, "symbol": symbol}
-    query = "&".join(f"{k}={v}" for k, v in params.items())
-    path = "/v5/position/list"
-    timestamp = str(int(time.time() * 1000))
-    signature = _bybit_sign_request(timestamp, api_key, api_secret, query)
-    headers = {
-        "X-BAPI-API-KEY": api_key,
-        "X-BAPI-SIGN": signature,
-        "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-RECV-WINDOW": BYBIT_RECV_WINDOW,
-        "X-BAPI-SIGN-TYPE": "2",
-    }
-    url = f"{base_url}{path}?{query}"
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(url, headers=headers)
-    resp.raise_for_status()
-    payload = resp.json()
+    payload = await _bybit_signed_get(
+        base_url=base_url,
+        api_key=api_key,
+        api_secret=api_secret,
+        path="/v5/position/list",
+        params={"category": category, "symbol": symbol},
+    )
     _log_webhook_event(
         request_id,
         "position_list_response",
@@ -9075,7 +9288,7 @@ async def _fetch_bybit_positions(
             "result_count": len(payload.get("result", {}).get("list", [])),
         },
     )
-    if payload.get("retCode") != 0:
+    if payload.get("retCode") not in (0, "0"):
         raise ValueError(f"Bybit position lookup failed: {payload.get('retMsg')}")
     return payload.get("result", {}).get("list", [])
 
@@ -9137,23 +9350,13 @@ async def _set_bybit_trading_stop(
         if stop_loss is not None:
             body["stopLoss"] = str(stop_loss)
     _log_webhook_event(request_id, "trading_stop_request", {"payload": body})
-    body_json = json.dumps(body, separators=(",", ":"))
-    timestamp = str(int(time.time() * 1000))
-    signature = _bybit_sign_request(timestamp, api_key, api_secret, body_json)
-    headers = {
-        "Content-Type": "application/json",
-        "X-BAPI-API-KEY": api_key,
-        "X-BAPI-SIGN": signature,
-        "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-RECV-WINDOW": BYBIT_RECV_WINDOW,
-        "X-BAPI-SIGN-TYPE": "2",
-    }
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.post(
-            f"{base_url}/v5/position/trading-stop", headers=headers, content=body_json
-        )
-    resp.raise_for_status()
-    payload = resp.json()
+    payload = await _bybit_signed_post(
+        base_url=base_url,
+        api_key=api_key,
+        api_secret=api_secret,
+        path="/v5/position/trading-stop",
+        body=body,
+    )
     _log_webhook_event(
         request_id,
         "trading_stop_response",
@@ -9163,7 +9366,7 @@ async def _set_bybit_trading_stop(
             "result": payload.get("result", {}),
         },
     )
-    if payload.get("retCode") != 0:
+    if payload.get("retCode") not in (0, "0"):
         raise ValueError(f"Bybit trading-stop failed: {payload.get('retMsg')}")
     return payload.get("result", {})
 
@@ -9223,23 +9426,13 @@ async def _place_bybit_reduce_only_limit(
         "reduceOnly": True,
     }
     _log_webhook_event(request_id, "tp_limit_request", {"payload": body})
-    body_json = json.dumps(body, separators=(",", ":"))
-    timestamp = str(int(time.time() * 1000))
-    signature = _bybit_sign_request(timestamp, api_key, api_secret, body_json)
-    headers = {
-        "Content-Type": "application/json",
-        "X-BAPI-API-KEY": api_key,
-        "X-BAPI-SIGN": signature,
-        "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-RECV-WINDOW": BYBIT_RECV_WINDOW,
-        "X-BAPI-SIGN-TYPE": "2",
-    }
-    async with httpx.AsyncClient(timeout=10) as client:
-        response = await client.post(
-            f"{base_url}/v5/order/create", headers=headers, content=body_json
-        )
-    response.raise_for_status()
-    payload = response.json()
+    payload = await _bybit_signed_post(
+        base_url=base_url,
+        api_key=api_key,
+        api_secret=api_secret,
+        path="/v5/order/create",
+        body=body,
+    )
     _log_webhook_event(
         request_id,
         "tp_limit_response",
@@ -9249,7 +9442,7 @@ async def _place_bybit_reduce_only_limit(
             "result": payload.get("result", {}),
         },
     )
-    if payload.get("retCode") != 0:
+    if payload.get("retCode") not in (0, "0"):
         raise ValueError(f"Bybit TP limit order failed: {payload.get('retMsg')}")
     return payload.get("result", {})
 
@@ -9510,40 +9703,47 @@ async def _place_bybit_order(
     planned_target_price = _normalize_linear_price(planned_target_price)
     _log_webhook_event(request_id, "order_request", {"payload": body})
 
-    body_json = json.dumps(body, separators=(",", ":"))
-    timestamp = str(int(time.time() * 1000))
-    signature = _bybit_sign_request(timestamp, api_key, api_secret, body_json)
-    headers = {
-        "Content-Type": "application/json",
-        "X-BAPI-API-KEY": api_key,
-        "X-BAPI-SIGN": signature,
-        "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-RECV-WINDOW": BYBIT_RECV_WINDOW,
-        "X-BAPI-SIGN-TYPE": "2",
-    }
-
-    async with httpx.AsyncClient(timeout=10) as client:
-        response = await client.post(
-            f"{base_url}/v5/order/create", headers=headers, content=body_json
-        )
     data: Dict[str, object] = {}
-    response_status = int(getattr(response, "status_code", 200) or 200)
     try:
-        response_json = response.json()
-        if isinstance(response_json, dict):
-            data = response_json
-    except Exception:
-        data = {}
-    if response_status >= 400:
+        data = await _bybit_signed_post(
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            path="/v5/order/create",
+            body=body,
+        )
+        response_status = 200
+    except httpx.HTTPStatusError as exc:
+        response = exc.response
+        response_status = int(getattr(response, "status_code", 500) or 500)
+        try:
+            response_json = response.json()
+            if isinstance(response_json, dict):
+                data = response_json
+        except Exception:
+            data = {}
         raise BybitOrderRejected(
             ret_code=data.get("retCode"),
-            ret_msg=data.get("retMsg") or response.text,
+            ret_msg=data.get("retMsg") or str(exc),
             ret_ext_info=data.get("retExtInfo"),
             result=data.get("result"),
             request_body=body,
             http_status=response_status,
             response_body=data,
-        )
+        ) from exc
+    except Exception as exc:
+        message = str(exc)
+        ret_code_match = re.search(r"retCode=([^\\s]+)", message)
+        ret_msg_match = re.search(r"retMsg=(.+)$", message)
+        raise BybitOrderRejected(
+            ret_code=ret_code_match.group(1) if ret_code_match else None,
+            ret_msg=ret_msg_match.group(1) if ret_msg_match else message,
+            ret_ext_info=None,
+            result=data.get("result") if isinstance(data, dict) else None,
+            request_body=body,
+            http_status=200,
+            response_body=data if isinstance(data, dict) else None,
+        ) from exc
     _log_webhook_event(
         request_id,
         "order_response",
@@ -11727,7 +11927,7 @@ async def _poll_bybit_demo_closed_pnl() -> None:
         try:
             await _run_bybit_closed_pnl_sync(account_mode="demo", reason="scheduled")
         except Exception as exc:  # pragma: no cover - background task
-            _record_bybit_demo_sync_status(last_checked_at=_utc_now_iso(), last_error=str(exc))
+            _record_bybit_demo_sync_status(last_checked_at=_utc_now_iso())
             BYBIT_LOGGER.exception("Bybit demo closed PnL poll error: %s", exc)
         await asyncio.sleep(BYBIT_DEMO_CLOSED_PNL_POLL_SECONDS)
 
@@ -11800,14 +12000,26 @@ async def _run_bybit_closed_pnl_sync(
                 last_seen = max(0, now_ms - (lookback_seconds * 1000))
             start_time = max(last_seen - (backfill_seconds * 1000), earliest)
         end_time = now_ms
-        max_seen = await _sync_bybit_closed_pnl_window(
-            account_mode=mode,
-            base_url=base_url,
-            api_key=api_key,
-            api_secret=api_secret,
-            start_time=start_time,
-            end_time=end_time,
-        )
+        try:
+            max_seen = await _sync_bybit_closed_pnl_window(
+                account_mode=mode,
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                start_time=start_time,
+                end_time=end_time,
+            )
+        except Exception as exc:
+            if mode == "demo":
+                _record_bybit_demo_sync_status(
+                    last_checked_at=_utc_now_iso(),
+                    last_error=_build_bybit_error_diagnostic(
+                        base_url=base_url,
+                        path="/v5/order/history",
+                        error_text=str(exc),
+                    ),
+                )
+            raise
         previous_seen = int(last_seen or 0)
         _BYBIT_CLOSED_PNL_LAST_SEEN[mode] = max(max_seen, previous_seen)
         _persist_bybit_closed_pnl_last_seen()
@@ -12258,20 +12470,9 @@ async def fetch_bybit_balance(
     params: Dict[str, str] = {"accountType": account_type}
     if account_mode != "demo":
         params["coin"] = coin
-    query = "&".join(f"{k}={v}" for k, v in params.items())
     path = "/v5/account/wallet-balance"
+    query = _build_bybit_query(params)
 
-    timestamp = str(int(time.time() * 1000))
-    signature = _bybit_sign_request(timestamp, api_key, api_secret, query)
-    headers = {
-        "X-BAPI-API-KEY": api_key,
-        "X-BAPI-SIGN": signature,
-        "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-RECV-WINDOW": BYBIT_RECV_WINDOW,
-        "X-BAPI-SIGN-TYPE": "2",
-    }
-
-    url = f"{base_url}{path}?{query}"
     BALANCE_LOGGER.info(
         "BALANCE_DIAG request mode=%s env=%s base_url=%s path=%s query=%s key_source=%s",
         account_mode,
@@ -12282,9 +12483,13 @@ async def fetch_bybit_balance(
         key_source,
     )
 
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(url, headers=headers)
-    payload = resp.json()
+    payload = await _bybit_signed_get(
+        base_url=base_url,
+        api_key=api_key,
+        api_secret=api_secret,
+        path=path,
+        params=params,
+    )
     ret_code = payload.get("retCode")
     ret_msg = payload.get("retMsg")
     results = payload.get("result", {}).get("list", [])
@@ -12311,7 +12516,7 @@ async def fetch_bybit_balance(
 
     BALANCE_LOGGER.info(
         "BALANCE_DIAG response http_status=%s retCode=%s retMsg=%s coins=%s equity_fields=%s",
-        resp.status_code,
+        200,
         ret_code,
         ret_msg,
         coin_entries,
