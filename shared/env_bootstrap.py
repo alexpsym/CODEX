@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Iterable
 
@@ -28,16 +29,35 @@ except Exception:  # pragma: no cover - fallback in minimal test envs
             loaded = True
         return loaded
 
+DEFAULT_MASTER_ENV_DIR = Path(r"C:\Users\User\Documents\GPT")
 DEFAULT_MASTER_ENV_FILE = Path(r"C:\Users\User\Documents\GPT\env.env")
-DEFAULT_MASTER_ENV_DIR = DEFAULT_MASTER_ENV_FILE.parent
 DEFAULT_ENV_FILENAMES = ("env.env", ".env", "scanner.env", "master.env")
 
 _ENV_LOADED = False
 _ENV_INFO: dict[str, str] = {}
 
 
+def _parse_protected_keys(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    keys: list[str] = []
+    seen: set[str] = set()
+    for part in str(raw).split(","):
+        key = part.strip()
+        if not key:
+            continue
+        folded = key.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        keys.append(key)
+    return keys
+
+
 def _as_path(raw: str, *, base: Path) -> Path:
     p = Path(raw).expanduser()
+    if re.match(r"^[A-Za-z]:[\\/]", str(raw or "").strip()):
+        return Path(str(raw).strip())
     if not p.is_absolute():
         p = (base / p).resolve()
     return p
@@ -56,7 +76,10 @@ def _resolve_paths(
         candidates.append(explicit_file)
     else:
         for filename in DEFAULT_ENV_FILENAMES:
-            candidates.append((env_dir / filename).resolve())
+            if re.match(r"^[A-Za-z]:[\\/]", str(env_dir)):
+                candidates.append(Path(f"{env_dir}\\{filename}"))
+            else:
+                candidates.append((env_dir / filename).resolve())
 
     selected = next((p for p in candidates if p.exists()), None)
     repo_fallback = (root / ".env").resolve()
@@ -81,9 +104,17 @@ def load_master_env(*, base_dir: Path | None = None, force_reload: bool = False)
     if repo_fallback.exists() and not explicit_missing:
         repo_fallback_used = bool(load_dotenv(repo_fallback, override=False))
 
+    protected_keys = _parse_protected_keys(os.getenv("MASTER_ENV_PROTECTED_KEYS"))
+    protected_values = {key: os.environ.get(key) for key in protected_keys}
+
     external_loaded = False
     if external_env is not None and external_env.exists():
         external_loaded = bool(load_dotenv(external_env, override=True))
+    for key, value in protected_values.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
 
     _ENV_INFO = {
         "configured_dir": str(env_dir),
@@ -93,6 +124,7 @@ def load_master_env(*, base_dir: Path | None = None, force_reload: bool = False)
         "repo_fallback_used": "1" if repo_fallback_used else "0",
         "repo_env": str(repo_fallback),
         "checked_files": _paths_csv(candidates),
+        "protected_keys": ",".join(protected_keys),
     }
     _ENV_LOADED = True
     return dict(_ENV_INFO)

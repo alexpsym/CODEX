@@ -107,3 +107,21 @@ def test_readme_documents_repo_root_output_and_external_flow() -> None:
     assert ".\\Trading Journal.exe" in readme
     assert "outside this repo" in readme
     assert "ExtractLatestCodexMaster.bat" in readme
+
+
+def test_run_trading_journal_local_launcher_enforces_local_source_mode() -> None:
+    launcher = (ROOT / "run_trading_journal_local.bat").read_text(encoding="utf-8")
+    assert 'set "TRADING_JOURNAL_SOURCE=local"' in launcher
+    assert 'set "TRADING_JOURNAL_ENABLE_LOCAL_IMPORT=1"' in launcher
+    assert 'set "TRADING_JOURNAL_LOCAL_DIR=C:\\Users\\User\\Documents\\TRADING"' in launcher
+    assert 'set "DROPBOX_SYNC_ENABLED=0"' in launcher
+    assert 'set "LOCAL_STATE_ONLY=1"' in launcher
+    assert "MASTER_ENV_PROTECTED_KEYS" in launcher
+    assert "TRADING_JOURNAL_SOURCE" in launcher
+    assert "DROPBOX_SYNC_ENABLED" in launcher
+
+
+def test_run_local_master_control_keeps_dropbox_sync_configurable() -> None:
+    launcher = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
+    assert 'if not defined DROPBOX_SYNC_ENABLED set "DROPBOX_SYNC_ENABLED=1"' in launcher
+    assert 'set "DROPBOX_SYNC_ENABLED=0"' not in launcher
