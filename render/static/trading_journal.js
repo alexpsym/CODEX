@@ -137,6 +137,9 @@
   const setStatus = (msg) => { status.textContent = msg || ''; };
   const MISSING_XLRD_STATUS = 'Sync failed: Local .xls journal workbooks require xlrd. Restart the journal launcher so dependencies can be installed automatically.';
   const isMissingXlrdError = (value) => String(value ?? '').toUpperCase().includes('MISSING_XLRD_FOR_XLS');
+  const diagnosticsErrorText = (value) => String(value?.message ?? value ?? '').trim();
+  const isBalanceAnchorWarning = (value) => diagnosticsErrorText(value).toLowerCase().includes('missing balance anchor');
+  const isParseSyncError = (value) => diagnosticsErrorText(value).length > 0 && !isBalanceAnchorWarning(value);
   const formatSyncFailureStatus = (err) => {
     const raw = String(err?.message || err || '');
     if (isMissingXlrdError(raw) || raw.toLowerCase().includes('local .xls journal workbooks require xlrd')) {
@@ -1217,7 +1220,9 @@
       const actualRowsTotal = Number(journal?.count ?? nextRows.length ?? 0);
       const diagnosticRowsTotal = Number(diagnostics?.rows_total || 0);
       const rowsTotal = Math.max(actualRowsTotal, diagnosticRowsTotal);
-      const hasErrors = Array.isArray(diagnostics?.errors) && diagnostics.errors.length > 0;
+      const diagnosticsErrors = Array.isArray(diagnostics?.errors) ? diagnostics.errors : [];
+      const hasParseSyncErrors = diagnosticsErrors.some((err) => isParseSyncError(err));
+      const hasBalanceAnchorWarnings = diagnosticsErrors.some((err) => isBalanceAnchorWarning(err));
       const workbookSourcesSeen = Number(
         diagnostics?.workbook_sources_seen
         ?? (Number(diagnostics?.local_workbooks_seen || 0) + Number(diagnostics?.dropbox_workbooks_seen || 0))
@@ -1240,9 +1245,10 @@
         } else if (journal?.warning) {
           setStatus(String(journal.warning));
         } else
-        if (hasErrors || rowsTotal === 0 || lowRowCount || shouldWarnZeroFx) {
+        if (hasParseSyncErrors || hasBalanceAnchorWarnings || rowsTotal === 0 || lowRowCount || shouldWarnZeroFx) {
           const reasons = [];
-          if (hasErrors) reasons.push('parse/sync errors');
+          if (hasParseSyncErrors) reasons.push('parse/sync errors');
+          if (hasBalanceAnchorWarnings) reasons.push('balance anchor missing');
           if (rowsTotal === 0) reasons.push('no journal rows loaded');
           if (lowRowCount) reasons.push('suspiciously low row count');
           if (shouldWarnZeroFx) reasons.push('zero FX rows');
@@ -1343,6 +1349,7 @@
         throw new Error(syncResult?.error || syncResult?.message || 'Sync failed');
       }
       const diagnosticsErrors = Array.isArray(syncResult?.result?.diagnostics?.errors) ? syncResult.result.diagnostics.errors : [];
+      const parseSyncErrors = diagnosticsErrors.filter((err) => isParseSyncError(err));
       const missingXlrd = diagnosticsErrors.some((err) => isMissingXlrdError(err?.code));
       if (missingXlrd) {
         throw new Error(MISSING_XLRD_STATUS);
@@ -1353,9 +1360,9 @@
       }
       const loadedRows = Number(state?.rows?.length || 0);
       const warnings = Array.isArray(syncResult?.result?.warnings) ? syncResult.result.warnings : [];
-      const parseFailure = diagnosticsErrors.length > 0 || Number(syncResult?.result?.rows_imported || 0) <= 0;
-      if (missingXlrd || (loadedRows <= 0 && parseFailure)) {
-        throw new Error(compactErrorMessage(diagnosticsErrors[0], 'Sync failed to import workbook rows'));
+      const importedRows = Number(syncResult?.result?.rows_imported || 0);
+      if (parseSyncErrors.length > 0 || (loadedRows <= 0 && importedRows <= 0)) {
+        throw new Error(compactErrorMessage(parseSyncErrors[0] ?? diagnosticsErrors[0], 'Sync failed to import workbook rows'));
       }
       const suffix = warnings.length ? ` (warnings: ${warnings.join('; ')})` : '';
       setStatus(`Sync complete: ${loadedRows} rows loaded${suffix}`);
