@@ -286,24 +286,27 @@
     let dotTitle = processTitle;
     if (isMonitor) {
       dotState = processRunning ? 'running' : (processStarting ? 'starting' : 'stopped');
-      dotTitle = processRunning ? 'Scanner running' : (processStarting ? 'Scanner starting' : 'Scanner stopped');
+      processTitle = processRunning ? 'Scanner running' : (processStarting ? 'Scanner starting' : 'Scanner stopped');
       if (!processRunning && stopReason) {
-        dotTitle = `Scanner stopped: ${stopReason}`;
+        processTitle = `Scanner stopped: ${stopReason}`;
       }
       if (typeof script.status_detail === 'string' && script.status_detail.trim()) {
-        dotTitle = script.status_detail.trim();
+        processTitle = script.status_detail.trim();
       }
-    } else {
-      if (isActiveMainView) {
-        if (activeMainLoadState === 'loading') workspaceTitle = 'Workspace loading';
-        else if (activeMainLoadState === 'loaded') workspaceTitle = 'Workspace loaded';
-        else if (activeMainLoadState === 'error') workspaceTitle = 'Workspace failed to load';
-        else workspaceTitle = 'Workspace selected';
-      } else if (isDashboardMainView(script)) {
-        workspaceTitle = 'Workspace not selected';
-      }
-      dotTitle = workspaceTitle ? `${processTitle}; ${workspaceTitle}` : processTitle;
+      dotTitle = processTitle;
     }
+
+    if (isActiveMainView) {
+      dotState = 'running';
+      workspaceTitle = activeMainLoadState === 'loading'
+        ? 'Open in workspace: loading'
+        : activeMainLoadState === 'error'
+          ? 'Open in workspace: load failed'
+          : 'Open in workspace';
+    } else if (isDashboardMainView(script)) {
+      workspaceTitle = 'Workspace not selected';
+    }
+    dotTitle = workspaceTitle ? `${workspaceTitle}; ${processTitle}` : processTitle;
     dot.className = `status-dot ${dotState}`;
     dot.title = dotTitle;
     dot.setAttribute('aria-label', dotTitle);
@@ -329,8 +332,8 @@
         setStatus('Loading scripts...');
         const scripts = await fetchJson('/scripts');
         scriptsState = Array.isArray(scripts) ? scripts : [];
-        renderScripts();
         syncWorkspaceSelectionFromScripts();
+        renderScripts();
         setStatus(`Updated ${new Date().toLocaleTimeString()}`);
       } catch (err) {
         console.error(err);

@@ -34,11 +34,19 @@ def test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls() -> No
     assert "if (isFxWeekend && processRunning && !fxEnabled) {" in js
     assert "if (dotState === 'stopped' && stopReason) {" in js
     assert "const isMonitor = String(script.name || '').trim().toLowerCase() === 'monitor';" in js
-    assert "dotTitle = processRunning ? 'Scanner running' : (processStarting ? 'Scanner starting' : 'Scanner stopped');" in js
-    assert "dotTitle = `Scanner stopped: ${stopReason}`;" in js
+    assert "processTitle = processRunning ? 'Scanner running' : (processStarting ? 'Scanner starting' : 'Scanner stopped');" in js
+    assert "processTitle = `Scanner stopped: ${stopReason}`;" in js
     assert "if (!processRunning && stopReason) {" in js
     assert "const isActiveMainView = isDashboardMainView(script) && String(script.name) === activeMainScriptName;" in js
     assert "if (isActiveMainView) {" in js
+    assert "dotState = 'running';" in js
+    assert "workspaceTitle = activeMainLoadState === 'loading'" in js
+    assert "'Open in workspace: loading'" in js
+    assert "'Open in workspace: load failed'" in js
+    assert "'Open in workspace'" in js
+    assert "dotTitle = workspaceTitle ? `${workspaceTitle}; ${processTitle}` : processTitle;" in js
+    assert "syncWorkspaceSelectionFromScripts();" in js
+    assert "syncWorkspaceSelectionFromScripts();\n        renderScripts();" in js
     assert "if (isMonitor) {" in js
     assert "dotTitle = 'Inactive view';" not in js
     assert "dotTitle = 'Active view loaded';" not in js
