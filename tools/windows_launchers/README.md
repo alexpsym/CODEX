@@ -2,22 +2,15 @@
 
 These `.exe` files are **launchers only**. They do not replace the existing batch startup logic.
 
-## What gets built
-
-This build process tries to create:
-
-- `dist/windows-launchers/Local Trading Tools.exe` → launches `run_local_master_control.bat`
-- `dist/windows-launchers/Trading Journal.exe` → launches `run_trading_journal_local.bat`
-
 ## Build commands
 
-Recommended:
+Recommended build command from repo root:
 
 ```bat
 .\build_windows_launchers.bat
 ```
 
-PowerShell alternative from repo root:
+PowerShell alternative:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\tools\windows_launchers\build_windows_launchers.ps1"
@@ -29,6 +22,11 @@ Do not run:
 - `powershell/powershell.exe Bypass -File tools/windows_launchers/build_windows_launchers.ps1`
 - `-powershell/powershell.exe Bypass -File tools/windows_launchers/build_windows_launchers.ps1`
 
+## What gets built
+
+- `.\Local Trading Tools.exe` -> launches `run_local_master_control.bat`
+- `.\Trading Journal.exe` -> launches `run_trading_journal_local.bat`
+
 ## Build order and fallback behavior
 
 The script builds in this order:
@@ -36,27 +34,14 @@ The script builds in this order:
 1. `csc.exe` (PATH + Microsoft.NET Framework locations)
 2. `Add-Type` C# compilation
 3. `iexpress.exe`
-4. `.lnk` shortcut fallback if `.exe` generation fails
+4. `.lnk` shortcut fallback as a last resort
 
-Notes:
+## Important
 
-- IExpress-built launchers contain the current repo path and must be rebuilt if the repo folder moves.
-- Shortcut fallback creates `.lnk` files only and does **not** count as successful `.exe` generation.
-- If `.exe` files are missing at the end, the build exits non-zero (no fake success).
-
-## Important behavior
-
-- The `.bat` files remain the source of truth for startup behavior.
-- Do **not** delete the `.bat` files.
-- Keep launcher `.exe` files beside the repo, or only copy them where the target `.bat` files are still reachable.
-- Do **not** move the `.exe` files away from the repo unless launcher path resolution to the target `.bat` still works.
-
-## Recommended pin-to-Start flow
-
-1. Build the launchers.
-2. Optionally create Windows shortcuts to the generated `.exe` files.
-3. Pin each shortcut (or each `.exe`) to Start.
-
-## Failure behavior
-
-If a target `.bat` file cannot be found, the launcher prints a clear error and exits non-zero.
+- The `.bat` files remain the source of truth.
+- Do not delete `run_local_master_control.bat` or `run_trading_journal_local.bat`.
+- The final `.exe` launchers are placed at repo root so the external `ExtractLatestCodexMaster.bat` can verify them.
+- The external `ExtractLatestCodexMaster.bat` is outside this repo and should call `.\build_windows_launchers.bat` after extraction.
+- If IExpress is used, launcher executables may contain the current repo path and should be rebuilt if the repo folder is moved.
+- `.lnk` fallback does **not** count as successful `.exe` generation.
+- If both repo-root `.exe` files are not present, the build exits non-zero.
