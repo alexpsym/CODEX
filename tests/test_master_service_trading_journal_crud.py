@@ -621,3 +621,106 @@ def test_manual_sync_calls_bybit_without_manual_cooldown(monkeypatch: pytest.Mon
     asyncio.run(master_service._run_trading_journal_sync_job())
     assert len(calls) == 2
     assert all(call.get("enforce_manual_cooldown") is False for call in calls)
+
+
+def test_balance_timeline_resets_on_cashflow_and_applies_later_non_test_pnl():
+    rows = [
+        {"id": "t1", "row_type": "trade", "account": "OANDA DEMO", "close_time": "2026-01-01T00:01:00Z", "net_profit": 10.0},
+        {"id": "t2", "row_type": "trade", "account": "OANDA DEMO", "close_time": "2026-01-01T00:02:00Z", "net_profit": -5.0},
+        {"id": "t3", "row_type": "trade", "account": "OANDA DEMO", "close_time": "2026-01-01T00:04:00Z", "net_profit": 20.0},
+    ]
+    ledger = {
+        "OANDA DEMO": [
+            {"account": "OANDA DEMO", "date": "2026-01-01T00:00:00Z", "new_balance": 1000.0, "currency": "AUD"},
+            {"account": "OANDA DEMO", "date": "2026-01-01T00:03:00Z", "new_balance": 500.0, "currency": "AUD"},
+        ]
+    }
+    timeline = master_service._build_journal_balance_timelines(rows, ledger, [])
+    balances = timeline["balances"]
+    assert balances[0]["balance"] == pytest.approx(520.0)
+
+
+def test_first_trade_pnl_is_not_double_counted_from_cashflow_anchor():
+    rows = [
+        {"id": "t1", "row_type": "trade", "account": "BYBIT", "close_time": "2026-01-01T00:01:00Z", "net_profit": 7.0},
+    ]
+    ledger = {"BYBIT": [{"account": "BYBIT", "date": "2026-01-01T00:00:00Z", "new_balance": 100.0, "currency": "USDT"}]}
+    timeline = master_service._build_journal_balance_timelines(rows, ledger, [])
+    trade = timeline["rows"][0]
+    assert trade["analysis_balance_after_trade"] == pytest.approx(107.0)
+
+
+def test_final_cashflow_after_final_trade_overrides_current_balance():
+    rows = [
+        {"id": "t1", "row_type": "trade", "account": "PEPPERSTONE DEMO", "close_time": "2026-01-01T00:01:00Z", "net_profit": -95.36},
+    ]
+    ledger = {
+        "PEPPERSTONE DEMO": [
+            {"account": "PEPPERSTONE DEMO", "date": "2026-01-01T00:00:00Z", "new_balance": 0.0, "currency": "AUD"},
+            {"account": "PEPPERSTONE DEMO", "date": "2026-01-01T00:02:00Z", "new_balance": 0.0, "currency": "AUD"},
+        ]
+    }
+    timeline = master_service._build_journal_balance_timelines(rows, ledger, [])
+    assert timeline["balances"][0]["balance"] == pytest.approx(0.0)
+
+
+def test_parse_excel_balance_uses_latest_trade_timestamp_not_bottom_row(monkeypatch: pytest.MonkeyPatch):
+    df = master_service.pd.DataFrame(
+        [
+            {"symbol": "BTCUSDT", "close_time": "2026-04-28T10:00:00Z", "balance_after_trade": 380.97753999, "currency": "USDT"},
+            {"symbol": "BTCUSDT", "close_time": "2026-04-01T10:00:00Z", "balance_after_trade": 403.72484338, "currency": "USDT"},
+        ]
+    )
+
+    class FakeExcel:
+        sheet_names = ["Sheet1"]
+
+    monkeypatch.setattr(master_service.pd, "ExcelFile", lambda *_args, **_kwargs: FakeExcel())
+    monkeypatch.setattr(master_service.pd, "read_excel", lambda *_args, **_kwargs: df)
+    _rows, balance = master_service._parse_excel_account_workbook("Bybit Demo.xlsx", "/tmp/Bybit Demo.xlsx", b"x")
+    assert balance is not None
+    assert balance["balance"] == pytest.approx(380.97753999)
+
+
+def test_balance_timeline_merges_alias_accounts_by_normalized_key():
+    rows = [
+        {"id": "t1", "row_type": "trade", "account": "OANDA Demo", "account_label": "OANDA Demo", "close_time": "2026-01-01T00:01:00Z", "net_profit": 3.0},
+    ]
+    ledger = {"OANDA DEMO": [{"account": "OANDA DEMO", "date": "2026-01-01T00:00:00Z", "new_balance": 100.0, "currency": "AUD"}]}
+    timeline = master_service._build_journal_balance_timelines(rows, ledger, [])
+    assert len(timeline["balances"]) == 1
+    assert timeline["balances"][0]["balance"] == pytest.approx(103.0)
+
+
+def test_trading_journal_balances_snapshot_expected_values(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_load_trading_journal_view_snapshot", lambda: None)
+    monkeypatch.setattr(master_service, "_journal_source_fingerprint", lambda: {"source_mode": "local", "files": []})
+    monkeypatch.setattr(master_service, "_build_trading_journal_diagnostics_snapshot", lambda: {"errors": []})
+    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(master_service, "_get_excel_account_balances", lambda: [])
+    monkeypatch.setattr(
+        master_service,
+        "_get_trading_journal_rows",
+        lambda: [
+            {"id": "bybit:t1", "row_type": "trade", "account": "BYBIT", "close_time": "2026-01-01T00:01:00Z", "net_profit": 0.0},
+            {"id": "oanda-live:t1", "row_type": "trade", "account": "OANDA LIVE", "close_time": "2026-01-01T00:01:00Z", "net_profit": 0.0},
+            {"id": "pep-live:t1", "row_type": "trade", "account": "PEPPERSTONE LIVE", "close_time": "2026-01-01T00:01:00Z", "net_profit": 0.0},
+            {"id": "pep-demo:t1", "row_type": "trade", "account": "PEPPERSTONE DEMO", "close_time": "2026-01-01T00:01:00Z", "net_profit": 0.0},
+        ],
+    )
+    monkeypatch.setattr(
+        master_service,
+        "_load_cashflows_for_active_journal_source",
+        lambda _state: {
+            "BYBIT": [{"account": "BYBIT", "date": "2026-01-01T00:00:00Z", "new_balance": 224.87769878, "currency": "USDT"}],
+            "OANDA LIVE": [{"account": "OANDA LIVE", "date": "2026-01-01T00:00:00Z", "new_balance": 1479.31, "currency": "AUD"}],
+            "PEPPERSTONE LIVE": [{"account": "PEPPERSTONE LIVE", "date": "2026-01-01T00:00:00Z", "new_balance": 2508.73, "currency": "AUD"}],
+            "PEPPERSTONE DEMO": [{"account": "PEPPERSTONE DEMO", "date": "2026-01-01T00:00:00Z", "new_balance": 0.0, "currency": "AUD"}],
+        },
+    )
+    snapshot = master_service._build_trading_journal_view_snapshot(force=True)
+    by_label = {str(i.get("label")): i for i in snapshot.get("balances", [])}
+    assert by_label["BYBIT"]["balance"] == pytest.approx(224.87769878)
+    assert by_label["OANDA LIVE"]["balance"] == pytest.approx(1479.31)
+    assert by_label["PEPPERSTONE LIVE"]["balance"] == pytest.approx(2508.73)
+    assert by_label["PEPPERSTONE DEMO"]["balance"] == pytest.approx(0.0)
