@@ -256,6 +256,7 @@ def test_env_bootstrap_default_dir_and_checked_files_order(monkeypatch: pytest.M
 
     monkeypatch.delenv("MASTER_ENV_DIR", raising=False)
     monkeypatch.delenv("MASTER_ENV_FILE", raising=False)
+    monkeypatch.delenv("MASTER_ENV_PROTECTED_KEYS", raising=False)
     info = env_bootstrap.load_master_env(force_reload=True)
     assert info["configured_dir"] == r"C:\Users\User\Documents\GPT"
     checked_files = info["checked_files"].split(";")
@@ -263,6 +264,24 @@ def test_env_bootstrap_default_dir_and_checked_files_order(monkeypatch: pytest.M
     assert checked_files[1] == r"C:\Users\User\Documents\GPT\.env"
     assert checked_files[2] == r"C:\Users\User\Documents\GPT\scanner.env"
     assert checked_files[3] == r"C:\Users\User\Documents\GPT\master.env"
+
+
+def test_env_bootstrap_protected_keys_preserve_existing_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from shared import env_bootstrap
+
+    env_dir = tmp_path / "envs"
+    env_dir.mkdir()
+    env_file = env_dir / "env.env"
+    env_file.write_text("TRADING_JOURNAL_SOURCE=dropbox\nDROPBOX_SYNC_ENABLED=1\n", encoding="utf-8")
+    monkeypatch.setenv("MASTER_ENV_DIR", str(env_dir))
+    monkeypatch.delenv("MASTER_ENV_FILE", raising=False)
+    monkeypatch.setenv("TRADING_JOURNAL_SOURCE", "local")
+    monkeypatch.setenv("DROPBOX_SYNC_ENABLED", "0")
+    monkeypatch.setenv("MASTER_ENV_PROTECTED_KEYS", "TRADING_JOURNAL_SOURCE,DROPBOX_SYNC_ENABLED")
+    info = env_bootstrap.load_master_env(base_dir=tmp_path, force_reload=True)
+    assert info["protected_keys"] == "TRADING_JOURNAL_SOURCE,DROPBOX_SYNC_ENABLED"
+    assert os.environ.get("TRADING_JOURNAL_SOURCE") == "local"
+    assert os.environ.get("DROPBOX_SYNC_ENABLED") == "0"
 
 
 def test_run_scanner_local_bat_sets_explicit_env_file() -> None:

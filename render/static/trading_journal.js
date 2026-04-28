@@ -135,6 +135,23 @@
   ];
 
   const setStatus = (msg) => { status.textContent = msg || ''; };
+  const compactErrorMessage = (detail, fallback = 'Request failed') => {
+    const pick = (obj, keys) => {
+      for (const key of keys) {
+        const value = obj?.[key];
+        if (typeof value === 'string' && value.trim()) return value.trim();
+      }
+      return '';
+    };
+    let msg = '';
+    if (typeof detail === 'string') msg = detail.trim();
+    else if (detail && typeof detail === 'object') {
+      msg = pick(detail, ['message', 'error', 'warning']) || pick(detail?.detail || {}, ['message', 'error', 'warning']);
+      if (!msg && typeof detail?.detail === 'string') msg = detail.detail.trim();
+    }
+    if (!msg) msg = fallback;
+    return String(msg).replace(/\s+/g, ' ').trim().slice(0, 300);
+  };
   const isoToInput = (v) => {
     if (!v) return '';
     const d = new Date(v);
@@ -158,8 +175,13 @@
   async function fetchJson(url, options = {}) {
     const res = await fetch(url, { cache: 'no-store', ...options });
     const text = await res.text();
-    if (!res.ok) throw new Error(`${res.status} ${text}`);
-    try { return JSON.parse(text); } catch { return {}; }
+    let payload = {};
+    try { payload = text ? JSON.parse(text) : {}; } catch {}
+    if (!res.ok) {
+      const detail = payload?.detail ?? payload;
+      throw new Error(`${res.status} ${compactErrorMessage(detail, text || res.statusText || 'Request failed')}`);
+    }
+    return payload;
   }
 
   function isAbortError(err, signal) {
@@ -263,13 +285,22 @@
     syncWatchTimer = setTimeout(poll, 800);
   }
 
+  function backgroundSyncLabel(syncStatus) {
+    const mode = String(syncStatus?.source_mode || '').toLowerCase();
+    const usesDropbox = Boolean(syncStatus?.uses_dropbox_journal_import);
+    if (mode === 'local') return 'Background local journal import running…';
+    if (mode === 'dropbox' || usesDropbox) return 'Background Dropbox journal import running…';
+    if (mode === 'both' || mode === 'auto') return 'Background journal source sync running…';
+    return 'Background journal cache build running…';
+  }
+
   async function triggerBackgroundSync() {
     try {
       const st = await fetchJson('/api/trading-journal/sync/status');
       if (!st?.running) {
         await fetchJson('/api/trading-journal/sync', { method: 'POST' });
       }
-      setStatus('Background Dropbox sync running…');
+      setStatus(backgroundSyncLabel(st));
       watchSyncCompletion();
     } catch (e) {
       console.warn('Background sync skipped:', e);
@@ -1077,7 +1108,7 @@
   }
 
   async function load({ silent = false, skipAutoSync = false, preserveStatus = false, statusOverride = '' } = {}) {
-    if (loadInFlight) return;
+    if (loadInFlight) return { ok: false, error: 'Load already in progress' };
     loadInFlight = true;
     const controller = new AbortController();
     activeAbort = controller;
@@ -1110,7 +1141,7 @@
         await syncStatusPromise;
       }
 
-      // Auto-sync from Dropbox on load (throttled) so Excel workbooks are picked up even when
+      // Auto-sync from configured journal sources on load (throttled) so workbook updates are picked up even when
       // live webhook trades already exist. This runs in the background and does not block UI load.
       if (!silent && !skipAutoSync) {
         try {
@@ -1220,14 +1251,17 @@
           fetched_at: new Date().toISOString(),
         });
       }
+      return { ok: true, rowsLoaded: nextRows.length, journal, diagnostics, balances };
     } catch (e) {
       if (isAbortError(e, signal)) {
         if (ownsVisibleOverlay && loading?.style?.display === 'flex') hideLoading();
-        return;
+        return { ok: false, error: 'Request aborted' };
       }
       console.error(e);
       if (ownsVisibleOverlay && loading?.style?.display === 'flex') hideLoading();
-      if (!preserveStatus) setStatus(`Load failed: ${e.message}`);
+      const errorMsg = compactErrorMessage(e?.message || e, 'Load failed');
+      if (!preserveStatus) setStatus(`Load failed: ${errorMsg}`);
+      return { ok: false, error: errorMsg };
     } finally {
       loadInFlight = false;
       if (activeAbort === controller) activeAbort = null;
@@ -1293,14 +1327,23 @@
       if (syncResult?.ok === false) {
         throw new Error(syncResult?.error || syncResult?.message || 'Sync failed');
       }
-      await load({ skipAutoSync: true, preserveStatus: true });
+      const loadResult = await load({ skipAutoSync: true, preserveStatus: true });
+      if (loadResult?.ok === false) {
+        throw new Error(`Sync finished but reload failed: ${loadResult?.error || 'unknown error'}`);
+      }
       const loadedRows = Number(state?.rows?.length || 0);
       const warnings = Array.isArray(syncResult?.result?.warnings) ? syncResult.result.warnings : [];
+      const diagnosticsErrors = Array.isArray(syncResult?.result?.diagnostics?.errors) ? syncResult.result.diagnostics.errors : [];
+      const missingXlrd = diagnosticsErrors.some((err) => String(err?.code || '').toUpperCase() === 'MISSING_XLRD_FOR_XLS');
+      const parseFailure = diagnosticsErrors.length > 0 || Number(syncResult?.result?.rows_imported || 0) <= 0;
+      if (missingXlrd || (loadedRows <= 0 && parseFailure)) {
+        throw new Error(compactErrorMessage(diagnosticsErrors[0], 'Sync failed to import workbook rows'));
+      }
       const suffix = warnings.length ? ` (warnings: ${warnings.join('; ')})` : '';
       setStatus(`Sync complete: ${loadedRows} rows loaded${suffix}`);
     } catch (e) {
       hideLoading();
-      setStatus(`Sync failed: ${e.message}`);
+      setStatus(`Sync failed: ${compactErrorMessage(e?.message || e, 'Sync failed')}`);
     } finally {
       state.manualSyncInFlight = false;
       scheduleAutoRefresh();

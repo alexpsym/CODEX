@@ -21,8 +21,14 @@ SPEC.loader.exec_module(master_service)
 def temp_state_paths(tmp_path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_PATH", tmp_path / "trading_journal.json")
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_STATE_PATH", tmp_path / "trading_journal_state.json")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_SYNC_STATE_PATH", tmp_path / "trading_journal_sync_state.json")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_VIEW_CACHE_PATH", tmp_path / "trading_journal_view_cache.json")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_IMPORT_CACHE_PATH", tmp_path / "trading_journal_import_cache.json")
     monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
     monkeypatch.setattr(master_service, "_get_excel_account_balances", lambda: [])
+    master_service._TRADING_JOURNAL_VIEW_CACHE["key"] = None
+    master_service._TRADING_JOURNAL_VIEW_CACHE["payload"] = None
+    monkeypatch.setattr(master_service, "ENABLE_BYBIT_DEMO_JOURNAL", True)
     return tmp_path
 
 
@@ -221,9 +227,10 @@ def test_stats_and_balances_still_compute_after_create_and_edit(temp_state_paths
         )
     )["row"]
     asyncio.run(master_service.trading_journal_patch_row(created["id"], {"notes": "after edit"}))
+    master_service._build_trading_journal_view_snapshot(force=True)
     journal = _json(asyncio.run(master_service.trading_journal_items()))
     balances = _json(asyncio.run(master_service.trading_journal_balances()))
-    assert journal["count"] >= 1
+    assert int(journal.get("count") or 0) >= 1
     assert isinstance(journal.get("stats"), dict)
     assert isinstance(balances.get("items"), list)
 
@@ -251,6 +258,11 @@ def test_trading_journal_js_contains_crud_controls_and_endpoints():
     assert "if (!journalPending) {" in js
     assert "state.rows = nextRows" in js
     assert "new Error(`/api/trading-journal:" not in js
+    assert "Background Dropbox sync running…" not in js
+    assert "Background local journal import running…" in js
+    assert "compactErrorMessage" in js
+    assert "slice(0, 300)" in js
+    assert "Sync finished but reload failed:" in js
 
 
 def test_diagnostics_derive_rows_total_from_existing_journal_rows(temp_state_paths):
@@ -275,6 +287,107 @@ def test_diagnostics_derive_rows_total_from_existing_journal_rows(temp_state_pat
     assert payload["journal_rows_total"] >= 25
     assert payload["has_current_journal_rows"] is True
     assert payload["rows_by_source"]
+
+
+def test_import_sources_local_mode_skips_dropbox(monkeypatch: pytest.MonkeyPatch, temp_state_paths):
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_SOURCE", "local")
+    monkeypatch.setattr(master_service, "_local_journal_import_enabled", lambda: True)
+    monkeypatch.setattr(master_service, "_list_local_trading_journal_workbooks", lambda: [])
+    monkeypatch.setattr(master_service, "_ensure_trading_journal_local_templates", lambda: {"errors": []})
+    called = {"dropbox": 0}
+    monkeypatch.setattr(
+        master_service,
+        "_import_trading_journal_from_dropbox_excel",
+        lambda progress_cb=None: called.__setitem__("dropbox", called["dropbox"] + 1),
+    )
+    result = master_service._import_trading_journal_from_sources()
+    assert called["dropbox"] == 0
+    assert result["dropbox_workbooks_seen"] == 0
+
+
+def test_sync_status_exposes_source_and_flags(monkeypatch: pytest.MonkeyPatch, temp_state_paths):
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_SOURCE", "local")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", Path(r"C:\Users\User\Documents\TRADING"))
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_ENABLE_LOCAL_IMPORT", True)
+    monkeypatch.setattr(master_service, "APP_PROFILE", "journal")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_BROKER_REFRESH_ENABLED", False)
+    monkeypatch.setenv("DROPBOX_SYNC_ENABLED", "0")
+    payload = _json(asyncio.run(master_service.trading_journal_sync_status()))
+    assert payload["source_mode"] == "local"
+    assert payload["local_import_enabled"] is True
+    assert payload["uses_dropbox_journal_import"] is False
+    assert payload["dropbox_sync_enabled"] is False
+    assert payload["broker_refresh_enabled"] is False
+
+
+def test_run_sync_job_local_profile_skips_broker_refresh(monkeypatch: pytest.MonkeyPatch, temp_state_paths):
+    monkeypatch.setattr(master_service, "APP_PROFILE", "journal")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_SOURCE", "local")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_BROKER_REFRESH_ENABLED", False)
+    calls = {"balance": 0, "closed": 0}
+
+    async def _fake_balance(_mode):
+        calls["balance"] += 1
+        return {"available_usdt": 0}
+
+    async def _fake_closed(**_kwargs):
+        calls["closed"] += 1
+        return {"ok": True}
+
+    monkeypatch.setattr(master_service, "_fetch_bybit_balance_usdt", _fake_balance)
+    monkeypatch.setattr(master_service, "_run_bybit_closed_pnl_sync", _fake_closed)
+    monkeypatch.setattr(master_service, "_import_trading_journal_from_sources", lambda progress_cb=None: {"ok": True, "rows_imported": 1, "diagnostics": {"rows_by_asset_class": {}}, "local_workbooks_seen": 1, "dropbox_workbooks_seen": 0})
+    asyncio.run(master_service._run_trading_journal_sync_job())
+    assert calls["balance"] == 0
+    assert calls["closed"] == 0
+
+
+def test_missing_xlrd_for_local_xls_returns_structured_failure(monkeypatch: pytest.MonkeyPatch, temp_state_paths):
+    workbook = temp_state_paths / "journal.xls"
+    workbook.write_bytes(b"dummy")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_SOURCE", "local")
+    monkeypatch.setattr(master_service, "_local_journal_import_enabled", lambda: True)
+    monkeypatch.setattr(master_service, "_ensure_trading_journal_local_templates", lambda: {"errors": []})
+    monkeypatch.setattr(master_service, "_list_local_trading_journal_workbooks", lambda: [workbook])
+    monkeypatch.setattr(master_service, "_set_trading_journal_diagnostics", lambda payload: None)
+    real_import = __import__
+
+    def _fake_import(name, *args, **kwargs):
+        if name == "xlrd":
+            raise ImportError("missing xlrd")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", _fake_import)
+    result = master_service._import_trading_journal_from_sources()
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "MISSING_XLRD_FOR_XLS"
+
+
+def test_balances_returns_200_when_items_exist_even_with_errors(monkeypatch: pytest.MonkeyPatch, temp_state_paths):
+    snapshot = {
+        "balances": [{"account": "A", "balance": 1}],
+        "diagnostics": {"errors": [{"code": "X", "message": "warn"}]},
+    }
+    monkeypatch.setattr(master_service, "_load_trading_journal_view_snapshot", lambda: snapshot)
+    master_service._TRADING_JOURNAL_VIEW_CACHE["key"] = None
+    master_service._TRADING_JOURNAL_VIEW_CACHE["payload"] = None
+    res = asyncio.run(master_service.trading_journal_balances())
+    payload = _json(res)
+    assert res.status_code == 200
+    assert payload["ok"] is False
+    assert payload["items"]
+
+
+def test_diagnostics_local_mode_zeroes_stale_dropbox_counts(monkeypatch: pytest.MonkeyPatch, temp_state_paths):
+    master_service.TRADING_JOURNAL_IMPORT_DIAGNOSTICS = master_service._default_journal_diagnostics()
+    master_service.TRADING_JOURNAL_IMPORT_DIAGNOSTICS["dropbox_workbooks_seen"] = 0
+    master_service.TRADING_JOURNAL_IMPORT_DIAGNOSTICS["local_workbooks_seen"] = 2
+    master_service.TRADING_JOURNAL_IMPORT_DIAGNOSTICS["last_sync"] = {"source_mode": "local"}
+    master_service._save_json_file(master_service.TRADING_JOURNAL_STATE_PATH, {"workbooks_seen": 99, "dropbox_workbooks_seen": 99})
+    monkeypatch.setattr(master_service, "_sync_state_snapshot", lambda: {"dropbox_workbooks_seen": 25, "source_mode": "local"})
+    snapshot = master_service._build_trading_journal_diagnostics_snapshot()
+    assert snapshot["dropbox_workbooks_seen"] == 0
+    assert snapshot["workbook_sources_seen"] == snapshot["local_workbooks_seen"]
 
 
 def test_trading_journal_items_first_load_returns_pending_and_queues_sync(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
@@ -519,6 +632,7 @@ def test_bybit_invalid_time_rows_are_quarantined_from_items(temp_state_paths):
     rows, stats = master_service._sanitize_bybit_demo_rows(master_service._get_trading_journal_rows())
     assert stats["quarantined_invalid_time"] >= 1
     master_service._set_trading_journal_rows(rows)
+    master_service._build_trading_journal_view_snapshot(force=True)
     payload = _json(asyncio.run(master_service.trading_journal_items()))
     assert len([r for r in payload["items"] if r.get("symbol") == "HYPERUSDT"]) == 1
 

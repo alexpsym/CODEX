@@ -476,6 +476,12 @@ TRADING_JOURNAL_ENABLE_LOCAL_IMPORT = os.getenv("TRADING_JOURNAL_ENABLE_LOCAL_IM
     "on",
 }
 TRADING_JOURNAL_SOURCE = str(os.getenv("TRADING_JOURNAL_SOURCE", "both") or "both").strip().lower()
+TRADING_JOURNAL_BROKER_REFRESH_ENABLED = os.getenv("TRADING_JOURNAL_BROKER_REFRESH_ENABLED", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 TRADING_JOURNAL_SYNC_STATE: Dict[str, object] = {
     "running": False,
     "progress": 0,
@@ -574,6 +580,25 @@ def _sync_state_snapshot() -> Dict[str, object]:
     return merged
 
 
+def _trading_journal_source_mode() -> str:
+    mode = str(TRADING_JOURNAL_SOURCE or "").strip().lower()
+    return mode if mode in {"dropbox", "local", "both", "auto"} else "both"
+
+
+def _trading_journal_uses_dropbox_journal_import() -> bool:
+    return _trading_journal_source_mode() in {"dropbox", "both", "auto"}
+
+
+def _trading_journal_uses_local_only_source() -> bool:
+    return _trading_journal_source_mode() == "local"
+
+
+def _trading_journal_broker_refresh_enabled() -> bool:
+    if APP_PROFILE == "journal" and _trading_journal_uses_local_only_source():
+        return TRADING_JOURNAL_BROKER_REFRESH_ENABLED
+    return True
+
+
 def _set_trading_journal_sync_state(**updates: object) -> None:
     with TRADING_JOURNAL_SYNC_LOCK:
         merged = _sync_state_snapshot()
@@ -617,6 +642,8 @@ def _queue_trading_journal_sync_if_idle(reason: str) -> Dict[str, object]:
                 "result": None,
                 "started_at": _utc_now_iso(),
                 "finished_at": None,
+                "source_mode": _trading_journal_source_mode(),
+                "local_dir": str(TRADING_JOURNAL_LOCAL_DIR),
                 "updated_at": _utc_now_iso(),
             }
         )
@@ -725,6 +752,15 @@ def _build_trading_journal_diagnostics_snapshot() -> Dict[str, object]:
     if journal_rows_total > 0 and (not rows_by_asset_class or rows_by_asset_sum != journal_rows_total):
         rows_by_asset_class = dict(computed_rows_by_asset_class)
 
+    source_mode = str(
+        (diagnostics.get("last_sync") if isinstance(diagnostics.get("last_sync"), dict) else {}).get("source_mode")
+        or (sync_result or {}).get("source_mode")
+        or sync_state.get("source_mode")
+        or _trading_journal_source_mode()
+    ).strip().lower()
+    if source_mode not in {"dropbox", "local", "both", "auto"}:
+        source_mode = _trading_journal_source_mode()
+
     local_workbooks_seen = int(diagnostics.get("local_workbooks_seen") or 0)
     if local_workbooks_seen <= 0:
         local_workbooks_seen = int((sync_result or {}).get("local_workbooks_seen") or 0)
@@ -733,13 +769,15 @@ def _build_trading_journal_diagnostics_snapshot() -> Dict[str, object]:
     if local_workbooks_seen <= 0 and isinstance(state, dict):
         local_workbooks_seen = int(state.get("local_workbooks_seen") or 0)
 
-    dropbox_workbooks_seen = int(diagnostics.get("dropbox_workbooks_seen") or 0)
-    if dropbox_workbooks_seen <= 0:
-        dropbox_workbooks_seen = int((sync_result or {}).get("dropbox_workbooks_seen") or 0)
-    if dropbox_workbooks_seen <= 0:
-        dropbox_workbooks_seen = int(sync_state.get("dropbox_workbooks_seen") or 0)
-    if dropbox_workbooks_seen <= 0 and isinstance(state, dict):
-        dropbox_workbooks_seen = int(state.get("workbooks_seen") or state.get("dropbox_workbooks_seen") or 0)
+    dropbox_workbooks_seen = 0
+    if source_mode != "local":
+        dropbox_workbooks_seen = int(diagnostics.get("dropbox_workbooks_seen") or 0)
+        if dropbox_workbooks_seen <= 0:
+            dropbox_workbooks_seen = int((sync_result or {}).get("dropbox_workbooks_seen") or 0)
+        if dropbox_workbooks_seen <= 0:
+            dropbox_workbooks_seen = int(sync_state.get("dropbox_workbooks_seen") or 0)
+        if dropbox_workbooks_seen <= 0 and isinstance(state, dict):
+            dropbox_workbooks_seen = int(state.get("workbooks_seen") or state.get("dropbox_workbooks_seen") or 0)
 
     if journal_rows_total > 0 and diagnostics_rows_total <= 0:
         diagnostics_source = "derived_from_current_rows"
@@ -768,7 +806,7 @@ def _build_trading_journal_diagnostics_snapshot() -> Dict[str, object]:
     snapshot["last_sync"] = snapshot.get("last_sync") if isinstance(snapshot.get("last_sync"), dict) else {}
     snapshot["local_workbooks_seen"] = int(local_workbooks_seen)
     snapshot["dropbox_workbooks_seen"] = int(dropbox_workbooks_seen)
-    snapshot["workbook_sources_seen"] = int(local_workbooks_seen + dropbox_workbooks_seen)
+    snapshot["workbook_sources_seen"] = int(local_workbooks_seen if source_mode == "local" else (local_workbooks_seen + dropbox_workbooks_seen))
     snapshot["duplicate_rows_dropped"] = int(snapshot.get("duplicate_rows_dropped") or 0)
     snapshot["source_duplicate_rows_dropped"] = int(snapshot.get("source_duplicate_rows_dropped") or 0)
     snapshot["dedupe_groups"] = int(snapshot.get("dedupe_groups") or 0)
@@ -4181,7 +4219,12 @@ def _list_local_trading_journal_workbooks() -> List[Path]:
             continue
         if candidate.suffix.lower() not in {".xls", ".xlsx", ".xlsm"}:
             continue
-        if candidate.name.strip().lower() == "account_cashflows.xlsx":
+        candidate_name = candidate.name.strip().lower()
+        if candidate_name in {
+            "account_cashflows.xlsx",
+            BYBIT_DEMO_WORKBOOK_NAME.strip().lower(),
+            BYBIT_DEMO_TEMPLATE_NAME.strip().lower(),
+        }:
             continue
         found.append(candidate)
     return sorted(found, key=lambda p: p.name.lower())
@@ -4515,14 +4558,14 @@ def _import_trading_journal_from_sources(
     progress_cb: Optional[Callable[[int, str], None]] = None,
 ) -> Dict[str, object]:
     started_at = _utc_now_iso()
-    source_mode = TRADING_JOURNAL_SOURCE if TRADING_JOURNAL_SOURCE in {"dropbox", "local", "both", "auto"} else "both"
+    source_mode = _trading_journal_source_mode()
     include_dropbox = source_mode in {"dropbox", "both", "auto"}
     include_local = source_mode in {"local", "both", "auto"}
     local_enabled = _local_journal_import_enabled()
     template_result: Dict[str, object] = {"errors": []}
     warnings: List[str] = []
 
-    if include_local:
+    if include_local and local_enabled:
         template_result = _ensure_trading_journal_local_templates()
         for err in template_result.get("errors") or []:
             warnings.append(str(err))
@@ -4536,6 +4579,7 @@ def _import_trading_journal_from_sources(
                 all_rows[rid] = dict(row)
 
     diagnostics = _default_journal_diagnostics()
+    diagnostics["dropbox_workbooks_seen"] = 0
     errors: List[Dict[str, str]] = []
     balances: List[Dict[str, object]] = []
     imported_any = False
@@ -4564,6 +4608,56 @@ def _import_trading_journal_from_sources(
     if include_local and (not local_enabled) and local_files:
         ignored_local_workbooks = [p.name for p in local_files]
         local_files = []
+    requires_xls_engine = [str(p) for p in local_files if p.suffix.lower() == ".xls"]
+    if requires_xls_engine:
+        try:
+            import xlrd as _xlrd  # noqa: F401
+        except Exception:
+            error_payload = {
+                "code": "MISSING_XLRD_FOR_XLS",
+                "message": "Local .xls journal workbooks require xlrd. Install with: python -m pip install -r render\\requirements.txt",
+                "files": requires_xls_engine,
+            }
+            errors.append(error_payload)
+            diagnostics.update(
+                {
+                    "errors": errors,
+                    "last_sync": {
+                        "source_mode": source_mode,
+                        "updated_at": _utc_now_iso(),
+                        "ok": False,
+                        "balances_found": 0,
+                        "local_import_enabled": local_enabled,
+                    },
+                }
+            )
+            _set_trading_journal_diagnostics(diagnostics)
+            return {
+                "ok": False,
+                "message": error_payload["message"],
+                "source_mode": source_mode,
+                "rows_imported": 0,
+                "cashflow_rows_loaded": 0,
+                "balances_found": 0,
+                "templates_created": {
+                    "cashflow_template_created": bool(template_result.get("cashflow_template_created")),
+                    "trade_history_template_created": bool(template_result.get("trade_history_template_created")),
+                    "demo_workbook_created": bool(template_result.get("demo_workbook_created")),
+                },
+                "local_workbooks_seen": diagnostics["local_workbooks_seen"],
+                "workbooks_scanned": int(diagnostics["local_workbooks_seen"]),
+                "workbooks_changed": 0,
+                "dropbox_workbooks_seen": 0,
+                "duplicate_rows_dropped": 0,
+                "source_duplicate_rows_dropped": 0,
+                "dedupe_groups": 0,
+                "ignored_local_workbooks": ignored_local_workbooks,
+                "errors": errors,
+                "warnings": warnings,
+                "snapshot_generated": False,
+                "snapshot_error": None,
+                "diagnostics": diagnostics,
+            }
     local_rows_total = 0
     local_balances: List[Dict[str, object]] = []
     for local_file in local_files:
@@ -19107,9 +19201,11 @@ async def trading_journal_balances() -> JSONResponse:
     items = snapshot.get("balances") if isinstance(snapshot.get("balances"), list) else []
     diagnostics = snapshot.get("diagnostics") if isinstance(snapshot.get("diagnostics"), dict) else {}
     errors = diagnostics.get("errors") if isinstance(diagnostics.get("errors"), list) else []
+    if items:
+        return JSONResponse({"items": items, "ok": not bool(errors), "diagnostics": diagnostics, "errors": errors}, status_code=200)
     if errors:
-        return JSONResponse({"items": items, "ok": False, "diagnostics": diagnostics}, status_code=503)
-    return JSONResponse({"items": items, "ok": True})
+        return JSONResponse({"items": items, "ok": False, "diagnostics": diagnostics, "errors": errors}, status_code=503)
+    return JSONResponse({"items": items, "ok": True, "diagnostics": diagnostics})
 
 
 @app.post("/api/trading-journal/rows")
@@ -19212,6 +19308,13 @@ async def trading_journal_sync_status() -> JSONResponse:
             },
         },
     }
+    source_mode = _trading_journal_source_mode()
+    snapshot["source_mode"] = source_mode
+    snapshot["local_dir"] = str(TRADING_JOURNAL_LOCAL_DIR)
+    snapshot["local_import_enabled"] = bool(_local_journal_import_enabled())
+    snapshot["dropbox_sync_enabled"] = os.getenv("DROPBOX_SYNC_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+    snapshot["uses_dropbox_journal_import"] = bool(_trading_journal_uses_dropbox_journal_import())
+    snapshot["broker_refresh_enabled"] = bool(_trading_journal_broker_refresh_enabled())
     return JSONResponse(snapshot)
 
 
@@ -19235,31 +19338,35 @@ async def _run_trading_journal_sync_job() -> None:
         result=None,
         started_at=_utc_now_iso(),
         finished_at=None,
+        source_mode=_trading_journal_source_mode(),
+        local_dir=str(TRADING_JOURNAL_LOCAL_DIR),
     )
 
     try:
         broker_balance_warnings: List[str] = []
         broker_account_balances: List[Dict[str, object]] = []
-        for account_mode in ("demo", "live"):
-            if account_mode == "demo" and not ENABLE_BYBIT_DEMO_JOURNAL:
-                continue
-            label = "Bybit Demo" if account_mode == "demo" else "Bybit Live"
-            try:
-                snapshot = await _fetch_bybit_balance_usdt(account_mode)
-                broker_account_balances.append(
-                    {
-                        "account": label,
-                        "label": label,
-                        "balance": _to_float(snapshot.get("available_usdt")),
-                        "currency": "USDT",
-                        "source": "bybit_wallet_balance",
-                        "balance_source": "bybit_wallet_balance",
-                        "account_mode": account_mode,
-                        "as_of": _utc_now_iso(),
-                    }
-                )
-            except Exception as exc:
-                broker_balance_warnings.append(f"Bybit {account_mode} balance unavailable: {exc}")
+        broker_refresh_enabled = _trading_journal_broker_refresh_enabled()
+        if broker_refresh_enabled:
+            for account_mode in ("demo", "live"):
+                if account_mode == "demo" and not ENABLE_BYBIT_DEMO_JOURNAL:
+                    continue
+                label = "Bybit Demo" if account_mode == "demo" else "Bybit Live"
+                try:
+                    snapshot = await _fetch_bybit_balance_usdt(account_mode)
+                    broker_account_balances.append(
+                        {
+                            "account": label,
+                            "label": label,
+                            "balance": _to_float(snapshot.get("available_usdt")),
+                            "currency": "USDT",
+                            "source": "bybit_wallet_balance",
+                            "balance_source": "bybit_wallet_balance",
+                            "account_mode": account_mode,
+                            "as_of": _utc_now_iso(),
+                        }
+                    )
+                except Exception as exc:
+                    broker_balance_warnings.append(f"Bybit {account_mode} balance unavailable: {exc}")
         if broker_account_balances or broker_balance_warnings:
             state = _load_trading_journal_state()
             state["broker_account_balances"] = broker_account_balances
@@ -19272,23 +19379,31 @@ async def _run_trading_journal_sync_job() -> None:
 
         bybit_demo = None
         bybit_live = None
-        try:
-            bybit_demo = await _run_bybit_closed_pnl_sync(
-                account_mode="demo",
-                reason="manual",
-                enforce_manual_cooldown=False,
-            )
-        except Exception as exc:
-            bybit_demo = {"ok": False, "error": str(exc)}
-        try:
-            bybit_live = await _run_bybit_closed_pnl_sync(
-                account_mode="live",
-                reason="manual",
-                enforce_manual_cooldown=False,
-            )
-        except Exception as exc:
-            bybit_live = {"ok": False, "error": str(exc)}
+        if broker_refresh_enabled:
+            try:
+                bybit_demo = await _run_bybit_closed_pnl_sync(
+                    account_mode="demo",
+                    reason="manual",
+                    enforce_manual_cooldown=False,
+                )
+            except Exception as exc:
+                bybit_demo = {"ok": False, "error": str(exc)}
+            try:
+                bybit_live = await _run_bybit_closed_pnl_sync(
+                    account_mode="live",
+                    reason="manual",
+                    enforce_manual_cooldown=False,
+                )
+            except Exception as exc:
+                bybit_live = {"ok": False, "error": str(exc)}
 
+        source_mode = _trading_journal_source_mode()
+        if source_mode == "local":
+            _cb(25, "Importing local journal workbooks…")
+        elif source_mode == "dropbox":
+            _cb(25, "Importing Dropbox journal workbooks…")
+        else:
+            _cb(25, "Importing journal workbooks…")
         result = await asyncio.to_thread(_import_trading_journal_from_sources, progress_cb=_cb)
         warnings: List[str] = []
         warnings.extend(broker_balance_warnings)
@@ -19316,6 +19431,8 @@ async def _run_trading_journal_sync_job() -> None:
             rows_by_asset_class=rows_by_asset_class if isinstance(rows_by_asset_class, dict) else {},
             local_workbooks_seen=int((result or {}).get("local_workbooks_seen") or 0),
             dropbox_workbooks_seen=int((result or {}).get("dropbox_workbooks_seen") or 0),
+            source_mode=_trading_journal_source_mode(),
+            local_dir=str(TRADING_JOURNAL_LOCAL_DIR),
             finished_at=_utc_now_iso(),
         )
     except Exception as exc:
@@ -19330,6 +19447,8 @@ async def _run_trading_journal_sync_job() -> None:
             rows_by_asset_class={},
             local_workbooks_seen=0,
             dropbox_workbooks_seen=0,
+            source_mode=_trading_journal_source_mode(),
+            local_dir=str(TRADING_JOURNAL_LOCAL_DIR),
             finished_at=_utc_now_iso(),
         )
 
