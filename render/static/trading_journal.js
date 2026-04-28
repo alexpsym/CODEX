@@ -1085,6 +1085,7 @@
           renderBalances(Array.isArray(cached.balances.items) ? cached.balances.items : []);
           renderStats(state.stats);
           setStatus('Cached data shown, refreshing…');
+          hideLoading();
         }
       }
       if (!silent) setLoading(5, 'Loading…');
@@ -1158,6 +1159,11 @@
       const workbookFxRows = Number(diagnostics?.rows_by_asset_class?.fx || 0);
       const shouldWarnZeroFx = fxCount === 0 && workbookFxRows > 0;
       if (!state.editorOpen && !state.editorDirty) {
+        if (journal?.snapshot_stale) {
+          setStatus('Cached journal shown. Sync required to include latest workbook changes.');
+        } else if (journal?.warning) {
+          setStatus(String(journal.warning));
+        } else
         if (hasErrors || rowsTotal === 0 || lowRowCount || shouldWarnZeroFx) {
           const reasons = [];
           if (hasErrors) reasons.push('parse/sync errors');
@@ -1185,7 +1191,6 @@
     } catch (e) {
       if (isAbortError(e, signal)) {
         if (ownsVisibleOverlay && loading?.style?.display === 'flex') hideLoading();
-        if (ownsVisibleOverlay && !silent && !preserveStatus) setStatus('Refresh cancelled.');
         return;
       }
       console.error(e);
@@ -1250,7 +1255,7 @@
     state.manualSyncInFlight = true;
     try {
       setStatus('Syncing…');
-      setLoading(10, 'Syncing from Dropbox…');
+      setLoading(10, 'Syncing journal sources…');
       await fetchJson('/api/trading-journal/sync', { method: 'POST' });
       const syncResult = await waitForSync();
       if (syncResult?.ok === false) {
