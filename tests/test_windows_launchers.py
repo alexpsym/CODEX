@@ -20,6 +20,11 @@ def test_root_bat_invokes_expected_powershell_command() -> None:
     assert "tools\\windows_launchers\\build_windows_launchers.ps1" in script
 
 
+def test_build_script_has_valid_powershell_syntax() -> None:
+    script = (LAUNCHER_DIR / "build_windows_launchers.ps1").read_text(encoding="utf-8")
+    assert '\\"' not in script
+
+
 def test_build_script_searches_csc_beyond_path_and_supports_add_type() -> None:
     script = (LAUNCHER_DIR / "build_windows_launchers.ps1").read_text(encoding="utf-8")
     assert "Get-Command csc.exe" in script
@@ -50,6 +55,10 @@ def test_build_script_validates_required_checkout_and_hardens_iexpress() -> None
 def test_build_script_uses_lnk_fallback_but_requires_exe_for_success() -> None:
     script = (LAUNCHER_DIR / "build_windows_launchers.ps1").read_text(encoding="utf-8")
     assert ".lnk" in script
+    assert "$shortcut.Arguments" in script
+    assert "/d /s /c" in script
+    assert '""{0}""' in script
+    assert "-f $targetBatPath" in script
     assert "Could not create .exe launchers. Created .lnk shortcuts instead." in script
     assert "Build did not produce all required .exe launchers" in script
 

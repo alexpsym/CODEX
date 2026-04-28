@@ -176,7 +176,7 @@ function Build-WithIExpress {
 
         New-IExpressLauncherScript -RepoRootPath $RepoRootPath -TargetBat $entry.TargetBat -OutputCmd $launcherCmd
 
-        $sourceDirForSed = "$stagingDir\"
+        $sourceDirForSed = ('{0}\' -f $stagingDir)
         $sedContent = @"
 [Version]
 Class=IEXPRESS
@@ -257,7 +257,7 @@ function New-ShortcutFallbacks {
         $targetBatPath = Join-Path $RepoRootPath $entry.TargetBat
         $shortcut = $shell.CreateShortcut($shortcutPath)
         $shortcut.TargetPath = Join-Path $env:WINDIR "System32\cmd.exe"
-        $shortcut.Arguments = "/d /c \"\"$targetBatPath\"\""
+        $shortcut.Arguments = ('/d /s /c ""{0}""' -f $targetBatPath)
         $shortcut.WorkingDirectory = $RepoRootPath
         $shortcut.Save()
         Write-Host "Created fallback shortcut: $shortcutPath"
