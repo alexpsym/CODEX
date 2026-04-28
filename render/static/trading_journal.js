@@ -29,8 +29,7 @@
 
   let activeFlags = new Set();
   let autoRefreshTimer = null;
-  // Auto-refresh cadence increased from the old 15s interval to 60s scheduled refreshes.
-  const AUTO_REFRESH_MS = 60000;
+  const AUTO_REFRESH_MS = 60 * 60 * 1000;
   let loadInFlight = false;
   let activeAbort = null;
   let syncWatchTimer = null;
@@ -1067,7 +1066,7 @@
     renderAll();
   }
 
-  async function load({ silent = false, skipAutoSync = false } = {}) {
+  async function load({ silent = false, skipAutoSync = false, preserveStatus = false, statusOverride = '' } = {}) {
     if (loadInFlight) return;
     loadInFlight = true;
     const controller = new AbortController();
@@ -1075,7 +1074,7 @@
     const signal = controller.signal;
     const ownsVisibleOverlay = !silent;
     try {
-      setStatus(silent ? 'Refreshing…' : 'Loading…');
+      if (!preserveStatus) setStatus(statusOverride || (silent ? 'Refreshing…' : 'Loading…'));
       if (!silent) {
         const cached = await readCachedPayload();
         if (cached?.journal && cached?.balances && cached?.diagnostics) {
@@ -1107,7 +1106,7 @@
           const lastFinished = new Date(st?.finished_at || 0).getTime() || 0;
           const localLast = Number(localStorage.getItem('tj_last_auto_sync_ms') || 0) || 0;
           const now = Date.now();
-          const minMs = 5 * 60 * 1000;
+          const minMs = AUTO_REFRESH_MS;
           const anchor = Math.max(lastFinished, localLast);
           if (!st?.running && (now - anchor > minMs)) {
             triggerBackgroundSync();
@@ -1166,14 +1165,14 @@
           if (lowRowCount) reasons.push('suspiciously low row count');
           if (shouldWarnZeroFx) reasons.push('zero FX rows');
           const dropped = Number(diagnostics?.duplicate_rows_dropped || 0);
-          setStatus(`Warning: Trading Journal diagnostics require attention (${reasons.join(', ')}; rows=${rowsTotal}; duplicates dropped=${dropped}).`);
+          if (!preserveStatus) setStatus(`Warning: Trading Journal diagnostics require attention (${reasons.join(', ')}; rows=${rowsTotal}; duplicates dropped=${dropped}).`);
         } else if (actualRowsTotal > 0 && quarantinedRows > 0) {
           const label = quarantinedRows === 1 ? 'row was' : 'rows were';
-          setStatus(`Info: ${actualRowsTotal} journal rows loaded; ${quarantinedRows} invalid historical ${label} excluded.`);
+          if (!preserveStatus) setStatus(`Info: ${actualRowsTotal} journal rows loaded; ${quarantinedRows} invalid historical ${label} excluded.`);
         } else if (noSources && actualRowsTotal > 0) {
-          setStatus(`Info: ${actualRowsTotal} journal rows loaded; no Excel workbook imports detected.`);
+          if (!preserveStatus) setStatus(`Info: ${actualRowsTotal} journal rows loaded; no Excel workbook imports detected.`);
         } else {
-          setStatus(`Updated ${new Date().toLocaleTimeString()}`);
+          if (!preserveStatus) setStatus(`Updated ${new Date().toLocaleTimeString()}`);
         }
       }
       if (!silent) { setLoading(100, 'Done'); hideLoading(); }
@@ -1186,12 +1185,12 @@
     } catch (e) {
       if (isAbortError(e, signal)) {
         if (ownsVisibleOverlay && loading?.style?.display === 'flex') hideLoading();
-        if (ownsVisibleOverlay && !silent) setStatus('Refresh cancelled.');
+        if (ownsVisibleOverlay && !silent && !preserveStatus) setStatus('Refresh cancelled.');
         return;
       }
       console.error(e);
       if (ownsVisibleOverlay && loading?.style?.display === 'flex') hideLoading();
-      setStatus(`Load failed: ${e.message}`);
+      if (!preserveStatus) setStatus(`Load failed: ${e.message}`);
     } finally {
       loadInFlight = false;
       if (activeAbort === controller) activeAbort = null;
@@ -1213,11 +1212,11 @@
     autoRefreshTimer = setTimeout(() => load({ silent: true }), AUTO_REFRESH_MS);
   }
 
-  // When the tab is hidden we stop the timer and abort active network work to reduce backend pressure.
+  // When the tab is hidden we stop the timer. Background refreshes may abort; manual sync must continue.
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
       stopAutoRefresh();
-      if (activeAbort) { try { activeAbort.abort(); } catch {} }
+      if (activeAbort && !state.manualSyncInFlight) { try { activeAbort.abort(); } catch {} }
       return;
     }
     scheduleAutoRefresh();
@@ -1226,7 +1225,7 @@
   // Also clean up on navigation away so no refresh request survives route changes.
   window.addEventListener('pagehide', () => {
     stopAutoRefresh();
-    if (activeAbort) { try { activeAbort.abort(); } catch {} }
+    if (activeAbort && !state.manualSyncInFlight) { try { activeAbort.abort(); } catch {} }
   });
 
   q('#tj-filter-btn')?.addEventListener('click', () => { persistUiState(); renderAll(); });
@@ -1257,7 +1256,11 @@
       if (syncResult?.ok === false) {
         throw new Error(syncResult?.error || syncResult?.message || 'Sync failed');
       }
-      await load({ skipAutoSync: true });
+      await load({ skipAutoSync: true, preserveStatus: true });
+      const loadedRows = Number(state?.rows?.length || 0);
+      const warnings = Array.isArray(syncResult?.result?.warnings) ? syncResult.result.warnings : [];
+      const suffix = warnings.length ? ` (warnings: ${warnings.join('; ')})` : '';
+      setStatus(`Sync complete: ${loadedRows} rows loaded${suffix}`);
     } catch (e) {
       hideLoading();
       setStatus(`Sync failed: ${e.message}`);
