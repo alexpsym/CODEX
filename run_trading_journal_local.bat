@@ -26,10 +26,43 @@ echo [journal-local] MASTER_ENV_DIR=%MASTER_ENV_DIR%
 echo [journal-local] MASTER_ENV_FILE=%MASTER_ENV_FILE%
 
 start "Local Trading Journal" /D "%ROOT%" cmd /d /v:on /k ""%~f0" __worker"
-timeout /t 2 /nobreak >nul
-start "" "http://127.0.0.1:8010/trading-journal"
+set "JOURNAL_URL=http://127.0.0.1:8010/trading-journal"
+set "JOURNAL_HEALTH_URL=http://127.0.0.1:8010/health"
+set "JOURNAL_API_URL=http://127.0.0.1:8010/api/trading-journal"
+set "JOURNAL_READY_TIMEOUT_SECONDS=90"
+echo [journal-local] waiting for %JOURNAL_HEALTH_URL% ...
+set /a READY_WAITED=0
+
+:wait_for_journal_health
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r = Invoke-WebRequest -UseBasicParsing -Uri '%JOURNAL_HEALTH_URL%' -TimeoutSec 1; if ($r.StatusCode -eq 200 -and (($r.Content | Out-String).Trim() -eq 'ok')) { exit 0 } else { exit 1 } } catch { exit 1 }"
+if not errorlevel 1 goto health_ready
+set /a READY_WAITED+=1
+if !READY_WAITED! GEQ %JOURNAL_READY_TIMEOUT_SECONDS% goto journal_not_ready
+timeout /t 1 /nobreak >nul
+goto wait_for_journal_health
+
+:health_ready
+echo [journal-local] health ready after !READY_WAITED! seconds.
+set /a API_WAITED=0
+:wait_for_journal_api
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r = Invoke-WebRequest -UseBasicParsing -Uri '%JOURNAL_API_URL%' -TimeoutSec 2; if ($r.StatusCode -eq 200 -or $r.StatusCode -eq 202) { exit 0 } else { exit 1 } } catch { if ($_.Exception.Response -and ($_.Exception.Response.StatusCode.value__ -eq 200 -or $_.Exception.Response.StatusCode.value__ -eq 202)) { exit 0 } exit 1 }"
+if not errorlevel 1 goto journal_ready
+set /a API_WAITED+=1
+if !API_WAITED! GEQ %JOURNAL_READY_TIMEOUT_SECONDS% goto journal_not_ready
+timeout /t 1 /nobreak >nul
+goto wait_for_journal_api
+
+:journal_ready
+echo [journal-local] journal endpoint ready after !API_WAITED! seconds.
+start "" "%JOURNAL_URL%"
 echo Local trading journal launch requested.
 exit /b 0
+
+:journal_not_ready
+echo [journal-local] ERROR: journal backend did not become ready after %JOURNAL_READY_TIMEOUT_SECONDS% seconds.
+echo [journal-local] Check the "Local Trading Journal" window for startup errors.
+echo [journal-local] Browser was not opened to avoid a dead-page / manual-refresh failure.
+exit /b 1
 
 :worker
 cd /d "%ROOT%" || (
