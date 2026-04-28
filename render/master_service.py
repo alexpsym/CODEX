@@ -602,7 +602,14 @@ def _record_daily_trade_sync_status(**updates: object) -> None:
 def _default_journal_diagnostics() -> Dict[str, object]:
     return {
         "rows_total": 0,
+        "raw_workbook_rows_total": 0,
+        "visible_trade_rows_total": 0,
+        "excluded_test_trade_rows": 0,
+        "quarantined_invalid_time_rows": 0,
+        "blank_pnl_trade_rows": 0,
+        "cashflow_rows_total": 0,
         "rows_by_source": {},
+        "rows_by_account": {},
         "rows_by_asset_class": {},
         "last_sync": {},
         "local_workbooks_seen": 0,
@@ -639,6 +646,8 @@ def _build_trading_journal_diagnostics_snapshot() -> Dict[str, object]:
     sync_result = sync_state.get("result") if isinstance(sync_state.get("result"), dict) else {}
     raw_rows = [row for row in _get_trading_journal_rows() if isinstance(row, dict)]
     visible_rows = [row for row in raw_rows if _is_visible_trading_journal_row(row)]
+    visible_trade_rows = [row for row in visible_rows if _row_type(row) == "trade"]
+    stats_included_trade_rows = [row for row in visible_trade_rows if not _is_test_trade_row(row)]
     raw_rows_total = len(raw_rows)
     visible_rows_total = len(visible_rows)
     quarantined_rows = sum(
@@ -695,6 +704,12 @@ def _build_trading_journal_diagnostics_snapshot() -> Dict[str, object]:
     snapshot["journal_rows_total"] = int(journal_rows_total)
     snapshot["raw_rows_total"] = int(raw_rows_total)
     snapshot["visible_rows_total"] = int(visible_rows_total)
+    snapshot["visible_trade_rows_total"] = int(len(visible_trade_rows))
+    snapshot["stats_included_trade_rows_total"] = int(len(stats_included_trade_rows))
+    snapshot["excluded_test_trade_rows"] = int(sum(1 for row in visible_trade_rows if _is_test_trade_row(row)))
+    snapshot["blank_pnl_trade_rows"] = int(sum(1 for row in visible_trade_rows if _row_pnl(row) is None))
+    snapshot["cashflow_rows_total"] = int(sum(1 for row in visible_rows if _row_type(row) == "cashflow"))
+    snapshot["quarantined_invalid_time_rows"] = int(quarantined_rows)
     snapshot["excluded_rows_total"] = int(excluded_rows_total)
     snapshot["excluded_bybit_demo_rows"] = int(excluded_bybit_demo_rows)
     snapshot["has_current_journal_rows"] = journal_rows_total > 0
@@ -712,6 +727,9 @@ def _build_trading_journal_diagnostics_snapshot() -> Dict[str, object]:
     snapshot["errors"] = snapshot.get("errors") if isinstance(snapshot.get("errors"), list) else []
     snapshot["diagnostics_source"] = diagnostics_source
     return snapshot
+
+
+_TRADING_JOURNAL_VIEW_CACHE: Dict[str, object] = {"key": None, "payload": None}
 
 
 TRADING_JOURNAL_DROPBOX_RECURSIVE = os.getenv(
@@ -1827,7 +1845,7 @@ def _load_trading_journal() -> List[Dict[str, object]]:
     rows: List[Dict[str, object]] = []
     for entry in items:
         if isinstance(entry, dict):
-            rows.append(entry)
+            rows.append(_normalize_journal_profit_fields(entry))
     return rows
 
 
@@ -2031,7 +2049,7 @@ def _upsert_trading_journal_rows(rows: Iterable[Dict[str, object]]) -> int:
         for raw in rows:
             if not isinstance(raw, dict):
                 continue
-            row = dict(raw)
+            row = _normalize_journal_profit_fields(dict(raw))
             row_id = str(row.get("id") or "").strip()
             if not row_id:
                 continue
@@ -2052,13 +2070,15 @@ def _upsert_trading_journal_rows(rows: Iterable[Dict[str, object]]) -> int:
             changed += 1
         if changed:
             _save_trading_journal(list(by_id.values()))
+            _TRADING_JOURNAL_VIEW_CACHE["key"] = None
+            _TRADING_JOURNAL_VIEW_CACHE["payload"] = None
     return changed
 
 
 def _merge_trading_journal_row(
     existing: Dict[str, object], incoming: Dict[str, object]
 ) -> Dict[str, object]:
-    merged = dict(existing)
+    merged = _normalize_journal_profit_fields(dict(existing))
     preserve_when_incoming_null = {
         "stop_loss",
         "take_profit",
@@ -2080,7 +2100,7 @@ def _merge_trading_journal_row(
             if (value is None or (isinstance(value, str) and value.strip() == "")) and merged.get(key) is not None:
                 continue
         merged[key] = value
-    return _reapply_trading_journal_manual_overrides(merged)
+    return _normalize_journal_profit_fields(_reapply_trading_journal_manual_overrides(merged))
 
 
 def _load_trading_journal_state() -> Dict[str, object]:
@@ -2261,16 +2281,19 @@ def _get_trading_journal_rows() -> List[Dict[str, object]]:
     with _TRADING_JOURNAL_ROWS_LOCK:
         data = _load_json_file(TRADING_JOURNAL_PATH, {"items": []})
         if isinstance(data, list):
-            return [row for row in data if isinstance(row, dict)]
+            return [_normalize_journal_profit_fields(row) for row in data if isinstance(row, dict)]
         items = data.get("items") if isinstance(data, dict) else []
-        return items if isinstance(items, list) else []
+        return [_normalize_journal_profit_fields(row) for row in items if isinstance(row, dict)] if isinstance(items, list) else []
 
 
 def _set_trading_journal_rows(rows: List[Dict[str, object]]) -> None:
     global _TRADING_JOURNAL_CACHE
     with _TRADING_JOURNAL_ROWS_LOCK:
-        _TRADING_JOURNAL_CACHE = [dict(item) for item in rows if isinstance(item, dict)]
-        _save_json_file(TRADING_JOURNAL_PATH, {"items": rows, "updated_at": _utc_now_iso()})
+        normalized_rows = [_normalize_journal_profit_fields(dict(item)) for item in rows if isinstance(item, dict)]
+        _TRADING_JOURNAL_CACHE = [dict(item) for item in normalized_rows]
+        _save_json_file(TRADING_JOURNAL_PATH, {"items": normalized_rows, "updated_at": _utc_now_iso()})
+    _TRADING_JOURNAL_VIEW_CACHE["key"] = None
+    _TRADING_JOURNAL_VIEW_CACHE["payload"] = None
     _schedule_dropbox_upload_state_backup()
 
 
@@ -3222,7 +3245,7 @@ def _parse_excel_account_workbook(
                     else None
                 )
 
-                all_rows.append({
+                all_rows.append(_normalize_journal_profit_fields({
                     "id": row_id,
                     "source": "excel",
                     "account": row_account_label,
@@ -3273,7 +3296,7 @@ def _parse_excel_account_workbook(
                         "orderId": order_id_raw or None,
                     },
                     "updated_at": _utc_now_iso(),
-                })
+                }))
 
         bal_col = _first_present(
             df,
@@ -3600,6 +3623,8 @@ def _list_local_trading_journal_workbooks() -> List[Path]:
         if not candidate.is_file():
             continue
         if candidate.suffix.lower() not in {".xls", ".xlsx", ".xlsm"}:
+            continue
+        if candidate.name.strip().lower() == "account_cashflows.xlsx":
             continue
         found.append(candidate)
     return sorted(found, key=lambda p: p.name.lower())
@@ -4019,6 +4044,7 @@ def _import_trading_journal_from_sources(
         source_duplicate_rows_dropped += 1
 
     final_rows = sorted([*canonical_rows.values(), *carry_rows], key=_row_sort_dt, reverse=True)
+    final_rows, sanitize_stats = _sanitize_bybit_demo_rows(final_rows)
     if final_rows:
         _set_trading_journal_rows(final_rows)
         if local_balances:
@@ -4033,11 +4059,15 @@ def _import_trading_journal_from_sources(
 
     persisted_rows = [row for row in _get_trading_journal_rows() if isinstance(row, dict)]
     visible_rows = [row for row in persisted_rows if _is_visible_trading_journal_row(row)]
+    visible_trade_rows = [row for row in visible_rows if _row_type(row) == "trade"]
+    stats_trade_rows = [row for row in visible_trade_rows if not _is_test_trade_row(row)]
     rows_by_source: Dict[str, int] = defaultdict(int)
     rows_by_asset_class: Dict[str, int] = defaultdict(int)
+    rows_by_account: Dict[str, int] = defaultdict(int)
     for row in visible_rows:
         rows_by_source[str(row.get("source") or "unknown")] += 1
         rows_by_asset_class[str(row.get("asset_class") or "unknown")] += 1
+        rows_by_account[str(row.get("account_label") or row.get("account") or "unknown")] += 1
     quarantined_rows = sum(
         1
         for row in persisted_rows
@@ -4045,14 +4075,25 @@ def _import_trading_journal_from_sources(
     )
     excluded_bybit_demo_rows = sum(1 for row in persisted_rows if _exclude_bybit_demo_row(row))
     excluded_rows_total = max(0, len(persisted_rows) - len(visible_rows))
+    excluded_test_trade_rows = sum(1 for row in visible_trade_rows if _is_test_trade_row(row))
+    blank_pnl_trade_rows = sum(1 for row in visible_trade_rows if _row_pnl(row) is None)
+    cashflow_rows_total = sum(1 for row in visible_rows if _row_type(row) == "cashflow")
     diagnostics.update(
         {
             "rows_total": len(visible_rows),
+            "raw_workbook_rows_total": imported_rows_total,
+            "visible_trade_rows_total": len(visible_trade_rows),
+            "stats_included_trade_rows_total": len(stats_trade_rows),
+            "excluded_test_trade_rows": excluded_test_trade_rows,
+            "quarantined_invalid_time_rows": int(sanitize_stats.get("quarantined_invalid_time", 0)) + quarantined_rows,
+            "blank_pnl_trade_rows": blank_pnl_trade_rows,
+            "cashflow_rows_total": cashflow_rows_total,
             "raw_rows_total": len(persisted_rows),
             "visible_rows_total": len(visible_rows),
             "excluded_rows_total": excluded_rows_total,
             "excluded_bybit_demo_rows": excluded_bybit_demo_rows,
             "rows_by_source": dict(rows_by_source),
+            "rows_by_account": dict(rows_by_account),
             "rows_by_asset_class": dict(rows_by_asset_class),
             "duplicate_rows_dropped": duplicate_rows_dropped,
             "source_duplicate_rows_dropped": source_duplicate_rows_dropped,
@@ -4099,6 +4140,24 @@ def _to_float(value: object) -> Optional[float]:
         return None
 
 
+def _normalize_journal_profit_fields(row: Dict[str, object]) -> Dict[str, object]:
+    normalized = dict(row)
+    net_profit = _to_float(normalized.get("net_profit"))
+    realized_pnl = _to_float(normalized.get("realized_pnl"))
+    if net_profit is None and realized_pnl is not None:
+        normalized["net_profit"] = realized_pnl
+    if realized_pnl is None and net_profit is not None:
+        normalized["realized_pnl"] = net_profit
+    return normalized
+
+
+def _row_pnl(row: Dict[str, object]) -> Optional[float]:
+    net_profit = _to_float(row.get("net_profit"))
+    if net_profit is not None:
+        return net_profit
+    return _to_float(row.get("realized_pnl"))
+
+
 def _ms_to_iso(value: object) -> Optional[str]:
     try:
         ms = int(float(value))
@@ -4143,7 +4202,7 @@ def _journal_rows_from_bybit_execution(entry: Dict[str, object]) -> List[Dict[st
     qty = _to_float(entry.get("execQty")) or 0.0
     exec_price = _to_float(entry.get("execPrice"))
     exec_fee = _to_float(entry.get("execFee")) or 0.0
-    exec_pnl = _to_float(entry.get("execPnl")) or 0.0
+    exec_pnl = _to_float(entry.get("execPnl"))
     exec_time_raw = _to_float(entry.get("execTime"))
     close_time = None
     if exec_time_raw:
@@ -4161,8 +4220,10 @@ def _journal_rows_from_bybit_execution(entry: Dict[str, object]) -> List[Dict[st
             timeframe = _normalize_timeframe(ctx.get("timeframe"))
             if is_test_trade is None:
                 is_test_trade = _normalize_test_trade_flag(ctx.get("is_test_trade"))
+    if exec_pnl in (None, 0.0):
+        return []
     return [
-        {
+        _normalize_journal_profit_fields({
             "id": f"bybit:{account}:{category}:{symbol}:{order_id}:{exec_id}",
             "source": "bybit",
             "account": account,
@@ -4170,7 +4231,7 @@ def _journal_rows_from_bybit_execution(entry: Dict[str, object]) -> List[Dict[st
             "asset_class": "crypto",
             "symbol": symbol,
             "side": side.title() if side else "",
-            "status": "closed" if exec_pnl != 0 else "filled",
+            "status": "closed",
             "open_time": close_time,
             "close_time": close_time,
             "entry_price": exec_price,
@@ -4183,6 +4244,7 @@ def _journal_rows_from_bybit_execution(entry: Dict[str, object]) -> List[Dict[st
             "fees": exec_fee,
             "fee_currency": "USDT",
             "realized_pnl": exec_pnl,
+            "net_profit": exec_pnl,
             "realized_pnl_currency": str(entry.get("currency") or "USDT"),
             "strategy_tag": "",
             "notes": "",
@@ -4190,7 +4252,7 @@ def _journal_rows_from_bybit_execution(entry: Dict[str, object]) -> List[Dict[st
             "is_test_trade": is_test_trade,
             "metrics": {k: v for k, v in {"timeframe": timeframe, "is_test_trade": is_test_trade}.items() if v not in ("", None)},
             "raw_refs": {"orderId": order_id, "execIds": [exec_id]},
-        }
+        })
     ]
 
 
@@ -4457,6 +4519,7 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             "fees": fees,
             "fee_currency": "AUD",
             "realized_pnl": realized_pnl,
+            "net_profit": realized_pnl,
             "realized_pnl_currency": str(entry.get("accountCurrency") or ""),
             "balance_after_trade": _to_float(entry.get("accountBalance")),
             "strategy_tag": "",
@@ -4468,7 +4531,7 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             "metrics": {k: v for k, v in {"timeframe": row_timeframe, "is_test_trade": row_is_test_trade}.items() if v not in ("", None)},
             "raw_refs": {"transactionId": tx_id, "orderId": entry.get("orderID"), "tradeId": trade_id},
         }
-        rows.append(row)
+        rows.append(_normalize_journal_profit_fields(row))
         if trade_id and open_leg and leg_units >= abs(_to_float(open_leg.get("units")) or 0.0):
             legs.pop(trade_id, None)
     _persist_oanda_fill_state()
@@ -11148,6 +11211,7 @@ def _normalize_bybit_closed_pnl_row(
     take_profit: Optional[float] = None,
     raw_refs_extra: Optional[Dict[str, object]] = None,
     resolved_trade_context: Optional[Dict[str, object]] = None,
+    resolved_open_time: Optional[str] = None,
 ) -> Optional[Dict[str, object]]:
     symbol = str(entry.get("symbol") or "").strip().upper()
     order_id = str(entry.get("orderId") or "").strip()
@@ -11234,7 +11298,7 @@ def _normalize_bybit_closed_pnl_row(
                 "status": "CLOSED",
             }
         )
-    open_time = (
+    open_time = resolved_open_time or (
         _epoch_or_iso_to_iso(ctx.get("open_time")) if isinstance(ctx, dict) else None
     ) or (
         _epoch_or_iso_to_iso(ctx.get("created_at")) if isinstance(ctx, dict) else None
@@ -11245,23 +11309,17 @@ def _normalize_bybit_closed_pnl_row(
         if created_ts is not None and created_ts < close_ts:
             open_time = created_fallback
     open_ts = _canonical_trade_epoch_second(open_time)
-    if close_ts is None or open_ts is None or close_ts <= open_ts:
-        return {
-            "id": f"bybit:{mode}:closedpnl:{symbol}:{order_id}:invalid-time",
-            "source": "bybit",
-            "account": mode,
-            "account_label": "Bybit Demo" if mode == "demo" else "Bybit Live",
-            "asset_class": "crypto",
-            "symbol": symbol,
-            "side": side_value.title(),
-            "status": "invalid_time_order",
-            "row_type": "quarantine",
-            "open_time": open_time,
-            "close_time": close_time_iso,
-            "notes": "Bybit row quarantined: close_time must be after open_time",
-            "raw_refs": raw_refs,
-        }
-    return {
+    status = "closed"
+    row_type = "trade"
+    if close_ts is None:
+        status = "invalid_time_order"
+        row_type = "quarantine"
+    elif open_ts is None:
+        status = "closed_missing_open_time"
+    elif close_ts <= open_ts:
+        status = "invalid_time_order"
+        row_type = "quarantine"
+    return _normalize_journal_profit_fields({
         "id": f"bybit:{mode}:closedpnl:{symbol}:{order_id}",
         "source": "bybit",
         "account": mode,
@@ -11269,7 +11327,8 @@ def _normalize_bybit_closed_pnl_row(
         "asset_class": "crypto",
         "symbol": symbol,
         "side": side_value.title(),
-        "status": "closed",
+        "status": status,
+        "row_type": row_type,
         "open_time": open_time,
         "close_time": close_time_iso,
         "entry_price": _to_float(entry.get("avgEntryPrice")),
@@ -11283,14 +11342,15 @@ def _normalize_bybit_closed_pnl_row(
         "fees": fees,
         "fee_currency": "USDT",
         "realized_pnl": _to_float(entry.get("closedPnl")),
+        "net_profit": _to_float(entry.get("closedPnl")),
         "realized_pnl_currency": "USDT",
         "balance_after_trade": balance_after_trade,
-        "notes": notes,
+        "notes": notes if status == "closed" else (notes + " | missing open time from Bybit context" if status == "closed_missing_open_time" else "Bybit row quarantined: close_time must be after open_time"),
         "timeframe": timeframe,
         "is_test_trade": is_test_trade,
         "metrics": {k: v for k, v in {"timeframe": timeframe, "is_test_trade": is_test_trade}.items() if v not in ("", None)},
         "raw_refs": raw_refs,
-    }
+    })
 
 
 def _backfill_trade_row_context_fields(row: Dict[str, object]) -> Dict[str, object]:
@@ -11820,6 +11880,26 @@ async def _sync_bybit_closed_pnl_window(
             ) or (
                 _epoch_or_iso_to_iso(resolved_ctx.get("created_at")) if isinstance(resolved_ctx, dict) else None
             )
+            if not resolved_open_time:
+                try:
+                    execution_candidates = await _fetch_bybit_executions(
+                        base_url=base_url,
+                        api_key=api_key,
+                        api_secret=api_secret,
+                        category="linear",
+                        start_time=start_time,
+                    )
+                    times = [
+                        int(_to_float(ex.get("execTime")) or 0)
+                        for ex in execution_candidates
+                        if isinstance(ex, dict)
+                        and str(ex.get("orderId") or "").strip() == order_id
+                        and int(_to_float(ex.get("execTime")) or 0) > 0
+                    ]
+                    if times:
+                        resolved_open_time = _ms_to_iso(min(times))
+                except Exception:
+                    resolved_open_time = None
             row = _normalize_bybit_closed_pnl_row(
                 entry,
                 account_mode=mode,
@@ -11828,6 +11908,7 @@ async def _sync_bybit_closed_pnl_window(
                 stop_loss=stop_loss,
                 take_profit=take_profit,
                 resolved_trade_context=resolved_ctx,
+                resolved_open_time=resolved_open_time,
                 raw_refs_extra={
                     "orderLinkId": order_link_id or order_match.get("orderLinkId"),
                     "parentOrderLinkId": order_match.get("parentOrderLinkId"),
@@ -11840,6 +11921,7 @@ async def _sync_bybit_closed_pnl_window(
                         **tpsl_debug,
                         "cache_hit": cache_hit,
                         "cache_match_type": cache_match_type,
+                        "open_time_derived_from_execution": bool(resolved_open_time),
                     },
                 },
             )
@@ -15187,18 +15269,18 @@ def _render_trade_chart_png(row: Dict[str, object], candles: List[Dict[str, obje
     return buf.getvalue()
 
 def _is_win(row: Dict[str, object]) -> bool:
-    pnl = _to_float(row.get("net_profit"))
+    pnl = _row_pnl(row)
     return pnl is not None and pnl > 0
 
 
 def _is_loss(row: Dict[str, object]) -> bool:
-    pnl = _to_float(row.get("net_profit"))
+    pnl = _row_pnl(row)
     return pnl is not None and pnl < 0
 
 
 def _is_be(row: Dict[str, object]) -> bool:
     breakeven = str(row.get("breakeven") or "").strip().lower()
-    pnl = _to_float(row.get("net_profit"))
+    pnl = _row_pnl(row)
     return breakeven in {"yes", "y", "true", "1"} or (pnl is not None and abs(pnl) < 1e-12)
 
 
@@ -15257,7 +15339,7 @@ def _calc_balance_after_trade(
                     continue
                 segment_running[anchor] = start_bal
 
-            pnl = _to_float(row.get("net_profit"))
+            pnl = _row_pnl(row)
             if pnl is not None:
                 segment_running[anchor] += pnl
 
@@ -15296,7 +15378,7 @@ def _apply_analysis_balances(rows: List[Dict[str, object]]) -> List[Dict[str, ob
         for row_idx in sorted(indices, key=lambda i: _to_ts(out_rows[i].get("close_time") or out_rows[i].get("open_time"))):
             row = out_rows[row_idx]
             balance_after = _to_float(row.get("balance_after_trade"))
-            pnl = _to_float(row.get("net_profit"))
+            pnl = _row_pnl(row)
             if running_balance is None:
                 if balance_after is None:
                     continue
@@ -15354,7 +15436,7 @@ def _enrich_trade_row_metrics(rows: List[Dict[str, object]]) -> List[Dict[str, o
 
         entry = _to_float(r.get("entry_price"))
         sl = _to_float(r.get("stop_loss"))
-        pnl = _to_float(r.get("net_profit"))
+        pnl = _row_pnl(r)
         move = _signed_price_move(r)
 
         price_move_pct = None
@@ -17976,7 +18058,14 @@ app.mount("/static", StaticFiles(directory=BASE_DIR / "render" / "static"), name
 
 @app.get("/api/trading-journal")
 async def trading_journal_items(filter: str = "") -> JSONResponse:
-    # Enforce "no Bybit Demo" across all journal outputs.
+    state_meta = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
+    source_folder = str(state_meta.get("source_folder") if isinstance(state_meta, dict) else "")
+    journal_mtime = TRADING_JOURNAL_PATH.stat().st_mtime if TRADING_JOURNAL_PATH.exists() else 0
+    cache_key = f"{journal_mtime}:{source_folder}"
+    cached_payload = _TRADING_JOURNAL_VIEW_CACHE.get("payload") if _TRADING_JOURNAL_VIEW_CACHE.get("key") == cache_key else None
+    if isinstance(cached_payload, dict) and not str(filter or "").strip():
+        return JSONResponse(cached_payload)
+
     items = [
         _backfill_trade_row_context_fields(r)
         for r in _get_trading_journal_rows()
@@ -18020,9 +18109,6 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
         items = [r for r in items if match(r)]
 
     balances = [b for b in _get_excel_account_balances() if not _is_bybit_demo_account_label(b.get("label") or b.get("account"))]
-    state_meta = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
-    source_folder = str(state_meta.get("source_folder") if isinstance(state_meta, dict) else "")
-
     # Pull cashflow rows from the active source folder tracked in journal state.
     trade_items = _enrich_trade_row_metrics(_apply_analysis_balances(_calc_balance_after_trade(items, balances)))
     cashflow_rows = _cashflow_rows_for_journal(source_folder) if source_folder else []
@@ -18034,7 +18120,11 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
 
     combined_items = sorted([*trade_items, *cashflow_rows], key=_row_sort_dt, reverse=True)
     stats = _compute_journal_stats(combined_items, balances)
-    return JSONResponse({"items": combined_items, "count": len(combined_items), "stats": stats})
+    payload = {"items": combined_items, "count": len(combined_items), "stats": stats}
+    if not tokens:
+        _TRADING_JOURNAL_VIEW_CACHE["key"] = cache_key
+        _TRADING_JOURNAL_VIEW_CACHE["payload"] = payload
+    return JSONResponse(payload)
 
 
 @app.get("/api/trading-journal/diagnostics")
@@ -18302,7 +18392,7 @@ async def _run_trading_journal_sync_job() -> None:
             bybit_demo = await _run_bybit_closed_pnl_sync(
                 account_mode="demo",
                 reason="manual",
-                enforce_manual_cooldown=True,
+                enforce_manual_cooldown=False,
             )
         except Exception as exc:
             bybit_demo = {"ok": False, "error": str(exc)}
@@ -18310,18 +18400,28 @@ async def _run_trading_journal_sync_job() -> None:
             bybit_live = await _run_bybit_closed_pnl_sync(
                 account_mode="live",
                 reason="manual",
-                enforce_manual_cooldown=True,
+                enforce_manual_cooldown=False,
             )
         except Exception as exc:
             bybit_live = {"ok": False, "error": str(exc)}
 
         result = await asyncio.to_thread(_import_trading_journal_from_sources, progress_cb=_cb)
+        warnings: List[str] = []
+        for mode_name, mode_payload in {"demo": bybit_demo, "live": bybit_live}.items():
+            if isinstance(mode_payload, dict):
+                if mode_payload.get("cooldown_active"):
+                    warnings.append(f"Bybit {mode_name} skipped by cooldown")
+                if mode_payload.get("ok") is False:
+                    warnings.append(f"Bybit {mode_name} failed: {mode_payload.get('error') or mode_payload.get('message') or 'unknown'}")
         if isinstance(result, dict):
             result["bybit"] = {"demo": bybit_demo, "live": bybit_live}
+            result["warnings"] = warnings
         diagnostics = result.get("diagnostics") if isinstance(result, dict) else {}
         rows_by_asset_class = diagnostics.get("rows_by_asset_class") if isinstance(diagnostics, dict) else {}
         ok_flag = bool(result.get("ok", True)) if isinstance(result, dict) else True
-        msg = "Done" if ok_flag else str((result or {}).get("message") or (result or {}).get("error") or "Failed")
+        if warnings:
+            ok_flag = False
+        msg = "Done" if ok_flag else str((result or {}).get("message") or (result or {}).get("error") or "; ".join(warnings) or "Failed")
         _set_trading_journal_sync_state(
             running=False,
             progress=100,

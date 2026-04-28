@@ -244,6 +244,8 @@ def test_trading_journal_js_contains_crud_controls_and_endpoints():
     assert "fetchNamedJson" in js
     assert "manualSyncInFlight" in js
     assert "skipAutoSync: true" in js
+    assert "const AUTO_REFRESH_MS = 60 * 60 * 1000;" in js
+    assert "preserveStatus" in js
     assert "new Error(`/api/trading-journal:" not in js
 
 
@@ -470,3 +472,67 @@ def test_parse_excel_generic_filename_infers_fx_asset_class(monkeypatch: pytest.
     rows, _bal = master_service._parse_excel_account_workbook("edgewonk-export-78784.xls", "/tmp/edgewonk-export-78784.xls", b"x")
     assert rows
     assert rows[0]["asset_class"] == "fx"
+
+
+def test_row_pnl_fallback_counts_realized_pnl_only_rows():
+    assert master_service._is_win({"realized_pnl": 1.0}) is True
+    assert master_service._is_loss({"realized_pnl": -1.0}) is True
+    assert master_service._is_be({"realized_pnl": 0.0}) is True
+
+
+def test_normalize_bybit_closed_pnl_row_sets_net_profit():
+    row = master_service._normalize_bybit_closed_pnl_row(
+        {
+            "symbol": "BTCUSDT",
+            "orderId": "order-1",
+            "updatedTime": 1710000001000,
+            "createdTime": 1710000000000,
+            "closedPnl": "9.5",
+            "avgEntryPrice": "100",
+            "avgExitPrice": "109.5",
+            "closedSize": "1",
+            "side": "Buy",
+        },
+        account_mode="demo",
+        balance_after_trade=None,
+    )
+    assert row is not None
+    assert row["realized_pnl"] == 9.5
+    assert row["net_profit"] == 9.5
+
+
+def test_oanda_rows_set_net_profit_from_realized_pnl(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_persist_oanda_fill_state", lambda: None)
+    monkeypatch.setattr(master_service, "_load_trade_contexts", lambda: [])
+    monkeypatch.setattr(master_service, "_lookup_trade_context_for_journal_row", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(master_service, "_lookup_trade_context_by_market_window", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(master_service, "_update_unresolved_registry", lambda **_kwargs: (False, {}))
+    rows = master_service._journal_rows_from_oanda_order_fill(
+        {
+            "account": "live",
+            "id": "100",
+            "instrument": "EUR_USD",
+            "time": "2026-04-01T01:00:00Z",
+            "orderID": "200",
+            "units": "-1000",
+            "tradesClosed": [{"tradeID": "t1", "units": "-1000", "price": "1.2", "realizedPL": "7", "financing": "0"}],
+            "accountCurrency": "AUD",
+            "price": "1.2",
+        }
+    )
+    assert rows
+    assert rows[0]["net_profit"] == rows[0]["realized_pnl"]
+
+
+def test_manual_sync_calls_bybit_without_manual_cooldown(monkeypatch: pytest.MonkeyPatch):
+    calls = []
+
+    async def _fake_bybit(**kwargs):
+        calls.append(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(master_service, "_run_bybit_closed_pnl_sync", _fake_bybit)
+    monkeypatch.setattr(master_service, "_import_trading_journal_from_sources", lambda progress_cb=None: {"ok": True, "rows_imported": 0, "diagnostics": {}})
+    asyncio.run(master_service._run_trading_journal_sync_job())
+    assert len(calls) == 2
+    assert all(call.get("enforce_manual_cooldown") is False for call in calls)
