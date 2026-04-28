@@ -780,7 +780,7 @@ def _build_trading_journal_diagnostics_snapshot() -> Dict[str, object]:
 
 
 _TRADING_JOURNAL_VIEW_CACHE: Dict[str, object] = {"key": None, "payload": None}
-TRADING_JOURNAL_VIEW_CACHE_VERSION = 1
+TRADING_JOURNAL_VIEW_CACHE_VERSION = 2
 
 
 def _source_file_fingerprint(path: Path) -> Dict[str, object]:
@@ -816,6 +816,8 @@ def _journal_source_fingerprint() -> dict:
 def _load_trading_journal_view_snapshot() -> Optional[Dict[str, object]]:
     payload = _load_json_file(TRADING_JOURNAL_VIEW_CACHE_PATH, {})
     if not isinstance(payload, dict) or not payload:
+        return None
+    if int(payload.get("cache_version") or 0) != TRADING_JOURNAL_VIEW_CACHE_VERSION:
         return None
     return payload
 
@@ -911,18 +913,32 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
     ]
     excel_balances = _get_excel_account_balances()
     balances_seed = [b for b in excel_balances if not _is_bybit_demo_account_label(b.get("label") or b.get("account"))]
-    trade_items = _enrich_trade_row_metrics(_apply_analysis_balances(_calc_balance_after_trade(rows, balances_seed)))
     state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
     ledger = _load_cashflows_for_active_journal_source(state if isinstance(state, dict) else {})
+    timeline = _build_journal_balance_timelines(rows, ledger, excel_balances)
+    trade_items = _enrich_trade_row_metrics(timeline.get("rows") if isinstance(timeline.get("rows"), list) else rows)
     cashflow_rows = [r for r in _cashflow_rows_for_journal(ledger) if isinstance(r, dict) and not _exclude_bybit_demo_row(r)]
     combined_items = sorted([*trade_items, *cashflow_rows], key=_row_sort_dt, reverse=True)
-    stats = _compute_journal_stats(combined_items, balances_seed)
-    cashflow_balances = _latest_balances_from_cashflows(ledger)
+    balances = timeline.get("balances") if isinstance(timeline.get("balances"), list) else []
+    stats = _compute_journal_stats(combined_items, balances)
     broker_balances = (state or {}).get("broker_account_balances") if isinstance(state, dict) else []
     if not isinstance(broker_balances, list):
         broker_balances = []
-    balances = _merge_display_balances(cashflow_balances, excel_balances, broker_balances)
+    broker_only = []
+    for item in broker_balances:
+        if not isinstance(item, dict):
+            continue
+        key = _norm_account_key(item.get("label") or item.get("account"))
+        if key and not any(_norm_account_key(b.get("label") or b.get("account")) == key for b in balances):
+            broker_only.append(item)
+    balances = _merge_display_balances(balances, broker_only)
     diagnostics = _build_trading_journal_diagnostics_snapshot()
+    timeline_diag = timeline.get("diagnostics") if isinstance(timeline.get("diagnostics"), dict) else {}
+    missing_accounts = [d.get("account_key") for d in timeline_diag.values() if isinstance(d, dict) and d.get("missing_balance")]
+    if missing_accounts:
+        existing_errors = diagnostics.get("errors") if isinstance(diagnostics.get("errors"), list) else []
+        diagnostics["errors"] = [*existing_errors, f"Missing balance anchor for accounts: {', '.join(str(x) for x in missing_accounts)}"]
+    diagnostics["balance_timeline"] = timeline_diag
     broker_diag = (state or {}).get("broker_balance_diagnostics") if isinstance(state, dict) else {}
     if isinstance(broker_diag, dict):
         warnings = broker_diag.get("warnings")
@@ -3559,22 +3575,47 @@ def _parse_excel_account_workbook(
         nav_col = _first_present(df, ["nav", "equity", "account_equity"])
         ccy_col = _first_present(df, ["currency", "ccy", "account_currency"])
         if bal_col or nav_col:
-            # Prefer the most recent non-empty balance-like row (usually bottom of sheet).
-            for _, row in df.iloc[::-1].iterrows():
-                bal_val = row.get(bal_col) if bal_col else None
-                nav_val = row.get(nav_col) if nav_col else None
-                if _is_empty_cell(bal_val) and _is_empty_cell(nav_val):
-                    continue
+            latest_bal_row: Optional[pd.Series] = None
+            latest_bal_ts = float("-inf")
+            ts_col = close_time_col or open_time_col
+            if ts_col:
+                for _, row in df.iterrows():
+                    bal_val = row.get(bal_col) if bal_col else None
+                    nav_val = row.get(nav_col) if nav_col else None
+                    if _is_empty_cell(bal_val) and _is_empty_cell(nav_val):
+                        continue
+                    ts_raw = row.get(ts_col)
+                    if _is_empty_cell(ts_raw):
+                        continue
+                    try:
+                        ts = float(pd.to_datetime(ts_raw, utc=True).timestamp())
+                    except Exception:
+                        continue
+                    if ts >= latest_bal_ts:
+                        latest_bal_ts = ts
+                        latest_bal_row = row
+            chosen_row = latest_bal_row
+            if chosen_row is None:
+                # Fallback when timestamps are unavailable: use latest physical non-empty balance-like row.
+                for _, row in df.iloc[::-1].iterrows():
+                    bal_val = row.get(bal_col) if bal_col else None
+                    nav_val = row.get(nav_col) if nav_col else None
+                    if _is_empty_cell(bal_val) and _is_empty_cell(nav_val):
+                        continue
+                    chosen_row = row
+                    break
+            if chosen_row is not None:
+                bal_val = chosen_row.get(bal_col) if bal_col else None
+                nav_val = chosen_row.get(nav_col) if nav_col else None
                 account_balance = {
                     "source": "excel",
                     "account": account_label,
                     "label": account_label,
                     "balance": _cell_to_float(bal_val),
                     "nav": _cell_to_float(nav_val),
-                    "currency": _cell_to_str(row.get(ccy_col)) if ccy_col else _infer_account_currency(account_label),
+                    "currency": _cell_to_str(chosen_row.get(ccy_col)) if ccy_col else _infer_account_currency(account_label),
                     "dropbox_path": dbx_path,
                 }
-                break
 
     return all_rows, account_balance
 def _resolve_trading_journal_dropbox_folder() -> Tuple[str, List[Dict[str, Any]]]:
@@ -3852,6 +3893,160 @@ def _load_cashflows_for_active_journal_source(state: dict) -> Dict[str, List[Dic
         return _load_cashflows_from_local(local_dir)
     active_folder = str((state or {}).get("source_folder") or "")
     return _load_cashflows_from_dropbox(active_folder) if active_folder else {}
+
+
+def _build_journal_balance_timelines(
+    rows: List[Dict[str, object]],
+    cashflow_ledger: Dict[str, List[Dict[str, object]]],
+    excel_balances: List[Dict[str, object]],
+) -> Dict[str, object]:
+    def _to_ts(value: object) -> float:
+        if value in (None, ""):
+            return float("-inf")
+        try:
+            return float(pd.to_datetime(value, utc=True).timestamp())
+        except Exception:
+            return float("-inf")
+
+    out_rows = [dict(r) for r in rows]
+    by_account: Dict[str, Dict[str, object]] = defaultdict(lambda: {"trade_indices": [], "labels": [], "currencies": []})
+
+    for idx, row in enumerate(out_rows):
+        if not _is_trade_row(row):
+            continue
+        label = str(row.get("account_label") or row.get("account") or "").strip()
+        key = _norm_account_key(label)
+        if not key:
+            continue
+        by_account[key]["trade_indices"].append(idx)
+        if label:
+            by_account[key]["labels"].append((label, _to_ts(row.get("close_time") or row.get("open_time"))))
+        ccy = str(row.get("balance_after_trade_currency") or row.get("currency") or "").strip()
+        if ccy:
+            by_account[key]["currencies"].append((ccy, _to_ts(row.get("close_time") or row.get("open_time"))))
+
+    for bal in excel_balances or []:
+        if not isinstance(bal, dict):
+            continue
+        label = str(bal.get("label") or bal.get("account") or "").strip()
+        key = _norm_account_key(label)
+        if not key:
+            continue
+        by_account[key]["excel_balance"] = _to_float(bal.get("balance"))
+        by_account[key]["excel_label"] = label
+        by_account[key]["excel_currency"] = str(bal.get("currency") or "").strip()
+
+    diagnostics: Dict[str, Dict[str, object]] = {}
+    balances: List[Dict[str, object]] = []
+
+    for account_key in sorted(set([*by_account.keys(), *((cashflow_ledger or {}).keys())])):
+        bucket = by_account.get(account_key) or {"trade_indices": [], "labels": [], "currencies": []}
+        trade_indices = sorted(
+            bucket.get("trade_indices") or [],
+            key=lambda i: _to_ts(out_rows[i].get("close_time") or out_rows[i].get("open_time")),
+        )
+        events = sorted((cashflow_ledger or {}).get(account_key) or [], key=lambda e: _to_ts(e.get("date")))
+        has_cashflow = len(events) > 0
+        segment_running: Dict[int, float] = {}
+        last_known_balance: Optional[float] = None
+        last_known_ts = float("-inf")
+
+        for row_idx in trade_indices:
+            row = out_rows[row_idx]
+            trade_ts = _to_ts(row.get("close_time") or row.get("open_time"))
+            pnl = _row_pnl(row)
+            authoritative_after = _to_float(row.get("balance_after_trade")) if str(row.get("source") or "").lower() in {"excel", "local_excel"} else None
+
+            if has_cashflow:
+                anchor_idx = -1
+                for i, ev in enumerate(events):
+                    if _to_ts(ev.get("date")) <= trade_ts:
+                        anchor_idx = i
+                    else:
+                        break
+                if anchor_idx >= 0:
+                    if anchor_idx not in segment_running:
+                        segment_running[anchor_idx] = _to_float(events[anchor_idx].get("new_balance")) or 0.0
+                    before = segment_running[anchor_idx]
+                    after = before
+                    if not _is_test_trade_row(row) and pnl is not None:
+                        after = before + pnl
+                    segment_running[anchor_idx] = after
+                    row["analysis_balance_before_trade"] = before
+                    row["analysis_balance_after_trade"] = after
+                    last_known_balance = after
+                    last_known_ts = trade_ts
+                    continue
+                if authoritative_after is not None:
+                    before = authoritative_after - pnl if (pnl is not None and not _is_test_trade_row(row)) else authoritative_after
+                    row["analysis_balance_before_trade"] = before
+                    row["analysis_balance_after_trade"] = authoritative_after
+                continue
+
+            if authoritative_after is not None:
+                before = authoritative_after - pnl if (pnl is not None and not _is_test_trade_row(row)) else authoritative_after
+                row["analysis_balance_before_trade"] = before
+                row["analysis_balance_after_trade"] = authoritative_after
+                last_known_balance = authoritative_after
+                last_known_ts = trade_ts
+                continue
+
+            if last_known_balance is not None:
+                before = last_known_balance
+                after = before
+                if not _is_test_trade_row(row) and pnl is not None:
+                    after = before + pnl
+                row["analysis_balance_before_trade"] = before
+                row["analysis_balance_after_trade"] = after
+                last_known_balance = after
+                last_known_ts = trade_ts
+
+        display_balance: Optional[float] = None
+        balance_source = "timeline_missing"
+        as_of: Optional[object] = None
+        if has_cashflow:
+            latest_event_idx = len(events) - 1
+            base = _to_float(events[latest_event_idx].get("new_balance"))
+            if base is not None:
+                display_balance = segment_running.get(latest_event_idx, base)
+                balance_source = "cashflow_anchor_plus_trades"
+                as_of = events[latest_event_idx].get("date")
+        elif last_known_balance is not None:
+            display_balance = last_known_balance
+            balance_source = "trade_timeline"
+            as_of = next((out_rows[i].get("close_time") or out_rows[i].get("open_time") for i in reversed(trade_indices) if _to_ts(out_rows[i].get("close_time") or out_rows[i].get("open_time")) == last_known_ts), None)
+        elif _to_float(bucket.get("excel_balance")) is not None:
+            display_balance = _to_float(bucket.get("excel_balance"))
+            balance_source = "excel_account_balance"
+
+        latest_cashflow = events[-1] if events else {}
+        label = str(latest_cashflow.get("account") or bucket.get("excel_label") or (bucket.get("labels")[-1][0] if bucket.get("labels") else account_key))
+        currency = str(latest_cashflow.get("currency") or bucket.get("excel_currency") or (bucket.get("currencies")[-1][0] if bucket.get("currencies") else _infer_account_currency(label)))
+        missing_balance = display_balance is None
+        if (not ENABLE_BYBIT_DEMO_JOURNAL) and _is_bybit_demo_account_label(label):
+            continue
+        balances.append(
+            {
+                "account": label,
+                "label": label,
+                "balance": display_balance,
+                "currency": currency,
+                "source": balance_source,
+                "balance_source": balance_source,
+                "as_of": as_of,
+                "missing_balance": missing_balance,
+                "last_trade_at": (out_rows[trade_indices[-1]].get("close_time") or out_rows[trade_indices[-1]].get("open_time")) if trade_indices else None,
+            }
+        )
+        diagnostics[account_key] = {
+            "account_key": account_key,
+            "cashflow_events": len(events),
+            "trade_rows": len(trade_indices),
+            "missing_balance": missing_balance,
+            "warning": "No cashflow or authoritative trade balance anchor found." if missing_balance else "",
+        }
+    balances = sorted(balances, key=lambda x: str(x.get("label") or x.get("account") or ""))
+    return {"rows": out_rows, "balances": balances, "diagnostics": diagnostics}
 
 
 def _latest_balances_from_cashflows(ledger: Dict[str, List[Dict[str, object]]]) -> List[Dict[str, object]]:
@@ -16058,44 +16253,12 @@ def _calc_balance_after_trade(
 
 
 def _apply_analysis_balances(rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
-    out_rows = [dict(row) for row in rows]
-    by_account: Dict[str, List[int]] = defaultdict(list)
-
-    def _to_ts(value: object) -> float:
-        if value in (None, ""):
-            return float("-inf")
-        try:
-            return float(pd.to_datetime(value).timestamp())
-        except Exception:
-            return float("-inf")
-
-    for idx, row in enumerate(out_rows):
-        if not _is_trade_row(row):
-            continue
-        account = str(row.get("account_label") or row.get("account") or "")
-        key = _norm_account_key(account)
-        if key:
-            by_account[key].append(idx)
-
-    for indices in by_account.values():
-        running_balance: Optional[float] = None
-        for row_idx in sorted(indices, key=lambda i: _to_ts(out_rows[i].get("close_time") or out_rows[i].get("open_time"))):
-            row = out_rows[row_idx]
-            balance_after = _to_float(row.get("balance_after_trade"))
-            pnl = _row_pnl(row)
-            if running_balance is None:
-                if balance_after is None:
-                    continue
-                if _is_test_trade_row(row) and pnl is not None:
-                    running_balance = balance_after - pnl
-                else:
-                    running_balance = balance_after
-            before_balance = running_balance if pnl is not None else None
-            if not _is_test_trade_row(row) and pnl is not None and before_balance is not None:
-                running_balance = before_balance + pnl
-            row["analysis_balance_before_trade"] = before_balance
-            row["analysis_balance_after_trade"] = running_balance if before_balance is not None else balance_after
-    return out_rows
+    state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
+    ledger = _load_cashflows_for_active_journal_source(state if isinstance(state, dict) else {})
+    excel_balances = _get_excel_account_balances()
+    timeline = _build_journal_balance_timelines(rows, ledger, excel_balances)
+    out_rows = timeline.get("rows")
+    return out_rows if isinstance(out_rows, list) else [dict(r) for r in rows]
 
 
 def _avg(values: List[float]) -> Optional[float]:
@@ -18942,7 +19105,11 @@ async def trading_journal_balances() -> JSONResponse:
         status_code = 202 if pending else 503
         return JSONResponse({"items": [], "pending": pending, "sync_status": sync_status}, status_code=status_code)
     items = snapshot.get("balances") if isinstance(snapshot.get("balances"), list) else []
-    return JSONResponse({"items": items})
+    diagnostics = snapshot.get("diagnostics") if isinstance(snapshot.get("diagnostics"), dict) else {}
+    errors = diagnostics.get("errors") if isinstance(diagnostics.get("errors"), list) else []
+    if errors:
+        return JSONResponse({"items": items, "ok": False, "diagnostics": diagnostics}, status_code=503)
+    return JSONResponse({"items": items, "ok": True})
 
 
 @app.post("/api/trading-journal/rows")
