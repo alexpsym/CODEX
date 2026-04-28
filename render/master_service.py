@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import socket
 import signal
 import subprocess
@@ -455,6 +456,8 @@ TRADING_JOURNAL_PATH = BASE_DIR / "render" / "data" / "trading_journal.json"
 TRADING_JOURNAL_STATE_PATH = BASE_DIR / "render" / "data" / "trading_journal_state.json"
 TRADING_JOURNAL_SYNC_STATE_PATH = BASE_DIR / "render" / "data" / "trading_journal_sync_state.json"
 TRADING_JOURNAL_IMPORT_CACHE_PATH = BASE_DIR / "render" / "data" / "trading_journal_import_cache.json"
+TRADING_JOURNAL_VIEW_CACHE_PATH = BASE_DIR / "render" / "data" / "trading_journal_view_cache.json"
+TRADING_JOURNAL_SQLITE_PATH = BASE_DIR / "render" / "data" / "trading_journal.sqlite"
 MONTHLY_AUD_REVALUATION_PATH = BASE_DIR / "render" / "data" / "monthly_aud_revaluation.json"
 MONTHLY_AUD_REVALUATION_STATE_PATH = BASE_DIR / "render" / "data" / "monthly_aud_revaluation_state.json"
 OANDA_FILL_STATE_PATH = BASE_DIR / "render" / "data" / "oanda_fill_state.json"
@@ -730,6 +733,160 @@ def _build_trading_journal_diagnostics_snapshot() -> Dict[str, object]:
 
 
 _TRADING_JOURNAL_VIEW_CACHE: Dict[str, object] = {"key": None, "payload": None}
+TRADING_JOURNAL_VIEW_CACHE_VERSION = 1
+
+
+def _source_file_fingerprint(path: Path) -> Dict[str, object]:
+    info: Dict[str, object] = {"path": str(path), "exists": path.exists()}
+    if not path.exists():
+        return info
+    stat = path.stat()
+    info["size"] = int(stat.st_size)
+    info["mtime"] = float(stat.st_mtime)
+    try:
+        info["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    except Exception:
+        info["sha256"] = ""
+    return info
+
+
+def _journal_source_fingerprint() -> dict:
+    mode = TRADING_JOURNAL_SOURCE if TRADING_JOURNAL_SOURCE in {"dropbox", "local", "both", "auto"} else "both"
+    source_files: List[Dict[str, object]] = []
+    for path in _list_local_trading_journal_workbooks():
+        source_files.append(_source_file_fingerprint(path))
+    source_files.append(_source_file_fingerprint(TRADING_JOURNAL_LOCAL_DIR / "account_cashflows.xlsx"))
+    source_files.append(_source_file_fingerprint(TRADING_JOURNAL_LOCAL_DIR / BYBIT_DEMO_WORKBOOK_NAME))
+    source_files.append(_source_file_fingerprint(TRADING_JOURNAL_LOCAL_DIR / BYBIT_DEMO_TEMPLATE_NAME))
+    source_files = sorted(source_files, key=lambda x: str(x.get("path") or ""))
+    return {
+        "source_mode": mode,
+        "local_dir": str(TRADING_JOURNAL_LOCAL_DIR),
+        "files": source_files,
+    }
+
+
+def _load_trading_journal_view_snapshot() -> Optional[Dict[str, object]]:
+    payload = _load_json_file(TRADING_JOURNAL_VIEW_CACHE_PATH, {})
+    if not isinstance(payload, dict) or not payload:
+        return None
+    return payload
+
+
+def _save_trading_journal_view_snapshot(payload: dict) -> None:
+    _save_json_file(TRADING_JOURNAL_VIEW_CACHE_PATH, payload if isinstance(payload, dict) else {})
+
+
+def _ensure_trading_journal_sqlite_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS journal_trades (id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, imported_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS journal_cashflows (id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, imported_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS journal_balances (account_key TEXT PRIMARY KEY, payload_json TEXT NOT NULL, imported_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS journal_metrics (id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, imported_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS journal_stats (snapshot_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, imported_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS journal_diagnostics (snapshot_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, imported_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS source_files (absolute_path TEXT PRIMARY KEY, file_size INTEGER, modified_at REAL, content_hash TEXT, last_imported_at TEXT);
+        CREATE TABLE IF NOT EXISTS import_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT, finished_at TEXT, source_mode TEXT, workbooks_scanned INTEGER, workbooks_changed INTEGER, rows_imported INTEGER, cashflow_rows_loaded INTEGER, warnings_json TEXT, errors_json TEXT);
+        """
+    )
+
+
+def _persist_trading_journal_sqlite(snapshot: Dict[str, object], import_meta: Optional[Dict[str, object]] = None) -> None:
+    TRADING_JOURNAL_SQLITE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    now_iso = _utc_now_iso()
+    conn = sqlite3.connect(TRADING_JOURNAL_SQLITE_PATH)
+    try:
+        _ensure_trading_journal_sqlite_schema(conn)
+        items = snapshot.get("items") if isinstance(snapshot.get("items"), list) else []
+        balances = snapshot.get("balances") if isinstance(snapshot.get("balances"), list) else []
+        diagnostics = snapshot.get("diagnostics") if isinstance(snapshot.get("diagnostics"), dict) else {}
+        stats = snapshot.get("stats") if isinstance(snapshot.get("stats"), dict) else {}
+        conn.execute("DELETE FROM journal_trades")
+        conn.execute("DELETE FROM journal_cashflows")
+        conn.execute("DELETE FROM journal_balances")
+        conn.execute("DELETE FROM journal_metrics")
+        for row in items:
+            if not isinstance(row, dict):
+                continue
+            row_id = str(row.get("id") or uuid4().hex)
+            payload_json = json.dumps(row, ensure_ascii=False)
+            if _row_type(row) == "cashflow":
+                conn.execute("INSERT OR REPLACE INTO journal_cashflows(id,payload_json,imported_at) VALUES(?,?,?)", (row_id, payload_json, now_iso))
+            else:
+                conn.execute("INSERT OR REPLACE INTO journal_trades(id,payload_json,imported_at) VALUES(?,?,?)", (row_id, payload_json, now_iso))
+                metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+                conn.execute("INSERT OR REPLACE INTO journal_metrics(id,payload_json,imported_at) VALUES(?,?,?)", (row_id, json.dumps(metrics, ensure_ascii=False), now_iso))
+        for bal in balances:
+            if not isinstance(bal, dict):
+                continue
+            account_key = _norm_account_key(str(bal.get("account") or bal.get("label") or uuid4().hex))
+            conn.execute("INSERT OR REPLACE INTO journal_balances(account_key,payload_json,imported_at) VALUES(?,?,?)", (account_key, json.dumps(bal, ensure_ascii=False), now_iso))
+        snapshot_id = str(snapshot.get("generated_at") or now_iso)
+        conn.execute("INSERT OR REPLACE INTO journal_stats(snapshot_id,payload_json,imported_at) VALUES(?,?,?)", (snapshot_id, json.dumps(stats, ensure_ascii=False), now_iso))
+        conn.execute("INSERT OR REPLACE INTO journal_diagnostics(snapshot_id,payload_json,imported_at) VALUES(?,?,?)", (snapshot_id, json.dumps(diagnostics, ensure_ascii=False), now_iso))
+        for src in (snapshot.get("source_fingerprints") or {}).get("files", []):
+            if not isinstance(src, dict):
+                continue
+            conn.execute(
+                "INSERT OR REPLACE INTO source_files(absolute_path,file_size,modified_at,content_hash,last_imported_at) VALUES(?,?,?,?,?)",
+                (str(src.get("path") or ""), int(src.get("size") or 0), float(src.get("mtime") or 0.0), str(src.get("sha256") or ""), now_iso),
+            )
+        if isinstance(import_meta, dict):
+            conn.execute(
+                "INSERT INTO import_runs(started_at,finished_at,source_mode,workbooks_scanned,workbooks_changed,rows_imported,cashflow_rows_loaded,warnings_json,errors_json) VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    str(import_meta.get("started_at") or now_iso),
+                    now_iso,
+                    str(import_meta.get("source_mode") or ""),
+                    int(import_meta.get("workbooks_scanned") or 0),
+                    int(import_meta.get("workbooks_changed") or 0),
+                    int(import_meta.get("rows_imported") or 0),
+                    int(import_meta.get("cashflow_rows_loaded") or 0),
+                    json.dumps(import_meta.get("warnings") or [], ensure_ascii=False),
+                    json.dumps(import_meta.get("errors") or [], ensure_ascii=False),
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, object]:
+    existing = _load_trading_journal_view_snapshot()
+    fingerprint = _journal_source_fingerprint()
+    if not force and isinstance(existing, dict) and existing.get("source_fingerprints") == fingerprint:
+        return existing
+    rows = [
+        _backfill_trade_row_context_fields(r)
+        for r in _get_trading_journal_rows()
+        if _is_visible_trading_journal_row(r)
+    ]
+    balances_seed = [b for b in _get_excel_account_balances() if not _is_bybit_demo_account_label(b.get("label") or b.get("account"))]
+    trade_items = _enrich_trade_row_metrics(_apply_analysis_balances(_calc_balance_after_trade(rows, balances_seed)))
+    state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
+    ledger = _load_cashflows_for_active_journal_source(state if isinstance(state, dict) else {})
+    cashflow_rows = [r for r in _cashflow_rows_for_journal(ledger) if isinstance(r, dict) and not _exclude_bybit_demo_row(r)]
+    combined_items = sorted([*trade_items, *cashflow_rows], key=_row_sort_dt, reverse=True)
+    stats = _compute_journal_stats(combined_items, balances_seed)
+    balances = _latest_balances_from_cashflows(ledger)
+    diagnostics = _build_trading_journal_diagnostics_snapshot()
+    payload: Dict[str, object] = {
+        "cache_version": TRADING_JOURNAL_VIEW_CACHE_VERSION,
+        "generated_at": _utc_now_iso(),
+        "items": combined_items,
+        "count": len(combined_items),
+        "stats": stats,
+        "balances": balances,
+        "diagnostics": diagnostics,
+        "warnings": [],
+        "source_fingerprints": fingerprint,
+    }
+    _save_trading_journal_view_snapshot(payload)
+    _persist_trading_journal_sqlite(payload)
+    _TRADING_JOURNAL_VIEW_CACHE["key"] = "snapshot"
+    _TRADING_JOURNAL_VIEW_CACHE["payload"] = payload
+    return payload
 
 
 TRADING_JOURNAL_DROPBOX_RECURSIVE = os.getenv(
@@ -3451,37 +3608,15 @@ _CASHFLOW_CACHE: Dict[str, Tuple[float, Dict[str, List[Dict[str, object]]]]] = {
 _CASHFLOW_CACHE_LOCK = threading.Lock()
 
 
-def _load_cashflows_from_dropbox(active_folder: str) -> Dict[str, List[Dict[str, object]]]:
-    folder_key = str(active_folder or "").strip()
-    if folder_key:
-        now = time.time()
-        with _CASHFLOW_CACHE_LOCK:
-            cached = _CASHFLOW_CACHE.get(folder_key)
-        if cached and (now - cached[0] < _CASHFLOW_CACHE_TTL_SECONDS):
-            return cached[1]
-
+def _parse_cashflow_workbook_payload(payload: bytes) -> Dict[str, List[Dict[str, object]]]:
     out: Dict[str, List[Dict[str, object]]] = defaultdict(list)
-
-    def _cache_and_return() -> Dict[str, List[Dict[str, object]]]:
-        # Cache successful, empty, and error fallbacks to avoid retry storms during Dropbox issues.
-        payload: Dict[str, List[Dict[str, object]]] = dict(out)
-        if folder_key:
-            with _CASHFLOW_CACHE_LOCK:
-                _CASHFLOW_CACHE[folder_key] = (time.time(), payload)
-        return payload
-
-    cashflow_path = _join_dropbox_path(active_folder, "account_cashflows.xlsx")
-    try:
-        payload = _dropbox_download_bytes(cashflow_path)
-    except Exception:
-        return _cache_and_return()
     bio = io.BytesIO(payload)
     try:
         df = pd.read_excel(bio, sheet_name="Cashflows")
     except Exception:
-        return _cache_and_return()
+        return dict(out)
     if df is None or df.empty:
-        return _cache_and_return()
+        return dict(out)
     df.columns = [str(c) for c in df.columns]
     acct_col = _first_present(df, ["account"])
     date_col = _first_present(df, ["date"])
@@ -3490,7 +3625,7 @@ def _load_cashflows_from_dropbox(active_folder: str) -> Dict[str, List[Dict[str,
     ccy_col = _first_present(df, ["currency"])
     reason_col = _first_present(df, ["reason"])
     if not acct_col or not date_col or not bal_col:
-        return _cache_and_return()
+        return dict(out)
 
     for _, row in df.iterrows():
         account = _safe_str_from_row(row, acct_col)
@@ -3520,11 +3655,117 @@ def _load_cashflows_from_dropbox(active_folder: str) -> Dict[str, List[Dict[str,
 
     for account_key in list(out.keys()):
         out[account_key] = sorted(out[account_key], key=lambda x: str(x.get("date") or ""))
+    return dict(out)
+
+
+def _load_cashflows_from_local(local_dir: Path) -> Dict[str, List[Dict[str, object]]]:
+    cashflow_path = (local_dir / "account_cashflows.xlsx") if isinstance(local_dir, Path) else Path("account_cashflows.xlsx")
+    if not cashflow_path.exists() or not cashflow_path.is_file():
+        return {}
+    try:
+        payload = cashflow_path.read_bytes()
+    except Exception:
+        return {}
+    return _parse_cashflow_workbook_payload(payload)
+
+
+def _ensure_local_cashflow_template(local_dir: Path) -> bool:
+    target = local_dir / "account_cashflows.xlsx"
+    if target.exists():
+        return False
+    local_dir.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(_cashflow_template_bytes())
+    return True
+
+
+def _ensure_local_bybit_demo_files(local_dir: Path) -> Dict[str, bool]:
+    created = {"trade_history_template_created": False, "demo_workbook_created": False}
+    local_dir.mkdir(parents=True, exist_ok=True)
+    template_path = local_dir / BYBIT_DEMO_TEMPLATE_NAME
+    if not template_path.exists():
+        if bybit_history_fetcher is None:
+            raise RuntimeError("Bybit history exporter module not available.")
+        bybit_history_fetcher.write_blank_trade_history_template(str(template_path))
+        created["trade_history_template_created"] = True
+    workbook_path = local_dir / BYBIT_DEMO_WORKBOOK_NAME
+    if not workbook_path.exists():
+        workbook_path.write_bytes(_bybit_demo_workbook_bytes())
+        created["demo_workbook_created"] = True
+    return created
+
+
+def _ensure_trading_journal_local_templates() -> Dict[str, object]:
+    result: Dict[str, object] = {
+        "cashflow_template_created": False,
+        "trade_history_template_created": False,
+        "demo_workbook_created": False,
+        "errors": [],
+    }
+    local_dir = TRADING_JOURNAL_LOCAL_DIR
+    try:
+        result["cashflow_template_created"] = _ensure_local_cashflow_template(local_dir)
+    except Exception as exc:
+        result["errors"].append(f"account_cashflows.xlsx create failed: {exc}")
+    try:
+        bybit = _ensure_local_bybit_demo_files(local_dir)
+        result.update(bybit)
+    except Exception as exc:
+        result["errors"].append(f"Bybit local template create failed: {exc}")
+    return result
+
+
+def _load_cashflows_from_dropbox(active_folder: str) -> Dict[str, List[Dict[str, object]]]:
+    folder_key = str(active_folder or "").strip()
+    if folder_key:
+        now = time.time()
+        with _CASHFLOW_CACHE_LOCK:
+            cached = _CASHFLOW_CACHE.get(folder_key)
+        if cached and (now - cached[0] < _CASHFLOW_CACHE_TTL_SECONDS):
+            return cached[1]
+
+    out: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+
+    def _cache_and_return() -> Dict[str, List[Dict[str, object]]]:
+        # Cache successful, empty, and error fallbacks to avoid retry storms during Dropbox issues.
+        payload: Dict[str, List[Dict[str, object]]] = dict(out)
+        if folder_key:
+            with _CASHFLOW_CACHE_LOCK:
+                _CASHFLOW_CACHE[folder_key] = (time.time(), payload)
+        return payload
+
+    cashflow_path = _join_dropbox_path(active_folder, "account_cashflows.xlsx")
+    try:
+        payload = _dropbox_download_bytes(cashflow_path)
+    except Exception:
+        return _cache_and_return()
+    out.update(_parse_cashflow_workbook_payload(payload))
     return _cache_and_return()
 
 
-def _latest_balances_from_cashflows(active_folder: str) -> List[Dict[str, object]]:
-    ledger = _load_cashflows_from_dropbox(active_folder)
+def _load_cashflows_for_active_journal_source(state: dict) -> Dict[str, List[Dict[str, object]]]:
+    source_mode = str(os.getenv("TRADING_JOURNAL_SOURCE", TRADING_JOURNAL_SOURCE) or "").strip().lower()
+    state_source = str((state or {}).get("source_mode") or "").strip().lower()
+    active_source = state_source or source_mode or "both"
+    local_dir = TRADING_JOURNAL_LOCAL_DIR
+    local_cashflow_path = local_dir / "account_cashflows.xlsx"
+
+    if active_source == "local":
+        return _load_cashflows_from_local(local_dir)
+    if active_source == "dropbox":
+        active_folder = str((state or {}).get("source_folder") or "")
+        return _load_cashflows_from_dropbox(active_folder) if active_folder else {}
+    if active_source in {"both", "auto"}:
+        if local_cashflow_path.exists():
+            return _load_cashflows_from_local(local_dir)
+        active_folder = str((state or {}).get("source_folder") or "")
+        return _load_cashflows_from_dropbox(active_folder) if active_folder else {}
+    if local_cashflow_path.exists():
+        return _load_cashflows_from_local(local_dir)
+    active_folder = str((state or {}).get("source_folder") or "")
+    return _load_cashflows_from_dropbox(active_folder) if active_folder else {}
+
+
+def _latest_balances_from_cashflows(ledger: Dict[str, List[Dict[str, object]]]) -> List[Dict[str, object]]:
     items: List[Dict[str, object]] = []
     for account_key, events in ledger.items():
         if not events:
@@ -3545,8 +3786,7 @@ def _latest_balances_from_cashflows(active_folder: str) -> List[Dict[str, object
     return sorted(items, key=lambda x: str(x.get("label") or ""))
 
 
-def _cashflow_rows_for_journal(active_folder: str) -> List[Dict[str, object]]:
-    ledger = _load_cashflows_from_dropbox(active_folder)
+def _cashflow_rows_for_journal(ledger: Dict[str, List[Dict[str, object]]]) -> List[Dict[str, object]]:
     rows: List[Dict[str, object]] = []
     for account_key, events in ledger.items():
         for idx, ev in enumerate(events or []):
@@ -3957,10 +4197,18 @@ def _import_trading_journal_from_dropbox_excel(
 def _import_trading_journal_from_sources(
     progress_cb: Optional[Callable[[int, str], None]] = None,
 ) -> Dict[str, object]:
+    started_at = _utc_now_iso()
     source_mode = TRADING_JOURNAL_SOURCE if TRADING_JOURNAL_SOURCE in {"dropbox", "local", "both", "auto"} else "both"
     include_dropbox = source_mode in {"dropbox", "both", "auto"}
     include_local = source_mode in {"local", "both", "auto"}
     local_enabled = _local_journal_import_enabled()
+    template_result: Dict[str, object] = {"errors": []}
+    warnings: List[str] = []
+
+    if include_local:
+        template_result = _ensure_trading_journal_local_templates()
+        for err in template_result.get("errors") or []:
+            warnings.append(str(err))
 
     existing_rows = _get_trading_journal_rows()
     all_rows: Dict[str, Dict[str, object]] = {}
@@ -4111,18 +4359,50 @@ def _import_trading_journal_from_sources(
         }
     )
     _set_trading_journal_diagnostics(diagnostics)
+    snapshot_payload: Optional[Dict[str, object]] = None
+    snapshot_error: Optional[str] = None
+    try:
+        snapshot_payload = _build_trading_journal_view_snapshot(force=True)
+        _persist_trading_journal_sqlite(
+            snapshot_payload,
+            {
+                "started_at": started_at,
+                "source_mode": source_mode,
+                "workbooks_scanned": int(diagnostics["local_workbooks_seen"]) + int(diagnostics["dropbox_workbooks_seen"]),
+                "workbooks_changed": int(imported_rows_total > 0),
+                "rows_imported": imported_rows_total,
+                "cashflow_rows_loaded": int(sum(1 for r in (snapshot_payload.get("items") or []) if _row_type(r) == "cashflow")),
+                "warnings": warnings,
+                "errors": errors,
+            },
+        )
+    except Exception as exc:
+        snapshot_error = str(exc)
+        warnings.append(f"snapshot build failed: {exc}")
     return {
         "ok": bool(imported_any),
         "message": "Done" if imported_any else "No rows imported from configured sources; existing journal data was retained.",
+        "source_mode": source_mode,
         "rows_imported": imported_rows_total,
+        "cashflow_rows_loaded": int(cashflow_rows_total),
         "balances_found": len(balances),
+        "templates_created": {
+            "cashflow_template_created": bool(template_result.get("cashflow_template_created")),
+            "trade_history_template_created": bool(template_result.get("trade_history_template_created")),
+            "demo_workbook_created": bool(template_result.get("demo_workbook_created")),
+        },
         "local_workbooks_seen": diagnostics["local_workbooks_seen"],
+        "workbooks_scanned": int(diagnostics["local_workbooks_seen"]) + int(diagnostics["dropbox_workbooks_seen"]),
+        "workbooks_changed": int(imported_rows_total > 0),
         "dropbox_workbooks_seen": diagnostics["dropbox_workbooks_seen"],
         "duplicate_rows_dropped": duplicate_rows_dropped,
         "source_duplicate_rows_dropped": source_duplicate_rows_dropped,
         "dedupe_groups": dedupe_groups,
         "ignored_local_workbooks": ignored_local_workbooks,
         "errors": errors,
+        "warnings": warnings,
+        "snapshot_generated": snapshot_payload is not None,
+        "snapshot_error": snapshot_error,
         "diagnostics": diagnostics,
     }
 def _get_excel_account_balances() -> List[Dict[str, object]]:
@@ -5650,7 +5930,13 @@ async def _autostart_scripts() -> None:
         finished_at=None,
     )
     asyncio.create_task(_dropbox_restore_state_backup_on_startup())
-    asyncio.create_task(_ensure_trading_journal_dropbox_templates())
+    if TRADING_JOURNAL_SOURCE == "local":
+        try:
+            _ensure_trading_journal_local_templates()
+        except Exception as exc:
+            BYBIT_LOGGER.error("Local journal template ensure failed: %s", exc)
+    else:
+        asyncio.create_task(_ensure_trading_journal_dropbox_templates())
     asyncio.create_task(_log_outbound_traffic_summary())
     asyncio.create_task(_start_startup_recovery_import_after_restore())
     asyncio.create_task(_schedule_daily_trade_history_sync())
@@ -15288,8 +15574,7 @@ def _calc_balance_after_trade(
     rows: List[Dict[str, object]], current_balances: List[Dict[str, object]]
 ) -> List[Dict[str, object]]:
     state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
-    active_folder = str(state.get("source_folder") if isinstance(state, dict) else "")
-    cashflows = _load_cashflows_from_dropbox(active_folder) if active_folder else {}
+    cashflows = _load_cashflows_for_active_journal_source(state if isinstance(state, dict) else {})
 
     out_rows = [dict(row) for row in rows]
     by_account: Dict[str, List[int]] = defaultdict(list)
@@ -18058,19 +18343,15 @@ app.mount("/static", StaticFiles(directory=BASE_DIR / "render" / "static"), name
 
 @app.get("/api/trading-journal")
 async def trading_journal_items(filter: str = "") -> JSONResponse:
-    state_meta = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
-    source_folder = str(state_meta.get("source_folder") if isinstance(state_meta, dict) else "")
-    journal_mtime = TRADING_JOURNAL_PATH.stat().st_mtime if TRADING_JOURNAL_PATH.exists() else 0
-    cache_key = f"{journal_mtime}:{source_folder}"
-    cached_payload = _TRADING_JOURNAL_VIEW_CACHE.get("payload") if _TRADING_JOURNAL_VIEW_CACHE.get("key") == cache_key else None
-    if isinstance(cached_payload, dict) and not str(filter or "").strip():
-        return JSONResponse(cached_payload)
-
-    items = [
-        _backfill_trade_row_context_fields(r)
-        for r in _get_trading_journal_rows()
-        if _is_visible_trading_journal_row(r)
-    ]
+    snapshot = _TRADING_JOURNAL_VIEW_CACHE.get("payload") if _TRADING_JOURNAL_VIEW_CACHE.get("key") == "snapshot" else None
+    if not isinstance(snapshot, dict):
+        snapshot = _load_trading_journal_view_snapshot()
+    if not isinstance(snapshot, dict):
+        return JSONResponse({"ok": False, "warning": "journal cache not built yet", "items": [], "count": 0, "stats": {}}, status_code=503)
+    fingerprint_now = _journal_source_fingerprint()
+    is_stale = snapshot.get("source_fingerprints") != fingerprint_now
+    items = list(snapshot.get("items") or [])
+    stats = snapshot.get("stats") or {}
 
     def _norm_search_text(value: object) -> str:
         text = str(value or "").lower()
@@ -18108,155 +18389,32 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
 
         items = [r for r in items if match(r)]
 
-    balances = [b for b in _get_excel_account_balances() if not _is_bybit_demo_account_label(b.get("label") or b.get("account"))]
-    # Pull cashflow rows from the active source folder tracked in journal state.
-    trade_items = _enrich_trade_row_metrics(_apply_analysis_balances(_calc_balance_after_trade(items, balances)))
-    cashflow_rows = _cashflow_rows_for_journal(source_folder) if source_folder else []
-    cashflow_rows = [r for r in cashflow_rows if isinstance(r, dict) and not _exclude_bybit_demo_row(r)]
-    if tokens:
-        # Apply the same filter tokens to cashflow rows so symbol filters (e.g. BTCUSDT)
-        # do not include deposits/withdrawals.
-        cashflow_rows = [r for r in cashflow_rows if match(r)]
-
-    combined_items = sorted([*trade_items, *cashflow_rows], key=_row_sort_dt, reverse=True)
-    stats = _compute_journal_stats(combined_items, balances)
-    payload = {"items": combined_items, "count": len(combined_items), "stats": stats}
-    if not tokens:
-        _TRADING_JOURNAL_VIEW_CACHE["key"] = cache_key
-        _TRADING_JOURNAL_VIEW_CACHE["payload"] = payload
+    payload = {
+        "items": items,
+        "count": len(items),
+        "stats": stats,
+        "generated_at": snapshot.get("generated_at"),
+        "cache_version": snapshot.get("cache_version"),
+        "snapshot_stale": bool(is_stale),
+        "warning": "Cached journal shown. Sync required to include latest workbook changes." if is_stale else "",
+    }
+    _TRADING_JOURNAL_VIEW_CACHE["key"] = "snapshot"
+    _TRADING_JOURNAL_VIEW_CACHE["payload"] = snapshot
     return JSONResponse(payload)
 
 
 @app.get("/api/trading-journal/diagnostics")
 async def trading_journal_diagnostics() -> JSONResponse:
-    return JSONResponse(_build_trading_journal_diagnostics_snapshot())
+    snapshot = _TRADING_JOURNAL_VIEW_CACHE.get("payload") if _TRADING_JOURNAL_VIEW_CACHE.get("key") == "snapshot" else None
+    if not isinstance(snapshot, dict):
+        snapshot = _load_trading_journal_view_snapshot() or {}
+    return JSONResponse(snapshot.get("diagnostics") if isinstance(snapshot.get("diagnostics"), dict) else _build_trading_journal_diagnostics_snapshot())
 @app.get("/api/trading-journal/balances")
 async def trading_journal_balances() -> JSONResponse:
-    rows = [r for r in _get_trading_journal_rows() if isinstance(r, dict) and not _exclude_bybit_demo_row(r)]
-    rows = _enrich_trade_row_metrics(_calc_balance_after_trade(rows, _get_excel_account_balances()))
-    state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
-    source_folder = str(state.get("source_folder") if isinstance(state, dict) else "")
-
-    cashflow_items = _latest_balances_from_cashflows(source_folder) if source_folder else []
-    cashflow_items = [b for b in cashflow_items if not _is_bybit_demo_account_label(b.get("label") or b.get("account"))]
-    excel = [b for b in _get_excel_account_balances() if not _is_bybit_demo_account_label(b.get("label") or b.get("account"))]
-
-    by_acc: Dict[str, Dict[str, object]] = {}
-
-    # Priority for displayed balances:
-    #   - Prefer explicit balances (Excel/cashflow) *only if they are at least as recent* as
-    #     the latest trade-derived balance.
-    #   - Otherwise, use latest trade-derived balance_after_trade for the displayed balance.
-    for bal in excel:
-        label = str((bal.get("account") or bal.get("label") or "")).strip()
-        key = _norm_account_key(label)
-        if key:
-            by_acc[key] = dict(bal)
-
-    for bal in cashflow_items:
-        label = str((bal.get("account") or bal.get("label") or "")).strip()
-        key = _norm_account_key(label)
-        if not key:
-            continue
-
-        existing = dict(by_acc.get(key) or {})
-        existing_balance = _to_float(existing.get("balance"))
-        cash_balance = _to_float(bal.get("balance"))
-
-        if not existing:
-            by_acc[key] = dict(bal)
-            continue
-
-        if existing_balance is None and cash_balance is not None:
-            merged = dict(bal)
-            for k, v in existing.items():
-                if merged.get(k) in (None, "") and v not in (None, ""):
-                    merged[k] = v
-            by_acc[key] = merged
-            continue
-
-        merged = dict(existing)
-        for k, v in dict(bal).items():
-            if merged.get(k) in (None, "") and v not in (None, ""):
-                merged[k] = v
-        by_acc[key] = merged
-
-    for row in rows:
-        account = str(row.get("account_label") or row.get("account") or "").strip()
-        if not account:
-            continue
-        key = _norm_account_key(account)
-        if key not in by_acc:
-            by_acc[key] = {
-                "account": account,
-                "label": account,
-                "balance": None,
-                "nav": None,
-                "currency": _infer_account_currency(account),
-                "missing_balance": True,
-            }
-
-
-    latest_by_acc: Dict[str, Dict[str, object]] = {}
-    for row in sorted(rows, key=lambda r: _row_sort_dt(r), reverse=True):
-        account = str(row.get("account_label") or row.get("account") or "").strip()
-        key = _norm_account_key(account)
-        bal = _to_float(row.get("balance_after_trade"))
-        if key and bal is not None and key not in latest_by_acc:
-            latest_by_acc[key] = {
-                "account": account,
-                "label": account,
-                "balance": bal,
-                "nav": None,
-                "currency": str(row.get("balance_after_trade_currency") or row.get("currency") or _infer_account_currency(account)),
-                "source": "latest_trade_row",
-                "as_of": row.get("close_time") or row.get("open_time"),
-            }
-    def _ts(value: object) -> float:
-        if value in (None, ""):
-            return float("-inf")
-        try:
-            return float(pd.to_datetime(value).timestamp())
-        except Exception:
-            return float("-inf")
-
-    for key, bal in latest_by_acc.items():
-        existing = dict(by_acc.get(key) or {})
-        existing_balance = _to_float(existing.get("balance")) if existing else None
-
-        # If we already have a numeric balance (Excel/cashflow), only keep it when it is
-        # at least as recent as the latest trade-derived balance.
-        if existing and existing_balance is not None:
-            existing_ts = _ts(existing.get("as_of"))
-            trade_ts = _ts(bal.get("as_of"))
-            if trade_ts > existing_ts:
-                merged = dict(existing)
-                merged["balance"] = bal.get("balance")
-                merged["currency"] = bal.get("currency") or merged.get("currency")
-                merged["nav"] = bal.get("nav") if bal.get("nav") is not None else merged.get("nav")
-                merged["source"] = bal.get("source") or merged.get("source")
-                merged["as_of"] = bal.get("as_of") or merged.get("as_of")
-                # Fill any remaining missing fields from the trade-derived payload.
-                for k, v in bal.items():
-                    if merged.get(k) in (None, "") and v is not None:
-                        merged[k] = v
-                by_acc[key] = merged
-            else:
-                merged = dict(existing)
-                for k, v in bal.items():
-                    if merged.get(k) in (None, "") and v is not None:
-                        merged[k] = v
-                by_acc[key] = merged
-            continue
-
-        if existing:
-            merged = dict(existing)
-            merged.update({k: v for k, v in bal.items() if v is not None})
-            by_acc[key] = merged
-        else:
-            by_acc[key] = bal
-
-    items = sorted(by_acc.values(), key=lambda x: str(x.get("label") or ""))
+    snapshot = _TRADING_JOURNAL_VIEW_CACHE.get("payload") if _TRADING_JOURNAL_VIEW_CACHE.get("key") == "snapshot" else None
+    if not isinstance(snapshot, dict):
+        snapshot = _load_trading_journal_view_snapshot() or {}
+    items = snapshot.get("balances") if isinstance(snapshot.get("balances"), list) else []
     return JSONResponse({"items": items})
 
 
