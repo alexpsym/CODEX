@@ -98,6 +98,7 @@ function Build-WithCSharp {
         $outputPath = Join-Path $OutDir $entry.ExeName
 
         Set-Content -LiteralPath $tempSourcePath -Value $generatedSource -Encoding UTF8
+        $buildSucceeded = $false
         try {
             if ($CscPath) {
                 & $CscPath /nologo /target:exe /optimize+ /out:$outputPath $tempSourcePath
@@ -114,9 +115,16 @@ function Build-WithCSharp {
             }
 
             Write-Host "Built: $outputPath -> $($entry.TargetBat)"
+            $buildSucceeded = $true
+        }
+        catch {
+            Write-Warning "Generated C# source preserved at: $tempSourcePath"
+            throw
         }
         finally {
-            Remove-Item -LiteralPath $tempSourcePath -ErrorAction SilentlyContinue
+            if ($buildSucceeded) {
+                Remove-Item -LiteralPath $tempSourcePath -ErrorAction SilentlyContinue
+            }
         }
     }
 }

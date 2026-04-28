@@ -12,61 +12,68 @@ internal static class Program
     {
         try
         {
-            string? targetBatPath = ResolveTargetBatPath(TargetBat);
-            if (targetBatPath is null)
+            string targetBatPath = ResolveTargetBatPath(TargetBat);
+            if (targetBatPath == null)
             {
-                Console.Error.WriteLine($"ERROR: Could not find required launcher target '{TargetBat}'.");
+                Console.Error.WriteLine("ERROR: Could not find required launcher target '" + TargetBat + "'.");
                 Console.Error.WriteLine("Looked relative to the launcher location and current working directory.");
                 return 1;
             }
 
-            Console.WriteLine($"Launching {targetBatPath}");
-            string cmdArguments = $"/d /c \"\"{targetBatPath}\"{BuildForwardedArgString(args)}\"";
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = "cmd.exe",
-                Arguments = cmdArguments,
-                WorkingDirectory = Path.GetDirectoryName(targetBatPath) ?? Environment.CurrentDirectory,
-                UseShellExecute = false,
-            };
+            Console.WriteLine("Launching " + targetBatPath);
 
-            using Process? process = Process.Start(startInfo);
-            if (process is null)
+            string cmdArguments = "/d /s /c \"\"" + targetBatPath + "\"" + BuildForwardedArgString(args) + "\"";
+            string workingDirectory = Path.GetDirectoryName(targetBatPath);
+            if (string.IsNullOrEmpty(workingDirectory))
             {
-                Console.Error.WriteLine("ERROR: Failed to launch cmd.exe for target batch file.");
-                return 1;
+                workingDirectory = Environment.CurrentDirectory;
             }
 
-            process.WaitForExit();
-            int exitCode = process.ExitCode;
-            if (exitCode != 0)
-            {
-                Console.Error.WriteLine($"ERROR: Target exited with code {exitCode}.");
-            }
+            ProcessStartInfo startInfo = new ProcessStartInfo();
+            startInfo.FileName = "cmd.exe";
+            startInfo.Arguments = cmdArguments;
+            startInfo.WorkingDirectory = workingDirectory;
+            startInfo.UseShellExecute = false;
 
-            return exitCode;
+            using (Process process = Process.Start(startInfo))
+            {
+                if (process == null)
+                {
+                    Console.Error.WriteLine("ERROR: Failed to launch cmd.exe for target batch file.");
+                    return 1;
+                }
+
+                process.WaitForExit();
+                int exitCode = process.ExitCode;
+                if (exitCode != 0)
+                {
+                    Console.Error.WriteLine("ERROR: Target exited with code " + exitCode + ".");
+                }
+
+                return exitCode;
+            }
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"ERROR: Failed to launch target batch file: {ex.Message}");
+            Console.Error.WriteLine("ERROR: Failed to launch target batch file: " + ex.Message);
             return 1;
         }
     }
 
-    private static string? ResolveTargetBatPath(string targetBat)
+    private static string ResolveTargetBatPath(string targetBat)
     {
-        string baseDirectory = AppContext.BaseDirectory;
+        string baseDirectory = AppDomain.CurrentDomain.BaseDirectory;
         string currentDirectory = Environment.CurrentDirectory;
-        var candidates = new List<string>
-        {
-            Path.Combine(baseDirectory, targetBat),
-            Path.Combine(baseDirectory, "..", targetBat),
-            Path.Combine(baseDirectory, "..", "..", targetBat),
-            Path.Combine(currentDirectory, targetBat),
-        };
 
-        foreach (string candidate in candidates.Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase))
+        List<string> candidates = new List<string>();
+        candidates.Add(Path.Combine(baseDirectory, targetBat));
+        candidates.Add(Path.Combine(baseDirectory, "..", targetBat));
+        candidates.Add(Path.Combine(baseDirectory, "..", "..", targetBat));
+        candidates.Add(Path.Combine(currentDirectory, targetBat));
+
+        foreach (string rawCandidate in candidates)
         {
+            string candidate = Path.GetFullPath(rawCandidate);
             if (File.Exists(candidate))
             {
                 return candidate;
@@ -78,22 +85,22 @@ internal static class Program
 
     private static string BuildForwardedArgString(string[] args)
     {
-        if (args.Length == 0)
+        if (args == null || args.Length == 0)
         {
             return string.Empty;
         }
 
-        return " " + string.Join(" ", args.Select(QuoteForCmd));
+        return " " + string.Join(" ", args.Select(QuoteForCmd).ToArray());
     }
 
     private static string QuoteForCmd(string arg)
     {
-        if (arg.Length == 0)
+        if (arg == null || arg.Length == 0)
         {
             return "\"\"";
         }
 
-        bool needsQuotes = arg.Any(char.IsWhiteSpace) || arg.Contains('"');
+        bool needsQuotes = arg.Any(char.IsWhiteSpace) || arg.IndexOf('"') >= 0;
         if (!needsQuotes)
         {
             return arg;

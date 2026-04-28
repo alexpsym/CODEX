@@ -50,6 +50,7 @@ def test_build_script_validates_required_checkout_and_hardens_iexpress() -> None
     assert "IExpress debug files preserved at:" in script
     assert "--- IExpress stdout ---" in script
     assert "--- IExpress stderr ---" in script
+    assert "Generated C# source preserved at:" in script
 
 
 def test_build_script_uses_lnk_fallback_but_requires_exe_for_success() -> None:
@@ -65,7 +66,10 @@ def test_build_script_uses_lnk_fallback_but_requires_exe_for_success() -> None:
 
 def test_launcher_source_has_required_runtime_safety_behavior() -> None:
     source = (LAUNCHER_DIR / "TradingToolsLauncher.cs").read_text(encoding="utf-8")
-    assert "File.Exists" in source
+    assert '$"' not in source
+    assert "string?" not in source
+    assert "Process?" not in source
+    assert "AppDomain.CurrentDomain.BaseDirectory" in source
     assert "WaitForExit" in source
     assert "return exitCode;" in source
 
