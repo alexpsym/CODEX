@@ -13,6 +13,7 @@
   const watchlistAddBtn = document.getElementById('watchlist-add-btn');
   const watchlistClearBtn = document.getElementById('watchlist-clear-btn');
   const watchlistStatus = document.getElementById('watchlist-status');
+  const watchlistSyncMode = document.getElementById('watchlist-sync-mode');
   const watchlistItems = document.getElementById('watchlist-items');
   const watchlistEmpty = document.getElementById('watchlist-empty');
 
@@ -33,6 +34,8 @@
   let scriptsInFlight = null;
   let oandaInFlight = null;
   let watchlistInFlight = null;
+  let stateSyncInFlight = null;
+  let stateSyncPollTimer = null;
 
   let scriptsTimer = null;
   let oandaTimer = null;
@@ -47,6 +50,8 @@
   let oandaState = null;
   let oandaExpanded = false;
   let watchlistState = [];
+  let stateSyncState = null;
+  let watchlistLoaded = false;
   let scriptsState = [];
   let activeMainScriptName = '';
   let activeMainScriptUrl = '';
@@ -85,7 +90,8 @@
   };
 
   const fetchJson = async (url, options = {}) => {
-    const res = await fetch(url, options);
+    const fetchOptions = { cache: 'no-store', ...options };
+    const res = await fetch(url, fetchOptions);
     let bodyText = '';
     let bodyJson = null;
     try {
@@ -447,6 +453,26 @@
     watchlistStatus.style.color = isErr ? '#fca5a5' : '#94a3b8';
   };
 
+  const applyStateSyncModeLabel = (payload) => {
+    if (!watchlistSyncMode) return;
+    const enabled = payload?.enabled === true;
+    const restoreStatus = String(payload?.restore_status || '').toLowerCase();
+    const hasError = Boolean(payload?.restore_error) || Boolean(payload?.last_upload_error) || restoreStatus === 'failed';
+    if (!enabled) {
+      watchlistSyncMode.textContent = 'Saved locally only (repo deletion can lose local state)';
+      return;
+    }
+    if (restoreStatus === 'pending') {
+      watchlistSyncMode.textContent = 'Loading Dropbox state…';
+      return;
+    }
+    if (hasError) {
+      watchlistSyncMode.textContent = 'Dropbox sync error';
+      return;
+    }
+    watchlistSyncMode.textContent = 'Synced with Dropbox';
+  };
+
   const renderWatchlist = (items) => {
     if (!watchlistItems) return;
     watchlistItems.innerHTML = '';
@@ -468,7 +494,11 @@
       watchlistItems.appendChild(tr);
     });
     if (watchlistCount) watchlistCount.textContent = String(list.length);
-    if (watchlistEmpty) watchlistEmpty.style.display = list.length ? 'none' : 'block';
+    const restorePending = String(stateSyncState?.restore_status || '').toLowerCase() === 'pending';
+    if (watchlistEmpty) {
+      watchlistEmpty.textContent = restorePending && !watchlistLoaded ? 'Loading Dropbox state…' : 'No items yet.';
+      watchlistEmpty.style.display = list.length ? 'none' : 'block';
+    }
     if (watchlistClearBtn) watchlistClearBtn.disabled = !list.length || Boolean(watchlistInFlight);
   };
 
@@ -517,8 +547,14 @@
           body: JSON.stringify({ items: payloadItems }),
         });
         watchlistState = Array.isArray(payload?.items) ? payload.items : payloadItems;
+        watchlistLoaded = true;
+        stateSyncState = payload?.state_sync || stateSyncState;
+        applyStateSyncModeLabel(stateSyncState);
         renderWatchlist(watchlistState);
-        if (successMessage) setWatchlistStatus(successMessage, false);
+        if (successMessage) {
+          const uploadError = stateSyncState?.last_upload_error;
+          setWatchlistStatus(uploadError ? `Saved locally, Dropbox sync failed: ${uploadError}` : successMessage, Boolean(uploadError));
+        }
       } catch (err) {
         console.error(err);
         renderWatchlist(watchlistState);
@@ -535,12 +571,51 @@
     try {
       const payload = await fetchJson('/api/watchlist');
       watchlistState = Array.isArray(payload?.items) ? payload.items : [];
+      watchlistLoaded = true;
+      stateSyncState = payload?.state_sync || stateSyncState;
+      applyStateSyncModeLabel(stateSyncState);
       renderWatchlist(watchlistState);
       setWatchlistStatus('', false);
     } catch (err) {
       console.error(err);
       setWatchlistStatus(err?.message || 'Failed to load watchlist.', true);
     }
+  };
+
+  const refreshStateSyncStatus = async () => {
+    if (stateSyncInFlight) return stateSyncInFlight;
+    stateSyncInFlight = (async () => {
+      try {
+        const payload = await fetchJson('/api/state-sync/status');
+        stateSyncState = payload && typeof payload === 'object' ? payload : null;
+        applyStateSyncModeLabel(stateSyncState);
+        const restoreStatus = String(stateSyncState?.restore_status || '').toLowerCase();
+        if (restoreStatus === 'pending') {
+          watchlistLoaded = false;
+          renderWatchlist(watchlistState);
+          setWatchlistStatus('Loading Dropbox state…', false);
+        } else if (restoreStatus === 'failed') {
+          setWatchlistStatus(`Dropbox restore failed: ${stateSyncState?.restore_error || 'unknown error'}`, true);
+        }
+      } catch (err) {
+        console.error(err);
+      } finally {
+        stateSyncInFlight = null;
+      }
+    })();
+    return stateSyncInFlight;
+  };
+
+  const scheduleStateSyncPolling = () => {
+    if (stateSyncPollTimer) clearInterval(stateSyncPollTimer);
+    stateSyncPollTimer = setInterval(async () => {
+      await refreshStateSyncStatus();
+      const restoreStatus = String(stateSyncState?.restore_status || '').toLowerCase();
+      if (restoreStatus !== 'pending') {
+        if (stateSyncPollTimer) clearInterval(stateSyncPollTimer);
+        stateSyncPollTimer = null;
+      }
+    }, 1500);
   };
 
   const addWatchlistItems = async () => {
@@ -600,13 +675,19 @@
 
   restoreActiveWorkspace();
   refreshScripts();
-  refreshWatchlist();
+  refreshStateSyncStatus().then(() => {
+    const restoreStatus = String(stateSyncState?.restore_status || '').toLowerCase();
+    if (restoreStatus === 'pending') {
+      scheduleStateSyncPolling();
+    }
+    refreshWatchlist();
+  });
   refreshOandaInactivity();
   syncOandaDetailsVisibility();
   restartPolling();
   document.addEventListener('visibilitychange', restartPolling);
   window.addEventListener('beforeunload', () => {
-    [scriptsTimer, oandaTimer, oandaSecondTimer].forEach((id) => {
+    [scriptsTimer, oandaTimer, oandaSecondTimer, stateSyncPollTimer].forEach((id) => {
       if (id) clearInterval(id);
     });
   });
