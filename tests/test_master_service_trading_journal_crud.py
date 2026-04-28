@@ -246,6 +246,10 @@ def test_trading_journal_js_contains_crud_controls_and_endpoints():
     assert "skipAutoSync: true" in js
     assert "const AUTO_REFRESH_MS = 60 * 60 * 1000;" in js
     assert "preserveStatus" in js
+    assert "journalPending" in js
+    assert "journal cache is building" in js.lower()
+    assert "if (!journalPending) {" in js
+    assert "state.rows = nextRows" in js
     assert "new Error(`/api/trading-journal:" not in js
 
 
@@ -271,6 +275,87 @@ def test_diagnostics_derive_rows_total_from_existing_journal_rows(temp_state_pat
     assert payload["journal_rows_total"] >= 25
     assert payload["has_current_journal_rows"] is True
     assert payload["rows_by_source"]
+
+
+def test_trading_journal_items_first_load_returns_pending_and_queues_sync(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_TRADING_JOURNAL_VIEW_CACHE", {"key": None, "payload": None})
+    monkeypatch.setattr(master_service, "_load_trading_journal_view_snapshot", lambda: None)
+    monkeypatch.setattr(master_service, "_sync_state_snapshot", lambda: {"running": False, "ok": None, "message": ""})
+    queued = {"called": False}
+
+    def fake_queue(_reason: str):
+        queued["called"] = True
+        return {"running": True, "ok": None, "message": "queued"}
+
+    monkeypatch.setattr(master_service, "_queue_trading_journal_sync_if_idle", fake_queue)
+    response = asyncio.run(master_service.trading_journal_items())
+    payload = _json(response)
+    assert response.status_code == 202
+    assert payload["pending"] is True
+    assert payload["ok"] is False
+    assert queued["called"] is True
+
+
+def test_trading_journal_items_existing_snapshot_returns_200(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    snapshot = {
+        "items": [{"id": "manual:1", "row_type": "trade", "source": "manual"}],
+        "stats": {"groups": {}},
+        "generated_at": "2026-04-01T00:00:00Z",
+        "cache_version": 1,
+        "source_fingerprints": {"source_mode": "local", "files": []},
+    }
+    monkeypatch.setattr(master_service, "_TRADING_JOURNAL_VIEW_CACHE", {"key": "snapshot", "payload": snapshot})
+    monkeypatch.setattr(master_service, "_journal_source_fingerprint", lambda: {"source_mode": "local", "files": []})
+    response = asyncio.run(master_service.trading_journal_items())
+    payload = _json(response)
+    assert response.status_code == 200
+    assert payload["count"] == 1
+    assert payload["items"][0]["id"] == "manual:1"
+
+
+def test_trading_journal_items_failed_sync_without_snapshot_returns_503(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_TRADING_JOURNAL_VIEW_CACHE", {"key": None, "payload": None})
+    monkeypatch.setattr(master_service, "_load_trading_journal_view_snapshot", lambda: None)
+    monkeypatch.setattr(
+        master_service,
+        "_sync_state_snapshot",
+        lambda: {"running": False, "ok": False, "error": "import failed", "message": "import failed"},
+    )
+    response = asyncio.run(master_service.trading_journal_items())
+    payload = _json(response)
+    assert response.status_code == 503
+    assert payload["ok"] is False
+    assert "import failed" in str(payload.get("error") or "")
+
+
+def test_balance_merge_includes_bybit_demo_from_state_when_not_in_cashflow(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "ENABLE_BYBIT_DEMO_JOURNAL", True)
+    monkeypatch.setattr(master_service, "_load_trading_journal_view_snapshot", lambda: None)
+    monkeypatch.setattr(master_service, "_journal_source_fingerprint", lambda: {"source_mode": "local", "files": []})
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: [])
+    monkeypatch.setattr(master_service, "_get_excel_account_balances", lambda: [])
+    monkeypatch.setattr(master_service, "_load_cashflows_for_active_journal_source", lambda _state: {})
+    monkeypatch.setattr(master_service, "_cashflow_rows_for_journal", lambda _ledger: [])
+    monkeypatch.setattr(master_service, "_compute_journal_stats", lambda _items, _balances: {"groups": {}})
+    monkeypatch.setattr(master_service, "_build_trading_journal_diagnostics_snapshot", lambda: {"errors": []})
+    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        master_service,
+        "_load_json_file",
+        lambda path, default: {
+            "broker_account_balances": [
+                {"account": "Bybit Demo", "label": "Bybit Demo", "balance": 111.0, "currency": "USDT", "source": "bybit_wallet_balance"}
+            ]
+        } if path == master_service.TRADING_JOURNAL_STATE_PATH else default,
+    )
+    snapshot = master_service._build_trading_journal_view_snapshot(force=True)
+    labels = {str((item or {}).get("label") or "") for item in snapshot.get("balances", [])}
+    assert "Bybit Demo" in labels
+
+    monkeypatch.setattr(master_service, "ENABLE_BYBIT_DEMO_JOURNAL", False)
+    snapshot2 = master_service._build_trading_journal_view_snapshot(force=True)
+    labels2 = {str((item or {}).get("label") or "") for item in snapshot2.get("balances", [])}
+    assert "Bybit Demo" not in labels2
 
 
 def test_diagnostics_does_not_report_zero_when_journal_items_exist(temp_state_paths):

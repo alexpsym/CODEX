@@ -927,13 +927,23 @@
   function renderBalances(items) {
     const wrap = q('#tj-balances');
     wrap.innerHTML = '';
+    if (!Array.isArray(items) || !items.length) {
+      const div = document.createElement('div');
+      div.className = 'bal-card muted';
+      div.textContent = 'No balances available yet.';
+      wrap.appendChild(div);
+      return;
+    }
     (items || []).forEach((b) => {
       const div = document.createElement('div');
       div.className = 'bal-card';
+      const source = String(b.balance_source || b.source || '').trim();
+      const asOf = String(b.as_of || '').trim();
       div.innerHTML = `
         <div class="muted">${b.label || b.account || 'Account'}</div>
         <div style="font-size:1.0rem;font-weight:600">${fmtNum(b.balance, (() => { const c = String(b.currency || '').toUpperCase(); if (c === 'AUD' || c === 'USD') return 2; if (c === 'USDT') return 8; return 6; })())} ${b.currency || ''}</div>
         ${b.missing_balance ? `<div class="muted">Balance not found in workbook</div>` : ''}
+        ${(source || asOf) ? `<div class="muted" style="font-size:0.8rem">${source ? `source: ${source}` : ''}${source && asOf ? ' · ' : ''}${asOf ? `as of: ${asOf}` : ''}</div>` : ''}
       `;
       wrap.appendChild(div);
     });
@@ -1095,6 +1105,7 @@
       const balancesPromise = fetchNamedJson('/api/trading-journal/balances', '/api/trading-journal/balances', { signal });
       const syncStatusPromise = fetchNamedJson('/api/trading-journal/sync/status', '/api/trading-journal/sync/status', { signal });
       let journal = await journalPromise;
+      const journalPending = Number(journal?.pending ? 1 : 0) === 1;
       if (silent || skipAutoSync) {
         await syncStatusPromise;
       }
@@ -1131,8 +1142,10 @@
       const nextRows = Array.isArray(journal.items) ? journal.items : [];
       const nextStats = journal.stats || null;
       if (!state.editorOpen && !state.editorDirty && !state.saveInFlight) {
-        state.rows = nextRows;
-        state.stats = nextStats;
+        if (!journalPending) {
+          state.rows = nextRows;
+          state.stats = nextStats;
+        }
         state.diagnostics = diagnostics || null;
       }
 
@@ -1140,6 +1153,16 @@
       if (!silent) setLoading(95, 'Rendering…');
       renderAll();
       renderBalances(Array.isArray(balances.items) ? balances.items : []);
+      const diagErrors = Array.isArray(diagnostics?.errors) ? diagnostics.errors : [];
+      diagErrors
+        .filter((msg) => String(msg || '').toLowerCase().includes('bybit') && String(msg || '').toLowerCase().includes('balance'))
+        .forEach((msg) => {
+          const wrap = q('#tj-balances');
+          const div = document.createElement('div');
+          div.className = 'bal-card muted';
+          div.textContent = String(msg);
+          wrap.appendChild(div);
+        });
       renderStats(state.stats);
       const marketRows = Array.isArray(nextStats?.groups?.market_breakdown) ? nextStats.groups.market_breakdown : [];
       const fxCount = marketRows
@@ -1159,7 +1182,14 @@
       const workbookFxRows = Number(diagnostics?.rows_by_asset_class?.fx || 0);
       const shouldWarnZeroFx = fxCount === 0 && workbookFxRows > 0;
       if (!state.editorOpen && !state.editorDirty) {
-        if (journal?.snapshot_stale) {
+        if (journalPending) {
+          if (Array.isArray(state.rows) && state.rows.length > 0) {
+            setStatus('Cached browser data shown while journal cache is building. This will refresh automatically.');
+          } else {
+            setStatus('Journal cache is building/syncing. Data will appear automatically when ready.');
+          }
+          watchSyncCompletion();
+        } else if (journal?.snapshot_stale) {
           setStatus('Cached journal shown. Sync required to include latest workbook changes.');
         } else if (journal?.warning) {
           setStatus(String(journal.warning));
@@ -1182,12 +1212,14 @@
         }
       }
       if (!silent) { setLoading(100, 'Done'); hideLoading(); }
-      await writeCachedPayload({
-        journal,
-        diagnostics,
-        balances,
-        fetched_at: new Date().toISOString(),
-      });
+      if (!journalPending) {
+        await writeCachedPayload({
+          journal,
+          diagnostics,
+          balances,
+          fetched_at: new Date().toISOString(),
+        });
+      }
     } catch (e) {
       if (isAbortError(e, signal)) {
         if (ownsVisibleOverlay && loading?.style?.display === 'flex') hideLoading();
