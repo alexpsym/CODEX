@@ -53,6 +53,7 @@ def test_watchlist_rejects_invalid_atomically(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(master_service, "_resolve_symbol_payload", fake_resolve)
     monkeypatch.setattr(master_service, "_set_watchlist", fake_set_watchlist)
+    monkeypatch.setattr(master_service, "_wait_for_state_restore_or_error", lambda *args, **kwargs: asyncio.sleep(0, result={"enabled": True}))
 
     with pytest.raises(master_service.HTTPException) as exc:
         asyncio.run(master_service.set_watchlist(DummyRequest()))
@@ -85,6 +86,12 @@ def test_watchlist_mixed_crypto_fx_persists_canonical_values(monkeypatch: pytest
 
     monkeypatch.setattr(master_service, "_resolve_symbol_payload", fake_resolve)
     monkeypatch.setattr(master_service, "_set_watchlist", fake_set_watchlist)
+    monkeypatch.setattr(master_service, "_wait_for_state_restore_or_error", lambda *args, **kwargs: asyncio.sleep(0, result={"enabled": True}))
+    monkeypatch.setattr(
+        master_service,
+        "_upload_and_verify_state_backup_now",
+        lambda *args, **kwargs: asyncio.sleep(0, result={"enabled": True, "last_verified_at": "now", "last_verified_watchlist": ["BRUSDT", "EUR_USD"]}),
+    )
 
     response = asyncio.run(master_service.set_watchlist(DummyRequest()))
     payload = response.body.decode("utf-8")

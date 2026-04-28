@@ -899,6 +899,12 @@ DROPBOX_SYNC_ENABLED = os.getenv("DROPBOX_SYNC_ENABLED", "").strip().lower() in 
     "yes",
     "on",
 }
+LOCAL_STATE_ONLY = os.getenv("LOCAL_STATE_ONLY", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 DROPBOX_BACKUP_PATH = os.getenv(
     "DROPBOX_BACKUP_PATH", "/codex/master_control_backup.json"
 ).strip()
@@ -976,6 +982,30 @@ _STARTUP_STATE_RESTORE_DONE = asyncio.Event()
 _DROPBOX_UPLOAD_TASK: Optional[asyncio.Task] = None
 _DROPBOX_UPLOAD_TIMER: Optional[threading.Timer] = None
 _DROPBOX_UPLOAD_TIMER_LOCK = threading.Lock()
+_STATE_SYNC_STATUS_LOCK = threading.Lock()
+_STATE_SYNC_STATUS: Dict[str, object] = {
+    "enabled": DROPBOX_SYNC_ENABLED,
+    "restore_complete": not DROPBOX_SYNC_ENABLED,
+    "restore_status": "pending" if DROPBOX_SYNC_ENABLED else "skipped",
+    "restore_error": None,
+    "last_restore_at": None,
+    "last_upload_at": None,
+    "last_upload_error": None,
+    "last_verified_at": None,
+    "last_verified_watchlist": [],
+    "remote_backup_hash": None,
+    "pending_upload": False,
+    "backup_path": DROPBOX_BACKUP_PATH,
+    "env_loaded_file": _MASTER_ENV_INFO.get("loaded_file") or "",
+    "effective_local_state_mode": (
+        "local-only"
+        if (APP_PROFILE == "local" and (LOCAL_STATE_ONLY or not DROPBOX_SYNC_ENABLED))
+        else "dropbox-required"
+        if APP_PROFILE == "local"
+        else "profile-managed"
+    ),
+}
+_WATCHLIST_UPDATED_AT: Optional[str] = None
 _BYBIT_EXEC_LAST_SEEN: Dict[str, int] = {}
 _BYBIT_CLOSED_PNL_LAST_SEEN: Dict[str, Optional[int]] = {"demo": None, "live": None}
 _BYBIT_CLOSED_PNL_SYNC_LOCK: Dict[str, asyncio.Lock] = {"demo": asyncio.Lock(), "live": asyncio.Lock()}
@@ -1975,10 +2005,11 @@ def _save_watchlist(items: List[str]) -> None:
 
 
 def _set_watchlist(items: Iterable[object]) -> List[str]:
-    global _WATCHLIST_CACHE
+    global _WATCHLIST_CACHE, _WATCHLIST_UPDATED_AT
     normalized = _normalize_watchlist(items)
     _WATCHLIST_CACHE = normalized
     _save_watchlist(normalized)
+    _WATCHLIST_UPDATED_AT = _utc_now_iso()
     return list(normalized)
 
 
@@ -4823,7 +4854,14 @@ def _build_state_backup_payload() -> bytes:
         "bybit": {"alerts": bybit_monitor.get_custom_alerts(force=True)},
         "oanda": {"alerts": oanda_monitor.get_custom_alerts(force=True)},
     }
+    machine_hint = os.getenv("COMPUTERNAME") or socket.gethostname() or "unknown-host"
+    safe_machine_hint = re.sub(r"[^a-zA-Z0-9._-]", "-", str(machine_hint))[:80]
     payload = {
+        "version": 4,
+        "savedAt": _utc_now_iso(),
+        "source_profile": APP_PROFILE,
+        "source_host": safe_machine_hint,
+        "watchlist_updated_at": _WATCHLIST_UPDATED_AT,
         "alerts": alerts_payload,
         "watchlist": _get_watchlist(),
         "pending_webhooks": _load_pending_webhooks(),
@@ -4859,6 +4897,192 @@ def _dropbox_upload_bytes(path: str, payload: bytes) -> None:
     )
 
 
+def _state_sync_status_snapshot() -> Dict[str, object]:
+    with _STATE_SYNC_STATUS_LOCK:
+        _STATE_SYNC_STATUS["env_loaded_file"] = _MASTER_ENV_INFO.get("loaded_file") or ""
+        _STATE_SYNC_STATUS["effective_local_state_mode"] = (
+            "local-only"
+            if (APP_PROFILE == "local" and (LOCAL_STATE_ONLY or not DROPBOX_SYNC_ENABLED))
+            else "dropbox-required"
+            if APP_PROFILE == "local"
+            else "profile-managed"
+        )
+        if APP_PROFILE == "local" and not DROPBOX_SYNC_ENABLED and not LOCAL_STATE_ONLY:
+            _STATE_SYNC_STATUS["restore_status"] = "failed"
+            _STATE_SYNC_STATUS["restore_complete"] = True
+            _STATE_SYNC_STATUS["restore_error"] = "Dropbox sync is disabled; set LOCAL_STATE_ONLY=1 for explicit local-only mode."
+        return dict(_STATE_SYNC_STATUS)
+
+
+def _update_state_sync_status(**updates: object) -> Dict[str, object]:
+    with _STATE_SYNC_STATUS_LOCK:
+        _STATE_SYNC_STATUS.update(updates)
+        return dict(_STATE_SYNC_STATUS)
+
+
+async def _wait_for_state_restore_or_error(timeout: float = 20.0) -> Dict[str, object]:
+    status = _state_sync_status_snapshot()
+    if APP_PROFILE == "local" and not bool(status.get("enabled")) and not LOCAL_STATE_ONLY:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "dropbox_sync_required",
+                "message": "Dropbox sync is disabled; repo deletion will lose watchlist/custom alerts.",
+                "state_sync": status,
+            },
+        )
+    if not bool(status.get("enabled")):
+        if not _STARTUP_STATE_RESTORE_DONE.is_set():
+            _STARTUP_STATE_RESTORE_DONE.set()
+        return status
+    if status.get("restore_status") == "failed":
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "dropbox_restore_failed",
+                "message": "Dropbox restore failed during startup.",
+                "state_sync": status,
+            },
+        )
+    if _STARTUP_STATE_RESTORE_DONE.is_set():
+        return _state_sync_status_snapshot()
+    try:
+        await asyncio.wait_for(_STARTUP_STATE_RESTORE_DONE.wait(), timeout=max(0.1, float(timeout)))
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "dropbox_restore_timeout",
+                "message": "Dropbox restore is still pending.",
+                "state_sync": _state_sync_status_snapshot(),
+            },
+        ) from exc
+    status = _state_sync_status_snapshot()
+    if status.get("restore_status") == "failed":
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "dropbox_restore_failed",
+                "message": "Dropbox restore failed during startup.",
+                "state_sync": status,
+            },
+        )
+    return status
+
+
+async def _upload_state_backup_now(timeout: float = 10.0) -> Dict[str, object]:
+    return await _upload_and_verify_state_backup_now(timeout=timeout)
+
+
+def _extract_remote_backup_summary(raw: bytes) -> Dict[str, object]:
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        raise ValueError(f"Remote backup JSON invalid: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("Remote backup payload must be an object.")
+    alerts = data.get("alerts") if isinstance(data.get("alerts"), dict) else {}
+    bybit_alerts = []
+    oanda_alerts = []
+    bybit_block = alerts.get("bybit") if isinstance(alerts.get("bybit"), dict) else {}
+    oanda_block = alerts.get("oanda") if isinstance(alerts.get("oanda"), dict) else {}
+    if isinstance(bybit_block.get("alerts"), list):
+        bybit_alerts = [item for item in bybit_block.get("alerts", []) if isinstance(item, dict)]
+    if isinstance(oanda_block.get("alerts"), list):
+        oanda_alerts = [item for item in oanda_block.get("alerts", []) if isinstance(item, dict)]
+    watchlist = _normalize_watchlist(data.get("watchlist", [])) if isinstance(data.get("watchlist"), list) else []
+    summary = {
+        "ok": True,
+        "backup_path": DROPBOX_BACKUP_PATH,
+        "savedAt": data.get("savedAt"),
+        "updatedAt": data.get("updatedAt"),
+        "watchlist": watchlist,
+        "bybit_alert_count": len(bybit_alerts),
+        "oanda_alert_count": len(oanda_alerts),
+        "bybit_alert_ids": sorted(str(item.get("id") or "") for item in bybit_alerts),
+        "oanda_alert_ids": sorted(str(item.get("id") or "") for item in oanda_alerts),
+        "hash": hashlib.sha256(raw).hexdigest(),
+        "downloaded_at": _utc_now_iso(),
+    }
+    return summary
+
+
+async def _download_remote_backup_summary(timeout: float = 10.0) -> Dict[str, object]:
+    raw = await asyncio.wait_for(
+        asyncio.to_thread(_dropbox_download_bytes, DROPBOX_BACKUP_PATH),
+        timeout=max(0.1, float(timeout)),
+    )
+    return _extract_remote_backup_summary(raw)
+
+
+async def _upload_and_verify_state_backup_now(
+    *,
+    expected_watchlist: Optional[List[str]] = None,
+    expected_alert_probe: Optional[Dict[str, object]] = None,
+    timeout: float = 10.0,
+) -> Dict[str, object]:
+    status = _state_sync_status_snapshot()
+    if not bool(status.get("enabled")):
+        if APP_PROFILE == "local" and not LOCAL_STATE_ONLY:
+            status = _update_state_sync_status(
+                last_upload_error="Dropbox sync is disabled; repo deletion will lose watchlist/custom alerts.",
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "dropbox_sync_disabled",
+                    "message": "Dropbox sync is disabled; repo deletion will lose watchlist/custom alerts.",
+                    "state_sync": status,
+                },
+            )
+        return status
+    _update_state_sync_status(pending_upload=True, last_upload_error=None)
+    try:
+        payload = await asyncio.to_thread(_build_state_backup_payload)
+        await asyncio.wait_for(
+            asyncio.to_thread(_dropbox_upload_bytes, DROPBOX_BACKUP_PATH, payload),
+            timeout=max(0.1, float(timeout)),
+        )
+        remote_summary = await _download_remote_backup_summary(timeout=timeout)
+        if expected_watchlist is not None:
+            expected_norm = _normalize_watchlist(expected_watchlist)
+            remote_watchlist = _normalize_watchlist(remote_summary.get("watchlist", []))
+            missing = [item for item in expected_norm if item not in remote_watchlist]
+            if missing:
+                raise ValueError(f"Remote watchlist verification mismatch; missing: {', '.join(missing)}")
+        if isinstance(expected_alert_probe, dict):
+            expected_bybit = sorted(str(v) for v in (expected_alert_probe.get("bybit_alert_ids") or []))
+            expected_oanda = sorted(str(v) for v in (expected_alert_probe.get("oanda_alert_ids") or []))
+            if expected_bybit != list(remote_summary.get("bybit_alert_ids") or []):
+                raise ValueError("Remote Bybit alert verification mismatch.")
+            if expected_oanda != list(remote_summary.get("oanda_alert_ids") or []):
+                raise ValueError("Remote OANDA alert verification mismatch.")
+        status = _update_state_sync_status(
+            pending_upload=False,
+            last_upload_at=_utc_now_iso(),
+            last_upload_error=None,
+            last_verified_at=_utc_now_iso(),
+            last_verified_watchlist=list(remote_summary.get("watchlist") or []),
+            remote_backup_hash=remote_summary.get("hash"),
+        )
+        BYBIT_LOGGER.info("Dropbox backup uploaded to %s", DROPBOX_BACKUP_PATH)
+        return status
+    except Exception as exc:
+        status = _update_state_sync_status(
+            pending_upload=False,
+            last_upload_error=str(exc),
+        )
+        BYBIT_LOGGER.error("Dropbox backup failed: %s", exc)
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "dropbox_upload_failed",
+                "message": f"Dropbox backup upload failed: {exc}",
+                "state_sync": status,
+            },
+        ) from exc
+
+
 def _schedule_dropbox_upload_state_backup() -> None:
     if not DROPBOX_SYNC_ENABLED:
         return
@@ -4873,11 +5097,21 @@ def _schedule_dropbox_upload_state_backup() -> None:
             _DROPBOX_UPLOAD_TIMER = None
 
         def _run_upload() -> None:
+            _update_state_sync_status(pending_upload=True, last_upload_error=None)
             try:
                 payload = _build_state_backup_payload()
                 _dropbox_upload_bytes(DROPBOX_BACKUP_PATH, payload)
+                _update_state_sync_status(
+                    pending_upload=False,
+                    last_upload_at=_utc_now_iso(),
+                    last_upload_error=None,
+                )
                 BYBIT_LOGGER.info("Dropbox backup uploaded to %s", DROPBOX_BACKUP_PATH)
             except Exception as exc:  # pragma: no cover - network failure
+                _update_state_sync_status(
+                    pending_upload=False,
+                    last_upload_error=str(exc),
+                )
                 BYBIT_LOGGER.error("Dropbox backup failed: %s", exc)
 
         t = threading.Timer(DROPBOX_SYNC_DEBOUNCE_SECONDS, _run_upload)
@@ -4974,10 +5208,25 @@ def _restore_alerts_payload(data: Dict[str, object]) -> Dict[str, object]:
 
 async def _dropbox_restore_state_backup_on_startup() -> None:
     if not DROPBOX_SYNC_ENABLED:
+        _update_state_sync_status(
+            enabled=False,
+            restore_complete=True,
+            restore_status="skipped",
+            restore_error=None,
+            backup_path=DROPBOX_BACKUP_PATH,
+        )
         _STARTUP_STATE_RESTORE_DONE.set()
         return
+    _update_state_sync_status(
+        enabled=True,
+        restore_complete=False,
+        restore_status="pending",
+        restore_error=None,
+        backup_path=DROPBOX_BACKUP_PATH,
+    )
     try:
         payload = await asyncio.to_thread(download_bytes, DROPBOX_BACKUP_PATH)
+        remote_hash = hashlib.sha256(payload).hexdigest()
         data = json.loads(payload.decode("utf-8"))
         restored = _restore_alerts_payload(data)
         active_folder, _ = await asyncio.to_thread(_resolve_trading_journal_dropbox_folder)
@@ -4998,10 +5247,30 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
             int(workbook_stats.get("deduped_by_order_id", 0)) + int(workbook_stats.get("deduped_by_fingerprint", 0)),
             oanda_repaired_rows,
         )
+        _update_state_sync_status(
+            restore_complete=True,
+            restore_status="done",
+            restore_error=None,
+            last_restore_at=_utc_now_iso(),
+            remote_backup_hash=remote_hash,
+        )
     except FileNotFoundError:
         BYBIT_LOGGER.info("Dropbox restore skipped; no backup found at %s", DROPBOX_BACKUP_PATH)
+        _update_state_sync_status(
+            restore_complete=True,
+            restore_status="done",
+            restore_error=None,
+            last_restore_at=_utc_now_iso(),
+            remote_backup_hash=None,
+        )
     except Exception as exc:  # pragma: no cover - startup failure
         BYBIT_LOGGER.error("Dropbox restore failed: %s", exc)
+        _update_state_sync_status(
+            restore_complete=True,
+            restore_status="failed",
+            restore_error=str(exc),
+            last_restore_at=_utc_now_iso(),
+        )
     finally:
         _STARTUP_STATE_RESTORE_DONE.set()
 
@@ -5910,7 +6179,39 @@ async def _supervise_autostart_scripts(names: List[str]) -> None:
 @app.on_event("startup")
 async def _autostart_scripts() -> None:
     AUTOSTART_LOGGER.info(format_env_bootstrap_log(_MASTER_ENV_INFO))
+    AUTOSTART_LOGGER.info(
+        "Local state mode: LOCAL_STATE_ONLY=%s effective_mode=%s env_loaded_file=%s",
+        LOCAL_STATE_ONLY,
+        _state_sync_status_snapshot().get("effective_local_state_mode"),
+        _MASTER_ENV_INFO.get("loaded_file") or "<none>",
+    )
+    if APP_PROFILE == "local" and not DROPBOX_SYNC_ENABLED and not LOCAL_STATE_ONLY:
+        _update_state_sync_status(
+            enabled=False,
+            restore_complete=True,
+            restore_status="failed",
+            restore_error="Dropbox sync is disabled; set LOCAL_STATE_ONLY=1 for explicit local-only mode.",
+        )
+        _STARTUP_STATE_RESTORE_DONE.set()
+        raise RuntimeError("Dropbox sync is disabled; set LOCAL_STATE_ONLY=1 for explicit local-only mode.")
+    AUTOSTART_LOGGER.info(
+        "State sync startup: DROPBOX_SYNC_ENABLED=%s DROPBOX_BACKUP_PATH=%s env_loaded_file=%s",
+        DROPBOX_SYNC_ENABLED,
+        DROPBOX_BACKUP_PATH,
+        _MASTER_ENV_INFO.get("loaded_file") or "<none>",
+    )
     if _is_scanner_local_ui_mode():
+        _update_state_sync_status(
+            enabled=DROPBOX_SYNC_ENABLED,
+            restore_complete=not DROPBOX_SYNC_ENABLED,
+            restore_status="pending" if DROPBOX_SYNC_ENABLED else "skipped",
+            restore_error=None,
+            backup_path=DROPBOX_BACKUP_PATH,
+        )
+        if DROPBOX_SYNC_ENABLED:
+            asyncio.create_task(_dropbox_restore_state_backup_on_startup())
+        else:
+            _STARTUP_STATE_RESTORE_DONE.set()
         AUTOSTART_LOGGER.info(
             "SCANNER_LOCAL_UI_MODE=1: skipping non-scanner startup tasks and script autostart."
         )
@@ -5929,6 +6230,15 @@ async def _autostart_scripts() -> None:
         started_at=_utc_now_iso(),
         finished_at=None,
     )
+    _update_state_sync_status(
+        enabled=DROPBOX_SYNC_ENABLED,
+        restore_complete=not DROPBOX_SYNC_ENABLED,
+        restore_status="pending" if DROPBOX_SYNC_ENABLED else "skipped",
+        restore_error=None,
+        backup_path=DROPBOX_BACKUP_PATH,
+    )
+    if not DROPBOX_SYNC_ENABLED:
+        _STARTUP_STATE_RESTORE_DONE.set()
     asyncio.create_task(_dropbox_restore_state_backup_on_startup())
     if TRADING_JOURNAL_SOURCE == "local":
         try:
@@ -6644,7 +6954,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <div class="panel-header">
                         <div>
                             <h2>Watchlist</h2>
-                            <div class="watchlist-sub">Saved locally</div>
+                            <div class="watchlist-sub" id="watchlist-sync-mode">Loading sync status…</div>
                         </div>
                         <div class="oo-toolbar">
                             <span class="status-pill" id="watchlist-count">0</span>
@@ -6718,7 +7028,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
     </div>
 
-    <script src=\"/static/dashboard.js\"></script>
+    <script src=\"{{DASHBOARD_JS_URL}}\"></script>
 </body>
 </html>"""
 
@@ -12975,7 +13285,23 @@ async def fetch_bybit_balance(
 async def home_page() -> Response:
     if APP_PROFILE == "journal":
         return RedirectResponse(url="/trading-journal", status_code=307)
-    return HTMLResponse(HTML_TEMPLATE)
+    if APP_PROFILE == "local":
+        dashboard_js_path = BASE_DIR / "render" / "static" / "dashboard.js"
+        try:
+            dashboard_js_version = f"local-{int(dashboard_js_path.stat().st_mtime)}"
+        except Exception:
+            dashboard_js_version = f"local-{int(time.time())}"
+    else:
+        dashboard_js_version = quote(
+            str(os.getenv("APP_BUILD_STAMP") or os.getenv("RENDER_GIT_COMMIT") or app.version),
+            safe="",
+        )
+    page = HTML_TEMPLATE.replace("{{DASHBOARD_JS_URL}}", f"/static/dashboard.js?v={dashboard_js_version}")
+    response = HTMLResponse(page)
+    if APP_PROFILE == "local":
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+    return response
 
 
 @app.get("/instrument-specs", response_class=HTMLResponse)
@@ -16509,64 +16835,134 @@ async def oanda_monitor_runtime_status() -> JSONResponse:
 
 @app.get("/api/bybit-monitor/custom-alerts")
 async def bybit_monitor_custom_alerts() -> JSONResponse:
+    await _wait_for_state_restore_or_error()
     return JSONResponse({"alerts": bybit_monitor.get_custom_alerts(force=True)})
 
 
 @app.post("/api/bybit-monitor/custom-alerts")
 async def upsert_bybit_monitor_custom_alert(request: Request) -> JSONResponse:
+    await _wait_for_state_restore_or_error()
     payload = await request.json()
     alert = bybit_monitor.upsert_custom_alert(payload or {})
-    _schedule_dropbox_upload_state_backup()
-    return JSONResponse({"ok": True, "alert": alert})
+    sync_status = await _upload_and_verify_state_backup_now(
+        expected_alert_probe={
+            "bybit_alert_ids": [str(item.get("id") or "") for item in bybit_monitor.get_custom_alerts(force=True)],
+            "oanda_alert_ids": [str(item.get("id") or "") for item in oanda_monitor.get_custom_alerts(force=True)],
+        }
+    )
+    return JSONResponse({"ok": True, "alert": alert, "state_sync": sync_status})
 
 
 @app.delete("/api/bybit-monitor/custom-alerts/{alert_id}")
 async def delete_bybit_monitor_custom_alert(alert_id: str) -> JSONResponse:
+    await _wait_for_state_restore_or_error()
     bybit_monitor.delete_custom_alert(alert_id)
-    _schedule_dropbox_upload_state_backup()
-    return JSONResponse({"ok": True, "alert_id": alert_id})
+    sync_status = await _upload_and_verify_state_backup_now(
+        expected_alert_probe={
+            "bybit_alert_ids": [str(item.get("id") or "") for item in bybit_monitor.get_custom_alerts(force=True)],
+            "oanda_alert_ids": [str(item.get("id") or "") for item in oanda_monitor.get_custom_alerts(force=True)],
+        }
+    )
+    return JSONResponse({"ok": True, "alert_id": alert_id, "state_sync": sync_status})
 
 
 @app.post("/api/bybit-monitor/custom-alerts/{alert_id}/enabled")
 async def set_bybit_monitor_custom_alert_enabled(
     alert_id: str, request: Request
 ) -> JSONResponse:
+    await _wait_for_state_restore_or_error()
     payload = await request.json()
     enabled = bool((payload or {}).get("enabled", True))
     alert = bybit_monitor.set_custom_alert_enabled(alert_id, enabled)
-    _schedule_dropbox_upload_state_backup()
-    return JSONResponse({"ok": True, "alert": alert})
+    sync_status = await _upload_and_verify_state_backup_now(
+        expected_alert_probe={
+            "bybit_alert_ids": [str(item.get("id") or "") for item in bybit_monitor.get_custom_alerts(force=True)],
+            "oanda_alert_ids": [str(item.get("id") or "") for item in oanda_monitor.get_custom_alerts(force=True)],
+        }
+    )
+    return JSONResponse({"ok": True, "alert": alert, "state_sync": sync_status})
 
 
 @app.get("/api/oanda-monitor/custom-alerts")
 async def oanda_monitor_custom_alerts() -> JSONResponse:
+    await _wait_for_state_restore_or_error()
     return JSONResponse({"alerts": oanda_monitor.get_custom_alerts(force=True)})
 
 
 @app.post("/api/oanda-monitor/custom-alerts")
 async def upsert_oanda_monitor_custom_alert(request: Request) -> JSONResponse:
+    await _wait_for_state_restore_or_error()
     payload = await request.json()
     alert = oanda_monitor.upsert_custom_alert(payload or {})
-    _schedule_dropbox_upload_state_backup()
-    return JSONResponse({"ok": True, "alert": alert})
+    sync_status = await _upload_and_verify_state_backup_now(
+        expected_alert_probe={
+            "bybit_alert_ids": [str(item.get("id") or "") for item in bybit_monitor.get_custom_alerts(force=True)],
+            "oanda_alert_ids": [str(item.get("id") or "") for item in oanda_monitor.get_custom_alerts(force=True)],
+        }
+    )
+    return JSONResponse({"ok": True, "alert": alert, "state_sync": sync_status})
 
 
 @app.delete("/api/oanda-monitor/custom-alerts/{alert_id}")
 async def delete_oanda_monitor_custom_alert(alert_id: str) -> JSONResponse:
+    await _wait_for_state_restore_or_error()
     oanda_monitor.delete_custom_alert(alert_id)
-    _schedule_dropbox_upload_state_backup()
-    return JSONResponse({"ok": True, "alert_id": alert_id})
+    sync_status = await _upload_and_verify_state_backup_now(
+        expected_alert_probe={
+            "bybit_alert_ids": [str(item.get("id") or "") for item in bybit_monitor.get_custom_alerts(force=True)],
+            "oanda_alert_ids": [str(item.get("id") or "") for item in oanda_monitor.get_custom_alerts(force=True)],
+        }
+    )
+    return JSONResponse({"ok": True, "alert_id": alert_id, "state_sync": sync_status})
 
 
 @app.post("/api/oanda-monitor/custom-alerts/{alert_id}/enabled")
 async def set_oanda_monitor_custom_alert_enabled(
     alert_id: str, request: Request
 ) -> JSONResponse:
+    await _wait_for_state_restore_or_error()
     payload = await request.json()
     enabled = bool((payload or {}).get("enabled", True))
     alert = oanda_monitor.set_custom_alert_enabled(alert_id, enabled)
-    _schedule_dropbox_upload_state_backup()
-    return JSONResponse({"ok": True, "alert": alert})
+    sync_status = await _upload_and_verify_state_backup_now(
+        expected_alert_probe={
+            "bybit_alert_ids": [str(item.get("id") or "") for item in bybit_monitor.get_custom_alerts(force=True)],
+            "oanda_alert_ids": [str(item.get("id") or "") for item in oanda_monitor.get_custom_alerts(force=True)],
+        }
+    )
+    return JSONResponse({"ok": True, "alert": alert, "state_sync": sync_status})
+
+
+@app.get("/api/state-sync/status")
+async def state_sync_status() -> JSONResponse:
+    return JSONResponse(_state_sync_status_snapshot())
+
+
+@app.get("/api/state-sync/remote-backup-summary")
+async def state_sync_remote_backup_summary() -> JSONResponse:
+    if not DROPBOX_SYNC_ENABLED:
+        return JSONResponse(
+            {
+                "ok": False,
+                "backup_path": DROPBOX_BACKUP_PATH,
+                "error": "dropbox_sync_disabled",
+                "downloaded_at": _utc_now_iso(),
+            },
+            status_code=503,
+        )
+    try:
+        summary = await _download_remote_backup_summary()
+        return JSONResponse(summary)
+    except Exception as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "backup_path": DROPBOX_BACKUP_PATH,
+                "error": str(exc),
+                "downloaded_at": _utc_now_iso(),
+            },
+            status_code=502,
+        )
 
 
 @app.get("/api/admin/outbound-traffic")
@@ -16623,11 +17019,13 @@ async def set_pending_webhook_enabled(
 
 @app.get("/api/watchlist")
 async def get_watchlist() -> JSONResponse:
-    return JSONResponse({"items": _get_watchlist()})
+    sync_status = await _wait_for_state_restore_or_error()
+    return JSONResponse({"items": _get_watchlist(), "state_sync": sync_status})
 
 
 @app.post("/api/watchlist")
 async def set_watchlist(request: Request) -> JSONResponse:
+    await _wait_for_state_restore_or_error()
     payload = await request.json()
     if payload is None:
         payload = {}
@@ -16651,8 +17049,8 @@ async def set_watchlist(request: Request) -> JSONResponse:
             raise HTTPException(status_code=400, detail=f"Unable to resolve watchlist symbol: {token}")
         resolved_items.append(resolved_symbol)
     normalized = _set_watchlist(resolved_items)
-    _schedule_dropbox_upload_state_backup()
-    return JSONResponse({"ok": True, "items": normalized})
+    sync_status = await _upload_and_verify_state_backup_now(expected_watchlist=normalized)
+    return JSONResponse({"ok": True, "items": normalized, "state_sync": sync_status})
 
 
 @app.get("/api/alerts/backup")

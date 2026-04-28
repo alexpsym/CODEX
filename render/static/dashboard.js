@@ -13,6 +13,7 @@
   const watchlistAddBtn = document.getElementById('watchlist-add-btn');
   const watchlistClearBtn = document.getElementById('watchlist-clear-btn');
   const watchlistStatus = document.getElementById('watchlist-status');
+  const watchlistSyncMode = document.getElementById('watchlist-sync-mode');
   const watchlistItems = document.getElementById('watchlist-items');
   const watchlistEmpty = document.getElementById('watchlist-empty');
 
@@ -33,6 +34,8 @@
   let scriptsInFlight = null;
   let oandaInFlight = null;
   let watchlistInFlight = null;
+  let stateSyncInFlight = null;
+  let stateSyncPollTimer = null;
 
   let scriptsTimer = null;
   let oandaTimer = null;
@@ -47,6 +50,8 @@
   let oandaState = null;
   let oandaExpanded = false;
   let watchlistState = [];
+  let stateSyncState = null;
+  let watchlistLoaded = false;
   let scriptsState = [];
   let activeMainScriptName = '';
   let activeMainScriptUrl = '';
@@ -85,7 +90,8 @@
   };
 
   const fetchJson = async (url, options = {}) => {
-    const res = await fetch(url, options);
+    const fetchOptions = { cache: 'no-store', ...options };
+    const res = await fetch(url, fetchOptions);
     let bodyText = '';
     let bodyJson = null;
     try {
@@ -447,6 +453,33 @@
     watchlistStatus.style.color = isErr ? '#fca5a5' : '#94a3b8';
   };
 
+  const applyStateSyncModeLabel = (payload) => {
+    if (!watchlistSyncMode) return;
+    const enabled = payload?.enabled === true;
+    const restoreStatus = String(payload?.restore_status || '').toLowerCase();
+    const hasError = Boolean(payload?.restore_error) || Boolean(payload?.last_upload_error) || restoreStatus === 'failed';
+    if (!enabled) {
+      watchlistSyncMode.textContent = 'Saved locally only (repo deletion can lose local state)';
+      return;
+    }
+    if (restoreStatus === 'pending') {
+      watchlistSyncMode.textContent = 'Loading Dropbox state…';
+      return;
+    }
+    if (hasError) {
+      watchlistSyncMode.textContent = 'Dropbox sync error';
+      return;
+    }
+    watchlistSyncMode.textContent = 'Synced with Dropbox';
+  };
+
+  const watchlistEditingBlocked = () => {
+    const restoreStatus = String(stateSyncState?.restore_status || '').toLowerCase();
+    if (restoreStatus === 'pending' || restoreStatus === 'failed') return true;
+    if (stateSyncState?.enabled === false && String(stateSyncState?.effective_local_state_mode || '') !== 'local-only') return true;
+    return false;
+  };
+
   const renderWatchlist = (items) => {
     if (!watchlistItems) return;
     watchlistItems.innerHTML = '';
@@ -468,8 +501,14 @@
       watchlistItems.appendChild(tr);
     });
     if (watchlistCount) watchlistCount.textContent = String(list.length);
-    if (watchlistEmpty) watchlistEmpty.style.display = list.length ? 'none' : 'block';
+    const restorePending = String(stateSyncState?.restore_status || '').toLowerCase() === 'pending';
+    if (watchlistEmpty) {
+      watchlistEmpty.textContent = restorePending && !watchlistLoaded ? 'Loading Dropbox state…' : 'No items yet.';
+      watchlistEmpty.style.display = list.length ? 'none' : 'block';
+    }
     if (watchlistClearBtn) watchlistClearBtn.disabled = !list.length || Boolean(watchlistInFlight);
+    if (watchlistAddBtn) watchlistAddBtn.disabled = Boolean(watchlistInFlight) || watchlistEditingBlocked();
+    if (watchlistClearBtn && watchlistEditingBlocked()) watchlistClearBtn.disabled = true;
   };
 
   const normalizeWatchlistInput = (text) => {
@@ -517,8 +556,30 @@
           body: JSON.stringify({ items: payloadItems }),
         });
         watchlistState = Array.isArray(payload?.items) ? payload.items : payloadItems;
+        watchlistLoaded = true;
+        stateSyncState = payload?.state_sync || stateSyncState;
+        applyStateSyncModeLabel(stateSyncState);
         renderWatchlist(watchlistState);
-        if (successMessage) setWatchlistStatus(successMessage, false);
+        if (successMessage) {
+          const uploadError = stateSyncState?.last_upload_error;
+          const verifiedAt = stateSyncState?.last_verified_at;
+          const verifiedWatchlist = Array.isArray(stateSyncState?.last_verified_watchlist) ? stateSyncState.last_verified_watchlist : [];
+          if (stateSyncState?.enabled === true && !verifiedAt) {
+            setWatchlistStatus('Dropbox sync verification missing; save not confirmed durable.', true);
+            return;
+          }
+          if (uploadError) {
+            setWatchlistStatus(`Saved locally, Dropbox sync failed: ${uploadError}`, true);
+            return;
+          }
+          if (stateSyncState?.enabled === true) {
+            const remoteSummary = await fetchRemoteBackupSummary();
+            const remoteWatchlist = Array.isArray(remoteSummary?.watchlist) ? remoteSummary.watchlist : verifiedWatchlist;
+            setWatchlistStatus(`Dropbox verified: ${remoteWatchlist.join(', ') || '(empty)'}`, false);
+            return;
+          }
+          setWatchlistStatus(successMessage, false);
+        }
       } catch (err) {
         console.error(err);
         renderWatchlist(watchlistState);
@@ -535,6 +596,9 @@
     try {
       const payload = await fetchJson('/api/watchlist');
       watchlistState = Array.isArray(payload?.items) ? payload.items : [];
+      watchlistLoaded = true;
+      stateSyncState = payload?.state_sync || stateSyncState;
+      applyStateSyncModeLabel(stateSyncState);
       renderWatchlist(watchlistState);
       setWatchlistStatus('', false);
     } catch (err) {
@@ -543,7 +607,59 @@
     }
   };
 
+  const refreshStateSyncStatus = async () => {
+    if (stateSyncInFlight) return stateSyncInFlight;
+    stateSyncInFlight = (async () => {
+      try {
+        const payload = await fetchJson('/api/state-sync/status');
+        stateSyncState = payload && typeof payload === 'object' ? payload : null;
+        applyStateSyncModeLabel(stateSyncState);
+        const restoreStatus = String(stateSyncState?.restore_status || '').toLowerCase();
+        if (restoreStatus === 'pending') {
+          watchlistLoaded = false;
+          renderWatchlist(watchlistState);
+          setWatchlistStatus('Loading Dropbox state…', false);
+        } else if (restoreStatus === 'failed') {
+          setWatchlistStatus(`Dropbox restore failed: ${stateSyncState?.restore_error || 'unknown error'}`, true);
+        } else if (stateSyncState?.enabled === false) {
+          setWatchlistStatus('Saved locally only; repo deletion can lose unsynced state.', false);
+        }
+      } catch (err) {
+        console.error(err);
+      } finally {
+        stateSyncInFlight = null;
+      }
+    })();
+    return stateSyncInFlight;
+  };
+
+  const fetchRemoteBackupSummary = async () => {
+    try {
+      const payload = await fetchJson('/api/state-sync/remote-backup-summary');
+      return payload && typeof payload === 'object' ? payload : null;
+    } catch (err) {
+      console.error(err);
+      return null;
+    }
+  };
+
+  const scheduleStateSyncPolling = () => {
+    if (stateSyncPollTimer) clearInterval(stateSyncPollTimer);
+    stateSyncPollTimer = setInterval(async () => {
+      await refreshStateSyncStatus();
+      const restoreStatus = String(stateSyncState?.restore_status || '').toLowerCase();
+      if (restoreStatus !== 'pending') {
+        if (stateSyncPollTimer) clearInterval(stateSyncPollTimer);
+        stateSyncPollTimer = null;
+      }
+    }, 1500);
+  };
+
   const addWatchlistItems = async () => {
+    if (watchlistEditingBlocked()) {
+      setWatchlistStatus('Watchlist edits blocked until Dropbox restore/sync is healthy.', true);
+      return;
+    }
     const rawAdditions = normalizeWatchlistInput(watchlistInput?.value);
     const additions = [];
     for (const symbol of rawAdditions) {
@@ -566,6 +682,10 @@
   };
 
   const clearWatchlist = async () => {
+    if (watchlistEditingBlocked()) {
+      setWatchlistStatus('Watchlist edits blocked until Dropbox restore/sync is healthy.', true);
+      return;
+    }
     if (!watchlistState.length || watchlistInFlight) return;
     await saveWatchlist([], 'Watchlist cleared.');
   };
@@ -600,13 +720,19 @@
 
   restoreActiveWorkspace();
   refreshScripts();
-  refreshWatchlist();
+  refreshStateSyncStatus().then(() => {
+    const restoreStatus = String(stateSyncState?.restore_status || '').toLowerCase();
+    if (restoreStatus === 'pending') {
+      scheduleStateSyncPolling();
+    }
+    refreshWatchlist();
+  });
   refreshOandaInactivity();
   syncOandaDetailsVisibility();
   restartPolling();
   document.addEventListener('visibilitychange', restartPolling);
   window.addEventListener('beforeunload', () => {
-    [scriptsTimer, oandaTimer, oandaSecondTimer].forEach((id) => {
+    [scriptsTimer, oandaTimer, oandaSecondTimer, stateSyncPollTimer].forEach((id) => {
       if (id) clearInterval(id);
     });
   });

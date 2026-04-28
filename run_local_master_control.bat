@@ -11,6 +11,9 @@ set "TRADING_JOURNAL_SOURCE=local"
 set "TRADING_JOURNAL_ENABLE_LOCAL_IMPORT=1"
 set "TRADING_JOURNAL_LOCAL_DIR=C:\Users\User\Documents\TRADING"
 set "CASHFLOW_CACHE_TTL_SECONDS=3600"
+if not defined DROPBOX_SYNC_ENABLED set "DROPBOX_SYNC_ENABLED=1"
+if not defined DROPBOX_BACKUP_PATH set "DROPBOX_BACKUP_PATH=/codex/master_control_backup.json"
+if not defined LOCAL_STATE_ONLY set "LOCAL_STATE_ONLY=0"
 
 set "PYTHON_EXE=python"
 if defined PYTHON set "PYTHON_EXE=%PYTHON%"
@@ -26,6 +29,9 @@ echo [local-master] APP_PROFILE=%APP_PROFILE%
 echo [local-master] AUTOSTART_SCRIPTS=%AUTOSTART_SCRIPTS%
 echo [local-master] MASTER_ENV_DIR=%MASTER_ENV_DIR%
 echo [local-master] MASTER_ENV_FILE=%MASTER_ENV_FILE%
+echo [local-master] DROPBOX_SYNC_ENABLED=%DROPBOX_SYNC_ENABLED%
+echo [local-master] DROPBOX_BACKUP_PATH=%DROPBOX_BACKUP_PATH%
+echo [local-master] LOCAL_STATE_ONLY=%LOCAL_STATE_ONLY%
 
 start "Local Master Control" /D "%ROOT%" cmd /d /v:on /k ""%~f0" __worker"
 set "MASTER_URL=http://127.0.0.1:8000"
@@ -88,6 +94,9 @@ echo [local-master] APP_PROFILE=!APP_PROFILE!
 echo [local-master] AUTOSTART_SCRIPTS=!AUTOSTART_SCRIPTS!
 echo [local-master] MASTER_ENV_DIR=!MASTER_ENV_DIR!
 echo [local-master] MASTER_ENV_FILE=!MASTER_ENV_FILE!
+echo [local-master] DROPBOX_SYNC_ENABLED=!DROPBOX_SYNC_ENABLED!
+echo [local-master] DROPBOX_BACKUP_PATH=!DROPBOX_BACKUP_PATH!
+echo [local-master] LOCAL_STATE_ONLY=!LOCAL_STATE_ONLY!
 
 :restart_master
 echo [local-master] starting uvicorn at !DATE! !TIME!
