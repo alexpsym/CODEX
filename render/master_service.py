@@ -488,6 +488,7 @@ TRADING_JOURNAL_SYNC_STATE: Dict[str, object] = {
     "updated_at": None,
 }
 TRADING_JOURNAL_SYNC_LOCK = threading.Lock()
+TRADING_JOURNAL_SYNC_TASK: Optional[asyncio.Task] = None
 TRADING_JOURNAL_IMPORT_DIAGNOSTICS: Dict[str, object] = {
     "rows_total": 0,
     "rows_by_source": {},
@@ -580,6 +581,52 @@ def _set_trading_journal_sync_state(**updates: object) -> None:
         merged["updated_at"] = _utc_now_iso()
         TRADING_JOURNAL_SYNC_STATE.update(merged)
         _save_json_file(TRADING_JOURNAL_SYNC_STATE_PATH, merged)
+
+
+def _schedule_trading_journal_sync_job() -> bool:
+    global TRADING_JOURNAL_SYNC_TASK
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        threading.Thread(
+            target=lambda: asyncio.run(_run_trading_journal_sync_job()),
+            daemon=True,
+        ).start()
+        return True
+    task = TRADING_JOURNAL_SYNC_TASK
+    if isinstance(task, asyncio.Task) and not task.done():
+        return False
+    TRADING_JOURNAL_SYNC_TASK = loop.create_task(_run_trading_journal_sync_job())
+    return True
+
+
+def _queue_trading_journal_sync_if_idle(reason: str) -> Dict[str, object]:
+    with TRADING_JOURNAL_SYNC_LOCK:
+        snapshot = _sync_state_snapshot()
+        running = bool(snapshot.get("running"))
+        if running:
+            TRADING_JOURNAL_SYNC_STATE.update(snapshot)
+            return snapshot
+        snapshot.update(
+            {
+                "running": True,
+                "progress": 0,
+                "message": f"Journal cache build queued… ({reason})",
+                "ok": None,
+                "error": None,
+                "result": None,
+                "started_at": _utc_now_iso(),
+                "finished_at": None,
+                "updated_at": _utc_now_iso(),
+            }
+        )
+        TRADING_JOURNAL_SYNC_STATE.update(snapshot)
+        _save_json_file(TRADING_JOURNAL_SYNC_STATE_PATH, snapshot)
+    _schedule_trading_journal_sync_job()
+    with TRADING_JOURNAL_SYNC_LOCK:
+        snapshot = _sync_state_snapshot()
+        TRADING_JOURNAL_SYNC_STATE.update(snapshot)
+        return snapshot
 
 
 def _record_bybit_demo_sync_status(**updates: object) -> None:
@@ -862,15 +909,26 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
         for r in _get_trading_journal_rows()
         if _is_visible_trading_journal_row(r)
     ]
-    balances_seed = [b for b in _get_excel_account_balances() if not _is_bybit_demo_account_label(b.get("label") or b.get("account"))]
+    excel_balances = _get_excel_account_balances()
+    balances_seed = [b for b in excel_balances if not _is_bybit_demo_account_label(b.get("label") or b.get("account"))]
     trade_items = _enrich_trade_row_metrics(_apply_analysis_balances(_calc_balance_after_trade(rows, balances_seed)))
     state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
     ledger = _load_cashflows_for_active_journal_source(state if isinstance(state, dict) else {})
     cashflow_rows = [r for r in _cashflow_rows_for_journal(ledger) if isinstance(r, dict) and not _exclude_bybit_demo_row(r)]
     combined_items = sorted([*trade_items, *cashflow_rows], key=_row_sort_dt, reverse=True)
     stats = _compute_journal_stats(combined_items, balances_seed)
-    balances = _latest_balances_from_cashflows(ledger)
+    cashflow_balances = _latest_balances_from_cashflows(ledger)
+    broker_balances = (state or {}).get("broker_account_balances") if isinstance(state, dict) else []
+    if not isinstance(broker_balances, list):
+        broker_balances = []
+    balances = _merge_display_balances(cashflow_balances, excel_balances, broker_balances)
     diagnostics = _build_trading_journal_diagnostics_snapshot()
+    broker_diag = (state or {}).get("broker_balance_diagnostics") if isinstance(state, dict) else {}
+    if isinstance(broker_diag, dict):
+        warnings = broker_diag.get("warnings")
+        if isinstance(warnings, list) and warnings:
+            existing_errors = diagnostics.get("errors") if isinstance(diagnostics.get("errors"), list) else []
+            diagnostics["errors"] = [*existing_errors, *[str(w) for w in warnings if str(w).strip()]]
     payload: Dict[str, object] = {
         "cache_version": TRADING_JOURNAL_VIEW_CACHE_VERSION,
         "generated_at": _utc_now_iso(),
@@ -879,7 +937,7 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
         "stats": stats,
         "balances": balances,
         "diagnostics": diagnostics,
-        "warnings": [],
+        "warnings": diagnostics.get("errors") if isinstance(diagnostics.get("errors"), list) else [],
         "source_fingerprints": fingerprint,
     }
     _save_trading_journal_view_snapshot(payload)
@@ -3817,6 +3875,39 @@ def _latest_balances_from_cashflows(ledger: Dict[str, List[Dict[str, object]]]) 
     return sorted(items, key=lambda x: str(x.get("label") or ""))
 
 
+def _merge_display_balances(*groups: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    merged: Dict[str, Dict[str, object]] = {}
+    for group in groups:
+        for item in group or []:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or item.get("account") or "").strip()
+            if not label:
+                continue
+            if _is_bybit_demo_account_label(label) and not ENABLE_BYBIT_DEMO_JOURNAL:
+                continue
+            key = _norm_account_key(label)
+            existing = merged.get(key) or {}
+            balance = _to_float(item.get("balance"))
+            if balance is None:
+                balance = _to_float(item.get("nav"))
+            payload = dict(existing)
+            payload["account"] = str(item.get("account") or existing.get("account") or label)
+            payload["label"] = str(item.get("label") or existing.get("label") or label)
+            if balance is not None:
+                payload["balance"] = balance
+            payload["currency"] = str(item.get("currency") or existing.get("currency") or _infer_account_currency(label))
+            payload["source"] = str(item.get("source") or item.get("balance_source") or existing.get("source") or "unknown")
+            payload["balance_source"] = str(item.get("balance_source") or item.get("source") or existing.get("balance_source") or payload["source"])
+            if item.get("as_of"):
+                payload["as_of"] = item.get("as_of")
+            elif existing.get("as_of"):
+                payload["as_of"] = existing.get("as_of")
+            payload["missing_balance"] = payload.get("balance") is None
+            merged[key] = payload
+    return sorted(merged.values(), key=lambda x: str(x.get("label") or x.get("account") or ""))
+
+
 def _cashflow_rows_for_journal(ledger: Dict[str, List[Dict[str, object]]]) -> List[Dict[str, object]]:
     rows: List[Dict[str, object]] = []
     for account_key, events in ledger.items():
@@ -6007,10 +6098,12 @@ async def _start_bybit_demo_closed_pnl_poll_after_restore() -> None:
 
 
 async def _start_startup_recovery_import_after_restore() -> None:
-    await _wait_for_startup_restore_signal(
-        timeout=STARTUP_RESTORE_WAIT_TIMEOUT_SECONDS,
-        timeout_warning="STARTUP_RECOVERY_WAIT_TIMEOUT proceeding without restore signal",
-    )
+    source_mode = str(TRADING_JOURNAL_SOURCE or "").strip().lower()
+    if not (APP_PROFILE == "journal" or source_mode == "local" or (source_mode in {"both", "auto"} and not DROPBOX_SYNC_ENABLED)):
+        await _wait_for_startup_restore_signal(
+            timeout=STARTUP_RESTORE_WAIT_TIMEOUT_SECONDS,
+            timeout_warning="STARTUP_RECOVERY_WAIT_TIMEOUT proceeding without restore signal",
+        )
     await _run_startup_recovery_import_if_needed()
 
 
@@ -18745,7 +18838,31 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
     if not isinstance(snapshot, dict):
         snapshot = _load_trading_journal_view_snapshot()
     if not isinstance(snapshot, dict):
-        return JSONResponse({"ok": False, "warning": "journal cache not built yet", "items": [], "count": 0, "stats": {}}, status_code=503)
+        sync_status = _sync_state_snapshot()
+        if bool(sync_status.get("running")):
+            return JSONResponse(
+                {"ok": False, "pending": True, "warning": "journal cache building", "items": [], "count": 0, "stats": {}, "sync_status": sync_status},
+                status_code=202,
+            )
+        if sync_status.get("ok") is False:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "pending": False,
+                    "warning": "journal cache build failed",
+                    "error": sync_status.get("error") or sync_status.get("message") or "journal cache build failed",
+                    "items": [],
+                    "count": 0,
+                    "stats": {},
+                    "sync_status": sync_status,
+                },
+                status_code=503,
+            )
+        sync_status = _queue_trading_journal_sync_if_idle("first_api_request")
+        return JSONResponse(
+            {"ok": False, "pending": True, "warning": "journal cache building", "items": [], "count": 0, "stats": {}, "sync_status": sync_status},
+            status_code=202,
+        )
     fingerprint_now = _journal_source_fingerprint()
     is_stale = snapshot.get("source_fingerprints") != fingerprint_now
     items = list(snapshot.get("items") or [])
@@ -18788,6 +18905,7 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
         items = [r for r in items if match(r)]
 
     payload = {
+        "ok": True,
         "items": items,
         "count": len(items),
         "stats": stats,
@@ -18806,12 +18924,23 @@ async def trading_journal_diagnostics() -> JSONResponse:
     snapshot = _TRADING_JOURNAL_VIEW_CACHE.get("payload") if _TRADING_JOURNAL_VIEW_CACHE.get("key") == "snapshot" else None
     if not isinstance(snapshot, dict):
         snapshot = _load_trading_journal_view_snapshot() or {}
+    if not isinstance(snapshot, dict) or not snapshot:
+        sync_status = _sync_state_snapshot()
+        diagnostics = _build_trading_journal_diagnostics_snapshot()
+        diagnostics["pending"] = bool(sync_status.get("running") or sync_status.get("ok") is None)
+        diagnostics["sync_status"] = sync_status
+        return JSONResponse(diagnostics, status_code=202 if diagnostics["pending"] else 503)
     return JSONResponse(snapshot.get("diagnostics") if isinstance(snapshot.get("diagnostics"), dict) else _build_trading_journal_diagnostics_snapshot())
 @app.get("/api/trading-journal/balances")
 async def trading_journal_balances() -> JSONResponse:
     snapshot = _TRADING_JOURNAL_VIEW_CACHE.get("payload") if _TRADING_JOURNAL_VIEW_CACHE.get("key") == "snapshot" else None
     if not isinstance(snapshot, dict):
         snapshot = _load_trading_journal_view_snapshot() or {}
+    if not isinstance(snapshot, dict) or not snapshot:
+        sync_status = _sync_state_snapshot()
+        pending = bool(sync_status.get("running") or sync_status.get("ok") is None)
+        status_code = 202 if pending else 503
+        return JSONResponse({"items": [], "pending": pending, "sync_status": sync_status}, status_code=status_code)
     items = snapshot.get("balances") if isinstance(snapshot.get("balances"), list) else []
     return JSONResponse({"items": items})
 
@@ -18942,6 +19071,38 @@ async def _run_trading_journal_sync_job() -> None:
     )
 
     try:
+        broker_balance_warnings: List[str] = []
+        broker_account_balances: List[Dict[str, object]] = []
+        for account_mode in ("demo", "live"):
+            if account_mode == "demo" and not ENABLE_BYBIT_DEMO_JOURNAL:
+                continue
+            label = "Bybit Demo" if account_mode == "demo" else "Bybit Live"
+            try:
+                snapshot = await _fetch_bybit_balance_usdt(account_mode)
+                broker_account_balances.append(
+                    {
+                        "account": label,
+                        "label": label,
+                        "balance": _to_float(snapshot.get("available_usdt")),
+                        "currency": "USDT",
+                        "source": "bybit_wallet_balance",
+                        "balance_source": "bybit_wallet_balance",
+                        "account_mode": account_mode,
+                        "as_of": _utc_now_iso(),
+                    }
+                )
+            except Exception as exc:
+                broker_balance_warnings.append(f"Bybit {account_mode} balance unavailable: {exc}")
+        if broker_account_balances or broker_balance_warnings:
+            state = _load_trading_journal_state()
+            state["broker_account_balances"] = broker_account_balances
+            diagnostics = state.get("broker_balance_diagnostics")
+            diag = diagnostics if isinstance(diagnostics, dict) else {}
+            diag["warnings"] = broker_balance_warnings
+            diag["updated_at"] = _utc_now_iso()
+            state["broker_balance_diagnostics"] = diag
+            _save_trading_journal_state(state)
+
         bybit_demo = None
         bybit_live = None
         try:
@@ -18963,6 +19124,7 @@ async def _run_trading_journal_sync_job() -> None:
 
         result = await asyncio.to_thread(_import_trading_journal_from_sources, progress_cb=_cb)
         warnings: List[str] = []
+        warnings.extend(broker_balance_warnings)
         for mode_name, mode_payload in {"demo": bybit_demo, "live": bybit_live}.items():
             if isinstance(mode_payload, dict):
                 if mode_payload.get("cooldown_active"):
@@ -18975,8 +19137,6 @@ async def _run_trading_journal_sync_job() -> None:
         diagnostics = result.get("diagnostics") if isinstance(result, dict) else {}
         rows_by_asset_class = diagnostics.get("rows_by_asset_class") if isinstance(diagnostics, dict) else {}
         ok_flag = bool(result.get("ok", True)) if isinstance(result, dict) else True
-        if warnings:
-            ok_flag = False
         msg = "Done" if ok_flag else str((result or {}).get("message") or (result or {}).get("error") or "; ".join(warnings) or "Failed")
         _set_trading_journal_sync_state(
             running=False,
@@ -19009,27 +19169,5 @@ async def _run_trading_journal_sync_job() -> None:
 
 @app.post("/api/trading-journal/sync")
 async def trading_journal_sync() -> JSONResponse:
-    with TRADING_JOURNAL_SYNC_LOCK:
-        running = bool(_sync_state_snapshot().get("running"))
-    if running:
-        return await trading_journal_sync_status()
-
-    _set_trading_journal_sync_state(
-        running=True,
-        progress=0,
-        message="Queued…",
-        ok=None,
-        error=None,
-        result=None,
-        started_at=_utc_now_iso(),
-        finished_at=None,
-    )
-    try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(_run_trading_journal_sync_job())
-    except RuntimeError:
-        threading.Thread(
-            target=lambda: asyncio.run(_run_trading_journal_sync_job()),
-            daemon=True,
-        ).start()
+    _queue_trading_journal_sync_if_idle("manual_sync")
     return await trading_journal_sync_status()

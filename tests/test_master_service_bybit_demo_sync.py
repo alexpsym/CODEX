@@ -166,6 +166,9 @@ def test_startup_recovery_waits_for_restore_signal(monkeypatch) -> None:
         recovery_called["value"] = True
 
     event = asyncio.Event()
+    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_SOURCE", "dropbox")
+    monkeypatch.setattr(master_service, "DROPBOX_SYNC_ENABLED", True)
     monkeypatch.setattr(master_service, "_STARTUP_STATE_RESTORE_DONE", event)
     monkeypatch.setattr(master_service.asyncio, "wait_for", fake_wait_for)
     monkeypatch.setattr(master_service, "_run_startup_recovery_import_if_needed", fake_recovery)
@@ -515,6 +518,23 @@ def test_sync_bybit_closed_pnl_window_stale_context_does_not_raise(monkeypatch) 
     asyncio.run(master_service._sync_bybit_closed_pnl_window(account_mode="demo", base_url="u", api_key="k", api_secret="s", start_time=0, end_time=3000))
     assert statuses
     assert statuses[-1].get("last_error") is None
+
+
+def test_sync_records_broker_balance_warning_without_failing_import(monkeypatch) -> None:
+    monkeypatch.setattr(master_service, "ENABLE_BYBIT_DEMO_JOURNAL", True)
+    monkeypatch.setattr(master_service, "_run_bybit_closed_pnl_sync", lambda **_kwargs: asyncio.sleep(0, result={"ok": True}))
+    monkeypatch.setattr(master_service, "_import_trading_journal_from_sources", lambda progress_cb=None: {"ok": True, "rows_imported": 1, "diagnostics": {"rows_by_asset_class": {}}})
+    monkeypatch.setattr(master_service, "_fetch_bybit_balance_usdt", lambda account: (_ for _ in ()).throw(RuntimeError(f"{account} missing creds")))
+    saved_state = {}
+    monkeypatch.setattr(master_service, "_load_trading_journal_state", lambda: dict(saved_state))
+    monkeypatch.setattr(master_service, "_save_trading_journal_state", lambda payload: saved_state.update(payload))
+    updates = []
+    monkeypatch.setattr(master_service, "_set_trading_journal_sync_state", lambda **kwargs: updates.append(kwargs))
+    asyncio.run(master_service._run_trading_journal_sync_job())
+    assert isinstance(saved_state.get("broker_balance_diagnostics"), dict)
+    warnings = saved_state["broker_balance_diagnostics"].get("warnings") or []
+    assert any("Bybit demo balance unavailable" in str(w) for w in warnings)
+    assert any(update.get("ok") is True for update in updates)
 
 
 def test_repair_existing_bybit_row_open_time_from_context(monkeypatch) -> None:
