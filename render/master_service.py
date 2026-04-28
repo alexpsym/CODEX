@@ -5,6 +5,7 @@ import math
 import atexit
 import calendar
 import asyncio
+import importlib.util
 import threading
 import base64
 import hashlib
@@ -4613,9 +4614,13 @@ def _import_trading_journal_from_sources(
         try:
             import xlrd as _xlrd  # noqa: F401
         except Exception:
+            requirements_path = str((BASE_DIR / "render" / "requirements.txt").resolve())
             error_payload = {
                 "code": "MISSING_XLRD_FOR_XLS",
-                "message": "Local .xls journal workbooks require xlrd. Install with: python -m pip install -r render\\requirements.txt",
+                "message": (
+                    "Local .xls journal workbooks require xlrd. "
+                    f'Install into the same Python executable that launches the journal: python -m pip install -r "{requirements_path}"'
+                ),
                 "files": requires_xls_engine,
             }
             errors.append(error_payload)
@@ -19315,6 +19320,13 @@ async def trading_journal_sync_status() -> JSONResponse:
     snapshot["dropbox_sync_enabled"] = os.getenv("DROPBOX_SYNC_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
     snapshot["uses_dropbox_journal_import"] = bool(_trading_journal_uses_dropbox_journal_import())
     snapshot["broker_refresh_enabled"] = bool(_trading_journal_broker_refresh_enabled())
+    requirements_path = str((BASE_DIR / "render" / "requirements.txt").resolve())
+    xlrd_installed = importlib.util.find_spec("xlrd") is not None
+    snapshot["dependencies"] = {
+        "xlrd_installed": bool(xlrd_installed),
+        "local_xls_supported": bool(xlrd_installed),
+        "requirements_file": requirements_path,
+    }
     return JSONResponse(snapshot)
 
 
