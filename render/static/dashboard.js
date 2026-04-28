@@ -473,6 +473,13 @@
     watchlistSyncMode.textContent = 'Synced with Dropbox';
   };
 
+  const watchlistEditingBlocked = () => {
+    const restoreStatus = String(stateSyncState?.restore_status || '').toLowerCase();
+    if (restoreStatus === 'pending' || restoreStatus === 'failed') return true;
+    if (stateSyncState?.enabled === false && String(stateSyncState?.effective_local_state_mode || '') !== 'local-only') return true;
+    return false;
+  };
+
   const renderWatchlist = (items) => {
     if (!watchlistItems) return;
     watchlistItems.innerHTML = '';
@@ -500,6 +507,8 @@
       watchlistEmpty.style.display = list.length ? 'none' : 'block';
     }
     if (watchlistClearBtn) watchlistClearBtn.disabled = !list.length || Boolean(watchlistInFlight);
+    if (watchlistAddBtn) watchlistAddBtn.disabled = Boolean(watchlistInFlight) || watchlistEditingBlocked();
+    if (watchlistClearBtn && watchlistEditingBlocked()) watchlistClearBtn.disabled = true;
   };
 
   const normalizeWatchlistInput = (text) => {
@@ -553,7 +562,23 @@
         renderWatchlist(watchlistState);
         if (successMessage) {
           const uploadError = stateSyncState?.last_upload_error;
-          setWatchlistStatus(uploadError ? `Saved locally, Dropbox sync failed: ${uploadError}` : successMessage, Boolean(uploadError));
+          const verifiedAt = stateSyncState?.last_verified_at;
+          const verifiedWatchlist = Array.isArray(stateSyncState?.last_verified_watchlist) ? stateSyncState.last_verified_watchlist : [];
+          if (stateSyncState?.enabled === true && !verifiedAt) {
+            setWatchlistStatus('Dropbox sync verification missing; save not confirmed durable.', true);
+            return;
+          }
+          if (uploadError) {
+            setWatchlistStatus(`Saved locally, Dropbox sync failed: ${uploadError}`, true);
+            return;
+          }
+          if (stateSyncState?.enabled === true) {
+            const remoteSummary = await fetchRemoteBackupSummary();
+            const remoteWatchlist = Array.isArray(remoteSummary?.watchlist) ? remoteSummary.watchlist : verifiedWatchlist;
+            setWatchlistStatus(`Dropbox verified: ${remoteWatchlist.join(', ') || '(empty)'}`, false);
+            return;
+          }
+          setWatchlistStatus(successMessage, false);
         }
       } catch (err) {
         console.error(err);
@@ -596,6 +621,8 @@
           setWatchlistStatus('Loading Dropbox state…', false);
         } else if (restoreStatus === 'failed') {
           setWatchlistStatus(`Dropbox restore failed: ${stateSyncState?.restore_error || 'unknown error'}`, true);
+        } else if (stateSyncState?.enabled === false) {
+          setWatchlistStatus('Saved locally only; repo deletion can lose unsynced state.', false);
         }
       } catch (err) {
         console.error(err);
@@ -604,6 +631,16 @@
       }
     })();
     return stateSyncInFlight;
+  };
+
+  const fetchRemoteBackupSummary = async () => {
+    try {
+      const payload = await fetchJson('/api/state-sync/remote-backup-summary');
+      return payload && typeof payload === 'object' ? payload : null;
+    } catch (err) {
+      console.error(err);
+      return null;
+    }
   };
 
   const scheduleStateSyncPolling = () => {
@@ -619,6 +656,10 @@
   };
 
   const addWatchlistItems = async () => {
+    if (watchlistEditingBlocked()) {
+      setWatchlistStatus('Watchlist edits blocked until Dropbox restore/sync is healthy.', true);
+      return;
+    }
     const rawAdditions = normalizeWatchlistInput(watchlistInput?.value);
     const additions = [];
     for (const symbol of rawAdditions) {
@@ -641,6 +682,10 @@
   };
 
   const clearWatchlist = async () => {
+    if (watchlistEditingBlocked()) {
+      setWatchlistStatus('Watchlist edits blocked until Dropbox restore/sync is healthy.', true);
+      return;
+    }
     if (!watchlistState.length || watchlistInFlight) return;
     await saveWatchlist([], 'Watchlist cleared.');
   };

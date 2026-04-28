@@ -18,6 +18,7 @@ def test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls() -> No
     assert '/api/recent-trades' not in js
     assert '/api/watchlist' in js
     assert '/api/state-sync/status' in js
+    assert '/api/state-sync/remote-backup-summary' in js
     assert '/api/oanda-inactivity-status' in js
     assert 'window.open(' not in js
     assert 'Loaded ${new Date().toLocaleTimeString()}' not in js
@@ -54,6 +55,8 @@ def test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls() -> No
     assert "Saved locally only (repo deletion can lose local state)" in js
     assert "Synced with Dropbox" in js
     assert "Dropbox sync error" in js
+    assert "Dropbox sync verification missing; save not confirmed durable." in js
+    assert "Watchlist edits blocked until Dropbox restore/sync is healthy." in js
     assert "dotTitle = 'Inactive view';" not in js
     assert "dotTitle = 'Active view loaded';" not in js
     assert "Inactive view" not in js

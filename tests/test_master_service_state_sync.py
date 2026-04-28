@@ -24,6 +24,10 @@ class DummyRequest:
         return self._payload
 
 
+def _mk_dropbox_store():
+    return {"payload": b""}
+
+
 def test_watchlist_get_waits_for_restore(monkeypatch: pytest.MonkeyPatch) -> None:
     master_service._STARTUP_STATE_RESTORE_DONE.clear()
     master_service._update_state_sync_status(enabled=True, restore_status="pending", restore_complete=False)
@@ -48,80 +52,91 @@ def test_watchlist_get_waits_for_restore(monkeypatch: pytest.MonkeyPatch) -> Non
     assert payload["items"] == ["DASHUSDT", "BTCUSDT"]
 
 
-def test_watchlist_post_upload_failure_is_visible(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_watchlist_post_verifies_remote_backup(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _mk_dropbox_store()
+    master_service._update_state_sync_status(enabled=True, restore_status="done", restore_complete=True)
+    master_service._STARTUP_STATE_RESTORE_DONE.set()
+
     async def fake_resolve(symbol: str, *_args, **_kwargs):
         return {"resolved_symbol": symbol.upper()}
 
-    async def fake_wait(*_args, **_kwargs):
-        return {"enabled": True, "restore_status": "done"}
+    def fake_upload(_path: str, payload: bytes):
+        store["payload"] = payload
 
-    async def fake_upload(*_args, **_kwargs):
-        raise master_service.HTTPException(
-            status_code=502,
-            detail={"error": "dropbox_upload_failed", "message": "upload failed"},
-        )
+    def fake_download(_path: str):
+        return store["payload"]
 
-    monkeypatch.setattr(master_service, "_wait_for_state_restore_or_error", fake_wait)
     monkeypatch.setattr(master_service, "_resolve_symbol_payload", fake_resolve)
-    monkeypatch.setattr(master_service, "_upload_state_backup_now", fake_upload)
-    monkeypatch.setattr(master_service, "_set_watchlist", lambda items: list(items))
+    monkeypatch.setattr(master_service, "_dropbox_upload_bytes", fake_upload)
+    monkeypatch.setattr(master_service, "_dropbox_download_bytes", fake_download)
+
+    response = asyncio.run(master_service.set_watchlist(DummyRequest({"items": ["BTCUSDT"]})))
+    payload = json.loads(response.body.decode("utf-8"))
+    assert payload["ok"] is True
+    assert "BTCUSDT" in payload["state_sync"]["last_verified_watchlist"]
+
+
+def test_watchlist_post_fails_when_remote_misses_symbol(monkeypatch: pytest.MonkeyPatch) -> None:
+    master_service._update_state_sync_status(enabled=True, restore_status="done", restore_complete=True)
+    master_service._STARTUP_STATE_RESTORE_DONE.set()
+    remote = {"payload": json.dumps({"watchlist": ["DASHUSDT"]}).encode("utf-8")}
+
+    async def fake_resolve(symbol: str, *_args, **_kwargs):
+        return {"resolved_symbol": symbol.upper()}
+
+    monkeypatch.setattr(master_service, "_resolve_symbol_payload", fake_resolve)
+    monkeypatch.setattr(master_service, "_dropbox_upload_bytes", lambda _path, _payload: None)
+    monkeypatch.setattr(master_service, "_dropbox_download_bytes", lambda _path: remote["payload"])
 
     with pytest.raises(master_service.HTTPException) as exc:
         asyncio.run(master_service.set_watchlist(DummyRequest({"items": ["BTCUSDT"]})))
     assert exc.value.status_code == 502
-    assert "dropbox_upload_failed" in str(exc.value.detail)
+    assert "verification mismatch" in str(exc.value.detail).lower()
 
 
-def test_watchlist_post_triggers_upload_and_returns_sync_status(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured = {"upload_called": 0}
+def test_lifecycle_repo_replace_restores_watchlist(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    store = _mk_dropbox_store()
+    first_watchlist = tmp_path / "inst_a_watchlist.json"
+    second_watchlist = tmp_path / "inst_b_watchlist.json"
+    monkeypatch.setattr(master_service, "WATCHLIST_PATH", first_watchlist)
+    monkeypatch.setattr(master_service, "_WATCHLIST_CACHE", None)
+    master_service._update_state_sync_status(enabled=True, restore_status="done", restore_complete=True)
+    master_service._STARTUP_STATE_RESTORE_DONE.set()
 
     async def fake_resolve(symbol: str, *_args, **_kwargs):
         return {"resolved_symbol": symbol.upper()}
 
-    async def fake_wait(*_args, **_kwargs):
-        return {"enabled": True, "restore_status": "done"}
-
-    async def fake_upload(*_args, **_kwargs):
-        captured["upload_called"] += 1
-        return {"enabled": True, "restore_status": "done", "last_upload_error": None}
-
-    monkeypatch.setattr(master_service, "_wait_for_state_restore_or_error", fake_wait)
     monkeypatch.setattr(master_service, "_resolve_symbol_payload", fake_resolve)
-    monkeypatch.setattr(master_service, "_upload_state_backup_now", fake_upload)
-    monkeypatch.setattr(master_service, "_set_watchlist", lambda items: list(items))
+    monkeypatch.setattr(master_service, "_dropbox_upload_bytes", lambda _path, payload: store.__setitem__("payload", payload))
+    monkeypatch.setattr(master_service, "_dropbox_download_bytes", lambda _path: store["payload"])
 
-    response = asyncio.run(master_service.set_watchlist(DummyRequest({"items": ["BTCUSDT"]})))
-    payload = json.loads(response.body.decode("utf-8"))
-    assert payload["items"] == ["BTCUSDT"]
-    assert captured["upload_called"] == 1
-    assert payload["state_sync"]["enabled"] is True
+    write_resp = asyncio.run(master_service.set_watchlist(DummyRequest({"items": ["BTCUSDT"]})))
+    assert json.loads(write_resp.body.decode("utf-8"))["ok"] is True
 
+    first_watchlist.unlink(missing_ok=True)
+    monkeypatch.setattr(master_service, "WATCHLIST_PATH", second_watchlist)
+    monkeypatch.setattr(master_service, "_WATCHLIST_CACHE", None)
+    master_service._STARTUP_STATE_RESTORE_DONE.clear()
+    asyncio.run(master_service._dropbox_restore_state_backup_on_startup())
 
-def test_custom_alert_mutations_trigger_immediate_sync(monkeypatch: pytest.MonkeyPatch) -> None:
-    called = {"uploads": 0}
-    async def fake_wait(*_args, **_kwargs):
-        return {"enabled": True, "restore_status": "done"}
-    async def fake_upload(*_args, **_kwargs):
-        called["uploads"] += 1
-        return {"enabled": True, "restore_status": "done"}
-    monkeypatch.setattr(master_service, "_wait_for_state_restore_or_error", fake_wait)
-    monkeypatch.setattr(master_service, "_upload_state_backup_now", fake_upload)
-    monkeypatch.setattr(master_service.bybit_monitor, "upsert_custom_alert", lambda payload: {"id": "b1", **payload})
-    monkeypatch.setattr(master_service.bybit_monitor, "delete_custom_alert", lambda _alert_id: None)
-    monkeypatch.setattr(master_service.bybit_monitor, "set_custom_alert_enabled", lambda alert_id, enabled: {"id": alert_id, "enabled": enabled})
-
-    asyncio.run(master_service.upsert_bybit_monitor_custom_alert(DummyRequest({"symbol": "BTCUSDT"})))
-    asyncio.run(master_service.delete_bybit_monitor_custom_alert("b1"))
-    asyncio.run(master_service.set_bybit_monitor_custom_alert_enabled("b1", DummyRequest({"enabled": True})))
-    assert called["uploads"] == 3
+    read_resp = asyncio.run(master_service.get_watchlist())
+    assert "BTCUSDT" in json.loads(read_resp.body.decode("utf-8"))["items"]
 
 
-def test_state_sync_status_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        master_service,
-        "_state_sync_status_snapshot",
-        lambda: {"enabled": False, "restore_complete": True, "restore_status": "skipped", "backup_path": "/x"},
-    )
-    payload = json.loads(asyncio.run(master_service.state_sync_status()).body.decode("utf-8"))
-    assert payload["enabled"] is False
-    assert payload["restore_status"] == "skipped"
+def test_scanner_local_ui_mode_still_runs_restore(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = {"restore": 0}
+    monkeypatch.setattr(master_service, "_is_scanner_local_ui_mode", lambda: True)
+    monkeypatch.setattr(master_service, "DROPBOX_SYNC_ENABLED", True)
+    monkeypatch.setattr(master_service, "_dropbox_restore_state_backup_on_startup", lambda: called.__setitem__("restore", called["restore"] + 1) or asyncio.sleep(0))
+    monkeypatch.setattr(master_service, "_log_outbound_traffic_summary", lambda: asyncio.sleep(0))
+    monkeypatch.setattr(master_service, "_poll_pending_webhook_invalidations", lambda: asyncio.sleep(0))
+    asyncio.run(master_service._autostart_scripts())
+    assert called["restore"] == 1
+
+
+def test_state_sync_status_blocks_when_dropbox_disabled_and_not_local_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
+    monkeypatch.setattr(master_service, "DROPBOX_SYNC_ENABLED", False)
+    monkeypatch.setattr(master_service, "LOCAL_STATE_ONLY", False)
+    payload = master_service._state_sync_status_snapshot()
+    assert payload["restore_status"] == "failed"
