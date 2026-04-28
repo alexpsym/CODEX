@@ -26,6 +26,53 @@ $launcherTargets = @(
     @{ ExeName = "Trading Journal.exe"; TargetBat = "run_trading_journal_local.bat" }
 )
 
+function Get-CscCompilerPath {
+    $candidates = New-Object System.Collections.Generic.List[string]
+
+    $commandCsc = Get-Command csc.exe -ErrorAction SilentlyContinue
+    if ($commandCsc) {
+        $candidates.Add($commandCsc.Path)
+    }
+
+    $framework64v4 = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+    $frameworkv4 = Join-Path $env:WINDIR "Microsoft.NET\Framework\v4.0.30319\csc.exe"
+    $candidates.Add($framework64v4)
+    $candidates.Add($frameworkv4)
+
+    $wildcardPaths = @(
+        (Join-Path $env:WINDIR "Microsoft.NET\Framework64\*\csc.exe"),
+        (Join-Path $env:WINDIR "Microsoft.NET\Framework\*\csc.exe")
+    )
+
+    foreach ($pattern in $wildcardPaths) {
+        Get-ChildItem -Path $pattern -File -ErrorAction SilentlyContinue |
+            ForEach-Object { $candidates.Add($_.FullName) }
+    }
+
+    $existing = $candidates |
+        Where-Object { $_ -and (Test-Path -LiteralPath $_) } |
+        Select-Object -Unique
+
+    if (-not $existing) {
+        return $null
+    }
+
+    $ranked = $existing | Sort-Object -Descending -Property @(
+        { if ($_ -like "*Framework64*") { 1 } else { 0 } },
+        {
+            $versionFolder = Split-Path (Split-Path $_ -Parent) -Leaf
+            try {
+                [version]($versionFolder -replace '^[^0-9]*', '')
+            }
+            catch {
+                [version]"0.0.0.0"
+            }
+        }
+    )
+
+    return $ranked[0]
+}
+
 function Test-AddTypeCompiler {
     try {
         Add-Type -TypeDefinition "public static class LauncherCompilerProbe { public static int Value => 1; }" -Language CSharp -ErrorAction Stop | Out-Null
@@ -41,7 +88,7 @@ function Build-WithCSharp {
         [Parameter(Mandatory = $true)] [string] $Template,
         [Parameter(Mandatory = $true)] [array] $Targets,
         [Parameter(Mandatory = $true)] [string] $OutDir,
-        [Parameter()] $CscCommand,
+        [Parameter()] [string] $CscPath,
         [Parameter(Mandatory = $true)] [bool] $UseAddType
     )
 
@@ -52,8 +99,8 @@ function Build-WithCSharp {
 
         Set-Content -LiteralPath $tempSourcePath -Value $generatedSource -Encoding UTF8
         try {
-            if ($CscCommand) {
-                & $CscCommand.Path /nologo /target:exe /optimize+ /out:$outputPath $tempSourcePath
+            if ($CscPath) {
+                & $CscPath /nologo /target:exe /optimize+ /out:$outputPath $tempSourcePath
                 if ($LASTEXITCODE -ne 0) {
                     throw "Compilation failed for $($entry.ExeName)"
                 }
@@ -114,19 +161,23 @@ function Build-WithIExpress {
         [Parameter(Mandatory = $true)] [string] $IExpressPath
     )
 
+    $allBuilt = $true
+
     foreach ($entry in $Targets) {
         $outputPath = Join-Path $OutDir $entry.ExeName
         $tempRoot = Join-Path $env:TEMP ("iexpress_launcher_{0}" -f [Guid]::NewGuid().ToString('N'))
         $stagingDir = Join-Path $tempRoot "staging"
         $launcherCmd = Join-Path $stagingDir "launcher.cmd"
         $sedPath = Join-Path $tempRoot "launcher.sed"
+        $stdoutPath = Join-Path $tempRoot "iexpress.stdout.log"
+        $stderrPath = Join-Path $tempRoot "iexpress.stderr.log"
 
         New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
 
-        try {
-            New-IExpressLauncherScript -RepoRootPath $RepoRootPath -TargetBat $entry.TargetBat -OutputCmd $launcherCmd
+        New-IExpressLauncherScript -RepoRootPath $RepoRootPath -TargetBat $entry.TargetBat -OutputCmd $launcherCmd
 
-            $sedContent = @"
+        $sourceDirForSed = "$stagingDir\"
+        $sedContent = @"
 [Version]
 Class=IEXPRESS
 SEDVersion=3
@@ -145,61 +196,115 @@ DisplayLicense=
 FinishMessage=
 TargetName=$outputPath
 FriendlyName=$($entry.ExeName)
-AppLaunched=launcher.cmd
+AppLaunched=cmd /d /c launcher.cmd
 PostInstallCmd=<None>
-AdminQuietInstCmd=launcher.cmd
-UserQuietInstCmd=launcher.cmd
+AdminQuietInstCmd=cmd /d /c launcher.cmd
+UserQuietInstCmd=cmd /d /c launcher.cmd
 SourceFiles=SourceFiles
 
 [SourceFiles]
-SourceFiles0=$stagingDir
+SourceFiles0=$sourceDirForSed
 
 [SourceFiles0]
 launcher.cmd=
 "@
 
-            Set-Content -LiteralPath $sedPath -Value $sedContent -Encoding ASCII
+        Set-Content -LiteralPath $sedPath -Value $sedContent -Encoding ASCII
 
-            & $IExpressPath /N /Q /M $sedPath
-            if ($LASTEXITCODE -ne 0) {
-                throw "IExpress build failed for $($entry.ExeName)"
+        $process = Start-Process -FilePath $IExpressPath -ArgumentList @('/N', '/Q', '/M', $sedPath) -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -Wait -PassThru
+        $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -Raw -LiteralPath $stdoutPath } else { "" }
+        $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -Raw -LiteralPath $stderrPath } else { "" }
+
+        if ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $outputPath)) {
+            $allBuilt = $false
+            Write-Error "IExpress build failed for $($entry.ExeName)."
+            Write-Host "IExpress SED file: $sedPath"
+            Write-Host "IExpress staging directory: $stagingDir"
+            Write-Host "--- IExpress stdout ---"
+            Write-Host $stdout
+            Write-Host "--- IExpress stderr ---"
+            Write-Host $stderr
+
+            $logCandidates = Get-ChildItem -Path $tempRoot -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'iexpress|\.log$|\.txt$' }
+            if ($logCandidates) {
+                foreach ($logFile in $logCandidates) {
+                    Write-Host "--- IExpress log: $($logFile.FullName) ---"
+                    Write-Host (Get-Content -Raw -LiteralPath $logFile.FullName)
+                }
             }
 
-            if (-not (Test-Path -LiteralPath $outputPath)) {
-                throw "IExpress did not produce expected output: $outputPath"
-            }
-
-            Write-Host "Built (IExpress): $outputPath -> $($entry.TargetBat)"
+            Write-Warning "IExpress debug files preserved at: $tempRoot"
+            continue
         }
-        finally {
-            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+
+        Write-Host "Built (IExpress): $outputPath -> $($entry.TargetBat)"
+        Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    return $allBuilt
+}
+
+function New-ShortcutFallbacks {
+    param(
+        [Parameter(Mandatory = $true)] [array] $Targets,
+        [Parameter(Mandatory = $true)] [string] $RepoRootPath,
+        [Parameter(Mandatory = $true)] [string] $OutDir
+    )
+
+    $shell = New-Object -ComObject WScript.Shell
+    foreach ($entry in $Targets) {
+        $shortcutPath = Join-Path $OutDir ([IO.Path]::GetFileNameWithoutExtension($entry.ExeName) + ".lnk")
+        $targetBatPath = Join-Path $RepoRootPath $entry.TargetBat
+        $shortcut = $shell.CreateShortcut($shortcutPath)
+        $shortcut.TargetPath = Join-Path $env:WINDIR "System32\cmd.exe"
+        $shortcut.Arguments = "/d /c \"\"$targetBatPath\"\""
+        $shortcut.WorkingDirectory = $RepoRootPath
+        $shortcut.Save()
+        Write-Host "Created fallback shortcut: $shortcutPath"
+    }
+
+    Write-Warning "WARNING: Could not create .exe launchers. Created .lnk shortcuts instead."
+}
+
+$template = Get-Content -Raw -LiteralPath $TemplatePath
+$cscPath = Get-CscCompilerPath
+if ($cscPath) {
+    Write-Host "Using csc.exe: $cscPath"
+    Build-WithCSharp -Template $template -Targets $launcherTargets -OutDir $DistDir -CscPath $cscPath -UseAddType:$false
+}
+else {
+    $canUseAddType = Test-AddTypeCompiler
+    if ($canUseAddType) {
+        Write-Host "Using Add-Type CSharp compiler path."
+        Build-WithCSharp -Template $template -Targets $launcherTargets -OutDir $DistDir -UseAddType:$true
+    }
+    else {
+        $iexpressPath = Join-Path $env:WINDIR "System32\iexpress.exe"
+        if (Test-Path -LiteralPath $iexpressPath) {
+            Write-Warning "No C# compiler found. Falling back to IExpress launcher generation."
+            Write-Warning "These launcher executables contain the current repo path. Rebuild them if the repo folder is moved."
+            $iExpressBuiltAll = Build-WithIExpress -Targets $launcherTargets -RepoRootPath $RepoRoot -OutDir $DistDir -IExpressPath $iexpressPath
+            if (-not $iExpressBuiltAll) {
+                New-ShortcutFallbacks -Targets $launcherTargets -RepoRootPath $RepoRoot -OutDir $DistDir
+            }
+        }
+        else {
+            New-ShortcutFallbacks -Targets $launcherTargets -RepoRootPath $RepoRoot -OutDir $DistDir
+            throw @"
+ERROR: No supported executable builder found.
+Install .NET SDK / Visual Studio Build Tools, or use a Windows installation with iexpress.exe available.
+"@
         }
     }
 }
 
-$template = Get-Content -Raw -LiteralPath $TemplatePath
-$csc = Get-Command csc.exe -ErrorAction SilentlyContinue
-$canUseAddType = Test-AddTypeCompiler
-
-if ($csc) {
-    Build-WithCSharp -Template $template -Targets $launcherTargets -OutDir $DistDir -CscCommand $csc -UseAddType:$false
-    exit 0
+$requiredExeOutputs = $launcherTargets | ForEach-Object { Join-Path $DistDir $_.ExeName }
+$missingExeOutputs = $requiredExeOutputs | Where-Object { -not (Test-Path -LiteralPath $_) }
+if ($missingExeOutputs) {
+    Write-Error "Build did not produce all required .exe launchers. Missing: $($missingExeOutputs -join ', ')"
+    exit 1
 }
 
-if ($canUseAddType) {
-    Build-WithCSharp -Template $template -Targets $launcherTargets -OutDir $DistDir -UseAddType:$true
-    exit 0
-}
-
-$iexpressPath = Join-Path $env:WINDIR "System32\iexpress.exe"
-if (Test-Path -LiteralPath $iexpressPath) {
-    Write-Warning "No C# compiler found. Falling back to IExpress launcher generation."
-    Write-Warning "These launcher executables contain the current repo path. Rebuild them if the repo folder is moved."
-    Build-WithIExpress -Targets $launcherTargets -RepoRootPath $RepoRoot -OutDir $DistDir -IExpressPath $iexpressPath
-    exit 0
-}
-
-throw @"
-ERROR: No supported executable builder found.
-Install .NET SDK / Visual Studio Build Tools, or use a Windows installation with iexpress.exe available.
-"@
+Write-Host "Successfully created launcher executables:"
+$requiredExeOutputs | ForEach-Object { Write-Host "  $_" }
+exit 0

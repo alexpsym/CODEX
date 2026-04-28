@@ -4,7 +4,7 @@ These `.exe` files are **launchers only**. They do not replace the existing batc
 
 ## What gets built
 
-This creates:
+This build process tries to create:
 
 - `dist/windows-launchers/Local Trading Tools.exe` → launches `run_local_master_control.bat`
 - `dist/windows-launchers/Trading Journal.exe` → launches `run_trading_journal_local.bat`
@@ -29,7 +29,20 @@ Do not run:
 - `powershell/powershell.exe Bypass -File tools/windows_launchers/build_windows_launchers.ps1`
 - `-powershell/powershell.exe Bypass -File tools/windows_launchers/build_windows_launchers.ps1`
 
-If no C# compiler is installed, the script uses IExpress when available. IExpress-built launchers store the current repo path, so rebuild the launchers after moving the repo.
+## Build order and fallback behavior
+
+The script builds in this order:
+
+1. `csc.exe` (PATH + Microsoft.NET Framework locations)
+2. `Add-Type` C# compilation
+3. `iexpress.exe`
+4. `.lnk` shortcut fallback if `.exe` generation fails
+
+Notes:
+
+- IExpress-built launchers contain the current repo path and must be rebuilt if the repo folder moves.
+- Shortcut fallback creates `.lnk` files only and does **not** count as successful `.exe` generation.
+- If `.exe` files are missing at the end, the build exits non-zero (no fake success).
 
 ## Important behavior
 
