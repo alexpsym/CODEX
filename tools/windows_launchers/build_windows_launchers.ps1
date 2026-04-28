@@ -138,6 +138,7 @@ function Build-WithCsc {
 
 function Build-WithAddType {
     param(
+        [Parameter(Mandatory = $true)] [string] $CompilerPath,
         [Parameter(Mandatory = $true)] [string] $Template,
         [Parameter(Mandatory = $true)] [hashtable] $Target
     )
