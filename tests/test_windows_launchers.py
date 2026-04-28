@@ -48,10 +48,34 @@ def test_build_script_supports_add_type_and_iexpress_fallbacks() -> None:
     assert "WARNING: No C# compiler found. Falling back to IExpress launcher generation." in script
 
 
+def test_build_script_uses_safe_temp_names_and_csc_call_operator() -> None:
+    script = (LAUNCHER_DIR / "build_windows_launchers.ps1").read_text(encoding="utf-8")
+    assert "-replace '\\\\s+', '_'" not in script
+    assert "[^A-Za-z0-9_.-]" in script
+    assert "tempOutputPath" in script
+    assert "$Target.OutputPath" in script
+    assert "& $CompilerPath @compilerArgs" in script
+
+
+def test_build_script_does_not_use_start_process_for_csc_compilation() -> None:
+    script = (LAUNCHER_DIR / "build_windows_launchers.ps1").read_text(encoding="utf-8")
+    csc_section = script.split("function Build-WithCsc")[1].split("function Build-WithAddType")[0]
+    assert "Start-Process -FilePath $CompilerPath" not in csc_section
+
+
+def test_build_with_csc_recoverable_failures_do_not_use_write_error() -> None:
+    script = (LAUNCHER_DIR / "build_windows_launchers.ps1").read_text(encoding="utf-8")
+    csc_section = script.split("function Build-WithCsc")[1].split("function Build-WithAddType")[0]
+    assert "Write-Error" not in csc_section
+
+
 def test_build_script_requires_both_repo_root_exes_for_success() -> None:
     script = (LAUNCHER_DIR / "build_windows_launchers.ps1").read_text(encoding="utf-8")
     assert "Build did not produce all required .exe launchers at repo root" in script
     assert "Successfully created launcher executables" in script
+    assert "Local Trading Tools.exe" in script
+    assert "Trading Journal.exe" in script
+    assert "dist\\windows-launchers" not in script
 
 
 def test_build_script_validates_repo_layout() -> None:

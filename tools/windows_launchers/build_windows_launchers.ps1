@@ -72,82 +72,111 @@ function Build-WithCsc {
         [Parameter(Mandatory = $true)] [hashtable] $Target
     )
 
-    $generatedSource = $Template.Replace("__TARGET_BAT__", $Target.TargetBat)
-    $tempSourcePath = Join-Path $env:TEMP ("launcher_{0}_{1}.cs" -f ([IO.Path]::GetFileNameWithoutExtension($Target.ExeName) -replace '\\s+', '_'), [Guid]::NewGuid().ToString('N'))
-    $stdoutPath = "$tempSourcePath.stdout.log"
-    $stderrPath = "$tempSourcePath.stderr.log"
+    $safeBaseName = [IO.Path]::GetFileNameWithoutExtension($Target.ExeName) -replace '[^A-Za-z0-9_.-]', '_'
+    $tempBuildDir = Join-Path $env:TEMP ("codex_launcher_build_{0}" -f [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tempBuildDir -Force | Out-Null
 
+    $generatedSource = $Template.Replace("__TARGET_BAT__", $Target.TargetBat)
+    $tempSourcePath = Join-Path $tempBuildDir ($safeBaseName + ".cs")
+    $tempOutputPath = Join-Path $tempBuildDir ($safeBaseName + ".exe")
+    $compilerLogPath = Join-Path $tempBuildDir ($safeBaseName + ".compiler.log")
     Set-Content -LiteralPath $tempSourcePath -Value $generatedSource -Encoding UTF8
 
     try {
-        $arguments = @('/nologo', '/target:exe', '/optimize+', ('/out:{0}' -f $Target.OutputPath), $tempSourcePath)
-        $process = Start-Process -FilePath $CompilerPath -ArgumentList $arguments -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -Wait -PassThru
-        $stdout = if (Test-Path -LiteralPath $stdoutPath) { Get-Content -Raw -LiteralPath $stdoutPath } else { "" }
-        $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -Raw -LiteralPath $stderrPath } else { "" }
+        $compilerArgs = @(
+            "/nologo",
+            "/target:exe",
+            "/optimize+",
+            ("/out:{0}" -f $tempOutputPath),
+            $tempSourcePath
+        )
+        $compilerOutput = & $CompilerPath @compilerArgs 2>&1
+        $compilerExitCode = $LASTEXITCODE
 
-        if ($stdout) {
-            Write-Host $stdout
+        if ($compilerOutput) {
+            $compilerOutputText = ($compilerOutput | Out-String)
+            Write-Host $compilerOutputText
+            Set-Content -LiteralPath $compilerLogPath -Value $compilerOutputText -Encoding UTF8
         }
-        if ($stderr) {
-            Write-Host $stderr
+        else {
+            Set-Content -LiteralPath $compilerLogPath -Value "" -Encoding UTF8
         }
 
-        if ($process.ExitCode -ne 0) {
-            Write-Error "Compilation failed for $($Target.ExeName) with compiler exit code $($process.ExitCode)."
+        if ($compilerExitCode -ne 0) {
+            Write-Warning "Compilation failed for $($Target.ExeName) with compiler exit code $compilerExitCode."
             Write-Warning "Generated C# source preserved at: $tempSourcePath"
+            Write-Warning "Compiler debug files preserved at: $tempBuildDir"
             return $false
         }
 
+        if (-not (Test-Path -LiteralPath $tempOutputPath)) {
+            Write-Warning "Compilation reported success but output file is missing: $tempOutputPath"
+            Write-Warning "Generated C# source preserved at: $tempSourcePath"
+            Write-Warning "Compiler debug files preserved at: $tempBuildDir"
+            return $false
+        }
+
+        Move-Item -LiteralPath $tempOutputPath -Destination $Target.OutputPath -Force
         if (-not (Test-Path -LiteralPath $Target.OutputPath)) {
-            Write-Error "Compilation reported success but output file is missing: $($Target.OutputPath)"
+            Write-Warning "Failed to place compiled launcher at final output path: $($Target.OutputPath)"
             Write-Warning "Generated C# source preserved at: $tempSourcePath"
+            Write-Warning "Compiler debug files preserved at: $tempBuildDir"
             return $false
         }
 
-        Remove-Item -LiteralPath $tempSourcePath, $stdoutPath, $stderrPath -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $tempBuildDir -Recurse -Force -ErrorAction SilentlyContinue
         Write-Host "Built: $($Target.OutputPath) -> $($Target.TargetBat)"
         return $true
     }
     catch {
-        Write-Error "Compilation failed for $($Target.ExeName): $($_.Exception.Message)"
+        Write-Warning "Compilation failed for $($Target.ExeName): $($_.Exception.Message)"
         Write-Warning "Generated C# source preserved at: $tempSourcePath"
-        if (Test-Path -LiteralPath $stdoutPath) {
-            Write-Host "--- Compiler stdout ---"
-            Write-Host (Get-Content -Raw -LiteralPath $stdoutPath)
-        }
-        if (Test-Path -LiteralPath $stderrPath) {
-            Write-Host "--- Compiler stderr ---"
-            Write-Host (Get-Content -Raw -LiteralPath $stderrPath)
-        }
+        Write-Warning "Compiler debug files preserved at: $tempBuildDir"
         return $false
     }
 }
 
 function Build-WithAddType {
     param(
+        [Parameter(Mandatory = $true)] [string] $CompilerPath,
         [Parameter(Mandatory = $true)] [string] $Template,
         [Parameter(Mandatory = $true)] [hashtable] $Target
     )
 
+    $safeBaseName = [IO.Path]::GetFileNameWithoutExtension($Target.ExeName) -replace '[^A-Za-z0-9_.-]', '_'
+    $tempBuildDir = Join-Path $env:TEMP ("codex_launcher_build_{0}" -f [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tempBuildDir -Force | Out-Null
+
     $generatedSource = $Template.Replace("__TARGET_BAT__", $Target.TargetBat)
-    $tempSourcePath = Join-Path $env:TEMP ("launcher_{0}_{1}.cs" -f ([IO.Path]::GetFileNameWithoutExtension($Target.ExeName) -replace '\\s+', '_'), [Guid]::NewGuid().ToString('N'))
+    $tempSourcePath = Join-Path $tempBuildDir ($safeBaseName + ".cs")
+    $tempOutputPath = Join-Path $tempBuildDir ($safeBaseName + ".exe")
     Set-Content -LiteralPath $tempSourcePath -Value $generatedSource -Encoding UTF8
 
     try {
-        Add-Type -LiteralPath $tempSourcePath -OutputAssembly $Target.OutputPath -OutputType ConsoleApplication -Language CSharp -ErrorAction Stop | Out-Null
-        if (-not (Test-Path -LiteralPath $Target.OutputPath)) {
-            Write-Error "Add-Type reported success but output file is missing: $($Target.OutputPath)"
+        Add-Type -LiteralPath $tempSourcePath -OutputAssembly $tempOutputPath -OutputType ConsoleApplication -Language CSharp -ErrorAction Stop | Out-Null
+        if (-not (Test-Path -LiteralPath $tempOutputPath)) {
+            Write-Warning "Add-Type reported success but output file is missing: $tempOutputPath"
             Write-Warning "Generated C# source preserved at: $tempSourcePath"
+            Write-Warning "Compiler debug files preserved at: $tempBuildDir"
             return $false
         }
 
-        Remove-Item -LiteralPath $tempSourcePath -ErrorAction SilentlyContinue
+        Move-Item -LiteralPath $tempOutputPath -Destination $Target.OutputPath -Force
+        if (-not (Test-Path -LiteralPath $Target.OutputPath)) {
+            Write-Warning "Failed to place compiled launcher at final output path: $($Target.OutputPath)"
+            Write-Warning "Generated C# source preserved at: $tempSourcePath"
+            Write-Warning "Compiler debug files preserved at: $tempBuildDir"
+            return $false
+        }
+
+        Remove-Item -LiteralPath $tempBuildDir -Recurse -Force -ErrorAction SilentlyContinue
         Write-Host "Built (Add-Type): $($Target.OutputPath) -> $($Target.TargetBat)"
         return $true
     }
     catch {
-        Write-Error "Add-Type compilation failed for $($Target.ExeName): $($_.Exception.Message)"
+        Write-Warning "Add-Type compilation failed for $($Target.ExeName): $($_.Exception.Message)"
         Write-Warning "Generated C# source preserved at: $tempSourcePath"
+        Write-Warning "Compiler debug files preserved at: $tempBuildDir"
         return $false
     }
 }
@@ -236,7 +265,7 @@ launcher.cmd=
     $stderr = if (Test-Path -LiteralPath $stderrPath) { Get-Content -Raw -LiteralPath $stderrPath } else { "" }
 
     if ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $Target.OutputPath)) {
-        Write-Error "IExpress build failed for $($Target.ExeName)."
+        Write-Warning "IExpress build failed for $($Target.ExeName)."
         Write-Host "IExpress staging directory: $stagingDir"
         Write-Host "IExpress SED file: $sedPath"
         Write-Host "--- IExpress stdout ---"
