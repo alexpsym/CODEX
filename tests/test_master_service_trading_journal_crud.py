@@ -624,6 +624,106 @@ def test_import_from_sources_local_when_dropbox_missing(temp_state_paths, monkey
     assert any(str(r.get("source")) == "local_excel" for r in rows)
 
 
+def test_local_import_includes_bybit_demo_workbook_and_balance_anchor(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    bybit_workbook = temp_state_paths / master_service.BYBIT_DEMO_WORKBOOK_NAME
+    rows = []
+    base_balance = 400.0
+    for idx in range(15):
+        close_hour = idx + 1
+        open_hour = max(0, close_hour - 1)
+        opening_time = f"2026-04-01T{open_hour:02d}:00:00+00:00"
+        closing_time = f"2026-04-01T{close_hour:02d}:00:00+00:00"
+        if idx in {2, 9}:  # keep legacy invalid workbook time-order rows visible
+            opening_time, closing_time = closing_time, opening_time
+        side = "Buy" if idx < 10 else "Sell"
+        pnl = -1.0 if side == "Buy" else -2.0
+        balance = 380.97753999 if idx == 14 else base_balance + pnl
+        base_balance = balance
+        rows.append(
+            {
+                "opening_time": opening_time,
+                "closing_time": closing_time,
+                "type_buy_sell": side,
+                "symbol": "BTCUSDT" if idx % 2 == 0 else "ETHUSDT",
+                "size_quantity": 0.01 + (idx * 0.001),
+                "entry_price": 100 + idx,
+                "closing_price": 101 + idx,
+                "stop_loss": 95 + idx,
+                "take_profit": 105 + idx,
+                "commission": 0.1,
+                "net_profit": pnl,
+                "balance_after_trade": balance,
+                "timeframe": "5-minute",
+                "is_test_trade": "No",
+                "currency": "USDT",
+                "notes": f"row-{idx}",
+                "order_id": f"demo-order-{idx}",
+                "fill_count": 1,
+                "source": "excel",
+            }
+        )
+    master_service.pd.DataFrame(rows, columns=master_service.BYBIT_DEMO_WORKBOOK_COLUMNS).to_excel(
+        bybit_workbook,
+        sheet_name=master_service.BYBIT_DEMO_WORKBOOK_SHEET,
+        index=False,
+    )
+
+    master_service._set_trading_journal_rows(
+        [
+            {
+                "id": "bybit:demo:closedpnl:HYPERUSDT:existing",
+                "row_type": "trade",
+                "source": "bybit",
+                "account": "demo",
+                "account_label": "Bybit Demo",
+                "asset_class": "crypto",
+                "symbol": "HYPERUSDT",
+                "side": "Buy",
+                "status": "closed",
+                "open_time": "2026-04-02T00:00:00+00:00",
+                "close_time": "2026-04-02T01:00:00+00:00",
+                "net_profit": 1.0,
+            }
+        ]
+    )
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_SOURCE", "local")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_ENABLE_LOCAL_IMPORT", True)
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR_EXPLICIT", True)
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", temp_state_paths)
+
+    result = master_service._import_trading_journal_from_sources()
+    assert result["ok"] is True
+    assert result["rows_imported"] >= 15
+    assert result["local_workbooks_seen"] == 1
+    assert master_service.BYBIT_DEMO_WORKBOOK_NAME in result["local_workbook_names"]
+
+    snapshot = master_service._build_trading_journal_view_snapshot(force=True)
+    items = snapshot.get("items") or []
+    workbook_rows = [
+        row for row in items
+        if str(row.get("source")) == "local_excel"
+        and str(row.get("account_label") or row.get("account") or "").strip().lower() == "bybit demo"
+    ]
+    assert len(workbook_rows) == 15
+    assert sum(1 for row in workbook_rows if str((row.get("metrics") or {}).get("invalid_time_order")).lower() == "true") >= 2
+    bybit_demo_visible = [
+        row for row in items
+        if str(row.get("row_type") or "trade") == "trade"
+        and str(row.get("account_label") or row.get("account") or "").strip().lower() == "bybit demo"
+    ]
+    assert len(bybit_demo_visible) == 16
+
+    bybit_balance = next(
+        bal for bal in (snapshot.get("balances") or [])
+        if str(bal.get("label") or bal.get("account") or "").strip().lower() == "bybit demo"
+    )
+    assert bybit_balance["balance"] == pytest.approx(380.97753999)
+    assert bybit_balance["balance_source"] == "trade_timeline"
+
+    diag_errors = snapshot.get("diagnostics", {}).get("errors") or []
+    assert not any("Missing balance anchor for accounts: BYBIT DEMO" in str(err) for err in diag_errors)
+
+
 def test_import_from_sources_ignores_default_local_workbooks_when_not_enabled(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
     workbook = temp_state_paths / "edgewonk-export-78784.xls"
     workbook.write_bytes(b"dummy")

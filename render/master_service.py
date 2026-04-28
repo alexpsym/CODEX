@@ -2720,17 +2720,34 @@ def _bybit_demo_trade_score(row: Dict[str, object]) -> Tuple[int, int, int, int,
 
 def _sanitize_bybit_demo_rows(rows: List[Dict[str, object]]) -> tuple[List[Dict[str, object]], Dict[str, int]]:
     if not rows:
-        return [], {"repaired_sides": 0, "deduped_by_order_id": 0, "deduped_by_fingerprint": 0, "trade_group_merged": 0, "quarantined_invalid_time": 0, "changed": 0}
+        return [], {"repaired_sides": 0, "deduped_by_order_id": 0, "deduped_by_fingerprint": 0, "trade_group_merged": 0, "quarantined_invalid_time": 0, "workbook_invalid_time_order": 0, "changed": 0}
 
     repaired_rows, repaired_count = _repair_persisted_bybit_demo_sides(rows)
     passthrough: List[Dict[str, object]] = []
     bybit_rows: List[Dict[str, object]] = []
     quarantined_rows: List[Dict[str, object]] = []
+    workbook_invalid_time_order = 0
     for row in repaired_rows:
         if isinstance(row, dict) and _is_bybit_demo_trade_row(row):
             close_ts = _canonical_trade_epoch_second(row.get("close_time"))
             open_ts = _canonical_trade_epoch_second(row.get("open_time"))
             if close_ts is not None and open_ts is not None and close_ts <= open_ts:
+                source = str(row.get("source") or "").strip().lower()
+                if source in {"excel", "local_excel"}:
+                    kept = dict(row)
+                    kept["trade_duration_seconds"] = None
+                    if str(kept.get("status") or "").strip().lower() == "invalid_time_order":
+                        kept["status"] = "closed"
+                    metrics = kept.get("metrics") if isinstance(kept.get("metrics"), dict) else {}
+                    next_metrics = dict(metrics)
+                    next_metrics["invalid_time_order"] = True
+                    kept["metrics"] = next_metrics
+                    flags = kept.get("flags") if isinstance(kept.get("flags"), list) else []
+                    if "invalid_time_order" not in [str(flag) for flag in flags]:
+                        kept["flags"] = [*flags, "invalid_time_order"]
+                    workbook_invalid_time_order += 1
+                    bybit_rows.append(kept)
+                    continue
                 q = dict(row)
                 q["status"] = "invalid_time_order"
                 q["row_type"] = "quarantine"
@@ -2799,13 +2816,21 @@ def _sanitize_bybit_demo_rows(rows: List[Dict[str, object]]) -> tuple[List[Dict[
         trade_group_merged += 1
 
     sanitized_rows = sorted(list(grouped.values()) + passthrough, key=_row_sort_dt, reverse=True)
-    changed_total = int(repaired_count > 0 or order_dropped > 0 or fallback_dropped > 0 or trade_group_merged > 0 or len(sanitized_rows) != len(rows))
+    changed_total = int(
+        repaired_count > 0
+        or order_dropped > 0
+        or fallback_dropped > 0
+        or trade_group_merged > 0
+        or workbook_invalid_time_order > 0
+        or len(sanitized_rows) != len(rows)
+    )
     stats = {
         "repaired_sides": repaired_count,
         "deduped_by_order_id": order_dropped,
         "deduped_by_fingerprint": fallback_dropped,
         "trade_group_merged": trade_group_merged,
         "quarantined_invalid_time": len(quarantined_rows),
+        "workbook_invalid_time_order": workbook_invalid_time_order,
         "changed": changed_total,
     }
     return sanitized_rows, stats
@@ -4223,7 +4248,6 @@ def _list_local_trading_journal_workbooks() -> List[Path]:
         candidate_name = candidate.name.strip().lower()
         if candidate_name in {
             "account_cashflows.xlsx",
-            BYBIT_DEMO_WORKBOOK_NAME.strip().lower(),
             BYBIT_DEMO_TEMPLATE_NAME.strip().lower(),
         }:
             continue
@@ -4605,6 +4629,7 @@ def _import_trading_journal_from_sources(
 
     local_files = _list_local_trading_journal_workbooks() if include_local else []
     diagnostics["local_workbooks_seen"] = len(local_files)
+    diagnostics["local_workbook_names"] = [p.name for p in local_files]
     ignored_local_workbooks: List[str] = []
     if include_local and (not local_enabled) and local_files:
         ignored_local_workbooks = [p.name for p in local_files]
@@ -4650,6 +4675,7 @@ def _import_trading_journal_from_sources(
                     "demo_workbook_created": bool(template_result.get("demo_workbook_created")),
                 },
                 "local_workbooks_seen": diagnostics["local_workbooks_seen"],
+                "local_workbook_names": diagnostics.get("local_workbook_names") if isinstance(diagnostics.get("local_workbook_names"), list) else [],
                 "workbooks_scanned": int(diagnostics["local_workbooks_seen"]),
                 "workbooks_changed": 0,
                 "dropbox_workbooks_seen": 0,
@@ -4750,6 +4776,7 @@ def _import_trading_journal_from_sources(
             "stats_included_trade_rows_total": len(stats_trade_rows),
             "excluded_test_trade_rows": excluded_test_trade_rows,
             "quarantined_invalid_time_rows": int(sanitize_stats.get("quarantined_invalid_time", 0)) + quarantined_rows,
+            "workbook_invalid_time_order_rows": int(sanitize_stats.get("workbook_invalid_time_order", 0)),
             "blank_pnl_trade_rows": blank_pnl_trade_rows,
             "cashflow_rows_total": cashflow_rows_total,
             "raw_rows_total": len(persisted_rows),
@@ -4808,6 +4835,7 @@ def _import_trading_journal_from_sources(
             "demo_workbook_created": bool(template_result.get("demo_workbook_created")),
         },
         "local_workbooks_seen": diagnostics["local_workbooks_seen"],
+        "local_workbook_names": diagnostics.get("local_workbook_names") if isinstance(diagnostics.get("local_workbook_names"), list) else [],
         "workbooks_scanned": int(diagnostics["local_workbooks_seen"]) + int(diagnostics["dropbox_workbooks_seen"]),
         "workbooks_changed": int(imported_rows_total > 0),
         "dropbox_workbooks_seen": diagnostics["dropbox_workbooks_seen"],
