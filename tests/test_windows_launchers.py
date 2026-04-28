@@ -121,7 +121,22 @@ def test_run_trading_journal_local_launcher_enforces_local_source_mode() -> None
     assert "DROPBOX_SYNC_ENABLED" in launcher
 
 
+def test_run_trading_journal_local_launcher_bootstraps_dependencies_before_uvicorn() -> None:
+    launcher = (ROOT / "run_trading_journal_local.bat").read_text(encoding="utf-8")
+    assert '"%PYTHON_EXE%" tools\\check_trading_journal_deps.py' in launcher
+    assert '"%PYTHON_EXE%" -m pip install -r "%ROOT%render\\requirements.txt"' in launcher
+    assert "if errorlevel 1 goto deps_missing" in launcher
+    assert "exit /b 1" in launcher.split(":deps_missing", 1)[1]
+
+    first_dep_check = launcher.index('"%PYTHON_EXE%" tools\\check_trading_journal_deps.py')
+    pip_install = launcher.index('"%PYTHON_EXE%" -m pip install -r "%ROOT%render\\requirements.txt"')
+    uvicorn_start = launcher.index('"%PYTHON_EXE%" -m uvicorn render.master_service:app --host 127.0.0.1 --port 8010')
+    second_dep_check = launcher.index('echo [journal-local] re-checking dependencies after install...')
+    assert first_dep_check < pip_install < second_dep_check < uvicorn_start
+
+
 def test_run_local_master_control_keeps_dropbox_sync_configurable() -> None:
     launcher = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
     assert 'if not defined DROPBOX_SYNC_ENABLED set "DROPBOX_SYNC_ENABLED=1"' in launcher
     assert 'set "DROPBOX_SYNC_ENABLED=0"' not in launcher
+    assert "check_trading_journal_deps.py" not in launcher

@@ -135,6 +135,15 @@
   ];
 
   const setStatus = (msg) => { status.textContent = msg || ''; };
+  const MISSING_XLRD_STATUS = 'Sync failed: Local .xls journal workbooks require xlrd. Restart the journal launcher so dependencies can be installed automatically.';
+  const isMissingXlrdError = (value) => String(value ?? '').toUpperCase().includes('MISSING_XLRD_FOR_XLS');
+  const formatSyncFailureStatus = (err) => {
+    const raw = String(err?.message || err || '');
+    if (isMissingXlrdError(raw) || raw.toLowerCase().includes('local .xls journal workbooks require xlrd')) {
+      return MISSING_XLRD_STATUS;
+    }
+    return `Sync failed: ${compactErrorMessage(raw, 'Sync failed')}`;
+  };
   const compactErrorMessage = (detail, fallback = 'Request failed') => {
     const pick = (obj, keys) => {
       for (const key of keys) {
@@ -269,7 +278,13 @@
         }
         syncWatchTimer = null;
         if (st?.ok === false) {
-          setStatus(`Background sync failed: ${st?.error || st?.message || 'unknown error'}`);
+          const diagnosticsErrors = Array.isArray(st?.result?.diagnostics?.errors) ? st.result.diagnostics.errors : [];
+          const hasMissingXlrd = diagnosticsErrors.some((err) => isMissingXlrdError(err?.code));
+          if (hasMissingXlrd || isMissingXlrdError(st?.error) || isMissingXlrdError(st?.message)) {
+            setStatus(MISSING_XLRD_STATUS);
+          } else {
+            setStatus(`Background sync failed: ${compactErrorMessage(st?.error || st?.message || 'unknown error')}`);
+          }
           return;
         }
         if (state.manualSyncInFlight || loadInFlight) {
@@ -1327,14 +1342,17 @@
       if (syncResult?.ok === false) {
         throw new Error(syncResult?.error || syncResult?.message || 'Sync failed');
       }
+      const diagnosticsErrors = Array.isArray(syncResult?.result?.diagnostics?.errors) ? syncResult.result.diagnostics.errors : [];
+      const missingXlrd = diagnosticsErrors.some((err) => isMissingXlrdError(err?.code));
+      if (missingXlrd) {
+        throw new Error(MISSING_XLRD_STATUS);
+      }
       const loadResult = await load({ skipAutoSync: true, preserveStatus: true });
       if (loadResult?.ok === false) {
         throw new Error(`Sync finished but reload failed: ${loadResult?.error || 'unknown error'}`);
       }
       const loadedRows = Number(state?.rows?.length || 0);
       const warnings = Array.isArray(syncResult?.result?.warnings) ? syncResult.result.warnings : [];
-      const diagnosticsErrors = Array.isArray(syncResult?.result?.diagnostics?.errors) ? syncResult.result.diagnostics.errors : [];
-      const missingXlrd = diagnosticsErrors.some((err) => String(err?.code || '').toUpperCase() === 'MISSING_XLRD_FOR_XLS');
       const parseFailure = diagnosticsErrors.length > 0 || Number(syncResult?.result?.rows_imported || 0) <= 0;
       if (missingXlrd || (loadedRows <= 0 && parseFailure)) {
         throw new Error(compactErrorMessage(diagnosticsErrors[0], 'Sync failed to import workbook rows'));
@@ -1343,7 +1361,7 @@
       setStatus(`Sync complete: ${loadedRows} rows loaded${suffix}`);
     } catch (e) {
       hideLoading();
-      setStatus(`Sync failed: ${compactErrorMessage(e?.message || e, 'Sync failed')}`);
+      setStatus(formatSyncFailureStatus(e));
     } finally {
       state.manualSyncInFlight = false;
       scheduleAutoRefresh();

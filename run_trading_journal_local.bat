@@ -79,6 +79,37 @@ echo [journal-local] MASTER_ENV_DIR=!MASTER_ENV_DIR!
 echo [journal-local] MASTER_ENV_FILE=!MASTER_ENV_FILE!
 
 :restart_master
+echo [journal-local] checking Python journal dependencies...
+"%PYTHON_EXE%" tools\check_trading_journal_deps.py
+set "DEP_CHECK_EXIT=!ERRORLEVEL!"
+if "!DEP_CHECK_EXIT!"=="0" goto deps_ready
+
+echo [journal-local] dependency check failed.
+if not defined TRADING_JOURNAL_AUTO_INSTALL_DEPS set "TRADING_JOURNAL_AUTO_INSTALL_DEPS=1"
+if /I "!TRADING_JOURNAL_AUTO_INSTALL_DEPS!"=="0" goto deps_missing
+
+echo [journal-local] attempting dependency auto-install with !PYTHON_EXE!...
+"%PYTHON_EXE%" -m pip --version >nul 2>nul
+if errorlevel 1 (
+  echo [journal-local] pip unavailable; attempting ensurepip bootstrap...
+  "%PYTHON_EXE%" -m ensurepip --upgrade
+  if errorlevel 1 (
+    echo [journal-local] ERROR: ensurepip failed; cannot install journal dependencies.
+    goto deps_missing
+  )
+)
+
+"%PYTHON_EXE%" -m pip install -r "%ROOT%render\requirements.txt"
+if errorlevel 1 (
+  echo [journal-local] ERROR: dependency install failed.
+  goto deps_missing
+)
+
+echo [journal-local] re-checking dependencies after install...
+"%PYTHON_EXE%" tools\check_trading_journal_deps.py
+if errorlevel 1 goto deps_missing
+
+:deps_ready
 echo [journal-local] starting uvicorn at !DATE! !TIME!
 "%PYTHON_EXE%" -m uvicorn render.master_service:app --host 127.0.0.1 --port 8010
 set "EXIT_CODE=!ERRORLEVEL!"
@@ -86,3 +117,10 @@ echo [journal-local] uvicorn exited with !EXIT_CODE! at !DATE! !TIME!
 echo [journal-local] restarting in 3 seconds. Close this window to stop local trading journal.
 timeout /t 3 /nobreak >nul
 goto restart_master
+
+:deps_missing
+echo [journal-local] ERROR: required journal dependencies are still missing.
+echo [journal-local] Local .xls journal workbooks require xlrd and related packages.
+echo [journal-local] Install into this same Python executable and relaunch:
+echo [journal-local]   "!PYTHON_EXE!" -m pip install -r "%ROOT%render\requirements.txt"
+exit /b 1

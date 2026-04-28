@@ -263,6 +263,9 @@ def test_trading_journal_js_contains_crud_controls_and_endpoints():
     assert "compactErrorMessage" in js
     assert "slice(0, 300)" in js
     assert "Sync finished but reload failed:" in js
+    assert "Restart the journal launcher so dependencies can be installed automatically." in js
+    assert "Sync complete: 0 rows loaded" not in js
+    assert "MISSING_XLRD_FOR_XLS" in js
 
 
 def test_diagnostics_derive_rows_total_from_existing_journal_rows(temp_state_paths):
@@ -318,6 +321,40 @@ def test_sync_status_exposes_source_and_flags(monkeypatch: pytest.MonkeyPatch, t
     assert payload["uses_dropbox_journal_import"] is False
     assert payload["dropbox_sync_enabled"] is False
     assert payload["broker_refresh_enabled"] is False
+    assert isinstance(payload["dependencies"], dict)
+    assert "xlrd_installed" in payload["dependencies"]
+    assert "local_xls_supported" in payload["dependencies"]
+    assert payload["dependencies"]["requirements_file"].endswith("render/requirements.txt")
+
+
+def test_sync_status_dependency_flags_reflect_missing_xlrd(monkeypatch: pytest.MonkeyPatch, temp_state_paths):
+    monkeypatch.setattr(master_service.importlib.util, "find_spec", lambda name: None if name == "xlrd" else object())
+    payload = _json(asyncio.run(master_service.trading_journal_sync_status()))
+    assert payload["dependencies"]["xlrd_installed"] is False
+    assert payload["dependencies"]["local_xls_supported"] is False
+
+
+def test_local_xls_missing_xlrd_returns_hard_failure(monkeypatch: pytest.MonkeyPatch, temp_state_paths):
+    xls_file = temp_state_paths / "journal.xls"
+    xls_file.write_bytes(b"dummy")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_SOURCE", "local")
+    monkeypatch.setattr(master_service, "_local_journal_import_enabled", lambda: True)
+    monkeypatch.setattr(master_service, "_ensure_trading_journal_local_templates", lambda: {"errors": []})
+    monkeypatch.setattr(master_service, "_list_local_trading_journal_workbooks", lambda: [xls_file])
+    original_import = __import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "xlrd":
+            raise ImportError("No module named xlrd")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
+    result = master_service._import_trading_journal_from_sources()
+    assert result["ok"] is False
+    assert result["errors"][0]["code"] == "MISSING_XLRD_FOR_XLS"
+    assert "render" in result["errors"][0]["message"]
+    assert "requirements.txt" in result["errors"][0]["message"]
+    assert "same Python executable" in result["errors"][0]["message"]
 
 
 def test_run_sync_job_local_profile_skips_broker_refresh(monkeypatch: pytest.MonkeyPatch, temp_state_paths):
