@@ -31,7 +31,12 @@ def remote_json_path(key: str) -> str:
 
 def download_json(key: str, default: object | None = None, required: bool = False) -> object:
     path = remote_json_path(key)
-    payload = download_bytes(path)
+    try:
+        payload = download_bytes(path)
+    except FileNotFoundError as exc:
+        if required:
+            raise FileNotFoundError(f"Missing Dropbox state file for key '{key}': {path}") from exc
+        return default
     if payload is None:
         if required:
             raise FileNotFoundError(f"Missing Dropbox state file: {path}")
