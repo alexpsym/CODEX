@@ -573,9 +573,17 @@
             return;
           }
           if (stateSyncState?.enabled === true) {
+            if (verifiedAt && verifiedWatchlist.length) {
+              setWatchlistStatus(`Dropbox verified: ${verifiedWatchlist.join(', ') || '(empty)'}`, false);
+              return;
+            }
             const remoteSummary = await fetchRemoteBackupSummary();
-            const remoteWatchlist = Array.isArray(remoteSummary?.watchlist) ? remoteSummary.watchlist : verifiedWatchlist;
-            setWatchlistStatus(`Dropbox verified: ${remoteWatchlist.join(', ') || '(empty)'}`, false);
+            const remoteWatchlist = Array.isArray(remoteSummary?.watchlist) ? remoteSummary.watchlist : [];
+            if (verifiedAt && remoteWatchlist.length) {
+              setWatchlistStatus(`Dropbox verified: ${remoteWatchlist.join(', ') || '(empty)'}`, false);
+              return;
+            }
+            setWatchlistStatus('Dropbox sync verification missing; save not confirmed durable.', true);
             return;
           }
           setWatchlistStatus(successMessage, false);
