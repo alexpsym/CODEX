@@ -5341,6 +5341,25 @@ def _update_state_sync_status(**updates: object) -> Dict[str, object]:
         return dict(_STATE_SYNC_STATUS)
 
 
+def _mark_primary_state_verified(key: str, payload: object) -> Dict[str, object]:
+    now = _utc_now_iso()
+    status = _state_sync_status_snapshot()
+    missing_keys = [str(item) for item in (status.get("missing_state_keys") or []) if str(item)]
+    if key in missing_keys:
+        missing_keys = [item for item in missing_keys if item != key]
+    updates: Dict[str, object] = {
+        "last_upload_at": now,
+        "last_upload_error": None,
+        "pending_upload": False,
+        "missing_state_keys": missing_keys,
+        "per_file_state_ready": not bool(missing_keys),
+    }
+    if key == "watchlist":
+        updates["last_verified_at"] = now
+        updates["last_verified_watchlist"] = _normalize_watchlist(payload if isinstance(payload, list) else [])
+    return _update_state_sync_status(**updates)
+
+
 async def _wait_for_state_restore_or_error(timeout: float = 20.0) -> Dict[str, object]:
     status = _state_sync_status_snapshot()
     if APP_PROFILE == "local" and not bool(status.get("enabled")) and not LOCAL_STATE_ONLY:
@@ -17449,19 +17468,51 @@ async def state_sync_remote_backup_summary() -> JSONResponse:
             },
             status_code=503,
         )
+    backup_summary: Optional[Dict[str, object]] = None
+    backup_error: Optional[str] = None
     try:
-        summary = await _download_remote_backup_summary()
-        return JSONResponse(summary)
+        backup_summary = await _download_remote_backup_summary()
     except Exception as exc:
-        return JSONResponse(
-            {
-                "ok": False,
-                "backup_path": DROPBOX_BACKUP_PATH,
-                "error": str(exc),
-                "downloaded_at": _utc_now_iso(),
-            },
-            status_code=502,
-        )
+        backup_error = str(exc)
+    primary_error: Optional[str] = None
+    primary_watchlist: Optional[List[str]] = None
+    try:
+        primary = dropbox_state_store.download_json("watchlist", default=None, required=False)
+        if isinstance(primary, list):
+            primary_watchlist = _normalize_watchlist(primary)
+    except Exception as exc:
+        primary_error = str(exc)
+
+    if primary_watchlist is not None:
+        payload = dict(backup_summary or {})
+        payload.update({
+            "ok": True,
+            "watchlist": primary_watchlist,
+            "watchlist_source": "dropbox_primary_state",
+            "downloaded_at": _utc_now_iso(),
+        })
+        if backup_error:
+            payload["backup_error"] = backup_error
+        return JSONResponse(payload)
+
+    if backup_summary is not None:
+        payload = dict(backup_summary)
+        payload["watchlist_source"] = "state_backup_fallback"
+        if primary_error:
+            payload["primary_error"] = primary_error
+        return JSONResponse(payload)
+
+    return JSONResponse(
+        {
+            "ok": False,
+            "backup_path": DROPBOX_BACKUP_PATH,
+            "error": "dropbox_watchlist_summary_unavailable",
+            "primary_error": primary_error,
+            "backup_error": backup_error,
+            "downloaded_at": _utc_now_iso(),
+        },
+        status_code=502,
+    )
 
 
 @app.get("/api/admin/outbound-traffic")
@@ -17531,7 +17582,14 @@ async def get_watchlist() -> JSONResponse:
         if not isinstance(remote_items, list):
             raise ValueError("Dropbox watchlist must be a list")
         normalized = _set_watchlist_local_mirror(remote_items)
-        return JSONResponse({"items": normalized, "state_sync": sync_status})
+        status = _state_sync_status_snapshot()
+        missing_keys = [str(item) for item in (status.get("missing_state_keys") or []) if str(item)]
+        if "watchlist" in missing_keys:
+            status = _update_state_sync_status(
+                missing_state_keys=[item for item in missing_keys if item != "watchlist"],
+                per_file_state_ready=not bool([item for item in missing_keys if item != "watchlist"]),
+            )
+        return JSONResponse({"items": normalized, "state_sync": status})
     except Exception as exc:
         raise HTTPException(status_code=503, detail={"error": "dropbox_state_unavailable", "message": str(exc), "state_sync": sync_status}) from exc
 
@@ -17565,9 +17623,9 @@ async def set_watchlist(request: Request) -> JSONResponse:
     try:
         dropbox_state_store.upload_json_and_verify("watchlist", normalized, verifier=lambda remote: _normalize_watchlist(remote or []) == normalized)
     except Exception as exc:
-        raise HTTPException(status_code=502, detail={"error": "dropbox_state_unavailable", "message": str(exc), "state_sync": _state_sync_status_snapshot()}) from exc
+        raise HTTPException(status_code=502, detail={"error": "dropbox_watchlist_verify_failed", "message": str(exc), "state_sync": _state_sync_status_snapshot()}) from exc
     normalized = _set_watchlist_local_mirror(normalized)
-    sync_status = _state_sync_status_snapshot()
+    sync_status = _mark_primary_state_verified("watchlist", normalized)
     return JSONResponse({"ok": True, "items": normalized, "state_sync": sync_status})
 
 

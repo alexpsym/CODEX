@@ -60,3 +60,9 @@ def test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls() -> No
     assert "dotTitle = 'Inactive view';" not in js
     assert "dotTitle = 'Active view loaded';" not in js
     assert "Inactive view" not in js
+
+
+def test_dashboard_js_prefers_post_verified_watchlist_before_remote_summary() -> None:
+    js = JS_PATH.read_text(encoding='utf-8')
+    assert "if (verifiedAt && verifiedWatchlist.length) {" in js
+    assert "const remoteSummary = await fetchRemoteBackupSummary();" in js
