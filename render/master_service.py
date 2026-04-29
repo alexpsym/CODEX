@@ -15317,49 +15317,33 @@ MERGED_MONITOR_TEMPLATE = """<!doctype html>
     <p class="meta">Local merged controls for Bybit and OANDA scanners.</p>
     <p class="notice">This page polls local scanner status every 2 seconds. Closing this tab only stops these status requests/log lines; scanner processes keep running independently.</p>
     <div class="grid">
-      <section class="panel" id="bybit-panel">
-        <h3 style="margin-top:0">Bybit monitor controls</h3>
+      <section class="panel" id="monitor-control-panel">
+        <h3 style="margin-top:0">Monitor controls</h3>
         <div class="row">
-          <span id="bybit-status" class="badge">Checking…</span>
+          <label>Target monitor
+            <select id="monitor-target">
+              <option value="bybit" selected>Bybit</option>
+              <option value="oanda">OANDA</option>
+            </select>
+          </label>
+          <span id="monitor-status" class="badge">Checking…</span>
         </div>
-        <p class="meta" id="bybit-health">Phase: — | Heartbeat: — | Fresh: — | PID alive: —</p>
+        <p class="meta" id="monitor-health">Phase: — | Heartbeat: — | Fresh: — | PID alive: —</p>
         <div class="settings-grid">
           <label>Wait between scans (seconds)
-            <input id="bybit-wait-seconds" type="number" min="1" step="1"/>
+            <input id="monitor-wait-seconds" type="number" min="1" step="1"/>
           </label>
           <label>Alert threshold (%)
-            <input id="bybit-threshold" type="number" min="0" step="0.01"/>
+            <input id="monitor-threshold" type="number" min="0" step="0.01"/>
           </label>
         </div>
         <div class="row">
-          <button id="bybit-save-settings" type="button">Save</button>
-          <button id="bybit-reload-settings" type="button">Reset / Reload</button>
-          <button id="bybit-test-alert" type="button">Telegram test</button>
-          <span id="bybit-settings-status" class="badge">&nbsp;</span>
+          <button id="monitor-save-settings" type="button">Save</button>
+          <button id="monitor-reload-settings" type="button">Reset / Reload</button>
+          <button id="monitor-test-alert" type="button">Telegram test</button>
+          <span id="monitor-settings-status" class="badge">&nbsp;</span>
         </div>
-        <div id="bybit-custom-alerts"></div>
-      </section>
-      <section class="panel" id="oanda-panel">
-        <h3 style="margin-top:0">OANDA monitor controls</h3>
-        <div class="row">
-          <span id="oanda-status" class="badge">Checking…</span>
-        </div>
-        <p class="meta" id="oanda-health">Phase: — | Heartbeat: — | Fresh: — | PID alive: —</p>
-        <div class="settings-grid">
-          <label>Wait between scans (seconds)
-            <input id="oanda-wait-seconds" type="number" min="1" step="1"/>
-          </label>
-          <label>Alert threshold (%)
-            <input id="oanda-threshold" type="number" min="0" step="0.01"/>
-          </label>
-        </div>
-        <div class="row">
-          <button id="oanda-save-settings" type="button">Save</button>
-          <button id="oanda-reload-settings" type="button">Reset / Reload</button>
-          <button id="oanda-test-alert" type="button">Telegram test</button>
-          <span id="oanda-settings-status" class="badge">&nbsp;</span>
-        </div>
-        <div id="oanda-custom-alerts"></div>
+        <div id="monitor-custom-alerts"></div>
       </section>
     </div>
   </div>
