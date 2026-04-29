@@ -67,6 +67,7 @@ from shared.symbol_resolution import (
 )
 from shared.atomic_json import write_json_file
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
+from render import dropbox_state_store
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -2124,6 +2125,10 @@ def _set_watchlist(items: Iterable[object]) -> List[str]:
     _save_watchlist(normalized)
     _WATCHLIST_UPDATED_AT = _utc_now_iso()
     return list(normalized)
+
+
+def _set_watchlist_local_mirror(items: Iterable[object]) -> List[str]:
+    return _set_watchlist(items)
 
 
 def _load_trading_journal() -> List[Dict[str, object]]:
@@ -17203,34 +17208,44 @@ async def oanda_monitor_runtime_status() -> JSONResponse:
 @app.get("/api/bybit-monitor/custom-alerts")
 async def bybit_monitor_custom_alerts() -> JSONResponse:
     await _wait_for_state_restore_or_error()
-    return JSONResponse({"alerts": bybit_monitor.get_custom_alerts(force=True)})
+    try:
+        alerts = dropbox_state_store.download_json("bybit_alerts", default=[], required=True)
+        if not isinstance(alerts, list):
+            raise ValueError("Dropbox bybit_alerts must be a list")
+        bybit_monitor.replace_custom_alerts(alerts, strict=False)
+        return JSONResponse({"alerts": bybit_monitor.get_custom_alerts(force=True), "state_sync": _state_sync_status_snapshot()})
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail={"error": "dropbox_state_unavailable", "message": str(exc), "state_sync": _state_sync_status_snapshot()}) from exc
 
 
 @app.post("/api/bybit-monitor/custom-alerts")
 async def upsert_bybit_monitor_custom_alert(request: Request) -> JSONResponse:
     await _wait_for_state_restore_or_error()
     payload = await request.json()
-    alert = bybit_monitor.upsert_custom_alert(payload or {})
-    sync_status = await _upload_and_verify_state_backup_now(
-        expected_alert_probe={
-            "bybit_alert_ids": [str(item.get("id") or "") for item in bybit_monitor.get_custom_alerts(force=True)],
-            "oanda_alert_ids": [str(item.get("id") or "") for item in oanda_monitor.get_custom_alerts(force=True)],
-        }
-    )
-    return JSONResponse({"ok": True, "alert": alert, "state_sync": sync_status})
+    now = _utc_now_iso()
+    existing = dropbox_state_store.download_json("bybit_alerts", default=[], required=True)
+    if not isinstance(existing, list):
+        raise HTTPException(status_code=503, detail={"error": "dropbox_state_unavailable", "message": "Dropbox bybit_alerts is invalid", "state_sync": _state_sync_status_snapshot()})
+    incoming = dict(payload or {})
+    match = next((a for a in existing if str(a.get("id")) == str(incoming.get("id") or "")), None)
+    normalized = bybit_monitor._coerce_alert({**incoming, "id": (match or {}).get("id") or incoming.get("id")})
+    normalized["created_at"] = str((match or {}).get("created_at") or now)
+    normalized["updated_at"] = now
+    normalized["source"] = "dropbox"
+    updated = [a for a in existing if str(a.get("id")) != str(normalized.get("id"))] + [normalized]
+    dropbox_state_store.upload_json_and_verify("bybit_alerts", updated, verifier=lambda remote: any(str(a.get("id")) == str(normalized.get("id")) for a in (remote or [])))
+    bybit_monitor.replace_custom_alerts(updated, strict=False)
+    return JSONResponse({"ok": True, "alert": normalized, "state_sync": _state_sync_status_snapshot()})
 
 
 @app.delete("/api/bybit-monitor/custom-alerts/{alert_id}")
 async def delete_bybit_monitor_custom_alert(alert_id: str) -> JSONResponse:
     await _wait_for_state_restore_or_error()
-    bybit_monitor.delete_custom_alert(alert_id)
-    sync_status = await _upload_and_verify_state_backup_now(
-        expected_alert_probe={
-            "bybit_alert_ids": [str(item.get("id") or "") for item in bybit_monitor.get_custom_alerts(force=True)],
-            "oanda_alert_ids": [str(item.get("id") or "") for item in oanda_monitor.get_custom_alerts(force=True)],
-        }
-    )
-    return JSONResponse({"ok": True, "alert_id": alert_id, "state_sync": sync_status})
+    existing = dropbox_state_store.download_json("bybit_alerts", default=[], required=True)
+    updated = [a for a in (existing if isinstance(existing, list) else []) if str(a.get("id")) != str(alert_id)]
+    dropbox_state_store.upload_json_and_verify("bybit_alerts", updated, verifier=lambda remote: all(str(a.get("id")) != str(alert_id) for a in (remote or [])))
+    bybit_monitor.replace_custom_alerts(updated, strict=False)
+    return JSONResponse({"ok": True, "alert_id": alert_id, "state_sync": _state_sync_status_snapshot()})
 
 
 @app.post("/api/bybit-monitor/custom-alerts/{alert_id}/enabled")
@@ -17240,47 +17255,63 @@ async def set_bybit_monitor_custom_alert_enabled(
     await _wait_for_state_restore_or_error()
     payload = await request.json()
     enabled = bool((payload or {}).get("enabled", True))
-    alert = bybit_monitor.set_custom_alert_enabled(alert_id, enabled)
-    sync_status = await _upload_and_verify_state_backup_now(
-        expected_alert_probe={
-            "bybit_alert_ids": [str(item.get("id") or "") for item in bybit_monitor.get_custom_alerts(force=True)],
-            "oanda_alert_ids": [str(item.get("id") or "") for item in oanda_monitor.get_custom_alerts(force=True)],
-        }
-    )
-    return JSONResponse({"ok": True, "alert": alert, "state_sync": sync_status})
+    existing = dropbox_state_store.download_json("bybit_alerts", default=[], required=True)
+    now = _utc_now_iso()
+    alerts = []
+    found = None
+    for item in (existing if isinstance(existing, list) else []):
+        cloned = dict(item)
+        if str(cloned.get("id")) == alert_id:
+            cloned["enabled"] = enabled
+            cloned["updated_at"] = now
+            found = cloned
+        alerts.append(cloned)
+    if not found:
+        raise HTTPException(status_code=404, detail="Unknown alert id")
+    dropbox_state_store.upload_json_and_verify("bybit_alerts", alerts, verifier=lambda remote: any(str(a.get("id")) == alert_id and bool(a.get("enabled")) == enabled for a in (remote or [])))
+    bybit_monitor.replace_custom_alerts(alerts, strict=False)
+    return JSONResponse({"ok": True, "alert": found, "state_sync": _state_sync_status_snapshot()})
 
 
 @app.get("/api/oanda-monitor/custom-alerts")
 async def oanda_monitor_custom_alerts() -> JSONResponse:
     await _wait_for_state_restore_or_error()
-    return JSONResponse({"alerts": oanda_monitor.get_custom_alerts(force=True)})
+    try:
+        alerts = dropbox_state_store.download_json("oanda_alerts", default=[], required=True)
+        if not isinstance(alerts, list):
+            raise ValueError("Dropbox oanda_alerts must be a list")
+        oanda_monitor.replace_custom_alerts(alerts)
+        return JSONResponse({"alerts": oanda_monitor.get_custom_alerts(force=True), "state_sync": _state_sync_status_snapshot()})
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail={"error": "dropbox_state_unavailable", "message": str(exc), "state_sync": _state_sync_status_snapshot()}) from exc
 
 
 @app.post("/api/oanda-monitor/custom-alerts")
 async def upsert_oanda_monitor_custom_alert(request: Request) -> JSONResponse:
     await _wait_for_state_restore_or_error()
     payload = await request.json()
-    alert = oanda_monitor.upsert_custom_alert(payload or {})
-    sync_status = await _upload_and_verify_state_backup_now(
-        expected_alert_probe={
-            "bybit_alert_ids": [str(item.get("id") or "") for item in bybit_monitor.get_custom_alerts(force=True)],
-            "oanda_alert_ids": [str(item.get("id") or "") for item in oanda_monitor.get_custom_alerts(force=True)],
-        }
-    )
-    return JSONResponse({"ok": True, "alert": alert, "state_sync": sync_status})
+    now = _utc_now_iso()
+    existing = dropbox_state_store.download_json("oanda_alerts", default=[], required=True)
+    incoming = dict(payload or {})
+    match = next((a for a in (existing if isinstance(existing, list) else []) if str(a.get("id")) == str(incoming.get("id") or "")), None)
+    normalized = oanda_monitor._coerce_alert({**incoming, "id": (match or {}).get("id") or incoming.get("id")})
+    normalized["created_at"] = str((match or {}).get("created_at") or now)
+    normalized["updated_at"] = now
+    normalized["source"] = "dropbox"
+    updated = [a for a in (existing if isinstance(existing, list) else []) if str(a.get("id")) != str(normalized.get("id"))] + [normalized]
+    dropbox_state_store.upload_json_and_verify("oanda_alerts", updated, verifier=lambda remote: any(str(a.get("id")) == str(normalized.get("id")) for a in (remote or [])))
+    oanda_monitor.replace_custom_alerts(updated)
+    return JSONResponse({"ok": True, "alert": normalized, "state_sync": _state_sync_status_snapshot()})
 
 
 @app.delete("/api/oanda-monitor/custom-alerts/{alert_id}")
 async def delete_oanda_monitor_custom_alert(alert_id: str) -> JSONResponse:
     await _wait_for_state_restore_or_error()
-    oanda_monitor.delete_custom_alert(alert_id)
-    sync_status = await _upload_and_verify_state_backup_now(
-        expected_alert_probe={
-            "bybit_alert_ids": [str(item.get("id") or "") for item in bybit_monitor.get_custom_alerts(force=True)],
-            "oanda_alert_ids": [str(item.get("id") or "") for item in oanda_monitor.get_custom_alerts(force=True)],
-        }
-    )
-    return JSONResponse({"ok": True, "alert_id": alert_id, "state_sync": sync_status})
+    existing = dropbox_state_store.download_json("oanda_alerts", default=[], required=True)
+    updated = [a for a in (existing if isinstance(existing, list) else []) if str(a.get("id")) != str(alert_id)]
+    dropbox_state_store.upload_json_and_verify("oanda_alerts", updated, verifier=lambda remote: all(str(a.get("id")) != str(alert_id) for a in (remote or [])))
+    oanda_monitor.replace_custom_alerts(updated)
+    return JSONResponse({"ok": True, "alert_id": alert_id, "state_sync": _state_sync_status_snapshot()})
 
 
 @app.post("/api/oanda-monitor/custom-alerts/{alert_id}/enabled")
@@ -17290,19 +17321,30 @@ async def set_oanda_monitor_custom_alert_enabled(
     await _wait_for_state_restore_or_error()
     payload = await request.json()
     enabled = bool((payload or {}).get("enabled", True))
-    alert = oanda_monitor.set_custom_alert_enabled(alert_id, enabled)
-    sync_status = await _upload_and_verify_state_backup_now(
-        expected_alert_probe={
-            "bybit_alert_ids": [str(item.get("id") or "") for item in bybit_monitor.get_custom_alerts(force=True)],
-            "oanda_alert_ids": [str(item.get("id") or "") for item in oanda_monitor.get_custom_alerts(force=True)],
-        }
-    )
-    return JSONResponse({"ok": True, "alert": alert, "state_sync": sync_status})
+    existing = dropbox_state_store.download_json("oanda_alerts", default=[], required=True)
+    now = _utc_now_iso()
+    alerts = []
+    found = None
+    for item in (existing if isinstance(existing, list) else []):
+        cloned = dict(item)
+        if str(cloned.get("id")) == alert_id:
+            cloned["enabled"] = enabled
+            cloned["updated_at"] = now
+            found = cloned
+        alerts.append(cloned)
+    if not found:
+        raise HTTPException(status_code=404, detail="Unknown alert id")
+    dropbox_state_store.upload_json_and_verify("oanda_alerts", alerts, verifier=lambda remote: any(str(a.get("id")) == alert_id and bool(a.get("enabled")) == enabled for a in (remote or [])))
+    oanda_monitor.replace_custom_alerts(alerts)
+    return JSONResponse({"ok": True, "alert": found, "state_sync": _state_sync_status_snapshot()})
 
 
 @app.get("/api/state-sync/status")
 async def state_sync_status() -> JSONResponse:
-    return JSONResponse(_state_sync_status_snapshot())
+    payload = _state_sync_status_snapshot()
+    payload.update(dropbox_state_store.state_store_summary())
+    payload["effective_state_source"] = "dropbox" if dropbox_state_store.dropbox_state_enabled() and not LOCAL_STATE_ONLY else "local"
+    return JSONResponse(payload)
 
 
 @app.get("/api/state-sync/remote-backup-summary")
@@ -17387,7 +17429,14 @@ async def set_pending_webhook_enabled(
 @app.get("/api/watchlist")
 async def get_watchlist() -> JSONResponse:
     sync_status = await _wait_for_state_restore_or_error()
-    return JSONResponse({"items": _get_watchlist(), "state_sync": sync_status})
+    try:
+        remote_items = dropbox_state_store.download_json("watchlist", default=[], required=True)
+        if not isinstance(remote_items, list):
+            raise ValueError("Dropbox watchlist must be a list")
+        normalized = _set_watchlist_local_mirror(remote_items)
+        return JSONResponse({"items": normalized, "state_sync": sync_status})
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail={"error": "dropbox_state_unavailable", "message": str(exc), "state_sync": sync_status}) from exc
 
 
 @app.post("/api/watchlist")
@@ -17415,8 +17464,13 @@ async def set_watchlist(request: Request) -> JSONResponse:
         if not resolved_symbol:
             raise HTTPException(status_code=400, detail=f"Unable to resolve watchlist symbol: {token}")
         resolved_items.append(resolved_symbol)
-    normalized = _set_watchlist(resolved_items)
-    sync_status = await _upload_and_verify_state_backup_now(expected_watchlist=normalized)
+    normalized = _normalize_watchlist(resolved_items)
+    try:
+        dropbox_state_store.upload_json_and_verify("watchlist", normalized, verifier=lambda remote: _normalize_watchlist(remote or []) == normalized)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail={"error": "dropbox_state_unavailable", "message": str(exc), "state_sync": _state_sync_status_snapshot()}) from exc
+    normalized = _set_watchlist_local_mirror(normalized)
+    sync_status = _state_sync_status_snapshot()
     return JSONResponse({"ok": True, "items": normalized, "state_sync": sync_status})
 
 
