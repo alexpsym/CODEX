@@ -32,8 +32,14 @@ def test_merged_monitor_html_removed_controls_and_logs(monkeypatch: pytest.Monke
     assert 'id="oanda-stop-btn"' not in html
     assert 'id="bybit-log-box"' not in html
     assert 'id="oanda-log-box"' not in html
-    assert 'id="bybit-status" class="badge">Checking…</span>' in html
-    assert 'id="oanda-status" class="badge">Checking…</span>' in html
+    assert html.count('id="monitor-control-panel"') == 1
+    assert 'id="monitor-target"' in html
+    assert 'id="monitor-status" class="badge">Checking…</span>' in html
+    assert 'id="monitor-wait-seconds"' in html
+    assert 'id="monitor-threshold"' in html
+    assert 'id="monitor-custom-alerts"' in html
+    assert 'Bybit monitor controls' not in html
+    assert 'OANDA monitor controls' not in html
     assert "polls local scanner status every 2 seconds" in html
 
 
@@ -760,3 +766,13 @@ def test_scripts_merged_fxweekend_stopped_includes_error_detail(monkeypatch: pyt
     row = next(item for item in payload if item["name"] == "fxweekend")
     assert row["status_detail"] == "stopped: spawn failed"
     assert row["autostart_expected"] is False
+
+
+def test_merged_monitor_js_uses_unified_monitor_controller() -> None:
+    script = (ROOT / "render" / "static" / "merged_monitor.js").read_text(encoding="utf-8")
+    assert "monitor-target" in script
+    assert "monitor-status" in script
+    assert "monitor-custom-alerts" in script
+    assert "const controllers = [" not in script
+    assert "statusId: 'bybit-status'" not in script
+    assert "statusId: 'oanda-status'" not in script
