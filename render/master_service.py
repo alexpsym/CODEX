@@ -13982,6 +13982,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
     .compact-rr{max-width:90px}
     .compact-risk{max-width:110px}
     button{cursor:pointer;font-weight:700}
+    button:disabled{opacity:.55;cursor:not-allowed}
     .toggle button.active{background:#2563eb;border-color:#3b82f6}
     .error{color:#fca5a5;min-height:1.2em}
     .ok{color:#86efac}
@@ -14066,6 +14067,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
           <button id="calc-quote" type="button">Calculate</button>
           <button id="calc-submit" type="button" style="display:none">Submit Order</button>
         </div>
+        <div id="calc-quote-status" class="muted"></div>
       </div>
       <div class="row" id="calc-webhook-panel" style="display:none">
         <label>TradingView Webhook URL</label>
@@ -14235,6 +14237,14 @@ async def _fetch_bybit_balance_usdt(account: str) -> Dict[str, Decimal]:
                 "total_available_balance": total_available_balance,
             }
     raise HTTPException(status_code=502, detail=f"Bybit balance unavailable path={path}.")
+
+
+async def _cancel_pending_tasks(tasks: List[asyncio.Task[Any]]) -> None:
+    for task in tasks:
+        if task and not task.done():
+            task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @app.get("/api/calculator/bootstrap")
@@ -14491,6 +14501,8 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                 raise HTTPException(status_code=400, detail="take_profit_ticks must be greater than zero when target_mode=ticks.")
 
         webhook_enabled = webhook_mode in {"yes", "true", "1"}
+        quote_started = time.perf_counter()
+        timings_ms: Dict[str, int] = {}
         webhook_base_url = _public_webhook_base_url(request)
         webhook_endpoint_url = f"{webhook_base_url}/api/calculator/webhook"
         parsed_base = urlparse(webhook_base_url if "://" in webhook_base_url else f"https://{webhook_base_url}")
@@ -14534,7 +14546,22 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             resolved_symbol = str((resolved or {}).get("resolved_symbol") or "").upper()
             if not resolved_symbol:
                 raise HTTPException(status_code=404, detail=f"Could not resolve Bybit symbol: {symbol_in}")
-            inst_payload = await _bybit_get_async(base_url, "/v5/market/instruments-info", {"category": "linear", "symbol": resolved_symbol})
+            bybit_fetch_started = time.perf_counter()
+            inst_task = asyncio.create_task(_bybit_get_async(base_url, "/v5/market/instruments-info", {"category": "linear", "symbol": resolved_symbol}))
+            ticker_task = asyncio.create_task(_bybit_get_async(base_url, "/v5/market/tickers", {"category": "linear", "symbol": resolved_symbol}))
+            balance_task = asyncio.create_task(_fetch_bybit_balance_usdt(account))
+            aud_task = asyncio.create_task(_fetch_oanda_mid_prices_batch(cfg=_get_oanda_config("live"), instruments=["AUD_USD"]))
+            fee_task = None
+            if account != "demo":
+                fee_task = asyncio.create_task(_bybit_signed_get(base_url=base_url, api_key=api_key, api_secret=api_secret, path="/v5/account/fee-rate", params={"category": "linear", "symbol": resolved_symbol}))
+            tasks=[inst_task,ticker_task,balance_task,aud_task]+([fee_task] if fee_task else [])
+            try:
+                await asyncio.gather(*tasks)
+            except Exception:
+                await _cancel_pending_tasks(tasks)
+                raise
+            timings_ms["bybit_upstream_parallel_ms"] = int((time.perf_counter()-bybit_fetch_started)*1000)
+            inst_payload = inst_task.result()
             inst_rows = (inst_payload.get("result") or {}).get("list") or []
             if not inst_rows:
                 raise HTTPException(status_code=502, detail="Bybit instrument meta fetch failed.")
@@ -14548,7 +14575,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             max_leverage = Decimal(str((inst.get("leverageFilter") or {}).get("maxLeverage") or "0"))
             if tick_size <= 0 or qty_step <= 0:
                 raise HTTPException(status_code=502, detail="Bybit instrument constraints are invalid.")
-            tickers = await _bybit_get_async(base_url, "/v5/market/tickers", {"category": "linear", "symbol": resolved_symbol})
+            tickers = ticker_task.result()
             ticker_rows = (tickers.get("result") or {}).get("list") or []
             if not ticker_rows:
                 raise HTTPException(status_code=502, detail="Bybit ticker fetch failed.")
@@ -14572,13 +14599,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                 taker = fallback_taker
             else:
                 try:
-                    fee_payload = await _bybit_signed_get(
-                        base_url=base_url,
-                        api_key=api_key,
-                        api_secret=api_secret,
-                        path="/v5/account/fee-rate",
-                        params={"category": "linear", "symbol": resolved_symbol},
-                    )
+                    fee_payload = fee_task.result() if fee_task else {}
                     fee_row = ((fee_payload.get("result") or {}).get("list") or [{}])[0]
                     maker = Decimal(str(fee_row.get("makerFeeRate") or fallback_maker))
                     taker = Decimal(str(fee_row.get("takerFeeRate") or fallback_taker))
@@ -14592,17 +14613,13 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             open_fee = taker if order_type == "market" else max(maker, taker)
             close_fee = taker
             try:
-                aud_cfg = _get_oanda_config("live")
-            except Exception:
-                aud_cfg = {"base_url": "", "account_id": "", "token": ""}
-            try:
-                aud_usd = Decimal(str((await _fetch_oanda_mid_prices_batch(cfg=aud_cfg, instruments=["AUD_USD"])).get("AUD_USD") or 0))
+                aud_usd = Decimal(str((aud_task.result()).get("AUD_USD") or 0))
             except Exception as exc:
                 raise HTTPException(status_code=502, detail=f"AUD_USD conversion unavailable: {exc}") from exc
             if aud_usd <= 0:
                 raise HTTPException(status_code=502, detail="AUD_USD conversion unavailable.")
             try:
-                balance_snapshot = await _fetch_bybit_balance_usdt(account)
+                balance_snapshot = balance_task.result()
             except HTTPException as exc:
                 raise HTTPException(
                     status_code=502,
@@ -14740,6 +14757,9 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             elif previous_pending_id:
                 _delete_pending_webhook(previous_pending_id)
 
+            response_payload["quote_latency_ms"] = int((time.perf_counter() - quote_started) * 1000)
+            response_payload["upstream_timings_ms"] = timings_ms
+            logger.info("CALCULATOR_QUOTE_TIMING asset=%s account=%s symbol=%s total_ms=%s timings=%s", asset, account, resolved_symbol, response_payload["quote_latency_ms"], timings_ms)
             return JSONResponse(response_payload)
 
         if asset == "fx":
@@ -14748,14 +14768,19 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             except ValueError as exc:
                 raise HTTPException(status_code=500, detail=str(exc)) from exc
             symbol = normalize_oanda_symbol_query(symbol_in)
+            oanda_parallel_started = time.perf_counter()
+            meta_task = asyncio.create_task(_fetch_oanda_instrument_meta(base_url=cfg["base_url"], account_id=cfg["account_id"], api_key=cfg["token"], symbol=symbol, mode=account))
+            pricing_task = asyncio.create_task(_fetch_oanda_json(base_url=cfg["base_url"], account_id=cfg["account_id"], api_key=cfg["token"], endpoint=f"/accounts/{{account_id}}/pricing?instruments={symbol}&includeHomeConversions=true", mode=account))
+            summary_task = asyncio.create_task(_fetch_oanda_account_summary(account))
+            tasks=[meta_task,pricing_task,summary_task]
             try:
-                meta = await _fetch_oanda_instrument_meta(
-                    base_url=cfg["base_url"],
-                    account_id=cfg["account_id"],
-                    api_key=cfg["token"],
-                    symbol=symbol,
-                    mode=account,
-                )
+                await asyncio.gather(*tasks)
+            except Exception:
+                await _cancel_pending_tasks(tasks)
+                raise
+            timings_ms["oanda_upstream_parallel_ms"] = int((time.perf_counter()-oanda_parallel_started)*1000)
+            try:
+                meta = meta_task.result()
             except ValueError as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
             display_precision = int(meta["displayPrecision"])
@@ -14766,13 +14791,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             margin_rate = Decimal(str(meta.get("marginRate") or "0"))
             tick_size = Decimal("1").scaleb(-display_precision)
             try:
-                prices = await _fetch_oanda_json(
-                    base_url=cfg["base_url"],
-                    account_id=cfg["account_id"],
-                    api_key=cfg["token"],
-                    endpoint=f"/accounts/{{account_id}}/pricing?instruments={symbol}&includeHomeConversions=true",
-                    mode=account,
-                )
+                prices = pricing_task.result()
             except Exception as exc:
                 raise HTTPException(status_code=502, detail=f"OANDA pricing/meta fetch failure: {exc}") from exc
             rows = prices.get("prices") or []
@@ -14788,7 +14807,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                 raise HTTPException(status_code=400, detail="Bad limit price.")
             sl = (entry - stop_ticks * tick_size) if side == "buy" else (entry + stop_ticks * tick_size)
 
-            summary = await _fetch_oanda_account_summary(account)
+            summary = summary_task.result()
             account_home_ccy = str(summary.get("currency") or "").strip().upper()
             quote_ccy = symbol.split("_", 1)[1]
             try:
@@ -14981,6 +15000,9 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                     _delete_pending_webhook(previous_pending_id)
             elif previous_pending_id:
                 _delete_pending_webhook(previous_pending_id)
+            response_payload["quote_latency_ms"] = int((time.perf_counter() - quote_started) * 1000)
+            response_payload["upstream_timings_ms"] = timings_ms
+            logger.info("CALCULATOR_QUOTE_TIMING asset=%s account=%s symbol=%s total_ms=%s timings=%s", asset, account, symbol, response_payload["quote_latency_ms"], timings_ms)
             return JSONResponse(response_payload)
 
         raise HTTPException(status_code=400, detail="asset must be crypto or fx.")
