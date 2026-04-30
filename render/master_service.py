@@ -844,7 +844,7 @@ def _build_trading_journal_diagnostics_snapshot() -> Dict[str, object]:
 
 
 _TRADING_JOURNAL_VIEW_CACHE: Dict[str, object] = {"key": None, "payload": None}
-TRADING_JOURNAL_VIEW_CACHE_VERSION = 2
+TRADING_JOURNAL_VIEW_CACHE_VERSION = 3
 
 
 def _source_file_fingerprint(path: Path) -> Dict[str, object]:
@@ -16644,6 +16644,8 @@ def _compute_journal_stats(
     rows: List[Dict[str, object]], balances: List[Dict[str, object]]
 ) -> Dict[str, object]:
     trade_rows = [dict(r) for r in rows if _is_trade_row(r) and not _is_test_trade_row(r)]
+    fx_rows = [r for r in trade_rows if _is_fx_asset_class(r.get("asset_class"))]
+    crypto_rows = [r for r in trade_rows if _is_crypto_asset_class(r.get("asset_class"))]
 
     def _is_valid_price_level(val: Optional[float]) -> bool:
         # Some imports represent missing SL/TP/entry as 0.0, which explodes distance metrics.
@@ -16655,6 +16657,36 @@ def _compute_journal_stats(
         if entry == 0:
             return None
         return (abs(level - entry) / entry) * 100.0
+
+    def _winner_rows(rows_subset: List[Dict[str, object]]) -> List[Dict[str, object]]:
+        return [r for r in rows_subset if _is_win(r)]
+
+    def _loser_rows(rows_subset: List[Dict[str, object]]) -> List[Dict[str, object]]:
+        return [r for r in rows_subset if _is_loss(r)]
+
+    def _duration_values(rows_subset: List[Dict[str, object]]) -> List[float]:
+        vals = [_to_float(r.get("trade_duration_seconds")) for r in rows_subset]
+        return [v for v in vals if v is not None and v >= 0]
+
+    def _metric_values(rows_subset: List[Dict[str, object]], key: str) -> List[float]:
+        vals = [_to_float(r.get(key)) for r in rows_subset]
+        return [v for v in vals if v is not None]
+
+    def _stop_pct_values(rows_subset: List[Dict[str, object]]) -> List[float]:
+        out: List[float] = []
+        for r in rows_subset:
+            pct = _pct_distance(_to_float(r.get("entry_price")), _to_float(r.get("stop_loss")))
+            if pct is not None:
+                out.append(pct)
+        return out
+
+    def _target_pct_values(rows_subset: List[Dict[str, object]]) -> List[float]:
+        out: List[float] = []
+        for r in rows_subset:
+            pct = _pct_distance(_to_float(r.get("entry_price")), _to_float(r.get("take_profit")))
+            if pct is not None:
+                out.append(pct)
+        return out
 
     balance_by_account: List[Dict[str, object]] = []
     for bal in balances:
@@ -16811,48 +16843,23 @@ def _compute_journal_stats(
         key=lambda x: (-(x.get("total_trades") or 0), str(x.get("symbol") or ""))
     )
 
-    all_sl_pct: List[float] = []
-    all_tp_pct: List[float] = []
-    all_durations: List[float] = []
-    for row in trade_rows:
-        entry = _to_float(row.get("entry_price"))
-        sl = _to_float(row.get("stop_loss"))
-        tp = _to_float(row.get("take_profit"))
-        sl_pct = _pct_distance(entry, sl)
-        tp_pct = _pct_distance(entry, tp)
-        if sl_pct is not None:
-            all_sl_pct.append(sl_pct)
-        if tp_pct is not None:
-            all_tp_pct.append(tp_pct)
-        dur = _to_float(row.get("trade_duration_seconds"))
-        if dur is not None and dur >= 0:
-            all_durations.append(dur)
-    result_pct_vals = [_to_float(row.get("result_pct")) for row in trade_rows]
-    result_pct_vals = [x for x in result_pct_vals if x is not None]
-    r_mult_vals = [_to_float(row.get("r_multiple")) for row in trade_rows]
-    r_mult_vals = [x for x in r_mult_vals if x is not None]
-    winner_durations = [
-        _to_float(row.get("trade_duration_seconds")) for row in trade_rows if _is_win(row)
-    ]
-    winner_durations = [x for x in winner_durations if x is not None and x >= 0]
-    loser_durations = [
-        _to_float(row.get("trade_duration_seconds")) for row in trade_rows if _is_loss(row)
-    ]
-    loser_durations = [x for x in loser_durations if x is not None and x >= 0]
+    winner_rows = _winner_rows(trade_rows)
+    loser_rows = _loser_rows(trade_rows)
+    fx_winner_rows = _winner_rows(fx_rows)
+    fx_loser_rows = _loser_rows(fx_rows)
+    crypto_winner_rows = _winner_rows(crypto_rows)
+    crypto_loser_rows = _loser_rows(crypto_rows)
 
-    fx_trade_durations = [
-        _to_float(row.get("trade_duration_seconds"))
-        for row in trade_rows
-        if _is_fx_asset_class(row.get("asset_class"))
-    ]
-    fx_trade_durations = [x for x in fx_trade_durations if x is not None and x >= 0]
+    all_sl_pct = _stop_pct_values(trade_rows)
+    all_tp_pct = _target_pct_values(trade_rows)
+    all_durations = _duration_values(trade_rows)
+    result_pct_vals = _metric_values(trade_rows, "result_pct")
+    r_mult_vals = _metric_values(trade_rows, "r_multiple")
+    winner_durations = _duration_values(winner_rows)
+    loser_durations = _duration_values(loser_rows)
 
-    crypto_trade_durations = [
-        _to_float(row.get("trade_duration_seconds"))
-        for row in trade_rows
-        if _is_crypto_asset_class(row.get("asset_class"))
-    ]
-    crypto_trade_durations = [x for x in crypto_trade_durations if x is not None and x >= 0]
+    fx_trade_durations = _duration_values(fx_rows)
+    crypto_trade_durations = _duration_values(crypto_rows)
 
     min_fx_trade_duration = min(fx_trade_durations) if fx_trade_durations else None
     max_fx_trade_duration = max(fx_trade_durations) if fx_trade_durations else None
@@ -17009,11 +17016,33 @@ def _compute_journal_stats(
             "avg_profit_pct": _avg(result_pct_vals),
             "avg_result_pct": _avg(result_pct_vals),
             "avg_r_multiple": _avg(r_mult_vals),
+            "avg_stop_pct_winners": _avg(_stop_pct_values(winner_rows)),
+            "avg_stop_pct_losers": _avg(_stop_pct_values(loser_rows)),
+            "avg_target_pct_winners": _avg(_target_pct_values(winner_rows)),
+            "avg_target_pct_losers": _avg(_target_pct_values(loser_rows)),
+            "avg_result_pct_winners": _avg(_metric_values(winner_rows, "result_pct")),
+            "avg_result_pct_losers": _avg(_metric_values(loser_rows, "result_pct")),
+            "avg_r_multiple_winners": _avg(_metric_values(winner_rows, "r_multiple")),
+            "avg_r_multiple_losers": _avg(_metric_values(loser_rows, "r_multiple")),
             "avg_duration_seconds": _avg(all_durations),
             "avg_winner_duration_seconds": _avg(winner_durations),
             "avg_loser_duration_seconds": _avg(loser_durations),
+            "max_winner_duration_seconds": max(winner_durations) if winner_durations else None,
+            "max_loser_duration_seconds": max(loser_durations) if loser_durations else None,
             "avg_fx_duration_seconds": _avg(fx_trade_durations),
             "avg_crypto_duration_seconds": _avg(crypto_trade_durations),
+            "fx_avg_winner_duration_seconds": _avg(_duration_values(fx_winner_rows)),
+            "fx_avg_loser_duration_seconds": _avg(_duration_values(fx_loser_rows)),
+            "fx_min_winner_duration_seconds": min(_duration_values(fx_winner_rows)) if _duration_values(fx_winner_rows) else None,
+            "fx_min_loser_duration_seconds": min(_duration_values(fx_loser_rows)) if _duration_values(fx_loser_rows) else None,
+            "fx_max_winner_duration_seconds": max(_duration_values(fx_winner_rows)) if _duration_values(fx_winner_rows) else None,
+            "fx_max_loser_duration_seconds": max(_duration_values(fx_loser_rows)) if _duration_values(fx_loser_rows) else None,
+            "crypto_avg_winner_duration_seconds": _avg(_duration_values(crypto_winner_rows)),
+            "crypto_avg_loser_duration_seconds": _avg(_duration_values(crypto_loser_rows)),
+            "crypto_min_winner_duration_seconds": min(_duration_values(crypto_winner_rows)) if _duration_values(crypto_winner_rows) else None,
+            "crypto_min_loser_duration_seconds": min(_duration_values(crypto_loser_rows)) if _duration_values(crypto_loser_rows) else None,
+            "crypto_max_winner_duration_seconds": max(_duration_values(crypto_winner_rows)) if _duration_values(crypto_winner_rows) else None,
+            "crypto_max_loser_duration_seconds": max(_duration_values(crypto_loser_rows)) if _duration_values(crypto_loser_rows) else None,
             "min_fx_trade_duration_seconds": min_fx_trade_duration,
             "max_fx_trade_duration_seconds": max_fx_trade_duration,
             "min_crypto_trade_duration_seconds": min_crypto_trade_duration,
@@ -17055,9 +17084,6 @@ def _compute_journal_stats(
             "instruments": len({str(r.get("symbol") or "").strip() for r in rows_subset if str(r.get("symbol") or "").strip()}),
         }
 
-    fx_rows = [r for r in trade_rows if _is_fx_asset_class(r.get("asset_class"))]
-    crypto_rows = [r for r in trade_rows if _is_crypto_asset_class(r.get("asset_class"))]
-
     return {
         "totals": totals,
         "balances": balance_by_account,
@@ -17073,6 +17099,14 @@ def _compute_journal_stats(
                 "win_rate_pct": totals.get("win_rate_pct"),
                 "avg_result_pct": totals.get("avg_result_pct"),
                 "avg_r_multiple": totals.get("avg_r_multiple"),
+                "avg_stop_pct_winners": totals.get("avg_stop_pct_winners"),
+                "avg_stop_pct_losers": totals.get("avg_stop_pct_losers"),
+                "avg_target_pct_winners": totals.get("avg_target_pct_winners"),
+                "avg_target_pct_losers": totals.get("avg_target_pct_losers"),
+                "avg_result_pct_winners": totals.get("avg_result_pct_winners"),
+                "avg_result_pct_losers": totals.get("avg_result_pct_losers"),
+                "avg_r_multiple_winners": totals.get("avg_r_multiple_winners"),
+                "avg_r_multiple_losers": totals.get("avg_r_multiple_losers"),
                 "max_drawdown_pct": totals.get("max_drawdown_pct"),
             },
             "direction": {
@@ -17091,6 +17125,14 @@ def _compute_journal_stats(
                 "avg_target_pct": totals.get("avg_target_pct"),
                 "avg_result_pct": totals.get("avg_result_pct"),
                 "avg_r_multiple": totals.get("avg_r_multiple"),
+                "avg_stop_pct_winners": totals.get("avg_stop_pct_winners"),
+                "avg_stop_pct_losers": totals.get("avg_stop_pct_losers"),
+                "avg_target_pct_winners": totals.get("avg_target_pct_winners"),
+                "avg_target_pct_losers": totals.get("avg_target_pct_losers"),
+                "avg_result_pct_winners": totals.get("avg_result_pct_winners"),
+                "avg_result_pct_losers": totals.get("avg_result_pct_losers"),
+                "avg_r_multiple_winners": totals.get("avg_r_multiple_winners"),
+                "avg_r_multiple_losers": totals.get("avg_r_multiple_losers"),
                 "max_drawdown_pct": totals.get("max_drawdown_pct"),
                 "avg_drawdown_pct": totals.get("avg_drawdown_pct"),
                 "min_drawdown_pct": totals.get("min_drawdown_pct"),
@@ -17099,12 +17141,28 @@ def _compute_journal_stats(
                 "overall_avg_seconds": totals.get("avg_duration_seconds"),
                 "overall_shortest_seconds": totals.get("min_trade_duration_seconds"),
                 "overall_longest_seconds": totals.get("max_trade_duration_seconds"),
+                "overall_avg_winner_seconds": totals.get("avg_winner_duration_seconds"),
+                "overall_avg_loser_seconds": totals.get("avg_loser_duration_seconds"),
+                "overall_longest_winner_seconds": totals.get("max_winner_duration_seconds"),
+                "overall_longest_loser_seconds": totals.get("max_loser_duration_seconds"),
                 "fx_avg_seconds": totals.get("avg_fx_duration_seconds"),
                 "fx_shortest_seconds": totals.get("min_fx_trade_duration_seconds"),
                 "fx_longest_seconds": totals.get("max_fx_trade_duration_seconds"),
+                "fx_avg_winner_seconds": totals.get("fx_avg_winner_duration_seconds"),
+                "fx_avg_loser_seconds": totals.get("fx_avg_loser_duration_seconds"),
+                "fx_shortest_winner_seconds": totals.get("fx_min_winner_duration_seconds"),
+                "fx_shortest_loser_seconds": totals.get("fx_min_loser_duration_seconds"),
+                "fx_longest_winner_seconds": totals.get("fx_max_winner_duration_seconds"),
+                "fx_longest_loser_seconds": totals.get("fx_max_loser_duration_seconds"),
                 "crypto_avg_seconds": totals.get("avg_crypto_duration_seconds"),
                 "crypto_shortest_seconds": totals.get("min_crypto_trade_duration_seconds"),
                 "crypto_longest_seconds": totals.get("max_crypto_trade_duration_seconds"),
+                "crypto_avg_winner_seconds": totals.get("crypto_avg_winner_duration_seconds"),
+                "crypto_avg_loser_seconds": totals.get("crypto_avg_loser_duration_seconds"),
+                "crypto_shortest_winner_seconds": totals.get("crypto_min_winner_duration_seconds"),
+                "crypto_shortest_loser_seconds": totals.get("crypto_min_loser_duration_seconds"),
+                "crypto_longest_winner_seconds": totals.get("crypto_max_winner_duration_seconds"),
+                "crypto_longest_loser_seconds": totals.get("crypto_max_loser_duration_seconds"),
             },
             "leaders": {
                 "most_wins_instrument": most_wins if most_wins["symbol"] else None,
