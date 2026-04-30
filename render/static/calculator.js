@@ -30,6 +30,7 @@
   const webhookJsonEl = $('calc-webhook-json');
   const webhookCopyBtn = $('calc-webhook-copy');
   const webhookCopyUrlBtn = $('calc-webhook-copy-url');
+  const submitBtn = $('calc-submit');
 
   let symbolTimer = null;
   let resolveController = null;
@@ -80,6 +81,16 @@
     specsEl.dataset.state = kind;
     const msg = String(text || '').trim();
     specsEl.innerHTML = msg ? `<div class="muted">${msg}</div>` : '';
+  }
+
+  function setSubmitVisible(show) {
+    submitBtn.style.display = show ? '' : 'none';
+  }
+
+  function invalidateQuote({ clearResults = true } = {}) {
+    state.quote = null;
+    setSubmitVisible(false);
+    if (clearResults) resultEl.innerHTML = '';
   }
 
   function renderSpecs(specs) {
@@ -401,7 +412,7 @@
           state.fx_risk_mode = state.risk_mode;
         }
         syncToggleState(id, key);
-        state.quote = null;
+        invalidateQuote();
         if (key === 'order_type') $('limit-wrap').style.display = state.order_type === 'limit' ? '' : 'none';
         if (key === 'webhook_mode' && state.webhook_mode !== 'yes') {
           toggleWebhookPanel(false);
@@ -427,8 +438,7 @@
 
   async function resolveSymbolAndLoad() {
     const symbol = $('calc-symbol').value.trim();
-    state.quote = null;
-    resultEl.innerHTML = '';
+    invalidateQuote();
     canonicalEl.textContent = '';
     if (!symbol) {
       setJournalState('idle', 'Type a symbol to load journal summary.');
@@ -503,11 +513,20 @@
     }
   });
 
-  $('calc-symbol').addEventListener('input', debounceSymbolResolve);
+  $('calc-symbol').addEventListener('input', () => {
+    invalidateQuote({ clearResults: false });
+    debounceSymbolResolve();
+  });
+
+  ['calc-limit', 'calc-sl-ticks', 'calc-rr', 'calc-risk'].forEach((id) => {
+    const el = $(id);
+    ['input', 'change'].forEach((evt) => el.addEventListener(evt, () => invalidateQuote({ clearResults: false })));
+  });
 
   $('calc-quote').addEventListener('click', async () => {
     clearMessages();
     toggleWebhookPanel(false);
+    invalidateQuote();
     try {
       const payload = {
         ...state,
@@ -525,6 +544,7 @@
       const quote = await post('/api/calculator/quote', payload);
       state.quote = quote;
       renderQuote(quote);
+      setSubmitVisible(state.webhook_mode !== 'yes' && !!state.quote);
       if (state.webhook_mode === 'yes' && quote.webhook_payload_json) {
         state.pendingWebhookId = quote.pending_webhook_id || state.pendingWebhookId;
         webhookUrlEl.textContent = quote.webhook_endpoint_url || quote.webhook_endpoint || '';
@@ -536,8 +556,7 @@
         state.pendingWebhookId = '';
       }
     } catch (e) {
-      state.quote = null;
-      resultEl.innerHTML = '';
+      invalidateQuote();
       toggleWebhookPanel(false);
       errorEl.textContent = String(e.message || e);
       renderErrorDebug(e.detail || null);
@@ -580,6 +599,7 @@
   setTimeframeButtons();
   updateRiskUiForAsset();
   syncAllToggleStates();
+  setSubmitVisible(false);
   toggleWebhookPanel(false);
   setJournalState('idle', 'Type a symbol to load journal summary.');
   setSpecsState('idle', 'Enter a symbol to load instrument specs.');

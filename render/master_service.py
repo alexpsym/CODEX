@@ -13992,7 +13992,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
       <div class="row">
         <div class="group">
           <button id="calc-quote" type="button">Calculate</button>
-          <button id="calc-submit" type="button">Submit Order</button>
+          <button id="calc-submit" type="button" style="display:none">Submit Order</button>
         </div>
       </div>
       <div class="row" id="calc-webhook-panel" style="display:none">
