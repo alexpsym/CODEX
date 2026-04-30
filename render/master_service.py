@@ -926,6 +926,7 @@ def _persist_trading_journal_sqlite(snapshot: Dict[str, object], import_meta: Op
             payload_json = json.dumps(row, ensure_ascii=False)
             if _row_type(row) == "cashflow":
                 conn.execute("INSERT OR REPLACE INTO journal_cashflows(id,payload_json,imported_at) VALUES(?,?,?)", (row_id, payload_json, now_iso))
+                broker_response_summary = {"retCode": bybit_resp.get("retCode"), "retMsg": bybit_resp.get("retMsg"), "orderId": ((bybit_resp.get("result") or {}).get("orderId")), "orderLinkId": ((bybit_resp.get("result") or {}).get("orderLinkId"))}
             else:
                 conn.execute("INSERT OR REPLACE INTO journal_trades(id,payload_json,imported_at) VALUES(?,?,?)", (row_id, payload_json, now_iso))
                 metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
@@ -11677,8 +11678,8 @@ async def _is_bybit_order_open(
 
 async def _cancel_bybit_order(
     *, base_url: str, api_key: str, api_secret: str, category: str, symbol: str, order_id: str
-) -> None:
-    await _bybit_signed_post(
+) -> Dict[str, object]:
+    return await _bybit_signed_post(
         base_url=base_url,
         api_key=api_key,
         api_secret=api_secret,
@@ -11782,7 +11783,7 @@ async def _monitor_bybit_limit_cancel(
                 offset=limit_cancel_offset,
                 pct=limit_cancel_offset_pct,
             ):
-                await _cancel_bybit_order(
+                bybit_resp = await _cancel_bybit_order(
                     base_url=base_url,
                     api_key=api_key,
                     api_secret=api_secret,
@@ -11997,7 +11998,7 @@ async def _is_oanda_order_open(*, cfg: Dict[str, str], order_id: str, mode: str)
     return False
 
 
-async def _cancel_oanda_order(*, cfg: Dict[str, str], order_id: str, mode: str, account_id: Optional[str] = None) -> None:
+async def _cancel_oanda_order(*, cfg: Dict[str, str], order_id: str, mode: str, account_id: Optional[str] = None) -> Dict[str, object]:
     headers = {
         "Authorization": f"Bearer {cfg['token']}",
         "Content-Type": "application/json",
@@ -12013,7 +12014,7 @@ async def _cancel_oanda_order(*, cfg: Dict[str, str], order_id: str, mode: str, 
         raise ValueError(f"OANDA cancel failed ({resp.status_code}): {resp.text}")
 
 
-async def _close_oanda_trade(*, cfg: Dict[str, str], trade_id: str, mode: str, account_id: Optional[str] = None) -> None:
+async def _close_oanda_trade(*, cfg: Dict[str, str], trade_id: str, mode: str, account_id: Optional[str] = None) -> Dict[str, object]:
     headers = {
         "Authorization": f"Bearer {cfg['token']}",
         "Content-Type": "application/json",
@@ -18903,6 +18904,63 @@ async def oanda_inactivity_status() -> JSONResponse:
     return JSONResponse(payload, status_code=status_code)
 
 
+
+
+async def _verify_open_order_action(item: Dict[str, Any]) -> Dict[str, Any]:
+    broker = str(item.get("broker", "")).strip().lower()
+    account = str(item.get("account", "live")).strip().lower()
+    category = str(item.get("category", "linear")).strip().lower()
+    instrument = str(item.get("instrument", "")).strip().upper()
+    item_type = str(item.get("type", "")).strip().lower()
+    item_id = str(item.get("id", "")).strip()
+    action = str(item.get("action") or ("cancel" if item_type in {"order", "webhook"} else "close")).strip().lower()
+    still_open = False
+    status = "unknown"
+    msg = "Verification pending"
+    raw: Dict[str, Any] = {}
+    if broker == "oanda":
+        cfg = _get_oanda_config(account)
+        action_account_id = str(item.get("account_id") or cfg.get("account_id") or "").strip()
+        if action == "close":
+            trades = await _fetch_oanda_json(base_url=cfg["base_url"], account_id=action_account_id, api_key=cfg["token"], endpoint="/accounts/{account_id}/openTrades", mode=account, timeout_s=5.0)
+            ids = {str(t.get("id") or "").strip() for t in trades.get("trades", []) if isinstance(t, dict)}
+            still_open = item_id in ids
+            status = "open" if still_open else "closed"
+            msg = "Trade still open" if still_open else "Trade closed"
+            raw = {"open_trade_count": len(ids)}
+        else:
+            orders = await _fetch_oanda_json(base_url=cfg["base_url"], account_id=action_account_id, api_key=cfg["token"], endpoint="/accounts/{account_id}/pendingOrders", mode=account, timeout_s=5.0)
+            ids = {str(t.get("id") or "").strip() for t in orders.get("orders", []) if isinstance(t, dict)}
+            still_open = item_id in ids
+            status = "pending" if still_open else "cancelled"
+            msg = "Order still pending" if still_open else "Order no longer pending"
+            raw = {"pending_order_count": len(ids)}
+    elif broker == "bybit":
+        _mode, api_key, api_secret, base_url, _ = resolve_bybit_credentials_for("demo" if account in {"demo", "practice"} else "live")
+        if action == "close":
+            rows,_errs = await _fetch_bybit_positions_for_category(base_url=base_url, api_key=api_key, api_secret=api_secret, category=category or "linear")
+            pidx = str(item.get("position_idx") or "").strip()
+            side = str(item.get("side") or "").strip().lower()
+            for row in rows:
+                if str(row.get("symbol") or "").strip().upper() != instrument: continue
+                if pidx and str(row.get("positionIdx") or "").strip() != pidx: continue
+                rside = str(row.get("side") or "").strip().lower()
+                if side and rside and side not in rside: continue
+                size = abs(float(row.get("size") or 0))
+                if size > 0: still_open = True; break
+            status = "open" if still_open else "closed"; msg = "Position still open" if still_open else "Position closed"
+        else:
+            payload = await _bybit_signed_get(base_url=base_url, api_key=api_key, api_secret=api_secret, path="/v5/order/realtime", params={"category": category or "linear", "symbol": instrument, "orderId": item_id, "openOnly": "0"})
+            rows = (payload.get("result") or {}).get("list") or []
+            ord_status = str(rows[0].get("orderStatus") or "") if rows else "not_found"
+            still_open = bool(rows and _is_bybit_open_order(ord_status))
+            status = ord_status or "not_found"
+            msg = "Order still open" if still_open else "Order terminal/not found"
+            raw = {"order_status": ord_status}
+    else:
+        raise ValueError(f"Unsupported broker: {broker}")
+    return {"ok": True, "verified": not still_open, "still_open": still_open, "broker": broker, "action": action, "id": item_id, "status": status, "message": msg, "checked_at": _utc_now_iso(), "raw_summary": raw}
+
 @app.post("/api/open-orders/close")
 async def close_open_order(item: Dict[str, Any] = Body(...)) -> JSONResponse:
     if APP_PROFILE == "render":
@@ -18919,6 +18977,7 @@ async def close_open_order(item: Dict[str, Any] = Body(...)) -> JSONResponse:
 
     action = "cancel" if item_type == "order" else "close"
     action_requested = False
+    broker_response_summary: Dict[str, Any] = {}
 
     try:
         if broker == "webhook" or item_type == "webhook":
@@ -18939,7 +18998,7 @@ async def close_open_order(item: Dict[str, Any] = Body(...)) -> JSONResponse:
             if action == "cancel":
                 if not instrument:
                     raise ValueError("Bybit instrument is missing.")
-                await _cancel_bybit_order(
+                bybit_resp = await _cancel_bybit_order(
                     base_url=base_url,
                     api_key=api_key,
                     api_secret=api_secret,
@@ -18969,7 +19028,7 @@ async def close_open_order(item: Dict[str, Any] = Body(...)) -> JSONResponse:
                 except (TypeError, ValueError):
                     pass
 
-                await _close_bybit_position_market(
+                bybit_resp = await _close_bybit_position_market(
                     base_url=base_url,
                     api_key=api_key,
                     api_secret=api_secret,
@@ -18980,6 +19039,7 @@ async def close_open_order(item: Dict[str, Any] = Body(...)) -> JSONResponse:
                     position_idx=position_idx,
                     order_link_id=str(item.get("order_link_id", "")).strip() or None,
                 )
+                broker_response_summary = {"retCode": bybit_resp.get("retCode"), "retMsg": bybit_resp.get("retMsg"), "orderId": ((bybit_resp.get("result") or {}).get("orderId")), "orderLinkId": ((bybit_resp.get("result") or {}).get("orderLinkId"))}
             action_requested = True
 
         elif broker == "oanda":
@@ -18987,9 +19047,11 @@ async def close_open_order(item: Dict[str, Any] = Body(...)) -> JSONResponse:
             mode = account if account in {"demo", "practice"} else "live"
             action_account_id = str(item.get("account_id") or cfg.get("account_id") or "").strip()
             if action == "cancel":
-                await _cancel_oanda_order(cfg=cfg, order_id=item_id, mode=mode, account_id=action_account_id)
+                oanda_resp = await _cancel_oanda_order(cfg=cfg, order_id=item_id, mode=mode, account_id=action_account_id)
+                broker_response_summary = {"lastTransactionID": oanda_resp.get("lastTransactionID"), "relatedTransactionIDs": oanda_resp.get("relatedTransactionIDs"), "hasOrderCancelTransaction": bool(oanda_resp.get("orderCancelTransaction"))}
             else:
-                await _close_oanda_trade(cfg=cfg, trade_id=item_id, mode=mode, account_id=action_account_id)
+                oanda_resp = await _close_oanda_trade(cfg=cfg, trade_id=item_id, mode=mode, account_id=action_account_id)
+                broker_response_summary = {"lastTransactionID": oanda_resp.get("lastTransactionID"), "relatedTransactionIDs": oanda_resp.get("relatedTransactionIDs"), "hasOrderFillTransaction": bool(oanda_resp.get("orderFillTransaction")), "hasOrderCancelTransaction": bool(oanda_resp.get("orderCancelTransaction"))}
             action_requested = True
         else:
             raise ValueError(f"Unsupported broker: {broker}")
@@ -19010,8 +19072,22 @@ async def close_open_order(item: Dict[str, Any] = Body(...)) -> JSONResponse:
             "action": action,
             "id": item_id,
             "action_requested": action_requested,
+            "action_submitted_at": _utc_now_iso(),
+            "verification_hint": "verify-action",
+            "response_summary": broker_response_summary,
         }
     )
+
+
+@app.post("/api/open-orders/verify-action")
+async def verify_open_order_action(item: Dict[str, Any] = Body(...)) -> JSONResponse:
+    if APP_PROFILE == "render":
+        return _local_only_disabled_response("/api/open-orders/verify-action", as_json=True)  # type: ignore[return-value]
+    try:
+        payload = await _verify_open_order_action(item)
+        return JSONResponse(payload)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/scripts/{script_name:path}/start")

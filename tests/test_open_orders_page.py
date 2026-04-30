@@ -225,3 +225,62 @@ def test_open_orders_js_parses_with_node() -> None:
     node = shutil.which("node")
     assert node, "node is required for JS syntax check"
     subprocess.run([node, "--check", str(ROOT / "render" / "static" / "open_orders.js")], check=True)
+
+
+def test_open_orders_js_has_pending_registry_and_verify_polling() -> None:
+    js = (ROOT / "render" / "static" / "open_orders.js").read_text(encoding="utf-8")
+    assert "pendingManualActions" in js
+    assert "/api/open-orders/verify-action" in js
+    assert "await refresh()" not in js.split("const postClose", 1)[1].split("const renderActionCell", 1)[0]
+    assert "detail.message" in js or "JSON.stringify(detail)" in js
+
+
+def test_close_open_order_returns_response_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("live", "k", "s", "https://example.test", ""))
+    async def fake_close(**_kwargs):
+        return {"retCode": 0, "retMsg": "OK", "result": {"orderId": "1", "orderLinkId": "abc"}}
+    monkeypatch.setattr(master_service, "_close_bybit_position_market", fake_close)
+    monkeypatch.setattr(master_service, "_invalidate_open_orders_cache", lambda: None)
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    response = asyncio.run(master_service.close_open_order({"broker":"bybit","account":"live","category":"linear","instrument":"BTCUSDT","type":"position","id":"pos1","side":"Buy","size":"1"}))
+    payload = json.loads(response.body.decode("utf-8"))
+    assert payload["ok"] is True and payload["action"] == "close" and payload["action_requested"] is True
+    assert payload["response_summary"]["retCode"] == 0
+
+
+def test_verify_action_oanda_trade_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "_get_oanda_config", lambda _a: {"account_id":"A","token":"T","base_url":"https://example.test"})
+    async def fake_fetch(**kwargs):
+        return {"trades": []} if "openTrades" in kwargs["endpoint"] else {"orders": []}
+    monkeypatch.setattr(master_service, "_fetch_oanda_json", fake_fetch)
+    payload = json.loads(asyncio.run(master_service.verify_open_order_action({"broker":"oanda","account":"live","type":"trade","id":"t1","account_id":"A"})).body.decode("utf-8"))
+    assert payload["verified"] is True and payload["still_open"] is False
+
+
+def test_verify_action_oanda_trade_still_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "_get_oanda_config", lambda _a: {"account_id":"A","token":"T","base_url":"https://example.test"})
+    async def fake_fetch(**kwargs):
+        return {"trades": [{"id":"t1"}]}
+    monkeypatch.setattr(master_service, "_fetch_oanda_json", fake_fetch)
+    payload = json.loads(asyncio.run(master_service.verify_open_order_action({"broker":"oanda","account":"live","type":"trade","id":"t1","account_id":"A"})).body.decode("utf-8"))
+    assert payload["verified"] is False and payload["still_open"] is True
+
+
+def test_verify_action_bybit_position_and_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("live", "k", "s", "https://example.test", ""))
+    async def closed_positions(**_kwargs): return ([], [])
+    monkeypatch.setattr(master_service, "_fetch_bybit_positions_for_category", closed_positions)
+    payload = json.loads(asyncio.run(master_service.verify_open_order_action({"broker":"bybit","account":"live","type":"position","id":"p1","instrument":"BTCUSDT","category":"linear"})).body.decode("utf-8"))
+    assert payload["verified"] is True
+    async def open_positions(**_kwargs): return ([{"symbol":"BTCUSDT","side":"Buy","size":"1"}], [])
+    monkeypatch.setattr(master_service, "_fetch_bybit_positions_for_category", open_positions)
+    payload2 = json.loads(asyncio.run(master_service.verify_open_order_action({"broker":"bybit","account":"live","type":"position","id":"p1","instrument":"BTCUSDT","category":"linear","side":"Buy"})).body.decode("utf-8"))
+    assert payload2["still_open"] is True
+    async def fake_get(**_kwargs): return {"result":{"list":[{"orderStatus":"Filled"}]}}
+    monkeypatch.setattr(master_service, "_bybit_signed_get", fake_get)
+    payload3 = json.loads(asyncio.run(master_service.verify_open_order_action({"broker":"bybit","account":"live","type":"order","id":"o1","instrument":"BTCUSDT","category":"linear"})).body.decode("utf-8"))
+    assert payload3["verified"] is True
+    async def fake_get_open(**_kwargs): return {"result":{"list":[{"orderStatus":"New"}]}}
+    monkeypatch.setattr(master_service, "_bybit_signed_get", fake_get_open)
+    payload4 = json.loads(asyncio.run(master_service.verify_open_order_action({"broker":"bybit","account":"live","type":"order","id":"o1","instrument":"BTCUSDT","category":"linear"})).body.decode("utf-8"))
+    assert payload4["still_open"] is True
