@@ -813,6 +813,30 @@ def _build_trading_journal_diagnostics_snapshot() -> Dict[str, object]:
     snapshot["source_duplicate_rows_dropped"] = int(snapshot.get("source_duplicate_rows_dropped") or 0)
     snapshot["dedupe_groups"] = int(snapshot.get("dedupe_groups") or 0)
     snapshot["quarantined_rows"] = int(quarantined_rows)
+    invalid_details: List[Dict[str, object]] = []
+    repaired_rows = 0
+    for row in raw_rows:
+        refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+        metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+        if metrics.get("time_order_repaired") is True or str(refs.get("time_order_repaired") or "").strip():
+            repaired_rows += 1
+        if str(row.get("status") or "").strip().lower() != "invalid_time_order":
+            continue
+        invalid_details.append(
+            {
+                "symbol": row.get("symbol"),
+                "side": row.get("side"),
+                "order_id": refs.get("orderId") or row.get("order_id"),
+                "open_time": row.get("open_time"),
+                "close_time": row.get("close_time"),
+                "source": row.get("source"),
+                "reason": str(metrics.get("time_warning_code") or refs.get("time_warning_code") or "invalid_time_order"),
+            }
+        )
+    snapshot["invalid_time_order_rows"] = int(quarantined_rows)
+    snapshot["repaired_time_order_rows"] = int(repaired_rows)
+    snapshot["quarantined_invalid_time_rows"] = int(quarantined_rows)
+    snapshot["invalid_time_order_row_details"] = invalid_details
     snapshot["ignored_local_workbooks"] = snapshot.get("ignored_local_workbooks") if isinstance(snapshot.get("ignored_local_workbooks"), list) else []
     snapshot["errors"] = snapshot.get("errors") if isinstance(snapshot.get("errors"), list) else []
     snapshot["diagnostics_source"] = diagnostics_source
@@ -2741,21 +2765,30 @@ def _sanitize_bybit_demo_rows(rows: List[Dict[str, object]]) -> tuple[List[Dict[
             open_ts = _canonical_trade_epoch_second(row.get("open_time"))
             if close_ts is not None and open_ts is not None and close_ts <= open_ts:
                 source = str(row.get("source") or "").strip().lower()
-                if source in {"excel", "local_excel"}:
-                    kept = dict(row)
-                    kept["trade_duration_seconds"] = None
-                    if str(kept.get("status") or "").strip().lower() == "invalid_time_order":
+                if source in {"bybit", "excel", "local_excel"}:
+                    swapped_open = row.get("close_time")
+                    swapped_close = row.get("open_time")
+                    swapped_open_ts = _canonical_trade_epoch_second(swapped_open)
+                    swapped_close_ts = _canonical_trade_epoch_second(swapped_close)
+                    if swapped_open_ts is not None and swapped_close_ts is not None and swapped_close_ts > swapped_open_ts:
+                        kept = dict(row)
+                        refs = dict(kept.get("raw_refs") or {}) if isinstance(kept.get("raw_refs"), dict) else {}
+                        metrics = dict(kept.get("metrics") or {}) if isinstance(kept.get("metrics"), dict) else {}
+                        refs["time_order_repaired"] = "swapped_open_close"
+                        refs["time_order_original_open_time"] = row.get("open_time")
+                        refs["time_order_original_close_time"] = row.get("close_time")
+                        metrics["time_order_repaired"] = True
+                        metrics.pop("invalid_time_order", None)
+                        kept["raw_refs"] = refs
+                        kept["metrics"] = metrics
+                        kept["open_time"] = swapped_open
+                        kept["close_time"] = swapped_close
                         kept["status"] = "closed"
-                    metrics = kept.get("metrics") if isinstance(kept.get("metrics"), dict) else {}
-                    next_metrics = dict(metrics)
-                    next_metrics["invalid_time_order"] = True
-                    kept["metrics"] = next_metrics
-                    flags = kept.get("flags") if isinstance(kept.get("flags"), list) else []
-                    if "invalid_time_order" not in [str(flag) for flag in flags]:
-                        kept["flags"] = [*flags, "invalid_time_order"]
+                        kept["row_type"] = "trade"
+                        kept["trade_duration_seconds"] = max(0, swapped_close_ts - swapped_open_ts)
+                        bybit_rows.append(kept)
+                        continue
                     workbook_invalid_time_order += 1
-                    bybit_rows.append(kept)
-                    continue
                 q = dict(row)
                 q["status"] = "invalid_time_order"
                 q["row_type"] = "quarantine"
@@ -12323,6 +12356,8 @@ def _normalize_bybit_closed_pnl_row(
     raw_refs_extra: Optional[Dict[str, object]] = None,
     resolved_trade_context: Optional[Dict[str, object]] = None,
     resolved_open_time: Optional[str] = None,
+    execution_times: Optional[Dict[str, Optional[str]]] = None,
+    order_times: Optional[Dict[str, Optional[str]]] = None,
 ) -> Optional[Dict[str, object]]:
     symbol = str(entry.get("symbol") or "").strip().upper()
     order_id = str(entry.get("orderId") or "").strip()
@@ -12373,7 +12408,13 @@ def _normalize_bybit_closed_pnl_row(
         (stop_loss is not None and fallback_stop_loss is not None)
         or (take_profit is not None and fallback_take_profit is not None)
     )
-    close_time_iso = _ms_to_iso(entry.get("updatedTime"))
+    closed_pnl_created = _ms_to_iso(entry.get("createdTime"))
+    closed_pnl_updated = _ms_to_iso(entry.get("updatedTime"))
+    execution_open = (execution_times or {}).get("open_time")
+    execution_close = (execution_times or {}).get("close_time")
+    order_created = (order_times or {}).get("created_time")
+    order_updated = (order_times or {}).get("updated_time")
+    close_time_iso = execution_close or order_updated or closed_pnl_updated
     close_ts = _canonical_trade_epoch_second(close_time_iso)
     ctx_valid = isinstance(ctx, dict)
     if ctx_valid:
@@ -12409,12 +12450,12 @@ def _normalize_bybit_closed_pnl_row(
                 "status": "CLOSED",
             }
         )
-    open_time = resolved_open_time or (
+    open_time = execution_open or resolved_open_time or (
         _epoch_or_iso_to_iso(ctx.get("open_time")) if isinstance(ctx, dict) else None
     ) or (
         _epoch_or_iso_to_iso(ctx.get("created_at")) if isinstance(ctx, dict) else None
     )
-    created_fallback = _ms_to_iso(entry.get("createdTime"))
+    created_fallback = order_created or closed_pnl_created
     if (not open_time) and created_fallback and close_ts is not None:
         created_ts = _canonical_trade_epoch_second(created_fallback)
         if created_ts is not None and created_ts < close_ts:
@@ -12430,6 +12471,17 @@ def _normalize_bybit_closed_pnl_row(
     elif close_ts <= open_ts:
         status = "invalid_time_order"
         row_type = "quarantine"
+    raw_refs["time_source"] = (
+        "execution" if execution_open or execution_close else "order_history" if order_created or order_updated else "closed_pnl_or_context"
+    )
+    raw_refs["closed_pnl_createdTime"] = closed_pnl_created
+    raw_refs["closed_pnl_updatedTime"] = closed_pnl_updated
+    raw_refs["execution_open_time"] = execution_open
+    raw_refs["execution_close_time"] = execution_close
+    raw_refs["order_createdTime"] = order_created
+    raw_refs["order_updatedTime"] = order_updated
+    raw_refs["context_open_time"] = resolved_open_time
+    raw_refs["context_used_for_open_time"] = bool((not execution_open) and resolved_open_time)
     return _normalize_journal_profit_fields({
         "id": f"bybit:{mode}:closedpnl:{symbol}:{order_id}",
         "source": "bybit",
@@ -12879,6 +12931,24 @@ async def _sync_bybit_closed_pnl_window(
                 )
 
     tx_by_order: Dict[str, Dict[str, object]] = {}
+    executions_by_order_id: Dict[str, List[int]] = defaultdict(list)
+    try:
+        execution_entries = await _fetch_bybit_executions(
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            category="linear",
+            start_time=start_time,
+        )
+        for ex in execution_entries:
+            if not isinstance(ex, dict):
+                continue
+            oid = str(ex.get("orderId") or "").strip()
+            ets = int(_to_float(ex.get("execTime")) or 0)
+            if oid and ets > 0:
+                executions_by_order_id[oid].append(ets)
+    except Exception as exc:
+        BYBIT_LOGGER.warning("Bybit execution prefetch failed: %s", exc)
     tx_cursor: Optional[str] = None
     while True:
         tx_payload = await _fetch_bybit_transaction_log(
@@ -12991,26 +13061,19 @@ async def _sync_bybit_closed_pnl_window(
             ) or (
                 _epoch_or_iso_to_iso(resolved_ctx.get("created_at")) if isinstance(resolved_ctx, dict) else None
             )
-            if not resolved_open_time:
-                try:
-                    execution_candidates = await _fetch_bybit_executions(
-                        base_url=base_url,
-                        api_key=api_key,
-                        api_secret=api_secret,
-                        category="linear",
-                        start_time=start_time,
-                    )
-                    times = [
-                        int(_to_float(ex.get("execTime")) or 0)
-                        for ex in execution_candidates
-                        if isinstance(ex, dict)
-                        and str(ex.get("orderId") or "").strip() == order_id
-                        and int(_to_float(ex.get("execTime")) or 0) > 0
-                    ]
-                    if times:
-                        resolved_open_time = _ms_to_iso(min(times))
-                except Exception:
-                    resolved_open_time = None
+            execution_times = sorted(executions_by_order_id.get(order_id) or [])
+            if not resolved_open_time and execution_times:
+                resolved_open_time = _ms_to_iso(execution_times[0])
+            order_time_candidates = [
+                int(_to_float(item.get("createdTime")) or 0)
+                for item in order_candidates
+                if isinstance(item, dict)
+            ]
+            order_update_candidates = [
+                int(_to_float(item.get("updatedTime")) or 0)
+                for item in order_candidates
+                if isinstance(item, dict)
+            ]
             row = _normalize_bybit_closed_pnl_row(
                 entry,
                 account_mode=mode,
@@ -13020,6 +13083,14 @@ async def _sync_bybit_closed_pnl_window(
                 take_profit=take_profit,
                 resolved_trade_context=resolved_ctx,
                 resolved_open_time=resolved_open_time,
+                execution_times={
+                    "open_time": _ms_to_iso(execution_times[0]) if execution_times else None,
+                    "close_time": _ms_to_iso(execution_times[-1]) if execution_times else None,
+                },
+                order_times={
+                    "created_time": _ms_to_iso(min([x for x in order_time_candidates if x > 0])) if any(x > 0 for x in order_time_candidates) else None,
+                    "updated_time": _ms_to_iso(max([x for x in order_update_candidates if x > 0])) if any(x > 0 for x in order_update_candidates) else None,
+                },
                 raw_refs_extra={
                     "orderLinkId": order_link_id or order_match.get("orderLinkId"),
                     "parentOrderLinkId": order_match.get("parentOrderLinkId"),

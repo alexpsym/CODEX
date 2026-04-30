@@ -705,7 +705,7 @@ def test_local_import_includes_bybit_demo_workbook_and_balance_anchor(temp_state
         and str(row.get("account_label") or row.get("account") or "").strip().lower() == "bybit demo"
     ]
     assert len(workbook_rows) == 15
-    assert sum(1 for row in workbook_rows if str((row.get("metrics") or {}).get("invalid_time_order")).lower() == "true") >= 2
+    assert sum(1 for row in workbook_rows if str((row.get("metrics") or {}).get("time_order_repaired")).lower() == "true") >= 2
     bybit_demo_visible = [
         row for row in items
         if str(row.get("row_type") or "trade") == "trade"
@@ -737,7 +737,7 @@ def test_import_from_sources_ignores_default_local_workbooks_when_not_enabled(te
     assert result["ignored_local_workbooks"] == ["edgewonk-export-78784.xls"]
 
 
-def test_bybit_invalid_time_rows_are_quarantined_from_items(temp_state_paths):
+def test_bybit_invalid_time_rows_are_repaired_from_items(temp_state_paths):
     master_service._set_trading_journal_rows(
         [
             {
@@ -767,11 +767,13 @@ def test_bybit_invalid_time_rows_are_quarantined_from_items(temp_state_paths):
         ]
     )
     rows, stats = master_service._sanitize_bybit_demo_rows(master_service._get_trading_journal_rows())
-    assert stats["quarantined_invalid_time"] >= 1
+    assert stats["quarantined_invalid_time"] == 0
     master_service._set_trading_journal_rows(rows)
     master_service._build_trading_journal_view_snapshot(force=True)
     payload = _json(asyncio.run(master_service.trading_journal_items()))
-    assert len([r for r in payload["items"] if r.get("symbol") == "HYPERUSDT"]) == 1
+    repaired = [r for r in payload["items"] if r.get("symbol") == "HYPERUSDT"]
+    assert len(repaired) == 2
+    assert any((r.get("metrics") or {}).get("time_order_repaired") is True for r in repaired)
 
 
 def test_import_from_sources_preserves_existing_rows_on_empty_result(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
@@ -788,7 +790,7 @@ def test_import_from_sources_preserves_existing_rows_on_empty_result(temp_state_
 def test_trading_journal_js_quarantine_is_not_hard_warning():
     js = (ROOT / "render" / "static" / "trading_journal.js").read_text(encoding="utf-8")
     assert "|| quarantinedRows > 0" not in js
-    assert "invalid historical" in js
+    assert "repaired time-order rows" in js
 
 
 def test_parse_excel_generic_filename_infers_fx_asset_class(monkeypatch: pytest.MonkeyPatch):
