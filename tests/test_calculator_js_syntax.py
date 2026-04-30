@@ -30,6 +30,11 @@ def test_calculator_payload_uses_spread_state() -> None:
     assert "formatPercentFromFraction" in js
     assert "compactNumber" in js
     assert "AbortController" in js
+
+    assert "quoteStatus" in js
+    assert "calc-quote-status" in js
+    assert "submitBtn.disabled" in js
+    assert "state.quote && state.quoteStatus === 'ready'" in js
     assert "timeframe-toggle" in js
     assert "calc-timeframe" not in js
 

@@ -177,7 +177,7 @@ const ids = [
   'calc-webhook-panel', 'calc-webhook-url', 'calc-webhook-json', 'calc-webhook-copy', 'calc-webhook-copy-url',
   'risk-toggle', 'calc-risk-label', 'limit-wrap', 'account-toggle', 'asset-toggle', 'side-toggle',
   'order-toggle', 'webhook-toggle', 'test-toggle', 'timeframe-toggle', 'calc-symbol', 'calc-limit',
-  'calc-sl-ticks', 'calc-rr', 'calc-risk', 'calc-quote', 'calc-submit'
+  'calc-sl-ticks', 'calc-rr', 'calc-risk', 'calc-quote', 'calc-submit', 'calc-quote-status'
 ];
 const elements = Object.fromEntries(ids.map((id) => [id, new MockElement(id)]));
 
@@ -229,19 +229,23 @@ const webhookNo = elements['webhook-toggle'].buttons.find((b) => b.dataset.v ===
 (async () => {
   const states = [];
   states.push(submit.style.display === 'none');
-  await quoteClick();
-  states.push(submit.style.display === '');
+  let p1 = quoteClick();
+  states.push(submit.style.display === '' && submit.disabled === true);
+  await p1;
+  states.push(submit.style.display === '' && submit.disabled === false);
   elements['calc-risk'].value = '2';
   elements['calc-risk'].listeners.input();
-  states.push(submit.style.display === 'none');
-  await quoteClick();
-  states.push(submit.style.display === '');
+  states.push(submit.style.display === '' && submit.disabled === true);
+  p1 = quoteClick();
+  states.push(submit.style.display === '' && submit.disabled === true);
+  await p1;
+  states.push(submit.style.display === '' && submit.disabled === false);
   elements['calc-sl-ticks'].value = '20';
   elements['calc-sl-ticks'].listeners.change();
-  states.push(submit.style.display === 'none');
+  states.push(submit.style.display === '' && submit.disabled === true);
   nextQuoteShouldFail = true;
   await quoteClick();
-  states.push(submit.style.display === 'none');
+  states.push(submit.disabled === true);
   webhookYes.click();
   await quoteClick();
   states.push(submit.style.display === 'none');
@@ -253,4 +257,4 @@ const webhookNo = elements['webhook-toggle'].buttons.find((b) => b.dataset.v ===
 '''
     result = subprocess.run([node, "-e", harness, str(JS_PATH)], check=True, capture_output=True, text=True)
     states = json.loads(result.stdout.strip().splitlines()[-1])
-    assert states == [True, True, True, True, True, True, True, True]
+    assert states == [True, True, True, True, True, True, True, True, True, True]

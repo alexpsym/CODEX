@@ -13,6 +13,10 @@
     quote: null,
     resolvedSymbol: '',
     pendingWebhookId: '',
+    quoteStatus: 'idle',
+    hasCalculatedOnce: false,
+    quoteRequestSeq: 0,
+    quoteController: null,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -31,6 +35,7 @@
   const webhookCopyBtn = $('calc-webhook-copy');
   const webhookCopyUrlBtn = $('calc-webhook-copy-url');
   const submitBtn = $('calc-submit');
+  const quoteStatusEl = $('calc-quote-status');
 
   let symbolTimer = null;
   let resolveController = null;
@@ -83,14 +88,27 @@
     specsEl.innerHTML = msg ? `<div class="muted">${msg}</div>` : '';
   }
 
-  function setSubmitVisible(show) {
-    submitBtn.style.display = show ? '' : 'none';
+  function setQuoteStatus(text) {
+    if (quoteStatusEl) quoteStatusEl.textContent = text || '';
   }
 
-  function invalidateQuote({ clearResults = true } = {}) {
+  function setSubmitState({ visible, enabled, reason = '', stateName = '' }) {
+    submitBtn.style.display = visible ? '' : 'none';
+    submitBtn.disabled = !(enabled && state.quote && state.quoteStatus === 'ready' && state.webhook_mode !== 'yes');
+    submitBtn.title = reason || '';
+    if (stateName) submitBtn.dataset.state = stateName;
+  }
+
+  function invalidateQuote({ clearResults = true, status = 'stale', reason = '' } = {}) {
     state.quote = null;
-    setSubmitVisible(false);
-    if (clearResults) resultEl.innerHTML = '';
+    state.quoteStatus = status;
+    const visible = status === 'idle' ? false : state.hasCalculatedOnce;
+    setSubmitState({ visible, enabled: false, reason, stateName: status });
+    if (status === 'calculating') setQuoteStatus('Calculating position…');
+    else if (status === 'stale') setQuoteStatus('Quote changed. Recalculate before submitting.');
+    else if (status === 'error') setQuoteStatus('Quote failed. Recalculate before submitting.');
+    else if (status === 'idle') setQuoteStatus('');
+    if (clearResults) resultEl.innerHTML = status === 'calculating' ? '<div class="card"><div class="muted">Calculating position…</div></div>' : '';
   }
 
   function renderSpecs(specs) {
@@ -340,8 +358,8 @@
     return bodyText ? { message: bodyText } : {};
   }
 
-  async function post(url, body) {
-    return request(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  async function post(url, body, opts = {}) {
+    return request(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), ...opts });
   }
 
   function updateRiskUiForAsset() {
@@ -412,7 +430,7 @@
           state.fx_risk_mode = state.risk_mode;
         }
         syncToggleState(id, key);
-        invalidateQuote();
+        invalidateQuote({ status: state.hasCalculatedOnce ? 'stale' : 'idle', reason: 'Quote changed. Recalculate before submitting.' });
         if (key === 'order_type') $('limit-wrap').style.display = state.order_type === 'limit' ? '' : 'none';
         if (key === 'webhook_mode' && state.webhook_mode !== 'yes') {
           toggleWebhookPanel(false);
@@ -497,6 +515,11 @@
       okEl.textContent = 'Webhook JSON copied.';
     } catch (err) {
       errorEl.textContent = `Copy failed: ${err?.message || err}`;
+    } finally {
+      if (seq === state.quoteRequestSeq) {
+        quoteBtn.disabled = false;
+        quoteBtn.textContent = prevLabel;
+      }
     }
   });
   webhookCopyUrlBtn.addEventListener('click', async () => {
@@ -514,7 +537,7 @@
   });
 
   $('calc-symbol').addEventListener('input', () => {
-    invalidateQuote({ clearResults: false });
+    invalidateQuote({ clearResults: false, status: state.hasCalculatedOnce ? 'stale' : 'idle', reason: 'Quote changed. Recalculate before submitting.' });
     debounceSymbolResolve();
   });
 
@@ -526,7 +549,18 @@
   $('calc-quote').addEventListener('click', async () => {
     clearMessages();
     toggleWebhookPanel(false);
-    invalidateQuote();
+    if (state.quoteController) state.quoteController.abort();
+    if (resolveController) resolveController.abort();
+    if (journalController) journalController.abort();
+    state.quoteController = new AbortController();
+    state.quoteRequestSeq += 1;
+    const seq = state.quoteRequestSeq;
+    state.hasCalculatedOnce = true;
+    const quoteBtn = $('calc-quote');
+    const prevLabel = quoteBtn.textContent;
+    quoteBtn.disabled = true;
+    quoteBtn.textContent = 'Calculating…';
+    invalidateQuote({ status: 'calculating', reason: 'Calculating position…' });
     try {
       const payload = {
         ...state,
@@ -541,10 +575,13 @@
         previous_pending_webhook_id: state.webhook_mode === 'yes' ? undefined : (state.pendingWebhookId || undefined),
       };
       renderRequestSummary(payload);
-      const quote = await post('/api/calculator/quote', payload);
+      const quote = await post('/api/calculator/quote', payload, { signal: state.quoteController.signal });
+      if (seq !== state.quoteRequestSeq) return;
       state.quote = quote;
       renderQuote(quote);
-      setSubmitVisible(state.webhook_mode !== 'yes' && !!state.quote);
+      state.quoteStatus = 'ready';
+      setQuoteStatus('Quote ready.');
+      setSubmitState({ visible: state.webhook_mode !== 'yes', enabled: true, reason: '', stateName: 'ready' });
       if (state.webhook_mode === 'yes' && quote.webhook_payload_json) {
         state.pendingWebhookId = quote.pending_webhook_id || state.pendingWebhookId;
         webhookUrlEl.textContent = quote.webhook_endpoint_url || quote.webhook_endpoint || '';
@@ -555,8 +592,12 @@
       } else {
         state.pendingWebhookId = '';
       }
+      if (state.webhook_mode === 'yes') {
+        setSubmitState({ visible: false, enabled: false, reason: 'Webhook mode enabled.', stateName: 'ready' });
+      }
     } catch (e) {
-      invalidateQuote();
+      if (e.name === 'AbortError') return;
+      invalidateQuote({ status: 'error', reason: 'Quote failed. Recalculate before submitting.' });
       toggleWebhookPanel(false);
       errorEl.textContent = String(e.message || e);
       renderErrorDebug(e.detail || null);
@@ -566,8 +607,9 @@
   $('calc-submit').addEventListener('click', async () => {
     clearMessages();
     try {
+      if (submitBtn.disabled) throw new Error('Calculate a fresh quote before submitting.');
       if (state.webhook_mode === 'yes') throw new Error('Webhook mode is enabled. Use the generated TradingView JSON instead of Submit Order.');
-      if (!state.quote) throw new Error('Calculate first.');
+      if (state.quoteStatus !== 'ready' || !state.quote) throw new Error('Calculate first.');
       if (!state.timeframe) throw new Error('Timeframe is required.');
       const payload = {
         asset: state.asset,
@@ -599,7 +641,7 @@
   setTimeframeButtons();
   updateRiskUiForAsset();
   syncAllToggleStates();
-  setSubmitVisible(false);
+  setSubmitState({ visible: false, enabled: false, reason: '', stateName: 'idle' });
   toggleWebhookPanel(false);
   setJournalState('idle', 'Type a symbol to load journal summary.');
   setSpecsState('idle', 'Enter a symbol to load instrument specs.');
