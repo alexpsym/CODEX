@@ -1250,9 +1250,12 @@
           if (shouldWarnZeroFx) reasons.push('zero FX rows');
           const dropped = Number(diagnostics?.duplicate_rows_dropped || 0);
           if (!preserveStatus) setStatus(`Warning: Trading Journal diagnostics require attention (${reasons.join(', ')}; rows=${rowsTotal}; duplicates dropped=${dropped}).`);
-        } else if (actualRowsTotal > 0 && quarantinedRows > 0) {
-          const label = quarantinedRows === 1 ? 'row was' : 'rows were';
-          if (!preserveStatus) setStatus(`Info: ${actualRowsTotal} journal rows loaded; ${quarantinedRows} invalid historical ${label} excluded.`);
+        } else if (actualRowsTotal > 0 && (quarantinedRows > 0 || Number(diagnostics?.repaired_time_order_rows || 0) > 0)) {
+          const repaired = Number(diagnostics?.repaired_time_order_rows || 0);
+          const details = Array.isArray(diagnostics?.invalid_time_order_row_details) ? diagnostics.invalid_time_order_row_details : [];
+          const detailText = details.slice(0, 3).map((d) => `${d?.symbol || '—'} ${d?.side || '—'} ${d?.order_id || '—'}`).join('; ');
+          const suffix = detailText ? ` Excluded sample: ${detailText}.` : '';
+          if (!preserveStatus) setStatus(`Info: ${actualRowsTotal} journal rows loaded; repaired time-order rows=${repaired}, quarantined invalid-time rows=${quarantinedRows}.${suffix}`);
         } else if (noSources && actualRowsTotal > 0) {
           if (!preserveStatus) setStatus(`Info: ${actualRowsTotal} journal rows loaded; no Excel workbook imports detected.`);
         } else {

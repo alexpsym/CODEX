@@ -581,6 +581,30 @@ def test_repair_existing_bybit_row_open_time_when_open_after_close(monkeypatch) 
     assert repaired[0]["open_time"] == "2026-04-11T01:20:00+00:00"
 
 
+def test_normalize_bybit_closed_pnl_prefers_execution_times(monkeypatch) -> None:
+    monkeypatch.setattr(master_service, "_lookup_trade_context_for_journal_row", lambda _row: None)
+    row = master_service._normalize_bybit_closed_pnl_row(
+        {
+            "symbol": "BTCUSDT",
+            "orderId": "oid-exec",
+            "createdTime": 1_700_000_000_000,
+            "updatedTime": 1_700_000_900_000,
+            "avgEntryPrice": "100",
+            "avgExitPrice": "101",
+            "closedSize": "1",
+            "closedPnl": "1",
+            "side": "Buy",
+        },
+        account_mode="demo",
+        balance_after_trade=1000.0,
+        execution_times={"open_time": "2026-04-17T00:24:42.814000+00:00", "close_time": "2026-04-17T00:29:23.301318+00:00"},
+    )
+    assert row is not None
+    assert row["open_time"] == "2026-04-17T00:24:42.814000+00:00"
+    assert row["close_time"] == "2026-04-17T00:29:23.301318+00:00"
+    assert row["raw_refs"]["time_source"] == "execution"
+
+
 def test_repair_existing_bybit_row_missing_open_time(monkeypatch) -> None:
     bad_row = {
         "id": "bybit:demo:closedpnl:DASHUSDT:125",
