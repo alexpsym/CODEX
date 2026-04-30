@@ -986,13 +986,9 @@
     (items || []).forEach((b) => {
       const div = document.createElement('div');
       div.className = 'bal-card';
-      const source = String(b.balance_source || b.source || '').trim();
-      const asOf = String(b.as_of || '').trim();
       div.innerHTML = `
         <div class="muted">${b.label || b.account || 'Account'}</div>
         <div style="font-size:1.0rem;font-weight:600">${fmtNum(b.balance, (() => { const c = String(b.currency || '').toUpperCase(); if (c === 'AUD' || c === 'USD') return 2; if (c === 'USDT') return 8; return 6; })())} ${b.currency || ''}</div>
-        ${b.missing_balance ? `<div class="muted">Balance not found in workbook</div>` : ''}
-        ${(source || asOf) ? `<div class="muted" style="font-size:0.8rem">${source ? `source: ${source}` : ''}${source && asOf ? ' · ' : ''}${asOf ? `as of: ${asOf}` : ''}</div>` : ''}
       `;
       wrap.appendChild(div);
     });

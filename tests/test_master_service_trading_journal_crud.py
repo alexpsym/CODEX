@@ -258,6 +258,12 @@ def test_trading_journal_js_contains_crud_controls_and_endpoints():
     assert "if (!journalPending) {" in js
     assert "state.rows = nextRows" in js
     assert "new Error(`/api/trading-journal:" not in js
+
+    assert "renderBalances(items)" in js
+    assert "No balances available yet." in js
+    assert "source: ${source}" not in js
+    assert "as of: ${asOf}" not in js
+    assert "Balance not found in workbook" not in js
     assert "Background Dropbox sync running…" not in js
     assert "Background local journal import running…" in js
     assert "compactErrorMessage" in js
