@@ -58,7 +58,11 @@ goto wait_for_journal_api
 
 :journal_ready
 echo [journal-local] journal endpoint ready after !API_WAITED! seconds.
-start "" "%JOURNAL_URL%"
+call "%ROOT%tools\open_edge_url.bat" "%JOURNAL_URL%"
+if errorlevel 1 (
+  echo [journal-local] ERROR: failed to open Microsoft Edge for %JOURNAL_URL%.
+  exit /b 1
+)
 echo Local trading journal launch requested.
 exit /b 0
 

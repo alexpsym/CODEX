@@ -358,7 +358,7 @@ def test_run_local_master_control_bat_uses_local_autostart() -> None:
     assert "[local-master] ERROR: dashboard was not ready after %MASTER_READY_TIMEOUT_SECONDS% seconds." in content
     assert '[local-master] Browser was not opened to avoid a dead-page / manual-refresh failure.' in content
     assert "[local-master] ERROR: scanner did not become ready after %SCANNER_READY_TIMEOUT_SECONDS% seconds." in content
-    assert content.index('cmd /d /v:on /k ""%~f0" __worker"') < content.index('start "" "%MASTER_URL%"')
+    assert content.index('cmd /d /v:on /k ""%~f0" __worker"') < content.index('call "%ROOT%tools\\open_edge_url.bat" "%MASTER_URL%"')
     assert "timeout /t 2 /nobreak >nul\nstart \"\" \"%MASTER_URL%\"" not in content
 
 
@@ -370,15 +370,15 @@ def test_run_local_master_control_waits_for_health_before_opening_browser() -> N
     scanner_wait_idx = content.index(":wait_for_scanner_ready")
     scanner_ready_idx = content.index(":scanner_ready")
     scanner_not_ready_idx = content.index(":scanner_not_ready")
-    browser_idx = content.index('start "" "%MASTER_URL%"')
+    browser_idx = content.index('call "%ROOT%tools\\open_edge_url.bat" "%MASTER_URL%"')
     not_ready_idx = content.index(":master_not_ready")
 
     assert worker_start_idx < wait_idx < ready_idx < scanner_wait_idx < scanner_ready_idx < browser_idx
     assert browser_idx > scanner_ready_idx
     not_ready_block = content[not_ready_idx:]
-    assert 'start "" "%MASTER_URL%"' not in not_ready_block
+    assert 'call "%ROOT%tools\\open_edge_url.bat" "%MASTER_URL%"' not in not_ready_block
     scanner_not_ready_block = content[scanner_not_ready_idx:]
-    assert 'start "" "%MASTER_URL%"' not in scanner_not_ready_block
+    assert 'call "%ROOT%tools\\open_edge_url.bat" "%MASTER_URL%"' not in scanner_not_ready_block
 
 
 def test_run_trading_journal_local_bat_profile_and_port() -> None:
@@ -388,7 +388,7 @@ def test_run_trading_journal_local_bat_profile_and_port() -> None:
     assert 'set "SCANNER_LOCAL_UI_MODE=1"' not in content
     assert 'set "AUTOSTART_SCRIPTS=bybit_monitor,oanda_monitor"' not in content
     assert '"%PYTHON_EXE%" -m uvicorn render.master_service:app --host 127.0.0.1 --port 8010' in content
-    assert 'start "" "http://127.0.0.1:8010/trading-journal"' in content
+    assert 'call "%ROOT%tools\\open_edge_url.bat" "%JOURNAL_URL%"' in content
 
 
 
@@ -776,3 +776,50 @@ def test_merged_monitor_js_uses_unified_monitor_controller() -> None:
     assert "const controllers = [" not in script
     assert "statusId: 'bybit-status'" not in script
     assert "statusId: 'oanda-status'" not in script
+
+
+def test_edge_helper_wiring_for_local_launchers() -> None:
+    master = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
+    journal = (ROOT / "run_trading_journal_local.bat").read_text(encoding="utf-8")
+
+    assert 'start "" "%MASTER_URL%"' not in master
+    assert 'start "" "%JOURNAL_URL%"' not in journal
+
+    master_call = 'call "%ROOT%tools\\open_edge_url.bat" "%MASTER_URL%"'
+    journal_call = 'call "%ROOT%tools\\open_edge_url.bat" "%JOURNAL_URL%"'
+    assert master_call in master
+    assert journal_call in journal
+
+    worker_start = master.index('start "Local Master Control"')
+    ready_wait = master.index(':wait_for_master_ready')
+    scanner_ready = master.index(':scanner_ready')
+    edge_call = master.index(master_call)
+    assert worker_start < ready_wait < scanner_ready < edge_call
+
+    assert master_call not in master.split(':master_not_ready', 1)[1].split(':scanner_not_ready', 1)[0]
+    assert master_call not in master.split(':scanner_not_ready', 1)[1].split(':worker', 1)[0]
+
+    journal_worker_start = journal.index('start "Local Trading Journal"')
+    journal_wait = journal.index(':wait_for_journal_health')
+    journal_ready = journal.index(':journal_ready')
+    journal_edge_call = journal.index(journal_call)
+    assert journal_worker_start < journal_wait < journal_ready < journal_edge_call
+
+    assert journal_call not in journal.split(':journal_not_ready', 1)[1].split(':worker', 1)[0]
+
+
+def test_open_edge_url_helper_contract() -> None:
+    helper = ROOT / "tools" / "open_edge_url.bat"
+    assert helper.exists()
+    content = helper.read_text(encoding="utf-8")
+    lowered = content.lower()
+
+    assert 'msedge.exe' in lowered
+    assert '%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe' in content
+    assert '%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe' in content
+    assert '%LocalAppData%\\Microsoft\\Edge\\Application\\msedge.exe' in content
+    assert 'where msedge.exe' in lowered
+    assert 'chrome' not in lowered
+    assert 'brave' not in lowered
+    assert 'start "" "%~1"' not in content
+    assert 'start "" "%TARGET_URL%"' not in content
