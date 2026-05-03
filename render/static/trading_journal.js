@@ -1006,91 +1006,17 @@
     };
 
     wrap.style.display = 'block';
-    const mkSection = (title, bodyHtml) => {
-      const section = document.createElement('section');
-      section.className = 'bal-card';
-      section.style.marginBottom = '10px';
-      section.innerHTML = `<div style="font-weight:700;margin-bottom:8px">${title}</div>${bodyHtml}`;
-      wrap.appendChild(section);
-    };
-    const metricGrid = (items) => (
-      `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;">` +
-      items.map(([k, v]) => `<div class="bal-card"><div class="muted">${k}</div><div style="font-weight:600">${v ?? '—'}</div></div>`).join('') +
-      `</div>`
-    );
-
+    wrap.className = 'tj-stats-dashboard';
     const g = stats?.groups || {};
-    mkSection('Overview', metricGrid([
-      ['Trades', g?.overview?.trades],
-      ['Wins', g?.overview?.wins],
-      ['Losses', g?.overview?.losses],
-      ['Break-even', g?.overview?.break_even],
-      ['Win rate', fmtPctSmall(g?.overview?.win_rate_pct)],
-      ['Avg result %', fmtPct(g?.overview?.avg_result_pct)],
-      ['Avg R', fmtNum(g?.overview?.avg_r_multiple, 4)],
-      ['Max drawdown', fmtPctSmall(g?.overview?.max_drawdown_pct)],
-    ]));
-    mkSection('Direction', metricGrid([
-      ['Long trades', g?.direction?.long_trades],
-      ['Short trades', g?.direction?.short_trades],
-      ['Long win rate', fmtPctSmall(g?.direction?.long_win_rate_pct)],
-      ['Short win rate', fmtPctSmall(g?.direction?.short_win_rate_pct)],
-    ]));
-    const rows = Array.isArray(g?.market_breakdown) ? g.market_breakdown : [];
-    mkSection(
-      'Market breakdown',
-      `<div style="overflow:auto"><table style="min-width:920px"><thead><tr><th>Market</th><th>Trades</th><th>Wins</th><th>Losses</th><th>Win rate</th><th>Avg result %</th><th>Avg R</th><th>Avg duration</th><th>Longest</th><th>Shortest</th><th>Instruments</th></tr></thead><tbody>${
-        rows.map((row) => `<tr><td>${row.label || '—'}</td><td>${row.trades ?? '—'}</td><td>${row.wins ?? '—'}</td><td>${row.losses ?? '—'}</td><td>${fmtPctSmall(row.win_rate_pct)}</td><td>${fmtPct(row.avg_result_pct)}</td><td>${fmtNum(row.avg_r_multiple, 4)}</td><td>${fmtDuration(row.avg_duration_seconds)}</td><td>${fmtDuration(row.longest_duration_seconds)}</td><td>${fmtDuration(row.shortest_duration_seconds)}</td><td>${row.instruments ?? '—'}</td></tr>`).join('')
-      }</tbody></table></div>`,
-    );
-    mkSection('Risk & expectancy', metricGrid([
-      ['Avg stop %', fmtPct(g?.risk_expectancy?.avg_stop_pct)],
-      ['Avg stop % winners', fmtPct(g?.risk_expectancy?.avg_stop_pct_winners)],
-      ['Avg stop % losers', fmtPct(g?.risk_expectancy?.avg_stop_pct_losers)],
-      ['Avg target %', fmtPct(g?.risk_expectancy?.avg_target_pct)],
-      ['Avg target % winners', fmtPct(g?.risk_expectancy?.avg_target_pct_winners)],
-      ['Avg target % losers', fmtPct(g?.risk_expectancy?.avg_target_pct_losers)],
-      ['Avg result %', fmtPct(g?.risk_expectancy?.avg_result_pct)],
-      ['Avg result % winners', fmtPct(g?.risk_expectancy?.avg_result_pct_winners)],
-      ['Avg result % losers', fmtPct(g?.risk_expectancy?.avg_result_pct_losers)],
-      ['Avg R', fmtNum(g?.risk_expectancy?.avg_r_multiple, 4)],
-      ['Avg R winners', fmtNum(g?.risk_expectancy?.avg_r_multiple_winners, 4)],
-      ['Avg R losers', fmtNum(g?.risk_expectancy?.avg_r_multiple_losers, 4)],
-      ['Max drawdown', fmtPctSmall(g?.risk_expectancy?.max_drawdown_pct)],
-      ['Avg drawdown', fmtPctSmall(g?.risk_expectancy?.avg_drawdown_pct)],
-      ['Min drawdown', fmtPctSmall(g?.risk_expectancy?.min_drawdown_pct)],
-    ]));
-    mkSection('Duration', metricGrid([
-      ['Overall avg', fmtDuration(g?.duration?.overall_avg_seconds)],
-      ['Overall shortest', fmtDuration(g?.duration?.overall_shortest_seconds)],
-      ['Overall longest', fmtDuration(g?.duration?.overall_longest_seconds)],
-      ['Overall avg winner duration', fmtDuration(g?.duration?.overall_avg_winner_seconds)],
-      ['Overall avg loser duration', fmtDuration(g?.duration?.overall_avg_loser_seconds)],
-      ['Overall longest winner', fmtDuration(g?.duration?.overall_longest_winner_seconds)],
-      ['Overall longest loser', fmtDuration(g?.duration?.overall_longest_loser_seconds)],
-      ['FX avg', fmtDuration(g?.duration?.fx_avg_seconds)],
-      ['FX shortest', fmtDuration(g?.duration?.fx_shortest_seconds)],
-      ['FX longest', fmtDuration(g?.duration?.fx_longest_seconds)],
-      ['FX avg winner duration', fmtDuration(g?.duration?.fx_avg_winner_seconds)],
-      ['FX avg loser duration', fmtDuration(g?.duration?.fx_avg_loser_seconds)],
-      ['FX shortest winner', fmtDuration(g?.duration?.fx_shortest_winner_seconds)],
-      ['FX shortest loser', fmtDuration(g?.duration?.fx_shortest_loser_seconds)],
-      ['FX longest winner', fmtDuration(g?.duration?.fx_longest_winner_seconds)],
-      ['FX longest loser', fmtDuration(g?.duration?.fx_longest_loser_seconds)],
-      ['Crypto avg', fmtDuration(g?.duration?.crypto_avg_seconds)],
-      ['Crypto shortest', fmtDuration(g?.duration?.crypto_shortest_seconds)],
-      ['Crypto longest', fmtDuration(g?.duration?.crypto_longest_seconds)],
-      ['Crypto avg winner duration', fmtDuration(g?.duration?.crypto_avg_winner_seconds)],
-      ['Crypto avg loser duration', fmtDuration(g?.duration?.crypto_avg_loser_seconds)],
-      ['Crypto shortest winner', fmtDuration(g?.duration?.crypto_shortest_winner_seconds)],
-      ['Crypto shortest loser', fmtDuration(g?.duration?.crypto_shortest_loser_seconds)],
-      ['Crypto longest winner', fmtDuration(g?.duration?.crypto_longest_winner_seconds)],
-      ['Crypto longest loser', fmtDuration(g?.duration?.crypto_longest_loser_seconds)],
-    ]));
-    mkSection('Instrument leaders', metricGrid([
-      ['Most wins instrument', g?.leaders?.most_wins_instrument?.symbol || '—'],
-      ['Most losses instrument', g?.leaders?.most_losses_instrument?.symbol || '—'],
-    ]));
+    const byMarket = g?.by_market || {}; // groups.by_market
+    const sec = (title, m) => `<section class="tj-stats-section"><div class="tj-stats-title">${title}</div><table class="tj-stats-table">
+      <tr><td class="tj-stat-label tj-stat-neutral">Trades</td><td class="tj-stat-value">${m?.trades ?? '—'}</td></tr>
+      <tr><td class="tj-stat-label tj-stat-winner">Wins</td><td class="tj-stat-value tj-stat-winner">${m?.wins ?? '—'}</td></tr>
+      <tr><td class="tj-stat-label tj-stat-loser">Losses</td><td class="tj-stat-value tj-stat-loser">${m?.losses ?? '—'}</td></tr>
+      <tr><td class="tj-stat-label tj-stat-winner">Win rate</td><td class="tj-stat-value tj-stat-winner">${fmtPctSmall(m?.win_rate_pct)}</td></tr>
+      <tr><td class="tj-stat-label tj-stat-warning">Max drawdown</td><td class="tj-stat-value tj-stat-warning">${fmtPctSmall(m?.max_drawdown_pct)}</td></tr>
+    </table></section>`;
+    wrap.innerHTML = sec('Overall', byMarket?.overall || g?.overview) + sec('FX', byMarket?.fx || {}) + sec('Crypto', byMarket?.crypto || {}) + `<section class="tj-stats-section"><div class="tj-stats-title">Instrument leaders</div></section>`;
 
   }
 
@@ -1210,12 +1136,14 @@
       const balances = await balancesPromise;
       const nextRows = Array.isArray(journal.items) ? journal.items : [];
       const nextStats = journal.stats || null;
+      const excelOnly = !!journal?.excel_only;
       if (!state.editorOpen && !state.editorDirty && !state.saveInFlight) {
         if (!journalPending) {
           state.rows = nextRows;
           state.stats = nextStats;
         }
         state.diagnostics = diagnostics || null;
+        if (addBtn) addBtn.style.display = excelOnly ? 'none' : '';
       }
 
       persistUiState();

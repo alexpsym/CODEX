@@ -598,9 +598,12 @@ def _trading_journal_uses_local_only_source() -> bool:
 def _trading_journal_local_excel_authoritative() -> bool:
     return _trading_journal_source_mode() == "local"
 
+def _trading_journal_excel_only_mode() -> bool:
+    return _trading_journal_source_mode() == "local"
+
 
 def _trading_journal_broker_refresh_enabled() -> bool:
-    if APP_PROFILE == "journal" and _trading_journal_uses_local_only_source():
+    if _trading_journal_excel_only_mode():
         return TRADING_JOURNAL_BROKER_REFRESH_ENABLED
     return True
 
@@ -4763,6 +4766,8 @@ def _import_trading_journal_from_sources(
     local_files = _list_local_trading_journal_workbooks() if include_local else []
     diagnostics["local_workbooks_seen"] = len(local_files)
     diagnostics["local_workbook_names"] = [p.name for p in local_files]
+    diagnostics["source_mode"] = source_mode
+    diagnostics["local_dir"] = str(TRADING_JOURNAL_LOCAL_DIR)
     ignored_local_workbooks: List[str] = []
     if include_local and (not local_enabled) and local_files:
         ignored_local_workbooks = [p.name for p in local_files]
@@ -4881,6 +4886,7 @@ def _import_trading_journal_from_sources(
     final_rows, sanitize_stats = _sanitize_bybit_demo_rows(final_rows)
     pruned_source_counts: Dict[str, int] = {}
     non_local_rows_pruned = 0
+    stale_rows_removed = 0
     if local_authoritative:
         for row in existing_rows:
             if not isinstance(row, dict):
@@ -4890,6 +4896,7 @@ def _import_trading_journal_from_sources(
                 non_local_rows_pruned += 1
                 pruned_source_counts[src or "unknown"] = pruned_source_counts.get(src or "unknown", 0) + 1
         _set_trading_journal_rows(final_rows)
+        stale_rows_removed = max(0, len(existing_rows) - len(final_rows))
         state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
         if isinstance(state, dict):
             broker_balances = state.get("broker_account_balances")
@@ -4958,6 +4965,10 @@ def _import_trading_journal_from_sources(
             "authoritative_source": "local_excel" if local_authoritative else "",
             "source_enforcement_ok": (True if not local_authoritative else all(str(r.get("source") or "").lower() == "local_excel" for r in persisted_rows if _row_type(r) == "trade")),
             "non_local_rows_pruned": non_local_rows_pruned,
+            "non_excel_rows_removed": non_local_rows_pruned,
+            "stale_rows_removed": stale_rows_removed if local_authoritative else 0,
+            "unmatched_manual_rows_ignored": pruned_source_counts.get("manual", 0),
+            "workbook_rows_imported": imported_rows_total,
             "pruned_source_counts": pruned_source_counts,
             "bybit_demo_workbook_cleared": bybit_demo_workbook_cleared,
             "bybit_demo_rows_purged": bybit_demo_rows_purged,
@@ -6568,7 +6579,9 @@ async def _run_startup_recovery_import_if_needed() -> None:
         result=None,
     )
     oanda_recovery: Dict[str, object] = {}
-    if not _trading_journal_local_excel_authoritative():
+    if _trading_journal_excel_only_mode():
+        _set_trading_journal_sync_state(message="Importing local journal workbooks…")
+    elif not _trading_journal_local_excel_authoritative():
         for account in ("live", "demo"):
             try:
                 oanda_recovery[account] = await _recover_oanda_recent_fills(account)
@@ -6944,14 +6957,15 @@ async def _autostart_scripts() -> None:
         asyncio.create_task(_ensure_trading_journal_dropbox_templates())
     asyncio.create_task(_log_outbound_traffic_summary())
     asyncio.create_task(_start_startup_recovery_import_after_restore())
-    asyncio.create_task(_schedule_daily_trade_history_sync())
+    if not _trading_journal_excel_only_mode():
+        asyncio.create_task(_schedule_daily_trade_history_sync())
     asyncio.create_task(_schedule_monthly_aud_revaluation_sync())
     asyncio.create_task(_poll_pending_webhook_invalidations())
-    if ENABLE_BYBIT_DEMO_JOURNAL and ENABLE_BYBIT_DEMO_CLOSED_PNL_POLL:
+    if (not _trading_journal_excel_only_mode()) and ENABLE_BYBIT_DEMO_JOURNAL and ENABLE_BYBIT_DEMO_CLOSED_PNL_POLL:
         asyncio.create_task(_start_bybit_demo_closed_pnl_poll_after_restore())
     if not ENABLE_BYBIT_DEMO_JOURNAL:
         _purge_bybit_demo_journal_state()
-    if os.getenv("ENABLE_BYBIT_FILL_POLL", "0") == "1":
+    if (not _trading_journal_excel_only_mode()) and os.getenv("ENABLE_BYBIT_FILL_POLL", "0") == "1":
         asyncio.create_task(_poll_bybit_fills())
     if os.getenv("ENABLE_OANDA_FILL_POLL", "0") == "1":
         asyncio.create_task(_start_oanda_fill_poll_after_delay())
@@ -17155,7 +17169,9 @@ def _compute_journal_stats(
             continue
         dt = row.get("close_time") or row.get("open_time")
         ts = _to_ts(dt)
-        bal = _to_float(row.get("balance_after_trade"))
+        bal = _to_float(row.get("analysis_balance_after_trade"))
+        if bal is None:
+            bal = _to_float(row.get("balance_after_trade"))
         if bal is None or not math.isfinite(bal) or bal <= 0 or not math.isfinite(ts):
             continue
 
@@ -17179,14 +17195,20 @@ def _compute_journal_stats(
                 if dd > 0 and math.isfinite(dd):
                     dd_vals.append(dd)
 
+    balance_points = sum(len(v) for v in segments.values())
     if dd_vals:
         max_drawdown_pct = max(dd_vals)
         min_drawdown_pct = min(dd_vals)
         avg_drawdown_pct = sum(dd_vals) / len(dd_vals)
     else:
-        max_drawdown_pct = 0.0
-        min_drawdown_pct = 0.0
-        avg_drawdown_pct = 0.0
+        if balance_points > 0:
+            max_drawdown_pct = 0.0
+            min_drawdown_pct = 0.0
+            avg_drawdown_pct = 0.0
+        else:
+            max_drawdown_pct = None
+            min_drawdown_pct = None
+            avg_drawdown_pct = None
 
     totals = {
             "trades": len(trade_rows),
@@ -19800,6 +19822,9 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
         "generated_at": snapshot.get("generated_at"),
         "cache_version": snapshot.get("cache_version"),
         "snapshot_stale": bool(is_stale),
+        "source_mode": _trading_journal_source_mode(),
+        "local_dir": str(TRADING_JOURNAL_LOCAL_DIR),
+        "excel_only": _trading_journal_excel_only_mode(),
         "warning": "Cached journal shown. Sync required to include latest workbook changes." if is_stale else "",
     }
     _TRADING_JOURNAL_VIEW_CACHE["key"] = "snapshot"
@@ -19818,7 +19843,11 @@ async def trading_journal_diagnostics() -> JSONResponse:
         diagnostics["pending"] = bool(sync_status.get("running") or sync_status.get("ok") is None)
         diagnostics["sync_status"] = sync_status
         return JSONResponse(diagnostics, status_code=202 if diagnostics["pending"] else 503)
-    return JSONResponse(snapshot.get("diagnostics") if isinstance(snapshot.get("diagnostics"), dict) else _build_trading_journal_diagnostics_snapshot())
+    payload = snapshot.get("diagnostics") if isinstance(snapshot.get("diagnostics"), dict) else _build_trading_journal_diagnostics_snapshot()
+    payload["source_mode"] = _trading_journal_source_mode()
+    payload["excel_only"] = _trading_journal_excel_only_mode()
+    payload["local_dir"] = str(TRADING_JOURNAL_LOCAL_DIR)
+    return JSONResponse(payload)
 @app.get("/api/trading-journal/balances")
 async def trading_journal_balances() -> JSONResponse:
     snapshot = _TRADING_JOURNAL_VIEW_CACHE.get("payload") if _TRADING_JOURNAL_VIEW_CACHE.get("key") == "snapshot" else None
@@ -19841,6 +19870,8 @@ async def trading_journal_balances() -> JSONResponse:
 
 @app.post("/api/trading-journal/rows")
 async def trading_journal_create_row(payload: Dict[str, object] = Body(...)) -> JSONResponse:
+    if _trading_journal_excel_only_mode() and str(os.getenv("TRADING_JOURNAL_ALLOW_MANUAL_ROWS", "0")).strip().lower() not in {"1", "true", "yes", "on"}:
+        raise HTTPException(status_code=409, detail="Local Excel-only journal mode only displays trades from local workbook files.")
     normalized = _normalize_trading_journal_edit_payload(payload, for_create=True)
     open_time = normalized.get("open_time")
     close_time = normalized.get("close_time")
