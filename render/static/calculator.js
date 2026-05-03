@@ -336,6 +336,11 @@
       `stop_loss_ticks=${payload.stop_loss_ticks}`,
       `order_type=${payload.order_type}`,
       `side=${payload.side}`,
+      `webhook=${payload.webhook}`,
+      `test=${payload.test}`,
+      `timeframe=${state.timeframe || payload.timeframe || ''}`,
+      `pending_webhook_id=${payload.pending_webhook_id || ''}`,
+      `previous_pending_webhook_id=${payload.previous_pending_webhook_id || ''}`,
     ].join(' ');
   }
 
@@ -515,11 +520,6 @@
       okEl.textContent = 'Webhook JSON copied.';
     } catch (err) {
       errorEl.textContent = `Copy failed: ${err?.message || err}`;
-    } finally {
-      if (seq === state.quoteRequestSeq) {
-        quoteBtn.disabled = false;
-        quoteBtn.textContent = prevLabel;
-      }
     }
   });
   webhookCopyUrlBtn.addEventListener('click', async () => {
@@ -601,6 +601,11 @@
       toggleWebhookPanel(false);
       errorEl.textContent = String(e.message || e);
       renderErrorDebug(e.detail || null);
+    } finally {
+      if (seq === state.quoteRequestSeq) {
+        quoteBtn.disabled = false;
+        quoteBtn.textContent = prevLabel;
+      }
     }
   });
 

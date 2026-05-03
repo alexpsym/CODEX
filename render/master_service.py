@@ -14705,10 +14705,19 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             if not local_override:
                 raise HTTPException(
                     status_code=400,
-                    detail=(
-                        "TradingView webhook payload must be generated on the same public instance that receives it. "
-                        "Use the Render calculator page or set PUBLIC_WEBHOOK_BASE_URL to a reachable same-instance URL."
-                    ),
+                    detail={
+                        "code": "LOCAL_WEBHOOK_UNREACHABLE",
+                        "message": "TradingView webhook mode is not available from localhost/127.0.0.1 unless PUBLIC_WEBHOOK_BASE_URL points to a reachable public URL for this same running instance.",
+                        "debug": {
+                            "webhook": "yes",
+                            "webhook_origin_host": webhook_origin_host,
+                            "webhook_endpoint_url": webhook_endpoint_url,
+                            "public_webhook_base_url": webhook_base_url,
+                            "app_profile": APP_PROFILE,
+                            "app_instance_id": webhook_origin_instance_id,
+                            "resolution": "Use the Render calculator page for Render webhooks, or expose this local instance through a public tunnel and set PUBLIC_WEBHOOK_BASE_URL to that same-instance tunnel URL. Otherwise turn Webhook off and calculate normally.",
+                        },
+                    },
                 )
 
         if asset == "crypto":
