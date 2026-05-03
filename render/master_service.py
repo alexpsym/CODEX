@@ -1277,6 +1277,8 @@ _BYBIT_SYMBOL_LIST_CACHE_TTL_SECONDS = float(
 )
 _BYBIT_INSTRUMENT_CACHE: Dict[str, Dict[str, object]] = {}
 _BYBIT_INSTRUMENT_CACHE_TTL_SECONDS = float(os.getenv("BYBIT_INSTRUMENT_CACHE_TTL_SECONDS", "600"))
+_BYBIT_INSTRUMENT_NEGATIVE_TTL_SECONDS = float(os.getenv("BYBIT_INSTRUMENT_NEGATIVE_TTL_SECONDS", "30"))
+CALCULATOR_QUOTE_TIMEOUT_S = float(os.getenv("CALCULATOR_QUOTE_TIMEOUT_S", "15"))
 _OANDA_AUD_USD_CACHE: Dict[str, object] = {"ts": 0.0, "value": None}
 _OANDA_AUD_USD_CACHE_TTL_SECONDS = float(os.getenv("OANDA_AUD_USD_CACHE_TTL_SECONDS", "20"))
 _BYBIT_CLOSED_PNL_RECOVERY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
@@ -1416,8 +1418,8 @@ def _is_likely_bybit_symbol(value: str) -> bool:
     )
 
 
-async def _bybit_get_async(base_url: str, path: str, params: Dict[str, object]) -> Dict[str, object]:
-    timeout = httpx.Timeout(6.0, connect=2.0, read=6.0, write=6.0, pool=2.0)
+async def _bybit_get_async(base_url: str, path: str, params: Dict[str, object], *, timeout_s: float = 6.0, connect_s: float = 2.0, read_s: Optional[float] = None) -> Dict[str, object]:
+    timeout = httpx.Timeout(timeout_s, connect=connect_s, read=(read_s if read_s is not None else timeout_s), write=timeout_s, pool=2.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         res = await client.get(f"{base_url}{path}", params=params)
     res.raise_for_status()
@@ -1453,6 +1455,23 @@ async def _bybit_avg_7d_turnover_usd_async(
         return None
 
 
+
+
+def _bybit_base_key(base_url: str) -> str:
+    parsed = urlparse(str(base_url or '').strip())
+    host = str(parsed.netloc or parsed.path or '').strip().lower()
+    return host or str(base_url or '').strip().lower()
+
+
+def _bybit_symbol_list_cache_key(base_url: str, category: str) -> str:
+    category_key = category if category in {"linear", "spot", "inverse"} else "linear"
+    return f"{_bybit_base_key(base_url)}:{category_key}"
+
+
+def _bybit_instrument_cache_key(base_url: str, category: str, selector: str, selector_value: str) -> str:
+    category_key = category if category in {"linear", "spot", "inverse"} else "linear"
+    return f"{_bybit_base_key(base_url)}:{category_key}:{selector}:{str(selector_value or '').strip().upper()}"
+
 async def _bybit_fetch_symbols_by_category(base_url: str, category: str) -> List[str]:
     symbols: List[str] = []
     cursor: Optional[str] = None
@@ -1477,7 +1496,8 @@ async def _bybit_fetch_symbols_by_category(base_url: str, category: str) -> List
 
 async def _bybit_get_symbols_by_category_cached(base_url: str, category: str) -> List[str]:
     category_key = category if category in {"linear", "spot", "inverse"} else "linear"
-    entry = _BYBIT_SYMBOL_LIST_CACHE.get(category_key) or {"ts": 0.0, "symbols": []}
+    cache_key = _bybit_symbol_list_cache_key(base_url, category_key)
+    entry = _BYBIT_SYMBOL_LIST_CACHE.get(cache_key) or {"ts": 0.0, "symbols": []}
     now = time.time()
     cached = entry.get("symbols")
     ts = float(entry.get("ts") or 0.0)
@@ -1491,29 +1511,74 @@ async def _bybit_get_symbols_by_category_cached(base_url: str, category: str) ->
             return list(cached)
         raise
 
-    _BYBIT_SYMBOL_LIST_CACHE[category_key] = {"ts": now, "symbols": symbols}
+    _BYBIT_SYMBOL_LIST_CACHE[cache_key] = {"ts": now, "symbols": symbols}
     return list(symbols)
 
 
-async def _bybit_get_instrument_info_cached(base_url: str, category: str, symbol: str) -> Optional[Dict[str, object]]:
+async def _bybit_get_instrument_info_cached(base_url: str, category: str, symbol: str, *, timeout_s: float = 6.0, connect_s: float = 2.0, read_s: Optional[float] = None) -> Optional[Dict[str, object]]:
     category_key = category if category in {"linear", "spot", "inverse"} else "linear"
     symbol_key = str(symbol or "").strip().upper()
     if not symbol_key:
         return None
-    cache_key = f"{category_key}:{symbol_key}"
+    cache_key = _bybit_instrument_cache_key(base_url, category_key, "symbol", symbol_key)
     now = time.time()
     cached = _BYBIT_INSTRUMENT_CACHE.get(cache_key)
-    if cached and (now - float(cached.get("ts") or 0.0)) <= _BYBIT_INSTRUMENT_CACHE_TTL_SECONDS:
+    if cached and (now - float(cached.get("ts") or 0.0)) <= float(cached.get("ttl") or _BYBIT_INSTRUMENT_CACHE_TTL_SECONDS):
         row = cached.get("row")
         return dict(row) if isinstance(row, dict) else None
-    payload = await _bybit_get_async(base_url, "/v5/market/instruments-info", {"category": category_key, "symbol": symbol_key})
+    payload = await _bybit_get_async(base_url, "/v5/market/instruments-info", {"category": category_key, "symbol": symbol_key}, timeout_s=timeout_s, connect_s=connect_s, read_s=read_s)
     items = (payload.get("result") or {}).get("list") or []
     row = dict(items[0]) if isinstance(items, list) and items and isinstance(items[0], dict) else None
     if row:
-        _BYBIT_INSTRUMENT_CACHE[cache_key] = {"ts": now, "row": row}
+        _BYBIT_INSTRUMENT_CACHE[cache_key] = {"ts": now, "ttl": _BYBIT_INSTRUMENT_CACHE_TTL_SECONDS, "row": row}
     else:
-        _BYBIT_INSTRUMENT_CACHE.pop(cache_key, None)
+        _BYBIT_INSTRUMENT_CACHE[cache_key] = {"ts": now, "ttl": _BYBIT_INSTRUMENT_NEGATIVE_TTL_SECONDS, "row": None}
     return row
+
+
+async def _bybit_get_instrument_rows_by_base_cached(base_url: str, category: str, base_coin: str, *, timeout_s: float = 6.0, connect_s: float = 2.0, read_s: Optional[float] = None) -> List[Dict[str, object]]:
+    category_key = category if category in {"linear", "spot", "inverse"} else "linear"
+    base_key = str(base_coin or '').strip().upper()
+    if not base_key:
+        return []
+    cache_key = _bybit_instrument_cache_key(base_url, category_key, "base", base_key)
+    now = time.time()
+    cached = _BYBIT_INSTRUMENT_CACHE.get(cache_key)
+    if cached and (now - float(cached.get("ts") or 0.0)) <= float(cached.get("ttl") or _BYBIT_INSTRUMENT_CACHE_TTL_SECONDS):
+        rows = cached.get("rows")
+        return [dict(r) for r in rows] if isinstance(rows, list) else []
+    payload = await _bybit_get_async(base_url, "/v5/market/instruments-info", {"category": category_key, "baseCoin": base_key}, timeout_s=timeout_s, connect_s=connect_s, read_s=read_s)
+    rows = [dict(r) for r in ((payload.get("result") or {}).get("list") or []) if isinstance(r, dict)]
+    ttl = _BYBIT_INSTRUMENT_CACHE_TTL_SECONDS if rows else _BYBIT_INSTRUMENT_NEGATIVE_TTL_SECONDS
+    _BYBIT_INSTRUMENT_CACHE[cache_key] = {"ts": now, "ttl": ttl, "rows": rows}
+    return rows
+
+
+class CalculatorDependencyTimeout(Exception):
+    def __init__(self, dependency: str, timeout_s: float, elapsed_ms: int, path: Optional[str] = None):
+        self.dependency = dependency
+        self.timeout_s = timeout_s
+        self.elapsed_ms = elapsed_ms
+        self.path = path
+        super().__init__(f"{dependency} timed out after {timeout_s}s")
+
+
+async def _calculator_timed_dependency(name: str, coro: Any, timings_ms: Dict[str, Any], timeout_s: float, path: Optional[str] = None) -> Any:
+    started = time.perf_counter()
+    timings_ms[f"{name}_started"] = True
+    CALCULATOR_LOGGER.info("CALCULATOR_QUOTE_DEPENDENCY_START dependency=%s path=%s", name, path or "")
+    try:
+        result = await asyncio.wait_for(coro, timeout=timeout_s)
+        elapsed = int((time.perf_counter() - started) * 1000)
+        timings_ms[name] = {"elapsed_ms": elapsed, "path": path}
+        CALCULATOR_LOGGER.info("CALCULATOR_QUOTE_DEPENDENCY_DONE dependency=%s elapsed_ms=%s path=%s", name, elapsed, path or "")
+        return result
+    except asyncio.CancelledError:
+        raise
+    except asyncio.TimeoutError as exc:
+        elapsed = int((time.perf_counter() - started) * 1000)
+        timings_ms[name] = {"elapsed_ms": elapsed, "timeout_ms": int(timeout_s*1000), "path": path, "status": "timeout"}
+        raise CalculatorDependencyTimeout(name, timeout_s, elapsed, path) from exc
 
 
 async def _bybit_lookup_symbol(base_url: str, symbol: str) -> Optional[Dict[str, object]]:
@@ -14482,7 +14547,7 @@ async def _bybit_name_aliases_for_choices(base_url: str, symbols: List[str] | Se
     return out
 
 
-async def _fetch_bybit_balance_usdt(account: str) -> Dict[str, Decimal]:
+async def _fetch_bybit_balance_usdt(account: str, timeout_s: float = 5.0) -> Dict[str, Decimal]:
     _mode, api_key, api_secret, base_url, _src = resolve_bybit_credentials_for(account)
     if not api_key or not api_secret:
         raise HTTPException(status_code=500, detail="Bybit credentials are missing for selected account.")
@@ -14493,7 +14558,8 @@ async def _fetch_bybit_balance_usdt(account: str) -> Dict[str, Decimal]:
             api_key=api_key,
             api_secret=api_secret,
             path=path,
-            params={"accountType": "UNIFIED"},
+            params={"accountType": "UNIFIED", "coin": "USDT"},
+            timeout_s=timeout_s,
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Bybit balance lookup failed path={path}: {exc}") from exc
