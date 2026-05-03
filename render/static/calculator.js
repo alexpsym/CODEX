@@ -326,22 +326,23 @@
   }
 
   function renderRequestSummary(payload) {
+    requestSummaryEl.style.whiteSpace = 'pre-wrap';
     requestSummaryEl.textContent = [
       `Submitted payload:`,
       `asset=${payload.asset}`,
       `account=${payload.account}`,
       `symbol=${payload.symbol}`,
+      `webhook=${payload.webhook}`,
+      `test=${payload.test}`,
+      `timeframe=${state.timeframe || payload.timeframe || ''}`,
       `risk_mode=${payload.risk_mode}`,
       `risk_value=${payload.risk_value}`,
       `stop_loss_ticks=${payload.stop_loss_ticks}`,
       `order_type=${payload.order_type}`,
       `side=${payload.side}`,
-      `webhook=${payload.webhook}`,
-      `test=${payload.test}`,
-      `timeframe=${state.timeframe || payload.timeframe || ''}`,
       `pending_webhook_id=${payload.pending_webhook_id || ''}`,
       `previous_pending_webhook_id=${payload.previous_pending_webhook_id || ''}`,
-    ].join(' ');
+    ].join('\n');
   }
 
   async function request(url, opts = {}) {
@@ -557,7 +558,8 @@
     const seq = state.quoteRequestSeq;
     state.hasCalculatedOnce = true;
     const quoteBtn = $('calc-quote');
-    const prevLabel = quoteBtn.textContent;
+    const defaultLabel = quoteBtn.dataset.defaultLabel || quoteBtn.textContent || 'Calculate';
+    quoteBtn.dataset.defaultLabel = defaultLabel;
     quoteBtn.disabled = true;
     quoteBtn.textContent = 'Calculating…';
     invalidateQuote({ status: 'calculating', reason: 'Calculating position…' });
@@ -604,7 +606,7 @@
     } finally {
       if (seq === state.quoteRequestSeq) {
         quoteBtn.disabled = false;
-        quoteBtn.textContent = prevLabel;
+        quoteBtn.textContent = defaultLabel;
       }
     }
   });
