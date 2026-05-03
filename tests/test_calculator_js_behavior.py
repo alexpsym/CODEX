@@ -44,7 +44,13 @@ class MockButton {
     this.dataset = { v };
     this.listeners = {};
     this.classList = { toggle: () => {}, add: () => {}, remove: () => {} };
+    this.disabled = false;
+    this.title = '';
+    this._attrs = {};
   }
+  setAttribute(k,v){ this._attrs[k]=String(v); this[k] = v; }
+  getAttribute(k){ return this._attrs[k]; }
+  removeAttribute(k){ delete this._attrs[k]; }
   addEventListener(evt, cb) { this.listeners[evt] = cb; }
   click() { if (this.listeners.click) this.listeners.click(); }
 }
@@ -181,7 +187,7 @@ const ids = [
   'calc-webhook-panel', 'calc-webhook-url', 'calc-webhook-json', 'calc-webhook-copy', 'calc-webhook-copy-url',
   'risk-toggle', 'calc-risk-label', 'limit-wrap', 'account-toggle', 'asset-toggle', 'side-toggle',
   'order-toggle', 'webhook-toggle', 'test-toggle', 'timeframe-toggle', 'calc-symbol', 'calc-limit',
-  'calc-sl-ticks', 'calc-rr', 'calc-risk', 'calc-quote', 'calc-submit', 'calc-quote-status'
+  'calc-sl-ticks', 'calc-rr', 'calc-risk', 'calc-quote', 'calc-submit', 'calc-quote-status', 'calc-webhook-status'
 ];
 const elements = Object.fromEntries(ids.map((id) => [id, new MockElement(id)]));
 
@@ -300,3 +306,52 @@ eval(source);
 '''
     result = subprocess.run([node, "-e", harness, str(JS_PATH)], check=True, capture_output=True, text=True)
     assert result.stdout.strip().splitlines()[-1] == "ok"
+
+
+def test_webhook_disabled_from_bootstrap_blocks_yes_mode() -> None:
+    node = shutil.which("node")
+    assert node, "node is required for JS behavior test"
+    harness = r'''
+const fs = require('fs'); const source = fs.readFileSync(process.argv[1], 'utf8');
+class E { constructor(id){ this.id=id; this.value=''; this.textContent=''; this.innerHTML=''; this.dataset={}; this.style={}; this.listeners={}; this.buttons=[]; this.classList={toggle:()=>{},add:()=>{},remove:()=>{}}; } addEventListener(e,cb){this.listeners[e]=cb;} querySelectorAll(sel){return sel==='button'?this.buttons:[];} }
+class B { constructor(v){ this.dataset={v}; this.listeners={}; this.classList={toggle:()=>{},add:()=>{},remove:()=>{}}; this.disabled=false; this._attrs={}; } addEventListener(e,cb){this.listeners[e]=cb;} click(){ if(this.listeners.click) this.listeners.click(); } setAttribute(k,v){this._attrs[k]=String(v);} getAttribute(k){return this._attrs[k];} removeAttribute(k){delete this._attrs[k];}}
+const ids=['calc-error','calc-error-debug','calc-success','calc-results','calc-request-summary','calc-canonical-symbol','calc-journal-summary','calc-instrument-specs','risk-toggle-wrap','calc-webhook-panel','calc-webhook-url','calc-webhook-json','calc-webhook-copy','calc-webhook-copy-url','risk-toggle','calc-risk-label','limit-wrap','account-toggle','asset-toggle','side-toggle','order-toggle','webhook-toggle','test-toggle','timeframe-toggle','calc-symbol','calc-limit','calc-sl-ticks','calc-rr','calc-risk','calc-quote','calc-submit','calc-quote-status','calc-webhook-status'];
+const el=Object.fromEntries(ids.map(i=>[i,new E(i)])); const mk=(v)=>v.map(x=>new B(x));
+el['risk-toggle'].buttons=mk(['fixed_aud','percent']); el['asset-toggle'].buttons=mk(['crypto','fx']); el['account-toggle'].buttons=mk(['live','demo']); el['side-toggle'].buttons=mk(['buy','sell']); el['order-toggle'].buttons=mk(['market','limit']); el['webhook-toggle'].buttons=mk(['no','yes']); el['test-toggle'].buttons=mk(['no','yes']); el['timeframe-toggle'].buttons=[];
+el['calc-symbol'].value='BTCUSDT'; el['calc-sl-ticks'].value='10'; el['calc-rr'].value='2'; el['calc-risk'].value='1';
+let quotePayloads=[];
+global.fetch=async (url,opts={})=>{ if(url.includes('/api/calculator/bootstrap')) return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({webhook:{available:false,unavailable_message:'blocked',webhook_origin_host:'127.0.0.1'}})}; if(url.includes('/api/calculator/quote')){ quotePayloads.push(JSON.parse(opts.body||'{}')); return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({broker:'bybit',symbol:'BTCUSDT',tick_size:'1',entry_price:'100',stop_price:'90',target_price:'120',target_distance:'20',quantity:'1',estimated_fees_or_spread:'1',estimated_total_loss:'10',estimated_reward:'20'})}; } return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({status:'no_data'})}; };
+global.document={getElementById:(id)=>el[id]}; global.navigator={clipboard:{writeText:async()=>{}}}; global.setTimeout=(fn)=>{fn();return 1;}; global.clearTimeout=()=>{};
+eval(source);
+(async()=>{ await Promise.resolve(); const yes=el['webhook-toggle'].buttons[1]; yes.click(); await el['calc-quote'].listeners.click(); console.log(JSON.stringify({yesDisabled:yes.disabled,payloadWebhook:quotePayloads[0]?.webhook,panel:el['calc-webhook-panel'].style.display,status:el['calc-webhook-status'].textContent})); })();
+'''
+    result = subprocess.run([node, "-e", harness, str(JS_PATH)], check=True, capture_output=True, text=True)
+    data = json.loads(result.stdout.strip().splitlines()[-1])
+    assert data["yesDisabled"] is True
+    assert data["payloadWebhook"] == "no"
+    assert data["panel"] == "none"
+    assert "unavailable" in data["status"].lower() or "localhost" in data["status"].lower()
+
+
+def test_webhook_enabled_from_bootstrap_allows_yes_mode() -> None:
+    node = shutil.which("node")
+    assert node, "node is required for JS behavior test"
+    harness = r'''
+const fs = require('fs'); const source = fs.readFileSync(process.argv[1], 'utf8');
+class E { constructor(id){ this.id=id; this.value=''; this.textContent=''; this.innerHTML=''; this.dataset={}; this.style={}; this.listeners={}; this.buttons=[]; this.classList={toggle:()=>{},add:()=>{},remove:()=>{}}; } addEventListener(e,cb){this.listeners[e]=cb;} querySelectorAll(sel){return sel==='button'?this.buttons:[];} }
+class B { constructor(v){ this.dataset={v}; this.listeners={}; this.classList={toggle:()=>{},add:()=>{},remove:()=>{}}; this.disabled=false; this._attrs={}; } addEventListener(e,cb){this.listeners[e]=cb;} click(){ if(this.listeners.click) this.listeners.click(); } setAttribute(k,v){this._attrs[k]=String(v);} getAttribute(k){return this._attrs[k];} removeAttribute(k){delete this._attrs[k];}}
+const ids=['calc-error','calc-error-debug','calc-success','calc-results','calc-request-summary','calc-canonical-symbol','calc-journal-summary','calc-instrument-specs','risk-toggle-wrap','calc-webhook-panel','calc-webhook-url','calc-webhook-json','calc-webhook-copy','calc-webhook-copy-url','risk-toggle','calc-risk-label','limit-wrap','account-toggle','asset-toggle','side-toggle','order-toggle','webhook-toggle','test-toggle','timeframe-toggle','calc-symbol','calc-limit','calc-sl-ticks','calc-rr','calc-risk','calc-quote','calc-submit','calc-quote-status','calc-webhook-status'];
+const el=Object.fromEntries(ids.map(i=>[i,new E(i)])); const mk=(v)=>v.map(x=>new B(x));
+el['risk-toggle'].buttons=mk(['fixed_aud','percent']); el['asset-toggle'].buttons=mk(['crypto','fx']); el['account-toggle'].buttons=mk(['live','demo']); el['side-toggle'].buttons=mk(['buy','sell']); el['order-toggle'].buttons=mk(['market','limit']); el['webhook-toggle'].buttons=mk(['no','yes']); el['test-toggle'].buttons=mk(['no','yes']); el['timeframe-toggle'].buttons=[];
+el['calc-symbol'].value='BTCUSDT'; el['calc-sl-ticks'].value='10'; el['calc-rr'].value='2'; el['calc-risk'].value='1';
+let quotePayload;
+global.fetch=async (url,opts={})=>{ if(url.includes('/api/calculator/bootstrap')) return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({webhook:{available:true}})}; if(url.includes('/api/calculator/quote')){ quotePayload=JSON.parse(opts.body||'{}'); return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({broker:'bybit',symbol:'BTCUSDT',tick_size:'1',entry_price:'100',stop_price:'90',target_price:'120',target_distance:'20',quantity:'1',estimated_fees_or_spread:'1',estimated_total_loss:'10',estimated_reward:'20',webhook_payload_json:'{\"a\":1}',pending_webhook_id:'pid-1',webhook_endpoint_url:'https://example.test/api/calculator/webhook'})}; } return {ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({status:'no_data'})}; };
+global.document={getElementById:(id)=>el[id]}; global.navigator={clipboard:{writeText:async()=>{}}}; global.setTimeout=(fn)=>{fn();return 1;}; global.clearTimeout=()=>{};
+eval(source);
+(async()=>{ await Promise.resolve(); await Promise.resolve(); el['webhook-toggle'].buttons[1].disabled=false; el['webhook-toggle'].buttons[1].removeAttribute('aria-disabled'); el['webhook-toggle'].buttons[1].click(); await el['calc-quote'].listeners.click(); console.log(JSON.stringify({webhook:quotePayload?.webhook,panel:el['calc-webhook-panel'].style.display,url:el['calc-webhook-url'].textContent,json:el['calc-webhook-json'].textContent})); })();
+'''
+    result = subprocess.run([node, "-e", harness, str(JS_PATH)], check=True, capture_output=True, text=True)
+    data = json.loads(result.stdout.strip().splitlines()[-1])
+    assert data["webhook"] == "yes"
+    assert data["panel"] == ""
+    assert "https://example.test" in data["url"]
