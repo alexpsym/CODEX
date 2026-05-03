@@ -366,3 +366,8 @@ def test_webhook_stale_runtime_warning_on_old_public_webhook_message() -> None:
     data = json.loads(out.stdout.strip().splitlines()[-1])
     assert data["yesDisabled"] is True
     assert "Stale local server code detected" in data["status"]
+
+
+def test_abort_error_message_fallback_present() -> None:
+    script = JS_PATH.read_text(encoding="utf-8")
+    assert "Quote timed out after 25s" in script
