@@ -1000,23 +1000,54 @@
     wrap.innerHTML = '';
     if (!stats) return;
 
-    const fmtPct = (v) => {
-      const n = asNum(v);
-      return Number.isFinite(n) ? `${fmtNum(n, 4)}%` : '—';
-    };
-
     wrap.style.display = 'block';
     wrap.className = 'tj-stats-dashboard';
     const g = stats?.groups || {};
-    const byMarket = g?.by_market || {}; // groups.by_market
-    const sec = (title, m) => `<section class="tj-stats-section"><div class="tj-stats-title">${title}</div><table class="tj-stats-table">
-      <tr><td class="tj-stat-label tj-stat-neutral">Trades</td><td class="tj-stat-value">${m?.trades ?? '—'}</td></tr>
-      <tr><td class="tj-stat-label tj-stat-winner">Wins</td><td class="tj-stat-value tj-stat-winner">${m?.wins ?? '—'}</td></tr>
-      <tr><td class="tj-stat-label tj-stat-loser">Losses</td><td class="tj-stat-value tj-stat-loser">${m?.losses ?? '—'}</td></tr>
-      <tr><td class="tj-stat-label tj-stat-winner">Win rate</td><td class="tj-stat-value tj-stat-winner">${fmtPctSmall(m?.win_rate_pct)}</td></tr>
-      <tr><td class="tj-stat-label tj-stat-warning">Max drawdown</td><td class="tj-stat-value tj-stat-warning">${fmtPctSmall(m?.max_drawdown_pct)}</td></tr>
-    </table></section>`;
-    wrap.innerHTML = sec('Overall', byMarket?.overall || g?.overview) + sec('FX', byMarket?.fx || {}) + sec('Crypto', byMarket?.crypto || {}) + `<section class="tj-stats-section"><div class="tj-stats-title">Instrument leaders</div></section>`;
+    const byMarket = { ...(g?.by_market || {}) };
+    if (!byMarket.overall || !byMarket.fx || !byMarket.crypto) {
+      (g?.market_breakdown || []).forEach((m) => {
+        const lbl = String(m?.label || '').toLowerCase();
+        if (lbl === 'overall') byMarket.overall = byMarket.overall || m;
+        else if (lbl === 'forex' || lbl === 'fx') byMarket.fx = byMarket.fx || m;
+        else if (lbl === 'crypto') byMarket.crypto = byMarket.crypto || m;
+      });
+    }
+    byMarket.overall = byMarket.overall || g?.overview || stats?.totals || {};
+
+    const row = (label, value, cls='tj-stat-neutral') => `<tr class="tj-stat-row"><td class="tj-stat-label ${cls}">${label}</td><td class="tj-stat-value ${cls}">${value ?? '—'}</td></tr>`;
+    const sec = (title, rows) => `<section class="tj-stats-section"><div class="tj-stats-title">${title}</div><table class="tj-stats-table">${rows.length ? rows.join('') : row('No data', '—')}</table></section>`;
+    const core = (m) => [
+      row('Trades', m?.trades),
+      row('Wins', m?.wins, 'tj-stat-winner'),
+      row('Losses', m?.losses, 'tj-stat-loser'),
+      row('Break-even', m?.break_even),
+      row('Win rate', fmtPctSmall(m?.win_rate_pct), 'tj-stat-winner'),
+      row('Net P/L', fmtNum(m?.net_profit_total, 2), 'tj-stat-positive'),
+      row('Gross gain', fmtNum(m?.gross_gain, 2), 'tj-stat-winner'),
+      row('Gross loss', fmtNum(m?.gross_loss, 2), 'tj-stat-loser'),
+      row('Avg result %', fmtPctSmall(m?.avg_result_pct)),
+      row('Min result %', fmtPctSmall(m?.min_result_pct), 'tj-stat-loser'),
+      row('Max result %', fmtPctSmall(m?.max_result_pct), 'tj-stat-winner'),
+      row('Avg R', fmtR(m?.avg_r_multiple)),
+      row('Min R', fmtR(m?.min_r_multiple), 'tj-stat-loser'),
+      row('Max R', fmtR(m?.max_r_multiple), 'tj-stat-winner'),
+      row('Avg stop %', fmtPctSmall(m?.avg_stop_pct)),
+      row('Avg target %', fmtPctSmall(m?.avg_target_pct)),
+      row('Avg duration', fmtDuration(m?.avg_duration_seconds)),
+    ];
+    const risk = g?.risk_expectancy || stats?.totals || {};
+    const dur = g?.duration || stats?.totals || {};
+    const leaders = g?.leaders || {};
+    wrap.innerHTML = [
+      sec('Overall', core(byMarket.overall)),
+      sec('Winners', [row('Avg stop %', fmtPctSmall(risk?.avg_stop_pct_winners), 'tj-stat-winner'), row('Avg target %', fmtPctSmall(risk?.avg_target_pct_winners), 'tj-stat-winner'), row('Avg result %', fmtPctSmall(risk?.avg_result_pct_winners), 'tj-stat-winner'), row('Avg R', fmtR(risk?.avg_r_multiple_winners), 'tj-stat-winner')]),
+      sec('Losers', [row('Avg stop %', fmtPctSmall(risk?.avg_stop_pct_losers), 'tj-stat-loser'), row('Avg target %', fmtPctSmall(risk?.avg_target_pct_losers), 'tj-stat-loser'), row('Avg result %', fmtPctSmall(risk?.avg_result_pct_losers), 'tj-stat-loser'), row('Avg R', fmtR(risk?.avg_r_multiple_losers), 'tj-stat-loser')]),
+      sec('Drawdown', [row('Max drawdown', fmtPctSmall(risk?.max_drawdown_pct), 'tj-stat-drawdown'), row('Avg drawdown', fmtPctSmall(risk?.avg_drawdown_pct), 'tj-stat-drawdown'), row('Drawdown points', stats?.totals?.drawdown_balance_points), row('Segments', stats?.totals?.drawdown_segments_count)]),
+      sec('Duration', [row('Overall avg', fmtDuration(dur?.overall_avg_seconds)), row('Overall shortest', fmtDuration(dur?.overall_shortest_seconds)), row('Overall longest', fmtDuration(dur?.overall_longest_seconds))]),
+      sec('FX', core(byMarket.fx || {})),
+      sec('Crypto', core(byMarket.crypto || {})),
+      sec('Instrument leaders', [row('Most wins', leaders?.most_wins_instrument?.symbol || '—', 'tj-stat-winner'), row('Most losses', leaders?.most_losses_instrument?.symbol || '—', 'tj-stat-loser')]),
+    ].join('');
 
   }
 

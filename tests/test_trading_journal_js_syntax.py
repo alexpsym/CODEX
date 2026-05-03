@@ -20,3 +20,11 @@ def test_trading_journal_diagnostics_split_balance_anchor_from_parse_sync() -> N
     assert "if (syncResult?.ok === false)" in js
     assert "snapshotError" in js
     assert "Bybit Demo workbook is blank; old Bybit Demo rows purged" in js
+    assert "g?.market_breakdown || []" in js
+    assert "avg_result_pct" in js
+    assert "avg_r_multiple" in js
+    assert "avg_stop_pct_winners" in js
+    assert "avg_stop_pct_losers" in js
+    assert "max_drawdown_pct" in js
+    assert "overall_avg_seconds" in js
+    assert "tj-stats-table" in js
