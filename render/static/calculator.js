@@ -326,17 +326,23 @@
   }
 
   function renderRequestSummary(payload) {
+    requestSummaryEl.style.whiteSpace = 'pre-wrap';
     requestSummaryEl.textContent = [
       `Submitted payload:`,
       `asset=${payload.asset}`,
       `account=${payload.account}`,
       `symbol=${payload.symbol}`,
+      `webhook=${payload.webhook}`,
+      `test=${payload.test}`,
+      `timeframe=${state.timeframe || payload.timeframe || ''}`,
       `risk_mode=${payload.risk_mode}`,
       `risk_value=${payload.risk_value}`,
       `stop_loss_ticks=${payload.stop_loss_ticks}`,
       `order_type=${payload.order_type}`,
       `side=${payload.side}`,
-    ].join(' ');
+      `pending_webhook_id=${payload.pending_webhook_id || ''}`,
+      `previous_pending_webhook_id=${payload.previous_pending_webhook_id || ''}`,
+    ].join('\n');
   }
 
   async function request(url, opts = {}) {
@@ -515,11 +521,6 @@
       okEl.textContent = 'Webhook JSON copied.';
     } catch (err) {
       errorEl.textContent = `Copy failed: ${err?.message || err}`;
-    } finally {
-      if (seq === state.quoteRequestSeq) {
-        quoteBtn.disabled = false;
-        quoteBtn.textContent = prevLabel;
-      }
     }
   });
   webhookCopyUrlBtn.addEventListener('click', async () => {
@@ -557,7 +558,8 @@
     const seq = state.quoteRequestSeq;
     state.hasCalculatedOnce = true;
     const quoteBtn = $('calc-quote');
-    const prevLabel = quoteBtn.textContent;
+    const defaultLabel = quoteBtn.dataset.defaultLabel || quoteBtn.textContent || 'Calculate';
+    quoteBtn.dataset.defaultLabel = defaultLabel;
     quoteBtn.disabled = true;
     quoteBtn.textContent = 'Calculating…';
     invalidateQuote({ status: 'calculating', reason: 'Calculating position…' });
@@ -601,6 +603,11 @@
       toggleWebhookPanel(false);
       errorEl.textContent = String(e.message || e);
       renderErrorDebug(e.detail || null);
+    } finally {
+      if (seq === state.quoteRequestSeq) {
+        quoteBtn.disabled = false;
+        quoteBtn.textContent = defaultLabel;
+      }
     }
   });
 

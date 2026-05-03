@@ -949,7 +949,11 @@ def test_local_calculator_blocks_webhook_without_public_base_url(monkeypatch: py
     with pytest.raises(master_service.HTTPException) as exc:
         asyncio.run(master_service.calculator_quote({"asset": "crypto", "account": "live", "symbol": "BTC", "side": "buy", "order_type": "market", "risk_mode": "percent", "risk_value": 1, "stop_loss_ticks": 1, "take_profit_ticks": 2, "webhook": "yes"}))
     assert exc.value.status_code == 400
-    assert "same public instance" in str(exc.value.detail)
+    assert isinstance(exc.value.detail, dict)
+    assert exc.value.detail.get("code") == "LOCAL_WEBHOOK_UNREACHABLE"
+    debug = exc.value.detail.get("debug") or {}
+    assert debug.get("webhook_origin_host") in {"localhost", "127.0.0.1"}
+    assert "pending_webhook_id" not in debug
 
 
 def test_webhook_missing_pending_id_returns_409_and_attempt_row(monkeypatch: pytest.MonkeyPatch) -> None:
