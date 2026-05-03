@@ -932,6 +932,27 @@ def test_calculator_quote_returns_absolute_webhook_url(monkeypatch: pytest.Monke
     assert body["webhook_endpoint_url"] == "https://codex-rdqh.onrender.com/api/calculator/webhook"
 
 
+def test_calculator_bootstrap_reports_local_webhook_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PUBLIC_WEBHOOK_BASE_URL", raising=False)
+    monkeypatch.delenv("RENDER_EXTERNAL_URL", raising=False)
+    monkeypatch.delenv("ALLOW_LOCAL_TRADINGVIEW_WEBHOOKS", raising=False)
+    response = asyncio.run(master_service.calculator_bootstrap(master_service.Request({"type": "http", "method": "GET", "scheme": "http", "server": ("127.0.0.1", 8000), "path": "/api/calculator/bootstrap", "headers": []})))
+    body = json.loads(response.body.decode("utf-8"))
+    webhook = body["webhook"]
+    assert webhook["available"] is False
+    assert webhook["unavailable_code"] == "LOCAL_WEBHOOK_UNREACHABLE"
+    assert webhook["webhook_origin_host"] in {"localhost", "127.0.0.1"}
+
+
+def test_calculator_bootstrap_reports_public_webhook_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PUBLIC_WEBHOOK_BASE_URL", "https://example-tunnel.test")
+    response = asyncio.run(master_service.calculator_bootstrap(master_service.Request({"type": "http", "method": "GET", "scheme": "http", "server": ("127.0.0.1", 8000), "path": "/api/calculator/bootstrap", "headers": []})))
+    body = json.loads(response.body.decode("utf-8"))
+    webhook = body["webhook"]
+    assert webhook["available"] is True
+    assert webhook["webhook_endpoint_url"] == "https://example-tunnel.test/api/calculator/webhook"
+
+
 def test_local_calculator_blocks_webhook_without_public_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PUBLIC_WEBHOOK_BASE_URL", raising=False)
     monkeypatch.delenv("RENDER_EXTERNAL_URL", raising=False)

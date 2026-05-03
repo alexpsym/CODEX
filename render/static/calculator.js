@@ -17,6 +17,7 @@
     hasCalculatedOnce: false,
     quoteRequestSeq: 0,
     quoteController: null,
+    webhookCapability: null,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -36,6 +37,7 @@
   const webhookCopyUrlBtn = $('calc-webhook-copy-url');
   const submitBtn = $('calc-submit');
   const quoteStatusEl = $('calc-quote-status');
+  const webhookStatusEl = $('calc-webhook-status');
 
   let symbolTimer = null;
   let resolveController = null;
@@ -90,6 +92,9 @@
 
   function setQuoteStatus(text) {
     if (quoteStatusEl) quoteStatusEl.textContent = text || '';
+  }
+  function webhookUnavailableMessage() {
+    return 'TradingView webhook is unavailable on localhost unless you use Render or set PUBLIC_WEBHOOK_BASE_URL to a public same-instance tunnel URL.';
   }
 
   function setSubmitState({ visible, enabled, reason = '', stateName = '' }) {
@@ -431,6 +436,8 @@
     const root = $(id);
     root.querySelectorAll('button').forEach((btn) => {
       btn.addEventListener('click', () => {
+        const ariaDisabled = typeof btn.getAttribute === 'function' ? btn.getAttribute('aria-disabled') : btn.ariaDisabled;
+        if (btn.disabled || ariaDisabled === 'true') return;
         state[key] = btn.dataset.v;
         if (key === 'risk_mode' && state.asset === 'fx') {
           state.fx_risk_mode = state.risk_mode;
@@ -446,6 +453,31 @@
         syncAllToggleStates();
       });
     });
+  }
+
+  async function loadBootstrapCapability() {
+    try {
+      const bootstrap = await request('/api/calculator/bootstrap', { cache: 'no-store' });
+      state.webhookCapability = bootstrap?.webhook || null;
+      const yesBtn = $('webhook-toggle').querySelectorAll('button')[1];
+      if (state.webhookCapability && state.webhookCapability.available === false) {
+        state.webhook_mode = 'no';
+        yesBtn.disabled = true;
+        if (typeof yesBtn.setAttribute === 'function') yesBtn.setAttribute('aria-disabled', 'true');
+        else yesBtn.ariaDisabled = 'true';
+        yesBtn.title = webhookUnavailableMessage();
+        if (webhookStatusEl) webhookStatusEl.textContent = webhookUnavailableMessage();
+      } else {
+        yesBtn.disabled = false;
+        if (typeof yesBtn.removeAttribute === 'function') yesBtn.removeAttribute('aria-disabled');
+        else yesBtn.ariaDisabled = '';
+        yesBtn.title = '';
+        if (webhookStatusEl) webhookStatusEl.textContent = '';
+      }
+    } catch (_err) {
+      state.webhookCapability = null;
+      if (webhookStatusEl) webhookStatusEl.textContent = 'Webhook availability could not be verified; server will validate on calculate.';
+    }
   }
 
   function setTimeframeButtons() {
@@ -564,6 +596,25 @@
     quoteBtn.textContent = 'Calculating…';
     invalidateQuote({ status: 'calculating', reason: 'Calculating position…' });
     try {
+      if (state.webhook_mode === 'yes' && state.webhookCapability && state.webhookCapability.available === false) {
+        const detail = {
+          message: state.webhookCapability.unavailable_message || webhookUnavailableMessage(),
+          debug: {
+            webhook: 'yes',
+            webhook_origin_host: state.webhookCapability.webhook_origin_host,
+            webhook_endpoint_url: state.webhookCapability.webhook_endpoint_url,
+            public_webhook_base_url: state.webhookCapability.public_webhook_base_url,
+            app_profile: state.webhookCapability.app_profile,
+            app_instance_id: state.webhookCapability.app_instance_id,
+            resolution: state.webhookCapability.resolution,
+          },
+        };
+        invalidateQuote({ status: 'error', reason: 'Quote failed. Recalculate before submitting.' });
+        errorEl.textContent = detail.message;
+        renderErrorDebug(detail);
+        toggleWebhookPanel(false);
+        return;
+      }
       const payload = {
         ...state,
         symbol: $('calc-symbol').value,
@@ -648,6 +699,14 @@
   setTimeframeButtons();
   updateRiskUiForAsset();
   syncAllToggleStates();
+  const webhookYesBtn = $('webhook-toggle').querySelectorAll('button')[1];
+  if (webhookYesBtn) {
+    webhookYesBtn.disabled = true;
+    if (typeof webhookYesBtn.setAttribute === 'function') webhookYesBtn.setAttribute('aria-disabled', 'true');
+    else webhookYesBtn.ariaDisabled = 'true';
+    webhookYesBtn.title = 'Checking webhook availability…';
+  }
+  loadBootstrapCapability().finally(syncAllToggleStates);
   setSubmitState({ visible: false, enabled: false, reason: '', stateName: 'idle' });
   toggleWebhookPanel(false);
   setJournalState('idle', 'Type a symbol to load journal summary.');

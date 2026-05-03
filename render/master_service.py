@@ -9921,6 +9921,32 @@ def _public_webhook_base_url(request: Request) -> str:
     return str(request.base_url).rstrip("/")
 
 
+def _calculator_webhook_capability(request: Request) -> Dict[str, object]:
+    webhook_base_url = _public_webhook_base_url(request)
+    webhook_endpoint_url = f"{webhook_base_url}/api/calculator/webhook"
+    parsed_base = urlparse(webhook_base_url if "://" in webhook_base_url else f"https://{webhook_base_url}")
+    webhook_origin_host = str(parsed_base.hostname or "").strip().lower() or None
+    local_override_allowed = str(os.getenv("ALLOW_LOCAL_TRADINGVIEW_WEBHOOKS") or "").strip().lower() in {"1", "true", "yes", "on"}
+    app_instance_id = str(os.getenv("APP_INSTANCE_ID") or os.getenv("RENDER_INSTANCE_ID") or os.getenv("RENDER_SERVICE_ID") or os.getenv("HOSTNAME") or "").strip() or None
+    public_base_configured = bool(os.getenv("PUBLIC_WEBHOOK_BASE_URL", "").strip() or os.getenv("RENDER_EXTERNAL_URL", "").strip())
+    available = not (webhook_origin_host in {"localhost", "127.0.0.1"} and not local_override_allowed)
+    capability: Dict[str, object] = {
+        "available": available,
+        "public_webhook_base_url": webhook_base_url,
+        "webhook_endpoint_url": webhook_endpoint_url,
+        "webhook_origin_host": webhook_origin_host,
+        "app_profile": APP_PROFILE,
+        "app_instance_id": app_instance_id,
+        "public_base_configured": public_base_configured,
+        "local_override_allowed": local_override_allowed,
+    }
+    if not available:
+        capability["unavailable_code"] = "LOCAL_WEBHOOK_UNREACHABLE"
+        capability["unavailable_message"] = "TradingView webhook mode is not available from localhost/127.0.0.1 unless PUBLIC_WEBHOOK_BASE_URL points to a reachable public URL for this same running instance."
+        capability["resolution"] = "Use the Render calculator page for Render webhooks, or expose this local instance through a public tunnel and set PUBLIC_WEBHOOK_BASE_URL to that same-instance tunnel URL. Otherwise turn Webhook off and calculate normally."
+    return capability
+
+
 def _prune_trade_contexts(items: List[Dict[str, object]]) -> List[Dict[str, object]]:
     cutoff = datetime.now(timezone.utc) - timedelta(days=30)
     kept: List[Dict[str, object]] = []
@@ -14238,6 +14264,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
       <div class="row">
         <label>Webhook</label>
         <div class="group toggle" id="webhook-toggle"><button type="button" data-v="no" class="active">No</button><button type="button" data-v="yes">Yes</button></div>
+        <div id="calc-webhook-status" class="muted"></div>
       </div>
       <div class="row">
         <label>Test</label>
@@ -14433,7 +14460,7 @@ async def _cancel_pending_tasks(tasks: List[asyncio.Task[Any]]) -> None:
 
 
 @app.get("/api/calculator/bootstrap")
-async def calculator_bootstrap() -> JSONResponse:
+async def calculator_bootstrap(request: Request) -> JSONResponse:
     return JSONResponse(
         {
             "accounts": ["live", "demo"],
@@ -14441,7 +14468,10 @@ async def calculator_bootstrap() -> JSONResponse:
             "sides": ["buy", "sell"],
             "order_types": ["market", "limit"],
             "risk_modes": ["fixed_aud", "percent"],
-        }
+            "app_profile": APP_PROFILE,
+            "webhook": _calculator_webhook_capability(request),
+        },
+        headers={"cache-control": "no-store, max-age=0"},
     )
 
 
@@ -14688,26 +14718,18 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
         webhook_enabled = webhook_mode in {"yes", "true", "1"}
         quote_started = time.perf_counter()
         timings_ms: Dict[str, int] = {}
-        webhook_base_url = _public_webhook_base_url(request)
-        webhook_endpoint_url = f"{webhook_base_url}/api/calculator/webhook"
-        parsed_base = urlparse(webhook_base_url if "://" in webhook_base_url else f"https://{webhook_base_url}")
-        webhook_origin_host = str(parsed_base.hostname or "").strip().lower() or None
-        webhook_origin_profile = APP_PROFILE
-        webhook_origin_instance_id = str(
-            os.getenv("APP_INSTANCE_ID")
-            or os.getenv("RENDER_INSTANCE_ID")
-            or os.getenv("RENDER_SERVICE_ID")
-            or os.getenv("HOSTNAME")
-            or ""
-        ).strip() or None
-        if webhook_enabled and webhook_origin_host in {"localhost", "127.0.0.1"}:
-            local_override = str(os.getenv("ALLOW_LOCAL_TRADINGVIEW_WEBHOOKS") or "").strip().lower() in {"1", "true", "yes", "on"}
-            if not local_override:
+        webhook_capability = _calculator_webhook_capability(request)
+        webhook_base_url = str(webhook_capability.get("public_webhook_base_url") or "").strip()
+        webhook_endpoint_url = str(webhook_capability.get("webhook_endpoint_url") or "").strip()
+        webhook_origin_host = webhook_capability.get("webhook_origin_host")
+        webhook_origin_profile = webhook_capability.get("app_profile")
+        webhook_origin_instance_id = webhook_capability.get("app_instance_id")
+        if webhook_enabled and not bool(webhook_capability.get("available")):
                 raise HTTPException(
                     status_code=400,
                     detail={
                         "code": "LOCAL_WEBHOOK_UNREACHABLE",
-                        "message": "TradingView webhook mode is not available from localhost/127.0.0.1 unless PUBLIC_WEBHOOK_BASE_URL points to a reachable public URL for this same running instance.",
+                        "message": webhook_capability.get("unavailable_message"),
                         "debug": {
                             "webhook": "yes",
                             "webhook_origin_host": webhook_origin_host,
@@ -14715,7 +14737,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                             "public_webhook_base_url": webhook_base_url,
                             "app_profile": APP_PROFILE,
                             "app_instance_id": webhook_origin_instance_id,
-                            "resolution": "Use the Render calculator page for Render webhooks, or expose this local instance through a public tunnel and set PUBLIC_WEBHOOK_BASE_URL to that same-instance tunnel URL. Otherwise turn Webhook off and calculate normally.",
+                            "resolution": webhook_capability.get("resolution"),
                         },
                     },
                 )
