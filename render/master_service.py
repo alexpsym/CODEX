@@ -2189,7 +2189,6 @@ def _load_trading_journal() -> List[Dict[str, object]]:
         return []
 
     rows: List[Dict[str, object]] = []
-    dropped_invalid_rows: List[Dict[str, object]] = []
     for entry in items:
         if isinstance(entry, dict):
             rows.append(_normalize_journal_profit_fields(entry))
@@ -13065,6 +13064,7 @@ async def _sync_bybit_closed_pnl_window(
             break
 
     rows: List[Dict[str, object]] = []
+    dropped_invalid_rows: List[Dict[str, object]] = []
     tpsl_cache = load_bybit_demo_tpsl_cache() if mode == "demo" else {}
     cursor: Optional[str] = None
     max_seen = start_time
