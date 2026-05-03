@@ -1384,11 +1384,19 @@
       const loadedRows = Number(state?.rows?.length || 0);
       const warnings = Array.isArray(syncResult?.result?.warnings) ? syncResult.result.warnings : [];
       const importedRows = Number(syncResult?.result?.rows_imported || 0);
+      const snapshotError = syncResult?.result?.snapshot_error;
+      if (snapshotError) throw new Error(snapshotError);
       if (parseSyncErrors.length > 0 || (loadedRows <= 0 && importedRows <= 0)) {
         throw new Error(compactErrorMessage(parseSyncErrors[0] ?? diagnosticsErrors[0], 'Sync failed to import workbook rows'));
       }
       const suffix = warnings.length ? ` (warnings: ${warnings.join('; ')})` : '';
-      setStatus(`Sync complete: ${loadedRows} rows loaded${suffix}`);
+      const cleared = Boolean(syncResult?.result?.diagnostics?.bybit_demo_workbook_cleared);
+      const purged = Number(syncResult?.result?.diagnostics?.bybit_demo_rows_purged || 0);
+      if (cleared) {
+        setStatus(`Sync complete: Bybit Demo workbook is blank; old Bybit Demo rows purged (${purged}); ${loadedRows} rows loaded${suffix}`);
+      } else {
+        setStatus(`Sync complete: ${loadedRows} rows loaded${suffix}`);
+      }
     } catch (e) {
       hideLoading();
       setStatus(formatSyncFailureStatus(e));
