@@ -329,8 +329,9 @@
       errorDebugEl.innerHTML = '';
       return;
     }
+    const formatDebugValue = (v) => (v && typeof v === "object" ? `<pre>${JSON.stringify(v, null, 2)}</pre>` : (v ?? "-"));
     const rows = Object.entries(debug)
-      .map(([k, v]) => `<div class="card"><div class="muted">${k}</div><div>${v ?? '-'}</div></div>`)
+      .map(([k, v]) => `<div class="card"><div class="muted">${k}</div><div>${formatDebugValue(v)}</div></div>`)
       .join('');
     errorDebugEl.innerHTML = rows;
   }
@@ -600,7 +601,7 @@
     if (resolveController) resolveController.abort();
     if (journalController) journalController.abort();
     state.quoteController = new AbortController();
-    const quoteTimeoutMs = 20000;
+    const quoteTimeoutMs = 25000;
     const timeoutId = setTimeout(() => state.quoteController && state.quoteController.abort(), quoteTimeoutMs);
     state.quoteRequestSeq += 1;
     const seq = state.quoteRequestSeq;
@@ -669,7 +670,7 @@
     } catch (e) {
       if (e.name === 'AbortError') {
         invalidateQuote({ status: 'error', reason: 'Quote failed. Recalculate before submitting.' });
-        errorEl.textContent = 'Quote timed out after 20s. Slow dependency: unknown unless server returned timings.';
+        errorEl.textContent = 'Quote timed out after 25s. Slow dependency: unknown unless server returned timings. The browser aborted before the server returned diagnostics.';
         return;
       }
       invalidateQuote({ status: 'error', reason: 'Quote failed. Recalculate before submitting.' });
