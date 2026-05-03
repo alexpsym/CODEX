@@ -9256,7 +9256,15 @@ def _is_bybit_open_order(status: Optional[str]) -> bool:
 
 
 async def _bybit_signed_get(
-    *, base_url: str, api_key: str, api_secret: str, path: str, params: Dict[str, str]
+    *,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+    path: str,
+    params: Dict[str, str],
+    timeout_s: float = 10.0,
+    connect_s: float = 2.0,
+    read_s: Optional[float] = None,
 ) -> Dict[str, object]:
     query = _build_bybit_query(params)
     normalized_base = _normalize_bybit_base_url(base_url)
@@ -9278,7 +9286,8 @@ async def _bybit_signed_get(
             "X-BAPI-RECV-WINDOW": recv_window,
             "X-BAPI-SIGN-TYPE": "2",
         }
-        async with httpx.AsyncClient(timeout=10) as client:
+        timeout = httpx.Timeout(timeout_s, connect=connect_s, read=(read_s if read_s is not None else timeout_s), write=timeout_s, pool=2.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.get(url, headers=headers)
         _record_outbound_traffic(
             "bybit",
@@ -12134,7 +12143,8 @@ async def _fetch_oanda_mid_price(
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     url = f"{cfg['base_url'].rstrip('/')}/v3/accounts/{cfg['account_id']}/pricing"
     params = {"instruments": instrument}
-    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+    timeout = httpx.Timeout(timeout_s, connect=connect_s, read=(read_s if read_s is not None else timeout_s), write=timeout_s, pool=2.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         resp = await client.get(url, headers=headers, params=params)
     if resp.status_code >= 400:
         raise ValueError(f"OANDA pricing failed ({resp.status_code}): {resp.text}")
@@ -12159,7 +12169,7 @@ async def _fetch_oanda_mid_price(
 
 
 async def _fetch_oanda_mid_prices_batch(
-    *, cfg: Dict[str, str], instruments: List[str]
+    *, cfg: Dict[str, str], instruments: List[str], timeout_s: float = 10.0, connect_s: float = 2.0, read_s: Optional[float] = None
 ) -> Dict[str, float]:
     unique = sorted({str(item or "").strip().upper() for item in instruments if str(item or "").strip()})
     if not unique:
@@ -12168,7 +12178,8 @@ async def _fetch_oanda_mid_prices_batch(
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     url = f"{cfg['base_url'].rstrip('/')}/v3/accounts/{cfg['account_id']}/pricing"
     params = {"instruments": ",".join(unique)}
-    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+    timeout = httpx.Timeout(timeout_s, connect=connect_s, read=(read_s if read_s is not None else timeout_s), write=timeout_s, pool=2.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         resp = await client.get(url, headers=headers, params=params)
     if resp.status_code >= 400:
         raise ValueError(f"OANDA pricing failed ({resp.status_code}): {resp.text}")
@@ -14560,6 +14571,8 @@ async def _fetch_bybit_balance_usdt(account: str, timeout_s: float = 5.0) -> Dic
             path=path,
             params={"accountType": "UNIFIED", "coin": "USDT"},
             timeout_s=timeout_s,
+            connect_s=2.0,
+            read_s=timeout_s,
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Bybit balance lookup failed path={path}: {exc}") from exc
@@ -14964,7 +14977,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                 cached_val = _OANDA_AUD_USD_CACHE.get("value")
                 if cached_val and (now - float(_OANDA_AUD_USD_CACHE.get("ts") or 0.0)) <= _OANDA_AUD_USD_CACHE_TTL_SECONDS:
                     return {"AUD_USD": float(cached_val)}
-                prices = await _fetch_oanda_mid_prices_batch(cfg=_get_oanda_config("live"), instruments=["AUD_USD"])
+                prices = await _fetch_oanda_mid_prices_batch(cfg=_get_oanda_config("live"), instruments=["AUD_USD"], timeout_s=3.5, connect_s=1.5, read_s=3.0)
                 px = float(prices.get("AUD_USD") or 0.0)
                 if px > 0:
                     _OANDA_AUD_USD_CACHE.update({"ts": now, "value": px})
@@ -14972,7 +14985,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             aud_task = asyncio.create_task(_fetch_aud_usd_cached())
             fee_task = None
             if account != "demo":
-                fee_task = asyncio.create_task(_bybit_signed_get(base_url=base_url, api_key=api_key, api_secret=api_secret, path="/v5/account/fee-rate", params={"category": "linear", "symbol": resolved_symbol}))
+                fee_task = asyncio.create_task(_bybit_signed_get(base_url=base_url, api_key=api_key, api_secret=api_secret, path="/v5/account/fee-rate", params={"category": "linear", "symbol": resolved_symbol}, timeout_s=4.0, connect_s=2.0, read_s=4.0))
             tasks=[inst_task,ticker_task,balance_task,aud_task]+([fee_task] if fee_task else [])
             try:
                 await asyncio.gather(*tasks)

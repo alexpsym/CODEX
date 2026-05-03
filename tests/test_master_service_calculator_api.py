@@ -1303,3 +1303,30 @@ def test_calculator_webhook_direct_dict_call_uses_payload(monkeypatch: pytest.Mo
     body = json.loads(response.body.decode("utf-8"))
     assert response.status_code == 409
     assert body.get("code") == "PENDING_WEBHOOK_NOT_FOUND"
+
+
+def test_bybit_signed_get_signature_supports_timeout_args() -> None:
+    import inspect
+    sig = inspect.signature(master_service._bybit_signed_get)
+    assert "timeout_s" in sig.parameters
+    assert "connect_s" in sig.parameters
+    assert "read_s" in sig.parameters
+
+
+def test_fetch_bybit_balance_usdt_passes_coin_and_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("demo", "k", "s", "https://bybit.test", "KEY1"))
+    calls = {}
+
+    async def fake_signed_get(**kwargs):
+        calls.update(kwargs)
+        return {"result": {"list": [{"totalEquity": "1000", "totalAvailableBalance": "900", "coin": [{"coin": "USDT", "availableToTrade": "900"}]}]}}
+
+    monkeypatch.setattr(master_service, "_bybit_signed_get", fake_signed_get)
+    out = asyncio.run(master_service._fetch_bybit_balance_usdt("demo", timeout_s=5.0))
+    assert out["available_usdt"] == master_service.Decimal("900")
+    assert calls["path"] == "/v5/account/wallet-balance"
+    assert calls["params"]["accountType"] == "UNIFIED"
+    assert calls["params"]["coin"] == "USDT"
+    assert calls["timeout_s"] == 5.0
+    assert calls["connect_s"] == 2.0
+    assert calls["read_s"] == 5.0
