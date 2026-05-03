@@ -101,3 +101,25 @@ def test_compute_journal_stats_winner_loser_splits_and_durations() -> None:
     assert duration["crypto_shortest_loser_seconds"] == 10800
     assert duration["crypto_longest_winner_seconds"] == 1800
     assert duration["crypto_longest_loser_seconds"] == 10800
+    by_market = stats["groups"]["by_market"]
+    assert by_market["overall"]["trades"] == 5
+    assert by_market["fx"]["trades"] == 3
+    assert by_market["crypto"]["trades"] == 2
+    assert isinstance(stats["groups"]["market_breakdown"], list)
+    assert stats["totals"]["gross_gain"] == 30
+    assert stats["totals"]["gross_loss"] == 13
+    assert stats["totals"]["net_profit_total"] == 17
+
+
+def test_compute_journal_stats_drawdown_behaviour() -> None:
+    rows = [
+        {"row_type": "trade", "asset_class": "fx", "symbol": "EURUSD", "net_profit": 1, "analysis_balance_after_trade": 1000, "account": "a", "close_time": "2026-01-01T00:00:00Z"},
+        {"row_type": "trade", "asset_class": "fx", "symbol": "EURUSD", "net_profit": 1, "analysis_balance_after_trade": 1100, "account": "a", "close_time": "2026-01-02T00:00:00Z"},
+        {"row_type": "trade", "asset_class": "fx", "symbol": "EURUSD", "net_profit": -1, "analysis_balance_after_trade": 990, "account": "a", "close_time": "2026-01-03T00:00:00Z"},
+    ]
+    stats = _compute_journal_stats(rows, balances=[])
+    assert stats["totals"]["max_drawdown_pct"] == 10.0
+    single = _compute_journal_stats(rows[:1], balances=[])
+    assert single["totals"]["max_drawdown_pct"] is None
+    flat = _compute_journal_stats(rows[:2], balances=[])
+    assert flat["totals"]["max_drawdown_pct"] == 0.0

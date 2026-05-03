@@ -15964,6 +15964,16 @@ async def trading_journal_page() -> str:
     .loading-panel { width:min(520px, calc(100% - 32px)); background:#111827; border:1px solid #1f2937; border-radius:14px; padding:16px; }
     .loading-bar { height:10px; background:#0f172a; border:1px solid #1f2937; border-radius:999px; overflow:hidden; }
     #tj-loading-bar { height:100%; width:0%; background:#2563eb; }
+    .tj-stats-dashboard { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 420px)); gap:8px; align-items:start; margin-bottom:10px; }
+    .tj-stats-section { background:#0f172a; border:1px solid #1f2937; border-radius:10px; padding:6px 8px; }
+    .tj-stats-title { font-size:12px; font-weight:700; color:#93c5fd; margin-bottom:4px; letter-spacing:.02em; }
+    .tj-stats-table { width:100%; min-width:0; table-layout:fixed; border-collapse:collapse; }
+    .tj-stat-row td { padding:4px 8px; font-size:12px; line-height:1.2; border-bottom:1px solid #1f2937; white-space:nowrap; }
+    .tj-stat-label { color:#cbd5e1; overflow:hidden; text-overflow:ellipsis; }
+    .tj-stat-value { text-align:right; font-variant-numeric:tabular-nums; }
+    .tj-stat-positive, .tj-stat-winner { color:#86efac; }
+    .tj-stat-negative, .tj-stat-loser, .tj-stat-drawdown { color:#fca5a5; }
+    .tj-stat-neutral { color:#cbd5e1; }
   </style>
 </head>
 <body>
@@ -16879,6 +16889,10 @@ def _compute_journal_stats(
     def _metric_values(rows_subset: List[Dict[str, object]], key: str) -> List[float]:
         vals = [_to_float(r.get(key)) for r in rows_subset]
         return [v for v in vals if v is not None]
+    def _safe_min(vals: List[float]) -> Optional[float]:
+        return min(vals) if vals else None
+    def _safe_max(vals: List[float]) -> Optional[float]:
+        return max(vals) if vals else None
 
     def _stop_pct_values(rows_subset: List[Dict[str, object]]) -> List[float]:
         out: List[float] = []
@@ -17184,8 +17198,14 @@ def _compute_journal_stats(
         segments[(account_key, anchor_id)].append((ts, bal))
 
     dd_vals: List[float] = []
+    dd_segment_count = 0
+    dd_balance_points = 0
     for pts in segments.values():
         pts_sorted = sorted(pts, key=lambda x: x[0])
+        if len(pts_sorted) < 2:
+            continue
+        dd_segment_count += 1
+        dd_balance_points += len(pts_sorted)
         peak: Optional[float] = None
         for _, bal in pts_sorted:
             if peak is None or bal > peak:
@@ -17195,13 +17215,12 @@ def _compute_journal_stats(
                 if dd > 0 and math.isfinite(dd):
                     dd_vals.append(dd)
 
-    balance_points = sum(len(v) for v in segments.values())
     if dd_vals:
         max_drawdown_pct = max(dd_vals)
         min_drawdown_pct = min(dd_vals)
         avg_drawdown_pct = sum(dd_vals) / len(dd_vals)
     else:
-        if balance_points > 0:
+        if dd_segment_count > 0:
             max_drawdown_pct = 0.0
             min_drawdown_pct = 0.0
             avg_drawdown_pct = 0.0
@@ -17210,6 +17229,10 @@ def _compute_journal_stats(
             min_drawdown_pct = None
             avg_drawdown_pct = None
 
+    pnl_vals = [_row_pnl(r) for r in trade_rows]
+    pnl_vals = [v for v in pnl_vals if v is not None]
+    gains = [v for v in pnl_vals if v > 0]
+    losses_abs = [abs(v) for v in pnl_vals if v < 0]
     totals = {
             "trades": len(trade_rows),
             "wins": sum(1 for row in trade_rows if _is_win(row)),
@@ -17232,6 +17255,14 @@ def _compute_journal_stats(
             "avg_profit_pct": _avg(result_pct_vals),
             "avg_result_pct": _avg(result_pct_vals),
             "avg_r_multiple": _avg(r_mult_vals),
+            "min_result_pct": _safe_min(result_pct_vals),
+            "max_result_pct": _safe_max(result_pct_vals),
+            "min_r_multiple": _safe_min(r_mult_vals),
+            "max_r_multiple": _safe_max(r_mult_vals),
+            "min_stop_pct": _safe_min(all_sl_pct),
+            "max_stop_pct": _safe_max(all_sl_pct),
+            "min_target_pct": _safe_min(all_tp_pct),
+            "max_target_pct": _safe_max(all_tp_pct),
             "avg_stop_pct_winners": _avg(_stop_pct_values(winner_rows)),
             "avg_stop_pct_losers": _avg(_stop_pct_values(loser_rows)),
             "avg_target_pct_winners": _avg(_target_pct_values(winner_rows)),
@@ -17240,6 +17271,31 @@ def _compute_journal_stats(
             "avg_result_pct_losers": _avg(_metric_values(loser_rows, "result_pct")),
             "avg_r_multiple_winners": _avg(_metric_values(winner_rows, "r_multiple")),
             "avg_r_multiple_losers": _avg(_metric_values(loser_rows, "r_multiple")),
+            "min_result_pct_winners": _safe_min(_metric_values(winner_rows, "result_pct")),
+            "max_result_pct_winners": _safe_max(_metric_values(winner_rows, "result_pct")),
+            "min_result_pct_losers": _safe_min(_metric_values(loser_rows, "result_pct")),
+            "max_result_pct_losers": _safe_max(_metric_values(loser_rows, "result_pct")),
+            "min_r_multiple_winners": _safe_min(_metric_values(winner_rows, "r_multiple")),
+            "max_r_multiple_winners": _safe_max(_metric_values(winner_rows, "r_multiple")),
+            "min_r_multiple_losers": _safe_min(_metric_values(loser_rows, "r_multiple")),
+            "max_r_multiple_losers": _safe_max(_metric_values(loser_rows, "r_multiple")),
+            "min_stop_pct_winners": _safe_min(_stop_pct_values(winner_rows)),
+            "max_stop_pct_winners": _safe_max(_stop_pct_values(winner_rows)),
+            "min_stop_pct_losers": _safe_min(_stop_pct_values(loser_rows)),
+            "max_stop_pct_losers": _safe_max(_stop_pct_values(loser_rows)),
+            "min_target_pct_winners": _safe_min(_target_pct_values(winner_rows)),
+            "max_target_pct_winners": _safe_max(_target_pct_values(winner_rows)),
+            "min_target_pct_losers": _safe_min(_target_pct_values(loser_rows)),
+            "max_target_pct_losers": _safe_max(_target_pct_values(loser_rows)),
+            "net_profit_total": sum(pnl_vals) if pnl_vals else None,
+            "gross_gain": sum(gains) if gains else None,
+            "gross_loss": sum(losses_abs) if losses_abs else None,
+            "avg_gain": _avg(gains),
+            "avg_loss": _avg(losses_abs),
+            "max_gain": _safe_max(gains),
+            "max_loss": _safe_max(losses_abs),
+            "min_gain": _safe_min(gains),
+            "min_loss": _safe_min(losses_abs),
             "avg_duration_seconds": _avg(all_durations),
             "avg_winner_duration_seconds": _avg(winner_durations),
             "avg_loser_duration_seconds": _avg(loser_durations),
@@ -17271,6 +17327,8 @@ def _compute_journal_stats(
             "max_drawdown_pct": max_drawdown_pct,
             "min_drawdown_pct": min_drawdown_pct,
             "avg_drawdown_pct": avg_drawdown_pct,
+            "drawdown_balance_points": dd_balance_points,
+            "drawdown_segments_count": dd_segment_count,
             "unique_instruments": len(unique_symbols),
             "crypto_instruments": len(crypto_symbols),
             "fx_instruments": len(fx_symbols),
@@ -17286,18 +17344,45 @@ def _compute_journal_stats(
         wins = sum(1 for r in rows_subset if _is_win(r))
         losses = sum(1 for r in rows_subset if _is_loss(r))
         denom_local = wins + losses
+        pnl = [_row_pnl(r) for r in rows_subset]
+        pnl = [v for v in pnl if v is not None]
+        gains_local = [v for v in pnl if v > 0]
+        losses_local = [abs(v) for v in pnl if v < 0]
+        result_vals = _metric_values(rows_subset, "result_pct")
+        r_vals = _metric_values(rows_subset, "r_multiple")
+        stop_vals = _stop_pct_values(rows_subset)
+        target_vals = _target_pct_values(rows_subset)
         return {
             "label": label,
             "trades": len(rows_subset),
             "wins": wins,
             "losses": losses,
+            "break_even": sum(1 for r in rows_subset if _is_be(r)),
             "win_rate_pct": (wins / denom_local * 100.0) if denom_local else None,
-            "avg_result_pct": _avg([_to_float(r.get("result_pct")) for r in rows_subset if _to_float(r.get("result_pct")) is not None]),
-            "avg_r_multiple": _avg([_to_float(r.get("r_multiple")) for r in rows_subset if _to_float(r.get("r_multiple")) is not None]),
+            "net_profit_total": sum(pnl) if pnl else None,
+            "gross_gain": sum(gains_local) if gains_local else None,
+            "gross_loss": sum(losses_local) if losses_local else None,
+            "avg_gain": _avg(gains_local),
+            "avg_loss": _avg(losses_local),
+            "max_gain": _safe_max(gains_local),
+            "max_loss": _safe_max(losses_local),
+            "avg_result_pct": _avg(result_vals),
+            "min_result_pct": _safe_min(result_vals),
+            "max_result_pct": _safe_max(result_vals),
+            "avg_r_multiple": _avg(r_vals),
+            "min_r_multiple": _safe_min(r_vals),
+            "max_r_multiple": _safe_max(r_vals),
+            "avg_stop_pct": _avg(stop_vals),
+            "min_stop_pct": _safe_min(stop_vals),
+            "max_stop_pct": _safe_max(stop_vals),
+            "avg_target_pct": _avg(target_vals),
+            "min_target_pct": _safe_min(target_vals),
+            "max_target_pct": _safe_max(target_vals),
             "avg_duration_seconds": _avg(durations),
             "longest_duration_seconds": max(durations) if durations else None,
             "shortest_duration_seconds": min(durations) if durations else None,
             "instruments": len({str(r.get("symbol") or "").strip() for r in rows_subset if str(r.get("symbol") or "").strip()}),
+            "max_drawdown_pct": totals.get("max_drawdown_pct") if label == "Overall" else None,
         }
 
     return {
@@ -17336,6 +17421,11 @@ def _compute_journal_stats(
                 _market_bucket(fx_rows, "Forex"),
                 _market_bucket(crypto_rows, "Crypto"),
             ],
+            "by_market": {
+                "overall": _market_bucket(trade_rows, "Overall"),
+                "fx": _market_bucket(fx_rows, "Forex"),
+                "crypto": _market_bucket(crypto_rows, "Crypto"),
+            },
             "risk_expectancy": {
                 "avg_stop_pct": totals.get("avg_stop_pct"),
                 "avg_target_pct": totals.get("avg_target_pct"),
