@@ -953,6 +953,16 @@ def test_calculator_bootstrap_reports_public_webhook_available(monkeypatch: pyte
     assert webhook["webhook_endpoint_url"] == "https://example-tunnel.test/api/calculator/webhook"
 
 
+def test_calculator_bootstrap_reports_remote_render_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
+    monkeypatch.setenv("RENDER_CALCULATOR_BASE_URL", "https://render.example.test")
+    response = asyncio.run(master_service.calculator_bootstrap(master_service.Request({"type": "http", "method": "GET", "scheme": "http", "server": ("127.0.0.1", 8000), "path": "/api/calculator/bootstrap", "headers": []})))
+    webhook = json.loads(response.body.decode("utf-8"))["webhook"]
+    assert webhook["available"] is True
+    assert webhook["mode"] == "remote_render"
+    assert webhook["webhook_endpoint_url"] == "https://render.example.test/api/calculator/webhook"
+
+
 def test_local_calculator_blocks_webhook_without_public_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PUBLIC_WEBHOOK_BASE_URL", raising=False)
     monkeypatch.delenv("RENDER_EXTERNAL_URL", raising=False)
@@ -975,6 +985,34 @@ def test_local_calculator_blocks_webhook_without_public_base_url(monkeypatch: py
     debug = exc.value.detail.get("debug") or {}
     assert debug.get("webhook_origin_host") in {"localhost", "127.0.0.1"}
     assert "pending_webhook_id" not in debug
+
+
+def test_local_webhook_quote_proxies_to_remote_render(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RENDER_CALCULATOR_BASE_URL", "https://render.example.test")
+    monkeypatch.setattr(master_service, "_calculator_webhook_capability", lambda _r: {"available": True, "mode": "remote_render"})
+    called = {"upsert": 0}
+    monkeypatch.setattr(master_service, "_upsert_pending_webhook", lambda _payload: called.__setitem__("upsert", called["upsert"] + 1))
+
+    class _Resp:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        def json(self):
+            return {"pending_webhook_id": "rid-1", "webhook_payload_json": "{\"a\":1}", "webhook_endpoint_url": "https://render.example.test/api/calculator/webhook"}
+
+    class _Client:
+        def __init__(self, *args, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, exc_type, exc, tb): return False
+        async def post(self, *_args, **_kwargs): return _Resp()
+
+    monkeypatch.setattr(master_service.httpx, "AsyncClient", _Client)
+    request = master_service.Request({"type": "http", "method": "POST", "scheme": "http", "server": ("127.0.0.1", 8000), "client": ("127.0.0.1", 1234), "path": "/api/calculator/quote", "headers": []})
+    response = asyncio.run(master_service.calculator_quote(request, {"asset": "crypto", "account": "live", "symbol": "BTC", "side": "buy", "order_type": "market", "risk_mode": "percent", "risk_value": 1, "stop_loss_ticks": 1, "take_profit_ticks": 2, "webhook": "yes"}))
+    body = json.loads(response.body.decode("utf-8"))
+    assert response.status_code == 200
+    assert body["pending_webhook_owner"] == "remote_render"
+    assert body["pending_webhook_delete_url"].startswith("/api/calculator/remote-pending-webhooks/")
+    assert called["upsert"] == 0
 
 
 def test_webhook_missing_pending_id_returns_409_and_attempt_row(monkeypatch: pytest.MonkeyPatch) -> None:
