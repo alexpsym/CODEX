@@ -71,7 +71,11 @@ goto wait_for_scanner_ready
 
 :scanner_ready
 echo [local-master] scanner ready after !SCANNER_READY_WAITED! seconds.
-start "" "%MASTER_URL%"
+call "%ROOT%tools\open_edge_url.bat" "%MASTER_URL%"
+if errorlevel 1 (
+  echo [local-master] ERROR: failed to open Microsoft Edge for %MASTER_URL%.
+  exit /b 1
+)
 echo Local master control launch requested with scanner autostart supervision.
 exit /b 0
 
