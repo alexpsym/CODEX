@@ -1261,3 +1261,45 @@ def test_oanda_nzdusd_35_ticks_fixed_aud_10_demo_flat_account_quotes_successfull
     })).body.decode("utf-8"))
     assert body["symbol"] == "NZD_USD"
     assert float(body["estimated_initial_margin_home"]) < 1513.09
+
+def test_calculator_quote_bybit_success_has_no_logger_nameerror(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("demo", "k", "s", "https://bybit.test", "KEY1"))
+    monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["LABUSDT"]))
+    monkeypatch.setattr(master_service, "_fetch_oanda_mid_prices_batch", lambda **_kwargs: asyncio.sleep(0, result={"AUD_USD": 1}))
+
+    async def fake_get(_base, path, _params):
+        if path.endswith("instruments-info"):
+            return {"result": {"list": [{"priceFilter": {"tickSize": "0.0001"}, "lotSizeFilter": {"qtyStep": "1", "minOrderQty": "1", "maxOrderQty": "999999", "maxMktOrderQty": "999999", "minNotionalValue": "1"}, "leverageFilter": {"maxLeverage": "10"}}]}}
+        return {"result": {"list": [{"bid1Price": "1.0000", "ask1Price": "1.0002", "lastPrice": "1.0001"}]}}
+
+    monkeypatch.setattr(master_service, "_bybit_get_async", fake_get)
+    monkeypatch.setattr(master_service, "_bybit_signed_get", lambda **_kwargs: asyncio.sleep(0, result={"result": {"list": [{"makerFeeRate": "0", "takerFeeRate": "0"}]}}))
+    monkeypatch.setattr(master_service, "_fetch_bybit_balance_usdt", lambda *_args, **_kwargs: asyncio.sleep(0, result={"available_usdt": "1000", "total_equity": "1000"}))
+
+    response = asyncio.run(master_service.calculator_quote({"asset": "crypto", "account": "demo", "symbol": "LAB", "side": "sell", "order_type": "market", "risk_mode": "percent", "risk_value": 1, "stop_loss_ticks": 10, "take_profit_ticks": 20}))
+    assert isinstance(response, master_service.JSONResponse)
+    body = json.loads(response.body.decode("utf-8"))
+    assert body["broker"] == "bybit"
+    for k in ("quantity", "entry_price", "stop_price", "target_price"):
+        assert k in body
+
+
+def test_calculator_quote_oanda_success_has_no_logger_nameerror(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "_get_oanda_config", lambda _a: {"base_url": "https://oanda.test", "account_id": "acct", "token": "tok"})
+    monkeypatch.setattr(master_service, "_fetch_oanda_instrument_meta", lambda **_kwargs: asyncio.sleep(0, result={"displayPrecision": 5, "tradeUnitsPrecision": 0, "minimumTradeSize": "1", "marginRate": "0.05"}))
+    monkeypatch.setattr(master_service, "_fetch_oanda_json", lambda **_kwargs: asyncio.sleep(0, result={"prices": [{"bids": [{"price": "1.10000"}], "asks": [{"price": "1.10020"}]}], "homeConversions": [{"currency": "USD", "accountGain": "1", "accountLoss": "1", "positionValue": "1"}]}))
+    monkeypatch.setattr(master_service, "_fetch_oanda_account_summary", lambda _a: asyncio.sleep(0, result={"currency": "USD", "nav": 1000, "marginAvailable": 1000, "marginRate": 0.05}))
+    monkeypatch.setattr(master_service, "_fetch_oanda_mid_prices_batch", lambda **_kwargs: asyncio.sleep(0, result={"AUD_USD": 1}))
+
+    response = asyncio.run(master_service.calculator_quote({"asset": "fx", "account": "demo", "symbol": "eurusd", "side": "buy", "order_type": "market", "risk_mode": "fixed_aud", "risk_value": 10, "stop_loss_ticks": 10, "take_profit_ticks": 20}))
+    assert isinstance(response, master_service.JSONResponse)
+    body = json.loads(response.body.decode("utf-8"))
+    assert body["broker"] == "oanda"
+
+
+def test_calculator_webhook_direct_dict_call_uses_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "_assert_pending_webhook_executable", lambda _p: (_ for _ in ()).throw(ValueError("Pending webhook missing or no longer active.")))
+    response = asyncio.run(master_service.calculator_webhook({"asset": "crypto", "pending_webhook_id": "bogus", "symbol": "BTCUSDT", "action": "buy", "order_type": "market", "quantity": "0.01"}))
+    body = json.loads(response.body.decode("utf-8"))
+    assert response.status_code == 409
+    assert body.get("code") == "PENDING_WEBHOOK_NOT_FOUND"

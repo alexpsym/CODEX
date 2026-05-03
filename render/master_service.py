@@ -10371,6 +10371,7 @@ def _oanda_credentials(mode: str) -> Dict[str, str]:
     }
 BALANCE_LOGGER = logging.getLogger("uvicorn.error")
 BYBIT_LOGGER = logging.getLogger("uvicorn.error")
+CALCULATOR_LOGGER = logging.getLogger("uvicorn.error")
 _OUTBOUND_METRICS_LOCK = threading.Lock()
 _OUTBOUND_METRICS: Dict[str, Dict[str, object]] = {}
 
@@ -14703,7 +14704,7 @@ async def calculator_journal_summary(asset: str, symbol: str) -> JSONResponse:
 
 @app.post("/api/calculator/quote")
 async def calculator_quote(request: Request, payload: Dict[str, object] = Body(default={})) -> JSONResponse:
-    if isinstance(request, dict) and (not payload):
+    if isinstance(request, dict) and (not isinstance(payload, dict) or not payload):
         payload = request
         request = Request(
             {
@@ -15057,7 +15058,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
 
             response_payload["quote_latency_ms"] = int((time.perf_counter() - quote_started) * 1000)
             response_payload["upstream_timings_ms"] = timings_ms
-            logger.info("CALCULATOR_QUOTE_TIMING asset=%s account=%s symbol=%s total_ms=%s timings=%s", asset, account, resolved_symbol, response_payload["quote_latency_ms"], timings_ms)
+            CALCULATOR_LOGGER.info("CALCULATOR_QUOTE_TIMING asset=%s account=%s symbol=%s total_ms=%s timings=%s", asset, account, resolved_symbol, response_payload["quote_latency_ms"], timings_ms)
             return JSONResponse(response_payload)
 
         if asset == "fx":
@@ -15300,7 +15301,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                 _delete_pending_webhook(previous_pending_id)
             response_payload["quote_latency_ms"] = int((time.perf_counter() - quote_started) * 1000)
             response_payload["upstream_timings_ms"] = timings_ms
-            logger.info("CALCULATOR_QUOTE_TIMING asset=%s account=%s symbol=%s total_ms=%s timings=%s", asset, account, symbol, response_payload["quote_latency_ms"], timings_ms)
+            CALCULATOR_LOGGER.info("CALCULATOR_QUOTE_TIMING asset=%s account=%s symbol=%s total_ms=%s timings=%s", asset, account, symbol, response_payload["quote_latency_ms"], timings_ms)
             return JSONResponse(response_payload)
 
         raise HTTPException(status_code=400, detail="asset must be crypto or fx.")
@@ -15359,7 +15360,7 @@ def _get_oanda_quote_home_factors(
 
 @app.post("/api/calculator/webhook")
 async def calculator_webhook(request: Request, payload: Dict[str, object] = Body(default={})) -> JSONResponse:
-    if isinstance(request, dict) and (not payload):
+    if isinstance(request, dict) and (not isinstance(payload, dict) or not payload):
         payload = request
         request = Request(
             {
