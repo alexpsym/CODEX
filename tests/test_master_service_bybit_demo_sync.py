@@ -520,6 +520,88 @@ def test_sync_bybit_closed_pnl_window_stale_context_does_not_raise(monkeypatch) 
     assert statuses[-1].get("last_error") is None
 
 
+def test_sync_bybit_closed_pnl_window_quarantines_invalid_time_row(monkeypatch) -> None:
+    statuses = []
+    upsert_calls = []
+    workbook_calls = []
+    monkeypatch.setattr(master_service, "_resolve_trading_journal_dropbox_folder", lambda: ("/tmp", []))
+    monkeypatch.setattr(master_service, "_ensure_bybit_demo_dropbox_files", lambda _folder: None)
+
+    async def fake_empty_payload(**_kwargs):
+        return {"result": {"list": []}}
+
+    monkeypatch.setattr(master_service, "_fetch_bybit_order_history", fake_empty_payload)
+    monkeypatch.setattr(master_service, "_fetch_bybit_order_realtime", fake_empty_payload)
+    monkeypatch.setattr(master_service, "_fetch_bybit_transaction_log", fake_empty_payload)
+    monkeypatch.setattr(master_service, "_fetch_bybit_executions", lambda **_kwargs: [])
+    monkeypatch.setattr(master_service, "_record_bybit_demo_sync_status", lambda **kwargs: statuses.append(kwargs))
+    monkeypatch.setattr(master_service, "_upsert_trade_context", lambda payload: payload)
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setattr(master_service, "load_bybit_demo_tpsl_cache", lambda: {})
+
+    def fake_upsert(rows):
+        upsert_calls.append(rows)
+        return len(rows)
+
+    monkeypatch.setattr(master_service, "_upsert_trading_journal_rows", fake_upsert)
+    monkeypatch.setattr(master_service, "_append_bybit_demo_rows_to_workbook", lambda *_args, **_kwargs: workbook_calls.append(_args) or 0)
+
+    async def fake_closed_pnl(**_kwargs):
+        return {
+            "result": {
+                "list": [
+                    {
+                        "symbol": "HYPERUSDT",
+                        "orderId": "oid-quarantine",
+                        "orderLinkId": "",
+                        "side": "Buy",
+                        "createdTime": 1_775_884_246_000,
+                        "updatedTime": 1_775_884_246_000,
+                        "avgEntryPrice": "100",
+                        "avgExitPrice": "101",
+                        "closedSize": "1",
+                        "closedPnl": "1",
+                        "openFee": "0",
+                        "closeFee": "0",
+                    }
+                ]
+            }
+        }
+
+    monkeypatch.setattr(master_service, "_fetch_bybit_closed_pnl", fake_closed_pnl)
+    monkeypatch.setattr(
+        master_service,
+        "_load_trade_contexts",
+        lambda: [{"order_id": "oid-quarantine", "open_time": "2026-04-11T06:10:46+00:00"}],
+    )
+
+    asyncio.run(
+        master_service._sync_bybit_closed_pnl_window(
+            account_mode="demo",
+            base_url="u",
+            api_key="k",
+            api_secret="s",
+            start_time=0,
+            end_time=3000,
+        )
+    )
+
+    assert statuses
+    status = statuses[-1]
+    assert status.get("last_error") is None
+    assert status.get("last_invalid_time_rows_dropped") == 1
+    dropped = status.get("last_invalid_time_row_details") or []
+    assert len(dropped) == 1
+    assert dropped[0]["symbol"] == "HYPERUSDT"
+    assert dropped[0]["side"] == "Buy"
+    assert dropped[0]["orderId"] == "oid-quarantine"
+    assert dropped[0]["open_time"] == "2026-04-11T06:10:46+00:00"
+    assert dropped[0]["close_time"] == "2026-04-11T05:10:46+00:00"
+    assert dropped[0]["reason"] == "invalid_time_order"
+    assert upsert_calls == []
+    assert workbook_calls == []
+
+
 def test_sync_records_broker_balance_warning_without_failing_import(monkeypatch) -> None:
     monkeypatch.setattr(master_service, "ENABLE_BYBIT_DEMO_JOURNAL", True)
     monkeypatch.setattr(master_service, "_run_bybit_closed_pnl_sync", lambda **_kwargs: asyncio.sleep(0, result={"ok": True}))
