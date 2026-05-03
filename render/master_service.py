@@ -869,6 +869,9 @@ def _journal_source_fingerprint() -> dict:
     source_files.append(_source_file_fingerprint(TRADING_JOURNAL_LOCAL_DIR / "account_cashflows.xlsx"))
     source_files.append(_source_file_fingerprint(TRADING_JOURNAL_LOCAL_DIR / BYBIT_DEMO_WORKBOOK_NAME))
     source_files.append(_source_file_fingerprint(TRADING_JOURNAL_LOCAL_DIR / BYBIT_DEMO_TEMPLATE_NAME))
+    source_files.append(_source_file_fingerprint(TRADING_JOURNAL_PATH))
+    source_files.append(_source_file_fingerprint(TRADING_JOURNAL_STATE_PATH))
+    source_files.append(_source_file_fingerprint(OANDA_FILL_STATE_PATH))
     source_files = sorted(source_files, key=lambda x: str(x.get("path") or ""))
     return {
         "source_mode": mode,
@@ -888,6 +891,16 @@ def _load_trading_journal_view_snapshot() -> Optional[Dict[str, object]]:
 
 def _save_trading_journal_view_snapshot(payload: dict) -> None:
     _save_json_file(TRADING_JOURNAL_VIEW_CACHE_PATH, payload if isinstance(payload, dict) else {})
+
+
+def _invalidate_trading_journal_view_snapshot() -> None:
+    _TRADING_JOURNAL_VIEW_CACHE["key"] = None
+    _TRADING_JOURNAL_VIEW_CACHE["payload"] = None
+    try:
+        if TRADING_JOURNAL_VIEW_CACHE_PATH.exists():
+            TRADING_JOURNAL_VIEW_CACHE_PATH.unlink()
+    except Exception as exc:
+        BYBIT_LOGGER.warning("Trading journal view cache invalidation failed: %s", exc)
 
 
 def _ensure_trading_journal_sqlite_schema(conn: sqlite3.Connection) -> None:
@@ -2176,6 +2189,7 @@ def _load_trading_journal() -> List[Dict[str, object]]:
         return []
 
     rows: List[Dict[str, object]] = []
+    dropped_invalid_rows: List[Dict[str, object]] = []
     for entry in items:
         if isinstance(entry, dict):
             rows.append(_normalize_journal_profit_fields(entry))
@@ -2199,6 +2213,7 @@ def _save_trading_journal(rows: List[Dict[str, object]]) -> None:
         )
         _TRADING_JOURNAL_CACHE = [dict(item) for item in sorted_rows]
         _save_json_file(TRADING_JOURNAL_PATH, {"items": sorted_rows, "updated_at": _utc_now_iso()})
+    _invalidate_trading_journal_view_snapshot()
     _schedule_dropbox_upload_state_backup()
 
 
@@ -2403,14 +2418,19 @@ def _upsert_trading_journal_rows(rows: Iterable[Dict[str, object]]) -> int:
             changed += 1
         if changed:
             _save_trading_journal(list(by_id.values()))
-            _TRADING_JOURNAL_VIEW_CACHE["key"] = None
-            _TRADING_JOURNAL_VIEW_CACHE["payload"] = None
+            _invalidate_trading_journal_view_snapshot()
     return changed
 
 
 def _merge_trading_journal_row(
     existing: Dict[str, object], incoming: Dict[str, object]
 ) -> Dict[str, object]:
+    incoming_status = str(incoming.get("status") or "").strip().lower()
+    incoming_type = str(incoming.get("row_type") or "").strip().lower()
+    existing_status = str(existing.get("status") or "").strip().lower()
+    if incoming_status == "invalid_time_order" or incoming_type == "quarantine":
+        if existing_status in {"closed", "filled", "complete", "completed"}:
+            return _normalize_journal_profit_fields(dict(existing))
     merged = _normalize_journal_profit_fields(dict(existing))
     preserve_when_incoming_null = {
         "stop_loss",
@@ -2625,8 +2645,7 @@ def _set_trading_journal_rows(rows: List[Dict[str, object]]) -> None:
         normalized_rows = [_normalize_journal_profit_fields(dict(item)) for item in rows if isinstance(item, dict)]
         _TRADING_JOURNAL_CACHE = [dict(item) for item in normalized_rows]
         _save_json_file(TRADING_JOURNAL_PATH, {"items": normalized_rows, "updated_at": _utc_now_iso()})
-    _TRADING_JOURNAL_VIEW_CACHE["key"] = None
-    _TRADING_JOURNAL_VIEW_CACHE["payload"] = None
+    _invalidate_trading_journal_view_snapshot()
     _schedule_dropbox_upload_state_backup()
 
 
@@ -5110,7 +5129,7 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
     def _context_registry_key(trade_id: Optional[str] = None) -> str:
         return _stable_registry_key([account, tx_order_id, trade_id or "", symbol])
 
-    def _resolve_context_for_fill(trade_id: Optional[str] = None) -> Optional[Dict[str, object]]:
+    def _resolve_context_for_fill(trade_id: Optional[str] = None, warn: bool = False) -> Optional[Dict[str, object]]:
         warning_key = (account, tx_id, tx_order_id, str(trade_id or "").strip())
         if warning_key in context_cache:
             return context_cache[warning_key]
@@ -5239,9 +5258,9 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
                 details={"reason": "ambiguous", "candidates": len(candidates)},
                 resolved=False,
             )
-            if should_warn:
-                BYBIT_LOGGER.warning(
-                    "OANDA_CONTEXT_AMBIGUOUS account=%s symbol=%s side=%s tx_id=%s order_id=%s trade_id=%s candidates=%s",
+            if should_warn and warn:
+                BYBIT_LOGGER.info(
+                    "OANDA_CONTEXT_ENRICHMENT_MISSING ambiguous account=%s symbol=%s side=%s tx_id=%s order_id=%s trade_id=%s candidates=%s",
                     account,
                     symbol,
                     side_hint,
@@ -5257,9 +5276,9 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
                 details={"reason": "missing"},
                 resolved=False,
             )
-            if should_warn:
-                BYBIT_LOGGER.warning(
-                    "OANDA_CONTEXT_MISSING account=%s symbol=%s tx_id=%s order_id=%s trade_id=%s",
+            if should_warn and warn:
+                BYBIT_LOGGER.info(
+                    "OANDA_CONTEXT_ENRICHMENT_MISSING missing account=%s symbol=%s tx_id=%s order_id=%s trade_id=%s",
                     account,
                     symbol,
                     tx_id,
@@ -12873,6 +12892,8 @@ def _append_bybit_demo_rows_to_workbook(active_folder: str, rows: List[Dict[str,
         order_ids = existing.get("order_id", pd.Series(dtype=str)).fillna("").astype(str).str.strip()
         order_index = {order_id: idx for idx, order_id in order_ids.items() if order_id}
         for row in rows:
+            if str(row.get("status") or "").strip().lower() == "invalid_time_order" or str(row.get("row_type") or "").strip().lower() == "quarantine":
+                continue
             workbook_row = _bybit_demo_workbook_row(row)
             workbook_row = {
                 column: _sanitize_workbook_cell(column, workbook_row.get(column))
@@ -13181,6 +13202,21 @@ async def _sync_bybit_closed_pnl_window(
                 },
             )
             if row:
+                row_status = str(row.get("status") or "").strip().lower()
+                row_type = str(row.get("row_type") or "").strip().lower()
+                if row_status == "invalid_time_order" or row_type == "quarantine":
+                    refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+                    dropped_invalid_rows.append(
+                        {
+                            "symbol": row.get("symbol"),
+                            "side": row.get("side"),
+                            "orderId": refs.get("orderId"),
+                            "open_time": row.get("open_time"),
+                            "close_time": row.get("close_time"),
+                            "reason": refs.get("time_warning_code") or row_status or row_type or "invalid_time_order",
+                        }
+                    )
+                    continue
                 refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
                 unresolved_key = _stable_registry_key(
                     [
@@ -13248,7 +13284,12 @@ async def _sync_bybit_closed_pnl_window(
             break
 
     if not rows:
-        _record_bybit_demo_sync_status(last_checked_at=_utc_now_iso(), last_error=None)
+        _record_bybit_demo_sync_status(
+            last_checked_at=_utc_now_iso(),
+            last_error=None,
+            last_invalid_time_rows_dropped=len(dropped_invalid_rows),
+            last_invalid_time_row_details=dropped_invalid_rows,
+        )
         return max_seen
 
     changed = _upsert_trading_journal_rows(rows)
@@ -13272,6 +13313,8 @@ async def _sync_bybit_closed_pnl_window(
         + int(sanitize_stats.get("deduped_by_fingerprint", 0)),
         last_workbook_rows_deduped=int(workbook_stats.get("deduped_by_order_id", 0))
         + int(workbook_stats.get("deduped_by_fingerprint", 0)),
+        last_invalid_time_rows_dropped=len(dropped_invalid_rows),
+        last_invalid_time_row_details=dropped_invalid_rows,
     )
     return max_seen
 

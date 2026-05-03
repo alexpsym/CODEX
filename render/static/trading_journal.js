@@ -1277,9 +1277,12 @@
         } else if (actualRowsTotal > 0 && (quarantinedRows > 0 || Number(diagnostics?.repaired_time_order_rows || 0) > 0)) {
           const repaired = Number(diagnostics?.repaired_time_order_rows || 0);
           const details = Array.isArray(diagnostics?.invalid_time_order_row_details) ? diagnostics.invalid_time_order_row_details : [];
-          const detailText = details.slice(0, 3).map((d) => `${d?.symbol || '—'} ${d?.side || '—'} ${d?.order_id || '—'}`).join('; ');
-          const suffix = detailText ? ` Excluded sample: ${detailText}.` : '';
-          if (!preserveStatus) setStatus(`Info: ${actualRowsTotal} journal rows loaded; repaired time-order rows=${repaired}, quarantined invalid-time rows=${quarantinedRows}.${suffix}`);
+          const currentNonBybitInvalid = details.filter((d) => !String(d?.account_label || d?.source || '').toLowerCase().includes('bybit'));
+          if (currentNonBybitInvalid.length > 0) {
+            if (!preserveStatus) setStatus(`Info: ${actualRowsTotal} journal rows loaded; diagnostics include ${currentNonBybitInvalid.length} quarantined row(s).`);
+          } else {
+            if (!preserveStatus) setStatus(`Updated ${new Date().toLocaleTimeString()}`);
+          }
         } else if (noSources && actualRowsTotal > 0) {
           if (!preserveStatus) setStatus(`Info: ${actualRowsTotal} journal rows loaded; no Excel workbook imports detected.`);
         } else {
