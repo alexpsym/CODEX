@@ -304,6 +304,10 @@
     if (Array.isArray(q.warnings) && q.warnings.length) {
       rows.push(['Warnings', q.warnings.map((w) => String(w || '').replace(/\s+/g, ' ').trim()).join(' | ')]);
     }
+    rows.push(['Quote latency (ms)', q.quote_latency_ms ?? '-']);
+    if (q.upstream_timings_ms && typeof q.upstream_timings_ms === 'object') {
+      Object.entries(q.upstream_timings_ms).forEach(([k, v]) => rows.push([`Timing: ${k}`, v]));
+    }
     resultEl.innerHTML = rows.map(([k, v]) => `<div class="card"><div class="muted">${k}</div><div>${v ?? '-'}</div></div>`).join('');
   }
 
@@ -596,6 +600,8 @@
     if (resolveController) resolveController.abort();
     if (journalController) journalController.abort();
     state.quoteController = new AbortController();
+    const quoteTimeoutMs = 20000;
+    const timeoutId = setTimeout(() => state.quoteController && state.quoteController.abort(), quoteTimeoutMs);
     state.quoteRequestSeq += 1;
     const seq = state.quoteRequestSeq;
     state.hasCalculatedOnce = true;
@@ -661,7 +667,11 @@
         setSubmitState({ visible: false, enabled: false, reason: 'Webhook mode enabled.', stateName: 'ready' });
       }
     } catch (e) {
-      if (e.name === 'AbortError') return;
+      if (e.name === 'AbortError') {
+        invalidateQuote({ status: 'error', reason: 'Quote failed. Recalculate before submitting.' });
+        errorEl.textContent = 'Quote timed out after 20s. Slow dependency: unknown unless server returned timings.';
+        return;
+      }
       invalidateQuote({ status: 'error', reason: 'Quote failed. Recalculate before submitting.' });
       toggleWebhookPanel(false);
       state.pendingWebhookId = '';
@@ -669,6 +679,7 @@
       errorEl.textContent = String(e.message || e);
       renderErrorDebug(e.detail || null);
     } finally {
+      clearTimeout(timeoutId);
       if (seq === state.quoteRequestSeq) {
         quoteBtn.disabled = false;
         quoteBtn.textContent = defaultLabel;

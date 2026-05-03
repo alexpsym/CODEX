@@ -1275,6 +1275,10 @@ _BYBIT_SYMBOL_LIST_CACHE: Dict[str, Dict[str, object]] = {
 _BYBIT_SYMBOL_LIST_CACHE_TTL_SECONDS = float(
     os.getenv("BYBIT_SYMBOL_LIST_CACHE_TTL_SECONDS", "900")
 )
+_BYBIT_INSTRUMENT_CACHE: Dict[str, Dict[str, object]] = {}
+_BYBIT_INSTRUMENT_CACHE_TTL_SECONDS = float(os.getenv("BYBIT_INSTRUMENT_CACHE_TTL_SECONDS", "600"))
+_OANDA_AUD_USD_CACHE: Dict[str, object] = {"ts": 0.0, "value": None}
+_OANDA_AUD_USD_CACHE_TTL_SECONDS = float(os.getenv("OANDA_AUD_USD_CACHE_TTL_SECONDS", "20"))
 _BYBIT_CLOSED_PNL_RECOVERY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 _BYBIT_CLOSED_PNL_RECOVERY_SAFETY_MARGIN_MS = 60_000
 
@@ -1489,6 +1493,27 @@ async def _bybit_get_symbols_by_category_cached(base_url: str, category: str) ->
 
     _BYBIT_SYMBOL_LIST_CACHE[category_key] = {"ts": now, "symbols": symbols}
     return list(symbols)
+
+
+async def _bybit_get_instrument_info_cached(base_url: str, category: str, symbol: str) -> Optional[Dict[str, object]]:
+    category_key = category if category in {"linear", "spot", "inverse"} else "linear"
+    symbol_key = str(symbol or "").strip().upper()
+    if not symbol_key:
+        return None
+    cache_key = f"{category_key}:{symbol_key}"
+    now = time.time()
+    cached = _BYBIT_INSTRUMENT_CACHE.get(cache_key)
+    if cached and (now - float(cached.get("ts") or 0.0)) <= _BYBIT_INSTRUMENT_CACHE_TTL_SECONDS:
+        row = cached.get("row")
+        return dict(row) if isinstance(row, dict) else None
+    payload = await _bybit_get_async(base_url, "/v5/market/instruments-info", {"category": category_key, "symbol": symbol_key})
+    items = (payload.get("result") or {}).get("list") or []
+    row = dict(items[0]) if isinstance(items, list) and items and isinstance(items[0], dict) else None
+    if row:
+        _BYBIT_INSTRUMENT_CACHE[cache_key] = {"ts": now, "row": row}
+    else:
+        _BYBIT_INSTRUMENT_CACHE.pop(cache_key, None)
+    return row
 
 
 async def _bybit_lookup_symbol(base_url: str, symbol: str) -> Optional[Dict[str, object]]:
@@ -14831,25 +14856,54 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             _mode, api_key, api_secret, base_url, _src = resolve_bybit_credentials_for(account)
             if not api_key or not api_secret:
                 raise HTTPException(status_code=500, detail="Bybit credentials are missing for selected account.")
-            choices = await _bybit_get_symbols_by_category_cached(base_url, "linear")
-            if not choices:
-                raise HTTPException(status_code=404, detail=f"Could not resolve Bybit symbol: {symbol_in}")
-            resolved = resolve_bybit_symbol_from_choices(symbol_in, choices)
-            if not resolved or not resolved.get("resolved_symbol"):
-                try:
-                    name_aliases = await _bybit_name_aliases_for_choices(base_url, set(choices))
-                except Exception as exc:
-                    raise HTTPException(status_code=503, detail=f"Bybit alias metadata unavailable: {exc}") from exc
-                if name_aliases:
-                    resolved = resolve_bybit_symbol_from_choices(symbol_in, choices, extra_aliases=name_aliases)
-            resolved_symbol = str((resolved or {}).get("resolved_symbol") or "").upper()
+            resolved_symbol = ""
+            symbol_resolution_started = time.perf_counter()
+            raw_symbol = str(symbol_in or "").strip().upper()
+            candidates: List[str] = []
+            if raw_symbol.endswith(("USDT", "USDC", "USD")):
+                candidates = [raw_symbol]
+            else:
+                candidates = [f"{raw_symbol}USDT", f"{raw_symbol}USDC", f"{raw_symbol}USD"]
+            for candidate in candidates:
+                direct_started = time.perf_counter()
+                inst_direct = await _bybit_get_instrument_info_cached(base_url, "linear", candidate)
+                timings_ms["bybit_instruments_info_ms"] = timings_ms.get("bybit_instruments_info_ms", 0) + int((time.perf_counter() - direct_started) * 1000)
+                if inst_direct:
+                    resolved_symbol = candidate
+                    break
+            if not resolved_symbol:
+                symbol_list_started = time.perf_counter()
+                choices = await _bybit_get_symbols_by_category_cached(base_url, "linear")
+                timings_ms["bybit_symbol_list_ms"] = int((time.perf_counter() - symbol_list_started) * 1000)
+                if not choices:
+                    raise HTTPException(status_code=404, detail=f"Could not resolve Bybit symbol: {symbol_in}")
+                resolved = resolve_bybit_symbol_from_choices(symbol_in, choices)
+                if not resolved or not resolved.get("resolved_symbol"):
+                    try:
+                        name_aliases = await _bybit_name_aliases_for_choices(base_url, set(choices))
+                    except Exception as exc:
+                        raise HTTPException(status_code=503, detail=f"Bybit alias metadata unavailable: {exc}") from exc
+                    if name_aliases:
+                        resolved = resolve_bybit_symbol_from_choices(symbol_in, choices, extra_aliases=name_aliases)
+                resolved_symbol = str((resolved or {}).get("resolved_symbol") or "").upper()
+            timings_ms["symbol_resolution_ms"] = int((time.perf_counter() - symbol_resolution_started) * 1000)
             if not resolved_symbol:
                 raise HTTPException(status_code=404, detail=f"Could not resolve Bybit symbol: {symbol_in}")
             bybit_fetch_started = time.perf_counter()
-            inst_task = asyncio.create_task(_bybit_get_async(base_url, "/v5/market/instruments-info", {"category": "linear", "symbol": resolved_symbol}))
+            inst_task = asyncio.create_task(_bybit_get_instrument_info_cached(base_url, "linear", resolved_symbol))
             ticker_task = asyncio.create_task(_bybit_get_async(base_url, "/v5/market/tickers", {"category": "linear", "symbol": resolved_symbol}))
             balance_task = asyncio.create_task(_fetch_bybit_balance_usdt(account))
-            aud_task = asyncio.create_task(_fetch_oanda_mid_prices_batch(cfg=_get_oanda_config("live"), instruments=["AUD_USD"]))
+            async def _fetch_aud_usd_cached() -> Dict[str, float]:
+                now = time.time()
+                cached_val = _OANDA_AUD_USD_CACHE.get("value")
+                if cached_val and (now - float(_OANDA_AUD_USD_CACHE.get("ts") or 0.0)) <= _OANDA_AUD_USD_CACHE_TTL_SECONDS:
+                    return {"AUD_USD": float(cached_val)}
+                prices = await _fetch_oanda_mid_prices_batch(cfg=_get_oanda_config("live"), instruments=["AUD_USD"])
+                px = float(prices.get("AUD_USD") or 0.0)
+                if px > 0:
+                    _OANDA_AUD_USD_CACHE.update({"ts": now, "value": px})
+                return prices
+            aud_task = asyncio.create_task(_fetch_aud_usd_cached())
             fee_task = None
             if account != "demo":
                 fee_task = asyncio.create_task(_bybit_signed_get(base_url=base_url, api_key=api_key, api_secret=api_secret, path="/v5/account/fee-rate", params={"category": "linear", "symbol": resolved_symbol}))
@@ -14860,11 +14914,11 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                 await _cancel_pending_tasks(tasks)
                 raise
             timings_ms["bybit_upstream_parallel_ms"] = int((time.perf_counter()-bybit_fetch_started)*1000)
-            inst_payload = inst_task.result()
-            inst_rows = (inst_payload.get("result") or {}).get("list") or []
-            if not inst_rows:
+            inst_started = time.perf_counter()
+            inst = inst_task.result()
+            timings_ms["bybit_instruments_info_ms"] = timings_ms.get("bybit_instruments_info_ms", 0) + int((time.perf_counter() - inst_started) * 1000)
+            if not inst:
                 raise HTTPException(status_code=502, detail="Bybit instrument meta fetch failed.")
-            inst = inst_rows[0]
             tick_size = Decimal(str(inst.get("priceFilter", {}).get("tickSize") or "0"))
             qty_step = Decimal(str(inst.get("lotSizeFilter", {}).get("qtyStep") or "0"))
             min_qty = Decimal(str(inst.get("lotSizeFilter", {}).get("minOrderQty") or "0"))
@@ -14874,7 +14928,9 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             max_leverage = Decimal(str((inst.get("leverageFilter") or {}).get("maxLeverage") or "0"))
             if tick_size <= 0 or qty_step <= 0:
                 raise HTTPException(status_code=502, detail="Bybit instrument constraints are invalid.")
+            ticker_started = time.perf_counter()
             tickers = ticker_task.result()
+            timings_ms["bybit_ticker_ms"] = int((time.perf_counter() - ticker_started) * 1000)
             ticker_rows = (tickers.get("result") or {}).get("list") or []
             if not ticker_rows:
                 raise HTTPException(status_code=502, detail="Bybit ticker fetch failed.")
@@ -14911,12 +14967,15 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                     )
             open_fee = taker if order_type == "market" else max(maker, taker)
             close_fee = taker
+            aud_started = time.perf_counter()
             try:
                 aud_usd = Decimal(str((aud_task.result()).get("AUD_USD") or 0))
             except Exception as exc:
                 raise HTTPException(status_code=502, detail=f"AUD_USD conversion unavailable: {exc}") from exc
+            timings_ms["oanda_aud_usd_ms"] = int((time.perf_counter() - aud_started) * 1000)
             if aud_usd <= 0:
                 raise HTTPException(status_code=502, detail="AUD_USD conversion unavailable.")
+            balance_started = time.perf_counter()
             try:
                 balance_snapshot = balance_task.result()
             except HTTPException as exc:
@@ -14924,6 +14983,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                     status_code=502,
                     detail=f"Bybit risk sizing dependency failed path=/v5/account/wallet-balance: {exc.detail}",
                 ) from exc
+            timings_ms["bybit_wallet_balance_ms"] = int((time.perf_counter() - balance_started) * 1000)
             available_usdt = Decimal(str(balance_snapshot.get("available_usdt") or "0"))
             total_equity = Decimal(str(balance_snapshot.get("total_equity") or "0"))
             risk_aud = (available_usdt / aud_usd) * (risk_val / Decimal("100"))
@@ -15057,6 +15117,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                 _delete_pending_webhook(previous_pending_id)
 
             response_payload["quote_latency_ms"] = int((time.perf_counter() - quote_started) * 1000)
+            timings_ms["quote_total_ms"] = int(response_payload["quote_latency_ms"])
             response_payload["upstream_timings_ms"] = timings_ms
             CALCULATOR_LOGGER.info("CALCULATOR_QUOTE_TIMING asset=%s account=%s symbol=%s total_ms=%s timings=%s", asset, account, resolved_symbol, response_payload["quote_latency_ms"], timings_ms)
             return JSONResponse(response_payload)
