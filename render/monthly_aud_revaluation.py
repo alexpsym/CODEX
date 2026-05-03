@@ -13,7 +13,34 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-BYBIT_RECV_WINDOW = "5000"
+def _normalize_bybit_recv_window_ms(raw: Any) -> int:
+    try:
+        value = int(str(raw).strip())
+    except Exception:
+        value = 15000
+    return max(1000, min(60000, value))
+
+
+def _normalize_max_retries(raw: Any) -> int:
+    try:
+        value = int(str(raw).strip())
+    except Exception:
+        value = 2
+    return max(1, min(3, value))
+
+
+def _normalize_offset_ttl_seconds(raw: Any) -> int:
+    try:
+        value = int(str(raw).strip())
+    except Exception:
+        value = 300
+    return max(10, value)
+
+
+BYBIT_RECV_WINDOW_MS = _normalize_bybit_recv_window_ms(__import__("os").getenv("BYBIT_RECV_WINDOW", "15000"))
+BYBIT_SIGNED_REQUEST_MAX_RETRIES = _normalize_max_retries(__import__("os").getenv("BYBIT_SIGNED_REQUEST_MAX_RETRIES", "2"))
+BYBIT_TIME_OFFSET_TTL_SECONDS = _normalize_offset_ttl_seconds(__import__("os").getenv("BYBIT_TIME_OFFSET_TTL_SECONDS", "300"))
+_BYBIT_TIME_OFFSET_CACHE: Dict[str, Dict[str, float]] = {}
 BRISBANE_TZ = ZoneInfo("Australia/Brisbane")
 SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000
 TWO_YEARS_MS = 730 * 24 * 60 * 60 * 1000
@@ -55,8 +82,101 @@ def _build_bybit_query(params: Dict[str, str]) -> str:
     return "&".join(f"{k}={v}" for k, v in sorted(params.items())) if params else ""
 
 
-def _bybit_sign_request(timestamp: str, api_key: str, api_secret: str, payload: str) -> str:
-    raw = f"{timestamp}{api_key}{BYBIT_RECV_WINDOW}{payload}"
+def _normalize_bybit_base_url(base_url: str) -> str:
+    return str(base_url or "").strip().rstrip("/")
+
+
+def _bybit_recv_window_str() -> str:
+    return str(BYBIT_RECV_WINDOW_MS)
+
+
+def _bybit_timestamp_window_error(ret_code: Any, ret_msg: Any) -> bool:
+    msg = str(ret_msg or "").lower()
+    return str(ret_code) == "10002" or "timestamp" in msg or "recv_window" in msg
+
+
+def _extract_bybit_timestamp_diag(ret_msg: Any) -> str:
+    msg = str(ret_msg or "")
+    import re
+    req = re.search(r"req_timestamp\[(\d+)\]", msg)
+    srv = re.search(r"server_timestamp\[(\d+)\]", msg)
+    win = re.search(r"recv_window\[(\d+)\]", msg)
+    parts = []
+    if req:
+        parts.append(f"req_timestamp={req.group(1)}")
+    if srv:
+        parts.append(f"server_timestamp={srv.group(1)}")
+    if win:
+        parts.append(f"ret_recv_window={win.group(1)}")
+    if req and srv:
+        parts.append(f"server_delta_ms={int(req.group(1)) - int(srv.group(1))}")
+    return " ".join(parts)
+
+
+async def _fetch_bybit_server_time_ms(base_url: str) -> int:
+    url = f"{_normalize_bybit_base_url(base_url)}/v5/market/time"
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(url)
+    resp.raise_for_status()
+    payload = resp.json()
+    result = payload.get("result") if isinstance(payload, dict) else {}
+    time_nano = _coerce_int(result.get("timeNano")) if isinstance(result, dict) else None
+    if time_nano is not None:
+        return time_nano // 1_000_000
+    time_second = _coerce_int(result.get("timeSecond")) if isinstance(result, dict) else None
+    if time_second is not None:
+        return time_second * 1000
+    top_time = _coerce_int(payload.get("time")) if isinstance(payload, dict) else None
+    if top_time is not None:
+        return top_time
+    raise ValueError("Bybit server time payload missing parseable timestamp")
+
+
+async def _refresh_bybit_time_offset_ms(base_url: str, logger=None) -> int:
+    normalized = _normalize_bybit_base_url(base_url)
+    local_before = int(time.time() * 1000)
+    server_ms = await _fetch_bybit_server_time_ms(normalized)
+    local_after = int(time.time() * 1000)
+    midpoint = (local_before + local_after) // 2
+    offset_ms = int(server_ms - midpoint)
+    rtt_ms = max(0, local_after - local_before)
+    _BYBIT_TIME_OFFSET_CACHE[normalized] = {"synced_at": float(local_after), "offset_ms": float(offset_ms), "rtt_ms": float(rtt_ms)}
+    if logger:
+        logger.info("MONTHLY_AUD_REVAL_BYBIT_TIME_SYNC base_url=%s offset_ms=%s rtt_ms=%s", normalized, offset_ms, rtt_ms)
+        if abs(offset_ms) > 3000:
+            logger.warning("MONTHLY_AUD_REVAL_BYBIT_TIME_SYNC_DRIFT base_url=%s offset_ms=%s", normalized, offset_ms)
+    return offset_ms
+
+
+async def _get_bybit_time_offset_ms(base_url: str, force_refresh: bool = False, logger=None) -> int:
+    normalized = _normalize_bybit_base_url(base_url)
+    cached = _BYBIT_TIME_OFFSET_CACHE.get(normalized)
+    now_ms = int(time.time() * 1000)
+    if not force_refresh and cached and (now_ms - int(cached.get("synced_at", 0))) < (BYBIT_TIME_OFFSET_TTL_SECONDS * 1000):
+        return int(cached.get("offset_ms", 0))
+    try:
+        return await _refresh_bybit_time_offset_ms(normalized, logger=logger)
+    except Exception as exc:
+        if cached:
+            if logger:
+                logger.warning("MONTHLY_AUD_REVAL_BYBIT_TIME_SYNC_CACHE_FALLBACK base_url=%s error=%s", normalized, exc)
+            return int(cached.get("offset_ms", 0))
+        if force_refresh:
+            raise MonthlyAudRevalError(
+                "MONTHLY_AUD_REVAL_BYBIT_BALANCE_ERROR",
+                f"Bybit time sync failed base_url={normalized} error={exc}",
+                stage="bybit_time_sync",
+            ) from exc
+        return 0
+
+
+async def _bybit_timestamp_ms(base_url: str, force_time_sync: bool = False, logger=None) -> str:
+    offset_ms = await _get_bybit_time_offset_ms(base_url, force_refresh=force_time_sync, logger=logger)
+    return str(int(time.time() * 1000) + int(offset_ms))
+
+
+def _bybit_sign_request(timestamp: str, api_key: str, api_secret: str, payload: str, recv_window: str) -> str:
+    raw = f"{timestamp}{api_key}{recv_window}{payload}"
     return hmac.new(api_secret.encode(), raw.encode(), hashlib.sha256).hexdigest()
 
 
@@ -67,38 +187,35 @@ async def _bybit_signed_get(
     api_secret: str,
     path: str,
     params: Dict[str, str],
+    logger=None,
 ) -> Dict[str, Any]:
+    normalized_base = _normalize_bybit_base_url(base_url)
     query = _build_bybit_query(params)
-    timestamp = str(int(time.time() * 1000))
-    signature = _bybit_sign_request(timestamp, api_key, api_secret, query)
-    headers = {
-        "X-BAPI-API-KEY": api_key,
-        "X-BAPI-SIGN": signature,
-        "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-RECV-WINDOW": BYBIT_RECV_WINDOW,
-        "X-BAPI-SIGN-TYPE": "2",
-    }
-    url = f"{base_url}{path}" + (f"?{query}" if query else "")
-    try:
-        async with httpx.AsyncClient(timeout=12) as client:
-            resp = await client.get(url, headers=headers)
-        status_code = resp.status_code
-        resp.raise_for_status()
-        payload = resp.json()
-    except Exception as exc:
-        raise MonthlyAudRevalError(
-            "MONTHLY_AUD_REVAL_BYBIT_BALANCE_ERROR",
-            f"Bybit GET failed path={path} query={query} error={exc}",
-            stage="bybit_request",
-        ) from exc
-
-    if payload.get("retCode") not in (0, "0"):
-        raise MonthlyAudRevalError(
-            "MONTHLY_AUD_REVAL_BYBIT_BALANCE_ERROR",
-            f"Bybit GET retCode failure path={path} status={status_code} retCode={payload.get('retCode')} retMsg={payload.get('retMsg')}",
-            stage="bybit_request",
-        )
-    return payload
+    recv_window = _bybit_recv_window_str()
+    url = f"{normalized_base}{path}" + (f"?{query}" if query else "")
+    for attempt in range(1, BYBIT_SIGNED_REQUEST_MAX_RETRIES + 1):
+        timestamp = await _bybit_timestamp_ms(normalized_base, force_time_sync=(attempt > 1), logger=logger)
+        signature = _bybit_sign_request(timestamp, api_key, api_secret, query, recv_window)
+        headers = {"X-BAPI-API-KEY": api_key, "X-BAPI-SIGN": signature, "X-BAPI-TIMESTAMP": timestamp, "X-BAPI-RECV-WINDOW": recv_window, "X-BAPI-SIGN-TYPE": "2"}
+        try:
+            async with httpx.AsyncClient(timeout=12) as client:
+                resp = await client.get(url, headers=headers)
+            status_code = resp.status_code
+            resp.raise_for_status()
+            payload = resp.json()
+        except Exception as exc:
+            raise MonthlyAudRevalError("MONTHLY_AUD_REVAL_BYBIT_BALANCE_ERROR", f"Bybit GET failed path={path} query={query} error={exc}", stage="bybit_request") from exc
+        ret_code = payload.get("retCode")
+        ret_msg = payload.get("retMsg")
+        if ret_code in (0, "0"):
+            return payload
+        if _bybit_timestamp_window_error(ret_code, ret_msg) and attempt < BYBIT_SIGNED_REQUEST_MAX_RETRIES:
+            if logger:
+                logger.warning("MONTHLY_AUD_REVAL_BYBIT_SIGNED_RETRY path=%s attempt=%s reason=timestamp_window recv_window=%s", path, attempt, recv_window)
+            continue
+        diag = _extract_bybit_timestamp_diag(ret_msg)
+        raise MonthlyAudRevalError("MONTHLY_AUD_REVAL_BYBIT_BALANCE_ERROR", f"Bybit GET retCode failure path={path} status={status_code} retCode={ret_code} retMsg={ret_msg} recv_window={recv_window} {diag}".strip(), stage="bybit_request")
+    raise MonthlyAudRevalError("MONTHLY_AUD_REVAL_BYBIT_BALANCE_ERROR", f"Bybit GET failed path={path} query={query}", stage="bybit_request")
 
 
 async def _fetch_transaction_pages(
@@ -108,6 +225,7 @@ async def _fetch_transaction_pages(
     api_secret: str,
     start_time: int,
     end_time: int,
+    logger=None,
 ) -> List[Dict[str, Any]]:
     cursor: Optional[str] = None
     rows: List[Dict[str, Any]] = []
@@ -126,6 +244,7 @@ async def _fetch_transaction_pages(
             api_secret=api_secret,
             path="/v5/account/transaction-log",
             params=params,
+            logger=logger,
         )
         result = payload.get("result") if isinstance(payload, dict) else {}
         page = result.get("list") if isinstance(result, dict) else []
@@ -144,6 +263,7 @@ async def _fetch_transaction_rows_range(
     api_secret: str,
     start_ms: int,
     end_ms: int,
+    logger=None,
 ) -> List[Dict[str, Any]]:
     if start_ms > end_ms:
         return []
@@ -157,6 +277,7 @@ async def _fetch_transaction_rows_range(
             api_secret=api_secret,
             start_time=current,
             end_time=chunk_end,
+            logger=logger,
         )
         rows.extend(part)
         current = chunk_end + 1
@@ -194,6 +315,7 @@ async def _get_current_unified_balance_usdt_equivalent(
     base_url: str,
     api_key: str,
     api_secret: str,
+    logger=None,
 ) -> Tuple[float, str]:
     payload = await _bybit_signed_get(
         base_url=base_url,
@@ -201,6 +323,7 @@ async def _get_current_unified_balance_usdt_equivalent(
         api_secret=api_secret,
         path="/v5/account/wallet-balance",
         params={"accountType": "UNIFIED"},
+        logger=logger,
     )
     entries = ((payload.get("result") or {}).get("list") or [])
     if not entries or not isinstance(entries[0], dict):
@@ -258,6 +381,7 @@ async def _has_account_activity_since(
     api_secret: str,
     boundary_ms: int,
     now_ms: int,
+    logger=None,
 ) -> bool:
     if boundary_ms > now_ms:
         return False
@@ -267,6 +391,7 @@ async def _has_account_activity_since(
         api_secret=api_secret,
         start_ms=boundary_ms,
         end_ms=now_ms,
+        logger=logger,
     )
     return len(rows) > 0
 
@@ -277,6 +402,7 @@ async def _get_latest_balance_on_or_before(
     api_key: str,
     api_secret: str,
     boundary_ms: int,
+    logger=None,
 ) -> Optional[float]:
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     earliest = max(0, now_ms - TWO_YEARS_MS)
@@ -289,6 +415,7 @@ async def _get_latest_balance_on_or_before(
             api_secret=api_secret,
             start_time=start,
             end_time=end,
+            logger=logger,
         )
         if rows:
             latest_row: Optional[Dict[str, Any]] = None
@@ -573,6 +700,7 @@ async def _resolve_boundary_balance(
         base_url=base_url,
         api_key=api_key,
         api_secret=api_secret,
+        logger=logger,
     )
 
     activity_found = await _has_account_activity_since(
@@ -581,6 +709,7 @@ async def _resolve_boundary_balance(
         api_secret=api_secret,
         boundary_ms=boundary_ms,
         now_ms=now_ms,
+        logger=logger,
     )
 
     if not activity_found:
@@ -592,6 +721,7 @@ async def _resolve_boundary_balance(
             api_key=api_key,
             api_secret=api_secret,
             boundary_ms=boundary_ms,
+            logger=logger,
         )
         if latest is None:
             resolved = current_balance
