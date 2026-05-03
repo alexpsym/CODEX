@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import json
+import sqlite3
 import sys
 import threading
 from pathlib import Path
@@ -983,3 +984,23 @@ def test_trading_journal_balances_snapshot_expected_values(temp_state_paths, mon
     assert by_label["OANDA LIVE"]["balance"] == pytest.approx(1479.31)
     assert by_label["PEPPERSTONE LIVE"]["balance"] == pytest.approx(2508.73)
     assert by_label["PEPPERSTONE DEMO"]["balance"] == pytest.approx(0.0)
+
+
+def test_persist_trading_journal_sqlite_cashflow_no_name_error(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    sqlite_path = tmp_path / "trading_journal.sqlite"
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_SQLITE_PATH", sqlite_path)
+    snapshot = {
+        "generated_at": "2026-05-01T00:00:00Z",
+        "items": [{"id": "cf:1", "row_type": "cashflow", "source": "cashflow_ledger", "close_time": "2026-05-01T00:00:00Z"}],
+        "balances": [],
+        "stats": {},
+        "diagnostics": {},
+        "source_fingerprints": {"files": []},
+    }
+    master_service._persist_trading_journal_sqlite(snapshot)
+    conn = sqlite3.connect(sqlite_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM journal_cashflows").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM journal_trades").fetchone()[0] == 0
+    finally:
+        conn.close()

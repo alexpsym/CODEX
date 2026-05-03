@@ -17,3 +17,6 @@ def test_trading_journal_diagnostics_split_balance_anchor_from_parse_sync() -> N
     assert "balance anchor missing" in js
     assert "const isBalanceAnchorWarning" in js
     assert "const isParseSyncError" in js
+    assert "if (syncResult?.ok === false)" in js
+    assert "snapshotError" in js
+    assert "Bybit Demo workbook is blank; old Bybit Demo rows purged" in js

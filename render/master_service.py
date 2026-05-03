@@ -926,7 +926,6 @@ def _persist_trading_journal_sqlite(snapshot: Dict[str, object], import_meta: Op
             payload_json = json.dumps(row, ensure_ascii=False)
             if _row_type(row) == "cashflow":
                 conn.execute("INSERT OR REPLACE INTO journal_cashflows(id,payload_json,imported_at) VALUES(?,?,?)", (row_id, payload_json, now_iso))
-                broker_response_summary = {"retCode": bybit_resp.get("retCode"), "retMsg": bybit_resp.get("retMsg"), "orderId": ((bybit_resp.get("result") or {}).get("orderId")), "orderLinkId": ((bybit_resp.get("result") or {}).get("orderLinkId"))}
             else:
                 conn.execute("INSERT OR REPLACE INTO journal_trades(id,payload_json,imported_at) VALUES(?,?,?)", (row_id, payload_json, now_iso))
                 metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
@@ -2711,13 +2710,30 @@ def _is_bybit_demo_trade_row(row: Dict[str, object]) -> bool:
     account_label = str(row.get("account_label") or row.get("account") or "").strip()
     if source == "bybit":
         return account in {"demo", "practice"} or _is_bybit_demo_account_label(account_label)
-    if source == "excel":
+    if source in {"excel", "local_excel"}:
         if _is_bybit_demo_account_label(account_label):
             return True
         refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
-        dbx_path = str(refs.get("dropbox_path") or refs.get("workbook_path") or "").strip().lower()
-        return dbx_path.endswith(f"/{BYBIT_DEMO_WORKBOOK_NAME.lower()}") or dbx_path == BYBIT_DEMO_WORKBOOK_NAME.lower()
+        dbx_path = refs.get("dropbox_path") or refs.get("workbook_path")
+        workbook_source = row.get("_workbook_source")
+        row_id = str(row.get("id") or "").strip().lower()
+        return (
+            _is_bybit_demo_source_path(dbx_path)
+            or _is_bybit_demo_source_path(workbook_source)
+            or row_id.startswith("bybitdemo:")
+        )
     return False
+
+
+def _purge_bybit_demo_rows(rows: List[Dict[str, object]]) -> Tuple[List[Dict[str, object]], int]:
+    filtered: List[Dict[str, object]] = []
+    purged = 0
+    for row in rows:
+        if isinstance(row, dict) and _is_bybit_demo_trade_row(row):
+            purged += 1
+            continue
+        filtered.append(row)
+    return filtered, purged
 
 
 def _merge_row_notes_comments(target: Dict[str, object], incoming: Dict[str, object]) -> Dict[str, object]:
@@ -3432,6 +3448,21 @@ def _first_present(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
 def _is_bybit_demo_account_label(label: object) -> bool:
     text = str(label or "").strip().upper()
     return bool(text) and ("BYBIT" in text) and ("DEMO" in text)
+
+
+def _is_bybit_demo_workbook_name(name_or_path: object) -> bool:
+    text = str(name_or_path or "").strip().lower()
+    if not text:
+        return False
+    base = Path(text).name
+    return base == BYBIT_DEMO_WORKBOOK_NAME.lower()
+
+
+def _is_bybit_demo_source_path(path: object) -> bool:
+    text = str(path or "").strip().lower()
+    if not text:
+        return False
+    return text.endswith(f"/{BYBIT_DEMO_WORKBOOK_NAME.lower()}") or _is_bybit_demo_workbook_name(text)
 
 
 def _parse_excel_account_workbook(
@@ -4495,12 +4526,16 @@ def _import_trading_journal_from_dropbox_excel(
             "errors": [{"file": "", "path": active_folder, "error": msg}],
         }
 
+    bybit_demo_workbook_seen = False
+    bybit_demo_rows_imported = 0
     for entry_index, entry in enumerate(entries, start=1):
         name = str(entry.get("name") or "")
         dbx_path = str(entry.get("path_lower") or entry.get("path_display") or "")
         dbx_rev = str(entry.get("rev") or "")
         if not dbx_path:
             continue
+        if _is_bybit_demo_workbook_name(name) or _is_bybit_demo_source_path(dbx_path):
+            bybit_demo_workbook_seen = True
         try:
             if progress_cb:
                 pct = 10 + int(80 * (entry_index / max(total_files, 1)))
@@ -4519,6 +4554,8 @@ def _import_trading_journal_from_dropbox_excel(
                 parsed_rows, parsed_balance = _parse_excel_account_workbook(name, dbx_path, payload)
 
             rows.extend(parsed_rows)
+            if _is_bybit_demo_workbook_name(name) or _is_bybit_demo_source_path(dbx_path):
+                bybit_demo_rows_imported += sum(1 for r in parsed_rows if isinstance(r, dict) and _is_bybit_demo_trade_row(r))
             if parsed_balance:
                 balances.append(parsed_balance)
             workbook_count += 1
@@ -4543,7 +4580,15 @@ def _import_trading_journal_from_dropbox_excel(
     if progress_cb:
         progress_cb(95, "Finalising…")
 
-    if (not final_rows) and existing_count:
+    bybit_demo_workbook_cleared = bool(bybit_demo_workbook_seen and bybit_demo_rows_imported == 0)
+    bybit_demo_rows_purged = 0
+    if bybit_demo_workbook_cleared:
+        kept, bybit_demo_rows_purged = _purge_bybit_demo_rows(existing_rows)
+        _set_trading_journal_rows(kept)
+        existing_rows = kept
+        existing_count = len(existing_rows)
+
+    if (not final_rows) and existing_count and (not bybit_demo_workbook_cleared):
         # Keep prior data if the import produced no rows (common when folder is wrong or parsing failed).
         msg = "Imported 0 rows; keeping existing journal data."
         errors.append({"file": "", "path": active_folder, "error": msg})
@@ -4564,7 +4609,7 @@ def _import_trading_journal_from_dropbox_excel(
         else:
             _set_trading_journal_rows(final_rows)
 
-    ok_flag = bool(final_rows) or bool(balances)
+    ok_flag = bool(final_rows) or bool(balances) or bool(bybit_demo_workbook_cleared and bybit_demo_rows_purged >= 0)
     message = (
         "Done"
         if ok_flag
@@ -4613,6 +4658,10 @@ def _import_trading_journal_from_dropbox_excel(
         "workbooks_seen": workbook_count,
         "workbooks_reused": reused_count,
         "rows_imported": len(final_rows),
+        "bybit_demo_workbook_seen": bybit_demo_workbook_seen,
+        "bybit_demo_rows_imported": bybit_demo_rows_imported,
+        "bybit_demo_workbook_cleared": bybit_demo_workbook_cleared,
+        "bybit_demo_rows_purged": bybit_demo_rows_purged,
         "rows_deduped": int(sanitize_stats.get("deduped_by_order_id", 0)) + int(sanitize_stats.get("deduped_by_fingerprint", 0)),
         "workbook_rows_deduped": int(workbook_stats.get("deduped_by_order_id", 0)) + int(workbook_stats.get("deduped_by_fingerprint", 0)),
         "balances_found": len(balances),
@@ -4651,6 +4700,8 @@ def _import_trading_journal_from_sources(
     balances: List[Dict[str, object]] = []
     imported_any = False
     imported_rows_total = 0
+    bybit_demo_workbook_cleared = False
+    bybit_demo_rows_purged = 0
 
     if include_dropbox:
         try:
@@ -4659,6 +4710,9 @@ def _import_trading_journal_from_sources(
             errors.extend(dropbox_result.get("errors") or [])
             imported_any = imported_any or bool(dropbox_result.get("rows_imported"))
             imported_rows_total += int(dropbox_result.get("rows_imported") or 0)
+            if bool(dropbox_result.get("bybit_demo_workbook_cleared")):
+                bybit_demo_workbook_cleared = True
+                bybit_demo_rows_purged += int(dropbox_result.get("bybit_demo_rows_purged") or 0)
             rows_now = _get_trading_journal_rows()
             for row in rows_now:
                 if isinstance(row, dict):
@@ -4736,6 +4790,12 @@ def _import_trading_journal_from_sources(
     for local_file in local_files:
         try:
             local_rows, local_balance = _parse_local_trading_journal_workbook(local_file)
+            if _is_bybit_demo_workbook_name(local_file.name) and not local_rows:
+                current_rows = [r for r in _get_trading_journal_rows() if isinstance(r, dict)]
+                kept_rows, purged = _purge_bybit_demo_rows(current_rows)
+                _set_trading_journal_rows(kept_rows)
+                bybit_demo_workbook_cleared = True
+                bybit_demo_rows_purged += purged
             local_kind = "explicit" if local_enabled else "default"
             local_rows_total += len(local_rows)
             for row in local_rows:
@@ -4834,6 +4894,8 @@ def _import_trading_journal_from_sources(
             "ignored_local_workbooks": ignored_local_workbooks,
             "quarantined_rows": quarantined_rows,
             "errors": errors,
+            "bybit_demo_workbook_cleared": bybit_demo_workbook_cleared,
+            "bybit_demo_rows_purged": bybit_demo_rows_purged,
             "last_sync": {
                 "source_mode": source_mode,
                 "updated_at": _utc_now_iso(),
@@ -4848,25 +4910,35 @@ def _import_trading_journal_from_sources(
     snapshot_error: Optional[str] = None
     try:
         snapshot_payload = _build_trading_journal_view_snapshot(force=True)
-        _persist_trading_journal_sqlite(
-            snapshot_payload,
-            {
-                "started_at": started_at,
-                "source_mode": source_mode,
-                "workbooks_scanned": int(diagnostics["local_workbooks_seen"]) + int(diagnostics["dropbox_workbooks_seen"]),
-                "workbooks_changed": int(imported_rows_total > 0),
-                "rows_imported": imported_rows_total,
-                "cashflow_rows_loaded": int(sum(1 for r in (snapshot_payload.get("items") or []) if _row_type(r) == "cashflow")),
-                "warnings": warnings,
-                "errors": errors,
-            },
-        )
     except Exception as exc:
-        snapshot_error = str(exc)
-        warnings.append(f"snapshot build failed: {exc}")
+        snapshot_error = f"Snapshot build failed after import: {exc}"
+        warnings.append(snapshot_error)
+    if snapshot_payload is not None:
+        try:
+            _persist_trading_journal_sqlite(
+                snapshot_payload,
+                {
+                    "started_at": started_at,
+                    "source_mode": source_mode,
+                    "workbooks_scanned": int(diagnostics["local_workbooks_seen"]) + int(diagnostics["dropbox_workbooks_seen"]),
+                    "workbooks_changed": int(imported_rows_total > 0),
+                    "rows_imported": imported_rows_total,
+                    "cashflow_rows_loaded": int(sum(1 for r in (snapshot_payload.get("items") or []) if _row_type(r) == "cashflow")),
+                    "warnings": warnings,
+                    "errors": errors,
+                },
+            )
+        except Exception as exc:
+            snapshot_error = f"Snapshot persistence failed after import: {exc}"
+            warnings.append(snapshot_error)
+    ok_after_snapshot = bool(imported_any) and not snapshot_error
     return {
-        "ok": bool(imported_any),
-        "message": "Done" if imported_any else "No rows imported from configured sources; existing journal data was retained.",
+        "ok": ok_after_snapshot,
+        "message": (
+            snapshot_error
+            if snapshot_error
+            else ("Done" if imported_any else "No rows imported from configured sources; existing journal data was retained.")
+        ),
         "source_mode": source_mode,
         "rows_imported": imported_rows_total,
         "cashflow_rows_loaded": int(cashflow_rows_total),
@@ -19061,7 +19133,6 @@ async def close_open_order(item: Dict[str, Any] = Body(...)) -> JSONResponse:
                     position_idx=position_idx,
                     order_link_id=str(item.get("order_link_id", "")).strip() or None,
                 )
-                broker_response_summary = {"retCode": bybit_resp.get("retCode"), "retMsg": bybit_resp.get("retMsg"), "orderId": ((bybit_resp.get("result") or {}).get("orderId")), "orderLinkId": ((bybit_resp.get("result") or {}).get("orderLinkId"))}
             action_requested = True
 
         elif broker == "oanda":
@@ -19837,26 +19908,6 @@ async def _run_trading_journal_sync_job() -> None:
             state["broker_balance_diagnostics"] = diag
             _save_trading_journal_state(state)
 
-        bybit_demo = None
-        bybit_live = None
-        if broker_refresh_enabled:
-            try:
-                bybit_demo = await _run_bybit_closed_pnl_sync(
-                    account_mode="demo",
-                    reason="manual",
-                    enforce_manual_cooldown=False,
-                )
-            except Exception as exc:
-                bybit_demo = {"ok": False, "error": str(exc)}
-            try:
-                bybit_live = await _run_bybit_closed_pnl_sync(
-                    account_mode="live",
-                    reason="manual",
-                    enforce_manual_cooldown=False,
-                )
-            except Exception as exc:
-                bybit_live = {"ok": False, "error": str(exc)}
-
         source_mode = _trading_journal_source_mode()
         if source_mode == "local":
             _cb(25, "Importing local journal workbooks…")
@@ -19865,7 +19916,22 @@ async def _run_trading_journal_sync_job() -> None:
         else:
             _cb(25, "Importing journal workbooks…")
         result = await asyncio.to_thread(_import_trading_journal_from_sources, progress_cb=_cb)
-        warnings: List[str] = []
+        bybit_demo = None
+        bybit_live = None
+        if broker_refresh_enabled:
+            skip_demo = bool((result or {}).get("diagnostics", {}).get("bybit_demo_workbook_cleared"))
+            if skip_demo:
+                bybit_demo = {"ok": True, "skipped": True, "reason": "bybit_demo_workbook_cleared"}
+            else:
+                try:
+                    bybit_demo = await _run_bybit_closed_pnl_sync(account_mode="demo", reason="manual", enforce_manual_cooldown=False)
+                except Exception as exc:
+                    bybit_demo = {"ok": False, "error": str(exc)}
+            try:
+                bybit_live = await _run_bybit_closed_pnl_sync(account_mode="live", reason="manual", enforce_manual_cooldown=False)
+            except Exception as exc:
+                bybit_live = {"ok": False, "error": str(exc)}
+        warnings: List[str] = list((result or {}).get("warnings") or [])
         warnings.extend(broker_balance_warnings)
         for mode_name, mode_payload in {"demo": bybit_demo, "live": bybit_live}.items():
             if isinstance(mode_payload, dict):
@@ -19875,7 +19941,7 @@ async def _run_trading_journal_sync_job() -> None:
                     warnings.append(f"Bybit {mode_name} failed: {mode_payload.get('error') or mode_payload.get('message') or 'unknown'}")
         if isinstance(result, dict):
             result["bybit"] = {"demo": bybit_demo, "live": bybit_live}
-            result["warnings"] = warnings
+            result["warnings"] = list(dict.fromkeys([str(w) for w in warnings if str(w).strip()]))
         diagnostics = result.get("diagnostics") if isinstance(result, dict) else {}
         rows_by_asset_class = diagnostics.get("rows_by_asset_class") if isinstance(diagnostics, dict) else {}
         ok_flag = bool(result.get("ok", True)) if isinstance(result, dict) else True
