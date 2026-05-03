@@ -595,6 +595,10 @@ def _trading_journal_uses_local_only_source() -> bool:
     return _trading_journal_source_mode() == "local"
 
 
+def _trading_journal_local_excel_authoritative() -> bool:
+    return _trading_journal_source_mode() == "local"
+
+
 def _trading_journal_broker_refresh_enabled() -> bool:
     if APP_PROFILE == "journal" and _trading_journal_uses_local_only_source():
         return TRADING_JOURNAL_BROKER_REFRESH_ENABLED
@@ -988,6 +992,11 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
         for r in _get_trading_journal_rows()
         if _is_visible_trading_journal_row(r)
     ]
+    if _trading_journal_local_excel_authoritative():
+        rows = [
+            r for r in rows
+            if (_row_type(r) != "trade") or str(r.get("source") or "").strip().lower() == "local_excel"
+        ]
     excel_balances = _get_excel_account_balances()
     balances_seed = [b for b in excel_balances if not _is_bybit_demo_account_label(b.get("label") or b.get("account"))]
     state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
@@ -2385,6 +2394,14 @@ def _find_journal_row_index(row_id: str) -> int:
 
 
 def _upsert_trading_journal_rows(rows: Iterable[Dict[str, object]]) -> int:
+    if _trading_journal_local_excel_authoritative():
+        blocked = 0
+        for raw in rows:
+            if isinstance(raw, dict) and str(raw.get("source") or "").strip().lower() != "local_excel":
+                blocked += 1
+        if blocked:
+            BYBIT_LOGGER.info("trading_journal upsert blocked in local authoritative mode blocked_rows=%s", blocked)
+            return 0
     with _TRADING_JOURNAL_ROWS_LOCK:
         existing = _get_trading_journal_rows()
         by_id: Dict[str, Dict[str, object]] = {}
@@ -4693,7 +4710,8 @@ def _import_trading_journal_from_sources(
 ) -> Dict[str, object]:
     started_at = _utc_now_iso()
     source_mode = _trading_journal_source_mode()
-    include_dropbox = source_mode in {"dropbox", "both", "auto"}
+    local_authoritative = _trading_journal_local_excel_authoritative()
+    include_dropbox = (source_mode in {"dropbox", "both", "auto"}) and not local_authoritative
     include_local = source_mode in {"local", "both", "auto"}
     local_enabled = _local_journal_import_enabled()
     template_result: Dict[str, object] = {"errors": []}
@@ -4706,11 +4724,12 @@ def _import_trading_journal_from_sources(
 
     existing_rows = _get_trading_journal_rows()
     all_rows: Dict[str, Dict[str, object]] = {}
-    for row in existing_rows:
-        if isinstance(row, dict):
-            rid = str(row.get("id") or "")
-            if rid:
-                all_rows[rid] = dict(row)
+    if not local_authoritative:
+        for row in existing_rows:
+            if isinstance(row, dict):
+                rid = str(row.get("id") or "")
+                if rid:
+                    all_rows[rid] = dict(row)
 
     diagnostics = _default_journal_diagnostics()
     diagnostics["dropbox_workbooks_seen"] = 0
@@ -4819,8 +4838,13 @@ def _import_trading_journal_from_sources(
             for row in local_rows:
                 rid = str(row.get("id") or "")
                 if rid:
+                    row["source"] = "local_excel"
                     row["_local_import_kind"] = local_kind
                     row["_workbook_source"] = str(local_file)
+                    refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+                    refs["local_path"] = str(local_file)
+                    refs["workbook_path"] = str(local_file)
+                    row["raw_refs"] = refs
                     all_rows[rid] = row
             if local_balance:
                 local_balances.append(local_balance)
@@ -4855,7 +4879,26 @@ def _import_trading_journal_from_sources(
 
     final_rows = sorted([*canonical_rows.values(), *carry_rows], key=_row_sort_dt, reverse=True)
     final_rows, sanitize_stats = _sanitize_bybit_demo_rows(final_rows)
-    if final_rows:
+    pruned_source_counts: Dict[str, int] = {}
+    non_local_rows_pruned = 0
+    if local_authoritative:
+        for row in existing_rows:
+            if not isinstance(row, dict):
+                continue
+            src = str(row.get("source") or "unknown").strip().lower()
+            if src != "local_excel":
+                non_local_rows_pruned += 1
+                pruned_source_counts[src or "unknown"] = pruned_source_counts.get(src or "unknown", 0) + 1
+        _set_trading_journal_rows(final_rows)
+        state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
+        if isinstance(state, dict):
+            broker_balances = state.get("broker_account_balances")
+            if isinstance(broker_balances, list):
+                state["broker_account_balances"] = []
+            if local_balances:
+                state["excel_account_balances"] = local_balances
+            _save_json_file(TRADING_JOURNAL_STATE_PATH, state)
+    elif final_rows:
         _set_trading_journal_rows(final_rows)
         if local_balances:
             state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
@@ -4864,7 +4907,7 @@ def _import_trading_journal_from_sources(
             state["excel_account_balances"] = merged_balances
             _save_json_file(TRADING_JOURNAL_STATE_PATH, state)
             balances = merged_balances
-    else:
+    elif not local_authoritative:
         errors.append({"file": "", "path": "sources", "error": "Imported 0 rows; keeping existing journal data."})
 
     persisted_rows = [row for row in _get_trading_journal_rows() if isinstance(row, dict)]
@@ -4912,6 +4955,10 @@ def _import_trading_journal_from_sources(
             "ignored_local_workbooks": ignored_local_workbooks,
             "quarantined_rows": quarantined_rows,
             "errors": errors,
+            "authoritative_source": "local_excel" if local_authoritative else "",
+            "source_enforcement_ok": (True if not local_authoritative else all(str(r.get("source") or "").lower() == "local_excel" for r in persisted_rows if _row_type(r) == "trade")),
+            "non_local_rows_pruned": non_local_rows_pruned,
+            "pruned_source_counts": pruned_source_counts,
             "bybit_demo_workbook_cleared": bybit_demo_workbook_cleared,
             "bybit_demo_rows_purged": bybit_demo_rows_purged,
             "last_sync": {
@@ -4950,12 +4997,22 @@ def _import_trading_journal_from_sources(
             snapshot_error = f"Snapshot persistence failed after import: {exc}"
             warnings.append(snapshot_error)
     ok_after_snapshot = bool(imported_any) and not snapshot_error
+    if local_authoritative and not imported_any:
+        ok_after_snapshot = False
     return {
         "ok": ok_after_snapshot,
         "message": (
             snapshot_error
             if snapshot_error
-            else ("Done" if imported_any else "No rows imported from configured sources; existing journal data was retained.")
+            else (
+                "Done"
+                if imported_any
+                else (
+                    "No local Excel trade rows imported; local Excel is authoritative, stale journal rows were cleared."
+                    if local_authoritative
+                    else "No rows imported from configured sources; existing journal data was retained."
+                )
+            )
         ),
         "source_mode": source_mode,
         "rows_imported": imported_rows_total,
@@ -5401,6 +5458,17 @@ def _build_state_backup_payload() -> bytes:
     }
     machine_hint = os.getenv("COMPUTERNAME") or socket.gethostname() or "unknown-host"
     safe_machine_hint = re.sub(r"[^a-zA-Z0-9._-]", "-", str(machine_hint))[:80]
+    trading_journal_payload = _load_json_file(TRADING_JOURNAL_PATH, {"items": []})
+    if _trading_journal_local_excel_authoritative():
+        journal_items = trading_journal_payload.get("items") if isinstance(trading_journal_payload, dict) else []
+        if isinstance(journal_items, list):
+            trading_journal_payload = {
+                **(trading_journal_payload if isinstance(trading_journal_payload, dict) else {}),
+                "items": [
+                    r for r in journal_items
+                    if isinstance(r, dict) and (_row_type(r) != "trade" or str(r.get("source") or "").strip().lower() == "local_excel")
+                ],
+            }
     payload = {
         "version": 4,
         "savedAt": _utc_now_iso(),
@@ -5411,7 +5479,7 @@ def _build_state_backup_payload() -> bytes:
         "watchlist": _get_watchlist(),
         "pending_webhooks": _load_pending_webhooks(),
         "trade_contexts": _load_trade_contexts(),
-        "trading_journal": _load_json_file(TRADING_JOURNAL_PATH, {"items": []}),
+        "trading_journal": trading_journal_payload,
         "trading_journal_state": _load_json_file(TRADING_JOURNAL_STATE_PATH, {}),
         "trading_journal_import_cache": _load_json_file(TRADING_JOURNAL_IMPORT_CACHE_PATH, {}),
         "monthly_aud_revaluation": _load_json_file(MONTHLY_AUD_REVALUATION_PATH, {"items": []}),
@@ -5723,7 +5791,7 @@ def _restore_alerts_payload(data: Dict[str, object]) -> Dict[str, object]:
 
     journal_restored = 0
     journal_sanitized = 0
-    if "trading_journal" in data and isinstance(data["trading_journal"], (dict, list)):
+    if (not _trading_journal_local_excel_authoritative()) and "trading_journal" in data and isinstance(data["trading_journal"], (dict, list)):
         _save_json_file(TRADING_JOURNAL_PATH, data["trading_journal"])
         rows = _get_trading_journal_rows()
         journal_restored = len(rows)
@@ -5737,7 +5805,7 @@ def _restore_alerts_payload(data: Dict[str, object]) -> Dict[str, object]:
     if "trading_journal_state" in data and isinstance(data["trading_journal_state"], dict):
         _save_json_file(TRADING_JOURNAL_STATE_PATH, data["trading_journal_state"])
 
-    if "trading_journal_import_cache" in data and isinstance(data["trading_journal_import_cache"], dict):
+    if (not _trading_journal_local_excel_authoritative()) and "trading_journal_import_cache" in data and isinstance(data["trading_journal_import_cache"], dict):
         _save_json_file(TRADING_JOURNAL_IMPORT_CACHE_PATH, data["trading_journal_import_cache"])
 
     monthly_rows_restored = 0
@@ -5747,7 +5815,7 @@ def _restore_alerts_payload(data: Dict[str, object]) -> Dict[str, object]:
     if "monthly_aud_revaluation_state" in data and isinstance(data["monthly_aud_revaluation_state"], dict):
         _save_json_file(MONTHLY_AUD_REVALUATION_STATE_PATH, data["monthly_aud_revaluation_state"])
     oanda_fill_state_restored = False
-    if "oanda_fill_state" in data and isinstance(data["oanda_fill_state"], dict):
+    if (not _trading_journal_local_excel_authoritative()) and "oanda_fill_state" in data and isinstance(data["oanda_fill_state"], dict):
         _save_json_file(OANDA_FILL_STATE_PATH, data["oanda_fill_state"])
         _restore_oanda_fill_state_on_startup()
         oanda_fill_state_restored = True
@@ -6500,29 +6568,17 @@ async def _run_startup_recovery_import_if_needed() -> None:
         result=None,
     )
     oanda_recovery: Dict[str, object] = {}
-    for account in ("live", "demo"):
-        try:
-            oanda_recovery[account] = await _recover_oanda_recent_fills(account)
-        except Exception as exc:
-            oanda_recovery[account] = {"ok": False, "error": str(exc)}
-            _record_oanda_fill_diagnostic(
-                account,
-                poll_enabled=os.getenv("ENABLE_OANDA_FILL_POLL", "0") == "1",
-                last_error=f"startup recovery failed: {exc}",
-            )
-            BYBIT_LOGGER.exception("OANDA startup recovery sync error account=%s: %s", account, exc)
-    if ENABLE_BYBIT_DEMO_JOURNAL:
-        try:
-            await _run_bybit_closed_pnl_sync(
-                account_mode="demo",
-                reason="startup_recovery",
-            )
-        except Exception as exc:
-            _record_bybit_demo_sync_status(
-                last_checked_at=_utc_now_iso(),
-                last_error=f"Startup recovery demo sync failed: {exc}",
-            )
-            BYBIT_LOGGER.exception("Bybit demo startup recovery sync error: %s", exc)
+    if not _trading_journal_local_excel_authoritative():
+        for account in ("live", "demo"):
+            try:
+                oanda_recovery[account] = await _recover_oanda_recent_fills(account)
+            except Exception as exc:
+                oanda_recovery[account] = {"ok": False, "error": str(exc)}
+        if ENABLE_BYBIT_DEMO_JOURNAL:
+            try:
+                await _run_bybit_closed_pnl_sync(account_mode="demo", reason="startup_recovery")
+            except Exception:
+                pass
     try:
         result = await asyncio.to_thread(_import_trading_journal_from_sources)
         ok_flag = bool(result.get("ok", False)) if isinstance(result, dict) else False
@@ -6667,24 +6723,24 @@ async def _run_daily_trade_history_sync(*, reason: str) -> Dict[str, object]:
             last_error=None,
         )
 
-        for account in ("live", "demo"):
+        if not _trading_journal_local_excel_authoritative():
+            for account in ("live", "demo"):
+                try:
+                    oanda_result[account] = await _recover_oanda_recent_fills(account)
+                except Exception as exc:
+                    errors.append(f"OANDA {account} recovery failed: {exc}")
+                    oanda_result[account] = {"ok": False, "error": str(exc)}
+            if ENABLE_BYBIT_DEMO_JOURNAL:
+                try:
+                    bybit_result["demo"] = await _run_bybit_closed_pnl_sync(account_mode="demo", reason=reason)
+                except Exception as exc:
+                    errors.append(f"Bybit demo sync failed: {exc}")
+                    bybit_result["demo"] = {"ok": False, "error": str(exc)}
             try:
-                oanda_result[account] = await _recover_oanda_recent_fills(account)
+                bybit_result["live"] = await _run_bybit_closed_pnl_sync(account_mode="live", reason=reason)
             except Exception as exc:
-                errors.append(f"OANDA {account} recovery failed: {exc}")
-                oanda_result[account] = {"ok": False, "error": str(exc)}
-
-        if ENABLE_BYBIT_DEMO_JOURNAL:
-            try:
-                bybit_result["demo"] = await _run_bybit_closed_pnl_sync(account_mode="demo", reason=reason)
-            except Exception as exc:
-                errors.append(f"Bybit demo sync failed: {exc}")
-                bybit_result["demo"] = {"ok": False, "error": str(exc)}
-        try:
-            bybit_result["live"] = await _run_bybit_closed_pnl_sync(account_mode="live", reason=reason)
-        except Exception as exc:
-            errors.append(f"Bybit live sync failed: {exc}")
-            bybit_result["live"] = {"ok": False, "error": str(exc)}
+                errors.append(f"Bybit live sync failed: {exc}")
+                bybit_result["live"] = {"ok": False, "error": str(exc)}
 
         try:
             import_result = await asyncio.to_thread(_import_trading_journal_from_sources)
@@ -19691,6 +19747,14 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
     is_stale = snapshot.get("source_fingerprints") != fingerprint_now
     items = list(snapshot.get("items") or [])
     stats = snapshot.get("stats") or {}
+    if _trading_journal_local_excel_authoritative():
+        filtered = [
+            r for r in items
+            if not (isinstance(r, dict) and _row_type(r) == "trade" and str(r.get("source") or "").strip().lower() != "local_excel")
+        ]
+        if len(filtered) != len(items):
+            items = filtered
+            stats = _compute_journal_stats(items, snapshot.get("balances") if isinstance(snapshot.get("balances"), list) else [])
 
     def _norm_search_text(value: object) -> str:
         text = str(value or "").lower()

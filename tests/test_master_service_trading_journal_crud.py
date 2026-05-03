@@ -718,7 +718,8 @@ def test_local_import_includes_bybit_demo_workbook_and_balance_anchor(temp_state
         if str(row.get("row_type") or "trade") == "trade"
         and str(row.get("account_label") or row.get("account") or "").strip().lower() == "bybit demo"
     ]
-    assert len(bybit_demo_visible) == 16
+    assert len(bybit_demo_visible) == 15
+    assert not any(str(row.get("source") or "").lower() == "bybit" for row in bybit_demo_visible)
 
     bybit_balance = next(
         bal for bal in (snapshot.get("balances") or [])
@@ -783,15 +784,24 @@ def test_bybit_invalid_time_rows_are_repaired_from_items(temp_state_paths):
     assert any((r.get("metrics") or {}).get("time_order_repaired") is True for r in repaired)
 
 
-def test_import_from_sources_preserves_existing_rows_on_empty_result(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+def test_import_from_sources_clears_existing_rows_on_empty_result_in_local_mode(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
     master_service._set_trading_journal_rows([{"id": "existing:1", "source": "manual", "open_time": "2026-04-01T00:00:00+00:00"}])
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_SOURCE", "local")
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", temp_state_paths)
     monkeypatch.setattr(master_service, "_list_local_trading_journal_workbooks", lambda: [])
     result = master_service._import_trading_journal_from_sources()
     assert result["ok"] is False
+    assert "authoritative" in str(result.get("message") or "").lower()
     rows = master_service._get_trading_journal_rows()
-    assert any(str(r.get("id")) == "existing:1" for r in rows)
+    assert not any(str(r.get("id")) == "existing:1" for r in rows)
+
+
+def test_upsert_trading_journal_rows_rejects_broker_rows_in_local_mode(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_SOURCE", "local")
+    master_service._set_trading_journal_rows([])
+    changed = master_service._upsert_trading_journal_rows([{"id": "oanda:demo:test", "source": "oanda"}])
+    assert changed == 0
+    assert master_service._get_trading_journal_rows() == []
 
 
 def test_trading_journal_js_quarantine_is_not_hard_warning():
