@@ -121,6 +121,8 @@ def test_merged_calculator_page_returns_200() -> None:
     assert "Type a symbol to load instrument specs." not in html
     assert "calc-grid" in html
     assert '/static/calculator.js?v=' in html
+    import re
+    assert re.search(r"/static/calculator\\.js\\?v=[a-f0-9]{12}", html)
     assert 'id="calc-timeframe"' not in html
     assert 'id="timeframe-toggle"' in html
     assert 'id="test-toggle"' in html
@@ -942,6 +944,7 @@ def test_calculator_bootstrap_reports_local_webhook_unavailable(monkeypatch: pyt
     assert webhook["available"] is False
     assert webhook["unavailable_code"] == "LOCAL_WEBHOOK_UNREACHABLE"
     assert webhook["webhook_origin_host"] in {"localhost", "127.0.0.1"}
+    assert "RENDER_CALCULATOR_BASE_URL" in str(webhook.get("unavailable_message") or "")
 
 
 def test_calculator_bootstrap_reports_public_webhook_available(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -961,6 +964,22 @@ def test_calculator_bootstrap_reports_remote_render_mode(monkeypatch: pytest.Mon
     assert webhook["available"] is True
     assert webhook["mode"] == "remote_render"
     assert webhook["webhook_endpoint_url"] == "https://render.example.test/api/calculator/webhook"
+    assert webhook["pending_owner"] == "remote_render"
+
+
+def test_calculator_bootstrap_includes_runtime_fingerprint() -> None:
+    response = asyncio.run(master_service.calculator_bootstrap(master_service.Request({"type": "http", "method": "GET", "scheme": "http", "server": ("127.0.0.1", 8000), "path": "/api/calculator/bootstrap", "headers": []})))
+    body = json.loads(response.body.decode("utf-8"))
+    for key in ("app_profile", "app_version", "app_build_stamp", "render_git_commit", "calculator_js_sha256_12", "calculator_js_mtime", "master_service_path", "render_calculator_base_url_configured", "render_calculator_base_url_host", "webhook"):
+        assert key in body
+
+
+def test_old_public_webhook_unavailable_string_removed() -> None:
+    py = (ROOT / "render" / "master_service.py").read_text(encoding="utf-8")
+    js = (ROOT / "render" / "static" / "calculator.js").read_text(encoding="utf-8")
+    old = "PUBLIC_WEBHOOK_BASE_URL to a public same-instance tunnel"
+    assert old not in py
+    assert old not in js
 
 
 def test_local_calculator_blocks_webhook_without_public_base_url(monkeypatch: pytest.MonkeyPatch) -> None:

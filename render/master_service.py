@@ -6908,6 +6908,14 @@ async def _autostart_scripts() -> None:
         DROPBOX_BACKUP_PATH,
         _MASTER_ENV_INFO.get("loaded_file") or "<none>",
     )
+    remote_base = str(os.getenv("RENDER_CALCULATOR_BASE_URL") or "").strip()
+    AUTOSTART_LOGGER.info(
+        "Calculator webhook runtime: APP_PROFILE=%s RENDER_CALCULATOR_BASE_URL=%s PUBLIC_WEBHOOK_BASE_URL=%s RENDER_EXTERNAL_URL=%s",
+        APP_PROFILE,
+        "configured" if remote_base else "missing",
+        "configured" if str(os.getenv("PUBLIC_WEBHOOK_BASE_URL") or "").strip() else "missing",
+        "configured" if str(os.getenv("RENDER_EXTERNAL_URL") or "").strip() else "missing",
+    )
     if _is_scanner_local_ui_mode():
         _update_state_sync_status(
             enabled=DROPBOX_SYNC_ENABLED,
@@ -9964,9 +9972,21 @@ def _calculator_webhook_capability(request: Request) -> Dict[str, object]:
     }
     if not available:
         capability["unavailable_code"] = "LOCAL_WEBHOOK_UNREACHABLE"
-        capability["unavailable_message"] = "Set RENDER_CALCULATOR_BASE_URL to the Render service URL to generate Render-owned TradingView webhook alerts from the local calculator. Webhook=No calculation remains available."
+        capability["unavailable_message"] = "Set RENDER_CALCULATOR_BASE_URL=https://<your-render-service>.onrender.com in C:\\Users\\User\\Documents\\GPT\\env.env, then restart run_local_master_control.bat."
         capability["resolution"] = "Use a non-local Render URL in RENDER_CALCULATOR_BASE_URL for local Webhook=Yes, or disable Webhook and calculate locally."
     return capability
+
+
+def _calculator_js_fingerprint() -> Dict[str, str]:
+    js_path = BASE_DIR / "render" / "static" / "calculator.js"
+    try:
+        raw = js_path.read_bytes()
+        sha12 = hashlib.sha256(raw).hexdigest()[:12]
+        mtime = str(int(js_path.stat().st_mtime))
+    except Exception:
+        sha12 = "unknown"
+        mtime = "unknown"
+    return {"sha12": sha12, "mtime": mtime, "path": str(js_path)}
 
 
 def _prune_trade_contexts(items: List[Dict[str, object]]) -> List[Dict[str, object]]:
@@ -14331,7 +14351,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
 
 @app.get("/merged/calculator")
 async def merged_calculator_page() -> HTMLResponse:
-    calc_js_version = quote(str(os.getenv("APP_BUILD_STAMP") or os.getenv("RENDER_GIT_COMMIT") or app.version), safe="")
+    calc_js_version = quote(_calculator_js_fingerprint()["sha12"], safe="")
     page = CALCULATOR_TEMPLATE.replace("{{CALCULATOR_JS_URL}}", f"/static/calculator.js?v={calc_js_version}")
     return HTMLResponse(page)
 
@@ -14483,6 +14503,9 @@ async def _cancel_pending_tasks(tasks: List[asyncio.Task[Any]]) -> None:
 
 @app.get("/api/calculator/bootstrap")
 async def calculator_bootstrap(request: Request) -> JSONResponse:
+    remote_base = str(os.getenv("RENDER_CALCULATOR_BASE_URL") or "").strip().rstrip("/")
+    remote_host = str((urlparse(remote_base).hostname if remote_base else "") or "").strip().lower() or None
+    js_fp = _calculator_js_fingerprint()
     return JSONResponse(
         {
             "accounts": ["live", "demo"],
@@ -14491,6 +14514,14 @@ async def calculator_bootstrap(request: Request) -> JSONResponse:
             "order_types": ["market", "limit"],
             "risk_modes": ["fixed_aud", "percent"],
             "app_profile": APP_PROFILE,
+            "app_version": str(app.version),
+            "app_build_stamp": str(os.getenv("APP_BUILD_STAMP") or ""),
+            "render_git_commit": str(os.getenv("RENDER_GIT_COMMIT") or ""),
+            "calculator_js_sha256_12": js_fp["sha12"],
+            "calculator_js_mtime": js_fp["mtime"],
+            "master_service_path": str(Path(__file__).resolve()),
+            "render_calculator_base_url_configured": bool(remote_base),
+            "render_calculator_base_url_host": remote_host,
             "webhook": _calculator_webhook_capability(request),
         },
         headers={"cache-control": "no-store, max-age=0"},

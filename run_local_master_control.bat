@@ -30,6 +30,15 @@ echo [local-master] APP_PROFILE=%APP_PROFILE%
 echo [local-master] AUTOSTART_SCRIPTS=%AUTOSTART_SCRIPTS%
 echo [local-master] MASTER_ENV_DIR=%MASTER_ENV_DIR%
 echo [local-master] MASTER_ENV_FILE=%MASTER_ENV_FILE%
+echo [local-master] CWD=%CD%
+for %%I in ("%RENDER_CALCULATOR_BASE_URL%") do set "RCB_HOST=%%~nxI"
+if defined RENDER_CALCULATOR_BASE_URL (
+  echo [local-master] RENDER_CALCULATOR_BASE_URL=present host=!RCB_HOST!
+  echo [local-master] Calculator webhook local-to-Render mode: enabled
+) else (
+  echo [local-master] RENDER_CALCULATOR_BASE_URL=missing
+  echo [local-master] Calculator webhook local-to-Render mode: disabled
+)
 echo [local-master] DROPBOX_SYNC_ENABLED=%DROPBOX_SYNC_ENABLED%
 echo [local-master] DROPBOX_BACKUP_PATH=%DROPBOX_BACKUP_PATH%
 echo [local-master] DROPBOX_STATE_ROOT=%DROPBOX_STATE_ROOT%
@@ -102,6 +111,15 @@ echo [local-master] APP_PROFILE=!APP_PROFILE!
 echo [local-master] AUTOSTART_SCRIPTS=!AUTOSTART_SCRIPTS!
 echo [local-master] MASTER_ENV_DIR=!MASTER_ENV_DIR!
 echo [local-master] MASTER_ENV_FILE=!MASTER_ENV_FILE!
+echo [local-master] CWD=!CD!
+for %%I in ("!RENDER_CALCULATOR_BASE_URL!") do set "RCB_HOST=%%~nxI"
+if defined RENDER_CALCULATOR_BASE_URL (
+  echo [local-master] RENDER_CALCULATOR_BASE_URL=present host=!RCB_HOST!
+  echo [local-master] Calculator webhook local-to-Render mode: enabled
+) else (
+  echo [local-master] RENDER_CALCULATOR_BASE_URL=missing
+  echo [local-master] Calculator webhook local-to-Render mode: disabled
+)
 echo [local-master] DROPBOX_SYNC_ENABLED=!DROPBOX_SYNC_ENABLED!
 echo [local-master] DROPBOX_BACKUP_PATH=!DROPBOX_BACKUP_PATH!
 echo [local-master] DROPBOX_STATE_ROOT=!DROPBOX_STATE_ROOT!

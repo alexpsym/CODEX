@@ -463,6 +463,7 @@
     try {
       const bootstrap = await request('/api/calculator/bootstrap', { cache: 'no-store' });
       state.webhookCapability = bootstrap?.webhook || null;
+      const diag = `Build: ${bootstrap?.calculator_js_sha256_12 || 'unknown'} | Profile: ${bootstrap?.app_profile || 'unknown'} | Render target: ${bootstrap?.render_calculator_base_url_configured ? 'configured' : 'missing'}`;
       const yesBtn = $('webhook-toggle').querySelectorAll('button')[1];
       if (state.webhookCapability && state.webhookCapability.available === false) {
         state.webhook_mode = 'no';
@@ -470,13 +471,18 @@
         if (typeof yesBtn.setAttribute === 'function') yesBtn.setAttribute('aria-disabled', 'true');
         else yesBtn.ariaDisabled = 'true';
         yesBtn.title = state.webhookCapability?.unavailable_message || webhookUnavailableMessage();
-        if (webhookStatusEl) webhookStatusEl.textContent = state.webhookCapability?.unavailable_message || webhookUnavailableMessage();
+        let warn = state.webhookCapability?.unavailable_message || webhookUnavailableMessage();
+        const msg = String(state.webhookCapability?.unavailable_message || '');
+        if ((msg.includes('PUBLIC_WEBHOOK_BASE_URL') || (bootstrap?.app_profile === 'local' && !msg.includes('RENDER_CALCULATOR_BASE_URL')))) {
+          warn = 'Stale local server code detected. Restart local master from the replaced CODEX-master folder.';
+        }
+        if (webhookStatusEl) webhookStatusEl.textContent = `${diag} | ${warn}`;
       } else {
         yesBtn.disabled = false;
         if (typeof yesBtn.removeAttribute === 'function') yesBtn.removeAttribute('aria-disabled');
         else yesBtn.ariaDisabled = '';
         yesBtn.title = '';
-        if (webhookStatusEl) webhookStatusEl.textContent = '';
+        if (webhookStatusEl) webhookStatusEl.textContent = diag;
       }
     } catch (_err) {
       state.webhookCapability = null;
