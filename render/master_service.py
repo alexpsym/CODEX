@@ -1563,14 +1563,66 @@ class CalculatorDependencyTimeout(Exception):
         super().__init__(f"{dependency} timed out after {timeout_s}s")
 
 
-async def _calculator_timed_dependency(name: str, coro: Any, timings_ms: Dict[str, Any], timeout_s: float, path: Optional[str] = None) -> Any:
+def _calculator_quote_elapsed_ms(quote_started: Optional[float]) -> int:
+    if not quote_started:
+        return 0
+    return int((time.perf_counter() - quote_started) * 1000)
+
+
+def _calculator_safe_submitted_payload(payload: Dict[str, object]) -> Dict[str, object]:
+    safe: Dict[str, object] = {}
+    for key in ("asset", "account", "submitted_symbol", "webhook", "test", "timeframe", "risk_mode", "risk_value", "stop_loss_ticks", "order_type", "side"):
+        if key in payload:
+            safe[key] = payload.get(key)
+    return safe
+
+
+def _calculator_quote_error_detail(
+    code: str,
+    message: str,
+    *,
+    dependency: Optional[str] = None,
+    timings_ms: Optional[Dict[str, Any]] = None,
+    quote_started: Optional[float] = None,
+    submitted_payload: Optional[Dict[str, object]] = None,
+    resolved_symbol: Optional[str] = None,
+    pending_dependencies: Optional[Set[str]] = None,
+) -> Dict[str, object]:
+    return {
+        "code": code,
+        "message": message,
+        "dependency": dependency,
+        "debug": {
+            "submitted_payload": submitted_payload or {},
+            "resolved_symbol": resolved_symbol or "",
+            "quote_latency_ms": _calculator_quote_elapsed_ms(quote_started),
+            "quote_timeout_ms": int(CALCULATOR_QUOTE_TIMEOUT_S * 1000),
+            "upstream_timings_ms": timings_ms or {},
+            "pending_dependencies": sorted(pending_dependencies or set()),
+        },
+    }
+
+
+async def _calculator_timed_dependency(
+    name: str,
+    coro: Any,
+    timings_ms: Dict[str, Any],
+    timeout_s: float,
+    path: Optional[str] = None,
+    *,
+    pending_dependencies: Optional[Set[str]] = None,
+    last_dependency_started: Optional[Dict[str, Optional[str]]] = None,
+) -> Any:
     started = time.perf_counter()
-    timings_ms[f"{name}_started"] = True
+    if pending_dependencies is not None:
+        pending_dependencies.add(name)
+    if last_dependency_started is not None:
+        last_dependency_started["name"] = name
     CALCULATOR_LOGGER.info("CALCULATOR_QUOTE_DEPENDENCY_START dependency=%s path=%s", name, path or "")
     try:
         result = await asyncio.wait_for(coro, timeout=timeout_s)
         elapsed = int((time.perf_counter() - started) * 1000)
-        timings_ms[name] = {"elapsed_ms": elapsed, "path": path}
+        timings_ms[name] = {"elapsed_ms": elapsed, "timeout_ms": int(timeout_s * 1000), "path": path, "status": "ok"}
         CALCULATOR_LOGGER.info("CALCULATOR_QUOTE_DEPENDENCY_DONE dependency=%s elapsed_ms=%s path=%s", name, elapsed, path or "")
         return result
     except asyncio.CancelledError:
@@ -1578,7 +1630,11 @@ async def _calculator_timed_dependency(name: str, coro: Any, timings_ms: Dict[st
     except asyncio.TimeoutError as exc:
         elapsed = int((time.perf_counter() - started) * 1000)
         timings_ms[name] = {"elapsed_ms": elapsed, "timeout_ms": int(timeout_s*1000), "path": path, "status": "timeout"}
+        CALCULATOR_LOGGER.warning("CALCULATOR_QUOTE_DEPENDENCY_TIMEOUT dependency=%s elapsed_ms=%s timeout_s=%s path=%s", name, elapsed, timeout_s, path or "")
         raise CalculatorDependencyTimeout(name, timeout_s, elapsed, path) from exc
+    finally:
+        if pending_dependencies is not None:
+            pending_dependencies.discard(name)
 
 
 async def _bybit_lookup_symbol(base_url: str, symbol: str) -> Optional[Dict[str, object]]:
@@ -14875,7 +14931,11 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
 
         webhook_enabled = webhook_mode in {"yes", "true", "1"}
         quote_started = time.perf_counter()
-        timings_ms: Dict[str, int] = {}
+        timings_ms: Dict[str, Any] = {}
+        last_dependency_started: Dict[str, Optional[str]] = {"name": None}
+        pending_dependencies: Set[str] = set()
+        resolved_symbol_for_debug = ""
+        submitted_debug = _calculator_safe_submitted_payload({"asset": asset, "account": account, "submitted_symbol": symbol_in, "webhook": webhook_mode, "test": "yes" if is_test_trade else "no", "timeframe": _normalize_timeframe(payload.get("timeframe") or ""), "risk_mode": risk_mode, "risk_value": str(payload.get("risk_value") or ""), "stop_loss_ticks": str(payload.get("stop_loss_ticks") or ""), "order_type": order_type, "side": side})
         webhook_capability = _calculator_webhook_capability(request)
         webhook_base_url = str(webhook_capability.get("public_webhook_base_url") or "").strip()
         webhook_endpoint_url = str(webhook_capability.get("webhook_endpoint_url") or "").strip()
@@ -15445,10 +15505,19 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             return JSONResponse(response_payload)
 
         raise HTTPException(status_code=400, detail="asset must be crypto or fx.")
-    except HTTPException:
-        raise
+    except HTTPException as exc:
+        detail = exc.detail
+        if isinstance(detail, dict):
+            dbg = detail.setdefault("debug", {})
+            dbg.setdefault("quote_latency_ms", _calculator_quote_elapsed_ms(quote_started))
+            dbg.setdefault("upstream_timings_ms", timings_ms)
+            dbg.setdefault("submitted_payload", submitted_debug)
+            dbg.setdefault("resolved_symbol", resolved_symbol_for_debug)
+            dbg.setdefault("pending_dependencies", sorted(pending_dependencies))
+            raise HTTPException(status_code=exc.status_code, detail=detail)
+        raise HTTPException(status_code=exc.status_code, detail=_calculator_quote_error_detail("QUOTE_FAILED", str(detail), timings_ms=timings_ms, quote_started=quote_started, submitted_payload=submitted_debug, resolved_symbol=resolved_symbol_for_debug, pending_dependencies=pending_dependencies))
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=502, detail=_calculator_quote_error_detail("QUOTE_FAILED", str(exc), timings_ms=timings_ms, quote_started=quote_started, submitted_payload=submitted_debug, resolved_symbol=resolved_symbol_for_debug, pending_dependencies=pending_dependencies)) from exc
 
 
 def _get_oanda_quote_home_factors(

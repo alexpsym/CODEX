@@ -1330,3 +1330,11 @@ def test_fetch_bybit_balance_usdt_passes_coin_and_timeouts(monkeypatch: pytest.M
     assert calls["timeout_s"] == 5.0
     assert calls["connect_s"] == 2.0
     assert calls["read_s"] == 5.0
+
+
+def test_crypto_quote_backend_timeout_beats_frontend_timeout() -> None:
+    js = (ROOT / "render" / "static" / "calculator.js").read_text(encoding="utf-8")
+    import re
+    m = re.search(r"quoteTimeoutMs\s*=\s*(\d+)", js)
+    assert m
+    assert int(master_service.CALCULATOR_QUOTE_TIMEOUT_S * 1000) < int(m.group(1))
