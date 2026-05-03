@@ -306,7 +306,7 @@
     }
     rows.push(['Quote latency (ms)', q.quote_latency_ms ?? '-']);
     if (q.upstream_timings_ms && typeof q.upstream_timings_ms === 'object') {
-      Object.entries(q.upstream_timings_ms).forEach(([k, v]) => rows.push([`Timing: ${k}`, v]));
+      Object.entries(q.upstream_timings_ms).forEach(([k, v]) => rows.push([`Timing: ${k}`, (v && typeof v === "object") ? JSON.stringify(v, null, 2) : v]));
     }
     resultEl.innerHTML = rows.map(([k, v]) => `<div class="card"><div class="muted">${k}</div><div>${v ?? '-'}</div></div>`).join('');
   }
