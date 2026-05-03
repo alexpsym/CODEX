@@ -13,6 +13,7 @@
     quote: null,
     resolvedSymbol: '',
     pendingWebhookId: '',
+    pendingWebhookDeleteUrl: '',
     quoteStatus: 'idle',
     hasCalculatedOnce: false,
     quoteRequestSeq: 0,
@@ -94,7 +95,7 @@
     if (quoteStatusEl) quoteStatusEl.textContent = text || '';
   }
   function webhookUnavailableMessage() {
-    return 'TradingView webhook is unavailable on localhost unless you use Render or set PUBLIC_WEBHOOK_BASE_URL to a public same-instance tunnel URL.';
+    return 'Set RENDER_CALCULATOR_BASE_URL to the Render service URL to generate Render-owned TradingView webhook alerts from the local calculator. Webhook=No calculation remains available.';
   }
 
   function setSubmitState({ visible, enabled, reason = '', stateName = '' }) {
@@ -397,6 +398,7 @@
       webhookJsonEl.textContent = '';
       webhookPanel.dataset.pendingId = '';
       webhookPanel.dataset.endpoint = '';
+      state.pendingWebhookDeleteUrl = '';
     }
   }
 
@@ -404,11 +406,13 @@
     if (!state.pendingWebhookId) return;
     const staleId = state.pendingWebhookId;
     try {
-      await request(`/api/pending-webhooks/${encodeURIComponent(staleId)}`, { method: 'DELETE' });
-    } catch (_err) {
-      // best-effort cleanup
+      const deleteUrl = state.pendingWebhookDeleteUrl || `/api/pending-webhooks/${encodeURIComponent(staleId)}`;
+      await request(deleteUrl, { method: 'DELETE' });
+    } catch (err) {
+      if (webhookStatusEl) webhookStatusEl.textContent = `Pending webhook cleanup failed: ${err?.message || err}`;
     }
     state.pendingWebhookId = '';
+    state.pendingWebhookDeleteUrl = '';
     if (state.quote && state.quote.pending_webhook_id === staleId) {
       delete state.quote.pending_webhook_id;
       delete state.quote.webhook_payload_json;
@@ -459,20 +463,26 @@
     try {
       const bootstrap = await request('/api/calculator/bootstrap', { cache: 'no-store' });
       state.webhookCapability = bootstrap?.webhook || null;
+      const diag = `Build: ${bootstrap?.calculator_js_sha256_12 || 'unknown'} | Profile: ${bootstrap?.app_profile || 'unknown'} | Render target: ${bootstrap?.render_calculator_base_url_configured ? 'configured' : 'missing'}`;
       const yesBtn = $('webhook-toggle').querySelectorAll('button')[1];
       if (state.webhookCapability && state.webhookCapability.available === false) {
         state.webhook_mode = 'no';
         yesBtn.disabled = true;
         if (typeof yesBtn.setAttribute === 'function') yesBtn.setAttribute('aria-disabled', 'true');
         else yesBtn.ariaDisabled = 'true';
-        yesBtn.title = webhookUnavailableMessage();
-        if (webhookStatusEl) webhookStatusEl.textContent = webhookUnavailableMessage();
+        yesBtn.title = state.webhookCapability?.unavailable_message || webhookUnavailableMessage();
+        let warn = state.webhookCapability?.unavailable_message || webhookUnavailableMessage();
+        const msg = String(state.webhookCapability?.unavailable_message || '');
+        if ((msg.includes('PUBLIC_WEBHOOK_BASE_URL') || (bootstrap?.app_profile === 'local' && !msg.includes('RENDER_CALCULATOR_BASE_URL')))) {
+          warn = 'Stale local server code detected. Restart local master from the replaced CODEX-master folder.';
+        }
+        if (webhookStatusEl) webhookStatusEl.textContent = `${diag} | ${warn}`;
       } else {
         yesBtn.disabled = false;
         if (typeof yesBtn.removeAttribute === 'function') yesBtn.removeAttribute('aria-disabled');
         else yesBtn.ariaDisabled = '';
         yesBtn.title = '';
-        if (webhookStatusEl) webhookStatusEl.textContent = '';
+        if (webhookStatusEl) webhookStatusEl.textContent = diag;
       }
     } catch (_err) {
       state.webhookCapability = null;
@@ -637,6 +647,7 @@
       setSubmitState({ visible: state.webhook_mode !== 'yes', enabled: true, reason: '', stateName: 'ready' });
       if (state.webhook_mode === 'yes' && quote.webhook_payload_json) {
         state.pendingWebhookId = quote.pending_webhook_id || state.pendingWebhookId;
+        state.pendingWebhookDeleteUrl = quote.pending_webhook_delete_url || '';
         webhookUrlEl.textContent = quote.webhook_endpoint_url || quote.webhook_endpoint || '';
         webhookJsonEl.textContent = quote.webhook_payload_json;
         webhookPanel.dataset.pendingId = quote.pending_webhook_id || '';
@@ -644,6 +655,7 @@
         toggleWebhookPanel(true);
       } else {
         state.pendingWebhookId = '';
+        state.pendingWebhookDeleteUrl = '';
       }
       if (state.webhook_mode === 'yes') {
         setSubmitState({ visible: false, enabled: false, reason: 'Webhook mode enabled.', stateName: 'ready' });
@@ -652,6 +664,8 @@
       if (e.name === 'AbortError') return;
       invalidateQuote({ status: 'error', reason: 'Quote failed. Recalculate before submitting.' });
       toggleWebhookPanel(false);
+      state.pendingWebhookId = '';
+      state.pendingWebhookDeleteUrl = '';
       errorEl.textContent = String(e.message || e);
       renderErrorDebug(e.detail || null);
     } finally {

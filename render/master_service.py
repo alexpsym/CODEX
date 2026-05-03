@@ -6908,6 +6908,14 @@ async def _autostart_scripts() -> None:
         DROPBOX_BACKUP_PATH,
         _MASTER_ENV_INFO.get("loaded_file") or "<none>",
     )
+    remote_base = str(os.getenv("RENDER_CALCULATOR_BASE_URL") or "").strip()
+    AUTOSTART_LOGGER.info(
+        "Calculator webhook runtime: APP_PROFILE=%s RENDER_CALCULATOR_BASE_URL=%s PUBLIC_WEBHOOK_BASE_URL=%s RENDER_EXTERNAL_URL=%s",
+        APP_PROFILE,
+        "configured" if remote_base else "missing",
+        "configured" if str(os.getenv("PUBLIC_WEBHOOK_BASE_URL") or "").strip() else "missing",
+        "configured" if str(os.getenv("RENDER_EXTERNAL_URL") or "").strip() else "missing",
+    )
     if _is_scanner_local_ui_mode():
         _update_state_sync_status(
             enabled=DROPBOX_SYNC_ENABLED,
@@ -9911,6 +9919,11 @@ def _update_webhook_attempt(request_id: str, updates: Dict[str, object]) -> Opti
     return None
 
 
+def _is_local_host(host: str) -> bool:
+    raw = str(host or "").strip().lower()
+    return raw in {"", "localhost", "127.0.0.1", "0.0.0.0", "::1"}
+
+
 def _public_webhook_base_url(request: Request) -> str:
     configured = os.getenv("PUBLIC_WEBHOOK_BASE_URL", "").strip().rstrip("/")
     if configured:
@@ -9922,6 +9935,21 @@ def _public_webhook_base_url(request: Request) -> str:
 
 
 def _calculator_webhook_capability(request: Request) -> Dict[str, object]:
+    remote_base = str(os.getenv("RENDER_CALCULATOR_BASE_URL") or "").strip().rstrip("/")
+    remote_parsed = urlparse(remote_base) if remote_base else None
+    remote_host = str((remote_parsed.hostname if remote_parsed else "") or "").strip().lower()
+    if APP_PROFILE == "local" and remote_base and remote_parsed and remote_parsed.scheme in {"http", "https"} and not _is_local_host(remote_host):
+        return {
+            "available": True,
+            "mode": "remote_render",
+            "app_profile": APP_PROFILE,
+            "pending_owner": "remote_render",
+            "public_webhook_base_url": remote_base,
+            "webhook_origin_host": remote_host,
+            "webhook_endpoint_url": f"{remote_base}/api/calculator/webhook",
+            "quote_endpoint_url": f"{remote_base}/api/calculator/quote",
+        }
+
     webhook_base_url = _public_webhook_base_url(request)
     webhook_endpoint_url = f"{webhook_base_url}/api/calculator/webhook"
     parsed_base = urlparse(webhook_base_url if "://" in webhook_base_url else f"https://{webhook_base_url}")
@@ -9929,9 +9957,11 @@ def _calculator_webhook_capability(request: Request) -> Dict[str, object]:
     local_override_allowed = str(os.getenv("ALLOW_LOCAL_TRADINGVIEW_WEBHOOKS") or "").strip().lower() in {"1", "true", "yes", "on"}
     app_instance_id = str(os.getenv("APP_INSTANCE_ID") or os.getenv("RENDER_INSTANCE_ID") or os.getenv("RENDER_SERVICE_ID") or os.getenv("HOSTNAME") or "").strip() or None
     public_base_configured = bool(os.getenv("PUBLIC_WEBHOOK_BASE_URL", "").strip() or os.getenv("RENDER_EXTERNAL_URL", "").strip())
-    available = not (webhook_origin_host in {"localhost", "127.0.0.1"} and not local_override_allowed)
+    available = not (_is_local_host(webhook_origin_host or "") and not local_override_allowed)
     capability: Dict[str, object] = {
         "available": available,
+        "mode": "same_instance",
+        "pending_owner": "same_instance",
         "public_webhook_base_url": webhook_base_url,
         "webhook_endpoint_url": webhook_endpoint_url,
         "webhook_origin_host": webhook_origin_host,
@@ -9942,9 +9972,21 @@ def _calculator_webhook_capability(request: Request) -> Dict[str, object]:
     }
     if not available:
         capability["unavailable_code"] = "LOCAL_WEBHOOK_UNREACHABLE"
-        capability["unavailable_message"] = "TradingView webhook mode is not available from localhost/127.0.0.1 unless PUBLIC_WEBHOOK_BASE_URL points to a reachable public URL for this same running instance."
-        capability["resolution"] = "Use the Render calculator page for Render webhooks, or expose this local instance through a public tunnel and set PUBLIC_WEBHOOK_BASE_URL to that same-instance tunnel URL. Otherwise turn Webhook off and calculate normally."
+        capability["unavailable_message"] = "Set RENDER_CALCULATOR_BASE_URL=https://<your-render-service>.onrender.com in C:\\Users\\User\\Documents\\GPT\\env.env, then restart run_local_master_control.bat."
+        capability["resolution"] = "Use a non-local Render URL in RENDER_CALCULATOR_BASE_URL for local Webhook=Yes, or disable Webhook and calculate locally."
     return capability
+
+
+def _calculator_js_fingerprint() -> Dict[str, str]:
+    js_path = BASE_DIR / "render" / "static" / "calculator.js"
+    try:
+        raw = js_path.read_bytes()
+        sha12 = hashlib.sha256(raw).hexdigest()[:12]
+        mtime = str(int(js_path.stat().st_mtime))
+    except Exception:
+        sha12 = "unknown"
+        mtime = "unknown"
+    return {"sha12": sha12, "mtime": mtime, "path": str(js_path)}
 
 
 def _prune_trade_contexts(items: List[Dict[str, object]]) -> List[Dict[str, object]]:
@@ -14309,7 +14351,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
 
 @app.get("/merged/calculator")
 async def merged_calculator_page() -> HTMLResponse:
-    calc_js_version = quote(str(os.getenv("APP_BUILD_STAMP") or os.getenv("RENDER_GIT_COMMIT") or app.version), safe="")
+    calc_js_version = quote(_calculator_js_fingerprint()["sha12"], safe="")
     page = CALCULATOR_TEMPLATE.replace("{{CALCULATOR_JS_URL}}", f"/static/calculator.js?v={calc_js_version}")
     return HTMLResponse(page)
 
@@ -14461,6 +14503,9 @@ async def _cancel_pending_tasks(tasks: List[asyncio.Task[Any]]) -> None:
 
 @app.get("/api/calculator/bootstrap")
 async def calculator_bootstrap(request: Request) -> JSONResponse:
+    remote_base = str(os.getenv("RENDER_CALCULATOR_BASE_URL") or "").strip().rstrip("/")
+    remote_host = str((urlparse(remote_base).hostname if remote_base else "") or "").strip().lower() or None
+    js_fp = _calculator_js_fingerprint()
     return JSONResponse(
         {
             "accounts": ["live", "demo"],
@@ -14469,6 +14514,14 @@ async def calculator_bootstrap(request: Request) -> JSONResponse:
             "order_types": ["market", "limit"],
             "risk_modes": ["fixed_aud", "percent"],
             "app_profile": APP_PROFILE,
+            "app_version": str(app.version),
+            "app_build_stamp": str(os.getenv("APP_BUILD_STAMP") or ""),
+            "render_git_commit": str(os.getenv("RENDER_GIT_COMMIT") or ""),
+            "calculator_js_sha256_12": js_fp["sha12"],
+            "calculator_js_mtime": js_fp["mtime"],
+            "master_service_path": str(Path(__file__).resolve()),
+            "render_calculator_base_url_configured": bool(remote_base),
+            "render_calculator_base_url_host": remote_host,
             "webhook": _calculator_webhook_capability(request),
         },
         headers={"cache-control": "no-store, max-age=0"},
@@ -14741,6 +14794,35 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                         },
                     },
                 )
+        if webhook_enabled and str(webhook_capability.get("mode") or "") == "remote_render":
+            remote_base = str(os.getenv("RENDER_CALCULATOR_BASE_URL") or "").strip().rstrip("/")
+            remote_parsed = urlparse(remote_base) if remote_base else None
+            remote_host = str((remote_parsed.hostname if remote_parsed else "") or "").strip().lower()
+            req_host = str(getattr(request.url, "hostname", "") or "").strip().lower()
+            if not (_is_local_host(req_host) and not _is_local_host(remote_host) and req_host != remote_host):
+                raise HTTPException(status_code=400, detail={"code": "REMOTE_PROXY_GUARD", "message": "Remote calculator proxy guard blocked this request."})
+            outbound_payload = dict(payload or {})
+            outbound_payload["webhook"] = "yes"
+            timeout = httpx.Timeout(45.0, connect=10.0)
+            target_url = f"{remote_base}/api/calculator/quote"
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                proxied = await client.post(target_url, json=outbound_payload)
+            if proxied.status_code >= 400:
+                detail_obj: object
+                try:
+                    detail_obj = proxied.json()
+                except Exception:
+                    detail_obj = {"message": proxied.text or "Remote calculator quote failed."}
+                return JSONResponse(detail_obj, status_code=proxied.status_code)
+            proxied_json = proxied.json()
+            if isinstance(proxied_json, dict):
+                pending_id = str(proxied_json.get("pending_webhook_id") or "").strip()
+                if pending_id:
+                    proxied_json.setdefault("pending_webhook_delete_url", f"/api/calculator/remote-pending-webhooks/{quote(pending_id, safe='')}")
+                proxied_json.setdefault("quote_owner", "remote_render")
+                proxied_json.setdefault("pending_webhook_owner", "remote_render")
+                proxied_json.setdefault("proxied_by", "local_calculator")
+            return JSONResponse(proxied_json, status_code=proxied.status_code)
 
         if asset == "crypto":
             if risk_mode == "fixed_aud":
@@ -18013,6 +18095,24 @@ async def upsert_pending_webhook(request: Request) -> JSONResponse:
     item = _upsert_pending_webhook(payload)
     _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "item": item})
+
+
+
+
+@app.delete("/api/calculator/remote-pending-webhooks/{webhook_id}")
+async def delete_remote_pending_webhook(request: Request, webhook_id: str) -> JSONResponse:
+    capability = _calculator_webhook_capability(request)
+    if str(capability.get("mode") or "") != "remote_render":
+        raise HTTPException(status_code=400, detail={"code": "REMOTE_WEBHOOK_DISABLED", "message": "Remote Render calculator mode is not enabled."})
+    remote_base = str(os.getenv("RENDER_CALCULATOR_BASE_URL") or "").strip().rstrip("/")
+    target_url = f"{remote_base}/api/pending-webhooks/{quote(webhook_id, safe='')}"
+    timeout = httpx.Timeout(15.0, connect=5.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.delete(target_url)
+    content_type = (resp.headers.get("content-type") or "").lower()
+    if "application/json" in content_type:
+        return JSONResponse(resp.json(), status_code=resp.status_code)
+    return JSONResponse({"status": "ok" if resp.status_code < 300 else "error", "detail": resp.text}, status_code=resp.status_code)
 
 
 @app.delete("/api/pending-webhooks/{webhook_id}")

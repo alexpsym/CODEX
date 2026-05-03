@@ -67,3 +67,9 @@ Use the calculator UI (`/merged/calculator`) to generate the exact JSON payload 
 - If you need to pin a different Python binary, set the `PYTHON` environment variable and the manager will use it when spawning scripts.
 
 This setup keeps everything on one Render Starter instance so you can replace SignalStack with your own always-on webhook listener and trading automation hub.
+
+## 7) Local calculator with Render-owned TradingView webhooks
+- To generate Render-owned TradingView webhook JSON from the local calculator, set `RENDER_CALCULATOR_BASE_URL=https://<your-render-service>.onrender.com` in `C:\Users\User\Documents\GPT\env.env`, restart local master, then use **Webhook=Yes** in local `/merged/calculator`.
+- The webhook URL shown in the local UI should be the Render URL, not localhost.
+- The pending webhook record is created on Render (execution owner), so TradingView must post to Render.
+- `Webhook=No` calculations remain local and unchanged.
