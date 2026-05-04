@@ -19,6 +19,8 @@
     quoteRequestSeq: 0,
     quoteController: null,
     webhookCapability: null,
+    quotePrewarmStatus: null,
+    quotePrewarmPromise: null,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -41,6 +43,7 @@
   const webhookStatusEl = $('calc-webhook-status');
 
   let symbolTimer = null;
+  let walletPrewarmInterval = null;
   let resolveController = null;
   let resolveInFlight = null;
   let journalController = null;
@@ -107,13 +110,33 @@
   function setQuoteStatus(text) {
     if (quoteStatusEl) quoteStatusEl.textContent = text || '';
   }
+  function setPrewarmStatus(status) {
+    state.quotePrewarmStatus = status || null;
+    if (!status) return;
+    if (status.ready_for_quote) setQuoteStatus('Quote data ready');
+    else if ((status.missing_required || []).includes('wallet')) setQuoteStatus('Wallet unavailable');
+    else setQuoteStatus('Preparing quote data…');
+  }
+  function refreshPrewarmSchedule() {
+    if (walletPrewarmInterval) {
+      clearInterval(walletPrewarmInterval);
+      walletPrewarmInterval = null;
+    }
+    if (state.asset === 'crypto') {
+      prewarmAccountDependencies();
+      if (typeof setInterval === 'function') {
+        walletPrewarmInterval = setInterval(() => { prewarmAccountDependencies(); }, 20000);
+        if (walletPrewarmInterval && typeof walletPrewarmInterval.unref === 'function') walletPrewarmInterval.unref();
+      }
+    }
+  }
   function webhookUnavailableMessage() {
     return 'Set RENDER_CALCULATOR_BASE_URL to the Render service URL to generate Render-owned TradingView webhook alerts from the local calculator. Webhook=No calculation remains available.';
   }
 
   function setSubmitState({ visible, enabled, reason = '', stateName = '' }) {
     submitBtn.style.display = visible ? '' : 'none';
-    submitBtn.disabled = !(enabled && state.quote && state.quoteStatus === 'ready' && state.webhook_mode !== 'yes');
+    submitBtn.disabled = !(enabled && state.quote && state.quoteStatus === 'ready' && state.webhook_mode !== 'yes' && state.quote.quote_valid_for_submit !== false);
     submitBtn.title = reason || '';
     if (stateName) submitBtn.dataset.state = stateName;
   }
@@ -230,6 +253,12 @@
     if (!Number.isFinite(n)) return '-';
     return n.toFixed(2);
   };
+  function safeTimeout(fn, ms) {
+    let sync = true;
+    const id = setTimeout(() => { if (!sync) fn(); }, ms);
+    sync = false;
+    return id;
+  }
 
   const fmtDuration = (secs) => {
     const n = Number(secs);
@@ -586,8 +615,18 @@
   async function prewarmQuoteDependencies(symbol) {
     try {
       if (!symbol) return;
-      await post('/api/calculator/prewarm', { asset: state.asset, account: state.account, symbol });
+      state.quotePrewarmPromise = post('/api/calculator/prewarm', { asset: state.asset, account: state.account, symbol });
+      setPrewarmStatus(await state.quotePrewarmPromise);
     } catch (_e) {}
+    finally { state.quotePrewarmPromise = null; }
+  }
+  async function prewarmAccountDependencies() {
+    try {
+      if (state.asset !== 'crypto') return;
+      state.quotePrewarmPromise = post('/api/calculator/prewarm-account', { asset: state.asset, account: state.account });
+      setPrewarmStatus(await state.quotePrewarmPromise);
+    } catch (_e) {}
+    finally { state.quotePrewarmPromise = null; }
   }
 
   function debounceSymbolResolve() {
@@ -642,10 +681,10 @@
     const quoteTimeoutMs = 15000;
     state.quoteRequestSeq += 1;
     const seq = state.quoteRequestSeq;
-    const softTimeoutId = setTimeout(() => {
+    const softTimeoutId = safeTimeout(() => Promise.resolve().then(() => {
       if (seq === state.quoteRequestSeq) setQuoteStatus('Still calculating… waiting for upstream quote dependencies.');
-    }, quoteSoftTimeoutMs);
-    const timeoutId = setTimeout(() => state.quoteController && state.quoteController.abort(), quoteTimeoutMs);
+    }), quoteSoftTimeoutMs);
+    const timeoutId = safeTimeout(() => Promise.resolve().then(() => state.quoteController && state.quoteController.abort()), quoteTimeoutMs);
     state.hasCalculatedOnce = true;
     const quoteBtn = $('calc-quote');
     const defaultLabel = quoteBtn.dataset.defaultLabel || quoteBtn.textContent || 'Calculate';
@@ -673,8 +712,12 @@
         toggleWebhookPanel(false);
         return;
       }
-      if (!state.resolvedSymbol && resolveInFlight) {
+      if (state.asset === 'crypto' && !state.resolvedSymbol && resolveInFlight) {
         try { await Promise.race([resolveInFlight, new Promise((r) => setTimeout(r, 800))]); } catch (_e) {}
+      }
+      if (state.asset === 'crypto' && state.quotePrewarmPromise) setQuoteStatus('Preparing quote data…');
+      if (state.asset === 'crypto' && state.quotePrewarmStatus && state.quotePrewarmStatus.ready_for_quote === false) {
+        throw new Error('Preparing quote data… please wait for wallet/ticker prewarm.');
       }
       const payload = {
         ...state,
@@ -689,6 +732,8 @@
         pending_webhook_id: state.webhook_mode === 'yes' ? (state.pendingWebhookId || undefined) : undefined,
         previous_pending_webhook_id: state.webhook_mode === 'yes' ? undefined : (state.pendingWebhookId || undefined),
       };
+      delete payload.quotePrewarmStatus;
+      delete payload.quotePrewarmPromise;
       renderRequestSummary(payload);
       const quote = await post('/api/calculator/quote', payload, { signal: state.quoteController.signal });
       if (seq !== state.quoteRequestSeq) return;
@@ -769,15 +814,18 @@
       if (!submitResp || submitResp.ok !== true) {
         throw buildFetchError('/api/calculator/submit', 'POST', 400, 'Bad Request', '', submitResp || {});
       }
-      okEl.textContent = 'Order submitted successfully.';
+      const adj = submitResp?.submit_level_adjustments || {};
+      if (adj && adj.submit_take_profit_auto_adjusted) okEl.textContent = `Order submitted. TP adjusted from ${adj.original_take_profit_price} to ${adj.adjusted_take_profit_price} because LastPrice moved since quote.`;
+      else okEl.textContent = 'Order submitted successfully.';
     } catch (e) {
+      okEl.textContent = '';
       errorEl.textContent = String(e.message || e);
       renderErrorDebug(e.detail || (e.debug ? { debug: e.debug } : null));
     }
   });
 
-  setToggle('account-toggle', 'account', resolveSymbolAndLoad);
-  setToggle('asset-toggle', 'asset', () => { updateRiskUiForAsset(); resolveSymbolAndLoad(); });
+  setToggle('account-toggle', 'account', () => { refreshPrewarmSchedule(); resolveSymbolAndLoad(); });
+  setToggle('asset-toggle', 'asset', () => { updateRiskUiForAsset(); refreshPrewarmSchedule(); resolveSymbolAndLoad(); });
   setToggle('side-toggle', 'side');
   setToggle('order-toggle', 'order_type');
   setToggle('risk-toggle', 'risk_mode');
@@ -794,6 +842,7 @@
     webhookYesBtn.title = 'Checking webhook availability…';
   }
   loadBootstrapCapability().finally(syncAllToggleStates);
+  refreshPrewarmSchedule();
   setSubmitState({ visible: false, enabled: false, reason: '', stateName: 'idle' });
   toggleWebhookPanel(false);
   setJournalState('idle', 'Type a symbol to load journal summary.');

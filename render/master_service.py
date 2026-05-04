@@ -1314,6 +1314,8 @@ _BYBIT_INSTRUMENT_CACHE_TTL_SECONDS = float(os.getenv("BYBIT_INSTRUMENT_CACHE_TT
 _BYBIT_INSTRUMENT_NEGATIVE_TTL_SECONDS = float(os.getenv("BYBIT_INSTRUMENT_NEGATIVE_TTL_SECONDS", "30"))
 _BYBIT_TICKER_CACHE: Dict[str, Dict[str, object]] = {}
 _BYBIT_TICKER_CACHE_TTL_SECONDS = float(os.getenv("BYBIT_TICKER_CACHE_TTL_SECONDS", "3"))
+_BYBIT_TICKER_INFLIGHT: Dict[str, "asyncio.Task[Dict[str, object]]"] = {}
+_BYBIT_WALLET_BALANCE_INFLIGHT: Dict[str, "asyncio.Task[Dict[str, Decimal]]"] = {}
 _BYBIT_WALLET_BALANCE_CACHE: Dict[str, Dict[str, object]] = {}
 _BYBIT_WALLET_BALANCE_CACHE_TTL_SECONDS = float(os.getenv("BYBIT_WALLET_BALANCE_CACHE_TTL_SECONDS", "30"))
 
@@ -11495,17 +11497,17 @@ async def _place_bybit_order(
         stop_dec = Decimal(str(body.get("stopLoss"))) if body.get("stopLoss") is not None else None
         take_dec = Decimal(str(body.get("takeProfit"))) if body.get("takeProfit") is not None else None
         try:
-            _validate_bybit_linear_levels_before_submit(
-                symbol=symbol,
-                side=action,
-                order_type=order_type,
-                entry_price=entry_dec,
-                stop_loss=stop_dec,
-                take_profit=take_dec,
-                last_price=last_price,
-                tick_size=tick_size_dec,
-                source_context="calculator_submit" if str(payload.get("pending_webhook_id") or "").strip() == "" else "calculator_webhook",
+            src_ctx = "calculator_submit" if str(payload.get("pending_webhook_id") or "").strip() == "" else "calculator_webhook"
+            safe_entry, safe_sl, safe_tp, safe_diag = _make_bybit_levels_submit_safe(
+                symbol=symbol, side=action, order_type=order_type, entry_price=entry_dec, stop_loss=stop_dec, take_profit=take_dec, last_price=last_price, tick_size=tick_size_dec, source_context=src_ctx
             )
+            if safe_tp is not None:
+                body["takeProfit"] = _fmt_dec(safe_tp)
+            if safe_sl is not None:
+                body["stopLoss"] = _fmt_dec(safe_sl)
+            if "price" in body and safe_entry is not None:
+                body["price"] = _fmt_dec(safe_entry)
+            payload["_submit_level_adjustments"] = safe_diag
         except BybitPreSubmitValidationError:
             raise
 
@@ -14899,6 +14901,43 @@ def _adjust_bybit_take_profit_for_last_price(
                 'rule': rule,
             }
     return take_profit, None
+
+def _make_bybit_levels_submit_safe(
+    *,
+    symbol: str,
+    side: str,
+    order_type: str,
+    entry_price: Decimal,
+    stop_loss: Optional[Decimal],
+    take_profit: Optional[Decimal],
+    last_price: Decimal,
+    tick_size: Decimal,
+    source_context: str,
+) -> Tuple[Decimal, Optional[Decimal], Optional[Decimal], Dict[str, object]]:
+    snapped_entry = _snap_to_increment(entry_price, tick_size) or entry_price
+    snapped_sl = (_snap_to_increment(stop_loss, tick_size) if stop_loss is not None else None)
+    snapped_tp = (_snap_to_increment(take_profit, tick_size) if take_profit is not None else None)
+    diag: Dict[str, object] = {"submit_last_price": _fmt_dec(last_price), "tick_size": _fmt_dec(tick_size), "source_context": source_context}
+    if snapped_tp is not None:
+        adjusted_tp, adj = _adjust_bybit_take_profit_for_last_price(
+            symbol=symbol, side=side, entry_price=snapped_entry, take_profit=snapped_tp, last_price=last_price, tick_size=tick_size
+        )
+        if adj:
+            diag.update({
+                "submit_take_profit_auto_adjusted": True,
+                "original_take_profit_price": _fmt_dec(snapped_tp),
+                "adjusted_take_profit_price": _fmt_dec(adjusted_tp),
+                "reason": "bybit_last_price_moved_since_quote",
+            })
+        snapped_tp = adjusted_tp
+    _validate_bybit_linear_levels_before_submit(
+        symbol=symbol, side=side, order_type=order_type, entry_price=snapped_entry, stop_loss=snapped_sl, take_profit=snapped_tp, last_price=last_price, tick_size=tick_size, source_context=source_context
+    )
+    if side == "buy" and snapped_tp is not None and snapped_tp <= snapped_entry:
+        raise HTTPException(status_code=409, detail={"code": "QUOTE_STALE_RECALC_REQUIRED", "message": "Market moved enough that TP/SL relationship must be recalculated."})
+    if side == "sell" and snapped_tp is not None and snapped_tp >= snapped_entry:
+        raise HTTPException(status_code=409, detail={"code": "QUOTE_STALE_RECALC_REQUIRED", "message": "Market moved enough that TP/SL relationship must be recalculated."})
+    return snapped_entry, snapped_sl, snapped_tp, diag
 def _fmt_dec_by_increment(
     value: Optional[Decimal],
     increment: Optional[Decimal],
@@ -14966,10 +15005,19 @@ async def _fetch_bybit_ticker_cached(base_url: str, category: str, symbol: str, 
     entry = _BYBIT_TICKER_CACHE.get(key) or {}
     ts = float(entry.get("ts") or 0.0)
     if entry.get("payload") and (now - ts) <= max_age_s:
-        return {"payload": entry["payload"], "cache_status": "fresh", "cache_age_ms": int((now-ts)*1000)}
-    payload = await _bybit_get_async(base_url, "/v5/market/tickers", {"category": category, "symbol": symbol}, timeout_s=timeout_s, connect_s=0.5, read_s=timeout_s)
-    _BYBIT_TICKER_CACHE[key] = {"ts": now, "payload": payload}
-    return {"payload": payload, "cache_status": "live", "cache_age_ms": 0}
+        return {"payload": entry["payload"], "cache_status": "fresh", "cache_age_ms": int((now-ts)*1000), "joined_inflight": False}
+    task = _BYBIT_TICKER_INFLIGHT.get(key)
+    joined = bool(task and not task.done())
+    if not joined:
+        task = asyncio.create_task(_bybit_get_async(base_url, "/v5/market/tickers", {"category": category, "symbol": symbol}, timeout_s=timeout_s, connect_s=0.5, read_s=timeout_s))
+        _BYBIT_TICKER_INFLIGHT[key] = task
+    try:
+        payload = await task
+        _BYBIT_TICKER_CACHE[key] = {"ts": time.time(), "payload": payload}
+        return {"payload": payload, "cache_status": ("joined_live" if joined else "live"), "cache_age_ms": 0, "joined_inflight": joined}
+    finally:
+        if _BYBIT_TICKER_INFLIGHT.get(key) is task and task.done():
+            _BYBIT_TICKER_INFLIGHT.pop(key, None)
 
 async def _fetch_bybit_balance_usdt_cached(account: str, *, max_age_s: float = _BYBIT_WALLET_BALANCE_CACHE_TTL_SECONDS, allow_stale_s: float = 120.0, timeout_s: float = 2.5, connect_s: float = 1.0, read_s: float = 2.5) -> Tuple[Dict[str, Decimal], Dict[str, object]]:
     _mode, api_key, _api_secret, base_url, _src = resolve_bybit_credentials_for(account)
@@ -14979,15 +15027,23 @@ async def _fetch_bybit_balance_usdt_cached(account: str, *, max_age_s: float = _
     ts = float(entry.get("ts") or 0.0)
     age = now - ts
     if entry.get("snapshot") and age <= max_age_s:
-        return entry["snapshot"], {"wallet_cache_status": "fresh", "wallet_cache_age_ms": int(age*1000)}
+        return entry["snapshot"], {"wallet_cache_status": "fresh", "wallet_cache_age_ms": int(age*1000), "joined_inflight": False}
+    task = _BYBIT_WALLET_BALANCE_INFLIGHT.get(key)
+    joined = bool(task and not task.done())
+    if not joined:
+        task = asyncio.create_task(_fetch_bybit_balance_usdt(account, timeout_s=timeout_s, connect_s=connect_s, read_s=read_s))
+        _BYBIT_WALLET_BALANCE_INFLIGHT[key] = task
     try:
-        snap = await _fetch_bybit_balance_usdt(account, timeout_s=timeout_s, connect_s=connect_s, read_s=read_s)
+        snap = await task
         _BYBIT_WALLET_BALANCE_CACHE[key] = {"ts": now, "snapshot": snap, "last_error": ""}
-        return snap, {"wallet_cache_status": "live", "wallet_cache_age_ms": 0}
+        return snap, {"wallet_cache_status": ("joined_live" if joined else "live"), "wallet_cache_age_ms": 0, "joined_inflight": joined}
     except Exception as exc:
         if entry.get("snapshot") and age <= allow_stale_s:
-            return entry["snapshot"], {"wallet_cache_status": "stale_fallback", "wallet_cache_age_ms": int(age*1000), "wallet_cache_error": str(exc)}
+            return entry["snapshot"], {"wallet_cache_status": "stale_fallback", "wallet_cache_age_ms": int(age*1000), "wallet_cache_error": str(exc), "joined_inflight": joined}
         raise
+    finally:
+        if _BYBIT_WALLET_BALANCE_INFLIGHT.get(key) is task and task.done():
+            _BYBIT_WALLET_BALANCE_INFLIGHT.pop(key, None)
 
 async def _fetch_bybit_balance_usdt(account: str, timeout_s: float = 5.0, connect_s: float = 2.0, read_s: Optional[float] = None) -> Dict[str, Decimal]:
     _mode, api_key, api_secret, base_url, _src = resolve_bybit_credentials_for(account)
@@ -15113,14 +15169,16 @@ async def calculator_instrument(asset: str, account: str, symbol: str) -> JSONRe
             raise HTTPException(status_code=404, detail=f"Could not resolve Bybit symbol: {symbol}")
         resolved_symbol = str(resolved["resolved_symbol"]).upper()
         item = await _bybit_get_instrument_info_cached(base_url, "linear", resolved_symbol)
-        try:
-            await _fetch_bybit_ticker_cached(base_url, "linear", resolved_symbol)
-        except Exception:
-            pass
-        try:
-            await _fetch_bybit_balance_usdt_cached(account_norm)
-        except Exception:
-            pass
+        async def _bg_prewarm() -> None:
+            try:
+                await asyncio.gather(
+                    _fetch_bybit_ticker_cached(base_url, "linear", resolved_symbol),
+                    _fetch_bybit_balance_usdt_cached(account_norm),
+                    return_exceptions=True,
+                )
+            except Exception:
+                pass
+        asyncio.create_task(_bg_prewarm())
         if not item:
             raise HTTPException(status_code=502, detail=f"Bybit instrument meta unavailable for {resolved_symbol}.")
         return JSONResponse(
@@ -15274,22 +15332,54 @@ async def calculator_prewarm(payload: Dict[str, object] = Body(default={})) -> J
     asset = str(payload.get("asset") or "").strip().lower()
     account = str(payload.get("account") or "live").strip().lower()
     symbol = str(payload.get("symbol") or "").strip()
-    out = {"ok": True, "asset": asset, "account": account, "symbol": symbol, "warmed": []}
-    if asset == "crypto" and symbol:
+    started = time.perf_counter()
+    out = {"ok": True, "asset": asset, "account": account, "symbol": symbol, "warmed": [], "missing_required": [], "timings_ms": {}}
+    if asset == "crypto":
         _mode, api_key, _sec, base_url, _src = resolve_bybit_credentials_for(account)
-        await _bybit_get_instrument_info_cached(base_url, "linear", symbol, timeout_s=1.0, connect_s=0.5, read_s=1.0)
-        out["warmed"].append("instrument")
-        try:
-            await _fetch_bybit_ticker_cached(base_url, "linear", symbol, timeout_s=1.0)
+        async def _warm_instrument() -> None:
+            if not symbol:
+                out["instrument_status"] = "not_requested"
+                return
+            await _bybit_get_instrument_info_cached(base_url, "linear", symbol, timeout_s=1.0, connect_s=0.5, read_s=1.0)
+            out["warmed"].append("instrument")
+            out["instrument_status"] = "ready"
+        async def _warm_ticker() -> None:
+            if not symbol:
+                out["ticker_status"] = "not_requested"
+                return
+            tick = await _fetch_bybit_ticker_cached(base_url, "linear", symbol, timeout_s=1.0)
             out["warmed"].append("ticker")
-        except Exception as exc:
-            out["ticker_error"] = str(exc)
-        try:
-            await _fetch_bybit_balance_usdt_cached(account, timeout_s=2.0, connect_s=1.0, read_s=2.0)
+            out["ticker_status"] = tick.get("cache_status")
+            out["ticker_cache_age_ms"] = tick.get("cache_age_ms")
+        async def _warm_wallet() -> None:
+            _snap, wallet_meta = await _fetch_bybit_balance_usdt_cached(account, timeout_s=2.0, connect_s=1.0, read_s=2.0)
             out["warmed"].append("wallet")
-        except Exception as exc:
-            out["wallet_error"] = str(exc)
+            out["wallet_status"] = wallet_meta.get("wallet_cache_status")
+            out["wallet_cache_age_ms"] = wallet_meta.get("wallet_cache_age_ms")
+        results = await asyncio.gather(_warm_instrument(), _warm_ticker(), _warm_wallet(), return_exceptions=True)
+        for idx, res in enumerate(results):
+            if isinstance(res, Exception):
+                if idx == 1:
+                    out["ticker_status"] = "error"; out["ticker_error"] = str(res)
+                elif idx == 2:
+                    out["wallet_status"] = "error"; out["wallet_error"] = str(res)
+                else:
+                    out["instrument_status"] = "error"; out["instrument_error"] = str(res)
+        out["time_offset_status"] = ("ready" if api_key else "missing_credentials")
+        out["ready_for_quote"] = bool(out.get("wallet_status") not in {"error", None} and ((not symbol) or out.get("ticker_status") not in {"error", None}))
+        if not out.get("ready_for_quote"):
+            if out.get("wallet_status") in {"error", None}:
+                out["missing_required"].append("wallet")
+            if symbol and out.get("ticker_status") in {"error", None}:
+                out["missing_required"].append("ticker")
+    out["timings_ms"]["total"] = int((time.perf_counter() - started) * 1000)
     return JSONResponse(out)
+
+@app.post("/api/calculator/prewarm-account")
+async def calculator_prewarm_account(payload: Dict[str, object] = Body(default={})) -> JSONResponse:
+    account_payload = dict(payload or {})
+    account_payload["symbol"] = ""
+    return await calculator_prewarm(account_payload)
 
 
 @app.post("/api/calculator/quote")
@@ -15675,6 +15765,11 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                 "estimated_reward": _fmt_dec(max(Decimal("0"), reward_usdt)),
                 "rr": _fmt_dec_by_precision(rr_value, Decimal("0.01")),
                 "effective_rr": _fmt_dec_by_precision(rr_value, Decimal("0.01")),
+                "quote_created_at_ms": int(time.time() * 1000),
+                "quote_last_price": _fmt_dec(last),
+                "quote_tick_size": _fmt_dec(tick_size),
+                "quote_valid_for_submit": True,
+                "submit_validity_boundary": ("take_profit_price < latest LastPrice" if side == "sell" else "take_profit_price > latest LastPrice"),
                 "target_mode": target_mode,
                 "requested_rr_net": _fmt_dec_by_precision(requested_rr_net, Decimal("0.01")) if requested_rr_net is not None else None,
                 "effective_rr_net": _fmt_dec_by_precision(effective_rr_net_value if effective_rr_net_value is not None else effective_rr_net, Decimal("0.01")) if (effective_rr_net_value is not None or effective_rr_net is not None) else None,
@@ -16518,7 +16613,7 @@ async def calculator_submit(payload: Dict[str, object] = Body(default={})) -> JS
                 canonical,
                 request_id=request_id,
             )
-            return JSONResponse({"ok": True, "broker": "bybit", "result": result})
+            return JSONResponse({"ok": True, "broker": "bybit", "result": result, "submit_level_adjustments": canonical.get("_submit_level_adjustments")})
         if asset == "fx":
             result = await _place_oanda_order(
                 canonical,
