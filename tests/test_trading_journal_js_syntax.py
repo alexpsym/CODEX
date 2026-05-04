@@ -28,7 +28,11 @@ def test_trading_journal_diagnostics_split_balance_anchor_from_parse_sync() -> N
     assert "max_drawdown_pct" in js
     assert "overall_avg_seconds" in js
     assert "tj-stats-table" in js
-    assert "fmtTradeRef" in js
+    assert "fmtStatTradeJump" in js
+    assert "jumpToTradeRow" in js
+    assert "data-jump-row-id" in js
+    assert "tj-stat-jump" in js
+    assert "tj-row-highlight" in js
     assert "fmtLeader" in js
     assert "tj-stat-detail" in js
     assert "fx_most_wins_instrument" in js
@@ -36,6 +40,15 @@ def test_trading_journal_diagnostics_split_balance_anchor_from_parse_sync() -> N
     assert "crypto_most_wins_instrument" in js
     assert "crypto_most_losses_instrument" in js
     assert "metric_sources" in js
+    assert "escHtml(fmtTradeRef" not in js
+    assert 'Min result %' not in js
+    assert 'Max result %' not in js
+    assert 'Max loss %' in js
+    assert 'Max win %' in js
+    assert 'Max R loss' in js
+    assert 'Max R win' in js
+    assert 'Drawdown points' not in js
+    assert "Segments" not in js
     assert "wrap.style.display = 'block';" not in js
 
 
@@ -50,4 +63,4 @@ def test_trading_journal_stats_classes_are_value_only_and_net_pl_is_sign_based()
     assert '<td class="tj-stat-detail">' in js
     assert "row('Win rate', fmtPctSmall(m?.win_rate_pct))" in js
     assert "row('Win rate', fmtPctSmall(m?.win_rate_pct), 'tj-stat-winner')" not in js
-    assert "row('Net P/L', fmtNum(m?.net_profit_total, 2), toneBySign(m?.net_profit_total))" in js
+    assert "row('Avg result %', fmtPctSmall(m?.avg_result_pct), toneBySign(m?.avg_result_pct))" in js

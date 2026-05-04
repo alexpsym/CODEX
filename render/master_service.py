@@ -23,7 +23,7 @@ import subprocess
 import sys
 import time
 import traceback
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
 from datetime import datetime, timedelta, timezone
@@ -5274,6 +5274,19 @@ def _row_pnl(row: Dict[str, object]) -> Optional[float]:
     if net_profit is not None:
         return net_profit
     return _to_float(row.get("realized_pnl"))
+
+
+def _row_pnl_currency(row: Dict[str, object]) -> str:
+    ccy = str(
+        row.get("realized_pnl_currency")
+        or row.get("currency")
+        or row.get("account_currency")
+        or row.get("balance_after_trade_currency")
+        or ""
+    ).strip().upper()
+    if ccy:
+        return ccy
+    return _infer_account_currency(str(row.get("account_label") or row.get("account") or "")).strip().upper()
 
 
 def _ms_to_iso(value: object) -> Optional[str]:
@@ -16345,7 +16358,9 @@ async def trading_journal_page() -> str:
     .tj-stat-row td { padding:4px 8px; font-size:12px; line-height:1.2; border-bottom:1px solid #1f2937; vertical-align:top; white-space:normal; }
     .tj-stat-label { color:#cbd5e1; overflow:hidden; text-overflow:ellipsis; }
     .tj-stat-value { text-align:right; font-variant-numeric:tabular-nums; }
-    .tj-stat-detail { color:#94a3b8; font-size:11px; line-height:1.25; text-align:left; overflow:hidden; text-overflow:ellipsis; }
+    .tj-stat-detail { color:#94a3b8; font-size:11px; line-height:1.25; text-align:left; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .tj-stat-jump { background:transparent; border:0; padding:0; color:#93c5fd; cursor:pointer; text-decoration:underline; font:inherit; max-width:100%; }
+    .tj-row-highlight { outline:2px solid #60a5fa; background:rgba(96,165,250,0.16); }
     .tj-stat-positive, .tj-stat-winner { color:#86efac; }
     .tj-stat-negative, .tj-stat-loser, .tj-stat-drawdown { color:#fca5a5; }
     .tj-stat-neutral { color:#cbd5e1; }
@@ -17274,6 +17289,8 @@ def _compute_journal_stats(
             "side": row.get("side"),
             "open_time": row.get("open_time"),
             "close_time": row.get("close_time"),
+            "date": row.get("close_time") or row.get("open_time"),
+            "currency": _row_pnl_currency(row),
             "account": row.get("account_label") or row.get("account"),
             "source": row.get("source"),
             "timeframe": row.get("timeframe") or ((row.get("metrics") or {}).get("timeframe") if isinstance(row.get("metrics"), dict) else None),
@@ -17284,6 +17301,29 @@ def _compute_journal_stats(
             "metric_key": metric_key,
             "metric_value": metric_value,
         }
+    def _money_stats_by_currency(rows_subset: List[Dict[str, object]]) -> Dict[str, object]:
+        money: Dict[str, Dict[str, float]] = {k: {} for k in ("net_profit_total", "gross_gain", "gross_loss", "avg_gain", "avg_loss", "max_gain", "max_loss")}
+        pnl_by_ccy: Dict[str, List[float]] = defaultdict(list)
+        for r in rows_subset:
+            p = _row_pnl(r)
+            if p is None:
+                continue
+            ccy = _row_pnl_currency(r) or "UNKNOWN"
+            pnl_by_ccy[ccy].append(p)
+        for ccy, vals in pnl_by_ccy.items():
+            gains_ccy = [v for v in vals if v > 0]
+            losses_ccy = [abs(v) for v in vals if v < 0]
+            money["net_profit_total"][ccy] = sum(vals)
+            money["gross_gain"][ccy] = sum(gains_ccy) if gains_ccy else 0.0
+            money["gross_loss"][ccy] = sum(losses_ccy) if losses_ccy else 0.0
+            money["avg_gain"][ccy] = _avg(gains_ccy) or 0.0
+            money["avg_loss"][ccy] = _avg(losses_ccy) or 0.0
+            money["max_gain"][ccy] = _safe_max(gains_ccy) or 0.0
+            money["max_loss"][ccy] = _safe_max(losses_ccy) or 0.0
+        currencies = sorted(pnl_by_ccy.keys())
+        money["currencies"] = currencies
+        money["mixed_currency"] = len(currencies) > 1
+        return money
     def _metric_extreme_ref(rows_subset: List[Dict[str, object]], key: str, mode: str) -> Optional[Dict[str, object]]:
         choices = []
         for r in rows_subset:
@@ -17339,6 +17379,40 @@ def _compute_journal_stats(
             if pct is not None:
                 out.append(pct)
         return out
+    def _compute_longest_streaks(rows_subset: List[Dict[str, object]]) -> Dict[str, Optional[Dict[str, object]]]:
+        enriched = []
+        for i, r in enumerate(rows_subset):
+            dt = r.get("close_time") or r.get("open_time")
+            ts = _to_ts(dt)
+            enriched.append((math.isfinite(ts), ts, i, r))
+        enriched.sort(key=lambda x: (0 if x[0] else 1, x[1] if x[0] else float("inf"), x[2]))
+        best = {"winning": None, "losing": None}
+        cur_type = None
+        cur_rows: List[Dict[str, object]] = []
+        def finalize():
+            nonlocal cur_type, cur_rows
+            if not cur_type or not cur_rows:
+                return
+            times = [r.get("close_time") or r.get("open_time") for r in cur_rows]
+            start_t, end_t = times[0], times[-1]
+            start_ts, end_ts = _to_ts(start_t), _to_ts(end_t)
+            symbols = Counter([str(r.get("symbol") or "").strip() for r in cur_rows if str(r.get("symbol") or "").strip()])
+            r_vals = [_to_float(r.get("r_multiple")) for r in cur_rows if _to_float(r.get("r_multiple")) is not None]
+            pct_vals = [_to_float(r.get("result_pct")) for r in cur_rows if _to_float(r.get("result_pct")) is not None]
+            cand = {"type": cur_type, "trade_count": len(cur_rows), "start_time": start_t, "end_time": end_t, "elapsed_seconds": (end_ts - start_ts) if math.isfinite(start_ts) and math.isfinite(end_ts) else None, "dominant_symbol": (symbols.most_common(1)[0][0] if symbols else None), "symbol_counts": dict(symbols), "net_r_multiple": (sum(r_vals) if r_vals else None), "net_result_pct": (sum(pct_vals) if pct_vals else None), "trade_ids": [r.get("id") for r in cur_rows]}
+            prev = best[cur_type]
+            if (prev is None or cand["trade_count"] > prev["trade_count"] or (cand["trade_count"] == prev["trade_count"] and _to_ts(cand["start_time"]) < _to_ts(prev["start_time"]))):
+                best[cur_type] = cand
+        for _, _, _, r in enriched:
+            kind = "winning" if _is_win(r) else ("losing" if _is_loss(r) else None)
+            if kind is None:
+                finalize(); cur_type = None; cur_rows = []; continue
+            if cur_type and kind != cur_type:
+                finalize(); cur_rows = []
+            cur_type = kind
+            cur_rows.append(r)
+        finalize()
+        return {"longest_winning": best["winning"], "longest_losing": best["losing"]}
 
     balance_by_account: List[Dict[str, object]] = []
     for bal in balances:
@@ -17669,6 +17743,8 @@ def _compute_journal_stats(
     pnl_vals = [v for v in pnl_vals if v is not None]
     gains = [v for v in pnl_vals if v > 0]
     losses_abs = [abs(v) for v in pnl_vals if v < 0]
+    streaks = _compute_longest_streaks(trade_rows)
+    totals_money = _money_stats_by_currency(trade_rows)
     totals = {
             "trades": len(trade_rows),
             "wins": sum(1 for row in trade_rows if _is_win(row)),
@@ -17768,6 +17844,9 @@ def _compute_journal_stats(
             "unique_instruments": len(unique_symbols),
             "crypto_instruments": len(crypto_symbols),
             "fx_instruments": len(fx_symbols),
+            "money_by_currency": totals_money,
+            "longest_winning_streak": streaks.get("longest_winning"),
+            "longest_losing_streak": streaks.get("longest_losing"),
         }
 
     def _market_bucket(rows_subset: List[Dict[str, object]], label: str) -> Dict[str, object]:
@@ -17788,6 +17867,7 @@ def _compute_journal_stats(
         r_vals = _metric_values(rows_subset, "r_multiple")
         stop_vals = _stop_pct_values(rows_subset)
         target_vals = _target_pct_values(rows_subset)
+        money = _money_stats_by_currency(rows_subset)
         return {
             "label": label,
             "trades": len(rows_subset),
@@ -17829,6 +17909,7 @@ def _compute_journal_stats(
             },
             "instruments": len({str(r.get("symbol") or "").strip() for r in rows_subset if str(r.get("symbol") or "").strip()}),
             "max_drawdown_pct": totals.get("max_drawdown_pct") if label == "Overall" else None,
+            "money_by_currency": money,
         }
 
     return {
@@ -17942,6 +18023,7 @@ def _compute_journal_stats(
                 "crypto_most_wins_instrument": crypto_most_wins,
                 "crypto_most_losses_instrument": crypto_most_losses,
             },
+            "streaks": streaks,
         },
         "balance_after_trade_note": "Approximate unless cashflow ledger fully captures deposits/withdrawals/transfers.",
     }

@@ -527,6 +527,7 @@
     if (emptyInst) emptyInst.style.display = 'none';
     list.forEach((item) => {
       const tr = document.createElement('tr');
+      tr.dataset.rowId = String(r.id || '');
       tr.innerHTML = `
         <td>${item.symbol || '—'}</td>
         <td>${item.asset_class || '—'}</td>
@@ -993,6 +994,22 @@
       wrap.appendChild(div);
     });
   }
+  function fmtMoneyValue(value, ccy, decimals = 2) { return `${ccy || 'UNKNOWN'} ${fmtNum(value, decimals)}`; }
+  function fmtMoneyBreakdown(bucket, key, decimals = 2) {
+    const map = bucket?.money_by_currency?.[key];
+    if (map && typeof map === 'object' && Object.keys(map).length) return Object.entries(map).map(([c, v]) => fmtMoneyValue(v, c, decimals)).join(' / ');
+    const legacy = bucket?.[key];
+    const ccy = bucket?.currency || (bucket?.money_by_currency?.currencies?.[0]) || 'UNKNOWN';
+    return Number.isFinite(asNum(legacy)) ? fmtMoneyValue(legacy, ccy, decimals) : '—';
+  }
+  function moneyTone(bucket, key) {
+    const map = bucket?.money_by_currency?.[key];
+    const vals = map && typeof map === 'object' ? Object.values(map).map((v) => asNum(v)).filter((v) => Number.isFinite(v) && v !== 0) : [asNum(bucket?.[key])].filter((v) => Number.isFinite(v) && v !== 0);
+    if (!vals.length) return 'tj-stat-neutral';
+    if (vals.every((v) => v > 0)) return 'tj-stat-winner';
+    if (vals.every((v) => v < 0)) return 'tj-stat-loser';
+    return 'tj-stat-neutral';
+  }
 
   function renderStats(stats) {
     const wrap = q('#tj-stats');
@@ -1019,17 +1036,9 @@
       return n > 0 ? 'tj-stat-positive' : 'tj-stat-negative';
     };
     const escHtml = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-    function fmtTradeRef(ref) {
-      if (!ref || typeof ref !== 'object') return '';
-      const parts = [];
-      if (ref.symbol) parts.push(String(ref.symbol));
-      if (ref.open_time) parts.push(`Open ${fmtTime(ref.open_time)}`);
-      if (ref.close_time) parts.push(`Close ${fmtTime(ref.close_time)}`);
-      if (ref.side) parts.push(String(ref.side));
-      if (ref.account) parts.push(String(ref.account));
-      if (ref.id) parts.push(`<a href="/trade-chart/${encodeURIComponent(ref.id)}" target="_blank" rel="noopener">Chart</a>`);
-      return parts.join(' • ');
-    }
+    const escAttr = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const fmtDateOnly = (v) => { if (!v) return ''; const d = new Date(v); return Number.isNaN(d.getTime()) ? String(v).slice(0,10) : d.toISOString().slice(0,10); };
+    function fmtStatTradeJump(ref) { if (!ref || typeof ref !== 'object' || !ref.id) return ''; const label = `${ref.symbol || 'Trade'}${fmtDateOnly(ref.date || ref.close_time || ref.open_time) ? ` · ${fmtDateOnly(ref.date || ref.close_time || ref.open_time)}` : ''}`; return `<button type="button" class="tj-stat-jump" data-jump-row-id="${escAttr(ref.id)}">${escHtml(label)}</button>`; }
     function fmtLeader(leader, countKey) {
       const count = asNum(leader?.[countKey]);
       if (!leader || !leader.symbol || !Number.isFinite(count) || count <= 0) return '—';
@@ -1044,17 +1053,17 @@
       row('Losses', m?.losses, 'tj-stat-loser'),
       row('Break-even', m?.break_even),
       row('Win rate', fmtPctSmall(m?.win_rate_pct)),
-      row('Net P/L', fmtNum(m?.net_profit_total, 2), toneBySign(m?.net_profit_total)),
-      row('Gross gain', fmtNum(m?.gross_gain, 2), 'tj-stat-winner'),
-      row('Gross loss', fmtNum(m?.gross_loss, 2), 'tj-stat-loser'),
-      row('Avg result %', fmtPctSmall(m?.avg_result_pct)),
-      row('Min result %', fmtPctSmall(m?.min_result_pct), 'tj-stat-loser', 'tj-stat-neutral', escHtml(fmtTradeRef(m?.metric_sources?.min_result_pct))),
-      row('Max result %', fmtPctSmall(m?.max_result_pct), 'tj-stat-winner', 'tj-stat-neutral', escHtml(fmtTradeRef(m?.metric_sources?.max_result_pct))),
-      row('Avg R', fmtR(m?.avg_r_multiple)),
-      row('Min R', fmtR(m?.min_r_multiple), 'tj-stat-loser', 'tj-stat-neutral', escHtml(fmtTradeRef(m?.metric_sources?.min_r_multiple))),
-      row('Max R', fmtR(m?.max_r_multiple), 'tj-stat-winner', 'tj-stat-neutral', escHtml(fmtTradeRef(m?.metric_sources?.max_r_multiple))),
-      row('Max gain', fmtNum(m?.max_gain, 2), 'tj-stat-winner', 'tj-stat-neutral', escHtml(fmtTradeRef(m?.metric_sources?.max_gain))),
-      row('Max loss', fmtNum(m?.max_loss, 2), 'tj-stat-loser', 'tj-stat-neutral', escHtml(fmtTradeRef(m?.metric_sources?.max_loss))),
+      row('Net P/L', fmtMoneyBreakdown(m, 'net_profit_total'), moneyTone(m, 'net_profit_total')),
+      row('Gross gain', fmtMoneyBreakdown(m, 'gross_gain'), 'tj-stat-winner'),
+      row('Gross loss', fmtMoneyBreakdown(m, 'gross_loss'), 'tj-stat-loser'),
+      row('Avg result %', fmtPctSmall(m?.avg_result_pct), toneBySign(m?.avg_result_pct)),
+      row('Max loss %', fmtPctSmall(m?.min_result_pct), 'tj-stat-loser', 'tj-stat-neutral', fmtStatTradeJump(m?.metric_sources?.min_result_pct)),
+      row('Max win %', fmtPctSmall(m?.max_result_pct), 'tj-stat-winner', 'tj-stat-neutral', fmtStatTradeJump(m?.metric_sources?.max_result_pct)),
+      row('Avg R', fmtR(m?.avg_r_multiple), toneBySign(m?.avg_r_multiple)),
+      row('Max R loss', fmtR(m?.min_r_multiple), 'tj-stat-loser', 'tj-stat-neutral', fmtStatTradeJump(m?.metric_sources?.min_r_multiple)),
+      row('Max R win', fmtR(m?.max_r_multiple), 'tj-stat-winner', 'tj-stat-neutral', fmtStatTradeJump(m?.metric_sources?.max_r_multiple)),
+      row('Max gain', fmtMoneyBreakdown(m, 'max_gain'), 'tj-stat-winner', 'tj-stat-neutral', fmtStatTradeJump(m?.metric_sources?.max_gain)),
+      row('Max loss', fmtMoneyBreakdown(m, 'max_loss'), 'tj-stat-loser', 'tj-stat-neutral', fmtStatTradeJump(m?.metric_sources?.max_loss)),
       row('Avg stop %', fmtPctSmall(m?.avg_stop_pct)),
       row('Avg target %', fmtPctSmall(m?.avg_target_pct)),
       row('Avg duration', fmtDuration(m?.avg_duration_seconds)),
@@ -1064,15 +1073,32 @@
     const leaders = g?.leaders || {};
     wrap.innerHTML = [
       sec('Overall', core(byMarket.overall)),
-      sec('Winners', [row('Avg stop %', fmtPctSmall(risk?.avg_stop_pct_winners), 'tj-stat-winner'), row('Avg target %', fmtPctSmall(risk?.avg_target_pct_winners), 'tj-stat-winner'), row('Avg result %', fmtPctSmall(risk?.avg_result_pct_winners), 'tj-stat-winner'), row('Avg R', fmtR(risk?.avg_r_multiple_winners), 'tj-stat-winner')]),
-      sec('Losers', [row('Avg stop %', fmtPctSmall(risk?.avg_stop_pct_losers), 'tj-stat-loser'), row('Avg target %', fmtPctSmall(risk?.avg_target_pct_losers), 'tj-stat-loser'), row('Avg result %', fmtPctSmall(risk?.avg_result_pct_losers), 'tj-stat-loser'), row('Avg R', fmtR(risk?.avg_r_multiple_losers), 'tj-stat-loser')]),
-      sec('Drawdown', [row('Max drawdown', fmtPctSmall(risk?.max_drawdown_pct), 'tj-stat-drawdown'), row('Avg drawdown', fmtPctSmall(risk?.avg_drawdown_pct), 'tj-stat-drawdown'), row('Drawdown points', stats?.totals?.drawdown_balance_points), row('Segments', stats?.totals?.drawdown_segments_count)]),
-      sec('Duration', [row('Overall avg', fmtDuration(dur?.overall_avg_seconds)), row('Overall shortest', fmtDuration(dur?.overall_shortest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', escHtml(fmtTradeRef(dur?.metric_sources?.overall_shortest_seconds))), row('Overall longest', fmtDuration(dur?.overall_longest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', escHtml(fmtTradeRef(dur?.metric_sources?.overall_longest_seconds))), row('FX shortest', fmtDuration(dur?.fx_shortest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', escHtml(fmtTradeRef(dur?.metric_sources?.fx_shortest_seconds))), row('FX longest', fmtDuration(dur?.fx_longest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', escHtml(fmtTradeRef(dur?.metric_sources?.fx_longest_seconds))), row('Crypto shortest', fmtDuration(dur?.crypto_shortest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', escHtml(fmtTradeRef(dur?.metric_sources?.crypto_shortest_seconds))), row('Crypto longest', fmtDuration(dur?.crypto_longest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', escHtml(fmtTradeRef(dur?.metric_sources?.crypto_longest_seconds)))]),
+      sec('Winners', [row('Avg stop %', fmtPctSmall(risk?.avg_stop_pct_winners)), row('Avg target %', fmtPctSmall(risk?.avg_target_pct_winners)), row('Avg result %', fmtPctSmall(risk?.avg_result_pct_winners), 'tj-stat-winner'), row('Avg R', fmtR(risk?.avg_r_multiple_winners), 'tj-stat-winner')]),
+      sec('Losers', [row('Avg stop %', fmtPctSmall(risk?.avg_stop_pct_losers)), row('Avg target %', fmtPctSmall(risk?.avg_target_pct_losers)), row('Avg result %', fmtPctSmall(risk?.avg_result_pct_losers), 'tj-stat-loser'), row('Avg R', fmtR(risk?.avg_r_multiple_losers), 'tj-stat-loser')]),
+      sec('Drawdown', [row('Max drawdown', fmtPctSmall(risk?.max_drawdown_pct), 'tj-stat-drawdown'), row('Avg drawdown', fmtPctSmall(risk?.avg_drawdown_pct), 'tj-stat-drawdown')]),
+      sec('Duration', [row('Overall avg', fmtDuration(dur?.overall_avg_seconds)), row('Overall shortest', fmtDuration(dur?.overall_shortest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.overall_shortest_seconds)), row('Overall longest', fmtDuration(dur?.overall_longest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.overall_longest_seconds)), row('FX shortest', fmtDuration(dur?.fx_shortest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.fx_shortest_seconds)), row('FX longest', fmtDuration(dur?.fx_longest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.fx_longest_seconds)), row('Crypto shortest', fmtDuration(dur?.crypto_shortest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.crypto_shortest_seconds)), row('Crypto longest', fmtDuration(dur?.crypto_longest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.crypto_longest_seconds))]),
       sec('FX', core(byMarket.fx || {})),
       sec('Crypto', core(byMarket.crypto || {})),
       sec('Instrument leaders', [row('Overall most wins', fmtLeader(leaders?.most_wins_instrument, 'wins'), 'tj-stat-winner'), row('Overall most losses', fmtLeader(leaders?.most_losses_instrument, 'losses'), 'tj-stat-loser'), row('FX most wins', fmtLeader(leaders?.fx_most_wins_instrument, 'wins'), 'tj-stat-winner'), row('FX most losses', fmtLeader(leaders?.fx_most_losses_instrument, 'losses'), 'tj-stat-loser'), row('Crypto most wins', fmtLeader(leaders?.crypto_most_wins_instrument, 'wins'), 'tj-stat-winner'), row('Crypto most losses', fmtLeader(leaders?.crypto_most_losses_instrument, 'losses'), 'tj-stat-loser')]),
     ].join('');
 
+  }
+
+  function jumpToTradeRow(rowId) {
+    if (!rowId) return setStatus('No trade row id available for this statistic.');
+    state.view = 'trades'; applyView();
+    const visible = applyFlagFilters(applyTextFilter(state.rows)).some((r) => String(r?.id || '') === String(rowId));
+    if (!visible) { if (filterInput) filterInput.value = ''; activeFlags.clear(); qa('.tj-chip[data-flag]').forEach((btn) => { btn.style.opacity = '0.7'; btn.style.outline = 'none'; btn.classList.remove('active'); }); }
+    renderAll();
+    requestAnimationFrame(() => {
+      const rows = qa('#tj-table tbody tr[data-row-id]');
+      const tr = rows.find((el) => String(el.dataset.rowId || '') === String(rowId));
+      if (!tr) return setStatus('Trade row not found in the current journal data.');
+      tr.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+      tr.classList.add('tj-row-highlight');
+      window.setTimeout(() => tr.classList.remove('tj-row-highlight'), 2500);
+      setStatus('Opened linked trade row.');
+    });
   }
 
   function renderAll() {
@@ -1455,6 +1481,8 @@
   });
 
   document.addEventListener('click', (e) => {
+    const jumpEl = e.target?.closest ? e.target.closest('[data-jump-row-id]') : null;
+    if (jumpEl) { e.preventDefault(); jumpToTradeRow(jumpEl.dataset.jumpRowId || ''); return; }
     const btn = e.target?.closest ? e.target.closest('button[data-flag]') : null;
     if (!btn) return;
     const flag = btn.dataset.flag;
