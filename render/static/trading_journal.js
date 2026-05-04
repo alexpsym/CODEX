@@ -527,7 +527,8 @@
     if (emptyInst) emptyInst.style.display = 'none';
     list.forEach((item) => {
       const tr = document.createElement('tr');
-      tr.dataset.rowId = String(r.id || '');
+      tr.dataset.symbol = String(item.symbol || '');
+      tr.dataset.assetClass = String(item.asset_class || '');
       tr.innerHTML = `
         <td>${item.symbol || '—'}</td>
         <td>${item.asset_class || '—'}</td>
@@ -1310,11 +1311,11 @@
       return { ok: true, rowsLoaded: nextRows.length, journal, diagnostics, balances };
     } catch (e) {
       if (isAbortError(e, signal)) {
-        if (ownsVisibleOverlay && loading?.style?.display === 'flex') hideLoading();
+        if (ownsVisibleOverlay) hideLoading();
         return { ok: false, error: 'Request aborted' };
       }
       console.error(e);
-      if (ownsVisibleOverlay && loading?.style?.display === 'flex') hideLoading();
+      if (ownsVisibleOverlay) hideLoading();
       const errorMsg = compactErrorMessage(e?.message || e, 'Load failed');
       if (!preserveStatus) setStatus(`Load failed: ${errorMsg}`);
       return { ok: false, error: errorMsg };

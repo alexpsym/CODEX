@@ -64,3 +64,12 @@ def test_trading_journal_stats_classes_are_value_only_and_net_pl_is_sign_based()
     assert "row('Win rate', fmtPctSmall(m?.win_rate_pct))" in js
     assert "row('Win rate', fmtPctSmall(m?.win_rate_pct), 'tj-stat-winner')" not in js
     assert "row('Avg result %', fmtPctSmall(m?.avg_result_pct), toneBySign(m?.avg_result_pct))" in js
+
+
+def test_trading_journal_instrument_view_uses_aggregate_safe_dataset_and_load_hides_overlay_on_failure() -> None:
+    js = JS_PATH.read_text(encoding="utf-8")
+    assert "tr.dataset.rowId = String(r.id || '')" not in js
+    assert "tr.dataset.symbol = String(item.symbol || '')" in js
+    assert "tr.dataset.assetClass = String(item.asset_class || '')" in js
+    assert "loading?.style?.display === 'flex'" not in js
+    assert "if (ownsVisibleOverlay) hideLoading();" in js
