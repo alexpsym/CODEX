@@ -338,8 +338,7 @@
         targetPriceInput.min = '0';
         targetPriceInput.step = '0.0001';
 
-        const expirySelect = form.querySelector('[data-alert-expiry]');
-            const messageInput = document.createElement('input');
+        const messageInput = document.createElement('input');
         messageInput.type = 'text';
         messageInput.placeholder = 'Optional Telegram note (fixed price alerts only)';
         messageInput.maxLength = 500;
