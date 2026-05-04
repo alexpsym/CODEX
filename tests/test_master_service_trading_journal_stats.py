@@ -152,3 +152,32 @@ def test_compute_journal_stats_drawdown_behaviour() -> None:
     assert single["totals"]["max_drawdown_pct"] is None
     flat = _compute_journal_stats(rows[:2], balances=[])
     assert flat["totals"]["max_drawdown_pct"] == 0.0
+
+
+def test_compute_journal_stats_streaks_and_money_by_currency() -> None:
+    rows = [
+        {"row_type": "trade", "id": "1", "asset_class": "fx", "symbol": "EURUSD", "result_pct": 1.0, "r_multiple": 1.0, "net_profit": 10, "currency": "AUD", "close_time": "2026-01-01T00:00:00Z"},
+        {"row_type": "trade", "id": "2", "asset_class": "fx", "symbol": "EURUSD", "result_pct": 1.2, "r_multiple": 1.1, "net_profit": 12, "currency": "AUD", "close_time": "2026-01-02T00:00:00Z"},
+        {"row_type": "trade", "id": "3", "asset_class": "fx", "symbol": "USDJPY", "result_pct": 0.8, "r_multiple": 0.9, "net_profit": 8, "currency": "AUD", "close_time": "2026-01-03T00:00:00Z"},
+        {"row_type": "trade", "id": "4", "asset_class": "fx", "symbol": "AUDUSD", "result_pct": 0.0, "r_multiple": 0.0, "net_profit": 0, "breakeven": "yes", "currency": "AUD", "close_time": "2026-01-04T00:00:00Z"},
+        {"row_type": "trade", "id": "5", "asset_class": "crypto", "symbol": "BTCUSDT", "result_pct": -1.0, "r_multiple": -1.0, "net_profit": -5, "currency": "USDT", "close_time": "2026-01-05T00:00:00Z"},
+        {"row_type": "trade", "id": "6", "asset_class": "crypto", "symbol": "ETHUSDT", "result_pct": -1.2, "r_multiple": -1.1, "net_profit": -7, "currency": "USDT", "close_time": "2026-01-06T00:00:00Z"},
+        {"row_type": "trade", "id": "7", "asset_class": "crypto", "symbol": "BTCUSDT", "result_pct": -0.4, "r_multiple": -0.5, "net_profit": -2, "currency": "USDT", "close_time": "2026-01-07T00:00:00Z"},
+        {"row_type": "trade", "id": "8", "asset_class": "crypto", "symbol": "BTCUSDT", "result_pct": -0.3, "r_multiple": -0.4, "net_profit": -2, "currency": "USDT", "close_time": "2026-01-08T00:00:00Z"},
+    ]
+    stats = _compute_journal_stats(rows, balances=[])
+    streaks = stats["groups"]["streaks"]
+    assert streaks["longest_winning"]["trade_count"] == 3
+    assert streaks["longest_winning"]["start_time"] == "2026-01-01T00:00:00Z"
+    assert streaks["longest_winning"]["end_time"] == "2026-01-03T00:00:00Z"
+    assert streaks["longest_winning"]["dominant_symbol"] == "EURUSD"
+    assert round(streaks["longest_winning"]["net_r_multiple"], 3) == 3.0
+    assert round(streaks["longest_winning"]["net_result_pct"], 3) == 3.0
+    assert streaks["longest_losing"]["trade_count"] == 4
+    money = stats["totals"]["money_by_currency"]["net_profit_total"]
+    assert money["AUD"] == 30
+    assert money["USDT"] == -16
+    by_market = stats["groups"]["by_market"]
+    assert by_market["overall"]["money_by_currency"]["mixed_currency"] is True
+    assert by_market["fx"]["money_by_currency"]["currencies"] == ["AUD"]
+    assert by_market["crypto"]["money_by_currency"]["currencies"] == ["USDT"]
