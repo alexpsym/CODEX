@@ -626,7 +626,7 @@
     if (resolveController) resolveController.abort();
     if (journalController) journalController.abort();
     state.quoteController = new AbortController();
-    const quoteTimeoutMs = 25000;
+    const quoteTimeoutMs = 5000;
     const timeoutId = setTimeout(() => state.quoteController && state.quoteController.abort(), quoteTimeoutMs);
     state.quoteRequestSeq += 1;
     const seq = state.quoteRequestSeq;
@@ -695,7 +695,10 @@
     } catch (e) {
       if (e.name === 'AbortError') {
         invalidateQuote({ status: 'error', reason: 'Quote failed. Recalculate before submitting.' });
-        errorEl.textContent = 'Quote timed out after 25s. Slow dependency: unknown unless server returned timings. The browser aborted before the server returned diagnostics.';
+        toggleWebhookPanel(false);
+        state.pendingWebhookId = '';
+        state.pendingWebhookDeleteUrl = '';
+        errorEl.textContent = 'Quote timed out after 5s. If the server returned diagnostics first, they appear below.';
         return;
       }
       invalidateQuote({ status: 'error', reason: 'Quote failed. Recalculate before submitting.' });
