@@ -1372,3 +1372,33 @@ def test_calculator_webhook_capability_remote_render(monkeypatch: pytest.MonkeyP
     req=Request({"type":"http","method":"GET","path":"/","headers":[],"query_string":b"","client":("127.0.0.1",1),"server":("localhost",80),"scheme":"http"})
     cap=master_service._calculator_webhook_capability(req)
     assert cap["mode"] == "remote_render"
+
+def test_calculator_submit_bybit_rejection_returns_400_structured(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_bybit(_payload, request_id):
+        raise master_service.BybitOrderRejected(ret_code=10001, ret_msg='request parameter error', ret_ext_info={'x':1}, result={}, request_body={'symbol':'BTCUSDT'}, http_status=200, response_body={'retCode':10001})
+
+    monkeypatch.setattr(master_service, '_place_bybit_order', fake_bybit)
+    resp = asyncio.run(master_service.calculator_submit({'asset':'crypto','account':'demo','symbol':'BTCUSDT','side':'buy','order_type':'limit'}))
+    assert resp.status_code == 400
+    body = json.loads(resp.body.decode('utf-8'))
+    assert body['code'] == 'BYBIT_REJECTED'
+    assert body['debug']['ret_code'] == 10001
+
+
+def test_calculator_quote_rejects_buy_limit_above_last(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, 'resolve_bybit_credentials_for', lambda _a: ('live','k','s','https://bybit.test','KEY1'))
+    monkeypatch.setattr(master_service, '_bybit_get_symbols_by_category_cached', lambda *_a, **_k: asyncio.sleep(0, result=['PARTIUSDT']))
+    monkeypatch.setattr(master_service, '_fetch_bybit_balance_usdt', lambda *_a, **_k: asyncio.sleep(0, result={'available_usdt':'1000','total_equity':'1000'}))
+    monkeypatch.setattr(master_service, '_fetch_oanda_mid_prices_batch', lambda **_k: asyncio.sleep(0, result={'AUD_USD':0.5}))
+    async def fake_inst(_b,_c,s):
+        return {'priceFilter': {'tickSize':'0.0001'}, 'lotSizeFilter': {'qtyStep':'1','minOrderQty':'1','maxOrderQty':'999999','maxMktOrderQty':'999999','minNotionalValue':'0'}, 'leverageFilter': {'maxLeverage':'50'}}
+    monkeypatch.setattr(master_service, '_bybit_get_instrument_info_cached', fake_inst)
+    async def fake_get(base, path, params):
+        if path.endswith('tickers'):
+            return {'result': {'list': [{'bid1Price':'0.4938','ask1Price':'0.4940','lastPrice':'0.4939'}]}}
+        raise AssertionError(path)
+    monkeypatch.setattr(master_service, '_bybit_get_async', fake_get)
+    with pytest.raises(master_service.HTTPException) as exc:
+        asyncio.run(master_service.calculator_quote({'asset':'crypto','account':'live','symbol':'PARTI','side':'buy','order_type':'limit','entry_price':'0.5313','risk_mode':'percent','risk_value':1,'stop_loss_ticks':37,'take_profit_ticks':74}))
+    assert exc.value.status_code == 400
+    assert exc.value.detail['code'] in {'BYBIT_LIMIT_WOULD_FILL_IMMEDIATELY','BYBIT_STOP_LOSS_INVALID_FOR_BUY'}
