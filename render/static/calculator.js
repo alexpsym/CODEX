@@ -42,6 +42,7 @@
 
   let symbolTimer = null;
   let resolveController = null;
+  let resolveInFlight = null;
   let journalController = null;
   const SPECS_HIDDEN_FIELDS = new Set([
     'contractType',
@@ -544,7 +545,8 @@
     if (resolveController) resolveController.abort();
     resolveController = new AbortController();
     try {
-      const instrument = await request(`/api/calculator/instrument?asset=${encodeURIComponent(state.asset)}&account=${encodeURIComponent(state.account)}&symbol=${encodeURIComponent(symbol)}`, { signal: resolveController.signal });
+      resolveInFlight = request(`/api/calculator/instrument?asset=${encodeURIComponent(state.asset)}&account=${encodeURIComponent(state.account)}&symbol=${encodeURIComponent(symbol)}`, { signal: resolveController.signal });
+      const instrument = await resolveInFlight;
       state.resolvedSymbol = instrument.symbol;
       canonicalEl.textContent = `Canonical symbol: ${instrument.symbol}`;
       setSpecsState('loading', 'Loading instrument specs...');
@@ -574,6 +576,8 @@
       setJournalState('unresolved', `Unresolved symbol: ${symbol}`);
       setSpecsState('unresolved', `Unresolved symbol: ${symbol}`);
       canonicalEl.textContent = '';
+    } finally {
+      resolveInFlight = null;
     }
   }
 
@@ -660,6 +664,9 @@
         toggleWebhookPanel(false);
         return;
       }
+      if (!state.resolvedSymbol && resolveInFlight) {
+        try { await Promise.race([resolveInFlight, new Promise((r) => setTimeout(r, 800))]); } catch (_e) {}
+      }
       const payload = {
         ...state,
         submitted_symbol: $('calc-symbol').value,
@@ -728,6 +735,9 @@
       if (state.webhook_mode === 'yes') throw new Error('Webhook mode is enabled. Use the generated TradingView JSON instead of Submit Order.');
       if (state.quoteStatus !== 'ready' || !state.quote) throw new Error('Calculate first.');
       if (!state.timeframe) throw new Error('Timeframe is required.');
+      if (!state.resolvedSymbol && resolveInFlight) {
+        try { await Promise.race([resolveInFlight, new Promise((r) => setTimeout(r, 800))]); } catch (_e) {}
+      }
       const payload = {
         asset: state.asset,
         account: state.account,

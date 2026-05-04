@@ -14992,6 +14992,34 @@ async def _fetch_bybit_balance_usdt(account: str, timeout_s: float = 5.0, connec
     raise HTTPException(status_code=502, detail=f"Bybit balance unavailable path={path}.")
 
 
+
+
+async def _resolve_bybit_calculator_symbol_fast(base_url: str, raw_symbol: str, timings_ms: Dict[str, Any], deadline: Optional[float]) -> Tuple[str, Optional[Dict[str, object]], Dict[str, Any]]:
+    started = time.perf_counter()
+    raw = str(raw_symbol or "").strip().upper()
+    debug = {"attempted_candidates": [], "resolution_status": "unresolved"}
+    if not raw:
+        timings_ms["candidate_symbol_lookup_ms"] = 0
+        return "", None, debug
+    direct_suffix = raw.endswith(("USDT", "USDC", "USD"))
+    timings_ms["raw_symbol_direct_lookup_skipped"] = (not direct_suffix)
+    candidates = [raw] if direct_suffix else [f"{raw}USDT", f"{raw}USDC", f"{raw}USD"]
+    debug["attempted_candidates"] = candidates
+    timings_ms["candidate_symbols_checked"] = candidates
+    for cand in candidates:
+        per_timeout = _calculator_remaining_timeout_s(deadline, 1.0)
+        if per_timeout <= 0.05:
+            break
+        row = await _bybit_get_instrument_info_cached(base_url, "linear", cand, timeout_s=per_timeout, connect_s=0.5, read_s=min(1.0, per_timeout))
+        if row:
+            timings_ms["candidate_symbol_lookup_ms"] = int((time.perf_counter()-started)*1000)
+            timings_ms["bybit_instrument_lookup_status"] = "candidate_hit"
+            return cand, row, {**debug, "resolution_status": "candidate_hit"}
+    timings_ms["candidate_symbol_lookup_ms"] = int((time.perf_counter()-started)*1000)
+    timings_ms["bybit_instrument_lookup_status"] = "candidate_miss"
+    return "", None, debug
+
+
 async def _cancel_pending_tasks(tasks: List[asyncio.Task[Any]]) -> None:
     for task in tasks:
         if task and not task.done():
@@ -15263,6 +15291,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
 
         webhook_enabled = webhook_mode in {"yes", "true", "1"}
         quote_started = time.perf_counter()
+        quote_deadline = quote_started + CALCULATOR_QUOTE_TIMEOUT_S
         timings_ms: Dict[str, Any] = {}
         last_dependency_started: Dict[str, Optional[str]] = {"name": None}
         pending_dependencies: Set[str] = set()
@@ -15331,46 +15360,28 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             resolved_inst_row: Optional[Dict[str, object]] = None
             symbol_resolution_started = time.perf_counter()
             raw_symbol = str(symbol_in or "").strip().upper()
-            if raw_symbol:
-                direct_inst = await _bybit_get_instrument_info_cached(base_url, "linear", raw_symbol)
-                if direct_inst:
-                    resolved_symbol = raw_symbol
-                    resolved_symbol_for_debug = resolved_symbol
-                    resolved_inst_row = direct_inst
-                    timings_ms["bybit_instrument_cache_hit"] = True
-            candidates: List[str] = []
-            if raw_symbol.endswith(("USDT", "USDC", "USD")):
-                candidates = [raw_symbol]
-            else:
-                candidates = [f"{raw_symbol}USDT", f"{raw_symbol}USDC", f"{raw_symbol}USD"]
-            for candidate in ([] if resolved_symbol else candidates):
-                direct_started = time.perf_counter()
-                inst_direct = await _bybit_get_instrument_info_cached(base_url, "linear", candidate)
-                timings_ms["bybit_instruments_info_ms"] = timings_ms.get("bybit_instruments_info_ms", 0) + int((time.perf_counter() - direct_started) * 1000)
-                if inst_direct:
-                    resolved_symbol = candidate
-                    resolved_symbol_for_debug = resolved_symbol
-                    resolved_inst_row = inst_direct
-                    break
+            resolved_symbol, resolved_inst_row, resolution_debug = await _resolve_bybit_calculator_symbol_fast(base_url, raw_symbol, timings_ms, quote_deadline)
             if not resolved_symbol:
                 symbol_list_started = time.perf_counter()
-                choices = await _bybit_get_symbols_by_category_cached(base_url, "linear")
+                choices = await _calculator_timed_dependency("bybit_symbol_list", _bybit_get_symbols_by_category_cached(base_url, "linear"), timings_ms, 1.2, "/v5/market/instruments-info", pending_dependencies=pending_dependencies, last_dependency_started=last_dependency_started, deadline=quote_deadline)
                 timings_ms["bybit_symbol_list_ms"] = int((time.perf_counter() - symbol_list_started) * 1000)
                 if not choices:
-                    raise HTTPException(status_code=404, detail=f"Could not resolve Bybit symbol: {symbol_in}")
+                    raise HTTPException(status_code=404, detail=_calculator_quote_error_detail("BYBIT_SYMBOL_UNRESOLVED", f"Could not resolve Bybit symbol: {symbol_in}", timings_ms=timings_ms, quote_started=quote_started, submitted_payload=submitted_debug, resolved_symbol=resolved_symbol_for_debug, pending_dependencies=pending_dependencies))
                 resolved = resolve_bybit_symbol_from_choices(symbol_in, choices)
                 if not resolved or not resolved.get("resolved_symbol"):
-                    try:
-                        name_aliases = await _bybit_name_aliases_for_choices(base_url, set(choices))
-                    except Exception as exc:
-                        raise HTTPException(status_code=503, detail=f"Bybit alias metadata unavailable: {exc}") from exc
+                    name_aliases = await _calculator_timed_dependency("bybit_symbol_aliases", _bybit_name_aliases_for_choices(base_url, set(choices)), timings_ms, 1.0, "bybit_aliases", pending_dependencies=pending_dependencies, last_dependency_started=last_dependency_started, deadline=quote_deadline)
                     if name_aliases:
                         resolved = resolve_bybit_symbol_from_choices(symbol_in, choices, extra_aliases=name_aliases)
                 resolved_symbol = str((resolved or {}).get("resolved_symbol") or "").upper()
-                resolved_symbol_for_debug = resolved_symbol or resolved_symbol_for_debug
+                resolution_debug["resolution_status"] = "fallback_list" if resolved_symbol else "unresolved"
+                if resolved_symbol:
+                    resolved_inst_row = await _bybit_get_instrument_info_cached(base_url, "linear", resolved_symbol, timeout_s=_calculator_remaining_timeout_s(quote_deadline, 1.0), connect_s=0.5, read_s=1.0)
             timings_ms["symbol_resolution_ms"] = int((time.perf_counter() - symbol_resolution_started) * 1000)
+            timings_ms["bybit_instrument_cache_hit"] = bool(resolved_inst_row)
+            timings_ms["symbol_resolution_debug"] = resolution_debug
+            resolved_symbol_for_debug = resolved_symbol or resolved_symbol_for_debug
             if not resolved_symbol:
-                raise HTTPException(status_code=404, detail=f"Could not resolve Bybit symbol: {symbol_in}")
+                raise HTTPException(status_code=404, detail=_calculator_quote_error_detail("BYBIT_SYMBOL_UNRESOLVED", f"Could not resolve Bybit symbol: {symbol_in}", timings_ms=timings_ms, quote_started=quote_started, submitted_payload=submitted_debug, resolved_symbol=resolved_symbol_for_debug, pending_dependencies=pending_dependencies))
             bybit_fetch_started = time.perf_counter()
             inst_task = None
             if not resolved_inst_row:
