@@ -177,8 +177,8 @@
         if (!parentCard) return;
         const apiBase =
             monitor === 'oanda'
-                ? '/api/oanda-monitor/custom-alerts'
-                : '/api/bybit-monitor/custom-alerts';
+                ? '/api/oanda-alerts/custom-alerts'
+                : '/api/bybit-alerts/custom-alerts';
 
         const section = el('div', { class: 'settings-section' }, [
             el('h3', { text: 'Custom alerts', style: 'margin-top:16px;' }),
@@ -419,7 +419,7 @@
         if (!isBybitMonitor || !settingsCard) return;
         settingsCard.style.display = 'block';
         try {
-            const resp = await fetch('/api/bybit-monitor/settings');
+            const resp = await fetch('/api/bybit-alerts/settings');
             if (!resp.ok) {
                 throw new Error(`Failed to load settings (${resp.status})`);
             }
@@ -437,7 +437,7 @@
         if (!isOandaMonitor || !oandaSettingsCard) return;
         oandaSettingsCard.style.display = 'block';
         try {
-            const resp = await fetch('/api/oanda-monitor/settings');
+            const resp = await fetch('/api/oanda-alerts/settings');
             if (!resp.ok) {
                 throw new Error(`Failed to load settings (${resp.status})`);
             }
@@ -463,7 +463,7 @@
         setSettingsBadge(settingsStatus, 'Saving...');
 
         try {
-            const resp = await fetch('/api/bybit-monitor/settings', {
+            const resp = await fetch('/api/bybit-alerts/settings', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
@@ -500,7 +500,7 @@
         setSettingsBadge(oandaSettingsStatus, 'Saving...');
 
         try {
-            const resp = await fetch('/api/oanda-monitor/settings', {
+            const resp = await fetch('/api/oanda-alerts/settings', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),

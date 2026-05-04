@@ -96,7 +96,7 @@ exit /b 1
 
 :scanner_not_ready
 echo [local-master] ERROR: scanner did not become ready after %SCANNER_READY_TIMEOUT_SECONDS% seconds.
-echo [local-master] Scanner startup may have failed. Check the "Local Master Control" window/logs for bybit_monitor/oanda_monitor errors.
+echo [local-master] Alerts startup may have failed. Check the "Local Master Control" window/logs for bybit_monitor/oanda_monitor errors.
 echo [local-master] Browser was not opened to avoid showing a misleading dashboard state.
 exit /b 1
 

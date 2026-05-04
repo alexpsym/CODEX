@@ -204,7 +204,7 @@ LOCAL_ONLY_APP_NAMES = {
 }
 LOCAL_ONLY_PATH_PREFIXES = (
     "/merged/history",
-    "/merged/monitor",
+    "/merged/alerts",
     "/bybit-history",
     "/oanda-history",
     "/coinspot-history",
@@ -243,7 +243,7 @@ def _profile_main_buttons() -> List[Dict[str, object]]:
             [
                 {"id": "open-orders", "name": "open-orders", "label": "Open Orders and Positions", "open_url": "/merged/open-orders", "dashboard_main_view": True},
                 {"id": "history", "name": "history", "label": "History", "open_url": "/merged/history", "dashboard_main_view": True},
-                {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor", "dashboard_main_view": True},
+                {"id": "monitor", "name": "monitor", "label": "Alerts", "open_url": "/merged/alerts", "dashboard_main_view": True},
             ]
         )
     return buttons
@@ -8215,7 +8215,7 @@ LOG_VIEWER_TEMPLATE = """<!DOCTYPE html>
         <div class=\"settings-header\">
             <div>
                 <strong>OANDA monitor settings</strong>
-                <p class=\"meta\">Adjust OANDA monitoring.</p>
+                <p class=\"meta\">Adjust OANDA alerts.</p>
             </div>
             <span class=\"badge\" id=\"oanda-settings-status\">&nbsp;</span>
         </div>
@@ -14518,7 +14518,7 @@ async def merged_calculator_page() -> HTMLResponse:
 async def merged_scanner_redirect() -> Response:
     if APP_PROFILE == "render":
         return _local_only_disabled_response("/merged/scanner")
-    return RedirectResponse(url="/merged/monitor", status_code=307)
+    return RedirectResponse(url="/merged/alerts", status_code=307)
 
 
 def _dec(value: object, field: str) -> Decimal:
@@ -15997,7 +15997,7 @@ MERGED_MONITOR_TEMPLATE = """<!doctype html>
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Merged Scanner Monitor</title>
+  <title>Merged Alerts</title>
   <style>
     body { margin:0; background:#0b1220; color:#e2e8f0; font-family:Inter,system-ui,sans-serif; }
     .wrap { max-width: 1280px; margin: 0 auto; padding: 18px; }
@@ -16015,14 +16015,14 @@ MERGED_MONITOR_TEMPLATE = """<!doctype html>
 </head>
 <body>
   <div class="wrap">
-    <h2 style="margin-top:0">Scanner Monitor</h2>
-    <p class="meta">Local merged controls for Bybit and OANDA scanners.</p>
+    <h2 style="margin-top:0">Alerts</h2>
+    <p class="meta">Local merged controls for Bybit and OANDA alerts.</p>
     <p class="notice">This page polls local scanner status every 2 seconds. Closing this tab only stops these status requests/log lines; scanner processes keep running independently.</p>
     <div class="grid">
       <section class="panel" id="monitor-control-panel">
-        <h3 style="margin-top:0">Monitor controls</h3>
+        <h3 style="margin-top:0">Alerts controls</h3>
         <div class="row">
-          <label>Target monitor
+          <label>Target alerts
             <select id="monitor-target">
               <option value="bybit" selected>Bybit</option>
               <option value="oanda">OANDA</option>
@@ -16157,12 +16157,12 @@ async def merged_history_page() -> str:
     return HISTORY_PAGE_TEMPLATE
 
 
-@app.get("/merged/monitor")
+@app.get("/merged/alerts")
 async def merged_monitor_page() -> Response:
     if APP_PROFILE == "render":
-        return _local_only_disabled_response("/merged/monitor")
+        return _local_only_disabled_response("/merged/alerts")
     monitor_js_version = quote(str(os.getenv("APP_BUILD_STAMP") or os.getenv("RENDER_GIT_COMMIT") or app.version), safe="")
-    page = MERGED_MONITOR_TEMPLATE.replace("{{MERGED_MONITOR_JS_URL}}", f"/static/merged_monitor.js?v={monitor_js_version}")
+    page = MERGED_MONITOR_TEMPLATE.replace("{{MERGED_MONITOR_JS_URL}}", f"/static/merged_alerts.js?v={monitor_js_version}")
     return HTMLResponse(page)
 
 
@@ -18028,36 +18028,43 @@ async def proxy_app(script_name: str, request: Request, path: str = "") -> Respo
     )
 
 
+@app.get("/api/bybit-alerts/settings")
 @app.get("/api/bybit-monitor/settings")
 async def bybit_monitor_settings() -> JSONResponse:
     return JSONResponse(_read_bybit_settings())
 
 
+@app.post("/api/bybit-alerts/settings")
 @app.post("/api/bybit-monitor/settings")
 async def update_bybit_monitor_settings(payload: Dict[str, object]) -> JSONResponse:
     return JSONResponse(_update_bybit_settings(payload))
 
 
+@app.get("/api/oanda-alerts/settings")
 @app.get("/api/oanda-monitor/settings")
 async def oanda_monitor_settings() -> JSONResponse:
     return JSONResponse(_read_oanda_settings())
 
 
+@app.post("/api/oanda-alerts/settings")
 @app.post("/api/oanda-monitor/settings")
 async def update_oanda_monitor_settings(payload: Dict[str, object]) -> JSONResponse:
     return JSONResponse(_update_oanda_settings(payload))
 
 
+@app.get("/api/bybit-alerts/status")
 @app.get("/api/bybit-monitor/status")
 async def bybit_monitor_runtime_status() -> JSONResponse:
     return JSONResponse(_scanner_status_payload(BYBIT_RUNTIME_STATUS_PATH))
 
 
+@app.get("/api/oanda-alerts/status")
 @app.get("/api/oanda-monitor/status")
 async def oanda_monitor_runtime_status() -> JSONResponse:
     return JSONResponse(_scanner_status_payload(OANDA_RUNTIME_STATUS_PATH))
 
 
+@app.get("/api/bybit-alerts/custom-alerts")
 @app.get("/api/bybit-monitor/custom-alerts")
 async def bybit_monitor_custom_alerts() -> JSONResponse:
     await _wait_for_state_restore_or_error()
@@ -18078,6 +18085,7 @@ async def bybit_monitor_custom_alerts() -> JSONResponse:
         raise HTTPException(status_code=503, detail={"error": "dropbox_state_unavailable", "message": str(exc), "state_sync": _state_sync_status_snapshot()}) from exc
 
 
+@app.post("/api/bybit-alerts/custom-alerts")
 @app.post("/api/bybit-monitor/custom-alerts")
 async def upsert_bybit_monitor_custom_alert(request: Request) -> JSONResponse:
     await _wait_for_state_restore_or_error()
@@ -18098,6 +18106,7 @@ async def upsert_bybit_monitor_custom_alert(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "alert": normalized, "state_sync": _state_sync_status_snapshot()})
 
 
+@app.delete("/api/bybit-alerts/custom-alerts/{alert_id}")
 @app.delete("/api/bybit-monitor/custom-alerts/{alert_id}")
 async def delete_bybit_monitor_custom_alert(alert_id: str) -> JSONResponse:
     await _wait_for_state_restore_or_error()
@@ -18108,6 +18117,7 @@ async def delete_bybit_monitor_custom_alert(alert_id: str) -> JSONResponse:
     return JSONResponse({"ok": True, "alert_id": alert_id, "state_sync": _state_sync_status_snapshot()})
 
 
+@app.post("/api/bybit-alerts/custom-alerts/{alert_id}/enabled")
 @app.post("/api/bybit-monitor/custom-alerts/{alert_id}/enabled")
 async def set_bybit_monitor_custom_alert_enabled(
     alert_id: str, request: Request
@@ -18133,6 +18143,7 @@ async def set_bybit_monitor_custom_alert_enabled(
     return JSONResponse({"ok": True, "alert": found, "state_sync": _state_sync_status_snapshot()})
 
 
+@app.get("/api/oanda-alerts/custom-alerts")
 @app.get("/api/oanda-monitor/custom-alerts")
 async def oanda_monitor_custom_alerts() -> JSONResponse:
     await _wait_for_state_restore_or_error()
@@ -18153,6 +18164,7 @@ async def oanda_monitor_custom_alerts() -> JSONResponse:
         raise HTTPException(status_code=503, detail={"error": "dropbox_state_unavailable", "message": str(exc), "state_sync": _state_sync_status_snapshot()}) from exc
 
 
+@app.post("/api/oanda-alerts/custom-alerts")
 @app.post("/api/oanda-monitor/custom-alerts")
 async def upsert_oanda_monitor_custom_alert(request: Request) -> JSONResponse:
     await _wait_for_state_restore_or_error()
@@ -18171,6 +18183,7 @@ async def upsert_oanda_monitor_custom_alert(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "alert": normalized, "state_sync": _state_sync_status_snapshot()})
 
 
+@app.delete("/api/oanda-alerts/custom-alerts/{alert_id}")
 @app.delete("/api/oanda-monitor/custom-alerts/{alert_id}")
 async def delete_oanda_monitor_custom_alert(alert_id: str) -> JSONResponse:
     await _wait_for_state_restore_or_error()
@@ -18181,6 +18194,7 @@ async def delete_oanda_monitor_custom_alert(alert_id: str) -> JSONResponse:
     return JSONResponse({"ok": True, "alert_id": alert_id, "state_sync": _state_sync_status_snapshot()})
 
 
+@app.post("/api/oanda-alerts/custom-alerts/{alert_id}/enabled")
 @app.post("/api/oanda-monitor/custom-alerts/{alert_id}/enabled")
 async def set_oanda_monitor_custom_alert_enabled(
     alert_id: str, request: Request
@@ -18436,6 +18450,7 @@ async def restore_all_alerts(file: UploadFile = File(...)) -> JSONResponse:
 
 
 
+@app.post("/api/bybit-alerts/push-test")
 @app.post("/api/bybit-monitor/push-test")
 async def bybit_monitor_push_test() -> JSONResponse:
     try:
@@ -18449,6 +18464,7 @@ async def bybit_monitor_push_test() -> JSONResponse:
         ) from exc
 
 
+@app.post("/api/oanda-alerts/push-test")
 @app.post("/api/oanda-monitor/push-test")
 async def oanda_monitor_push_test() -> JSONResponse:
     try:
