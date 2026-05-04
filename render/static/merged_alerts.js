@@ -98,8 +98,7 @@
         ].forEach((item) => { const o=document.createElement('option'); o.value=item.value; o.textContent=item.label; windowSelect.appendChild(o); });
 
         const cooldownInput = document.createElement('input'); cooldownInput.type='number'; cooldownInput.min='0'; cooldownInput.step='1'; cooldownInput.value='0';
-        const expirySelect = form.querySelector('[data-alert-expiry]');
-            const messageInput = document.createElement('input'); messageInput.type='text'; messageInput.placeholder='Optional custom message';
+        const messageInput = document.createElement('input'); messageInput.type='text'; messageInput.placeholder='Optional custom message';
         const enabledInput = document.createElement('input'); enabledInput.type='checkbox'; enabledInput.checked=true;
 
         formGrid.append(makeLabel('Symbol', symbolInput), makeLabel('Type', kindSelect), makeLabel('Price direction', priceDirectionSelect), makeLabel('Move direction', moveDirectionSelect), makeLabel('Target price', targetPriceInput), makeLabel('Move threshold', thresholdInput), makeLabel('Unit', unitSelect), makeLabel('Window', windowSelect), makeLabel('Cooldown (seconds)', cooldownInput), makeLabel('Custom message', messageInput), makeLabel('Enabled', enabledInput));
@@ -183,7 +182,7 @@
             try {
                 let symbol = symbolInput.value.trim().toUpperCase(); if (!symbol) throw new Error('Symbol is required');
                 symbol = await resolveBybitSymbol(symbol); symbolInput.value = symbol;
-                const kind = kindSelect.value; const payload = { id: editingId || undefined, symbol, kind, enabled: enabledInput.checked, cooldown_seconds: cooldownInput.value ? parseRequiredNumber(cooldownInput, 'Cooldown seconds') : 0, expiry_choice: (expirySelect?.value || 'never') };
+                const kind = kindSelect.value; const payload = { id: editingId || undefined, symbol, kind, enabled: enabledInput.checked, cooldown_seconds: cooldownInput.value ? parseRequiredNumber(cooldownInput, 'Cooldown seconds') : 0 };
                 if (kind === 'price') { const target = parseRequiredNumber(targetPriceInput, 'Target price'); if (target <= 0) throw new Error('Target price must be greater than zero'); payload.direction = priceDirectionSelect.value; payload.target_price = target; const customMessage = messageInput.value.trim(); if (customMessage) payload.message = customMessage; }
                 else { const threshold = parseRequiredNumber(thresholdInput, 'Move threshold'); if (threshold <= 0) throw new Error('Move threshold must be greater than zero'); const windowSeconds = Number(windowSelect.value); if (!Number.isFinite(windowSeconds) || windowSeconds <= 0) throw new Error('Window must be selected'); payload.direction = moveDirectionSelect.value; payload.threshold = threshold; payload.unit = unitSelect.value; payload.window_seconds = windowSeconds; }
                 const monitor = getMonitor();
@@ -223,7 +222,7 @@
         const refreshStatus = async () => { const monitor = getMonitor(); const req = ++statusSeq; try { const payload = await fetchJson(`/api/${monitor}-alerts/status`); if (req !== statusSeq || monitor !== getMonitor()) return; const uiStatus = String(payload?.ui_status || '').toLowerCase(); setRunningState(uiStatus === 'running' ? 'running' : (uiStatus === 'unavailable' ? 'unavailable' : 'stopped')); updateHealth(payload || {}); } catch (err) { if (req !== statusSeq || monitor !== getMonitor()) return; console.error(err); setRunningState('unavailable'); updateHealth({ reason: 'request_failed', error: err?.message || String(err || 'Unknown error') }); } };
         const loadSettings = async () => { const monitor = getMonitor(); const req = ++settingsSeq; try { const data = await fetchJson(`/api/${monitor}-alerts/settings`); if (req !== settingsSeq || monitor !== getMonitor()) return; if (waitInput) waitInput.value = data.wait_seconds ?? ''; if (thresholdInput) thresholdInput.value = data.percent_threshold ?? ''; setSettingsBadge(settingsStatus, data.push_ready ? 'Ready' : 'Telegram not configured', !data.push_ready); } catch (err) { if (req !== settingsSeq || monitor !== getMonitor()) return; console.error(err); setSettingsBadge(settingsStatus, 'Load failed', true); window.alert(err.message || 'Unable to load settings'); } };
         const saveSettings = async () => { const monitor = getMonitor(); const body = { wait_seconds: Number(waitInput?.value || 0), percent_threshold: Number(thresholdInput?.value || 0) }; saveSettingsBtn.disabled = true; reloadSettingsBtn.disabled = true; testAlertBtn.disabled = true; setSettingsBadge(settingsStatus, 'Saving...'); try { const data = await fetchJson(`/api/${monitor}-alerts/settings`, { method:'POST', headers:{ 'Content-Type':'application/json' }, body:JSON.stringify(body) }); if (waitInput) waitInput.value = data.wait_seconds ?? ''; if (thresholdInput) thresholdInput.value = data.percent_threshold ?? ''; setSettingsBadge(settingsStatus, 'Saved'); } catch (err) { console.error(err); setSettingsBadge(settingsStatus, 'Save failed', true); window.alert(err.message || 'Unable to save settings'); } finally { saveSettingsBtn.disabled = false; reloadSettingsBtn.disabled = false; testAlertBtn.disabled = false; } };
-        const sendTestAlert = async () => { const monitor = getMonitor(); testAlertBtn.disabled = true; setSettingsBadge(settingsStatus, 'Sending test...'); try { const resp = await fetch(`/api/${monitor}-alerts/push-test`, { method:'POST' }); const payloadText = await resp.text(); if (!resp.ok) throw new Error(payloadText || `Test failed (${resp.status})`); const data = payloadText ? JSON.parse(payloadText) : {}; if (data?.sent) setSettingsBadge(settingsStatus, 'Test sent'); else if (data?.configured === false) setSettingsBadge(settingsStatus, 'Telegram not configured', true); else setSettingsBadge(settingsStatus, 'Test completed'); } catch (err) { console.error(err); setSettingsBadge(settingsStatus, 'Test failed', true); window.alert(err.message || 'Unable to send test alert'); } finally { testAlertBtn.disabled = false; } };
+        const sendTestAlert = async () => { const monitor = getMonitor(); testAlertBtn.disabled = true; setSettingsBadge(settingsStatus, 'Sending test...'); try { const resp = await fetch(`/api/${monitor}-alerts/push-test`, { method:'POST' }); const bodyText = await resp.text(); let data = null; if (bodyText) { try { data = JSON.parse(bodyText); } catch (_err) { data = { detail: bodyText }; } } const detail = data?.detail || bodyText || `HTTP ${resp.status}`; if (data?.sent) { setSettingsBadge(settingsStatus, 'Test sent'); return; } if (data?.configured === false) { setSettingsBadge(settingsStatus, `Telegram not configured: ${detail}`, true); return; } setSettingsBadge(settingsStatus, `Test failed: ${detail}`, true); if (!resp.ok) throw new Error(detail || `Test failed (${resp.status})`); } catch (err) { console.error(err); if (!String(settingsStatus?.textContent || '').startsWith('Test failed') && !String(settingsStatus?.textContent || '').startsWith('Telegram not configured')) { setSettingsBadge(settingsStatus, `Test failed: ${err.message || String(err)}`, true); } } finally { testAlertBtn.disabled = false; } };
 
         const onMonitorChange = () => {
             if (monitorTargetEl) monitorTargetEl.value = getMonitor();
@@ -243,7 +242,19 @@
         return { refreshStatus, loadSettings, loadAlerts: customAlerts.loadAlerts, onMonitorChange };
     };
 
-    const controller = createMonitorController();
-    const init = async () => { controller.onMonitorChange(); setInterval(() => { controller.refreshStatus(); }, 2000); };
-    init();
+    const init = async () => {
+        const controller = createMonitorController();
+        controller.onMonitorChange();
+        setInterval(() => { controller.refreshStatus(); }, 2000);
+    };
+
+    init().catch((err) => {
+        console.error('Merged alerts page initialization failed', err);
+        const statusEl = document.getElementById('monitor-status');
+        const healthEl = document.getElementById('monitor-health');
+        const settingsStatus = document.getElementById('monitor-settings-status');
+        if (statusEl) statusEl.textContent = 'Page init failed';
+        if (healthEl) healthEl.textContent = `Init error: ${err?.message || String(err)}`;
+        setSettingsBadge(settingsStatus, 'Init failed', true);
+    });
 })();
