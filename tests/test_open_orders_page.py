@@ -284,3 +284,15 @@ def test_verify_action_bybit_position_and_order(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(master_service, "_bybit_signed_get", fake_get_open)
     payload4 = json.loads(asyncio.run(master_service.verify_open_order_action({"broker":"bybit","account":"live","type":"order","id":"o1","instrument":"BTCUSDT","category":"linear"})).body.decode("utf-8"))
     assert payload4["still_open"] is True
+
+
+def test_open_orders_page_contains_webhook_diagnostic_ui() -> None:
+    html = asyncio.run(master_service.merged_open_orders_page()).body.decode("utf-8")
+    assert 'id="pending-webhook-id-input"' in html
+    assert 'id="webhook-diagnostic-card"' in html
+
+
+def test_open_orders_js_fetches_webhook_diagnostic() -> None:
+    js = (ROOT / "render" / "static" / "open_orders.js").read_text(encoding="utf-8")
+    assert "pending_webhook_id" in js
+    assert "/api/calculator/webhook-diagnostic/" in js

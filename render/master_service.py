@@ -7144,13 +7144,15 @@ async def _autostart_scripts() -> None:
         DROPBOX_BACKUP_PATH,
         _MASTER_ENV_INFO.get("loaded_file") or "<none>",
     )
-    remote_base = str(os.getenv("RENDER_CALCULATOR_BASE_URL") or "").strip()
+    calc_host = _render_calculator_host()
+    calc_mode = "remote_render" if (APP_PROFILE == "local" and calc_host and not _is_local_host(calc_host)) else "same_instance"
+    calc_endpoint = (str(os.getenv("RENDER_CALCULATOR_BASE_URL") or "").strip().rstrip("/") + "/api/calculator/webhook") if calc_mode == "remote_render" else "<same-instance>"
     AUTOSTART_LOGGER.info(
-        "Calculator webhook runtime: APP_PROFILE=%s RENDER_CALCULATOR_BASE_URL=%s PUBLIC_WEBHOOK_BASE_URL=%s RENDER_EXTERNAL_URL=%s",
-        APP_PROFILE,
-        "configured" if remote_base else "missing",
-        "configured" if str(os.getenv("PUBLIC_WEBHOOK_BASE_URL") or "").strip() else "missing",
-        "configured" if str(os.getenv("RENDER_EXTERNAL_URL") or "").strip() else "missing",
+        "CALCULATOR_WEBHOOK_MODE mode=%s endpoint=%s owner=%s env_loaded_file=%s",
+        calc_mode,
+        calc_endpoint,
+        "remote_render" if calc_mode == "remote_render" else "same_instance",
+        _MASTER_ENV_INFO.get("loaded_file") or "<none>",
     )
     if _is_scanner_local_ui_mode():
         _update_state_sync_status(
@@ -10220,6 +10222,12 @@ def _calculator_webhook_capability(request: Request) -> Dict[str, object]:
         capability["unavailable_message"] = "Set RENDER_CALCULATOR_BASE_URL=https://<your-render-service>.onrender.com in C:\\Users\\User\\Documents\\GPT\\env.env, then restart run_local_master_control.bat."
         capability["resolution"] = "Use a non-local Render URL in RENDER_CALCULATOR_BASE_URL for local Webhook=Yes, or disable Webhook and calculate locally."
     return capability
+
+
+def _render_calculator_host() -> str:
+    remote_base = str(os.getenv("RENDER_CALCULATOR_BASE_URL") or "").strip().rstrip("/")
+    parsed = urlparse(remote_base) if remote_base else None
+    return str((parsed.hostname if parsed else "") or "").strip().lower()
 
 
 def _calculator_js_fingerprint() -> Dict[str, str]:
@@ -15737,6 +15745,16 @@ async def calculator_webhook(request: Request, payload: Dict[str, object] = Body
             "payload": dict(payload),
         }
     )
+    logger.info(
+        "WEBHOOK_RECEIVED request_id=%s pending_webhook_id=%s host=%s origin_host=%s endpoint_url=%s symbol=%s account=%s",
+        request_id,
+        pending_id or "<none>",
+        request.headers.get("host") or "<none>",
+        str(payload.get("webhook_origin_host") or "<none>"),
+        str(payload.get("webhook_endpoint_url") or "<none>"),
+        str(payload.get("symbol") or "").strip().upper() or "<none>",
+        str(payload.get("account") or "").strip().lower() or "<none>",
+    )
 
     try:
         _assert_pending_webhook_executable(payload)
@@ -15776,6 +15794,15 @@ async def calculator_webhook(request: Request, payload: Dict[str, object] = Body
         }
 
         if asset == "crypto":
+            logger.info(
+                "WEBHOOK_BYBIT_SUBMIT request_id=%s account=%s category=%s symbol=%s order_type=%s qty=%s",
+                request_id,
+                str(canonical.get("account") or "").strip().lower() or "<none>",
+                "linear",
+                str(canonical.get("symbol") or "").strip().upper() or "<none>",
+                str(canonical.get("order_type") or "market"),
+                str(canonical.get("quantity") or "<none>"),
+            )
             result = await _place_bybit_order(
                 canonical,
                 request_id=request_id,
@@ -15831,6 +15858,14 @@ async def calculator_webhook(request: Request, payload: Dict[str, object] = Body
                     ).strip()
                     or None,
                 },
+            )
+            logger.info(
+                "WEBHOOK_BYBIT_RESPONSE request_id=%s retCode=%s retMsg=%s orderId=%s orderLinkId=%s",
+                request_id,
+                0,
+                "OK",
+                str((bybit_result or {}).get("orderId") or "<none>"),
+                str((bybit_result or {}).get("orderLinkId") or "<none>"),
             )
             if pending_id:
                 _consume_pending_webhook(
@@ -15918,6 +15953,14 @@ async def calculator_webhook(request: Request, payload: Dict[str, object] = Body
                 "error": str(exc),
                 "stack": traceback.format_exc(),
             },
+        )
+        logger.warning(
+            "WEBHOOK_BYBIT_RESPONSE request_id=%s retCode=%s retMsg=%s orderId=%s orderLinkId=%s",
+            request_id,
+            exc.ret_code,
+            exc.ret_msg,
+            str((exc.result or {}).get("orderId") or "<none>"),
+            str((exc.result or {}).get("orderLinkId") or "<none>"),
         )
         if pending_id:
             _upsert_trade_context(
@@ -16012,10 +16055,72 @@ async def calculator_webhook(request: Request, payload: Dict[str, object] = Body
 
 
 @app.get("/api/calculator/webhook-attempts")
-async def calculator_webhook_attempts(limit: int = Query(50, ge=1, le=500)) -> JSONResponse:
-    attempts = _load_webhook_attempts()
-    items = list(reversed(attempts))[: int(limit)]
-    return JSONResponse({"items": items, "updated_at": _utc_now_iso()})
+async def calculator_webhook_attempts(
+    limit: int = Query(50, ge=1, le=500),
+    pending_webhook_id: Optional[str] = Query(None),
+    symbol: Optional[str] = Query(None),
+    account: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+) -> JSONResponse:
+    items = list(reversed(_load_webhook_attempts()))
+    if pending_webhook_id:
+        needle = pending_webhook_id.strip()
+        items = [it for it in items if str(it.get("pending_webhook_id") or "").strip() == needle]
+    if symbol:
+        needle = symbol.strip().upper()
+        items = [it for it in items if str(it.get("symbol") or "").strip().upper() == needle]
+    if account:
+        needle = account.strip().lower()
+        items = [it for it in items if str(it.get("account") or "").strip().lower() == needle]
+    if status:
+        needle = status.strip().upper()
+        items = [it for it in items if str(it.get("status") or "").strip().upper() == needle]
+    limited = items[: int(limit)]
+    return JSONResponse(
+        {
+            "items": limited,
+            "updated_at": _utc_now_iso(),
+            "matched_count": len(items),
+            "latest_status": str(limited[0].get("status") or "") if limited else None,
+            "found_pending_id": bool(pending_webhook_id and items),
+        }
+    )
+
+
+@app.get("/api/calculator/webhook-diagnostic/{pending_webhook_id}")
+async def calculator_webhook_diagnostic(pending_webhook_id: str) -> JSONResponse:
+    pid = str(pending_webhook_id or "").strip()
+    attempts = [a for a in reversed(_load_webhook_attempts()) if str(a.get("pending_webhook_id") or "").strip() == pid]
+    pending = next((p for p in _load_pending_webhooks() if str(p.get("id") or "").strip() == pid), None)
+    trade = next((t for t in _load_trade_contexts() if str(t.get("pending_webhook_id") or "").strip() == pid), None)
+    if pending and not attempts:
+        status = "WAITING_NO_POST_RECEIVED"
+    elif attempts:
+        status = str(attempts[0].get("status") or "UNKNOWN")
+    else:
+        status = "NO_RENDER_ATTEMPT_RECORDED"
+    latest = attempts[0] if attempts else {}
+    return JSONResponse(
+        {
+            "ok": True,
+            "status": status,
+            "pending_webhook_id": pid,
+            "pending_webhook_record": pending,
+            "attempts": attempts,
+            "trade_context": trade,
+            "bybit_ret_code": latest.get("bybit_ret_code"),
+            "bybit_ret_msg": latest.get("bybit_ret_msg"),
+            "orderId": latest.get("order_id"),
+            "orderLinkId": latest.get("order_link_id"),
+            "current_instance": {
+                "app_profile": APP_PROFILE,
+                "app_instance_id": str(os.getenv("APP_INSTANCE_ID") or os.getenv("RENDER_INSTANCE_ID") or os.getenv("RENDER_SERVICE_ID") or os.getenv("HOSTNAME") or "").strip() or None,
+                "host": str(os.getenv("HOSTNAME") or "").strip() or None,
+                "render_calculator_base_url_configured": bool(str(os.getenv("RENDER_CALCULATOR_BASE_URL") or "").strip()),
+                "render_calculator_base_url_host": _render_calculator_host() or None,
+            },
+        }
+    )
 
 
 @app.post("/api/calculator/submit")
@@ -16237,6 +16342,7 @@ OPEN_ORDERS_TEMPLATE = """<!doctype html>
     .subpanel-title { margin: 14px 0 8px; color:#93c5fd; font-size: 14px; font-weight: 700; }
     .mini-table-wrap { overflow: auto; border: 1px solid #1f2937; border-radius: 10px; background: #0b1220; margin-top: 6px; }
     table.mini { min-width: 1100px; }
+    .diag-card { border:1px solid #334155; border-radius:10px; padding:10px; background:#0f172a; margin-bottom:10px; }
   </style>
 </head>
 <body>
@@ -16251,6 +16357,10 @@ OPEN_ORDERS_TEMPLATE = """<!doctype html>
         <div><strong>Source errors</strong></div>
         <ul></ul>
       </div>
+      <div class="toolbar">
+        <input id="pending-webhook-id-input" class="btn" style="min-width:420px" placeholder="pending_webhook_id (optional)"/>
+      </div>
+      <div id="webhook-diagnostic-card" class="diag-card muted">Webhook diagnostic idle.</div>
       <div id="open-orders-empty" class="muted">No open orders, positions, or pending webhooks.</div>
       <div class="table-wrap">
         <table id="open-orders-table">
