@@ -6680,6 +6680,20 @@ script_manager = ScriptManager(discover_scripts())
 app = FastAPI(title="TradingTools", version="1.0")
 
 
+def _static_asset_version(relative_path: str) -> str:
+    explicit = str(os.getenv("APP_BUILD_STAMP") or os.getenv("RENDER_GIT_COMMIT") or "").strip()
+    if explicit:
+        return quote(explicit, safe="")
+    target = BASE_DIR / relative_path
+    try:
+        stat = target.stat()
+        digest = hashlib.sha256(target.read_bytes()).hexdigest()[:12]
+        return quote(f"{stat.st_mtime_ns}-{stat.st_size}-{digest}", safe="")
+    except Exception as exc:
+        BYBIT_LOGGER.warning("Static asset version fallback for %s: %s", relative_path, exc)
+        return quote(f"missing-{int(time.time_ns())}", safe="")
+
+
 @app.middleware("http")
 async def profile_router_guard(request: Request, call_next: Callable) -> Response:
     path = request.url.path
@@ -14345,16 +14359,9 @@ async def home_page() -> Response:
     if APP_PROFILE == "journal":
         return RedirectResponse(url="/trading-journal", status_code=307)
     if APP_PROFILE == "local":
-        dashboard_js_path = BASE_DIR / "render" / "static" / "dashboard.js"
-        try:
-            dashboard_js_version = f"local-{int(dashboard_js_path.stat().st_mtime)}"
-        except Exception:
-            dashboard_js_version = f"local-{int(time.time())}"
+        dashboard_js_version = _static_asset_version("render/static/dashboard.js")
     else:
-        dashboard_js_version = quote(
-            str(os.getenv("APP_BUILD_STAMP") or os.getenv("RENDER_GIT_COMMIT") or app.version),
-            safe="",
-        )
+        dashboard_js_version = _static_asset_version("render/static/dashboard.js")
     page = HTML_TEMPLATE.replace("{{DASHBOARD_JS_URL}}", f"/static/dashboard.js?v={dashboard_js_version}")
     response = HTMLResponse(page)
     if APP_PROFILE == "local":
@@ -16223,9 +16230,12 @@ async def merged_history_page() -> str:
 async def merged_monitor_page() -> Response:
     if APP_PROFILE == "render":
         return _local_only_disabled_response("/merged/alerts")
-    monitor_js_version = quote(str(os.getenv("APP_BUILD_STAMP") or os.getenv("RENDER_GIT_COMMIT") or app.version), safe="")
+    monitor_js_version = _static_asset_version("render/static/merged_alerts.js")
     page = MERGED_MONITOR_TEMPLATE.replace("{{MERGED_MONITOR_JS_URL}}", f"/static/merged_alerts.js?v={monitor_js_version}")
-    return HTMLResponse(page)
+    response = HTMLResponse(page)
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return response
 
 
 @app.get("/merged/bounce-trader")
@@ -16237,7 +16247,7 @@ async def merged_bounce_page() -> Response:
 async def merged_open_orders_page() -> HTMLResponse:
     if APP_PROFILE == "render":
         return _local_only_disabled_response("/merged/open-orders")  # type: ignore[return-value]
-    script_version = quote(str(os.getenv("APP_BUILD_STAMP") or os.getenv("RENDER_GIT_COMMIT") or app.version), safe="")
+    script_version = _static_asset_version("render/static/open_orders.js")
     page = OPEN_ORDERS_TEMPLATE.replace("{{OPEN_ORDERS_JS_URL}}", f"/static/open_orders.js?v={script_version}")
     return HTMLResponse(page)
 
