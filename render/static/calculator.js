@@ -59,7 +59,10 @@
     'status',
     'scannerVolume24h',
     'openInterest',
+    'volume24h',
     '_units',
+    '_btc_reference',
+    '_spec_warnings',
   ]);
   const SPECS_FIELD_LABELS = {
     resolved_symbol: 'resolved_symbol',
@@ -69,9 +72,18 @@
     nextFundingTime: 'nextFundingTime (Brisbane time)',
     launchTime: 'launchTime (Brisbane time)',
     openInterestValue: 'openInterestValue (USD)',
-    turnover24h: 'turnover24h (USD)',
-    volume24h: 'volume24h (base units)',
+    volume24hUsd: 'volume24h (USD)',
+    turnover24h: 'volume24h (USD)',
     avg7dTurnoverUsd: 'avg7dVolume (USD)',
+    'range.1m': 'range 1m (%)',
+    'range.5m': 'range 5m (%)',
+    'range.15m': 'range 15m (%)',
+    'range.30m': 'range 30m (%)',
+    'range.1h': 'range 1h (%)',
+    'range.4h': 'range 4h (%)',
+    'range.1d': 'range daily (%)',
+    'range.1w': 'range weekly (%)',
+    'range.1mo': 'range monthly (%)',
   };
 
   function clearMessages() {
@@ -164,26 +176,25 @@
         if (ts) return ts;
       }
       if (key === 'fundingRate' || key.endsWith('.fundingRate')) return formatPercentFromFraction(value);
-      if (/^(turnover24h|openInterestValue|avg7dTurnoverUsd)$/i.test(key)) return `$${compactNumber(value)}`;
-      if (/^volume24h$/i.test(key)) return compactNumber(value);
+      if (key === 'fundingRate' || key.endsWith('.fundingRate') || key.startsWith('range.')) return formatPercentFromFraction(value, 2);
+      if (/^(volume24hUsd|turnover24h|openInterestValue|avg7dTurnoverUsd)$/i.test(key)) return `$${compactNumber(value)}`;
       if (typeof value === 'object' && value !== null) return JSON.stringify(value);
       return String(value ?? '—');
     };
-    const entries = Object.entries(specs || {})
-      .filter(([k]) => !SPECS_HIDDEN_FIELDS.has(k))
-      .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+    const ORDER=['resolved_symbol','category','lastPrice','fundingRate','nextFundingTime','launchTime','openInterestValue','volume24hUsd','turnover24h','avg7dTurnoverUsd','range.1m','range.5m','range.15m','range.30m','range.1h','range.4h','range.1d','range.1w','range.1mo'];
+    const btcRef = (specs && typeof specs._btc_reference==='object')?specs._btc_reference:null;
+    const keys = Object.keys(specs||{}).filter((k)=>!SPECS_HIDDEN_FIELDS.has(k));
+    const entries=[...ORDER.filter((k)=>keys.includes(k)).map((k)=>[k,specs[k]]), ...keys.filter((k)=>!ORDER.includes(k)).sort().map((k)=>[k,specs[k]])];
     if (!entries.length) {
       setSpecsState('empty', '');
       return;
     }
-    const rows = entries.map(([k, v]) => `
-      <tr>
-        <td>${SPECS_FIELD_LABELS[k] || k}</td>
-        <td>${formatSpecsValue(k, v)}</td>
-      </tr>
-    `).join('');
+    const rows=[];
+    for (const [k,v] of entries){ const label=SPECS_FIELD_LABELS[k]||k; rows.push(`<tr><td>${label}</td><td>${formatSpecsValue(k,v)}</td></tr>`); if (btcRef && btcRef[k]!==undefined){ rows.push(`<tr class="btc-reference-row"><td>BTC ${label}</td><td>${formatSpecsValue(k,btcRef[k])}</td></tr>`);} }
+    const warnings=Array.isArray(specs?._spec_warnings)?specs._spec_warnings:[];
+    const warnHtml=warnings.length?`<div class="muted">Some instrument specs could not be loaded: ${warnings.map((w)=>`${w.field||'spec'} ${w.symbol||''}`).join(', ')}</div>`:'';
     specsEl.dataset.state = 'ready';
-    specsEl.innerHTML = `<div class="card"><table class="specs-table">${rows}</table></div>`;
+    specsEl.innerHTML = `<div class="card"><table class="specs-table">${rows.join('')}</table>${warnHtml}</div>`;
   }
 
   const fmtPct = (value) => {

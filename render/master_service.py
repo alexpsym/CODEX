@@ -1742,70 +1742,89 @@ async def _oanda_resolve_and_fetch_specs(query: str) -> Optional[Dict[str, objec
     return dict(result)
 
 
-async def _bybit_resolve_and_fetch_specs(query: str) -> Optional[Dict[str, object]]:
+async def _bybit_fetch_range_specs_async(base_url: str, category: str, symbol: str) -> Tuple[Dict[str, float], List[Dict[str, str]]]:
+    out: Dict[str, float] = {}
+    warnings: List[Dict[str, str]] = []
+    for field, interval in _BYBIT_RANGE_INTERVALS:
+        try:
+            payload = await _bybit_get_async(
+                base_url,
+                "/v5/market/kline",
+                {"category": category, "symbol": symbol, "interval": interval, "limit": 1},
+            )
+            rows = _bybit_parse_kline_rows((payload.get("result") or {}).get("list"))
+            if not rows:
+                raise ValueError("No kline rows returned")
+            row = rows[-1]
+            if len(row) < 4:
+                raise ValueError("Kline row missing OHLC fields")
+            open_price = float(row[1]); high = float(row[2]); low = float(row[3])
+            if open_price <= 0:
+                raise ValueError(f"Open price <= 0 ({open_price})")
+            out[field] = (high - low) / open_price
+        except Exception as exc:
+            warnings.append({"scope": "range", "symbol": symbol, "field": field, "message": str(exc)})
+    return out, warnings
+
+
+def _is_bitcoin_bybit_symbol(symbol: str, resolved_inst: Dict[str, object]) -> bool:
+    base_coin = str((resolved_inst or {}).get("baseCoin") or "").upper()
+    sym = str(symbol or "").upper()
+    return base_coin == "BTC" or sym.startswith("BTC")
+
+
+def _btc_reference_symbol_for_category(category: str, quote_coin: Optional[str] = None) -> str:
+    cat = str(category or "").lower()
+    quote = str(quote_coin or "").upper()
+    if cat == "inverse":
+        return "BTCUSD"
+    if cat == "linear" and quote == "USDC":
+        return "BTCUSDC"
+    return "BTCUSDT"
+
+
+async def _bybit_resolve_and_fetch_specs(query: str, *, include_btc_reference: bool = True) -> Optional[Dict[str, object]]:
     want_key = _normalize_instrument_key(query)
     if not want_key:
         return None
-
     creds = resolve_bybit_credentials_for("default")
-    base_url = creds.get("base_url") if isinstance(creds, dict) else None
-    base_url = base_url or BYBIT_BASE
-
+    base_url = (creds.get("base_url") if isinstance(creds, dict) else None) or BYBIT_BASE
     resolved_inst = await _bybit_lookup_symbol(base_url, want_key)
     if not resolved_inst:
         return None
-
     category = str(resolved_inst.get("_category") or "")
     symbol = str(resolved_inst.get("symbol") or "")
-
+    warnings: List[Dict[str, str]] = []
     ticker = None
     try:
-        payload = await _bybit_get_async(
-            base_url,
-            "/v5/market/tickers",
-            {"category": category, "symbol": symbol},
-        )
+        payload = await _bybit_get_async(base_url, "/v5/market/tickers", {"category": category, "symbol": symbol})
         items = (payload.get("result") or {}).get("list") or []
         if isinstance(items, list) and items and isinstance(items[0], dict):
             ticker = items[0]
-    except Exception:
-        ticker = None
-
+    except Exception as exc:
+        warnings.append({"scope": "ticker", "symbol": symbol, "field": "tickers", "message": str(exc)})
     specs: Dict[str, object] = {
-        "source": "bybit",
-        "query": query,
-        "resolved_symbol": (ticker or {}).get("symbol") or symbol,
-        "category": category,
-        "lastPrice": (ticker or {}).get("lastPrice"),
-        "fundingRate": (ticker or {}).get("fundingRate"),
-        "nextFundingTime": (ticker or {}).get("nextFundingTime"),
-        "launchTime": resolved_inst.get("launchTime"),
-        "openInterest": (ticker or {}).get("openInterest"),
-        "openInterestValue": (ticker or {}).get("openInterestValue"),
-        "volume24h": (ticker or {}).get("volume24h"),
-        "turnover24h": (ticker or {}).get("turnover24h"),
+        "source": "bybit", "query": query, "resolved_symbol": (ticker or {}).get("symbol") or symbol,
+        "category": category, "lastPrice": (ticker or {}).get("lastPrice"), "fundingRate": (ticker or {}).get("fundingRate"),
+        "nextFundingTime": (ticker or {}).get("nextFundingTime"), "launchTime": resolved_inst.get("launchTime"),
+        "openInterest": (ticker or {}).get("openInterest"), "openInterestValue": (ticker or {}).get("openInterestValue"),
+        "volume24hUsd": (ticker or {}).get("turnover24h"),
     }
-
-    avg7d = await _bybit_avg_7d_turnover_usd_async(
-        base_url,
-        str((ticker or {}).get("symbol") or symbol),
-        category,
-    )
-    if avg7d is not None:
-        specs["avg7dTurnoverUsd"] = avg7d
-
-    specs["_units"] = {
-        "fundingRate": "fraction",
-        "lastPrice": "price",
-        "launchTime": "timestamp_ms",
-        "nextFundingTime": "timestamp_ms",
-        "openInterest": "contracts",
-        "openInterestValue": "usd_value",
-        "volume24h": "base_units_24h",
-        "turnover24h": "usd_value_24h",
-        "avg7dTurnoverUsd": "usd_value_per_day_avg_7d",
-    }
-
+    avg7d = await _bybit_avg_7d_turnover_usd_async(base_url, str((ticker or {}).get("symbol") or symbol), category)
+    if avg7d is not None: specs["avg7dTurnoverUsd"] = avg7d
+    range_specs, range_warnings = await _bybit_fetch_range_specs_async(base_url, category, symbol)
+    specs.update(range_specs); warnings.extend(range_warnings)
+    units = {"fundingRate":"fraction","lastPrice":"price","launchTime":"timestamp_ms","nextFundingTime":"timestamp_ms","openInterest":"contracts","openInterestValue":"usd_value","volume24hUsd":"usd_value_24h","avg7dTurnoverUsd":"usd_value_per_day_avg_7d"}
+    for field,_ in _BYBIT_RANGE_INTERVALS: units[field] = "fraction"
+    specs["_units"] = units
+    if include_btc_reference and not _is_bitcoin_bybit_symbol(symbol, resolved_inst):
+        btc_symbol = _btc_reference_symbol_for_category(category, resolved_inst.get("quoteCoin"))
+        btc_specs = await _bybit_resolve_and_fetch_specs(btc_symbol, include_btc_reference=False)
+        if btc_specs:
+            specs["_btc_reference"] = {k: v for k, v in btc_specs.items() if not str(k).startswith("_")}
+            warnings.extend(btc_specs.get("_spec_warnings") or [])
+    if warnings:
+        specs["_spec_warnings"] = warnings
     return {k: v for k, v in specs.items() if v is not None}
 
 
@@ -1973,6 +1992,19 @@ def _ma_window_changes(values: List[float], window: int = 20) -> List[float]:
             changes.append((cur - avg_prev) / avg_prev)
     return changes
 
+
+
+_BYBIT_RANGE_INTERVALS = [
+    ("range.1m", "1"),
+    ("range.5m", "5"),
+    ("range.15m", "15"),
+    ("range.30m", "30"),
+    ("range.1h", "60"),
+    ("range.4h", "240"),
+    ("range.1d", "D"),
+    ("range.1w", "W"),
+    ("range.1mo", "M"),
+]
 
 _BYBIT_VOLUME_INTERVALS = {
     "5M": "5",
@@ -2253,13 +2285,29 @@ async def _attach_scanner_metrics(specs: Dict[str, object]) -> None:
 
 
 def _specs_to_lines(specs: Dict[str, object]) -> List[str]:
-    lines: List[str] = []
-    for k in sorted(specs.keys()):
-        v = specs[k]
-        if isinstance(v, (dict, list)):
-            lines.append(f"{k}: {json.dumps(v, ensure_ascii=False)}")
-        else:
-            lines.append(f"{k}: {v}")
+    ordered = ["resolved_symbol","category","lastPrice","fundingRate","nextFundingTime","launchTime","openInterestValue","volume24hUsd","turnover24h","avg7dTurnoverUsd","range.1m","range.5m","range.15m","range.30m","range.1h","range.4h","range.1d","range.1w","range.1mo"]
+    labels = {"volume24hUsd":"volume24h (USD)","turnover24h":"volume24h (USD)","avg7dTurnoverUsd":"avg7dVolume (USD)","range.1m":"range 1m (%)","range.5m":"range 5m (%)","range.15m":"range 15m (%)","range.30m":"range 30m (%)","range.1h":"range 1h (%)","range.4h":"range 4h (%)","range.1d":"range daily (%)","range.1w":"range weekly (%)","range.1mo":"range monthly (%)"}
+    hidden={"_units","_btc_reference","_spec_warnings","source","query","volume24h"}
+    btc = specs.get("_btc_reference") if isinstance(specs.get("_btc_reference"), dict) else {}
+    def fmt(k,v):
+        try:
+            if k.startswith("range.") or k=="fundingRate": return f"{float(v)*100:.2f}%"
+            if k in {"volume24hUsd","turnover24h","openInterestValue","avg7dTurnoverUsd"}: return f"${float(v):,.2f}"
+        except Exception:
+            pass
+        return str(v)
+    keys=[k for k in ordered if k in specs and k not in hidden]+[k for k in specs.keys() if k not in hidden and k not in ordered]
+    lines=[]
+    for k in keys:
+        lines.append(f"{labels.get(k,k)}: {fmt(k,specs.get(k))}")
+        if k in btc:
+            lines.append(f"BTC {labels.get(k,k)}: {fmt(k,btc.get(k))}")
+    warnings = specs.get("_spec_warnings") or []
+    if isinstance(warnings,list) and warnings:
+        lines.append("")
+        lines.append("Warnings:")
+        for w in warnings:
+            if isinstance(w,dict): lines.append(f"- {w.get('field','spec')} {w.get('symbol','')}: {w.get('message','')}")
     return lines
 
 
@@ -14406,6 +14454,7 @@ CALCULATOR_TEMPLATE = """<!doctype html>
     #calc-instrument-specs,#calc-journal-summary{width:100%;min-width:0;overflow:hidden}
     .specs-table{width:100%;border-collapse:collapse;table-layout:fixed}
     .specs-table td{border-bottom:1px solid #1f2937;padding:4px 5px;font-size:0.76rem;vertical-align:top;overflow-wrap:anywhere;word-break:break-word;line-height:1.3}
+    .btc-reference-row td{color:#94a3b8;font-size:0.72rem}
     @media (max-width:820px){.calc-grid{grid-template-columns:1fr}}
     @media (max-width:900px){.grid.compact-grid{grid-template-columns:1fr}}
   </style>
