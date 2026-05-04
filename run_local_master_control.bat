@@ -140,26 +140,19 @@ goto restart_master
 
 :load_master_env_vars
 set "ENV_LOAD_ERROR="
-for /f "usebackq tokens=1,* delims==" %%A in (`powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$ErrorActionPreference='Stop';" ^
-  "$path='%MASTER_ENV_FILE%';" ^
-  "$allow = @('RENDER_CALCULATOR_BASE_URL','PUBLIC_WEBHOOK_BASE_URL','RENDER_EXTERNAL_URL','LOCAL_STATE_ONLY','DROPBOX_SYNC_ENABLED','DROPBOX_BACKUP_PATH','DROPBOX_STATE_ROOT');" ^
-  "if(-not (Test-Path -LiteralPath $path)){ exit 0 };" ^
-  "Get-Content -LiteralPath $path | ForEach-Object {" ^
-  "  $line = [string]$_;" ^
-  "  if([string]::IsNullOrWhiteSpace($line)){ return };" ^
-  "  $trim = $line.Trim();" ^
-  "  if($trim.StartsWith('#')){ return };" ^
-  "  $idx = $trim.IndexOf('='); if($idx -lt 1){ return };" ^
-  "  $k = $trim.Substring(0,$idx).Trim();" ^
-  "  $v = $trim.Substring($idx+1).Trim();" ^
-  "  if(($v.StartsWith('\"') -and $v.EndsWith('\"')) -or ($v.StartsWith(\"'\") -and $v.EndsWith(\"'\"))){ $v = $v.Substring(1, [Math]::Max(0,$v.Length-2)); }" ^
-  "  if($k -like 'DROPBOX_*' -or $allow -contains $k){ '{0}={1}' -f $k,$v };" ^
-  "}" 2^>nul`) do (
-  set "%%A=%%B"
-)
+set "ENV_PARSE_HELPER=%ROOT%tools\windows_launchers\parse_master_env.ps1"
+set "ENV_PARSE_OUTPUT=%TEMP%\local_master_env_%RANDOM%_%RANDOM%.txt"
+
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ENV_PARSE_HELPER%" -EnvFilePath "%MASTER_ENV_FILE%" -OutputPath "%ENV_PARSE_OUTPUT%" >nul 2>nul
 if errorlevel 1 (
   set "ENV_LOAD_ERROR=1"
   echo [local-master] WARNING: failed to parse %MASTER_ENV_FILE% for launcher preflight variables.
+) else (
+  if exist "%ENV_PARSE_OUTPUT%" (
+    for /f "usebackq tokens=1,* delims==" %%A in ("%ENV_PARSE_OUTPUT%") do (
+      if not "%%~A"=="" set "%%A=%%B"
+    )
+  )
 )
+if exist "%ENV_PARSE_OUTPUT%" del /q "%ENV_PARSE_OUTPUT%" >nul 2>nul
 goto :eof
