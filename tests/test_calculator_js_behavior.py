@@ -370,7 +370,7 @@ def test_webhook_stale_runtime_warning_on_old_public_webhook_message() -> None:
 
 def test_abort_error_message_fallback_present() -> None:
     script = JS_PATH.read_text(encoding="utf-8")
-    assert "Quote timed out after 25s" in script
+    assert "Quote timed out after 15s" in script
 
 def test_render_quote_shows_tp_auto_adjustment() -> None:
     node = shutil.which('node')
