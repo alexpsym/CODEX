@@ -136,7 +136,7 @@
 
   function setSubmitState({ visible, enabled, reason = '', stateName = '' }) {
     submitBtn.style.display = visible ? '' : 'none';
-    submitBtn.disabled = !(enabled && state.quote && state.quoteStatus === 'ready' && state.webhook_mode !== 'yes');
+    submitBtn.disabled = !(enabled && state.quote && state.quoteStatus === 'ready' && state.webhook_mode !== 'yes' && state.quote.quote_valid_for_submit !== false);
     submitBtn.title = reason || '';
     if (stateName) submitBtn.dataset.state = stateName;
   }
@@ -814,7 +814,9 @@
       if (!submitResp || submitResp.ok !== true) {
         throw buildFetchError('/api/calculator/submit', 'POST', 400, 'Bad Request', '', submitResp || {});
       }
-      okEl.textContent = 'Order submitted successfully.';
+      const adj = submitResp?.submit_level_adjustments || {};
+      if (adj && adj.submit_take_profit_auto_adjusted) okEl.textContent = `Order submitted. TP adjusted from ${adj.original_take_profit_price} to ${adj.adjusted_take_profit_price} because LastPrice moved since quote.`;
+      else okEl.textContent = 'Order submitted successfully.';
     } catch (e) {
       okEl.textContent = '';
       errorEl.textContent = String(e.message || e);

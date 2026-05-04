@@ -11497,17 +11497,17 @@ async def _place_bybit_order(
         stop_dec = Decimal(str(body.get("stopLoss"))) if body.get("stopLoss") is not None else None
         take_dec = Decimal(str(body.get("takeProfit"))) if body.get("takeProfit") is not None else None
         try:
-            _validate_bybit_linear_levels_before_submit(
-                symbol=symbol,
-                side=action,
-                order_type=order_type,
-                entry_price=entry_dec,
-                stop_loss=stop_dec,
-                take_profit=take_dec,
-                last_price=last_price,
-                tick_size=tick_size_dec,
-                source_context="calculator_submit" if str(payload.get("pending_webhook_id") or "").strip() == "" else "calculator_webhook",
+            src_ctx = "calculator_submit" if str(payload.get("pending_webhook_id") or "").strip() == "" else "calculator_webhook"
+            safe_entry, safe_sl, safe_tp, safe_diag = _make_bybit_levels_submit_safe(
+                symbol=symbol, side=action, order_type=order_type, entry_price=entry_dec, stop_loss=stop_dec, take_profit=take_dec, last_price=last_price, tick_size=tick_size_dec, source_context=src_ctx
             )
+            if safe_tp is not None:
+                body["takeProfit"] = _fmt_dec(safe_tp)
+            if safe_sl is not None:
+                body["stopLoss"] = _fmt_dec(safe_sl)
+            if "price" in body and safe_entry is not None:
+                body["price"] = _fmt_dec(safe_entry)
+            payload["_submit_level_adjustments"] = safe_diag
         except BybitPreSubmitValidationError:
             raise
 
@@ -14901,6 +14901,43 @@ def _adjust_bybit_take_profit_for_last_price(
                 'rule': rule,
             }
     return take_profit, None
+
+def _make_bybit_levels_submit_safe(
+    *,
+    symbol: str,
+    side: str,
+    order_type: str,
+    entry_price: Decimal,
+    stop_loss: Optional[Decimal],
+    take_profit: Optional[Decimal],
+    last_price: Decimal,
+    tick_size: Decimal,
+    source_context: str,
+) -> Tuple[Decimal, Optional[Decimal], Optional[Decimal], Dict[str, object]]:
+    snapped_entry = _snap_to_increment(entry_price, tick_size) or entry_price
+    snapped_sl = (_snap_to_increment(stop_loss, tick_size) if stop_loss is not None else None)
+    snapped_tp = (_snap_to_increment(take_profit, tick_size) if take_profit is not None else None)
+    diag: Dict[str, object] = {"submit_last_price": _fmt_dec(last_price), "tick_size": _fmt_dec(tick_size), "source_context": source_context}
+    if snapped_tp is not None:
+        adjusted_tp, adj = _adjust_bybit_take_profit_for_last_price(
+            symbol=symbol, side=side, entry_price=snapped_entry, take_profit=snapped_tp, last_price=last_price, tick_size=tick_size
+        )
+        if adj:
+            diag.update({
+                "submit_take_profit_auto_adjusted": True,
+                "original_take_profit_price": _fmt_dec(snapped_tp),
+                "adjusted_take_profit_price": _fmt_dec(adjusted_tp),
+                "reason": "bybit_last_price_moved_since_quote",
+            })
+        snapped_tp = adjusted_tp
+    _validate_bybit_linear_levels_before_submit(
+        symbol=symbol, side=side, order_type=order_type, entry_price=snapped_entry, stop_loss=snapped_sl, take_profit=snapped_tp, last_price=last_price, tick_size=tick_size, source_context=source_context
+    )
+    if side == "buy" and snapped_tp is not None and snapped_tp <= snapped_entry:
+        raise HTTPException(status_code=409, detail={"code": "QUOTE_STALE_RECALC_REQUIRED", "message": "Market moved enough that TP/SL relationship must be recalculated."})
+    if side == "sell" and snapped_tp is not None and snapped_tp >= snapped_entry:
+        raise HTTPException(status_code=409, detail={"code": "QUOTE_STALE_RECALC_REQUIRED", "message": "Market moved enough that TP/SL relationship must be recalculated."})
+    return snapped_entry, snapped_sl, snapped_tp, diag
 def _fmt_dec_by_increment(
     value: Optional[Decimal],
     increment: Optional[Decimal],
@@ -15728,6 +15765,11 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                 "estimated_reward": _fmt_dec(max(Decimal("0"), reward_usdt)),
                 "rr": _fmt_dec_by_precision(rr_value, Decimal("0.01")),
                 "effective_rr": _fmt_dec_by_precision(rr_value, Decimal("0.01")),
+                "quote_created_at_ms": int(time.time() * 1000),
+                "quote_last_price": _fmt_dec(last),
+                "quote_tick_size": _fmt_dec(tick_size),
+                "quote_valid_for_submit": True,
+                "submit_validity_boundary": ("take_profit_price < latest LastPrice" if side == "sell" else "take_profit_price > latest LastPrice"),
                 "target_mode": target_mode,
                 "requested_rr_net": _fmt_dec_by_precision(requested_rr_net, Decimal("0.01")) if requested_rr_net is not None else None,
                 "effective_rr_net": _fmt_dec_by_precision(effective_rr_net_value if effective_rr_net_value is not None else effective_rr_net, Decimal("0.01")) if (effective_rr_net_value is not None or effective_rr_net is not None) else None,
@@ -16571,7 +16613,7 @@ async def calculator_submit(payload: Dict[str, object] = Body(default={})) -> JS
                 canonical,
                 request_id=request_id,
             )
-            return JSONResponse({"ok": True, "broker": "bybit", "result": result})
+            return JSONResponse({"ok": True, "broker": "bybit", "result": result, "submit_level_adjustments": canonical.get("_submit_level_adjustments")})
         if asset == "fx":
             result = await _place_oanda_order(
                 canonical,
