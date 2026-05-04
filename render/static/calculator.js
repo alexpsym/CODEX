@@ -126,6 +126,7 @@
       prewarmAccountDependencies();
       if (typeof setInterval === 'function') {
         walletPrewarmInterval = setInterval(() => { prewarmAccountDependencies(); }, 20000);
+        if (walletPrewarmInterval && typeof walletPrewarmInterval.unref === 'function') walletPrewarmInterval.unref();
       }
     }
   }
@@ -252,6 +253,12 @@
     if (!Number.isFinite(n)) return '-';
     return n.toFixed(2);
   };
+  function safeTimeout(fn, ms) {
+    let sync = true;
+    const id = setTimeout(() => { if (!sync) fn(); }, ms);
+    sync = false;
+    return id;
+  }
 
   const fmtDuration = (secs) => {
     const n = Number(secs);
@@ -674,10 +681,10 @@
     const quoteTimeoutMs = 15000;
     state.quoteRequestSeq += 1;
     const seq = state.quoteRequestSeq;
-    const softTimeoutId = setTimeout(() => Promise.resolve().then(() => {
+    const softTimeoutId = safeTimeout(() => Promise.resolve().then(() => {
       if (seq === state.quoteRequestSeq) setQuoteStatus('Still calculating… waiting for upstream quote dependencies.');
     }), quoteSoftTimeoutMs);
-    const timeoutId = setTimeout(() => Promise.resolve().then(() => state.quoteController && state.quoteController.abort()), quoteTimeoutMs);
+    const timeoutId = safeTimeout(() => Promise.resolve().then(() => state.quoteController && state.quoteController.abort()), quoteTimeoutMs);
     state.hasCalculatedOnce = true;
     const quoteBtn = $('calc-quote');
     const defaultLabel = quoteBtn.dataset.defaultLabel || quoteBtn.textContent || 'Calculate';
@@ -705,10 +712,10 @@
         toggleWebhookPanel(false);
         return;
       }
-      if (!state.resolvedSymbol && resolveInFlight) {
+      if (state.asset === 'crypto' && !state.resolvedSymbol && resolveInFlight) {
         try { await Promise.race([resolveInFlight, new Promise((r) => setTimeout(r, 800))]); } catch (_e) {}
       }
-      if (state.quotePrewarmPromise) setQuoteStatus('Preparing quote data…');
+      if (state.asset === 'crypto' && state.quotePrewarmPromise) setQuoteStatus('Preparing quote data…');
       if (state.asset === 'crypto' && state.quotePrewarmStatus && state.quotePrewarmStatus.ready_for_quote === false) {
         throw new Error('Preparing quote data… please wait for wallet/ticker prewarm.');
       }
