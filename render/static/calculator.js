@@ -42,6 +42,7 @@
 
   let symbolTimer = null;
   let resolveController = null;
+  let resolveInFlight = null;
   let journalController = null;
   const SPECS_HIDDEN_FIELDS = new Set([
     'contractType',
@@ -544,9 +545,11 @@
     if (resolveController) resolveController.abort();
     resolveController = new AbortController();
     try {
-      const instrument = await request(`/api/calculator/instrument?asset=${encodeURIComponent(state.asset)}&account=${encodeURIComponent(state.account)}&symbol=${encodeURIComponent(symbol)}`, { signal: resolveController.signal });
+      resolveInFlight = request(`/api/calculator/instrument?asset=${encodeURIComponent(state.asset)}&account=${encodeURIComponent(state.account)}&symbol=${encodeURIComponent(symbol)}`, { signal: resolveController.signal });
+      const instrument = await resolveInFlight;
       state.resolvedSymbol = instrument.symbol;
       canonicalEl.textContent = `Canonical symbol: ${instrument.symbol}`;
+      prewarmQuoteDependencies(instrument.symbol);
       setSpecsState('loading', 'Loading instrument specs...');
       const prefer = state.asset === 'fx' ? '&prefer=oanda' : '';
       try {
@@ -574,7 +577,17 @@
       setJournalState('unresolved', `Unresolved symbol: ${symbol}`);
       setSpecsState('unresolved', `Unresolved symbol: ${symbol}`);
       canonicalEl.textContent = '';
+    } finally {
+      resolveInFlight = null;
     }
+  }
+
+
+  async function prewarmQuoteDependencies(symbol) {
+    try {
+      if (!symbol) return;
+      await post('/api/calculator/prewarm', { asset: state.asset, account: state.account, symbol });
+    } catch (_e) {}
   }
 
   function debounceSymbolResolve() {
@@ -623,13 +636,16 @@
     clearMessages();
     toggleWebhookPanel(false);
     if (state.quoteController) state.quoteController.abort();
-    if (resolveController) resolveController.abort();
     if (journalController) journalController.abort();
     state.quoteController = new AbortController();
-    const quoteTimeoutMs = 25000;
-    const timeoutId = setTimeout(() => state.quoteController && state.quoteController.abort(), quoteTimeoutMs);
+    const quoteSoftTimeoutMs = 5000;
+    const quoteTimeoutMs = 15000;
     state.quoteRequestSeq += 1;
     const seq = state.quoteRequestSeq;
+    const softTimeoutId = setTimeout(() => {
+      if (seq === state.quoteRequestSeq) setQuoteStatus('Still calculating… waiting for upstream quote dependencies.');
+    }, quoteSoftTimeoutMs);
+    const timeoutId = setTimeout(() => state.quoteController && state.quoteController.abort(), quoteTimeoutMs);
     state.hasCalculatedOnce = true;
     const quoteBtn = $('calc-quote');
     const defaultLabel = quoteBtn.dataset.defaultLabel || quoteBtn.textContent || 'Calculate';
@@ -657,9 +673,13 @@
         toggleWebhookPanel(false);
         return;
       }
+      if (!state.resolvedSymbol && resolveInFlight) {
+        try { await Promise.race([resolveInFlight, new Promise((r) => setTimeout(r, 800))]); } catch (_e) {}
+      }
       const payload = {
         ...state,
-        symbol: $('calc-symbol').value,
+        submitted_symbol: $('calc-symbol').value,
+        symbol: state.resolvedSymbol || $('calc-symbol').value,
         entry_price: $('calc-limit').value,
         stop_loss_ticks: $('calc-sl-ticks').value,
         risk_reward: $('calc-rr').value,
@@ -695,7 +715,10 @@
     } catch (e) {
       if (e.name === 'AbortError') {
         invalidateQuote({ status: 'error', reason: 'Quote failed. Recalculate before submitting.' });
-        errorEl.textContent = 'Quote timed out after 25s. Slow dependency: unknown unless server returned timings. The browser aborted before the server returned diagnostics.';
+        toggleWebhookPanel(false);
+        state.pendingWebhookId = '';
+        state.pendingWebhookDeleteUrl = '';
+        errorEl.textContent = 'Quote timed out after 15s. Upstream dependencies did not complete within the hard cap.';
         return;
       }
       invalidateQuote({ status: 'error', reason: 'Quote failed. Recalculate before submitting.' });
@@ -705,6 +728,7 @@
       errorEl.textContent = String(e.message || e);
       renderErrorDebug(e.detail || null);
     } finally {
+      clearTimeout(softTimeoutId);
       clearTimeout(timeoutId);
       if (seq === state.quoteRequestSeq) {
         quoteBtn.disabled = false;
@@ -720,6 +744,9 @@
       if (state.webhook_mode === 'yes') throw new Error('Webhook mode is enabled. Use the generated TradingView JSON instead of Submit Order.');
       if (state.quoteStatus !== 'ready' || !state.quote) throw new Error('Calculate first.');
       if (!state.timeframe) throw new Error('Timeframe is required.');
+      if (!state.resolvedSymbol && resolveInFlight) {
+        try { await Promise.race([resolveInFlight, new Promise((r) => setTimeout(r, 800))]); } catch (_e) {}
+      }
       const payload = {
         asset: state.asset,
         account: state.account,

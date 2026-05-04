@@ -1313,6 +1313,14 @@ def test_bybit_signed_get_signature_supports_timeout_args() -> None:
     assert "read_s" in sig.parameters
 
 
+
+
+def test_fetch_bybit_balance_usdt_signature_supports_timeout_args() -> None:
+    import inspect
+    sig = inspect.signature(master_service._fetch_bybit_balance_usdt)
+    assert "timeout_s" in sig.parameters
+    assert "connect_s" in sig.parameters
+    assert "read_s" in sig.parameters
 def test_fetch_bybit_balance_usdt_passes_coin_and_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("demo", "k", "s", "https://bybit.test", "KEY1"))
     calls = {}
@@ -1322,14 +1330,14 @@ def test_fetch_bybit_balance_usdt_passes_coin_and_timeouts(monkeypatch: pytest.M
         return {"result": {"list": [{"totalEquity": "1000", "totalAvailableBalance": "900", "coin": [{"coin": "USDT", "availableToTrade": "900"}]}]}}
 
     monkeypatch.setattr(master_service, "_bybit_signed_get", fake_signed_get)
-    out = asyncio.run(master_service._fetch_bybit_balance_usdt("demo", timeout_s=5.0))
+    out = asyncio.run(master_service._fetch_bybit_balance_usdt("demo", timeout_s=2.5, connect_s=1.0, read_s=2.5))
     assert out["available_usdt"] == master_service.Decimal("900")
     assert calls["path"] == "/v5/account/wallet-balance"
     assert calls["params"]["accountType"] == "UNIFIED"
     assert calls["params"]["coin"] == "USDT"
-    assert calls["timeout_s"] == 5.0
-    assert calls["connect_s"] == 2.0
-    assert calls["read_s"] == 5.0
+    assert calls["timeout_s"] == 2.5
+    assert calls["connect_s"] == 1.0
+    assert calls["read_s"] == 2.5
 
 
 def test_crypto_quote_backend_timeout_beats_frontend_timeout() -> None:
@@ -1337,7 +1345,11 @@ def test_crypto_quote_backend_timeout_beats_frontend_timeout() -> None:
     import re
     m = re.search(r"quoteTimeoutMs\s*=\s*(\d+)", js)
     assert m
-    assert int(master_service.CALCULATOR_QUOTE_TIMEOUT_S * 1000) < int(m.group(1))
+    frontend_timeout_ms = int(m.group(1))
+    backend_timeout_ms = int(master_service.CALCULATOR_QUOTE_TIMEOUT_S * 1000)
+    assert frontend_timeout_ms <= 15000
+    assert backend_timeout_ms <= 4500
+    assert backend_timeout_ms < frontend_timeout_ms
 
 
 def test_webhook_attempts_filter_by_pending_id(monkeypatch: pytest.MonkeyPatch) -> None:
