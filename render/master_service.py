@@ -508,6 +508,9 @@ TRADING_JOURNAL_IMPORT_DIAGNOSTICS: Dict[str, object] = {
 }
 BYBIT_DEMO_TEMPLATE_NAME = "Bybit-UM-USDTPerp-TradeHistory-template.csv"
 BYBIT_DEMO_WORKBOOK_NAME = "Bybit Demo.xlsx"
+BYBIT_DEMO_CALC_CONTEXT_NAME = "Bybit Demo Calculation Context.json"
+BYBIT_DEMO_CALC_CONTEXT_VERSION = 1
+BYBIT_DEMO_CALC_CONTEXT_DROPBOX_PATH = os.getenv("BYBIT_DEMO_CALC_CONTEXT_DROPBOX_PATH", "").strip()
 BYBIT_DEMO_WORKBOOK_SHEET = "Trades"
 BYBIT_DEMO_WORKBOOK_COLUMNS = [
     "opening_time",
@@ -4101,6 +4104,50 @@ def _bybit_demo_workbook_bytes() -> bytes:
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         template.to_excel(writer, sheet_name=BYBIT_DEMO_WORKBOOK_SHEET, index=False)
     return buffer.getvalue()
+
+
+def _bybit_demo_calc_context_path(active_folder: Optional[str] = None) -> str:
+    override = BYBIT_DEMO_CALC_CONTEXT_DROPBOX_PATH
+    if override:
+        return override
+    folder = active_folder or _resolve_trading_journal_dropbox_folder()[0]
+    return _join_dropbox_path(folder, BYBIT_DEMO_CALC_CONTEXT_NAME)
+
+
+def _load_bybit_demo_calc_contexts(active_folder: Optional[str] = None) -> Dict[str, object]:
+    path = _bybit_demo_calc_context_path(active_folder)
+    try:
+        payload = json.loads(_dropbox_download_bytes(path).decode("utf-8"))
+    except FileNotFoundError:
+        return {"version": BYBIT_DEMO_CALC_CONTEXT_VERSION, "updated_at": _utc_now_iso(), "items": []}
+    if not isinstance(payload, dict):
+        return {"version": BYBIT_DEMO_CALC_CONTEXT_VERSION, "updated_at": _utc_now_iso(), "items": []}
+    payload.setdefault("version", BYBIT_DEMO_CALC_CONTEXT_VERSION)
+    payload.setdefault("updated_at", _utc_now_iso())
+    payload["items"] = payload.get("items") if isinstance(payload.get("items"), list) else []
+    return payload
+
+
+def _sanitize_calc_context_obj(value: object) -> object:
+    if isinstance(value, dict):
+        out: Dict[str, object] = {}
+        for k, v in value.items():
+            key = str(k)
+            low = key.lower()
+            if any(x in low for x in ("api_key", "api-secret", "api_secret", "authorization", "auth_header", "token")):
+                continue
+            out[key] = _sanitize_calc_context_obj(v)
+        return out
+    if isinstance(value, list):
+        return [_sanitize_calc_context_obj(v) for v in value]
+    return value
+
+
+def _save_bybit_demo_calc_contexts(payload: Dict[str, object], active_folder: Optional[str] = None) -> None:
+    path = _bybit_demo_calc_context_path(active_folder)
+    payload["version"] = BYBIT_DEMO_CALC_CONTEXT_VERSION
+    payload["updated_at"] = _utc_now_iso()
+    _dropbox_upload_bytes(path, json.dumps(_sanitize_calc_context_obj(payload), ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
 def _ensure_bybit_demo_dropbox_files(active_folder: str) -> Dict[str, bool]:
@@ -10294,6 +10341,60 @@ def _prune_trade_contexts(items: List[Dict[str, object]]) -> List[Dict[str, obje
     return kept
 
 
+def _upsert_bybit_demo_calc_context(context: Dict[str, object], active_folder: Optional[str] = None, require_dropbox: bool = True) -> Dict[str, object]:
+    now = _utc_now_iso()
+    ctx = dict(_sanitize_calc_context_obj(context) if isinstance(context, dict) else {})
+    ctx["calculation_context_id"] = str(ctx.get("calculation_context_id") or "").strip() or f"calcctx_bybit_demo_{uuid4().hex}"
+    ctx.setdefault("created_at", now)
+    ctx["updated_at"] = now
+    state = _load_bybit_demo_calc_contexts(active_folder)
+    items = [i for i in (state.get("items") or []) if isinstance(i, dict)]
+    idx = next((n for n, i in enumerate(items) if str(i.get("calculation_context_id") or "") == ctx["calculation_context_id"]), None)
+    if idx is None:
+        items.append(ctx)
+    else:
+        merged = dict(items[idx]); merged.update({k: v for k, v in ctx.items() if v is not None}); items[idx] = merged; ctx = merged
+    state["items"] = items[-1000:]
+    try:
+        _save_bybit_demo_calc_contexts(state, active_folder)
+    except Exception:
+        if require_dropbox:
+            raise
+    return ctx
+
+
+def _lookup_bybit_demo_calc_context_for_row(row_or_refs: Dict[str, object]) -> Optional[Dict[str, object]]:
+    state = _load_bybit_demo_calc_contexts()
+    items = [i for i in (state.get("items") or []) if isinstance(i, dict)]
+    calc_id = str(row_or_refs.get("calculation_context_id") or "").strip()
+    oid = str(row_or_refs.get("order_id") or row_or_refs.get("orderId") or "").strip()
+    for item in reversed(items):
+        if calc_id and str(item.get("calculation_context_id") or "").strip() == calc_id:
+            return dict(item)
+        if oid and str(item.get("order_id") or "").strip() == oid:
+            return dict(item)
+    return None
+
+
+def _merge_bybit_demo_calc_context_into_row(row: Dict[str, object], ctx: Dict[str, object]) -> Dict[str, object]:
+    out = dict(row)
+    if not out.get("stop_loss"): out["stop_loss"] = ctx.get("stop_loss")
+    if not out.get("take_profit"): out["take_profit"] = ctx.get("take_profit")
+    if not out.get("timeframe"): out["timeframe"] = ctx.get("timeframe")
+    if out.get("is_test_trade") in (None, ""): out["is_test_trade"] = ctx.get("is_test_trade")
+    out.setdefault("planned_entry_price", ctx.get("entry_price"))
+    out.setdefault("planned_stop_price", ctx.get("stop_loss"))
+    out.setdefault("planned_target_price", ctx.get("take_profit"))
+    for k in ("risk_mode", "risk_value", "stop_loss_ticks", "take_profit_ticks", "target_mode", "risk_reward"):
+        if out.get(k) in (None, "") and ctx.get(k) not in (None, ""):
+            out[k] = ctx.get(k)
+    out["calculation_context_id"] = out.get("calculation_context_id") or ctx.get("calculation_context_id")
+    refs = out.get("raw_refs") if isinstance(out.get("raw_refs"), dict) else {}
+    refs["calculation_context_source"] = "dropbox_calculation_context"
+    out["raw_refs"] = refs
+    return out
+
+
 def _upsert_trade_context(payload: Dict[str, object]) -> Dict[str, object]:
     items = _load_trade_contexts()
     now_iso = _utc_now_iso()
@@ -13704,6 +13805,16 @@ async def _sync_bybit_closed_pnl_window(
                     },
                 },
             )
+            if row and mode == "demo":
+                ctx = _lookup_bybit_demo_calc_context_for_row(
+                    {
+                        "order_id": order_id,
+                        "orderLinkId": order_link_id,
+                        "calculation_context_id": (row.get("raw_refs") or {}).get("calculation_context_id") if isinstance(row.get("raw_refs"), dict) else None,
+                    }
+                )
+                if ctx:
+                    row = _merge_bybit_demo_calc_context_into_row(row, ctx)
             if row:
                 row_status = str(row.get("status") or "").strip().lower()
                 row_type = str(row.get("row_type") or "").strip().lower()
@@ -13781,6 +13892,16 @@ async def _sync_bybit_closed_pnl_window(
                         "status": "CLOSED",
                     }
                 )
+                if mode == "demo" and ctx:
+                    _upsert_bybit_demo_calc_context(
+                        {
+                            "calculation_context_id": ctx.get("calculation_context_id"),
+                            "status": "CLOSED",
+                            "order_id": order_id,
+                            "close_time": row.get("close_time"),
+                        },
+                        require_dropbox=False,
+                    )
                 rows.append(row)
         cursor = str(result.get("nextPageCursor") or "").strip() or None
         if not cursor:
@@ -13800,6 +13921,9 @@ async def _sync_bybit_closed_pnl_window(
     workbook_stats: Dict[str, int] = {"deduped_by_order_id": 0, "deduped_by_fingerprint": 0}
     if mode == "demo":
         sanitized_rows, sanitize_stats = _sanitize_bybit_demo_rows(_get_trading_journal_rows())
+        snapshot = await _fetch_bybit_demo_current_balance_snapshot() if rows else {}
+        if snapshot.get("current_balance") is not None:
+            sanitized_rows, _diag = _backfill_bybit_demo_balances_from_current_balance(sanitized_rows, snapshot)
         if int(sanitize_stats.get("changed", 0)):
             _set_trading_journal_rows(sanitized_rows)
         if active_folder:
@@ -15066,6 +15190,7 @@ async def _fetch_bybit_balance_usdt(account: str, timeout_s: float = 5.0, connec
     rows = (payload.get("result") or {}).get("list") or []
     for row in rows:
         total_equity = Decimal(str(row.get("totalEquity") or "0"))
+        total_wallet_balance = Decimal(str(row.get("totalWalletBalance") or "0"))
         total_available_balance = Decimal(str(row.get("totalAvailableBalance") or "0"))
         for coin in row.get("coin", []) or []:
             if str(coin.get("coin") or "").upper() == "USDT":
@@ -15074,13 +15199,17 @@ async def _fetch_bybit_balance_usdt(account: str, timeout_s: float = 5.0, connec
                     return {
                         "available_usdt": Decimal(str(val)),
                         "total_equity": total_equity,
+                        "total_wallet_balance": total_wallet_balance,
                         "total_available_balance": total_available_balance,
+                        "balance_source_used": Decimal("1"),
                     }
         if total_equity > 0 or total_available_balance > 0:
             return {
                 "available_usdt": total_available_balance if total_available_balance > 0 else total_equity,
                 "total_equity": total_equity,
+                "total_wallet_balance": total_wallet_balance,
                 "total_available_balance": total_available_balance,
+                "balance_source_used": Decimal("2"),
             }
     raise HTTPException(status_code=502, detail=f"Bybit balance unavailable path={path}.")
 
@@ -15111,6 +15240,39 @@ async def _resolve_bybit_calculator_symbol_fast(base_url: str, raw_symbol: str, 
     timings_ms["candidate_symbol_lookup_ms"] = int((time.perf_counter()-started)*1000)
     timings_ms["bybit_instrument_lookup_status"] = "candidate_miss"
     return "", None, debug
+
+
+async def _fetch_bybit_demo_current_balance_snapshot() -> Dict[str, object]:
+    snap = await _fetch_bybit_balance_usdt("demo")
+    current = snap.get("total_wallet_balance") or snap.get("total_equity") or snap.get("available_usdt")
+    return {"current_balance": _to_float(current), "balance_source_used": "wallet_balance", "snapshot_at": _utc_now_iso()}
+
+
+def _backfill_bybit_demo_balances_from_current_balance(rows: List[Dict[str, object]], balance_snapshot: Dict[str, object]) -> Tuple[List[Dict[str, object]], Dict[str, object]]:
+    out = [dict(r) for r in rows]
+    current = _to_float(balance_snapshot.get("current_balance"))
+    if current is None:
+        return out, {"balance_rows_backfilled": 0, "balance_backfill_warning": "missing_current_balance"}
+    targets = []
+    for i, row in enumerate(out):
+        if not _is_bybit_demo_trade_row(row):
+            continue
+        if str(row.get("currency") or "USDT").upper() != "USDT":
+            continue
+        pnl = _to_float(row.get("net_profit", row.get("realized_pnl")))
+        if pnl is None:
+            continue
+        targets.append((i, row, pnl))
+    targets.sort(key=lambda x: (str(x[1].get("close_time") or ""), str(x[1].get("order_id") or "")), reverse=True)
+    running = float(current)
+    for i, row, pnl in targets:
+        row["balance_after_trade"] = running
+        row["balance_after_trade_currency"] = "USDT"
+        row["balance_source"] = "bybit_wallet_balance_backfill"
+        row["balance_snapshot_at"] = balance_snapshot.get("snapshot_at")
+        running = running - float(pnl)
+        out[i] = row
+    return out, {"balance_rows_backfilled": len(targets), "current_balance_used": current, "balance_snapshot_at": balance_snapshot.get("snapshot_at")}
 
 
 async def _cancel_pending_tasks(tasks: List[asyncio.Task[Any]]) -> None:
@@ -15780,6 +15942,44 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             }
             if warnings:
                 response_payload["warnings"] = warnings
+            calculation_context_id = str(payload.get("calculation_context_id") or "").strip() or f"calcctx_bybit_demo_{uuid4().hex}"
+            response_payload["calculation_context_id"] = calculation_context_id
+            if account == "demo":
+                try:
+                    _upsert_bybit_demo_calc_context(
+                        {
+                            "calculation_context_id": calculation_context_id,
+                            "broker": "bybit",
+                            "account": "demo",
+                            "asset": "crypto",
+                            "symbol": resolved_symbol,
+                            "side": side,
+                            "order_type": order_type,
+                            "target_mode": target_mode,
+                            "risk_mode": risk_mode,
+                            "risk_value": _fmt_dec(risk_val),
+                            "stop_loss_ticks": _fmt_dec(stop_ticks),
+                            "take_profit_ticks": _fmt_dec(tp_ticks) if tp_ticks is not None else None,
+                            "risk_reward": _fmt_dec(rr_requested) if rr_requested is not None else None,
+                            "timeframe": _normalize_timeframe(payload.get("timeframe") or ""),
+                            "is_test_trade": is_test_trade,
+                            "entry_price": response_payload.get("entry_price"),
+                            "stop_loss": response_payload.get("stop_price"),
+                            "take_profit": response_payload.get("target_price"),
+                            "quantity": response_payload.get("quantity"),
+                            "notional": response_payload.get("notional"),
+                            "last_price": response_payload.get("quote_last_price"),
+                            "tick_size": response_payload.get("quote_tick_size"),
+                            "quote_created_at_ms": response_payload.get("quote_created_at_ms"),
+                            "status": "QUOTED",
+                            "quote_payload": payload,
+                            "quote_result": response_payload,
+                        },
+                        require_dropbox=True,
+                    )
+                    response_payload["calculation_context_saved"] = True
+                except Exception as exc:
+                    raise HTTPException(status_code=502, detail={"code": "BYBIT_DEMO_CALC_CONTEXT_SAVE_FAILED", "message": "Bybit Demo calculation was not saved to Dropbox, so the journal cannot safely enrich the completed trade.", "debug": {"dropbox_path": _bybit_demo_calc_context_path(), "error": str(exc), "symbol": resolved_symbol, "account": "demo"}}) from exc
 
             if webhook_enabled:
                 pending_id = existing_pending_id or f"calc_bybit_{uuid4().hex[:16]}"
@@ -15800,6 +16000,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                     "timeframe": _normalize_timeframe(payload.get("timeframe") or ""),
                     "is_test_trade": is_test_trade,
                     "pending_webhook_id": pending_id,
+                    "calculation_context_id": calculation_context_id,
                     "webhook_endpoint_url": webhook_endpoint_url,
                     "webhook_origin_host": webhook_origin_host,
                     "webhook_origin_profile": webhook_origin_profile,
@@ -15821,6 +16022,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                         "is_test_trade": is_test_trade,
                         "status": "WAITING",
                         "enabled": True,
+                        "calculation_context_id": calculation_context_id,
                     }
                 )
                 response_payload["pending_webhook_id"] = pending_item.get("id")

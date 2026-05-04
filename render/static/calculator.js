@@ -809,6 +809,14 @@
         planned_target_price: state.quote.target_price,
         level_anchor_mode: state.order_type === 'limit' ? 'planned_entry' : 'actual_fill',
         pending_webhook_id: state.quote.pending_webhook_id || '',
+        calculation_context_id: state.quote.calculation_context_id || '',
+        quote_created_at_ms: state.quote.quote_created_at_ms,
+        risk_mode: state.risk_mode,
+        risk_value: state.risk_value,
+        stop_loss_ticks: state.stop_loss_ticks,
+        take_profit_ticks: state.take_profit_ticks,
+        target_mode: state.target_mode,
+        risk_reward: state.risk_reward,
       };
       const submitResp = await post('/api/calculator/submit', payload);
       if (!submitResp || submitResp.ok !== true) {
