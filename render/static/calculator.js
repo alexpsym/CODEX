@@ -549,6 +549,7 @@
       const instrument = await resolveInFlight;
       state.resolvedSymbol = instrument.symbol;
       canonicalEl.textContent = `Canonical symbol: ${instrument.symbol}`;
+      prewarmQuoteDependencies(instrument.symbol);
       setSpecsState('loading', 'Loading instrument specs...');
       const prefer = state.asset === 'fx' ? '&prefer=oanda' : '';
       try {
@@ -579,6 +580,14 @@
     } finally {
       resolveInFlight = null;
     }
+  }
+
+
+  async function prewarmQuoteDependencies(symbol) {
+    try {
+      if (!symbol) return;
+      await post('/api/calculator/prewarm', { asset: state.asset, account: state.account, symbol });
+    } catch (_e) {}
   }
 
   function debounceSymbolResolve() {
