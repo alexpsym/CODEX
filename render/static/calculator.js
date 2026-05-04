@@ -392,8 +392,7 @@
   }
 
   function renderRequestSummary(payload) {
-    requestSummaryEl.style.whiteSpace = 'pre-wrap';
-    requestSummaryEl.textContent = [
+    const lines = [
       `Submitted payload:`,
       `asset=${payload.asset}`,
       `account=${payload.account}`,
@@ -408,7 +407,23 @@
       `side=${payload.side}`,
       `pending_webhook_id=${payload.pending_webhook_id || ''}`,
       `previous_pending_webhook_id=${payload.previous_pending_webhook_id || ''}`,
-    ].join('\n');
+    ];
+    [
+      'entry_price',
+      'stop_loss_price',
+      'take_profit_price',
+      'quantity',
+      'planned_entry_price',
+      'planned_stop_price',
+      'planned_target_price',
+      'level_anchor_mode',
+      'calculation_context_id',
+      'quote_created_at_ms',
+    ].forEach((k) => {
+      if (payload[k] !== undefined && payload[k] !== null && payload[k] !== '') lines.push(`${k}=${payload[k]}`);
+    });
+    requestSummaryEl.style.whiteSpace = 'pre-wrap';
+    requestSummaryEl.textContent = lines.join('\n');
   }
 
   async function request(url, opts = {}) {
@@ -812,12 +827,13 @@
         calculation_context_id: state.quote.calculation_context_id || '',
         quote_created_at_ms: state.quote.quote_created_at_ms,
         risk_mode: state.risk_mode,
-        risk_value: state.risk_value,
-        stop_loss_ticks: state.stop_loss_ticks,
-        take_profit_ticks: state.take_profit_ticks,
-        target_mode: state.target_mode,
-        risk_reward: state.risk_reward,
+        risk_value: $('calc-risk').value,
+        stop_loss_ticks: $('calc-sl-ticks').value,
+        target_mode: state.quote?.target_mode || 'rr',
+        risk_reward: $('calc-rr').value,
       };
+      if (state.take_profit_ticks !== undefined && state.take_profit_ticks !== null && state.take_profit_ticks !== '') payload.take_profit_ticks = state.take_profit_ticks;
+      renderRequestSummary(payload);
       const submitResp = await post('/api/calculator/submit', payload);
       if (!submitResp || submitResp.ok !== true) {
         throw buildFetchError('/api/calculator/submit', 'POST', 400, 'Bad Request', '', submitResp || {});
