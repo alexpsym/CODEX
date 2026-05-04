@@ -28,6 +28,15 @@ def test_trading_journal_diagnostics_split_balance_anchor_from_parse_sync() -> N
     assert "max_drawdown_pct" in js
     assert "overall_avg_seconds" in js
     assert "tj-stats-table" in js
+    assert "fmtTradeRef" in js
+    assert "fmtLeader" in js
+    assert "tj-stat-detail" in js
+    assert "fx_most_wins_instrument" in js
+    assert "fx_most_losses_instrument" in js
+    assert "crypto_most_wins_instrument" in js
+    assert "crypto_most_losses_instrument" in js
+    assert "metric_sources" in js
+    assert "wrap.style.display = 'block';" not in js
 
 
 def test_trading_journal_stats_classes_are_value_only_and_net_pl_is_sign_based() -> None:
@@ -35,9 +44,10 @@ def test_trading_journal_stats_classes_are_value_only_and_net_pl_is_sign_based()
     assert "const toneBySign = (value) =>" in js
     assert "if (!Number.isFinite(n) || n === 0) return 'tj-stat-neutral';" in js
     assert "return n > 0 ? 'tj-stat-positive' : 'tj-stat-negative';" in js
-    assert "const row = (label, value, valueCls='tj-stat-neutral', labelCls='tj-stat-neutral')" in js
+    assert "const row = (label, value, valueCls='tj-stat-neutral', labelCls='tj-stat-neutral', detail='')" in js
     assert '<td class="tj-stat-label ${labelCls}">' in js
     assert '<td class="tj-stat-value ${valueCls}">' in js
+    assert '<td class="tj-stat-detail">' in js
     assert "row('Win rate', fmtPctSmall(m?.win_rate_pct))" in js
     assert "row('Win rate', fmtPctSmall(m?.win_rate_pct), 'tj-stat-winner')" not in js
     assert "row('Net P/L', fmtNum(m?.net_profit_total, 2), toneBySign(m?.net_profit_total))" in js
