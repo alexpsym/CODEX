@@ -260,3 +260,26 @@ async def test_place_bybit_order_raises_structured_rejection(monkeypatch):
         )
     assert exc.value.ret_code == 10001
     assert "request parameter error" in exc.value.ret_msg
+
+
+@pytest.mark.asyncio
+async def test_place_bybit_limit_order_with_attached_tpsl_does_not_wait_for_position_entry(bybit_order_mocks, monkeypatch):
+    async def boom(**_kwargs):
+        raise AssertionError("should not wait for position")
+    monkeypatch.setattr(master_service, "_wait_for_position_entry", boom)
+    payload={"symbol":"BTCUSDT","action":"buy","quantity":1,"account":"demo","trade_mode":"linear","order_type":"limit","entry_price":100,"stop_loss_price":95,"take_profit_price":110}
+    result=await master_service._place_bybit_order(payload, request_id="req-limit")
+    assert result["tpsl"]["status"]=="attached_to_order_create"
+    assert (result.get("order") or {}).get("orderId")
+
+@pytest.mark.asyncio
+async def test_place_bybit_limit_order_requested_tpsl_without_absolute_levels_rejects_before_unprotected_create(bybit_order_mocks, monkeypatch):
+    called={"post":False}
+    async def fake_post(**_kwargs):
+        called["post"]=True
+        return {"retCode":0,"result":{"orderId":"1"}}
+    monkeypatch.setattr(master_service, "_bybit_signed_post", fake_post)
+    payload={"symbol":"BTCUSDT","action":"buy","quantity":1,"account":"demo","trade_mode":"linear","order_type":"limit","entry_price":100,"tp_offset":"x"}
+    with pytest.raises(ValueError):
+        await master_service._place_bybit_order(payload, request_id="req-limit-2")
+    assert called["post"] is False

@@ -1240,6 +1240,21 @@ class BybitOrderRejected(RuntimeError):
         super().__init__(message)
 
 
+class BybitPostCreateProtectionError(RuntimeError):
+    def __init__(self, *, order_id: object, order_link_id: object, symbol: str, account: str, category: str, side: str, request_body: Dict[str, object], order_result: Dict[str, object], tpsl_error: str, stage: str) -> None:
+        self.order_id = str(order_id or "")
+        self.order_link_id = str(order_link_id or "")
+        self.symbol = symbol
+        self.account = account
+        self.category = category
+        self.side = side
+        self.request_body = dict(request_body or {})
+        self.order_result = dict(order_result or {})
+        self.tpsl_error = str(tpsl_error or "")
+        self.stage = stage
+        super().__init__(f"Bybit order {self.order_id} created but TP/SL application failed at stage={stage}: {self.tpsl_error}")
+
+
 class OandaUpstreamHTTPError(ValueError):
     def __init__(
         self,
@@ -11415,6 +11430,17 @@ async def _place_bybit_order(
             body["tpslMode"] = "Full"
             body["tpOrderType"] = "Market"
             body["slOrderType"] = "Market"
+    has_requested_tpsl = any(
+        item is not None
+        for item in (
+            take_profit_offset,
+            stop_loss_offset,
+            take_profit,
+            stop_loss,
+        )
+    )
+    if category == "linear" and order_type == "limit" and has_requested_tpsl and ("takeProfit" not in body and "stopLoss" not in body):
+        raise ValueError("Bybit limit order TP/SL was requested but did not resolve to absolute takeProfit/stopLoss before order create.")
 
     planned_entry_price = _parse_trigger_price(
         payload.get("planned_entry_price") or payload.get("entry_price")
@@ -11492,6 +11518,9 @@ async def _place_bybit_order(
         )
     order_result = data.get("result", {}) or {}
     order_id = order_result.get("orderId")
+    attached_tp = _normalize_linear_price(_parse_bybit_price_level(body.get("takeProfit")))
+    attached_sl = _normalize_linear_price(_parse_bybit_price_level(body.get("stopLoss")))
+    has_attached_order_create_tpsl = attached_tp is not None or attached_sl is not None
     _upsert_trade_context(
         {
             "pending_webhook_id": str(payload.get("pending_webhook_id") or "").strip(),
@@ -11509,7 +11538,7 @@ async def _place_bybit_order(
             "opened_at": _epoch_or_iso_to_iso(payload.get("opened_at")) or request_open_time_iso,
             "order_id": str(order_id or "").strip(),
             "order_link_id": str(order_result.get("orderLinkId") or body.get("orderLinkId") or "").strip(),
-            "status": "ACTIVE",
+            "status": "PENDING_ENTRY" if (category == "linear" and order_type == "limit" and has_attached_order_create_tpsl) else "ACTIVE",
         }
     )
     if account == "demo" and category == "linear":
@@ -11527,7 +11556,21 @@ async def _place_bybit_order(
     tpsl_error: Optional[str] = None
     tp_order: Optional[Dict[str, object]] = None
     tp_error: Optional[str] = None
-    if category == "linear" and any(
+    if category == "linear" and order_type == "limit" and has_attached_order_create_tpsl:
+        BYBIT_LOGGER.info(
+            "WEBHOOK_TPSL %s limit_order_tpsl_attached_to_create symbol=%s orderId=%s tp=%s sl=%s",
+            request_id, symbol, order_id, attached_tp, attached_sl
+        )
+        tpsl_result = {
+            "status": "attached_to_order_create",
+            "verification": "pending_until_limit_fill",
+            "takeProfit": _format_decimal_value(attached_tp),
+            "stopLoss": _format_decimal_value(attached_sl),
+            "tpslMode": body.get("tpslMode"),
+            "tpOrderType": body.get("tpOrderType"),
+            "slOrderType": body.get("slOrderType"),
+        }
+    elif category == "linear" and any(
         item is not None
         for item in (
             take_profit_offset,
@@ -11737,8 +11780,17 @@ async def _place_bybit_order(
                 exc,
             )
     if tpsl_error:
-        raise RuntimeError(
-            f"Bybit order {order_id or ''} created but TP/SL application failed: {tpsl_error}"
+        raise BybitPostCreateProtectionError(
+            order_id=order_id,
+            order_link_id=order_result.get("orderLinkId") or body.get("orderLinkId"),
+            symbol=symbol,
+            account=account,
+            category=category,
+            side=side,
+            request_body=body,
+            order_result=order_result,
+            tpsl_error=tpsl_error,
+            stage="post_create_tpsl",
         )
     if category == "option":
         try:
@@ -11828,6 +11880,7 @@ async def _place_bybit_order(
         "planned_entry_price": planned_entry_price,
         "planned_stop_price": planned_stop_price,
         "planned_target_price": planned_target_price,
+        "status_message": "Limit order accepted by Bybit. TP/SL was attached to the entry order; live position verification will only be possible after fill." if (category == "linear" and order_type == "limit" and has_attached_order_create_tpsl) else "",
     }
 
 
@@ -15098,9 +15151,9 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             if not resolved_symbol:
                 raise HTTPException(status_code=404, detail=f"Could not resolve Bybit symbol: {symbol_in}")
             bybit_fetch_started = time.perf_counter()
-            inst_task = asyncio.create_task(_bybit_get_instrument_info_cached(base_url, "linear", resolved_symbol))
-            ticker_task = asyncio.create_task(_bybit_get_async(base_url, "/v5/market/tickers", {"category": "linear", "symbol": resolved_symbol}))
-            balance_task = asyncio.create_task(_fetch_bybit_balance_usdt(account))
+            inst_task = asyncio.create_task(_calculator_timed_dependency("bybit_instruments_info", _bybit_get_instrument_info_cached(base_url, "linear", resolved_symbol), timings_ms, 4.0, "/v5/market/instruments-info", pending_dependencies=pending_dependencies, last_dependency_started=last_dependency_started))
+            ticker_task = asyncio.create_task(_calculator_timed_dependency("bybit_ticker", _bybit_get_async(base_url, "/v5/market/tickers", {"category": "linear", "symbol": resolved_symbol}), timings_ms, 4.0, "/v5/market/tickers", pending_dependencies=pending_dependencies, last_dependency_started=last_dependency_started))
+            balance_task = asyncio.create_task(_calculator_timed_dependency("bybit_wallet_balance", _fetch_bybit_balance_usdt(account), timings_ms, 5.0, "/v5/account/wallet-balance", pending_dependencies=pending_dependencies, last_dependency_started=last_dependency_started))
             async def _fetch_aud_usd_cached() -> Dict[str, float]:
                 now = time.time()
                 cached_val = _OANDA_AUD_USD_CACHE.get("value")
@@ -15111,10 +15164,10 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                 if px > 0:
                     _OANDA_AUD_USD_CACHE.update({"ts": now, "value": px})
                 return prices
-            aud_task = asyncio.create_task(_fetch_aud_usd_cached())
+            aud_task = asyncio.create_task(_calculator_timed_dependency("oanda_aud_usd", _fetch_aud_usd_cached(), timings_ms, 4.0, "AUD_USD", pending_dependencies=pending_dependencies, last_dependency_started=last_dependency_started))
             fee_task = None
             if account != "demo":
-                fee_task = asyncio.create_task(_bybit_signed_get(base_url=base_url, api_key=api_key, api_secret=api_secret, path="/v5/account/fee-rate", params={"category": "linear", "symbol": resolved_symbol}, timeout_s=4.0, connect_s=2.0, read_s=4.0))
+                fee_task = asyncio.create_task(_calculator_timed_dependency("bybit_fee_rate", _bybit_signed_get(base_url=base_url, api_key=api_key, api_secret=api_secret, path="/v5/account/fee-rate", params={"category": "linear", "symbol": resolved_symbol}, timeout_s=4.0, connect_s=2.0, read_s=4.0), timings_ms, 4.0, "/v5/account/fee-rate", pending_dependencies=pending_dependencies, last_dependency_started=last_dependency_started))
             tasks=[inst_task,ticker_task,balance_task,aud_task]+([fee_task] if fee_task else [])
             try:
                 await asyncio.gather(*tasks)
@@ -15574,6 +15627,12 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             return JSONResponse(response_payload)
 
         raise HTTPException(status_code=400, detail="asset must be crypto or fx.")
+    except CalculatorDependencyTimeout as exc:
+        CALCULATOR_LOGGER.warning("CALCULATOR_QUOTE_TIMEOUT asset=%s account=%s symbol=%s dependency=%s timings=%s", asset, account, resolved_symbol_for_debug, exc.dependency, timings_ms)
+        raise HTTPException(status_code=504, detail=_calculator_quote_error_detail("QUOTE_DEPENDENCY_TIMEOUT", str(exc), dependency=exc.dependency, timings_ms=timings_ms, quote_started=quote_started, submitted_payload=submitted_debug, resolved_symbol=resolved_symbol_for_debug, pending_dependencies=pending_dependencies))
+    except asyncio.TimeoutError:
+        CALCULATOR_LOGGER.warning("CALCULATOR_QUOTE_TIMEOUT asset=%s account=%s symbol=%s dependency=%s timings=%s", asset, account, resolved_symbol_for_debug, last_dependency_started.get("name"), timings_ms)
+        raise HTTPException(status_code=504, detail=_calculator_quote_error_detail("QUOTE_TIMEOUT", "Calculator quote timed out.", dependency=last_dependency_started.get("name"), timings_ms=timings_ms, quote_started=quote_started, submitted_payload=submitted_debug, resolved_symbol=resolved_symbol_for_debug, pending_dependencies=pending_dependencies))
     except HTTPException as exc:
         detail = exc.detail
         if isinstance(detail, dict):
@@ -15972,6 +16031,12 @@ async def calculator_submit(payload: Dict[str, object] = Body(default={})) -> JS
         "take_profit_price": payload.get("take_profit_price"),
         "quantity": payload.get("quantity"),
         "timeframe": payload.get("timeframe"),
+        "planned_entry_price": payload.get("planned_entry_price"),
+        "planned_stop_price": payload.get("planned_stop_price"),
+        "planned_target_price": payload.get("planned_target_price"),
+        "level_anchor_mode": payload.get("level_anchor_mode"),
+        "pending_webhook_id": payload.get("pending_webhook_id"),
+        "previous_pending_webhook_id": payload.get("previous_pending_webhook_id"),
         "is_test_trade": _normalize_test_trade_flag(
             payload.get("is_test_trade", payload.get("test_trade", payload.get("test")))
         ),
@@ -15995,6 +16060,27 @@ async def calculator_submit(payload: Dict[str, object] = Body(default={})) -> JS
         raise
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"Order submit failed: {exc}") from exc
+    except BybitPostCreateProtectionError as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "code": "BYBIT_ORDER_CREATED_TPSL_FAILED",
+                "message": "Bybit order was created, but TP/SL application failed.",
+                "debug": {
+                    "order_id": exc.order_id,
+                    "order_link_id": exc.order_link_id,
+                    "symbol": exc.symbol,
+                    "account": exc.account,
+                    "category": exc.category,
+                    "side": exc.side,
+                    "stage": exc.stage,
+                    "tpsl_error": exc.tpsl_error,
+                    "request_body": exc.request_body,
+                    "order_result": exc.order_result,
+                },
+            },
+            status_code=409,
+        )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Order submit failed: {exc}") from exc
 
