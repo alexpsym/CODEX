@@ -718,11 +718,17 @@
         quantity: state.quote.quantity,
         timeframe: state.timeframe,
         test: state.test_mode,
+        planned_entry_price: state.quote.entry_price,
+        planned_stop_price: state.quote.stop_price,
+        planned_target_price: state.quote.target_price,
+        level_anchor_mode: state.order_type === 'limit' ? 'planned_entry' : 'actual_fill',
+        pending_webhook_id: state.quote.pending_webhook_id || '',
       };
       await post('/api/calculator/submit', payload);
       okEl.textContent = 'Order submitted successfully.';
     } catch (e) {
       errorEl.textContent = String(e.message || e);
+      renderErrorDebug(e.detail || null);
     }
   });
 
