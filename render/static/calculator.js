@@ -623,13 +623,16 @@
     clearMessages();
     toggleWebhookPanel(false);
     if (state.quoteController) state.quoteController.abort();
-    if (resolveController) resolveController.abort();
     if (journalController) journalController.abort();
     state.quoteController = new AbortController();
-    const quoteTimeoutMs = 5000;
-    const timeoutId = setTimeout(() => state.quoteController && state.quoteController.abort(), quoteTimeoutMs);
+    const quoteSoftTimeoutMs = 5000;
+    const quoteTimeoutMs = 15000;
     state.quoteRequestSeq += 1;
     const seq = state.quoteRequestSeq;
+    const softTimeoutId = setTimeout(() => {
+      if (seq === state.quoteRequestSeq) setQuoteStatus('Still calculating… waiting for upstream quote dependencies.');
+    }, quoteSoftTimeoutMs);
+    const timeoutId = setTimeout(() => state.quoteController && state.quoteController.abort(), quoteTimeoutMs);
     state.hasCalculatedOnce = true;
     const quoteBtn = $('calc-quote');
     const defaultLabel = quoteBtn.dataset.defaultLabel || quoteBtn.textContent || 'Calculate';
@@ -659,7 +662,8 @@
       }
       const payload = {
         ...state,
-        symbol: $('calc-symbol').value,
+        submitted_symbol: $('calc-symbol').value,
+        symbol: state.resolvedSymbol || $('calc-symbol').value,
         entry_price: $('calc-limit').value,
         stop_loss_ticks: $('calc-sl-ticks').value,
         risk_reward: $('calc-rr').value,
@@ -698,7 +702,7 @@
         toggleWebhookPanel(false);
         state.pendingWebhookId = '';
         state.pendingWebhookDeleteUrl = '';
-        errorEl.textContent = 'Quote timed out after 5s. If the server returned diagnostics first, they appear below.';
+        errorEl.textContent = 'Quote timed out after 15s. Upstream dependencies did not complete within the hard cap.';
         return;
       }
       invalidateQuote({ status: 'error', reason: 'Quote failed. Recalculate before submitting.' });
@@ -708,6 +712,7 @@
       errorEl.textContent = String(e.message || e);
       renderErrorDebug(e.detail || null);
     } finally {
+      clearTimeout(softTimeoutId);
       clearTimeout(timeoutId);
       if (seq === state.quoteRequestSeq) {
         quoteBtn.disabled = false;

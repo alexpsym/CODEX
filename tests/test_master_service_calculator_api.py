@@ -1339,7 +1339,7 @@ def test_crypto_quote_backend_timeout_beats_frontend_timeout() -> None:
     assert m
     frontend_timeout_ms = int(m.group(1))
     backend_timeout_ms = int(master_service.CALCULATOR_QUOTE_TIMEOUT_S * 1000)
-    assert frontend_timeout_ms <= 5000
+    assert frontend_timeout_ms <= 15000
     assert backend_timeout_ms <= 4500
     assert backend_timeout_ms < frontend_timeout_ms
 

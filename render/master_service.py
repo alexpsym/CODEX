@@ -15047,15 +15047,9 @@ async def calculator_instrument(asset: str, account: str, symbol: str) -> JSONRe
         if not resolved or not resolved.get("resolved_symbol"):
             raise HTTPException(status_code=404, detail=f"Could not resolve Bybit symbol: {symbol}")
         resolved_symbol = str(resolved["resolved_symbol"]).upper()
-        payload = await _bybit_get_async(
-            base_url,
-            "/v5/market/instruments-info",
-            {"category": "linear", "symbol": resolved_symbol},
-        )
-        rows = (payload.get("result") or {}).get("list") or []
-        if not rows:
+        item = await _bybit_get_instrument_info_cached(base_url, "linear", resolved_symbol)
+        if not item:
             raise HTTPException(status_code=502, detail=f"Bybit instrument meta unavailable for {resolved_symbol}.")
-        item = rows[0]
         return JSONResponse(
             {
                 "broker": "bybit",
@@ -15334,19 +15328,27 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             if not api_key or not api_secret:
                 raise HTTPException(status_code=500, detail="Bybit credentials are missing for selected account.")
             resolved_symbol = ""
+            resolved_inst_row: Optional[Dict[str, object]] = None
             symbol_resolution_started = time.perf_counter()
             raw_symbol = str(symbol_in or "").strip().upper()
+            if raw_symbol:
+                direct_inst = await _bybit_get_instrument_info_cached(base_url, "linear", raw_symbol)
+                if direct_inst:
+                    resolved_symbol = raw_symbol
+                    resolved_inst_row = direct_inst
+                    timings_ms["bybit_instrument_cache_hit"] = True
             candidates: List[str] = []
             if raw_symbol.endswith(("USDT", "USDC", "USD")):
                 candidates = [raw_symbol]
             else:
                 candidates = [f"{raw_symbol}USDT", f"{raw_symbol}USDC", f"{raw_symbol}USD"]
-            for candidate in candidates:
+            for candidate in ([] if resolved_symbol else candidates):
                 direct_started = time.perf_counter()
                 inst_direct = await _bybit_get_instrument_info_cached(base_url, "linear", candidate)
                 timings_ms["bybit_instruments_info_ms"] = timings_ms.get("bybit_instruments_info_ms", 0) + int((time.perf_counter() - direct_started) * 1000)
                 if inst_direct:
                     resolved_symbol = candidate
+                    resolved_inst_row = inst_direct
                     break
             if not resolved_symbol:
                 symbol_list_started = time.perf_counter()
@@ -15367,9 +15369,11 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             if not resolved_symbol:
                 raise HTTPException(status_code=404, detail=f"Could not resolve Bybit symbol: {symbol_in}")
             bybit_fetch_started = time.perf_counter()
-            inst_task = asyncio.create_task(_calculator_timed_dependency("bybit_instruments_info", _bybit_get_instrument_info_cached(base_url, "linear", resolved_symbol), timings_ms, 4.0, "/v5/market/instruments-info", pending_dependencies=pending_dependencies, last_dependency_started=last_dependency_started))
+            inst_task = None
+            if not resolved_inst_row:
+                inst_task = asyncio.create_task(_calculator_timed_dependency("bybit_instruments_info", _bybit_get_instrument_info_cached(base_url, "linear", resolved_symbol), timings_ms, 3.0, "/v5/market/instruments-info", pending_dependencies=pending_dependencies, last_dependency_started=last_dependency_started))
             ticker_task = asyncio.create_task(_calculator_timed_dependency("bybit_ticker", _bybit_get_async(base_url, "/v5/market/tickers", {"category": "linear", "symbol": resolved_symbol}), timings_ms, 4.0, "/v5/market/tickers", pending_dependencies=pending_dependencies, last_dependency_started=last_dependency_started))
-            balance_task = asyncio.create_task(_calculator_timed_dependency("bybit_wallet_balance", _fetch_bybit_balance_usdt(account), timings_ms, 5.0, "/v5/account/wallet-balance", pending_dependencies=pending_dependencies, last_dependency_started=last_dependency_started))
+            balance_task = asyncio.create_task(_calculator_timed_dependency("bybit_wallet_balance", _fetch_bybit_balance_usdt(account, timeout_s=2.5, connect_s=1.0, read_s=2.5), timings_ms, 3.0, "/v5/account/wallet-balance", pending_dependencies=pending_dependencies, last_dependency_started=last_dependency_started))
             async def _fetch_aud_usd_cached() -> Dict[str, float]:
                 now = time.time()
                 cached_val = _OANDA_AUD_USD_CACHE.get("value")
@@ -15384,15 +15388,20 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             fee_task = None
             if account != "demo":
                 fee_task = asyncio.create_task(_calculator_timed_dependency("bybit_fee_rate", _bybit_signed_get(base_url=base_url, api_key=api_key, api_secret=api_secret, path="/v5/account/fee-rate", params={"category": "linear", "symbol": resolved_symbol}, timeout_s=4.0, connect_s=2.0, read_s=4.0), timings_ms, 4.0, "/v5/account/fee-rate", pending_dependencies=pending_dependencies, last_dependency_started=last_dependency_started))
-            tasks=[inst_task,ticker_task,balance_task]+([aud_task] if aud_task else [])+([fee_task] if fee_task else [])
+            required_tasks=[ticker_task,balance_task]+([inst_task] if inst_task else [])
             try:
-                await asyncio.gather(*tasks)
+                await asyncio.gather(*required_tasks)
             except Exception:
-                await _cancel_pending_tasks(tasks)
+                await _cancel_pending_tasks(required_tasks + ([aud_task] if aud_task else []) + ([fee_task] if fee_task else []))
                 raise
+            optional_tasks=[t for t in [aud_task, fee_task] if t is not None]
+            if optional_tasks:
+                done, pending = await asyncio.wait(optional_tasks, timeout=0.2)
+                for ptask in pending:
+                    ptask.cancel()
             timings_ms["bybit_upstream_parallel_ms"] = int((time.perf_counter()-bybit_fetch_started)*1000)
             inst_started = time.perf_counter()
-            inst = inst_task.result()
+            inst = resolved_inst_row or (inst_task.result() if inst_task else None)
             timings_ms["bybit_instruments_info_ms"] = timings_ms.get("bybit_instruments_info_ms", 0) + int((time.perf_counter() - inst_started) * 1000)
             if not inst:
                 raise HTTPException(status_code=502, detail="Bybit instrument meta fetch failed.")
@@ -15438,10 +15447,12 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                     fee_row = ((fee_payload.get("result") or {}).get("list") or [{}])[0]
                     maker = Decimal(str(fee_row.get("makerFeeRate") or fallback_maker))
                     taker = Decimal(str(fee_row.get("takerFeeRate") or fallback_taker))
+                    timings_ms["bybit_fee_rate_status"] = "live"
                 except Exception as exc:
                     exc_text = str(exc)
                     ret_code_match = re.search(r"retCode=([0-9-]+)", exc_text)
                     ret_code = ret_code_match.group(1) if ret_code_match else "unknown"
+                    timings_ms["bybit_fee_rate_status"] = "fallback"
                     warnings.append(
                         f"Bybit fee rate unavailable (retCode {ret_code}). Using conservative fallback fees for this quote."
                     )
@@ -15455,7 +15466,10 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                 warnings.append("AUD conversion unavailable within quote SLA; showing USDT sizing only.")
             timings_ms["oanda_aud_usd_ms"] = int((time.perf_counter() - aud_started) * 1000)
             if aud_usd <= 0:
+                timings_ms["aud_conversion_status"] = "unavailable"
                 aud_usd = Decimal("0")
+            else:
+                timings_ms["aud_conversion_status"] = "ok"
             balance_started = time.perf_counter()
             try:
                 balance_snapshot = balance_task.result()
