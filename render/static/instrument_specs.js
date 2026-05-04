@@ -22,7 +22,10 @@
     'status',
     'scannerVolume24h',
     'openInterest',
+    'volume24h',
     '_units',
+    '_btc_reference',
+    '_spec_warnings',
   ]);
 
   const FIELD_LABELS = {
@@ -33,9 +36,18 @@
     nextFundingTime: 'nextFundingTime (Brisbane time)',
     launchTime: 'launchTime (Brisbane time)',
     openInterestValue: 'openInterestValue (USD)',
-    turnover24h: 'turnover24h (USD)',
-    volume24h: 'volume24h (base units)',
+    volume24hUsd: 'volume24h (USD)',
+    turnover24h: 'volume24h (USD)',
     avg7dTurnoverUsd: 'avg7dVolume (USD)',
+    'range.1m': 'range 1m (%)',
+    'range.5m': 'range 5m (%)',
+    'range.15m': 'range 15m (%)',
+    'range.30m': 'range 30m (%)',
+    'range.1h': 'range 1h (%)',
+    'range.4h': 'range 4h (%)',
+    'range.1d': 'range daily (%)',
+    'range.1w': 'range weekly (%)',
+    'range.1mo': 'range monthly (%)',
   };
 
   function isNumericLike(v) {
@@ -93,10 +105,13 @@
       return formatPercentFromFraction(value);
     }
 
-    if (/^(turnover24h|openInterestValue|avg7dTurnoverUsd)$/i.test(key)) {
+    if (key === 'fundingRate' || key.endsWith('.fundingRate') || key.startsWith('range.')) {
+      return formatPercentFromFraction(value, 2);
+    }
+
+    if (/^(volume24hUsd|turnover24h|openInterestValue|avg7dTurnoverUsd)$/i.test(key)) {
       return `$${compactNumber(value)}`;
     }
-    if (/^volume24h$/i.test(key)) return compactNumber(value);
 
     if (typeof value === 'object' && value !== null) return JSON.stringify(value);
     return String(value ?? '—');
@@ -123,17 +138,7 @@
     return false;
   }
 
-  async function resolveBybitSymbol(q) {
-    const value = String(q || '').trim();
-    if (!value || isLikelyFxPair(value)) return value;
-    const resp = await fetch(`/api/resolve-symbol?symbol=${encodeURIComponent(value)}&prefer=bybit&scope=all`, {
-      cache: 'no-store',
-    });
-    if (!resp.ok) return value;
-    const data = await resp.json().catch(() => null);
-    const resolved = String(data?.resolved_symbol || '').trim();
-    return resolved || value;
-  }
+  const DISPLAY_ORDER=['resolved_symbol','category','lastPrice','fundingRate','nextFundingTime','launchTime','openInterestValue','volume24hUsd','turnover24h','avg7dTurnoverUsd','range.1m','range.5m','range.15m','range.30m','range.1h','range.4h','range.1d','range.1w','range.1mo'];
 
   async function resolveBybitSymbol(q) {
     const value = String(q || '').trim();
@@ -146,11 +151,15 @@
     const resolved = String(data?.resolved_symbol || '').trim();
     return resolved || value;
   }
+
+  
 
   function renderSpecsTable(specs) {
     if (!rows) return;
     rows.innerHTML = '';
-    const flattenedEntries = Object.entries(specs || {}).sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+    const btcRef = specs && typeof specs._btc_reference === 'object' ? specs._btc_reference : null;
+    const keys = Object.keys(specs || {}).filter((k) => !HIDE_FIELDS.has(k));
+    const flattenedEntries = [...DISPLAY_ORDER.filter((k) => keys.includes(k)).map((k) => [k, specs[k]]), ...keys.filter((k) => !DISPLAY_ORDER.includes(k)).sort().map((k) => [k, specs[k]])];
 
     for (const [key, value] of flattenedEntries) {
       if (HIDE_FIELDS.has(key)) continue;
@@ -163,6 +172,17 @@
       tr.appendChild(tdKey);
       tr.appendChild(tdVal);
       rows.appendChild(tr);
+      if (btcRef && btcRef[key] !== undefined) {
+        const btr = document.createElement('tr');
+        btr.className = 'btc-reference-row';
+        const bKey = document.createElement('td');
+        const bVal = document.createElement('td');
+        bKey.textContent = `BTC ${FIELD_LABELS[key] || key}`;
+        bVal.textContent = formatValue(key, btcRef[key]);
+        btr.appendChild(bKey);
+        btr.appendChild(bVal);
+        rows.appendChild(btr);
+      }
     }
   }
 
@@ -204,6 +224,8 @@
 
     setErr('');
     renderSpecsTable(data);
+    const warnings = Array.isArray(data?._spec_warnings) ? data._spec_warnings : [];
+    if (warnings.length) setErr(`Some instrument specs could not be loaded: ${warnings.map((w) => `${w.field || 'spec'} ${w.symbol || ''}`).join(', ')}`);
   }
 
   async function load() {

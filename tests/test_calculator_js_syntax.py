@@ -5,6 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 JS_PATH = ROOT / "render" / "static" / "calculator.js"
+INSTRUMENT_JS_PATH = ROOT / "render" / "static" / "instrument_specs.js"
 
 
 def test_calculator_payload_uses_spread_state() -> None:
@@ -51,3 +52,18 @@ def test_calculator_js_displays_and_copies_webhook_url() -> None:
     assert "calc-webhook-copy-url" in js
     assert "No webhook URL to copy." in js
     assert "Webhook URL copied." in js
+
+
+def test_instrument_specs_js_parses_with_node() -> None:
+    node = shutil.which("node")
+    assert node, "node is required for JS syntax check"
+    subprocess.run([node, "--check", str(INSTRUMENT_JS_PATH)], check=True)
+
+def test_specs_labels_and_ranges_present() -> None:
+    js = JS_PATH.read_text(encoding="utf-8") + INSTRUMENT_JS_PATH.read_text(encoding="utf-8")
+    assert "volume24h (USD)" in js
+    assert "volume24h (base units)" not in js
+    assert "turnover24h (USD)" not in js
+    assert "range 1m (%)" in js
+    assert "range monthly (%)" in js
+    assert "btc-reference-row" in js
