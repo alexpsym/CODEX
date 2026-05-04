@@ -14808,6 +14808,83 @@ def _snap_to_increment(
     return (value / increment).to_integral_value(rounding=rounding) * increment
 
 
+
+
+def _ceil_to_increment(value: Optional[Decimal], increment: Optional[Decimal]) -> Optional[Decimal]:
+    if value is None:
+        return None
+    if increment is None or increment <= 0:
+        return value
+    return (value / increment).to_integral_value(rounding=ROUND_UP) * increment
+
+
+def _floor_to_increment(value: Optional[Decimal], increment: Optional[Decimal]) -> Optional[Decimal]:
+    return _snap_to_increment(value, increment, rounding=ROUND_DOWN)
+
+
+def _adjust_bybit_take_profit_for_last_price(
+    *,
+    symbol: str,
+    side: str,
+    entry_price: Decimal,
+    take_profit: Decimal,
+    last_price: Decimal,
+    tick_size: Decimal,
+) -> tuple[Decimal, Optional[Dict[str, object]]]:
+    if entry_price <= 0 or take_profit <= 0 or last_price <= 0 or tick_size <= 0:
+        return take_profit, None
+
+    side_norm = str(side or '').lower()
+    rule = 'Buy TP must be above current LastPrice and entry. Sell TP must be below current LastPrice and entry.'
+
+    if side_norm == 'buy':
+        anchor = max(entry_price, last_price)
+        if take_profit <= anchor:
+            min_tp = anchor + tick_size
+            adjusted = _ceil_to_increment(min_tp, tick_size) or min_tp
+            return adjusted, {
+                'adjusted': True,
+                'field': 'take_profit',
+                'reason': 'bybit_last_price_trigger_side',
+                'original_take_profit': _fmt_dec(take_profit),
+                'adjusted_take_profit': _fmt_dec(adjusted),
+                'entry_price': _fmt_dec(entry_price),
+                'last_price': _fmt_dec(last_price),
+                'tick_size': _fmt_dec(tick_size),
+                'side': side_norm,
+                'rule': rule,
+            }
+    elif side_norm == 'sell':
+        anchor = min(entry_price, last_price)
+        if take_profit >= anchor:
+            max_tp = anchor - tick_size
+            adjusted = _floor_to_increment(max_tp, tick_size) or max_tp
+            if adjusted <= 0:
+                raise HTTPException(status_code=400, detail={
+                    'code': 'BYBIT_TAKE_PROFIT_ADJUSTMENT_IMPOSSIBLE',
+                    'message': 'No positive take profit can be placed below LastPrice with the current tick size.',
+                    'debug': {
+                        'symbol': symbol,
+                        'side': side_norm,
+                        'entry_price': _fmt_dec(entry_price),
+                        'original_take_profit': _fmt_dec(take_profit),
+                        'last_price': _fmt_dec(last_price),
+                        'tick_size': _fmt_dec(tick_size),
+                    },
+                })
+            return adjusted, {
+                'adjusted': True,
+                'field': 'take_profit',
+                'reason': 'bybit_last_price_trigger_side',
+                'original_take_profit': _fmt_dec(take_profit),
+                'adjusted_take_profit': _fmt_dec(adjusted),
+                'entry_price': _fmt_dec(entry_price),
+                'last_price': _fmt_dec(last_price),
+                'tick_size': _fmt_dec(tick_size),
+                'side': side_norm,
+                'rule': rule,
+            }
+    return take_profit, None
 def _fmt_dec_by_increment(
     value: Optional[Decimal],
     increment: Optional[Decimal],
@@ -15431,8 +15508,27 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             reward_usdt = qty * max(Decimal("0"), target_distance - spread_quote - (entry * open_fee) - (abs(tp) * close_fee))
             snapped_entry = _snap_to_increment(entry, tick_size) or entry
             snapped_sl = _snap_to_increment(sl, tick_size) or sl
-            snapped_tp = _snap_to_increment(tp, tick_size) or tp
-            snapped_target_distance = _snap_to_increment(target_distance, tick_size) or target_distance
+            requested_target_before_adjustment = _snap_to_increment(tp, tick_size) or tp
+            snapped_tp = requested_target_before_adjustment
+            take_profit_adjustment = None
+            snapped_tp, take_profit_adjustment = _adjust_bybit_take_profit_for_last_price(
+                symbol=resolved_symbol,
+                side=side,
+                entry_price=snapped_entry,
+                take_profit=snapped_tp,
+                last_price=last,
+                tick_size=tick_size,
+            )
+            if take_profit_adjustment:
+                warnings.append('Take profit was auto-adjusted to satisfy Bybit LastPrice trigger rules.')
+            effective_target_distance = abs(snapped_tp - snapped_entry)
+            snapped_target_distance = _snap_to_increment(effective_target_distance, tick_size) or effective_target_distance
+            rr_value = (abs(snapped_tp - snapped_entry) / abs(snapped_entry - snapped_sl)) if abs(snapped_entry - snapped_sl) > 0 else Decimal('0')
+            reward_usdt = qty * max(Decimal('0'), effective_target_distance - spread_quote - (snapped_entry * open_fee) - (abs(snapped_tp) * close_fee))
+            effective_rr_net_value = None
+            if requested_rr_net is not None:
+                net_reward_per_unit = effective_target_distance - (spread_quote + (snapped_entry * open_fee) + (abs(snapped_tp) * close_fee))
+                effective_rr_net_value = net_reward_per_unit / loss_per_unit if loss_per_unit > 0 else Decimal('0')
             try:
                 _validate_bybit_linear_levels_before_submit(
                     symbol=resolved_symbol,
@@ -15458,6 +15554,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                 "stop_price": _fmt_dec(snapped_sl),
                 "target_price": _fmt_dec(snapped_tp),
                 "target_distance": _fmt_dec(snapped_target_distance),
+                "effective_target_distance": _fmt_dec(snapped_target_distance),
                 "quantity": _fmt_dec(qty),
                 "notional": _fmt_dec(notional),
                 "estimated_fees_or_spread_aud": _fmt_dec(((qty * entry * open_fee) + (qty * sl * close_fee)) / aud_usd),
@@ -15467,10 +15564,14 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                 "estimated_fees_or_spread": _fmt_dec((qty * entry * open_fee) + (qty * sl * close_fee)),
                 "estimated_total_loss": _fmt_dec(total_loss_usdt),
                 "estimated_reward": _fmt_dec(max(Decimal("0"), reward_usdt)),
-                "rr": _fmt_dec_by_precision((abs(tp - entry) / abs(entry - sl)) if abs(entry - sl) > 0 else Decimal("0"), Decimal("0.01")),
+                "rr": _fmt_dec_by_precision(rr_value, Decimal("0.01")),
+                "effective_rr": _fmt_dec_by_precision(rr_value, Decimal("0.01")),
                 "target_mode": target_mode,
                 "requested_rr_net": _fmt_dec_by_precision(requested_rr_net, Decimal("0.01")) if requested_rr_net is not None else None,
-                "effective_rr_net": _fmt_dec_by_precision(effective_rr_net, Decimal("0.01")) if effective_rr_net is not None else None,
+                "effective_rr_net": _fmt_dec_by_precision(effective_rr_net_value if effective_rr_net_value is not None else effective_rr_net, Decimal("0.01")) if (effective_rr_net_value is not None or effective_rr_net is not None) else None,
+                "take_profit_adjusted": bool(take_profit_adjustment),
+                "take_profit_adjustment": take_profit_adjustment,
+                "requested_target_price_before_adjustment": _fmt_dec(requested_target_before_adjustment),
                 "fee_buffer_r": _fmt_dec_by_precision(fee_buffer_r, Decimal("0.01")) if fee_buffer_r is not None else None,
             }
             if warnings:

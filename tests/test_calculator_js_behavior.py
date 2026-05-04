@@ -371,3 +371,21 @@ def test_webhook_stale_runtime_warning_on_old_public_webhook_message() -> None:
 def test_abort_error_message_fallback_present() -> None:
     script = JS_PATH.read_text(encoding="utf-8")
     assert "Quote timed out after 25s" in script
+
+def test_render_quote_shows_tp_auto_adjustment() -> None:
+    node = shutil.which('node')
+    assert node
+    harness = r'''
+const fs = require('fs'); const source = fs.readFileSync(process.argv[1], 'utf8');
+class E{constructor(){this.value='';this.textContent='';this.innerHTML='';this.dataset={};this.style={};this.listeners={};this.buttons=[];this.classList={toggle:()=>{},add:()=>{},remove:()=>{}};}addEventListener(e,cb){this.listeners[e]=cb;}querySelectorAll(s){return s==='button'?this.buttons:[];}}
+class B{constructor(v){this.dataset={v};this.listeners={};this.classList={toggle:()=>{},add:()=>{},remove:()=>{}};}addEventListener(e,cb){this.listeners[e]=cb;}click(){if(this.listeners.click)this.listeners.click();}}
+const ids=['calc-error','calc-error-debug','calc-success','calc-results','calc-request-summary','calc-canonical-symbol','calc-journal-summary','calc-instrument-specs','risk-toggle-wrap','calc-webhook-panel','calc-webhook-url','calc-webhook-json','calc-webhook-copy','calc-webhook-copy-url','risk-toggle','calc-risk-label','limit-wrap','account-toggle','asset-toggle','side-toggle','order-toggle','webhook-toggle','test-toggle','timeframe-toggle','calc-symbol','calc-limit','calc-sl-ticks','calc-rr','calc-risk','calc-quote','calc-submit','calc-quote-status'];
+const el=Object.fromEntries(ids.map(i=>[i,new E()]));
+const mk=(vals)=>vals.map(v=>new B(v)); el['risk-toggle'].buttons=mk(['fixed_aud','percent']);el['asset-toggle'].buttons=mk(['crypto','fx']);el['account-toggle'].buttons=mk(['live','demo']);el['side-toggle'].buttons=mk(['buy','sell']);el['order-toggle'].buttons=mk(['market','limit']);el['webhook-toggle'].buttons=mk(['no','yes']);el['test-toggle'].buttons=mk(['no','yes']);
+el['calc-symbol'].value='BTCUSDT';el['calc-sl-ticks'].value='10';el['calc-rr'].value='2';el['calc-risk'].value='1';
+global.fetch=async (url,opts={})=> url.includes('/api/calculator/quote')?{ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({broker:'bybit',symbol:'BTCUSDT',tick_size:'0.1',entry_price:'95',stop_price:'94',target_price:'100.1',target_distance:'5.1',quantity:'1',estimated_fees_or_spread:'1',estimated_total_loss:'10',estimated_reward:'20',take_profit_adjusted:true,take_profit_adjustment:{original_take_profit:'96',adjusted_take_profit:'100.1',reason:'bybit_last_price_trigger_side',last_price:'100'},warnings:['Take profit was auto-adjusted to satisfy Bybit LastPrice trigger rules.']})}:{ok:true,status:200,statusText:'OK',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({})};
+global.document={getElementById:(id)=>el[id]};global.navigator={clipboard:{writeText:async()=>{}}};global.setTimeout=(f)=>{f();return 1;};global.clearTimeout=()=>{};eval(source);
+(async()=>{await el['calc-quote'].listeners.click(); console.log(el['calc-results'].innerHTML);})();
+'''
+    out = subprocess.run([node, '-e', harness, str(JS_PATH)], check=True, capture_output=True, text=True).stdout
+    assert 'TP auto-adjusted' in out
