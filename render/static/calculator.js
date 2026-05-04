@@ -330,6 +330,12 @@
       err.detail = detail;
       return err;
     }
+    if (bodyJson && typeof bodyJson === 'object' && (bodyJson.message || bodyJson.code || bodyJson.debug)) {
+      const err = new Error(bodyJson.message || `${method} ${url} failed: ${status}`);
+      err.detail = { code: bodyJson.code, message: bodyJson.message, debug: bodyJson.debug };
+      err.debug = bodyJson.debug;
+      return err;
+    }
     const body = (bodyText || '').trim();
     return new Error(`${method || 'GET'} ${url} failed: ${status} ${body || statusText}`);
   };
@@ -724,11 +730,14 @@
         level_anchor_mode: state.order_type === 'limit' ? 'planned_entry' : 'actual_fill',
         pending_webhook_id: state.quote.pending_webhook_id || '',
       };
-      await post('/api/calculator/submit', payload);
+      const submitResp = await post('/api/calculator/submit', payload);
+      if (!submitResp || submitResp.ok !== true) {
+        throw buildFetchError('/api/calculator/submit', 'POST', 400, 'Bad Request', '', submitResp || {});
+      }
       okEl.textContent = 'Order submitted successfully.';
     } catch (e) {
       errorEl.textContent = String(e.message || e);
-      renderErrorDebug(e.detail || null);
+      renderErrorDebug(e.detail || (e.debug ? { debug: e.debug } : null));
     }
   });
 

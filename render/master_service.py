@@ -1240,6 +1240,25 @@ class BybitOrderRejected(RuntimeError):
         super().__init__(message)
 
 
+class BybitSignedAPIError(ValueError):
+    def __init__(self, *, path: str, ret_code: object, ret_msg: object, recv_window: str, http_status: Optional[int], response_body: Optional[Dict[str, object]] = None) -> None:
+        self.path = path
+        self.ret_code = ret_code
+        self.ret_msg = str(ret_msg or "").strip() or "Bybit request failed"
+        self.recv_window = recv_window
+        self.http_status = int(http_status) if http_status is not None else None
+        self.response_body = dict(response_body) if isinstance(response_body, dict) else {}
+        super().__init__(f"Bybit signed POST failed path={path} retCode={ret_code} retMsg={self.ret_msg} recv_window={recv_window}")
+
+
+class BybitPreSubmitValidationError(ValueError):
+    def __init__(self, *, code: str, message: str, debug: Dict[str, object]) -> None:
+        self.code = code
+        self.message = message
+        self.debug = dict(debug or {})
+        super().__init__(message)
+
+
 class BybitPostCreateProtectionError(RuntimeError):
     def __init__(self, *, order_id: object, order_link_id: object, symbol: str, account: str, category: str, side: str, request_body: Dict[str, object], order_result: Dict[str, object], tpsl_error: str, stage: str) -> None:
         self.order_id = str(order_id or "")
@@ -9522,11 +9541,16 @@ async def _bybit_signed_post(
             )
             continue
         diag = _extract_bybit_timestamp_diag(ret_msg)
-        raise ValueError(
-            f"Bybit signed POST failed path={path} retCode={ret_code} retMsg={ret_msg} recv_window={recv_window}"
-            + (f" {diag}" if diag else "")
+        full_msg = f"{ret_msg}{(' ' + diag) if diag else ''}"
+        raise BybitSignedAPIError(
+            path=path,
+            ret_code=ret_code,
+            ret_msg=full_msg,
+            recv_window=recv_window,
+            http_status=getattr(resp, "status_code", None),
+            response_body=payload if isinstance(payload, dict) else None,
         )
-    raise ValueError(f"Bybit signed POST failed path={path} retCode=unknown retMsg=unknown")
+    raise BybitSignedAPIError(path=path, ret_code="unknown", ret_msg="unknown", recv_window=recv_window, http_status=None, response_body=None)
 
 
 async def _fetch_bybit_positions_for_category(
@@ -11449,6 +11473,27 @@ async def _place_bybit_order(
     )
     if category == "linear" and order_type == "limit" and has_requested_tpsl and ("takeProfit" not in body and "stopLoss" not in body):
         raise ValueError("Bybit limit order TP/SL was requested but did not resolve to absolute takeProfit/stopLoss before order create.")
+    if category == "linear" and ("takeProfit" in body or "stopLoss" in body):
+        ticker = await _bybit_get_async(base_url, "/v5/market/tickers", {"category": "linear", "symbol": symbol})
+        rows = ((ticker.get("result") or {}).get("list") or []) if isinstance(ticker, dict) else []
+        last_price = Decimal(str((rows[0] if rows else {}).get("lastPrice") or "0"))
+        entry_dec = Decimal(str(body.get("price") or price_val or "0"))
+        stop_dec = Decimal(str(body.get("stopLoss"))) if body.get("stopLoss") is not None else None
+        take_dec = Decimal(str(body.get("takeProfit"))) if body.get("takeProfit") is not None else None
+        try:
+            _validate_bybit_linear_levels_before_submit(
+                symbol=symbol,
+                side=action,
+                order_type=order_type,
+                entry_price=entry_dec,
+                stop_loss=stop_dec,
+                take_profit=take_dec,
+                last_price=last_price,
+                tick_size=tick_size_dec,
+                source_context="calculator_submit" if str(payload.get("pending_webhook_id") or "").strip() == "" else "calculator_webhook",
+            )
+        except BybitPreSubmitValidationError:
+            raise
 
     planned_entry_price = _parse_trigger_price(
         payload.get("planned_entry_price") or payload.get("entry_price")
@@ -11491,6 +11536,16 @@ async def _place_bybit_order(
             request_body=body,
             http_status=response_status,
             response_body=data,
+        ) from exc
+    except BybitSignedAPIError as exc:
+        raise BybitOrderRejected(
+            ret_code=exc.ret_code,
+            ret_msg=exc.ret_msg,
+            ret_ext_info=(exc.response_body or {}).get("retExtInfo"),
+            result=(exc.response_body or {}).get("result"),
+            request_body=body,
+            http_status=exc.http_status,
+            response_body=exc.response_body,
         ) from exc
     except Exception as exc:
         message = str(exc)
@@ -14674,6 +14729,73 @@ def _fmt_dec(value: Decimal) -> str:
     return text.rstrip("0").rstrip(".") if "." in text else text
 
 
+def _validate_bybit_linear_levels_before_submit(
+    *,
+    symbol: str,
+    side: str,
+    order_type: str,
+    entry_price: Optional[Decimal],
+    stop_loss: Optional[Decimal],
+    take_profit: Optional[Decimal],
+    last_price: Optional[Decimal],
+    tick_size: Optional[Decimal],
+    source_context: str,
+) -> None:
+    def _d(v: Optional[Decimal]) -> Optional[str]:
+        return _fmt_dec(v) if isinstance(v, Decimal) else None
+
+    def _raise(code: str, message: str) -> None:
+        raise BybitPreSubmitValidationError(
+            code=code,
+            message=message,
+            debug={
+                "symbol": symbol,
+                "side": side,
+                "order_type": order_type,
+                "entry_price": _d(entry_price),
+                "stop_loss_price": _d(stop_loss),
+                "take_profit_price": _d(take_profit),
+                "last_price": _d(last_price),
+                "tick_size": _d(tick_size),
+                "source_context": source_context,
+                "resolution": "Recalculate with a valid limit/SL/TP relationship before submitting.",
+            },
+        )
+
+    if entry_price is None or entry_price <= 0:
+        _raise("BYBIT_LEVELS_INVALID", "Entry price must be a positive number.")
+    if last_price is None or last_price <= 0:
+        _raise("BYBIT_LAST_PRICE_UNAVAILABLE", "Current LastPrice is unavailable for Bybit pre-submit validation.")
+    if stop_loss is not None and stop_loss <= 0:
+        _raise("BYBIT_LEVELS_INVALID", "Stop loss must be a positive number.")
+    if take_profit is not None and take_profit <= 0:
+        _raise("BYBIT_LEVELS_INVALID", "Take profit must be a positive number.")
+
+    side = str(side or "").lower()
+    order_type = str(order_type or "").lower()
+    if side == "buy":
+        if order_type == "limit" and entry_price >= last_price:
+            _raise("BYBIT_LIMIT_WOULD_FILL_IMMEDIATELY", "Buy limit entry is at or above current LastPrice. Use Market, lower the limit below current price, or add explicit conditional stop-entry support.")
+        if stop_loss is not None and stop_loss >= last_price:
+            _raise("BYBIT_STOP_LOSS_INVALID_FOR_BUY", "Bybit will reject this Buy because stop loss is not below current LastPrice.")
+        if take_profit is not None and take_profit <= last_price:
+            _raise("BYBIT_TAKE_PROFIT_INVALID_FOR_BUY", "Bybit will reject this Buy because take profit is not above current LastPrice.")
+        if stop_loss is not None and stop_loss >= entry_price:
+            _raise("BYBIT_STOP_LOSS_INVALID_FOR_BUY", "Buy stop loss must be below entry price.")
+        if take_profit is not None and take_profit <= entry_price:
+            _raise("BYBIT_TAKE_PROFIT_INVALID_FOR_BUY", "Buy take profit must be above entry price.")
+    elif side == "sell":
+        if order_type == "limit" and entry_price <= last_price:
+            _raise("BYBIT_LIMIT_WOULD_FILL_IMMEDIATELY", "Sell limit entry is at or below current LastPrice. Use Market, raise the limit above current price, or add explicit conditional stop-entry support.")
+        if stop_loss is not None and stop_loss <= last_price:
+            _raise("BYBIT_STOP_LOSS_INVALID_FOR_SELL", "Bybit will reject this Sell because stop loss is not above current LastPrice.")
+        if take_profit is not None and take_profit >= last_price:
+            _raise("BYBIT_TAKE_PROFIT_INVALID_FOR_SELL", "Bybit will reject this Sell because take profit is not below current LastPrice.")
+        if stop_loss is not None and stop_loss <= entry_price:
+            _raise("BYBIT_STOP_LOSS_INVALID_FOR_SELL", "Sell stop loss must be above entry price.")
+        if take_profit is not None and take_profit >= entry_price:
+            _raise("BYBIT_TAKE_PROFIT_INVALID_FOR_SELL", "Sell take profit must be below entry price.")
+
 def _snap_to_increment(
     value: Optional[Decimal],
     increment: Optional[Decimal],
@@ -15206,8 +15328,11 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             row = ticker_rows[0]
             bid = Decimal(str(row.get("bid1Price") or row.get("lastPrice") or "0"))
             ask = Decimal(str(row.get("ask1Price") or row.get("lastPrice") or "0"))
+            last = Decimal(str(row.get("lastPrice") or "0"))
             if bid <= 0 or ask <= 0:
                 raise HTTPException(status_code=502, detail="Bybit pricing unavailable.")
+            if last <= 0:
+                raise HTTPException(status_code=502, detail="Bybit lastPrice unavailable.")
             entry = _dec(limit_entry, "entry_price") if order_type == "limit" else (ask if side == "buy" else bid)
             if entry <= 0:
                 raise HTTPException(status_code=400, detail="entry_price must be greater than zero.")
@@ -15308,10 +15433,27 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             snapped_sl = _snap_to_increment(sl, tick_size) or sl
             snapped_tp = _snap_to_increment(tp, tick_size) or tp
             snapped_target_distance = _snap_to_increment(target_distance, tick_size) or target_distance
+            try:
+                _validate_bybit_linear_levels_before_submit(
+                    symbol=resolved_symbol,
+                    side=side,
+                    order_type=order_type,
+                    entry_price=snapped_entry,
+                    stop_loss=snapped_sl,
+                    take_profit=snapped_tp,
+                    last_price=last,
+                    tick_size=tick_size,
+                    source_context="calculator_quote",
+                )
+            except BybitPreSubmitValidationError as exc:
+                raise HTTPException(status_code=400, detail={"code": exc.code, "message": exc.message, "debug": exc.debug}) from exc
             response_payload: Dict[str, object] = {
                 "broker": "bybit",
                 "symbol": resolved_symbol,
                 "tick_size": _fmt_dec(tick_size),
+                "last_price": _fmt_dec(last),
+                "submitted_order_type": order_type,
+                "submitted_side": side,
                 "entry_price": _fmt_dec(snapped_entry),
                 "stop_price": _fmt_dec(snapped_sl),
                 "target_price": _fmt_dec(snapped_tp),
@@ -15883,6 +16025,19 @@ async def calculator_webhook(request: Request, payload: Dict[str, object] = Body
             return JSONResponse({"ok": True, "broker": "oanda", "result": result})
 
         raise HTTPException(status_code=400, detail="asset must be crypto or fx.")
+    except BybitPreSubmitValidationError as exc:
+        if pending_id:
+            _update_pending_webhook(
+                pending_id,
+                {
+                    "status": "BYBIT_PRE_SUBMIT_BLOCKED",
+                    "last_error": exc.message,
+                    "last_attempt_at": _utc_now_iso(),
+                    "request_id": request_id,
+                },
+            )
+        _update_webhook_attempt(request_id, {"status": "FAILED_BEFORE_SUBMIT", "error": exc.message, "debug": exc.debug})
+        raise HTTPException(status_code=400, detail={"code": exc.code, "message": exc.message, "debug": exc.debug}) from exc
     except ValueError as exc:
         if "pending_webhook_id is required" in str(exc):
             _update_webhook_attempt(
@@ -16163,8 +16318,28 @@ async def calculator_submit(payload: Dict[str, object] = Body(default={})) -> JS
         raise HTTPException(status_code=400, detail="asset must be crypto or fx.")
     except HTTPException:
         raise
+    except BybitPreSubmitValidationError as exc:
+        return JSONResponse({"ok": False, "code": exc.code, "message": exc.message, "debug": exc.debug}, status_code=400)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"Order submit failed: {exc}") from exc
+    except BybitOrderRejected as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "code": "BYBIT_REJECTED",
+                "message": "Bybit rejected the order.",
+                "debug": {
+                    "ret_code": exc.ret_code,
+                    "ret_msg": exc.ret_msg,
+                    "http_status": exc.http_status,
+                    "request_body": exc.request_body,
+                    "response_body": exc.response_body,
+                    "result": exc.result,
+                    "ret_ext_info": exc.ret_ext_info,
+                },
+            },
+            status_code=400,
+        )
     except BybitPostCreateProtectionError as exc:
         return JSONResponse(
             {

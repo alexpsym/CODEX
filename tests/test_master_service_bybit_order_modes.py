@@ -283,3 +283,23 @@ async def test_place_bybit_limit_order_requested_tpsl_without_absolute_levels_re
     with pytest.raises(ValueError):
         await master_service._place_bybit_order(payload, request_id="req-limit-2")
     assert called["post"] is False
+
+@pytest.mark.asyncio
+async def test_place_bybit_order_blocks_invalid_linear_levels_before_create(monkeypatch):
+    called = {'post': 0}
+    monkeypatch.setattr(master_service, '_log_webhook_event', lambda *args, **kwargs: None)
+    monkeypatch.setattr(master_service, 'resolve_bybit_credentials_for', lambda mode: (mode,'k','s','https://api.test','env'))
+    monkeypatch.setattr(master_service, '_bybit_lookup_symbol', lambda *_a, **_k: asyncio.sleep(0, result={'priceFilter': {'tickSize': '0.0001'}}))
+    async def fake_get(base, path, params):
+        if path.endswith('tickers'):
+            return {'result': {'list': [{'lastPrice': '0.4939'}]}}
+        raise AssertionError(path)
+    monkeypatch.setattr(master_service, '_bybit_get_async', fake_get)
+    async def fake_post(**kwargs):
+        called['post'] += 1
+        return {'retCode': 0, 'result': {'orderId': 'x'}}
+    monkeypatch.setattr(master_service, '_bybit_signed_post', fake_post)
+
+    with pytest.raises(master_service.BybitPreSubmitValidationError):
+        await master_service._place_bybit_order({'symbol':'PARTIUSDT','action':'buy','quantity':'1','account':'demo','trade_mode':'linear','order_type':'limit','price':'0.5313','stop_loss_price':'0.5276','take_profit_price':'0.5400'}, request_id='rid')
+    assert called['post'] == 0
