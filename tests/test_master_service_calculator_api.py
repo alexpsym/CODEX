@@ -1338,3 +1338,37 @@ def test_crypto_quote_backend_timeout_beats_frontend_timeout() -> None:
     m = re.search(r"quoteTimeoutMs\s*=\s*(\d+)", js)
     assert m
     assert int(master_service.CALCULATOR_QUOTE_TIMEOUT_S * 1000) < int(m.group(1))
+
+
+def test_webhook_attempts_filter_by_pending_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "_load_webhook_attempts", lambda: [{"pending_webhook_id":"a","status":"X"},{"pending_webhook_id":"b","status":"Y"}])
+    payload=json.loads(asyncio.run(master_service.calculator_webhook_attempts(limit=50,pending_webhook_id="b")).body.decode("utf-8"))
+    assert payload["matched_count"] == 1
+    assert payload["items"][0]["pending_webhook_id"] == "b"
+
+
+def test_webhook_diagnostic_status_variants(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "_load_webhook_attempts", lambda: [])
+    monkeypatch.setattr(master_service, "_load_pending_webhooks", lambda: [])
+    monkeypatch.setattr(master_service, "_load_trade_contexts", lambda: [])
+    payload=json.loads(asyncio.run(master_service.calculator_webhook_diagnostic("pid1")).body.decode("utf-8"))
+    assert payload["status"] == "NO_RENDER_ATTEMPT_RECORDED"
+
+    monkeypatch.setattr(master_service, "_load_pending_webhooks", lambda: [{"id":"pid1"}])
+    payload=json.loads(asyncio.run(master_service.calculator_webhook_diagnostic("pid1")).body.decode("utf-8"))
+    assert payload["status"] == "WAITING_NO_POST_RECEIVED"
+
+    monkeypatch.setattr(master_service, "_load_webhook_attempts", lambda: [{"pending_webhook_id":"pid1","status":"BYBIT_REJECTED","bybit_ret_code":1001,"bybit_ret_msg":"bad","order_id":"o1","order_link_id":"l1"}])
+    payload=json.loads(asyncio.run(master_service.calculator_webhook_diagnostic("pid1")).body.decode("utf-8"))
+    assert payload["status"] == "BYBIT_REJECTED"
+    assert payload["bybit_ret_code"] == 1001
+    assert payload["bybit_ret_msg"] == "bad"
+
+
+def test_calculator_webhook_capability_remote_render(monkeypatch: pytest.MonkeyPatch) -> None:
+    from starlette.requests import Request
+    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
+    monkeypatch.setenv("RENDER_CALCULATOR_BASE_URL", "https://codex-rdqh.onrender.com")
+    req=Request({"type":"http","method":"GET","path":"/","headers":[],"query_string":b"","client":("127.0.0.1",1),"server":("localhost",80),"scheme":"http"})
+    cap=master_service._calculator_webhook_capability(req)
+    assert cap["mode"] == "remote_render"

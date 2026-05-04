@@ -24,6 +24,8 @@ if not exist "%MASTER_ENV_FILE%" (
   exit /b 1
 )
 
+call :load_master_env_vars
+
 if /I "%~1"=="__worker" goto worker
 
 echo [local-master] APP_PROFILE=%APP_PROFILE%
@@ -135,3 +137,29 @@ echo [local-master] uvicorn exited with !EXIT_CODE! at !DATE! !TIME!
 echo [local-master] restarting in 3 seconds. Close this window to stop local master.
 timeout /t 3 /nobreak >nul
 goto restart_master
+
+:load_master_env_vars
+set "ENV_LOAD_ERROR="
+for /f "usebackq tokens=1,* delims==" %%A in (`powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$ErrorActionPreference='Stop';" ^
+  "$path='%MASTER_ENV_FILE%';" ^
+  "$allow = @('RENDER_CALCULATOR_BASE_URL','PUBLIC_WEBHOOK_BASE_URL','RENDER_EXTERNAL_URL','LOCAL_STATE_ONLY','DROPBOX_SYNC_ENABLED','DROPBOX_BACKUP_PATH','DROPBOX_STATE_ROOT');" ^
+  "if(-not (Test-Path -LiteralPath $path)){ exit 0 };" ^
+  "Get-Content -LiteralPath $path | ForEach-Object {" ^
+  "  $line = [string]$_;" ^
+  "  if([string]::IsNullOrWhiteSpace($line)){ return };" ^
+  "  $trim = $line.Trim();" ^
+  "  if($trim.StartsWith('#')){ return };" ^
+  "  $idx = $trim.IndexOf('='); if($idx -lt 1){ return };" ^
+  "  $k = $trim.Substring(0,$idx).Trim();" ^
+  "  $v = $trim.Substring($idx+1).Trim();" ^
+  "  if(($v.StartsWith('\"') -and $v.EndsWith('\"')) -or ($v.StartsWith(\"'\") -and $v.EndsWith(\"'\"))){ $v = $v.Substring(1, [Math]::Max(0,$v.Length-2)); }" ^
+  "  if($k -like 'DROPBOX_*' -or $allow -contains $k){ '{0}={1}' -f $k,$v };" ^
+  "}" 2^>nul`) do (
+  set "%%A=%%B"
+)
+if errorlevel 1 (
+  set "ENV_LOAD_ERROR=1"
+  echo [local-master] WARNING: failed to parse %MASTER_ENV_FILE% for launcher preflight variables.
+)
+goto :eof
