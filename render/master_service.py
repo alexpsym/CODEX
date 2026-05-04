@@ -16287,13 +16287,16 @@ async def trading_journal_page() -> str:
     .loading-panel { width:min(520px, calc(100% - 32px)); background:#111827; border:1px solid #1f2937; border-radius:14px; padding:16px; }
     .loading-bar { height:10px; background:#0f172a; border:1px solid #1f2937; border-radius:999px; overflow:hidden; }
     #tj-loading-bar { height:100%; width:0%; background:#2563eb; }
-    .tj-stats-dashboard { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 420px)); gap:8px; align-items:start; margin-bottom:10px; }
+    .tj-stats-dashboard { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:10px; align-items:start; margin-bottom:10px; }
+    @media (max-width: 1100px) { .tj-stats-dashboard { grid-template-columns:repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 720px) { .tj-stats-dashboard { grid-template-columns:1fr; } }
     .tj-stats-section { background:#0f172a; border:1px solid #1f2937; border-radius:10px; padding:6px 8px; }
     .tj-stats-title { font-size:12px; font-weight:700; color:#93c5fd; margin-bottom:4px; letter-spacing:.02em; }
     .tj-stats-table { width:100%; min-width:0; table-layout:fixed; border-collapse:collapse; }
-    .tj-stat-row td { padding:4px 8px; font-size:12px; line-height:1.2; border-bottom:1px solid #1f2937; white-space:nowrap; }
+    .tj-stat-row td { padding:4px 8px; font-size:12px; line-height:1.2; border-bottom:1px solid #1f2937; vertical-align:top; white-space:normal; }
     .tj-stat-label { color:#cbd5e1; overflow:hidden; text-overflow:ellipsis; }
     .tj-stat-value { text-align:right; font-variant-numeric:tabular-nums; }
+    .tj-stat-detail { color:#94a3b8; font-size:11px; line-height:1.25; text-align:left; overflow:hidden; text-overflow:ellipsis; }
     .tj-stat-positive, .tj-stat-winner { color:#86efac; }
     .tj-stat-negative, .tj-stat-loser, .tj-stat-drawdown { color:#fca5a5; }
     .tj-stat-neutral { color:#cbd5e1; }
@@ -17212,6 +17215,61 @@ def _compute_journal_stats(
     def _metric_values(rows_subset: List[Dict[str, object]], key: str) -> List[float]:
         vals = [_to_float(r.get(key)) for r in rows_subset]
         return [v for v in vals if v is not None]
+    def _trade_metric_ref(
+        row: Dict[str, object], metric_key: Optional[str] = None, metric_value: Optional[float] = None
+    ) -> Dict[str, object]:
+        return {
+            "id": row.get("id"),
+            "symbol": row.get("symbol") or row.get("symbol_raw") or row.get("instrument"),
+            "asset_class": row.get("asset_class"),
+            "side": row.get("side"),
+            "open_time": row.get("open_time"),
+            "close_time": row.get("close_time"),
+            "account": row.get("account_label") or row.get("account"),
+            "source": row.get("source"),
+            "timeframe": row.get("timeframe") or ((row.get("metrics") or {}).get("timeframe") if isinstance(row.get("metrics"), dict) else None),
+            "net_profit": _row_pnl(row),
+            "result_pct": _to_float(row.get("result_pct")),
+            "r_multiple": _to_float(row.get("r_multiple")),
+            "trade_duration_seconds": _to_float(row.get("trade_duration_seconds")),
+            "metric_key": metric_key,
+            "metric_value": metric_value,
+        }
+    def _metric_extreme_ref(rows_subset: List[Dict[str, object]], key: str, mode: str) -> Optional[Dict[str, object]]:
+        choices = []
+        for r in rows_subset:
+            v = _to_float(r.get(key))
+            if v is not None:
+                choices.append((v, str(r.get("symbol") or ""), r))
+        if not choices:
+            return None
+        picked = (min if mode == "min" else max)(choices, key=lambda t: (t[0], t[1]) if mode == "min" else (t[0], -len(t[1])))
+        return _trade_metric_ref(picked[2], key, picked[0])
+    def _duration_extreme_ref(rows_subset: List[Dict[str, object]], mode: str) -> Optional[Dict[str, object]]:
+        choices = []
+        for r in rows_subset:
+            v = _to_float(r.get("trade_duration_seconds"))
+            if v is not None and v >= 0:
+                choices.append((v, str(r.get("symbol") or ""), r))
+        if not choices:
+            return None
+        picked = (min if mode == "min" else max)(choices, key=lambda t: (t[0], t[1]) if mode == "min" else (t[0], -len(t[1])))
+        return _trade_metric_ref(picked[2], "trade_duration_seconds", picked[0])
+    def _pnl_extreme_ref(rows_subset: List[Dict[str, object]], mode: str) -> Optional[Dict[str, object]]:
+        pnl_rows = []
+        for r in rows_subset:
+            p = _row_pnl(r)
+            if p is None:
+                continue
+            if mode == "max_gain" and p > 0:
+                pnl_rows.append((p, str(r.get("symbol") or ""), r))
+            elif mode == "max_loss" and p < 0:
+                pnl_rows.append((p, str(r.get("symbol") or ""), r))
+        if not pnl_rows:
+            return None
+        picked = max(pnl_rows, key=lambda t: (t[0], t[1])) if mode == "max_gain" else min(pnl_rows, key=lambda t: (t[0], t[1]))
+        metric_value = picked[0] if mode == "max_gain" else abs(picked[0])
+        return _trade_metric_ref(picked[2], mode, metric_value)
     def _safe_min(vals: List[float]) -> Optional[float]:
         return min(vals) if vals else None
     def _safe_max(vals: List[float]) -> Optional[float]:
@@ -17245,8 +17303,12 @@ def _compute_journal_stats(
         )
 
     by_instrument: Dict[str, Dict[str, object]] = {}
-    most_wins: Dict[str, object] = {"symbol": None, "wins": -1}
-    most_losses: Dict[str, object] = {"symbol": None, "losses": -1}
+    def _pick_leader(items: List[Dict[str, object]], count_key: str, asset_class: Optional[str] = None) -> Optional[Dict[str, object]]:
+        eligible = [i for i in items if (i.get(count_key) or 0) > 0 and (asset_class is None or i.get("asset_class") == asset_class)]
+        if not eligible:
+            return None
+        best = sorted(eligible, key=lambda i: (-(i.get(count_key) or 0), -(i.get("total_trades") or 0), str(i.get("symbol") or "")))[0]
+        return {"symbol": best.get("symbol"), "wins": best.get("wins"), "losses": best.get("losses"), "total_trades": best.get("total_trades"), "asset_class": best.get("asset_class")}
 
     for row in trade_rows:
         symbol = str(row.get("symbol") or "")
@@ -17380,10 +17442,12 @@ def _compute_journal_stats(
         else:
             item["quote_currency"] = ""
         out_by_instrument.append(item)
-        if item["wins"] > most_wins["wins"]:
-            most_wins = {"symbol": item["symbol"], "wins": item["wins"]}
-        if item["losses"] > most_losses["losses"]:
-            most_losses = {"symbol": item["symbol"], "losses": item["losses"]}
+    most_wins = _pick_leader(out_by_instrument, "wins")
+    most_losses = _pick_leader(out_by_instrument, "losses")
+    fx_most_wins = _pick_leader(out_by_instrument, "wins", "fx")
+    fx_most_losses = _pick_leader(out_by_instrument, "losses", "fx")
+    crypto_most_wins = _pick_leader(out_by_instrument, "wins", "crypto")
+    crypto_most_losses = _pick_leader(out_by_instrument, "losses", "crypto")
     out_by_instrument.sort(
         key=lambda x: (-(x.get("total_trades") or 0), str(x.get("symbol") or ""))
     )
@@ -17704,6 +17768,16 @@ def _compute_journal_stats(
             "avg_duration_seconds": _avg(durations),
             "longest_duration_seconds": max(durations) if durations else None,
             "shortest_duration_seconds": min(durations) if durations else None,
+            "metric_sources": {
+                "min_result_pct": _metric_extreme_ref(rows_subset, "result_pct", "min"),
+                "max_result_pct": _metric_extreme_ref(rows_subset, "result_pct", "max"),
+                "min_r_multiple": _metric_extreme_ref(rows_subset, "r_multiple", "min"),
+                "max_r_multiple": _metric_extreme_ref(rows_subset, "r_multiple", "max"),
+                "shortest_duration_seconds": _duration_extreme_ref(rows_subset, "min"),
+                "longest_duration_seconds": _duration_extreme_ref(rows_subset, "max"),
+                "max_gain": _pnl_extreme_ref(rows_subset, "max_gain"),
+                "max_loss": _pnl_extreme_ref(rows_subset, "max_loss"),
+            },
             "instruments": len({str(r.get("symbol") or "").strip() for r in rows_subset if str(r.get("symbol") or "").strip()}),
             "max_drawdown_pct": totals.get("max_drawdown_pct") if label == "Overall" else None,
         }
@@ -17712,8 +17786,8 @@ def _compute_journal_stats(
         "totals": totals,
         "balances": balance_by_account,
         "by_instrument": out_by_instrument,
-        "instrument_with_most_wins": most_wins if most_wins["symbol"] else None,
-        "instrument_with_most_losses": most_losses if most_losses["symbol"] else None,
+        "instrument_with_most_wins": most_wins,
+        "instrument_with_most_losses": most_losses,
         "groups": {
             "overview": {
                 "trades": totals.get("trades"),
@@ -17792,10 +17866,32 @@ def _compute_journal_stats(
                 "crypto_shortest_loser_seconds": totals.get("crypto_min_loser_duration_seconds"),
                 "crypto_longest_winner_seconds": totals.get("crypto_max_winner_duration_seconds"),
                 "crypto_longest_loser_seconds": totals.get("crypto_max_loser_duration_seconds"),
+                "metric_sources": {
+                    "overall_shortest_seconds": _duration_extreme_ref(trade_rows, "min"),
+                    "overall_longest_seconds": _duration_extreme_ref(trade_rows, "max"),
+                    "fx_shortest_seconds": _duration_extreme_ref(fx_rows, "min"),
+                    "fx_longest_seconds": _duration_extreme_ref(fx_rows, "max"),
+                    "crypto_shortest_seconds": _duration_extreme_ref(crypto_rows, "min"),
+                    "crypto_longest_seconds": _duration_extreme_ref(crypto_rows, "max"),
+                    "overall_longest_winner_seconds": _duration_extreme_ref(winner_rows, "max"),
+                    "overall_longest_loser_seconds": _duration_extreme_ref(loser_rows, "max"),
+                    "fx_shortest_winner_seconds": _duration_extreme_ref(fx_winner_rows, "min"),
+                    "fx_shortest_loser_seconds": _duration_extreme_ref(fx_loser_rows, "min"),
+                    "fx_longest_winner_seconds": _duration_extreme_ref(fx_winner_rows, "max"),
+                    "fx_longest_loser_seconds": _duration_extreme_ref(fx_loser_rows, "max"),
+                    "crypto_shortest_winner_seconds": _duration_extreme_ref(crypto_winner_rows, "min"),
+                    "crypto_shortest_loser_seconds": _duration_extreme_ref(crypto_loser_rows, "min"),
+                    "crypto_longest_winner_seconds": _duration_extreme_ref(crypto_winner_rows, "max"),
+                    "crypto_longest_loser_seconds": _duration_extreme_ref(crypto_loser_rows, "max"),
+                },
             },
             "leaders": {
-                "most_wins_instrument": most_wins if most_wins["symbol"] else None,
-                "most_losses_instrument": most_losses if most_losses["symbol"] else None,
+                "most_wins_instrument": most_wins,
+                "most_losses_instrument": most_losses,
+                "fx_most_wins_instrument": fx_most_wins,
+                "fx_most_losses_instrument": fx_most_losses,
+                "crypto_most_wins_instrument": crypto_most_wins,
+                "crypto_most_losses_instrument": crypto_most_losses,
             },
         },
         "balance_after_trade_note": "Approximate unless cashflow ledger fully captures deposits/withdrawals/transfers.",
