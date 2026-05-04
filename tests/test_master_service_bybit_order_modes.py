@@ -303,3 +303,47 @@ async def test_place_bybit_order_blocks_invalid_linear_levels_before_create(monk
     with pytest.raises(master_service.BybitPreSubmitValidationError):
         await master_service._place_bybit_order({'symbol':'PARTIUSDT','action':'buy','quantity':'1','account':'demo','trade_mode':'linear','order_type':'limit','price':'0.5313','stop_loss_price':'0.5276','take_profit_price':'0.5400'}, request_id='rid')
     assert called['post'] == 0
+
+
+@pytest.mark.asyncio
+async def test_market_submit_uses_planned_entry_validation_anchor_and_no_price(monkeypatch):
+    captured = {"body": None}
+    monkeypatch.setattr(master_service, "_log_webhook_event", lambda *a, **k: None)
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda mode: (mode, "k", "s", "https://api.test", "env"))
+    monkeypatch.setattr(master_service, "_upsert_trade_context", lambda *_a, **_k: None)
+    monkeypatch.setattr(master_service, "_delete_pending_webhook", lambda _pid: False)
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setattr(master_service, "_bybit_lookup_symbol", lambda *_a, **_k: asyncio.sleep(0, result={"priceFilter": {"tickSize": "0.5"}}))
+    monkeypatch.setattr(master_service, "_bybit_get_async", lambda *_a, **_k: asyncio.sleep(0, result={"result": {"list": [{"lastPrice": "79200"}]}}))
+    monkeypatch.setattr(master_service, "_wait_for_position_entry", lambda **_k: asyncio.sleep(0, result={"size": "0.012", "avgPrice": "79300", "entryPrice": "79300", "positionIdx": 0}))
+    monkeypatch.setattr(master_service, "_fetch_bybit_positions", lambda **_k: asyncio.sleep(0, result=[]))
+    monkeypatch.setattr(master_service, "_set_bybit_trading_stop", lambda **_k: asyncio.sleep(0, result={"ok": True}))
+    async def fake_post(**kwargs):
+        captured["body"] = kwargs["body"]
+        return {"retCode": 0, "retMsg": "OK", "result": {"orderId": "1", "orderLinkId": "l1"}}
+    monkeypatch.setattr(master_service, "_bybit_signed_post", fake_post)
+    payload = {"symbol":"BTCUSDT","action":"buy","quantity":"0.012","account":"demo","trade_mode":"linear","order_type":"market","entry_price":"79300","planned_entry_price":"79300","stop_loss_price":"78784.5","take_profit_price":"79669","level_anchor_mode":"actual_fill"}
+    result = await master_service._place_bybit_order(payload, request_id="r1")
+    assert captured["body"]["orderType"] == "Market"
+    assert captured["body"]["timeInForce"] == "IOC"
+    assert "price" not in captured["body"]
+    assert captured["body"]["tpslMode"] == "Full"
+    assert captured["body"]["tpOrderType"] == "Market"
+    assert captured["body"]["slOrderType"] == "Market"
+    assert result["submit_level_adjustments"]["entry_validation_source"] == "planned_entry_price"
+
+
+@pytest.mark.asyncio
+async def test_bybit_tpsl_rejects_when_tick_size_unavailable(monkeypatch):
+    called = {"post": 0}
+    monkeypatch.setattr(master_service, "_log_webhook_event", lambda *a, **k: None)
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda mode: (mode, "k", "s", "https://api.test", "env"))
+    monkeypatch.setattr(master_service, "_bybit_lookup_symbol", lambda *_a, **_k: asyncio.sleep(0, result={"priceFilter": {}}))
+    async def fake_post(**_kwargs):
+        called["post"] += 1
+        return {"retCode": 0, "result": {"orderId": "x"}}
+    monkeypatch.setattr(master_service, "_bybit_signed_post", fake_post)
+    with pytest.raises(master_service.BybitPreSubmitValidationError) as exc:
+        await master_service._place_bybit_order({"symbol":"BTCUSDT","action":"buy","quantity":"0.01","account":"demo","trade_mode":"linear","order_type":"market","stop_loss_price":"78000","take_profit_price":"80000"}, request_id="rid-ts")
+    assert exc.value.code == "BYBIT_TICK_SIZE_UNAVAILABLE"
+    assert called["post"] == 0

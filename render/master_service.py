@@ -11372,6 +11372,26 @@ async def _round_option_price_to_tick(
     return max(rounded, tick)
 
 
+def _entry_price_for_bybit_submit_validation(
+    *,
+    order_type: str,
+    body: Dict[str, object],
+    price_val: Optional[float],
+    planned_entry_price: Optional[float],
+    last_price: Optional[Decimal],
+) -> Tuple[Optional[Decimal], str]:
+    if order_type == "limit":
+        raw = body.get("price") or price_val
+        if raw is None:
+            return None, "missing_limit_price"
+        return Decimal(str(raw)), "limit_price"
+    if planned_entry_price is not None and planned_entry_price > 0:
+        return Decimal(str(planned_entry_price)), "planned_entry_price"
+    if last_price is not None and last_price > 0:
+        return Decimal(str(last_price)), "latest_last_price_fallback"
+    return None, "missing_market_validation_anchor"
+
+
 
 
 async def _place_bybit_order(
@@ -11590,15 +11610,54 @@ async def _place_bybit_order(
     )
     if category == "linear" and order_type == "limit" and has_requested_tpsl and ("takeProfit" not in body and "stopLoss" not in body):
         raise ValueError("Bybit limit order TP/SL was requested but did not resolve to absolute takeProfit/stopLoss before order create.")
+    planned_entry_price = _parse_trigger_price(
+        payload.get("planned_entry_price") or payload.get("entry_price")
+    )
+
     if category == "linear" and ("takeProfit" in body or "stopLoss" in body):
+        src_ctx = "calculator_submit" if str(payload.get("pending_webhook_id") or "").strip() == "" else "calculator_webhook"
+        if tick_size_dec is None:
+            raise BybitPreSubmitValidationError(
+                code="BYBIT_TICK_SIZE_UNAVAILABLE",
+                message="Bybit tick size unavailable for TP/SL validation.",
+                debug={
+                    "symbol": symbol,
+                    "account": account,
+                    "category": category,
+                    "order_type": order_type,
+                    "source_context": src_ctx,
+                    "resolution": "Retry after instrument metadata is available.",
+                },
+            )
         ticker = await _bybit_get_async(base_url, "/v5/market/tickers", {"category": "linear", "symbol": symbol})
         rows = ((ticker.get("result") or {}).get("list") or []) if isinstance(ticker, dict) else []
         last_price = Decimal(str((rows[0] if rows else {}).get("lastPrice") or "0"))
-        entry_dec = Decimal(str(body.get("price") or price_val or "0"))
+        entry_dec, entry_source = _entry_price_for_bybit_submit_validation(
+            order_type=order_type,
+            body=body,
+            price_val=price_val,
+            planned_entry_price=planned_entry_price,
+            last_price=last_price,
+        )
+        if entry_dec is None or entry_dec <= 0:
+            raise BybitPreSubmitValidationError(
+                code="BYBIT_LIMIT_ENTRY_UNAVAILABLE" if order_type == "limit" else "BYBIT_MARKET_ENTRY_ANCHOR_UNAVAILABLE",
+                message="Bybit entry price anchor unavailable for TP/SL validation.",
+                debug={
+                    "symbol": symbol,
+                    "action": action,
+                    "order_type": order_type,
+                    "last_price": _format_decimal_value(last_price),
+                    "planned_entry_price": planned_entry_price,
+                    "body_has_price": "price" in body,
+                    "price_val": price_val,
+                    "source_context": src_ctx,
+                    "entry_source": entry_source,
+                },
+            )
         stop_dec = Decimal(str(body.get("stopLoss"))) if body.get("stopLoss") is not None else None
         take_dec = Decimal(str(body.get("takeProfit"))) if body.get("takeProfit") is not None else None
         try:
-            src_ctx = "calculator_submit" if str(payload.get("pending_webhook_id") or "").strip() == "" else "calculator_webhook"
             safe_entry, safe_sl, safe_tp, safe_diag = _make_bybit_levels_submit_safe(
                 symbol=symbol, side=action, order_type=order_type, entry_price=entry_dec, stop_loss=stop_dec, take_profit=take_dec, last_price=last_price, tick_size=tick_size_dec, source_context=src_ctx
             )
@@ -11608,13 +11667,11 @@ async def _place_bybit_order(
                 body["stopLoss"] = _fmt_dec(safe_sl)
             if "price" in body and safe_entry is not None:
                 body["price"] = _fmt_dec(safe_entry)
+            safe_diag["entry_validation_source"] = entry_source
             payload["_submit_level_adjustments"] = safe_diag
         except BybitPreSubmitValidationError:
             raise
 
-    planned_entry_price = _parse_trigger_price(
-        payload.get("planned_entry_price") or payload.get("entry_price")
-    )
     planned_stop_price = _parse_trigger_price(
         payload.get("planned_stop_price") or payload.get("stop_loss_price")
     )
