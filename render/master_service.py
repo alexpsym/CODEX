@@ -15132,14 +15132,16 @@ async def calculator_instrument(asset: str, account: str, symbol: str) -> JSONRe
             raise HTTPException(status_code=404, detail=f"Could not resolve Bybit symbol: {symbol}")
         resolved_symbol = str(resolved["resolved_symbol"]).upper()
         item = await _bybit_get_instrument_info_cached(base_url, "linear", resolved_symbol)
-        try:
-            await _fetch_bybit_ticker_cached(base_url, "linear", resolved_symbol)
-        except Exception:
-            pass
-        try:
-            await _fetch_bybit_balance_usdt_cached(account_norm)
-        except Exception:
-            pass
+        async def _bg_prewarm() -> None:
+            try:
+                await asyncio.gather(
+                    _fetch_bybit_ticker_cached(base_url, "linear", resolved_symbol),
+                    _fetch_bybit_balance_usdt_cached(account_norm),
+                    return_exceptions=True,
+                )
+            except Exception:
+                pass
+        asyncio.create_task(_bg_prewarm())
         if not item:
             raise HTTPException(status_code=502, detail=f"Bybit instrument meta unavailable for {resolved_symbol}.")
         return JSONResponse(
@@ -15297,31 +15299,35 @@ async def calculator_prewarm(payload: Dict[str, object] = Body(default={})) -> J
     out = {"ok": True, "asset": asset, "account": account, "symbol": symbol, "warmed": [], "missing_required": [], "timings_ms": {}}
     if asset == "crypto":
         _mode, api_key, _sec, base_url, _src = resolve_bybit_credentials_for(account)
-        if symbol:
+        async def _warm_instrument() -> None:
+            if not symbol:
+                out["instrument_status"] = "not_requested"
+                return
             await _bybit_get_instrument_info_cached(base_url, "linear", symbol, timeout_s=1.0, connect_s=0.5, read_s=1.0)
             out["warmed"].append("instrument")
             out["instrument_status"] = "ready"
-        else:
-            out["instrument_status"] = "not_requested"
-        try:
-            if symbol:
-                tick = await _fetch_bybit_ticker_cached(base_url, "linear", symbol, timeout_s=1.0)
-                out["warmed"].append("ticker")
-                out["ticker_status"] = tick.get("cache_status")
-                out["ticker_cache_age_ms"] = tick.get("cache_age_ms")
-            else:
+        async def _warm_ticker() -> None:
+            if not symbol:
                 out["ticker_status"] = "not_requested"
-        except Exception as exc:
-            out["ticker_status"] = "error"
-            out["ticker_error"] = str(exc)
-        try:
+                return
+            tick = await _fetch_bybit_ticker_cached(base_url, "linear", symbol, timeout_s=1.0)
+            out["warmed"].append("ticker")
+            out["ticker_status"] = tick.get("cache_status")
+            out["ticker_cache_age_ms"] = tick.get("cache_age_ms")
+        async def _warm_wallet() -> None:
             _snap, wallet_meta = await _fetch_bybit_balance_usdt_cached(account, timeout_s=2.0, connect_s=1.0, read_s=2.0)
             out["warmed"].append("wallet")
             out["wallet_status"] = wallet_meta.get("wallet_cache_status")
             out["wallet_cache_age_ms"] = wallet_meta.get("wallet_cache_age_ms")
-        except Exception as exc:
-            out["wallet_status"] = "error"
-            out["wallet_error"] = str(exc)
+        results = await asyncio.gather(_warm_instrument(), _warm_ticker(), _warm_wallet(), return_exceptions=True)
+        for idx, res in enumerate(results):
+            if isinstance(res, Exception):
+                if idx == 1:
+                    out["ticker_status"] = "error"; out["ticker_error"] = str(res)
+                elif idx == 2:
+                    out["wallet_status"] = "error"; out["wallet_error"] = str(res)
+                else:
+                    out["instrument_status"] = "error"; out["instrument_error"] = str(res)
         out["time_offset_status"] = ("ready" if api_key else "missing_credentials")
         out["ready_for_quote"] = bool(out.get("wallet_status") not in {"error", None} and ((not symbol) or out.get("ticker_status") not in {"error", None}))
         if not out.get("ready_for_quote"):

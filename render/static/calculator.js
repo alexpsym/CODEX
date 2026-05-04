@@ -43,6 +43,7 @@
   const webhookStatusEl = $('calc-webhook-status');
 
   let symbolTimer = null;
+  let walletPrewarmInterval = null;
   let resolveController = null;
   let resolveInFlight = null;
   let journalController = null;
@@ -115,6 +116,18 @@
     if (status.ready_for_quote) setQuoteStatus('Quote data ready');
     else if ((status.missing_required || []).includes('wallet')) setQuoteStatus('Wallet unavailable');
     else setQuoteStatus('Preparing quote data…');
+  }
+  function refreshPrewarmSchedule() {
+    if (walletPrewarmInterval) {
+      clearInterval(walletPrewarmInterval);
+      walletPrewarmInterval = null;
+    }
+    if (state.asset === 'crypto') {
+      prewarmAccountDependencies();
+      if (typeof setInterval === 'function') {
+        walletPrewarmInterval = setInterval(() => { prewarmAccountDependencies(); }, 20000);
+      }
+    }
   }
   function webhookUnavailableMessage() {
     return 'Set RENDER_CALCULATOR_BASE_URL to the Render service URL to generate Render-owned TradingView webhook alerts from the local calculator. Webhook=No calculation remains available.';
@@ -696,6 +709,9 @@
         try { await Promise.race([resolveInFlight, new Promise((r) => setTimeout(r, 800))]); } catch (_e) {}
       }
       if (state.quotePrewarmPromise) setQuoteStatus('Preparing quote data…');
+      if (state.asset === 'crypto' && state.quotePrewarmStatus && state.quotePrewarmStatus.ready_for_quote === false) {
+        throw new Error('Preparing quote data… please wait for wallet/ticker prewarm.');
+      }
       const payload = {
         ...state,
         submitted_symbol: $('calc-symbol').value,
@@ -709,6 +725,8 @@
         pending_webhook_id: state.webhook_mode === 'yes' ? (state.pendingWebhookId || undefined) : undefined,
         previous_pending_webhook_id: state.webhook_mode === 'yes' ? undefined : (state.pendingWebhookId || undefined),
       };
+      delete payload.quotePrewarmStatus;
+      delete payload.quotePrewarmPromise;
       renderRequestSummary(payload);
       const quote = await post('/api/calculator/quote', payload, { signal: state.quoteController.signal });
       if (seq !== state.quoteRequestSeq) return;
@@ -791,13 +809,14 @@
       }
       okEl.textContent = 'Order submitted successfully.';
     } catch (e) {
+      okEl.textContent = '';
       errorEl.textContent = String(e.message || e);
       renderErrorDebug(e.detail || (e.debug ? { debug: e.debug } : null));
     }
   });
 
-  setToggle('account-toggle', 'account', resolveSymbolAndLoad);
-  setToggle('asset-toggle', 'asset', () => { updateRiskUiForAsset(); resolveSymbolAndLoad(); });
+  setToggle('account-toggle', 'account', () => { refreshPrewarmSchedule(); resolveSymbolAndLoad(); });
+  setToggle('asset-toggle', 'asset', () => { updateRiskUiForAsset(); refreshPrewarmSchedule(); resolveSymbolAndLoad(); });
   setToggle('side-toggle', 'side');
   setToggle('order-toggle', 'order_type');
   setToggle('risk-toggle', 'risk_mode');
@@ -814,6 +833,7 @@
     webhookYesBtn.title = 'Checking webhook availability…';
   }
   loadBootstrapCapability().finally(syncAllToggleStates);
+  refreshPrewarmSchedule();
   setSubmitState({ visible: false, enabled: false, reason: '', stateName: 'idle' });
   toggleWebhookPanel(false);
   setJournalState('idle', 'Type a symbol to load journal summary.');
