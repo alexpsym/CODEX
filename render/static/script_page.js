@@ -338,7 +338,8 @@
         targetPriceInput.min = '0';
         targetPriceInput.step = '0.0001';
 
-        const messageInput = document.createElement('input');
+        const expirySelect = form.querySelector('[data-alert-expiry]');
+            const messageInput = document.createElement('input');
         messageInput.type = 'text';
         messageInput.placeholder = 'Optional Telegram note (fixed price alerts only)';
         messageInput.maxLength = 500;
@@ -520,7 +521,7 @@
                 toggleBtn.addEventListener('click', async () => {
                     toggleBtn.disabled = true;
                     try {
-                        await fetchJson(`/api/${monitor}-monitor/custom-alerts/${alert.id}/enabled`, {
+                        await fetchJson(`/api/${monitor}-alerts/custom-alerts/${alert.id}/enabled`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ enabled: !alert.enabled }),
@@ -565,7 +566,7 @@
                     if (!confirm('Delete this alert?')) return;
                     deleteBtn.disabled = true;
                     try {
-                        await fetchJson(`/api/${monitor}-monitor/custom-alerts/${alert.id}`, {
+                        await fetchJson(`/api/${monitor}-alerts/custom-alerts/${alert.id}`, {
                             method: 'DELETE',
                         });
                         await loadAlerts();
@@ -587,7 +588,7 @@
         const loadAlerts = async () => {
             setSettingsBadge(statusBadge, 'Loading...');
             try {
-                const data = await fetchJson(`/api/${monitor}-monitor/custom-alerts`, {
+                const data = await fetchJson(`/api/${monitor}-alerts/custom-alerts`, {
                     headers: { 'Cache-Control': 'no-store' },
                 });
                 renderAlerts(data.alerts || []);
@@ -665,7 +666,7 @@
                     payload.window_seconds = windowSeconds;
                 }
                 setSettingsBadge(statusBadge, 'Saving...');
-                await fetchJson(`/api/${monitor}-monitor/custom-alerts`, {
+                await fetchJson(`/api/${monitor}-alerts/custom-alerts`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload),
@@ -694,7 +695,7 @@
         if (!isBybitMonitor || !settingsCard) return;
         settingsCard.style.display = 'block';
         try {
-            const resp = await fetch('/api/bybit-monitor/settings');
+            const resp = await fetch('/api/bybit-alerts/settings');
             if (!resp.ok) {
                 throw new Error(`Failed to load settings (${resp.status})`);
             }
@@ -716,7 +717,7 @@
         if (!isOandaMonitor || !oandaSettingsCard) return;
         oandaSettingsCard.style.display = 'block';
         try {
-            const resp = await fetch('/api/oanda-monitor/settings');
+            const resp = await fetch('/api/oanda-alerts/settings');
             if (!resp.ok) {
                 throw new Error(`Failed to load settings (${resp.status})`);
             }
@@ -747,7 +748,7 @@
         setSettingsBadge(settingsStatus, 'Saving...');
 
         try {
-            const resp = await fetch('/api/bybit-monitor/settings', {
+            const resp = await fetch('/api/bybit-alerts/settings', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
@@ -786,7 +787,7 @@
         setSettingsBadge(oandaSettingsStatus, 'Saving...');
 
         try {
-            const resp = await fetch('/api/oanda-monitor/settings', {
+            const resp = await fetch('/api/oanda-alerts/settings', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
@@ -817,7 +818,7 @@
         if (testAlertBtn) testAlertBtn.disabled = true;
         setSettingsBadge(settingsStatus, 'Sending test...');
         try {
-            const resp = await fetch('/api/bybit-monitor/push-test', { method: 'POST' });
+            const resp = await fetch('/api/bybit-alerts/push-test', { method: 'POST' });
             const payloadText = await resp.text();
             if (!resp.ok) {
                 throw new Error(payloadText || `Test failed (${resp.status})`);
@@ -844,7 +845,7 @@
         if (oandaTestAlertBtn) oandaTestAlertBtn.disabled = true;
         setSettingsBadge(oandaSettingsStatus, 'Sending test...');
         try {
-            const resp = await fetch('/api/oanda-monitor/push-test', { method: 'POST' });
+            const resp = await fetch('/api/oanda-alerts/push-test', { method: 'POST' });
             const payloadText = await resp.text();
             if (!resp.ok) {
                 throw new Error(payloadText || `Test failed (${resp.status})`);

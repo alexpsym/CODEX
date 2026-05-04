@@ -292,9 +292,9 @@
     let dotTitle = processTitle;
     if (isMonitor) {
       dotState = processRunning ? 'running' : (processStarting ? 'starting' : 'stopped');
-      processTitle = processRunning ? 'Scanner running' : (processStarting ? 'Scanner starting' : 'Scanner stopped');
+      processTitle = processRunning ? 'Alerts running' : (processStarting ? 'Alerts starting' : 'Alerts stopped');
       if (!processRunning && stopReason) {
-        processTitle = `Scanner stopped: ${stopReason}`;
+        processTitle = `Alerts stopped: ${stopReason}`;
       }
       if (typeof script.status_detail === 'string' && script.status_detail.trim()) {
         processTitle = script.status_detail.trim();

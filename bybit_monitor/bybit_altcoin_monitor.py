@@ -101,9 +101,9 @@ def ensure_local_only_execution() -> None:
     if present:
         joined = ", ".join(present)
         raise SystemExit(
-            "Scanner is local-only and cannot run on Render/server env; "
+            "Alerts are local-only and cannot run on Render/server env; "
             f"detected environment variable(s): {joined}. "
-            "Run run_scanner_local.bat on your PC."
+            "Run run_local_master_control.bat on your PC."
         )
 
 
@@ -1265,7 +1265,7 @@ def run_monitor() -> None:
         settings = get_runtime_settings()
         if settings != last_logged_settings:
             log(
-                "Monitor settings: "
+                "Alerts settings: "
                 f"wait_seconds={settings['wait_seconds']}s, "
                 f"percent_threshold={settings['percent_threshold']:.2f}%"
             )
@@ -1341,7 +1341,7 @@ def run_monitor() -> None:
         )
         if suppress_alerts_for_gap:
             log(
-                "Detected long scanner gap (sleep/resume). Resetting baseline; "
+                "Detected long alerts gap (sleep/resume). Resetting baseline; "
                 "suppressing alerts for this cycle. "
                 f"gap_seconds={scanner_gap_seconds:.1f}, threshold_seconds={resume_reset_after_seconds}."
             )
@@ -1362,7 +1362,7 @@ def run_monitor() -> None:
                 previous_prices = prices
                 price_history = {sym: deque([(now_ts, float(px))]) for sym, px in prices.items()}
                 last_successful_scan_at = now_ts
-                log("Baseline has been rebuilt after scanner gap; alerts resume on next normal cycle.")
+                log("Baseline has been rebuilt after alerts gap; alerts resume on next normal cycle.")
                 log(
                     "Waiting "
                     f"{settings['wait_seconds'] // 60} minute(s) ({settings['wait_seconds']} seconds) "
@@ -1437,7 +1437,7 @@ def main() -> None:
     """Entry point for the monitor."""
     ensure_local_only_execution()
     log(format_env_bootstrap_log(_ENV_BOOTSTRAP_INFO))
-    log("Bybit perpetual futures monitor started.")
+    log("Bybit Alerts started.")
     settings = get_runtime_settings(force=True)
     log(
         "The script asks Bybit for every linear perpetual price and raises alerts when the "
