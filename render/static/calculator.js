@@ -19,6 +19,8 @@
     quoteRequestSeq: 0,
     quoteController: null,
     webhookCapability: null,
+    quotePrewarmStatus: null,
+    quotePrewarmPromise: null,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -106,6 +108,13 @@
 
   function setQuoteStatus(text) {
     if (quoteStatusEl) quoteStatusEl.textContent = text || '';
+  }
+  function setPrewarmStatus(status) {
+    state.quotePrewarmStatus = status || null;
+    if (!status) return;
+    if (status.ready_for_quote) setQuoteStatus('Quote data ready');
+    else if ((status.missing_required || []).includes('wallet')) setQuoteStatus('Wallet unavailable');
+    else setQuoteStatus('Preparing quote data…');
   }
   function webhookUnavailableMessage() {
     return 'Set RENDER_CALCULATOR_BASE_URL to the Render service URL to generate Render-owned TradingView webhook alerts from the local calculator. Webhook=No calculation remains available.';
@@ -586,8 +595,18 @@
   async function prewarmQuoteDependencies(symbol) {
     try {
       if (!symbol) return;
-      await post('/api/calculator/prewarm', { asset: state.asset, account: state.account, symbol });
+      state.quotePrewarmPromise = post('/api/calculator/prewarm', { asset: state.asset, account: state.account, symbol });
+      setPrewarmStatus(await state.quotePrewarmPromise);
     } catch (_e) {}
+    finally { state.quotePrewarmPromise = null; }
+  }
+  async function prewarmAccountDependencies() {
+    try {
+      if (state.asset !== 'crypto') return;
+      state.quotePrewarmPromise = post('/api/calculator/prewarm-account', { asset: state.asset, account: state.account });
+      setPrewarmStatus(await state.quotePrewarmPromise);
+    } catch (_e) {}
+    finally { state.quotePrewarmPromise = null; }
   }
 
   function debounceSymbolResolve() {
@@ -642,10 +661,10 @@
     const quoteTimeoutMs = 15000;
     state.quoteRequestSeq += 1;
     const seq = state.quoteRequestSeq;
-    const softTimeoutId = setTimeout(() => {
+    const softTimeoutId = setTimeout(() => Promise.resolve().then(() => {
       if (seq === state.quoteRequestSeq) setQuoteStatus('Still calculating… waiting for upstream quote dependencies.');
-    }, quoteSoftTimeoutMs);
-    const timeoutId = setTimeout(() => state.quoteController && state.quoteController.abort(), quoteTimeoutMs);
+    }), quoteSoftTimeoutMs);
+    const timeoutId = setTimeout(() => Promise.resolve().then(() => state.quoteController && state.quoteController.abort()), quoteTimeoutMs);
     state.hasCalculatedOnce = true;
     const quoteBtn = $('calc-quote');
     const defaultLabel = quoteBtn.dataset.defaultLabel || quoteBtn.textContent || 'Calculate';
@@ -676,6 +695,7 @@
       if (!state.resolvedSymbol && resolveInFlight) {
         try { await Promise.race([resolveInFlight, new Promise((r) => setTimeout(r, 800))]); } catch (_e) {}
       }
+      if (state.quotePrewarmPromise) setQuoteStatus('Preparing quote data…');
       const payload = {
         ...state,
         submitted_symbol: $('calc-symbol').value,
