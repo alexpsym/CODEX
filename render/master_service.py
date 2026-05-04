@@ -14952,7 +14952,7 @@ async def _bybit_name_aliases_for_choices(base_url: str, symbols: List[str] | Se
     return out
 
 
-async def _fetch_bybit_balance_usdt(account: str, timeout_s: float = 5.0) -> Dict[str, Decimal]:
+async def _fetch_bybit_balance_usdt(account: str, timeout_s: float = 5.0, connect_s: float = 2.0, read_s: Optional[float] = None) -> Dict[str, Decimal]:
     _mode, api_key, api_secret, base_url, _src = resolve_bybit_credentials_for(account)
     if not api_key or not api_secret:
         raise HTTPException(status_code=500, detail="Bybit credentials are missing for selected account.")
@@ -14965,8 +14965,8 @@ async def _fetch_bybit_balance_usdt(account: str, timeout_s: float = 5.0) -> Dic
             path=path,
             params={"accountType": "UNIFIED", "coin": "USDT"},
             timeout_s=timeout_s,
-            connect_s=2.0,
-            read_s=timeout_s,
+            connect_s=connect_s,
+            read_s=(read_s if read_s is not None else timeout_s),
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Bybit balance lookup failed path={path}: {exc}") from exc
@@ -15335,6 +15335,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                 direct_inst = await _bybit_get_instrument_info_cached(base_url, "linear", raw_symbol)
                 if direct_inst:
                     resolved_symbol = raw_symbol
+                    resolved_symbol_for_debug = resolved_symbol
                     resolved_inst_row = direct_inst
                     timings_ms["bybit_instrument_cache_hit"] = True
             candidates: List[str] = []
@@ -15348,6 +15349,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                 timings_ms["bybit_instruments_info_ms"] = timings_ms.get("bybit_instruments_info_ms", 0) + int((time.perf_counter() - direct_started) * 1000)
                 if inst_direct:
                     resolved_symbol = candidate
+                    resolved_symbol_for_debug = resolved_symbol
                     resolved_inst_row = inst_direct
                     break
             if not resolved_symbol:
@@ -15365,6 +15367,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                     if name_aliases:
                         resolved = resolve_bybit_symbol_from_choices(symbol_in, choices, extra_aliases=name_aliases)
                 resolved_symbol = str((resolved or {}).get("resolved_symbol") or "").upper()
+                resolved_symbol_for_debug = resolved_symbol or resolved_symbol_for_debug
             timings_ms["symbol_resolution_ms"] = int((time.perf_counter() - symbol_resolution_started) * 1000)
             if not resolved_symbol:
                 raise HTTPException(status_code=404, detail=f"Could not resolve Bybit symbol: {symbol_in}")
@@ -15920,7 +15923,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             raise HTTPException(status_code=exc.status_code, detail=detail)
         raise HTTPException(status_code=exc.status_code, detail=_calculator_quote_error_detail("QUOTE_FAILED", str(detail), timings_ms=timings_ms, quote_started=quote_started, submitted_payload=submitted_debug, resolved_symbol=resolved_symbol_for_debug, pending_dependencies=pending_dependencies))
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=_calculator_quote_error_detail("QUOTE_FAILED", str(exc), timings_ms=timings_ms, quote_started=quote_started, submitted_payload=submitted_debug, resolved_symbol=resolved_symbol_for_debug, pending_dependencies=pending_dependencies)) from exc
+        raise HTTPException(status_code=502, detail=_calculator_quote_error_detail("INTERNAL_CALCULATOR_ERROR", str(exc), timings_ms=timings_ms, quote_started=quote_started, submitted_payload=submitted_debug, resolved_symbol=resolved_symbol_for_debug, pending_dependencies=pending_dependencies)) from exc
 
 
 def _get_oanda_quote_home_factors(
