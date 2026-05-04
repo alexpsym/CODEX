@@ -41,6 +41,36 @@ def test_merged_monitor_html_removed_controls_and_logs(monkeypatch: pytest.Monke
     assert 'Bybit monitor controls' not in html
     assert 'OANDA monitor controls' not in html
     assert "polls local scanner status every 2 seconds" in html
+    assert "/static/merged_alerts.js?v=" in html
+    assert "/static/merged_monitor.js" not in html
+    assert response.headers.get("Cache-Control") == "no-store, no-cache, must-revalidate, max-age=0"
+    assert response.headers.get("Pragma") == "no-cache"
+
+
+def test_merged_monitor_page_uses_static_asset_version_helper(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("APP_BUILD_STAMP", raising=False)
+    monkeypatch.delenv("RENDER_GIT_COMMIT", raising=False)
+    monkeypatch.setattr(master_service, "APP_PROFILE", "local")
+    response = asyncio.run(master_service.merged_monitor_page())
+    html = response.body.decode("utf-8")
+    assert "/static/merged_alerts.js?v=" in html
+    assert "/static/merged_alerts.js?v=1.0" not in html
+
+
+def test_static_asset_version_is_stable_and_changes_on_edit(tmp_path: Path) -> None:
+    monkeypatch_base = tmp_path
+    target = monkeypatch_base / "sample.js"
+    target.write_text("console.log('a');", encoding="utf-8")
+    original_base = master_service.BASE_DIR
+    master_service.BASE_DIR = monkeypatch_base
+    rel = "sample.js"
+    v1 = master_service._static_asset_version(rel)
+    v2 = master_service._static_asset_version(rel)
+    assert v1 and v1 == v2
+    target.write_text("console.log('b');", encoding="utf-8")
+    v3 = master_service._static_asset_version(rel)
+    assert v3 != v1
+    master_service.BASE_DIR = original_base
 
 
 def test_merged_monitor_js_avoids_script_and_log_endpoints() -> None:

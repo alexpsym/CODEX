@@ -171,7 +171,7 @@
                 table.appendChild(tbody);
                 setSettingsBadge(statusBadge, 'Loaded');
             } catch (err) {
-                console.error(err); setSettingsBadge(statusBadge, 'Alerts load failed', true); window.alert(err.message || 'Unable to load custom alerts');
+                console.error(err); const detail = err?.message || 'Unable to load custom alerts'; setSettingsBadge(statusBadge, `Alerts load failed: ${detail}`, true);
             }
         };
 
@@ -215,7 +215,13 @@
         let statusSeq = 0;
         let settingsSeq = 0;
 
-        const customAlerts = setupCustomAlerts({ container: customAlertsContainer, getMonitor });
+        let customAlerts = { loadAlerts: async () => {}, resetForMonitor: () => {} };
+        try {
+            customAlerts = setupCustomAlerts({ container: customAlertsContainer, getMonitor });
+        } catch (err) {
+            console.error('Custom alerts UI init failed', err);
+            if (customAlertsContainer) customAlertsContainer.textContent = `Alerts load failed: ${err?.message || String(err)}`;
+        }
         const setRunningState = (state) => { const running = state === 'running'; const unavailable = state === 'unavailable'; if (statusEl) { statusEl.textContent = running ? 'Running' : (unavailable ? 'Status unavailable' : 'Stopped'); statusEl.style.background = running ? '#14532d' : (unavailable ? '#7f1d1d' : '#1f2937'); } };
         const updateHealth = (payload) => { if (!healthEl) return; const phase = String(payload?.phase || 'unknown'); const heartbeat = String(payload?.last_heartbeat_at || 'n/a'); const heartbeatFresh = payload?.heartbeat_fresh === true ? 'yes' : (payload?.heartbeat_fresh === false ? 'no' : 'unknown'); const pidAlive = payload?.pid_alive === true ? 'yes' : (payload?.pid_alive === false ? 'no' : 'unknown'); const reason = payload?.reason ? ` | Reason: ${payload.reason}` : ''; const error = payload?.error ? ` | Error: ${payload.error}` : ''; healthEl.textContent = `Phase: ${phase} | Heartbeat: ${heartbeat} | Fresh: ${heartbeatFresh} | PID alive: ${pidAlive}${reason}${error}`; };
 
@@ -253,8 +259,8 @@
         const statusEl = document.getElementById('monitor-status');
         const healthEl = document.getElementById('monitor-health');
         const settingsStatus = document.getElementById('monitor-settings-status');
-        if (statusEl) statusEl.textContent = 'Page init failed';
+        if (statusEl) { statusEl.textContent = 'Page init failed'; statusEl.style.background = '#7f1d1d'; statusEl.style.color = '#fecdd3'; }
         if (healthEl) healthEl.textContent = `Init error: ${err?.message || String(err)}`;
-        setSettingsBadge(settingsStatus, 'Init failed', true);
+        setSettingsBadge(settingsStatus, `Init failed: ${err?.message || String(err)}`, true);
     });
 })();

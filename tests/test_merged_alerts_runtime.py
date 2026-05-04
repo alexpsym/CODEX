@@ -16,9 +16,11 @@ def test_merged_alerts_js_syntax() -> None:
 
 def test_merged_alerts_source_has_no_expiry_form_artifacts() -> None:
     src = MERGED_ALERTS.read_text(encoding='utf-8')
-    assert "form.querySelector('[data-alert-expiry]')" not in src
-    assert 'expirySelect?.value' not in src
+    assert "form.querySelector" not in src
+    assert 'expirySelect' not in src
     assert 'expiry_choice' not in src
+    assert 'data-alert-expiry' not in src
+    assert 'form.' not in src
 
 
 def test_merged_alerts_runtime_init_and_telegram_paths() -> None:
@@ -65,6 +67,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 (async () => {
   await sleep(0);
   if (elements['monitor-status'].textContent === 'Checking…' || elements['monitor-status'].textContent === 'Checking...') throw new Error('status did not update');
+  if (!elements['monitor-custom-alerts'].children.length) throw new Error('custom alerts controls not rendered');
   const testBtn = elements['monitor-test-alert'];
   testBtn.listeners['click']({preventDefault(){}});
   await sleep(0);

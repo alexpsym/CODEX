@@ -73,7 +73,7 @@ def test_scanner_merged_routes_work_locally(monkeypatch: pytest.MonkeyPatch) -> 
     assert "Monitor controls" in html
     assert 'id="monitor-target"' in html
     assert 'id="monitor-status" class="badge">Checking…</span>' in html
-    assert "/static/merged_monitor.js" in html
+    assert "/static/merged_alerts.js?v=" in html
     assert 'id="bybit-start-btn"' not in html
     assert 'id="oanda-start-btn"' not in html
     assert 'id="bybit-log-box"' not in html
