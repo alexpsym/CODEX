@@ -1337,7 +1337,11 @@ def test_crypto_quote_backend_timeout_beats_frontend_timeout() -> None:
     import re
     m = re.search(r"quoteTimeoutMs\s*=\s*(\d+)", js)
     assert m
-    assert int(master_service.CALCULATOR_QUOTE_TIMEOUT_S * 1000) < int(m.group(1))
+    frontend_timeout_ms = int(m.group(1))
+    backend_timeout_ms = int(master_service.CALCULATOR_QUOTE_TIMEOUT_S * 1000)
+    assert frontend_timeout_ms <= 15000
+    assert backend_timeout_ms <= 4500
+    assert backend_timeout_ms < frontend_timeout_ms
 
 
 def test_webhook_attempts_filter_by_pending_id(monkeypatch: pytest.MonkeyPatch) -> None:
