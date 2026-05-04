@@ -1402,3 +1402,36 @@ def test_calculator_quote_rejects_buy_limit_above_last(monkeypatch: pytest.Monke
         asyncio.run(master_service.calculator_quote({'asset':'crypto','account':'live','symbol':'PARTI','side':'buy','order_type':'limit','entry_price':'0.5313','risk_mode':'percent','risk_value':1,'stop_loss_ticks':37,'take_profit_ticks':74}))
     assert exc.value.status_code == 400
     assert exc.value.detail['code'] in {'BYBIT_LIMIT_WOULD_FILL_IMMEDIATELY','BYBIT_STOP_LOSS_INVALID_FOR_BUY'}
+
+def _mock_bybit_quote_env(monkeypatch, *, tick='0.00001', bid='0.04921', ask='0.04923', last='0.04922'):
+    monkeypatch.setattr(master_service, 'resolve_bybit_credentials_for', lambda _a: ('live','k','s','https://bybit.test','KEY1'))
+    monkeypatch.setattr(master_service, '_bybit_get_symbols_by_category_cached', lambda *_args, **_kwargs: asyncio.sleep(0, result=['PARTIUSDT','BTCUSDT']))
+    monkeypatch.setattr(master_service, '_fetch_oanda_mid_prices_batch', lambda **_kwargs: asyncio.sleep(0, result={'AUD_USD': 1}))
+    async def fake_get(_base, path, _params):
+        if path.endswith('instruments-info'):
+            return {'result': {'list': [{'priceFilter': {'tickSize': tick}, 'lotSizeFilter': {'qtyStep': '1', 'minOrderQty': '1', 'maxOrderQty': '999999', 'maxMktOrderQty': '999999', 'minNotionalValue': '1'}, 'leverageFilter': {'maxLeverage': '50'}}]}}
+        return {'result': {'list': [{'bid1Price': bid, 'ask1Price': ask, 'lastPrice': last}]}}
+    async def fake_signed_get(**kwargs):
+        if kwargs.get('path','').endswith('fee-rate'):
+            return {'result': {'list': [{'makerFeeRate': '0.0002', 'takerFeeRate': '0.00055'}]}}
+        return {'result': {'list': [{'totalEquity': '10000', 'totalAvailableBalance': '10000', 'coin': [{'coin': 'USDT', 'availableToTrade': '10000'}]}]}}
+    monkeypatch.setattr(master_service, '_bybit_get_async', fake_get)
+    monkeypatch.setattr(master_service, '_bybit_signed_get', fake_signed_get)
+
+
+def test_bybit_sell_limit_auto_adjusts_take_profit_below_last(monkeypatch):
+    _mock_bybit_quote_env(monkeypatch)
+    body = json.loads(asyncio.run(master_service.calculator_quote({'asset':'crypto','account':'live','symbol':'PARTI','side':'sell','order_type':'limit','entry_price':'0.05313','risk_mode':'percent','risk_value':1,'stop_loss_ticks':37,'take_profit_ticks':94,'webhook':'yes'})).body.decode())
+    assert float(body['target_price']) < float(body['last_price'])
+    assert float(body['target_price']) < float(body['entry_price'])
+    assert body['take_profit_adjusted'] is True
+    wh = json.loads(body['webhook_payload_json'])
+    assert wh['take_profit_price'] == body['target_price']
+
+
+def test_bybit_buy_limit_auto_adjusts_take_profit_above_last(monkeypatch):
+    _mock_bybit_quote_env(monkeypatch, tick='0.1', bid='99.9', ask='100.1', last='100')
+    body = json.loads(asyncio.run(master_service.calculator_quote({'asset':'crypto','account':'live','symbol':'BTC','side':'buy','order_type':'limit','entry_price':'95','risk_mode':'percent','risk_value':1,'stop_loss_ticks':20,'take_profit_ticks':10})).body.decode())
+    assert float(body['target_price']) > float(body['last_price'])
+    assert float(body['target_price']) > float(body['entry_price'])
+    assert body['take_profit_adjusted'] is True

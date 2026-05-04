@@ -312,6 +312,14 @@
       ['Requested net R', fmtR(q.requested_rr_net)], ['Effective net R', fmtR(q.effective_rr_net)],
       ['Fee buffer (R)', fmtR(q.fee_buffer_r)],
     ];
+    if (q.take_profit_adjusted && q.take_profit_adjustment) {
+      const adj = q.take_profit_adjustment;
+      rows.push(['TP auto-adjusted', 'Yes']);
+      rows.push(['TP original', fmtPriceLike(adj.original_take_profit, tickSize)]);
+      rows.push(['TP adjusted', fmtPriceLike(adj.adjusted_take_profit, tickSize)]);
+      rows.push(['TP reason', adj.reason || '-']);
+      rows.push(['TP last price anchor', fmtPriceLike(adj.last_price, tickSize)]);
+    }
     if (Array.isArray(q.warnings) && q.warnings.length) {
       rows.push(['Warnings', q.warnings.map((w) => String(w || '').replace(/\s+/g, ' ').trim()).join(' | ')]);
     }
