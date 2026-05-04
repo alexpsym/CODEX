@@ -6,6 +6,7 @@ import json
 import math
 import time
 import traceback
+import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -26,7 +27,7 @@ def _normalize_max_retries(raw: Any) -> int:
         value = int(str(raw).strip())
     except Exception:
         value = 2
-    return max(1, min(3, value))
+    return max(1, min(4, value))
 
 
 def _normalize_offset_ttl_seconds(raw: Any) -> int:
@@ -38,7 +39,7 @@ def _normalize_offset_ttl_seconds(raw: Any) -> int:
 
 
 BYBIT_RECV_WINDOW_MS = _normalize_bybit_recv_window_ms(__import__("os").getenv("BYBIT_RECV_WINDOW", "15000"))
-BYBIT_SIGNED_REQUEST_MAX_RETRIES = _normalize_max_retries(__import__("os").getenv("BYBIT_SIGNED_REQUEST_MAX_RETRIES", "2"))
+BYBIT_SIGNED_REQUEST_MAX_RETRIES = _normalize_max_retries(__import__("os").getenv("BYBIT_SIGNED_REQUEST_MAX_RETRIES", "3"))
 BYBIT_TIME_OFFSET_TTL_SECONDS = _normalize_offset_ttl_seconds(__import__("os").getenv("BYBIT_TIME_OFFSET_TTL_SECONDS", "300"))
 _BYBIT_TIME_OFFSET_CACHE: Dict[str, Dict[str, float]] = {}
 BRISBANE_TZ = ZoneInfo("Australia/Brisbane")
@@ -193,6 +194,9 @@ async def _bybit_signed_get(
     query = _build_bybit_query(params)
     recv_window = _bybit_recv_window_str()
     url = f"{normalized_base}{path}" + (f"?{query}" if query else "")
+    transient_http_status = {429, 500, 502, 503, 504}
+    network_errors = tuple(e for e in (getattr(httpx, "RemoteProtocolError", None), getattr(httpx, "ReadTimeout", None), getattr(httpx, "ConnectTimeout", None), getattr(httpx, "ConnectError", None), getattr(httpx, "NetworkError", None)) if e is not None)
+    last_exc = None
     for attempt in range(1, BYBIT_SIGNED_REQUEST_MAX_RETRIES + 1):
         timestamp = await _bybit_timestamp_ms(normalized_base, force_time_sync=(attempt > 1), logger=logger)
         signature = _bybit_sign_request(timestamp, api_key, api_secret, query, recv_window)
@@ -201,21 +205,38 @@ async def _bybit_signed_get(
             async with httpx.AsyncClient(timeout=12) as client:
                 resp = await client.get(url, headers=headers)
             status_code = resp.status_code
+            if status_code in transient_http_status and attempt < BYBIT_SIGNED_REQUEST_MAX_RETRIES:
+                delay = min(2.0, 0.25 * (2 ** (attempt - 1))) + (0.05 * attempt)
+                if logger:
+                    logger.warning("MONTHLY_AUD_REVAL_BYBIT_RETRY path=%s query=%s attempt=%s status=%s delay=%s", path, query, attempt, status_code, delay)
+                await _get_bybit_time_offset_ms(normalized_base, force_refresh=True, logger=logger)
+                await asyncio.sleep(delay)
+                continue
             resp.raise_for_status()
             payload = resp.json()
+        except network_errors as exc:
+            last_exc = exc
+            if attempt < BYBIT_SIGNED_REQUEST_MAX_RETRIES:
+                delay = min(2.0, 0.25 * (2 ** (attempt - 1))) + (0.05 * attempt)
+                if logger:
+                    logger.warning("MONTHLY_AUD_REVAL_BYBIT_RETRY path=%s query=%s attempt=%s error=%s delay=%s", path, query, attempt, exc.__class__.__name__, delay)
+                await _get_bybit_time_offset_ms(normalized_base, force_refresh=True, logger=logger)
+                await asyncio.sleep(delay)
+                continue
+            raise MonthlyAudRevalError("MONTHLY_AUD_REVAL_BYBIT_BALANCE_ERROR", f"Bybit GET failed path={path} query={query} attempts={attempt} error={exc}", stage="bybit_request") from exc
         except Exception as exc:
             raise MonthlyAudRevalError("MONTHLY_AUD_REVAL_BYBIT_BALANCE_ERROR", f"Bybit GET failed path={path} query={query} error={exc}", stage="bybit_request") from exc
         ret_code = payload.get("retCode")
         ret_msg = payload.get("retMsg")
         if ret_code in (0, "0"):
             return payload
-        if _bybit_timestamp_window_error(ret_code, ret_msg) and attempt < BYBIT_SIGNED_REQUEST_MAX_RETRIES:
-            if logger:
-                logger.warning("MONTHLY_AUD_REVAL_BYBIT_SIGNED_RETRY path=%s attempt=%s reason=timestamp_window recv_window=%s", path, attempt, recv_window)
+        if (_bybit_timestamp_window_error(ret_code, ret_msg) or status_code in transient_http_status) and attempt < BYBIT_SIGNED_REQUEST_MAX_RETRIES:
+            await _get_bybit_time_offset_ms(normalized_base, force_refresh=True, logger=logger)
+            await asyncio.sleep(min(2.0, 0.2 * (2 ** (attempt - 1))))
             continue
         diag = _extract_bybit_timestamp_diag(ret_msg)
-        raise MonthlyAudRevalError("MONTHLY_AUD_REVAL_BYBIT_BALANCE_ERROR", f"Bybit GET retCode failure path={path} status={status_code} retCode={ret_code} retMsg={ret_msg} recv_window={recv_window} {diag}".strip(), stage="bybit_request")
-    raise MonthlyAudRevalError("MONTHLY_AUD_REVAL_BYBIT_BALANCE_ERROR", f"Bybit GET failed path={path} query={query}", stage="bybit_request")
+        raise MonthlyAudRevalError("MONTHLY_AUD_REVAL_BYBIT_BALANCE_ERROR", f"Bybit GET retCode failure path={path} status={status_code} retCode={ret_code} retMsg={ret_msg} attempts={attempt} recv_window={recv_window} {diag}".strip(), stage="bybit_request")
+    raise MonthlyAudRevalError("MONTHLY_AUD_REVAL_BYBIT_BALANCE_ERROR", f"Bybit GET failed path={path} query={query} attempts={BYBIT_SIGNED_REQUEST_MAX_RETRIES} last={last_exc}", stage="bybit_request")
 
 
 async def _fetch_transaction_pages(
@@ -385,15 +406,21 @@ async def _has_account_activity_since(
 ) -> bool:
     if boundary_ms > now_ms:
         return False
-    rows = await _fetch_transaction_rows_range(
-        base_url=base_url,
-        api_key=api_key,
-        api_secret=api_secret,
-        start_ms=boundary_ms,
-        end_ms=now_ms,
-        logger=logger,
-    )
-    return len(rows) > 0
+    current_end = now_ms
+    while current_end >= boundary_ms:
+        current_start = max(boundary_ms, current_end - SEVEN_DAYS_MS + 1)
+        rows = await _fetch_transaction_pages(
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            start_time=current_start,
+            end_time=current_end,
+            logger=logger,
+        )
+        if rows:
+            return True
+        current_end = current_start - 1
+    return False
 
 
 async def _get_latest_balance_on_or_before(
@@ -836,8 +863,13 @@ async def sync_monthly_aud_revaluation(
     by_id = {str(r.get("id") or ""): dict(r) for r in rows if isinstance(r, dict) and str(r.get("id") or "").strip()}
     last_boundary_meta: Dict[str, Any] = {}
     last_oanda_window: Dict[str, Any] = {}
+    processed_months: List[str] = []
+    succeeded_months: List[str] = []
+    failed_months: List[str] = []
+    failures: List[Dict[str, Any]] = []
 
     for month_key in target_months:
+        processed_months.append(month_key)
         start_local, next_local = _month_bounds(month_key)
         start_ms = int(start_local.astimezone(timezone.utc).timestamp() * 1000)
         end_ms = int(next_local.astimezone(timezone.utc).timestamp() * 1000)
@@ -939,6 +971,7 @@ async def sync_monthly_aud_revaluation(
                 by_id[row_id] = row
                 changed += 1
             last_boundary_meta = {"month_key": month_key, "start": start_meta, "end": end_meta}
+            succeeded_months.append(month_key)
         except Exception as exc:
             code = exc.code if isinstance(exc, MonthlyAudRevalError) else "MONTHLY_AUD_REVAL_BYBIT_BALANCE_ERROR"
             stage = exc.stage if isinstance(exc, MonthlyAudRevalError) else "monthly_loop"
@@ -962,34 +995,29 @@ async def sync_monthly_aud_revaluation(
                 error_detail=detail,
                 tb=tb,
             )
+            failed_months.append(month_key)
+            failures.append({"month_key": month_key, "code": code, "stage": stage, "detail": detail})
             if last_oanda_window:
                 state = _load_state(state_path)
                 state["last_oanda_window"] = last_oanda_window
                 _save_state(state_path, state)
-            raise MonthlyAudRevalError(code, detail, stage=stage) from exc
+            continue
 
     rows_out = list(by_id.values())
     mandatory_id = f"monthly_aud_reval:bybit_live:{MANDATORY_MONTH}"
     mandatory_row = by_id.get(mandatory_id)
     if mandatory_row is None or not _row_is_valid_month_row(mandatory_row, MANDATORY_MONTH):
         detail = f"Mandatory month {MANDATORY_MONTH} is still missing or invalid"
-        _persist_error_state(
-            state=state,
-            state_path=state_path,
-            month_key=MANDATORY_MONTH,
-            stage="mandatory_month_check",
-            error_code="MONTHLY_AUD_REVAL_MISSING_MANDATORY_ROW",
-            error_detail=detail,
-            tb="",
-        )
-        raise MonthlyAudRevalError("MONTHLY_AUD_REVAL_MISSING_MANDATORY_ROW", detail, stage="mandatory_month_check")
+        failures.append({"month_key": MANDATORY_MONTH, "code": "MONTHLY_AUD_REVAL_MISSING_MANDATORY_ROW", "stage": "mandatory_month_check", "detail": detail})
+        if MANDATORY_MONTH not in failed_months:
+            failed_months.append(MANDATORY_MONTH)
 
     if changed:
         _save_rows(data_path, rows_out)
 
     state.update(
         {
-            "ok": True,
+            "ok": len(failures) == 0,
             "month_key": None,
             "stage": "complete",
             "last_error_code": None,
@@ -1004,6 +1032,11 @@ async def sync_monthly_aud_revaluation(
                 "started_at": started_at,
                 "finished_at": _utc_now_iso(),
                 "target_months": target_months,
+                "processed_months": processed_months,
+                "succeeded_months": succeeded_months,
+                "failed_months": failed_months,
+                "failures": failures,
+                "partial": bool(succeeded_months and failures),
                 "changed": changed,
                 "rows": len(rows_out),
                 "mandatory_row_id": mandatory_id,
@@ -1011,4 +1044,4 @@ async def sync_monthly_aud_revaluation(
         }
     )
     _save_state(state_path, state)
-    return {"ok": True, "changed": changed, "rows": len(rows_out), "processed_months": target_months}
+    return {"ok": len(failures) == 0, "partial": bool(succeeded_months and failures), "changed": changed, "rows": len(rows_out), "processed_months": processed_months, "succeeded_months": succeeded_months, "failed_months": failed_months, "failures": failures}
