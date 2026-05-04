@@ -1014,15 +1014,20 @@
     }
     byMarket.overall = byMarket.overall || g?.overview || stats?.totals || {};
 
-    const row = (label, value, cls='tj-stat-neutral') => `<tr class="tj-stat-row"><td class="tj-stat-label ${cls}">${label}</td><td class="tj-stat-value ${cls}">${value ?? '—'}</td></tr>`;
+    const toneBySign = (value) => {
+      const n = asNum(value);
+      if (!Number.isFinite(n) || n === 0) return 'tj-stat-neutral';
+      return n > 0 ? 'tj-stat-positive' : 'tj-stat-negative';
+    };
+    const row = (label, value, valueCls='tj-stat-neutral', labelCls='tj-stat-neutral') => `<tr class="tj-stat-row"><td class="tj-stat-label ${labelCls}">${label}</td><td class="tj-stat-value ${valueCls}">${value ?? '—'}</td></tr>`;
     const sec = (title, rows) => `<section class="tj-stats-section"><div class="tj-stats-title">${title}</div><table class="tj-stats-table">${rows.length ? rows.join('') : row('No data', '—')}</table></section>`;
     const core = (m) => [
       row('Trades', m?.trades),
       row('Wins', m?.wins, 'tj-stat-winner'),
       row('Losses', m?.losses, 'tj-stat-loser'),
       row('Break-even', m?.break_even),
-      row('Win rate', fmtPctSmall(m?.win_rate_pct), 'tj-stat-winner'),
-      row('Net P/L', fmtNum(m?.net_profit_total, 2), 'tj-stat-positive'),
+      row('Win rate', fmtPctSmall(m?.win_rate_pct)),
+      row('Net P/L', fmtNum(m?.net_profit_total, 2), toneBySign(m?.net_profit_total)),
       row('Gross gain', fmtNum(m?.gross_gain, 2), 'tj-stat-winner'),
       row('Gross loss', fmtNum(m?.gross_loss, 2), 'tj-stat-loser'),
       row('Avg result %', fmtPctSmall(m?.avg_result_pct)),

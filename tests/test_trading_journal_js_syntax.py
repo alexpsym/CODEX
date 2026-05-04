@@ -28,3 +28,16 @@ def test_trading_journal_diagnostics_split_balance_anchor_from_parse_sync() -> N
     assert "max_drawdown_pct" in js
     assert "overall_avg_seconds" in js
     assert "tj-stats-table" in js
+
+
+def test_trading_journal_stats_classes_are_value_only_and_net_pl_is_sign_based() -> None:
+    js = JS_PATH.read_text(encoding="utf-8")
+    assert "const toneBySign = (value) =>" in js
+    assert "if (!Number.isFinite(n) || n === 0) return 'tj-stat-neutral';" in js
+    assert "return n > 0 ? 'tj-stat-positive' : 'tj-stat-negative';" in js
+    assert "const row = (label, value, valueCls='tj-stat-neutral', labelCls='tj-stat-neutral')" in js
+    assert '<td class="tj-stat-label ${labelCls}">' in js
+    assert '<td class="tj-stat-value ${valueCls}">' in js
+    assert "row('Win rate', fmtPctSmall(m?.win_rate_pct))" in js
+    assert "row('Win rate', fmtPctSmall(m?.win_rate_pct), 'tj-stat-winner')" not in js
+    assert "row('Net P/L', fmtNum(m?.net_profit_total, 2), toneBySign(m?.net_profit_total))" in js
