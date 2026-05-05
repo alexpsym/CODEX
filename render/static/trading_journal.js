@@ -1291,7 +1291,7 @@
           if (currentNonBybitInvalid.length > 0) {
             if (!preserveStatus) setStatus(`Info: ${actualRowsTotal} journal rows loaded; diagnostics include ${currentNonBybitInvalid.length} quarantined row(s).`);
           } else {
-            if (!preserveStatus) setStatus(`Updated ${new Date().toLocaleTimeString()}`);
+            if (!preserveStatus) setStatus(`Info: ${actualRowsTotal} journal rows loaded; repaired time-order rows=${repaired}.`);
           }
         } else if (noSources && actualRowsTotal > 0) {
           if (!preserveStatus) setStatus(`Info: ${actualRowsTotal} journal rows loaded; no Excel workbook imports detected.`);

@@ -511,6 +511,7 @@ BYBIT_DEMO_WORKBOOK_NAME = "Bybit Demo.xlsx"
 BYBIT_DEMO_CALC_CONTEXT_NAME = "Bybit Demo Calculation Context.json"
 BYBIT_DEMO_CALC_CONTEXT_VERSION = 1
 BYBIT_DEMO_CALC_CONTEXT_DROPBOX_PATH = os.getenv("BYBIT_DEMO_CALC_CONTEXT_DROPBOX_PATH", "").strip()
+BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH = BASE_DIR / "render" / "data" / "bybit_demo_calc_contexts.json"
 BYBIT_DEMO_WORKBOOK_SHEET = "Trades"
 BYBIT_DEMO_WORKBOOK_COLUMNS = [
     "opening_time",
@@ -1188,6 +1189,7 @@ _OANDA_TX_LAST_SEEN: Dict[str, str] = {}
 _OANDA_FILL_BACKOFF_UNTIL: Dict[str, float] = {}
 _OANDA_FILL_FAILURES: Dict[str, int] = {}
 _OANDA_OPEN_TRADE_LEGS: Dict[str, Dict[str, Dict[str, object]]] = {"live": {}, "demo": {}}
+_OANDA_CONTEXT_WARNED_RUNTIME: set[str] = set()
 _OANDA_FILL_DIAGNOSTICS: Dict[str, Dict[str, object]] = {}
 _OANDA_ACCOUNTS_CACHE: Dict[str, Tuple[float, List[Dict[str, object]]]] = {}
 _OANDA_ACCOUNTS_CACHE_TTL_SECONDS = 20.0
@@ -4106,6 +4108,39 @@ def _bybit_demo_workbook_bytes() -> bytes:
     return buffer.getvalue()
 
 
+def _local_journal_workbook_path(name: str) -> Path:
+    return TRADING_JOURNAL_LOCAL_DIR / str(name or "").strip()
+
+
+def _write_excel_atomic(path: Path, sheet_name: str, frame: pd.DataFrame) -> None:
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    tmp = parent / f".{path.name}.{uuid4().hex}.tmp.xlsx"
+    try:
+        with pd.ExcelWriter(tmp, engine="openpyxl") as writer:
+            frame.to_excel(writer, sheet_name=sheet_name, index=False)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
+        raise
+
+
+def _read_excel_sheet_or_empty(path: Path, sheet_name: str, columns: List[str]) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame(columns=columns)
+    try:
+        frame = pd.read_excel(path, sheet_name=sheet_name)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to read workbook '{path}' sheet '{sheet_name}': {exc}") from exc
+    if not isinstance(frame, pd.DataFrame):
+        return pd.DataFrame(columns=columns)
+    return frame
+
+
 def _bybit_demo_calc_context_path(active_folder: Optional[str] = None) -> str:
     override = BYBIT_DEMO_CALC_CONTEXT_DROPBOX_PATH
     if override:
@@ -4115,6 +4150,20 @@ def _bybit_demo_calc_context_path(active_folder: Optional[str] = None) -> str:
 
 
 def _load_bybit_demo_calc_contexts(active_folder: Optional[str] = None) -> Dict[str, object]:
+    if LOCAL_STATE_ONLY or _trading_journal_local_excel_authoritative():
+        try:
+            if BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH.exists():
+                payload = json.loads(BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH.read_text(encoding="utf-8"))
+            else:
+                payload = {"version": BYBIT_DEMO_CALC_CONTEXT_VERSION, "updated_at": _utc_now_iso(), "items": []}
+        except Exception:
+            payload = {"version": BYBIT_DEMO_CALC_CONTEXT_VERSION, "updated_at": _utc_now_iso(), "items": []}
+        if not isinstance(payload, dict):
+            payload = {"version": BYBIT_DEMO_CALC_CONTEXT_VERSION, "updated_at": _utc_now_iso(), "items": []}
+        payload.setdefault("version", BYBIT_DEMO_CALC_CONTEXT_VERSION)
+        payload.setdefault("updated_at", _utc_now_iso())
+        payload["items"] = payload.get("items") if isinstance(payload.get("items"), list) else []
+        return payload
     path = _bybit_demo_calc_context_path(active_folder)
     try:
         payload = json.loads(_dropbox_download_bytes(path).decode("utf-8"))
@@ -4144,6 +4193,15 @@ def _sanitize_calc_context_obj(value: object) -> object:
 
 
 def _save_bybit_demo_calc_contexts(payload: Dict[str, object], active_folder: Optional[str] = None) -> None:
+    if LOCAL_STATE_ONLY or _trading_journal_local_excel_authoritative():
+        payload["version"] = BYBIT_DEMO_CALC_CONTEXT_VERSION
+        payload["updated_at"] = _utc_now_iso()
+        BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+        BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH.write_text(
+            json.dumps(_sanitize_calc_context_obj(payload), ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        return
     path = _bybit_demo_calc_context_path(active_folder)
     payload["version"] = BYBIT_DEMO_CALC_CONTEXT_VERSION
     payload["updated_at"] = _utc_now_iso()
@@ -5011,7 +5069,7 @@ def _import_trading_journal_from_sources(
     template_result: Dict[str, object] = {"errors": []}
     warnings: List[str] = []
 
-    if include_local and local_enabled:
+    if include_local and local_enabled and (source_mode == "local" or local_authoritative):
         template_result = _ensure_trading_journal_local_templates()
         for err in template_result.get("errors") or []:
             warnings.append(str(err))
@@ -5069,55 +5127,14 @@ def _import_trading_journal_from_sources(
             import xlrd as _xlrd  # noqa: F401
         except Exception:
             requirements_path = str((BASE_DIR / "render" / "requirements.txt").resolve())
-            error_payload = {
+            warnings.append({
                 "code": "MISSING_XLRD_FOR_XLS",
                 "message": (
                     "Local .xls journal workbooks require xlrd. "
                     f'Install into the same Python executable that launches the journal: python -m pip install -r "{requirements_path}"'
                 ),
                 "files": requires_xls_engine,
-            }
-            errors.append(error_payload)
-            diagnostics.update(
-                {
-                    "errors": errors,
-                    "last_sync": {
-                        "source_mode": source_mode,
-                        "updated_at": _utc_now_iso(),
-                        "ok": False,
-                        "balances_found": 0,
-                        "local_import_enabled": local_enabled,
-                    },
-                }
-            )
-            _set_trading_journal_diagnostics(diagnostics)
-            return {
-                "ok": False,
-                "message": error_payload["message"],
-                "source_mode": source_mode,
-                "rows_imported": 0,
-                "cashflow_rows_loaded": 0,
-                "balances_found": 0,
-                "templates_created": {
-                    "cashflow_template_created": bool(template_result.get("cashflow_template_created")),
-                    "trade_history_template_created": bool(template_result.get("trade_history_template_created")),
-                    "demo_workbook_created": bool(template_result.get("demo_workbook_created")),
-                },
-                "local_workbooks_seen": diagnostics["local_workbooks_seen"],
-                "local_workbook_names": diagnostics.get("local_workbook_names") if isinstance(diagnostics.get("local_workbook_names"), list) else [],
-                "workbooks_scanned": int(diagnostics["local_workbooks_seen"]),
-                "workbooks_changed": 0,
-                "dropbox_workbooks_seen": 0,
-                "duplicate_rows_dropped": 0,
-                "source_duplicate_rows_dropped": 0,
-                "dedupe_groups": 0,
-                "ignored_local_workbooks": ignored_local_workbooks,
-                "errors": errors,
-                "warnings": warnings,
-                "snapshot_generated": False,
-                "snapshot_error": None,
-                "diagnostics": diagnostics,
-            }
+            })
     local_rows_total = 0
     local_balances: List[Dict[str, object]] = []
     for local_file in local_files:
@@ -5145,7 +5162,15 @@ def _import_trading_journal_from_sources(
             if local_balance:
                 local_balances.append(local_balance)
         except Exception as exc:
-            errors.append({"file": local_file.name, "path": str(local_file), "error": str(exc)})
+            err_payload: Dict[str, object] = {"file": local_file.name, "path": str(local_file), "error": str(exc)}
+            if local_file.suffix.lower() == ".xls" and "xlrd" in str(exc).lower():
+                err_payload["code"] = "MISSING_XLRD_FOR_XLS"
+                requirements_path = str((BASE_DIR / "render" / "requirements.txt").resolve())
+                err_payload["message"] = (
+                    "Local .xls journal workbooks require xlrd. "
+                    f'Install into the same Python executable that launches the journal: python -m pip install -r "{requirements_path}"'
+                )
+            errors.append(err_payload)
     imported_any = imported_any or local_rows_total > 0
     imported_rows_total += int(local_rows_total)
 
@@ -5498,12 +5523,33 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
     context_cache: Dict[Tuple[str, str, str, str], Optional[Dict[str, object]]] = {}
     contexts = _load_trade_contexts()
     def _context_registry_key(trade_id: Optional[str] = None) -> str:
-        return _stable_registry_key([account, tx_order_id, trade_id or "", symbol])
+        return _stable_registry_key([account, tx_id, tx_order_id, trade_id or "", symbol])
 
-    def _resolve_context_for_fill(trade_id: Optional[str] = None, warn: bool = False) -> Optional[Dict[str, object]]:
+    def _resolve_context_for_fill(trade_id: Optional[str] = None, warn: bool = True) -> Optional[Dict[str, object]]:
         warning_key = (account, tx_id, tx_order_id, str(trade_id or "").strip())
         if warning_key in context_cache:
             return context_cache[warning_key]
+        if not contexts:
+            unresolved_key = _context_registry_key(trade_id)
+            should_warn, _ = _update_unresolved_registry(
+                family="oanda_context",
+                key=unresolved_key,
+                details={"reason": "missing"},
+                resolved=False,
+            )
+            runtime_key = f"missing:{unresolved_key}"
+            if (should_warn or runtime_key not in _OANDA_CONTEXT_WARNED_RUNTIME) and warn:
+                BYBIT_LOGGER.warning(
+                    "OANDA_CONTEXT_MISSING account=%s symbol=%s tx_id=%s order_id=%s trade_id=%s",
+                    account,
+                    symbol,
+                    tx_id,
+                    tx_order_id,
+                    trade_id or "",
+                )
+                _OANDA_CONTEXT_WARNED_RUNTIME.add(runtime_key)
+            context_cache[warning_key] = None
+            return None
         refs = {"orderId": tx_order_id, "transactionId": tx_id}
         if trade_id:
             refs["tradeId"] = trade_id
@@ -5520,6 +5566,8 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             return ctx
         side_hint = _normalize_side_for_comparison("buy" if (_to_float(entry.get("units")) or 0.0) >= 0 else "sell")
         open_leg = legs.get(str(trade_id or "").strip()) if trade_id else None
+        if isinstance(open_leg, dict) and str(open_leg.get("symbol") or "").strip().upper() != symbol:
+            open_leg = None
         if isinstance(open_leg, dict):
             open_refs = {
                 "orderId": open_leg.get("order_id"),
@@ -5629,9 +5677,10 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
                 details={"reason": "ambiguous", "candidates": len(candidates)},
                 resolved=False,
             )
-            if should_warn and warn:
-                BYBIT_LOGGER.info(
-                    "OANDA_CONTEXT_ENRICHMENT_MISSING ambiguous account=%s symbol=%s side=%s tx_id=%s order_id=%s trade_id=%s candidates=%s",
+            runtime_key = f"ambiguous:{unresolved_key}"
+            if (should_warn or runtime_key not in _OANDA_CONTEXT_WARNED_RUNTIME) and warn:
+                BYBIT_LOGGER.warning(
+                    "OANDA_CONTEXT_AMBIGUOUS account=%s symbol=%s side=%s tx_id=%s order_id=%s trade_id=%s candidates=%s",
                     account,
                     symbol,
                     side_hint,
@@ -5640,6 +5689,7 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
                     trade_id or "",
                     len(candidates),
                 )
+                _OANDA_CONTEXT_WARNED_RUNTIME.add(runtime_key)
         else:
             should_warn, _ = _update_unresolved_registry(
                 family="oanda_context",
@@ -5647,15 +5697,17 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
                 details={"reason": "missing"},
                 resolved=False,
             )
-            if should_warn and warn:
-                BYBIT_LOGGER.info(
-                    "OANDA_CONTEXT_ENRICHMENT_MISSING missing account=%s symbol=%s tx_id=%s order_id=%s trade_id=%s",
+            runtime_key = f"missing:{unresolved_key}"
+            if (should_warn or runtime_key not in _OANDA_CONTEXT_WARNED_RUNTIME) and warn:
+                BYBIT_LOGGER.warning(
+                    "OANDA_CONTEXT_MISSING account=%s symbol=%s tx_id=%s order_id=%s trade_id=%s",
                     account,
                     symbol,
                     tx_id,
                     tx_order_id,
                     trade_id or "",
                 )
+                _OANDA_CONTEXT_WARNED_RUNTIME.add(runtime_key)
         context_cache[warning_key] = None
         return None
 
@@ -5691,7 +5743,7 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
         _persist_oanda_fill_state()
         return []
 
-    base_ctx = _resolve_context_for_fill()
+    base_ctx = _resolve_context_for_fill(None, warn=(len(close_legs) > 1))
     timeframe = _normalize_timeframe(entry.get("timeframe")) or _normalize_timeframe((base_ctx or {}).get("timeframe"))
     base_is_test_trade = _normalize_test_trade_flag(
         entry.get("is_test_trade", entry.get("test_trade", entry.get("test")))
@@ -5705,6 +5757,8 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
         trade_id = str(close_leg.get("tradeID") or "").strip()
         leg_units = abs(_to_float(close_leg.get("units")) or 0.0)
         open_leg = legs.get(trade_id) if trade_id else None
+        if isinstance(open_leg, dict) and str(open_leg.get("symbol") or "").strip().upper() != symbol:
+            open_leg = None
         leg_ctx = _resolve_context_for_fill(trade_id) or base_ctx
         entry_price = _to_float((open_leg or {}).get("entry_price"))
         open_time = str((open_leg or {}).get("open_time") or "") or None
@@ -9582,10 +9636,11 @@ async def _bybit_signed_post(
                 resp = await client.post(url, headers=headers, content=body_json)
         except httpx.TimeoutException:
             raise
+        response_content = getattr(resp, "content", b"") or b""
         _record_outbound_traffic(
             "bybit",
             bytes_sent=len(url) + len(body_json) + sum(len(str(v)) for v in headers.values()),
-            bytes_received=len(resp.content),
+            bytes_received=len(response_content),
             context=path,
         )
         resp.raise_for_status()
@@ -10363,8 +10418,11 @@ def _upsert_bybit_demo_calc_context(context: Dict[str, object], active_folder: O
     return ctx
 
 
-def _lookup_bybit_demo_calc_context_for_row(row_or_refs: Dict[str, object]) -> Optional[Dict[str, object]]:
-    state = _load_bybit_demo_calc_contexts()
+def _lookup_bybit_demo_calc_context_for_row(row_or_refs: Dict[str, object], active_folder: Optional[str] = None) -> Optional[Dict[str, object]]:
+    try:
+        state = _load_bybit_demo_calc_contexts(active_folder)
+    except Exception:
+        return None
     items = [i for i in (state.get("items") or []) if isinstance(i, dict)]
     calc_id = str(row_or_refs.get("calculation_context_id") or "").strip()
     oid = str(row_or_refs.get("order_id") or row_or_refs.get("orderId") or "").strip()
@@ -13169,11 +13227,15 @@ def _normalize_bybit_closed_pnl_row(
     close_time_iso = execution_close or order_updated or closed_pnl_updated
     close_ts = _canonical_trade_epoch_second(close_time_iso)
     ctx_valid = isinstance(ctx, dict)
+    invalid_context_time = False
+    context_candidate_open_for_diag = None
     if ctx_valid:
         candidate_open = _epoch_or_iso_to_iso(ctx.get("open_time")) or _epoch_or_iso_to_iso(ctx.get("created_at"))
+        context_candidate_open_for_diag = candidate_open
         if candidate_open and close_ts is not None:
             candidate_open_ts = _canonical_trade_epoch_second(candidate_open)
             if candidate_open_ts is not None and candidate_open_ts >= close_ts:
+                invalid_context_time = True
                 ctx = None
                 ctx_valid = False
     if isinstance(ctx, dict):
@@ -13212,6 +13274,8 @@ def _normalize_bybit_closed_pnl_row(
         created_ts = _canonical_trade_epoch_second(created_fallback)
         if created_ts is not None and created_ts < close_ts:
             open_time = created_fallback
+    if (not open_time) and context_candidate_open_for_diag:
+        open_time = context_candidate_open_for_diag
     open_ts = _canonical_trade_epoch_second(open_time)
     status = "closed"
     row_type = "trade"
@@ -13220,6 +13284,9 @@ def _normalize_bybit_closed_pnl_row(
         row_type = "quarantine"
     elif open_ts is None:
         status = "closed_missing_open_time"
+        if invalid_context_time:
+            status = "invalid_time_order"
+            row_type = "quarantine"
     elif close_ts <= open_ts:
         status = "invalid_time_order"
         row_type = "quarantine"
@@ -13233,6 +13300,7 @@ def _normalize_bybit_closed_pnl_row(
     raw_refs["order_createdTime"] = order_created
     raw_refs["order_updatedTime"] = order_updated
     raw_refs["context_open_time"] = resolved_open_time
+    raw_refs["context_invalid_time"] = bool(invalid_context_time)
     raw_refs["context_used_for_open_time"] = bool((not execution_open) and resolved_open_time)
     return _normalize_journal_profit_fields({
         "id": f"bybit:{mode}:closedpnl:{symbol}:{order_id}",
@@ -13591,6 +13659,106 @@ def _append_bybit_demo_rows_to_workbook(active_folder: str, rows: List[Dict[str,
         return changed
 
 
+def _append_bybit_demo_rows_to_local_workbook(local_dir: Path, rows: List[Dict[str, object]]) -> int:
+    if not rows:
+        return 0
+    workbook_path = local_dir / BYBIT_DEMO_WORKBOOK_NAME
+    with _BYBIT_DEMO_WORKBOOK_LOCK:
+        existing = _coerce_bybit_demo_workbook_frame(
+            _read_excel_sheet_or_empty(workbook_path, BYBIT_DEMO_WORKBOOK_SHEET, BYBIT_DEMO_WORKBOOK_COLUMNS)
+        )
+        changed = 0
+        order_ids = existing.get("order_id", pd.Series(dtype=str)).fillna("").astype(str).str.strip()
+        order_index = {order_id: idx for idx, order_id in order_ids.items() if order_id}
+        for row in rows:
+            if str(row.get("status") or "").strip().lower() == "invalid_time_order" or str(row.get("row_type") or "").strip().lower() == "quarantine":
+                continue
+            workbook_row = _bybit_demo_workbook_row(row)
+            order_id = str(workbook_row.get("order_id") or "").strip()
+            if not order_id:
+                continue
+            if order_id in order_index:
+                idx = order_index[order_id]
+                for column, value in workbook_row.items():
+                    existing.at[idx, column] = value
+                changed += 1
+            else:
+                existing = pd.concat([existing, pd.DataFrame([workbook_row], columns=BYBIT_DEMO_WORKBOOK_COLUMNS)], ignore_index=True)
+                order_index[order_id] = len(existing) - 1
+                changed += 1
+        if changed:
+            _write_excel_atomic(workbook_path, BYBIT_DEMO_WORKBOOK_SHEET, existing.reindex(columns=BYBIT_DEMO_WORKBOOK_COLUMNS))
+        return changed
+
+
+def _sanitize_bybit_demo_local_workbook(local_dir: Path) -> Dict[str, int]:
+    workbook_path = local_dir / BYBIT_DEMO_WORKBOOK_NAME
+    frame = _coerce_bybit_demo_workbook_frame(
+        _read_excel_sheet_or_empty(workbook_path, BYBIT_DEMO_WORKBOOK_SHEET, BYBIT_DEMO_WORKBOOK_COLUMNS)
+    )
+    if frame.empty:
+        return {"changed": 0, "repaired_sides": 0, "deduped_by_order_id": 0, "deduped_by_fingerprint": 0}
+    rows = []
+    for _, wb_row in frame.iterrows():
+        rows.append({"account": "Bybit Demo", "account_label": "Bybit Demo", "source": "excel", "symbol": _excel_cell_to_python(wb_row.get("symbol")), "side": _excel_cell_to_python(wb_row.get("type_buy_sell")), "open_time": _excel_cell_to_python(wb_row.get("opening_time")), "close_time": _excel_cell_to_python(wb_row.get("closing_time")), "qty": _excel_cell_to_python(wb_row.get("size_quantity")), "entry_price": _excel_cell_to_python(wb_row.get("entry_price")), "exit_price": _excel_cell_to_python(wb_row.get("closing_price")), "stop_loss": _excel_cell_to_python(wb_row.get("stop_loss")), "take_profit": _excel_cell_to_python(wb_row.get("take_profit")), "commission": _excel_cell_to_python(wb_row.get("commission")), "realized_pnl": _excel_cell_to_python(wb_row.get("net_profit")), "balance_after_trade": _excel_cell_to_python(wb_row.get("balance_after_trade")), "timeframe": _excel_cell_to_python(wb_row.get("timeframe")), "is_test_trade": _excel_cell_to_python(wb_row.get("is_test_trade")), "notes": _excel_cell_to_python(wb_row.get("notes")), "raw_refs": {"orderId": _excel_cell_to_python(wb_row.get("order_id"))}})
+    sanitized_rows, stats = _sanitize_bybit_demo_rows(rows)
+    if int(stats.get("changed", 0)):
+        out = pd.DataFrame([_bybit_demo_workbook_row(r) for r in sanitized_rows if _is_bybit_demo_trade_row(r)], columns=BYBIT_DEMO_WORKBOOK_COLUMNS)
+        _write_excel_atomic(workbook_path, BYBIT_DEMO_WORKBOOK_SHEET, out)
+    return stats
+
+
+def _append_generic_local_broker_rows(workbook_name: str, rows: List[Dict[str, object]], source_label: str) -> int:
+    columns = ["account","account_currency","opening_time","closing_time","type_buy_sell","symbol","size_quantity","entry_price","closing_price","stop_loss","take_profit","commission","net_profit","balance_after_trade","timeframe","is_test_trade","currency","notes","order_id","trade_id","transaction_id","source"]
+    path = _local_journal_workbook_path(workbook_name)
+    with _BYBIT_DEMO_WORKBOOK_LOCK:
+        existing = _read_excel_sheet_or_empty(path, "Trades", columns)
+        for col in columns:
+            if col not in existing.columns:
+                existing[col] = None
+        def map_row(r):
+            refs = r.get("raw_refs") if isinstance(r.get("raw_refs"), dict) else {}
+            return {"account": r.get("account_label") or r.get("account"), "account_currency": r.get("realized_pnl_currency") or r.get("currency"), "opening_time": r.get("open_time"), "closing_time": r.get("close_time"), "type_buy_sell": r.get("side"), "symbol": r.get("symbol"), "size_quantity": r.get("qty") or r.get("qty_raw"), "entry_price": r.get("entry_price"), "closing_price": r.get("exit_price"), "stop_loss": r.get("stop_loss"), "take_profit": r.get("take_profit"), "commission": r.get("commission") if r.get("commission") is not None else r.get("fees"), "net_profit": r.get("net_profit") if r.get("net_profit") is not None else r.get("realized_pnl"), "balance_after_trade": r.get("balance_after_trade"), "timeframe": r.get("timeframe"), "is_test_trade": r.get("is_test_trade"), "currency": r.get("currency") or r.get("realized_pnl_currency"), "notes": r.get("notes"), "order_id": refs.get("orderId") or refs.get("orderID"), "trade_id": refs.get("tradeId") or refs.get("tradeID"), "transaction_id": refs.get("transactionId") or refs.get("transactionID"), "source": source_label}
+        changed=0
+        for r in rows:
+            m=map_row(r)
+            id_masks: List[pd.Series] = []
+            tx_id = str(m.get("transaction_id") or "").strip()
+            tr_id = str(m.get("trade_id") or "").strip()
+            or_id = str(m.get("order_id") or "").strip()
+            if tx_id:
+                id_masks.append(existing["transaction_id"].fillna("").astype(str).str.strip() == tx_id)
+            if tr_id:
+                id_masks.append(existing["trade_id"].fillna("").astype(str).str.strip() == tr_id)
+            if or_id:
+                id_masks.append(existing["order_id"].fillna("").astype(str).str.strip() == or_id)
+            if id_masks:
+                mask = id_masks[0]
+                for extra in id_masks[1:]:
+                    mask = mask | extra
+            else:
+                mask = (
+                    (existing["account"].fillna("").astype(str).str.strip()==str(m.get("account") or "").strip()) &
+                    (existing["symbol"].fillna("").astype(str).str.strip()==str(m.get("symbol") or "").strip()) &
+                    (existing["type_buy_sell"].fillna("").astype(str).str.strip()==str(m.get("type_buy_sell") or "").strip()) &
+                    (existing["opening_time"].fillna("").astype(str).str.strip()==str(m.get("opening_time") or "").strip()) &
+                    (existing["closing_time"].fillna("").astype(str).str.strip()==str(m.get("closing_time") or "").strip()) &
+                    (existing["entry_price"].fillna("").astype(str).str.strip()==str(m.get("entry_price") or "").strip()) &
+                    (existing["closing_price"].fillna("").astype(str).str.strip()==str(m.get("closing_price") or "").strip()) &
+                    (existing["size_quantity"].fillna("").astype(str).str.strip()==str(m.get("size_quantity") or "").strip()) &
+                    (existing["net_profit"].fillna("").astype(str).str.strip()==str(m.get("net_profit") or "").strip())
+                )
+            idxs = existing.index[mask]
+            if len(idxs):
+                for c,v in m.items(): existing.at[idxs[0],c]=v
+            else:
+                existing = pd.concat([existing, pd.DataFrame([m])], ignore_index=True)
+            changed += 1
+        if changed:
+            _write_excel_atomic(path, "Trades", existing)
+        return changed
+
+
 async def _sync_bybit_closed_pnl_window(
     *,
     account_mode: str,
@@ -13601,10 +13769,14 @@ async def _sync_bybit_closed_pnl_window(
     end_time: int,
 ) -> int:
     mode = "demo" if str(account_mode).strip().lower() == "demo" else "live"
+    local_authoritative = _trading_journal_local_excel_authoritative()
     active_folder: Optional[str] = None
     if mode == "demo":
-        active_folder, _entries = await asyncio.to_thread(_resolve_trading_journal_dropbox_folder)
-        await asyncio.to_thread(_ensure_bybit_demo_dropbox_files, active_folder)
+        if local_authoritative:
+            await asyncio.to_thread(_ensure_local_bybit_demo_files, TRADING_JOURNAL_LOCAL_DIR)
+        else:
+            active_folder, _entries = await asyncio.to_thread(_resolve_trading_journal_dropbox_folder)
+            await asyncio.to_thread(_ensure_bybit_demo_dropbox_files, active_folder)
 
     orders_by_id: Dict[str, List[Dict[str, object]]] = defaultdict(list)
     orders_by_link_id: Dict[str, List[Dict[str, object]]] = defaultdict(list)
@@ -13973,26 +14145,40 @@ async def _sync_bybit_closed_pnl_window(
         )
         return max_seen
 
-    changed = _upsert_trading_journal_rows(rows)
+    changed = 0 if local_authoritative else _upsert_trading_journal_rows(rows)
     sanitize_stats: Dict[str, int] = {"deduped_by_order_id": 0, "deduped_by_fingerprint": 0}
     workbook_stats: Dict[str, int] = {"deduped_by_order_id": 0, "deduped_by_fingerprint": 0}
+    local_workbook_changed = 0
     if mode == "demo":
         sanitized_rows, sanitize_stats = _sanitize_bybit_demo_rows(_get_trading_journal_rows())
-        snapshot = await _fetch_bybit_demo_current_balance_snapshot() if rows else {}
+        try:
+            snapshot = await _fetch_bybit_demo_current_balance_snapshot() if rows else {}
+        except Exception:
+            snapshot = {}
         if snapshot.get("current_balance") is not None:
             sanitized_rows, _diag = _backfill_bybit_demo_balances_from_current_balance(sanitized_rows, snapshot)
         if int(sanitize_stats.get("changed", 0)):
             _set_trading_journal_rows(sanitized_rows)
-        if active_folder:
+        if local_authoritative:
+            local_dir = TRADING_JOURNAL_LOCAL_DIR
+            await asyncio.to_thread(_ensure_local_bybit_demo_files, local_dir)
+            local_workbook_changed = await asyncio.to_thread(_append_bybit_demo_rows_to_local_workbook, local_dir, rows)
+            workbook_stats = await asyncio.to_thread(_sanitize_bybit_demo_local_workbook, local_dir)
+        elif active_folder:
             await asyncio.to_thread(_append_bybit_demo_rows_to_workbook, active_folder, rows)
             workbook_stats = await asyncio.to_thread(_sanitize_bybit_demo_workbook, active_folder)
+    elif local_authoritative:
+        local_workbook_changed = await asyncio.to_thread(_append_generic_local_broker_rows, "Bybit Live.xlsx", rows, "bybit_closed_pnl")
     _schedule_dropbox_upload_state_backup()
     _record_bybit_demo_sync_status(
         last_checked_at=_utc_now_iso(),
         last_success_at=_utc_now_iso(),
         last_error=None,
         last_rows_seen=len(rows),
-        last_rows_upserted=changed,
+        last_rows_upserted=changed if not local_authoritative else local_workbook_changed,
+        last_local_workbook_path=str((_local_journal_workbook_path(BYBIT_DEMO_WORKBOOK_NAME) if mode == "demo" else _local_journal_workbook_path("Bybit Live.xlsx"))) if local_authoritative else None,
+        last_local_workbook_rows_upserted=local_workbook_changed if local_authoritative else 0,
+        last_local_workbook_sanitized=int(workbook_stats.get("changed", 0)) if local_authoritative else 0,
         last_rows_deduped=int(sanitize_stats.get("deduped_by_order_id", 0))
         + int(sanitize_stats.get("deduped_by_fingerprint", 0)),
         last_workbook_rows_deduped=int(workbook_stats.get("deduped_by_order_id", 0))
@@ -14464,7 +14650,14 @@ async def _recover_oanda_recent_fills(account: str, lookback_hours: int = 72) ->
             max_seen = max(max_seen, int(_to_float(tx_id) or 0))
         journal_rows = _journal_rows_from_oanda_order_fill({**entry, "account": account})
         if journal_rows:
-            recovered_rows += _upsert_trading_journal_rows(journal_rows)
+            if _trading_journal_local_excel_authoritative():
+                recovered_rows += _append_generic_local_broker_rows(
+                    "OANDA Demo.xlsx" if account == "demo" else "OANDA Live.xlsx",
+                    journal_rows,
+                    "oanda_order_fill",
+                )
+            else:
+                recovered_rows += _upsert_trading_journal_rows(journal_rows)
     if last_transaction_id:
         max_seen = max(max_seen, int(_to_float(last_transaction_id) or 0))
     if max_seen > 0:
@@ -14535,7 +14728,14 @@ async def _poll_oanda_fills() -> None:
                     entry_payload = {**entry, "account": account}
                     journal_rows = _journal_rows_from_oanda_order_fill(entry_payload)
                     if journal_rows:
-                        _upsert_trading_journal_rows(journal_rows)
+                        if _trading_journal_local_excel_authoritative():
+                            _append_generic_local_broker_rows(
+                                "OANDA Demo.xlsx" if account == "demo" else "OANDA Live.xlsx",
+                                journal_rows,
+                                "oanda_order_fill",
+                            )
+                        else:
+                            _upsert_trading_journal_rows(journal_rows)
                     await _send_telegram_alert(_format_oanda_fill_alert(entry_payload))
 
                 if last_transaction_id:
@@ -21675,6 +21875,7 @@ async def _run_trading_journal_sync_job() -> None:
         result = await asyncio.to_thread(_import_trading_journal_from_sources, progress_cb=_cb)
         bybit_demo = None
         bybit_live = None
+        oanda_sync: Dict[str, object] = {}
         if broker_refresh_enabled:
             skip_demo = bool((result or {}).get("diagnostics", {}).get("bybit_demo_workbook_cleared"))
             if skip_demo:
@@ -21688,6 +21889,13 @@ async def _run_trading_journal_sync_job() -> None:
                 bybit_live = await _run_bybit_closed_pnl_sync(account_mode="live", reason="manual", enforce_manual_cooldown=False)
             except Exception as exc:
                 bybit_live = {"ok": False, "error": str(exc)}
+            for acct in ("demo", "live"):
+                try:
+                    oanda_sync[acct] = await _recover_oanda_recent_fills(acct)
+                except Exception as exc:
+                    oanda_sync[acct] = {"ok": False, "error": str(exc)}
+        if _trading_journal_local_excel_authoritative() and broker_refresh_enabled:
+            result = await asyncio.to_thread(_import_trading_journal_from_sources, progress_cb=_cb)
         warnings: List[str] = list((result or {}).get("warnings") or [])
         warnings.extend(broker_balance_warnings)
         for mode_name, mode_payload in {"demo": bybit_demo, "live": bybit_live}.items():
@@ -21696,13 +21904,33 @@ async def _run_trading_journal_sync_job() -> None:
                     warnings.append(f"Bybit {mode_name} skipped by cooldown")
                 if mode_payload.get("ok") is False:
                     warnings.append(f"Bybit {mode_name} failed: {mode_payload.get('error') or mode_payload.get('message') or 'unknown'}")
+        for acct, payload in oanda_sync.items():
+            if isinstance(payload, dict) and payload.get("ok") is False:
+                warnings.append(f"OANDA {acct} failed: {payload.get('error') or payload.get('message') or 'unknown'}")
         if isinstance(result, dict):
             result["bybit"] = {"demo": bybit_demo, "live": bybit_live}
+            result["oanda"] = oanda_sync
             result["warnings"] = list(dict.fromkeys([str(w) for w in warnings if str(w).strip()]))
         diagnostics = result.get("diagnostics") if isinstance(result, dict) else {}
         rows_by_asset_class = diagnostics.get("rows_by_asset_class") if isinstance(diagnostics, dict) else {}
-        ok_flag = bool(result.get("ok", True)) if isinstance(result, dict) else True
-        msg = "Done" if ok_flag else str((result or {}).get("message") or (result or {}).get("error") or "; ".join(warnings) or "Failed")
+        broker_payloads = [p for p in [bybit_demo, bybit_live, *list(oanda_sync.values())] if isinstance(p, dict)]
+        def _is_optional_config_warning(payload: Dict[str, object]) -> bool:
+            msg = str(payload.get("error") or payload.get("message") or "").lower()
+            return any(x in msg for x in ["missing", "not configured", "credentials are not configured"])
+        broker_failed = any((p.get("ok") is False) and (not _is_optional_config_warning(p)) for p in broker_payloads)
+        local_workbook_failed = any(
+            any(tok in str(p.get("error") or p.get("message") or "").lower() for tok in ["permission", "openpyxl", "os.replace", "workbook", "excel", "failed to read workbook", "failed to write"])
+            for p in broker_payloads
+        ) or any("workbook" in str(w).lower() for w in warnings)
+        has_warnings = bool(warnings)
+        base_ok = bool(result.get("ok", True)) if isinstance(result, dict) else True
+        ok_flag = bool(base_ok and not broker_failed and not local_workbook_failed)
+        if not ok_flag:
+            msg = f"Failed: {str((result or {}).get('message') or (result or {}).get('error') or '; '.join(warnings) or 'sync failed')}"
+        elif has_warnings:
+            msg = "Completed with warnings"
+        else:
+            msg = "Done"
         _set_trading_journal_sync_state(
             running=False,
             progress=100,

@@ -1014,3 +1014,12 @@ def test_persist_trading_journal_sqlite_cashflow_no_name_error(tmp_path, monkeyp
         assert conn.execute("SELECT COUNT(*) FROM journal_trades").fetchone()[0] == 0
     finally:
         conn.close()
+
+def test_append_generic_local_broker_rows_does_not_match_blank_ids(tmp_path, monkeypatch):
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
+    rows_a = [{"account": "Bybit Live", "symbol": "BTCUSDT", "side": "Buy", "open_time": "2026-01-01T00:00:00Z", "close_time": "2026-01-01T01:00:00Z", "entry_price": 1, "exit_price": 2, "qty": 1, "realized_pnl": 1, "raw_refs": {"orderId": "A"}}]
+    rows_b = [{"account": "Bybit Live", "symbol": "ETHUSDT", "side": "Sell", "open_time": "2026-01-02T00:00:00Z", "close_time": "2026-01-02T01:00:00Z", "entry_price": 3, "exit_price": 2, "qty": 2, "realized_pnl": -1, "raw_refs": {"orderId": "B"}}]
+    master_service._append_generic_local_broker_rows("Bybit Live.xlsx", rows_a, "bybit_closed_pnl")
+    master_service._append_generic_local_broker_rows("Bybit Live.xlsx", rows_b, "bybit_closed_pnl")
+    df = master_service.pd.read_excel(tmp_path / "Bybit Live.xlsx", sheet_name="Trades")
+    assert set(df["order_id"].astype(str)) >= {"A", "B"}
