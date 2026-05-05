@@ -991,6 +991,74 @@ def test_local_authoritative_sync_bybit_demo_does_not_touch_dropbox(tmp_path, mo
     assert calls["local_append"] == 1
 
 
+def test_append_bybit_demo_rows_to_local_workbook_writes_and_is_idempotent(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
+    row = {
+        "status": "closed",
+        "open_time": "2026-04-01T00:00:00Z",
+        "close_time": "2026-04-01T01:00:00Z",
+        "side": "Buy",
+        "symbol": "BTCUSDT",
+        "qty": 1.5,
+        "entry_price": 100.0,
+        "exit_price": 110.0,
+        "stop_loss": 95.0,
+        "take_profit": 120.0,
+        "commission": 0.2,
+        "realized_pnl": 14.8,
+        "balance_after_trade": 1000.0,
+        "timeframe": "1-hour",
+        "is_test_trade": False,
+        "notes": "n",
+        "raw_refs": {"orderId": "oid-local-1", "fillCount": 1, "source": "closed_pnl"},
+    }
+    changed = master_service._append_bybit_demo_rows_to_local_workbook(tmp_path, [row])
+    assert changed == 1
+    workbook = tmp_path / master_service.BYBIT_DEMO_WORKBOOK_NAME
+    assert workbook.exists()
+    df = master_service.pd.read_excel(workbook, sheet_name=master_service.BYBIT_DEMO_WORKBOOK_SHEET)
+    assert len(df) == 1
+    assert str(df.iloc[0]["order_id"]) == "oid-local-1"
+    changed2 = master_service._append_bybit_demo_rows_to_local_workbook(tmp_path, [row])
+    assert changed2 == 1
+    df2 = master_service.pd.read_excel(workbook, sheet_name=master_service.BYBIT_DEMO_WORKBOOK_SHEET)
+    assert len(df2) == 1
+
+
+def test_local_authoritative_sync_bybit_demo_writes_real_workbook(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
+    monkeypatch.setattr(master_service, "_trading_journal_local_excel_authoritative", lambda: True)
+    monkeypatch.setattr(master_service, "_resolve_trading_journal_dropbox_folder", lambda: (_ for _ in ()).throw(AssertionError("dropbox resolve called")))
+    monkeypatch.setattr(master_service, "_ensure_bybit_demo_dropbox_files", lambda *_: (_ for _ in ()).throw(AssertionError("dropbox ensure called")))
+    monkeypatch.setattr(master_service, "_dropbox_download_bytes", lambda *_: (_ for _ in ()).throw(AssertionError("dropbox download called")))
+    monkeypatch.setattr(master_service, "_dropbox_upload_bytes", lambda *_: (_ for _ in ()).throw(AssertionError("dropbox upload called")))
+    monkeypatch.setattr(master_service, "_ensure_local_bybit_demo_files", lambda _d: {"demo_workbook_created": True, "trade_history_template_created": True})
+    async def _empty_payload(**_): return {"result": {"list": []}}
+    async def _empty_exec(**_): return []
+    monkeypatch.setattr(master_service, "_fetch_bybit_order_history", _empty_payload)
+    monkeypatch.setattr(master_service, "_fetch_bybit_order_realtime", _empty_payload)
+    monkeypatch.setattr(master_service, "_fetch_bybit_executions", _empty_exec)
+    monkeypatch.setattr(master_service, "_fetch_bybit_transaction_log", _empty_payload)
+    monkeypatch.setattr(master_service, "load_bybit_demo_tpsl_cache", lambda: {})
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setattr(master_service, "_record_bybit_demo_sync_status", lambda **_: None)
+    monkeypatch.setattr(master_service, "_upsert_trade_context", lambda payload: payload)
+    async def _empty_balance(): return {}
+    monkeypatch.setattr(master_service, "_fetch_bybit_demo_current_balance_snapshot", _empty_balance)
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_rows", lambda rows: (rows, {"changed": 0, "deduped_by_order_id": 0, "deduped_by_fingerprint": 0}))
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: [])
+    monkeypatch.setattr(master_service, "_set_trading_journal_rows", lambda _rows: None)
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_local_workbook", lambda *_: {"changed": 0, "deduped_by_order_id": 0, "deduped_by_fingerprint": 0})
+    async def fake_closed(**_):
+        return {"result": {"list": [{"symbol": "BTCUSDT", "orderId": "oid-real-1", "side": "Buy", "avgEntryPrice": "100", "avgExitPrice": "101", "closedSize": "1", "closedPnl": "1", "openFee": "0", "closeFee": "0", "createdTime": 1000, "updatedTime": 2000}]}}
+    monkeypatch.setattr(master_service, "_fetch_bybit_closed_pnl", fake_closed)
+    asyncio.run(master_service._sync_bybit_closed_pnl_window(account_mode="demo", base_url="u", api_key="k", api_secret="s", start_time=0, end_time=3000))
+    workbook = tmp_path / master_service.BYBIT_DEMO_WORKBOOK_NAME
+    assert workbook.exists()
+    df = master_service.pd.read_excel(workbook, sheet_name=master_service.BYBIT_DEMO_WORKBOOK_SHEET)
+    assert any(str(v) == "oid-real-1" for v in df["order_id"].tolist())
+
+
 def test_bybit_signed_get_retries_after_timestamp_window_error(monkeypatch) -> None:
     calls: list[tuple[str, dict[str, str]]] = []
     market_time_calls = {"count": 0}
