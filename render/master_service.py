@@ -9639,10 +9639,11 @@ async def _bybit_signed_post(
                 resp = await client.post(url, headers=headers, content=body_json)
         except httpx.TimeoutException:
             raise
+        response_content = getattr(resp, "content", b"") or b""
         _record_outbound_traffic(
             "bybit",
             bytes_sent=len(url) + len(body_json) + sum(len(str(v)) for v in headers.values()),
-            bytes_received=len(resp.content),
+            bytes_received=len(response_content),
             context=path,
         )
         resp.raise_for_status()
@@ -13711,11 +13712,32 @@ def _append_generic_local_broker_rows(workbook_name: str, rows: List[Dict[str, o
         changed=0
         for r in rows:
             m=map_row(r)
-            key = str(m.get("transaction_id") or m.get("trade_id") or m.get("order_id") or "")
-            if key:
-                mask = (existing["transaction_id"].astype(str)==str(m.get("transaction_id") or "")) | (existing["trade_id"].astype(str)==str(m.get("trade_id") or "")) | (existing["order_id"].astype(str)==str(m.get("order_id") or ""))
+            id_masks: List[pd.Series] = []
+            tx_id = str(m.get("transaction_id") or "").strip()
+            tr_id = str(m.get("trade_id") or "").strip()
+            or_id = str(m.get("order_id") or "").strip()
+            if tx_id:
+                id_masks.append(existing["transaction_id"].fillna("").astype(str).str.strip() == tx_id)
+            if tr_id:
+                id_masks.append(existing["trade_id"].fillna("").astype(str).str.strip() == tr_id)
+            if or_id:
+                id_masks.append(existing["order_id"].fillna("").astype(str).str.strip() == or_id)
+            if id_masks:
+                mask = id_masks[0]
+                for extra in id_masks[1:]:
+                    mask = mask | extra
             else:
-                mask = (existing["account"].astype(str)==str(m.get("account") or "")) & (existing["symbol"].astype(str)==str(m.get("symbol") or "")) & (existing["opening_time"].astype(str)==str(m.get("opening_time") or "")) & (existing["closing_time"].astype(str)==str(m.get("closing_time") or ""))
+                mask = (
+                    (existing["account"].fillna("").astype(str).str.strip()==str(m.get("account") or "").strip()) &
+                    (existing["symbol"].fillna("").astype(str).str.strip()==str(m.get("symbol") or "").strip()) &
+                    (existing["type_buy_sell"].fillna("").astype(str).str.strip()==str(m.get("type_buy_sell") or "").strip()) &
+                    (existing["opening_time"].fillna("").astype(str).str.strip()==str(m.get("opening_time") or "").strip()) &
+                    (existing["closing_time"].fillna("").astype(str).str.strip()==str(m.get("closing_time") or "").strip()) &
+                    (existing["entry_price"].fillna("").astype(str).str.strip()==str(m.get("entry_price") or "").strip()) &
+                    (existing["closing_price"].fillna("").astype(str).str.strip()==str(m.get("closing_price") or "").strip()) &
+                    (existing["size_quantity"].fillna("").astype(str).str.strip()==str(m.get("size_quantity") or "").strip()) &
+                    (existing["net_profit"].fillna("").astype(str).str.strip()==str(m.get("net_profit") or "").strip())
+                )
             idxs = existing.index[mask]
             if len(idxs):
                 for c,v in m.items(): existing.at[idxs[0],c]=v
@@ -13737,10 +13759,14 @@ async def _sync_bybit_closed_pnl_window(
     end_time: int,
 ) -> int:
     mode = "demo" if str(account_mode).strip().lower() == "demo" else "live"
+    local_authoritative = _trading_journal_local_excel_authoritative()
     active_folder: Optional[str] = None
     if mode == "demo":
-        active_folder, _entries = await asyncio.to_thread(_resolve_trading_journal_dropbox_folder)
-        await asyncio.to_thread(_ensure_bybit_demo_dropbox_files, active_folder)
+        if local_authoritative:
+            await asyncio.to_thread(_ensure_local_bybit_demo_files, TRADING_JOURNAL_LOCAL_DIR)
+        else:
+            active_folder, _entries = await asyncio.to_thread(_resolve_trading_journal_dropbox_folder)
+            await asyncio.to_thread(_ensure_bybit_demo_dropbox_files, active_folder)
 
     orders_by_id: Dict[str, List[Dict[str, object]]] = defaultdict(list)
     orders_by_link_id: Dict[str, List[Dict[str, object]]] = defaultdict(list)
@@ -14109,7 +14135,6 @@ async def _sync_bybit_closed_pnl_window(
         )
         return max_seen
 
-    local_authoritative = _trading_journal_local_excel_authoritative()
     changed = 0 if local_authoritative else _upsert_trading_journal_rows(rows)
     sanitize_stats: Dict[str, int] = {"deduped_by_order_id": 0, "deduped_by_fingerprint": 0}
     workbook_stats: Dict[str, int] = {"deduped_by_order_id": 0, "deduped_by_fingerprint": 0}
@@ -21875,8 +21900,21 @@ async def _run_trading_journal_sync_job() -> None:
             result["warnings"] = list(dict.fromkeys([str(w) for w in warnings if str(w).strip()]))
         diagnostics = result.get("diagnostics") if isinstance(result, dict) else {}
         rows_by_asset_class = diagnostics.get("rows_by_asset_class") if isinstance(diagnostics, dict) else {}
-        ok_flag = bool(result.get("ok", True)) if isinstance(result, dict) else True
-        msg = "Done" if ok_flag else str((result or {}).get("message") or (result or {}).get("error") or "; ".join(warnings) or "Failed")
+        broker_payloads = [p for p in [bybit_demo, bybit_live, *list(oanda_sync.values())] if isinstance(p, dict)]
+        broker_failed = any(p.get("ok") is False for p in broker_payloads)
+        local_workbook_failed = any(
+            any(tok in str(p.get("error") or p.get("message") or "").lower() for tok in ["permission", "openpyxl", "os.replace", "workbook", "excel", "failed to read workbook", "failed to write"])
+            for p in broker_payloads
+        ) or any("workbook" in str(w).lower() for w in warnings)
+        has_warnings = bool(warnings)
+        base_ok = bool(result.get("ok", True)) if isinstance(result, dict) else True
+        ok_flag = bool(base_ok and not broker_failed and not local_workbook_failed)
+        if not ok_flag:
+            msg = f"Failed: {str((result or {}).get('message') or (result or {}).get('error') or '; '.join(warnings) or 'sync failed')}"
+        elif has_warnings:
+            msg = "Completed with warnings"
+        else:
+            msg = "Done"
         _set_trading_journal_sync_state(
             running=False,
             progress=100,
