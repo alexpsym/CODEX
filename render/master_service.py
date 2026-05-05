@@ -1189,6 +1189,7 @@ _OANDA_TX_LAST_SEEN: Dict[str, str] = {}
 _OANDA_FILL_BACKOFF_UNTIL: Dict[str, float] = {}
 _OANDA_FILL_FAILURES: Dict[str, int] = {}
 _OANDA_OPEN_TRADE_LEGS: Dict[str, Dict[str, Dict[str, object]]] = {"live": {}, "demo": {}}
+_OANDA_CONTEXT_WARNED_RUNTIME: set[str] = set()
 _OANDA_FILL_DIAGNOSTICS: Dict[str, Dict[str, object]] = {}
 _OANDA_ACCOUNTS_CACHE: Dict[str, Tuple[float, List[Dict[str, object]]]] = {}
 _OANDA_ACCOUNTS_CACHE_TTL_SECONDS = 20.0
@@ -5068,7 +5069,7 @@ def _import_trading_journal_from_sources(
     template_result: Dict[str, object] = {"errors": []}
     warnings: List[str] = []
 
-    if include_local and local_enabled:
+    if include_local and local_enabled and (source_mode == "local" or local_authoritative):
         template_result = _ensure_trading_journal_local_templates()
         for err in template_result.get("errors") or []:
             warnings.append(str(err))
@@ -5126,55 +5127,14 @@ def _import_trading_journal_from_sources(
             import xlrd as _xlrd  # noqa: F401
         except Exception:
             requirements_path = str((BASE_DIR / "render" / "requirements.txt").resolve())
-            error_payload = {
+            warnings.append({
                 "code": "MISSING_XLRD_FOR_XLS",
                 "message": (
                     "Local .xls journal workbooks require xlrd. "
                     f'Install into the same Python executable that launches the journal: python -m pip install -r "{requirements_path}"'
                 ),
                 "files": requires_xls_engine,
-            }
-            errors.append(error_payload)
-            diagnostics.update(
-                {
-                    "errors": errors,
-                    "last_sync": {
-                        "source_mode": source_mode,
-                        "updated_at": _utc_now_iso(),
-                        "ok": False,
-                        "balances_found": 0,
-                        "local_import_enabled": local_enabled,
-                    },
-                }
-            )
-            _set_trading_journal_diagnostics(diagnostics)
-            return {
-                "ok": False,
-                "message": error_payload["message"],
-                "source_mode": source_mode,
-                "rows_imported": 0,
-                "cashflow_rows_loaded": 0,
-                "balances_found": 0,
-                "templates_created": {
-                    "cashflow_template_created": bool(template_result.get("cashflow_template_created")),
-                    "trade_history_template_created": bool(template_result.get("trade_history_template_created")),
-                    "demo_workbook_created": bool(template_result.get("demo_workbook_created")),
-                },
-                "local_workbooks_seen": diagnostics["local_workbooks_seen"],
-                "local_workbook_names": diagnostics.get("local_workbook_names") if isinstance(diagnostics.get("local_workbook_names"), list) else [],
-                "workbooks_scanned": int(diagnostics["local_workbooks_seen"]),
-                "workbooks_changed": 0,
-                "dropbox_workbooks_seen": 0,
-                "duplicate_rows_dropped": 0,
-                "source_duplicate_rows_dropped": 0,
-                "dedupe_groups": 0,
-                "ignored_local_workbooks": ignored_local_workbooks,
-                "errors": errors,
-                "warnings": warnings,
-                "snapshot_generated": False,
-                "snapshot_error": None,
-                "diagnostics": diagnostics,
-            }
+            })
     local_rows_total = 0
     local_balances: List[Dict[str, object]] = []
     for local_file in local_files:
@@ -5202,7 +5162,15 @@ def _import_trading_journal_from_sources(
             if local_balance:
                 local_balances.append(local_balance)
         except Exception as exc:
-            errors.append({"file": local_file.name, "path": str(local_file), "error": str(exc)})
+            err_payload: Dict[str, object] = {"file": local_file.name, "path": str(local_file), "error": str(exc)}
+            if local_file.suffix.lower() == ".xls" and "xlrd" in str(exc).lower():
+                err_payload["code"] = "MISSING_XLRD_FOR_XLS"
+                requirements_path = str((BASE_DIR / "render" / "requirements.txt").resolve())
+                err_payload["message"] = (
+                    "Local .xls journal workbooks require xlrd. "
+                    f'Install into the same Python executable that launches the journal: python -m pip install -r "{requirements_path}"'
+                )
+            errors.append(err_payload)
     imported_any = imported_any or local_rows_total > 0
     imported_rows_total += int(local_rows_total)
 
@@ -5555,12 +5523,33 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
     context_cache: Dict[Tuple[str, str, str, str], Optional[Dict[str, object]]] = {}
     contexts = _load_trade_contexts()
     def _context_registry_key(trade_id: Optional[str] = None) -> str:
-        return _stable_registry_key([account, tx_order_id, trade_id or "", symbol])
+        return _stable_registry_key([account, tx_id, tx_order_id, trade_id or "", symbol])
 
-    def _resolve_context_for_fill(trade_id: Optional[str] = None, warn: bool = False) -> Optional[Dict[str, object]]:
+    def _resolve_context_for_fill(trade_id: Optional[str] = None, warn: bool = True) -> Optional[Dict[str, object]]:
         warning_key = (account, tx_id, tx_order_id, str(trade_id or "").strip())
         if warning_key in context_cache:
             return context_cache[warning_key]
+        if not contexts:
+            unresolved_key = _context_registry_key(trade_id)
+            should_warn, _ = _update_unresolved_registry(
+                family="oanda_context",
+                key=unresolved_key,
+                details={"reason": "missing"},
+                resolved=False,
+            )
+            runtime_key = f"missing:{unresolved_key}"
+            if (should_warn or runtime_key not in _OANDA_CONTEXT_WARNED_RUNTIME) and warn:
+                BYBIT_LOGGER.warning(
+                    "OANDA_CONTEXT_MISSING account=%s symbol=%s tx_id=%s order_id=%s trade_id=%s",
+                    account,
+                    symbol,
+                    tx_id,
+                    tx_order_id,
+                    trade_id or "",
+                )
+                _OANDA_CONTEXT_WARNED_RUNTIME.add(runtime_key)
+            context_cache[warning_key] = None
+            return None
         refs = {"orderId": tx_order_id, "transactionId": tx_id}
         if trade_id:
             refs["tradeId"] = trade_id
@@ -5577,6 +5566,8 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             return ctx
         side_hint = _normalize_side_for_comparison("buy" if (_to_float(entry.get("units")) or 0.0) >= 0 else "sell")
         open_leg = legs.get(str(trade_id or "").strip()) if trade_id else None
+        if isinstance(open_leg, dict) and str(open_leg.get("symbol") or "").strip().upper() != symbol:
+            open_leg = None
         if isinstance(open_leg, dict):
             open_refs = {
                 "orderId": open_leg.get("order_id"),
@@ -5686,9 +5677,10 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
                 details={"reason": "ambiguous", "candidates": len(candidates)},
                 resolved=False,
             )
-            if should_warn and warn:
-                BYBIT_LOGGER.info(
-                    "OANDA_CONTEXT_ENRICHMENT_MISSING ambiguous account=%s symbol=%s side=%s tx_id=%s order_id=%s trade_id=%s candidates=%s",
+            runtime_key = f"ambiguous:{unresolved_key}"
+            if (should_warn or runtime_key not in _OANDA_CONTEXT_WARNED_RUNTIME) and warn:
+                BYBIT_LOGGER.warning(
+                    "OANDA_CONTEXT_AMBIGUOUS account=%s symbol=%s side=%s tx_id=%s order_id=%s trade_id=%s candidates=%s",
                     account,
                     symbol,
                     side_hint,
@@ -5697,6 +5689,7 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
                     trade_id or "",
                     len(candidates),
                 )
+                _OANDA_CONTEXT_WARNED_RUNTIME.add(runtime_key)
         else:
             should_warn, _ = _update_unresolved_registry(
                 family="oanda_context",
@@ -5704,15 +5697,17 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
                 details={"reason": "missing"},
                 resolved=False,
             )
-            if should_warn and warn:
-                BYBIT_LOGGER.info(
-                    "OANDA_CONTEXT_ENRICHMENT_MISSING missing account=%s symbol=%s tx_id=%s order_id=%s trade_id=%s",
+            runtime_key = f"missing:{unresolved_key}"
+            if (should_warn or runtime_key not in _OANDA_CONTEXT_WARNED_RUNTIME) and warn:
+                BYBIT_LOGGER.warning(
+                    "OANDA_CONTEXT_MISSING account=%s symbol=%s tx_id=%s order_id=%s trade_id=%s",
                     account,
                     symbol,
                     tx_id,
                     tx_order_id,
                     trade_id or "",
                 )
+                _OANDA_CONTEXT_WARNED_RUNTIME.add(runtime_key)
         context_cache[warning_key] = None
         return None
 
@@ -5748,7 +5743,7 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
         _persist_oanda_fill_state()
         return []
 
-    base_ctx = _resolve_context_for_fill()
+    base_ctx = _resolve_context_for_fill(None, warn=(len(close_legs) > 1))
     timeframe = _normalize_timeframe(entry.get("timeframe")) or _normalize_timeframe((base_ctx or {}).get("timeframe"))
     base_is_test_trade = _normalize_test_trade_flag(
         entry.get("is_test_trade", entry.get("test_trade", entry.get("test")))
@@ -5762,6 +5757,8 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
         trade_id = str(close_leg.get("tradeID") or "").strip()
         leg_units = abs(_to_float(close_leg.get("units")) or 0.0)
         open_leg = legs.get(trade_id) if trade_id else None
+        if isinstance(open_leg, dict) and str(open_leg.get("symbol") or "").strip().upper() != symbol:
+            open_leg = None
         leg_ctx = _resolve_context_for_fill(trade_id) or base_ctx
         entry_price = _to_float((open_leg or {}).get("entry_price"))
         open_time = str((open_leg or {}).get("open_time") or "") or None
@@ -10421,8 +10418,11 @@ def _upsert_bybit_demo_calc_context(context: Dict[str, object], active_folder: O
     return ctx
 
 
-def _lookup_bybit_demo_calc_context_for_row(row_or_refs: Dict[str, object]) -> Optional[Dict[str, object]]:
-    state = _load_bybit_demo_calc_contexts()
+def _lookup_bybit_demo_calc_context_for_row(row_or_refs: Dict[str, object], active_folder: Optional[str] = None) -> Optional[Dict[str, object]]:
+    try:
+        state = _load_bybit_demo_calc_contexts(active_folder)
+    except Exception:
+        return None
     items = [i for i in (state.get("items") or []) if isinstance(i, dict)]
     calc_id = str(row_or_refs.get("calculation_context_id") or "").strip()
     oid = str(row_or_refs.get("order_id") or row_or_refs.get("orderId") or "").strip()
@@ -13227,11 +13227,15 @@ def _normalize_bybit_closed_pnl_row(
     close_time_iso = execution_close or order_updated or closed_pnl_updated
     close_ts = _canonical_trade_epoch_second(close_time_iso)
     ctx_valid = isinstance(ctx, dict)
+    invalid_context_time = False
+    context_candidate_open_for_diag = None
     if ctx_valid:
         candidate_open = _epoch_or_iso_to_iso(ctx.get("open_time")) or _epoch_or_iso_to_iso(ctx.get("created_at"))
+        context_candidate_open_for_diag = candidate_open
         if candidate_open and close_ts is not None:
             candidate_open_ts = _canonical_trade_epoch_second(candidate_open)
             if candidate_open_ts is not None and candidate_open_ts >= close_ts:
+                invalid_context_time = True
                 ctx = None
                 ctx_valid = False
     if isinstance(ctx, dict):
@@ -13270,6 +13274,8 @@ def _normalize_bybit_closed_pnl_row(
         created_ts = _canonical_trade_epoch_second(created_fallback)
         if created_ts is not None and created_ts < close_ts:
             open_time = created_fallback
+    if (not open_time) and context_candidate_open_for_diag:
+        open_time = context_candidate_open_for_diag
     open_ts = _canonical_trade_epoch_second(open_time)
     status = "closed"
     row_type = "trade"
@@ -13278,6 +13284,9 @@ def _normalize_bybit_closed_pnl_row(
         row_type = "quarantine"
     elif open_ts is None:
         status = "closed_missing_open_time"
+        if invalid_context_time:
+            status = "invalid_time_order"
+            row_type = "quarantine"
     elif close_ts <= open_ts:
         status = "invalid_time_order"
         row_type = "quarantine"
@@ -13291,6 +13300,7 @@ def _normalize_bybit_closed_pnl_row(
     raw_refs["order_createdTime"] = order_created
     raw_refs["order_updatedTime"] = order_updated
     raw_refs["context_open_time"] = resolved_open_time
+    raw_refs["context_invalid_time"] = bool(invalid_context_time)
     raw_refs["context_used_for_open_time"] = bool((not execution_open) and resolved_open_time)
     return _normalize_journal_profit_fields({
         "id": f"bybit:{mode}:closedpnl:{symbol}:{order_id}",
@@ -14141,7 +14151,10 @@ async def _sync_bybit_closed_pnl_window(
     local_workbook_changed = 0
     if mode == "demo":
         sanitized_rows, sanitize_stats = _sanitize_bybit_demo_rows(_get_trading_journal_rows())
-        snapshot = await _fetch_bybit_demo_current_balance_snapshot() if rows else {}
+        try:
+            snapshot = await _fetch_bybit_demo_current_balance_snapshot() if rows else {}
+        except Exception:
+            snapshot = {}
         if snapshot.get("current_balance") is not None:
             sanitized_rows, _diag = _backfill_bybit_demo_balances_from_current_balance(sanitized_rows, snapshot)
         if int(sanitize_stats.get("changed", 0)):
@@ -21901,7 +21914,10 @@ async def _run_trading_journal_sync_job() -> None:
         diagnostics = result.get("diagnostics") if isinstance(result, dict) else {}
         rows_by_asset_class = diagnostics.get("rows_by_asset_class") if isinstance(diagnostics, dict) else {}
         broker_payloads = [p for p in [bybit_demo, bybit_live, *list(oanda_sync.values())] if isinstance(p, dict)]
-        broker_failed = any(p.get("ok") is False for p in broker_payloads)
+        def _is_optional_config_warning(payload: Dict[str, object]) -> bool:
+            msg = str(payload.get("error") or payload.get("message") or "").lower()
+            return any(x in msg for x in ["missing", "not configured", "credentials are not configured"])
+        broker_failed = any((p.get("ok") is False) and (not _is_optional_config_warning(p)) for p in broker_payloads)
         local_workbook_failed = any(
             any(tok in str(p.get("error") or p.get("message") or "").lower() for tok in ["permission", "openpyxl", "os.replace", "workbook", "excel", "failed to read workbook", "failed to write"])
             for p in broker_payloads

@@ -1093,6 +1093,8 @@ def test_bybit_signed_get_persistent_timestamp_error_raises(monkeypatch) -> None
 
 def test_bybit_signed_get_non_timestamp_error_does_not_retry(monkeypatch) -> None:
     requests = {"count": 0}
+    master_service._BYBIT_TIME_OFFSET_CACHE.clear()
+    master_service._BYBIT_TIME_OFFSET_CACHE["https://api.bybit.com"] = {"synced_at": int(master_service.time.time() * 1000), "offset_ms": 0, "rtt_ms": 0}
 
     class DummyResponse:
         status_code = 200
@@ -1112,8 +1114,9 @@ def test_bybit_signed_get_non_timestamp_error_does_not_retry(monkeypatch) -> Non
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
-        async def get(self, *_args, **_kwargs):
-            requests["count"] += 1
+        async def get(self, url, *_args, **_kwargs):
+            if "/v5/order/history" in str(url):
+                requests["count"] += 1
             return DummyResponse()
 
     monkeypatch.setattr(master_service.httpx, "AsyncClient", DummyClient)
