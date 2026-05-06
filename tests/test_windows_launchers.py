@@ -23,3 +23,14 @@ def test_parse_master_env_helper_exists_and_filters_allowed_keys() -> None:
     assert "'RENDER_CALCULATOR_BASE_URL'" in helper
     assert "$k -like 'DROPBOX_*' -or $allow -contains $k" in helper
     assert "Set-Content -LiteralPath $OutputPath" in helper
+
+
+def test_windows_launchers_use_repo_journal_dir_and_preflight() -> None:
+    journal = (ROOT / 'run_trading_journal_local.bat').read_text(encoding='utf-8')
+    master = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
+    for script in (journal, master):
+        assert 'set "TRADING_JOURNAL_LOCAL_DIR=%ROOT%journal"' in script
+        assert 'C:\\Users\\User\\Documents\\TRADING' not in script
+        assert 'account_cashflows.xlsx' in script
+    assert '[journal-local] TRADING_JOURNAL_LOCAL_DIR=%TRADING_JOURNAL_LOCAL_DIR%' in journal
+    assert '[local-master] TRADING_JOURNAL_LOCAL_DIR=%TRADING_JOURNAL_LOCAL_DIR%' in master

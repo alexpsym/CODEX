@@ -877,9 +877,9 @@ def _journal_source_fingerprint() -> dict:
     source_files: List[Dict[str, object]] = []
     for path in _list_local_trading_journal_workbooks():
         source_files.append(_source_file_fingerprint(path))
-    source_files.append(_source_file_fingerprint(TRADING_JOURNAL_LOCAL_DIR / "account_cashflows.xlsx"))
-    source_files.append(_source_file_fingerprint(TRADING_JOURNAL_LOCAL_DIR / BYBIT_DEMO_WORKBOOK_NAME))
-    source_files.append(_source_file_fingerprint(TRADING_JOURNAL_LOCAL_DIR / BYBIT_DEMO_TEMPLATE_NAME))
+    source_files.append(_source_file_fingerprint(_resolve_local_journal_file("account_cashflows.xlsx", TRADING_JOURNAL_LOCAL_DIR)))
+    source_files.append(_source_file_fingerprint(_resolve_local_journal_file(BYBIT_DEMO_WORKBOOK_NAME, TRADING_JOURNAL_LOCAL_DIR)))
+    source_files.append(_source_file_fingerprint(_resolve_local_journal_file(BYBIT_DEMO_TEMPLATE_NAME, TRADING_JOURNAL_LOCAL_DIR)))
     source_files.append(_source_file_fingerprint(TRADING_JOURNAL_PATH))
     source_files.append(_source_file_fingerprint(TRADING_JOURNAL_STATE_PATH))
     source_files.append(_source_file_fingerprint(OANDA_FILL_STATE_PATH))
@@ -4108,8 +4108,23 @@ def _bybit_demo_workbook_bytes() -> bytes:
     return buffer.getvalue()
 
 
+def _resolve_local_journal_file(name: str, base_dir: Optional[Path] = None) -> Path:
+    root = base_dir or TRADING_JOURNAL_LOCAL_DIR
+    target = root / str(name or "").strip()
+    if target.exists():
+        return target
+    try:
+        expected = target.name.lower()
+        for candidate in root.iterdir():
+            if candidate.is_file() and candidate.name.lower() == expected:
+                return candidate
+    except Exception:
+        pass
+    return target
+
+
 def _local_journal_workbook_path(name: str) -> Path:
-    return TRADING_JOURNAL_LOCAL_DIR / str(name or "").strip()
+    return _resolve_local_journal_file(name, TRADING_JOURNAL_LOCAL_DIR)
 
 
 def _write_excel_atomic(path: Path, sheet_name: str, frame: pd.DataFrame) -> None:
@@ -4341,7 +4356,7 @@ def _ensure_local_bybit_demo_files(local_dir: Path) -> Dict[str, bool]:
             raise RuntimeError("Bybit history exporter module not available.")
         bybit_history_fetcher.write_blank_trade_history_template(str(template_path))
         created["trade_history_template_created"] = True
-    workbook_path = local_dir / BYBIT_DEMO_WORKBOOK_NAME
+    workbook_path = _resolve_local_journal_file(BYBIT_DEMO_WORKBOOK_NAME, local_dir)
     if not workbook_path.exists():
         workbook_path.write_bytes(_bybit_demo_workbook_bytes())
         created["demo_workbook_created"] = True
@@ -13662,7 +13677,7 @@ def _append_bybit_demo_rows_to_workbook(active_folder: str, rows: List[Dict[str,
 def _append_bybit_demo_rows_to_local_workbook(local_dir: Path, rows: List[Dict[str, object]]) -> int:
     if not rows:
         return 0
-    workbook_path = local_dir / BYBIT_DEMO_WORKBOOK_NAME
+    workbook_path = _resolve_local_journal_file(BYBIT_DEMO_WORKBOOK_NAME, local_dir)
     with _BYBIT_DEMO_WORKBOOK_LOCK:
         existing = _coerce_bybit_demo_workbook_frame(
             _read_excel_sheet_or_empty(workbook_path, BYBIT_DEMO_WORKBOOK_SHEET, BYBIT_DEMO_WORKBOOK_COLUMNS)
@@ -13692,7 +13707,7 @@ def _append_bybit_demo_rows_to_local_workbook(local_dir: Path, rows: List[Dict[s
 
 
 def _sanitize_bybit_demo_local_workbook(local_dir: Path) -> Dict[str, int]:
-    workbook_path = local_dir / BYBIT_DEMO_WORKBOOK_NAME
+    workbook_path = _resolve_local_journal_file(BYBIT_DEMO_WORKBOOK_NAME, local_dir)
     frame = _coerce_bybit_demo_workbook_frame(
         _read_excel_sheet_or_empty(workbook_path, BYBIT_DEMO_WORKBOOK_SHEET, BYBIT_DEMO_WORKBOOK_COLUMNS)
     )

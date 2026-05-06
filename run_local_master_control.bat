@@ -9,7 +9,16 @@ set "AUTOSTART_SCRIPTS=bybit_monitor,oanda_monitor,fxweekend-clone"
 set "PYTHONUNBUFFERED=1"
 set "TRADING_JOURNAL_SOURCE=local"
 set "TRADING_JOURNAL_ENABLE_LOCAL_IMPORT=1"
-set "TRADING_JOURNAL_LOCAL_DIR=C:\Users\User\Documents\TRADING"
+set "TRADING_JOURNAL_LOCAL_DIR=%ROOT%journal"
+echo [local-master] TRADING_JOURNAL_LOCAL_DIR=%TRADING_JOURNAL_LOCAL_DIR%
+if not exist "%TRADING_JOURNAL_LOCAL_DIR%\" (
+  echo [local-master] ERROR: TRADING_JOURNAL_LOCAL_DIR not found at %TRADING_JOURNAL_LOCAL_DIR%
+  exit /b 1
+)
+if not exist "%TRADING_JOURNAL_LOCAL_DIR%\account_cashflows.xlsx" (
+  echo [local-master] ERROR: required workbook missing: %TRADING_JOURNAL_LOCAL_DIR%\account_cashflows.xlsx
+  exit /b 1
+)
 set "CASHFLOW_CACHE_TTL_SECONDS=3600"
 if not defined DROPBOX_SYNC_ENABLED set "DROPBOX_SYNC_ENABLED=1"
 if not defined DROPBOX_BACKUP_PATH set "DROPBOX_BACKUP_PATH=/codex/master_control_backup.json"

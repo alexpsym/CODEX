@@ -1310,3 +1310,21 @@ def test_run_closed_pnl_sync_records_error_details(monkeypatch) -> None:
     assert statuses
     assert "retCode=10002" in str(statuses[-1].get("last_error"))
     assert "path=/v5/order/history" in str(statuses[-1].get("last_error"))
+
+
+def test_resolve_local_journal_file_case_insensitive_and_append_reuses_existing(tmp_path, monkeypatch) -> None:
+    local_dir = tmp_path / "journal"
+    local_dir.mkdir()
+    existing = local_dir / "BYBIT DEMO.xlsx"
+    pd.DataFrame(columns=master_service.BYBIT_DEMO_WORKBOOK_COLUMNS).to_excel(existing, index=False)
+
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", local_dir)
+    resolved = master_service._resolve_local_journal_file("Bybit Demo.xlsx")
+    assert resolved == existing
+
+    rows = [{"order_id": "oid-1", "symbol": "BTCUSDT"}]
+    monkeypatch.setattr(master_service, "_bybit_demo_workbook_row", lambda _row: {col: "" for col in master_service.BYBIT_DEMO_WORKBOOK_COLUMNS} | {"order_id": "oid-1", "symbol": "BTCUSDT"})
+    changed = master_service._append_bybit_demo_rows_to_local_workbook(local_dir, rows)
+    assert changed == 1
+    assert existing.exists()
+    assert not (local_dir / "Bybit Demo.xlsx").exists()
