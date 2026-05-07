@@ -58,5 +58,36 @@ def test_dashboard_does_not_collapse_mixed_currency_money(tmp_path: Path):
     ws.append(["2026-01-02","2026-01-02","Buy","BTCUSDT",100,110,20,"USDT"])
     wb.save(j/'BYBIT DEMO.xlsx')
     out=tmp_path/'o.xlsx';build_output(j,out)
-    vals={load_workbook(out)['Dashboard'].cell(r,c).value for r in range(1,200) for c in range(1,5)}
+    wb2=load_workbook(out, read_only=True, data_only=True); ws2=wb2['Dashboard']
+    vals={(ws2.cell(r,c).value) for r in range(1,200) for c in range(1,5)}
     assert 'AUD' in vals and 'USDT' in vals
+    overall_net=None
+    for r in range(1,200):
+        if ws2.cell(r,1).value=='Net P/L' and any(ws2.cell(rr,1).value=='Overall' for rr in range(max(1,r-25),r)):
+            overall_net=ws2.cell(r,2).value; break
+    assert isinstance(overall_net,str) and 'AUD' in overall_net and 'USDT' in overall_net and '30' not in overall_net
+
+
+def test_duration_metric_sources_are_real_refs():
+    rows=[{"id":"s","symbol":"A","side":"BUY","asset_class":"FX","net_profit":1,"trade_duration_seconds":10},{"id":"l","symbol":"A","side":"BUY","asset_class":"FX","net_profit":1,"trade_duration_seconds":20}]
+    ms=compute_journal_stats_replica(rows)['groups']['duration']['metric_sources']
+    assert ms['overall_shortest_seconds']['id']=='s' and ms['overall_longest_seconds']['id']=='l'
+
+def test_market_bucket_matches_render_shape():
+    b=compute_journal_stats_replica([{"symbol":"A","side":"BUY","asset_class":"FX","entry":100,"stop_loss":90,"take_profit":110,"net_profit":1,"trade_duration_seconds":10}])['groups']['by_market']['overall']
+    for k in ['shortest_duration_seconds','longest_duration_seconds','instruments','min_stop_pct','max_stop_pct','min_target_pct','max_target_pct','max_drawdown_pct']:
+        assert k in b
+
+def test_totals_contains_render_parity_keys():
+    t=compute_journal_stats_replica([{"symbol":"A","side":"BUY","asset_class":"FX","net_profit":1,"trade_duration_seconds":10}])['totals']
+    for k in ['min_gain','min_loss','max_winner_duration_seconds','max_loser_duration_seconds','drawdown_balance_points','drawdown_segments_count','unique_instruments','crypto_instruments','fx_instruments']:
+        assert k in t
+
+def test_dashboard_duration_values_are_human_readable_or_explicitly_labelled(tmp_path: Path):
+    j=tmp_path/'journal';j.mkdir();wb=Workbook();ws=wb.active
+    ws.append(["opening_time","closing_time","type_buy_sell","symbol","entry_price","closing_price","net_profit","currency"])
+    ws.append(["2026-01-01 00:00","2026-01-01 01:24","Buy","EURUSD",1.1,1.2,10,"AUD"])
+    wb.save(j/'BYBIT DEMO.xlsx')
+    out=tmp_path/'o2.xlsx';build_output(j,out);wb2=load_workbook(out, read_only=True, data_only=True);d=wb2['Dashboard']
+    vals={str(d.cell(r,2).value) for r in range(1,220) if d.cell(r,1).value=='Avg duration'}
+    assert any(('h' in v or 'm' in v or 's' in v) for v in vals)

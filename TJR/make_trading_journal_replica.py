@@ -600,6 +600,16 @@ def _streak(rows: List[Dict[str, Any]], want_win: bool) -> Dict[str, Any]:
         "trade_ids": [r.get("id") for r in best if r.get("id")],
     }
 
+
+
+def _row_ref(row: Dict[str, Any], metric_key: str, metric_value: Any) -> Dict[str, Any]:
+    return {"id":row.get("id"),"symbol":row.get("symbol"),"asset_class":clean_text(row.get("asset_class")).lower(),"side":row.get("side"),"open_time":row.get("open_time"),"close_time":row.get("close_time"),"date":row.get("close_time") or row.get("open_time"),"currency":row_pnl_currency(row),"account":row.get("account"),"source":row.get("import_source"),"timeframe":row.get("timeframe"),"net_profit":row.get("net_profit"),"result_pct":row.get("result_pct"),"r_multiple":row.get("r_multiple"),"trade_duration_seconds":row.get("trade_duration_seconds"),"metric_key":metric_key,"metric_value":metric_value}
+
+def _duration_extreme_ref(rows: List[Dict[str, Any]], mode: str, metric_key: str) -> Optional[Dict[str, Any]]:
+    vals=[(r,safe_float(r.get("trade_duration_seconds"))) for r in rows if safe_float(r.get("trade_duration_seconds")) is not None]
+    if not vals: return None
+    row,val=(min(vals,key=lambda t:t[1]) if mode=="min" else max(vals,key=lambda t:t[1]))
+    return _row_ref(row, metric_key, val)
 def _market_bucket(rows: List[Dict[str, Any]], label: str) -> Dict[str, Any]:
     pnls=[row_pnl(r) for r in rows if row_pnl(r) is not None]
     wins=[r for r in rows if is_win(r)]; losses=[r for r in rows if is_loss(r)]; bes=[r for r in rows if is_be(r)]
@@ -630,8 +640,16 @@ def _market_bucket(rows: List[Dict[str, Any]], label: str) -> Dict[str, Any]:
         "avg_result_pct": avg_metric(rows, "result_pct"), "min_result_pct": safe_min(metric_values(rows, "result_pct")), "max_result_pct": safe_max(metric_values(rows, "result_pct")),
         "avg_r_multiple": avg_metric(rows, "r_multiple"), "min_r_multiple": safe_min(metric_values(rows, "r_multiple")), "max_r_multiple": safe_max(metric_values(rows, "r_multiple")),
         "avg_stop_pct": avg([stop_pct(t) for t in rows if stop_pct(t) is not None]),
+        "min_stop_pct": safe_min([stop_pct(t) for t in rows if stop_pct(t) is not None]),
+        "max_stop_pct": safe_max([stop_pct(t) for t in rows if stop_pct(t) is not None]),
         "avg_target_pct": avg([target_pct(t) for t in rows if target_pct(t) is not None]),
+        "min_target_pct": safe_min([target_pct(t) for t in rows if target_pct(t) is not None]),
+        "max_target_pct": safe_max([target_pct(t) for t in rows if target_pct(t) is not None]),
         "avg_duration_seconds": avg_metric(rows, "trade_duration_seconds"),
+        "shortest_duration_seconds": safe_min(metric_values(rows,"trade_duration_seconds")),
+        "longest_duration_seconds": safe_max(metric_values(rows,"trade_duration_seconds")),
+        "instruments": sorted({clean_text(t.get("symbol")) for t in rows if clean_text(t.get("symbol"))}),
+        "max_drawdown_pct": None,
         "money_by_currency": totals,
         "metric_sources": metric_sources,
     }
@@ -659,6 +677,10 @@ def compute_journal_stats_replica(trades: List[Dict[str, Any]]) -> Dict[str, Any
         "min_fx_trade_duration_seconds": safe_min(metric_values(fx,"trade_duration_seconds")),"max_fx_trade_duration_seconds": safe_max(metric_values(fx,"trade_duration_seconds")),
         "min_crypto_trade_duration_seconds": safe_min(metric_values(crypto,"trade_duration_seconds")),"max_crypto_trade_duration_seconds": safe_max(metric_values(crypto,"trade_duration_seconds")),
         "max_drawdown_pct": safe_max(dds) if len(dds)>=1 else None, "avg_drawdown_pct": avg(dds) if len(dds)>=1 else None, "min_drawdown_pct": safe_min(dds) if len(dds)>=1 else None,
+        "min_gain": safe_min([v for v in [row_pnl(t) for t in live] if v is not None and v>0]), "min_loss": safe_min([abs(v) for v in [row_pnl(t) for t in live] if v is not None and v<0]),
+        "max_winner_duration_seconds": safe_max(metric_values(wins,"trade_duration_seconds")), "max_loser_duration_seconds": safe_max(metric_values(losses,"trade_duration_seconds")),
+        "unique_instruments": len({t.get("symbol") for t in live if t.get("symbol")}), "crypto_instruments": len({t.get("symbol") for t in crypto if t.get("symbol")}), "fx_instruments": len({t.get("symbol") for t in fx if t.get("symbol")}),
+        "drawdown_balance_points": sum(1 for t in live if safe_float(t.get("balance_after")) is not None), "drawdown_segments_count": 1 if dds else 0,
     })
     def leader(rows, key):
         cand=[r for r in rows if r.get(key,0)>0]
@@ -666,7 +688,7 @@ def compute_journal_stats_replica(trades: List[Dict[str, Any]]) -> Dict[str, Any
     groups={
       "overview": totals,
       "risk_expectancy": {k: totals.get(k) for k in ["avg_stop_pct","avg_target_pct","avg_result_pct","avg_r_multiple","avg_stop_pct_winners","avg_stop_pct_losers","avg_target_pct_winners","avg_target_pct_losers","avg_result_pct_winners","avg_result_pct_losers","avg_r_multiple_winners","avg_r_multiple_losers","max_drawdown_pct","avg_drawdown_pct","min_drawdown_pct"]},
-      "duration": {"overall_avg_seconds":totals.get("avg_duration_seconds"),"overall_shortest_seconds":totals.get("min_trade_duration_seconds"),"overall_longest_seconds":totals.get("max_trade_duration_seconds"),"overall_avg_winner_seconds":totals.get("avg_winner_duration_seconds"),"overall_avg_loser_seconds":totals.get("avg_loser_duration_seconds"),"overall_longest_winner_seconds":safe_max(metric_values(wins,"trade_duration_seconds")),"overall_longest_loser_seconds":safe_max(metric_values(losses,"trade_duration_seconds")),"fx_avg_seconds":totals.get("avg_fx_duration_seconds"),"fx_shortest_seconds":totals.get("min_fx_trade_duration_seconds"),"fx_longest_seconds":totals.get("max_fx_trade_duration_seconds"),"fx_avg_winner_seconds":avg_metric([t for t in fx if is_win(t)],"trade_duration_seconds"),"fx_avg_loser_seconds":avg_metric([t for t in fx if is_loss(t)],"trade_duration_seconds"),"fx_shortest_winner_seconds":safe_min(metric_values([t for t in fx if is_win(t)],"trade_duration_seconds")),"fx_shortest_loser_seconds":safe_min(metric_values([t for t in fx if is_loss(t)],"trade_duration_seconds")),"fx_longest_winner_seconds":safe_max(metric_values([t for t in fx if is_win(t)],"trade_duration_seconds")),"fx_longest_loser_seconds":safe_max(metric_values([t for t in fx if is_loss(t)],"trade_duration_seconds")),"crypto_avg_seconds":totals.get("avg_crypto_duration_seconds"),"crypto_shortest_seconds":totals.get("min_crypto_trade_duration_seconds"),"crypto_longest_seconds":totals.get("max_crypto_trade_duration_seconds"),"crypto_avg_winner_seconds":avg_metric([t for t in crypto if is_win(t)],"trade_duration_seconds"),"crypto_avg_loser_seconds":avg_metric([t for t in crypto if is_loss(t)],"trade_duration_seconds"),"crypto_shortest_winner_seconds":safe_min(metric_values([t for t in crypto if is_win(t)],"trade_duration_seconds")),"crypto_shortest_loser_seconds":safe_min(metric_values([t for t in crypto if is_loss(t)],"trade_duration_seconds")),"crypto_longest_winner_seconds":safe_max(metric_values([t for t in crypto if is_win(t)],"trade_duration_seconds")),"crypto_longest_loser_seconds":safe_max(metric_values([t for t in crypto if is_loss(t)],"trade_duration_seconds")),"metric_sources":{}},
+      "duration": {"overall_avg_seconds":totals.get("avg_duration_seconds"),"overall_shortest_seconds":totals.get("min_trade_duration_seconds"),"overall_longest_seconds":totals.get("max_trade_duration_seconds"),"overall_avg_winner_seconds":totals.get("avg_winner_duration_seconds"),"overall_avg_loser_seconds":totals.get("avg_loser_duration_seconds"),"overall_longest_winner_seconds":safe_max(metric_values(wins,"trade_duration_seconds")),"overall_longest_loser_seconds":safe_max(metric_values(losses,"trade_duration_seconds")),"fx_avg_seconds":totals.get("avg_fx_duration_seconds"),"fx_shortest_seconds":totals.get("min_fx_trade_duration_seconds"),"fx_longest_seconds":totals.get("max_fx_trade_duration_seconds"),"fx_avg_winner_seconds":avg_metric([t for t in fx if is_win(t)],"trade_duration_seconds"),"fx_avg_loser_seconds":avg_metric([t for t in fx if is_loss(t)],"trade_duration_seconds"),"fx_shortest_winner_seconds":safe_min(metric_values([t for t in fx if is_win(t)],"trade_duration_seconds")),"fx_shortest_loser_seconds":safe_min(metric_values([t for t in fx if is_loss(t)],"trade_duration_seconds")),"fx_longest_winner_seconds":safe_max(metric_values([t for t in fx if is_win(t)],"trade_duration_seconds")),"fx_longest_loser_seconds":safe_max(metric_values([t for t in fx if is_loss(t)],"trade_duration_seconds")),"crypto_avg_seconds":totals.get("avg_crypto_duration_seconds"),"crypto_shortest_seconds":totals.get("min_crypto_trade_duration_seconds"),"crypto_longest_seconds":totals.get("max_crypto_trade_duration_seconds"),"crypto_avg_winner_seconds":avg_metric([t for t in crypto if is_win(t)],"trade_duration_seconds"),"crypto_avg_loser_seconds":avg_metric([t for t in crypto if is_loss(t)],"trade_duration_seconds"),"crypto_shortest_winner_seconds":safe_min(metric_values([t for t in crypto if is_win(t)],"trade_duration_seconds")),"crypto_shortest_loser_seconds":safe_min(metric_values([t for t in crypto if is_loss(t)],"trade_duration_seconds")),"crypto_longest_winner_seconds":safe_max(metric_values([t for t in crypto if is_win(t)],"trade_duration_seconds")),"crypto_longest_loser_seconds":safe_max(metric_values([t for t in crypto if is_loss(t)],"trade_duration_seconds")),"metric_sources":{"overall_shortest_seconds":_duration_extreme_ref(live,"min","overall_shortest_seconds"),"overall_longest_seconds":_duration_extreme_ref(live,"max","overall_longest_seconds"),"fx_shortest_seconds":_duration_extreme_ref(fx,"min","fx_shortest_seconds"),"fx_longest_seconds":_duration_extreme_ref(fx,"max","fx_longest_seconds"),"crypto_shortest_seconds":_duration_extreme_ref(crypto,"min","crypto_shortest_seconds"),"crypto_longest_seconds":_duration_extreme_ref(crypto,"max","crypto_longest_seconds"),"overall_longest_winner_seconds":_duration_extreme_ref(wins,"max","overall_longest_winner_seconds"),"overall_longest_loser_seconds":_duration_extreme_ref(losses,"max","overall_longest_loser_seconds"),"fx_shortest_winner_seconds":_duration_extreme_ref([t for t in fx if is_win(t)],"min","fx_shortest_winner_seconds"),"fx_shortest_loser_seconds":_duration_extreme_ref([t for t in fx if is_loss(t)],"min","fx_shortest_loser_seconds"),"fx_longest_winner_seconds":_duration_extreme_ref([t for t in fx if is_win(t)],"max","fx_longest_winner_seconds"),"fx_longest_loser_seconds":_duration_extreme_ref([t for t in fx if is_loss(t)],"max","fx_longest_loser_seconds"),"crypto_shortest_winner_seconds":_duration_extreme_ref([t for t in crypto if is_win(t)],"min","crypto_shortest_winner_seconds"),"crypto_shortest_loser_seconds":_duration_extreme_ref([t for t in crypto if is_loss(t)],"min","crypto_shortest_loser_seconds"),"crypto_longest_winner_seconds":_duration_extreme_ref([t for t in crypto if is_win(t)],"max","crypto_longest_winner_seconds"),"crypto_longest_loser_seconds":_duration_extreme_ref([t for t in crypto if is_loss(t)],"max","crypto_longest_loser_seconds")}},
       "by_market": {"overall": _market_bucket(live,"Overall"),"fx": _market_bucket(fx,"Forex"),"crypto": _market_bucket(crypto,"Crypto")},
       "market_breakdown": [_market_bucket(live,"Overall"),_market_bucket(fx,"Forex"),_market_bucket(crypto,"Crypto")],
       "leaders": {"most_wins_instrument": leader(by_inst,"wins"),"most_losses_instrument": leader(by_inst,"losses"),"fx_most_wins_instrument": leader([r for r in by_inst if clean_text(r.get("asset_class")).lower()=="fx"],"wins"),"fx_most_losses_instrument": leader([r for r in by_inst if clean_text(r.get("asset_class")).lower()=="fx"],"losses"),"crypto_most_wins_instrument": leader([r for r in by_inst if clean_text(r.get("asset_class")).lower()=="crypto"],"wins"),"crypto_most_losses_instrument": leader([r for r in by_inst if clean_text(r.get("asset_class")).lower()=="crypto"],"losses")},
@@ -793,6 +815,16 @@ def set_pl_format(ws, ranges: Iterable[str]) -> None:
         ws.conditional_formatting.add(rng, CellIsRule(operator="lessThan", formula=["0"], font=Font(color=RED)))
 
 
+def fmt_duration(seconds: Any) -> str:
+    v=safe_float(seconds)
+    if v is None: return "—"
+    s=int(v)
+    h=s//3600; m=(s%3600)//60
+    if h and m: return f"{h}h {m}m"
+    if h: return f"{h}h"
+    if m: return f"{m}m"
+    return f"{s}s"
+
 def fmt_money_breakdown(bucket: Dict[str, Any], key: str) -> str:
     m=(bucket.get("money_by_currency") or {}).get(key) or {}
     if not isinstance(m, dict) or not m: return "—"
@@ -810,13 +842,13 @@ def write_dashboard(wb: Workbook, trades: List[Dict[str, Any]], sources: List[Pa
         for k,v in rows: ws.append([k,v])
         ws.append([None,None])
     def market_rows(bucket):
-        return [("Trades",bucket.get("trades")),("Wins",bucket.get("wins")),("Losses",bucket.get("losses")),("Break-even",bucket.get("break_even")),("Win rate",bucket.get("win_rate_pct")),("Net P/L",fmt_money_breakdown(bucket,"net_profit_total")),("Gross gain",fmt_money_breakdown(bucket,"gross_gain")),("Gross loss",fmt_money_breakdown(bucket,"gross_loss")),("Avg result %",bucket.get("avg_result_pct")),("Max loss %",bucket.get("min_result_pct")),("Max win %",bucket.get("max_result_pct")),("Avg R",bucket.get("avg_r_multiple")),("Max R loss",bucket.get("min_r_multiple")),("Max R win",bucket.get("max_r_multiple")),("Max gain",fmt_money_breakdown(bucket,"max_gain")),("Max loss",fmt_money_breakdown(bucket,"max_loss")),("Avg stop %",bucket.get("avg_stop_pct")),("Avg target %",bucket.get("avg_target_pct")),("Avg duration",bucket.get("avg_duration_seconds"))]
+        return [("Trades",bucket.get("trades")),("Wins",bucket.get("wins")),("Losses",bucket.get("losses")),("Break-even",bucket.get("break_even")),("Win rate",bucket.get("win_rate_pct")),("Net P/L",fmt_money_breakdown(bucket,"net_profit_total")),("Gross gain",fmt_money_breakdown(bucket,"gross_gain")),("Gross loss",fmt_money_breakdown(bucket,"gross_loss")),("Avg result %",bucket.get("avg_result_pct")),("Max loss %",bucket.get("min_result_pct")),("Max win %",bucket.get("max_result_pct")),("Avg R",bucket.get("avg_r_multiple")),("Max R loss",bucket.get("min_r_multiple")),("Max R win",bucket.get("max_r_multiple")),("Max gain",fmt_money_breakdown(bucket,"max_gain")),("Max loss",fmt_money_breakdown(bucket,"max_loss")),("Avg stop %",bucket.get("avg_stop_pct")),("Avg target %",bucket.get("avg_target_pct")),("Avg duration",fmt_duration(bucket.get("avg_duration_seconds")))]
     bym=g["by_market"]
     section("Overall", market_rows(bym["overall"]))
     section("Winners", [("Avg stop %",stats["totals"].get("avg_stop_pct_winners")),("Avg target %",stats["totals"].get("avg_target_pct_winners")),("Avg result %",stats["totals"].get("avg_result_pct_winners")),("Avg R",stats["totals"].get("avg_r_multiple_winners"))])
     section("Losers", [("Avg stop %",stats["totals"].get("avg_stop_pct_losers")),("Avg target %",stats["totals"].get("avg_target_pct_losers")),("Avg result %",stats["totals"].get("avg_result_pct_losers")),("Avg R",stats["totals"].get("avg_r_multiple_losers"))])
     section("Drawdown", [("Max drawdown",g["risk_expectancy"].get("max_drawdown_pct")),("Avg drawdown",g["risk_expectancy"].get("avg_drawdown_pct")),("Min drawdown",g["risk_expectancy"].get("min_drawdown_pct"))])
-    section("Duration", [("Overall avg",stats["totals"].get("avg_duration_seconds")),("Overall shortest",stats["totals"].get("min_trade_duration_seconds")),("Overall longest",stats["totals"].get("max_trade_duration_seconds")),("FX shortest",stats["totals"].get("min_fx_trade_duration_seconds")),("FX longest",stats["totals"].get("max_fx_trade_duration_seconds")),("Crypto shortest",stats["totals"].get("min_crypto_trade_duration_seconds")),("Crypto longest",stats["totals"].get("max_crypto_trade_duration_seconds"))])
+    section("Duration", [("Overall avg",fmt_duration(stats["totals"].get("avg_duration_seconds"))),("Overall shortest",fmt_duration(stats["totals"].get("min_trade_duration_seconds"))),("Overall longest",fmt_duration(stats["totals"].get("max_trade_duration_seconds"))),("FX shortest",fmt_duration(stats["totals"].get("min_fx_trade_duration_seconds"))),("FX longest",fmt_duration(stats["totals"].get("max_fx_trade_duration_seconds"))),("Crypto shortest",fmt_duration(stats["totals"].get("min_crypto_trade_duration_seconds"))),("Crypto longest",fmt_duration(stats["totals"].get("max_crypto_trade_duration_seconds")))])
     section("FX", market_rows(bym["fx"]))
     section("Crypto", market_rows(bym["crypto"]))
     L=g["leaders"]
