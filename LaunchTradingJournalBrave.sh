@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Android / Termux launcher for the CODEX Trading Journal.
 # Opens Brave Browser on Android only.
-# Repo expected at: /storage/emulated/0/Download/CODEX-master (4)
+## Repo expected at: /storage/emulated/0/Download/CODEX-master/CODEX-master (preferred)
 
 set -Eeuo pipefail
 
@@ -10,7 +10,6 @@ JOURNAL_URL="http://127.0.0.1:${JOURNAL_PORT}/trading-journal"
 JOURNAL_HEALTH_URL="http://127.0.0.1:${JOURNAL_PORT}/health"
 JOURNAL_API_URL="http://127.0.0.1:${JOURNAL_PORT}/api/trading-journal"
 JOURNAL_READY_TIMEOUT_SECONDS="${JOURNAL_READY_TIMEOUT_SECONDS:-90}"
-DEFAULT_REPO_DIR="/storage/emulated/0/Download/CODEX-master (4)"
 BRAVE_PACKAGES=(
   "com.brave.browser"
   "com.brave.browser_beta"
@@ -36,14 +35,20 @@ fail() {
 }
 
 resolve_repo_dir() {
+  local candidates=()
   if [[ -n "${CODEX_REPO_DIR:-}" ]]; then
-    printf '%s\n' "$CODEX_REPO_DIR"
-    return 0
+    candidates+=("$CODEX_REPO_DIR")
   fi
-  if [[ -f "${DEFAULT_REPO_DIR}/render/master_service.py" ]]; then
-    printf '%s\n' "$DEFAULT_REPO_DIR"
+  candidates+=(
+    "/storage/emulated/0/Download/CODEX-master/CODEX-master"
+    "/sdcard/Download/CODEX-master/CODEX-master"
+    "${HOME}/storage/downloads/CODEX-master/CODEX-master"
+  )
+  for candidate in "${candidates[@]}"; do
+    [[ -f "${candidate}/render/master_service.py" ]] || continue
+    printf '%s\n' "$candidate"
     return 0
-  fi
+  done
   if [[ -f "${SCRIPT_DIR}/render/master_service.py" ]]; then
     printf '%s\n' "$SCRIPT_DIR"
     return 0
@@ -56,7 +61,7 @@ resolve_repo_dir() {
 }
 
 REPO_DIR="$(resolve_repo_dir || true)"
-[[ -n "$REPO_DIR" ]] || fail "repo not found. Expected ${DEFAULT_REPO_DIR}. If storage permission is missing, open Termux once and run termux-setup-storage."
+[[ -n "$REPO_DIR" ]] || fail "repo not found. Expected /Internal storage/Download/CODEX-master/CODEX-master (Termux: /storage/emulated/0/Download/CODEX-master/CODEX-master). If storage permission is missing, open Termux once and run termux-setup-storage."
 [[ -f "${REPO_DIR}/render/master_service.py" ]] || fail "render/master_service.py not found under ${REPO_DIR}"
 
 if [[ ! -f "$ENV_FILE" ]]; then
