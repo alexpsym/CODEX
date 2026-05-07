@@ -17453,7 +17453,7 @@ async def trading_journal_page() -> str:
   <title>Trading Journal</title>
   <style>
     body { background:#0b1220; color:#e5e7eb; font-family:system-ui,sans-serif; margin:0; }
-    .wrap { max-width: 1400px; margin: 0 auto; padding: 16px; }
+    .wrap { width: min(1880px, calc(100vw - 32px)); margin: 0 auto; padding: 16px 0; }
     .toolbar, .balances, .table-wrap { background:#111827; border:1px solid #1f2937; border-radius:12px; }
     .table-shell { background:#111827; border:1px solid #1f2937; border-radius:12px; padding:8px; }
     .hscroll-top { overflow-x:auto; overflow-y:hidden; height:14px; margin-bottom:6px; }
@@ -17510,6 +17510,7 @@ async def trading_journal_page() -> str:
     .loading-bar { height:10px; background:#0f172a; border:1px solid #1f2937; border-radius:999px; overflow:hidden; }
     #tj-loading-bar { height:100%; width:0%; background:#2563eb; }
     .tj-stats-dashboard { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:10px; align-items:start; margin-bottom:10px; }
+    .tj-stats-column { min-width:0; display:flex; flex-direction:column; gap:10px; }
     @media (max-width: 1100px) { .tj-stats-dashboard { grid-template-columns:repeat(2, minmax(0, 1fr)); } }
     @media (max-width: 720px) { .tj-stats-dashboard { grid-template-columns:1fr; } }
     .tj-stats-section { background:#0f172a; border:1px solid #1f2937; border-radius:10px; padding:6px 8px; }
