@@ -46,7 +46,9 @@ def test_home_page_local_profile_returns_dashboard_html() -> None:
     response = asyncio.run(master_service.home_page())
     assert response.status_code == 200
     assert "text/html" in response.headers.get("content-type", "")
-    assert "Master Control Dashboard" in response.body.decode("utf-8")
+    body = response.body.decode("utf-8")
+    assert "dashboard-workspace" in body
+    assert "scripts-grid" in body
 
 
 def test_home_page_render_profile_returns_dashboard_html() -> None:
@@ -54,7 +56,9 @@ def test_home_page_render_profile_returns_dashboard_html() -> None:
     response = asyncio.run(master_service.home_page())
     assert response.status_code == 200
     assert "text/html" in response.headers.get("content-type", "")
-    assert "Master Control Dashboard" in response.body.decode("utf-8")
+    body = response.body.decode("utf-8")
+    assert "dashboard-workspace" in body
+    assert "scripts-grid" in body
 
 
 def test_render_profile_blocks_local_only_routes() -> None:
