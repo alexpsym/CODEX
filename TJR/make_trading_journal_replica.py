@@ -438,8 +438,9 @@ def find_journal_dir(repo_dir: Optional[str]) -> Path:
     if env_repo:
         candidates.append(Path(env_repo) / "journal")
     candidates.extend([
-        Path("/storage/emulated/0/Download/CODEX-master (4)/CODEX-master/journal"),
-        Path.home() / "storage" / "downloads" / "CODEX-master (4)" / "CODEX-master" / "journal",
+        Path("/storage/emulated/0/Download/CODEX-master/CODEX-master/journal"),
+        Path.home() / "storage" / "downloads" / "CODEX-master" / "CODEX-master" / "journal",
+        Path("/sdcard/Download/CODEX-master/CODEX-master/journal"),
     ])
     for c in candidates:
         if c.exists() and c.is_dir():
@@ -451,7 +452,10 @@ def find_journal_dir(repo_dir: Optional[str]) -> Path:
         for found in root.glob("**/CODEX-master/journal"):
             if found.is_dir():
                 return found
-    raise FileNotFoundError("Could not find CODEX-master/journal under Downloads")
+    raise FileNotFoundError(
+        "Could not find CODEX-master/journal under Downloads. "
+        "Expected /Internal storage/Download/CODEX-master/CODEX-master/journal"
+    )
 
 
 def list_source_workbooks(journal_dir: Path) -> List[Path]:
@@ -1000,7 +1004,7 @@ def build_output(journal_dir: Path, output_path: Path) -> Tuple[int, int, List[s
 
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--repo", default=None, help="Path to CODEX-master repo. Defaults to Downloads/CODEX-master (4)/CODEX-master.")
+    ap.add_argument("--repo", default=None, help="Path to CODEX-master repo. Defaults to Downloads/CODEX-master/CODEX-master.")
     ap.add_argument("--output", default=None, help="Output .xlsx path. Defaults to repo/journal/TradingJournal_Android_Replica.xlsx")
     args = ap.parse_args(argv)
     try:

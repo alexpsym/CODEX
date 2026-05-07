@@ -1,15 +1,15 @@
-TradingJournalExcelReplica32bit
+TJR (Trading Journal Replica for Phone 2)
 
 Purpose:
 Creates a 32-bit Android/Termux-safe Excel workbook replica of the Trading Journal from the Excel files inside:
-/storage/emulated/0/Download/CODEX-master (4)/CODEX-master/journal
+/Internal storage/Download/CODEX-master/CODEX-master/journal
 
-This does not run the FastAPI/web Trading Journal and does not use pandas.
+This is for the replica phone mode only. It does not run the FastAPI/web Trading Journal app.
 It generates:
-/storage/emulated/0/Download/CODEX-master (4)/CODEX-master/journal/TradingJournal_Android_Replica.xlsx
+/Internal storage/Download/CODEX-master/CODEX-master/journal/TradingJournal_Android_Replica.xlsx
 
 Install:
-1. Extract this ZIP to /Internal storage/Download/TradingJournalExcelReplica32bit/
+1. Ensure this folder exists: /Internal storage/Download/CODEX-master/CODEX-master/TJR
 2. Open COPY_PASTE_INTO_TERMUX.txt
 3. Select All, Copy, Paste into Termux.
 4. Refresh the Termux widget.

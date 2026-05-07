@@ -43,17 +43,29 @@ set -u
 log() { printf '%s\n' "[journal-replica] $*"; }
 fail() { printf '%s\n' "[journal-replica] ERROR: $*" >&2; exit 1; }
 
-REPO="/storage/emulated/0/Download/CODEX-master (4)/CODEX-master"
-if [ ! -d "$REPO/journal" ]; then
+resolve_repo() {
+  local candidate found root
+  for candidate in \
+    "/storage/emulated/0/Download/CODEX-master/CODEX-master" \
+    "/sdcard/Download/CODEX-master/CODEX-master" \
+    "$HOME/storage/downloads/CODEX-master/CODEX-master"
+  do
+    [ -d "$candidate/journal" ] || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
   FOUND=""
   for root in "$HOME/storage/downloads" "/storage/emulated/0/Download" "/sdcard/Download"; do
     [ -d "$root" ] || continue
     FOUND="$(find "$root" -maxdepth 8 -type d -path '*/CODEX-master/journal' 2>/dev/null | head -n 1)"
     [ -n "$FOUND" ] && break
   done
-  [ -n "$FOUND" ] || fail "CODEX-master/journal not found under Downloads"
-  REPO="${FOUND%/journal}"
-fi
+  [ -n "$FOUND" ] || fail "journal not found. Expected /Internal storage/Download/CODEX-master/CODEX-master/journal"
+  printf '%s\n' "${FOUND%/journal}"
+}
+
+REPO="$(resolve_repo)"
+[ -d "$REPO/journal" ] || fail "journal missing under repo: $REPO. Expected /Internal storage/Download/CODEX-master/CODEX-master/journal"
 
 SCRIPT="$HOME/.codex-trading-journal-replica/make_trading_journal_replica.py"
 [ -f "$SCRIPT" ] || fail "replica generator missing: $SCRIPT. Rerun setup."
@@ -80,7 +92,29 @@ chmod +x "$SHORTCUTS/Generate Journal Replica"
 cat > "$SHORTCUTS/Open Journal Replica" <<'EOF'
 #!/data/data/com.termux/files/usr/bin/bash
 set -u
-REPO="/storage/emulated/0/Download/CODEX-master (4)/CODEX-master"
+resolve_repo() {
+  local candidate found root
+  for candidate in \
+    "/storage/emulated/0/Download/CODEX-master/CODEX-master" \
+    "/sdcard/Download/CODEX-master/CODEX-master" \
+    "$HOME/storage/downloads/CODEX-master/CODEX-master"
+  do
+    [ -d "$candidate/journal" ] || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  found=""
+  for root in "$HOME/storage/downloads" "/storage/emulated/0/Download" "/sdcard/Download"; do
+    [ -d "$root" ] || continue
+    found="$(find "$root" -maxdepth 8 -type d -path '*/CODEX-master/journal' 2>/dev/null | head -n 1)"
+    [ -n "$found" ] && break
+  done
+  [ -n "$found" ] || return 1
+  printf '%s\n' "${found%/journal}"
+}
+REPO="$(resolve_repo || true)"
+[ -n "$REPO" ] || { echo "[journal-replica] ERROR: repo not found. Expected /Internal storage/Download/CODEX-master/CODEX-master"; exit 1; }
+[ -d "$REPO/journal" ] || { echo "[journal-replica] ERROR: journal not found in $REPO. Expected /Internal storage/Download/CODEX-master/CODEX-master/journal"; exit 1; }
 OUT="$REPO/journal/TradingJournal_Android_Replica.xlsx"
 if [ ! -f "$OUT" ]; then
   FOUND="$(find "$HOME/storage/downloads" "/storage/emulated/0/Download" "/sdcard/Download" -maxdepth 9 -type f -name 'TradingJournal_Android_Replica.xlsx' 2>/dev/null | head -n 1)"

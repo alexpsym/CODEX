@@ -5,7 +5,13 @@
 set -Eeuo pipefail
 
 DOWNLOADS="/storage/emulated/0/Download"
-SOURCE="${DOWNLOADS}/LaunchTradingJournalBrave.sh"
+CANDIDATE_SOURCES=(
+  "/storage/emulated/0/Download/CODEX-master/CODEX-master/LaunchTradingJournalBrave.sh"
+  "/sdcard/Download/CODEX-master/CODEX-master/LaunchTradingJournalBrave.sh"
+  "${HOME}/storage/downloads/CODEX-master/CODEX-master/LaunchTradingJournalBrave.sh"
+  "/storage/emulated/0/Download/LaunchTradingJournalBrave.sh"
+)
+SOURCE=""
 TARGET_DIR="${HOME}/.shortcuts"
 TARGET="${TARGET_DIR}/Trading Journal.sh"
 
@@ -16,8 +22,15 @@ if [[ ! -d "$DOWNLOADS" ]]; then
   fail "Downloads is not visible to Termux. Open Termux once and grant storage access."
 fi
 
-if [[ ! -f "$SOURCE" ]]; then
-  fail "missing ${SOURCE}. Put LaunchTradingJournalBrave.sh in Android Downloads first."
+for candidate in "${CANDIDATE_SOURCES[@]}"; do
+  if [[ -f "$candidate" ]]; then
+    SOURCE="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$SOURCE" ]]; then
+  fail "missing LaunchTradingJournalBrave.sh. Checked: ${CANDIDATE_SOURCES[*]}"
 fi
 
 mkdir -p "$TARGET_DIR"

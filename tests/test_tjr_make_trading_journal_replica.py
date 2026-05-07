@@ -1,7 +1,13 @@
 from datetime import datetime
 from pathlib import Path
 from openpyxl import Workbook, load_workbook
-from TJR.make_trading_journal_replica import compute_journal_stats_replica, instrument_display_rows, build_output, trade_duration_seconds
+from TJR.make_trading_journal_replica import (
+    compute_journal_stats_replica,
+    instrument_display_rows,
+    build_output,
+    trade_duration_seconds,
+    find_journal_dir,
+)
 
 
 def test_gross_loss_is_positive_absolute_value():
@@ -91,3 +97,24 @@ def test_dashboard_duration_values_are_human_readable_or_explicitly_labelled(tmp
     out=tmp_path/'o2.xlsx';build_output(j,out);wb2=load_workbook(out, read_only=True, data_only=True);d=wb2['Dashboard']
     vals={str(d.cell(r,2).value) for r in range(1,220) if d.cell(r,1).value=='Avg duration'}
     assert any(('h' in v or 'm' in v or 's' in v) for v in vals)
+
+
+def test_find_journal_dir_uses_repo_arg(tmp_path: Path):
+    repo = tmp_path / "repo"
+    journal = repo / "journal"
+    journal.mkdir(parents=True)
+    assert find_journal_dir(str(repo)) == journal
+
+
+def test_find_journal_dir_uses_codex_repo_env(tmp_path: Path, monkeypatch):
+    repo = tmp_path / "env_repo"
+    journal = repo / "journal"
+    journal.mkdir(parents=True)
+    monkeypatch.setenv("CODEX_REPO_DIR", str(repo))
+    assert find_journal_dir(None) == journal
+
+
+def test_find_journal_dir_defaults_updated():
+    text = (Path(__file__).resolve().parents[1] / "TJR" / "make_trading_journal_replica.py").read_text(encoding="utf-8")
+    assert "/storage/emulated/0/Download/CODEX-master/CODEX-master/journal" in text
+    assert "CODEX-master (4)" not in text
