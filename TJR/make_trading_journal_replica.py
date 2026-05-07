@@ -263,13 +263,18 @@ def is_loss(row: Dict[str, Any]) -> bool:
 
 
 def is_be(row: Dict[str, Any]) -> bool:
-    return not is_win(row) and not is_loss(row)
+    be = clean_text(row.get("breakeven")).lower() in {"yes","y","true","1"}
+    pnl = row_pnl(row)
+    return be or (pnl is not None and abs(pnl) < 1e-12)
 
 
 def trade_duration_seconds(row: Dict[str, Any]) -> Optional[float]:
     o, c = row.get("open_time"), row.get("close_time")
     if isinstance(o, datetime) and isinstance(c, datetime):
-        return max(0.0, (c - o).total_seconds())
+        delta=(c-o).total_seconds()
+        if delta < 0:
+            return None
+        return max(1.0, float(math.ceil(delta)))
     return None
 
 
@@ -529,15 +534,16 @@ def _money_by_currency(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     currencies = sorted(by.keys())
     net = {c: sum(v) for c, v in by.items()}
     gain = {c: sum(x for x in v if x > 0) for c, v in by.items()}
-    loss = {c: sum(x for x in v if x < 0) for c, v in by.items()}
+    loss_abs = {c: [abs(x) for x in v if x < 0] for c, v in by.items()}
+    loss = {c: sum(vals) for c, vals in loss_abs.items()}
     return {
         "net_profit_total": net,
         "gross_gain": gain,
         "gross_loss": loss,
         "avg_gain": {c: avg([x for x in v if x > 0]) for c, v in by.items()},
-        "avg_loss": {c: avg([x for x in v if x < 0]) for c, v in by.items()},
+        "avg_loss": {c: avg(loss_abs[c]) for c in by.keys()},
         "max_gain": {c: safe_max([x for x in v if x > 0]) for c, v in by.items()},
-        "max_loss": {c: safe_min([x for x in v if x < 0]) for c, v in by.items()},
+        "max_loss": {c: safe_max(loss_abs[c]) for c in by.keys()},
         "currencies": currencies,
         "mixed_currency": len(currencies) > 1,
     }
@@ -560,7 +566,9 @@ def _drawdowns(rows: List[Dict[str, Any]]) -> List[float]:
         for _, bal in vals:
             peak = max(peak, bal)
             if peak > 0:
-                dds.append((peak - bal) / peak * 100.0)
+                dd=(peak - bal) / peak * 100.0
+                if dd > 0 and math.isfinite(dd):
+                    dds.append(dd)
     return dds
 
 
@@ -596,18 +604,33 @@ def _market_bucket(rows: List[Dict[str, Any]], label: str) -> Dict[str, Any]:
     wins=[r for r in rows if is_win(r)]; losses=[r for r in rows if is_loss(r)]; bes=[r for r in rows if is_be(r)]
     known=len(wins)+len(losses)
     totals=_money_by_currency(rows)
+    losses_abs=[abs(v) for v in pnls if v < 0]
+    gains=[v for v in pnls if v > 0]
+    metric_sources={}
+    def src(metric_key, key, fn):
+        vals=[(r,safe_float(r.get(key))) for r in rows if safe_float(r.get(key)) is not None]
+        if not vals: return None
+        row,val=fn(vals,key=lambda t:t[1])
+        return {"id":row.get("id"),"symbol":row.get("symbol"),"asset_class":clean_text(row.get("asset_class")).lower(),"side":row.get("side"),"open_time":row.get("open_time"),"close_time":row.get("close_time"),"date":row.get("close_time") or row.get("open_time"),"currency":row_pnl_currency(row),"account":row.get("account"),"source":row.get("import_source"),"timeframe":row.get("timeframe"),"net_profit":row.get("net_profit"),"result_pct":row.get("result_pct"),"r_multiple":row.get("r_multiple"),"trade_duration_seconds":row.get("trade_duration_seconds"),"metric_key":metric_key,"metric_value":val}
+    metric_sources["min_result_pct"]=src("min_result_pct","result_pct",min)
+    metric_sources["max_result_pct"]=src("max_result_pct","result_pct",max)
+    metric_sources["min_r_multiple"]=src("min_r_multiple","r_multiple",min)
+    metric_sources["max_r_multiple"]=src("max_r_multiple","r_multiple",max)
+    metric_sources["max_gain"]=src("max_gain","net_profit",max)
+    metric_sources["max_loss"]=src("max_loss","net_profit",min)
     return {
         "label": label, "trades": len(rows), "wins": len(wins), "losses": len(losses), "break_even": len(bes),
         "win_rate_pct": (len(wins)/known*100.0) if known else None,
-        "net_profit_total": sum(pnls), "gross_gain": sum(v for v in pnls if v>0), "gross_loss": sum(v for v in pnls if v<0),
-        "avg_gain": avg([v for v in pnls if v>0]), "avg_loss": avg([v for v in pnls if v<0]),
-        "max_gain": safe_max([v for v in pnls if v>0]), "max_loss": safe_min([v for v in pnls if v<0]),
+        "net_profit_total": sum(pnls), "gross_gain": sum(gains), "gross_loss": (sum(losses_abs) if losses_abs else None),
+        "avg_gain": avg(gains), "avg_loss": avg(losses_abs),
+        "max_gain": safe_max(gains), "max_loss": safe_max(losses_abs),
         "avg_result_pct": avg_metric(rows, "result_pct"), "min_result_pct": safe_min(metric_values(rows, "result_pct")), "max_result_pct": safe_max(metric_values(rows, "result_pct")),
         "avg_r_multiple": avg_metric(rows, "r_multiple"), "min_r_multiple": safe_min(metric_values(rows, "r_multiple")), "max_r_multiple": safe_max(metric_values(rows, "r_multiple")),
         "avg_stop_pct": avg([stop_pct(t) for t in rows if stop_pct(t) is not None]),
         "avg_target_pct": avg([target_pct(t) for t in rows if target_pct(t) is not None]),
         "avg_duration_seconds": avg_metric(rows, "trade_duration_seconds"),
         "money_by_currency": totals,
+        "metric_sources": metric_sources,
     }
 
 def compute_journal_stats_replica(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -639,8 +662,8 @@ def compute_journal_stats_replica(trades: List[Dict[str, Any]]) -> Dict[str, Any
         return max(cand,key=lambda x:(x.get(key,0),x.get("symbol",""))) if cand else None
     groups={
       "overview": totals,
-      "risk_expectancy": {k: totals.get(k) for k in ["avg_stop_pct_winners","avg_stop_pct_losers","avg_target_pct_winners","avg_target_pct_losers","avg_result_pct_winners","avg_result_pct_losers","avg_r_multiple_winners","avg_r_multiple_losers"]},
-      "duration": {k: totals.get(k) for k in ["avg_duration_seconds","min_trade_duration_seconds","max_trade_duration_seconds","min_fx_trade_duration_seconds","max_fx_trade_duration_seconds","min_crypto_trade_duration_seconds","max_crypto_trade_duration_seconds"]},
+      "risk_expectancy": {k: totals.get(k) for k in ["avg_stop_pct","avg_target_pct","avg_result_pct","avg_r_multiple","avg_stop_pct_winners","avg_stop_pct_losers","avg_target_pct_winners","avg_target_pct_losers","avg_result_pct_winners","avg_result_pct_losers","avg_r_multiple_winners","avg_r_multiple_losers","max_drawdown_pct","avg_drawdown_pct","min_drawdown_pct"]},
+      "duration": {"overall_avg_seconds":totals.get("avg_duration_seconds"),"overall_shortest_seconds":totals.get("min_trade_duration_seconds"),"overall_longest_seconds":totals.get("max_trade_duration_seconds"),"overall_avg_winner_seconds":totals.get("avg_winner_duration_seconds"),"overall_avg_loser_seconds":totals.get("avg_loser_duration_seconds"),"overall_longest_winner_seconds":safe_max(metric_values(wins,"trade_duration_seconds")),"overall_longest_loser_seconds":safe_max(metric_values(losses,"trade_duration_seconds")),"fx_avg_seconds":totals.get("avg_fx_duration_seconds"),"fx_shortest_seconds":totals.get("min_fx_trade_duration_seconds"),"fx_longest_seconds":totals.get("max_fx_trade_duration_seconds"),"fx_avg_winner_seconds":avg_metric([t for t in fx if is_win(t)],"trade_duration_seconds"),"fx_avg_loser_seconds":avg_metric([t for t in fx if is_loss(t)],"trade_duration_seconds"),"fx_shortest_winner_seconds":safe_min(metric_values([t for t in fx if is_win(t)],"trade_duration_seconds")),"fx_shortest_loser_seconds":safe_min(metric_values([t for t in fx if is_loss(t)],"trade_duration_seconds")),"fx_longest_winner_seconds":safe_max(metric_values([t for t in fx if is_win(t)],"trade_duration_seconds")),"fx_longest_loser_seconds":safe_max(metric_values([t for t in fx if is_loss(t)],"trade_duration_seconds")),"crypto_avg_seconds":totals.get("avg_crypto_duration_seconds"),"crypto_shortest_seconds":totals.get("min_crypto_trade_duration_seconds"),"crypto_longest_seconds":totals.get("max_crypto_trade_duration_seconds"),"crypto_avg_winner_seconds":avg_metric([t for t in crypto if is_win(t)],"trade_duration_seconds"),"crypto_avg_loser_seconds":avg_metric([t for t in crypto if is_loss(t)],"trade_duration_seconds"),"crypto_shortest_winner_seconds":safe_min(metric_values([t for t in crypto if is_win(t)],"trade_duration_seconds")),"crypto_shortest_loser_seconds":safe_min(metric_values([t for t in crypto if is_loss(t)],"trade_duration_seconds")),"crypto_longest_winner_seconds":safe_max(metric_values([t for t in crypto if is_win(t)],"trade_duration_seconds")),"crypto_longest_loser_seconds":safe_max(metric_values([t for t in crypto if is_loss(t)],"trade_duration_seconds")),"metric_sources":{}},
       "by_market": {"overall": _market_bucket(live,"Overall"),"fx": _market_bucket(fx,"Forex"),"crypto": _market_bucket(crypto,"Crypto")},
       "market_breakdown": [_market_bucket(live,"Overall"),_market_bucket(fx,"Forex"),_market_bucket(crypto,"Crypto")],
       "leaders": {"most_wins_instrument": leader(by_inst,"wins"),"most_losses_instrument": leader(by_inst,"losses"),"fx_most_wins_instrument": leader([r for r in by_inst if clean_text(r.get("asset_class")).lower()=="fx"],"wins"),"fx_most_losses_instrument": leader([r for r in by_inst if clean_text(r.get("asset_class")).lower()=="fx"],"losses"),"crypto_most_wins_instrument": leader([r for r in by_inst if clean_text(r.get("asset_class")).lower()=="crypto"],"wins"),"crypto_most_losses_instrument": leader([r for r in by_inst if clean_text(r.get("asset_class")).lower()=="crypto"],"losses")},
@@ -661,14 +684,14 @@ def instrument_stats(trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             if kind=="tp" and tp is not None: return abs(tp-e)
             return None
         durs=metric_values(items,"trade_duration_seconds")
-        out.append({"symbol":sym,"asset_class":items[0].get("asset_class",""),"total_trades":len(items),"long_trades":sum(1 for x in items if _is_long_side(x)),"short_trades":sum(1 for x in items if _is_short_side(x)),"wins":len(wins),"losses":len(losses),"break_even":sum(1 for x in items if is_be(x)),"long_wins":sum(1 for x in items if _is_long_side(x) and is_win(x)),"long_losses":sum(1 for x in items if _is_long_side(x) and is_loss(x)),"long_break_even":sum(1 for x in items if _is_long_side(x) and is_be(x)),"short_wins":sum(1 for x in items if _is_short_side(x) and is_win(x)),"short_losses":sum(1 for x in items if _is_short_side(x) and is_loss(x)),"short_break_even":sum(1 for x in items if _is_short_side(x) and is_be(x)),"avg_trade_duration_seconds":avg(durs),"min_trade_duration_seconds":safe_min(durs),"max_trade_duration_seconds":safe_max(durs),"avg_sl_distance_pips":None,"avg_tp_distance_pips":None,"avg_sl_distance_quote":avg([dist("sl",x) for x in items if dist("sl",x) is not None]),"avg_tp_distance_quote":avg([dist("tp",x) for x in items if dist("tp",x) is not None]),"avg_sl_distance_pips_wins":None,"avg_sl_distance_pips_losses":None,"avg_tp_distance_pips_wins":None,"avg_tp_distance_pips_losses":None,"avg_sl_distance_quote_wins":avg([dist("sl",x) for x in wins if dist("sl",x) is not None]),"avg_sl_distance_quote_losses":avg([dist("sl",x) for x in losses if dist("sl",x) is not None]),"avg_tp_distance_quote_wins":avg([dist("tp",x) for x in wins if dist("tp",x) is not None]),"avg_tp_distance_quote_losses":avg([dist("tp",x) for x in losses if dist("tp",x) is not None]),"quote_currency":items[0].get("currency")})
+        out.append({"symbol":sym,"asset_class":clean_text(items[0].get("asset_class","")).lower(),"total_trades":len(items),"long_trades":sum(1 for x in items if _is_long_side(x)),"short_trades":sum(1 for x in items if _is_short_side(x)),"wins":len(wins),"losses":len(losses),"break_even":sum(1 for x in items if is_be(x)),"long_wins":sum(1 for x in items if _is_long_side(x) and is_win(x)),"long_losses":sum(1 for x in items if _is_long_side(x) and is_loss(x)),"long_break_even":sum(1 for x in items if _is_long_side(x) and is_be(x)),"short_wins":sum(1 for x in items if _is_short_side(x) and is_win(x)),"short_losses":sum(1 for x in items if _is_short_side(x) and is_loss(x)),"short_break_even":sum(1 for x in items if _is_short_side(x) and is_be(x)),"avg_trade_duration_seconds":avg(durs),"min_trade_duration_seconds":safe_min(durs),"max_trade_duration_seconds":safe_max(durs),"avg_sl_distance_pips":avg([abs(safe_float(x.get("entry"))-safe_float(x.get("stop_loss")))/pip_size_for_symbol(sym) for x in items if clean_text(items[0].get("asset_class","")).lower()=="fx" and safe_float(x.get("entry")) is not None and safe_float(x.get("stop_loss")) is not None]) if clean_text(items[0].get("asset_class","")).lower()=="fx" else None,"avg_tp_distance_pips":avg([abs(safe_float(x.get("take_profit"))-safe_float(x.get("entry")))/pip_size_for_symbol(sym) for x in items if clean_text(items[0].get("asset_class","")).lower()=="fx" and safe_float(x.get("entry")) is not None and safe_float(x.get("take_profit")) is not None]) if clean_text(items[0].get("asset_class","")).lower()=="fx" else None,"avg_sl_distance_quote":avg([dist("sl",x) for x in items if dist("sl",x) is not None]),"avg_tp_distance_quote":avg([dist("tp",x) for x in items if dist("tp",x) is not None]),"avg_sl_distance_pips_wins":avg([abs(safe_float(x.get("entry"))-safe_float(x.get("stop_loss")))/pip_size_for_symbol(sym) for x in wins if clean_text(items[0].get("asset_class","")).lower()=="fx" and safe_float(x.get("entry")) is not None and safe_float(x.get("stop_loss")) is not None]) if clean_text(items[0].get("asset_class","")).lower()=="fx" else None,"avg_sl_distance_pips_losses":avg([abs(safe_float(x.get("entry"))-safe_float(x.get("stop_loss")))/pip_size_for_symbol(sym) for x in losses if clean_text(items[0].get("asset_class","")).lower()=="fx" and safe_float(x.get("entry")) is not None and safe_float(x.get("stop_loss")) is not None]) if clean_text(items[0].get("asset_class","")).lower()=="fx" else None,"avg_tp_distance_pips_wins":avg([abs(safe_float(x.get("take_profit"))-safe_float(x.get("entry")))/pip_size_for_symbol(sym) for x in wins if clean_text(items[0].get("asset_class","")).lower()=="fx" and safe_float(x.get("entry")) is not None and safe_float(x.get("take_profit")) is not None]) if clean_text(items[0].get("asset_class","")).lower()=="fx" else None,"avg_tp_distance_pips_losses":avg([abs(safe_float(x.get("take_profit"))-safe_float(x.get("entry")))/pip_size_for_symbol(sym) for x in losses if clean_text(items[0].get("asset_class","")).lower()=="fx" and safe_float(x.get("entry")) is not None and safe_float(x.get("take_profit")) is not None]) if clean_text(items[0].get("asset_class","")).lower()=="fx" else None,"avg_sl_distance_quote_wins":avg([dist("sl",x) for x in wins if dist("sl",x) is not None]),"avg_sl_distance_quote_losses":avg([dist("sl",x) for x in losses if dist("sl",x) is not None]),"avg_tp_distance_quote_wins":avg([dist("tp",x) for x in wins if dist("tp",x) is not None]),"avg_tp_distance_quote_losses":avg([dist("tp",x) for x in losses if dist("tp",x) is not None]),"quote_currency":items[0].get("currency") or "USDT"})
     out.sort(key=lambda r:(-int(r["total_trades"] or 0),r["symbol"]))
     return out
 
 def instrument_display_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     out=[]
     for r in rows:
-        out.append({"Symbol":r.get("symbol"),"Asset":r.get("asset_class"),"Total Trades":r.get("total_trades"),"Long Trades":r.get("long_trades"),"Short Trades":r.get("short_trades"),"Wins":r.get("wins"),"Losses":r.get("losses"),"Breakeven":r.get("break_even"),"Long Wins":r.get("long_wins"),"Long Losses":r.get("long_losses"),"Short Wins":r.get("short_wins"),"Short Losses":r.get("short_losses"),"Avg SL W":r.get("avg_sl_distance_quote_wins") or r.get("avg_sl_distance_pips_wins"),"Avg SL L":r.get("avg_sl_distance_quote_losses") or r.get("avg_sl_distance_pips_losses"),"Avg TP W":r.get("avg_tp_distance_quote_wins") or r.get("avg_tp_distance_pips_wins"),"Avg TP L":r.get("avg_tp_distance_quote_losses") or r.get("avg_tp_distance_pips_losses"),"Avg Duration":r.get("avg_trade_duration_seconds"),"Shortest Duration":r.get("min_trade_duration_seconds"),"Longest Duration":r.get("max_trade_duration_seconds")})
+        out.append({"Symbol":r.get("symbol"),"Asset":r.get("asset_class"),"Total Trades":r.get("total_trades"),"Long Trades":r.get("long_trades"),"Short Trades":r.get("short_trades"),"Wins":r.get("wins"),"Losses":r.get("losses"),"Breakeven":r.get("break_even"),"Long Wins":r.get("long_wins"),"Long Losses":r.get("long_losses"),"Short Wins":r.get("short_wins"),"Short Losses":r.get("short_losses"),"Avg SL W":(r.get("avg_sl_distance_pips_wins") if clean_text(r.get("asset_class")).lower()=="fx" else r.get("avg_sl_distance_quote_wins")),"Avg SL L":(r.get("avg_sl_distance_pips_losses") if clean_text(r.get("asset_class")).lower()=="fx" else r.get("avg_sl_distance_quote_losses")),"Avg TP W":(r.get("avg_tp_distance_pips_wins") if clean_text(r.get("asset_class")).lower()=="fx" else r.get("avg_tp_distance_quote_wins")),"Avg TP L":(r.get("avg_tp_distance_pips_losses") if clean_text(r.get("asset_class")).lower()=="fx" else r.get("avg_tp_distance_quote_losses")),"Avg Duration":r.get("avg_trade_duration_seconds"),"Shortest Duration":r.get("min_trade_duration_seconds"),"Longest Duration":r.get("max_trade_duration_seconds")})
     return out
 
 def avg(values: Iterable[Any]) -> Optional[float]:
@@ -783,7 +806,7 @@ def write_dashboard(wb: Workbook, trades: List[Dict[str, Any]], sources: List[Pa
     section("Overall", market_rows(bym["overall"]))
     section("Winners", [("Avg stop %",stats["totals"].get("avg_stop_pct_winners")),("Avg target %",stats["totals"].get("avg_target_pct_winners")),("Avg result %",stats["totals"].get("avg_result_pct_winners")),("Avg R",stats["totals"].get("avg_r_multiple_winners"))])
     section("Losers", [("Avg stop %",stats["totals"].get("avg_stop_pct_losers")),("Avg target %",stats["totals"].get("avg_target_pct_losers")),("Avg result %",stats["totals"].get("avg_result_pct_losers")),("Avg R",stats["totals"].get("avg_r_multiple_losers"))])
-    section("Drawdown", [("Max drawdown",stats["totals"].get("max_drawdown_pct")),("Avg drawdown",stats["totals"].get("avg_drawdown_pct")),("Min drawdown",stats["totals"].get("min_drawdown_pct"))])
+    section("Drawdown", [("Max drawdown",g["risk_expectancy"].get("max_drawdown_pct")),("Avg drawdown",g["risk_expectancy"].get("avg_drawdown_pct")),("Min drawdown",g["risk_expectancy"].get("min_drawdown_pct"))])
     section("Duration", [("Overall avg",stats["totals"].get("avg_duration_seconds")),("Overall shortest",stats["totals"].get("min_trade_duration_seconds")),("Overall longest",stats["totals"].get("max_trade_duration_seconds")),("FX shortest",stats["totals"].get("min_fx_trade_duration_seconds")),("FX longest",stats["totals"].get("max_fx_trade_duration_seconds")),("Crypto shortest",stats["totals"].get("min_crypto_trade_duration_seconds")),("Crypto longest",stats["totals"].get("max_crypto_trade_duration_seconds"))])
     section("FX", market_rows(bym["fx"]))
     section("Crypto", market_rows(bym["crypto"]))

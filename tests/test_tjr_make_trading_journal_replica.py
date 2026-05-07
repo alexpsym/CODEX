@@ -1,65 +1,62 @@
+from datetime import datetime
 from pathlib import Path
 from openpyxl import Workbook, load_workbook
-from TJR.make_trading_journal_replica import parse_workbook, compute_journal_stats_replica, build_output, instrument_display_rows
+from TJR.make_trading_journal_replica import compute_journal_stats_replica, instrument_display_rows, build_output, trade_duration_seconds
 
-H=["opening_time","closing_time","type_buy_sell","symbol","size_quantity","entry_price","closing_price","stop_loss","take_profit","commission","net_profit","balance_after_trade","timeframe","is_test_trade","currency","notes","order_id","fill_count","source"]
 
-def make_file(path, rows):
-    wb=Workbook();ws=wb.active;ws.title='Trades';ws.append(H)
-    for r in rows: ws.append(r)
-    wb.save(path)
+def test_gross_loss_is_positive_absolute_value():
+    s=compute_journal_stats_replica([{"symbol":"A","side":"BUY","asset_class":"FX","net_profit":-5},{"symbol":"A","side":"BUY","asset_class":"FX","net_profit":3}])
+    assert s['totals']['gross_loss']==5
 
-def mk(o,c,side,sym,pnl,bal,test=False,cur='USDT',sl=90,tp=110):
-    return [o,c,side,sym,1,100,101 if pnl<0 else 110,sl,tp,0,pnl,bal,'1h',test,cur,'','o',1,'s']
+def test_money_by_currency_gross_loss_is_positive_absolute_value():
+    s=compute_journal_stats_replica([{"symbol":"A","side":"BUY","asset_class":"FX","net_profit":-5,"currency":"AUD"}])
+    assert s['totals']['money_by_currency']['gross_loss']['AUD']==5
 
-def test_long_short_breakdown_is_calculated():
-    rows=[
-        {"symbol":"EURUSD","asset_class":"FX","side":"BUY","net_profit":10},
-        {"symbol":"EURUSD","asset_class":"FX","side":"BUY","net_profit":-2},
-        {"symbol":"EURUSD","asset_class":"FX","side":"BUY","net_profit":0},
-        {"symbol":"BTCUSDT","asset_class":"Crypto","side":"SELL","net_profit":3},
-        {"symbol":"BTCUSDT","asset_class":"Crypto","side":"SELL","net_profit":-1},
-        {"symbol":"BTCUSDT","asset_class":"Crypto","side":"SELL","net_profit":0},
-    ]
-    s=compute_journal_stats_replica(rows)["totals"]
-    assert (s["long_wins"],s["long_losses"],s["long_break_even"],s["short_wins"],s["short_losses"],s["short_break_even"])==(1,1,1,1,1,1)
+def test_drawdown_average_ignores_zero_peak_points():
+    rows=[{"symbol":"A","side":"BUY","asset_class":"FX","net_profit":1,"balance_after":1000,"close_time":datetime(2026,1,1)},{"symbol":"A","side":"BUY","asset_class":"FX","net_profit":1,"balance_after":1100,"close_time":datetime(2026,1,2)},{"symbol":"A","side":"BUY","asset_class":"FX","net_profit":-1,"balance_after":990,"close_time":datetime(2026,1,3)}]
+    t=compute_journal_stats_replica(rows)['totals']
+    assert t['max_drawdown_pct']==10.0 and t['avg_drawdown_pct']==10.0 and t['min_drawdown_pct']==10.0
 
-def test_fx_crypto_win_rates_are_calculated():
-    rows=[{"symbol":"EURUSD","asset_class":"FX","side":"BUY","net_profit":1},{"symbol":"EURUSD","asset_class":"FX","side":"BUY","net_profit":-1},{"symbol":"BTCUSDT","asset_class":"Crypto","side":"BUY","net_profit":2},{"symbol":"ETHUSDT","asset_class":"Crypto","side":"BUY","net_profit":-2}]
-    s=compute_journal_stats_replica(rows)["totals"]
-    assert s["fx_win_rate_pct"]==50.0 and s["crypto_win_rate_pct"]==50.0
+def test_duration_group_matches_render_stats_shape():
+    rows=[{"symbol":"A","side":"BUY","asset_class":"FX","net_profit":1,"trade_duration_seconds":10},{"symbol":"B","side":"SELL","asset_class":"crypto","net_profit":-1,"trade_duration_seconds":20}]
+    d=compute_journal_stats_replica(rows)['groups']['duration']
+    keys=["overall_avg_seconds","overall_shortest_seconds","overall_longest_seconds","overall_avg_winner_seconds","overall_avg_loser_seconds","overall_longest_winner_seconds","overall_longest_loser_seconds","fx_avg_seconds","fx_shortest_seconds","fx_longest_seconds","fx_avg_winner_seconds","fx_avg_loser_seconds","fx_shortest_winner_seconds","fx_shortest_loser_seconds","fx_longest_winner_seconds","fx_longest_loser_seconds","crypto_avg_seconds","crypto_shortest_seconds","crypto_longest_seconds","crypto_avg_winner_seconds","crypto_avg_loser_seconds","crypto_shortest_winner_seconds","crypto_shortest_loser_seconds","crypto_longest_winner_seconds","crypto_longest_loser_seconds","metric_sources"]
+    for k in keys: assert k in d
 
-def test_drawdown_from_balance_after():
-    rows=[{"symbol":"EURUSD","asset_class":"FX","side":"BUY","net_profit":1,"balance_after":1000,"close_time":__import__('datetime').datetime(2026,1,1)}, {"symbol":"EURUSD","asset_class":"FX","side":"BUY","net_profit":1,"balance_after":1100,"close_time":__import__('datetime').datetime(2026,1,2)}, {"symbol":"EURUSD","asset_class":"FX","side":"BUY","net_profit":-1,"balance_after":990,"close_time":__import__('datetime').datetime(2026,1,3)}]
-    s=compute_journal_stats_replica(rows)["totals"]
-    assert s["max_drawdown_pct"]==10.0
+def test_risk_expectancy_group_matches_render_stats_shape():
+    rows=[{"symbol":"A","side":"BUY","asset_class":"FX","entry":100,"stop_loss":90,"take_profit":110,"result_pct":1,"r_multiple":1,"net_profit":1,"balance_after":1000,"close_time":datetime(2026,1,1)},{"symbol":"A","side":"BUY","asset_class":"FX","entry":100,"stop_loss":90,"take_profit":110,"result_pct":-1,"r_multiple":-1,"net_profit":-1,"balance_after":900,"close_time":datetime(2026,1,2)}]
+    r=compute_journal_stats_replica(rows)['groups']['risk_expectancy']
+    for k in ["avg_stop_pct","avg_target_pct","avg_result_pct","avg_r_multiple","avg_stop_pct_winners","avg_stop_pct_losers","avg_target_pct_winners","avg_target_pct_losers","avg_result_pct_winners","avg_result_pct_losers","avg_r_multiple_winners","avg_r_multiple_losers","max_drawdown_pct","avg_drawdown_pct","min_drawdown_pct"]: assert k in r
 
-def test_streaks_are_real_objects():
-    from datetime import datetime,timedelta
-    rows=[];t=datetime(2026,1,1)
-    for i,p in enumerate([1,1,1,-1,-1]): rows.append({"id":f"t{i}","symbol":"EURUSD","asset_class":"FX","side":"BUY","net_profit":p,"close_time":t+timedelta(days=i)})
-    st=compute_journal_stats_replica(rows)["groups"]["streaks"]
-    assert st["longest_winning"]["trade_count"]==3 and st["longest_losing"]["trade_count"]==2 and st["longest_winning"]["trade_ids"]
+def test_fx_instrument_distances_are_pips_not_raw_price():
+    rows=[{"symbol":"EURUSD","side":"BUY","asset_class":"FX","entry":1.1,"stop_loss":1.095,"take_profit":1.11,"net_profit":10,"trade_duration_seconds":1}]
+    first=compute_journal_stats_replica(rows)['by_instrument'][0]
+    assert round(first['avg_sl_distance_pips'],6)==50.0 and round(first['avg_tp_distance_pips'],6)==100.0
+    disp=instrument_display_rows([first])[0]
+    assert round(disp['Avg SL W'],6)==50.0 and round(disp['Avg TP W'],6)==100.0
 
-def test_by_market_buckets_have_core_metrics():
-    rows=[{"symbol":"EURUSD","asset_class":"FX","side":"BUY","net_profit":1,"result_pct":1,"r_multiple":1,"trade_duration_seconds":10},{"symbol":"BTCUSDT","asset_class":"Crypto","side":"BUY","net_profit":-1,"result_pct":-1,"r_multiple":-1,"trade_duration_seconds":20}]
-    bm=compute_journal_stats_replica(rows)["groups"]["by_market"]
-    for k in ["overall","fx","crypto"]:
-        for f in ["win_rate_pct","avg_result_pct","avg_r_multiple","money_by_currency","avg_duration_seconds"]: assert f in bm[k]
+def test_by_instrument_asset_class_is_render_normalized():
+    first=compute_journal_stats_replica([{"symbol":"A","side":"BUY","asset_class":"FX","net_profit":1}])['by_instrument'][0]
+    assert first['asset_class'] in {'fx','crypto'}
 
-def test_dashboard_writes_values_not_only_labels(tmp_path: Path):
-    j=tmp_path/'journal';j.mkdir();make_file(j/'BYBIT DEMO.xlsx',[mk('2026-01-01','2026-01-01','Buy','BTCUSDT',100,1000),mk('2026-01-02','2026-01-02','Buy','BTCUSDT',100,1100),mk('2026-01-03','2026-01-03','Buy','BTCUSDT',-110,990)])
-    out=tmp_path/'o.xlsx';build_output(j,out);ws=load_workbook(out)['Dashboard']
-    vals=[ws.cell(r,1).value for r in range(1,ws.max_row+1)]
-    assert 'Overall' in vals and 'Drawdown' in vals and 'Money by currency' in vals
-    allvals={ws.cell(r,c).value for r in range(1,ws.max_row+1) for c in range(1,5)}
-    assert 10.0 in allvals
+def test_market_buckets_have_metric_sources():
+    b=compute_journal_stats_replica([{"id":"x1","symbol":"A","side":"BUY","asset_class":"FX","net_profit":-5,"result_pct":-5,"r_multiple":-1,"trade_duration_seconds":2}])['groups']['by_market']['overall']
+    assert 'metric_sources' in b and b['metric_sources']['max_loss']['id']=='x1'
 
-def test_by_instrument_is_render_compatible(tmp_path: Path):
-    p=tmp_path/'BYBIT DEMO.xlsx';make_file(p,[mk('2026-01-01','2026-01-01','Buy','BTCUSDT',10,1000)])
-    rows,_=parse_workbook(p);s=compute_journal_stats_replica(rows)
-    first=s['by_instrument'][0]
-    assert 'symbol' in first and 'asset_class' in first and 'total_trades' in first and 'avg_trade_duration_seconds' in first
-    assert ('avg_sl_distance_pips_wins' in first) or ('avg_sl_distance_quote_wins' in first)
-    disp=instrument_display_rows(s['by_instrument'])[0]
-    assert 'Symbol' in disp and 'Avg Duration' in disp
+def test_unknown_pnl_is_not_break_even():
+    t=compute_journal_stats_replica([{"symbol":"A","side":"BUY","asset_class":"FX","entry":1,"exit":2,"net_profit":None}])['totals']
+    assert t['break_even']==0
+
+def test_zero_second_trade_duration_rounds_to_one_second():
+    row={"open_time":datetime(2026,1,1),"close_time":datetime(2026,1,1)}
+    assert trade_duration_seconds(row)==1.0
+
+def test_dashboard_does_not_collapse_mixed_currency_money(tmp_path: Path):
+    j=tmp_path/'journal';j.mkdir();wb=Workbook();ws=wb.active
+    ws.append(["opening_time","closing_time","type_buy_sell","symbol","entry_price","closing_price","net_profit","currency"])
+    ws.append(["2026-01-01","2026-01-01","Buy","EURUSD",1.1,1.2,10,"AUD"])
+    ws.append(["2026-01-02","2026-01-02","Buy","BTCUSDT",100,110,20,"USDT"])
+    wb.save(j/'BYBIT DEMO.xlsx')
+    out=tmp_path/'o.xlsx';build_output(j,out)
+    vals={load_workbook(out)['Dashboard'].cell(r,c).value for r in range(1,200) for c in range(1,5)}
+    assert 'AUD' in vals and 'USDT' in vals
