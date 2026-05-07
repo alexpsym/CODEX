@@ -243,7 +243,7 @@ def _profile_main_buttons() -> List[Dict[str, object]]:
             [
                 {"id": "open-orders", "name": "open-orders", "label": "Open Orders and Positions", "open_url": "/merged/open-orders", "dashboard_main_view": True},
                 {"id": "history", "name": "history", "label": "History", "open_url": "/merged/history", "dashboard_main_view": True},
-                {"id": "monitor", "name": "monitor", "label": "Alerts", "open_url": "/merged/alerts", "dashboard_main_view": True},
+                {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor", "dashboard_main_view": True},
             ]
         )
     return buttons
@@ -1893,7 +1893,27 @@ async def _bybit_resolve_and_fetch_specs(query: str, *, include_btc_reference: b
         btc_inst = next((r for r in btc_rows if isinstance(r, dict) and str(r.get("symbol") or "").upper() == btc_symbol), None)
         btc_specs = None
         if btc_inst:
-            btc_specs = {"resolved_symbol": btc_symbol, "category": category, "source": "bybit"}
+            btc_ticker = None
+            try:
+                p = await _bybit_get_async(base_url, "/v5/market/tickers", {"category": category, "symbol": btc_symbol})
+                lst = (p.get("result") or {}).get("list") or []
+                if isinstance(lst, list) and lst and isinstance(lst[0], dict):
+                    btc_ticker = lst[0]
+            except Exception:
+                btc_ticker = None
+            btc_specs = {
+                "source": "bybit",
+                "query": btc_symbol,
+                "resolved_symbol": btc_symbol,
+                "category": category,
+                "lastPrice": (btc_ticker or {}).get("lastPrice"),
+                "volume24hUsd": (btc_ticker or {}).get("turnover24h"),
+            }
+            btc_avg7d = await _bybit_avg_7d_turnover_usd_async(base_url, btc_symbol, category)
+            if btc_avg7d is not None:
+                btc_specs["avg7dTurnoverUsd"] = btc_avg7d
+            btc_ranges, _btc_warnings = await _bybit_fetch_range_specs_async(base_url, category, btc_symbol)
+            btc_specs.update(btc_ranges)
         if btc_specs:
             specs["_btc_reference"] = {k: v for k, v in btc_specs.items() if not str(k).startswith("_")}
             warnings.extend(btc_specs.get("_spec_warnings") or [])
@@ -15206,8 +15226,8 @@ async def merged_calculator_page() -> HTMLResponse:
 @app.get("/merged/scanner")
 async def merged_scanner_redirect() -> Response:
     if _runtime_is_render():
-        return _local_only_disabled_response("/merged/scanner")
-    return RedirectResponse(url="/merged/alerts", status_code=307)
+        return _scanner_local_only_response("/merged/scanner")
+    return RedirectResponse(url="/merged/monitor", status_code=307)
 
 
 def _dec(value: object, field: str) -> Decimal:
@@ -17389,7 +17409,7 @@ MERGED_MONITOR_TEMPLATE = """<!doctype html>
     <p class="notice">This page polls local scanner status every 2 seconds. Closing this tab only stops these status requests/log lines; scanner processes keep running independently.</p>
     <div class="grid">
       <section class="panel" id="monitor-control-panel">
-        <h3 style="margin-top:0">Alerts controls</h3>
+        <h3 style="margin-top:0">Monitor controls</h3>
         <div class="row">
           <label>Target alerts
             <select id="monitor-target">
@@ -17531,10 +17551,11 @@ async def merged_history_page() -> str:
     return HISTORY_PAGE_TEMPLATE
 
 
+@app.get("/merged/monitor")
 @app.get("/merged/alerts")
 async def merged_monitor_page() -> Response:
     if _runtime_is_render():
-        return _local_only_disabled_response("/merged/alerts")
+        return _scanner_local_only_response("/merged/monitor")
     monitor_js_version = _static_asset_version("render/static/merged_alerts.js")
     page = MERGED_MONITOR_TEMPLATE.replace("{{MERGED_MONITOR_JS_URL}}", f"/static/merged_alerts.js?v={monitor_js_version}")
     response = HTMLResponse(page)
@@ -20038,13 +20059,18 @@ async def _background_start(script: ManagedScript) -> None:
 
 @app.get("/scripts")
 async def list_scripts() -> JSONResponse:
+    runtime_render = _runtime_is_render()
     raw = script_manager.list_scripts()
+    if runtime_render:
+        raw = [s for s in raw if str(s.get("name")) not in {"bybit_monitor", "oanda_monitor"}]
     by_name = {str(s.get("name")): s for s in raw}
 
     merged: List[Dict[str, object]] = []
     autostart_targets = set(_compute_autostart_scripts())
 
     for btn in get_merged_script_buttons():
+        if runtime_render and btn.get("name") == "monitor":
+            continue
         row: Dict[str, object] = {
             "id": btn["id"],
             "name": btn["name"],
@@ -20105,6 +20131,7 @@ async def list_scripts() -> JSONResponse:
 
     merged_source_names = get_merged_source_names()
     extras = [s for s in raw if str(s.get("name")) not in merged_source_names]
+    extras = [s for s in extras if str(s.get("name")) not in {"bybit_monitor", "oanda_monitor"}]
     for item in extras:
         if str(item.get("name")) == "ivindicator-clone":
             item["dashboard_main_view"] = True
@@ -22143,3 +22170,11 @@ async def trading_journal_sync() -> JSONResponse:
     return await trading_journal_sync_status()
 def _runtime_is_render() -> bool:
     return _resolve_app_profile() == "render"
+
+
+def _scanner_local_only_response(path: str) -> PlainTextResponse:
+    return PlainTextResponse(
+        "Scanner is local-only. Run run_scanner_local.bat on your PC.",
+        status_code=410,
+        headers={"cache-control": "no-store, max-age=0", "x-disabled-path": path},
+    )
