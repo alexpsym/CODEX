@@ -40,7 +40,6 @@ OUTPUT_NAME = "TradingJournal_Android_Replica.xlsx"
 EXCLUDED_SOURCE_NAMES = {
     OUTPUT_NAME.lower(),
     "account_cashflows.xlsx",
-    "bybit demo.xlsx",
 }
 
 ALIASES = {
@@ -66,6 +65,12 @@ ALIASES = {
     "breakeven": ["breakeven", "break_even", "be"],
     "timeframe": ["timeframe", "tf"],
     "error": ["error"],
+    "is_test_trade": ["is_test_trade", "test_trade", "test"],
+    "order_id": ["order_id", "orderid", "order_no", "order_no_"],
+    "fill_count": ["fill_count", "fillcount"],
+    "source": ["source", "source_file", "import_source"],
+    "result_pct": ["result_pct", "profit_pct", "result_percent", "profit_percent"],
+    "r_multiple": ["r_multiple", "r", "r_mult"],
     "held_through_news": ["held_through_news"],
     "spiked_out": ["spiked_out"],
     "early_close": ["early_close"],
@@ -229,11 +234,99 @@ def infer_asset_class(symbol: str, account: str) -> str:
     return "Crypto"
 
 
+def is_trade_row(row: Dict[str, Any]) -> bool:
+    return bool(clean_text(row.get("symbol"))) and any(
+        row.get(k) is not None for k in ("entry", "exit", "net_profit", "open_time", "close_time")
+    )
+
+
+def is_test_trade_row(row: Dict[str, Any]) -> bool:
+    return clean_text(row.get("is_test_trade")).lower() in {"1", "true", "yes", "y"}
+
+
+def row_pnl(row: Dict[str, Any]) -> Optional[float]:
+    return safe_float(row.get("net_profit"))
+
+
+def row_pnl_currency(row: Dict[str, Any]) -> str:
+    return clean_text(row.get("realized_pnl_currency") or row.get("currency")) or "UNKNOWN"
+
+
+def is_win(row: Dict[str, Any]) -> bool:
+    pnl = row_pnl(row)
+    return pnl is not None and pnl > 0
+
+
+def is_loss(row: Dict[str, Any]) -> bool:
+    pnl = row_pnl(row)
+    return pnl is not None and pnl < 0
+
+
+def is_be(row: Dict[str, Any]) -> bool:
+    return not is_win(row) and not is_loss(row)
+
+
+def trade_duration_seconds(row: Dict[str, Any]) -> Optional[float]:
+    o, c = row.get("open_time"), row.get("close_time")
+    if isinstance(o, datetime) and isinstance(c, datetime):
+        return max(0.0, (c - o).total_seconds())
+    return None
+
+
+def pip_size_for_symbol(symbol: str) -> float:
+    s = clean_text(symbol).upper()
+    return 0.01 if s.endswith("JPY") else 0.0001
+
+
+def signed_price_move(row: Dict[str, Any]) -> Optional[float]:
+    entry, exit_p = safe_float(row.get("entry")), safe_float(row.get("exit"))
+    if entry is None or exit_p is None:
+        return None
+    move = exit_p - entry
+    side = clean_text(row.get("side")).upper()
+    if side.startswith("SELL") or side == "SHORT":
+        move = -move
+    return move
+
+
+def stop_pct(row: Dict[str, Any]) -> Optional[float]:
+    entry, sl = safe_float(row.get("entry")), safe_float(row.get("stop_loss"))
+    if entry and sl and entry > 0:
+        return abs(entry - sl) / entry * 100.0
+    return None
+
+
+def target_pct(row: Dict[str, Any]) -> Optional[float]:
+    entry, tp = safe_float(row.get("entry")), safe_float(row.get("take_profit"))
+    if entry and tp and entry > 0:
+        return abs(tp - entry) / entry * 100.0
+    return None
+
+
+def metric_values(rows: List[Dict[str, Any]], key: str) -> List[float]:
+    vals = [safe_float(r.get(key)) for r in rows]
+    return [v for v in vals if v is not None]
+
+
+def avg_metric(rows: List[Dict[str, Any]], key: str) -> Optional[float]:
+    return avg(metric_values(rows, key))
+
+
+def safe_min(vals: List[float]) -> Optional[float]:
+    return min(vals) if vals else None
+
+
+def safe_max(vals: List[float]) -> Optional[float]:
+    return max(vals) if vals else None
+
+
 def parse_workbook(path: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
     warnings: List[str] = []
     trades: List[Dict[str, Any]] = []
     loader = load_sheet_rows_xls if path.suffix.lower() == ".xls" else load_sheet_rows_xlsx
-    account_default = path.stem.strip() or path.name
+    name_lower = path.name.lower()
+    is_bybit_demo = name_lower in {"bybit demo.xlsx", "bybit demo.xlsm", "bybit demo.xls"}
+    account_default = "Bybit Demo" if is_bybit_demo else (path.stem.strip() or path.name)
 
     for sheet_name, rows, datemode in loader(path):
         non_empty = [r for r in rows if any(clean_text(x) for x in r)]
@@ -247,7 +340,7 @@ def parse_workbook(path: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
                 header_map[n] = idx
         col = {key: first_present(header_map, aliases) for key, aliases in ALIASES.items()}
         signal_cols = [col.get("symbol"), col.get("side"), col.get("entry"), col.get("exit"), col.get("net_profit"), col.get("open_time"), col.get("close_time")]
-        if not col.get("symbol") or sum(x is not None for x in signal_cols) < 3:
+        if not col.get("symbol") or sum(x is not None for x in signal_cols) < 2:
             continue
         data_rows = non_empty[header_i + 1:]
         for row_index, row in enumerate(data_rows, start=header_i + 2):
@@ -264,7 +357,7 @@ def parse_workbook(path: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
             pnl = safe_float(cell("net_profit"))
             commission = safe_float(cell("commission"))
             swap = safe_float(cell("swap"))
-            if pnl is None and commission is None and cell("exit") is None:
+            if pnl is None and commission is None and cell("exit") is None and cell("entry") is None:
                 # Avoid treating account/balance rows as trades.
                 continue
             account = clean_text(cell("account")) or account_default
@@ -288,8 +381,9 @@ def parse_workbook(path: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
                 "sheet": sheet_name,
                 "row": row_index,
                 "account": account,
-                "currency": clean_text(cell("currency")),
-                "asset_class": infer_asset_class(symbol, account),
+                "currency": clean_text(cell("currency")) or ("USDT" if is_bybit_demo else ""),
+                "realized_pnl_currency": clean_text(cell("currency")) or ("USDT" if is_bybit_demo else ""),
+                "asset_class": "Crypto" if is_bybit_demo else infer_asset_class(symbol, account),
                 "symbol": symbol,
                 "side": side,
                 "setup": clean_text(cell("setup")),
@@ -307,7 +401,24 @@ def parse_workbook(path: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
                 "balance_after": balance_after,
                 "breakeven": breakeven,
                 "notes": " | ".join(notes_parts),
+                "is_test_trade": clean_text(cell("is_test_trade")),
+                "order_id": clean_text(cell("order_id")),
+                "fill_count": clean_text(cell("fill_count")),
+                "import_source": clean_text(cell("source")),
+                "result_pct": safe_float(cell("result_pct")),
+                "r_multiple": safe_float(cell("r_multiple")),
             }
+            if not trade["side"] and is_bybit_demo:
+                trade["side"] = clean_text(cell("side")).upper()
+            if trade["result_pct"] is None and trade.get("balance_after") is not None and pnl is not None:
+                bal_before = trade["balance_after"] - pnl
+                if bal_before > 0:
+                    trade["result_pct"] = (pnl / bal_before) * 100.0
+            if trade["r_multiple"] is None:
+                move = signed_price_move(trade)
+                if move is not None and entry is not None and stop_loss is not None and abs(entry - stop_loss) > 0:
+                    trade["r_multiple"] = move / abs(entry - stop_loss)
+            trade["trade_duration_seconds"] = trade_duration_seconds(trade)
             trades.append(trade)
     if not trades:
         warnings.append(f"No trade rows parsed from {path.name}")
@@ -392,6 +503,19 @@ def summarize(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def compute_journal_stats_replica(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
+    live = [t for t in trades if is_trade_row(t) and not is_test_trade_row(t)]
+    by_inst = instrument_stats(live)
+    groups = {"overview": {"trades": len(live)}, "risk_expectancy": {"avg_result_pct_winners": avg_metric([t for t in live if is_win(t)], "result_pct")}, "duration": {"overall_avg_seconds": avg_metric(live, "trade_duration_seconds")}, "by_market": {"fx": {"trades": sum(1 for t in live if clean_text(t.get("asset_class")).lower() == "fx")}, "crypto": {"trades": sum(1 for t in live if clean_text(t.get("asset_class")).lower() == "crypto")}}, "market_breakdown": {}, "leaders": {"most_wins_instrument": by_inst[0] if by_inst else None}, "streaks": {"longest_winning_streak": 0, "longest_losing_streak": 0}}
+    pnls = [row_pnl(t) for t in live if row_pnl(t) is not None]
+    gains = [v for v in pnls if v > 0]; losses = [abs(v) for v in pnls if v < 0]
+    money_by_currency: Dict[str, float] = defaultdict(float)
+    for t in live:
+        if row_pnl(t) is not None:
+            money_by_currency[row_pnl_currency(t)] += float(row_pnl(t))
+    return {"totals": {"trades": len(live), "wins": sum(is_win(t) for t in live), "losses": sum(is_loss(t) for t in live), "break_even": sum(is_be(t) for t in live), "long_trades": sum(1 for t in live if clean_text(t.get("side")).upper().startswith("BUY") or clean_text(t.get("side")).upper()=="LONG"), "short_trades": sum(1 for t in live if clean_text(t.get("side")).upper().startswith("SELL") or clean_text(t.get("side")).upper()=="SHORT"), "long_wins": 0, "long_losses": 0, "long_break_even": 0, "short_wins": 0, "short_losses": 0, "short_break_even": 0, "win_rate_pct": (sum(is_win(t) for t in live)/(sum(is_win(t) for t in live)+sum(is_loss(t) for t in live))*100.0) if (sum(is_win(t) for t in live)+sum(is_loss(t) for t in live)) else None, "fx_win_rate_pct": None, "crypto_win_rate_pct": None, "net_profit_total": sum(pnls), "gross_gain": sum(gains), "gross_loss": sum(losses), "avg_gain": avg(gains), "avg_loss": avg(losses), "max_gain": safe_max(gains), "max_loss": safe_max(losses), "avg_result_pct": avg_metric(live, "result_pct"), "min_result_pct": safe_min(metric_values(live, "result_pct")), "max_result_pct": safe_max(metric_values(live, "result_pct")), "avg_r_multiple": avg_metric(live, "r_multiple"), "min_r_multiple": safe_min(metric_values(live, "r_multiple")), "max_r_multiple": safe_max(metric_values(live, "r_multiple")), "avg_stop_pct": avg([stop_pct(t) for t in live if stop_pct(t) is not None]), "min_stop_pct": safe_min([stop_pct(t) for t in live if stop_pct(t) is not None]), "max_stop_pct": safe_max([stop_pct(t) for t in live if stop_pct(t) is not None]), "avg_target_pct": avg([target_pct(t) for t in live if target_pct(t) is not None]), "min_target_pct": safe_min([target_pct(t) for t in live if target_pct(t) is not None]), "max_target_pct": safe_max([target_pct(t) for t in live if target_pct(t) is not None]), "avg_duration_seconds": avg_metric(live, "trade_duration_seconds"), "min_trade_duration_seconds": safe_min(metric_values(live, "trade_duration_seconds")), "max_trade_duration_seconds": safe_max(metric_values(live, "trade_duration_seconds")), "avg_winner_duration_seconds": avg_metric([t for t in live if is_win(t)], "trade_duration_seconds"), "avg_loser_duration_seconds": avg_metric([t for t in live if is_loss(t)], "trade_duration_seconds"), "max_drawdown_pct": None, "avg_drawdown_pct": None, "min_drawdown_pct": None, "unique_instruments": len({t.get('symbol') for t in live if t.get('symbol')}), "fx_instruments": len({t.get('symbol') for t in live if clean_text(t.get('asset_class')).lower()=='fx'}), "crypto_instruments": len({t.get('symbol') for t in live if clean_text(t.get('asset_class')).lower()=='crypto'}), "money_by_currency": dict(money_by_currency), "longest_winning_streak": 0, "longest_losing_streak": 0}, "groups": groups, "by_instrument": by_inst}
+
+
 def instrument_stats(trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     buckets: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for t in trades:
@@ -399,22 +523,33 @@ def instrument_stats(trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     rows = []
     for sym, items in buckets.items():
         s = summarize(items)
+        longs = [x for x in items if clean_text(x.get("side")).upper() in {"BUY", "LONG"} or clean_text(x.get("side")).upper().startswith("BUY")]
+        shorts = [x for x in items if clean_text(x.get("side")).upper() in {"SELL", "SHORT"} or clean_text(x.get("side")).upper().startswith("SELL")]
+        wins = [x for x in items if is_win(x)]
+        losses = [x for x in items if is_loss(x)]
+        dur = [safe_float(x.get("trade_duration_seconds")) for x in items if safe_float(x.get("trade_duration_seconds")) is not None]
         rows.append({
             "Symbol": sym,
             "Asset": items[0].get("asset_class", ""),
-            "Trades": s["trades"],
+            "Total Trades": s["trades"],
+            "Long Trades": len(longs),
+            "Short Trades": len(shorts),
             "Wins": s["wins"],
             "Losses": s["losses"],
             "Breakeven": s["breakeven"],
-            "Win Rate": s["win_rate"],
-            "Net P/L": s["net_pl"],
-            "Avg P/L": s["avg_pl"],
-            "Avg Entry": avg([x.get("entry") for x in items]),
-            "Avg Exit": avg([x.get("exit") for x in items]),
-            "Avg Stop Loss": avg([x.get("stop_loss") for x in items]),
-            "Avg Target": avg([x.get("take_profit") for x in items]),
+            "Long Wins": sum(1 for x in longs if is_win(x)),
+            "Long Losses": sum(1 for x in longs if is_loss(x)),
+            "Short Wins": sum(1 for x in shorts if is_win(x)),
+            "Short Losses": sum(1 for x in shorts if is_loss(x)),
+            "Avg SL W": avg([safe_float(x.get("entry")) - safe_float(x.get("stop_loss")) if safe_float(x.get("entry")) and safe_float(x.get("stop_loss")) else None for x in wins]),
+            "Avg SL L": avg([safe_float(x.get("entry")) - safe_float(x.get("stop_loss")) if safe_float(x.get("entry")) and safe_float(x.get("stop_loss")) else None for x in losses]),
+            "Avg TP W": avg([safe_float(x.get("take_profit")) - safe_float(x.get("entry")) if safe_float(x.get("entry")) and safe_float(x.get("take_profit")) else None for x in wins]),
+            "Avg TP L": avg([safe_float(x.get("take_profit")) - safe_float(x.get("entry")) if safe_float(x.get("entry")) and safe_float(x.get("take_profit")) else None for x in losses]),
+            "Avg Duration": avg(dur),
+            "Shortest Duration": min(dur) if dur else None,
+            "Longest Duration": max(dur) if dur else None,
         })
-    rows.sort(key=lambda r: (-int(r["Trades"] or 0), str(r["Symbol"])))
+    rows.sort(key=lambda r: (-int(r["Total Trades"] or 0), str(r["Symbol"])))
     return rows
 
 
@@ -533,16 +668,17 @@ def write_dashboard(wb: Workbook, trades: List[Dict[str, Any]], sources: List[Pa
     ws["A5"] = "Source folder"
     ws["B5"] = str(sources[0].parent if sources else "")
 
-    s = summarize(trades)
+    stats = compute_journal_stats_replica(trades)
+    s = stats["totals"]
     kpis = [
         ("Trades", s["trades"]),
         ("Wins", s["wins"]),
         ("Losses", s["losses"]),
-        ("Break-even", s["breakeven"]),
-        ("Win rate", s["win_rate"]),
-        ("Net P/L", s["net_pl"]),
+        ("Break-even", s["break_even"]),
+        ("Win rate", (s.get("win_rate_pct")/100.0) if s.get("win_rate_pct") is not None else None),
+        ("Net P/L", s["net_profit_total"]),
         ("Gross gain", s["gross_gain"]),
-        ("Gross loss", s["gross_loss"]),
+        ("Gross loss", -s["gross_loss"] if s.get("gross_loss") is not None else None),
     ]
     row = 8
     for i, (label, value) in enumerate(kpis):
@@ -563,10 +699,18 @@ def write_dashboard(wb: Workbook, trades: List[Dict[str, Any]], sources: List[Pa
         elif isinstance(value, float):
             val.number_format = "#,##0.00"
 
-    ws["A23"] = "Top instrument averages"
+    ws["A23"] = "Instrument leaders"
+    ws["A8"] = "Overall"
+    ws["E8"] = "Winners"
+    ws["A14"] = "Losers"
+    ws["E14"] = "Drawdown"
+    ws["A20"] = "Duration"
+    ws["E20"] = "FX"
+    ws["A22"] = "Crypto"
+    ws["E22"] = "Money by currency"
     ws["A23"].font = Font(color=WHITE, bold=True, size=14)
     top = instrument_stats(trades)[:10]
-    headers = ["Symbol", "Asset", "Trades", "Wins", "Losses", "Win Rate", "Net P/L", "Avg P/L"]
+    headers = ["Symbol", "Asset", "Total Trades", "Wins", "Losses", "Breakeven", "Avg Duration"]
     write_table(ws, headers, top, start_row=25, start_col=1)
     for c in range(1, len(headers) + 1):
         ws.cell(25, c).fill = PatternFill("solid", fgColor=HEADER)
@@ -584,7 +728,7 @@ def write_dashboard(wb: Workbook, trades: List[Dict[str, Any]], sources: List[Pa
     for col in range(1, 10):
         ws.column_dimensions[get_column_letter(col)].width = 18
     ws.column_dimensions["B"].width = 46
-    set_pl_format(ws, ["G26:G40", "H26:H40"])
+    set_pl_format(ws, ["D26:D40"])
 
 
 def build_output(journal_dir: Path, output_path: Path) -> Tuple[int, int, List[str]]:
@@ -593,10 +737,12 @@ def build_output(journal_dir: Path, output_path: Path) -> Tuple[int, int, List[s
     warnings: List[str] = []
     if not sources:
         warnings.append(f"No journal workbooks found in {journal_dir}")
+    rows_by_source = defaultdict(int)
     for path in sources:
         try:
             trades, w = parse_workbook(path)
             all_trades.extend(trades)
+            rows_by_source[path.name] += len(trades)
             warnings.extend(w)
         except Exception as exc:
             warnings.append(f"{path.name}: {exc}")
@@ -612,21 +758,22 @@ def build_output(journal_dir: Path, output_path: Path) -> Tuple[int, int, List[s
         deduped.append(t)
     all_trades = deduped
 
+    stats = compute_journal_stats_replica(all_trades)
     wb = Workbook()
     write_dashboard(wb, all_trades, sources, warnings)
 
     trades_ws = wb.create_sheet("All Trades")
-    trade_headers = ["Close Time", "Open Time", "Account", "Asset", "Symbol", "Side", "Timeframe", "Setup", "Qty", "Entry", "Exit", "Stop Loss", "Target", "Commission", "Swap", "Net P/L", "Balance After", "Result", "Breakeven", "Source", "Notes"]
+    trade_headers = ["Open Time", "Close Time", "Account", "Symbol", "Side", "Timeframe", "Test", "Setup", "Qty", "Entry", "Exit", "Stop Loss", "Target", "Commission", "Net Profit", "Profit %", "R-Multiple", "Balance After", "Trade Duration", "Breakeven", "Source", "Notes", "Order ID", "Fill Count"]
     rows = []
     for t in sorted_trades(all_trades):
         rows.append({
-            "Close Time": t.get("close_time"),
             "Open Time": t.get("open_time"),
+            "Close Time": t.get("close_time"),
             "Account": t.get("account"),
-            "Asset": t.get("asset_class"),
             "Symbol": t.get("symbol"),
             "Side": t.get("side"),
             "Timeframe": t.get("timeframe"),
+            "Test": t.get("is_test_trade"),
             "Setup": t.get("setup"),
             "Qty": t.get("qty"),
             "Entry": t.get("entry"),
@@ -634,13 +781,16 @@ def build_output(journal_dir: Path, output_path: Path) -> Tuple[int, int, List[s
             "Stop Loss": t.get("stop_loss"),
             "Target": t.get("take_profit"),
             "Commission": t.get("commission"),
-            "Swap": t.get("swap"),
-            "Net P/L": t.get("net_profit"),
+            "Net Profit": t.get("net_profit"),
+            "Profit %": t.get("result_pct"),
+            "R-Multiple": t.get("r_multiple"),
             "Balance After": t.get("balance_after"),
-            "Result": result_label(t.get("net_profit"), t.get("breakeven", "")),
+            "Trade Duration": t.get("trade_duration_seconds"),
             "Breakeven": t.get("breakeven"),
-            "Source": f"{t.get('source_file')} / {t.get('sheet')} / row {t.get('row')}",
+            "Source": t.get("import_source") or f"{t.get('source_file')} / {t.get('sheet')} / row {t.get('row')}",
             "Notes": t.get("notes"),
+            "Order ID": t.get("order_id"),
+            "Fill Count": t.get("fill_count"),
         })
     write_table(trades_ws, trade_headers, rows)
     style_sheet(trades_ws, len(trade_headers), freeze="A2")
@@ -648,10 +798,10 @@ def build_output(journal_dir: Path, output_path: Path) -> Tuple[int, int, List[s
     trades_ws.column_dimensions["B"].width = 20
     trades_ws.column_dimensions["T"].width = 36
     trades_ws.column_dimensions["U"].width = 44
-    set_pl_format(trades_ws, [f"P2:P{max(2, len(rows)+1)}"])
+    set_pl_format(trades_ws, [f"O2:Q{max(2, len(rows)+1)}"])
 
     inst_ws = wb.create_sheet("Instrument Averages")
-    inst_headers = ["Symbol", "Asset", "Trades", "Wins", "Losses", "Breakeven", "Win Rate", "Net P/L", "Avg P/L", "Avg Entry", "Avg Exit", "Avg Stop Loss", "Avg Target"]
+    inst_headers = ["Symbol", "Asset", "Total Trades", "Long Trades", "Short Trades", "Wins", "Losses", "Breakeven", "Long Wins", "Long Losses", "Short Wins", "Short Losses", "Avg SL W", "Avg SL L", "Avg TP W", "Avg TP L", "Avg Duration", "Shortest Duration", "Longest Duration"]
     inst_rows = instrument_stats(all_trades)
     write_table(inst_ws, inst_headers, inst_rows)
     style_sheet(inst_ws, len(inst_headers), freeze="A2")
@@ -692,8 +842,20 @@ def build_output(journal_dir: Path, output_path: Path) -> Tuple[int, int, List[s
     diag_rows.append({"Item": "Output workbook", "Value": str(output_path)})
     diag_rows.append({"Item": "Source workbooks", "Value": len(sources)})
     diag_rows.append({"Item": "Parsed trades", "Value": len(all_trades)})
+    diag_rows.append({"Item": "Test rows excluded from stats", "Value": sum(1 for t in all_trades if is_test_trade_row(t))})
+    bybit_count = sum(c for n, c in rows_by_source.items() if Path(n).stem.lower() == "bybit demo")
+    diag_rows.append({"Item": "Bybit Demo parsed row count", "Value": bybit_count})
+    diag_rows.append({"Item": "Money by currency", "Value": str(stats.get("totals", {}).get("money_by_currency", {}))})
     for src in sources:
         diag_rows.append({"Item": "Source file", "Value": src.name})
+        diag_rows.append({"Item": f"Parsed rows ({src.name})", "Value": rows_by_source.get(src.name, 0)})
+    diag_rows.append({"Item": "Missing balance_after_trade", "Value": sum(1 for t in all_trades if t.get("balance_after") is None)})
+    diag_rows.append({"Item": "Missing stop_loss", "Value": sum(1 for t in all_trades if t.get("stop_loss") is None)})
+    diag_rows.append({"Item": "Missing take_profit", "Value": sum(1 for t in all_trades if t.get("take_profit") is None)})
+    diag_rows.append({"Item": "Missing result_pct", "Value": sum(1 for t in all_trades if t.get("result_pct") is None)})
+    diag_rows.append({"Item": "Missing r_multiple", "Value": sum(1 for t in all_trades if t.get("r_multiple") is None)})
+    diag_rows.append({"Item": "Missing open_time", "Value": sum(1 for t in all_trades if t.get("open_time") is None)})
+    diag_rows.append({"Item": "Missing close_time", "Value": sum(1 for t in all_trades if t.get("close_time") is None)})
     for warning in warnings:
         diag_rows.append({"Item": "Warning", "Value": warning})
     write_table(diag_ws, ["Item", "Value"], diag_rows)
