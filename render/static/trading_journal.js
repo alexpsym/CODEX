@@ -584,6 +584,8 @@
       const tr = document.createElement('tr');
       tr.dataset.symbol = String(item.symbol || '');
       tr.dataset.assetClass = String(item.asset_class || '');
+      if (r.id) tr.setAttribute('data-row-id', String(r.id));
+      if (r.id) tr.setAttribute('data-row-id', String(r.id));
       tr.innerHTML = `
         <td>${item.symbol || '—'}</td>
         <td>${item.asset_class || '—'}</td>
