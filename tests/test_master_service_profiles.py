@@ -99,3 +99,14 @@ def test_journal_profile_redirects_root_and_allows_trading_journal_api() -> None
     assert "Trading Journal" in page
     api_response = asyncio.run(master_service.trading_journal_sync_status())
     assert api_response.status_code == 200
+
+
+def test_trading_journal_page_includes_stats_columns_and_wider_wrap() -> None:
+    master_service = _load_master_service("render_master_service_trading_journal_layout", "journal")
+    page = asyncio.run(master_service.trading_journal_page())
+    assert ".tj-stats-dashboard" in page
+    assert ".tj-stats-column" in page
+    assert "@media (max-width: 1100px)" in page
+    assert "@media (max-width: 720px)" in page
+    assert "max-width: 1400px" not in page
+    assert "width: min(1880px, calc(100vw - 32px));" in page

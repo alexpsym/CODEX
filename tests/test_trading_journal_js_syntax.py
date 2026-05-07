@@ -51,6 +51,10 @@ def test_trading_journal_diagnostics_split_balance_anchor_from_parse_sync() -> N
     assert "Segments" not in js
     assert "wrap.style.display = 'block';" not in js
 
+    assert "tj-stats-column" in js
+    assert "const sections = [" in js
+    assert "wrap.innerHTML = [" not in js
+
 
 def test_trading_journal_stats_classes_are_value_only_and_net_pl_is_sign_based() -> None:
     js = JS_PATH.read_text(encoding="utf-8")
