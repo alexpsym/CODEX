@@ -162,7 +162,16 @@ async def test_place_bybit_market_order_uses_ioc_position_idx_and_tpsl(monkeypat
     monkeypatch.setattr(master_service, "_upsert_trade_context", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(master_service, "_delete_pending_webhook", lambda _pid: False)
     monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
-    monkeypatch.setattr(master_service, "_bybit_lookup_symbol", lambda *_a, **_k: asyncio.sleep(0, result=None))
+    monkeypatch.setattr(
+        master_service,
+        "_bybit_lookup_symbol",
+        lambda *_a, **_k: asyncio.sleep(0, result={"symbol": "BTCUSDT", "_category": "linear", "priceFilter": {"tickSize": "0.1"}}),
+    )
+    async def _fake_get_async(base_url, path, params, **_kwargs):
+        if path == "/v5/market/tickers":
+            return {"result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "77343.8"}]}}
+        return {"result": {"list": []}}
+    monkeypatch.setattr(master_service, "_bybit_get_async", _fake_get_async)
     monkeypatch.setattr(
         master_service,
         "_wait_for_position_entry",

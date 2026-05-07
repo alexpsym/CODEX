@@ -1738,6 +1738,20 @@ async def _bybit_lookup_symbol(base_url: str, symbol: str) -> Optional[Dict[str,
     return None
 
 
+async def _bybit_lookup_linear_symbol_with_fallback(base_url: str, symbol: str) -> Optional[Dict[str, object]]:
+    inst = await _bybit_lookup_symbol(base_url, symbol)
+    tick = ((inst or {}).get("priceFilter") or {}).get("tickSize") if isinstance(inst, dict) else None
+    if tick not in (None, "", "0", 0):
+        return inst
+    payload = await _bybit_get_async(base_url, "/v5/market/instruments-info", {"category": "linear", "symbol": symbol})
+    rows = ((payload.get("result") or {}).get("list") or []) if isinstance(payload, dict) else []
+    for row in rows:
+        if isinstance(row, dict) and str(row.get("symbol") or "").upper() == str(symbol).upper():
+            row["_category"] = "linear"
+            return row
+    return inst
+
+
 def _oanda_specs_mode() -> str:
     env = (os.getenv("OANDA_ENV") or "live").strip().lower()
     return "demo" if env in {"practice", "demo", "test"} else "live"
@@ -1874,7 +1888,12 @@ async def _bybit_resolve_and_fetch_specs(query: str, *, include_btc_reference: b
     specs["_units"] = units
     if include_btc_reference and not _is_bitcoin_bybit_symbol(symbol, resolved_inst):
         btc_symbol = _btc_reference_symbol_for_category(category, resolved_inst.get("quoteCoin"))
-        btc_specs = await _bybit_resolve_and_fetch_specs(btc_symbol, include_btc_reference=False)
+        btc_exact = await _bybit_get_async(base_url, "/v5/market/instruments-info", {"category": category, "symbol": btc_symbol})
+        btc_rows = ((btc_exact.get("result") or {}).get("list") or []) if isinstance(btc_exact, dict) else []
+        btc_inst = next((r for r in btc_rows if isinstance(r, dict) and str(r.get("symbol") or "").upper() == btc_symbol), None)
+        btc_specs = None
+        if btc_inst:
+            btc_specs = {"resolved_symbol": btc_symbol, "category": category, "source": "bybit"}
         if btc_specs:
             specs["_btc_reference"] = {k: v for k, v in btc_specs.items() if not str(k).startswith("_")}
             warnings.extend(btc_specs.get("_spec_warnings") or [])
@@ -11592,7 +11611,7 @@ async def _place_bybit_order(
     tick_size_dec: Optional[Decimal] = None
     if category == "linear":
         try:
-            symbol_meta = await _bybit_lookup_symbol(base_url, symbol)
+            symbol_meta = await _bybit_lookup_linear_symbol_with_fallback(base_url, symbol)
             if isinstance(symbol_meta, dict):
                 tick_size_dec = Decimal(str((symbol_meta.get("priceFilter") or {}).get("tickSize") or "0"))
         except Exception:
@@ -15186,7 +15205,7 @@ async def merged_calculator_page() -> HTMLResponse:
 
 @app.get("/merged/scanner")
 async def merged_scanner_redirect() -> Response:
-    if APP_PROFILE == "render":
+    if _runtime_is_render():
         return _local_only_disabled_response("/merged/scanner")
     return RedirectResponse(url="/merged/alerts", status_code=307)
 
@@ -17514,7 +17533,7 @@ async def merged_history_page() -> str:
 
 @app.get("/merged/alerts")
 async def merged_monitor_page() -> Response:
-    if APP_PROFILE == "render":
+    if _runtime_is_render():
         return _local_only_disabled_response("/merged/alerts")
     monitor_js_version = _static_asset_version("render/static/merged_alerts.js")
     page = MERGED_MONITOR_TEMPLATE.replace("{{MERGED_MONITOR_JS_URL}}", f"/static/merged_alerts.js?v={monitor_js_version}")
@@ -22122,3 +22141,5 @@ async def _run_trading_journal_sync_job() -> None:
 async def trading_journal_sync() -> JSONResponse:
     _queue_trading_journal_sync_if_idle("manual_sync")
     return await trading_journal_sync_status()
+def _runtime_is_render() -> bool:
+    return _resolve_app_profile() == "render"
