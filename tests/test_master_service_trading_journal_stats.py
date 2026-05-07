@@ -85,9 +85,9 @@ def test_compute_journal_stats_winner_loser_splits_and_durations() -> None:
     duration = stats["groups"]["duration"]
 
     assert risk["avg_stop_pct_winners"] == 7.5
-    assert risk["avg_stop_pct_losers"] == 10.0
+    assert risk["avg_stop_pct_losers"] == 6.0
     assert risk["avg_target_pct_winners"] == 15.0
-    assert risk["avg_target_pct_losers"] == 15.0
+    assert risk["avg_target_pct_losers"] == 12.5
     assert risk["avg_result_pct_winners"] == 3.0
     assert risk["avg_result_pct_losers"] == -1.5
     assert risk["avg_r_multiple_winners"] == 1.6

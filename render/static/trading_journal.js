@@ -1072,16 +1072,47 @@
     const risk = g?.risk_expectancy || stats?.totals || {};
     const dur = g?.duration || stats?.totals || {};
     const leaders = g?.leaders || {};
-    wrap.innerHTML = [
-      sec('Overall', core(byMarket.overall)),
-      sec('Winners', [row('Avg stop %', fmtPctSmall(risk?.avg_stop_pct_winners)), row('Avg target %', fmtPctSmall(risk?.avg_target_pct_winners)), row('Avg result %', fmtPctSmall(risk?.avg_result_pct_winners), 'tj-stat-winner'), row('Avg R', fmtR(risk?.avg_r_multiple_winners), 'tj-stat-winner')]),
-      sec('Losers', [row('Avg stop %', fmtPctSmall(risk?.avg_stop_pct_losers)), row('Avg target %', fmtPctSmall(risk?.avg_target_pct_losers)), row('Avg result %', fmtPctSmall(risk?.avg_result_pct_losers), 'tj-stat-loser'), row('Avg R', fmtR(risk?.avg_r_multiple_losers), 'tj-stat-loser')]),
-      sec('Drawdown', [row('Max drawdown', fmtPctSmall(risk?.max_drawdown_pct), 'tj-stat-drawdown'), row('Avg drawdown', fmtPctSmall(risk?.avg_drawdown_pct), 'tj-stat-drawdown')]),
-      sec('Duration', [row('Overall avg', fmtDuration(dur?.overall_avg_seconds)), row('Overall shortest', fmtDuration(dur?.overall_shortest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.overall_shortest_seconds)), row('Overall longest', fmtDuration(dur?.overall_longest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.overall_longest_seconds)), row('FX shortest', fmtDuration(dur?.fx_shortest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.fx_shortest_seconds)), row('FX longest', fmtDuration(dur?.fx_longest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.fx_longest_seconds)), row('Crypto shortest', fmtDuration(dur?.crypto_shortest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.crypto_shortest_seconds)), row('Crypto longest', fmtDuration(dur?.crypto_longest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.crypto_longest_seconds))]),
-      sec('FX', core(byMarket.fx || {})),
-      sec('Crypto', core(byMarket.crypto || {})),
-      sec('Instrument leaders', [row('Overall most wins', fmtLeader(leaders?.most_wins_instrument, 'wins'), 'tj-stat-winner'), row('Overall most losses', fmtLeader(leaders?.most_losses_instrument, 'losses'), 'tj-stat-loser'), row('FX most wins', fmtLeader(leaders?.fx_most_wins_instrument, 'wins'), 'tj-stat-winner'), row('FX most losses', fmtLeader(leaders?.fx_most_losses_instrument, 'losses'), 'tj-stat-loser'), row('Crypto most wins', fmtLeader(leaders?.crypto_most_wins_instrument, 'wins'), 'tj-stat-winner'), row('Crypto most losses', fmtLeader(leaders?.crypto_most_losses_instrument, 'losses'), 'tj-stat-loser')]),
-    ].join('');
+
+    const sections = [
+      { key: 'overall', rows: core(byMarket.overall), title: 'Overall' },
+      { key: 'winners', rows: [row('Avg stop %', fmtPctSmall(risk?.avg_stop_pct_winners)), row('Avg target %', fmtPctSmall(risk?.avg_target_pct_winners)), row('Avg result %', fmtPctSmall(risk?.avg_result_pct_winners), 'tj-stat-winner'), row('Avg R', fmtR(risk?.avg_r_multiple_winners), 'tj-stat-winner')], title: 'Winners' },
+      { key: 'losers', rows: [row('Avg stop %', fmtPctSmall(risk?.avg_stop_pct_losers)), row('Avg target %', fmtPctSmall(risk?.avg_target_pct_losers)), row('Avg result %', fmtPctSmall(risk?.avg_result_pct_losers), 'tj-stat-loser'), row('Avg R', fmtR(risk?.avg_r_multiple_losers), 'tj-stat-loser')], title: 'Losers' },
+      { key: 'drawdown', rows: [row('Max drawdown', fmtPctSmall(risk?.max_drawdown_pct), 'tj-stat-drawdown'), row('Avg drawdown', fmtPctSmall(risk?.avg_drawdown_pct), 'tj-stat-drawdown')], title: 'Drawdown' },
+      { key: 'duration', rows: [row('Overall avg', fmtDuration(dur?.overall_avg_seconds)), row('Overall shortest', fmtDuration(dur?.overall_shortest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.overall_shortest_seconds)), row('Overall longest', fmtDuration(dur?.overall_longest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.overall_longest_seconds)), row('FX shortest', fmtDuration(dur?.fx_shortest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.fx_shortest_seconds)), row('FX longest', fmtDuration(dur?.fx_longest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.fx_longest_seconds)), row('Crypto shortest', fmtDuration(dur?.crypto_shortest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.crypto_shortest_seconds)), row('Crypto longest', fmtDuration(dur?.crypto_longest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.crypto_longest_seconds))], title: 'Duration' },
+      { key: 'fx', rows: core(byMarket.fx || {}), title: 'FX' },
+      { key: 'crypto', rows: core(byMarket.crypto || {}), title: 'Crypto' },
+      { key: 'leaders', rows: [row('Overall most wins', fmtLeader(leaders?.most_wins_instrument, 'wins'), 'tj-stat-winner'), row('Overall most losses', fmtLeader(leaders?.most_losses_instrument, 'losses'), 'tj-stat-loser'), row('FX most wins', fmtLeader(leaders?.fx_most_wins_instrument, 'wins'), 'tj-stat-winner'), row('FX most losses', fmtLeader(leaders?.fx_most_losses_instrument, 'losses'), 'tj-stat-loser'), row('Crypto most wins', fmtLeader(leaders?.crypto_most_wins_instrument, 'wins'), 'tj-stat-winner'), row('Crypto most losses', fmtLeader(leaders?.crypto_most_losses_instrument, 'losses'), 'tj-stat-loser')], title: 'Instrument leaders' },
+    ].map((section) => ({ ...section, html: sec(section.title, section.rows), weight: section.rows.length + 1 }));
+
+    const pick = (key) => sections.find((section) => section.key === key);
+    const columns = [
+      { items: [], weight: 0 },
+      { items: [], weight: 0 },
+      { items: [], weight: 0 },
+    ];
+    const pushSection = (columnIndex, section) => {
+      if (!section) return;
+      columns[columnIndex].items.push(section);
+      columns[columnIndex].weight += section.weight;
+    };
+
+    pushSection(0, pick('overall'));
+    pushSection(1, pick('winners'));
+    pushSection(2, pick('losers'));
+
+    ['drawdown', 'duration', 'fx', 'crypto', 'leaders'].forEach((key) => {
+      const section = pick(key);
+      if (!section) return;
+      let target = 0;
+      for (let i = 1; i < columns.length; i += 1) {
+        if (columns[i].weight < columns[target].weight) target = i;
+      }
+      pushSection(target, section);
+    });
+
+    wrap.innerHTML = columns
+      .map((column) => `<div class="tj-stats-column">${column.items.map((section) => section.html).join('')}</div>`)
+      .join('');
 
   }
 

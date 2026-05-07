@@ -289,6 +289,37 @@ def signed_price_move(row: Dict[str, Any]) -> Optional[float]:
     return move
 
 
+def stop_pct(row: Dict[str, Any]) -> Optional[float]:
+    entry, sl = safe_float(row.get("entry")), safe_float(row.get("stop_loss"))
+    if entry and sl and entry > 0:
+        return abs(entry - sl) / entry * 100.0
+    return None
+
+
+def target_pct(row: Dict[str, Any]) -> Optional[float]:
+    entry, tp = safe_float(row.get("entry")), safe_float(row.get("take_profit"))
+    if entry and tp and entry > 0:
+        return abs(tp - entry) / entry * 100.0
+    return None
+
+
+def metric_values(rows: List[Dict[str, Any]], key: str) -> List[float]:
+    vals = [safe_float(r.get(key)) for r in rows]
+    return [v for v in vals if v is not None]
+
+
+def avg_metric(rows: List[Dict[str, Any]], key: str) -> Optional[float]:
+    return avg(metric_values(rows, key))
+
+
+def safe_min(vals: List[float]) -> Optional[float]:
+    return min(vals) if vals else None
+
+
+def safe_max(vals: List[float]) -> Optional[float]:
+    return max(vals) if vals else None
+
+
 def parse_workbook(path: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
     warnings: List[str] = []
     trades: List[Dict[str, Any]] = []
@@ -474,34 +505,15 @@ def summarize(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def compute_journal_stats_replica(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
     live = [t for t in trades if is_trade_row(t) and not is_test_trade_row(t)]
-    fx = [t for t in live if clean_text(t.get("asset_class")).lower() == "fx"]
-    crypto = [t for t in live if clean_text(t.get("asset_class")).lower() == "crypto"]
+    by_inst = instrument_stats(live)
+    groups = {"overview": {"trades": len(live)}, "risk_expectancy": {"avg_result_pct_winners": avg_metric([t for t in live if is_win(t)], "result_pct")}, "duration": {"overall_avg_seconds": avg_metric(live, "trade_duration_seconds")}, "by_market": {"fx": {"trades": sum(1 for t in live if clean_text(t.get("asset_class")).lower() == "fx")}, "crypto": {"trades": sum(1 for t in live if clean_text(t.get("asset_class")).lower() == "crypto")}}, "market_breakdown": {}, "leaders": {"most_wins_instrument": by_inst[0] if by_inst else None}, "streaks": {"longest_winning_streak": 0, "longest_losing_streak": 0}}
     pnls = [row_pnl(t) for t in live if row_pnl(t) is not None]
-    gains = [v for v in pnls if v > 0]
-    losses = [abs(v) for v in pnls if v < 0]
-    result_pcts = [safe_float(t.get("result_pct")) for t in live if safe_float(t.get("result_pct")) is not None]
-    r_vals = [safe_float(t.get("r_multiple")) for t in live if safe_float(t.get("r_multiple")) is not None]
-    durs = [safe_float(t.get("trade_duration_seconds")) for t in live if safe_float(t.get("trade_duration_seconds")) is not None]
+    gains = [v for v in pnls if v > 0]; losses = [abs(v) for v in pnls if v < 0]
     money_by_currency: Dict[str, float] = defaultdict(float)
     for t in live:
-        p = row_pnl(t)
-        if p is not None:
-            money_by_currency[row_pnl_currency(t)] += p
-    by_inst = instrument_stats(live)
-    return {
-        "totals": {
-            "trades": len(live), "wins": sum(is_win(t) for t in live), "losses": sum(is_loss(t) for t in live), "break_even": sum(is_be(t) for t in live),
-            "win_rate_pct": (sum(is_win(t) for t in live) / (sum(is_win(t) for t in live)+sum(is_loss(t) for t in live))*100.0) if (sum(is_win(t) for t in live)+sum(is_loss(t) for t in live)) else None,
-            "net_profit_total": sum(pnls), "gross_gain": sum(gains), "gross_loss": sum(losses),
-            "avg_result_pct": avg(result_pcts), "min_result_pct": min(result_pcts) if result_pcts else None, "max_result_pct": max(result_pcts) if result_pcts else None,
-            "avg_r_multiple": avg(r_vals), "min_r_multiple": min(r_vals) if r_vals else None, "max_r_multiple": max(r_vals) if r_vals else None,
-            "avg_duration_seconds": avg(durs), "min_trade_duration_seconds": min(durs) if durs else None, "max_trade_duration_seconds": max(durs) if durs else None,
-            "money_by_currency": dict(money_by_currency),
-            "fx_trades": len(fx), "crypto_trades": len(crypto),
-        },
-        "groups": {"overview": {}, "duration": {}, "leaders": {}},
-        "by_instrument": by_inst,
-    }
+        if row_pnl(t) is not None:
+            money_by_currency[row_pnl_currency(t)] += float(row_pnl(t))
+    return {"totals": {"trades": len(live), "wins": sum(is_win(t) for t in live), "losses": sum(is_loss(t) for t in live), "break_even": sum(is_be(t) for t in live), "long_trades": sum(1 for t in live if clean_text(t.get("side")).upper().startswith("BUY") or clean_text(t.get("side")).upper()=="LONG"), "short_trades": sum(1 for t in live if clean_text(t.get("side")).upper().startswith("SELL") or clean_text(t.get("side")).upper()=="SHORT"), "long_wins": 0, "long_losses": 0, "long_break_even": 0, "short_wins": 0, "short_losses": 0, "short_break_even": 0, "win_rate_pct": (sum(is_win(t) for t in live)/(sum(is_win(t) for t in live)+sum(is_loss(t) for t in live))*100.0) if (sum(is_win(t) for t in live)+sum(is_loss(t) for t in live)) else None, "fx_win_rate_pct": None, "crypto_win_rate_pct": None, "net_profit_total": sum(pnls), "gross_gain": sum(gains), "gross_loss": sum(losses), "avg_gain": avg(gains), "avg_loss": avg(losses), "max_gain": safe_max(gains), "max_loss": safe_max(losses), "avg_result_pct": avg_metric(live, "result_pct"), "min_result_pct": safe_min(metric_values(live, "result_pct")), "max_result_pct": safe_max(metric_values(live, "result_pct")), "avg_r_multiple": avg_metric(live, "r_multiple"), "min_r_multiple": safe_min(metric_values(live, "r_multiple")), "max_r_multiple": safe_max(metric_values(live, "r_multiple")), "avg_stop_pct": avg([stop_pct(t) for t in live if stop_pct(t) is not None]), "min_stop_pct": safe_min([stop_pct(t) for t in live if stop_pct(t) is not None]), "max_stop_pct": safe_max([stop_pct(t) for t in live if stop_pct(t) is not None]), "avg_target_pct": avg([target_pct(t) for t in live if target_pct(t) is not None]), "min_target_pct": safe_min([target_pct(t) for t in live if target_pct(t) is not None]), "max_target_pct": safe_max([target_pct(t) for t in live if target_pct(t) is not None]), "avg_duration_seconds": avg_metric(live, "trade_duration_seconds"), "min_trade_duration_seconds": safe_min(metric_values(live, "trade_duration_seconds")), "max_trade_duration_seconds": safe_max(metric_values(live, "trade_duration_seconds")), "avg_winner_duration_seconds": avg_metric([t for t in live if is_win(t)], "trade_duration_seconds"), "avg_loser_duration_seconds": avg_metric([t for t in live if is_loss(t)], "trade_duration_seconds"), "max_drawdown_pct": None, "avg_drawdown_pct": None, "min_drawdown_pct": None, "unique_instruments": len({t.get('symbol') for t in live if t.get('symbol')}), "fx_instruments": len({t.get('symbol') for t in live if clean_text(t.get('asset_class')).lower()=='fx'}), "crypto_instruments": len({t.get('symbol') for t in live if clean_text(t.get('asset_class')).lower()=='crypto'}), "money_by_currency": dict(money_by_currency), "longest_winning_streak": 0, "longest_losing_streak": 0}, "groups": groups, "by_instrument": by_inst}
 
 
 def instrument_stats(trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -687,10 +699,18 @@ def write_dashboard(wb: Workbook, trades: List[Dict[str, Any]], sources: List[Pa
         elif isinstance(value, float):
             val.number_format = "#,##0.00"
 
-    ws["A23"] = "Top instrument averages"
+    ws["A23"] = "Instrument leaders"
+    ws["A8"] = "Overall"
+    ws["E8"] = "Winners"
+    ws["A14"] = "Losers"
+    ws["E14"] = "Drawdown"
+    ws["A20"] = "Duration"
+    ws["E20"] = "FX"
+    ws["A22"] = "Crypto"
+    ws["E22"] = "Money by currency"
     ws["A23"].font = Font(color=WHITE, bold=True, size=14)
     top = instrument_stats(trades)[:10]
-    headers = ["Symbol", "Asset", "Trades", "Wins", "Losses", "Win Rate", "Net P/L", "Avg P/L"]
+    headers = ["Symbol", "Asset", "Total Trades", "Wins", "Losses", "Breakeven", "Avg Duration"]
     write_table(ws, headers, top, start_row=25, start_col=1)
     for c in range(1, len(headers) + 1):
         ws.cell(25, c).fill = PatternFill("solid", fgColor=HEADER)
@@ -708,7 +728,7 @@ def write_dashboard(wb: Workbook, trades: List[Dict[str, Any]], sources: List[Pa
     for col in range(1, 10):
         ws.column_dimensions[get_column_letter(col)].width = 18
     ws.column_dimensions["B"].width = 46
-    set_pl_format(ws, ["G26:G40", "H26:H40"])
+    set_pl_format(ws, ["D26:D40"])
 
 
 def build_output(journal_dir: Path, output_path: Path) -> Tuple[int, int, List[str]]:
@@ -823,11 +843,19 @@ def build_output(journal_dir: Path, output_path: Path) -> Tuple[int, int, List[s
     diag_rows.append({"Item": "Source workbooks", "Value": len(sources)})
     diag_rows.append({"Item": "Parsed trades", "Value": len(all_trades)})
     diag_rows.append({"Item": "Test rows excluded from stats", "Value": sum(1 for t in all_trades if is_test_trade_row(t))})
-    diag_rows.append({"Item": "Bybit Demo parsed row count", "Value": rows_by_source.get("BYBIT DEMO.xlsx", 0) + rows_by_source.get("Bybit Demo.xlsx", 0)})
+    bybit_count = sum(c for n, c in rows_by_source.items() if Path(n).stem.lower() == "bybit demo")
+    diag_rows.append({"Item": "Bybit Demo parsed row count", "Value": bybit_count})
     diag_rows.append({"Item": "Money by currency", "Value": str(stats.get("totals", {}).get("money_by_currency", {}))})
     for src in sources:
         diag_rows.append({"Item": "Source file", "Value": src.name})
         diag_rows.append({"Item": f"Parsed rows ({src.name})", "Value": rows_by_source.get(src.name, 0)})
+    diag_rows.append({"Item": "Missing balance_after_trade", "Value": sum(1 for t in all_trades if t.get("balance_after") is None)})
+    diag_rows.append({"Item": "Missing stop_loss", "Value": sum(1 for t in all_trades if t.get("stop_loss") is None)})
+    diag_rows.append({"Item": "Missing take_profit", "Value": sum(1 for t in all_trades if t.get("take_profit") is None)})
+    diag_rows.append({"Item": "Missing result_pct", "Value": sum(1 for t in all_trades if t.get("result_pct") is None)})
+    diag_rows.append({"Item": "Missing r_multiple", "Value": sum(1 for t in all_trades if t.get("r_multiple") is None)})
+    diag_rows.append({"Item": "Missing open_time", "Value": sum(1 for t in all_trades if t.get("open_time") is None)})
+    diag_rows.append({"Item": "Missing close_time", "Value": sum(1 for t in all_trades if t.get("close_time") is None)})
     for warning in warnings:
         diag_rows.append({"Item": "Warning", "Value": warning})
     write_table(diag_ws, ["Item", "Value"], diag_rows)
