@@ -263,13 +263,18 @@ def is_loss(row: Dict[str, Any]) -> bool:
 
 
 def is_be(row: Dict[str, Any]) -> bool:
-    return not is_win(row) and not is_loss(row)
+    be = clean_text(row.get("breakeven")).lower() in {"yes","y","true","1"}
+    pnl = row_pnl(row)
+    return be or (pnl is not None and abs(pnl) < 1e-12)
 
 
 def trade_duration_seconds(row: Dict[str, Any]) -> Optional[float]:
     o, c = row.get("open_time"), row.get("close_time")
     if isinstance(o, datetime) and isinstance(c, datetime):
-        return max(0.0, (c - o).total_seconds())
+        delta=(c-o).total_seconds()
+        if delta < 0:
+            return None
+        return max(1.0, float(math.ceil(delta)))
     return None
 
 
@@ -389,7 +394,7 @@ def parse_workbook(path: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
                 "setup": clean_text(cell("setup")),
                 "timeframe": clean_text(cell("timeframe")),
                 "open_time": open_dt,
-                "close_time": close_dt or open_dt,
+                "close_time": close_dt,
                 "qty": qty,
                 "entry": entry,
                 "exit": exit_price,
@@ -503,55 +508,195 @@ def summarize(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def compute_journal_stats_replica(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
-    live = [t for t in trades if is_trade_row(t) and not is_test_trade_row(t)]
-    by_inst = instrument_stats(live)
-    groups = {"overview": {"trades": len(live)}, "risk_expectancy": {"avg_result_pct_winners": avg_metric([t for t in live if is_win(t)], "result_pct")}, "duration": {"overall_avg_seconds": avg_metric(live, "trade_duration_seconds")}, "by_market": {"fx": {"trades": sum(1 for t in live if clean_text(t.get("asset_class")).lower() == "fx")}, "crypto": {"trades": sum(1 for t in live if clean_text(t.get("asset_class")).lower() == "crypto")}}, "market_breakdown": {}, "leaders": {"most_wins_instrument": by_inst[0] if by_inst else None}, "streaks": {"longest_winning_streak": 0, "longest_losing_streak": 0}}
-    pnls = [row_pnl(t) for t in live if row_pnl(t) is not None]
-    gains = [v for v in pnls if v > 0]; losses = [abs(v) for v in pnls if v < 0]
-    money_by_currency: Dict[str, float] = defaultdict(float)
-    for t in live:
-        if row_pnl(t) is not None:
-            money_by_currency[row_pnl_currency(t)] += float(row_pnl(t))
-    return {"totals": {"trades": len(live), "wins": sum(is_win(t) for t in live), "losses": sum(is_loss(t) for t in live), "break_even": sum(is_be(t) for t in live), "long_trades": sum(1 for t in live if clean_text(t.get("side")).upper().startswith("BUY") or clean_text(t.get("side")).upper()=="LONG"), "short_trades": sum(1 for t in live if clean_text(t.get("side")).upper().startswith("SELL") or clean_text(t.get("side")).upper()=="SHORT"), "long_wins": 0, "long_losses": 0, "long_break_even": 0, "short_wins": 0, "short_losses": 0, "short_break_even": 0, "win_rate_pct": (sum(is_win(t) for t in live)/(sum(is_win(t) for t in live)+sum(is_loss(t) for t in live))*100.0) if (sum(is_win(t) for t in live)+sum(is_loss(t) for t in live)) else None, "fx_win_rate_pct": None, "crypto_win_rate_pct": None, "net_profit_total": sum(pnls), "gross_gain": sum(gains), "gross_loss": sum(losses), "avg_gain": avg(gains), "avg_loss": avg(losses), "max_gain": safe_max(gains), "max_loss": safe_max(losses), "avg_result_pct": avg_metric(live, "result_pct"), "min_result_pct": safe_min(metric_values(live, "result_pct")), "max_result_pct": safe_max(metric_values(live, "result_pct")), "avg_r_multiple": avg_metric(live, "r_multiple"), "min_r_multiple": safe_min(metric_values(live, "r_multiple")), "max_r_multiple": safe_max(metric_values(live, "r_multiple")), "avg_stop_pct": avg([stop_pct(t) for t in live if stop_pct(t) is not None]), "min_stop_pct": safe_min([stop_pct(t) for t in live if stop_pct(t) is not None]), "max_stop_pct": safe_max([stop_pct(t) for t in live if stop_pct(t) is not None]), "avg_target_pct": avg([target_pct(t) for t in live if target_pct(t) is not None]), "min_target_pct": safe_min([target_pct(t) for t in live if target_pct(t) is not None]), "max_target_pct": safe_max([target_pct(t) for t in live if target_pct(t) is not None]), "avg_duration_seconds": avg_metric(live, "trade_duration_seconds"), "min_trade_duration_seconds": safe_min(metric_values(live, "trade_duration_seconds")), "max_trade_duration_seconds": safe_max(metric_values(live, "trade_duration_seconds")), "avg_winner_duration_seconds": avg_metric([t for t in live if is_win(t)], "trade_duration_seconds"), "avg_loser_duration_seconds": avg_metric([t for t in live if is_loss(t)], "trade_duration_seconds"), "max_drawdown_pct": None, "avg_drawdown_pct": None, "min_drawdown_pct": None, "unique_instruments": len({t.get('symbol') for t in live if t.get('symbol')}), "fx_instruments": len({t.get('symbol') for t in live if clean_text(t.get('asset_class')).lower()=='fx'}), "crypto_instruments": len({t.get('symbol') for t in live if clean_text(t.get('asset_class')).lower()=='crypto'}), "money_by_currency": dict(money_by_currency), "longest_winning_streak": 0, "longest_losing_streak": 0}, "groups": groups, "by_instrument": by_inst}
 
+
+def _is_long_side(row: Dict[str, Any]) -> bool:
+    side = clean_text(row.get("side")).upper()
+    return side.startswith("BUY") or side == "LONG"
+
+
+def _is_short_side(row: Dict[str, Any]) -> bool:
+    side = clean_text(row.get("side")).upper()
+    return side.startswith("SELL") or side == "SHORT"
+
+
+def _asset_class(row: Dict[str, Any]) -> str:
+    return clean_text(row.get("asset_class") or "").lower()
+
+
+def _money_by_currency(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    by = defaultdict(list)
+    for r in rows:
+        pnl = row_pnl(r)
+        if pnl is None:
+            continue
+        by[row_pnl_currency(r)].append(float(pnl))
+    currencies = sorted(by.keys())
+    net = {c: sum(v) for c, v in by.items()}
+    gain = {c: sum(x for x in v if x > 0) for c, v in by.items()}
+    loss_abs = {c: [abs(x) for x in v if x < 0] for c, v in by.items()}
+    loss = {c: sum(vals) for c, vals in loss_abs.items()}
+    return {
+        "net_profit_total": net,
+        "gross_gain": {c:(gain[c] if gain[c] else 0.0) for c in by.keys()},
+        "gross_loss": {c:(loss[c] if loss[c] else 0.0) for c in by.keys()},
+        "avg_gain": {c: (avg([x for x in by[c] if x > 0]) or 0.0) for c in by.keys()},
+        "avg_loss": {c: (avg(loss_abs[c]) or 0.0) for c in by.keys()},
+        "max_gain": {c: (safe_max([x for x in by[c] if x > 0]) or 0.0) for c in by.keys()},
+        "max_loss": {c: (safe_max(loss_abs[c]) or 0.0) for c in by.keys()},
+        "currencies": currencies,
+        "mixed_currency": len(currencies) > 1,
+    }
+
+
+def _drawdowns(rows: List[Dict[str, Any]]) -> List[float]:
+    by_acct = defaultdict(list)
+    for r in rows:
+        bal = safe_float(r.get("balance_after"))
+        dt = r.get("close_time") or r.get("open_time")
+        if bal is None or not isinstance(dt, datetime):
+            continue
+        by_acct[clean_text(r.get("account")) or "UNKNOWN"].append((dt, bal))
+    dds=[]
+    for vals in by_acct.values():
+        vals.sort(key=lambda x:x[0])
+        if len(vals) < 2:
+            continue
+        peak = vals[0][1]
+        for _, bal in vals:
+            peak = max(peak, bal)
+            if peak > 0:
+                dd=(peak - bal) / peak * 100.0
+                if dd > 0 and math.isfinite(dd):
+                    dds.append(dd)
+    return dds
+
+
+def _streak(rows: List[Dict[str, Any]], want_win: bool) -> Dict[str, Any]:
+    best=None;cur=[]
+    def close(st):
+        nonlocal best
+        if not st: return
+        if best is None or len(st) > len(best): best=list(st)
+    for r in sorted(rows, key=lambda t: (t.get("close_time") or t.get("open_time") or datetime.min, str(t.get("id") or ""))):
+        ok = is_win(r) if want_win else is_loss(r)
+        if ok: cur.append(r)
+        else: close(cur);cur=[]
+    close(cur)
+    if not best:
+        return None
+    syms=defaultdict(int)
+    for r in best: syms[clean_text(r.get("symbol"))]+=1
+    st=best[0].get("close_time") or best[0].get("open_time")
+    en=best[-1].get("close_time") or best[-1].get("open_time")
+    return {
+        "type": "winning" if want_win else "losing",
+        "trade_count": len(best), "start_time": st, "end_time": en,
+        "elapsed_seconds": (en-st).total_seconds() if isinstance(st,datetime) and isinstance(en,datetime) else None,
+        "dominant_symbol": max(syms.items(), key=lambda kv: kv[1])[0] if syms else None,
+        "symbol_counts": dict(syms),
+        "net_r_multiple": sum(v for v in [safe_float(r.get("r_multiple")) for r in best] if v is not None),
+        "net_result_pct": sum(v for v in [safe_float(r.get("result_pct")) for r in best] if v is not None),
+        "trade_ids": [r.get("id") for r in best if r.get("id")],
+    }
+
+def _market_bucket(rows: List[Dict[str, Any]], label: str) -> Dict[str, Any]:
+    pnls=[row_pnl(r) for r in rows if row_pnl(r) is not None]
+    wins=[r for r in rows if is_win(r)]; losses=[r for r in rows if is_loss(r)]; bes=[r for r in rows if is_be(r)]
+    known=len(wins)+len(losses)
+    totals=_money_by_currency(rows)
+    losses_abs=[abs(v) for v in pnls if v < 0]
+    gains=[v for v in pnls if v > 0]
+    metric_sources={}
+    def src(metric_key, key, fn):
+        vals=[(r,safe_float(r.get(key))) for r in rows if safe_float(r.get(key)) is not None]
+        if not vals: return None
+        row,val=fn(vals,key=lambda t:t[1])
+        return {"id":row.get("id"),"symbol":row.get("symbol"),"asset_class":clean_text(row.get("asset_class")).lower(),"side":row.get("side"),"open_time":row.get("open_time"),"close_time":row.get("close_time"),"date":row.get("close_time") or row.get("open_time"),"currency":row_pnl_currency(row),"account":row.get("account"),"source":row.get("import_source"),"timeframe":row.get("timeframe"),"net_profit":row.get("net_profit"),"result_pct":row.get("result_pct"),"r_multiple":row.get("r_multiple"),"trade_duration_seconds":row.get("trade_duration_seconds"),"metric_key":metric_key,"metric_value":val}
+    metric_sources["min_result_pct"]=src("min_result_pct","result_pct",min)
+    metric_sources["max_result_pct"]=src("max_result_pct","result_pct",max)
+    metric_sources["min_r_multiple"]=src("min_r_multiple","r_multiple",min)
+    metric_sources["max_r_multiple"]=src("max_r_multiple","r_multiple",max)
+    metric_sources["max_gain"]=src("max_gain","net_profit",max)
+    _ml=src("max_loss","net_profit",min)
+    if _ml and _ml.get("metric_value") is not None: _ml["metric_value"]=abs(_ml["metric_value"])
+    metric_sources["max_loss"]=_ml
+    return {
+        "label": label, "trades": len(rows), "wins": len(wins), "losses": len(losses), "break_even": len(bes),
+        "win_rate_pct": (len(wins)/known*100.0) if known else None,
+        "net_profit_total": sum(pnls), "gross_gain": sum(gains), "gross_loss": (sum(losses_abs) if losses_abs else None),
+        "avg_gain": avg(gains), "avg_loss": avg(losses_abs),
+        "max_gain": safe_max(gains), "max_loss": safe_max(losses_abs),
+        "avg_result_pct": avg_metric(rows, "result_pct"), "min_result_pct": safe_min(metric_values(rows, "result_pct")), "max_result_pct": safe_max(metric_values(rows, "result_pct")),
+        "avg_r_multiple": avg_metric(rows, "r_multiple"), "min_r_multiple": safe_min(metric_values(rows, "r_multiple")), "max_r_multiple": safe_max(metric_values(rows, "r_multiple")),
+        "avg_stop_pct": avg([stop_pct(t) for t in rows if stop_pct(t) is not None]),
+        "avg_target_pct": avg([target_pct(t) for t in rows if target_pct(t) is not None]),
+        "avg_duration_seconds": avg_metric(rows, "trade_duration_seconds"),
+        "money_by_currency": totals,
+        "metric_sources": metric_sources,
+    }
+
+def compute_journal_stats_replica(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
+    live=[t for t in trades if is_trade_row(t) and not is_test_trade_row(t)]
+    fx=[t for t in live if _asset_class(t)=="fx"]; crypto=[t for t in live if _asset_class(t)=="crypto"]
+    wins=[t for t in live if is_win(t)]; losses=[t for t in live if is_loss(t)]; be=[t for t in live if is_be(t)]
+    longs=[t for t in live if _is_long_side(t)]; shorts=[t for t in live if _is_short_side(t)]
+    by_inst=instrument_stats(live)
+    dds=_drawdowns(live)
+    totals=_market_bucket(live, "Overall")
+    totals.update({
+        "long_trades":len(longs),"short_trades":len(shorts),
+        "long_wins":sum(1 for t in longs if is_win(t)),"long_losses":sum(1 for t in longs if is_loss(t)),"long_break_even":sum(1 for t in longs if is_be(t)),
+        "short_wins":sum(1 for t in shorts if is_win(t)),"short_losses":sum(1 for t in shorts if is_loss(t)),"short_break_even":sum(1 for t in shorts if is_be(t)),
+        "fx_win_rate_pct": _market_bucket(fx,"Forex")["win_rate_pct"], "crypto_win_rate_pct": _market_bucket(crypto,"Crypto")["win_rate_pct"],
+        "avg_stop_pct_winners": avg([stop_pct(t) for t in wins if stop_pct(t) is not None]), "avg_stop_pct_losers": avg([stop_pct(t) for t in losses if stop_pct(t) is not None]),
+        "avg_target_pct_winners": avg([target_pct(t) for t in wins if target_pct(t) is not None]), "avg_target_pct_losers": avg([target_pct(t) for t in losses if target_pct(t) is not None]),
+        "avg_result_pct_winners": avg_metric(wins,"result_pct"), "avg_result_pct_losers": avg_metric(losses,"result_pct"),
+        "avg_r_multiple_winners": avg_metric(wins,"r_multiple"), "avg_r_multiple_losers": avg_metric(losses,"r_multiple"),
+        "min_trade_duration_seconds": safe_min(metric_values(live,"trade_duration_seconds")), "max_trade_duration_seconds": safe_max(metric_values(live,"trade_duration_seconds")),
+        "avg_winner_duration_seconds": avg_metric(wins,"trade_duration_seconds"), "avg_loser_duration_seconds": avg_metric(losses,"trade_duration_seconds"),
+        "avg_fx_duration_seconds": avg_metric(fx,"trade_duration_seconds"),"avg_crypto_duration_seconds": avg_metric(crypto,"trade_duration_seconds"),
+        "min_fx_trade_duration_seconds": safe_min(metric_values(fx,"trade_duration_seconds")),"max_fx_trade_duration_seconds": safe_max(metric_values(fx,"trade_duration_seconds")),
+        "min_crypto_trade_duration_seconds": safe_min(metric_values(crypto,"trade_duration_seconds")),"max_crypto_trade_duration_seconds": safe_max(metric_values(crypto,"trade_duration_seconds")),
+        "max_drawdown_pct": safe_max(dds) if len(dds)>=1 else None, "avg_drawdown_pct": avg(dds) if len(dds)>=1 else None, "min_drawdown_pct": safe_min(dds) if len(dds)>=1 else None,
+    })
+    def leader(rows, key):
+        cand=[r for r in rows if r.get(key,0)>0]
+        return max(cand,key=lambda x:(x.get(key,0),x.get("symbol",""))) if cand else None
+    groups={
+      "overview": totals,
+      "risk_expectancy": {k: totals.get(k) for k in ["avg_stop_pct","avg_target_pct","avg_result_pct","avg_r_multiple","avg_stop_pct_winners","avg_stop_pct_losers","avg_target_pct_winners","avg_target_pct_losers","avg_result_pct_winners","avg_result_pct_losers","avg_r_multiple_winners","avg_r_multiple_losers","max_drawdown_pct","avg_drawdown_pct","min_drawdown_pct"]},
+      "duration": {"overall_avg_seconds":totals.get("avg_duration_seconds"),"overall_shortest_seconds":totals.get("min_trade_duration_seconds"),"overall_longest_seconds":totals.get("max_trade_duration_seconds"),"overall_avg_winner_seconds":totals.get("avg_winner_duration_seconds"),"overall_avg_loser_seconds":totals.get("avg_loser_duration_seconds"),"overall_longest_winner_seconds":safe_max(metric_values(wins,"trade_duration_seconds")),"overall_longest_loser_seconds":safe_max(metric_values(losses,"trade_duration_seconds")),"fx_avg_seconds":totals.get("avg_fx_duration_seconds"),"fx_shortest_seconds":totals.get("min_fx_trade_duration_seconds"),"fx_longest_seconds":totals.get("max_fx_trade_duration_seconds"),"fx_avg_winner_seconds":avg_metric([t for t in fx if is_win(t)],"trade_duration_seconds"),"fx_avg_loser_seconds":avg_metric([t for t in fx if is_loss(t)],"trade_duration_seconds"),"fx_shortest_winner_seconds":safe_min(metric_values([t for t in fx if is_win(t)],"trade_duration_seconds")),"fx_shortest_loser_seconds":safe_min(metric_values([t for t in fx if is_loss(t)],"trade_duration_seconds")),"fx_longest_winner_seconds":safe_max(metric_values([t for t in fx if is_win(t)],"trade_duration_seconds")),"fx_longest_loser_seconds":safe_max(metric_values([t for t in fx if is_loss(t)],"trade_duration_seconds")),"crypto_avg_seconds":totals.get("avg_crypto_duration_seconds"),"crypto_shortest_seconds":totals.get("min_crypto_trade_duration_seconds"),"crypto_longest_seconds":totals.get("max_crypto_trade_duration_seconds"),"crypto_avg_winner_seconds":avg_metric([t for t in crypto if is_win(t)],"trade_duration_seconds"),"crypto_avg_loser_seconds":avg_metric([t for t in crypto if is_loss(t)],"trade_duration_seconds"),"crypto_shortest_winner_seconds":safe_min(metric_values([t for t in crypto if is_win(t)],"trade_duration_seconds")),"crypto_shortest_loser_seconds":safe_min(metric_values([t for t in crypto if is_loss(t)],"trade_duration_seconds")),"crypto_longest_winner_seconds":safe_max(metric_values([t for t in crypto if is_win(t)],"trade_duration_seconds")),"crypto_longest_loser_seconds":safe_max(metric_values([t for t in crypto if is_loss(t)],"trade_duration_seconds")),"metric_sources":{}},
+      "by_market": {"overall": _market_bucket(live,"Overall"),"fx": _market_bucket(fx,"Forex"),"crypto": _market_bucket(crypto,"Crypto")},
+      "market_breakdown": [_market_bucket(live,"Overall"),_market_bucket(fx,"Forex"),_market_bucket(crypto,"Crypto")],
+      "leaders": {"most_wins_instrument": leader(by_inst,"wins"),"most_losses_instrument": leader(by_inst,"losses"),"fx_most_wins_instrument": leader([r for r in by_inst if clean_text(r.get("asset_class")).lower()=="fx"],"wins"),"fx_most_losses_instrument": leader([r for r in by_inst if clean_text(r.get("asset_class")).lower()=="fx"],"losses"),"crypto_most_wins_instrument": leader([r for r in by_inst if clean_text(r.get("asset_class")).lower()=="crypto"],"wins"),"crypto_most_losses_instrument": leader([r for r in by_inst if clean_text(r.get("asset_class")).lower()=="crypto"],"losses")},
+      "direction": {"long_trades":len(longs),"short_trades":len(shorts),"long_win_rate_pct":(sum(1 for t in longs if is_win(t))/ (sum(1 for t in longs if is_win(t) or is_loss(t)) or 1) *100.0 if longs else None),"short_win_rate_pct":(sum(1 for t in shorts if is_win(t))/ (sum(1 for t in shorts if is_win(t) or is_loss(t)) or 1) *100.0 if shorts else None)},
+      "streaks": {"longest_winning": _streak(live,True), "longest_losing": _streak(live,False)}
+    }
+    return {"totals": totals, "groups": groups, "by_instrument": by_inst}
 
 def instrument_stats(trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    buckets: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-    for t in trades:
-        buckets[t.get("symbol") or "UNKNOWN"].append(t)
-    rows = []
-    for sym, items in buckets.items():
-        s = summarize(items)
-        longs = [x for x in items if clean_text(x.get("side")).upper() in {"BUY", "LONG"} or clean_text(x.get("side")).upper().startswith("BUY")]
-        shorts = [x for x in items if clean_text(x.get("side")).upper() in {"SELL", "SHORT"} or clean_text(x.get("side")).upper().startswith("SELL")]
-        wins = [x for x in items if is_win(x)]
-        losses = [x for x in items if is_loss(x)]
-        dur = [safe_float(x.get("trade_duration_seconds")) for x in items if safe_float(x.get("trade_duration_seconds")) is not None]
-        rows.append({
-            "Symbol": sym,
-            "Asset": items[0].get("asset_class", ""),
-            "Total Trades": s["trades"],
-            "Long Trades": len(longs),
-            "Short Trades": len(shorts),
-            "Wins": s["wins"],
-            "Losses": s["losses"],
-            "Breakeven": s["breakeven"],
-            "Long Wins": sum(1 for x in longs if is_win(x)),
-            "Long Losses": sum(1 for x in longs if is_loss(x)),
-            "Short Wins": sum(1 for x in shorts if is_win(x)),
-            "Short Losses": sum(1 for x in shorts if is_loss(x)),
-            "Avg SL W": avg([safe_float(x.get("entry")) - safe_float(x.get("stop_loss")) if safe_float(x.get("entry")) and safe_float(x.get("stop_loss")) else None for x in wins]),
-            "Avg SL L": avg([safe_float(x.get("entry")) - safe_float(x.get("stop_loss")) if safe_float(x.get("entry")) and safe_float(x.get("stop_loss")) else None for x in losses]),
-            "Avg TP W": avg([safe_float(x.get("take_profit")) - safe_float(x.get("entry")) if safe_float(x.get("entry")) and safe_float(x.get("take_profit")) else None for x in wins]),
-            "Avg TP L": avg([safe_float(x.get("take_profit")) - safe_float(x.get("entry")) if safe_float(x.get("entry")) and safe_float(x.get("take_profit")) else None for x in losses]),
-            "Avg Duration": avg(dur),
-            "Shortest Duration": min(dur) if dur else None,
-            "Longest Duration": max(dur) if dur else None,
-        })
-    rows.sort(key=lambda r: (-int(r["Total Trades"] or 0), str(r["Symbol"])))
-    return rows
+    buckets=defaultdict(list)
+    for t in trades: buckets[t.get("symbol") or "UNKNOWN"].append(t)
+    out=[]
+    for sym,items in buckets.items():
+        wins=[x for x in items if is_win(x)]; losses=[x for x in items if is_loss(x)]
+        def dist(kind, row):
+            e,sl,tp=safe_float(row.get("entry")),safe_float(row.get("stop_loss")),safe_float(row.get("take_profit"))
+            if e is None: return None
+            if kind=="sl" and sl is not None: return abs(e-sl)
+            if kind=="tp" and tp is not None: return abs(tp-e)
+            return None
+        durs=metric_values(items,"trade_duration_seconds")
+        out.append({"symbol":sym,"asset_class":clean_text(items[0].get("asset_class","")).lower(),"total_trades":len(items),"long_trades":sum(1 for x in items if _is_long_side(x)),"short_trades":sum(1 for x in items if _is_short_side(x)),"wins":len(wins),"losses":len(losses),"break_even":sum(1 for x in items if is_be(x)),"long_wins":sum(1 for x in items if _is_long_side(x) and is_win(x)),"long_losses":sum(1 for x in items if _is_long_side(x) and is_loss(x)),"long_break_even":sum(1 for x in items if _is_long_side(x) and is_be(x)),"short_wins":sum(1 for x in items if _is_short_side(x) and is_win(x)),"short_losses":sum(1 for x in items if _is_short_side(x) and is_loss(x)),"short_break_even":sum(1 for x in items if _is_short_side(x) and is_be(x)),"avg_trade_duration_seconds":avg(durs),"min_trade_duration_seconds":safe_min(durs),"max_trade_duration_seconds":safe_max(durs),"avg_sl_distance_pips":avg([abs(safe_float(x.get("entry"))-safe_float(x.get("stop_loss")))/pip_size_for_symbol(sym) for x in items if clean_text(items[0].get("asset_class","")).lower()=="fx" and safe_float(x.get("entry")) is not None and safe_float(x.get("stop_loss")) is not None]) if clean_text(items[0].get("asset_class","")).lower()=="fx" else None,"avg_tp_distance_pips":avg([abs(safe_float(x.get("take_profit"))-safe_float(x.get("entry")))/pip_size_for_symbol(sym) for x in items if clean_text(items[0].get("asset_class","")).lower()=="fx" and safe_float(x.get("entry")) is not None and safe_float(x.get("take_profit")) is not None]) if clean_text(items[0].get("asset_class","")).lower()=="fx" else None,"avg_sl_distance_quote":(None if clean_text(items[0].get("asset_class","")).lower()=="fx" else avg([dist("sl",x) for x in items if dist("sl",x) is not None])),"avg_tp_distance_quote":(None if clean_text(items[0].get("asset_class","")).lower()=="fx" else avg([dist("tp",x) for x in items if dist("tp",x) is not None])),"avg_sl_distance_pips_wins":avg([abs(safe_float(x.get("entry"))-safe_float(x.get("stop_loss")))/pip_size_for_symbol(sym) for x in wins if clean_text(items[0].get("asset_class","")).lower()=="fx" and safe_float(x.get("entry")) is not None and safe_float(x.get("stop_loss")) is not None]) if clean_text(items[0].get("asset_class","")).lower()=="fx" else None,"avg_sl_distance_pips_losses":avg([abs(safe_float(x.get("entry"))-safe_float(x.get("stop_loss")))/pip_size_for_symbol(sym) for x in losses if clean_text(items[0].get("asset_class","")).lower()=="fx" and safe_float(x.get("entry")) is not None and safe_float(x.get("stop_loss")) is not None]) if clean_text(items[0].get("asset_class","")).lower()=="fx" else None,"avg_tp_distance_pips_wins":avg([abs(safe_float(x.get("take_profit"))-safe_float(x.get("entry")))/pip_size_for_symbol(sym) for x in wins if clean_text(items[0].get("asset_class","")).lower()=="fx" and safe_float(x.get("entry")) is not None and safe_float(x.get("take_profit")) is not None]) if clean_text(items[0].get("asset_class","")).lower()=="fx" else None,"avg_tp_distance_pips_losses":avg([abs(safe_float(x.get("take_profit"))-safe_float(x.get("entry")))/pip_size_for_symbol(sym) for x in losses if clean_text(items[0].get("asset_class","")).lower()=="fx" and safe_float(x.get("entry")) is not None and safe_float(x.get("take_profit")) is not None]) if clean_text(items[0].get("asset_class","")).lower()=="fx" else None,"avg_sl_distance_quote_wins":(None if clean_text(items[0].get("asset_class","")).lower()=="fx" else avg([dist("sl",x) for x in wins if dist("sl",x) is not None])),"avg_sl_distance_quote_losses":(None if clean_text(items[0].get("asset_class","")).lower()=="fx" else avg([dist("sl",x) for x in losses if dist("sl",x) is not None])),"avg_tp_distance_quote_wins":(None if clean_text(items[0].get("asset_class","")).lower()=="fx" else avg([dist("tp",x) for x in wins if dist("tp",x) is not None])),"avg_tp_distance_quote_losses":(None if clean_text(items[0].get("asset_class","")).lower()=="fx" else avg([dist("tp",x) for x in losses if dist("tp",x) is not None])),"quote_currency":items[0].get("currency") or "USDT"})
+    out.sort(key=lambda r:(-int(r["total_trades"] or 0),r["symbol"]))
+    return out
 
+def instrument_display_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out=[]
+    for r in rows:
+        out.append({"Symbol":r.get("symbol"),"Asset":r.get("asset_class"),"Total Trades":r.get("total_trades"),"Long Trades":r.get("long_trades"),"Short Trades":r.get("short_trades"),"Wins":r.get("wins"),"Losses":r.get("losses"),"Breakeven":r.get("break_even"),"Long Wins":r.get("long_wins"),"Long Losses":r.get("long_losses"),"Short Wins":r.get("short_wins"),"Short Losses":r.get("short_losses"),"Avg SL W":(r.get("avg_sl_distance_pips_wins") if clean_text(r.get("asset_class")).lower()=="fx" else r.get("avg_sl_distance_quote_wins")),"Avg SL L":(r.get("avg_sl_distance_pips_losses") if clean_text(r.get("asset_class")).lower()=="fx" else r.get("avg_sl_distance_quote_losses")),"Avg TP W":(r.get("avg_tp_distance_pips_wins") if clean_text(r.get("asset_class")).lower()=="fx" else r.get("avg_tp_distance_quote_wins")),"Avg TP L":(r.get("avg_tp_distance_pips_losses") if clean_text(r.get("asset_class")).lower()=="fx" else r.get("avg_tp_distance_quote_losses")),"Avg Duration":r.get("avg_trade_duration_seconds"),"Shortest Duration":r.get("min_trade_duration_seconds"),"Longest Duration":r.get("max_trade_duration_seconds")})
+    return out
 
 def avg(values: Iterable[Any]) -> Optional[float]:
     nums = [float(v) for v in values if isinstance(v, (int, float)) and not math.isnan(float(v))]
@@ -648,88 +793,39 @@ def set_pl_format(ws, ranges: Iterable[str]) -> None:
         ws.conditional_formatting.add(rng, CellIsRule(operator="lessThan", formula=["0"], font=Font(color=RED)))
 
 
+def fmt_money_breakdown(bucket: Dict[str, Any], key: str) -> str:
+    m=(bucket.get("money_by_currency") or {}).get(key) or {}
+    if not isinstance(m, dict) or not m: return "—"
+    return " / ".join(f"{c} {m.get(c,0):.2f}" for c in sorted(m.keys()))
+
 def write_dashboard(wb: Workbook, trades: List[Dict[str, Any]], sources: List[Path], warnings: List[str]) -> None:
     ws = wb.active
     ws.title = "Dashboard"
-    ws.sheet_view.showGridLines = False
-    for row in range(1, 46):
-        for col in range(1, 10):
-            ws.cell(row, col).fill = PatternFill("solid", fgColor=DARK2)
-            ws.cell(row, col).font = Font(color=TEXT, name="Calibri", size=11)
-    ws.merge_cells("A1:I2")
-    ws["A1"] = "Trading Journal Android Replica"
-    ws["A1"].font = Font(color=WHITE, bold=True, size=20)
-    ws["A1"].alignment = Alignment(vertical="center")
-    ws["A3"] = "Generated"
-    ws["B3"] = datetime.now()
-    ws["B3"].number_format = "yyyy-mm-dd hh:mm"
-    ws["A4"] = "Source workbooks"
-    ws["B4"] = len(sources)
-    ws["A5"] = "Source folder"
-    ws["B5"] = str(sources[0].parent if sources else "")
-
     stats = compute_journal_stats_replica(trades)
-    s = stats["totals"]
-    kpis = [
-        ("Trades", s["trades"]),
-        ("Wins", s["wins"]),
-        ("Losses", s["losses"]),
-        ("Break-even", s["break_even"]),
-        ("Win rate", (s.get("win_rate_pct")/100.0) if s.get("win_rate_pct") is not None else None),
-        ("Net P/L", s["net_profit_total"]),
-        ("Gross gain", s["gross_gain"]),
-        ("Gross loss", -s["gross_loss"] if s.get("gross_loss") is not None else None),
-    ]
-    row = 8
-    for i, (label, value) in enumerate(kpis):
-        r = row + (i // 2) * 3
-        c = 1 + (i % 2) * 4
-        ws.merge_cells(start_row=r, start_column=c, end_row=r+1, end_column=c+2)
-        cell = ws.cell(r, c, label)
-        cell.fill = PatternFill("solid", fgColor=PANEL)
-        cell.font = Font(color=MUTED, bold=True, size=12)
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-        val = ws.cell(r+2, c, value)
-        ws.merge_cells(start_row=r+2, start_column=c, end_row=r+2, end_column=c+2)
-        val.fill = PatternFill("solid", fgColor=PANEL)
-        val.font = Font(color=GREEN if (isinstance(value, (int, float)) and value > 0 and "loss" not in label.lower()) else RED if ("Loss" in label or (label == "Net P/L" and isinstance(value, (int, float)) and value < 0)) else TEXT, bold=True, size=16)
-        val.alignment = Alignment(horizontal="center", vertical="center")
-        if label == "Win rate":
-            val.number_format = "0.00%"
-        elif isinstance(value, float):
-            val.number_format = "#,##0.00"
-
-    ws["A23"] = "Instrument leaders"
-    ws["A8"] = "Overall"
-    ws["E8"] = "Winners"
-    ws["A14"] = "Losers"
-    ws["E14"] = "Drawdown"
-    ws["A20"] = "Duration"
-    ws["E20"] = "FX"
-    ws["A22"] = "Crypto"
-    ws["E22"] = "Money by currency"
-    ws["A23"].font = Font(color=WHITE, bold=True, size=14)
-    top = instrument_stats(trades)[:10]
-    headers = ["Symbol", "Asset", "Total Trades", "Wins", "Losses", "Breakeven", "Avg Duration"]
-    write_table(ws, headers, top, start_row=25, start_col=1)
-    for c in range(1, len(headers) + 1):
-        ws.cell(25, c).fill = PatternFill("solid", fgColor=HEADER)
-        ws.cell(25, c).font = Font(color=WHITE, bold=True)
-    for r in range(26, 26 + len(top)):
-        for c in range(1, len(headers) + 1):
-            ws.cell(r, c).fill = PatternFill("solid", fgColor=DARK)
-            ws.cell(r, c).font = Font(color=TEXT)
-    if warnings:
-        ws["A38"] = "Diagnostics / warnings"
-        ws["A38"].font = Font(color=AMBER, bold=True, size=13)
-        for i, warning in enumerate(warnings[:6], start=39):
-            ws.cell(i, 1, warning)
-            ws.cell(i, 1).font = Font(color=AMBER)
-    for col in range(1, 10):
-        ws.column_dimensions[get_column_letter(col)].width = 18
-    ws.column_dimensions["B"].width = 46
-    set_pl_format(ws, ["D26:D40"])
-
+    g = stats["groups"]
+    ws.append(["Trading Journal Android Replica", "Generated", datetime.now()])
+    ws.append(["Source workbooks", len(sources), "Source folder", str(sources[0].parent if sources else "")])
+    def section(title, rows):
+        ws.append([title, "Value"])
+        for k,v in rows: ws.append([k,v])
+        ws.append([None,None])
+    def market_rows(bucket):
+        return [("Trades",bucket.get("trades")),("Wins",bucket.get("wins")),("Losses",bucket.get("losses")),("Break-even",bucket.get("break_even")),("Win rate",bucket.get("win_rate_pct")),("Net P/L",fmt_money_breakdown(bucket,"net_profit_total")),("Gross gain",fmt_money_breakdown(bucket,"gross_gain")),("Gross loss",fmt_money_breakdown(bucket,"gross_loss")),("Avg result %",bucket.get("avg_result_pct")),("Max loss %",bucket.get("min_result_pct")),("Max win %",bucket.get("max_result_pct")),("Avg R",bucket.get("avg_r_multiple")),("Max R loss",bucket.get("min_r_multiple")),("Max R win",bucket.get("max_r_multiple")),("Max gain",fmt_money_breakdown(bucket,"max_gain")),("Max loss",fmt_money_breakdown(bucket,"max_loss")),("Avg stop %",bucket.get("avg_stop_pct")),("Avg target %",bucket.get("avg_target_pct")),("Avg duration",bucket.get("avg_duration_seconds"))]
+    bym=g["by_market"]
+    section("Overall", market_rows(bym["overall"]))
+    section("Winners", [("Avg stop %",stats["totals"].get("avg_stop_pct_winners")),("Avg target %",stats["totals"].get("avg_target_pct_winners")),("Avg result %",stats["totals"].get("avg_result_pct_winners")),("Avg R",stats["totals"].get("avg_r_multiple_winners"))])
+    section("Losers", [("Avg stop %",stats["totals"].get("avg_stop_pct_losers")),("Avg target %",stats["totals"].get("avg_target_pct_losers")),("Avg result %",stats["totals"].get("avg_result_pct_losers")),("Avg R",stats["totals"].get("avg_r_multiple_losers"))])
+    section("Drawdown", [("Max drawdown",g["risk_expectancy"].get("max_drawdown_pct")),("Avg drawdown",g["risk_expectancy"].get("avg_drawdown_pct")),("Min drawdown",g["risk_expectancy"].get("min_drawdown_pct"))])
+    section("Duration", [("Overall avg",stats["totals"].get("avg_duration_seconds")),("Overall shortest",stats["totals"].get("min_trade_duration_seconds")),("Overall longest",stats["totals"].get("max_trade_duration_seconds")),("FX shortest",stats["totals"].get("min_fx_trade_duration_seconds")),("FX longest",stats["totals"].get("max_fx_trade_duration_seconds")),("Crypto shortest",stats["totals"].get("min_crypto_trade_duration_seconds")),("Crypto longest",stats["totals"].get("max_crypto_trade_duration_seconds"))])
+    section("FX", market_rows(bym["fx"]))
+    section("Crypto", market_rows(bym["crypto"]))
+    L=g["leaders"]
+    section("Instrument leaders", [("Overall most wins", (L.get("most_wins_instrument") or {}).get("symbol")),("Overall most losses", (L.get("most_losses_instrument") or {}).get("symbol")),("FX most wins", (L.get("fx_most_wins_instrument") or {}).get("symbol")),("FX most losses", (L.get("fx_most_losses_instrument") or {}).get("symbol")),("Crypto most wins", (L.get("crypto_most_wins_instrument") or {}).get("symbol")),("Crypto most losses", (L.get("crypto_most_losses_instrument") or {}).get("symbol"))])
+    ws.append(["Money by currency","Net","Gross gain","Gross loss"])
+    mb = bym["overall"].get("money_by_currency",{})
+    for c in mb.get("currencies",[]): ws.append([c, mb["net_profit_total"].get(c), mb["gross_gain"].get(c), mb["gross_loss"].get(c)])
+    ws.append(["Diagnostics / warnings", None])
+    for w in warnings: ws.append([w,None])
 
 def build_output(journal_dir: Path, output_path: Path) -> Tuple[int, int, List[str]]:
     sources = list_source_workbooks(journal_dir)
@@ -763,7 +859,7 @@ def build_output(journal_dir: Path, output_path: Path) -> Tuple[int, int, List[s
     write_dashboard(wb, all_trades, sources, warnings)
 
     trades_ws = wb.create_sheet("All Trades")
-    trade_headers = ["Open Time", "Close Time", "Account", "Symbol", "Side", "Timeframe", "Test", "Setup", "Qty", "Entry", "Exit", "Stop Loss", "Target", "Commission", "Net Profit", "Profit %", "R-Multiple", "Balance After", "Trade Duration", "Breakeven", "Source", "Notes", "Order ID", "Fill Count"]
+    trade_headers = ["Open Time", "Close Time", "Account", "Symbol", "Side", "Timeframe", "Test", "Setup", "Qty", "Entry", "Exit", "Stop Loss", "Target", "Commission", "Net Profit", "Profit %", "R-Multiple", "Balance After", "Trade Duration", "Breakeven", "Chart", "Actions", "Source", "Notes", "Order ID", "Fill Count"]
     rows = []
     for t in sorted_trades(all_trades):
         rows.append({
@@ -787,6 +883,8 @@ def build_output(journal_dir: Path, output_path: Path) -> Tuple[int, int, List[s
             "Balance After": t.get("balance_after"),
             "Trade Duration": t.get("trade_duration_seconds"),
             "Breakeven": t.get("breakeven"),
+            "Chart": "",
+            "Actions": "",
             "Source": t.get("import_source") or f"{t.get('source_file')} / {t.get('sheet')} / row {t.get('row')}",
             "Notes": t.get("notes"),
             "Order ID": t.get("order_id"),
@@ -802,7 +900,7 @@ def build_output(journal_dir: Path, output_path: Path) -> Tuple[int, int, List[s
 
     inst_ws = wb.create_sheet("Instrument Averages")
     inst_headers = ["Symbol", "Asset", "Total Trades", "Long Trades", "Short Trades", "Wins", "Losses", "Breakeven", "Long Wins", "Long Losses", "Short Wins", "Short Losses", "Avg SL W", "Avg SL L", "Avg TP W", "Avg TP L", "Avg Duration", "Shortest Duration", "Longest Duration"]
-    inst_rows = instrument_stats(all_trades)
+    inst_rows = instrument_display_rows(stats["by_instrument"])
     write_table(inst_ws, inst_headers, inst_rows)
     style_sheet(inst_ws, len(inst_headers), freeze="A2")
     set_pl_format(inst_ws, [f"H2:I{max(2, len(inst_rows)+1)}"])
