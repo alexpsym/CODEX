@@ -1353,9 +1353,11 @@ def test_sync_demo_persists_balance_only_changes(monkeypatch) -> None:
     monkeypatch.setattr(master_service, "_trading_journal_local_excel_authoritative", lambda: False)
     monkeypatch.setattr(master_service, "_resolve_trading_journal_dropbox_folder", lambda: ("/x", []))
     monkeypatch.setattr(master_service, "_ensure_bybit_demo_dropbox_files", lambda _f: None)
-    monkeypatch.setattr(master_service, "_fetch_bybit_order_history", lambda **_k: {"result": {"list": [], "nextPageCursor": ""}})
-    monkeypatch.setattr(master_service, "_fetch_bybit_closed_pnl", lambda **_k: {"result": {"list": [], "nextPageCursor": ""}})
-    monkeypatch.setattr(master_service, "_fetch_bybit_transaction_log", lambda **_k: {"result": {"list": [], "nextPageCursor": ""}})
+    async def _empty_async(**_k):
+        return {"result": {"list": [], "nextPageCursor": ""}}
+    monkeypatch.setattr(master_service, "_fetch_bybit_order_history", _empty_async)
+    monkeypatch.setattr(master_service, "_fetch_bybit_closed_pnl", _empty_async)
+    monkeypatch.setattr(master_service, "_fetch_bybit_transaction_log", _empty_async)
     monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: list(seed))
     monkeypatch.setattr(master_service, "_sanitize_bybit_demo_rows", lambda rows: (rows, {"changed": 0}))
     monkeypatch.setattr(master_service, "_fetch_bybit_demo_current_balance_snapshot", lambda: asyncio.sleep(0, result={"current_balance": 10.0, "snapshot_at": "2026-01-01T00:00:00Z"}))
@@ -1365,3 +1367,12 @@ def test_sync_demo_persists_balance_only_changes(monkeypatch) -> None:
     monkeypatch.setattr(master_service, "_record_bybit_demo_sync_status", lambda **_k: None)
     asyncio.run(master_service._sync_bybit_closed_pnl_window(account_mode="demo", base_url="u", api_key="k", api_secret="s", start_time=0, end_time=1))
     assert saved["rows"] is not None
+
+
+def test_wallet_snapshot_prefers_total_wallet_when_coin_wallet_missing(monkeypatch) -> None:
+    async def fake_signed_get(**_kwargs):
+        return {"result": {"list": [{"totalEquity": "100", "totalWalletBalance": "90", "totalAvailableBalance": "80", "coin": [{"coin": "USDT", "availableToTrade": "70"}]}]}}
+    monkeypatch.setattr(master_service, "_bybit_signed_get", fake_signed_get)
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("demo", "k", "s", "https://api-demo.bybit.com", "env"))
+    snap = asyncio.run(master_service._fetch_bybit_balance_usdt("demo"))
+    assert "wallet_balance_usdt" not in snap
