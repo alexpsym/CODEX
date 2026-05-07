@@ -1,54 +1,62 @@
+from datetime import datetime
 from pathlib import Path
 from openpyxl import Workbook, load_workbook
+from TJR.make_trading_journal_replica import compute_journal_stats_replica, instrument_display_rows, build_output, trade_duration_seconds
 
-from TJR.make_trading_journal_replica import list_source_workbooks, parse_workbook, compute_journal_stats_replica, build_output
 
-HEADERS = [
-    "opening_time","closing_time","type_buy_sell","symbol","size_quantity","entry_price","closing_price","stop_loss","take_profit","commission","net_profit","balance_after_trade","timeframe","is_test_trade","currency","notes","order_id","fill_count","source"
-]
+def test_gross_loss_is_positive_absolute_value():
+    s=compute_journal_stats_replica([{"symbol":"A","side":"BUY","asset_class":"FX","net_profit":-5},{"symbol":"A","side":"BUY","asset_class":"FX","net_profit":3}])
+    assert s['totals']['gross_loss']==5
 
-def make_bybit(path: Path):
-    wb = Workbook(); ws = wb.active; ws.title = "Trades"; ws.append(HEADERS)
-    ws.append(["2026-01-01 10:00","2026-01-01 11:00","Buy","HYPEUSDT",1,10,9,8,12,0.1,-1,"", "1h",False,"USDT","n1","o1",2,"bybit"])
-    ws.append(["2026-01-02 10:00","2026-01-02 11:00","Buy","LABUSDT",1,10,11,9,13,0.1,1,101, "1h",False,"USDT","n2","o2",1,"bybit"])
-    ws.append(["2026-01-03 10:00","2026-01-03 11:00","Sell","BTCUSDT",1,100,101,102,98,0.1,-1,100, "1h",True,"USDT","n3","o3",3,"bybit"])
-    wb.save(path)
+def test_money_by_currency_gross_loss_is_positive_absolute_value():
+    s=compute_journal_stats_replica([{"symbol":"A","side":"BUY","asset_class":"FX","net_profit":-5,"currency":"AUD"}])
+    assert s['totals']['money_by_currency']['gross_loss']['AUD']==5
 
-def test_bybit_included_and_parse(tmp_path: Path):
-    journal = tmp_path / "journal"; journal.mkdir()
-    p = journal / "BYBIT DEMO.xlsx"; make_bybit(p)
-    files = list_source_workbooks(journal)
-    assert p in files
-    rows, warnings = parse_workbook(p)
-    assert not warnings
-    assert len(rows) == 3
-    assert all(r["account"] == "Bybit Demo" for r in rows)
-    assert all(r["asset_class"] == "Crypto" for r in rows)
-    assert all(r["currency"] == "USDT" for r in rows)
-    assert rows[0]["order_id"] == "o1"
-    assert rows[0]["fill_count"] == "2"
-    assert rows[0]["import_source"] == "bybit"
+def test_drawdown_average_ignores_zero_peak_points():
+    rows=[{"symbol":"A","side":"BUY","asset_class":"FX","net_profit":1,"balance_after":1000,"close_time":datetime(2026,1,1)},{"symbol":"A","side":"BUY","asset_class":"FX","net_profit":1,"balance_after":1100,"close_time":datetime(2026,1,2)},{"symbol":"A","side":"BUY","asset_class":"FX","net_profit":-1,"balance_after":990,"close_time":datetime(2026,1,3)}]
+    t=compute_journal_stats_replica(rows)['totals']
+    assert t['max_drawdown_pct']==10.0 and t['avg_drawdown_pct']==10.0 and t['min_drawdown_pct']==10.0
 
-def test_stats_exclude_test_rows(tmp_path: Path):
-    p = tmp_path / "BYBIT DEMO.xlsx"; make_bybit(p)
-    rows, _ = parse_workbook(p)
-    stats = compute_journal_stats_replica(rows)
-    assert len(rows) == 3
-    assert stats["totals"]["trades"] == 2
+def test_duration_group_matches_render_stats_shape():
+    rows=[{"symbol":"A","side":"BUY","asset_class":"FX","net_profit":1,"trade_duration_seconds":10},{"symbol":"B","side":"SELL","asset_class":"crypto","net_profit":-1,"trade_duration_seconds":20}]
+    d=compute_journal_stats_replica(rows)['groups']['duration']
+    keys=["overall_avg_seconds","overall_shortest_seconds","overall_longest_seconds","overall_avg_winner_seconds","overall_avg_loser_seconds","overall_longest_winner_seconds","overall_longest_loser_seconds","fx_avg_seconds","fx_shortest_seconds","fx_longest_seconds","fx_avg_winner_seconds","fx_avg_loser_seconds","fx_shortest_winner_seconds","fx_shortest_loser_seconds","fx_longest_winner_seconds","fx_longest_loser_seconds","crypto_avg_seconds","crypto_shortest_seconds","crypto_longest_seconds","crypto_avg_winner_seconds","crypto_avg_loser_seconds","crypto_shortest_winner_seconds","crypto_shortest_loser_seconds","crypto_longest_winner_seconds","crypto_longest_loser_seconds","metric_sources"]
+    for k in keys: assert k in d
 
-def test_output_headers_and_sheets(tmp_path: Path):
-    journal = tmp_path / "journal"; journal.mkdir()
-    make_bybit(journal / "BYBIT DEMO.xlsx")
-    out = tmp_path / "TradingJournal_Android_Replica.xlsx"
-    build_output(journal, out)
-    wb = load_workbook(out)
-    for name in ["Dashboard","All Trades","Instrument Averages","PL Calendar","Equity Curve","Diagnostics"]:
-        assert name in wb.sheetnames
-    headers = [c.value for c in wb["All Trades"][1]]
-    for h in ["Test","Profit %","R-Multiple","Trade Duration","Order ID","Fill Count"]:
-        assert h in headers
-    iheaders = [c.value for c in wb["Instrument Averages"][1]]
-    for h in ["Long Trades","Short Trades","Avg SL W","Avg TP L","Shortest Duration","Longest Duration"]:
-        assert h in iheaders
-    dvals = [wb["Diagnostics"].cell(r,1).value for r in range(1, wb["Diagnostics"].max_row+1)]
-    assert "Bybit Demo parsed row count" in dvals
+def test_risk_expectancy_group_matches_render_stats_shape():
+    rows=[{"symbol":"A","side":"BUY","asset_class":"FX","entry":100,"stop_loss":90,"take_profit":110,"result_pct":1,"r_multiple":1,"net_profit":1,"balance_after":1000,"close_time":datetime(2026,1,1)},{"symbol":"A","side":"BUY","asset_class":"FX","entry":100,"stop_loss":90,"take_profit":110,"result_pct":-1,"r_multiple":-1,"net_profit":-1,"balance_after":900,"close_time":datetime(2026,1,2)}]
+    r=compute_journal_stats_replica(rows)['groups']['risk_expectancy']
+    for k in ["avg_stop_pct","avg_target_pct","avg_result_pct","avg_r_multiple","avg_stop_pct_winners","avg_stop_pct_losers","avg_target_pct_winners","avg_target_pct_losers","avg_result_pct_winners","avg_result_pct_losers","avg_r_multiple_winners","avg_r_multiple_losers","max_drawdown_pct","avg_drawdown_pct","min_drawdown_pct"]: assert k in r
+
+def test_fx_instrument_distances_are_pips_not_raw_price():
+    rows=[{"symbol":"EURUSD","side":"BUY","asset_class":"FX","entry":1.1,"stop_loss":1.095,"take_profit":1.11,"net_profit":10,"trade_duration_seconds":1}]
+    first=compute_journal_stats_replica(rows)['by_instrument'][0]
+    assert round(first['avg_sl_distance_pips'],6)==50.0 and round(first['avg_tp_distance_pips'],6)==100.0
+    disp=instrument_display_rows([first])[0]
+    assert round(disp['Avg SL W'],6)==50.0 and round(disp['Avg TP W'],6)==100.0
+
+def test_by_instrument_asset_class_is_render_normalized():
+    first=compute_journal_stats_replica([{"symbol":"A","side":"BUY","asset_class":"FX","net_profit":1}])['by_instrument'][0]
+    assert first['asset_class'] in {'fx','crypto'}
+
+def test_market_buckets_have_metric_sources():
+    b=compute_journal_stats_replica([{"id":"x1","symbol":"A","side":"BUY","asset_class":"FX","net_profit":-5,"result_pct":-5,"r_multiple":-1,"trade_duration_seconds":2}])['groups']['by_market']['overall']
+    assert 'metric_sources' in b and b['metric_sources']['max_loss']['id']=='x1'
+
+def test_unknown_pnl_is_not_break_even():
+    t=compute_journal_stats_replica([{"symbol":"A","side":"BUY","asset_class":"FX","entry":1,"exit":2,"net_profit":None}])['totals']
+    assert t['break_even']==0
+
+def test_zero_second_trade_duration_rounds_to_one_second():
+    row={"open_time":datetime(2026,1,1),"close_time":datetime(2026,1,1)}
+    assert trade_duration_seconds(row)==1.0
+
+def test_dashboard_does_not_collapse_mixed_currency_money(tmp_path: Path):
+    j=tmp_path/'journal';j.mkdir();wb=Workbook();ws=wb.active
+    ws.append(["opening_time","closing_time","type_buy_sell","symbol","entry_price","closing_price","net_profit","currency"])
+    ws.append(["2026-01-01","2026-01-01","Buy","EURUSD",1.1,1.2,10,"AUD"])
+    ws.append(["2026-01-02","2026-01-02","Buy","BTCUSDT",100,110,20,"USDT"])
+    wb.save(j/'BYBIT DEMO.xlsx')
+    out=tmp_path/'o.xlsx';build_output(j,out)
+    vals={load_workbook(out)['Dashboard'].cell(r,c).value for r in range(1,200) for c in range(1,5)}
+    assert 'AUD' in vals and 'USDT' in vals

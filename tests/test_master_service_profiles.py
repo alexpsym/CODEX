@@ -46,7 +46,9 @@ def test_home_page_local_profile_returns_dashboard_html() -> None:
     response = asyncio.run(master_service.home_page())
     assert response.status_code == 200
     assert "text/html" in response.headers.get("content-type", "")
-    assert "Master Control Dashboard" in response.body.decode("utf-8")
+    body = response.body.decode("utf-8")
+    assert "dashboard-workspace" in body
+    assert "scripts-grid" in body
 
 
 def test_home_page_render_profile_returns_dashboard_html() -> None:
@@ -54,7 +56,9 @@ def test_home_page_render_profile_returns_dashboard_html() -> None:
     response = asyncio.run(master_service.home_page())
     assert response.status_code == 200
     assert "text/html" in response.headers.get("content-type", "")
-    assert "Master Control Dashboard" in response.body.decode("utf-8")
+    body = response.body.decode("utf-8")
+    assert "dashboard-workspace" in body
+    assert "scripts-grid" in body
 
 
 def test_render_profile_blocks_local_only_routes() -> None:
@@ -99,3 +103,17 @@ def test_journal_profile_redirects_root_and_allows_trading_journal_api() -> None
     assert "Trading Journal" in page
     api_response = asyncio.run(master_service.trading_journal_sync_status())
     assert api_response.status_code == 200
+
+
+def test_trading_journal_page_includes_stats_columns_and_wider_wrap() -> None:
+    master_service = _load_master_service("render_master_service_trading_journal_layout", "journal")
+    page = asyncio.run(master_service.trading_journal_page())
+    assert ".tj-stats-dashboard" in page
+    assert ".tj-stats-column" in page
+    assert "@media (max-width: 1100px)" in page
+    assert "@media (max-width: 720px)" in page
+    assert "max-width: 1400px" not in page
+    assert "width: min(1880px, calc(100vw - 32px));" in page
+    assert 'id="tj-stat-trade-filter-btn"' in page
+    assert "tj-linked-trade-filter-btn" in page
+    assert "Export shown trades" in page

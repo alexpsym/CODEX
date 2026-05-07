@@ -17629,7 +17629,7 @@ async def trading_journal_page() -> str:
   <title>Trading Journal</title>
   <style>
     body { background:#0b1220; color:#e5e7eb; font-family:system-ui,sans-serif; margin:0; }
-    .wrap { max-width: 1400px; margin: 0 auto; padding: 16px; }
+    .wrap { width: min(1880px, calc(100vw - 32px)); margin: 0 auto; padding: 16px 0; }
     .toolbar, .balances, .table-wrap { background:#111827; border:1px solid #1f2937; border-radius:12px; }
     .table-shell { background:#111827; border:1px solid #1f2937; border-radius:12px; padding:8px; }
     .hscroll-top { overflow-x:auto; overflow-y:hidden; height:14px; margin-bottom:6px; }
@@ -17641,6 +17641,7 @@ async def trading_journal_page() -> str:
     .toolbar.compact input { flex:0 1 520px; max-width:520px; padding:6px 8px; }
     .toolbar.compact button { padding:6px 10px; }
     .toolbar button[disabled] { opacity:0.6; cursor:not-allowed; }
+    .tj-linked-trade-filter-btn { background:#1d4ed8 !important; border:1px solid #60a5fa !important; color:#dbeafe !important; font-weight:600; max-width:360px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .balances { padding:8px; margin-bottom:10px; display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:8px; }
     .hidden { display:none !important; }
     .bal-card { background:#0f172a; border:1px solid #1f2937; border-radius:10px; padding:8px; }
@@ -17686,6 +17687,7 @@ async def trading_journal_page() -> str:
     .loading-bar { height:10px; background:#0f172a; border:1px solid #1f2937; border-radius:999px; overflow:hidden; }
     #tj-loading-bar { height:100%; width:0%; background:#2563eb; }
     .tj-stats-dashboard { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:10px; align-items:start; margin-bottom:10px; }
+    .tj-stats-column { min-width:0; display:flex; flex-direction:column; gap:10px; }
     @media (max-width: 1100px) { .tj-stats-dashboard { grid-template-columns:repeat(2, minmax(0, 1fr)); } }
     @media (max-width: 720px) { .tj-stats-dashboard { grid-template-columns:1fr; } }
     .tj-stats-section { background:#0f172a; border:1px solid #1f2937; border-radius:10px; padding:6px 8px; }
@@ -17739,6 +17741,7 @@ async def trading_journal_page() -> str:
     <div class="table-shell">
       <div class="toolbar compact" style="margin:0 0 6px 0; padding:0;">
         <button id="tj-export-btn">Export shown trades</button>
+        <button id="tj-stat-trade-filter-btn" class="hidden tj-linked-trade-filter-btn" type="button" title="Clear linked trade filter and show all trades"></button>
       </div>
       <div id="tj-top-scroll" class="hscroll-top"><div></div></div>
       <div id="tj-trades-wrap" class="table-wrap">

@@ -17,6 +17,7 @@
   const editorErr = q('#tj-editor-error');
   const editorCancelBtn = q('#tj-editor-cancel');
   const editorSaveBtn = q('#tj-editor-save');
+  const statTradeFilterBtn = q('#tj-stat-trade-filter-btn');
 
   const setLoading = (pct, msg) => {
     if (loadingText) loadingText.textContent = msg || '';
@@ -56,6 +57,7 @@
     diagnostics: null,
     renderedRows: [],
     manualSyncInFlight: false,
+    statTradeFilter: null,
   };
   try { filterInput.value = localStorage.getItem('tj.filter') || ''; } catch {}
 
@@ -393,6 +395,59 @@
     return out;
   }
 
+
+  function syncFlagButtons() {
+    qa('.tj-chip[data-flag]').forEach((btn) => {
+      const on = activeFlags.has(btn.dataset.flag || '');
+      btn.classList.toggle('active', on);
+      btn.style.opacity = on ? '1' : '0.7';
+      btn.style.outline = on ? '1px solid #60a5fa' : 'none';
+    });
+  }
+
+  function clearStatTradeFilter({ clearAllFilters = false, render = true, status: statusMessage = true } = {}) {
+    state.statTradeFilter = null;
+    if (clearAllFilters) {
+      if (filterInput) filterInput.value = '';
+      activeFlags.clear();
+      syncFlagButtons();
+      state.view = 'trades';
+    }
+    if (render) renderAll();
+    if (statusMessage) setStatus('Trade filter cleared; showing all trades.');
+  }
+
+  function getFilteredRows() {
+    let filtered = applyFlagFilters(applyTextFilter(state.rows));
+    const rowId = state.statTradeFilter?.rowId;
+    if (rowId) {
+      const exists = (state.rows || []).some((row) => String(row?.id || '') === String(rowId));
+      if (!exists) {
+        state.statTradeFilter = null;
+      } else {
+        filtered = filtered.filter((row) => String(row?.id || '') === String(rowId));
+      }
+    }
+    return filtered;
+  }
+
+  function renderStatTradeFilterButton() {
+    if (!statTradeFilterBtn) return;
+    const active = state.statTradeFilter?.rowId && state.statTradeFilter?.label;
+    if (!active) {
+      statTradeFilterBtn.classList.add('hidden');
+      statTradeFilterBtn.textContent = '';
+      statTradeFilterBtn.title = '';
+      statTradeFilterBtn.setAttribute('aria-label', '');
+      return;
+    }
+    statTradeFilterBtn.textContent = state.statTradeFilter.label;
+    statTradeFilterBtn.classList.remove('hidden');
+    const hint = 'Clear linked trade filter and show all trades';
+    statTradeFilterBtn.title = hint;
+    statTradeFilterBtn.setAttribute('aria-label', hint);
+  }
+
   function qtyPrecision(row) {
     if (row?.qty_unit === 'lots') {
       const qty = Math.abs(Number(row?.qty));
@@ -529,6 +584,8 @@
       const tr = document.createElement('tr');
       tr.dataset.symbol = String(item.symbol || '');
       tr.dataset.assetClass = String(item.asset_class || '');
+      if (r.id) tr.setAttribute('data-row-id', String(r.id));
+      if (r.id) tr.setAttribute('data-row-id', String(r.id));
       tr.innerHTML = `
         <td>${item.symbol || '—'}</td>
         <td>${item.asset_class || '—'}</td>
@@ -788,7 +845,7 @@
     if (!_equityResizeWired) {
       _equityResizeWired = true;
       window.addEventListener('resize', () => {
-        if (state.view === 'equity') renderEquityView(applyFlagFilters(applyTextFilter(state.rows)));
+        if (state.view === 'equity') renderEquityView(getFilteredRows());
       });
     }
   }
@@ -944,6 +1001,7 @@
         continue;
       }
 
+      if (r.id) tr.setAttribute('data-row-id', String(r.id));
       tr.innerHTML = `
         <td>${fmtTime(r.open_time)}</td>
         <td>${fmtTime(r.close_time || r.open_time)}</td>
@@ -996,6 +1054,14 @@
     });
   }
   function fmtMoneyValue(value, ccy, decimals = 2) { return `${ccy || 'UNKNOWN'} ${fmtNum(value, decimals)}`; }
+  function formatTradeFilterLabel(row, fallbackLabel) {
+    if (String(fallbackLabel || '').trim()) return String(fallbackLabel).trim();
+    const symbol = row?.symbol || row?.symbol_raw || 'Trade';
+    const stamp = row?.close_time || row?.open_time;
+    const d = stamp ? new Date(stamp) : null;
+    const dateOnly = d && !Number.isNaN(d.getTime()) ? d.toISOString().slice(0, 10) : String(stamp || '').slice(0, 10);
+    return dateOnly ? `${symbol} · ${dateOnly}` : String(symbol);
+  }
   function fmtMoneyBreakdown(bucket, key, decimals = 2) {
     const map = bucket?.money_by_currency?.[key];
     if (map && typeof map === 'object' && Object.keys(map).length) return Object.entries(map).map(([c, v]) => fmtMoneyValue(v, c, decimals)).join(' / ');
@@ -1039,7 +1105,7 @@
     const escHtml = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     const escAttr = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const fmtDateOnly = (v) => { if (!v) return ''; const d = new Date(v); return Number.isNaN(d.getTime()) ? String(v).slice(0,10) : d.toISOString().slice(0,10); };
-    function fmtStatTradeJump(ref) { if (!ref || typeof ref !== 'object' || !ref.id) return ''; const label = `${ref.symbol || 'Trade'}${fmtDateOnly(ref.date || ref.close_time || ref.open_time) ? ` · ${fmtDateOnly(ref.date || ref.close_time || ref.open_time)}` : ''}`; return `<button type="button" class="tj-stat-jump" data-jump-row-id="${escAttr(ref.id)}">${escHtml(label)}</button>`; }
+    function fmtStatTradeJump(ref) { if (!ref || typeof ref !== 'object' || !ref.id) return ''; const label = `${ref.symbol || 'Trade'}${fmtDateOnly(ref.date || ref.close_time || ref.open_time) ? ` · ${fmtDateOnly(ref.date || ref.close_time || ref.open_time)}` : ''}`; return `<button type="button" class="tj-stat-jump" data-jump-row-id="${escAttr(ref.id)}" data-jump-row-label="${escAttr(label)}">${escHtml(label)}</button>`; }
     function fmtLeader(leader, countKey) {
       const count = asNum(leader?.[countKey]);
       if (!leader || !leader.symbol || !Number.isFinite(count) || count <= 0) return '—';
@@ -1072,24 +1138,64 @@
     const risk = g?.risk_expectancy || stats?.totals || {};
     const dur = g?.duration || stats?.totals || {};
     const leaders = g?.leaders || {};
-    wrap.innerHTML = [
-      sec('Overall', core(byMarket.overall)),
-      sec('Winners', [row('Avg stop %', fmtPctSmall(risk?.avg_stop_pct_winners)), row('Avg target %', fmtPctSmall(risk?.avg_target_pct_winners)), row('Avg result %', fmtPctSmall(risk?.avg_result_pct_winners), 'tj-stat-winner'), row('Avg R', fmtR(risk?.avg_r_multiple_winners), 'tj-stat-winner')]),
-      sec('Losers', [row('Avg stop %', fmtPctSmall(risk?.avg_stop_pct_losers)), row('Avg target %', fmtPctSmall(risk?.avg_target_pct_losers)), row('Avg result %', fmtPctSmall(risk?.avg_result_pct_losers), 'tj-stat-loser'), row('Avg R', fmtR(risk?.avg_r_multiple_losers), 'tj-stat-loser')]),
-      sec('Drawdown', [row('Max drawdown', fmtPctSmall(risk?.max_drawdown_pct), 'tj-stat-drawdown'), row('Avg drawdown', fmtPctSmall(risk?.avg_drawdown_pct), 'tj-stat-drawdown')]),
-      sec('Duration', [row('Overall avg', fmtDuration(dur?.overall_avg_seconds)), row('Overall shortest', fmtDuration(dur?.overall_shortest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.overall_shortest_seconds)), row('Overall longest', fmtDuration(dur?.overall_longest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.overall_longest_seconds)), row('FX shortest', fmtDuration(dur?.fx_shortest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.fx_shortest_seconds)), row('FX longest', fmtDuration(dur?.fx_longest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.fx_longest_seconds)), row('Crypto shortest', fmtDuration(dur?.crypto_shortest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.crypto_shortest_seconds)), row('Crypto longest', fmtDuration(dur?.crypto_longest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.crypto_longest_seconds))]),
-      sec('FX', core(byMarket.fx || {})),
-      sec('Crypto', core(byMarket.crypto || {})),
-      sec('Instrument leaders', [row('Overall most wins', fmtLeader(leaders?.most_wins_instrument, 'wins'), 'tj-stat-winner'), row('Overall most losses', fmtLeader(leaders?.most_losses_instrument, 'losses'), 'tj-stat-loser'), row('FX most wins', fmtLeader(leaders?.fx_most_wins_instrument, 'wins'), 'tj-stat-winner'), row('FX most losses', fmtLeader(leaders?.fx_most_losses_instrument, 'losses'), 'tj-stat-loser'), row('Crypto most wins', fmtLeader(leaders?.crypto_most_wins_instrument, 'wins'), 'tj-stat-winner'), row('Crypto most losses', fmtLeader(leaders?.crypto_most_losses_instrument, 'losses'), 'tj-stat-loser')]),
-    ].join('');
+
+    const sections = [
+      { key: 'overall', rows: core(byMarket.overall), title: 'Overall' },
+      { key: 'winners', rows: [row('Avg stop %', fmtPctSmall(risk?.avg_stop_pct_winners)), row('Avg target %', fmtPctSmall(risk?.avg_target_pct_winners)), row('Avg result %', fmtPctSmall(risk?.avg_result_pct_winners), 'tj-stat-winner'), row('Avg R', fmtR(risk?.avg_r_multiple_winners), 'tj-stat-winner')], title: 'Winners' },
+      { key: 'losers', rows: [row('Avg stop %', fmtPctSmall(risk?.avg_stop_pct_losers)), row('Avg target %', fmtPctSmall(risk?.avg_target_pct_losers)), row('Avg result %', fmtPctSmall(risk?.avg_result_pct_losers), 'tj-stat-loser'), row('Avg R', fmtR(risk?.avg_r_multiple_losers), 'tj-stat-loser')], title: 'Losers' },
+      { key: 'drawdown', rows: [row('Max drawdown', fmtPctSmall(risk?.max_drawdown_pct), 'tj-stat-drawdown'), row('Avg drawdown', fmtPctSmall(risk?.avg_drawdown_pct), 'tj-stat-drawdown')], title: 'Drawdown' },
+      { key: 'duration', rows: [row('Overall avg', fmtDuration(dur?.overall_avg_seconds)), row('Overall shortest', fmtDuration(dur?.overall_shortest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.overall_shortest_seconds)), row('Overall longest', fmtDuration(dur?.overall_longest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.overall_longest_seconds)), row('FX shortest', fmtDuration(dur?.fx_shortest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.fx_shortest_seconds)), row('FX longest', fmtDuration(dur?.fx_longest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.fx_longest_seconds)), row('Crypto shortest', fmtDuration(dur?.crypto_shortest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.crypto_shortest_seconds)), row('Crypto longest', fmtDuration(dur?.crypto_longest_seconds), 'tj-stat-neutral', 'tj-stat-neutral', fmtStatTradeJump(dur?.metric_sources?.crypto_longest_seconds))], title: 'Duration' },
+      { key: 'fx', rows: core(byMarket.fx || {}), title: 'FX' },
+      { key: 'crypto', rows: core(byMarket.crypto || {}), title: 'Crypto' },
+      { key: 'leaders', rows: [row('Overall most wins', fmtLeader(leaders?.most_wins_instrument, 'wins'), 'tj-stat-winner'), row('Overall most losses', fmtLeader(leaders?.most_losses_instrument, 'losses'), 'tj-stat-loser'), row('FX most wins', fmtLeader(leaders?.fx_most_wins_instrument, 'wins'), 'tj-stat-winner'), row('FX most losses', fmtLeader(leaders?.fx_most_losses_instrument, 'losses'), 'tj-stat-loser'), row('Crypto most wins', fmtLeader(leaders?.crypto_most_wins_instrument, 'wins'), 'tj-stat-winner'), row('Crypto most losses', fmtLeader(leaders?.crypto_most_losses_instrument, 'losses'), 'tj-stat-loser')], title: 'Instrument leaders' },
+    ].map((section) => ({ ...section, html: sec(section.title, section.rows), weight: section.rows.length + 1 }));
+
+    const pick = (key) => sections.find((section) => section.key === key);
+    const columns = [
+      { items: [], weight: 0 },
+      { items: [], weight: 0 },
+      { items: [], weight: 0 },
+    ];
+    const pushSection = (columnIndex, section) => {
+      if (!section) return;
+      columns[columnIndex].items.push(section);
+      columns[columnIndex].weight += section.weight;
+    };
+
+    pushSection(0, pick('overall'));
+    pushSection(1, pick('winners'));
+    pushSection(2, pick('losers'));
+
+    ['drawdown', 'duration', 'fx', 'crypto', 'leaders'].forEach((key) => {
+      const section = pick(key);
+      if (!section) return;
+      let target = 0;
+      for (let i = 1; i < columns.length; i += 1) {
+        if (columns[i].weight < columns[target].weight) target = i;
+      }
+      pushSection(target, section);
+    });
+
+    wrap.innerHTML = columns
+      .map((column) => `<div class="tj-stats-column">${column.items.map((section) => section.html).join('')}</div>`)
+      .join('');
 
   }
 
-  function jumpToTradeRow(rowId) {
+  function jumpToTradeRow(rowId, labelFromLink = '') {
     if (!rowId) return setStatus('No trade row id available for this statistic.');
-    state.view = 'trades'; applyView();
-    const visible = applyFlagFilters(applyTextFilter(state.rows)).some((r) => String(r?.id || '') === String(rowId));
-    if (!visible) { if (filterInput) filterInput.value = ''; activeFlags.clear(); qa('.tj-chip[data-flag]').forEach((btn) => { btn.style.opacity = '0.7'; btn.style.outline = 'none'; btn.classList.remove('active'); }); }
+    const row = (state.rows || []).find((r) => String(r?.id || '') === String(rowId));
+    if (!row) {
+      state.statTradeFilter = null;
+      renderStatTradeFilterButton();
+      setStatus('Trade row not found in the current journal data.');
+      return;
+    }
+    state.view = 'trades';
+    if (filterInput) filterInput.value = '';
+    activeFlags.clear();
+    syncFlagButtons();
+    state.statTradeFilter = { rowId: String(rowId), label: formatTradeFilterLabel(row, labelFromLink) };
     renderAll();
     requestAnimationFrame(() => {
       const rows = qa('#tj-table tbody tr[data-row-id]');
@@ -1098,12 +1204,12 @@
       tr.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
       tr.classList.add('tj-row-highlight');
       window.setTimeout(() => tr.classList.remove('tj-row-highlight'), 2500);
-      setStatus('Opened linked trade row.');
+      setStatus(`Showing linked trade only: ${state.statTradeFilter?.label || formatTradeFilterLabel(row, labelFromLink)}.`);
     });
   }
 
   function renderAll() {
-    const filtered = applyFlagFilters(applyTextFilter(state.rows));
+    const filtered = getFilteredRows();
     state.renderedRows = [...filtered];
     renderRows(filtered);
     renderSortIndicators();
@@ -1111,6 +1217,7 @@
     renderCalendarView(filtered);
     renderEquityView(filtered);
     applyView();
+    renderStatTradeFilterButton();
     syncTopScrollbar();
     persistUiState();
   }
@@ -1144,11 +1251,7 @@
   function toggle(flag) {
     if (activeFlags.has(flag)) activeFlags.delete(flag);
     else activeFlags.add(flag);
-    qa('.tj-chip[data-flag]').forEach((btn) => {
-      const on = activeFlags.has(btn.dataset.flag || '');
-      btn.style.opacity = on ? '1' : '0.7';
-      btn.style.outline = on ? '1px solid #60a5fa' : 'none';
-    });
+    syncFlagButtons();
     persistUiState();
     renderAll();
   }
@@ -1356,15 +1459,16 @@
     if (activeAbort && !state.manualSyncInFlight) { try { activeAbort.abort(); } catch {} }
   });
 
-  q('#tj-filter-btn')?.addEventListener('click', () => { persistUiState(); renderAll(); });
+  q('#tj-filter-btn')?.addEventListener('click', () => { state.statTradeFilter = null; persistUiState(); renderAll(); });
   q('#tj-view-trades-btn')?.addEventListener('click', () => { state.view = 'trades'; applyView(); });
   q('#tj-view-inst-btn')?.addEventListener('click', () => { state.view = 'instrument'; applyView(); });
-  q('#tj-view-cal-btn')?.addEventListener('click', () => { state.view = 'calendar'; applyView(); renderCalendarView(applyFlagFilters(applyTextFilter(state.rows))); });
-  q('#tj-view-equity-btn')?.addEventListener('click', () => { state.view = 'equity'; applyView(); renderEquityView(applyFlagFilters(applyTextFilter(state.rows))); });
-  q('#tj-cal-prev')?.addEventListener('click', () => { state.calMonth = _monthShift(state.calMonth, -1); persistUiState(); renderCalendarView(applyFlagFilters(applyTextFilter(state.rows))); });
-  q('#tj-cal-next')?.addEventListener('click', () => { state.calMonth = _monthShift(state.calMonth, 1); persistUiState(); renderCalendarView(applyFlagFilters(applyTextFilter(state.rows))); });
-  q('#tj-clear-btn')?.addEventListener('click', () => { filterInput.value = ''; persistUiState(); renderAll(); });
+  q('#tj-view-cal-btn')?.addEventListener('click', () => { state.view = 'calendar'; applyView(); renderCalendarView(getFilteredRows()); });
+  q('#tj-view-equity-btn')?.addEventListener('click', () => { state.view = 'equity'; applyView(); renderEquityView(getFilteredRows()); });
+  q('#tj-cal-prev')?.addEventListener('click', () => { state.calMonth = _monthShift(state.calMonth, -1); persistUiState(); renderCalendarView(getFilteredRows()); });
+  q('#tj-cal-next')?.addEventListener('click', () => { state.calMonth = _monthShift(state.calMonth, 1); persistUiState(); renderCalendarView(getFilteredRows()); });
+  q('#tj-clear-btn')?.addEventListener('click', () => { clearStatTradeFilter({ clearAllFilters: true }); });
   q('#tj-export-btn')?.addEventListener('click', exportShownTrades);
+  statTradeFilterBtn?.addEventListener('click', (e) => { e.preventDefault(); clearStatTradeFilter({ clearAllFilters: true }); });
   addBtn?.addEventListener('click', () => {
     openEditor(null);
     stopAutoRefresh();
@@ -1483,11 +1587,12 @@
 
   document.addEventListener('click', (e) => {
     const jumpEl = e.target?.closest ? e.target.closest('[data-jump-row-id]') : null;
-    if (jumpEl) { e.preventDefault(); jumpToTradeRow(jumpEl.dataset.jumpRowId || ''); return; }
+    if (jumpEl) { e.preventDefault(); jumpToTradeRow(jumpEl.dataset.jumpRowId || '', jumpEl.dataset.jumpRowLabel || ''); return; }
     const btn = e.target?.closest ? e.target.closest('button[data-flag]') : null;
     if (!btn) return;
     const flag = btn.dataset.flag;
     if (!flag) return;
+    state.statTradeFilter = null;
     toggle(flag);
     btn.classList.toggle('active', activeFlags.has(flag));
   });
@@ -1527,7 +1632,7 @@
   filterInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') renderAll(); });
   syncActionButtons();
 
-  qa('.tj-chip[data-flag]').forEach((btn) => { const on = activeFlags.has(btn.dataset.flag || ''); btn.classList.toggle('active', on); btn.style.opacity = on ? '1' : '0.7'; btn.style.outline = on ? '1px solid #60a5fa' : 'none'; });
+  syncFlagButtons();
   applyView();
   load();
   scheduleAutoRefresh();
