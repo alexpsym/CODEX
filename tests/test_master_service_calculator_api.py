@@ -122,7 +122,7 @@ def test_merged_calculator_page_returns_200() -> None:
     assert "calc-grid" in html
     assert '/static/calculator.js?v=' in html
     import re
-    assert re.search(r"/static/calculator\\.js\\?v=[a-f0-9]{12}", html)
+    assert re.search(r"/static/calculator\.js\?v=[a-f0-9]{12}", html)
     assert 'id="calc-timeframe"' not in html
     assert 'id="timeframe-toggle"' in html
     assert 'id="test-toggle"' in html
@@ -190,6 +190,15 @@ def test_bybit_place_order_not_modified_with_matching_live_tpsl_is_success(
         lambda *_args, **_kwargs: asyncio.sleep(0, result={"priceFilter": {"tickSize": "0.1"}}),
     )
 
+    async def fake_get_async(_base_url, path, _params, **_kwargs):
+        if path == "/v5/market/tickers":
+            return {"result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "100", "bid1Price": "99.9", "ask1Price": "100.1"}]}}
+        if path == "/v5/market/instruments-info":
+            return {"result": {"list": [{"symbol": "BTCUSDT", "priceFilter": {"tickSize": "0.1"}}]}}
+        return {"result": {"list": []}}
+
+    monkeypatch.setattr(master_service, "_bybit_get_async", fake_get_async)
+
     class _Resp:
         status_code = 200
 
@@ -236,7 +245,7 @@ def test_bybit_quote_uses_tick_step_fee_and_no_oversize(monkeypatch: pytest.Monk
     async def fake_symbols(*_args, **_kwargs):
         return ["BTCUSDT"]
 
-    async def fake_get(base_url, path, params):
+    async def fake_get(base_url, path, params, **_kwargs):
         if path.endswith("instruments-info"):
             return {"result": {"list": [{"priceFilter": {"tickSize": "0.1"}, "lotSizeFilter": {"qtyStep": "0.001", "minOrderQty": "0.001", "maxOrderQty": "999999", "maxMktOrderQty": "999999", "minNotionalValue": "5"}, "leverageFilter": {"maxLeverage": "50"}}]}}
         if path.endswith("tickers"):
@@ -276,7 +285,7 @@ def test_bybit_quote_snaps_price_fields_with_trailing_zero_tick(monkeypatch: pyt
     monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["BTCUSDT"]))
     monkeypatch.setattr(master_service, "_fetch_oanda_mid_prices_batch", lambda **_kwargs: asyncio.sleep(0, result={"AUD_USD": 1}))
 
-    async def fake_get(_base, path, _params):
+    async def fake_get(_base, path, _params, **_kwargs):
         if path.endswith("instruments-info"):
             return {"result": {"list": [{"priceFilter": {"tickSize": "0.10"}, "lotSizeFilter": {"qtyStep": "0.001", "minOrderQty": "0.001", "maxOrderQty": "999999", "maxMktOrderQty": "999999", "minNotionalValue": "5"}, "leverageFilter": {"maxLeverage": "50"}}]}}
         return {"result": {"list": [{"bid1Price": "78032.90", "ask1Price": "78032.96", "lastPrice": "78032.93"}]}}
@@ -302,7 +311,7 @@ def test_bybit_quote_webhook_payload_uses_snapped_prices(monkeypatch: pytest.Mon
     monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["BTCUSDT"]))
     monkeypatch.setattr(master_service, "_fetch_oanda_mid_prices_batch", lambda **_kwargs: asyncio.sleep(0, result={"AUD_USD": 1}))
 
-    async def fake_get(_base, path, _params):
+    async def fake_get(_base, path, _params, **_kwargs):
         if path.endswith("instruments-info"):
             return {"result": {"list": [{"priceFilter": {"tickSize": "0.10"}, "lotSizeFilter": {"qtyStep": "0.001", "minOrderQty": "0.001", "maxOrderQty": "999999", "maxMktOrderQty": "999999", "minNotionalValue": "5"}, "leverageFilter": {"maxLeverage": "50"}}]}}
         return {"result": {"list": [{"bid1Price": "78032.90", "ask1Price": "78032.96", "lastPrice": "78032.93"}]}}
@@ -330,7 +339,7 @@ def test_bybit_market_uses_side_specific_bid_ask(monkeypatch: pytest.MonkeyPatch
     async def fake_symbols(*_args, **_kwargs):
         return ["BTCUSDT"]
 
-    async def fake_get(base_url, path, params):
+    async def fake_get(base_url, path, params, **_kwargs):
         if path.endswith("instruments-info"):
             return {"result": {"list": [{"priceFilter": {"tickSize": "1"}, "lotSizeFilter": {"qtyStep": "1", "minOrderQty": "1", "maxOrderQty": "999", "maxMktOrderQty": "999", "minNotionalValue": "1"}, "leverageFilter": {"maxLeverage": "50"}}]}}
         if path.endswith("tickers"):
@@ -560,7 +569,7 @@ def test_bybit_rejects_min_notional_and_market_max(monkeypatch: pytest.MonkeyPat
             return {"result": {"list": [{"makerFeeRate": "0", "takerFeeRate": "0"}]}}
         return {"result": {"list": [{"totalEquity": "1000", "totalAvailableBalance": "1", "coin": [{"coin": "USDT", "availableToTrade": "1"}]}]}}
 
-    async def fake_get(_base, path, _params):
+    async def fake_get(_base, path, _params, **_kwargs):
         if path.endswith("instruments-info"):
             return {"result": {"list": [{"priceFilter": {"tickSize": "1"}, "lotSizeFilter": {"qtyStep": "1", "minOrderQty": "1", "maxOrderQty": "10", "maxMktOrderQty": "2", "minNotionalValue": "1000"}, "leverageFilter": {"maxLeverage": "2"}}]}}
         return {"result": {"list": [{"bid1Price": "100", "ask1Price": "100", "lastPrice": "100"}]}}
@@ -676,7 +685,7 @@ def test_rr_fee_buffer_pushes_target_distance_beyond_plain_rr(monkeypatch: pytes
     monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("live", "k", "s", "https://bybit.test", "KEY1"))
     monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["BTCUSDT"]))
 
-    async def fake_get(_base, path, _params):
+    async def fake_get(_base, path, _params, **_kwargs):
         if path.endswith("instruments-info"):
             return {"result": {"list": [{"priceFilter": {"tickSize": "1"}, "lotSizeFilter": {"qtyStep": "0.001", "minOrderQty": "0.001", "maxOrderQty": "999", "maxMktOrderQty": "999", "minNotionalValue": "1"}, "leverageFilter": {"maxLeverage": "50"}}]}}
         return {"result": {"list": [{"bid1Price": "100", "ask1Price": "101", "lastPrice": "100.5"}]}}
@@ -703,7 +712,7 @@ def test_fee_rate_failure_falls_back_with_warning(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("live", "k", "s", "https://bybit.test", "KEY1"))
     monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["BTCUSDT"]))
 
-    async def fake_get(_base, path, _params):
+    async def fake_get(_base, path, _params, **_kwargs):
         if path.endswith("instruments-info"):
             return {"result": {"list": [{"priceFilter": {"tickSize": "1"}, "lotSizeFilter": {"qtyStep": "1", "minOrderQty": "1", "maxOrderQty": "999", "maxMktOrderQty": "999", "minNotionalValue": "1"}, "leverageFilter": {"maxLeverage": "50"}}]}}
         return {"result": {"list": [{"bid1Price": "100", "ask1Price": "101", "lastPrice": "100.5"}]}}
@@ -733,7 +742,7 @@ def test_balance_failure_returns_endpoint_specific_error(monkeypatch: pytest.Mon
     monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["BTCUSDT"]))
     monkeypatch.setattr(master_service, "_fetch_oanda_mid_prices_batch", lambda **_kwargs: asyncio.sleep(0, result={"AUD_USD": 1}))
 
-    async def fake_get(_base, path, _params):
+    async def fake_get(_base, path, _params, **_kwargs):
         if path.endswith("instruments-info"):
             return {"result": {"list": [{"priceFilter": {"tickSize": "1"}, "lotSizeFilter": {"qtyStep": "1", "minOrderQty": "1", "maxOrderQty": "999", "maxMktOrderQty": "999", "minNotionalValue": "1"}, "leverageFilter": {"maxLeverage": "50"}}]}}
         return {"result": {"list": [{"bid1Price": "100", "ask1Price": "101", "lastPrice": "100.5"}]}}
@@ -923,7 +932,7 @@ def test_calculator_quote_returns_absolute_webhook_url(monkeypatch: pytest.Monke
     monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("live", "k", "s", "https://bybit.test", "KEY1"))
     monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["BTCUSDT"]))
     monkeypatch.setattr(master_service, "_fetch_oanda_mid_prices_batch", lambda **_kwargs: asyncio.sleep(0, result={"AUD_USD": 1}))
-    async def fake_get(_base, path, _params):
+    async def fake_get(_base, path, _params, **_kwargs):
         if path.endswith("instruments-info"):
             return {"result": {"list": [{"priceFilter": {"tickSize": "1"}, "lotSizeFilter": {"qtyStep": "1", "minOrderQty": "1", "maxOrderQty": "999999", "maxMktOrderQty": "999999", "minNotionalValue": "1"}, "leverageFilter": {"maxLeverage": "10"}}]}}
         return {"result": {"list": [{"bid1Price": "100", "ask1Price": "101", "lastPrice": "100.5"}]}}
@@ -989,7 +998,7 @@ def test_local_calculator_blocks_webhook_without_public_base_url(monkeypatch: py
     monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("live", "k", "s", "https://bybit.test", "KEY1"))
     monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["BTCUSDT"]))
     monkeypatch.setattr(master_service, "_fetch_oanda_mid_prices_batch", lambda **_kwargs: asyncio.sleep(0, result={"AUD_USD": 1}))
-    async def fake_get(_base, path, _params):
+    async def fake_get(_base, path, _params, **_kwargs):
         if path.endswith("instruments-info"):
             return {"result": {"list": [{"priceFilter": {"tickSize": "1"}, "lotSizeFilter": {"qtyStep": "1", "minOrderQty": "1", "maxOrderQty": "999999", "maxMktOrderQty": "999999", "minNotionalValue": "1"}, "leverageFilter": {"maxLeverage": "10"}}]}}
         return {"result": {"list": [{"bid1Price": "100", "ask1Price": "101", "lastPrice": "100.5"}]}}
@@ -1052,7 +1061,7 @@ def test_crypto_demo_skips_fee_rate_warning(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["BTCUSDT"]))
     monkeypatch.setattr(master_service, "_fetch_oanda_mid_prices_batch", lambda **_kwargs: asyncio.sleep(0, result={"AUD_USD": 1}))
 
-    async def fake_get(_base, path, _params):
+    async def fake_get(_base, path, _params, **_kwargs):
         if path.endswith("instruments-info"):
             return {"result": {"list": [{"priceFilter": {"tickSize": "1"}, "lotSizeFilter": {"qtyStep": "1", "minOrderQty": "1", "maxOrderQty": "999", "maxMktOrderQty": "999", "minNotionalValue": "1"}, "leverageFilter": {"maxLeverage": "50"}}]}}
         return {"result": {"list": [{"bid1Price": "100", "ask1Price": "101", "lastPrice": "100.5"}]}}
@@ -1267,7 +1276,7 @@ def test_calculator_quote_bybit_success_has_no_logger_nameerror(monkeypatch: pyt
     monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["LABUSDT"]))
     monkeypatch.setattr(master_service, "_fetch_oanda_mid_prices_batch", lambda **_kwargs: asyncio.sleep(0, result={"AUD_USD": 1}))
 
-    async def fake_get(_base, path, _params):
+    async def fake_get(_base, path, _params, **_kwargs):
         if path.endswith("instruments-info"):
             return {"result": {"list": [{"priceFilter": {"tickSize": "0.0001"}, "lotSizeFilter": {"qtyStep": "1", "minOrderQty": "1", "maxOrderQty": "999999", "maxMktOrderQty": "999999", "minNotionalValue": "1"}, "leverageFilter": {"maxLeverage": "10"}}]}}
         return {"result": {"list": [{"bid1Price": "1.0000", "ask1Price": "1.0002", "lastPrice": "1.0001"}]}}
@@ -1405,7 +1414,7 @@ def test_calculator_quote_rejects_buy_limit_above_last(monkeypatch: pytest.Monke
     async def fake_inst(_b,_c,s):
         return {'priceFilter': {'tickSize':'0.0001'}, 'lotSizeFilter': {'qtyStep':'1','minOrderQty':'1','maxOrderQty':'999999','maxMktOrderQty':'999999','minNotionalValue':'0'}, 'leverageFilter': {'maxLeverage':'50'}}
     monkeypatch.setattr(master_service, '_bybit_get_instrument_info_cached', fake_inst)
-    async def fake_get(base, path, params):
+    async def fake_get(base, path, params, **_kwargs):
         if path.endswith('tickers'):
             return {'result': {'list': [{'bid1Price':'0.4938','ask1Price':'0.4940','lastPrice':'0.4939'}]}}
         raise AssertionError(path)
@@ -1419,7 +1428,7 @@ def _mock_bybit_quote_env(monkeypatch, *, tick='0.00001', bid='0.04921', ask='0.
     monkeypatch.setattr(master_service, 'resolve_bybit_credentials_for', lambda _a: ('live','k','s','https://bybit.test','KEY1'))
     monkeypatch.setattr(master_service, '_bybit_get_symbols_by_category_cached', lambda *_args, **_kwargs: asyncio.sleep(0, result=['PARTIUSDT','BTCUSDT']))
     monkeypatch.setattr(master_service, '_fetch_oanda_mid_prices_batch', lambda **_kwargs: asyncio.sleep(0, result={'AUD_USD': 1}))
-    async def fake_get(_base, path, _params):
+    async def fake_get(_base, path, _params, **_kwargs):
         if path.endswith('instruments-info'):
             return {'result': {'list': [{'priceFilter': {'tickSize': tick}, 'lotSizeFilter': {'qtyStep': '1', 'minOrderQty': '1', 'maxOrderQty': '999999', 'maxMktOrderQty': '999999', 'minNotionalValue': '1'}, 'leverageFilter': {'maxLeverage': '50'}}]}}
         return {'result': {'list': [{'bid1Price': bid, 'ask1Price': ask, 'lastPrice': last}]}}

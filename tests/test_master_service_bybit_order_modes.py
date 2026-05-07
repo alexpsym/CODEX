@@ -59,6 +59,24 @@ def bybit_order_mocks(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
 
 
+
+
+@pytest.fixture
+def bybit_linear_market_mocks(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        master_service,
+        "_bybit_lookup_symbol",
+        lambda *_a, **_k: asyncio.sleep(0, result={"symbol": "BTCUSDT", "_category": "linear", "priceFilter": {"tickSize": "0.1"}}),
+    )
+
+    async def _fake_get_async(_base_url, path, _params, **_kwargs):
+        if path == "/v5/market/tickers":
+            return {"result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "120", "bid1Price": "99.9", "ask1Price": "100.1"}]}}
+        if path == "/v5/market/instruments-info":
+            return {"result": {"list": [{"symbol": "BTCUSDT", "priceFilter": {"tickSize": "0.1"}}]}}
+        return {"result": {"list": []}}
+
+    monkeypatch.setattr(master_service, "_bybit_get_async", _fake_get_async)
 @pytest.mark.asyncio
 async def test_place_bybit_order_planned_entry_uses_absolute_levels(bybit_order_mocks, monkeypatch):
     captured = {}
@@ -272,7 +290,7 @@ async def test_place_bybit_order_raises_structured_rejection(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_place_bybit_limit_order_with_attached_tpsl_does_not_wait_for_position_entry(bybit_order_mocks, monkeypatch):
+async def test_place_bybit_limit_order_with_attached_tpsl_does_not_wait_for_position_entry(bybit_order_mocks, bybit_linear_market_mocks, monkeypatch):
     async def boom(**_kwargs):
         raise AssertionError("should not wait for position")
     monkeypatch.setattr(master_service, "_wait_for_position_entry", boom)
@@ -282,7 +300,7 @@ async def test_place_bybit_limit_order_with_attached_tpsl_does_not_wait_for_posi
     assert (result.get("order") or {}).get("orderId")
 
 @pytest.mark.asyncio
-async def test_place_bybit_limit_order_requested_tpsl_without_absolute_levels_rejects_before_unprotected_create(bybit_order_mocks, monkeypatch):
+async def test_place_bybit_limit_order_requested_tpsl_without_absolute_levels_rejects_before_unprotected_create(bybit_order_mocks, bybit_linear_market_mocks, monkeypatch):
     called={"post":False}
     async def fake_post(**_kwargs):
         called["post"]=True
@@ -299,7 +317,7 @@ async def test_place_bybit_order_blocks_invalid_linear_levels_before_create(monk
     monkeypatch.setattr(master_service, '_log_webhook_event', lambda *args, **kwargs: None)
     monkeypatch.setattr(master_service, 'resolve_bybit_credentials_for', lambda mode: (mode,'k','s','https://api.test','env'))
     monkeypatch.setattr(master_service, '_bybit_lookup_symbol', lambda *_a, **_k: asyncio.sleep(0, result={'priceFilter': {'tickSize': '0.0001'}}))
-    async def fake_get(base, path, params):
+    async def fake_get(base, path, params, **_kwargs):
         if path.endswith('tickers'):
             return {'result': {'list': [{'lastPrice': '0.4939'}]}}
         raise AssertionError(path)
@@ -315,15 +333,20 @@ async def test_place_bybit_order_blocks_invalid_linear_levels_before_create(monk
 
 
 @pytest.mark.asyncio
-async def test_market_submit_uses_planned_entry_validation_anchor_and_no_price(monkeypatch):
+async def test_market_submit_uses_planned_entry_validation_anchor_and_no_price(bybit_linear_market_mocks, monkeypatch):
     captured = {"body": None}
     monkeypatch.setattr(master_service, "_log_webhook_event", lambda *a, **k: None)
     monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda mode: (mode, "k", "s", "https://api.test", "env"))
     monkeypatch.setattr(master_service, "_upsert_trade_context", lambda *_a, **_k: None)
     monkeypatch.setattr(master_service, "_delete_pending_webhook", lambda _pid: False)
     monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
-    monkeypatch.setattr(master_service, "_bybit_lookup_symbol", lambda *_a, **_k: asyncio.sleep(0, result={"priceFilter": {"tickSize": "0.5"}}))
-    monkeypatch.setattr(master_service, "_bybit_get_async", lambda *_a, **_k: asyncio.sleep(0, result={"result": {"list": [{"lastPrice": "79200"}]}}))
+    async def _market_get_async(_base_url, path, _params, **_kwargs):
+        if path == "/v5/market/tickers":
+            return {"result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "79300", "bid1Price": "79299.9", "ask1Price": "79300.1"}]}}
+        if path == "/v5/market/instruments-info":
+            return {"result": {"list": [{"symbol": "BTCUSDT", "priceFilter": {"tickSize": "0.1"}}]}}
+        return {"result": {"list": []}}
+    monkeypatch.setattr(master_service, "_bybit_get_async", _market_get_async)
     monkeypatch.setattr(master_service, "_wait_for_position_entry", lambda **_k: asyncio.sleep(0, result={"size": "0.012", "avgPrice": "79300", "entryPrice": "79300", "positionIdx": 0}))
     monkeypatch.setattr(master_service, "_fetch_bybit_positions", lambda **_k: asyncio.sleep(0, result=[]))
     monkeypatch.setattr(master_service, "_set_bybit_trading_stop", lambda **_k: asyncio.sleep(0, result={"ok": True}))

@@ -25,7 +25,7 @@ import time
 import traceback
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP, ROUND_UP
 from datetime import datetime, timedelta, timezone
 from dateutil.relativedelta import relativedelta
 from pathlib import Path
@@ -1747,9 +1747,12 @@ async def _bybit_lookup_linear_symbol_with_fallback(base_url: str, symbol: str) 
     rows = ((payload.get("result") or {}).get("list") or []) if isinstance(payload, dict) else []
     for row in rows:
         if isinstance(row, dict) and str(row.get("symbol") or "").upper() == str(symbol).upper():
+            row_tick = ((row.get("priceFilter") or {}).get("tickSize") if isinstance(row, dict) else None)
+            if row_tick in (None, "", "0", 0):
+                continue
             row["_category"] = "linear"
             return row
-    return inst
+    return None
 
 
 def _oanda_specs_mode() -> str:
@@ -11666,6 +11669,19 @@ async def _place_bybit_order(
             configured_mode=os.getenv("BYBIT_POSITION_MODE", "one_way"),
         )
 
+    for _name, _raw in (
+        ("take_profit_offset", payload.get("take_profit_offset")),
+        ("tp_offset", payload.get("tp_offset")),
+        ("stop_loss_offset", payload.get("stop_loss_offset")),
+        ("sl_offset", payload.get("sl_offset")),
+    ):
+        if _raw is None:
+            continue
+        if isinstance(_raw, str) and _raw.strip() == "":
+            continue
+        if _parse_offset_value(_raw) is None and _parse_trigger_offset(_raw) is None:
+            raise ValueError(f"Webhook payload {_name} must be numeric or a valid {{close}} expression.")
+
     take_profit_offset = _parse_offset_value(
         payload.get("take_profit_offset") or payload.get("tp_offset")
     )
@@ -12231,6 +12247,7 @@ async def _place_bybit_order(
         "planned_entry_price": planned_entry_price,
         "planned_stop_price": planned_stop_price,
         "planned_target_price": planned_target_price,
+        "submit_level_adjustments": payload.get("_submit_level_adjustments"),
         "status_message": "Limit order accepted by Bybit. TP/SL was attached to the entry order; live position verification will only be possible after fill." if (category == "linear" and order_type == "limit" and has_attached_order_create_tpsl) else "",
     }
 
