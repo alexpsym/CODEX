@@ -114,3 +114,6 @@ def test_trading_journal_page_includes_stats_columns_and_wider_wrap() -> None:
     assert "@media (max-width: 720px)" in page
     assert "max-width: 1400px" not in page
     assert "width: min(1880px, calc(100vw - 32px));" in page
+    assert 'id="tj-stat-trade-filter-btn"' in page
+    assert "tj-linked-trade-filter-btn" in page
+    assert "Export shown trades" in page
