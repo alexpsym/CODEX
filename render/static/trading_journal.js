@@ -1001,6 +1001,7 @@
         continue;
       }
 
+      if (r.id) tr.setAttribute('data-row-id', String(r.id));
       tr.innerHTML = `
         <td>${fmtTime(r.open_time)}</td>
         <td>${fmtTime(r.close_time || r.open_time)}</td>
