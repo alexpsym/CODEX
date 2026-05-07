@@ -243,7 +243,7 @@ def _profile_main_buttons() -> List[Dict[str, object]]:
             [
                 {"id": "open-orders", "name": "open-orders", "label": "Open Orders and Positions", "open_url": "/merged/open-orders", "dashboard_main_view": True},
                 {"id": "history", "name": "history", "label": "History", "open_url": "/merged/history", "dashboard_main_view": True},
-                {"id": "monitor", "name": "monitor", "label": "Alerts", "open_url": "/merged/alerts", "dashboard_main_view": True},
+                {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor", "dashboard_main_view": True},
             ]
         )
     return buttons
@@ -1738,6 +1738,20 @@ async def _bybit_lookup_symbol(base_url: str, symbol: str) -> Optional[Dict[str,
     return None
 
 
+async def _bybit_lookup_linear_symbol_with_fallback(base_url: str, symbol: str) -> Optional[Dict[str, object]]:
+    inst = await _bybit_lookup_symbol(base_url, symbol)
+    tick = ((inst or {}).get("priceFilter") or {}).get("tickSize") if isinstance(inst, dict) else None
+    if tick not in (None, "", "0", 0):
+        return inst
+    payload = await _bybit_get_async(base_url, "/v5/market/instruments-info", {"category": "linear", "symbol": symbol})
+    rows = ((payload.get("result") or {}).get("list") or []) if isinstance(payload, dict) else []
+    for row in rows:
+        if isinstance(row, dict) and str(row.get("symbol") or "").upper() == str(symbol).upper():
+            row["_category"] = "linear"
+            return row
+    return inst
+
+
 def _oanda_specs_mode() -> str:
     env = (os.getenv("OANDA_ENV") or "live").strip().lower()
     return "demo" if env in {"practice", "demo", "test"} else "live"
@@ -1874,7 +1888,32 @@ async def _bybit_resolve_and_fetch_specs(query: str, *, include_btc_reference: b
     specs["_units"] = units
     if include_btc_reference and not _is_bitcoin_bybit_symbol(symbol, resolved_inst):
         btc_symbol = _btc_reference_symbol_for_category(category, resolved_inst.get("quoteCoin"))
-        btc_specs = await _bybit_resolve_and_fetch_specs(btc_symbol, include_btc_reference=False)
+        btc_exact = await _bybit_get_async(base_url, "/v5/market/instruments-info", {"category": category, "symbol": btc_symbol})
+        btc_rows = ((btc_exact.get("result") or {}).get("list") or []) if isinstance(btc_exact, dict) else []
+        btc_inst = next((r for r in btc_rows if isinstance(r, dict) and str(r.get("symbol") or "").upper() == btc_symbol), None)
+        btc_specs = None
+        if btc_inst:
+            btc_ticker = None
+            try:
+                p = await _bybit_get_async(base_url, "/v5/market/tickers", {"category": category, "symbol": btc_symbol})
+                lst = (p.get("result") or {}).get("list") or []
+                if isinstance(lst, list) and lst and isinstance(lst[0], dict):
+                    btc_ticker = lst[0]
+            except Exception:
+                btc_ticker = None
+            btc_specs = {
+                "source": "bybit",
+                "query": btc_symbol,
+                "resolved_symbol": btc_symbol,
+                "category": category,
+                "lastPrice": (btc_ticker or {}).get("lastPrice"),
+                "volume24hUsd": (btc_ticker or {}).get("turnover24h"),
+            }
+            btc_avg7d = await _bybit_avg_7d_turnover_usd_async(base_url, btc_symbol, category)
+            if btc_avg7d is not None:
+                btc_specs["avg7dTurnoverUsd"] = btc_avg7d
+            btc_ranges, _btc_warnings = await _bybit_fetch_range_specs_async(base_url, category, btc_symbol)
+            btc_specs.update(btc_ranges)
         if btc_specs:
             specs["_btc_reference"] = {k: v for k, v in btc_specs.items() if not str(k).startswith("_")}
             warnings.extend(btc_specs.get("_spec_warnings") or [])
@@ -2989,12 +3028,14 @@ def _is_bybit_demo_trade_row(row: Dict[str, object]) -> bool:
     if _row_type(row) != "trade":
         return False
     status = str(row.get("status") or row.get("state") or "").strip().lower()
-    if status and status not in {"closed", "close", "filled", "complete", "completed"}:
+    if status and status not in {"closed", "close", "filled", "complete", "completed", "finalized"}:
         return False
 
     source = str(row.get("source") or "").strip().lower()
     account = str(row.get("account") or "").strip().lower()
     account_label = str(row.get("account_label") or row.get("account") or "").strip()
+    if _is_bybit_demo_account_label(account_label):
+        return True
     if source == "bybit":
         return account in {"demo", "practice"} or _is_bybit_demo_account_label(account_label)
     if source in {"excel", "local_excel"}:
@@ -5047,7 +5088,7 @@ def _import_trading_journal_from_dropbox_excel(
     sanitized_rows, sanitize_stats = _sanitize_bybit_demo_rows(_get_trading_journal_rows())
     if int(sanitize_stats.get("changed", 0)):
         _set_trading_journal_rows(sanitized_rows)
-    workbook_stats = _sanitize_bybit_demo_workbook(active_folder)
+    workbook_stats = _sanitize_bybit_demo_workbook(active_folder, None)
     _schedule_dropbox_upload_state_backup()
 
     return {
@@ -11590,7 +11631,7 @@ async def _place_bybit_order(
     tick_size_dec: Optional[Decimal] = None
     if category == "linear":
         try:
-            symbol_meta = await _bybit_lookup_symbol(base_url, symbol)
+            symbol_meta = await _bybit_lookup_linear_symbol_with_fallback(base_url, symbol)
             if isinstance(symbol_meta, dict):
                 tick_size_dec = Decimal(str((symbol_meta.get("priceFilter") or {}).get("tickSize") or "0"))
         except Exception:
@@ -13539,7 +13580,20 @@ def _coerce_bybit_demo_workbook_frame(df: Optional[pd.DataFrame]) -> pd.DataFram
     return frame
 
 
-def _sanitize_bybit_demo_workbook(active_folder: str) -> Dict[str, int]:
+def _bybit_demo_workbook_has_rows_needing_balance(frame: pd.DataFrame) -> bool:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return False
+    net = pd.to_numeric(frame.get("net_profit"), errors="coerce")
+    bal = frame.get("balance_after_trade")
+    bal_num = pd.to_numeric(bal, errors="coerce")
+    has_trade = net.notna() if isinstance(net, pd.Series) else pd.Series(dtype=bool)
+    if not len(has_trade):
+        return False
+    missing_bal = bal_num.isna() if isinstance(bal_num, pd.Series) else pd.Series(dtype=bool)
+    return bool((has_trade & missing_bal).any() or has_trade.any())
+
+
+def _sanitize_bybit_demo_workbook(active_folder: str, balance_snapshot: Optional[Dict[str, object]] = None) -> Dict[str, int]:
     workbook_path = _join_dropbox_path(active_folder, BYBIT_DEMO_WORKBOOK_NAME)
     try:
         payload = _dropbox_download_bytes(workbook_path)
@@ -13586,9 +13640,13 @@ def _sanitize_bybit_demo_workbook(active_folder: str) -> Dict[str, int]:
             workbook_rows.append(row)
 
         sanitized_rows, stats = _sanitize_bybit_demo_rows(workbook_rows)
-        if not int(stats.get("changed", 0)):
+        backfill_stats = {"changed": False}
+        if balance_snapshot and any(_is_bybit_demo_trade_row(r) for r in sanitized_rows):
+            sanitized_rows, backfill_stats = _backfill_bybit_demo_balances_from_current_balance(sanitized_rows, balance_snapshot)
+        if not int(stats.get("changed", 0)) and not bool(backfill_stats.get("changed")):
             return stats
-
+        if backfill_stats.get("changed"):
+            stats["changed"] = 1
         output_rows = [_bybit_demo_workbook_row(row) for row in sanitized_rows if _is_bybit_demo_trade_row(row)]
         output = pd.DataFrame(output_rows, columns=BYBIT_DEMO_WORKBOOK_COLUMNS)
         buffer = io.BytesIO()
@@ -13670,7 +13728,6 @@ def _append_bybit_demo_rows_to_workbook(active_folder: str, rows: List[Dict[str,
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
             existing.to_excel(writer, sheet_name=BYBIT_DEMO_WORKBOOK_SHEET, index=False)
         _dropbox_upload_bytes(workbook_path, buffer.getvalue())
-        _sanitize_bybit_demo_workbook(active_folder)
         return changed
 
 
@@ -13679,9 +13736,11 @@ def _append_bybit_demo_rows_to_local_workbook(local_dir: Path, rows: List[Dict[s
         return 0
     workbook_path = _resolve_local_journal_file(BYBIT_DEMO_WORKBOOK_NAME, local_dir)
     with _BYBIT_DEMO_WORKBOOK_LOCK:
-        existing = _coerce_bybit_demo_workbook_frame(
-            _read_excel_sheet_or_empty(workbook_path, BYBIT_DEMO_WORKBOOK_SHEET, BYBIT_DEMO_WORKBOOK_COLUMNS)
-        )
+        try:
+            loaded = _read_excel_sheet_or_empty(workbook_path, BYBIT_DEMO_WORKBOOK_SHEET, BYBIT_DEMO_WORKBOOK_COLUMNS)
+        except RuntimeError:
+            loaded = pd.DataFrame(columns=BYBIT_DEMO_WORKBOOK_COLUMNS)
+        existing = _coerce_bybit_demo_workbook_frame(loaded)
         changed = 0
         order_ids = existing.get("order_id", pd.Series(dtype=str)).fillna("").astype(str).str.strip()
         order_index = {order_id: idx for idx, order_id in order_ids.items() if order_id}
@@ -13706,7 +13765,7 @@ def _append_bybit_demo_rows_to_local_workbook(local_dir: Path, rows: List[Dict[s
         return changed
 
 
-def _sanitize_bybit_demo_local_workbook(local_dir: Path) -> Dict[str, int]:
+def _sanitize_bybit_demo_local_workbook(local_dir: Path, balance_snapshot: Optional[Dict[str, object]] = None) -> Dict[str, int]:
     workbook_path = _resolve_local_journal_file(BYBIT_DEMO_WORKBOOK_NAME, local_dir)
     frame = _coerce_bybit_demo_workbook_frame(
         _read_excel_sheet_or_empty(workbook_path, BYBIT_DEMO_WORKBOOK_SHEET, BYBIT_DEMO_WORKBOOK_COLUMNS)
@@ -13717,9 +13776,14 @@ def _sanitize_bybit_demo_local_workbook(local_dir: Path) -> Dict[str, int]:
     for _, wb_row in frame.iterrows():
         rows.append({"account": "Bybit Demo", "account_label": "Bybit Demo", "source": "excel", "symbol": _excel_cell_to_python(wb_row.get("symbol")), "side": _excel_cell_to_python(wb_row.get("type_buy_sell")), "open_time": _excel_cell_to_python(wb_row.get("opening_time")), "close_time": _excel_cell_to_python(wb_row.get("closing_time")), "qty": _excel_cell_to_python(wb_row.get("size_quantity")), "entry_price": _excel_cell_to_python(wb_row.get("entry_price")), "exit_price": _excel_cell_to_python(wb_row.get("closing_price")), "stop_loss": _excel_cell_to_python(wb_row.get("stop_loss")), "take_profit": _excel_cell_to_python(wb_row.get("take_profit")), "commission": _excel_cell_to_python(wb_row.get("commission")), "realized_pnl": _excel_cell_to_python(wb_row.get("net_profit")), "balance_after_trade": _excel_cell_to_python(wb_row.get("balance_after_trade")), "timeframe": _excel_cell_to_python(wb_row.get("timeframe")), "is_test_trade": _excel_cell_to_python(wb_row.get("is_test_trade")), "notes": _excel_cell_to_python(wb_row.get("notes")), "raw_refs": {"orderId": _excel_cell_to_python(wb_row.get("order_id"))}})
     sanitized_rows, stats = _sanitize_bybit_demo_rows(rows)
-    if int(stats.get("changed", 0)):
+    backfill_stats = {"changed": False}
+    if balance_snapshot and any(_is_bybit_demo_trade_row(r) for r in sanitized_rows):
+        sanitized_rows, backfill_stats = _backfill_bybit_demo_balances_from_current_balance(sanitized_rows, balance_snapshot)
+    if int(stats.get("changed", 0)) or bool(backfill_stats.get("changed")):
         out = pd.DataFrame([_bybit_demo_workbook_row(r) for r in sanitized_rows if _is_bybit_demo_trade_row(r)], columns=BYBIT_DEMO_WORKBOOK_COLUMNS)
         _write_excel_atomic(workbook_path, BYBIT_DEMO_WORKBOOK_SHEET, out)
+        if backfill_stats.get("changed"):
+            stats["changed"] = 1
     return stats
 
 
@@ -13792,6 +13856,7 @@ async def _sync_bybit_closed_pnl_window(
         else:
             active_folder, _entries = await asyncio.to_thread(_resolve_trading_journal_dropbox_folder)
             await asyncio.to_thread(_ensure_bybit_demo_dropbox_files, active_folder)
+    balance_backfill_error: Optional[str] = None
 
     orders_by_id: Dict[str, List[Dict[str, object]]] = defaultdict(list)
     orders_by_link_id: Dict[str, List[Dict[str, object]]] = defaultdict(list)
@@ -14152,9 +14217,45 @@ async def _sync_bybit_closed_pnl_window(
             break
 
     if not rows:
+        if mode == "demo":
+            sanitized_rows, sanitize_stats = _sanitize_bybit_demo_rows(_get_trading_journal_rows())
+            snapshot = {}
+            backfill_stats = {"balance_rows_seen": 0, "balance_rows_backfilled": 0, "changed": False}
+            has_demo_rows = any(_is_bybit_demo_trade_row(r) for r in sanitized_rows)
+            if local_authoritative:
+                workbook_path = _resolve_local_journal_file(BYBIT_DEMO_WORKBOOK_NAME, TRADING_JOURNAL_LOCAL_DIR)
+                wb_frame = _coerce_bybit_demo_workbook_frame(_read_excel_sheet_or_empty(workbook_path, BYBIT_DEMO_WORKBOOK_SHEET, BYBIT_DEMO_WORKBOOK_COLUMNS))
+                has_demo_rows = has_demo_rows or _bybit_demo_workbook_has_rows_needing_balance(wb_frame)
+            elif active_folder:
+                try:
+                    payload = _dropbox_download_bytes(_join_dropbox_path(active_folder, BYBIT_DEMO_WORKBOOK_NAME))
+                    wb_frame = _coerce_bybit_demo_workbook_frame(pd.read_excel(io.BytesIO(payload), sheet_name=BYBIT_DEMO_WORKBOOK_SHEET))
+                    has_demo_rows = has_demo_rows or _bybit_demo_workbook_has_rows_needing_balance(wb_frame)
+                except Exception:
+                    pass
+            if has_demo_rows:
+                try:
+                    snapshot = await _fetch_bybit_demo_current_balance_snapshot()
+                    sanitized_rows, backfill_stats = _backfill_bybit_demo_balances_from_current_balance(sanitized_rows, snapshot)
+                except Exception:
+                    balance_backfill_error = "Bybit Demo balance reconstruction failed: wallet balance unavailable; Balance After values were not populated."
+                    _record_bybit_demo_sync_status(bybit_demo_balance_backfill_error=balance_backfill_error)
+            if int(sanitize_stats.get("changed", 0)) or bool(backfill_stats.get("changed")):
+                _set_trading_journal_rows(sanitized_rows)
+            if has_demo_rows:
+                if local_authoritative:
+                    await asyncio.to_thread(_sanitize_bybit_demo_local_workbook, TRADING_JOURNAL_LOCAL_DIR, snapshot)
+                elif active_folder:
+                    await asyncio.to_thread(_sanitize_bybit_demo_workbook, active_folder, snapshot)
+            _record_bybit_demo_sync_status(
+                bybit_demo_balance_backfill_rows_seen=int(backfill_stats.get("balance_rows_seen", 0)),
+                bybit_demo_balance_backfill_rows_backfilled=int(backfill_stats.get("balance_rows_backfilled", 0)),
+                bybit_demo_balance_backfill_changed=bool(backfill_stats.get("changed")),
+                bybit_demo_balance_backfill_snapshot_at=backfill_stats.get("balance_snapshot_at"),
+            )
         _record_bybit_demo_sync_status(
             last_checked_at=_utc_now_iso(),
-            last_error=None,
+                last_error=balance_backfill_error,
             last_invalid_time_rows_dropped=len(dropped_invalid_rows),
             last_invalid_time_row_details=dropped_invalid_rows,
         )
@@ -14166,29 +14267,40 @@ async def _sync_bybit_closed_pnl_window(
     local_workbook_changed = 0
     if mode == "demo":
         sanitized_rows, sanitize_stats = _sanitize_bybit_demo_rows(_get_trading_journal_rows())
-        try:
-            snapshot = await _fetch_bybit_demo_current_balance_snapshot() if rows else {}
-        except Exception:
-            snapshot = {}
-        if snapshot.get("current_balance") is not None:
-            sanitized_rows, _diag = _backfill_bybit_demo_balances_from_current_balance(sanitized_rows, snapshot)
-        if int(sanitize_stats.get("changed", 0)):
+        backfill_stats: Dict[str, object] = {"balance_rows_seen": 0, "balance_rows_backfilled": 0, "changed": False}
+        snapshot = {}
+        has_demo_rows = any(_is_bybit_demo_trade_row(r) for r in sanitized_rows) or bool(rows)
+        if has_demo_rows:
+            try:
+                snapshot = await _fetch_bybit_demo_current_balance_snapshot()
+                sanitized_rows, backfill_stats = _backfill_bybit_demo_balances_from_current_balance(sanitized_rows, snapshot)
+            except Exception:
+                balance_backfill_error = "Bybit Demo balance reconstruction failed: wallet balance unavailable; Balance After values were not populated."
+                _record_bybit_demo_sync_status(bybit_demo_balance_backfill_error=balance_backfill_error)
+        if int(sanitize_stats.get("changed", 0)) or bool(backfill_stats.get("changed")):
             _set_trading_journal_rows(sanitized_rows)
         if local_authoritative:
             local_dir = TRADING_JOURNAL_LOCAL_DIR
             await asyncio.to_thread(_ensure_local_bybit_demo_files, local_dir)
             local_workbook_changed = await asyncio.to_thread(_append_bybit_demo_rows_to_local_workbook, local_dir, rows)
-            workbook_stats = await asyncio.to_thread(_sanitize_bybit_demo_local_workbook, local_dir)
+            workbook_stats = await asyncio.to_thread(_sanitize_bybit_demo_local_workbook, local_dir, snapshot)
         elif active_folder:
             await asyncio.to_thread(_append_bybit_demo_rows_to_workbook, active_folder, rows)
-            workbook_stats = await asyncio.to_thread(_sanitize_bybit_demo_workbook, active_folder)
+            workbook_stats = await asyncio.to_thread(_sanitize_bybit_demo_workbook, active_folder, snapshot)
+        _record_bybit_demo_sync_status(
+            bybit_demo_balance_backfill_rows_seen=int(backfill_stats.get("balance_rows_seen", 0)),
+            bybit_demo_balance_backfill_rows_backfilled=int(backfill_stats.get("balance_rows_backfilled", 0)),
+            bybit_demo_balance_backfill_changed=bool(backfill_stats.get("changed")),
+            bybit_demo_balance_backfill_snapshot_at=backfill_stats.get("balance_snapshot_at"),
+            bybit_demo_balance_backfill_error=balance_backfill_error,
+        )
     elif local_authoritative:
         local_workbook_changed = await asyncio.to_thread(_append_generic_local_broker_rows, "Bybit Live.xlsx", rows, "bybit_closed_pnl")
     _schedule_dropbox_upload_state_backup()
     _record_bybit_demo_sync_status(
         last_checked_at=_utc_now_iso(),
         last_success_at=_utc_now_iso(),
-        last_error=None,
+        last_error=balance_backfill_error,
         last_rows_seen=len(rows),
         last_rows_upserted=changed if not local_authoritative else local_workbook_changed,
         last_local_workbook_path=str((_local_journal_workbook_path(BYBIT_DEMO_WORKBOOK_NAME) if mode == "demo" else _local_journal_workbook_path("Bybit Live.xlsx"))) if local_authoritative else None,
@@ -15113,9 +15225,9 @@ async def merged_calculator_page() -> HTMLResponse:
 
 @app.get("/merged/scanner")
 async def merged_scanner_redirect() -> Response:
-    if APP_PROFILE == "render":
-        return _local_only_disabled_response("/merged/scanner")
-    return RedirectResponse(url="/merged/alerts", status_code=307)
+    if _runtime_is_render():
+        return _scanner_local_only_response("/merged/scanner")
+    return RedirectResponse(url="/merged/monitor", status_code=307)
 
 
 def _dec(value: object, field: str) -> Decimal:
@@ -15464,25 +15576,31 @@ async def _fetch_bybit_balance_usdt(account: str, timeout_s: float = 5.0, connec
         total_equity = Decimal(str(row.get("totalEquity") or "0"))
         total_wallet_balance = Decimal(str(row.get("totalWalletBalance") or "0"))
         total_available_balance = Decimal(str(row.get("totalAvailableBalance") or "0"))
+        wallet_balance_usdt: Optional[Decimal] = None
+        coin_equity_usdt: Optional[Decimal] = None
+        available_usdt: Optional[Decimal] = None
         for coin in row.get("coin", []) or []:
-            if str(coin.get("coin") or "").upper() == "USDT":
-                val = coin.get("availableToTrade") or coin.get("walletBalance")
-                if val is not None:
-                    return {
-                        "available_usdt": Decimal(str(val)),
-                        "total_equity": total_equity,
-                        "total_wallet_balance": total_wallet_balance,
-                        "total_available_balance": total_available_balance,
-                        "balance_source_used": Decimal("1"),
-                    }
-        if total_equity > 0 or total_available_balance > 0:
-            return {
-                "available_usdt": total_available_balance if total_available_balance > 0 else total_equity,
+            if str(coin.get("coin") or "").upper() != "USDT":
+                continue
+            if coin.get("walletBalance") is not None:
+                wallet_balance_usdt = Decimal(str(coin.get("walletBalance")))
+            if coin.get("equity") is not None:
+                coin_equity_usdt = Decimal(str(coin.get("equity")))
+            if coin.get("availableToTrade") is not None:
+                available_usdt = Decimal(str(coin.get("availableToTrade")))
+            break
+        if wallet_balance_usdt is not None or total_equity > 0 or total_available_balance > 0:
+            result: Dict[str, object] = {
+                "available_usdt": available_usdt if available_usdt is not None else (total_available_balance if total_available_balance > 0 else total_equity),
                 "total_equity": total_equity,
                 "total_wallet_balance": total_wallet_balance,
                 "total_available_balance": total_available_balance,
-                "balance_source_used": Decimal("2"),
             }
+            if wallet_balance_usdt is not None:
+                result["wallet_balance_usdt"] = wallet_balance_usdt
+            if coin_equity_usdt is not None:
+                result["coin_equity_usdt"] = coin_equity_usdt
+            return result
     raise HTTPException(status_code=502, detail=f"Bybit balance unavailable path={path}.")
 
 
@@ -15516,35 +15634,92 @@ async def _resolve_bybit_calculator_symbol_fast(base_url: str, raw_symbol: str, 
 
 async def _fetch_bybit_demo_current_balance_snapshot() -> Dict[str, object]:
     snap = await _fetch_bybit_balance_usdt("demo")
-    current = snap.get("total_wallet_balance") or snap.get("total_equity") or snap.get("available_usdt")
-    return {"current_balance": _to_float(current), "balance_source_used": "wallet_balance", "snapshot_at": _utc_now_iso()}
+    current = None
+    source_used = None
+    for key in ("wallet_balance_usdt", "total_wallet_balance", "total_equity", "available_usdt"):
+        val = _to_float(snap.get(key))
+        if val is not None:
+            current = val
+            source_used = key
+            break
+    return {
+        "current_balance": current,
+        "currency": "USDT",
+        "balance_source_used": source_used or "unavailable",
+        "snapshot_at": _utc_now_iso(),
+    }
+
+
+def _safe_decimal(value: object) -> Optional[Decimal]:
+    if value is None or value is pd.NA:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
 
 
 def _backfill_bybit_demo_balances_from_current_balance(rows: List[Dict[str, object]], balance_snapshot: Dict[str, object]) -> Tuple[List[Dict[str, object]], Dict[str, object]]:
     out = [dict(r) for r in rows]
-    current = _to_float(balance_snapshot.get("current_balance"))
+    current = _safe_decimal(balance_snapshot.get("current_balance"))
+    diag = {
+        "balance_rows_seen": 0,
+        "balance_rows_backfilled": 0,
+        "balance_rows_missing_pnl": 0,
+        "current_balance_used": _to_float(current),
+        "balance_snapshot_at": balance_snapshot.get("snapshot_at"),
+        "changed": False,
+    }
     if current is None:
-        return out, {"balance_rows_backfilled": 0, "balance_backfill_warning": "missing_current_balance"}
+        return out, diag
     targets = []
+    valid_statuses = {"closed", "close", "filled", "complete", "completed", "finalized"}
     for i, row in enumerate(out):
         if not _is_bybit_demo_trade_row(row):
             continue
-        if str(row.get("currency") or "USDT").upper() != "USDT":
+        if str(row.get("status") or "closed").strip().lower() not in valid_statuses:
             continue
-        pnl = _to_float(row.get("net_profit", row.get("realized_pnl")))
+        if str(row.get("currency") or row.get("realized_pnl_currency") or "USDT").strip().upper() != "USDT":
+            continue
+        diag["balance_rows_seen"] += 1
+        pnl = _safe_decimal(row.get("net_profit"))
         if pnl is None:
+            pnl = _safe_decimal(row.get("realized_pnl"))
+        if pnl is None:
+            diag["balance_rows_missing_pnl"] += 1
             continue
-        targets.append((i, row, pnl))
-    targets.sort(key=lambda x: (str(x[1].get("close_time") or ""), str(x[1].get("order_id") or "")), reverse=True)
-    running = float(current)
-    for i, row, pnl in targets:
-        row["balance_after_trade"] = running
+        order_id = str((row.get("raw_refs") or {}).get("orderId") or row.get("order_id") or "")
+        close_epoch = (
+            _canonical_trade_epoch_second(row.get("close_time"))
+            or _canonical_trade_epoch_second(row.get("updated_at"))
+            or _canonical_trade_epoch_second(row.get("open_time"))
+            or 0
+        )
+        targets.append((i, row, pnl, int(close_epoch), order_id, i))
+    targets.sort(key=lambda x: (x[3], x[4], x[5]), reverse=True)
+    running = current
+    for i, row, pnl, *_ in targets:
+        new_balance = _to_float(running)
+        if (_to_float(row.get("balance_after_trade")) != new_balance
+            or str(row.get("balance_after_trade_currency") or "").upper() != "USDT"
+            or str(row.get("balance_source") or "") != "bybit_demo_wallet_reverse_pnl"):
+            diag["changed"] = True
+        row["balance_after_trade"] = new_balance
         row["balance_after_trade_currency"] = "USDT"
-        row["balance_source"] = "bybit_wallet_balance_backfill"
+        row["balance_source"] = "bybit_demo_wallet_reverse_pnl"
         row["balance_snapshot_at"] = balance_snapshot.get("snapshot_at")
-        running = running - float(pnl)
+        row["balance_reconstructed"] = True
         out[i] = row
-    return out, {"balance_rows_backfilled": len(targets), "current_balance_used": current, "balance_snapshot_at": balance_snapshot.get("snapshot_at")}
+        running = running - pnl
+        diag["balance_rows_backfilled"] += 1
+    return out, diag
 
 
 async def _cancel_pending_tasks(tasks: List[asyncio.Task[Any]]) -> None:
@@ -17234,7 +17409,7 @@ MERGED_MONITOR_TEMPLATE = """<!doctype html>
     <p class="notice">This page polls local scanner status every 2 seconds. Closing this tab only stops these status requests/log lines; scanner processes keep running independently.</p>
     <div class="grid">
       <section class="panel" id="monitor-control-panel">
-        <h3 style="margin-top:0">Alerts controls</h3>
+        <h3 style="margin-top:0">Monitor controls</h3>
         <div class="row">
           <label>Target alerts
             <select id="monitor-target">
@@ -17376,10 +17551,11 @@ async def merged_history_page() -> str:
     return HISTORY_PAGE_TEMPLATE
 
 
+@app.get("/merged/monitor")
 @app.get("/merged/alerts")
 async def merged_monitor_page() -> Response:
-    if APP_PROFILE == "render":
-        return _local_only_disabled_response("/merged/alerts")
+    if _runtime_is_render():
+        return _scanner_local_only_response("/merged/monitor")
     monitor_js_version = _static_asset_version("render/static/merged_alerts.js")
     page = MERGED_MONITOR_TEMPLATE.replace("{{MERGED_MONITOR_JS_URL}}", f"/static/merged_alerts.js?v={monitor_js_version}")
     response = HTMLResponse(page)
@@ -19880,13 +20056,18 @@ async def _background_start(script: ManagedScript) -> None:
 
 @app.get("/scripts")
 async def list_scripts() -> JSONResponse:
+    runtime_render = _runtime_is_render()
     raw = script_manager.list_scripts()
+    if runtime_render:
+        raw = [s for s in raw if str(s.get("name")) not in {"bybit_monitor", "oanda_monitor"}]
     by_name = {str(s.get("name")): s for s in raw}
 
     merged: List[Dict[str, object]] = []
     autostart_targets = set(_compute_autostart_scripts())
 
     for btn in get_merged_script_buttons():
+        if runtime_render and btn.get("name") == "monitor":
+            continue
         row: Dict[str, object] = {
             "id": btn["id"],
             "name": btn["name"],
@@ -19947,6 +20128,7 @@ async def list_scripts() -> JSONResponse:
 
     merged_source_names = get_merged_source_names()
     extras = [s for s in raw if str(s.get("name")) not in merged_source_names]
+    extras = [s for s in extras if str(s.get("name")) not in {"bybit_monitor", "oanda_monitor"}]
     for item in extras:
         if str(item.get("name")) == "ivindicator-clone":
             item["dashboard_main_view"] = True
@@ -21983,3 +22165,13 @@ async def _run_trading_journal_sync_job() -> None:
 async def trading_journal_sync() -> JSONResponse:
     _queue_trading_journal_sync_if_idle("manual_sync")
     return await trading_journal_sync_status()
+def _runtime_is_render() -> bool:
+    return _resolve_app_profile() == "render"
+
+
+def _scanner_local_only_response(path: str) -> PlainTextResponse:
+    return PlainTextResponse(
+        "Scanner is local-only. Run run_scanner_local.bat on your PC.",
+        status_code=410,
+        headers={"cache-control": "no-store, max-age=0", "x-disabled-path": path},
+    )
