@@ -1328,3 +1328,40 @@ def test_resolve_local_journal_file_case_insensitive_and_append_reuses_existing(
     assert changed == 1
     assert existing.exists()
     assert not (local_dir / "Bybit Demo.xlsx").exists()
+
+def test_backfill_bybit_demo_balances_reverse_pnl_ordering() -> None:
+    rows = [
+        {"account": "Bybit Demo", "status": "closed", "close_time": "2026-01-01T00:00:00Z", "net_profit": -1.386334, "raw_refs": {"orderId": "1"}, "currency": "USDT"},
+        {"account": "Bybit Demo", "status": "closed", "close_time": "2026-01-04T00:00:00Z", "net_profit": -1.421031, "raw_refs": {"orderId": "4"}, "currency": "USDT"},
+        {"account": "Bybit Demo", "status": "closed", "close_time": "2026-01-03T00:00:00Z", "net_profit": 2.153793, "raw_refs": {"orderId": "3"}, "currency": "USDT"},
+        {"account": "Bybit Demo", "status": "closed", "close_time": "2026-01-02T00:00:00Z", "net_profit": -3.664636, "raw_refs": {"orderId": "2"}, "currency": "USDT"},
+    ]
+    out, stats = master_service._backfill_bybit_demo_balances_from_current_balance(rows, {"current_balance": 224.87769878, "snapshot_at": "2026-01-04T12:00:00Z"})
+    by_oid = {str((r.get("raw_refs") or {}).get("orderId")): r for r in out}
+    assert by_oid["4"]["balance_after_trade"] == pytest.approx(224.87769878)
+    assert by_oid["3"]["balance_after_trade"] == pytest.approx(224.87769878 - (-1.421031))
+    assert by_oid["2"]["balance_after_trade"] == pytest.approx(by_oid["3"]["balance_after_trade"] - 2.153793)
+    assert by_oid["1"]["balance_after_trade"] == pytest.approx(by_oid["2"]["balance_after_trade"] - (-3.664636))
+    assert all(r.get("balance_after_trade_currency") == "USDT" for r in out)
+    assert all(r.get("balance_source") == "bybit_demo_wallet_reverse_pnl" for r in out)
+    assert stats["changed"] is True
+
+
+def test_sync_demo_persists_balance_only_changes(monkeypatch) -> None:
+    seed = [{"account": "Bybit Demo", "status": "closed", "close_time": "2026-01-01T00:00:00Z", "net_profit": 1.0, "raw_refs": {"orderId": "1"}, "currency": "USDT", "balance_after_trade": None}]
+    saved = {"rows": None}
+    monkeypatch.setattr(master_service, "_trading_journal_local_excel_authoritative", lambda: False)
+    monkeypatch.setattr(master_service, "_resolve_trading_journal_dropbox_folder", lambda: ("/x", []))
+    monkeypatch.setattr(master_service, "_ensure_bybit_demo_dropbox_files", lambda _f: None)
+    monkeypatch.setattr(master_service, "_fetch_bybit_order_history", lambda **_k: {"result": {"list": [], "nextPageCursor": ""}})
+    monkeypatch.setattr(master_service, "_fetch_bybit_closed_pnl", lambda **_k: {"result": {"list": [], "nextPageCursor": ""}})
+    monkeypatch.setattr(master_service, "_fetch_bybit_transaction_log", lambda **_k: {"result": {"list": [], "nextPageCursor": ""}})
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: list(seed))
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_rows", lambda rows: (rows, {"changed": 0}))
+    monkeypatch.setattr(master_service, "_fetch_bybit_demo_current_balance_snapshot", lambda: asyncio.sleep(0, result={"current_balance": 10.0, "snapshot_at": "2026-01-01T00:00:00Z"}))
+    monkeypatch.setattr(master_service, "_set_trading_journal_rows", lambda rows: saved.update({"rows": rows}))
+    monkeypatch.setattr(master_service, "_append_bybit_demo_rows_to_workbook", lambda *_a, **_k: 0)
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_workbook", lambda *_a, **_k: {"changed": 0})
+    monkeypatch.setattr(master_service, "_record_bybit_demo_sync_status", lambda **_k: None)
+    asyncio.run(master_service._sync_bybit_closed_pnl_window(account_mode="demo", base_url="u", api_key="k", api_secret="s", start_time=0, end_time=1))
+    assert saved["rows"] is not None
