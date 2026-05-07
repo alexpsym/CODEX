@@ -72,8 +72,21 @@ def test_trading_journal_stats_classes_are_value_only_and_net_pl_is_sign_based()
 
 def test_trading_journal_instrument_view_uses_aggregate_safe_dataset_and_load_hides_overlay_on_failure() -> None:
     js = JS_PATH.read_text(encoding="utf-8")
-    assert "tr.dataset.rowId = String(r.id || '')" not in js
+    assert "if (r.id) tr.setAttribute('data-row-id', String(r.id));" in js
     assert "tr.dataset.symbol = String(item.symbol || '')" in js
     assert "tr.dataset.assetClass = String(item.asset_class || '')" in js
+    inst_scope = js[js.index("function renderInstrumentView"):js.index("function renderCalendarView")]
+    assert "tr.dataset.rowId" not in inst_scope
     assert "loading?.style?.display === 'flex'" not in js
     assert "if (ownsVisibleOverlay) hideLoading();" in js
+
+
+def test_trading_journal_stat_trade_filter_wiring_present() -> None:
+    js = JS_PATH.read_text(encoding="utf-8")
+    assert "statTradeFilter" in js
+    assert "getFilteredRows" in js
+    assert "renderStatTradeFilterButton" in js
+    assert "clearStatTradeFilter" in js
+    assert "data-jump-row-label" in js
+    assert "tj-stat-trade-filter-btn" in js
+    assert "jumpToTradeRow(jumpEl.dataset.jumpRowId || '', jumpEl.dataset.jumpRowLabel || '')" in js

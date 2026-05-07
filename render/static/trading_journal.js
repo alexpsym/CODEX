@@ -17,6 +17,7 @@
   const editorErr = q('#tj-editor-error');
   const editorCancelBtn = q('#tj-editor-cancel');
   const editorSaveBtn = q('#tj-editor-save');
+  const statTradeFilterBtn = q('#tj-stat-trade-filter-btn');
 
   const setLoading = (pct, msg) => {
     if (loadingText) loadingText.textContent = msg || '';
@@ -56,6 +57,7 @@
     diagnostics: null,
     renderedRows: [],
     manualSyncInFlight: false,
+    statTradeFilter: null,
   };
   try { filterInput.value = localStorage.getItem('tj.filter') || ''; } catch {}
 
@@ -393,6 +395,59 @@
     return out;
   }
 
+
+  function syncFlagButtons() {
+    qa('.tj-chip[data-flag]').forEach((btn) => {
+      const on = activeFlags.has(btn.dataset.flag || '');
+      btn.classList.toggle('active', on);
+      btn.style.opacity = on ? '1' : '0.7';
+      btn.style.outline = on ? '1px solid #60a5fa' : 'none';
+    });
+  }
+
+  function clearStatTradeFilter({ clearAllFilters = false, render = true, status: statusMessage = true } = {}) {
+    state.statTradeFilter = null;
+    if (clearAllFilters) {
+      if (filterInput) filterInput.value = '';
+      activeFlags.clear();
+      syncFlagButtons();
+      state.view = 'trades';
+    }
+    if (render) renderAll();
+    if (statusMessage) setStatus('Trade filter cleared; showing all trades.');
+  }
+
+  function getFilteredRows() {
+    let filtered = applyFlagFilters(applyTextFilter(state.rows));
+    const rowId = state.statTradeFilter?.rowId;
+    if (rowId) {
+      const exists = (state.rows || []).some((row) => String(row?.id || '') === String(rowId));
+      if (!exists) {
+        state.statTradeFilter = null;
+      } else {
+        filtered = filtered.filter((row) => String(row?.id || '') === String(rowId));
+      }
+    }
+    return filtered;
+  }
+
+  function renderStatTradeFilterButton() {
+    if (!statTradeFilterBtn) return;
+    const active = state.statTradeFilter?.rowId && state.statTradeFilter?.label;
+    if (!active) {
+      statTradeFilterBtn.classList.add('hidden');
+      statTradeFilterBtn.textContent = '';
+      statTradeFilterBtn.title = '';
+      statTradeFilterBtn.setAttribute('aria-label', '');
+      return;
+    }
+    statTradeFilterBtn.textContent = state.statTradeFilter.label;
+    statTradeFilterBtn.classList.remove('hidden');
+    const hint = 'Clear linked trade filter and show all trades';
+    statTradeFilterBtn.title = hint;
+    statTradeFilterBtn.setAttribute('aria-label', hint);
+  }
+
   function qtyPrecision(row) {
     if (row?.qty_unit === 'lots') {
       const qty = Math.abs(Number(row?.qty));
@@ -529,6 +584,8 @@
       const tr = document.createElement('tr');
       tr.dataset.symbol = String(item.symbol || '');
       tr.dataset.assetClass = String(item.asset_class || '');
+      if (r.id) tr.setAttribute('data-row-id', String(r.id));
+      if (r.id) tr.setAttribute('data-row-id', String(r.id));
       tr.innerHTML = `
         <td>${item.symbol || '—'}</td>
         <td>${item.asset_class || '—'}</td>
@@ -788,7 +845,7 @@
     if (!_equityResizeWired) {
       _equityResizeWired = true;
       window.addEventListener('resize', () => {
-        if (state.view === 'equity') renderEquityView(applyFlagFilters(applyTextFilter(state.rows)));
+        if (state.view === 'equity') renderEquityView(getFilteredRows());
       });
     }
   }
@@ -996,6 +1053,14 @@
     });
   }
   function fmtMoneyValue(value, ccy, decimals = 2) { return `${ccy || 'UNKNOWN'} ${fmtNum(value, decimals)}`; }
+  function formatTradeFilterLabel(row, fallbackLabel) {
+    if (String(fallbackLabel || '').trim()) return String(fallbackLabel).trim();
+    const symbol = row?.symbol || row?.symbol_raw || 'Trade';
+    const stamp = row?.close_time || row?.open_time;
+    const d = stamp ? new Date(stamp) : null;
+    const dateOnly = d && !Number.isNaN(d.getTime()) ? d.toISOString().slice(0, 10) : String(stamp || '').slice(0, 10);
+    return dateOnly ? `${symbol} · ${dateOnly}` : String(symbol);
+  }
   function fmtMoneyBreakdown(bucket, key, decimals = 2) {
     const map = bucket?.money_by_currency?.[key];
     if (map && typeof map === 'object' && Object.keys(map).length) return Object.entries(map).map(([c, v]) => fmtMoneyValue(v, c, decimals)).join(' / ');
@@ -1039,7 +1104,7 @@
     const escHtml = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     const escAttr = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const fmtDateOnly = (v) => { if (!v) return ''; const d = new Date(v); return Number.isNaN(d.getTime()) ? String(v).slice(0,10) : d.toISOString().slice(0,10); };
-    function fmtStatTradeJump(ref) { if (!ref || typeof ref !== 'object' || !ref.id) return ''; const label = `${ref.symbol || 'Trade'}${fmtDateOnly(ref.date || ref.close_time || ref.open_time) ? ` · ${fmtDateOnly(ref.date || ref.close_time || ref.open_time)}` : ''}`; return `<button type="button" class="tj-stat-jump" data-jump-row-id="${escAttr(ref.id)}">${escHtml(label)}</button>`; }
+    function fmtStatTradeJump(ref) { if (!ref || typeof ref !== 'object' || !ref.id) return ''; const label = `${ref.symbol || 'Trade'}${fmtDateOnly(ref.date || ref.close_time || ref.open_time) ? ` · ${fmtDateOnly(ref.date || ref.close_time || ref.open_time)}` : ''}`; return `<button type="button" class="tj-stat-jump" data-jump-row-id="${escAttr(ref.id)}" data-jump-row-label="${escAttr(label)}">${escHtml(label)}</button>`; }
     function fmtLeader(leader, countKey) {
       const count = asNum(leader?.[countKey]);
       if (!leader || !leader.symbol || !Number.isFinite(count) || count <= 0) return '—';
@@ -1116,11 +1181,20 @@
 
   }
 
-  function jumpToTradeRow(rowId) {
+  function jumpToTradeRow(rowId, labelFromLink = '') {
     if (!rowId) return setStatus('No trade row id available for this statistic.');
-    state.view = 'trades'; applyView();
-    const visible = applyFlagFilters(applyTextFilter(state.rows)).some((r) => String(r?.id || '') === String(rowId));
-    if (!visible) { if (filterInput) filterInput.value = ''; activeFlags.clear(); qa('.tj-chip[data-flag]').forEach((btn) => { btn.style.opacity = '0.7'; btn.style.outline = 'none'; btn.classList.remove('active'); }); }
+    const row = (state.rows || []).find((r) => String(r?.id || '') === String(rowId));
+    if (!row) {
+      state.statTradeFilter = null;
+      renderStatTradeFilterButton();
+      setStatus('Trade row not found in the current journal data.');
+      return;
+    }
+    state.view = 'trades';
+    if (filterInput) filterInput.value = '';
+    activeFlags.clear();
+    syncFlagButtons();
+    state.statTradeFilter = { rowId: String(rowId), label: formatTradeFilterLabel(row, labelFromLink) };
     renderAll();
     requestAnimationFrame(() => {
       const rows = qa('#tj-table tbody tr[data-row-id]');
@@ -1129,12 +1203,12 @@
       tr.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
       tr.classList.add('tj-row-highlight');
       window.setTimeout(() => tr.classList.remove('tj-row-highlight'), 2500);
-      setStatus('Opened linked trade row.');
+      setStatus(`Showing linked trade only: ${state.statTradeFilter?.label || formatTradeFilterLabel(row, labelFromLink)}.`);
     });
   }
 
   function renderAll() {
-    const filtered = applyFlagFilters(applyTextFilter(state.rows));
+    const filtered = getFilteredRows();
     state.renderedRows = [...filtered];
     renderRows(filtered);
     renderSortIndicators();
@@ -1142,6 +1216,7 @@
     renderCalendarView(filtered);
     renderEquityView(filtered);
     applyView();
+    renderStatTradeFilterButton();
     syncTopScrollbar();
     persistUiState();
   }
@@ -1175,11 +1250,7 @@
   function toggle(flag) {
     if (activeFlags.has(flag)) activeFlags.delete(flag);
     else activeFlags.add(flag);
-    qa('.tj-chip[data-flag]').forEach((btn) => {
-      const on = activeFlags.has(btn.dataset.flag || '');
-      btn.style.opacity = on ? '1' : '0.7';
-      btn.style.outline = on ? '1px solid #60a5fa' : 'none';
-    });
+    syncFlagButtons();
     persistUiState();
     renderAll();
   }
@@ -1387,15 +1458,16 @@
     if (activeAbort && !state.manualSyncInFlight) { try { activeAbort.abort(); } catch {} }
   });
 
-  q('#tj-filter-btn')?.addEventListener('click', () => { persistUiState(); renderAll(); });
+  q('#tj-filter-btn')?.addEventListener('click', () => { state.statTradeFilter = null; persistUiState(); renderAll(); });
   q('#tj-view-trades-btn')?.addEventListener('click', () => { state.view = 'trades'; applyView(); });
   q('#tj-view-inst-btn')?.addEventListener('click', () => { state.view = 'instrument'; applyView(); });
-  q('#tj-view-cal-btn')?.addEventListener('click', () => { state.view = 'calendar'; applyView(); renderCalendarView(applyFlagFilters(applyTextFilter(state.rows))); });
-  q('#tj-view-equity-btn')?.addEventListener('click', () => { state.view = 'equity'; applyView(); renderEquityView(applyFlagFilters(applyTextFilter(state.rows))); });
-  q('#tj-cal-prev')?.addEventListener('click', () => { state.calMonth = _monthShift(state.calMonth, -1); persistUiState(); renderCalendarView(applyFlagFilters(applyTextFilter(state.rows))); });
-  q('#tj-cal-next')?.addEventListener('click', () => { state.calMonth = _monthShift(state.calMonth, 1); persistUiState(); renderCalendarView(applyFlagFilters(applyTextFilter(state.rows))); });
-  q('#tj-clear-btn')?.addEventListener('click', () => { filterInput.value = ''; persistUiState(); renderAll(); });
+  q('#tj-view-cal-btn')?.addEventListener('click', () => { state.view = 'calendar'; applyView(); renderCalendarView(getFilteredRows()); });
+  q('#tj-view-equity-btn')?.addEventListener('click', () => { state.view = 'equity'; applyView(); renderEquityView(getFilteredRows()); });
+  q('#tj-cal-prev')?.addEventListener('click', () => { state.calMonth = _monthShift(state.calMonth, -1); persistUiState(); renderCalendarView(getFilteredRows()); });
+  q('#tj-cal-next')?.addEventListener('click', () => { state.calMonth = _monthShift(state.calMonth, 1); persistUiState(); renderCalendarView(getFilteredRows()); });
+  q('#tj-clear-btn')?.addEventListener('click', () => { clearStatTradeFilter({ clearAllFilters: true }); });
   q('#tj-export-btn')?.addEventListener('click', exportShownTrades);
+  statTradeFilterBtn?.addEventListener('click', (e) => { e.preventDefault(); clearStatTradeFilter({ clearAllFilters: true }); });
   addBtn?.addEventListener('click', () => {
     openEditor(null);
     stopAutoRefresh();
@@ -1514,11 +1586,12 @@
 
   document.addEventListener('click', (e) => {
     const jumpEl = e.target?.closest ? e.target.closest('[data-jump-row-id]') : null;
-    if (jumpEl) { e.preventDefault(); jumpToTradeRow(jumpEl.dataset.jumpRowId || ''); return; }
+    if (jumpEl) { e.preventDefault(); jumpToTradeRow(jumpEl.dataset.jumpRowId || '', jumpEl.dataset.jumpRowLabel || ''); return; }
     const btn = e.target?.closest ? e.target.closest('button[data-flag]') : null;
     if (!btn) return;
     const flag = btn.dataset.flag;
     if (!flag) return;
+    state.statTradeFilter = null;
     toggle(flag);
     btn.classList.toggle('active', activeFlags.has(flag));
   });
@@ -1558,7 +1631,7 @@
   filterInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') renderAll(); });
   syncActionButtons();
 
-  qa('.tj-chip[data-flag]').forEach((btn) => { const on = activeFlags.has(btn.dataset.flag || ''); btn.classList.toggle('active', on); btn.style.opacity = on ? '1' : '0.7'; btn.style.outline = on ? '1px solid #60a5fa' : 'none'; });
+  syncFlagButtons();
   applyView();
   load();
   scheduleAutoRefresh();
