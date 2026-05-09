@@ -1186,14 +1186,35 @@ def _reconcile_oanda_export_balance_labels(
     excel_balances: List[Dict[str, object]],
     cashflow_ledger: Dict[str, List[Dict[str, object]]],
 ) -> Tuple[List[Dict[str, object]], List[str]]:
+    def _is_oanda_account_key_or_label(value: object) -> bool:
+        text = str(value or "").strip().lower()
+        norm = _norm_account_key(value).strip().lower()
+        return ("oanda" in text) or ("oanda" in norm)
+
+    def _canonical_oanda_key(value: object) -> Optional[str]:
+        norm = _norm_account_key(value).strip().upper()
+        if not norm or "OANDA" not in norm:
+            return None
+        if "DEMO" in norm:
+            return "OANDA DEMO"
+        if "LIVE" in norm:
+            return "OANDA LIVE"
+        return norm
+
     reconciled: List[Dict[str, object]] = []
     warnings: List[str] = []
-    oanda_keys = {
-        _norm_account_key((events[-1] or {}).get("account") or key)
-        for key, events in (cashflow_ledger or {}).items()
-        if ("oanda" in _norm_account_key(key)) or ("oanda" in _norm_account_key((events[-1] or {}).get("account")))
-    }
-    oanda_keys = {k for k in oanda_keys if k}
+    oanda_keys: Set[str] = set()
+    for key, events in (cashflow_ledger or {}).items():
+        if _is_oanda_account_key_or_label(key):
+            canon = _canonical_oanda_key(key)
+            if canon:
+                oanda_keys.add(canon)
+        for ev in (events or []):
+            acct = (ev or {}).get("account")
+            if _is_oanda_account_key_or_label(acct):
+                canon = _canonical_oanda_key(acct)
+                if canon:
+                    oanda_keys.add(canon)
     for item in excel_balances or []:
         if not isinstance(item, dict):
             continue
@@ -1209,8 +1230,7 @@ def _reconcile_oanda_export_balance_labels(
         elif "live" in text:
             target = "OANDA LIVE"
         elif len(oanda_keys) == 1:
-            only = next(iter(oanda_keys))
-            target = "OANDA DEMO" if "demo" in only else ("OANDA LIVE" if "live" in only else label)
+            target = next(iter(oanda_keys))
         elif len(oanda_keys) > 1:
             warnings.append(
                 f"ambiguous_oanda_export_account_mapping: cannot map export '{label}' to OANDA DEMO/LIVE without filename hint."
