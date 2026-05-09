@@ -515,6 +515,39 @@ def test_balance_merge_includes_bybit_demo_from_state_when_not_in_cashflow(temp_
     assert "Bybit Demo" not in labels2
 
 
+def test_balance_merge_resolves_missing_timeline_anchor_with_broker_balance(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "ENABLE_BYBIT_DEMO_JOURNAL", True)
+    monkeypatch.setattr(master_service, "_load_trading_journal_view_snapshot", lambda: None)
+    monkeypatch.setattr(master_service, "_journal_source_fingerprint", lambda: {"source_mode": "local", "files": []})
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: [])
+    monkeypatch.setattr(master_service, "_get_excel_account_balances", lambda: [])
+    monkeypatch.setattr(master_service, "_load_cashflows_for_active_journal_source", lambda _state: {})
+    monkeypatch.setattr(master_service, "_cashflow_rows_for_journal", lambda _ledger: [])
+    monkeypatch.setattr(master_service, "_compute_journal_stats", lambda _items, _balances: {"groups": {}})
+    monkeypatch.setattr(master_service, "_build_trading_journal_diagnostics_snapshot", lambda: {"errors": []})
+    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(master_service, "_build_journal_balance_timelines", lambda *_a, **_k: {
+        "rows": [],
+        "balances": [{"account": "BYBIT DEMO", "label": "BYBIT DEMO", "balance": None, "currency": "USDT", "missing_balance": True, "last_trade_at": "2026-01-01T00:00:00Z"}],
+        "diagnostics": {"bybit_demo": {"account_key": "bybit_demo", "missing_balance": True, "warning": "missing"}},
+    })
+    monkeypatch.setattr(
+        master_service,
+        "_load_json_file",
+        lambda path, default: {
+            "broker_account_balances": [
+                {"account": "Bybit Demo", "label": "Bybit Demo", "balance": 224.87, "currency": "USDT", "source": "bybit_wallet_balance"}
+            ]
+        } if path == master_service.TRADING_JOURNAL_STATE_PATH else default,
+    )
+    snapshot = master_service._build_trading_journal_view_snapshot(force=True)
+    bybit_demo = next(item for item in snapshot["balances"] if master_service._norm_account_key(item.get("label")) == "bybit_demo")
+    assert bybit_demo["balance"] == pytest.approx(224.87)
+    assert bybit_demo["balance_source"] == "bybit_wallet_balance"
+    assert bybit_demo["resolved_missing_balance_with_broker"] is True
+    assert not any("Missing balance anchor for accounts: BYBIT DEMO" in str(err) for err in snapshot["diagnostics"]["errors"])
+
+
 def test_diagnostics_does_not_report_zero_when_journal_items_exist(temp_state_paths):
     master_service._set_trading_journal_rows(
         [
