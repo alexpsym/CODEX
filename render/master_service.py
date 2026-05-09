@@ -3520,6 +3520,8 @@ def _repair_persisted_oanda_trade_rows() -> int:
         return 0
     contexts = _load_trade_contexts()
     changed = 0
+    inserted = 0
+    updated = 0
     repaired: List[Dict[str, object]] = []
     for row in rows:
         if not isinstance(row, dict) or str(row.get("source") or "").strip().lower() != "oanda":
@@ -14513,7 +14515,7 @@ def _sanitize_bybit_demo_local_workbook(local_dir: Path, balance_snapshot: Optio
     return stats
 
 
-def _append_generic_local_broker_rows(workbook_name: str, rows: List[Dict[str, object]], source_label: str) -> int:
+def _append_generic_local_broker_rows(workbook_name: str, rows: List[Dict[str, object]], source_label: str, return_stats: bool = False):
     columns = ["account","account_currency","opening_time","closing_time","type_buy_sell","symbol","size_quantity","entry_price","closing_price","stop_loss","take_profit","commission","net_profit","balance_after_trade","timeframe","is_test_trade","currency","notes","order_id","trade_id","transaction_id","source"]
     path = _local_journal_workbook_path(workbook_name)
     with _BYBIT_DEMO_WORKBOOK_LOCK:
@@ -14525,6 +14527,8 @@ def _append_generic_local_broker_rows(workbook_name: str, rows: List[Dict[str, o
             refs = r.get("raw_refs") if isinstance(r.get("raw_refs"), dict) else {}
             return {"account": r.get("account_label") or r.get("account"), "account_currency": r.get("realized_pnl_currency") or r.get("currency"), "opening_time": r.get("open_time"), "closing_time": r.get("close_time"), "type_buy_sell": r.get("side"), "symbol": r.get("symbol"), "size_quantity": r.get("qty") or r.get("qty_raw"), "entry_price": r.get("entry_price"), "closing_price": r.get("exit_price"), "stop_loss": r.get("stop_loss"), "take_profit": r.get("take_profit"), "commission": r.get("commission") if r.get("commission") is not None else r.get("fees"), "net_profit": r.get("net_profit") if r.get("net_profit") is not None else r.get("realized_pnl"), "balance_after_trade": r.get("balance_after_trade"), "timeframe": r.get("timeframe"), "is_test_trade": r.get("is_test_trade"), "currency": r.get("currency") or r.get("realized_pnl_currency"), "notes": r.get("notes"), "order_id": refs.get("orderId") or refs.get("orderID"), "trade_id": refs.get("tradeId") or refs.get("tradeID"), "transaction_id": refs.get("transactionId") or refs.get("transactionID"), "source": source_label}
         changed=0
+        inserted=0
+        updated=0
         for r in rows:
             m=map_row(r)
             id_masks: List[pd.Series] = []
@@ -14556,11 +14560,15 @@ def _append_generic_local_broker_rows(workbook_name: str, rows: List[Dict[str, o
             idxs = existing.index[mask]
             if len(idxs):
                 for c,v in m.items(): existing.at[idxs[0],c]=v
+                updated += 1
             else:
                 existing = pd.concat([existing, pd.DataFrame([m])], ignore_index=True)
+                inserted += 1
             changed += 1
         if changed:
             _write_excel_atomic(path, "Trades", existing)
+        if return_stats:
+            return {"changed": changed, "inserted": inserted, "updated": updated}
         return changed
 
 
@@ -22326,7 +22334,11 @@ async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
     changed = 0
     append_error = None
     try:
-        changed = _append_oanda_export_rows_to_local_workbook(account_mode, mapped, str(job.output_path))
+        workbook_name = _canonical_local_oanda_workbook_name(account_mode)
+        stats = _append_generic_local_broker_rows(workbook_name, mapped, "oanda_transaction_export", return_stats=True)
+        changed = int(stats.get("changed") or 0)
+        inserted = int(stats.get("inserted") or 0)
+        updated = int(stats.get("updated") or 0)
     except Exception as exc:
         append_error = str(exc)
     import_result = {"ok": False, "message": "Backfill append failed."}
@@ -22337,8 +22349,8 @@ async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
     return JSONResponse({
         "ok": ok_flag,
         "oanda_export_trades_seen": len(mapped),
-        "oanda_export_trades_backfilled": int(changed),
-        "oanda_export_trades_updated": max(0, int(changed) - len(mapped)),
+        "oanda_export_trades_backfilled": int(inserted),
+        "oanda_export_trades_updated": int(updated),
         "oanda_export_target_workbook": _canonical_local_oanda_workbook_name(account_mode),
         "oanda_export_source_path": str(job.output_path),
         "oanda_export_latest_balance": (balance or {}).get("balance") if isinstance(balance, dict) else None,

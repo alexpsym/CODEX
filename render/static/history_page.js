@@ -152,7 +152,9 @@
               method: 'POST',
             });
             if (!backfillRes || backfillRes.ok === false) {
-              throw new Error(backfillRes?.detail || backfillRes?.sync?.message || 'OANDA export backfill failed.');
+              const detail = backfillRes?.error || backfillRes?.sync?.message || backfillRes?.detail || 'OANDA export backfill failed.';
+              const target = backfillRes?.oanda_export_target_workbook ? ` (${backfillRes.oanda_export_target_workbook})` : '';
+              throw new Error(`Export completed, but Trading Journal backfill failed: ${detail}${target}`);
             }
             setStatus(`Export complete. Backfilled ${backfillRes.oanda_export_trades_seen || 0} OANDA ${String(payload.account || '').toUpperCase()} trades into Trading Journal.`);
             await fetchJson('/api/trading-journal/sync', { method: 'POST' });
