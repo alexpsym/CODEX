@@ -1168,6 +1168,44 @@ def test_balance_timeline_diagnostics_no_authoritative_candidate_no_nameerror():
     assert diag["latest_authoritative_balance_at"] is None
 
 
+def test_oanda_export_generic_filename_relabels_to_single_existing_oanda_cashflow_account():
+    balances = [{"account": "oanda_history_test", "label": "oanda_history_test", "balance": 1500.65, "balance_source": "oanda_transaction_export_balance"}]
+    ledger = {"OANDA DEMO": [{"account": "OANDA DEMO", "date": "2022-05-05T00:00:00Z", "new_balance": 202.12, "currency": "AUD"}]}
+    relabeled, warnings = master_service._reconcile_oanda_export_balance_labels(balances, ledger)
+    timeline = master_service._build_journal_balance_timelines([], ledger, relabeled)
+    labels = {b["label"]: b for b in timeline["balances"]}
+    assert warnings == []
+    assert "oanda_history_test" not in labels
+    assert labels["OANDA DEMO"]["balance"] == pytest.approx(1500.65)
+
+
+def test_oanda_export_generic_filename_is_ambiguous_when_demo_and_live_exist():
+    balances = [{"account": "oanda_history_test", "label": "oanda_history_test", "balance": 1500.65, "balance_source": "oanda_transaction_export_balance"}]
+    ledger = {
+        "OANDA DEMO": [{"account": "OANDA DEMO", "date": "2022-05-05T00:00:00Z", "new_balance": 202.12, "currency": "AUD"}],
+        "OANDA LIVE": [{"account": "OANDA LIVE", "date": "2022-05-05T00:00:00Z", "new_balance": 300.0, "currency": "AUD"}],
+    }
+    relabeled, warnings = master_service._reconcile_oanda_export_balance_labels(balances, ledger)
+    assert relabeled == []
+    assert any("ambiguous_oanda_export_account_mapping" in w for w in warnings)
+
+
+def test_oanda_export_filename_demo_hint_maps_to_oanda_demo_even_with_live_present():
+    balances = [{"account": "oanda_history_demo", "label": "oanda_history_demo", "balance": 1500.65, "balance_source": "oanda_transaction_export_balance", "dropbox_path": "/tmp/oanda_history_demo.xlsx"}]
+    ledger = {"OANDA DEMO": [{}], "OANDA LIVE": [{}]}
+    relabeled, warnings = master_service._reconcile_oanda_export_balance_labels(balances, ledger)
+    assert warnings == []
+    assert relabeled[0]["label"] == "OANDA DEMO"
+
+
+def test_oanda_export_filename_live_hint_maps_to_oanda_live_even_with_demo_present():
+    balances = [{"account": "oanda_history_live", "label": "oanda_history_live", "balance": 1500.65, "balance_source": "oanda_transaction_export_balance", "dropbox_path": "/tmp/oanda_history_live.xlsx"}]
+    ledger = {"OANDA DEMO": [{}], "OANDA LIVE": [{}]}
+    relabeled, warnings = master_service._reconcile_oanda_export_balance_labels(balances, ledger)
+    assert warnings == []
+    assert relabeled[0]["label"] == "OANDA LIVE"
+
+
 def test_parse_excel_balance_uses_latest_trade_timestamp_not_bottom_row(monkeypatch: pytest.MonkeyPatch):
     df = master_service.pd.DataFrame(
         [

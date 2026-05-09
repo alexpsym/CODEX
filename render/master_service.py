@@ -1105,6 +1105,10 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
     balances_seed = [b for b in excel_balances if not _is_bybit_demo_account_label(b.get("label") or b.get("account"))]
     state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
     ledger = _load_cashflows_for_active_journal_source(state if isinstance(state, dict) else {})
+    excel_balances, oanda_balance_warnings = _reconcile_oanda_export_balance_labels(
+        excel_balances,
+        ledger,
+    )
     timeline = _build_journal_balance_timelines(rows, ledger, excel_balances)
     trade_items = _enrich_trade_row_metrics(timeline.get("rows") if isinstance(timeline.get("rows"), list) else rows)
     cashflow_rows = [r for r in _cashflow_rows_for_journal(ledger) if isinstance(r, dict) and not _exclude_bybit_demo_row(r)]
@@ -1116,6 +1120,9 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
         broker_balances = []
     balances = _merge_missing_timeline_balances_with_broker(balances, broker_balances)
     diagnostics = _build_trading_journal_diagnostics_snapshot()
+    if oanda_balance_warnings:
+        existing_errors = diagnostics.get("errors") if isinstance(diagnostics.get("errors"), list) else []
+        diagnostics["errors"] = [*existing_errors, *oanda_balance_warnings]
     timeline_diag = timeline.get("diagnostics") if isinstance(timeline.get("diagnostics"), dict) else {}
     def _diag_account_key_variants(value: object) -> Set[str]:
         raw = str(value or "").strip()
@@ -1173,6 +1180,48 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
     _TRADING_JOURNAL_VIEW_CACHE["key"] = "snapshot"
     _TRADING_JOURNAL_VIEW_CACHE["payload"] = payload
     return payload
+
+
+def _reconcile_oanda_export_balance_labels(
+    excel_balances: List[Dict[str, object]],
+    cashflow_ledger: Dict[str, List[Dict[str, object]]],
+) -> Tuple[List[Dict[str, object]], List[str]]:
+    reconciled: List[Dict[str, object]] = []
+    warnings: List[str] = []
+    oanda_keys = {
+        _norm_account_key((events[-1] or {}).get("account") or key)
+        for key, events in (cashflow_ledger or {}).items()
+        if ("oanda" in _norm_account_key(key)) or ("oanda" in _norm_account_key((events[-1] or {}).get("account")))
+    }
+    oanda_keys = {k for k in oanda_keys if k}
+    for item in excel_balances or []:
+        if not isinstance(item, dict):
+            continue
+        patched = dict(item)
+        source = str(patched.get("balance_source") or patched.get("source") or "").strip().lower()
+        if source != "oanda_transaction_export_balance":
+            reconciled.append(patched)
+            continue
+        label = str(patched.get("label") or patched.get("account") or "").strip()
+        text = f"{label} {patched.get('dropbox_path') or ''}".lower()
+        if "demo" in text:
+            target = "OANDA DEMO"
+        elif "live" in text:
+            target = "OANDA LIVE"
+        elif len(oanda_keys) == 1:
+            only = next(iter(oanda_keys))
+            target = "OANDA DEMO" if "demo" in only else ("OANDA LIVE" if "live" in only else label)
+        elif len(oanda_keys) > 1:
+            warnings.append(
+                f"ambiguous_oanda_export_account_mapping: cannot map export '{label}' to OANDA DEMO/LIVE without filename hint."
+            )
+            continue
+        else:
+            target = label
+        patched["account"] = target
+        patched["label"] = target
+        reconciled.append(patched)
+    return reconciled, warnings
 
 
 TRADING_JOURNAL_DROPBOX_RECURSIVE = os.getenv(
