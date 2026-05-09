@@ -1208,7 +1208,7 @@ def test_oanda_export_generic_filename_is_ambiguous_when_demo_and_live_exist():
 
 
 def test_oanda_export_filename_demo_hint_maps_to_oanda_demo_even_with_live_present():
-    balances = [{"account": "oanda_history_demo", "label": "oanda_history_demo", "balance": 1500.65, "balance_source": "oanda_transaction_export_balance", "dropbox_path": "/tmp/oanda_history_demo.xlsx"}]
+    balances = [{"account": "oanda_history_demo", "label": "oanda_history_demo", "balance": 1500.65, "balance_source": "oanda_transaction_export_balance", "dropbox_path": "/tmp/oanda_history_demo.xlsx", "as_of": "2026-04-30T09:46:41+00:00", "raw_refs": {"transaction_date": "2026-04-30T09:46:41+00:00", "workbook": "oanda_history_demo.xlsx"}}]
     ledger = {"OANDA DEMO": [{}], "OANDA LIVE": [{}]}
     relabeled, warnings = master_service._reconcile_oanda_export_balance_labels(balances, ledger)
     assert warnings == []
@@ -1216,7 +1216,7 @@ def test_oanda_export_filename_demo_hint_maps_to_oanda_demo_even_with_live_prese
 
 
 def test_oanda_export_filename_live_hint_maps_to_oanda_live_even_with_demo_present():
-    balances = [{"account": "oanda_history_live", "label": "oanda_history_live", "balance": 1500.65, "balance_source": "oanda_transaction_export_balance", "dropbox_path": "/tmp/oanda_history_live.xlsx"}]
+    balances = [{"account": "oanda_history_live", "label": "oanda_history_live", "balance": 1500.65, "balance_source": "oanda_transaction_export_balance", "dropbox_path": "/tmp/oanda_history_live.xlsx", "as_of": "2026-04-30T09:46:41+00:00", "raw_refs": {"transaction_date": "2026-04-30T09:46:41+00:00", "workbook": "oanda_history_live.xlsx"}}]
     ledger = {"OANDA DEMO": [{}], "OANDA LIVE": [{}]}
     relabeled, warnings = master_service._reconcile_oanda_export_balance_labels(balances, ledger)
     assert warnings == []

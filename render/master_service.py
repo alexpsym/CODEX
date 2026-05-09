@@ -1244,7 +1244,12 @@ def _reconcile_oanda_export_balance_labels(
         raw_refs = patched.get("raw_refs") if isinstance(patched.get("raw_refs"), dict) else {}
         if not as_of:
             as_of = raw_refs.get("transaction_date")
-        if not str(as_of or "").strip():
+        has_dated_cashflow = any(
+            _norm_account_key((ev or {}).get("account")) == _norm_account_key(target)
+            and str((ev or {}).get("date") or "").strip()
+            for ev in (cashflow_ledger.get(target) or [])
+        )
+        if (not str(as_of or "").strip()) and has_dated_cashflow:
             warnings.append(
                 f"oanda_export_balance_missing_timestamp: cannot prove export balance is newer than cashflow for {target}."
             )
