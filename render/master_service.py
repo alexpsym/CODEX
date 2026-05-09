@@ -5342,20 +5342,32 @@ def _parse_local_trading_journal_workbook(path: Path) -> Tuple[List[Dict[str, ob
         df = pd.read_csv(path, encoding="utf-8-sig")
         if _is_oanda_transaction_history_frame(df):
             lower = path.name.lower()
-            account_mode = "demo" if "demo" in lower else ("live" if "live" in lower else "demo")
+            hinted_mode = "demo" if "demo" in lower else ("live" if "live" in lower else "")
+            account_mode = hinted_mode or "demo"
             account_label = "OANDA DEMO" if account_mode == "demo" else "OANDA LIVE"
+            if not hinted_mode:
+                account_label = "__UNRESOLVED_OANDA_EXPORT__"
             parsed = _journal_rows_from_oanda_transaction_history_frame(
                 df,
                 account_mode=account_mode,
                 account_label=account_label,
                 source_path=str(path),
             )
-            if "demo" not in lower and "live" not in lower and isinstance(parsed.get("account_balance"), dict):
-                parsed["account_balance"]["raw_refs"] = {
-                    **(parsed["account_balance"].get("raw_refs") or {}),
-                    "unresolved_account_mapping": True,
-                    "workbook": path.name,
-                }
+            if not hinted_mode:
+                for row in parsed.get("rows") or []:
+                    row["account"] = "__unresolved_oanda_export__"
+                    row["account_label"] = "__UNRESOLVED_OANDA_EXPORT__"
+                    refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+                    refs["unresolved_account_mapping"] = True
+                    row["raw_refs"] = refs
+                if isinstance(parsed.get("account_balance"), dict):
+                    parsed["account_balance"]["account"] = "__UNRESOLVED_OANDA_EXPORT__"
+                    parsed["account_balance"]["label"] = "__UNRESOLVED_OANDA_EXPORT__"
+                    parsed["account_balance"]["raw_refs"] = {
+                        **(parsed["account_balance"].get("raw_refs") or {}),
+                        "unresolved_account_mapping": True,
+                        "workbook": path.name,
+                    }
             return parsed.get("rows") or [], parsed.get("account_balance")
         return [], None
     payload = path.read_bytes()
@@ -5757,8 +5769,10 @@ def _import_trading_journal_from_sources(
                 isinstance(local_balance, dict)
                 and str(local_balance.get("balance_source") or "").strip().lower() == "oanda_transaction_export_balance"
             )
+            mapped_rows_for_state: List[Dict[str, object]] = []
+            skip_csv_rows_from_state = False
             if is_oanda_history_csv and (has_oanda_export_rows or has_oanda_export_balance):
-                oanda_export_trades_seen += len(local_rows)
+                oanda_export_trades_seen += len([r for r in local_rows if str((r or {}).get("source") or "").strip().lower() == "oanda_transaction_export"])
                 lower_name = local_file.name.lower()
                 mapped_label: Optional[str] = None
                 if "demo" in lower_name:
@@ -5769,6 +5783,7 @@ def _import_trading_journal_from_sources(
                     mapped_label = list(known_oanda_accounts)[0]
                 elif len(known_oanda_accounts) > 1:
                     warnings.append("ambiguous_oanda_export_account_mapping")
+                    skip_csv_rows_from_state = True
                 if mapped_label:
                     mapped_mode = "live" if mapped_label.upper().endswith("LIVE") else "demo"
                     mapped_rows: List[Dict[str, object]] = []
@@ -5778,11 +5793,26 @@ def _import_trading_journal_from_sources(
                             row["account_label"] = mapped_label
                             mapped_rows.append(row)
                     if mapped_rows:
+                        workbook_name = _canonical_local_oanda_workbook_name(mapped_mode)
+                        workbook_path = _local_journal_workbook_path(workbook_name)
+                        before = _read_excel_sheet_or_empty(workbook_path, "Trades", ["transaction_id"])
                         backfilled = _append_oanda_export_rows_to_local_workbook(mapped_mode, mapped_rows, str(local_file))
-                        oanda_export_trades_backfilled += int(backfilled)
+                        after = _read_excel_sheet_or_empty(workbook_path, "Trades", ["transaction_id"])
+                        before_ids = set(before.get("transaction_id", pd.Series(dtype=str)).fillna("").astype(str))
+                        after_ids = set(after.get("transaction_id", pd.Series(dtype=str)).fillna("").astype(str))
+                        inserted = len([x for x in after_ids if x and x not in before_ids])
+                        oanda_export_trades_backfilled += int(inserted)
+                        diagnostics["oanda_export_trades_updated"] = int(backfilled) - int(inserted)
                         oanda_export_target_workbook = _canonical_local_oanda_workbook_name(mapped_mode)
                         oanda_export_source_path = str(local_file)
+                        reread_rows, _reread_balance = _parse_local_trading_journal_workbook(workbook_path)
+                        mapped_rows_for_state = [r for r in reread_rows if str((r or {}).get("source") or "").strip().lower() in {"local_excel", "excel"}]
+                        skip_csv_rows_from_state = True
             for row in local_rows:
+                if skip_csv_rows_from_state and str((row or {}).get("source") or "").strip().lower() == "oanda_transaction_export":
+                    continue
+                if str((row or {}).get("account_label") or "").strip() == "__UNRESOLVED_OANDA_EXPORT__":
+                    continue
                 rid = str(row.get("id") or "")
                 if rid:
                     if str(row.get("source") or "").strip().lower() != "oanda_transaction_export":
@@ -5795,11 +5825,20 @@ def _import_trading_journal_from_sources(
                     refs["workbook_path"] = str(local_file)
                     row["raw_refs"] = refs
                     all_rows[rid] = row
+            for row in mapped_rows_for_state:
+                rid = str(row.get("id") or "")
+                if rid:
+                    row["source"] = "local_excel"
+                    row["import_source"] = "local_excel"
+                    all_rows[rid] = row
             if local_balance:
-                if has_oanda_export_balance:
-                    oanda_export_latest_balance = local_balance.get("balance")
-                    oanda_export_latest_balance_as_of = local_balance.get("as_of")
-                local_balances.append(local_balance)
+                if skip_csv_rows_from_state and has_oanda_export_balance:
+                    pass
+                else:
+                    if has_oanda_export_balance:
+                        oanda_export_latest_balance = local_balance.get("balance")
+                        oanda_export_latest_balance_as_of = local_balance.get("as_of")
+                    local_balances.append(local_balance)
         except Exception as exc:
             err_payload: Dict[str, object] = {"file": local_file.name, "path": str(local_file), "error": str(exc)}
             if local_file.suffix.lower() == ".xls" and "xlrd" in str(exc).lower():
