@@ -93,3 +93,5 @@ def test_trading_journal_stat_trade_filter_wiring_present() -> None:
     assert "data-jump-row-label" in js
     assert "tj-stat-trade-filter-btn" in js
     assert "jumpToTradeRow(jumpEl.dataset.jumpRowId || '', jumpEl.dataset.jumpRowLabel || '')" in js
+    assert "stale_oanda_demo_balance_not_backfilled" in js
+    assert "OANDA demo export exists but was not applied. Balance is stale." in js
