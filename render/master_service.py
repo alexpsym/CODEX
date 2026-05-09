@@ -5729,6 +5729,7 @@ def _import_trading_journal_from_sources(
     oanda_export_source_path = ""
     oanda_export_latest_balance = None
     oanda_export_latest_balance_as_of = None
+    oanda_export_account_label = ""
     known_oanda_accounts: set[str] = set()
     try:
         _state_for_mapping = _load_trading_journal_state()
@@ -5775,7 +5776,25 @@ def _import_trading_journal_from_sources(
                 oanda_export_trades_seen += len([r for r in local_rows if str((r or {}).get("source") or "").strip().lower() == "oanda_transaction_export"])
                 lower_name = local_file.name.lower()
                 mapped_label: Optional[str] = None
-                if "demo" in lower_name:
+                explicit_mode = ""
+                try:
+                    sidecar_candidates = [
+                        local_file.with_suffix(".json"),
+                        local_file.parent / f"{local_file.stem.replace('oanda_history_', 'oanda_history_').split('_', 2)[0]}_{local_file.stem.split('_')[-1]}.json",
+                    ]
+                    for candidate in sidecar_candidates:
+                        if candidate.exists():
+                            meta = _load_json_file(candidate, {})
+                            explicit_mode = str((meta or {}).get("account_mode") or "").strip().lower()
+                            if explicit_mode in {"demo", "live"}:
+                                break
+                except Exception:
+                    explicit_mode = ""
+                if explicit_mode == "demo":
+                    mapped_label = "OANDA DEMO"
+                elif explicit_mode == "live":
+                    mapped_label = "OANDA LIVE"
+                elif "demo" in lower_name:
                     mapped_label = "OANDA DEMO"
                 elif "live" in lower_name:
                     mapped_label = "OANDA LIVE"
@@ -5805,6 +5824,7 @@ def _import_trading_journal_from_sources(
                         diagnostics["oanda_export_trades_updated"] = int(backfilled) - int(inserted)
                         oanda_export_target_workbook = _canonical_local_oanda_workbook_name(mapped_mode)
                         oanda_export_source_path = str(local_file)
+                        oanda_export_account_label = mapped_label
                         reread_rows, _reread_balance = _parse_local_trading_journal_workbook(workbook_path)
                         mapped_rows_for_state = [r for r in reread_rows if str((r or {}).get("source") or "").strip().lower() in {"local_excel", "excel"}]
                         skip_csv_rows_from_state = True
@@ -5857,6 +5877,7 @@ def _import_trading_journal_from_sources(
     diagnostics["oanda_export_source_path"] = oanda_export_source_path
     diagnostics["oanda_export_latest_balance"] = oanda_export_latest_balance
     diagnostics["oanda_export_latest_balance_as_of"] = oanda_export_latest_balance_as_of
+    diagnostics["oanda_export_account_label"] = oanda_export_account_label
 
     dedupe_groups = 0
     source_duplicate_rows_dropped = 0
@@ -8235,10 +8256,22 @@ async def _run_oanda_history_export(job: OandaHistoryJob) -> None:
                     end=_format_oanda_timestamp(end_dt),
                 )
 
-        output_path = OANDA_HISTORY_EXPORT_ROOT / f"oanda_history_{job.job_id}.csv"
+        output_path = OANDA_HISTORY_EXPORT_ROOT / f"oanda_history_{account_mode}_{job.job_id}.csv"
         await asyncio.to_thread(oanda_history_exporter.save_to_csv, transactions, output_path)
         if not output_path.exists():
             raise RuntimeError("OANDA history export failed to write CSV output.")
+        sidecar_path = OANDA_HISTORY_EXPORT_ROOT / f"oanda_history_{job.job_id}.json"
+        _save_json_file(
+            sidecar_path,
+            {
+                "job_id": job.job_id,
+                "account_mode": account_mode,
+                "account_label": "OANDA DEMO" if account_mode == "demo" else "OANDA LIVE",
+                "created_at": _utc_now_iso(),
+                "source": "oanda_history_export",
+                "csv_filename": output_path.name,
+            },
+        )
         job.output_path = output_path
         job.status = "done"
     except Exception as exc:
@@ -22166,6 +22199,7 @@ async def oanda_history_export_status(job_id: str) -> JSONResponse:
         "job_id": job.job_id,
         "status": job.status,
         "error": job.error,
+        "account": job.params.get("account"),
     }
     if (
         job.status == "done"

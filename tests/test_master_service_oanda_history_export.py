@@ -116,6 +116,29 @@ def test_oanda_history_export_status_only_returns_download_when_file_exists(tmp_
         master_service.OANDA_HISTORY_JOBS.pop(job.job_id, None)
 
 
+def test_oanda_history_export_filename_contains_account_mode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.setenv("OANDA_API_KEY_DEMO", "demo-key")
+    monkeypatch.setenv("OANDA_ACCOUNT_ID_DEMO", "demo-account")
+    monkeypatch.setenv("OANDA_API_URL_DEMO", "https://api-fxpractice.oanda.com")
+    monkeypatch.setenv("OANDA_API_KEY", "live-key")
+    monkeypatch.setenv("OANDA_ACCOUNT_ID", "live-account")
+    monkeypatch.setenv("OANDA_API_URL_LIVE", "https://api-fxtrade.oanda.com")
+    monkeypatch.setattr(master_service, "OANDA_HISTORY_EXPORT_ROOT", tmp_path)
+
+    async def fake_fetch(**kwargs):
+        return []
+
+    monkeypatch.setattr(master_service, "_fetch_oanda_transactions_window", fake_fetch)
+    monkeypatch.setattr(master_service.oanda_history_exporter, "save_to_csv", lambda tx, path: Path(path).write_text("x"))
+
+    demo_job = master_service.OandaHistoryJob(job_id="demo1", status="queued", created_at=0, updated_at=0, params={"account": "demo", "days": 1})
+    live_job = master_service.OandaHistoryJob(job_id="live1", status="queued", created_at=0, updated_at=0, params={"account": "live", "days": 1})
+    asyncio.run(master_service._run_oanda_history_export(demo_job))
+    asyncio.run(master_service._run_oanda_history_export(live_job))
+    assert demo_job.output_path is not None and "demo" in demo_job.output_path.name
+    assert live_job.output_path is not None and "live" in live_job.output_path.name
+
+
 import pandas as pd
 
 def _sample_oanda_history_rows():
