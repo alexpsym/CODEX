@@ -4908,8 +4908,8 @@ def _build_journal_balance_timelines(
             "balance_source": balance_source,
             "stale_cashflow_overridden": bool(events and display_balance is not None and balance_source != "cashflow_anchor_plus_trades" and _to_ts(events[-1].get("date")) <= selected_authoritative_ts),
             "previous_cashflow_balance": _to_float(events[-1].get("new_balance")) if events else None,
-            "authoritative_balance_used": authoritative_balance_used if authoritative_balance_used is not None else latest_authoritative_balance,
-            "authoritative_balance_source": authoritative_balance_source,
+            "authoritative_balance_used": authoritative_balance_used if authoritative_balance_used is not None else (selected_authoritative_balance if balance_source != "cashflow_anchor_plus_trades" else None),
+            "authoritative_balance_source": authoritative_balance_source if authoritative_balance_used is not None else (selected_authoritative_source if balance_source != "cashflow_anchor_plus_trades" else None),
             "warning": "No cashflow or authoritative trade balance anchor found." if missing_balance else "",
         }
     balances = sorted(balances, key=lambda x: str(x.get("label") or x.get("account") or ""))

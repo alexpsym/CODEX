@@ -993,7 +993,7 @@ def test_oanda_summary_is_saved_as_broker_balance_during_sync(monkeypatch: pytes
     monkeypatch.setattr(master_service, "_trading_journal_bybit_demo_balance_anchor_enabled", lambda: False)
     monkeypatch.setattr(master_service, "_import_trading_journal_from_sources", lambda progress_cb=None: {"ok": True, "rows_imported": 0, "diagnostics": {}})
     monkeypatch.setattr(master_service, "_run_bybit_closed_pnl_sync", lambda **kwargs: asyncio.sleep(0))
-    monkeypatch.setattr(master_service, "_run_oanda_fill_sync", lambda **kwargs: asyncio.sleep(0))
+    monkeypatch.setattr(master_service, "_recover_oanda_recent_fills", lambda account, lookback_hours=72: asyncio.sleep(0, result={"ok": True, "account": account}))
     monkeypatch.setattr(master_service, "_save_broker_balance_diagnostics_state", lambda balances, warnings: captured.update({"balances": balances, "warnings": warnings}))
     asyncio.run(master_service._run_trading_journal_sync_job())
     labels = {item.get("label"): item for item in captured.get("balances", [])}
@@ -1157,6 +1157,15 @@ def test_newer_final_cashflow_still_overrides_oanda_broker_summary():
     broker = [{"account": "OANDA DEMO", "label": "OANDA DEMO", "balance": 1500.65, "currency": "AUD", "source": "oanda_account_summary", "balance_source": "oanda_account_summary", "as_of": "2026-04-30T00:00:00Z"}]
     merged = master_service._merge_missing_timeline_balances_with_broker(balances, broker)
     assert merged[0]["balance"] == pytest.approx(202.12)
+
+
+def test_balance_timeline_diagnostics_no_authoritative_candidate_no_nameerror():
+    rows = [{"id": "m1", "row_type": "trade", "source": "manual", "account": "MANUAL ACC", "close_time": "2026-05-01T00:00:00Z", "net_profit": 1.0}]
+    ledger = {"MANUAL ACC": [{"account": "MANUAL ACC", "date": "2026-04-30T00:00:00Z", "new_balance": 100.0, "currency": "AUD"}]}
+    timeline = master_service._build_journal_balance_timelines(rows, ledger, [])
+    diag = timeline["diagnostics"][master_service._norm_account_key("MANUAL ACC")]
+    assert diag["authoritative_balance_used"] is None
+    assert diag["latest_authoritative_balance_at"] is None
 
 
 def test_parse_excel_balance_uses_latest_trade_timestamp_not_bottom_row(monkeypatch: pytest.MonkeyPatch):
