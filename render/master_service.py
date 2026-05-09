@@ -484,6 +484,9 @@ TRADING_JOURNAL_BROKER_REFRESH_ENABLED = os.getenv("TRADING_JOURNAL_BROKER_REFRE
     "yes",
     "on",
 }
+TRADING_JOURNAL_BYBIT_DEMO_BALANCE_ANCHOR_ENABLED = str(
+    os.getenv("TRADING_JOURNAL_BYBIT_DEMO_BALANCE_ANCHOR_ENABLED", "1") or "1"
+).strip().lower() not in {"0", "false", "no", "off"}
 TRADING_JOURNAL_SYNC_STATE: Dict[str, object] = {
     "running": False,
     "progress": 0,
@@ -610,6 +613,44 @@ def _trading_journal_broker_refresh_enabled() -> bool:
     if _trading_journal_excel_only_mode():
         return TRADING_JOURNAL_BROKER_REFRESH_ENABLED
     return True
+
+
+def _trading_journal_bybit_demo_balance_anchor_enabled() -> bool:
+    if not ENABLE_BYBIT_DEMO_JOURNAL:
+        return False
+    if _trading_journal_source_mode() != "local":
+        return False
+    return bool(TRADING_JOURNAL_BYBIT_DEMO_BALANCE_ANCHOR_ENABLED)
+
+
+def _save_broker_balance_diagnostics_state(
+    broker_account_balances: List[Dict[str, object]],
+    broker_balance_warnings: List[str],
+) -> None:
+    state = _load_trading_journal_state()
+    existing = state.get("broker_account_balances")
+    merged = list(existing) if isinstance(existing, list) else []
+    for candidate in broker_account_balances or []:
+        if not isinstance(candidate, dict):
+            continue
+        key = _norm_account_key(candidate.get("label") or candidate.get("account"))
+        if not key:
+            continue
+        replaced = False
+        for idx, prev in enumerate(merged):
+            if isinstance(prev, dict) and _norm_account_key(prev.get("label") or prev.get("account")) == key:
+                merged[idx] = dict(candidate)
+                replaced = True
+                break
+        if not replaced:
+            merged.append(dict(candidate))
+    state["broker_account_balances"] = merged
+    diagnostics = state.get("broker_balance_diagnostics")
+    diag = diagnostics if isinstance(diagnostics, dict) else {}
+    diag["warnings"] = [str(w) for w in (broker_balance_warnings or []) if str(w).strip()]
+    diag["updated_at"] = _utc_now_iso()
+    state["broker_balance_diagnostics"] = diag
+    _save_trading_journal_state(state)
 
 
 def _set_trading_journal_sync_state(**updates: object) -> None:
@@ -855,7 +896,7 @@ def _build_trading_journal_diagnostics_snapshot() -> Dict[str, object]:
 
 
 _TRADING_JOURNAL_VIEW_CACHE: Dict[str, object] = {"key": None, "payload": None}
-TRADING_JOURNAL_VIEW_CACHE_VERSION = 3
+TRADING_JOURNAL_VIEW_CACHE_VERSION = 4
 
 
 def _source_file_fingerprint(path: Path) -> Dict[str, object]:
@@ -21938,6 +21979,17 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
         "excel_only": _trading_journal_excel_only_mode(),
         "warning": "Cached journal shown. Sync required to include latest workbook changes." if is_stale else "",
     }
+    diag_errors = (snapshot.get("diagnostics") or {}).get("errors") if isinstance(snapshot.get("diagnostics"), dict) else []
+    missing_demo_anchor = any("Missing balance anchor for accounts: BYBIT DEMO" in str(e) for e in (diag_errors or []))
+    if missing_demo_anchor and _trading_journal_bybit_demo_balance_anchor_enabled():
+        sync_status = _sync_state_snapshot()
+        if not bool(sync_status.get("running")):
+            sync_status = _queue_trading_journal_sync_if_idle("bybit_demo_missing_balance_anchor")
+        payload["pending"] = True
+        payload["snapshot_stale"] = True
+        payload["ok"] = False
+        payload["warning"] = "BYBIT DEMO balance anchor repair queued. Journal cache is rebuilding."
+        payload["sync_status"] = sync_status
     _TRADING_JOURNAL_VIEW_CACHE["key"] = "snapshot"
     _TRADING_JOURNAL_VIEW_CACHE["payload"] = snapshot
     return JSONResponse(payload)
@@ -21972,6 +22024,24 @@ async def trading_journal_balances() -> JSONResponse:
     items = snapshot.get("balances") if isinstance(snapshot.get("balances"), list) else []
     diagnostics = snapshot.get("diagnostics") if isinstance(snapshot.get("diagnostics"), dict) else {}
     errors = diagnostics.get("errors") if isinstance(diagnostics.get("errors"), list) else []
+    missing_demo_anchor = any("Missing balance anchor for accounts: BYBIT DEMO" in str(e) for e in (errors or []))
+    if missing_demo_anchor and _trading_journal_bybit_demo_balance_anchor_enabled():
+        sync_status = _sync_state_snapshot()
+        if not bool(sync_status.get("running")):
+            sync_status = _queue_trading_journal_sync_if_idle("bybit_demo_missing_balance_anchor")
+        return JSONResponse(
+            {
+                "items": items,
+                "ok": False,
+                "pending": True,
+                "snapshot_stale": True,
+                "warning": "BYBIT DEMO balance anchor repair queued. Journal cache is rebuilding.",
+                "diagnostics": diagnostics,
+                "errors": errors,
+                "sync_status": sync_status,
+            },
+            status_code=202,
+        )
     if items:
         return JSONResponse({"items": items, "ok": not bool(errors), "diagnostics": diagnostics, "errors": errors}, status_code=200)
     if errors:
@@ -22147,22 +22217,11 @@ async def _run_trading_journal_sync_job() -> None:
                     )
                 except Exception as exc:
                     broker_balance_warnings.append(f"Bybit {account_mode} balance unavailable: {exc}")
-        if broker_account_balances or broker_balance_warnings:
-            state = _load_trading_journal_state()
-            state["broker_account_balances"] = broker_account_balances
-            diagnostics = state.get("broker_balance_diagnostics")
-            diag = diagnostics if isinstance(diagnostics, dict) else {}
-            diag["warnings"] = broker_balance_warnings
-            diag["updated_at"] = _utc_now_iso()
-            state["broker_balance_diagnostics"] = diag
-            _save_trading_journal_state(state)
-
         source_mode = _trading_journal_source_mode()
         if (
             source_mode == "local"
-            and broker_refresh_enabled
+            and _trading_journal_bybit_demo_balance_anchor_enabled()
             and _trading_journal_local_excel_authoritative()
-            and ENABLE_BYBIT_DEMO_JOURNAL
         ):
             try:
                 workbook_path = _resolve_local_journal_file(BYBIT_DEMO_WORKBOOK_NAME, TRADING_JOURNAL_LOCAL_DIR)
@@ -22172,6 +22231,20 @@ async def _run_trading_journal_sync_job() -> None:
                 if _bybit_demo_workbook_has_rows_needing_balance(wb_frame):
                     try:
                         demo_snapshot = await _fetch_bybit_demo_current_balance_snapshot()
+                        demo_balance = _to_float((demo_snapshot or {}).get("current_balance"))
+                        if demo_balance is not None:
+                            broker_account_balances.append(
+                                {
+                                    "account": "Bybit Demo",
+                                    "label": "Bybit Demo",
+                                    "balance": demo_balance,
+                                    "currency": "USDT",
+                                    "source": "bybit_demo_wallet_balance_anchor",
+                                    "balance_source": "bybit_demo_wallet_balance_anchor",
+                                    "account_mode": "demo",
+                                    "as_of": (demo_snapshot or {}).get("snapshot_at") or _utc_now_iso(),
+                                }
+                            )
                         await asyncio.to_thread(_sanitize_bybit_demo_local_workbook, TRADING_JOURNAL_LOCAL_DIR, demo_snapshot)
                     except Exception as exc:
                         broker_balance_warnings.append(
@@ -22182,6 +22255,8 @@ async def _run_trading_journal_sync_job() -> None:
                         )
             except Exception as exc:
                 broker_balance_warnings.append(f"Bybit demo workbook pre-sanitize failed: {exc}")
+        if broker_account_balances or broker_balance_warnings:
+            _save_broker_balance_diagnostics_state(broker_account_balances, broker_balance_warnings)
         if source_mode == "local":
             _cb(25, "Importing local journal workbooks…")
         elif source_mode == "dropbox":

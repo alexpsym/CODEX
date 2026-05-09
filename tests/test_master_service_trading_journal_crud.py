@@ -368,6 +368,7 @@ def test_run_sync_job_local_profile_skips_broker_refresh(monkeypatch: pytest.Mon
     monkeypatch.setattr(master_service, "APP_PROFILE", "journal")
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_SOURCE", "local")
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_BROKER_REFRESH_ENABLED", False)
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_BYBIT_DEMO_BALANCE_ANCHOR_ENABLED", False)
     calls = {"balance": 0, "closed": 0}
 
     async def _fake_balance(_mode):
@@ -468,6 +469,18 @@ def test_trading_journal_items_existing_snapshot_returns_200(temp_state_paths, m
     assert response.status_code == 200
     assert payload["count"] == 1
     assert payload["items"][0]["id"] == "manual:1"
+
+
+def test_load_view_snapshot_rejects_old_cache_version(temp_state_paths):
+    master_service._save_json_file(
+        master_service.TRADING_JOURNAL_VIEW_CACHE_PATH,
+        {
+            "cache_version": 3,
+            "source_fingerprints": {"source_mode": "local", "files": []},
+            "items": [],
+        },
+    )
+    assert master_service._load_trading_journal_view_snapshot() is None
 
 
 def test_trading_journal_items_failed_sync_without_snapshot_returns_503(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
