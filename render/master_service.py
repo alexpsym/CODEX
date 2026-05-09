@@ -291,16 +291,39 @@ def _env_source_hint() -> str:
 
 
 def _parse_iso_datetime(value: object) -> datetime | None:
-    if not isinstance(value, str) or not value.strip():
+    if value in (None, ""):
         return None
-    text = value.strip().replace("Z", "+00:00")
+    if isinstance(value, datetime):
+        dt = value
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except Exception:
+            pass
     try:
-        parsed = datetime.fromisoformat(text)
+        parsed_pd = pd.to_datetime(value, utc=True, errors="coerce")
     except Exception:
         return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+    if parsed_pd is None or pd.isna(parsed_pd):
+        return None
+    if hasattr(parsed_pd, "to_pydatetime"):
+        dt = parsed_pd.to_pydatetime()
+        if isinstance(dt, datetime):
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+    return None
 
 
 def _pid_is_alive(pid: object) -> bool:
@@ -647,7 +670,17 @@ def _save_broker_balance_diagnostics_state(
     state["broker_account_balances"] = merged
     diagnostics = state.get("broker_balance_diagnostics")
     diag = diagnostics if isinstance(diagnostics, dict) else {}
-    diag["warnings"] = [str(w) for w in (broker_balance_warnings or []) if str(w).strip()]
+    warning_values = [str(w) for w in (broker_balance_warnings or []) if str(w).strip()]
+    diag["warnings"] = warning_values
+    anchor_fp = hashlib.sha256(json.dumps(_journal_source_fingerprint(), sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    diag["bybit_demo_anchor_fingerprint"] = anchor_fp
+    if any(
+        ("wallet snapshot unavailable" in w.lower())
+        or ("no numeric current_balance" in w.lower())
+        or ("missing cred" in w.lower())
+        for w in warning_values
+    ):
+        diag["bybit_demo_anchor_last_failure_fingerprint"] = anchor_fp
     diag["updated_at"] = _utc_now_iso()
     state["broker_balance_diagnostics"] = diag
     _save_trading_journal_state(state)
@@ -658,6 +691,10 @@ def _should_auto_queue_bybit_demo_anchor_repair() -> bool:
     diag = state.get("broker_balance_diagnostics") if isinstance(state, dict) else {}
     warnings = diag.get("warnings") if isinstance(diag, dict) else []
     texts = [str(w).lower() for w in warnings] if isinstance(warnings, list) else []
+    current_fp = hashlib.sha256(json.dumps(_journal_source_fingerprint(), sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    last_failure_fp = str((diag or {}).get("bybit_demo_anchor_last_failure_fingerprint") or "")
+    if last_failure_fp and last_failure_fp != current_fp:
+        return True
     blocking = any(
         ("wallet snapshot unavailable" in t)
         or ("no numeric current_balance" in t)
@@ -665,6 +702,8 @@ def _should_auto_queue_bybit_demo_anchor_repair() -> bool:
         or ("credential" in t and "missing" in t)
         for t in texts
     )
+    if last_failure_fp and last_failure_fp == current_fp:
+        return False
     return not blocking
 
 
@@ -10148,29 +10187,6 @@ def _to_dt_utc(value: object) -> Optional[datetime]:
         return dt.astimezone(timezone.utc)
     except Exception:
         return None
-
-
-def _parse_iso_datetime(value: object) -> Optional[datetime]:
-    if value in (None, ""):
-        return None
-    if isinstance(value, datetime):
-        dt = value
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
-    try:
-        parsed = pd.to_datetime(value, utc=True, errors="coerce")
-    except Exception:
-        return None
-    if parsed is None or pd.isna(parsed):
-        return None
-    if hasattr(parsed, "to_pydatetime"):
-        dt = parsed.to_pydatetime()
-        if isinstance(dt, datetime):
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone(timezone.utc)
-    return None
 
 
 def _load_pending_webhooks() -> List[Dict[str, object]]:
