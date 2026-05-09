@@ -22327,6 +22327,23 @@ async def download_oanda_history_export(job_id: str) -> FileResponse:
 
 @app.post("/api/oanda-history/export/{job_id}/backfill-journal")
 async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
+    def _coerce_append_stats(stats: object) -> Dict[str, object]:
+        if isinstance(stats, dict):
+            return {
+                "changed": int(stats.get("changed") or 0),
+                "inserted": int(stats.get("inserted") or 0),
+                "updated": int(stats.get("updated") or 0),
+                "legacy_rows_migrated": int(stats.get("legacy_rows_migrated") or 0),
+                "legacy_migration_performed": bool(stats.get("legacy_migration_performed")),
+            }
+        changed = int(stats or 0)
+        return {
+            "changed": changed,
+            "inserted": changed,
+            "updated": 0,
+            "legacy_rows_migrated": 0,
+            "legacy_migration_performed": False,
+        }
     job = OANDA_HISTORY_JOBS.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Export job not found.")
@@ -22349,7 +22366,8 @@ async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
     updated = 0
     append_error = None
     try:
-        stats = _append_oanda_export_rows_to_local_workbook(account_mode, mapped, str(job.output_path), return_stats=True)
+        stats_raw = _append_oanda_export_rows_to_local_workbook(account_mode, mapped, str(job.output_path), return_stats=True)
+        stats = _coerce_append_stats(stats_raw)
         changed = int(stats.get("changed") or 0)
         inserted = int(stats.get("inserted") or 0)
         updated = int(stats.get("updated") or 0)
