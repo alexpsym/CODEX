@@ -108,3 +108,18 @@ def test_trading_journal_stat_trade_filter_wiring_present() -> None:
     assert "js_version: TJ_JS_VERSION" in js
     assert "payload.cache_schema_version" in js
     assert "payload.js_version" in js
+
+def test_monthly_aud_reval_rendering_hooks_present() -> None:
+    js = JS_PATH.read_text(encoding="utf-8")
+    assert "function isMonthlyAudRevalRow(row)" in js
+    assert "if (isMonthlyAud)" in js
+    assert "Monthly Bybit Live AUD P/L note; excluded from trading metrics." in js
+    assert "const isTrade = rowType === 'trade' || !rowType;" in js
+
+    assert "r?.raw_refs?.period_month" in js
+    assert "r?.result_currency" in js
+    assert "r?.result_cash" in js
+    assert "r?.row_type" in js
+    assert "r?.id" in js
+    assert "{ key: 'chart', header: 'Chart', value: (r) => { if (isMonthlyAudRevalRow(r)) return '';" in js
+    assert "{ key: 'actions', header: 'Actions', value: (r) => { if (isMonthlyAudRevalRow(r)) return '';" in js
