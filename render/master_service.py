@@ -4667,6 +4667,17 @@ def _build_journal_balance_timelines(
         if "ORDER_FILL" in refs_text.upper() or ("BALANCE" in excel_keys and "TRANSACTION DATE" in excel_keys):
             return bal
         return None
+
+    def _is_authoritative_account_balance_seed(seed: Dict[str, object]) -> bool:
+        source = str(seed.get("balance_source") or seed.get("source") or "").strip().lower()
+        if source in {"oanda_transaction_export_balance", "oanda_account_summary", "broker_account_summary", "account_summary"}:
+            return True
+        if source in {"excel", "local_excel"}:
+            raw_refs = seed.get("raw_refs") if isinstance(seed.get("raw_refs"), dict) else {}
+            refs_text = " ".join(str(raw_refs.get(k) or "") for k in ("transaction_type", "details", "sheet", "workbook"))
+            if "ORDER_FILL" in refs_text.upper() or "TRANSACTION" in refs_text.upper():
+                return True
+        return False
     def _to_ts(value: object) -> float:
         if value in (None, ""):
             return float("-inf")
@@ -4702,6 +4713,14 @@ def _build_journal_balance_timelines(
         by_account[key]["excel_balance"] = _to_float(bal.get("balance"))
         by_account[key]["excel_label"] = label
         by_account[key]["excel_currency"] = str(bal.get("currency") or "").strip()
+        by_account[key]["excel_balance_source"] = str(bal.get("balance_source") or bal.get("source") or "excel_account_balance")
+        excel_as_of = bal.get("as_of")
+        raw_refs = bal.get("raw_refs") if isinstance(bal.get("raw_refs"), dict) else {}
+        if not excel_as_of:
+            excel_as_of = raw_refs.get("transaction_date")
+        by_account[key]["excel_balance_as_of"] = excel_as_of
+        by_account[key]["excel_balance_ts"] = _to_ts(excel_as_of)
+        by_account[key]["excel_balance_authoritative"] = _is_authoritative_account_balance_seed(bal)
 
     diagnostics: Dict[str, Dict[str, object]] = {}
     balances: List[Dict[str, object]] = []
@@ -4783,9 +4802,23 @@ def _build_journal_balance_timelines(
                 latest_authoritative_ts = ts
                 latest_authoritative_balance = value
 
+        authoritative_seed_balance = _to_float(bucket.get("excel_balance")) if bool(bucket.get("excel_balance_authoritative")) else None
+        authoritative_seed_ts = _to_ts(bucket.get("excel_balance_as_of")) if authoritative_seed_balance is not None else float("-inf")
+        authoritative_seed_source = str(bucket.get("excel_balance_source") or "excel_account_balance")
+
         display_balance: Optional[float] = None
         balance_source = "timeline_missing"
         as_of: Optional[object] = None
+        authoritative_balance_used: Optional[float] = None
+        authoritative_balance_source: Optional[str] = None
+        latest_authoritative_at: Optional[object] = None
+        latest_authoritative_ts = latest_authoritative_ts if latest_authoritative_balance is not None else float("-inf")
+        if authoritative_seed_balance is not None and authoritative_seed_ts >= latest_authoritative_ts:
+            latest_authoritative_ts = authoritative_seed_ts
+            latest_authoritative_at = bucket.get("excel_balance_as_of")
+        elif latest_authoritative_balance is not None:
+            latest_authoritative_at = next((out_rows[i].get("close_time") or out_rows[i].get("open_time") for i in reversed(trade_indices) if _to_ts(out_rows[i].get("close_time") or out_rows[i].get("open_time")) == latest_authoritative_ts), None)
+
         if has_cashflow:
             latest_event_idx = len(events) - 1
             base = _to_float(events[latest_event_idx].get("new_balance"))
@@ -4798,10 +4831,30 @@ def _build_journal_balance_timelines(
                 display_balance = latest_authoritative_balance
                 balance_source = "authoritative_trade_balance"
                 as_of = next((out_rows[i].get("close_time") or out_rows[i].get("open_time") for i in reversed(trade_indices) if _to_ts(out_rows[i].get("close_time") or out_rows[i].get("open_time")) == latest_authoritative_ts), None)
+                authoritative_balance_used = latest_authoritative_balance
+                authoritative_balance_source = "authoritative_trade_balance"
+                latest_authoritative_at = as_of
+            elif authoritative_seed_balance is not None:
+                display_balance = authoritative_seed_balance
+                balance_source = authoritative_seed_source
+                as_of = bucket.get("excel_balance_as_of")
+                authoritative_balance_used = authoritative_seed_balance
+                authoritative_balance_source = authoritative_seed_source
+                latest_authoritative_at = as_of
         elif last_known_balance is not None:
             display_balance = last_known_balance
             balance_source = "trade_timeline"
             as_of = next((out_rows[i].get("close_time") or out_rows[i].get("open_time") for i in reversed(trade_indices) if _to_ts(out_rows[i].get("close_time") or out_rows[i].get("open_time")) == last_known_ts), None)
+            authoritative_balance_used = latest_authoritative_balance
+            authoritative_balance_source = "authoritative_trade_balance" if latest_authoritative_balance is not None else None
+            latest_authoritative_at = as_of if latest_authoritative_balance is not None else latest_authoritative_at
+        elif authoritative_seed_balance is not None:
+            display_balance = authoritative_seed_balance
+            balance_source = authoritative_seed_source
+            as_of = bucket.get("excel_balance_as_of")
+            authoritative_balance_used = authoritative_seed_balance
+            authoritative_balance_source = authoritative_seed_source
+            latest_authoritative_at = as_of
         elif _to_float(bucket.get("excel_balance")) is not None:
             display_balance = _to_float(bucket.get("excel_balance"))
             balance_source = "excel_account_balance"
@@ -4823,7 +4876,7 @@ def _build_journal_balance_timelines(
                 "as_of": as_of,
                 "missing_balance": missing_balance,
                 "last_trade_at": (out_rows[trade_indices[-1]].get("close_time") or out_rows[trade_indices[-1]].get("open_time")) if trade_indices else None,
-                "stale_cashflow_overridden": bool(events and latest_authoritative_balance is not None and _to_ts(events[-1].get("date")) <= latest_authoritative_ts),
+                "stale_cashflow_overridden": bool(events and display_balance is not None and balance_source != "cashflow_anchor_plus_trades" and _to_ts(events[-1].get("date")) <= latest_authoritative_ts),
             }
         )
         diagnostics[account_key] = {
@@ -4832,11 +4885,12 @@ def _build_journal_balance_timelines(
             "trade_rows": len(trade_indices),
             "missing_balance": missing_balance,
             "latest_cashflow_at": events[-1].get("date") if events else None,
-            "latest_authoritative_balance_at": next((out_rows[i].get("close_time") or out_rows[i].get("open_time") for i in reversed(trade_indices) if _to_ts(out_rows[i].get("close_time") or out_rows[i].get("open_time")) == latest_authoritative_ts), None) if latest_authoritative_balance is not None else None,
+            "latest_authoritative_balance_at": latest_authoritative_at,
             "balance_source": balance_source,
-            "stale_cashflow_overridden": bool(events and latest_authoritative_balance is not None and _to_ts(events[-1].get("date")) <= latest_authoritative_ts),
+            "stale_cashflow_overridden": bool(events and display_balance is not None and balance_source != "cashflow_anchor_plus_trades" and _to_ts(events[-1].get("date")) <= latest_authoritative_ts),
             "previous_cashflow_balance": _to_float(events[-1].get("new_balance")) if events else None,
-            "authoritative_balance_used": latest_authoritative_balance,
+            "authoritative_balance_used": authoritative_balance_used if authoritative_balance_used is not None else latest_authoritative_balance,
+            "authoritative_balance_source": authoritative_balance_source,
             "warning": "No cashflow or authoritative trade balance anchor found." if missing_balance else "",
         }
     balances = sorted(balances, key=lambda x: str(x.get("label") or x.get("account") or ""))
@@ -5128,7 +5182,9 @@ def _parse_local_trading_journal_workbook(path: Path) -> Tuple[List[Dict[str, ob
         if isinstance(row, dict):
             row["source"] = "local_excel"
     if isinstance(balance, dict):
-        balance["source"] = "local_excel"
+        balance["import_source"] = "local_excel"
+        if not str(balance.get("balance_source") or "").strip():
+            balance["source"] = "local_excel"
     return rows, balance
 
 

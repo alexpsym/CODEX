@@ -1063,6 +1063,43 @@ def test_oanda_broker_balance_overrides_reconstructed_timeline_balance():
     assert merged[0]["resolved_or_overridden_with_broker"] is True
 
 
+def test_oanda_export_account_balance_overrides_stale_cashflow_without_trade_rows():
+    rows = []
+    ledger = {"OANDA DEMO": [{"account": "OANDA DEMO", "date": "2022-05-05T00:00:00Z", "new_balance": 202.12, "currency": "AUD"}]}
+    excel_balances = [
+        {
+            "account": "OANDA DEMO",
+            "label": "OANDA DEMO",
+            "balance": 1500.65,
+            "currency": "AUD",
+            "source": "local_excel",
+            "balance_source": "oanda_transaction_export_balance",
+            "as_of": "2026-04-09T00:00:00Z",
+        }
+    ]
+    timeline = master_service._build_journal_balance_timelines(rows, ledger, excel_balances)
+    bal = timeline["balances"][0]
+    diag = timeline["diagnostics"][master_service._norm_account_key("OANDA DEMO")]
+    assert bal["balance"] == pytest.approx(1500.65)
+    assert bal["balance_source"] == "oanda_transaction_export_balance"
+    assert diag["stale_cashflow_overridden"] is True
+    assert diag["balance_source"] == "oanda_transaction_export_balance"
+
+
+def test_local_oanda_export_balance_source_is_preserved(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    path = tmp_path / "OANDA DEMO.xls"
+    path.write_bytes(b"x")
+    monkeypatch.setattr(
+        master_service,
+        "_parse_excel_account_workbook",
+        lambda *_a, **_k: ([], {"account": "OANDA DEMO", "label": "OANDA DEMO", "balance": 1500.65, "source": "oanda_transaction_export_balance", "balance_source": "oanda_transaction_export_balance"}),
+    )
+    _rows, balance = master_service._parse_local_trading_journal_workbook(path)
+    assert balance["balance_source"] == "oanda_transaction_export_balance"
+    assert balance["source"] == "oanda_transaction_export_balance"
+    assert balance["import_source"] == "local_excel"
+
+
 def test_parse_excel_balance_uses_latest_trade_timestamp_not_bottom_row(monkeypatch: pytest.MonkeyPatch):
     df = master_service.pd.DataFrame(
         [
