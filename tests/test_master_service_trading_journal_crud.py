@@ -1169,7 +1169,14 @@ def test_balance_timeline_diagnostics_no_authoritative_candidate_no_nameerror():
 
 
 def test_oanda_export_generic_filename_relabels_to_single_existing_oanda_cashflow_account():
-    balances = [{"account": "oanda_history_test", "label": "oanda_history_test", "balance": 1500.65, "balance_source": "oanda_transaction_export_balance"}]
+    balances = [{
+        "account": "oanda_history_test",
+        "label": "oanda_history_test",
+        "balance": 1500.65,
+        "balance_source": "oanda_transaction_export_balance",
+        "as_of": "2026-04-30T09:46:41+00:00",
+        "raw_refs": {"transaction_date": "2026-04-30T09:46:41+00:00", "workbook": "oanda_history_test.xlsx"},
+    }]
     ledger = {"OANDA DEMO": [{"account": "OANDA DEMO", "date": "2022-05-05T00:00:00Z", "new_balance": 202.12, "currency": "AUD"}]}
     relabeled, warnings = master_service._reconcile_oanda_export_balance_labels(balances, ledger)
     timeline = master_service._build_journal_balance_timelines([], ledger, relabeled)
@@ -1177,6 +1184,16 @@ def test_oanda_export_generic_filename_relabels_to_single_existing_oanda_cashflo
     assert warnings == []
     assert "oanda_history_test" not in labels
     assert labels["OANDA DEMO"]["balance"] == pytest.approx(1500.65)
+
+
+def test_oanda_export_balance_without_timestamp_does_not_silently_override_cashflow():
+    balances = [{"account": "oanda_history_test", "label": "oanda_history_test", "balance": 1500.65, "balance_source": "oanda_transaction_export_balance"}]
+    ledger = {"OANDA DEMO": [{"account": "OANDA DEMO", "date": "2022-05-05T00:00:00Z", "new_balance": 202.12, "currency": "AUD"}]}
+    relabeled, warnings = master_service._reconcile_oanda_export_balance_labels(balances, ledger)
+    timeline = master_service._build_journal_balance_timelines([], ledger, relabeled)
+    labels = {b["label"]: b for b in timeline["balances"]}
+    assert labels["OANDA DEMO"]["balance"] == pytest.approx(202.12)
+    assert any("oanda_export_balance_missing_timestamp" in w for w in warnings)
 
 
 def test_oanda_export_generic_filename_is_ambiguous_when_demo_and_live_exist():

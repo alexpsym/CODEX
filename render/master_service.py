@@ -1240,6 +1240,14 @@ def _reconcile_oanda_export_balance_labels(
             target = label
         patched["account"] = target
         patched["label"] = target
+        as_of = patched.get("as_of")
+        raw_refs = patched.get("raw_refs") if isinstance(patched.get("raw_refs"), dict) else {}
+        if not as_of:
+            as_of = raw_refs.get("transaction_date")
+        if not str(as_of or "").strip():
+            warnings.append(
+                f"oanda_export_balance_missing_timestamp: cannot prove export balance is newer than cashflow for {target}."
+            )
         reconciled.append(patched)
     return reconciled, warnings
 
