@@ -980,6 +980,8 @@ def _journal_source_fingerprint() -> dict:
     source_files.append(_source_file_fingerprint(TRADING_JOURNAL_PATH))
     source_files.append(_source_file_fingerprint(TRADING_JOURNAL_STATE_PATH))
     source_files.append(_source_file_fingerprint(OANDA_FILL_STATE_PATH))
+    source_files.append(_source_file_fingerprint(MONTHLY_AUD_REVALUATION_PATH))
+    source_files.append(_source_file_fingerprint(MONTHLY_AUD_REVALUATION_STATE_PATH))
     source_files = sorted(source_files, key=lambda x: str(x.get("path") or ""))
     return {
         "source_mode": mode,
@@ -1030,6 +1032,7 @@ def _ensure_trading_journal_sqlite_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS journal_trades (id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, imported_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS journal_cashflows (id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, imported_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS journal_balances (account_key TEXT PRIMARY KEY, payload_json TEXT NOT NULL, imported_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS journal_notes (id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, imported_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS journal_metrics (id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, imported_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS journal_stats (snapshot_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, imported_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS journal_diagnostics (snapshot_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, imported_at TEXT NOT NULL);
@@ -1052,14 +1055,18 @@ def _persist_trading_journal_sqlite(snapshot: Dict[str, object], import_meta: Op
         conn.execute("DELETE FROM journal_trades")
         conn.execute("DELETE FROM journal_cashflows")
         conn.execute("DELETE FROM journal_balances")
+        conn.execute("DELETE FROM journal_notes")
         conn.execute("DELETE FROM journal_metrics")
         for row in items:
             if not isinstance(row, dict):
                 continue
             row_id = str(row.get("id") or uuid4().hex)
             payload_json = json.dumps(row, ensure_ascii=False)
-            if _row_type(row) == "cashflow":
+            row_type = _row_type(row)
+            if row_type == "cashflow":
                 conn.execute("INSERT OR REPLACE INTO journal_cashflows(id,payload_json,imported_at) VALUES(?,?,?)", (row_id, payload_json, now_iso))
+            elif row_type == "monthly_aud_reval":
+                conn.execute("INSERT OR REPLACE INTO journal_notes(id,payload_json,imported_at) VALUES(?,?,?)", (row_id, payload_json, now_iso))
             else:
                 conn.execute("INSERT OR REPLACE INTO journal_trades(id,payload_json,imported_at) VALUES(?,?,?)", (row_id, payload_json, now_iso))
                 metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
@@ -1125,9 +1132,11 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
     timeline = _build_journal_balance_timelines(rows, ledger, excel_balances)
     trade_items = _enrich_trade_row_metrics(timeline.get("rows") if isinstance(timeline.get("rows"), list) else rows)
     cashflow_rows = [r for r in _cashflow_rows_for_journal(ledger) if isinstance(r, dict) and not _exclude_bybit_demo_row(r)]
-    combined_items = sorted([*trade_items, *cashflow_rows], key=_row_sort_dt, reverse=True)
+    stats_items = sorted([*trade_items, *cashflow_rows], key=_row_sort_dt, reverse=True)
+    monthly_note_rows = _monthly_aud_revaluation_rows_for_journal_view()
+    combined_items = sorted([*trade_items, *cashflow_rows, *monthly_note_rows], key=_row_sort_dt, reverse=True)
     balances = timeline.get("balances") if isinstance(timeline.get("balances"), list) else []
-    stats = _compute_journal_stats(combined_items, balances)
+    stats = _compute_journal_stats(stats_items, balances)
     broker_balances = (state or {}).get("broker_account_balances") if isinstance(state, dict) else []
     if not isinstance(broker_balances, list):
         broker_balances = []
@@ -1154,6 +1163,9 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
             bal["repair_blocked_reason"] = blocked_reason
             bal["latest_oanda_demo_export_path"] = str(latest_export) if latest_export else ""
     diagnostics = _build_trading_journal_diagnostics_snapshot()
+    diagnostics["monthly_aud_revaluation_rows_visible"] = len(monthly_note_rows)
+    diagnostics["monthly_aud_revaluation_latest_month"] = max((str((r.get("raw_refs") or {}).get("period_month") or "") for r in monthly_note_rows), default="")
+    diagnostics["monthly_aud_revaluation_source_path"] = str(MONTHLY_AUD_REVALUATION_PATH)
     if oanda_balance_warnings:
         existing_errors = diagnostics.get("errors") if isinstance(diagnostics.get("errors"), list) else []
         diagnostics["errors"] = [*existing_errors, *oanda_balance_warnings]
@@ -3224,6 +3236,42 @@ def _get_monthly_aud_revaluation_rows() -> List[Dict[str, object]]:
     return items if isinstance(items, list) else []
 
 
+
+
+def _monthly_aud_revaluation_rows_for_journal_view() -> List[Dict[str, object]]:
+    dedup: Dict[str, Dict[str, object]] = {}
+    for row in _get_monthly_aud_revaluation_rows():
+        if not isinstance(row, dict) or str(row.get("row_type") or "").strip().lower() != "monthly_aud_reval":
+            continue
+        row_id = str(row.get("id") or "").strip()
+        close_time = row.get("close_time")
+        result_cash = _to_float(row.get("result_cash"))
+        result_currency = str(row.get("result_currency") or "").strip().upper()
+        account = str(row.get("account") or "").strip().lower()
+        account_label = str(row.get("account_label") or "").strip().lower()
+        if not row_id or not close_time or not math.isfinite(result_cash or float('nan')):
+            continue
+        if result_currency != "AUD":
+            continue
+        if "bybit live" not in {account, account_label}:
+            continue
+        out = dict(row)
+        out["row_type"] = "monthly_aud_reval"
+        out["source"] = out.get("source") or "bybit_monthly_aud_reval"
+        out["symbol"] = out.get("symbol") or "MONTHLY AUD P/L"
+        out["setup"] = out.get("setup") or "Monthly Bybit Live AUD P/L note - excluded from metrics"
+        out["chart_available"] = False
+        out.pop("net_profit", None)
+        out.pop("realized_pnl", None)
+        existing = dedup.get(row_id)
+        if not existing:
+            dedup[row_id] = out
+            continue
+        curr_key = str(out.get("updated_at") or out.get("close_time") or "")
+        prev_key = str(existing.get("updated_at") or existing.get("close_time") or "")
+        if curr_key >= prev_key:
+            dedup[row_id] = out
+    return list(dedup.values())
 def _set_monthly_aud_revaluation_rows(rows: List[Dict[str, object]]) -> None:
     _save_json_file(MONTHLY_AUD_REVALUATION_PATH, {"items": rows, "updated_at": _utc_now_iso()})
     _schedule_dropbox_upload_state_backup()
@@ -7850,6 +7898,9 @@ async def _run_monthly_aud_revaluation_sync(*, reason: str) -> Dict[str, object]
             logger=BYBIT_LOGGER,
         )
         if result.get("changed"):
+            _invalidate_trading_journal_view_snapshot()
+            _TRADING_JOURNAL_VIEW_CACHE["key"] = None
+            _TRADING_JOURNAL_VIEW_CACHE["payload"] = None
             _schedule_dropbox_upload_state_backup()
         state_snapshot = _load_json_file(MONTHLY_AUD_REVALUATION_STATE_PATH, {})
         return {"ok": True, "reason": reason, "started_at": started_at, "finished_at": _utc_now_iso(), "state": state_snapshot, **result}
@@ -22739,6 +22790,11 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
                 row.get("account_label"),
                 row.get("account"),
                 row.get("source"),
+                row.get("row_type"),
+                row.get("result_currency"),
+                row.get("result_cash"),
+                ((row.get("raw_refs") or {}).get("period_month") if isinstance(row.get("raw_refs"), dict) else ""),
+                row.get("id"),
                 row.get("sheet"),
                 row.get("timeframe"),
                 _display_test_trade(row),
