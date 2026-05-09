@@ -3997,6 +3997,78 @@ def _is_bybit_demo_source_path(path: object) -> bool:
     return text.endswith(f"/{BYBIT_DEMO_WORKBOOK_NAME.lower()}") or _is_bybit_demo_workbook_name(text)
 
 
+def _is_oanda_transaction_history_frame(df: pd.DataFrame) -> bool:
+    required = {"TICKET", "TRANSACTION DATE", "TRANSACTION TYPE", "DETAILS", "BALANCE"}
+    cols = {str(c).strip().upper() for c in df.columns}
+    return required.issubset(cols)
+
+
+def _journal_rows_from_oanda_transaction_history_frame(
+    df: pd.DataFrame, *, account_mode: str, account_label: str, source_path: str
+) -> Dict[str, object]:
+    def _parse_dt(value: object) -> Optional[str]:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        normalized = raw.replace(" AEST", " +10:00").replace(" AEDT", " +11:00")
+        try:
+            return pd.to_datetime(normalized, utc=True).isoformat()
+        except Exception:
+            return None
+    rows=[]; warnings=[]; unmatched_open=[]; unmatched_close=[]
+    frame=df.copy()
+    frame['_ticket_num']=pd.to_numeric(frame.get('TICKET'), errors='coerce')
+    frame['_dt']=frame.get('TRANSACTION DATE').map(_parse_dt)
+    frame=frame.sort_values(by=['_dt','_ticket_num'], kind='stable')
+    open_legs=defaultdict(list)
+    pending_client=defaultdict(list)
+    financing_alloc=defaultdict(float)
+    latest_balance=None; latest_asof=None
+    for _, r in frame.iterrows():
+        tx_type=str(r.get('TRANSACTION TYPE') or '').strip().upper()
+        details=str(r.get('DETAILS') or '').strip().upper()
+        symbol=str(r.get('INSTRUMENT') or '').strip().upper()
+        direction=str(r.get('DIRECTION') or '').strip().title()
+        ticket=str(r.get('TICKET') or '').strip()
+        when=r.get('_dt')
+        pl=_to_float(r.get('PL')); bal=_to_float(r.get('BALANCE'))
+        if bal is not None and when:
+            latest_balance=bal; latest_asof=when
+        if tx_type=='MARKET_ORDER' and details=='CLIENT_ORDER' and symbol:
+            u=_to_float(r.get('UNITS')); units=int(abs(u)) if u is not None else 0
+            if units>0:
+                pending_client[(symbol,units,direction.lower())].append({'sl':_to_float(r.get('STOP LOSS')),'tp':_to_float(r.get('TAKE PROFIT')),'ticket':ticket})
+            continue
+        if tx_type=='ORDER_FILL' and details=='MARKET_ORDER' and symbol:
+            u=_to_float(r.get('UNITS')); units=int(abs(u)) if u is not None else 0
+            if units<=0: continue
+            pend=pending_client.get((symbol,units,direction.lower())) or []
+            pctx=pend.pop(0) if pend else {}
+            open_legs[(symbol,units)].append({'ticket':ticket,'open_time':when,'symbol':_canonical_symbol(symbol),'side':direction,'units':units,'entry':_to_float(r.get('PRICE')),'sl':_to_float(r.get('STOP LOSS')) or pctx.get('sl'),'tp':_to_float(r.get('TAKE PROFIT')) or pctx.get('tp'),'spread':abs(_to_float(r.get('SPREAD COST')) or 0.0)})
+            continue
+        if tx_type=='DAILY_FINANCING':
+            fin=_to_float(r.get('FINANCING'))
+            if fin is None: continue
+            live=[v[-1] for v in open_legs.values() if v]
+            if len(live)==1: financing_alloc[live[0]['ticket']]+=fin
+            elif len(live)==0: warnings.append(f'unallocated_oanda_financing:{ticket}')
+            else: warnings.append(f'ambiguous_oanda_financing_allocation:{ticket}')
+            continue
+        if tx_type=='ORDER_FILL' and details in {'MARKET_ORDER_TRADE_CLOSE','TAKE_PROFIT_ORDER','STOP_LOSS_ORDER'} and symbol:
+            u=_to_float(r.get('UNITS')); units=int(abs(u)) if u is not None else 0
+            if units<=0: continue
+            bucket=open_legs.get((symbol,units)) or []
+            if not bucket:
+                unmatched_close.append(ticket); continue
+            o=bucket.pop(0)
+            alloc=financing_alloc.pop(o['ticket'],0.0)
+            net=(pl or 0.0)+alloc
+            rows.append(_normalize_journal_profit_fields({'id':f"oanda_export:{account_mode}:{o['ticket']}:{ticket}",'source':'oanda_transaction_export','account':account_mode,'account_label':account_label,'asset_class':'forex','symbol':o['symbol'],'side':o['side'],'status':'closed','open_time':o['open_time'],'close_time':when,'qty':units/100000.0,'qty_raw':units,'qty_unit':'lots','entry_price':o['entry'],'exit_price':_to_float(r.get('PRICE')),'stop_loss':o['sl'],'take_profit':o['tp'],'swap':alloc or None,'commission':abs(o.get('spread') or 0.0)+abs(_to_float(r.get('SPREAD COST')) or 0.0)+abs(_to_float(r.get('COMMISSION')) or 0.0)+abs(_to_float(r.get('GSL FEE')) or 0.0),'net_profit':net,'realized_pnl':net,'balance_after_trade':bal,'balance_after_trade_currency':'AUD','metrics':{'oanda_export_pl':pl,'oanda_export_financing_allocated':alloc},'raw_refs':{'source_path':source_path,'open_ticket':o['ticket'],'close_ticket':ticket,'close_details':details,'transaction_date':when,'transactionId':ticket},'updated_at':_utc_now_iso()}))
+    for legs in open_legs.values():
+        unmatched_open.extend([str(l.get('ticket') or '') for l in legs if str(l.get('ticket') or '')])
+    return {'rows':rows,'account_balance':{'source':'oanda_transaction_export_balance','balance_source':'oanda_transaction_export_balance','account':account_label,'label':account_label,'balance':latest_balance,'currency':'AUD','as_of':latest_asof,'dropbox_path':source_path},'warnings':warnings,'unmatched_open_fills':unmatched_open,'unmatched_close_fills':unmatched_close}
+
+
 def _parse_excel_account_workbook(
     file_name: str, dbx_path: str, payload: bytes
 ) -> Tuple[List[Dict[str, object]], Optional[Dict[str, object]]]:
@@ -4041,8 +4113,7 @@ def _parse_excel_account_workbook(
         swap_col = _first_present(df, ["swap"])
         commission_col = _first_present(df, ["commission", "fee", "fees", "cost"])
         pnl_col = _first_present(df, ["net_profit", "realized_pnl", "pnl", "profit", "pl", "net_pnl"])
-        oanda_export_columns = {"TRANSACTION DATE", "TRANSACTION TYPE", "DETAILS", "INSTRUMENT", "PL", "BALANCE"}
-        is_oanda_export_sheet = oanda_export_columns.issubset({str(c).strip().upper() for c in df.columns})
+        is_oanda_export_sheet = _is_oanda_transaction_history_frame(df)
         balance_after_trade_aliases = ["balance_after_trade", "bal_after_trade", "balance_after", "bal_after"]
         if is_oanda_export_sheet:
             balance_after_trade_aliases.append("balance")
@@ -4242,49 +4313,15 @@ def _parse_excel_account_workbook(
                 }))
 
         if is_oanda_export_sheet:
-            tx_date_col = _first_present(df, ["transaction_date"])
-            tx_type_col = _first_present(df, ["transaction_type"])
-            details_col = _first_present(df, ["details"])
-            bal_col = _first_present(df, ["balance"])
-            ticket_col = _first_present(df, ["ticket", "id"])
-            latest_row = None
-            latest_ts = float("-inf")
-            if bal_col and tx_date_col:
-                for _, row in df.iterrows():
-                    bal_val = _safe_float_from_row(row, bal_col)
-                    if bal_val is None:
-                        continue
-                    ts, _iso = _parse_oanda_export_datetime(row.get(tx_date_col))
-                    if ts != float("-inf") and ts >= latest_ts:
-                        latest_ts = ts
-                        latest_row = row
-            if latest_row is None and bal_col:
-                for _, row in df.iloc[::-1].iterrows():
-                    if _safe_float_from_row(row, bal_col) is not None:
-                        latest_row = row
-                        break
-            if latest_row is not None:
-                as_of = None
-                if tx_date_col:
-                    _, as_of = _parse_oanda_export_datetime(latest_row.get(tx_date_col))
-                account_balance = {
-                    "source": "oanda_transaction_export_balance",
-                    "balance_source": "oanda_transaction_export_balance",
-                    "account": account_label,
-                    "label": account_label,
-                    "balance": _safe_float_from_row(latest_row, bal_col),
-                    "currency": _infer_account_currency(account_label),
-                    "as_of": as_of,
-                    "dropbox_path": dbx_path,
-                    "raw_refs": {
-                        "ticket": _safe_str_from_row(latest_row, ticket_col),
-                        "transaction_type": _safe_str_from_row(latest_row, tx_type_col),
-                        "details": _safe_str_from_row(latest_row, details_col),
-                        "transaction_date": as_of,
-                        "sheet": sheet,
-                        "workbook": file_name,
-                    },
-                }
+            mode = "demo" if "demo" in account_label.lower() else "live"
+            parsed = _journal_rows_from_oanda_transaction_history_frame(
+                df,
+                account_mode=mode,
+                account_label=account_label,
+                source_path=dbx_path,
+            )
+            all_rows.extend(parsed.get("rows") or [])
+            account_balance = parsed.get("account_balance") or account_balance
             continue
 
         bal_col = _first_present(
@@ -5202,7 +5239,28 @@ def _list_local_trading_journal_workbooks() -> List[Path]:
         }:
             continue
         found.append(candidate)
-    return sorted(found, key=lambda p: p.name.lower())
+    # Prefer canonical xlsx workbooks when both legacy xls and xlsx exist.
+    xlsx_stems = {p.stem.strip().lower() for p in found if p.suffix.lower() == ".xlsx"}
+    filtered: List[Path] = []
+    for candidate in found:
+        if candidate.suffix.lower() == ".xls" and candidate.stem.strip().lower() in xlsx_stems:
+            continue
+        filtered.append(candidate)
+    return sorted(filtered, key=lambda p: p.name.lower())
+
+
+def _list_local_oanda_history_exports() -> List[Path]:
+    root = TRADING_JOURNAL_LOCAL_DIR
+    if not root.exists() or not root.is_dir():
+        return []
+    hits: List[Path] = []
+    for candidate in root.iterdir():
+        if not candidate.is_file() or candidate.suffix.lower() != ".csv":
+            continue
+        name = candidate.name.strip().lower()
+        if "oanda" in name and "history" in name:
+            hits.append(candidate)
+    return sorted(hits, key=lambda p: p.name.lower())
 
 
 def _local_journal_import_enabled() -> bool:
@@ -5280,6 +5338,30 @@ def _merge_duplicate_import_rows(primary: Dict[str, object], incoming: Dict[str,
 
 
 def _parse_local_trading_journal_workbook(path: Path) -> Tuple[List[Dict[str, object]], Optional[Dict[str, object]]]:
+    if path.suffix.lower() == ".csv":
+        df = pd.read_csv(path, encoding="utf-8-sig")
+        if _is_oanda_transaction_history_frame(df):
+            lower = path.name.lower()
+            account_mode = "demo" if "demo" in lower else ("live" if "live" in lower else "")
+            if not account_mode:
+                return [], {
+                    "source": "oanda_transaction_export_balance",
+                    "balance_source": "oanda_transaction_export_balance",
+                    "account": Path(path.name).stem,
+                    "label": Path(path.name).stem,
+                    "balance": None,
+                    "currency": "AUD",
+                    "raw_refs": {"warning": "ambiguous_oanda_export_account_mapping"},
+                }
+            account_label = "OANDA DEMO" if account_mode == "demo" else "OANDA LIVE"
+            parsed = _journal_rows_from_oanda_transaction_history_frame(
+                df,
+                account_mode=account_mode,
+                account_label=account_label,
+                source_path=str(path),
+            )
+            return parsed.get("rows") or [], parsed.get("account_balance")
+        return [], None
     payload = path.read_bytes()
     rows, balance = _parse_excel_account_workbook(path.name, str(path), payload)
     for row in rows:
@@ -5605,6 +5687,10 @@ def _import_trading_journal_from_sources(
             errors.append({"file": "", "path": "dropbox", "error": str(exc)})
 
     local_files = _list_local_trading_journal_workbooks() if include_local else []
+    local_oanda_csvs = _list_local_oanda_history_exports() if include_local else []
+    for csv_path in local_oanda_csvs:
+        if csv_path not in local_files:
+            local_files.append(csv_path)
     diagnostics["local_workbooks_seen"] = len(local_files)
     diagnostics["local_workbook_names"] = [p.name for p in local_files]
     diagnostics["source_mode"] = source_mode
@@ -5865,9 +5951,16 @@ def _get_excel_account_balances() -> List[Dict[str, object]]:
 
 def _to_float(value: object) -> Optional[float]:
     try:
-        if value in (None, ""):
+        if value is None:
             return None
-        return float(value)
+        if pd.isna(value):
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        num = float(value)
+        if not math.isfinite(num):
+            return None
+        return num
     except (TypeError, ValueError):
         return None
 
@@ -14265,6 +14358,16 @@ def _append_generic_local_broker_rows(workbook_name: str, rows: List[Dict[str, o
         return changed
 
 
+def _canonical_local_oanda_workbook_name(account_mode: str) -> str:
+    mode = "demo" if str(account_mode).strip().lower() == "demo" else "live"
+    return "OANDA DEMO.xlsx" if mode == "demo" else "OANDA LIVE.xlsx"
+
+
+def _append_oanda_export_rows_to_local_workbook(account_mode: str, rows: List[Dict[str, object]], source_path: str) -> int:
+    workbook_name = _canonical_local_oanda_workbook_name(account_mode)
+    return _append_generic_local_broker_rows(workbook_name, rows, "oanda_transaction_export")
+
+
 async def _sync_bybit_closed_pnl_window(
     *,
     account_mode: str,
@@ -15206,7 +15309,7 @@ async def _recover_oanda_recent_fills(account: str, lookback_hours: int = 72) ->
         if journal_rows:
             if _trading_journal_local_excel_authoritative():
                 recovered_rows += _append_generic_local_broker_rows(
-                    "OANDA Demo.xlsx" if account == "demo" else "OANDA Live.xlsx",
+                    _canonical_local_oanda_workbook_name(account),
                     journal_rows,
                     "oanda_order_fill",
                 )
@@ -15284,7 +15387,7 @@ async def _poll_oanda_fills() -> None:
                     if journal_rows:
                         if _trading_journal_local_excel_authoritative():
                             _append_generic_local_broker_rows(
-                                "OANDA Demo.xlsx" if account == "demo" else "OANDA Live.xlsx",
+                                _canonical_local_oanda_workbook_name(account),
                                 journal_rows,
                                 "oanda_order_fill",
                             )
