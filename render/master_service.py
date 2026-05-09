@@ -5778,10 +5778,7 @@ def _import_trading_journal_from_sources(
                 mapped_label: Optional[str] = None
                 explicit_mode = ""
                 try:
-                    sidecar_candidates = [
-                        local_file.with_suffix(".json"),
-                        local_file.parent / f"{local_file.stem.replace('oanda_history_', 'oanda_history_').split('_', 2)[0]}_{local_file.stem.split('_')[-1]}.json",
-                    ]
+                    sidecar_candidates = [local_file.with_suffix(".json")]
                     for candidate in sidecar_candidates:
                         if candidate.exists():
                             meta = _load_json_file(candidate, {})
@@ -5852,12 +5849,12 @@ def _import_trading_journal_from_sources(
                     row["import_source"] = "local_excel"
                     all_rows[rid] = row
             if local_balance:
+                if has_oanda_export_balance:
+                    oanda_export_latest_balance = local_balance.get("balance")
+                    oanda_export_latest_balance_as_of = local_balance.get("as_of")
                 if skip_csv_rows_from_state and has_oanda_export_balance:
                     pass
                 else:
-                    if has_oanda_export_balance:
-                        oanda_export_latest_balance = local_balance.get("balance")
-                        oanda_export_latest_balance_as_of = local_balance.get("as_of")
                     local_balances.append(local_balance)
         except Exception as exc:
             err_payload: Dict[str, object] = {"file": local_file.name, "path": str(local_file), "error": str(exc)}
@@ -8260,7 +8257,7 @@ async def _run_oanda_history_export(job: OandaHistoryJob) -> None:
         await asyncio.to_thread(oanda_history_exporter.save_to_csv, transactions, output_path)
         if not output_path.exists():
             raise RuntimeError("OANDA history export failed to write CSV output.")
-        sidecar_path = OANDA_HISTORY_EXPORT_ROOT / f"oanda_history_{job.job_id}.json"
+        sidecar_path = output_path.with_suffix(".json")
         _save_json_file(
             sidecar_path,
             {
@@ -14504,6 +14501,17 @@ def _canonical_local_oanda_workbook_name(account_mode: str) -> str:
 
 def _append_oanda_export_rows_to_local_workbook(account_mode: str, rows: List[Dict[str, object]], source_path: str) -> int:
     workbook_name = _canonical_local_oanda_workbook_name(account_mode)
+    workbook_path = _local_journal_workbook_path(workbook_name)
+    legacy_name = "OANDA DEMO.xls" if str(account_mode).strip().lower() == "demo" else "OANDA LIVE.xls"
+    legacy_path = _local_journal_workbook_path(legacy_name)
+    if (not workbook_path.exists()) and legacy_path.exists():
+        try:
+            import xlrd as _xlrd  # noqa: F401
+        except Exception as exc:
+            raise RuntimeError("MISSING_XLRD_FOR_XLS") from exc
+        legacy_rows, _legacy_balance = _parse_local_trading_journal_workbook(legacy_path)
+        if legacy_rows:
+            _append_generic_local_broker_rows(workbook_name, legacy_rows, "local_excel")
     return _append_generic_local_broker_rows(workbook_name, rows, "oanda_transaction_export")
 
 

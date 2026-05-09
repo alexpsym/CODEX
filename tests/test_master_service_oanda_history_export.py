@@ -137,6 +137,8 @@ def test_oanda_history_export_filename_contains_account_mode(monkeypatch: pytest
     asyncio.run(master_service._run_oanda_history_export(live_job))
     assert demo_job.output_path is not None and "demo" in demo_job.output_path.name
     assert live_job.output_path is not None and "live" in live_job.output_path.name
+    assert demo_job.output_path.with_suffix(".json").exists()
+    assert live_job.output_path.with_suffix(".json").exists()
 
 
 import pandas as pd
