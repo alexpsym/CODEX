@@ -684,6 +684,8 @@ def _save_broker_balance_diagnostics_state(
     diag["updated_at"] = _utc_now_iso()
     state["broker_balance_diagnostics"] = diag
     _save_trading_journal_state(state)
+    _TRADING_JOURNAL_VIEW_CACHE["key"] = None
+    _TRADING_JOURNAL_VIEW_CACHE["payload"] = None
 
 
 def _should_auto_queue_bybit_demo_anchor_repair() -> bool:
@@ -1103,6 +1105,10 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
     balances_seed = [b for b in excel_balances if not _is_bybit_demo_account_label(b.get("label") or b.get("account"))]
     state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
     ledger = _load_cashflows_for_active_journal_source(state if isinstance(state, dict) else {})
+    excel_balances, oanda_balance_warnings = _reconcile_oanda_export_balance_labels(
+        excel_balances,
+        ledger,
+    )
     timeline = _build_journal_balance_timelines(rows, ledger, excel_balances)
     trade_items = _enrich_trade_row_metrics(timeline.get("rows") if isinstance(timeline.get("rows"), list) else rows)
     cashflow_rows = [r for r in _cashflow_rows_for_journal(ledger) if isinstance(r, dict) and not _exclude_bybit_demo_row(r)]
@@ -1114,6 +1120,9 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
         broker_balances = []
     balances = _merge_missing_timeline_balances_with_broker(balances, broker_balances)
     diagnostics = _build_trading_journal_diagnostics_snapshot()
+    if oanda_balance_warnings:
+        existing_errors = diagnostics.get("errors") if isinstance(diagnostics.get("errors"), list) else []
+        diagnostics["errors"] = [*existing_errors, *oanda_balance_warnings]
     timeline_diag = timeline.get("diagnostics") if isinstance(timeline.get("diagnostics"), dict) else {}
     def _diag_account_key_variants(value: object) -> Set[str]:
         raw = str(value or "").strip()
@@ -1171,6 +1180,76 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
     _TRADING_JOURNAL_VIEW_CACHE["key"] = "snapshot"
     _TRADING_JOURNAL_VIEW_CACHE["payload"] = payload
     return payload
+
+
+def _reconcile_oanda_export_balance_labels(
+    excel_balances: List[Dict[str, object]],
+    cashflow_ledger: Dict[str, List[Dict[str, object]]],
+) -> Tuple[List[Dict[str, object]], List[str]]:
+    def _is_oanda_account_key_or_label(value: object) -> bool:
+        text = str(value or "").strip().lower()
+        norm = _norm_account_key(value).strip().lower()
+        return ("oanda" in text) or ("oanda" in norm)
+
+    def _canonical_oanda_key(value: object) -> Optional[str]:
+        norm = _norm_account_key(value).strip().upper()
+        if not norm or "OANDA" not in norm:
+            return None
+        if "DEMO" in norm:
+            return "OANDA DEMO"
+        if "LIVE" in norm:
+            return "OANDA LIVE"
+        return norm
+
+    reconciled: List[Dict[str, object]] = []
+    warnings: List[str] = []
+    oanda_keys: Set[str] = set()
+    for key, events in (cashflow_ledger or {}).items():
+        if _is_oanda_account_key_or_label(key):
+            canon = _canonical_oanda_key(key)
+            if canon:
+                oanda_keys.add(canon)
+        for ev in (events or []):
+            acct = (ev or {}).get("account")
+            if _is_oanda_account_key_or_label(acct):
+                canon = _canonical_oanda_key(acct)
+                if canon:
+                    oanda_keys.add(canon)
+    for item in excel_balances or []:
+        if not isinstance(item, dict):
+            continue
+        patched = dict(item)
+        source = str(patched.get("balance_source") or patched.get("source") or "").strip().lower()
+        if source != "oanda_transaction_export_balance":
+            reconciled.append(patched)
+            continue
+        label = str(patched.get("label") or patched.get("account") or "").strip()
+        text = f"{label} {patched.get('dropbox_path') or ''}".lower()
+        if "demo" in text:
+            target = "OANDA DEMO"
+        elif "live" in text:
+            target = "OANDA LIVE"
+        elif len(oanda_keys) == 1:
+            target = next(iter(oanda_keys))
+        elif len(oanda_keys) > 1:
+            warnings.append(
+                f"ambiguous_oanda_export_account_mapping: cannot map export '{label}' to OANDA DEMO/LIVE without filename hint."
+            )
+            continue
+        else:
+            target = label
+        patched["account"] = target
+        patched["label"] = target
+        as_of = patched.get("as_of")
+        raw_refs = patched.get("raw_refs") if isinstance(patched.get("raw_refs"), dict) else {}
+        if not as_of:
+            as_of = raw_refs.get("transaction_date")
+        if not str(as_of or "").strip():
+            warnings.append(
+                f"oanda_export_balance_missing_timestamp: cannot prove export balance is newer than cashflow for {target}."
+            )
+        reconciled.append(patched)
+    return reconciled, warnings
 
 
 TRADING_JOURNAL_DROPBOX_RECURSIVE = os.getenv(
@@ -3916,6 +3995,16 @@ def _is_bybit_demo_source_path(path: object) -> bool:
 def _parse_excel_account_workbook(
     file_name: str, dbx_path: str, payload: bytes
 ) -> Tuple[List[Dict[str, object]], Optional[Dict[str, object]]]:
+    def _parse_oanda_export_datetime(value: object) -> Tuple[float, Optional[str]]:
+        raw = str(value or "").strip()
+        if not raw:
+            return float("-inf"), None
+        normalized = raw.replace(" AEST", " +10:00").replace(" AEDT", " +11:00")
+        try:
+            parsed = pd.to_datetime(normalized, utc=True)
+            return float(parsed.timestamp()), parsed.isoformat()
+        except Exception:
+            return float("-inf"), raw
     bio = io.BytesIO(payload)
     try:
         xls = pd.ExcelFile(bio, engine="openpyxl")
@@ -3947,10 +4036,12 @@ def _parse_excel_account_workbook(
         swap_col = _first_present(df, ["swap"])
         commission_col = _first_present(df, ["commission", "fee", "fees", "cost"])
         pnl_col = _first_present(df, ["net_profit", "realized_pnl", "pnl", "profit", "pl", "net_pnl"])
-        balance_after_trade_col = _first_present(
-            df,
-            ["balance_after_trade", "bal_after_trade", "balance_after", "bal_after"],
-        )
+        oanda_export_columns = {"TRANSACTION DATE", "TRANSACTION TYPE", "DETAILS", "INSTRUMENT", "PL", "BALANCE"}
+        is_oanda_export_sheet = oanda_export_columns.issubset({str(c).strip().upper() for c in df.columns})
+        balance_after_trade_aliases = ["balance_after_trade", "bal_after_trade", "balance_after", "bal_after"]
+        if is_oanda_export_sheet:
+            balance_after_trade_aliases.append("balance")
+        balance_after_trade_col = _first_present(df, balance_after_trade_aliases)
         sl_col = _first_present(df, ["stop_loss_optional", "stop_loss", "sl"])
         tp_col = _first_present(df, ["take_profit_optional", "take_profit", "tp"])
         high_col = _first_present(df, ["highest_price_optional", "highest_price"])
@@ -3983,7 +4074,7 @@ def _parse_excel_account_workbook(
             col is not None
             for col in [symbol_col, side_col, entry_col, exit_col, pnl_col, open_time_col, close_time_col]
         )
-        if symbol_col and trade_signal_count >= 3:
+        if symbol_col and trade_signal_count >= 3 and not is_oanda_export_sheet:
             for idx, row in df.iterrows():
                 symbol_raw = _safe_str_from_row(row, symbol_col)
                 if not symbol_raw or symbol_raw.lower() == "nan":
@@ -4144,6 +4235,52 @@ def _parse_excel_account_workbook(
                     },
                     "updated_at": _utc_now_iso(),
                 }))
+
+        if is_oanda_export_sheet:
+            tx_date_col = _first_present(df, ["transaction_date"])
+            tx_type_col = _first_present(df, ["transaction_type"])
+            details_col = _first_present(df, ["details"])
+            bal_col = _first_present(df, ["balance"])
+            ticket_col = _first_present(df, ["ticket", "id"])
+            latest_row = None
+            latest_ts = float("-inf")
+            if bal_col and tx_date_col:
+                for _, row in df.iterrows():
+                    bal_val = _safe_float_from_row(row, bal_col)
+                    if bal_val is None:
+                        continue
+                    ts, _iso = _parse_oanda_export_datetime(row.get(tx_date_col))
+                    if ts != float("-inf") and ts >= latest_ts:
+                        latest_ts = ts
+                        latest_row = row
+            if latest_row is None and bal_col:
+                for _, row in df.iloc[::-1].iterrows():
+                    if _safe_float_from_row(row, bal_col) is not None:
+                        latest_row = row
+                        break
+            if latest_row is not None:
+                as_of = None
+                if tx_date_col:
+                    _, as_of = _parse_oanda_export_datetime(latest_row.get(tx_date_col))
+                account_balance = {
+                    "source": "oanda_transaction_export_balance",
+                    "balance_source": "oanda_transaction_export_balance",
+                    "account": account_label,
+                    "label": account_label,
+                    "balance": _safe_float_from_row(latest_row, bal_col),
+                    "currency": _infer_account_currency(account_label),
+                    "as_of": as_of,
+                    "dropbox_path": dbx_path,
+                    "raw_refs": {
+                        "ticket": _safe_str_from_row(latest_row, ticket_col),
+                        "transaction_type": _safe_str_from_row(latest_row, tx_type_col),
+                        "details": _safe_str_from_row(latest_row, details_col),
+                        "transaction_date": as_of,
+                        "sheet": sheet,
+                        "workbook": file_name,
+                    },
+                }
+            continue
 
         bal_col = _first_present(
             df,
@@ -4600,6 +4737,37 @@ def _build_journal_balance_timelines(
     cashflow_ledger: Dict[str, List[Dict[str, object]]],
     excel_balances: List[Dict[str, object]],
 ) -> Dict[str, object]:
+    def _authoritative_balance_after_trade(row: Dict[str, object]) -> Optional[float]:
+        bal = _to_float(row.get("balance_after_trade"))
+        if bal is None:
+            return None
+        source = str(row.get("source") or "").strip().lower()
+        if source in {"oanda", "excel", "local_excel"}:
+            return bal
+        raw_refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+        raw_excel = row.get("raw_excel") if isinstance(row.get("raw_excel"), dict) else {}
+        refs_text = " ".join(str(raw_refs.get(k) or "") for k in ("transaction_type", "details", "sheet", "workbook"))
+        excel_keys = {str(k).strip().upper() for k in raw_excel.keys()}
+        if "ORDER_FILL" in refs_text.upper() or ("BALANCE" in excel_keys and "TRANSACTION DATE" in excel_keys):
+            return bal
+        return None
+
+    def _is_authoritative_account_balance_seed(seed: Dict[str, object]) -> bool:
+        source = str(seed.get("balance_source") or seed.get("source") or "").strip().lower()
+        if source in {"oanda_transaction_export_balance", "oanda_account_summary", "broker_account_summary", "account_summary"}:
+            return True
+        if source in {"excel", "local_excel"}:
+            raw_refs = seed.get("raw_refs") if isinstance(seed.get("raw_refs"), dict) else {}
+            refs_text = " ".join(str(raw_refs.get(k) or "") for k in ("transaction_type", "details", "sheet", "workbook"))
+            if "ORDER_FILL" in refs_text.upper() or "TRANSACTION" in refs_text.upper():
+                return True
+        return False
+    def _prefer_seed_on_tie(seed_source: str, seed_as_of: object) -> bool:
+        if not str(seed_as_of or "").strip():
+            return False
+        return str(seed_source or "").strip().lower() in {
+            "oanda_transaction_export_balance", "oanda_account_summary", "broker_account_summary", "account_summary"
+        }
     def _to_ts(value: object) -> float:
         if value in (None, ""):
             return float("-inf")
@@ -4635,6 +4803,14 @@ def _build_journal_balance_timelines(
         by_account[key]["excel_balance"] = _to_float(bal.get("balance"))
         by_account[key]["excel_label"] = label
         by_account[key]["excel_currency"] = str(bal.get("currency") or "").strip()
+        by_account[key]["excel_balance_source"] = str(bal.get("balance_source") or bal.get("source") or "excel_account_balance")
+        excel_as_of = bal.get("as_of")
+        raw_refs = bal.get("raw_refs") if isinstance(bal.get("raw_refs"), dict) else {}
+        if not excel_as_of:
+            excel_as_of = raw_refs.get("transaction_date")
+        by_account[key]["excel_balance_as_of"] = excel_as_of
+        by_account[key]["excel_balance_ts"] = _to_ts(excel_as_of)
+        by_account[key]["excel_balance_authoritative"] = _is_authoritative_account_balance_seed(bal)
 
     diagnostics: Dict[str, Dict[str, object]] = {}
     balances: List[Dict[str, object]] = []
@@ -4655,7 +4831,7 @@ def _build_journal_balance_timelines(
             row = out_rows[row_idx]
             trade_ts = _to_ts(row.get("close_time") or row.get("open_time"))
             pnl = _row_pnl(row)
-            authoritative_after = _to_float(row.get("balance_after_trade")) if str(row.get("source") or "").lower() in {"excel", "local_excel"} else None
+            authoritative_after = _authoritative_balance_after_trade(row)
 
             if has_cashflow:
                 anchor_idx = -1
@@ -4664,6 +4840,13 @@ def _build_journal_balance_timelines(
                         anchor_idx = i
                     else:
                         break
+                if authoritative_after is not None:
+                    before = authoritative_after - pnl if (pnl is not None and not _is_test_trade_row(row)) else authoritative_after
+                    row["analysis_balance_before_trade"] = before
+                    row["analysis_balance_after_trade"] = authoritative_after
+                    last_known_balance = authoritative_after
+                    last_known_ts = trade_ts
+                    continue
                 if anchor_idx >= 0:
                     if anchor_idx not in segment_running:
                         segment_running[anchor_idx] = _to_float(events[anchor_idx].get("new_balance")) or 0.0
@@ -4677,10 +4860,6 @@ def _build_journal_balance_timelines(
                     last_known_balance = after
                     last_known_ts = trade_ts
                     continue
-                if authoritative_after is not None:
-                    before = authoritative_after - pnl if (pnl is not None and not _is_test_trade_row(row)) else authoritative_after
-                    row["analysis_balance_before_trade"] = before
-                    row["analysis_balance_after_trade"] = authoritative_after
                 continue
 
             if authoritative_after is not None:
@@ -4701,20 +4880,77 @@ def _build_journal_balance_timelines(
                 last_known_balance = after
                 last_known_ts = trade_ts
 
+        latest_trade_authoritative_balance: Optional[float] = None
+        latest_trade_authoritative_ts = float("-inf")
+        latest_trade_authoritative_as_of: Optional[object] = None
+        for row_idx in trade_indices:
+            row = out_rows[row_idx]
+            value = _authoritative_balance_after_trade(row)
+            if value is None:
+                continue
+            ts = _to_ts(row.get("close_time") or row.get("open_time"))
+            if ts >= latest_trade_authoritative_ts:
+                latest_trade_authoritative_ts = ts
+                latest_trade_authoritative_balance = value
+                latest_trade_authoritative_as_of = row.get("close_time") or row.get("open_time")
+
+        authoritative_seed_balance = _to_float(bucket.get("excel_balance")) if bool(bucket.get("excel_balance_authoritative")) else None
+        authoritative_seed_ts = _to_ts(bucket.get("excel_balance_as_of")) if authoritative_seed_balance is not None else float("-inf")
+        authoritative_seed_source = str(bucket.get("excel_balance_source") or "excel_account_balance")
+
         display_balance: Optional[float] = None
         balance_source = "timeline_missing"
         as_of: Optional[object] = None
+        authoritative_balance_used: Optional[float] = None
+        authoritative_balance_source: Optional[str] = None
+        latest_authoritative_at: Optional[object] = None
+        selected_authoritative_balance: Optional[float] = latest_trade_authoritative_balance
+        selected_authoritative_source: Optional[str] = "authoritative_trade_balance" if latest_trade_authoritative_balance is not None else None
+        selected_authoritative_ts = latest_trade_authoritative_ts if latest_trade_authoritative_balance is not None else float("-inf")
+        selected_authoritative_as_of: Optional[object] = latest_trade_authoritative_as_of
+        if authoritative_seed_balance is not None:
+            if (
+                authoritative_seed_ts > selected_authoritative_ts
+                or (
+                    authoritative_seed_ts == selected_authoritative_ts
+                    and _prefer_seed_on_tie(authoritative_seed_source, bucket.get("excel_balance_as_of"))
+                )
+            ):
+                selected_authoritative_balance = authoritative_seed_balance
+                selected_authoritative_source = authoritative_seed_source
+                selected_authoritative_ts = authoritative_seed_ts
+                selected_authoritative_as_of = bucket.get("excel_balance_as_of")
+        latest_authoritative_at = selected_authoritative_as_of
+
         if has_cashflow:
             latest_event_idx = len(events) - 1
             base = _to_float(events[latest_event_idx].get("new_balance"))
-            if base is not None:
+            latest_cashflow_ts = _to_ts(events[latest_event_idx].get("date"))
+            if base is not None and latest_cashflow_ts > selected_authoritative_ts:
                 display_balance = segment_running.get(latest_event_idx, base)
                 balance_source = "cashflow_anchor_plus_trades"
                 as_of = events[latest_event_idx].get("date")
+            elif selected_authoritative_balance is not None:
+                display_balance = selected_authoritative_balance
+                balance_source = str(selected_authoritative_source or "authoritative_trade_balance")
+                as_of = selected_authoritative_as_of
+                authoritative_balance_used = selected_authoritative_balance
+                authoritative_balance_source = balance_source
+                latest_authoritative_at = as_of
         elif last_known_balance is not None:
             display_balance = last_known_balance
             balance_source = "trade_timeline"
             as_of = next((out_rows[i].get("close_time") or out_rows[i].get("open_time") for i in reversed(trade_indices) if _to_ts(out_rows[i].get("close_time") or out_rows[i].get("open_time")) == last_known_ts), None)
+            authoritative_balance_used = selected_authoritative_balance
+            authoritative_balance_source = selected_authoritative_source
+            latest_authoritative_at = selected_authoritative_as_of if selected_authoritative_balance is not None else latest_authoritative_at
+        elif selected_authoritative_balance is not None:
+            display_balance = selected_authoritative_balance
+            balance_source = str(selected_authoritative_source or "authoritative_trade_balance")
+            as_of = selected_authoritative_as_of
+            authoritative_balance_used = selected_authoritative_balance
+            authoritative_balance_source = selected_authoritative_source
+            latest_authoritative_at = as_of
         elif _to_float(bucket.get("excel_balance")) is not None:
             display_balance = _to_float(bucket.get("excel_balance"))
             balance_source = "excel_account_balance"
@@ -4736,6 +4972,7 @@ def _build_journal_balance_timelines(
                 "as_of": as_of,
                 "missing_balance": missing_balance,
                 "last_trade_at": (out_rows[trade_indices[-1]].get("close_time") or out_rows[trade_indices[-1]].get("open_time")) if trade_indices else None,
+                "stale_cashflow_overridden": bool(events and display_balance is not None and balance_source != "cashflow_anchor_plus_trades" and _to_ts(events[-1].get("date")) <= selected_authoritative_ts),
             }
         )
         diagnostics[account_key] = {
@@ -4743,6 +4980,13 @@ def _build_journal_balance_timelines(
             "cashflow_events": len(events),
             "trade_rows": len(trade_indices),
             "missing_balance": missing_balance,
+            "latest_cashflow_at": events[-1].get("date") if events else None,
+            "latest_authoritative_balance_at": latest_authoritative_at,
+            "balance_source": balance_source,
+            "stale_cashflow_overridden": bool(events and display_balance is not None and balance_source != "cashflow_anchor_plus_trades" and _to_ts(events[-1].get("date")) <= selected_authoritative_ts),
+            "previous_cashflow_balance": _to_float(events[-1].get("new_balance")) if events else None,
+            "authoritative_balance_used": authoritative_balance_used if authoritative_balance_used is not None else (selected_authoritative_balance if balance_source != "cashflow_anchor_plus_trades" else None),
+            "authoritative_balance_source": authoritative_balance_source if authoritative_balance_used is not None else (selected_authoritative_source if balance_source != "cashflow_anchor_plus_trades" else None),
             "warning": "No cashflow or authoritative trade balance anchor found." if missing_balance else "",
         }
     balances = sorted(balances, key=lambda x: str(x.get("label") or x.get("account") or ""))
@@ -4837,11 +5081,21 @@ def _merge_missing_timeline_balances_with_broker(
             continue
         existing = dict(merged[existing_idx])
         existing_balance = _to_float(existing.get("balance"))
-        if existing_balance is not None and not bool(existing.get("missing_balance")):
-            continue
         if broker_balance is None:
             continue
+        existing_as_of_ts = _to_float(pd.to_datetime(existing.get("as_of"), utc=True).timestamp()) if existing.get("as_of") else None
+        broker_as_of_ts = _to_float(pd.to_datetime(broker.get("as_of"), utc=True).timestamp()) if broker.get("as_of") else None
+        if existing_balance is not None and not bool(existing.get("missing_balance")):
+            existing_source = str(existing.get("balance_source") or existing.get("source") or "").lower()
+            broker_source = str(broker.get("balance_source") or broker.get("source") or "").lower()
+            is_oanda_broker = broker_source == "oanda_account_summary"
+            can_override = "cashflow" in existing_source or (is_oanda_broker and existing_source == "authoritative_trade_balance")
+            if not can_override:
+                continue
+            if existing_as_of_ts is not None and broker_as_of_ts is not None and existing_as_of_ts > broker_as_of_ts:
+                continue
         resolved = dict(existing)
+        resolved["previous_balance"] = existing_balance
         resolved["balance"] = broker_balance
         resolved["currency"] = str(broker.get("currency") or existing.get("currency") or _infer_account_currency(label))
         source = str(broker.get("source") or broker.get("balance_source") or "bybit_wallet_balance")
@@ -4849,7 +5103,9 @@ def _merge_missing_timeline_balances_with_broker(
         resolved["balance_source"] = str(broker.get("balance_source") or broker.get("source") or source)
         resolved["missing_balance"] = False
         resolved["resolved_missing_balance_with_broker"] = True
+        resolved["resolved_or_overridden_with_broker"] = True
         resolved["previous_balance_source"] = str(existing.get("balance_source") or existing.get("source") or "timeline_missing")
+        resolved["broker_balance_as_of"] = broker.get("as_of")
         if broker.get("as_of"):
             resolved["as_of"] = broker.get("as_of")
         merged[existing_idx] = resolved
@@ -5025,7 +5281,9 @@ def _parse_local_trading_journal_workbook(path: Path) -> Tuple[List[Dict[str, ob
         if isinstance(row, dict):
             row["source"] = "local_excel"
     if isinstance(balance, dict):
-        balance["source"] = "local_excel"
+        balance["import_source"] = "local_excel"
+        if not str(balance.get("balance_source") or "").strip():
+            balance["source"] = "local_excel"
     return rows, balance
 
 
@@ -22258,6 +22516,25 @@ async def _run_trading_journal_sync_job() -> None:
                     )
                 except Exception as exc:
                     broker_balance_warnings.append(f"Bybit {account_mode} balance unavailable: {exc}")
+            for account_mode in ("demo", "live"):
+                label = "OANDA DEMO" if account_mode == "demo" else "OANDA LIVE"
+                try:
+                    summary = await _fetch_oanda_account_summary(account_mode)
+                    broker_account_balances.append(
+                        {
+                            "account": label,
+                            "label": label,
+                            "balance": _to_float(summary.get("balance")),
+                            "nav": _to_float(summary.get("nav")),
+                            "currency": str(summary.get("currency") or "AUD"),
+                            "source": "oanda_account_summary",
+                            "balance_source": "oanda_account_summary",
+                            "account_mode": account_mode,
+                            "as_of": _utc_now_iso(),
+                        }
+                    )
+                except Exception as exc:
+                    broker_balance_warnings.append(f"OANDA {account_mode} account summary unavailable: {exc}")
         source_mode = _trading_journal_source_mode()
         if (
             source_mode == "local"
