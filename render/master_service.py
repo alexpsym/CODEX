@@ -5711,6 +5711,32 @@ def _import_trading_journal_from_sources(
             })
     local_rows_total = 0
     local_balances: List[Dict[str, object]] = []
+    oanda_export_trades_seen = 0
+    oanda_export_trades_backfilled = 0
+    oanda_export_target_workbook = ""
+    oanda_export_source_path = ""
+    oanda_export_latest_balance = None
+    oanda_export_latest_balance_as_of = None
+    known_oanda_accounts: set[str] = set()
+    try:
+        _state_for_mapping = _load_trading_journal_state()
+        _ledger_for_mapping = _load_cashflows_for_active_journal_source(
+            _state_for_mapping if isinstance(_state_for_mapping, dict) else {}
+        )
+        for acct in (_ledger_for_mapping or {}).keys():
+            label = str(acct or "").strip().upper()
+            if label in {"OANDA DEMO", "OANDA LIVE"}:
+                known_oanda_accounts.add(label)
+    except Exception:
+        pass
+    for existing in existing_rows:
+        label = str((existing or {}).get("account_label") or (existing or {}).get("account") or "").strip().upper()
+        if label in {"OANDA DEMO", "OANDA LIVE"}:
+            known_oanda_accounts.add(label)
+    for wb in local_files:
+        base = wb.stem.strip().upper()
+        if base in {"OANDA DEMO", "OANDA LIVE"}:
+            known_oanda_accounts.add(base)
     for local_file in local_files:
         try:
             local_rows, local_balance = _parse_local_trading_journal_workbook(local_file)
@@ -5722,10 +5748,46 @@ def _import_trading_journal_from_sources(
                 bybit_demo_rows_purged += purged
             local_kind = "explicit" if local_enabled else "default"
             local_rows_total += len(local_rows)
+            is_oanda_history_csv = local_file.suffix.lower() == ".csv" and "oanda" in local_file.name.lower() and "history" in local_file.name.lower()
+            has_oanda_export_rows = any(
+                str((r or {}).get("source") or "").strip().lower() == "oanda_transaction_export"
+                for r in local_rows
+            )
+            has_oanda_export_balance = (
+                isinstance(local_balance, dict)
+                and str(local_balance.get("balance_source") or "").strip().lower() == "oanda_transaction_export_balance"
+            )
+            if is_oanda_history_csv and (has_oanda_export_rows or has_oanda_export_balance):
+                oanda_export_trades_seen += len(local_rows)
+                lower_name = local_file.name.lower()
+                mapped_label: Optional[str] = None
+                if "demo" in lower_name:
+                    mapped_label = "OANDA DEMO"
+                elif "live" in lower_name:
+                    mapped_label = "OANDA LIVE"
+                elif len(known_oanda_accounts) == 1:
+                    mapped_label = list(known_oanda_accounts)[0]
+                elif len(known_oanda_accounts) > 1:
+                    warnings.append("ambiguous_oanda_export_account_mapping")
+                if mapped_label:
+                    mapped_mode = "live" if mapped_label.upper().endswith("LIVE") else "demo"
+                    mapped_rows: List[Dict[str, object]] = []
+                    for row in local_rows:
+                        if str((row or {}).get("source") or "").strip().lower() == "oanda_transaction_export":
+                            row["account"] = mapped_mode
+                            row["account_label"] = mapped_label
+                            mapped_rows.append(row)
+                    if mapped_rows:
+                        backfilled = _append_oanda_export_rows_to_local_workbook(mapped_mode, mapped_rows, str(local_file))
+                        oanda_export_trades_backfilled += int(backfilled)
+                        oanda_export_target_workbook = _canonical_local_oanda_workbook_name(mapped_mode)
+                        oanda_export_source_path = str(local_file)
             for row in local_rows:
                 rid = str(row.get("id") or "")
                 if rid:
-                    row["source"] = "local_excel"
+                    if str(row.get("source") or "").strip().lower() != "oanda_transaction_export":
+                        row["source"] = "local_excel"
+                    row["import_source"] = "local_excel"
                     row["_local_import_kind"] = local_kind
                     row["_workbook_source"] = str(local_file)
                     refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
@@ -5734,6 +5796,9 @@ def _import_trading_journal_from_sources(
                     row["raw_refs"] = refs
                     all_rows[rid] = row
             if local_balance:
+                if has_oanda_export_balance:
+                    oanda_export_latest_balance = local_balance.get("balance")
+                    oanda_export_latest_balance_as_of = local_balance.get("as_of")
                 local_balances.append(local_balance)
         except Exception as exc:
             err_payload: Dict[str, object] = {"file": local_file.name, "path": str(local_file), "error": str(exc)}
@@ -5747,6 +5812,12 @@ def _import_trading_journal_from_sources(
             errors.append(err_payload)
     imported_any = imported_any or local_rows_total > 0
     imported_rows_total += int(local_rows_total)
+    diagnostics["oanda_export_trades_seen"] = int(oanda_export_trades_seen)
+    diagnostics["oanda_export_trades_backfilled"] = int(oanda_export_trades_backfilled)
+    diagnostics["oanda_export_target_workbook"] = oanda_export_target_workbook
+    diagnostics["oanda_export_source_path"] = oanda_export_source_path
+    diagnostics["oanda_export_latest_balance"] = oanda_export_latest_balance
+    diagnostics["oanda_export_latest_balance_as_of"] = oanda_export_latest_balance_as_of
 
     dedupe_groups = 0
     source_duplicate_rows_dropped = 0
