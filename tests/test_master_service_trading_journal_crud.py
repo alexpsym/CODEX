@@ -980,6 +980,27 @@ def test_manual_sync_calls_bybit_without_manual_cooldown(monkeypatch: pytest.Mon
     assert all(call.get("enforce_manual_cooldown") is False for call in calls)
 
 
+def test_oanda_summary_is_saved_as_broker_balance_during_sync(monkeypatch: pytest.MonkeyPatch):
+    captured = {}
+    async def _fake_oanda_summary(account):
+        return {"balance": 1500.0 if account == "demo" else 2500.0, "nav": 1501.0, "currency": "AUD"}
+    async def _fake_bybit(*_a, **_k):
+        return {"available_usdt": 10.0}
+    monkeypatch.setattr(master_service, "_trading_journal_broker_refresh_enabled", lambda: True)
+    monkeypatch.setattr(master_service, "_fetch_oanda_account_summary", _fake_oanda_summary)
+    monkeypatch.setattr(master_service, "_fetch_bybit_balance_usdt", _fake_bybit)
+    monkeypatch.setattr(master_service, "_trading_journal_source_mode", lambda: "local")
+    monkeypatch.setattr(master_service, "_trading_journal_bybit_demo_balance_anchor_enabled", lambda: False)
+    monkeypatch.setattr(master_service, "_import_trading_journal_from_sources", lambda progress_cb=None: {"ok": True, "rows_imported": 0, "diagnostics": {}})
+    monkeypatch.setattr(master_service, "_run_bybit_closed_pnl_sync", lambda **kwargs: asyncio.sleep(0))
+    monkeypatch.setattr(master_service, "_recover_oanda_recent_fills", lambda account, lookback_hours=72: asyncio.sleep(0, result={"ok": True, "account": account}))
+    monkeypatch.setattr(master_service, "_save_broker_balance_diagnostics_state", lambda balances, warnings: captured.update({"balances": balances, "warnings": warnings}))
+    asyncio.run(master_service._run_trading_journal_sync_job())
+    labels = {item.get("label"): item for item in captured.get("balances", [])}
+    assert labels["OANDA DEMO"]["balance_source"] == "oanda_account_summary"
+    assert labels["OANDA LIVE"]["balance_source"] == "oanda_account_summary"
+
+
 def test_balance_timeline_resets_on_cashflow_and_applies_later_non_test_pnl():
     rows = [
         {"id": "t1", "row_type": "trade", "account": "OANDA DEMO", "close_time": "2026-01-01T00:01:00Z", "net_profit": 10.0},
@@ -1019,6 +1040,132 @@ def test_final_cashflow_after_final_trade_overrides_current_balance():
     }
     timeline = master_service._build_journal_balance_timelines(rows, ledger, [])
     assert timeline["balances"][0]["balance"] == pytest.approx(0.0)
+
+
+def test_oanda_export_balance_overrides_stale_cashflow_anchor():
+    rows = [
+        {"id": "t1", "row_type": "trade", "source": "local_excel", "account": "OANDA DEMO", "close_time": "2026-04-08T00:01:00Z", "net_profit": -6.88, "balance_after_trade": 1493.77},
+    ]
+    ledger = {"OANDA DEMO": [{"account": "OANDA DEMO", "date": "2022-05-05T00:00:00Z", "new_balance": 202.12, "currency": "AUD"}]}
+    timeline = master_service._build_journal_balance_timelines(rows, ledger, [])
+    bal = timeline["balances"][0]
+    diag = timeline["diagnostics"][master_service._norm_account_key("OANDA DEMO")]
+    assert bal["balance"] == pytest.approx(1493.77)
+    assert bal["balance_source"] == "authoritative_trade_balance"
+    assert diag["stale_cashflow_overridden"] is True
+
+
+def test_oanda_transaction_export_latest_balance_is_account_balance(monkeypatch: pytest.MonkeyPatch):
+    df = master_service.pd.DataFrame(
+        [
+            {"TICKET": 589, "TRANSACTION DATE": "2026-04-08T00:00:00Z", "TRANSACTION TYPE": "ORDER_FILL", "DETAILS": "fill", "INSTRUMENT": "EUR_USD", "PL": 0.0, "BALANCE": 1493.77},
+            {"TICKET": 622, "TRANSACTION DATE": "2026-04-09T00:00:00Z", "TRANSACTION TYPE": "ORDER_FILL", "DETAILS": "fill", "INSTRUMENT": "EUR_USD", "PL": 0.0, "BALANCE": 1500.65},
+        ]
+    )
+    class FakeExcel:
+        sheet_names = ["Sheet1"]
+    monkeypatch.setattr(master_service.pd, "ExcelFile", lambda *_a, **_k: FakeExcel())
+    monkeypatch.setattr(master_service.pd, "read_excel", lambda *_a, **_k: df)
+    rows, balance = master_service._parse_excel_account_workbook("OANDA DEMO.xls", "/tmp/OANDA DEMO.xls", b"x")
+    assert rows == []
+    assert balance["balance"] == pytest.approx(1500.65)
+    assert balance["source"] == "oanda_transaction_export_balance"
+
+
+def test_oanda_broker_balance_overrides_reconstructed_timeline_balance():
+    balances = [
+        {"account": "OANDA DEMO", "label": "OANDA DEMO", "balance": 193.71, "currency": "AUD", "source": "cashflow_anchor_plus_trades", "balance_source": "cashflow_anchor_plus_trades", "as_of": "2022-05-05T00:00:00Z"}
+    ]
+    broker = [
+        {"account": "OANDA DEMO", "label": "OANDA DEMO", "balance": 1493.77, "currency": "AUD", "source": "oanda_account_summary", "balance_source": "oanda_account_summary", "as_of": "2026-04-08T00:00:00Z"}
+    ]
+    merged = master_service._merge_missing_timeline_balances_with_broker(balances, broker)
+    assert merged[0]["balance"] == pytest.approx(1493.77)
+    assert merged[0]["resolved_or_overridden_with_broker"] is True
+
+
+def test_oanda_export_account_balance_overrides_stale_cashflow_without_trade_rows():
+    rows = []
+    ledger = {"OANDA DEMO": [{"account": "OANDA DEMO", "date": "2022-05-05T00:00:00Z", "new_balance": 202.12, "currency": "AUD"}]}
+    excel_balances = [
+        {
+            "account": "OANDA DEMO",
+            "label": "OANDA DEMO",
+            "balance": 1500.65,
+            "currency": "AUD",
+            "source": "local_excel",
+            "balance_source": "oanda_transaction_export_balance",
+            "as_of": "2026-04-09T00:00:00Z",
+        }
+    ]
+    timeline = master_service._build_journal_balance_timelines(rows, ledger, excel_balances)
+    bal = timeline["balances"][0]
+    diag = timeline["diagnostics"][master_service._norm_account_key("OANDA DEMO")]
+    assert bal["balance"] == pytest.approx(1500.65)
+    assert bal["balance_source"] == "oanda_transaction_export_balance"
+    assert diag["stale_cashflow_overridden"] is True
+    assert diag["balance_source"] == "oanda_transaction_export_balance"
+
+
+def test_local_oanda_export_balance_source_is_preserved(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    path = tmp_path / "OANDA DEMO.xls"
+    path.write_bytes(b"x")
+    monkeypatch.setattr(
+        master_service,
+        "_parse_excel_account_workbook",
+        lambda *_a, **_k: ([], {"account": "OANDA DEMO", "label": "OANDA DEMO", "balance": 1500.65, "source": "oanda_transaction_export_balance", "balance_source": "oanda_transaction_export_balance"}),
+    )
+    _rows, balance = master_service._parse_local_trading_journal_workbook(path)
+    assert balance["balance_source"] == "oanda_transaction_export_balance"
+    assert balance["source"] == "oanda_transaction_export_balance"
+    assert balance["import_source"] == "local_excel"
+
+
+def test_newer_oanda_export_account_balance_overrides_older_authoritative_trade_balance():
+    rows = [{"id": "t1", "row_type": "trade", "source": "oanda", "account": "OANDA DEMO", "account_label": "OANDA DEMO", "close_time": "2026-04-08T00:01:00Z", "net_profit": -6.88, "balance_after_trade": 1493.77}]
+    ledger = {"OANDA DEMO": [{"account": "OANDA DEMO", "date": "2022-05-05T00:00:00Z", "new_balance": 202.12, "currency": "AUD"}]}
+    excel_balances = [{"account": "OANDA DEMO", "label": "OANDA DEMO", "balance": 1500.65, "currency": "AUD", "source": "oanda_transaction_export_balance", "balance_source": "oanda_transaction_export_balance", "as_of": "2026-04-30T19:46:41"}]
+    timeline = master_service._build_journal_balance_timelines(rows, ledger, excel_balances)
+    bal = timeline["balances"][0]
+    diag = timeline["diagnostics"][master_service._norm_account_key("OANDA DEMO")]
+    assert bal["balance"] == pytest.approx(1500.65)
+    assert bal["balance_source"] == "oanda_transaction_export_balance"
+    assert diag["latest_authoritative_balance_at"] == "2026-04-30T19:46:41"
+
+
+def test_oanda_export_aest_dates_pick_latest_balance(monkeypatch: pytest.MonkeyPatch):
+    df = master_service.pd.DataFrame([
+        {"TICKET": 500, "TRANSACTION DATE": "2026-04-28 19:46:41 AEST", "TRANSACTION TYPE": "ORDER_FILL", "DETAILS": "fill", "INSTRUMENT": "EUR_USD", "PL": 0.0, "BALANCE": 1493.77},
+        {"TICKET": 622, "TRANSACTION DATE": "2026-04-30 19:46:41 AEST", "TRANSACTION TYPE": "ORDER_FILL", "DETAILS": "fill", "INSTRUMENT": "EUR_USD", "PL": 0.0, "BALANCE": 1500.65},
+    ])
+    class FakeExcel: sheet_names = ["Sheet1"]
+    monkeypatch.setattr(master_service.pd, "ExcelFile", lambda *_a, **_k: FakeExcel())
+    monkeypatch.setattr(master_service.pd, "read_excel", lambda *_a, **_k: df)
+    _rows, balance = master_service._parse_excel_account_workbook("OANDA DEMO.xls", "/tmp/OANDA DEMO.xls", b"x")
+    assert balance["balance"] == pytest.approx(1500.65)
+
+
+def test_newer_oanda_broker_summary_overrides_older_authoritative_trade_balance():
+    balances = [{"account": "OANDA DEMO", "label": "OANDA DEMO", "balance": 1493.77, "currency": "AUD", "source": "authoritative_trade_balance", "balance_source": "authoritative_trade_balance", "as_of": "2026-04-08T00:01:00Z"}]
+    broker = [{"account": "OANDA DEMO", "label": "OANDA DEMO", "balance": 1500.65, "currency": "AUD", "source": "oanda_account_summary", "balance_source": "oanda_account_summary", "as_of": "2026-04-30T00:00:00Z"}]
+    merged = master_service._merge_missing_timeline_balances_with_broker(balances, broker)
+    assert merged[0]["balance"] == pytest.approx(1500.65)
+
+
+def test_newer_final_cashflow_still_overrides_oanda_broker_summary():
+    balances = [{"account": "OANDA DEMO", "label": "OANDA DEMO", "balance": 202.12, "currency": "AUD", "source": "cashflow_anchor_plus_trades", "balance_source": "cashflow_anchor_plus_trades", "as_of": "2026-05-01T00:00:00Z"}]
+    broker = [{"account": "OANDA DEMO", "label": "OANDA DEMO", "balance": 1500.65, "currency": "AUD", "source": "oanda_account_summary", "balance_source": "oanda_account_summary", "as_of": "2026-04-30T00:00:00Z"}]
+    merged = master_service._merge_missing_timeline_balances_with_broker(balances, broker)
+    assert merged[0]["balance"] == pytest.approx(202.12)
+
+
+def test_balance_timeline_diagnostics_no_authoritative_candidate_no_nameerror():
+    rows = [{"id": "m1", "row_type": "trade", "source": "manual", "account": "MANUAL ACC", "close_time": "2026-05-01T00:00:00Z", "net_profit": 1.0}]
+    ledger = {"MANUAL ACC": [{"account": "MANUAL ACC", "date": "2026-04-30T00:00:00Z", "new_balance": 100.0, "currency": "AUD"}]}
+    timeline = master_service._build_journal_balance_timelines(rows, ledger, [])
+    diag = timeline["diagnostics"][master_service._norm_account_key("MANUAL ACC")]
+    assert diag["authoritative_balance_used"] is None
+    assert diag["latest_authoritative_balance_at"] is None
 
 
 def test_parse_excel_balance_uses_latest_trade_timestamp_not_bottom_row(monkeypatch: pytest.MonkeyPatch):
