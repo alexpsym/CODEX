@@ -3249,7 +3249,7 @@ def _monthly_aud_revaluation_rows_for_journal_view() -> List[Dict[str, object]]:
         result_currency = str(row.get("result_currency") or "").strip().upper()
         account = str(row.get("account") or "").strip().lower()
         account_label = str(row.get("account_label") or "").strip().lower()
-        if not row_id or not close_time or not math.isfinite(result_cash or float('nan')):
+        if not row_id or not close_time or result_cash is None or not math.isfinite(result_cash):
             continue
         if result_currency != "AUD":
             continue
