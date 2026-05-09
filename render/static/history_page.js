@@ -147,6 +147,18 @@
         const state = String(st.status || '').toLowerCase();
         if (state === 'done') {
           setStatus('Export complete.');
+          if (broker === 'oanda') {
+            const backfillRes = await fetchJson(`/api/oanda-history/export/${encodeURIComponent(jobId)}/backfill-journal`, {
+              method: 'POST',
+            });
+            if (!backfillRes || backfillRes.ok === false) {
+              const detail = backfillRes?.error || backfillRes?.sync?.message || backfillRes?.detail || 'OANDA export backfill failed.';
+              const target = backfillRes?.oanda_export_target_workbook ? ` (${backfillRes.oanda_export_target_workbook})` : '';
+              throw new Error(`Export completed, but Trading Journal backfill failed: ${detail}${target}`);
+            }
+            setStatus(`Export complete. Backfilled ${backfillRes.oanda_export_trades_seen || 0} OANDA ${String(payload.account || '').toUpperCase()} trades into Trading Journal.`);
+            await fetchJson('/api/trading-journal/sync', { method: 'POST' });
+          }
           const dl = st.download_url;
           if (dl) {
             setResult('Download started.');
