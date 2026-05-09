@@ -1057,8 +1057,22 @@
         ${staleOverridden ? '<div class="muted" style="font-size:0.78rem">Using OANDA export/API balance; stale cashflow anchor ignored.</div>' : ''}
         ${staleOandaBackfill ? `<div class="muted" style="font-size:0.78rem;color:#b91c1c">OANDA demo export exists but was not applied. Balance is stale.${state?.diagnostics?.latest_export_balance ? ` Latest export: ${fmtNum(state.diagnostics.latest_export_balance, 2)} AUD.` : ''}</div>` : ''}
         ${oandaBackfillErr.includes('MISSING_XLRD_FOR_XLS') ? `<div class="muted" style="font-size:0.78rem;color:#b91c1c">Install xlrd in the journal runtime, then rerun OANDA history backfill.</div>` : ''}
+        ${b.stale_balance_warning ? `<button class="tj-repair-oanda" style="margin-top:6px">Repair OANDA DEMO</button>` : ''}
       `;
       wrap.appendChild(div);
+      const repairBtn = div.querySelector('.tj-repair-oanda');
+      if (repairBtn) {
+        repairBtn.addEventListener('click', async () => {
+          try {
+            const r = await fetch('/api/trading-journal/oanda-demo/repair-balance', { method: 'POST' });
+            const p = await r.json();
+            if (!r.ok || p.ok === false) throw new Error(p.error || p.message || 'Repair failed');
+            await loadData();
+          } catch (e) {
+            alert(String(e?.message || e));
+          }
+        });
+      }
     });
   }
   function fmtMoneyValue(value, ccy, decimals = 2) { return `${ccy || 'UNKNOWN'} ${fmtNum(value, decimals)}`; }

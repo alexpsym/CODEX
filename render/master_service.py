@@ -1119,6 +1119,16 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
     if not isinstance(broker_balances, list):
         broker_balances = []
     balances = _merge_missing_timeline_balances_with_broker(balances, broker_balances)
+    for bal in balances:
+        if not isinstance(bal, dict):
+            continue
+        label = str(bal.get("label") or bal.get("account") or "").strip().upper()
+        if label == "OANDA DEMO" and str(bal.get("balance_source") or "") == "cashflow_anchor_plus_trades":
+            bal["stale_balance_warning"] = True
+            bal["stale_balance_reason"] = "oanda_demo_cashflow_anchor"
+            bal["repair_available"] = True
+            bal["repair_endpoint"] = "/api/trading-journal/oanda-demo/repair-balance"
+            bal["latest_backfill_error"] = (TRADING_JOURNAL_IMPORT_DIAGNOSTICS or {}).get("oanda_export_append_error")
     diagnostics = _build_trading_journal_diagnostics_snapshot()
     if oanda_balance_warnings:
         existing_errors = diagnostics.get("errors") if isinstance(diagnostics.get("errors"), list) else []
@@ -22404,6 +22414,32 @@ async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
         "sync": import_result,
         "snapshot_visible": visibility_error is None,
     })
+
+
+@app.post("/api/trading-journal/oanda-demo/repair-balance")
+async def trading_journal_repair_oanda_demo_balance() -> JSONResponse:
+    demo_exports = [p for p in _list_local_oanda_history_exports() if "demo" in p.name.lower()]
+    if not demo_exports:
+        return JSONResponse({"ok": False, "error": "OANDA_DEMO_EXPORT_NOT_FOUND", "message": "OANDA DEMO balance is stale. Run/export OANDA demo history, then repair."}, status_code=400)
+    source_path = sorted(demo_exports, key=lambda p: p.stat().st_mtime, reverse=True)[0]
+    rows, balance = _parse_local_trading_journal_workbook(source_path)
+    mapped = [r for r in rows if str((r or {}).get("source") or "").strip().lower() == "oanda_transaction_export"]
+    for row in mapped:
+        row["account"] = "demo"
+        row["account_label"] = "OANDA DEMO"
+    try:
+        stats = _append_oanda_export_rows_to_local_workbook("demo", mapped, str(source_path), return_stats=True)
+    except Exception as exc:
+        err = str(exc)
+        return JSONResponse({"ok": False, "error": err, "message": "Install dependencies in the same Python runtime used by run_trading_journal_local.bat, then restart." if "MISSING_XLRD_FOR_XLS" in err else err}, status_code=400)
+    _invalidate_trading_journal_view_snapshot()
+    sync = _import_trading_journal_from_sources()
+    snap = _build_trading_journal_view_snapshot(force=True)
+    balances = snap.get("balances", {}).get("items", []) if isinstance(snap, dict) else []
+    demo = next((b for b in balances if str((b or {}).get("label") or "").upper() == "OANDA DEMO"), None)
+    if not isinstance(demo, dict) or str(demo.get("balance_source") or "") == "cashflow_anchor_plus_trades":
+        return JSONResponse({"ok": False, "error": "OANDA_BACKFILL_NOT_VISIBLE_IN_JOURNAL_SNAPSHOT", "sync": sync}, status_code=409)
+    return JSONResponse({"ok": True, "stats": stats, "source_path": str(source_path), "balance": balance, "sync": sync})
 
 
 @app.post("/api/coinspot-history/export")
