@@ -121,7 +121,7 @@
     { key: 'close_time', header: 'Close Time', value: (r) => fmtTime(r.close_time || r.open_time) },
     { key: 'account_label', header: 'Account', value: (r) => r.account_label || r.account || '—' },
     { key: 'symbol', header: 'Symbol', value: (r) => r.symbol || '—' },
-    { key: 'side', header: 'Side', value: (r) => r.side || '—' },
+    { key: 'side', header: 'Side', value: (r) => isMonthlyAudRevalRow(r) ? 'NOTE' : (r.side || '—') },
     { key: 'timeframe', header: 'Timeframe', value: (r) => r.timeframe || r.metrics?.timeframe || '—' },
     { key: 'is_test_trade', header: 'Test', value: (r) => String(r.is_test_trade) === 'true' ? 'Yes' : (String(r.is_test_trade) === 'false' ? 'No' : '—') },
     { key: 'setup', header: 'Setup', value: (r) => r.setup || '—' },
@@ -137,8 +137,8 @@
     { key: 'balance_after_trade', header: 'Balance After', value: (r) => { const bal = asNum(r.analysis_balance_after_trade ?? r.balance_after_trade ?? r.cashflow_new_balance); const ccy = r.balance_after_trade_currency || r.currency || ''; return Number.isFinite(bal) ? `${fmtNum(bal, 2)} ${ccy}` : '—'; } },
     { key: 'trade_duration_seconds', header: 'Trade Duration', value: (r) => fmtDuration(r.trade_duration_seconds) },
     { key: 'breakeven', header: 'Breakeven', value: (r) => r.breakeven || '—' },
-    { key: 'chart', header: 'Chart', value: (r) => (r.id && String(r.source || '').toLowerCase() !== 'manual') ? 'Chart' : '' },
-    { key: 'actions', header: 'Actions', value: (r) => (r.is_manual || String(r.source || '').toLowerCase() === 'manual') ? 'Edit / Delete' : 'Edit' },
+    { key: 'chart', header: 'Chart', value: (r) => { if (isMonthlyAudRevalRow(r)) return ''; return (r.id && String(r.source || '').toLowerCase() !== 'manual') ? 'Chart' : ''; } },
+    { key: 'actions', header: 'Actions', value: (r) => { if (isMonthlyAudRevalRow(r)) return ''; return (r.is_manual || String(r.source || '').toLowerCase() === 'manual') ? 'Edit / Delete' : 'Edit'; } },
   ];
 
   const setStatus = (msg) => { status.textContent = msg || ''; };
@@ -362,6 +362,13 @@
         r?.account_label,
         r?.account,
         r?.source,
+        r?.id,
+        r?.row_type,
+        r?.result_cash,
+        r?.result_currency,
+        r?.open_time,
+        r?.close_time,
+        r?.raw_refs?.period_month,
         r?.sheet,
         r?.side,
         r?.status,
