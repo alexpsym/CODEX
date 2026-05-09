@@ -22323,18 +22323,29 @@ async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
         row["account"] = account_mode
         row["account_label"] = "OANDA DEMO" if account_mode == "demo" else "OANDA LIVE"
         mapped.append(row)
-    changed = _append_oanda_export_rows_to_local_workbook(account_mode, mapped, str(job.output_path))
-    import_result = _import_trading_journal_from_sources()
-    _set_trading_journal_view_cache(None)
+    changed = 0
+    append_error = None
+    try:
+        changed = _append_oanda_export_rows_to_local_workbook(account_mode, mapped, str(job.output_path))
+    except Exception as exc:
+        append_error = str(exc)
+    import_result = {"ok": False, "message": "Backfill append failed."}
+    if append_error is None:
+        import_result = _import_trading_journal_from_sources()
+        _invalidate_trading_journal_view_snapshot()
+    ok_flag = bool(append_error is None and bool(import_result.get("ok")))
     return JSONResponse({
-        "ok": bool(import_result.get("ok")),
+        "ok": ok_flag,
         "oanda_export_trades_seen": len(mapped),
         "oanda_export_trades_backfilled": int(changed),
+        "oanda_export_trades_updated": max(0, int(changed) - len(mapped)),
         "oanda_export_target_workbook": _canonical_local_oanda_workbook_name(account_mode),
+        "oanda_export_source_path": str(job.output_path),
         "oanda_export_latest_balance": (balance or {}).get("balance") if isinstance(balance, dict) else None,
         "oanda_export_latest_balance_as_of": (balance or {}).get("as_of") if isinstance(balance, dict) else None,
-        "oanda_export_balance_applied": bool(changed >= 0),
-        "oanda_export_rows_persisted": bool(changed >= 0),
+        "oanda_export_balance_applied": bool(ok_flag),
+        "oanda_export_rows_persisted": bool(ok_flag and len(mapped) > 0),
+        "error": append_error,
         "sync": import_result,
     })
 
