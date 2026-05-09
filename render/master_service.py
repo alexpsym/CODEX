@@ -5260,6 +5260,14 @@ def _list_local_oanda_history_exports() -> List[Path]:
         name = candidate.name.strip().lower()
         if "oanda" in name and "history" in name:
             hits.append(candidate)
+    export_root = OANDA_HISTORY_EXPORT_ROOT
+    if export_root.exists() and export_root.is_dir():
+        for candidate in export_root.iterdir():
+            if not candidate.is_file() or candidate.suffix.lower() != ".csv":
+                continue
+            name = candidate.name.strip().lower()
+            if name.startswith("oanda_history_") and ("demo" in name or "live" in name):
+                hits.append(candidate)
     return sorted(hits, key=lambda p: p.name.lower())
 
 
@@ -22272,6 +22280,41 @@ async def download_oanda_history_export(job_id: str) -> FileResponse:
         filename=job.output_path.name,
         media_type="text/csv",
     )
+
+
+@app.post("/api/oanda-history/export/{job_id}/backfill-journal")
+async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
+    job = OANDA_HISTORY_JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Export job not found.")
+    if job.status != "done" or job.output_path is None or not job.output_path.exists():
+        raise HTTPException(status_code=400, detail="Export not ready.")
+    sidecar = _load_json_file(job.output_path.with_suffix(".json"), {})
+    account_mode = str((sidecar or {}).get("account_mode") or job.params.get("account") or "").strip().lower()
+    if account_mode not in {"demo", "live"}:
+        raise HTTPException(status_code=400, detail="Unable to resolve OANDA account mode for backfill.")
+    rows, balance = _parse_local_trading_journal_workbook(job.output_path)
+    mapped = []
+    for row in rows:
+        if str((row or {}).get("source") or "").strip().lower() != "oanda_transaction_export":
+            continue
+        row["account"] = account_mode
+        row["account_label"] = "OANDA DEMO" if account_mode == "demo" else "OANDA LIVE"
+        mapped.append(row)
+    changed = _append_oanda_export_rows_to_local_workbook(account_mode, mapped, str(job.output_path))
+    import_result = _import_trading_journal_from_sources()
+    _set_trading_journal_view_cache(None)
+    return JSONResponse({
+        "ok": bool(import_result.get("ok")),
+        "oanda_export_trades_seen": len(mapped),
+        "oanda_export_trades_backfilled": int(changed),
+        "oanda_export_target_workbook": _canonical_local_oanda_workbook_name(account_mode),
+        "oanda_export_latest_balance": (balance or {}).get("balance") if isinstance(balance, dict) else None,
+        "oanda_export_latest_balance_as_of": (balance or {}).get("as_of") if isinstance(balance, dict) else None,
+        "oanda_export_balance_applied": bool(changed >= 0),
+        "oanda_export_rows_persisted": bool(changed >= 0),
+        "sync": import_result,
+    })
 
 
 @app.post("/api/coinspot-history/export")

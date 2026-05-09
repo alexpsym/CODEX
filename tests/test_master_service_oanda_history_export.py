@@ -141,6 +141,23 @@ def test_oanda_history_export_filename_contains_account_mode(monkeypatch: pytest
     assert live_job.output_path.with_suffix(".json").exists()
 
 
+def test_oanda_history_export_backfill_endpoint_writes_oanda_demo_workbook(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    csv_path = tmp_path / "oanda_history_demo_job.csv"
+    csv_path.write_text("TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,INSTRUMENT,PRICE,UNITS,DIRECTION,SPREAD COST,STOP LOSS,TAKE PROFIT,FINANCING,COMMISSION,PL,BALANCE\n589,2026-04-08 19:50:46 AEST,ORDER_FILL,MARKET_ORDER,NZD_USD,0.58217,2550,Buy,0,0.57864,0.58888,,,0,1493.64\n594,2026-04-09 19:35:17 AEST,ORDER_FILL,MARKET_ORDER_TRADE_CLOSE,NZD_USD,0.58308,-2550,Sell,0,,,,,3.2847,1496.92\n")
+    csv_path.with_suffix(".json").write_text('{"account_mode":"demo","account_label":"OANDA DEMO"}')
+    job = master_service.OandaHistoryJob(job_id="jobbf", status="done", created_at=0, updated_at=0, params={"account": "demo"}, output_path=csv_path)
+    master_service.OANDA_HISTORY_JOBS[job.job_id] = job
+    monkeypatch.setattr(master_service, "_append_oanda_export_rows_to_local_workbook", lambda *_a, **_k: 1)
+    monkeypatch.setattr(master_service, "_import_trading_journal_from_sources", lambda *_a, **_k: {"ok": True, "message": "Done"})
+    try:
+        res = asyncio.run(master_service.backfill_oanda_history_export_to_journal(job.job_id))
+        payload = res.body.decode("utf-8")
+        assert "oanda_export_trades_seen" in payload
+        assert "oanda_export_target_workbook" in payload
+    finally:
+        master_service.OANDA_HISTORY_JOBS.pop(job.job_id, None)
+
+
 import pandas as pd
 
 def _sample_oanda_history_rows():
