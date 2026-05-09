@@ -1312,3 +1312,107 @@ def test_append_generic_local_broker_rows_does_not_match_blank_ids(tmp_path, mon
     master_service._append_generic_local_broker_rows("Bybit Live.xlsx", rows_b, "bybit_closed_pnl")
     df = master_service.pd.read_excel(tmp_path / "Bybit Live.xlsx", sheet_name="Trades")
     assert set(df["order_id"].astype(str)) >= {"A", "B"}
+
+def test_snapshot_includes_monthly_aud_note_rows_excluded_from_stats(tmp_path, monkeypatch):
+    monthly_path = tmp_path / "monthly_aud_revaluation.json"
+    monthly_path.write_text(json.dumps({"items": [{
+        "id": "monthly_aud_reval:bybit_live:2026-03",
+        "row_type": "monthly_aud_reval",
+        "account": "Bybit Live",
+        "account_label": "Bybit Live",
+        "close_time": "2026-03-31T23:59:59Z",
+        "result_cash": 123.45,
+        "result_currency": "AUD",
+        "raw_refs": {"period_month": "2026-03"},
+    }]}), encoding="utf-8")
+    monkeypatch.setattr(master_service, "MONTHLY_AUD_REVALUATION_PATH", monthly_path)
+    monkeypatch.setattr(master_service, "_journal_source_fingerprint", lambda: {"source_mode": "local", "files": []})
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: [{"id": "t1", "row_type": "trade", "close_time": "2026-03-01T00:00:00Z", "net_profit": 10.0, "account": "A"}])
+    monkeypatch.setattr(master_service, "_get_excel_account_balances", lambda: [])
+    monkeypatch.setattr(master_service, "_load_cashflows_for_active_journal_source", lambda _state: {})
+    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_args, **_kwargs: None)
+    snapshot = master_service._build_trading_journal_view_snapshot(force=True)
+    ids = {str(r.get("id")) for r in snapshot["items"]}
+    assert "monthly_aud_reval:bybit_live:2026-03" in ids
+    monthly = next(r for r in snapshot["items"] if r.get("row_type") == "monthly_aud_reval")
+    assert monthly["result_currency"] == "AUD"
+    assert monthly["result_cash"] == pytest.approx(123.45)
+    assert "net_profit" not in monthly and "realized_pnl" not in monthly
+    assert snapshot["stats"]["totals"]["trades"] == 1
+    assert snapshot["stats"]["totals"]["net_profit_total"] == pytest.approx(10.0)
+    assert snapshot["stats"]["groups"]["overview"]["trades"] == 1
+
+
+def test_journal_source_fingerprint_includes_monthly_paths():
+    fp = master_service._journal_source_fingerprint()
+    paths = {str(i.get("path")) for i in fp.get("files", []) if isinstance(i, dict)}
+    assert str(master_service.MONTHLY_AUD_REVALUATION_PATH) in paths
+    assert str(master_service.MONTHLY_AUD_REVALUATION_STATE_PATH) in paths
+
+
+def test_run_monthly_sync_invalidates_snapshot_on_change(monkeypatch):
+    called = {"n": 0}
+    master_service._TRADING_JOURNAL_VIEW_CACHE["key"] = "snapshot"
+    master_service._TRADING_JOURNAL_VIEW_CACHE["payload"] = {"ok": True}
+
+    def _invalidate():
+        called["n"] += 1
+        master_service._TRADING_JOURNAL_VIEW_CACHE["key"] = None
+        master_service._TRADING_JOURNAL_VIEW_CACHE["payload"] = None
+
+    async def fake_sync_monthly_aud_revaluation(**_kwargs):
+        return {"ok": True, "changed": True}
+
+    monkeypatch.setattr(master_service, "_invalidate_trading_journal_view_snapshot", _invalidate)
+    monkeypatch.setattr(master_service, "sync_monthly_aud_revaluation", fake_sync_monthly_aud_revaluation)
+    monkeypatch.setattr(master_service, "_load_json_file", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    asyncio.run(master_service._run_monthly_aud_revaluation_sync(reason="test"))
+    assert called["n"] == 1
+    assert master_service._TRADING_JOURNAL_VIEW_CACHE["key"] is None
+    assert master_service._TRADING_JOURNAL_VIEW_CACHE["payload"] is None
+
+
+def test_monthly_aud_revaluation_rows_for_journal_view_keeps_zero_result(tmp_path, monkeypatch):
+    monthly_path = tmp_path / "monthly_aud_revaluation.json"
+    monthly_path.write_text(json.dumps({"items": [{
+        "id": "monthly_aud_reval:bybit_live:2026-04",
+        "row_type": "monthly_aud_reval",
+        "account": "live",
+        "account_label": "Bybit Live",
+        "close_time": "2026-04-30T23:59:59Z",
+        "result_cash": 0.0,
+        "result_currency": "AUD",
+        "raw_refs": {"period_month": "2026-04"},
+    }]}), encoding="utf-8")
+    monkeypatch.setattr(master_service, "MONTHLY_AUD_REVALUATION_PATH", monthly_path)
+    rows = master_service._monthly_aud_revaluation_rows_for_journal_view()
+    assert len(rows) == 1
+    assert rows[0]["id"] == "monthly_aud_reval:bybit_live:2026-04"
+    assert rows[0]["result_cash"] == pytest.approx(0.0)
+
+
+def test_persist_trading_journal_sqlite_routes_monthly_rows_to_journal_notes(tmp_path, monkeypatch):
+    sqlite_path = tmp_path / "trading_journal.sqlite"
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_SQLITE_PATH", sqlite_path)
+    snapshot = {
+        "generated_at": "2026-05-01T00:00:00Z",
+        "items": [
+            {"id": "monthly_aud_reval:bybit_live:2026-03", "row_type": "monthly_aud_reval", "result_cash": 12.3, "result_currency": "AUD", "close_time": "2026-03-31T23:59:59Z"},
+            {"id": "trade:1", "row_type": "trade", "close_time": "2026-05-01T00:00:00Z", "net_profit": 5.0, "metrics": {"x": 1}},
+        ],
+        "balances": [],
+        "stats": {},
+        "diagnostics": {},
+        "source_fingerprints": {"files": []},
+    }
+    master_service._persist_trading_journal_sqlite(snapshot)
+    conn = sqlite3.connect(sqlite_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM journal_notes WHERE id='monthly_aud_reval:bybit_live:2026-03'").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM journal_trades WHERE id='monthly_aud_reval:bybit_live:2026-03'").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM journal_metrics WHERE id='monthly_aud_reval:bybit_live:2026-03'").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM journal_trades WHERE id='trade:1'").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM journal_metrics WHERE id='trade:1'").fetchone()[0] == 1
+    finally:
+        conn.close()
