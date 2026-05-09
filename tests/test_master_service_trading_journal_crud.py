@@ -420,6 +420,30 @@ def test_balances_returns_200_when_items_exist_even_with_errors(monkeypatch: pyt
     payload = _json(res)
     assert res.status_code == 200
     assert payload["ok"] is False
+
+
+def test_missing_bybit_demo_anchor_with_wallet_failure_does_not_requeue(monkeypatch: pytest.MonkeyPatch, temp_state_paths):
+    snapshot = {
+        "balances": [{"account": "BYBIT DEMO", "label": "BYBIT DEMO", "balance": None, "currency": "USDT"}],
+        "diagnostics": {"errors": ["Missing balance anchor for accounts: BYBIT DEMO"]},
+    }
+    monkeypatch.setattr(master_service, "_load_trading_journal_view_snapshot", lambda: snapshot)
+    monkeypatch.setattr(master_service, "_trading_journal_bybit_demo_balance_anchor_enabled", lambda: True)
+    monkeypatch.setattr(
+        master_service,
+        "_load_trading_journal_state",
+        lambda: {"broker_balance_diagnostics": {"warnings": ["Bybit demo wallet snapshot unavailable for workbook anchor reconstruction: demo creds missing"]}},
+    )
+    queued = {"calls": 0}
+    monkeypatch.setattr(master_service, "_queue_trading_journal_sync_if_idle", lambda _r: queued.__setitem__("calls", queued["calls"] + 1) or {"running": True})
+    monkeypatch.setattr(master_service, "_sync_state_snapshot", lambda: {"running": False, "ok": False})
+    master_service._TRADING_JOURNAL_VIEW_CACHE["key"] = None
+    master_service._TRADING_JOURNAL_VIEW_CACHE["payload"] = None
+    res = asyncio.run(master_service.trading_journal_balances())
+    payload = _json(res)
+    assert queued["calls"] == 0
+    assert payload["pending"] is False
+    assert payload["ok"] is False
     assert payload["items"]
 
 

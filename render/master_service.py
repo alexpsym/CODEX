@@ -653,6 +653,21 @@ def _save_broker_balance_diagnostics_state(
     _save_trading_journal_state(state)
 
 
+def _should_auto_queue_bybit_demo_anchor_repair() -> bool:
+    state = _load_trading_journal_state()
+    diag = state.get("broker_balance_diagnostics") if isinstance(state, dict) else {}
+    warnings = diag.get("warnings") if isinstance(diag, dict) else []
+    texts = [str(w).lower() for w in warnings] if isinstance(warnings, list) else []
+    blocking = any(
+        ("wallet snapshot unavailable" in t)
+        or ("no numeric current_balance" in t)
+        or ("missing cred" in t)
+        or ("credential" in t and "missing" in t)
+        for t in texts
+    )
+    return not blocking
+
+
 def _set_trading_journal_sync_state(**updates: object) -> None:
     with TRADING_JOURNAL_SYNC_LOCK:
         merged = _sync_state_snapshot()
@@ -13723,7 +13738,7 @@ def _bybit_demo_workbook_has_rows_needing_balance(frame: pd.DataFrame) -> bool:
     if not len(has_trade):
         return False
     missing_bal = bal_num.isna() if isinstance(bal_num, pd.Series) else pd.Series(dtype=bool)
-    return bool((has_trade & missing_bal).any() or has_trade.any())
+    return bool((has_trade & missing_bal).any())
 
 
 def _sanitize_bybit_demo_workbook(active_folder: str, balance_snapshot: Optional[Dict[str, object]] = None) -> Dict[str, int]:
@@ -21983,12 +21998,17 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
     missing_demo_anchor = any("Missing balance anchor for accounts: BYBIT DEMO" in str(e) for e in (diag_errors or []))
     if missing_demo_anchor and _trading_journal_bybit_demo_balance_anchor_enabled():
         sync_status = _sync_state_snapshot()
-        if not bool(sync_status.get("running")):
+        can_queue = _should_auto_queue_bybit_demo_anchor_repair()
+        if can_queue and not bool(sync_status.get("running")):
             sync_status = _queue_trading_journal_sync_if_idle("bybit_demo_missing_balance_anchor")
-        payload["pending"] = True
-        payload["snapshot_stale"] = True
+        payload["pending"] = bool(can_queue)
+        payload["snapshot_stale"] = bool(can_queue)
         payload["ok"] = False
-        payload["warning"] = "BYBIT DEMO balance anchor repair queued. Journal cache is rebuilding."
+        payload["warning"] = (
+            "BYBIT DEMO balance anchor repair queued. Journal cache is rebuilding."
+            if can_queue
+            else "BYBIT DEMO balance anchor unresolved: wallet anchor fetch failed; check diagnostics."
+        )
         payload["sync_status"] = sync_status
     _TRADING_JOURNAL_VIEW_CACHE["key"] = "snapshot"
     _TRADING_JOURNAL_VIEW_CACHE["payload"] = snapshot
@@ -22027,20 +22047,25 @@ async def trading_journal_balances() -> JSONResponse:
     missing_demo_anchor = any("Missing balance anchor for accounts: BYBIT DEMO" in str(e) for e in (errors or []))
     if missing_demo_anchor and _trading_journal_bybit_demo_balance_anchor_enabled():
         sync_status = _sync_state_snapshot()
-        if not bool(sync_status.get("running")):
+        can_queue = _should_auto_queue_bybit_demo_anchor_repair()
+        if can_queue and not bool(sync_status.get("running")):
             sync_status = _queue_trading_journal_sync_if_idle("bybit_demo_missing_balance_anchor")
         return JSONResponse(
             {
                 "items": items,
                 "ok": False,
-                "pending": True,
-                "snapshot_stale": True,
-                "warning": "BYBIT DEMO balance anchor repair queued. Journal cache is rebuilding.",
+                "pending": bool(can_queue),
+                "snapshot_stale": bool(can_queue),
+                "warning": (
+                    "BYBIT DEMO balance anchor repair queued. Journal cache is rebuilding."
+                    if can_queue
+                    else "BYBIT DEMO balance anchor unresolved: wallet anchor fetch failed; check diagnostics."
+                ),
                 "diagnostics": diagnostics,
                 "errors": errors,
                 "sync_status": sync_status,
             },
-            status_code=202,
+            status_code=202 if can_queue else 200,
         )
     if items:
         return JSONResponse({"items": items, "ok": not bool(errors), "diagnostics": diagnostics, "errors": errors}, status_code=200)
@@ -22232,7 +22257,16 @@ async def _run_trading_journal_sync_job() -> None:
                     try:
                         demo_snapshot = await _fetch_bybit_demo_current_balance_snapshot()
                         demo_balance = _to_float((demo_snapshot or {}).get("current_balance"))
-                        if demo_balance is not None:
+                        if demo_balance is None:
+                            broker_balance_warnings.append(
+                                "Bybit demo wallet snapshot returned no numeric current_balance for workbook anchor reconstruction."
+                            )
+                            _record_bybit_demo_sync_status(
+                                bybit_demo_balance_backfill_error=(
+                                    "Bybit Demo workbook anchor reconstruction failed: wallet snapshot returned no numeric current_balance."
+                                )
+                            )
+                        else:
                             broker_account_balances.append(
                                 {
                                     "account": "Bybit Demo",
@@ -22245,7 +22279,7 @@ async def _run_trading_journal_sync_job() -> None:
                                     "as_of": (demo_snapshot or {}).get("snapshot_at") or _utc_now_iso(),
                                 }
                             )
-                        await asyncio.to_thread(_sanitize_bybit_demo_local_workbook, TRADING_JOURNAL_LOCAL_DIR, demo_snapshot)
+                            await asyncio.to_thread(_sanitize_bybit_demo_local_workbook, TRADING_JOURNAL_LOCAL_DIR, demo_snapshot)
                     except Exception as exc:
                         broker_balance_warnings.append(
                             f"Bybit demo wallet snapshot unavailable for workbook anchor reconstruction: {exc}"

@@ -1109,6 +1109,41 @@ def test_run_sync_job_demo_anchor_failure_keeps_missing_warning(tmp_path, monkey
     assert any("wallet snapshot unavailable" in str(w).lower() for w in warnings)
 
 
+def test_bybit_demo_workbook_has_rows_needing_balance_only_when_missing_balance():
+    df_full = master_service.pd.DataFrame(
+        [{"net_profit": 1.0, "balance_after_trade": 10.0}, {"net_profit": -1.0, "balance_after_trade": 9.0}]
+    )
+    assert master_service._bybit_demo_workbook_has_rows_needing_balance(df_full) is False
+    df_missing = master_service.pd.DataFrame(
+        [{"net_profit": 1.0, "balance_after_trade": None}, {"net_profit": -1.0, "balance_after_trade": 9.0}]
+    )
+    assert master_service._bybit_demo_workbook_has_rows_needing_balance(df_missing) is True
+
+
+def test_run_sync_job_demo_anchor_non_numeric_balance_warns_and_skips_sanitize(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
+    monkeypatch.setattr(master_service, "_trading_journal_source_mode", lambda: "local")
+    monkeypatch.setattr(master_service, "_trading_journal_local_excel_authoritative", lambda: True)
+    monkeypatch.setattr(master_service, "_trading_journal_broker_refresh_enabled", lambda: False)
+    monkeypatch.setattr(master_service, "_trading_journal_bybit_demo_balance_anchor_enabled", lambda: True)
+    monkeypatch.setattr(master_service, "_set_trading_journal_sync_state", lambda **_: None)
+    monkeypatch.setattr(master_service, "_import_trading_journal_from_sources", lambda **_: {"ok": True, "rows_imported": 0, "diagnostics": {}, "warnings": []})
+    monkeypatch.setattr(master_service, "_read_excel_sheet_or_empty", lambda *_: master_service.pd.DataFrame([{"net_profit": 1.0, "balance_after_trade": None}]))
+    monkeypatch.setattr(master_service, "_coerce_bybit_demo_workbook_frame", lambda frame: frame)
+    monkeypatch.setattr(master_service, "_bybit_demo_workbook_has_rows_needing_balance", lambda _f: True)
+    monkeypatch.setattr(master_service, "_fetch_bybit_demo_current_balance_snapshot", lambda: asyncio.sleep(0, result={"current_balance": None}))
+    calls = {"sanitize": 0}
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_local_workbook", lambda *_a, **_k: calls.__setitem__("sanitize", calls["sanitize"] + 1) or {"changed": 1})
+    state = {}
+    monkeypatch.setattr(master_service, "_load_trading_journal_state", lambda: dict(state))
+    monkeypatch.setattr(master_service, "_save_trading_journal_state", lambda s: state.update(s))
+    asyncio.run(master_service._run_trading_journal_sync_job())
+    assert calls["sanitize"] == 0
+    assert not any(str((b or {}).get("label")) == "Bybit Demo" for b in state.get("broker_account_balances", []))
+    warnings = ((state.get("broker_balance_diagnostics") or {}).get("warnings") or [])
+    assert any("no numeric current_balance" in str(w).lower() for w in warnings)
+
+
 def test_bybit_signed_get_retries_after_timestamp_window_error(monkeypatch) -> None:
     calls: list[tuple[str, dict[str, str]]] = []
     market_time_calls = {"count": 0}
