@@ -103,3 +103,8 @@ def test_trading_journal_stat_trade_filter_wiring_present() -> None:
     assert "loadData(" not in js
     assert "schedulePostRepairRefresh" in js
     assert "catch (_err) {}" not in js
+    assert "TJ_CACHE_SCHEMA_VERSION = 2" in js
+    assert "cache_schema_version: TJ_CACHE_SCHEMA_VERSION" in js
+    assert "js_version: TJ_JS_VERSION" in js
+    assert "payload.cache_schema_version" in js
+    assert "payload.js_version" in js

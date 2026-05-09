@@ -35,6 +35,8 @@
   let activeAbort = null;
   let syncWatchTimer = null;
   const TJ_CACHE_DB = 'trading_journal_cache_v1';
+  const TJ_CACHE_SCHEMA_VERSION = 2;
+  const TJ_JS_VERSION = String(window.TRADING_JOURNAL_JS_VERSION || '');
   const TJ_CACHE_KEY = 'combined_payload';
 
   function normYes(v) {
@@ -235,12 +237,19 @@
   async function readCachedPayload() {
     try {
       const db = await openCacheDb();
-      return await new Promise((resolve) => {
+      const payload = await new Promise((resolve) => {
         const tx = db.transaction('payloads', 'readonly');
         const req = tx.objectStore('payloads').get(TJ_CACHE_KEY);
         req.onsuccess = () => resolve(req.result || null);
         req.onerror = () => resolve(null);
       });
+      if (!payload || typeof payload !== 'object') return null;
+      if ((payload.cache_schema_version || 0) !== TJ_CACHE_SCHEMA_VERSION) return null;
+      if (String(payload.js_version || '') !== TJ_JS_VERSION) return null;
+      const balances = Array.isArray(payload?.balances?.items) ? payload.balances.items : [];
+      const demo = balances.find((b) => String(b?.label || b?.account || '').toUpperCase() === 'OANDA DEMO');
+      if (demo && String(demo.balance_source || '') === 'cashflow_anchor_plus_trades' && !demo.stale_balance_warning) return null;
+      return payload;
     } catch {
       return null;
     }
@@ -252,7 +261,12 @@
       const db = await openCacheDb();
       await new Promise((resolve, reject) => {
         const tx = db.transaction('payloads', 'readwrite');
-        tx.objectStore('payloads').put(payload, TJ_CACHE_KEY);
+        tx.objectStore('payloads').put({
+          ...payload,
+          cache_schema_version: TJ_CACHE_SCHEMA_VERSION,
+          js_version: TJ_JS_VERSION,
+          fetched_at: new Date().toISOString(),
+        }, TJ_CACHE_KEY);
         tx.oncomplete = () => resolve(true);
         tx.onerror = () => reject(tx.error || new Error('IndexedDB write failed'));
       });
