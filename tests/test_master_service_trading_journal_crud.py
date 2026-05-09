@@ -1312,3 +1312,47 @@ def test_append_generic_local_broker_rows_does_not_match_blank_ids(tmp_path, mon
     master_service._append_generic_local_broker_rows("Bybit Live.xlsx", rows_b, "bybit_closed_pnl")
     df = master_service.pd.read_excel(tmp_path / "Bybit Live.xlsx", sheet_name="Trades")
     assert set(df["order_id"].astype(str)) >= {"A", "B"}
+
+def test_snapshot_includes_monthly_aud_note_rows_excluded_from_stats(tmp_path, monkeypatch):
+    monthly_path = tmp_path / "monthly_aud_revaluation.json"
+    monthly_path.write_text(json.dumps({"items": [{
+        "id": "monthly_aud_reval:bybit_live:2026-03",
+        "row_type": "monthly_aud_reval",
+        "account": "Bybit Live",
+        "account_label": "Bybit Live",
+        "close_time": "2026-03-31T23:59:59Z",
+        "result_cash": 123.45,
+        "result_currency": "AUD",
+        "raw_refs": {"period_month": "2026-03"},
+    }]}), encoding="utf-8")
+    monkeypatch.setattr(master_service, "MONTHLY_AUD_REVALUATION_PATH", monthly_path)
+    monkeypatch.setattr(master_service, "_journal_source_fingerprint", lambda: {"source_mode": "local", "files": []})
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: [{"id": "t1", "row_type": "trade", "close_time": "2026-03-01T00:00:00Z", "net_profit": 10.0, "account": "A"}])
+    monkeypatch.setattr(master_service, "_get_excel_account_balances", lambda: [])
+    monkeypatch.setattr(master_service, "_load_cashflows_for_active_journal_source", lambda _state: {})
+    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_args, **_kwargs: None)
+    snapshot = master_service._build_trading_journal_view_snapshot(force=True)
+    ids = {str(r.get("id")) for r in snapshot["items"]}
+    assert "monthly_aud_reval:bybit_live:2026-03" in ids
+    monthly = next(r for r in snapshot["items"] if r.get("row_type") == "monthly_aud_reval")
+    assert monthly["result_currency"] == "AUD"
+    assert monthly["result_cash"] == pytest.approx(123.45)
+    assert "net_profit" not in monthly and "realized_pnl" not in monthly
+    assert snapshot["stats"].get("total_trades", 0) >= 1
+
+
+def test_journal_source_fingerprint_includes_monthly_paths():
+    fp = master_service._journal_source_fingerprint()
+    paths = {str(i.get("path")) for i in fp.get("files", []) if isinstance(i, dict)}
+    assert str(master_service.MONTHLY_AUD_REVALUATION_PATH) in paths
+    assert str(master_service.MONTHLY_AUD_REVALUATION_STATE_PATH) in paths
+
+
+def test_run_monthly_sync_invalidates_snapshot_on_change(monkeypatch):
+    called = {"n": 0}
+    monkeypatch.setattr(master_service, "_invalidate_trading_journal_view_snapshot", lambda: called.__setitem__("n", called["n"] + 1))
+    monkeypatch.setattr(master_service, "sync_monthly_aud_revaluation", lambda **_kwargs: {"ok": True, "changed": True})
+    monkeypatch.setattr(master_service, "_set_monthly_aud_revaluation_last_result", lambda _result: None)
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    asyncio.run(master_service._run_monthly_aud_revaluation_sync(reason="test"))
+    assert called["n"] == 1

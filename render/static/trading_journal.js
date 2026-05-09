@@ -131,7 +131,7 @@
     { key: 'stop_loss', header: 'Stop Loss', value: (r) => fmtNum(r.stop_loss, 6) },
     { key: 'take_profit', header: 'Target', value: (r) => fmtNum(r.take_profit, 6) },
     { key: 'commission', header: 'Commission', value: (r) => `${fmtNum(r.commission ?? r.fees, 4)} ${r.commission_currency || r.fee_currency || ''}`.trim() || '—' },
-    { key: 'net_profit', header: 'Net Profit', value: (r) => `${fmtNum(r.net_profit ?? r.realized_pnl, 4)} ${r.realized_pnl_currency || r.currency || ''}`.trim() || '—' },
+    { key: 'net_profit', header: 'Net Profit', value: (r) => `${fmtNum(rowPnlValue(r), 4)} ${rowPnlCurrency(r)}`.trim() || '—' },
     { key: 'profit_pct', header: 'Profit %', value: (r) => fmtProfitPct(r.result_pct ?? r.profit_pct) },
     { key: 'r_multiple', header: 'R-Multiple', value: (r) => fmtR(r.r_multiple) },
     { key: 'balance_after_trade', header: 'Balance After', value: (r) => { const bal = asNum(r.analysis_balance_after_trade ?? r.balance_after_trade ?? r.cashflow_new_balance); const ccy = r.balance_after_trade_currency || r.currency || ''; return Number.isFinite(bal) ? `${fmtNum(bal, 2)} ${ccy}` : '—'; } },
@@ -394,6 +394,8 @@
     };
 
     let out = [...rows];
+    const tradeFlagActive = ['breakeven','held_news','spiked_out','early_close'].some((f) => activeFlags.has(f));
+    if (tradeFlagActive) out = out.filter((r) => isTradeRow(r));
     if (activeFlags.has('errors')) {
       out = out.filter((r) => hasAnyKey(r, ['errors', 'error']));
     }
@@ -504,6 +506,33 @@
     if (Array.isArray(savedFlags)) savedFlags.forEach((f) => activeFlags.add(String(f)));
   } catch {}
 
+
+
+  function rowTypeOf(row) {
+    return String(row?.row_type || 'trade').toLowerCase();
+  }
+
+  function isTradeRow(row) {
+    const rowType = rowTypeOf(row);
+    return !rowType || rowType === 'trade';
+  }
+
+  function isCashflowRow(row) {
+    return rowTypeOf(row) === 'cashflow';
+  }
+
+  function isMonthlyAudRevalRow(row) {
+    return rowTypeOf(row) === 'monthly_aud_reval';
+  }
+
+  function rowPnlValue(row) {
+    return isMonthlyAudRevalRow(row) ? asNum(row?.result_cash) : asNum(row?.net_profit ?? row?.realized_pnl);
+  }
+
+  function rowPnlCurrency(row) {
+    if (isMonthlyAudRevalRow(row)) return String(row?.result_currency || 'AUD');
+    return String(row?.realized_pnl_currency || row?.currency || '');
+  }
   function fmtProfitPct(v) {
     const n = asNum(v);
     if (!Number.isFinite(n)) return '—';
@@ -694,8 +723,9 @@
       const dt = dtRaw ? new Date(dtRaw) : null;
       if (!dt || Number.isNaN(dt.getTime()) || !inMonth(dt)) return;
       const key = dt.toISOString().slice(0, 10);
-      const rowType = String(r?.row_type || 'trade').toLowerCase();
-      const isTrade = rowType !== 'cashflow';
+      const rowType = rowTypeOf(r);
+      const isTrade = rowType === 'trade' || !rowType;
+      if (rowType === 'monthly_aud_reval') return;
       const isTestTrade = isTrade && String(r?.is_test_trade ?? '').toLowerCase() === 'true';
       if (isTestTrade) return;
       if (!daily.has(key)) daily.set(key, { trades: 0, fx: 0, crypto: 0, pnlByCcy: new Map() });
@@ -704,8 +734,8 @@
         d.trades += 1;
         if (String(r?.asset_class || '').toLowerCase() === 'fx') d.fx += 1;
         if (String(r?.asset_class || '').toLowerCase() === 'crypto') d.crypto += 1;
-        const pnl = asNum(r?.net_profit ?? r?.realized_pnl);
-        const ccy = String(r?.realized_pnl_currency || r?.currency || '').trim().toUpperCase();
+        const pnl = rowPnlValue(r);
+        const ccy = rowPnlCurrency(r).trim().toUpperCase();
         if (Number.isFinite(pnl) && ccy) d.pnlByCcy.set(ccy, (d.pnlByCcy.get(ccy) || 0) + pnl);
       }
     });
@@ -771,7 +801,7 @@
       const account = String(r?.account_label || r?.account || 'Unknown').trim() || 'Unknown';
       const dtRaw = r?.close_time || r?.open_time;
       const ts = dtRaw ? new Date(dtRaw).getTime() : NaN;
-      if (String(r?.is_test_trade ?? '').toLowerCase() === 'true') return;
+      if (String(r?.is_test_trade ?? '').toLowerCase() === 'true' || isMonthlyAudRevalRow(r)) return;
       const bal = asNum(r?.analysis_balance_after_trade ?? r?.balance_after_trade ?? r?.cashflow_new_balance);
       if (!Number.isFinite(ts) || !Number.isFinite(bal)) return;
       if (!byAccount.has(account)) byAccount.set(account, []);
@@ -871,6 +901,10 @@
     const dir = sortDir === 'asc' ? 1 : -1;
     out.sort((a, b) => {
       let av = a?.[sortKey], bv = b?.[sortKey];
+      if (sortKey === 'net_profit') {
+        av = rowPnlValue(a);
+        bv = rowPnlValue(b);
+      }
       if (sortKey === 'close_time' || sortKey === 'open_time') {
         av = av ? new Date(av).getTime() : -Infinity;
         bv = bv ? new Date(bv).getTime() : -Infinity;
@@ -975,12 +1009,35 @@
     empty.style.display = 'none';
 
     for (const r of sorted) {
-      const rowType = String(r.row_type || 'trade').toLowerCase();
-      const isCashflow = rowType === 'cashflow';
-      const pnl = asNum(r.net_profit ?? r.realized_pnl);
+      const rowType = rowTypeOf(r);
+      const isCashflow = isCashflowRow(r);
+      const isMonthlyAud = isMonthlyAudRevalRow(r);
+      const pnl = rowPnlValue(r);
       const bal = asNum(r.analysis_balance_after_trade ?? r.balance_after_trade ?? r.cashflow_new_balance);
       const ccy = r.balance_after_trade_currency || r.currency || '';
       const tr = document.createElement('tr');
+
+      if (isMonthlyAud) {
+        const pnlCcy = rowPnlCurrency(r) || 'AUD';
+        const cls = Number.isFinite(pnl) ? (pnl > 0 ? 'pos' : (pnl < 0 ? 'neg' : '')) : '';
+        tr.className = 'tj-monthly-aud-reval';
+        tr.title = 'Monthly Bybit Live AUD P/L note; excluded from trading metrics.';
+        tr.innerHTML = `
+          <td>${fmtTime(r.open_time || r.close_time)}</td>
+          <td>${fmtTime(r.close_time || r.open_time)}</td>
+          <td>${r.account_label || r.account || 'Bybit Live'}</td>
+          <td>${r.symbol || 'MONTHLY AUD P/L'}</td>
+          <td>NOTE</td>
+          <td>—</td>
+          <td>—</td>
+          <td>${r.setup || 'Monthly Bybit Live AUD P/L note - excluded from metrics'}</td>
+          <td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td>
+          <td class="num ${cls}">${fmtNum(pnl, 4)} ${pnlCcy}</td>
+          <td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td></td><td></td>
+        `;
+        tbody.appendChild(tr);
+        continue;
+      }
 
       if (isCashflow) {
         const amt = asNum(r.cashflow_amount);
@@ -1032,7 +1089,7 @@
         <td>${fmtNum(r.stop_loss, 6)}</td>
         <td>${fmtNum(r.take_profit, 6)}</td>
         <td>${fmtNum(r.commission ?? r.fees, 4)} ${r.commission_currency || r.fee_currency || ''}</td>
-        <td class="num ${Number.isFinite(pnl) ? (pnl > 0 ? 'pos' : (pnl < 0 ? 'neg' : '')) : ''}">${fmtNum(pnl, 4)} ${r.realized_pnl_currency || r.currency || ''}</td>
+        <td class="num ${Number.isFinite(pnl) ? (pnl > 0 ? 'pos' : (pnl < 0 ? 'neg' : '')) : ''}">${fmtNum(pnl, 4)} ${rowPnlCurrency(r)}</td>
         <td class="num ${asNum(r.result_pct ?? r.profit_pct) > 0 ? 'pos' : (asNum(r.result_pct ?? r.profit_pct) < 0 ? 'neg' : '')}">${fmtProfitPct(r.result_pct ?? r.profit_pct)}</td>
         <td class="num ${asNum(r.r_multiple) > 0 ? 'pos' : (asNum(r.r_multiple) < 0 ? 'neg' : '')}">${fmtR(r.r_multiple)}</td>
         <td>${Number.isFinite(bal) ? `${fmtNum(bal, 2)} ${ccy}` : '—'}</td>
