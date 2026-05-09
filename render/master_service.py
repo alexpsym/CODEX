@@ -3918,6 +3918,16 @@ def _is_bybit_demo_source_path(path: object) -> bool:
 def _parse_excel_account_workbook(
     file_name: str, dbx_path: str, payload: bytes
 ) -> Tuple[List[Dict[str, object]], Optional[Dict[str, object]]]:
+    def _parse_oanda_export_datetime(value: object) -> Tuple[float, Optional[str]]:
+        raw = str(value or "").strip()
+        if not raw:
+            return float("-inf"), None
+        normalized = raw.replace(" AEST", " +10:00").replace(" AEDT", " +11:00")
+        try:
+            parsed = pd.to_datetime(normalized, utc=True)
+            return float(parsed.timestamp()), parsed.isoformat()
+        except Exception:
+            return float("-inf"), raw
     bio = io.BytesIO(payload)
     try:
         xls = pd.ExcelFile(bio, engine="openpyxl")
@@ -4162,8 +4172,8 @@ def _parse_excel_account_workbook(
                     bal_val = _safe_float_from_row(row, bal_col)
                     if bal_val is None:
                         continue
-                    ts = _to_float(pd.to_datetime(row.get(tx_date_col), utc=True).timestamp()) if not _is_empty_cell(row.get(tx_date_col)) else None
-                    if ts is not None and ts >= latest_ts:
+                    ts, _iso = _parse_oanda_export_datetime(row.get(tx_date_col))
+                    if ts != float("-inf") and ts >= latest_ts:
                         latest_ts = ts
                         latest_row = row
             if latest_row is None and bal_col:
@@ -4174,10 +4184,7 @@ def _parse_excel_account_workbook(
             if latest_row is not None:
                 as_of = None
                 if tx_date_col:
-                    try:
-                        as_of = pd.to_datetime(latest_row.get(tx_date_col)).isoformat()
-                    except Exception:
-                        as_of = str(latest_row.get(tx_date_col) or "")
+                    _, as_of = _parse_oanda_export_datetime(latest_row.get(tx_date_col))
                 account_balance = {
                     "source": "oanda_transaction_export_balance",
                     "balance_source": "oanda_transaction_export_balance",
@@ -4678,6 +4685,12 @@ def _build_journal_balance_timelines(
             if "ORDER_FILL" in refs_text.upper() or "TRANSACTION" in refs_text.upper():
                 return True
         return False
+    def _prefer_seed_on_tie(seed_source: str, seed_as_of: object) -> bool:
+        if not str(seed_as_of or "").strip():
+            return False
+        return str(seed_source or "").strip().lower() in {
+            "oanda_transaction_export_balance", "oanda_account_summary", "broker_account_summary", "account_summary"
+        }
     def _to_ts(value: object) -> float:
         if value in (None, ""):
             return float("-inf")
@@ -4790,17 +4803,19 @@ def _build_journal_balance_timelines(
                 last_known_balance = after
                 last_known_ts = trade_ts
 
-        latest_authoritative_balance: Optional[float] = None
-        latest_authoritative_ts = float("-inf")
+        latest_trade_authoritative_balance: Optional[float] = None
+        latest_trade_authoritative_ts = float("-inf")
+        latest_trade_authoritative_as_of: Optional[object] = None
         for row_idx in trade_indices:
             row = out_rows[row_idx]
             value = _authoritative_balance_after_trade(row)
             if value is None:
                 continue
             ts = _to_ts(row.get("close_time") or row.get("open_time"))
-            if ts >= latest_authoritative_ts:
-                latest_authoritative_ts = ts
-                latest_authoritative_balance = value
+            if ts >= latest_trade_authoritative_ts:
+                latest_trade_authoritative_ts = ts
+                latest_trade_authoritative_balance = value
+                latest_trade_authoritative_as_of = row.get("close_time") or row.get("open_time")
 
         authoritative_seed_balance = _to_float(bucket.get("excel_balance")) if bool(bucket.get("excel_balance_authoritative")) else None
         authoritative_seed_ts = _to_ts(bucket.get("excel_balance_as_of")) if authoritative_seed_balance is not None else float("-inf")
@@ -4812,48 +4827,52 @@ def _build_journal_balance_timelines(
         authoritative_balance_used: Optional[float] = None
         authoritative_balance_source: Optional[str] = None
         latest_authoritative_at: Optional[object] = None
-        latest_authoritative_ts = latest_authoritative_ts if latest_authoritative_balance is not None else float("-inf")
-        if authoritative_seed_balance is not None and authoritative_seed_ts >= latest_authoritative_ts:
-            latest_authoritative_ts = authoritative_seed_ts
-            latest_authoritative_at = bucket.get("excel_balance_as_of")
-        elif latest_authoritative_balance is not None:
-            latest_authoritative_at = next((out_rows[i].get("close_time") or out_rows[i].get("open_time") for i in reversed(trade_indices) if _to_ts(out_rows[i].get("close_time") or out_rows[i].get("open_time")) == latest_authoritative_ts), None)
+        selected_authoritative_balance: Optional[float] = latest_trade_authoritative_balance
+        selected_authoritative_source: Optional[str] = "authoritative_trade_balance" if latest_trade_authoritative_balance is not None else None
+        selected_authoritative_ts = latest_trade_authoritative_ts if latest_trade_authoritative_balance is not None else float("-inf")
+        selected_authoritative_as_of: Optional[object] = latest_trade_authoritative_as_of
+        if authoritative_seed_balance is not None:
+            if (
+                authoritative_seed_ts > selected_authoritative_ts
+                or (
+                    authoritative_seed_ts == selected_authoritative_ts
+                    and _prefer_seed_on_tie(authoritative_seed_source, bucket.get("excel_balance_as_of"))
+                )
+            ):
+                selected_authoritative_balance = authoritative_seed_balance
+                selected_authoritative_source = authoritative_seed_source
+                selected_authoritative_ts = authoritative_seed_ts
+                selected_authoritative_as_of = bucket.get("excel_balance_as_of")
+        latest_authoritative_at = selected_authoritative_as_of
 
         if has_cashflow:
             latest_event_idx = len(events) - 1
             base = _to_float(events[latest_event_idx].get("new_balance"))
             latest_cashflow_ts = _to_ts(events[latest_event_idx].get("date"))
-            if base is not None and latest_cashflow_ts > latest_authoritative_ts:
+            if base is not None and latest_cashflow_ts > selected_authoritative_ts:
                 display_balance = segment_running.get(latest_event_idx, base)
                 balance_source = "cashflow_anchor_plus_trades"
                 as_of = events[latest_event_idx].get("date")
-            elif latest_authoritative_balance is not None:
-                display_balance = latest_authoritative_balance
-                balance_source = "authoritative_trade_balance"
-                as_of = next((out_rows[i].get("close_time") or out_rows[i].get("open_time") for i in reversed(trade_indices) if _to_ts(out_rows[i].get("close_time") or out_rows[i].get("open_time")) == latest_authoritative_ts), None)
-                authoritative_balance_used = latest_authoritative_balance
-                authoritative_balance_source = "authoritative_trade_balance"
-                latest_authoritative_at = as_of
-            elif authoritative_seed_balance is not None:
-                display_balance = authoritative_seed_balance
-                balance_source = authoritative_seed_source
-                as_of = bucket.get("excel_balance_as_of")
-                authoritative_balance_used = authoritative_seed_balance
-                authoritative_balance_source = authoritative_seed_source
+            elif selected_authoritative_balance is not None:
+                display_balance = selected_authoritative_balance
+                balance_source = str(selected_authoritative_source or "authoritative_trade_balance")
+                as_of = selected_authoritative_as_of
+                authoritative_balance_used = selected_authoritative_balance
+                authoritative_balance_source = balance_source
                 latest_authoritative_at = as_of
         elif last_known_balance is not None:
             display_balance = last_known_balance
             balance_source = "trade_timeline"
             as_of = next((out_rows[i].get("close_time") or out_rows[i].get("open_time") for i in reversed(trade_indices) if _to_ts(out_rows[i].get("close_time") or out_rows[i].get("open_time")) == last_known_ts), None)
-            authoritative_balance_used = latest_authoritative_balance
-            authoritative_balance_source = "authoritative_trade_balance" if latest_authoritative_balance is not None else None
-            latest_authoritative_at = as_of if latest_authoritative_balance is not None else latest_authoritative_at
-        elif authoritative_seed_balance is not None:
-            display_balance = authoritative_seed_balance
-            balance_source = authoritative_seed_source
-            as_of = bucket.get("excel_balance_as_of")
-            authoritative_balance_used = authoritative_seed_balance
-            authoritative_balance_source = authoritative_seed_source
+            authoritative_balance_used = selected_authoritative_balance
+            authoritative_balance_source = selected_authoritative_source
+            latest_authoritative_at = selected_authoritative_as_of if selected_authoritative_balance is not None else latest_authoritative_at
+        elif selected_authoritative_balance is not None:
+            display_balance = selected_authoritative_balance
+            balance_source = str(selected_authoritative_source or "authoritative_trade_balance")
+            as_of = selected_authoritative_as_of
+            authoritative_balance_used = selected_authoritative_balance
+            authoritative_balance_source = selected_authoritative_source
             latest_authoritative_at = as_of
         elif _to_float(bucket.get("excel_balance")) is not None:
             display_balance = _to_float(bucket.get("excel_balance"))
@@ -4876,7 +4895,7 @@ def _build_journal_balance_timelines(
                 "as_of": as_of,
                 "missing_balance": missing_balance,
                 "last_trade_at": (out_rows[trade_indices[-1]].get("close_time") or out_rows[trade_indices[-1]].get("open_time")) if trade_indices else None,
-                "stale_cashflow_overridden": bool(events and display_balance is not None and balance_source != "cashflow_anchor_plus_trades" and _to_ts(events[-1].get("date")) <= latest_authoritative_ts),
+                "stale_cashflow_overridden": bool(events and display_balance is not None and balance_source != "cashflow_anchor_plus_trades" and _to_ts(events[-1].get("date")) <= selected_authoritative_ts),
             }
         )
         diagnostics[account_key] = {
@@ -4887,7 +4906,7 @@ def _build_journal_balance_timelines(
             "latest_cashflow_at": events[-1].get("date") if events else None,
             "latest_authoritative_balance_at": latest_authoritative_at,
             "balance_source": balance_source,
-            "stale_cashflow_overridden": bool(events and display_balance is not None and balance_source != "cashflow_anchor_plus_trades" and _to_ts(events[-1].get("date")) <= latest_authoritative_ts),
+            "stale_cashflow_overridden": bool(events and display_balance is not None and balance_source != "cashflow_anchor_plus_trades" and _to_ts(events[-1].get("date")) <= selected_authoritative_ts),
             "previous_cashflow_balance": _to_float(events[-1].get("new_balance")) if events else None,
             "authoritative_balance_used": authoritative_balance_used if authoritative_balance_used is not None else latest_authoritative_balance,
             "authoritative_balance_source": authoritative_balance_source,
@@ -4991,7 +5010,10 @@ def _merge_missing_timeline_balances_with_broker(
         broker_as_of_ts = _to_float(pd.to_datetime(broker.get("as_of"), utc=True).timestamp()) if broker.get("as_of") else None
         if existing_balance is not None and not bool(existing.get("missing_balance")):
             existing_source = str(existing.get("balance_source") or existing.get("source") or "").lower()
-            if "cashflow" not in existing_source:
+            broker_source = str(broker.get("balance_source") or broker.get("source") or "").lower()
+            is_oanda_broker = broker_source == "oanda_account_summary"
+            can_override = "cashflow" in existing_source or (is_oanda_broker and existing_source == "authoritative_trade_balance")
+            if not can_override:
                 continue
             if existing_as_of_ts is not None and broker_as_of_ts is not None and existing_as_of_ts > broker_as_of_ts:
                 continue
@@ -22417,6 +22439,25 @@ async def _run_trading_journal_sync_job() -> None:
                     )
                 except Exception as exc:
                     broker_balance_warnings.append(f"Bybit {account_mode} balance unavailable: {exc}")
+            for account_mode in ("demo", "live"):
+                label = "OANDA DEMO" if account_mode == "demo" else "OANDA LIVE"
+                try:
+                    summary = await _fetch_oanda_account_summary(account_mode)
+                    broker_account_balances.append(
+                        {
+                            "account": label,
+                            "label": label,
+                            "balance": _to_float(summary.get("balance")),
+                            "nav": _to_float(summary.get("nav")),
+                            "currency": str(summary.get("currency") or "AUD"),
+                            "source": "oanda_account_summary",
+                            "balance_source": "oanda_account_summary",
+                            "account_mode": account_mode,
+                            "as_of": _utc_now_iso(),
+                        }
+                    )
+                except Exception as exc:
+                    broker_balance_warnings.append(f"OANDA {account_mode} account summary unavailable: {exc}")
         source_mode = _trading_journal_source_mode()
         if (
             source_mode == "local"
