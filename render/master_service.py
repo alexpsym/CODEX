@@ -5342,17 +5342,7 @@ def _parse_local_trading_journal_workbook(path: Path) -> Tuple[List[Dict[str, ob
         df = pd.read_csv(path, encoding="utf-8-sig")
         if _is_oanda_transaction_history_frame(df):
             lower = path.name.lower()
-            account_mode = "demo" if "demo" in lower else ("live" if "live" in lower else "")
-            if not account_mode:
-                return [], {
-                    "source": "oanda_transaction_export_balance",
-                    "balance_source": "oanda_transaction_export_balance",
-                    "account": Path(path.name).stem,
-                    "label": Path(path.name).stem,
-                    "balance": None,
-                    "currency": "AUD",
-                    "raw_refs": {"warning": "ambiguous_oanda_export_account_mapping"},
-                }
+            account_mode = "demo" if "demo" in lower else ("live" if "live" in lower else "demo")
             account_label = "OANDA DEMO" if account_mode == "demo" else "OANDA LIVE"
             parsed = _journal_rows_from_oanda_transaction_history_frame(
                 df,
@@ -5360,6 +5350,12 @@ def _parse_local_trading_journal_workbook(path: Path) -> Tuple[List[Dict[str, ob
                 account_label=account_label,
                 source_path=str(path),
             )
+            if "demo" not in lower and "live" not in lower and isinstance(parsed.get("account_balance"), dict):
+                parsed["account_balance"]["raw_refs"] = {
+                    **(parsed["account_balance"].get("raw_refs") or {}),
+                    "unresolved_account_mapping": True,
+                    "workbook": path.name,
+                }
             return parsed.get("rows") or [], parsed.get("account_balance")
         return [], None
     payload = path.read_bytes()
