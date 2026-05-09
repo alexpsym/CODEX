@@ -5734,6 +5734,10 @@ def _import_trading_journal_from_sources(
     oanda_export_trades_failed = 0
     oanda_export_append_failed = False
     oanda_export_append_error = ""
+    oanda_export_balance_parsed = None
+    oanda_export_balance_parsed_as_of = None
+    oanda_export_balance_applied = False
+    oanda_export_rows_persisted = False
     known_oanda_accounts: set[str] = set()
     try:
         _state_for_mapping = _load_trading_journal_state()
@@ -5757,6 +5761,9 @@ def _import_trading_journal_from_sources(
     for local_file in local_files:
         try:
             local_rows, local_balance = _parse_local_trading_journal_workbook(local_file)
+            if isinstance(local_balance, dict) and str(local_balance.get("balance_source") or "").strip().lower() == "oanda_transaction_export_balance":
+                oanda_export_balance_parsed = local_balance.get("balance")
+                oanda_export_balance_parsed_as_of = local_balance.get("as_of")
             if _is_bybit_demo_workbook_name(local_file.name) and not local_rows:
                 current_rows = [r for r in _get_trading_journal_rows() if isinstance(r, dict)]
                 kept_rows, purged = _purge_bybit_demo_rows(current_rows)
@@ -5826,6 +5833,8 @@ def _import_trading_journal_from_sources(
                         oanda_export_target_workbook = _canonical_local_oanda_workbook_name(mapped_mode)
                         oanda_export_source_path = str(local_file)
                         oanda_export_account_label = mapped_label
+                        oanda_export_rows_persisted = True
+                        oanda_export_balance_applied = True
                         reread_rows, _reread_balance = _parse_local_trading_journal_workbook(workbook_path)
                         mapped_rows_for_state = [r for r in reread_rows if str((r or {}).get("source") or "").strip().lower() in {"local_excel", "excel"}]
                         skip_csv_rows_from_state = True
@@ -5870,6 +5879,8 @@ def _import_trading_journal_from_sources(
                 err_payload["code"] = "MISSING_XLRD_FOR_XLS"
                 oanda_export_append_failed = True
                 oanda_export_append_error = "MISSING_XLRD_FOR_XLS"
+                oanda_export_balance_applied = False
+                oanda_export_rows_persisted = False
             if local_file.suffix.lower() == ".xls" and "xlrd" in str(exc).lower():
                 err_payload["code"] = "MISSING_XLRD_FOR_XLS"
                 requirements_path = str((BASE_DIR / "render" / "requirements.txt").resolve())
@@ -5892,6 +5903,11 @@ def _import_trading_journal_from_sources(
     diagnostics["oanda_export_trades_failed"] = int(oanda_export_trades_failed)
     diagnostics["oanda_export_append_failed"] = bool(oanda_export_append_failed)
     diagnostics["oanda_export_append_error"] = oanda_export_append_error
+    diagnostics["oanda_export_balance_parsed"] = oanda_export_balance_parsed
+    diagnostics["oanda_export_balance_parsed_as_of"] = oanda_export_balance_parsed_as_of
+    diagnostics["oanda_export_balance_applied"] = bool(oanda_export_balance_applied)
+    diagnostics["oanda_export_rows_persisted"] = bool(oanda_export_rows_persisted)
+    diagnostics["oanda_export_failure_blocks_balance_update"] = bool(oanda_export_append_failed)
 
     dedupe_groups = 0
     source_duplicate_rows_dropped = 0
@@ -6010,7 +6026,7 @@ def _import_trading_journal_from_sources(
             "last_sync": {
                 "source_mode": source_mode,
                 "updated_at": _utc_now_iso(),
-                "ok": bool(imported_any),
+                "ok": bool(imported_any) and not bool(oanda_export_append_failed),
                 "balances_found": len(balances),
                 "local_import_enabled": local_enabled,
             },
@@ -6043,23 +6059,28 @@ def _import_trading_journal_from_sources(
             snapshot_error = f"Snapshot persistence failed after import: {exc}"
             warnings.append(snapshot_error)
     ok_after_snapshot = bool(imported_any) and not snapshot_error
-    if oanda_export_append_failed and not imported_any:
+    if oanda_export_append_failed:
         ok_after_snapshot = False
     if local_authoritative and not imported_any:
         ok_after_snapshot = False
+    oanda_failure_message = (
+        f"OANDA export parsed but not written to {oanda_export_target_workbook or 'canonical workbook'}: "
+        f"{oanda_export_append_error or 'append_failed'}."
+    )
     return {
         "ok": ok_after_snapshot,
         "message": (
             snapshot_error
             if snapshot_error
             else (
-                "Done"
-                if imported_any
+                oanda_failure_message
+                if oanda_export_append_failed
+                else ("Done" if imported_any
                 else (
                     "No local Excel trade rows imported; local Excel is authoritative, stale journal rows were cleared."
                     if local_authoritative
                     else "No rows imported from configured sources; existing journal data was retained."
-                )
+                ))
             )
         ),
         "source_mode": source_mode,
