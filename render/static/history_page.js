@@ -157,7 +157,10 @@
               throw new Error(`Export completed, but Trading Journal backfill failed: ${detail}${target}`);
             }
             setStatus(`Export complete. Backfilled ${backfillRes.oanda_export_trades_seen || 0} OANDA ${String(payload.account || '').toUpperCase()} trades into Trading Journal.`);
-            await fetchJson('/api/trading-journal/sync', { method: 'POST' });
+            const syncRes = await fetchJson('/api/trading-journal/sync', { method: 'POST' });
+            if (!syncRes || syncRes.ok === false) {
+              throw new Error(syncRes?.message || 'Trading Journal sync reported failure after OANDA backfill.');
+            }
           }
           const dl = st.download_url;
           if (dl) {

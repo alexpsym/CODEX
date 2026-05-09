@@ -177,7 +177,7 @@ def test_oanda_history_export_backfill_endpoint_invalidates_view_cache(monkeypat
 
 def test_oanda_history_export_backfill_endpoint_returns_failure_on_append_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     csv_path = tmp_path / "oanda_history_demo_job3.csv"
-    csv_path.write_text("TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,INSTRUMENT,PRICE,UNITS,DIRECTION,SPREAD COST,STOP LOSS,TAKE PROFIT,FINANCING,COMMISSION,PL,BALANCE\n")
+    csv_path.write_text("TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,INSTRUMENT,PRICE,UNITS,DIRECTION,SPREAD COST,STOP LOSS,TAKE PROFIT,FINANCING,COMMISSION,PL,BALANCE\n589,2026-04-08 19:50:46 AEST,ORDER_FILL,MARKET_ORDER,NZD_USD,0.58217,2550,Buy,0,0.57864,0.58888,,,0,1493.64\n594,2026-04-09 19:35:17 AEST,ORDER_FILL,MARKET_ORDER_TRADE_CLOSE,NZD_USD,0.58308,-2550,Sell,0,,,,,3.2847,1496.92\n")
     csv_path.with_suffix(".json").write_text('{"account_mode":"demo"}')
     job = master_service.OandaHistoryJob(job_id="jobbf3", status="done", created_at=0, updated_at=0, params={"account": "demo"}, output_path=csv_path)
     master_service.OANDA_HISTORY_JOBS[job.job_id] = job

@@ -14577,11 +14577,13 @@ def _canonical_local_oanda_workbook_name(account_mode: str) -> str:
     return "OANDA DEMO.xlsx" if mode == "demo" else "OANDA LIVE.xlsx"
 
 
-def _append_oanda_export_rows_to_local_workbook(account_mode: str, rows: List[Dict[str, object]], source_path: str) -> int:
+def _append_oanda_export_rows_to_local_workbook(account_mode: str, rows: List[Dict[str, object]], source_path: str, return_stats: bool = False):
     workbook_name = _canonical_local_oanda_workbook_name(account_mode)
     workbook_path = _local_journal_workbook_path(workbook_name)
     legacy_name = "OANDA DEMO.xls" if str(account_mode).strip().lower() == "demo" else "OANDA LIVE.xls"
     legacy_path = _local_journal_workbook_path(legacy_name)
+    legacy_rows_migrated = 0
+    legacy_migration_performed = False
     if (not workbook_path.exists()) and legacy_path.exists():
         try:
             import xlrd as _xlrd  # noqa: F401
@@ -14589,8 +14591,19 @@ def _append_oanda_export_rows_to_local_workbook(account_mode: str, rows: List[Di
             raise RuntimeError("MISSING_XLRD_FOR_XLS") from exc
         legacy_rows, _legacy_balance = _parse_local_trading_journal_workbook(legacy_path)
         if legacy_rows:
-            _append_generic_local_broker_rows(workbook_name, legacy_rows, "local_excel")
-    return _append_generic_local_broker_rows(workbook_name, rows, "oanda_transaction_export")
+            legacy_migration_performed = True
+            legacy_stats = _append_generic_local_broker_rows(workbook_name, legacy_rows, "local_excel", return_stats=True)
+            legacy_rows_migrated = int(legacy_stats.get("inserted") or 0)
+    stats = _append_generic_local_broker_rows(workbook_name, rows, "oanda_transaction_export", return_stats=True)
+    if return_stats:
+        return {
+            "changed": int(stats.get("changed") or 0),
+            "inserted": int(stats.get("inserted") or 0),
+            "updated": int(stats.get("updated") or 0),
+            "legacy_rows_migrated": legacy_rows_migrated,
+            "legacy_migration_performed": legacy_migration_performed,
+        }
+    return int(stats.get("changed") or 0)
 
 
 async def _sync_bybit_closed_pnl_window(
@@ -22332,10 +22345,11 @@ async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
         row["account_label"] = "OANDA DEMO" if account_mode == "demo" else "OANDA LIVE"
         mapped.append(row)
     changed = 0
+    inserted = 0
+    updated = 0
     append_error = None
     try:
-        workbook_name = _canonical_local_oanda_workbook_name(account_mode)
-        stats = _append_generic_local_broker_rows(workbook_name, mapped, "oanda_transaction_export", return_stats=True)
+        stats = _append_oanda_export_rows_to_local_workbook(account_mode, mapped, str(job.output_path), return_stats=True)
         changed = int(stats.get("changed") or 0)
         inserted = int(stats.get("inserted") or 0)
         updated = int(stats.get("updated") or 0)
