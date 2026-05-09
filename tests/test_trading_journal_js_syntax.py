@@ -93,3 +93,13 @@ def test_trading_journal_stat_trade_filter_wiring_present() -> None:
     assert "data-jump-row-label" in js
     assert "tj-stat-trade-filter-btn" in js
     assert "jumpToTradeRow(jumpEl.dataset.jumpRowId || '', jumpEl.dataset.jumpRowLabel || '')" in js
+    assert "stale_oanda_demo_balance_not_backfilled" in js
+    assert "OANDA demo export exists but was not applied. Balance is stale." in js
+    assert "Install xlrd in the journal runtime, then rerun OANDA history backfill." in js
+    assert "Repair OANDA DEMO" in js
+    assert "/api/trading-journal/oanda-demo/repair-balance" in js
+    assert "OANDA DEMO balance is stale. Run OANDA demo history export/backfill." in js
+    assert "oandaRepairAttempted" in js
+    assert "loadData(" not in js
+    assert "schedulePostRepairRefresh" in js
+    assert "catch (_err) {}" not in js

@@ -58,6 +58,9 @@
     renderedRows: [],
     manualSyncInFlight: false,
     statTradeFilter: null,
+    oandaRepairAttempted: false,
+    oandaRepairRefreshPending: false,
+    oandaRepairLastError: '',
   };
   try { filterInput.value = localStorage.getItem('tj.filter') || ''; } catch {}
 
@@ -1044,17 +1047,71 @@
     (items || []).forEach((b) => {
       const div = document.createElement('div');
       div.className = 'bal-card';
+      const label = String(b.label || b.account || 'Account');
       const source = String(b.balance_source || b.source || 'unknown');
       const asOf = b.as_of ? ` · ${fmtTime(b.as_of)}` : '';
       const staleOverridden = !!b.stale_cashflow_overridden;
+      const staleOandaBackfill = label.toUpperCase() === 'OANDA DEMO' && !!state?.diagnostics?.stale_oanda_demo_balance_not_backfilled;
+      const oandaBackfillErr = label.toUpperCase() === 'OANDA DEMO' ? String(state?.diagnostics?.oanda_export_append_error || '') : '';
+      const oandaRuntimeErr = label.toUpperCase() === 'OANDA DEMO' ? String(state?.oandaRepairLastError || '') : '';
       div.innerHTML = `
-        <div class="muted">${b.label || b.account || 'Account'}</div>
+        <div class="muted">${label}</div>
         <div style="font-size:1.0rem;font-weight:600">${fmtNum(b.balance, (() => { const c = String(b.currency || '').toUpperCase(); if (c === 'AUD' || c === 'USD') return 2; if (c === 'USDT') return 8; return 6; })())} ${b.currency || ''}</div>
         <div class="muted" style="font-size:0.8rem" title="${source}${asOf}">Source: ${source}${asOf}</div>
         ${staleOverridden ? '<div class="muted" style="font-size:0.78rem">Using OANDA export/API balance; stale cashflow anchor ignored.</div>' : ''}
+        ${staleOandaBackfill ? `<div class="muted" style="font-size:0.78rem;color:#b91c1c">OANDA demo export exists but was not applied. Balance is stale.${state?.diagnostics?.latest_export_balance ? ` Latest export: ${fmtNum(state.diagnostics.latest_export_balance, 2)} AUD.` : ''}</div>` : ''}
+        ${oandaBackfillErr.includes('MISSING_XLRD_FOR_XLS') ? `<div class="muted" style="font-size:0.78rem;color:#b91c1c">Install xlrd in the journal runtime, then rerun OANDA history backfill.</div>` : ''}
+        ${oandaRuntimeErr ? `<div class="muted" style="font-size:0.78rem;color:#b91c1c">${oandaRuntimeErr}</div>` : ''}
+        ${b.stale_balance_warning && !b.repair_export_available ? `<div class="muted" style="font-size:0.78rem;color:#b91c1c">OANDA DEMO balance is stale. Run OANDA demo history export/backfill.</div>` : ''}
+        ${b.stale_balance_warning ? `<button class="tj-repair-oanda" style="margin-top:6px">Repair OANDA DEMO</button>` : ''}
       `;
       wrap.appendChild(div);
+      const repairBtn = div.querySelector('.tj-repair-oanda');
+      if (repairBtn) {
+        repairBtn.addEventListener('click', async () => {
+          try {
+            const r = await fetch('/api/trading-journal/oanda-demo/repair-balance', { method: 'POST' });
+            const p = await r.json();
+            if (!r.ok || p.ok === false) throw new Error(p.error || p.message || 'Repair failed');
+            setStatus('OANDA DEMO repair applied. Refreshing journal…', false);
+            schedulePostRepairRefresh();
+          } catch (e) {
+            alert(String(e?.message || e));
+          }
+        });
+      }
     });
+  }
+
+  function schedulePostRepairRefresh() {
+    if (state.oandaRepairRefreshPending) return;
+    state.oandaRepairRefreshPending = true;
+    setTimeout(async () => {
+      if (loadInFlight) {
+        state.oandaRepairRefreshPending = false;
+        schedulePostRepairRefresh();
+        return;
+      }
+      state.oandaRepairRefreshPending = false;
+      await load({ silent: false, skipAutoSync: true, preserveStatus: true, statusOverride: 'OANDA repair applied. Refreshing…' });
+    }, 50);
+  }
+
+  async function maybeAutoRepairOandaDemo(items) {
+    if (state.oandaRepairAttempted) return;
+    const demo = (items || []).find((b) => String(b?.label || b?.account || '').toUpperCase() === 'OANDA DEMO');
+    if (!demo || !demo.stale_balance_warning || !demo.repair_available || !demo.repair_endpoint) return;
+    if (!demo.repair_export_available) return;
+    if (String(demo.repair_blocked_reason || '').toUpperCase() === 'MISSING_XLRD_FOR_XLS') return;
+    state.oandaRepairAttempted = true;
+    try {
+      const r = await fetch(demo.repair_endpoint, { method: 'POST' });
+      const p = await r.json();
+      if (!r.ok || p.ok === false) throw new Error(p.error || p.message || 'Repair failed');
+      schedulePostRepairRefresh();
+    } catch (err) {
+      state.oandaRepairLastError = String(err?.message || err);
+    }
   }
   function fmtMoneyValue(value, ccy, decimals = 2) { return `${ccy || 'UNKNOWN'} ${fmtNum(value, decimals)}`; }
   function formatTradeFilterLabel(row, fallbackLabel) {
@@ -1276,6 +1333,7 @@
           state.diagnostics = cached.diagnostics || null;
           renderAll();
           renderBalances(Array.isArray(cached.balances.items) ? cached.balances.items : []);
+          await maybeAutoRepairOandaDemo(Array.isArray(cached.balances.items) ? cached.balances.items : []);
           renderStats(state.stats);
           setStatus('Cached data shown, refreshing…');
           hideLoading();
@@ -1338,6 +1396,7 @@
       if (!silent) setLoading(95, 'Rendering…');
       renderAll();
       renderBalances(Array.isArray(balances.items) ? balances.items : []);
+      await maybeAutoRepairOandaDemo(Array.isArray(balances.items) ? balances.items : []);
       const diagErrors = Array.isArray(diagnostics?.errors) ? diagnostics.errors : [];
       diagErrors
         .filter((msg) => String(msg || '').toLowerCase().includes('bybit') && String(msg || '').toLowerCase().includes('balance'))
