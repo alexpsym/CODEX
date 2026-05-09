@@ -1137,11 +1137,22 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
             continue
         label = str(bal.get("label") or bal.get("account") or "").strip().upper()
         if label == "OANDA DEMO" and str(bal.get("balance_source") or "") == "cashflow_anchor_plus_trades":
+            demo_exports = [p for p in _list_local_oanda_history_exports() if "demo" in p.name.lower()]
+            latest_export = sorted(demo_exports, key=lambda p: p.stat().st_mtime, reverse=True)[0] if demo_exports else None
+            blocked_reason = None
+            latest_backfill_error = (TRADING_JOURNAL_IMPORT_DIAGNOSTICS or {}).get("oanda_export_append_error")
+            if latest_backfill_error and "MISSING_XLRD_FOR_XLS" in str(latest_backfill_error):
+                blocked_reason = "MISSING_XLRD_FOR_XLS"
+            elif not latest_export:
+                blocked_reason = "OANDA_DEMO_EXPORT_NOT_FOUND"
             bal["stale_balance_warning"] = True
             bal["stale_balance_reason"] = "oanda_demo_cashflow_anchor"
             bal["repair_available"] = True
             bal["repair_endpoint"] = "/api/trading-journal/oanda-demo/repair-balance"
-            bal["latest_backfill_error"] = (TRADING_JOURNAL_IMPORT_DIAGNOSTICS or {}).get("oanda_export_append_error")
+            bal["latest_backfill_error"] = latest_backfill_error
+            bal["repair_export_available"] = bool(latest_export) and blocked_reason is None
+            bal["repair_blocked_reason"] = blocked_reason
+            bal["latest_oanda_demo_export_path"] = str(latest_export) if latest_export else ""
     diagnostics = _build_trading_journal_diagnostics_snapshot()
     if oanda_balance_warnings:
         existing_errors = diagnostics.get("errors") if isinstance(diagnostics.get("errors"), list) else []

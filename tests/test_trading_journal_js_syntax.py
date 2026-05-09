@@ -98,3 +98,5 @@ def test_trading_journal_stat_trade_filter_wiring_present() -> None:
     assert "Install xlrd in the journal runtime, then rerun OANDA history backfill." in js
     assert "Repair OANDA DEMO" in js
     assert "/api/trading-journal/oanda-demo/repair-balance" in js
+    assert "OANDA DEMO balance is stale. Run OANDA demo history export/backfill." in js
+    assert "oandaRepairAttempted" in js
