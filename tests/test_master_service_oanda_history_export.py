@@ -114,3 +114,42 @@ def test_oanda_history_export_status_only_returns_download_when_file_exists(tmp_
         assert "download_url" not in payload
     finally:
         master_service.OANDA_HISTORY_JOBS.pop(job.job_id, None)
+
+
+import pandas as pd
+
+def _sample_oanda_history_rows():
+    return [
+        {"TICKET":589,"TRANSACTION DATE":"2026-04-08 19:50:46 AEST","TRANSACTION TYPE":"ORDER_FILL","DETAILS":"MARKET_ORDER","INSTRUMENT":"NZD_USD","PRICE":0.58217,"UNITS":2550,"DIRECTION":"Buy","SPREAD COST":-0.1,"STOP LOSS":0.57864,"TAKE PROFIT":0.58888,"FINANCING":"","COMMISSION":"","PL":"","BALANCE":1493.64},
+        {"TICKET":592,"TRANSACTION DATE":"2026-04-09 07:00:00 AEST","TRANSACTION TYPE":"DAILY_FINANCING","DETAILS":"DAILY_FINANCING","INSTRUMENT":"","PRICE":"","UNITS":"","DIRECTION":"","SPREAD COST":"","STOP LOSS":"","TAKE PROFIT":"","FINANCING":-0.1329,"COMMISSION":"","PL":"","BALANCE":1493.51},
+        {"TICKET":594,"TRANSACTION DATE":"2026-04-09 19:35:17 AEST","TRANSACTION TYPE":"ORDER_FILL","DETAILS":"MARKET_ORDER_TRADE_CLOSE","INSTRUMENT":"NZD_USD","PRICE":0.58308,"UNITS":-2550,"DIRECTION":"Sell","SPREAD COST":-0.1,"STOP LOSS":"","TAKE PROFIT":"","FINANCING":"","COMMISSION":0,"PL":3.2847,"BALANCE":1496.92},
+    ]
+
+def test_oanda_transaction_history_allocates_daily_financing_to_single_open_trade():
+    df = pd.DataFrame(_sample_oanda_history_rows())
+    parsed = master_service._journal_rows_from_oanda_transaction_history_frame(df, account_mode='demo', account_label='OANDA DEMO', source_path='/tmp/oanda_history_demo.csv')
+    assert len(parsed['rows']) == 1
+    row = parsed['rows'][0]
+    assert row['swap'] == pytest.approx(-0.1329)
+    assert row['metrics']['oanda_export_pl'] == pytest.approx(3.2847)
+    assert row['net_profit'] == pytest.approx(3.1518)
+    assert row['balance_after_trade'] == pytest.approx(1496.92)
+
+def test_oanda_transaction_history_csv_parses_closed_trades():
+    rows = _sample_oanda_history_rows() + [
+        {"TICKET":598,"TRANSACTION DATE":"2026-04-09 19:37:46 AEST","TRANSACTION TYPE":"ORDER_FILL","DETAILS":"MARKET_ORDER","INSTRUMENT":"NZD_USD","PRICE":0.58323,"UNITS":2916,"DIRECTION":"Buy","SPREAD COST":0,"STOP LOSS":0.58117,"TAKE PROFIT":0.58717,"FINANCING":"","COMMISSION":"","PL":"","BALANCE":1496.92},
+        {"TICKET":601,"TRANSACTION DATE":"2026-04-10 02:13:06 AEST","TRANSACTION TYPE":"ORDER_FILL","DETAILS":"MARKET_ORDER_TRADE_CLOSE","INSTRUMENT":"NZD_USD","PRICE":0.58718,"UNITS":-2916,"DIRECTION":"Sell","SPREAD COST":0,"STOP LOSS":"","TAKE PROFIT":"","FINANCING":"","COMMISSION":0,"PL":16.1655,"BALANCE":1513.09},
+        {"TICKET":604,"TRANSACTION DATE":"2026-04-22 20:51:56 AEST","TRANSACTION TYPE":"ORDER_FILL","DETAILS":"MARKET_ORDER","INSTRUMENT":"NZD_USD","PRICE":0.59116,"UNITS":30821,"DIRECTION":"Buy","SPREAD COST":0,"STOP LOSS":0.59097,"TAKE PROFIT":0.59166,"FINANCING":"","COMMISSION":"","PL":"","BALANCE":1513.09},
+        {"TICKET":608,"TRANSACTION DATE":"2026-04-22 20:52:36 AEST","TRANSACTION TYPE":"ORDER_FILL","DETAILS":"MARKET_ORDER_TRADE_CLOSE","INSTRUMENT":"NZD_USD","PRICE":0.59112,"UNITS":-30821,"DIRECTION":"Sell","SPREAD COST":0,"STOP LOSS":"","TAKE PROFIT":"","FINANCING":"","COMMISSION":0,"PL":-1.7385,"BALANCE":1511.35},
+        {"TICKET":612,"TRANSACTION DATE":"2026-04-28 20:52:52 AEST","TRANSACTION TYPE":"ORDER_FILL","DETAILS":"MARKET_ORDER","INSTRUMENT":"USD_JPY","PRICE":159.605,"UNITS":13319,"DIRECTION":"Sell","SPREAD COST":0,"STOP LOSS":159.681,"TAKE PROFIT":159.426,"FINANCING":"","COMMISSION":"","PL":"","BALANCE":1511.35},
+        {"TICKET":615,"TRANSACTION DATE":"2026-04-28 21:13:44 AEST","TRANSACTION TYPE":"ORDER_FILL","DETAILS":"MARKET_ORDER_TRADE_CLOSE","INSTRUMENT":"USD_JPY","PRICE":159.681,"UNITS":-13319,"DIRECTION":"Buy","SPREAD COST":0,"STOP LOSS":"","TAKE PROFIT":"","FINANCING":"","COMMISSION":0,"PL":-8.9385,"BALANCE":1502.41},
+        {"TICKET":618,"TRANSACTION DATE":"2026-04-30 19:45:59 AEST","TRANSACTION TYPE":"ORDER_FILL","DETAILS":"MARKET_ORDER","INSTRUMENT":"EUR_USD","PRICE":1.16929,"UNITS":6546,"DIRECTION":"Buy","SPREAD COST":0,"STOP LOSS":1.16824,"TAKE PROFIT":1.17148,"FINANCING":"","COMMISSION":"","PL":"","BALANCE":1502.41},
+        {"TICKET":622,"TRANSACTION DATE":"2026-04-30 19:46:41 AEST","TRANSACTION TYPE":"ORDER_FILL","DETAILS":"MARKET_ORDER_TRADE_CLOSE","INSTRUMENT":"EUR_USD","PRICE":1.16910,"UNITS":-6546,"DIRECTION":"Sell","SPREAD COST":0,"STOP LOSS":"","TAKE PROFIT":"","FINANCING":"","COMMISSION":0,"PL":-1.7591,"BALANCE":1500.65},
+    ]
+    parsed = master_service._journal_rows_from_oanda_transaction_history_frame(pd.DataFrame(rows), account_mode='demo', account_label='OANDA DEMO', source_path='/tmp/oanda_history_demo.csv')
+    assert len(parsed['rows']) == 5
+    final = parsed['rows'][-1]
+    assert final['raw_refs']['close_ticket'] == '622'
+    assert final['balance_after_trade'] == pytest.approx(1500.65)
+    assert final['net_profit'] == pytest.approx(-1.7591)
+    assert final['account_label'] == 'OANDA DEMO'
