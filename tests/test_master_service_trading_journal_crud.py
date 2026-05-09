@@ -528,8 +528,8 @@ def test_balance_merge_resolves_missing_timeline_anchor_with_broker_balance(temp
     monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(master_service, "_build_journal_balance_timelines", lambda *_a, **_k: {
         "rows": [],
-        "balances": [{"account": "BYBIT DEMO", "label": "BYBIT DEMO", "balance": None, "currency": "USDT", "missing_balance": True, "last_trade_at": "2026-01-01T00:00:00Z"}],
-        "diagnostics": {"bybit_demo": {"account_key": "bybit_demo", "missing_balance": True, "warning": "missing"}},
+        "balances": [{"account": "BYBIT DEMO", "label": "BYBIT DEMO", "balance": None, "currency": "USDT", "missing_balance": True, "last_trade_at": "2026-01-01T00:00:00Z", "balance_source": "timeline_missing"}],
+        "diagnostics": {"BYBIT DEMO": {"account_key": "BYBIT DEMO", "missing_balance": True, "warning": "missing"}},
     })
     monkeypatch.setattr(
         master_service,
@@ -541,11 +541,28 @@ def test_balance_merge_resolves_missing_timeline_anchor_with_broker_balance(temp
         } if path == master_service.TRADING_JOURNAL_STATE_PATH else default,
     )
     snapshot = master_service._build_trading_journal_view_snapshot(force=True)
-    bybit_demo = next(item for item in snapshot["balances"] if master_service._norm_account_key(item.get("label")) == "bybit_demo")
+    bybit_demo = next(item for item in snapshot["balances"] if master_service._is_bybit_demo_account_label(item.get("label")))
     assert bybit_demo["balance"] == pytest.approx(224.87)
     assert bybit_demo["balance_source"] == "bybit_wallet_balance"
     assert bybit_demo["resolved_missing_balance_with_broker"] is True
+    assert bybit_demo["previous_balance_source"] == "timeline_missing"
+    assert bybit_demo["last_trade_at"] == "2026-01-01T00:00:00Z"
     assert not any("Missing balance anchor for accounts: BYBIT DEMO" in str(err) for err in snapshot["diagnostics"]["errors"])
+
+
+def test_merge_missing_timeline_balances_with_broker_preserves_resolution_metadata():
+    balances = [
+        {"account": "BYBIT DEMO", "label": "BYBIT DEMO", "balance": None, "currency": "USDT", "missing_balance": True, "last_trade_at": "2026-01-01T00:00:00Z", "source": "timeline", "balance_source": "timeline_missing"}
+    ]
+    broker = [
+        {"account": "Bybit Demo", "label": "Bybit Demo", "balance": 224.87769878, "currency": "USDT", "source": "bybit_wallet_balance", "balance_source": "bybit_wallet_balance", "as_of": "2026-01-02T00:00:00Z"}
+    ]
+    merged = master_service._merge_missing_timeline_balances_with_broker(balances, broker)
+    resolved = next(item for item in merged if master_service._is_bybit_demo_account_label(item.get("label")))
+    assert resolved["missing_balance"] is False
+    assert resolved["resolved_missing_balance_with_broker"] is True
+    assert resolved["previous_balance_source"] == "timeline_missing"
+    assert resolved["last_trade_at"] == "2026-01-01T00:00:00Z"
 
 
 def test_diagnostics_does_not_report_zero_when_journal_items_exist(temp_state_paths):

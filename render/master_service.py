@@ -1020,15 +1020,29 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
     balances = _merge_missing_timeline_balances_with_broker(balances, broker_balances)
     diagnostics = _build_trading_journal_diagnostics_snapshot()
     timeline_diag = timeline.get("diagnostics") if isinstance(timeline.get("diagnostics"), dict) else {}
-    balances_by_key = {
-        _norm_account_key(item.get("label") or item.get("account")): item
-        for item in balances
-        if isinstance(item, dict)
-    }
+    def _diag_account_key_variants(value: object) -> Set[str]:
+        raw = str(value or "").strip()
+        if not raw:
+            return set()
+        variants = {raw}
+        variants.add(_norm_account_key(raw))
+        variants.add(_norm_account_key(raw.replace("_", " ")))
+        return {v for v in variants if v}
+
+    balances_by_key: Dict[str, Dict[str, object]] = {}
+    for item in balances:
+        if not isinstance(item, dict):
+            continue
+        for candidate in _diag_account_key_variants(item.get("label") or item.get("account")):
+            balances_by_key[candidate] = item
     for account_key, diag_entry in list(timeline_diag.items()):
         if not isinstance(diag_entry, dict):
             continue
-        bal = balances_by_key.get(account_key)
+        bal = None
+        for candidate in _diag_account_key_variants(account_key):
+            bal = balances_by_key.get(candidate)
+            if isinstance(bal, dict):
+                break
         if isinstance(bal, dict) and bool(bal.get("resolved_missing_balance_with_broker")):
             patched = dict(diag_entry)
             patched["missing_balance"] = False
@@ -4721,7 +4735,9 @@ def _merge_missing_timeline_balances_with_broker(
             broker_balance = _to_float(broker.get("nav"))
         existing_idx = by_key.get(key)
         if existing_idx is None:
-            merged.append(dict(broker))
+            broker_payload = dict(broker)
+            broker_payload["missing_balance"] = _to_float(broker_payload.get("balance")) is None
+            merged.append(broker_payload)
             by_key[key] = len(merged) - 1
             continue
         existing = dict(merged[existing_idx])
@@ -4742,7 +4758,7 @@ def _merge_missing_timeline_balances_with_broker(
         if broker.get("as_of"):
             resolved["as_of"] = broker.get("as_of")
         merged[existing_idx] = resolved
-    return _merge_display_balances(merged)
+    return sorted(merged, key=lambda x: str(x.get("label") or x.get("account") or ""))
 
 
 def _cashflow_rows_for_journal(ledger: Dict[str, List[Dict[str, object]]]) -> List[Dict[str, object]]:
