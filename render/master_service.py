@@ -1164,6 +1164,28 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
         if isinstance(warnings, list) and warnings:
             existing_errors = diagnostics.get("errors") if isinstance(diagnostics.get("errors"), list) else []
             diagnostics["errors"] = [*existing_errors, *[str(w) for w in warnings if str(w).strip()]]
+    try:
+        demo_balance = next(
+            (b for b in balances if isinstance(b, dict) and str(b.get("label") or b.get("account") or "").strip().upper() == "OANDA DEMO"),
+            None,
+        )
+        export_files = [p for p in _list_local_oanda_history_exports() if "demo" in p.name.lower()]
+        latest_export_balance = None
+        latest_export_as_of = None
+        for p in export_files:
+            _rows_tmp, bal_tmp = _parse_local_trading_journal_workbook(p)
+            if isinstance(bal_tmp, dict) and bal_tmp.get("balance") is not None:
+                latest_export_balance = bal_tmp.get("balance")
+                latest_export_as_of = bal_tmp.get("as_of")
+        if isinstance(demo_balance, dict) and str(demo_balance.get("balance_source") or "") == "cashflow_anchor_plus_trades" and latest_export_as_of:
+            diagnostics["stale_oanda_demo_balance_not_backfilled"] = True
+            diagnostics["current_balance_source"] = demo_balance.get("balance_source")
+            diagnostics["current_balance_as_of"] = demo_balance.get("as_of")
+            diagnostics["latest_export_balance"] = latest_export_balance
+            diagnostics["latest_export_as_of"] = latest_export_as_of
+            diagnostics["backfill_required"] = True
+    except Exception:
+        pass
     payload: Dict[str, object] = {
         "cache_version": TRADING_JOURNAL_VIEW_CACHE_VERSION,
         "generated_at": _utc_now_iso(),
