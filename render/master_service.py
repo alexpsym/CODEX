@@ -1017,16 +1017,24 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
     broker_balances = (state or {}).get("broker_account_balances") if isinstance(state, dict) else []
     if not isinstance(broker_balances, list):
         broker_balances = []
-    broker_only = []
-    for item in broker_balances:
-        if not isinstance(item, dict):
-            continue
-        key = _norm_account_key(item.get("label") or item.get("account"))
-        if key and not any(_norm_account_key(b.get("label") or b.get("account")) == key for b in balances):
-            broker_only.append(item)
-    balances = _merge_display_balances(balances, broker_only)
+    balances = _merge_missing_timeline_balances_with_broker(balances, broker_balances)
     diagnostics = _build_trading_journal_diagnostics_snapshot()
     timeline_diag = timeline.get("diagnostics") if isinstance(timeline.get("diagnostics"), dict) else {}
+    balances_by_key = {
+        _norm_account_key(item.get("label") or item.get("account")): item
+        for item in balances
+        if isinstance(item, dict)
+    }
+    for account_key, diag_entry in list(timeline_diag.items()):
+        if not isinstance(diag_entry, dict):
+            continue
+        bal = balances_by_key.get(account_key)
+        if isinstance(bal, dict) and bool(bal.get("resolved_missing_balance_with_broker")):
+            patched = dict(diag_entry)
+            patched["missing_balance"] = False
+            patched["resolved_missing_balance_with_broker"] = True
+            patched["warning"] = ""
+            timeline_diag[account_key] = patched
     missing_accounts = [d.get("account_key") for d in timeline_diag.values() if isinstance(d, dict) and d.get("missing_balance")]
     if missing_accounts:
         existing_errors = diagnostics.get("errors") if isinstance(diagnostics.get("errors"), list) else []
@@ -4684,6 +4692,57 @@ def _merge_display_balances(*groups: List[Dict[str, object]]) -> List[Dict[str, 
             payload["missing_balance"] = payload.get("balance") is None
             merged[key] = payload
     return sorted(merged.values(), key=lambda x: str(x.get("label") or x.get("account") or ""))
+
+
+def _merge_missing_timeline_balances_with_broker(
+    balances: List[Dict[str, object]],
+    broker_balances: List[Dict[str, object]],
+) -> List[Dict[str, object]]:
+    merged: List[Dict[str, object]] = [dict(item) for item in (balances or []) if isinstance(item, dict)]
+    by_key: Dict[str, int] = {}
+    for idx, item in enumerate(merged):
+        label = str(item.get("label") or item.get("account") or "").strip()
+        if _is_bybit_demo_account_label(label) and not ENABLE_BYBIT_DEMO_JOURNAL:
+            continue
+        key = _norm_account_key(label)
+        if key:
+            by_key[key] = idx
+    for broker in broker_balances or []:
+        if not isinstance(broker, dict):
+            continue
+        label = str(broker.get("label") or broker.get("account") or "").strip()
+        if not label:
+            continue
+        if _is_bybit_demo_account_label(label) and not ENABLE_BYBIT_DEMO_JOURNAL:
+            continue
+        key = _norm_account_key(label)
+        broker_balance = _to_float(broker.get("balance"))
+        if broker_balance is None:
+            broker_balance = _to_float(broker.get("nav"))
+        existing_idx = by_key.get(key)
+        if existing_idx is None:
+            merged.append(dict(broker))
+            by_key[key] = len(merged) - 1
+            continue
+        existing = dict(merged[existing_idx])
+        existing_balance = _to_float(existing.get("balance"))
+        if existing_balance is not None and not bool(existing.get("missing_balance")):
+            continue
+        if broker_balance is None:
+            continue
+        resolved = dict(existing)
+        resolved["balance"] = broker_balance
+        resolved["currency"] = str(broker.get("currency") or existing.get("currency") or _infer_account_currency(label))
+        source = str(broker.get("source") or broker.get("balance_source") or "bybit_wallet_balance")
+        resolved["source"] = source
+        resolved["balance_source"] = str(broker.get("balance_source") or broker.get("source") or source)
+        resolved["missing_balance"] = False
+        resolved["resolved_missing_balance_with_broker"] = True
+        resolved["previous_balance_source"] = str(existing.get("balance_source") or existing.get("source") or "timeline_missing")
+        if broker.get("as_of"):
+            resolved["as_of"] = broker.get("as_of")
+        merged[existing_idx] = resolved
+    return _merge_display_balances(merged)
 
 
 def _cashflow_rows_for_journal(ledger: Dict[str, List[Dict[str, object]]]) -> List[Dict[str, object]]:
@@ -22083,6 +22142,30 @@ async def _run_trading_journal_sync_job() -> None:
             _save_trading_journal_state(state)
 
         source_mode = _trading_journal_source_mode()
+        if (
+            source_mode == "local"
+            and broker_refresh_enabled
+            and _trading_journal_local_excel_authoritative()
+            and ENABLE_BYBIT_DEMO_JOURNAL
+        ):
+            try:
+                workbook_path = _resolve_local_journal_file(BYBIT_DEMO_WORKBOOK_NAME, TRADING_JOURNAL_LOCAL_DIR)
+                wb_frame = _coerce_bybit_demo_workbook_frame(
+                    _read_excel_sheet_or_empty(workbook_path, BYBIT_DEMO_WORKBOOK_SHEET, BYBIT_DEMO_WORKBOOK_COLUMNS)
+                )
+                if _bybit_demo_workbook_has_rows_needing_balance(wb_frame):
+                    try:
+                        demo_snapshot = await _fetch_bybit_demo_current_balance_snapshot()
+                        await asyncio.to_thread(_sanitize_bybit_demo_local_workbook, TRADING_JOURNAL_LOCAL_DIR, demo_snapshot)
+                    except Exception as exc:
+                        broker_balance_warnings.append(
+                            f"Bybit demo wallet snapshot unavailable for workbook anchor reconstruction: {exc}"
+                        )
+                        _record_bybit_demo_sync_status(
+                            bybit_demo_balance_backfill_error=f"Bybit Demo workbook anchor reconstruction failed: {exc}"
+                        )
+            except Exception as exc:
+                broker_balance_warnings.append(f"Bybit demo workbook pre-sanitize failed: {exc}")
         if source_mode == "local":
             _cb(25, "Importing local journal workbooks…")
         elif source_mode == "dropbox":
