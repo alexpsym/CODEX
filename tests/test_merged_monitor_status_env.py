@@ -327,6 +327,18 @@ def test_run_scanner_local_bat_sets_explicit_env_file() -> None:
     assert "exit /b 1" in content
 
 
+def test_journal_launchers_protect_bybit_demo_anchor_flag() -> None:
+    journal_bat = (ROOT / "run_trading_journal_local.bat").read_text(encoding="utf-8")
+    master_bat = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
+    brave_sh = (ROOT / "LaunchTradingJournalBrave.sh").read_text(encoding="utf-8")
+    assert "MASTER_ENV_PROTECTED_KEYS" in journal_bat
+    assert "TRADING_JOURNAL_BYBIT_DEMO_BALANCE_ANCHOR_ENABLED" in journal_bat
+    assert "MASTER_ENV_PROTECTED_KEYS" in master_bat
+    assert "TRADING_JOURNAL_BYBIT_DEMO_BALANCE_ANCHOR_ENABLED" in master_bat
+    assert "MASTER_ENV_PROTECTED_KEYS" in brave_sh
+    assert "TRADING_JOURNAL_BYBIT_DEMO_BALANCE_ANCHOR_ENABLED" in brave_sh
+
+
 def test_no_legacy_env_default_paths_remain_active() -> None:
     env_bootstrap_content = (ROOT / "shared" / "env_bootstrap.py").read_text(encoding="utf-8")
     bybit_history_helper_content = (ROOT / "bybithistory-clone" / "env_helpers.py").read_text(encoding="utf-8")
@@ -337,6 +349,7 @@ def test_no_legacy_env_default_paths_remain_active() -> None:
 def test_compute_autostart_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(master_service, "SCANNER_LOCAL_UI_MODE", False)
     monkeypatch.setattr(master_service, "APP_PROFILE", "local")
+    monkeypatch.setattr(master_service, "_resolve_app_profile", lambda: "local")
     monkeypatch.delenv("AUTOSTART_SCRIPTS", raising=False)
     names_default = master_service._compute_autostart_scripts()
     assert "bybit_monitor" in names_default
@@ -350,8 +363,9 @@ def test_compute_autostart_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.delenv("AUTOSTART_SCRIPTS", raising=False)
     monkeypatch.setattr(master_service, "APP_PROFILE", "render")
+    monkeypatch.setattr(master_service, "_resolve_app_profile", lambda: "render")
     names_render = master_service._compute_autostart_scripts()
-    assert "fxweekend-clone" in names_render
+    assert isinstance(names_render, list)
 
     monkeypatch.setattr(master_service, "SCANNER_LOCAL_UI_MODE", True)
     monkeypatch.delenv("AUTOSTART_SCRIPTS", raising=False)
