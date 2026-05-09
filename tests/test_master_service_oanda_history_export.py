@@ -184,12 +184,31 @@ def test_oanda_history_backfill_endpoint_accepts_legacy_int_append_stats(monkeyp
     called = {"n": 0}
     monkeypatch.setattr(master_service, "_append_oanda_export_rows_to_local_workbook", lambda *_a, **_k: 0)
     monkeypatch.setattr(master_service, "_import_trading_journal_from_sources", lambda *_a, **_k: {"ok": True, "message": "Done"})
+    monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", lambda *a, **k: {"balances": {"items": [{"label": "OANDA DEMO", "balance_source": "authoritative_trade_balance"}]}})
     monkeypatch.setattr(master_service, "_invalidate_trading_journal_view_snapshot", lambda: called.__setitem__("n", called["n"] + 1))
     try:
         res = asyncio.run(master_service.backfill_oanda_history_export_to_journal(job.job_id))
         payload = res.body.decode("utf-8")
         assert '"ok":true' in payload
         assert called["n"] == 1
+    finally:
+        master_service.OANDA_HISTORY_JOBS.pop(job.job_id, None)
+
+
+def test_oanda_backfill_endpoint_fails_if_snapshot_still_stale(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    csv_path = tmp_path / "oanda_history_demo_job_stale.csv"
+    csv_path.write_text("TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,INSTRUMENT,PRICE,UNITS,DIRECTION,SPREAD COST,STOP LOSS,TAKE PROFIT,FINANCING,COMMISSION,PL,BALANCE\n")
+    csv_path.with_suffix(".json").write_text('{"account_mode":"demo"}')
+    job = master_service.OandaHistoryJob(job_id="stale", status="done", created_at=0, updated_at=0, params={"account": "demo"}, output_path=csv_path)
+    master_service.OANDA_HISTORY_JOBS[job.job_id] = job
+    monkeypatch.setattr(master_service, "_append_oanda_export_rows_to_local_workbook", lambda *_a, **_k: {"changed": 0, "inserted": 0, "updated": 0})
+    monkeypatch.setattr(master_service, "_import_trading_journal_from_sources", lambda *_a, **_k: {"ok": True, "message": "Done"})
+    monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", lambda *a, **k: {"balances": {"items": [{"label": "OANDA DEMO", "balance_source": "cashflow_anchor_plus_trades"}]}})
+    try:
+        res = asyncio.run(master_service.backfill_oanda_history_export_to_journal(job.job_id))
+        payload = res.body.decode("utf-8")
+        assert '"ok":false' in payload
+        assert "OANDA_BACKFILL_NOT_VISIBLE_IN_JOURNAL_SNAPSHOT" in payload
     finally:
         master_service.OANDA_HISTORY_JOBS.pop(job.job_id, None)
 

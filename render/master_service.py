@@ -22374,10 +22374,21 @@ async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
     except Exception as exc:
         append_error = str(exc)
     import_result = {"ok": False, "message": "Backfill append failed."}
+    snapshot_payload = None
+    visibility_error = None
     if append_error is None:
-        import_result = _import_trading_journal_from_sources()
         _invalidate_trading_journal_view_snapshot()
-    ok_flag = bool(append_error is None and bool(import_result.get("ok")))
+        import_result = _import_trading_journal_from_sources()
+        try:
+            snapshot_payload = _build_trading_journal_view_snapshot(force=True)
+            balances_now = snapshot_payload.get("balances", {}).get("items", []) if isinstance(snapshot_payload, dict) else []
+            label = "OANDA DEMO" if account_mode == "demo" else "OANDA LIVE"
+            target_bal = next((b for b in balances_now if str((b or {}).get("label") or (b or {}).get("account") or "").strip().upper() == label), None)
+            if not isinstance(target_bal, dict) or str(target_bal.get("balance_source") or "") == "cashflow_anchor_plus_trades":
+                visibility_error = "OANDA_BACKFILL_NOT_VISIBLE_IN_JOURNAL_SNAPSHOT"
+        except Exception:
+            visibility_error = "OANDA_BACKFILL_NOT_VISIBLE_IN_JOURNAL_SNAPSHOT"
+    ok_flag = bool(append_error is None and bool(import_result.get("ok")) and not visibility_error)
     return JSONResponse({
         "ok": ok_flag,
         "oanda_export_trades_seen": len(mapped),
@@ -22389,8 +22400,9 @@ async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
         "oanda_export_latest_balance_as_of": (balance or {}).get("as_of") if isinstance(balance, dict) else None,
         "oanda_export_balance_applied": bool(ok_flag),
         "oanda_export_rows_persisted": bool(ok_flag and len(mapped) > 0),
-        "error": append_error,
+        "error": append_error or visibility_error,
         "sync": import_result,
+        "snapshot_visible": visibility_error is None,
     })
 
 
