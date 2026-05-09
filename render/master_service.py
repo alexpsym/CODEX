@@ -5721,7 +5721,8 @@ def _import_trading_journal_from_sources(
                 ),
                 "files": requires_xls_engine,
             })
-    local_rows_total = 0
+    local_rows_parsed_total = 0
+    local_rows_imported_total = 0
     local_balances: List[Dict[str, object]] = []
     oanda_export_trades_seen = 0
     oanda_export_trades_backfilled = 0
@@ -5730,6 +5731,9 @@ def _import_trading_journal_from_sources(
     oanda_export_latest_balance = None
     oanda_export_latest_balance_as_of = None
     oanda_export_account_label = ""
+    oanda_export_trades_failed = 0
+    oanda_export_append_failed = False
+    oanda_export_append_error = ""
     known_oanda_accounts: set[str] = set()
     try:
         _state_for_mapping = _load_trading_journal_state()
@@ -5760,7 +5764,7 @@ def _import_trading_journal_from_sources(
                 bybit_demo_workbook_cleared = True
                 bybit_demo_rows_purged += purged
             local_kind = "explicit" if local_enabled else "default"
-            local_rows_total += len(local_rows)
+            local_rows_parsed_total += len(local_rows)
             is_oanda_history_csv = local_file.suffix.lower() == ".csv" and "oanda" in local_file.name.lower() and "history" in local_file.name.lower()
             has_oanda_export_rows = any(
                 str((r or {}).get("source") or "").strip().lower() == "oanda_transaction_export"
@@ -5825,6 +5829,8 @@ def _import_trading_journal_from_sources(
                         reread_rows, _reread_balance = _parse_local_trading_journal_workbook(workbook_path)
                         mapped_rows_for_state = [r for r in reread_rows if str((r or {}).get("source") or "").strip().lower() in {"local_excel", "excel"}]
                         skip_csv_rows_from_state = True
+                    else:
+                        oanda_export_trades_failed += len(local_rows)
             for row in local_rows:
                 if skip_csv_rows_from_state and str((row or {}).get("source") or "").strip().lower() == "oanda_transaction_export":
                     continue
@@ -5842,12 +5848,14 @@ def _import_trading_journal_from_sources(
                     refs["workbook_path"] = str(local_file)
                     row["raw_refs"] = refs
                     all_rows[rid] = row
+                    local_rows_imported_total += 1
             for row in mapped_rows_for_state:
                 rid = str(row.get("id") or "")
                 if rid:
                     row["source"] = "local_excel"
                     row["import_source"] = "local_excel"
                     all_rows[rid] = row
+                    local_rows_imported_total += 1
             if local_balance:
                 if has_oanda_export_balance:
                     oanda_export_latest_balance = local_balance.get("balance")
@@ -5858,6 +5866,10 @@ def _import_trading_journal_from_sources(
                     local_balances.append(local_balance)
         except Exception as exc:
             err_payload: Dict[str, object] = {"file": local_file.name, "path": str(local_file), "error": str(exc)}
+            if local_file.suffix.lower() == ".csv" and "MISSING_XLRD_FOR_XLS" in str(exc):
+                err_payload["code"] = "MISSING_XLRD_FOR_XLS"
+                oanda_export_append_failed = True
+                oanda_export_append_error = "MISSING_XLRD_FOR_XLS"
             if local_file.suffix.lower() == ".xls" and "xlrd" in str(exc).lower():
                 err_payload["code"] = "MISSING_XLRD_FOR_XLS"
                 requirements_path = str((BASE_DIR / "render" / "requirements.txt").resolve())
@@ -5866,8 +5878,10 @@ def _import_trading_journal_from_sources(
                     f'Install into the same Python executable that launches the journal: python -m pip install -r "{requirements_path}"'
                 )
             errors.append(err_payload)
-    imported_any = imported_any or local_rows_total > 0
-    imported_rows_total += int(local_rows_total)
+    imported_any = imported_any or local_rows_imported_total > 0
+    imported_rows_total += int(local_rows_imported_total)
+    diagnostics["local_rows_parsed_total"] = int(local_rows_parsed_total)
+    diagnostics["local_rows_imported_total"] = int(local_rows_imported_total)
     diagnostics["oanda_export_trades_seen"] = int(oanda_export_trades_seen)
     diagnostics["oanda_export_trades_backfilled"] = int(oanda_export_trades_backfilled)
     diagnostics["oanda_export_target_workbook"] = oanda_export_target_workbook
@@ -5875,6 +5889,9 @@ def _import_trading_journal_from_sources(
     diagnostics["oanda_export_latest_balance"] = oanda_export_latest_balance
     diagnostics["oanda_export_latest_balance_as_of"] = oanda_export_latest_balance_as_of
     diagnostics["oanda_export_account_label"] = oanda_export_account_label
+    diagnostics["oanda_export_trades_failed"] = int(oanda_export_trades_failed)
+    diagnostics["oanda_export_append_failed"] = bool(oanda_export_append_failed)
+    diagnostics["oanda_export_append_error"] = oanda_export_append_error
 
     dedupe_groups = 0
     source_duplicate_rows_dropped = 0
@@ -6026,6 +6043,8 @@ def _import_trading_journal_from_sources(
             snapshot_error = f"Snapshot persistence failed after import: {exc}"
             warnings.append(snapshot_error)
     ok_after_snapshot = bool(imported_any) and not snapshot_error
+    if oanda_export_append_failed and not imported_any:
+        ok_after_snapshot = False
     if local_authoritative and not imported_any:
         ok_after_snapshot = False
     return {
