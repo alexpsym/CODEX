@@ -952,7 +952,7 @@ def _build_trading_journal_diagnostics_snapshot() -> Dict[str, object]:
 
 
 _TRADING_JOURNAL_VIEW_CACHE: Dict[str, object] = {"key": None, "payload": None}
-TRADING_JOURNAL_VIEW_CACHE_VERSION = 4
+TRADING_JOURNAL_VIEW_CACHE_VERSION = 5
 
 
 def _source_file_fingerprint(path: Path) -> Dict[str, object]:
@@ -995,6 +995,19 @@ def _load_trading_journal_view_snapshot() -> Optional[Dict[str, object]]:
     if int(payload.get("cache_version") or 0) != TRADING_JOURNAL_VIEW_CACHE_VERSION:
         return None
     return payload
+
+
+def _snapshot_balance_items(snapshot: object) -> List[Dict[str, object]]:
+    if not isinstance(snapshot, dict):
+        return []
+    balances = snapshot.get("balances")
+    if isinstance(balances, list):
+        return [b for b in balances if isinstance(b, dict)]
+    if isinstance(balances, dict):
+        items = balances.get("items")
+        if isinstance(items, list):
+            return [b for b in items if isinstance(b, dict)]
+    return []
 
 
 def _save_trading_journal_view_snapshot(payload: dict) -> None:
@@ -22391,7 +22404,7 @@ async def backfill_oanda_history_export_to_journal(job_id: str) -> JSONResponse:
         import_result = _import_trading_journal_from_sources()
         try:
             snapshot_payload = _build_trading_journal_view_snapshot(force=True)
-            balances_now = snapshot_payload.get("balances", {}).get("items", []) if isinstance(snapshot_payload, dict) else []
+            balances_now = _snapshot_balance_items(snapshot_payload)
             label = "OANDA DEMO" if account_mode == "demo" else "OANDA LIVE"
             target_bal = next((b for b in balances_now if str((b or {}).get("label") or (b or {}).get("account") or "").strip().upper() == label), None)
             if not isinstance(target_bal, dict) or str(target_bal.get("balance_source") or "") == "cashflow_anchor_plus_trades":
@@ -22435,7 +22448,7 @@ async def trading_journal_repair_oanda_demo_balance() -> JSONResponse:
     _invalidate_trading_journal_view_snapshot()
     sync = _import_trading_journal_from_sources()
     snap = _build_trading_journal_view_snapshot(force=True)
-    balances = snap.get("balances", {}).get("items", []) if isinstance(snap, dict) else []
+    balances = _snapshot_balance_items(snap)
     demo = next((b for b in balances if str((b or {}).get("label") or "").upper() == "OANDA DEMO"), None)
     if not isinstance(demo, dict) or str(demo.get("balance_source") or "") == "cashflow_anchor_plus_trades":
         return JSONResponse({"ok": False, "error": "OANDA_BACKFILL_NOT_VISIBLE_IN_JOURNAL_SNAPSHOT", "sync": sync}, status_code=409)

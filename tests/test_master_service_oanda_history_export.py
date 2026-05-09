@@ -184,7 +184,7 @@ def test_oanda_history_backfill_endpoint_accepts_legacy_int_append_stats(monkeyp
     called = {"n": 0}
     monkeypatch.setattr(master_service, "_append_oanda_export_rows_to_local_workbook", lambda *_a, **_k: 0)
     monkeypatch.setattr(master_service, "_import_trading_journal_from_sources", lambda *_a, **_k: {"ok": True, "message": "Done"})
-    monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", lambda *a, **k: {"balances": {"items": [{"label": "OANDA DEMO", "balance_source": "authoritative_trade_balance"}]}})
+    monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", lambda *a, **k: {"balances": [{"label": "OANDA DEMO", "balance_source": "authoritative_trade_balance"}]})
     monkeypatch.setattr(master_service, "_invalidate_trading_journal_view_snapshot", lambda: called.__setitem__("n", called["n"] + 1))
     try:
         res = asyncio.run(master_service.backfill_oanda_history_export_to_journal(job.job_id))
@@ -203,7 +203,7 @@ def test_oanda_backfill_endpoint_fails_if_snapshot_still_stale(monkeypatch: pyte
     master_service.OANDA_HISTORY_JOBS[job.job_id] = job
     monkeypatch.setattr(master_service, "_append_oanda_export_rows_to_local_workbook", lambda *_a, **_k: {"changed": 0, "inserted": 0, "updated": 0})
     monkeypatch.setattr(master_service, "_import_trading_journal_from_sources", lambda *_a, **_k: {"ok": True, "message": "Done"})
-    monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", lambda *a, **k: {"balances": {"items": [{"label": "OANDA DEMO", "balance_source": "cashflow_anchor_plus_trades"}]}})
+    monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", lambda *a, **k: {"balances": [{"label": "OANDA DEMO", "balance_source": "cashflow_anchor_plus_trades"}]})
     try:
         res = asyncio.run(master_service.backfill_oanda_history_export_to_journal(job.job_id))
         payload = res.body.decode("utf-8")
@@ -211,6 +211,13 @@ def test_oanda_backfill_endpoint_fails_if_snapshot_still_stale(monkeypatch: pyte
         assert "OANDA_BACKFILL_NOT_VISIBLE_IN_JOURNAL_SNAPSHOT" in payload
     finally:
         master_service.OANDA_HISTORY_JOBS.pop(job.job_id, None)
+
+
+def test_snapshot_balance_items_supports_list_and_dict_shapes():
+    a = master_service._snapshot_balance_items({"balances": [{"label": "OANDA DEMO"}]})
+    b = master_service._snapshot_balance_items({"balances": {"items": [{"label": "OANDA DEMO"}]}})
+    assert len(a) == 1
+    assert len(b) == 1
 
 
 def test_oanda_history_export_backfill_endpoint_returns_failure_on_append_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
