@@ -59,6 +59,8 @@
     manualSyncInFlight: false,
     statTradeFilter: null,
     oandaRepairAttempted: false,
+    oandaRepairRefreshPending: false,
+    oandaRepairLastError: '',
   };
   try { filterInput.value = localStorage.getItem('tj.filter') || ''; } catch {}
 
@@ -1051,6 +1053,7 @@
       const staleOverridden = !!b.stale_cashflow_overridden;
       const staleOandaBackfill = label.toUpperCase() === 'OANDA DEMO' && !!state?.diagnostics?.stale_oanda_demo_balance_not_backfilled;
       const oandaBackfillErr = label.toUpperCase() === 'OANDA DEMO' ? String(state?.diagnostics?.oanda_export_append_error || '') : '';
+      const oandaRuntimeErr = label.toUpperCase() === 'OANDA DEMO' ? String(state?.oandaRepairLastError || '') : '';
       div.innerHTML = `
         <div class="muted">${label}</div>
         <div style="font-size:1.0rem;font-weight:600">${fmtNum(b.balance, (() => { const c = String(b.currency || '').toUpperCase(); if (c === 'AUD' || c === 'USD') return 2; if (c === 'USDT') return 8; return 6; })())} ${b.currency || ''}</div>
@@ -1058,6 +1061,7 @@
         ${staleOverridden ? '<div class="muted" style="font-size:0.78rem">Using OANDA export/API balance; stale cashflow anchor ignored.</div>' : ''}
         ${staleOandaBackfill ? `<div class="muted" style="font-size:0.78rem;color:#b91c1c">OANDA demo export exists but was not applied. Balance is stale.${state?.diagnostics?.latest_export_balance ? ` Latest export: ${fmtNum(state.diagnostics.latest_export_balance, 2)} AUD.` : ''}</div>` : ''}
         ${oandaBackfillErr.includes('MISSING_XLRD_FOR_XLS') ? `<div class="muted" style="font-size:0.78rem;color:#b91c1c">Install xlrd in the journal runtime, then rerun OANDA history backfill.</div>` : ''}
+        ${oandaRuntimeErr ? `<div class="muted" style="font-size:0.78rem;color:#b91c1c">${oandaRuntimeErr}</div>` : ''}
         ${b.stale_balance_warning && !b.repair_export_available ? `<div class="muted" style="font-size:0.78rem;color:#b91c1c">OANDA DEMO balance is stale. Run OANDA demo history export/backfill.</div>` : ''}
         ${b.stale_balance_warning ? `<button class="tj-repair-oanda" style="margin-top:6px">Repair OANDA DEMO</button>` : ''}
       `;
@@ -1069,13 +1073,28 @@
             const r = await fetch('/api/trading-journal/oanda-demo/repair-balance', { method: 'POST' });
             const p = await r.json();
             if (!r.ok || p.ok === false) throw new Error(p.error || p.message || 'Repair failed');
-            await loadData();
+            setStatus('OANDA DEMO repair applied. Refreshing journal…', false);
+            schedulePostRepairRefresh();
           } catch (e) {
             alert(String(e?.message || e));
           }
         });
       }
     });
+  }
+
+  function schedulePostRepairRefresh() {
+    if (state.oandaRepairRefreshPending) return;
+    state.oandaRepairRefreshPending = true;
+    setTimeout(async () => {
+      if (loadInFlight) {
+        state.oandaRepairRefreshPending = false;
+        schedulePostRepairRefresh();
+        return;
+      }
+      state.oandaRepairRefreshPending = false;
+      await load({ silent: false, skipAutoSync: true, preserveStatus: true, statusOverride: 'OANDA repair applied. Refreshing…' });
+    }, 50);
   }
 
   async function maybeAutoRepairOandaDemo(items) {
@@ -1089,8 +1108,10 @@
       const r = await fetch(demo.repair_endpoint, { method: 'POST' });
       const p = await r.json();
       if (!r.ok || p.ok === false) throw new Error(p.error || p.message || 'Repair failed');
-      await loadData();
-    } catch (_err) {}
+      schedulePostRepairRefresh();
+    } catch (err) {
+      state.oandaRepairLastError = String(err?.message || err);
+    }
   }
   function fmtMoneyValue(value, ccy, decimals = 2) { return `${ccy || 'UNKNOWN'} ${fmtNum(value, decimals)}`; }
   function formatTradeFilterLabel(row, fallbackLabel) {
