@@ -18349,8 +18349,16 @@ OPEN_ORDERS_TEMPLATE = """<!doctype html>
 
 
 @app.get("/merged/history", response_class=HTMLResponse)
-async def merged_history_page() -> str:
-    return HISTORY_PAGE_TEMPLATE
+async def merged_history_page() -> Response:
+    history_page_js_version = _static_asset_version("render/static/history_page.js")
+    page = HISTORY_PAGE_TEMPLATE.replace(
+        '<script src="/static/history_page.js"></script>',
+        f'<script src="/static/history_page.js?v={history_page_js_version}"></script>',
+    )
+    response = HTMLResponse(page)
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return response
 
 
 @app.get("/merged/monitor")
@@ -18421,8 +18429,9 @@ async def legacy_coinspot_history(request: Request) -> Response:
 
 
 @app.get("/trading-journal", response_class=HTMLResponse)
-async def trading_journal_page() -> str:
-    return """
+async def trading_journal_page() -> Response:
+    trading_journal_js_version = _static_asset_version("render/static/trading_journal.js")
+    page = """
 <!doctype html>
 <html>
 <head>
@@ -18653,10 +18662,16 @@ async def trading_journal_page() -> str:
       </form>
     </div>
   </div>
-  <script src="/static/trading_journal.js"></script>
+  <script>window.TRADING_JOURNAL_JS_VERSION = "__TJ_VER__";</script>
+  <script src="/static/trading_journal.js?v=__TJ_VER__"></script>
 </body>
 </html>
 """
+    page = page.replace("__TJ_VER__", trading_journal_js_version)
+    response = HTMLResponse(page)
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return response
 
 
 def _trading_journal_filter_rows(rows: List[Dict[str, object]], query: str) -> List[Dict[str, object]]:

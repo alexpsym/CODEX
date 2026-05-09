@@ -220,6 +220,22 @@ def test_snapshot_balance_items_supports_list_and_dict_shapes():
     assert len(b) == 1
 
 
+def test_trading_journal_page_versions_static_js_and_no_store_headers():
+    response = asyncio.run(master_service.trading_journal_page())
+    body = response.body.decode("utf-8")
+    assert "/static/trading_journal.js?v=" in body
+    assert '/static/trading_journal.js"></script>' not in body
+    assert "no-store" in str(response.headers.get("Cache-Control") or "")
+
+
+def test_history_page_versions_static_js_and_no_store_headers():
+    response = asyncio.run(master_service.merged_history_page())
+    body = response.body.decode("utf-8")
+    assert "/static/history_page.js?v=" in body
+    assert '/static/history_page.js"></script>' not in body
+    assert "no-store" in str(response.headers.get("Cache-Control") or "")
+
+
 def test_oanda_history_export_backfill_endpoint_returns_failure_on_append_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     csv_path = tmp_path / "oanda_history_demo_job3.csv"
     csv_path.write_text("TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,INSTRUMENT,PRICE,UNITS,DIRECTION,SPREAD COST,STOP LOSS,TAKE PROFIT,FINANCING,COMMISSION,PL,BALANCE\n589,2026-04-08 19:50:46 AEST,ORDER_FILL,MARKET_ORDER,NZD_USD,0.58217,2550,Buy,0,0.57864,0.58888,,,0,1493.64\n594,2026-04-09 19:35:17 AEST,ORDER_FILL,MARKET_ORDER_TRADE_CLOSE,NZD_USD,0.58308,-2550,Sell,0,,,,,3.2847,1496.92\n")
