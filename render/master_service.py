@@ -7859,9 +7859,14 @@ async def _run_startup_recovery_import_if_needed() -> None:
             result = dict(workbook_sync or {})
         import_ok = bool(result.get("ok", False)) if isinstance(result, dict) else False
         workbook_ok = bool((workbook_sync or {}).get("master_journal_ok"))
-        ok_flag = bool(import_ok and workbook_ok)
+        github_sync_failed = bool(
+            isinstance(workbook_sync, dict)
+            and workbook_sync.get("github_sync_enabled")
+            and workbook_sync.get("github_sync_ok") is False
+        )
+        ok_flag = bool(import_ok and workbook_ok and not github_sync_failed)
         startup_error = (
-            str((workbook_sync or {}).get("master_journal_error") or "").strip()
+            str((workbook_sync or {}).get("master_journal_error") or (workbook_sync or {}).get("github_sync_error") or "").strip()
             or str((result or {}).get("message") or "Startup import failed.")
         )
         final_message = (
@@ -23254,6 +23259,8 @@ async def _run_trading_journal_sync_job() -> None:
         warnings: List[str] = list((result or {}).get("warnings") or [])
         if isinstance(workbook_sync, dict) and not workbook_sync.get('master_journal_ok'):
             warnings.append(str(workbook_sync.get('master_journal_error') or 'Master journal workbook generation failed'))
+        if isinstance(workbook_sync, dict) and workbook_sync.get("github_sync_enabled") and workbook_sync.get("github_sync_ok") is False:
+            warnings.append(str(workbook_sync.get("github_sync_error") or "GitHub sync failed"))
         warnings.extend(broker_balance_warnings)
         for mode_name, mode_payload in {"demo": bybit_demo, "live": bybit_live}.items():
             if isinstance(mode_payload, dict):
@@ -23281,13 +23288,25 @@ async def _run_trading_journal_sync_job() -> None:
         ) or any("workbook" in str(w).lower() for w in warnings)
         has_warnings = bool(warnings)
         base_ok = bool(result.get("ok", True)) if isinstance(result, dict) else True
-        ok_flag = bool(base_ok and not broker_failed and not local_workbook_failed)
+        github_sync_failed = bool(
+            isinstance(workbook_sync, dict)
+            and workbook_sync.get("github_sync_enabled")
+            and workbook_sync.get("github_sync_ok") is False
+        )
+        ok_flag = bool(base_ok and not broker_failed and not local_workbook_failed and not github_sync_failed)
         if not ok_flag:
             msg = f"Failed: {str((result or {}).get('message') or (result or {}).get('error') or '; '.join(warnings) or 'sync failed')}"
         elif has_warnings:
             msg = "Completed with warnings"
         else:
-            msg = "Done"
+            if isinstance(workbook_sync, dict) and workbook_sync.get("github_sync_enabled"):
+                msg = (
+                    "Synced Master Journal.xlsx and pushed to GitHub."
+                    if not workbook_sync.get("github_sync_noop")
+                    else "Master Journal.xlsx is up to date; no GitHub changes to push."
+                )
+            else:
+                msg = "Master Journal.xlsx created. GitHub sync disabled."
         _set_trading_journal_sync_state(
             running=False,
             progress=100,
@@ -23359,13 +23378,15 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
         size = path.stat().st_size
         if size <= 0:
             raise RuntimeError(f"Master Journal.xlsx was created but is empty at {path}")
-        return {
+        payload = {
             'master_journal_ok': True,
             'master_journal_path': str(path),
             'master_journal_exists': True,
             'master_journal_size_bytes': int(size),
             'master_journal_updated_at': _utc_now_iso(),
         }
+        payload.update(_sync_journal_excel_files_to_github(path))
+        return payload
     except (PermissionError, OSError) as exc:
         try:
             if tmp.exists():
@@ -23392,6 +23413,125 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
             'master_journal_error': str(exc),
             'master_journal_error_type': type(exc).__name__,
         }
+
+
+def _trading_journal_github_sync_enabled() -> bool:
+    raw = str(os.getenv("TRADING_JOURNAL_GITHUB_SYNC_ENABLED", "") or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return not _is_render_env()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    if _is_render_env():
+        return False
+    return APP_PROFILE == "local"
+
+
+def _repo_root_for_journal_path(path: Path) -> Path:
+    _ = path
+    return BASE_DIR
+
+
+def _run_git_command(args: List[str], cwd: Path, timeout_s: int) -> Tuple[int, str, str]:
+    try:
+        cp = subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=max(1, int(timeout_s)),
+            shell=False,
+        )
+        return int(cp.returncode), str(cp.stdout or ""), str(cp.stderr or "")
+    except Exception as exc:
+        return 1, "", str(exc)
+
+
+def _journal_excel_files_for_github(master_path: Path) -> List[Path]:
+    master_path = master_path.expanduser().resolve()
+    journal_dir = master_path.parent
+    files: List[Path] = [master_path]
+    include_sources = str(os.getenv("TRADING_JOURNAL_GITHUB_SYNC_INCLUDE_SOURCES", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+    if include_sources:
+        for p in sorted(journal_dir.glob("*.xlsx")):
+            name = p.name
+            if name.startswith("~$") or name.endswith(".tmp.xlsx") or name.endswith(".pending.xlsx"):
+                continue
+            if p.is_file():
+                files.append(p)
+    unique: List[Path] = []
+    seen: Set[Path] = set()
+    repo_root = BASE_DIR.resolve()
+    for p in files:
+        try:
+            rp = p.expanduser().resolve()
+            rp.relative_to(repo_root)
+            rp.relative_to(journal_dir.resolve())
+            if rp.suffix.lower() != ".xlsx":
+                continue
+            if rp not in seen:
+                seen.add(rp)
+                unique.append(rp)
+        except Exception:
+            continue
+    return unique
+
+
+def _sync_journal_excel_files_to_github(master_path: Path) -> Dict[str, object]:
+    enabled = _trading_journal_github_sync_enabled()
+    remote = str(os.getenv("TRADING_JOURNAL_GITHUB_SYNC_REMOTE", "origin") or "origin").strip() or "origin"
+    requested_branch = str(os.getenv("TRADING_JOURNAL_GITHUB_SYNC_BRANCH", "") or "").strip()
+    timeout_s = int(str(os.getenv("TRADING_JOURNAL_GITHUB_SYNC_TIMEOUT_SECONDS", "60") or "60").strip() or "60")
+    base = {
+        "github_sync_enabled": bool(enabled),
+        "github_sync_ok": True,
+        "github_sync_noop": True,
+        "github_sync_remote": remote,
+        "github_sync_branch": requested_branch,
+        "github_sync_commit": "",
+        "github_sync_files": [],
+        "github_sync_error": "",
+        "github_sync_error_type": "",
+    }
+    if not enabled:
+        return base
+    repo_root = _repo_root_for_journal_path(master_path)
+    if not (repo_root / ".git").exists():
+        return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": "local repo is not a Git checkout.", "github_sync_error_type": "NotGitRepo"}
+    files = _journal_excel_files_for_github(master_path)
+    if not files:
+        return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": "No eligible journal Excel files found to sync.", "github_sync_error_type": "NoEligibleFiles"}
+    rel_files = [str(p.relative_to(repo_root)).replace("\\", "/") for p in files]
+    base["github_sync_files"] = rel_files
+    code, _, err = _run_git_command(["--version"], repo_root, timeout_s)
+    if code != 0:
+        return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Git is unavailable: {err.strip()}", "github_sync_error_type": "GitNotInstalled"}
+    branch = requested_branch
+    if not branch:
+        code, out, err = _run_git_command(["rev-parse", "--abbrev-ref", "HEAD"], repo_root, timeout_s)
+        if code != 0:
+            return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Failed to detect branch: {err.strip()}", "github_sync_error_type": "BranchDetectFailed"}
+        branch = out.strip()
+        if branch == "HEAD" or not branch:
+            return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": "Git branch is detached (HEAD); set TRADING_JOURNAL_GITHUB_SYNC_BRANCH.", "github_sync_error_type": "DetachedHead"}
+    base["github_sync_branch"] = branch
+    code, _, err = _run_git_command(["remote", "get-url", remote], repo_root, timeout_s)
+    if code != 0:
+        return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Git remote '{remote}' is not configured: {err.strip()}", "github_sync_error_type": "RemoteMissing"}
+    code, _, err = _run_git_command(["add", "--", *rel_files], repo_root, timeout_s)
+    if code != 0:
+        return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Git add failed: {err.strip()}", "github_sync_error_type": "GitAddFailed"}
+    code, _, _ = _run_git_command(["diff", "--cached", "--quiet", "--", *rel_files], repo_root, timeout_s)
+    if code == 0:
+        return base
+    code, _, err = _run_git_command(["commit", "-m", "Update Master Journal workbook"], repo_root, timeout_s)
+    if code != 0:
+        return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Git commit failed: {err.strip()}", "github_sync_error_type": "GitCommitFailed"}
+    code, out, err = _run_git_command(["rev-parse", "--short", "HEAD"], repo_root, timeout_s)
+    commit = out.strip() if code == 0 else ""
+    code, _, err = _run_git_command(["push", remote, branch], repo_root, timeout_s)
+    if code != 0:
+        return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_commit": commit, "github_sync_error": f"Git push failed: {err.strip()}", "github_sync_error_type": "GitPushFailed"}
+    return {**base, "github_sync_ok": True, "github_sync_noop": False, "github_sync_commit": commit}
 
 
 

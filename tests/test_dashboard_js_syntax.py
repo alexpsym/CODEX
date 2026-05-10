@@ -82,6 +82,11 @@ def test_dashboard_js_includes_sync_journal_wiring():
     assert "master_journal_ok === true" in js
     assert "master_journal_path" in js
     assert "master_journal_exists" in js
+    assert "github_sync_ok" in js
+    assert "github_sync_error" in js
+    assert "GitHub updated" in js
+    assert "GitHub already up to date" in js
+    assert "Master Journal.xlsx created, but GitHub sync failed" in js
 
 
 def test_dashboard_js_open_master_journal_wiring():

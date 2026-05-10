@@ -84,8 +84,16 @@
           const masterOk = result.master_journal_ok === true;
           const masterPath = result.master_journal_path;
           const masterExists = result.master_journal_exists === true;
-          if (statusPayload.ok === true && masterOk && masterPath && masterExists) {
-            setSyncJournalStatus(`Synced: ${masterPath}`);
+          const githubEnabled = result.github_sync_enabled === true;
+          const githubOk = result.github_sync_ok === true;
+          const githubNoop = result.github_sync_noop === true;
+          if (masterOk && masterPath && masterExists && (!githubEnabled || githubOk)) {
+            const suffix = githubEnabled ? (githubNoop ? ' — GitHub already up to date' : ' — GitHub updated') : '';
+            setSyncJournalStatus(`Synced: ${masterPath}${suffix}`);
+            setOpenMasterJournalVisible(true);
+          } else if (masterOk && masterPath && masterExists && githubEnabled && !githubOk) {
+            const err = result.github_sync_error || statusPayload.error || statusPayload.message || 'Unknown GitHub sync error';
+            setSyncJournalStatus(`Master Journal.xlsx created, but GitHub sync failed: ${err}`, true);
             setOpenMasterJournalVisible(true);
           } else {
             const err = result.master_journal_error
