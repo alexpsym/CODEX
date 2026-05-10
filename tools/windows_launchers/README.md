@@ -44,4 +44,4 @@ The script builds in this order:
 - The external `ExtractLatestCodexMaster.bat` is outside this repo and should call `.\build_windows_launchers.bat` after extraction.
 - If IExpress is used, launcher executables may contain the current repo path and should be rebuilt if the repo folder is moved.
 - `.lnk` fallback does **not** count as successful `.exe` generation.
-- If both repo-root `.exe` files are not present, the build exits non-zero.
+- If repo-root `Local Trading Tools.exe` is not present, the build exits non-zero.
