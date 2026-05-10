@@ -64,6 +64,8 @@ start "Local Master Control" /D "%ROOT%" cmd /d /v:on /k ""%~f0" __worker"
 set "MASTER_URL=http://127.0.0.1:8000"
 set "MASTER_HEALTH_URL=http://127.0.0.1:8000/health"
 set "MASTER_SCRIPTS_URL=http://127.0.0.1:8000/scripts"
+for /f %%I in ('powershell -NoProfile -Command "[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()"') do set "LOCAL_LAUNCH_TS=%%I"
+set "MASTER_BROWSER_URL=%MASTER_URL%/?local_launch=%LOCAL_LAUNCH_TS%"
 set "MASTER_READY_TIMEOUT_SECONDS=60"
 set "SCANNER_READY_TIMEOUT_SECONDS=90"
 echo [local-master] waiting for %MASTER_HEALTH_URL% ...
@@ -94,9 +96,9 @@ goto wait_for_scanner_ready
 
 :scanner_ready
 echo [local-master] scanner ready after !SCANNER_READY_WAITED! seconds.
-call "%ROOT%tools\open_edge_url.bat" "%MASTER_URL%"
+call "%ROOT%tools\open_edge_url.bat" "%MASTER_BROWSER_URL%"
 if errorlevel 1 (
-  echo [local-master] ERROR: failed to open Microsoft Edge for %MASTER_URL%.
+  echo [local-master] ERROR: failed to open Microsoft Edge for %MASTER_BROWSER_URL%.
   exit /b 1
 )
 echo Local master control launch requested with scanner autostart supervision.
