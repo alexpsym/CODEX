@@ -331,12 +331,15 @@ def test_journal_launchers_protect_bybit_demo_anchor_flag() -> None:
     journal_bat = (ROOT / "run_trading_journal_local.bat").read_text(encoding="utf-8")
     master_bat = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
     brave_sh = (ROOT / "LaunchTradingJournalBrave.sh").read_text(encoding="utf-8")
-    assert "MASTER_ENV_PROTECTED_KEYS" in journal_bat
-    assert "TRADING_JOURNAL_BYBIT_DEMO_BALANCE_ANCHOR_ENABLED" in journal_bat
+    assert "MASTER_ENV_PROTECTED_KEYS" not in journal_bat
+    assert "TRADING_JOURNAL_BYBIT_DEMO_BALANCE_ANCHOR_ENABLED" not in journal_bat
+    assert "Master Journal.xlsx" in journal_bat
+    assert "uvicorn render.master_service:app" not in journal_bat
     assert "MASTER_ENV_PROTECTED_KEYS" in master_bat
     assert "TRADING_JOURNAL_BYBIT_DEMO_BALANCE_ANCHOR_ENABLED" in master_bat
-    assert "MASTER_ENV_PROTECTED_KEYS" in brave_sh
-    assert "TRADING_JOURNAL_BYBIT_DEMO_BALANCE_ANCHOR_ENABLED" in brave_sh
+    assert "MASTER_ENV_PROTECTED_KEYS" not in brave_sh
+    assert "TRADING_JOURNAL_BYBIT_DEMO_BALANCE_ANCHOR_ENABLED" not in brave_sh
+    assert "Deprecated" in brave_sh
 
 
 def test_no_legacy_env_default_paths_remain_active() -> None:
@@ -442,10 +445,14 @@ def test_all_local_bat_launchers_use_consistent_default_master_env_file() -> Non
     for name in (
         "run_local_master_control.bat",
         "run_scanner_local.bat",
-        "run_trading_journal_local.bat",
     ):
         content = (ROOT / name).read_text(encoding="utf-8")
         assert expected in content, f"{name} should default MASTER_ENV_FILE to Documents/GPT env.env"
+    journal = (ROOT / "run_trading_journal_local.bat").read_text(encoding="utf-8")
+    assert "Master Journal.xlsx" in journal
+    assert "MASTER_ENV_FILE" not in journal
+    assert "uvicorn render.master_service:app" not in journal
+    assert "/trading-journal" not in journal
 
 def test_run_local_master_control_bat_no_caret_continued_quoted_restart_loop() -> None:
     content = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
@@ -830,9 +837,11 @@ def test_edge_helper_wiring_for_local_launchers() -> None:
     assert 'start "" "%JOURNAL_URL%"' not in journal
 
     master_call = 'call "%ROOT%tools\\open_edge_url.bat" "%MASTER_URL%"'
-    journal_call = 'call "%ROOT%tools\\open_edge_url.bat" "%JOURNAL_URL%"'
     assert master_call in master
-    assert journal_call in journal
+    assert "JOURNAL_URL" not in journal
+    assert "open_edge_url.bat" not in journal
+    assert 'start "" "%JOURNAL_URL%"' not in journal
+    assert 'start "" "%JOURNAL%"' in journal
 
     worker_start = master.index('start "Local Master Control"')
     ready_wait = master.index(':wait_for_master_ready')
@@ -843,13 +852,8 @@ def test_edge_helper_wiring_for_local_launchers() -> None:
     assert master_call not in master.split(':master_not_ready', 1)[1].split(':scanner_not_ready', 1)[0]
     assert master_call not in master.split(':scanner_not_ready', 1)[1].split(':worker', 1)[0]
 
-    journal_worker_start = journal.index('start "Local Trading Journal"')
-    journal_wait = journal.index(':wait_for_journal_health')
-    journal_ready = journal.index(':journal_ready')
-    journal_edge_call = journal.index(journal_call)
-    assert journal_worker_start < journal_wait < journal_ready < journal_edge_call
-
-    assert journal_call not in journal.split(':journal_not_ready', 1)[1].split(':worker', 1)[0]
+    assert ':wait_for_journal_health' not in journal
+    assert ':journal_ready' not in journal
 
 
 def test_open_edge_url_helper_contract() -> None:

@@ -533,11 +533,15 @@ def test_sync_bybit_closed_pnl_window_quarantines_invalid_time_row(monkeypatch) 
     monkeypatch.setattr(master_service, "_fetch_bybit_order_history", fake_empty_payload)
     monkeypatch.setattr(master_service, "_fetch_bybit_order_realtime", fake_empty_payload)
     monkeypatch.setattr(master_service, "_fetch_bybit_transaction_log", fake_empty_payload)
-    monkeypatch.setattr(master_service, "_fetch_bybit_executions", lambda **_kwargs: [])
+    async def fake_executions(**_kwargs):
+        return []
+    monkeypatch.setattr(master_service, "_fetch_bybit_executions", fake_executions)
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_workbook", lambda *_args, **_kwargs: {"changed": 0})
     monkeypatch.setattr(master_service, "_record_bybit_demo_sync_status", lambda **kwargs: statuses.append(kwargs))
     monkeypatch.setattr(master_service, "_upsert_trade_context", lambda payload: payload)
     monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
     monkeypatch.setattr(master_service, "load_bybit_demo_tpsl_cache", lambda: {})
+    monkeypatch.setattr(master_service, "_fetch_bybit_balance_usdt", lambda _account: asyncio.sleep(0, result={"available_usdt": 1000, "total_equity": 1000}))
 
     def fake_upsert(rows):
         upsert_calls.append(rows)
