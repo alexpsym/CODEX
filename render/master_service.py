@@ -22162,6 +22162,16 @@ async def close_open_order(item: Dict[str, Any] = Body(...)) -> JSONResponse:
                     position_idx=position_idx,
                     order_link_id=str(item.get("order_link_id", "")).strip() or None,
                 )
+            bybit_resp = bybit_resp or {}
+            bybit_result = bybit_resp.get("result") if isinstance(bybit_resp, dict) else {}
+            if not isinstance(bybit_result, dict):
+                bybit_result = {}
+            broker_response_summary = {
+                "retCode": bybit_resp.get("retCode") if isinstance(bybit_resp, dict) else None,
+                "retMsg": bybit_resp.get("retMsg") if isinstance(bybit_resp, dict) else None,
+                "orderId": bybit_result.get("orderId"),
+                "orderLinkId": bybit_result.get("orderLinkId"),
+            }
             action_requested = True
 
         elif broker == "oanda":
@@ -22170,9 +22180,11 @@ async def close_open_order(item: Dict[str, Any] = Body(...)) -> JSONResponse:
             action_account_id = str(item.get("account_id") or cfg.get("account_id") or "").strip()
             if action == "cancel":
                 oanda_resp = await _cancel_oanda_order(cfg=cfg, order_id=item_id, mode=mode, account_id=action_account_id)
+                oanda_resp = oanda_resp or {}
                 broker_response_summary = {"lastTransactionID": oanda_resp.get("lastTransactionID"), "relatedTransactionIDs": oanda_resp.get("relatedTransactionIDs"), "hasOrderCancelTransaction": bool(oanda_resp.get("orderCancelTransaction"))}
             else:
                 oanda_resp = await _close_oanda_trade(cfg=cfg, trade_id=item_id, mode=mode, account_id=action_account_id)
+                oanda_resp = oanda_resp or {}
                 broker_response_summary = {"lastTransactionID": oanda_resp.get("lastTransactionID"), "relatedTransactionIDs": oanda_resp.get("relatedTransactionIDs"), "hasOrderFillTransaction": bool(oanda_resp.get("orderFillTransaction")), "hasOrderCancelTransaction": bool(oanda_resp.get("orderCancelTransaction"))}
             action_requested = True
         else:
