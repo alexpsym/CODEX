@@ -82,4 +82,16 @@ def test_dashboard_js_includes_sync_journal_wiring():
     assert "master_journal_ok === true" in js
     assert "master_journal_path" in js
     assert "master_journal_exists" in js
-    assert "Startup import completed but Master Journal.xlsx was not created. Click Sync Journal again." in js
+
+
+def test_dashboard_js_open_master_journal_wiring():
+    js = JS_PATH.read_text(encoding='utf-8')
+    assert 'open-master-journal-btn' in js
+    assert '/api/trading-journal/open-master-journal' in js
+    assert 'master_journal_ok === true' in js
+    assert 'master_journal_exists' in js
+    assert 'setOpenMasterJournalVisible(false)' in js
+    assert 'setOpenMasterJournalVisible(true)' in js
+    assert "openMasterJournalBtn?.addEventListener('click', openMasterJournal);" in js
+    assert 'master_journal_ok !== false' not in js
+    assert 'Startup journal sync complete' not in js

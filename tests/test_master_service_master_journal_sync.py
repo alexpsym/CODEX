@@ -213,3 +213,39 @@ def test_startup_recovery_import_master_journal_failure_is_not_success(monkeypat
     assert master_service.TRADING_JOURNAL_SYNC_STATE['ok'] is False
     assert 'boom' in str(master_service.TRADING_JOURNAL_SYNC_STATE.get('error') or '')
     assert str(master_service.TRADING_JOURNAL_SYNC_STATE.get('message') or '') != 'Startup journal sync complete.'
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_open_master_journal_missing_file_returns_404(tmp_path, monkeypatch):
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    with pytest.raises(master_service.HTTPException) as exc:
+        asyncio.run(master_service.open_master_journal_file())
+    assert exc.value.status_code == 404
+    assert 'Click Sync Journal first' in str(exc.value.detail)
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_open_master_journal_existing_file_opens_exact_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    target = tmp_path / 'Master Journal.xlsx'
+    target.write_bytes(b'x')
+    captured = {}
+    monkeypatch.setattr(master_service, '_open_path_with_os', lambda path: captured.setdefault('path', Path(path)))
+    resp = asyncio.run(master_service.open_master_journal_file())
+    import json
+    payload = json.loads(resp.body.decode('utf-8'))
+    assert payload['ok'] is True
+    assert captured['path'] == target
+    assert str(payload['master_journal_path']).endswith('Master Journal.xlsx')
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_open_master_journal_open_failure_returns_500(tmp_path, monkeypatch):
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    target = tmp_path / 'Master Journal.xlsx'
+    target.write_bytes(b'x')
+    monkeypatch.setattr(master_service, '_open_path_with_os', lambda _path: (_ for _ in ()).throw(RuntimeError('boom')))
+    with pytest.raises(master_service.HTTPException) as exc:
+        asyncio.run(master_service.open_master_journal_file())
+    assert exc.value.status_code == 500
+    assert 'boom' in str(exc.value.detail)
