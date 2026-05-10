@@ -838,8 +838,11 @@ def test_edge_helper_wiring_for_local_launchers() -> None:
     assert 'start "" "%MASTER_URL%"' not in master
     assert 'start "" "%JOURNAL_URL%"' not in journal
 
-    master_call = 'call "%ROOT%tools\\open_edge_url.bat" "%MASTER_URL%"'
+    master_call = 'call "%ROOT%tools\\open_edge_url.bat" "%MASTER_BROWSER_URL%"'
     assert master_call in master
+    assert "MASTER_BROWSER_URL" in master
+    assert "local_launch=" in master
+    assert 'call "%ROOT%tools\\open_edge_url.bat" "%MASTER_URL%"' not in master
     assert "JOURNAL_URL" not in journal
     assert "open_edge_url.bat" not in journal
     assert 'start "" "%JOURNAL_URL%"' not in journal
