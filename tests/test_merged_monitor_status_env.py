@@ -405,7 +405,7 @@ def test_run_local_master_control_bat_uses_local_autostart() -> None:
     assert "[local-master] ERROR: dashboard was not ready after %MASTER_READY_TIMEOUT_SECONDS% seconds." in content
     assert '[local-master] Browser was not opened to avoid a dead-page / manual-refresh failure.' in content
     assert "[local-master] ERROR: scanner did not become ready after %SCANNER_READY_TIMEOUT_SECONDS% seconds." in content
-    assert content.index('cmd /d /v:on /k ""%~f0" __worker"') < content.index('call "%ROOT%tools\\open_edge_url.bat" "%MASTER_URL%"')
+    assert content.index('cmd /d /v:on /k ""%~f0" __worker"') < content.index('call "%ROOT%tools\\open_edge_url.bat" "%MASTER_BROWSER_URL%"')
     assert "timeout /t 2 /nobreak >nul\nstart \"\" \"%MASTER_URL%\"" not in content
 
 
@@ -413,19 +413,21 @@ def test_run_local_master_control_waits_for_health_before_opening_browser() -> N
     content = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
     worker_start_idx = content.index('cmd /d /v:on /k ""%~f0" __worker"')
     wait_idx = content.index(":wait_for_master_ready")
+    assert "MASTER_BROWSER_URL" in content
+    assert "local_launch=" in content
     ready_idx = content.index(":master_ready")
     scanner_wait_idx = content.index(":wait_for_scanner_ready")
     scanner_ready_idx = content.index(":scanner_ready")
     scanner_not_ready_idx = content.index(":scanner_not_ready")
-    browser_idx = content.index('call "%ROOT%tools\\open_edge_url.bat" "%MASTER_URL%"')
+    browser_idx = content.index('call "%ROOT%tools\\open_edge_url.bat" "%MASTER_BROWSER_URL%"')
     not_ready_idx = content.index(":master_not_ready")
 
     assert worker_start_idx < wait_idx < ready_idx < scanner_wait_idx < scanner_ready_idx < browser_idx
     assert browser_idx > scanner_ready_idx
     not_ready_block = content[not_ready_idx:]
-    assert 'call "%ROOT%tools\\open_edge_url.bat" "%MASTER_URL%"' not in not_ready_block
+    assert 'call "%ROOT%tools\\open_edge_url.bat" "%MASTER_BROWSER_URL%"' not in not_ready_block
     scanner_not_ready_block = content[scanner_not_ready_idx:]
-    assert 'call "%ROOT%tools\\open_edge_url.bat" "%MASTER_URL%"' not in scanner_not_ready_block
+    assert 'call "%ROOT%tools\\open_edge_url.bat" "%MASTER_BROWSER_URL%"' not in scanner_not_ready_block
 
 
 def test_run_trading_journal_local_bat_profile_and_port() -> None:

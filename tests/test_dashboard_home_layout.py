@@ -1,3 +1,6 @@
+import importlib.util
+import sys
+
 import re
 from pathlib import Path
 
@@ -55,3 +58,37 @@ def test_dashboard_home_has_open_master_journal_button_hidden_default() -> None:
     assert 'id="sync-journal-btn"' in html
     assert html.index('sync-journal-btn') < html.index('open-master-journal-btn') < html.index('sync-journal-status')
     assert 'id="open-master-journal-btn" hidden disabled' in html
+
+
+def _load_master_service_module():
+    spec = importlib.util.spec_from_file_location("render_master_service_dashboard", ROOT / "render" / "master_service.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_dashboard_home_uses_versioned_dashboard_js_url() -> None:
+    source = MASTER_SERVICE_PATH.read_text(encoding='utf-8')
+    assert '/static/dashboard.js?v=' in source
+
+
+def test_local_profile_sets_no_cache_for_home_and_static_assets(monkeypatch) -> None:
+    pytest = __import__('pytest')
+    try:
+        from fastapi.testclient import TestClient
+    except Exception:
+        pytest.skip('fastapi TestClient is unavailable in this environment')
+
+    module = _load_master_service_module()
+    monkeypatch.setattr(module, 'APP_PROFILE', 'local')
+    client = TestClient(module.app)
+
+    home = client.get('/')
+    cache = home.headers.get('cache-control', '')
+    assert 'no-store' in cache or 'no-cache' in cache
+
+    static = client.get('/static/dashboard.js')
+    static_cache = static.headers.get('cache-control', '')
+    assert 'no-store' in static_cache or 'no-cache' in static_cache
