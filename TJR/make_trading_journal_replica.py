@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Build a 32-bit-Android-safe Excel replica of the Trading Journal from workbooks in CODEX-master/journal.
+Build the canonical Master Journal workbook from source workbooks in CODEX-master/journal.
 No pandas, no FastAPI, no local web server.
 """
 from __future__ import annotations
@@ -36,9 +36,10 @@ try:
 except Exception:  # pragma: no cover
     xlrd = None
 
-OUTPUT_NAME = "TradingJournal_Android_Replica.xlsx"
+OUTPUT_NAME = "Master Journal.xlsx"
 EXCLUDED_SOURCE_NAMES = {
     OUTPUT_NAME.lower(),
+    "tradingjournal_android_replica.xlsx",
     "account_cashflows.xlsx",
 }
 
@@ -941,7 +942,7 @@ def build_output(journal_dir: Path, output_path: Path) -> Tuple[int, int, List[s
     style_sheet(inst_ws, len(inst_headers), freeze="A2")
     set_pl_format(inst_ws, [f"H2:I{max(2, len(inst_rows)+1)}"])
 
-    cal_ws = wb.create_sheet("PL Calendar")
+    cal_ws = wb.create_sheet("P&L Calendar")
     cal_headers = ["Month"] + [str(i) for i in range(1, 32)] + ["Monthly Total"]
     cal_data = calendar_rows(all_trades)
     write_table(cal_ws, cal_headers, cal_data)
@@ -1005,7 +1006,7 @@ def build_output(journal_dir: Path, output_path: Path) -> Tuple[int, int, List[s
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", default=None, help="Path to CODEX-master repo. Defaults to Downloads/CODEX-master/CODEX-master.")
-    ap.add_argument("--output", default=None, help="Output .xlsx path. Defaults to repo/journal/TradingJournal_Android_Replica.xlsx")
+    ap.add_argument("--output", default=None, help="Output .xlsx path. Defaults to repo/journal/Master Journal.xlsx")
     args = ap.parse_args(argv)
     try:
         journal_dir = find_journal_dir(args.repo)
