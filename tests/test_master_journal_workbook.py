@@ -106,3 +106,18 @@ def test_is_test_trade_string_handling(tmp_path: Path):
     symbols=[inst.cell(r,1).value for r in range(2,inst.max_row+1)]
     assert 'EURUSD' in symbols
     assert 'BTCUSDT' not in symbols
+
+
+def test_section_pnl_colors(tmp_path: Path):
+    snap=sample_snapshot(); snap['items'].append({'id':'t3','row_type':'trade','symbol':'XAUUSD','side':'BUY','close_time':'2026-05-03T00:00:00Z','open_time':'2026-05-03T00:00:00Z','net_profit':-7.0,'entry_price':1,'exit_price':1,'qty':1,'account':'A','is_test_trade':False})
+    outp=tmp_path/'Master Journal.xlsx'; build_master_journal_workbook(snap,outp)
+    wb=load_workbook(outp)
+    inst=wb['Instrument Averages']
+    values=[inst.cell(r,5).value for r in range(2,inst.max_row+1)]
+    cal=wb['P&L Calendar']
+    cal_vals=[cal.cell(r,3).value for r in range(2,cal.max_row+1)]
+    eq=wb['Equity Curve']
+    eq_vals=[eq.cell(r,2).value for r in range(2,eq.max_row+1)]
+    assert any(v < 0 for v in values if isinstance(v,(int,float)))
+    assert any(v < 0 for v in cal_vals if isinstance(v,(int,float)))
+    assert any(v < 0 for v in eq_vals if isinstance(v,(int,float)))

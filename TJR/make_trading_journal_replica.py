@@ -842,7 +842,7 @@ def write_dashboard(wb: Workbook, trades: List[Dict[str, Any]], sources: List[Pa
     ws.title = "Dashboard"
     stats = compute_journal_stats_replica(trades)
     g = stats["groups"]
-    ws.append(["Trading Journal Android Replica", "Generated", datetime.now()])
+    ws.append(["Trading Journal", "Generated", datetime.now()])
     ws.append(["Source workbooks", len(sources), "Source folder", str(sources[0].parent if sources else "")])
     def section(title, rows):
         ws.append([title, "Value"])

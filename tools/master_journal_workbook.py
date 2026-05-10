@@ -1,5 +1,6 @@
 from __future__ import annotations
 from collections import defaultdict
+from copy import copy
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
@@ -7,7 +8,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font
 from openpyxl.worksheet.datavalidation import DataValidation
 import hashlib
-from openpyxl.styles import PatternFill, Border, Side, Alignment
+from openpyxl.styles import PatternFill, Border, Side, Alignment, Color
 
 SHEET_ORDER=["Dashboard","All Trades","Instrument Averages","P&L Calendar","Equity Curve","Diagnostics"]
 EDITABLE_COLS=["Test","Setup","Timeframe","Breakeven","Notes"]
@@ -97,10 +98,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         if k in totals:
             dash.cell(rr,1,l); c=dash.cell(rr,2,totals.get(k))
             if isinstance(c.value,(int,float)):
-                if k == 'gross_loss':
-                    c.font=Font(color='FF0000')
-                else:
-                    c.font=Font(color='008000' if c.value>0 else 'FF0000' if c.value<0 else None)
+                _apply_sign_font(c, loss_label=(k == 'gross_loss'))
             rr+=1
 
     ws=wb['All Trades']; headers=['__row_id','Open Time','Close Time','Account','Symbol','Side','Qty','Entry','Exit','Stop Loss','Target','Commission','Net P/L','Profit %','R-Multiple','Balance After','Trade Duration (s)','Source','Order ID','Fill Count']+EDITABLE_COLS; ws.append(headers)
@@ -115,7 +113,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     for i in range(2,ws.max_row+1):
         c=ws.cell(i,13)
         if isinstance(c.value,(int,float)):
-            c.font=Font(color='008000' if c.value>0 else 'FF0000' if c.value<0 else None)
+            _apply_sign_font(c)
 
     # Instrument Averages
     inst=wb['Instrument Averages']; inst.append(['Symbol','Trades','Wins','Losses','Net P/L','Avg P/L'])
@@ -196,3 +194,19 @@ def _wrap_columns(ws, letters):
     for l in letters:
         for r in range(2, ws.max_row+1):
             ws[f'{l}{r}'].alignment=Alignment(wrap_text=True, vertical='top')
+
+
+def _apply_sign_font(cell, *, loss_label: bool = False):
+    v = cell.value
+    if not isinstance(v, (int, float)):
+        return
+    f = copy(cell.font)
+    if loss_label and v >= 0:
+        f.color = Color(rgb='00FF0000')
+        cell.font = f
+    elif v > 0:
+        f.color = Color(rgb='00008000')
+        cell.font = f
+    elif v < 0:
+        f.color = Color(rgb='00FF0000')
+        cell.font = f
