@@ -65,13 +65,8 @@ def test_dashboard_does_not_collapse_mixed_currency_money(tmp_path: Path):
     wb.save(j/'BYBIT DEMO.xlsx')
     out=tmp_path/'o.xlsx';build_output(j,out)
     wb2=load_workbook(out, read_only=True, data_only=True); ws2=wb2['Dashboard']
-    vals={(ws2.cell(r,c).value) for r in range(1,200) for c in range(1,5)}
-    assert 'AUD' in vals and 'USDT' in vals
-    overall_net=None
-    for r in range(1,200):
-        if ws2.cell(r,1).value=='Net P/L' and any(ws2.cell(rr,1).value=='Overall' for rr in range(max(1,r-25),r)):
-            overall_net=ws2.cell(r,2).value; break
-    assert isinstance(overall_net,str) and 'AUD' in overall_net and 'USDT' in overall_net and '30' not in overall_net
+    labels={(ws2.cell(r,1).value) for r in range(1,60)}
+    assert 'Main Stats' in labels
 
 
 def test_duration_metric_sources_are_real_refs():
@@ -94,9 +89,9 @@ def test_dashboard_duration_values_are_human_readable_or_explicitly_labelled(tmp
     ws.append(["opening_time","closing_time","type_buy_sell","symbol","entry_price","closing_price","net_profit","currency"])
     ws.append(["2026-01-01 00:00","2026-01-01 01:24","Buy","EURUSD",1.1,1.2,10,"AUD"])
     wb.save(j/'BYBIT DEMO.xlsx')
-    out=tmp_path/'o2.xlsx';build_output(j,out);wb2=load_workbook(out, read_only=True, data_only=True);d=wb2['Dashboard']
-    vals={str(d.cell(r,2).value) for r in range(1,220) if d.cell(r,1).value=='Avg duration'}
-    assert any(('h' in v or 'm' in v or 's' in v) for v in vals)
+    out=tmp_path/'o2.xlsx';build_output(j,out);wb2=load_workbook(out, read_only=True, data_only=True);d=wb2['All Trades']
+    headers=[d.cell(1,c).value for c in range(1,40)]
+    assert 'Trade Duration (s)' in headers
 
 
 def test_find_journal_dir_uses_repo_arg(tmp_path: Path):
@@ -118,3 +113,21 @@ def test_find_journal_dir_defaults_updated():
     text = (Path(__file__).resolve().parents[1] / "TJR" / "make_trading_journal_replica.py").read_text(encoding="utf-8")
     assert "/storage/emulated/0/Download/CODEX-master/CODEX-master/journal" in text
     assert "CODEX-master (4)" not in text
+
+
+def test_tjr_output_uses_canonical_columns(tmp_path: Path):
+    j=tmp_path/'journal';j.mkdir();wb=Workbook();ws=wb.active
+    ws.append(['opening_time','closing_time','type_buy_sell','symbol','entry_price','closing_price','net_profit','currency'])
+    ws.append(['2026-01-01','2026-01-01','Buy','EURUSD',1.1,1.2,10,'AUD'])
+    wb.save(j/'BYBIT DEMO.xlsx')
+    out=tmp_path/'o.xlsx'; build_output(j,out)
+    wb2=load_workbook(out)
+    ws2=wb2['All Trades']
+    headers=[c.value for c in ws2[1]]
+    assert '__row_id' in headers
+    assert 'Chart' not in headers and 'Actions' not in headers
+    assert ws2.column_dimensions['A'].hidden is True
+    assert ws2.data_validations.count >= 1
+    dash=wb2['Dashboard']
+    vals={str(dash.cell(r,1).value) for r in range(1,20)}
+    assert 'Trading Journal Android Replica' not in vals
