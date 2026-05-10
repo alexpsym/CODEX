@@ -761,6 +761,7 @@
     }
   });
   watchlistClearBtn?.addEventListener('click', () => clearWatchlist());
+  syncJournalBtn?.addEventListener('click', runSyncJournal);
   oandaToggleBtn?.addEventListener('click', () => {
     oandaExpanded = !oandaExpanded;
     syncOandaDetailsVisibility();
@@ -786,4 +787,3 @@
   });
 })();
 
-if (syncJournalBtn) { syncJournalBtn.addEventListener('click', runSyncJournal); }
