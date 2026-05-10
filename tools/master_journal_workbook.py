@@ -86,22 +86,32 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     for k,l in mapping:
         if k in totals:
             dash.cell(rr,1,l); c=dash.cell(rr,2,totals.get(k))
-            if isinstance(c.value,(int,float)): c.font=Font(color='008000' if c.value>0 else 'FF0000' if c.value<0 else None)
+            if isinstance(c.value,(int,float)):
+                if k == 'gross_loss':
+                    c.font=Font(color='FF0000')
+                else:
+                    c.font=Font(color='008000' if c.value>0 else 'FF0000' if c.value<0 else None)
             rr+=1
 
-    ws=wb['All Trades']; headers=['__row_id','Open Time','Close Time','Account','Symbol','Side','Qty','Entry','Exit','Net P/L']+EDITABLE_COLS; ws.append(headers)
+    ws=wb['All Trades']; headers=['__row_id','Open Time','Close Time','Account','Symbol','Side','Qty','Entry','Exit','Stop Loss','Target','Commission','Net P/L','Profit %','R-Multiple','Balance After','Trade Duration (s)','Source','Order ID','Fill Count']+EDITABLE_COLS; ws.append(headers)
     for row in rows:
-        ws.append([stable_row_id(row),row.get('open_time'),row.get('close_time'),row.get('account_label') or row.get('account'),row.get('symbol'),row.get('side'),row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('net_profit'),'Yes' if row.get('is_test_trade') else 'No',row.get('setup') or '',row.get('timeframe') or '',row.get('breakeven') or '',row.get('notes') or ''])
-    ws.freeze_panes='A2'; ws.auto_filter.ref=f"A1:O{max(2,ws.max_row)}"; ws.column_dimensions['A'].hidden=True
-    dv=DataValidation(type='list',formula1='"Yes,No"',allow_blank=True); ws.add_data_validation(dv); dv.add(f"K2:K{max(2,ws.max_row)}")
+        ws.append([stable_row_id(row),row.get('open_time'),row.get('close_time'),row.get('account_label') or row.get('account'),row.get('symbol'),row.get('side'),row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('stop_loss'),row.get('take_profit'),row.get('commission'),row.get('net_profit'),row.get('result_pct'),row.get('r_multiple'),row.get('balance_after_trade'),row.get('trade_duration_seconds'),row.get('source'),row.get('order_id'),row.get('fill_count'),'Yes' if row.get('is_test_trade') else 'No',row.get('setup') or '',row.get('timeframe') or '',row.get('breakeven') or '',row.get('notes') or ''])
+    ws.freeze_panes='A2'; ws.auto_filter.ref=f"A1:Y{max(2,ws.max_row)}"; ws.column_dimensions['A'].hidden=True
+    dv=DataValidation(type='list',formula1='"Yes,No"',allow_blank=True); ws.add_data_validation(dv); dv.add(f"U2:U{max(2,ws.max_row)}")
     for i in range(2,ws.max_row+1):
-        c=ws.cell(i,10)
-        if isinstance(c.value,(int,float)): c.font=Font(color='008000' if c.value>0 else 'FF0000' if c.value<0 else None)
+        c=ws.cell(i,13)
+        if isinstance(c.value,(int,float)):
+                if k == 'gross_loss':
+                    c.font=Font(color='FF0000')
+                else:
+                    c.font=Font(color='008000' if c.value>0 else 'FF0000' if c.value<0 else None)
 
     # Instrument Averages
     inst=wb['Instrument Averages']; inst.append(['Symbol','Trades','Wins','Losses','Net P/L','Avg P/L'])
     bucket=defaultdict(list)
     for r in rows:
+        if bool(r.get('is_test_trade')):
+            continue
         bucket[str(r.get('symbol') or 'UNKNOWN')].append(r)
     for sym, grp in sorted(bucket.items()):
         pnls=[_as_float(x.get('net_profit')) for x in grp]
@@ -114,6 +124,8 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     cal=wb['P&L Calendar']; cal.append(['Type','Date','Net P/L'])
     daily=defaultdict(float)
     for r in rows:
+        if bool(r.get('is_test_trade')):
+            continue
         dt=str(r.get('close_time') or r.get('open_time') or '')[:10]
         pnl=_as_float(r.get('net_profit'))
         if dt and pnl is not None: daily[dt]+=pnl

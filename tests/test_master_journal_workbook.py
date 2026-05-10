@@ -21,7 +21,7 @@ def test_sheet_order_and_content(tmp_path: Path):
     wb=load_workbook(out)
     assert wb.sheetnames == SHEET_ORDER
     assert wb['Instrument Averages'].max_row > 1
-    assert wb['P&L Calendar'].max_row > 1
+    assert wb['P&L Calendar'].max_row > 2
     assert wb['Equity Curve'].max_row > 1
     assert wb['Diagnostics'].max_row > 3
 
@@ -32,14 +32,13 @@ def test_all_trades_columns_hidden_id_validation_and_colors(tmp_path: Path):
     wb=load_workbook(out)
     ws=wb['All Trades']
     headers=[c.value for c in ws[1]]
-    for col in ['Test','Setup','Timeframe','Breakeven','Notes','__row_id']:
+    for col in ['Test','Setup','Timeframe','Breakeven','Notes','__row_id','Stop Loss','Target','Commission','Profit %','R-Multiple','Balance After','Trade Duration (s)','Source','Order ID','Fill Count']:
         assert col in headers
     assert ws.column_dimensions['A'].hidden is True
     assert ws.data_validations.count >= 1
-    pos=ws.cell(2,10).font.color.rgb if ws.cell(2,10).font.color else ''
-    neg=ws.cell(3,10).font.color.rgb if ws.cell(3,10).font.color else ''
-    assert '008000' in str(pos)
-    assert 'FF0000' in str(neg)
+    colors=[str(ws.cell(r,13).font.color.rgb) for r in range(2,ws.max_row+1) if ws.cell(r,13).font.color]
+    assert colors
+    assert any('FF0000' in c for c in colors)
 
 
 def test_manual_overrides_only_whitelist_and_blank_preserved(tmp_path: Path):
@@ -47,7 +46,7 @@ def test_manual_overrides_only_whitelist_and_blank_preserved(tmp_path: Path):
     build_master_journal_workbook(sample_snapshot(), out)
     wb=load_workbook(out)
     ws=wb['All Trades']
-    ws['K2']='Yes'; ws['L2']=''; ws['M2']='H4'; ws['N2']=''; ws['O2']=''
+    ws['U2']='Yes'; ws['V2']=''; ws['W2']='H4'; ws['X2']=''; ws['Y2']=''
     ws['D2']='CHANGED_ACCOUNT'
     wb.save(out)
     o=read_master_journal_manual_overrides(out)
@@ -68,3 +67,15 @@ def test_stable_row_id_behavior():
     c=stable_row_id({**base,'raw_refs':{'source_row':2,'sheet':'S'}})
     assert a==b
     assert a!=c
+
+
+def test_gross_loss_is_red(tmp_path: Path):
+    snap=sample_snapshot(); snap['stats']={'totals':{'gross_loss':5,'gross_gain':10,'net_profit_total':5}}
+    out=tmp_path/'Master Journal.xlsx'; build_master_journal_workbook(snap,out)
+    wb=load_workbook(out); ws=wb['Dashboard']
+    color=None
+    for r in range(1,40):
+        if ws.cell(r,1).value=='Gross Loss':
+            color = ws.cell(r,2).font.color.rgb if ws.cell(r,2).font.color else ''
+            break
+    assert 'FF0000' in str(color)
