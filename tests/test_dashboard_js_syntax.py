@@ -73,3 +73,7 @@ def test_dashboard_js_includes_sync_journal_wiring():
     assert '/api/trading-journal/sync' in js
     assert '/api/trading-journal/sync/status' in js
     assert 'sync-journal-btn' in js
+    listener = "syncJournalBtn?.addEventListener('click', runSyncJournal);"
+    assert listener in js
+    assert "if (syncJournalBtn) { syncJournalBtn.addEventListener('click', runSyncJournal); }" not in js
+    assert js.index(listener) < js.rindex('})();')
