@@ -278,6 +278,9 @@ def test_github_sync_stages_only_target_file(monkeypatch, tmp_path):
     journal.mkdir()
     master = journal / "Master Journal.xlsx"
     master.write_bytes(b"x")
+    (journal / "~$Master Journal.xlsx").write_bytes(b"x")
+    (journal / "foo.tmp.xlsx").write_bytes(b"x")
+    (journal / "foo.pending.xlsx").write_bytes(b"x")
     commands = []
 
     def fake_git(args, _cwd, _timeout):
@@ -298,3 +301,8 @@ def test_github_sync_stages_only_target_file(monkeypatch, tmp_path):
     add_calls = [cmd for cmd in commands if cmd and cmd[0] == "add"]
     assert add_calls
     assert add_calls[0] == ["add", "--", "journal/Master Journal.xlsx"]
+    assert all(cmd != ["add", "."] for cmd in add_calls)
+    added_tokens = " ".join(add_calls[0])
+    assert "~$Master Journal.xlsx" not in added_tokens
+    assert ".tmp.xlsx" not in added_tokens
+    assert ".pending.xlsx" not in added_tokens

@@ -23447,10 +23447,11 @@ def _run_git_command(args: List[str], cwd: Path, timeout_s: int) -> Tuple[int, s
 
 
 def _journal_excel_files_for_github(master_path: Path) -> List[Path]:
+    master_path = master_path.expanduser().resolve()
+    journal_dir = master_path.parent
     files: List[Path] = [master_path]
     include_sources = str(os.getenv("TRADING_JOURNAL_GITHUB_SYNC_INCLUDE_SOURCES", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
     if include_sources:
-        journal_dir = _resolve_trading_journal_local_dir()
         for p in sorted(journal_dir.glob("*.xlsx")):
             name = p.name
             if name.startswith("~$") or name.endswith(".tmp.xlsx") or name.endswith(".pending.xlsx"):
@@ -23459,11 +23460,11 @@ def _journal_excel_files_for_github(master_path: Path) -> List[Path]:
                 files.append(p)
     unique: List[Path] = []
     seen: Set[Path] = set()
-    journal_dir = _resolve_trading_journal_local_dir()
+    repo_root = BASE_DIR.resolve()
     for p in files:
         try:
-            rp = p.resolve()
-            rp.relative_to(BASE_DIR.resolve())
+            rp = p.expanduser().resolve()
+            rp.relative_to(repo_root)
             rp.relative_to(journal_dir.resolve())
             if rp.suffix.lower() != ".xlsx":
                 continue
@@ -23497,6 +23498,8 @@ def _sync_journal_excel_files_to_github(master_path: Path) -> Dict[str, object]:
     if not (repo_root / ".git").exists():
         return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": "local repo is not a Git checkout.", "github_sync_error_type": "NotGitRepo"}
     files = _journal_excel_files_for_github(master_path)
+    if not files:
+        return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": "No eligible journal Excel files found to sync.", "github_sync_error_type": "NoEligibleFiles"}
     rel_files = [str(p.relative_to(repo_root)).replace("\\", "/") for p in files]
     base["github_sync_files"] = rel_files
     code, _, err = _run_git_command(["--version"], repo_root, timeout_s)
