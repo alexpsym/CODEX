@@ -86,3 +86,24 @@ def test_sync_master_journal_applies_manual_overrides(tmp_path, monkeypatch):
     assert r['master_journal_ok'] is True
     patched=captured['rows'][0]
     assert patched['is_test_trade'] is True and patched['setup']=='S' and patched['timeframe']=='M5' and patched['notes']=='note'
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_sync_master_journal_test_yes_excluded_from_aggregates(tmp_path, monkeypatch):
+    mj=tmp_path/'Master Journal.xlsx'
+    from tools.master_journal_workbook import build_master_journal_workbook
+    seed={'items':[{'id':'r1','row_type':'trade','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':10.0,'is_test_trade':False}], 'stats':{'totals':{}}, 'balances':[], 'diagnostics':{}}
+    build_master_journal_workbook(seed,mj)
+    from openpyxl import load_workbook
+    wb=load_workbook(mj); ws=wb['All Trades']; ws['U2']='Yes'; wb.save(mj)
+    monkeypatch.setattr(master_service, 'MASTER_JOURNAL_PATH', mj)
+    rows=[{'id':'r1','row_type':'trade','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':10.0}]
+    monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: rows)
+    monkeypatch.setattr(master_service, '_set_trading_journal_rows', lambda r: None)
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: {'items':[{'id':'r1','row_type':'trade','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':10.0,'is_test_trade':True}], 'stats':{'totals':{}}, 'balances':[], 'diagnostics':{}})
+    r=master_service._sync_master_journal_workbook()
+    assert r['master_journal_ok'] is True
+    out=load_workbook(mj)
+    assert out['All Trades']['U2'].value == 'Yes'
+    inst_symbols=[out['Instrument Averages'].cell(i,1).value for i in range(2,out['Instrument Averages'].max_row+1)]
+    assert 'EURUSD' not in inst_symbols

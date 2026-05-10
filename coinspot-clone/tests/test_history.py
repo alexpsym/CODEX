@@ -18,14 +18,14 @@ import coinspot_history
 class TestFetchHistory(unittest.TestCase):
     def test_fetch_history_expected_keys(self):
         mock_api = MagicMock()
-        mock_api.deposit_history.return_value = 'deposits'
-        mock_api.withdrawal_history.return_value = 'withdrawals'
-        mock_api.order_history.return_value = 'orders'
-        mock_api.market_order_history.return_value = 'market_orders'
-        mock_api.send_receive_history.return_value = 'send_receive'
+        mock_api.deposit_history.return_value = {'deposits':[{'id':1}]}
+        mock_api.withdrawal_history.return_value = {'withdrawals':[{'id':2}]}
+        mock_api.order_history.return_value = {'buyorders':[{'id':3}], 'sellorders':[{'id':4}]}
+        mock_api.market_order_history.return_value = {'buyorders':[{'id':5}], 'sellorders':[{'id':6}]}
+        mock_api.send_receive_history.return_value = {'sendtransactions':[{'id':7}], 'receivetransactions':[{'id':8}]}
 
         with patch('coinspot_history.ReadOnlyAPIV2', return_value=mock_api):
-            result = coinspot_history.fetch_history()
+            result = coinspot_history.fetch_history(api_key="dummy", api_secret="dummy")
 
         expected_keys = {
             'deposits',
@@ -35,11 +35,11 @@ class TestFetchHistory(unittest.TestCase):
             'send_receive',
         }
         self.assertEqual(set(result.keys()), expected_keys)
-        self.assertEqual(result['deposits'], 'deposits')
-        self.assertEqual(result['withdrawals'], 'withdrawals')
-        self.assertEqual(result['orders'], 'orders')
-        self.assertEqual(result['market_orders'], 'market_orders')
-        self.assertEqual(result['send_receive'], 'send_receive')
+        self.assertEqual(len(result['deposits']), 1)
+        self.assertEqual(len(result['withdrawals']), 1)
+        self.assertEqual(len(result['orders']), 2)
+        self.assertEqual(len(result['market_orders']), 2)
+        self.assertEqual(len(result['send_receive']), 2)
 
 
 if __name__ == '__main__':
