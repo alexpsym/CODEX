@@ -66,3 +66,10 @@ def test_dashboard_js_prefers_post_verified_watchlist_before_remote_summary() ->
     js = JS_PATH.read_text(encoding='utf-8')
     assert "if (verifiedAt && verifiedWatchlist.length) {" in js
     assert "const remoteSummary = await fetchRemoteBackupSummary();" in js
+
+
+def test_dashboard_js_includes_sync_journal_wiring():
+    js = (ROOT / 'render' / 'static' / 'dashboard.js').read_text(encoding='utf-8')
+    assert '/api/trading-journal/sync' in js
+    assert '/api/trading-journal/sync/status' in js
+    assert 'sync-journal-btn' in js
