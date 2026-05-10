@@ -8258,6 +8258,10 @@ async def _log_local_master_shutdown() -> None:
 
 def _log_local_master_atexit() -> None:
     try:
+        for handler in getattr(AUTOSTART_LOGGER, "handlers", []):
+            stream = getattr(handler, "stream", None)
+            if stream is not None and getattr(stream, "closed", False):
+                return
         AUTOSTART_LOGGER.error("LOCAL_MASTER_ATEXIT profile=%s", APP_PROFILE)
     except Exception:
         pass
@@ -21195,22 +21199,15 @@ def _clean_pending_webhooks_for_open_items(
     consumed_open_indices: Set[int] = set()
     filtered: List[Dict[str, object]] = []
     changed = False
-    visible_statuses = {
-        "WAITING",
-        "TRIGGERING",
-        "FAILED_BEFORE_SUBMIT",
-        "BYBIT_REJECTED",
-        "ORDER_CREATED_TPSL_FAILED",
-        "PENDING_NOT_FOUND",
-    }
+    visible_statuses = {"WAITING"}
     for pending in pending_items:
         status = str(pending.get("status") or "").strip().upper()
         if status in {"CONSUMED", "CLOSED", "CANCELLED"}:
             changed = True
             continue
         if status not in visible_statuses:
-            status = "WAITING"
-            pending = {**pending, "status": status}
+            changed = True
+            continue
         if not bool(pending.get("enabled", True)):
             changed = True
             continue
