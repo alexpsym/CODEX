@@ -109,17 +109,25 @@ def test_is_test_trade_string_handling(tmp_path: Path):
 
 
 def test_section_pnl_colors(tmp_path: Path):
-    snap=sample_snapshot(); snap['items'].append({'id':'t3','row_type':'trade','symbol':'XAUUSD','side':'BUY','close_time':'2026-05-03T00:00:00Z','open_time':'2026-05-03T00:00:00Z','net_profit':-7.0,'entry_price':1,'exit_price':1,'qty':1,'account':'A','is_test_trade':False})
+    snap=sample_snapshot()
+    snap['items'].append({'id':'t3','row_type':'trade','symbol':'XAUUSD','side':'BUY','close_time':'2026-05-03T00:00:00Z','open_time':'2026-05-03T00:00:00Z','net_profit':-7.0,'entry_price':1,'exit_price':1,'qty':1,'account':'A','is_test_trade':False})
     outp=tmp_path/'Master Journal.xlsx'; build_master_journal_workbook(snap,outp)
     wb=load_workbook(outp)
     inst=wb['Instrument Averages']
+    pos_inst=next(inst.cell(r,5) for r in range(2,inst.max_row+1) if isinstance(inst.cell(r,5).value,(int,float)) and inst.cell(r,5).value>0)
     neg_inst=next(inst.cell(r,5) for r in range(2,inst.max_row+1) if isinstance(inst.cell(r,5).value,(int,float)) and inst.cell(r,5).value<0)
     cal=wb['P&L Calendar']
+    pos_cal=next(cal.cell(r,3) for r in range(2,cal.max_row+1) if isinstance(cal.cell(r,3).value,(int,float)) and cal.cell(r,3).value>0)
     neg_cal=next(cal.cell(r,3) for r in range(2,cal.max_row+1) if isinstance(cal.cell(r,3).value,(int,float)) and cal.cell(r,3).value<0)
     eq=wb['Equity Curve']
+    pos_eq=next(eq.cell(r,2) for r in range(2,eq.max_row+1) if isinstance(eq.cell(r,2).value,(int,float)) and eq.cell(r,2).value>0)
     neg_eq=next(eq.cell(r,2) for r in range(2,eq.max_row+1) if isinstance(eq.cell(r,2).value,(int,float)) and eq.cell(r,2).value<0)
-    for c in (neg_inst, neg_cal, neg_eq):
-        assert c.font.color is not None
+    assert '008000' in str(pos_inst.font.color.rgb)
+    assert 'FF0000' in str(neg_inst.font.color.rgb)
+    assert '008000' in str(pos_cal.font.color.rgb)
+    assert 'FF0000' in str(neg_cal.font.color.rgb)
+    assert '008000' in str(pos_eq.font.color.rgb)
+    assert 'FF0000' in str(neg_eq.font.color.rgb)
 
 
 def test_headers_and_wrap_and_filters(tmp_path: Path):
@@ -137,4 +145,10 @@ def test_headers_and_wrap_and_filters(tmp_path: Path):
     assert ws['R2'].alignment.wrap_text is True
     assert ws['Y2'].alignment.wrap_text is True
     d=wb['Diagnostics']
-    assert d['B2'].alignment.wrap_text is True
+    assert d.auto_filter.ref == f"A1:B{d.max_row}"
+    for r in range(2,d.max_row+1):
+        assert d[f'B{r}'].alignment.wrap_text is True
+        assert d[f'B{r}'].border.left.style == 'thin'
+    for r in range(2,ws.max_row+1):
+        assert ws[f'R{r}'].alignment.wrap_text is True
+        assert ws[f'Y{r}'].alignment.wrap_text is True

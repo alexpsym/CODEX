@@ -129,6 +129,9 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         inst.append([sym,len(grp),wins,losses,net,(net/len(vals)) if vals else None])
     if inst.max_row==1: inst.append(['No data available','','','','',''])
     _style_table_sheet(inst,1,'A2',True)
+    for r in range(2, inst.max_row+1):
+        _apply_sign_font(inst.cell(r,5))
+        _apply_sign_font(inst.cell(r,6))
 
     # P&L Calendar (daily + monthly)
     cal=wb['P&L Calendar']; cal.append(['Type','Date','Net P/L'])
@@ -145,6 +148,8 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     for m,p in sorted(monthly.items()): cal.append(['Monthly',m,p])
     if cal.max_row==1: cal.append(['No data available','',''])
     _style_table_sheet(cal,1,'A2',True)
+    for r in range(2, cal.max_row+1):
+        _apply_sign_font(cal.cell(r,3))
 
     # Equity Curve
     eq=wb['Equity Curve']; eq.append(['Date','Delta P/L','Equity'])
@@ -154,6 +159,8 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         eq.append([d,p,running])
     if eq.max_row==1: eq.append(['No data available','',''])
     _style_table_sheet(eq,1,'A2',True)
+    for r in range(2, eq.max_row+1):
+        _apply_sign_font(eq.cell(r,2))
 
     for sheet_name, freeze, filt in [("Instrument Averages","A2","A1:F{row}"),("P&L Calendar","A2","A1:C{row}"),("Equity Curve","A2","A1:C{row}")]:
         sh=wb[sheet_name]
@@ -176,6 +183,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         diag.append(['warning',str(w)])
     for e in (diagnostics.get('errors') or []):
         diag.append(['error',str(e)])
+    _style_table_sheet(diag,1,'A2',True)
     _wrap_columns(diag,['B'])
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
