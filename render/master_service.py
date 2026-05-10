@@ -7839,22 +7839,38 @@ async def _run_startup_recovery_import_if_needed() -> None:
                 pass
     try:
         result = await asyncio.to_thread(_import_trading_journal_from_sources)
-        ok_flag = bool(result.get("ok", False)) if isinstance(result, dict) else False
+        workbook_sync = await asyncio.to_thread(_sync_master_journal_workbook)
+        if isinstance(result, dict):
+            result.update(workbook_sync)
+        else:
+            result = dict(workbook_sync or {})
+        import_ok = bool(result.get("ok", False)) if isinstance(result, dict) else False
+        workbook_ok = bool((workbook_sync or {}).get("master_journal_ok"))
+        ok_flag = bool(import_ok and workbook_ok)
+        startup_error = (
+            str((workbook_sync or {}).get("master_journal_error") or "").strip()
+            or str((result or {}).get("message") or "Startup import failed.")
+        )
+        final_message = (
+            "Startup journal sync complete. Master Journal.xlsx created."
+            if ok_flag
+            else startup_error
+        )
         diagnostics = result.get("diagnostics") if isinstance(result, dict) else {}
         rows_by_asset_class = diagnostics.get("rows_by_asset_class") if isinstance(diagnostics, dict) else {}
         _record_daily_trade_sync_status(
             last_attempt_at=_utc_now_iso(),
             last_success_at=_utc_now_iso() if ok_flag else None,
-            last_error=None if ok_flag else str((result or {}).get("message") or "Startup import failed."),
+            last_error=None if ok_flag else startup_error,
             last_reason="startup_recovery",
             last_result={**(result or {}), "oanda_recovery": oanda_recovery},
         )
         _set_trading_journal_sync_state(
             running=False,
             progress=100,
-            message="Startup journal sync complete." if ok_flag else str((result or {}).get("message") or "Startup import failed."),
+            message=final_message,
             ok=ok_flag,
-            error=None if ok_flag else str((result or {}).get("message") or "Startup import failed."),
+            error=None if ok_flag else startup_error,
             result=result,
             rows_imported=int((result or {}).get("rows_imported") or 0),
             rows_by_asset_class=rows_by_asset_class if isinstance(rows_by_asset_class, dict) else {},

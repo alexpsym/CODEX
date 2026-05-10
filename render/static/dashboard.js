@@ -44,7 +44,11 @@
           if (statusPayload.ok === true && masterOk && masterPath && masterExists) {
             setSyncJournalStatus(`Synced: ${masterPath}`);
           } else {
-            const err = result.master_journal_error
+            const startupOnlySync = String(statusPayload.message || '').includes('Startup journal sync complete')
+              && result.master_journal_ok === undefined;
+            const err = startupOnlySync
+              ? 'Startup import completed but Master Journal.xlsx was not created. Click Sync Journal again.'
+              : result.master_journal_error
               || statusPayload.error
               || statusPayload.message
               || 'Sync finished but Master Journal.xlsx was not created. Check the Local Master Control terminal.';

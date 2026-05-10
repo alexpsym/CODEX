@@ -82,3 +82,4 @@ def test_dashboard_js_includes_sync_journal_wiring():
     assert "master_journal_ok === true" in js
     assert "master_journal_path" in js
     assert "master_journal_exists" in js
+    assert "Startup import completed but Master Journal.xlsx was not created. Click Sync Journal again." in js

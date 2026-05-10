@@ -175,3 +175,41 @@ def test_sync_master_journal_uses_configured_local_dir(tmp_path, monkeypatch):
     expected = custom_journal_dir.resolve() / 'Master Journal.xlsx'
     assert Path(result['master_journal_path']) == expected
     assert expected.exists()
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_startup_recovery_import_includes_master_journal_sync_success(monkeypatch, tmp_path):
+    monkeypatch.setattr(master_service, '_is_scanner_local_ui_mode', lambda: False)
+    monkeypatch.setattr(master_service, '_trading_journal_excel_only_mode', lambda: True)
+    monkeypatch.setattr(master_service, '_import_trading_journal_from_sources', lambda: {'ok': True, 'rows_imported': 1})
+    monkeypatch.setattr(
+        master_service,
+        '_sync_master_journal_workbook',
+        lambda: {
+            'master_journal_ok': True,
+            'master_journal_path': str(tmp_path / 'journal' / 'Master Journal.xlsx'),
+            'master_journal_exists': True,
+            'master_journal_size_bytes': 123,
+        },
+    )
+    asyncio.run(master_service._run_startup_recovery_import_if_needed())
+    assert master_service.TRADING_JOURNAL_SYNC_STATE['ok'] is True
+    result = master_service.TRADING_JOURNAL_SYNC_STATE.get('result') or {}
+    assert result.get('master_journal_ok') is True
+    assert 'Master Journal.xlsx created' in str(master_service.TRADING_JOURNAL_SYNC_STATE.get('message') or '')
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_startup_recovery_import_master_journal_failure_is_not_success(monkeypatch):
+    monkeypatch.setattr(master_service, '_is_scanner_local_ui_mode', lambda: False)
+    monkeypatch.setattr(master_service, '_trading_journal_excel_only_mode', lambda: True)
+    monkeypatch.setattr(master_service, '_import_trading_journal_from_sources', lambda: {'ok': True, 'rows_imported': 1})
+    monkeypatch.setattr(
+        master_service,
+        '_sync_master_journal_workbook',
+        lambda: {'master_journal_ok': False, 'master_journal_error': 'boom'},
+    )
+    asyncio.run(master_service._run_startup_recovery_import_if_needed())
+    assert master_service.TRADING_JOURNAL_SYNC_STATE['ok'] is False
+    assert 'boom' in str(master_service.TRADING_JOURNAL_SYNC_STATE.get('error') or '')
+    assert str(master_service.TRADING_JOURNAL_SYNC_STATE.get('message') or '') != 'Startup journal sync complete.'
