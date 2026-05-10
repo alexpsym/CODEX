@@ -1,43 +1,4 @@
-cat <<'MSG'
-Trading Journal Excel Replica setup starting.
-If Android asks for storage permission, tap Allow.
-MSG
+Deprecated.
 
-if command -v termux-setup-storage >/dev/null 2>&1; then
-  yes y | termux-setup-storage >/dev/null 2>&1 || true
-  sleep 6
-fi
-
-SETUP=""
-for candidate in \
-  "$HOME/storage/downloads/CODEX-master/CODEX-master/TJR/setup-trading-journal-replica.sh" \
-  "/storage/emulated/0/Download/CODEX-master/CODEX-master/TJR/setup-trading-journal-replica.sh" \
-  "/sdcard/Download/CODEX-master/CODEX-master/TJR/setup-trading-journal-replica.sh"
-do
-  if [ -f "$candidate" ]; then
-    SETUP="$candidate"
-    break
-  fi
-done
-
-if [ -z "$SETUP" ]; then
-  for root in "$HOME/storage/downloads" "/storage/emulated/0/Download" "/sdcard/Download"; do
-    if [ -d "$root" ]; then
-      FOUND="$(find "$root" -maxdepth 8 -type f -name setup-trading-journal-replica.sh 2>/dev/null | head -n 1)"
-      if [ -n "$FOUND" ]; then
-        SETUP="$FOUND"
-        break
-      fi
-    fi
-  done
-fi
-
-if [ -z "$SETUP" ]; then
-  echo "ERROR: setup-trading-journal-replica.sh not found."
-  echo "Extract the ZIP to this file path: /Internal storage/Download/CODEX-master/CODEX-master/TJR/setup-trading-journal-replica.sh"
-  echo "Then paste this file again."
-  exit 1
-fi
-
-echo "Using setup script: $SETUP"
-bash "$SETUP"
+Trading Journal no longer requires Termux automation.
+Open journal/Master Journal.xlsx directly.

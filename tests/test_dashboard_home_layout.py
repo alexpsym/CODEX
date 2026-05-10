@@ -28,6 +28,10 @@ def test_dashboard_home_removes_instrument_specs_recent_trades_open_orders() -> 
     assert 'id="dashboard-workspace-empty"' in html
     assert 'id="dashboard-workspace-frame"' in html
 
+    assert 'id="sync-journal-btn"' in html
+    assert 'Sync Journal' in html
+    assert 'id="sync-journal-status"' in html
+
     scripts_idx = html.find('Scripts')
     watchlist_idx = html.find('Watchlist')
     oanda_idx = html.find('OANDA Inactivity')
