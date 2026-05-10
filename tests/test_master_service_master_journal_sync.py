@@ -249,3 +249,52 @@ def test_open_master_journal_open_failure_returns_500(tmp_path, monkeypatch):
         asyncio.run(master_service.open_master_journal_file())
     assert exc.value.status_code == 500
     assert 'boom' in str(exc.value.detail)
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_github_sync_disabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("TRADING_JOURNAL_GITHUB_SYNC_ENABLED", "0")
+    result = master_service._sync_journal_excel_files_to_github(tmp_path / "Master Journal.xlsx")
+    assert result["github_sync_enabled"] is False
+    assert result["github_sync_ok"] is True
+    assert result["github_sync_noop"] is True
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_github_sync_missing_git_checkout(monkeypatch, tmp_path):
+    monkeypatch.setenv("TRADING_JOURNAL_GITHUB_SYNC_ENABLED", "1")
+    monkeypatch.setattr(master_service, "BASE_DIR", tmp_path)
+    result = master_service._sync_journal_excel_files_to_github(tmp_path / "journal" / "Master Journal.xlsx")
+    assert result["github_sync_ok"] is False
+    assert "not a Git checkout" in str(result["github_sync_error"])
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_github_sync_stages_only_target_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("TRADING_JOURNAL_GITHUB_SYNC_ENABLED", "1")
+    monkeypatch.setattr(master_service, "BASE_DIR", tmp_path)
+    (tmp_path / ".git").mkdir()
+    journal = tmp_path / "journal"
+    journal.mkdir()
+    master = journal / "Master Journal.xlsx"
+    master.write_bytes(b"x")
+    commands = []
+
+    def fake_git(args, _cwd, _timeout):
+        commands.append(args)
+        if args == ["--version"]:
+            return 0, "git version 2", ""
+        if args[:2] == ["rev-parse", "--abbrev-ref"]:
+            return 0, "main\n", ""
+        if args[:3] == ["remote", "get-url", "origin"]:
+            return 0, "x\n", ""
+        if args[:2] == ["diff", "--cached"]:
+            return 0, "", ""
+        return 0, "", ""
+
+    monkeypatch.setattr(master_service, "_run_git_command", fake_git)
+    result = master_service._sync_journal_excel_files_to_github(master)
+    assert result["github_sync_ok"] is True
+    add_calls = [cmd for cmd in commands if cmd and cmd[0] == "add"]
+    assert add_calls
+    assert add_calls[0] == ["add", "--", "journal/Master Journal.xlsx"]
