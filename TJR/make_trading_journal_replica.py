@@ -468,7 +468,8 @@ def list_source_workbooks(journal_dir: Path) -> List[Path]:
             continue
         if path.name.lower() in EXCLUDED_SOURCE_NAMES:
             continue
-        if path.name.startswith("~$"):
+        n = path.name.lower()
+        if path.name.startswith("~$") or n.endswith(".tmp.xlsx") or n.endswith(".pending.xlsx"):
             continue
         out.append(path)
     return out
