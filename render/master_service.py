@@ -68,6 +68,7 @@ from shared.symbol_resolution import (
 from shared.atomic_json import write_json_file
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
+from tools.master_journal_workbook import build_master_journal_workbook
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -483,6 +484,9 @@ TRADING_JOURNAL_SYNC_STATE_PATH = BASE_DIR / "render" / "data" / "trading_journa
 TRADING_JOURNAL_IMPORT_CACHE_PATH = BASE_DIR / "render" / "data" / "trading_journal_import_cache.json"
 TRADING_JOURNAL_VIEW_CACHE_PATH = BASE_DIR / "render" / "data" / "trading_journal_view_cache.json"
 TRADING_JOURNAL_SQLITE_PATH = BASE_DIR / "render" / "data" / "trading_journal.sqlite"
+MASTER_JOURNAL_FILENAME = "Master Journal.xlsx"
+MASTER_JOURNAL_PATH = BASE_DIR / "journal" / MASTER_JOURNAL_FILENAME
+
 MONTHLY_AUD_REVALUATION_PATH = BASE_DIR / "render" / "data" / "monthly_aud_revaluation.json"
 MONTHLY_AUD_REVALUATION_STATE_PATH = BASE_DIR / "render" / "data" / "monthly_aud_revaluation_state.json"
 OANDA_FILL_STATE_PATH = BASE_DIR / "render" / "data" / "oanda_fill_state.json"
@@ -5342,7 +5346,9 @@ def _list_local_trading_journal_workbooks() -> List[Path]:
         if candidate_name in {
             "account_cashflows.xlsx",
             BYBIT_DEMO_TEMPLATE_NAME.strip().lower(),
-        }:
+            "master journal.xlsx",
+            "tradingjournal_android_replica.xlsx",
+        } or candidate_name.startswith("~$") or candidate_name.endswith(".tmp.xlsx") or candidate_name.endswith(".pending.xlsx"):
             continue
         found.append(candidate)
     # Prefer canonical xlsx workbooks when both legacy xls and xlsx exist.
@@ -8951,6 +8957,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     </div>
 
                     <p class="meta" id="watchlist-empty" style="display:none;">No items yet.</p>
+                </section>
+
+
+                <section class="panel" id="journal-sync-widget">
+                    <div class="panel-header"><div><h2>Trading Journal</h2></div></div>
+                    <button type="button" id="sync-journal-btn">Sync Journal</button>
+                    <div class="watchlist-sub" id="sync-journal-status"></div>
                 </section>
 
                 <section class="panel" id="oanda-inactivity-widget">
@@ -23173,7 +23186,12 @@ async def _run_trading_journal_sync_job() -> None:
                     oanda_sync[acct] = {"ok": False, "error": str(exc)}
         if _trading_journal_local_excel_authoritative() and broker_refresh_enabled:
             result = await asyncio.to_thread(_import_trading_journal_from_sources, progress_cb=_cb)
+        workbook_sync = await asyncio.to_thread(_sync_master_journal_workbook)
+        if isinstance(result, dict):
+            result.update(workbook_sync)
         warnings: List[str] = list((result or {}).get("warnings") or [])
+        if isinstance(workbook_sync, dict) and not workbook_sync.get('master_journal_ok'):
+            warnings.append(str(workbook_sync.get('master_journal_error') or 'Master journal workbook generation failed'))
         warnings.extend(broker_balance_warnings)
         for mode_name, mode_payload in {"demo": bybit_demo, "live": bybit_live}.items():
             if isinstance(mode_payload, dict):
@@ -23239,6 +23257,32 @@ async def _run_trading_journal_sync_job() -> None:
             local_dir=str(TRADING_JOURNAL_LOCAL_DIR),
             finished_at=_utc_now_iso(),
         )
+
+
+def _sync_master_journal_workbook() -> Dict[str, object]:
+    tmp = MASTER_JOURNAL_PATH.with_suffix('.tmp.xlsx')
+    try:
+        snapshot = _build_trading_journal_view_snapshot(force=True)
+        build_master_journal_workbook(snapshot, tmp)
+        pd.read_excel(tmp, sheet_name='Dashboard')
+        os.replace(tmp, MASTER_JOURNAL_PATH)
+        return {
+            'master_journal_ok': True,
+            'master_journal_path': str(MASTER_JOURNAL_PATH),
+            'master_journal_updated_at': _utc_now_iso(),
+        }
+    except (PermissionError, OSError) as exc:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
+        return {
+            'master_journal_ok': False,
+            'master_journal_path': str(MASTER_JOURNAL_PATH),
+            'master_journal_error': f"{exc}. Close Master Journal.xlsx and click Sync Journal again.",
+        }
+
 
 
 @app.post("/api/trading-journal/sync")

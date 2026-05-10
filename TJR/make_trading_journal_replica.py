@@ -36,9 +36,10 @@ try:
 except Exception:  # pragma: no cover
     xlrd = None
 
-OUTPUT_NAME = "TradingJournal_Android_Replica.xlsx"
+OUTPUT_NAME = "Master Journal.xlsx"
 EXCLUDED_SOURCE_NAMES = {
     OUTPUT_NAME.lower(),
+    "tradingjournal_android_replica.xlsx",
     "account_cashflows.xlsx",
 }
 
