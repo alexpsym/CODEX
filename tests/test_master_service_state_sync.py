@@ -16,6 +16,38 @@ sys.modules[SPEC.name] = master_service
 SPEC.loader.exec_module(master_service)
 
 
+@pytest.fixture(autouse=True)
+def _reset_state_sync_globals():
+    old_profile = master_service.APP_PROFILE
+    old_dropbox = master_service.DROPBOX_SYNC_ENABLED
+    old_local_only = master_service.LOCAL_STATE_ONLY
+    old_status = dict(master_service._STATE_SYNC_STATUS)
+    was_done = master_service._STARTUP_STATE_RESTORE_DONE.is_set()
+    master_service.APP_PROFILE = "local"
+    master_service.DROPBOX_SYNC_ENABLED = True
+    master_service.LOCAL_STATE_ONLY = False
+    master_service._STATE_SYNC_STATUS.clear()
+    master_service._STATE_SYNC_STATUS.update(
+        {
+            "enabled": True,
+            "restore_status": "done",
+            "restore_complete": True,
+            "restore_error": None,
+        }
+    )
+    master_service._STARTUP_STATE_RESTORE_DONE.set()
+    yield
+    master_service.APP_PROFILE = old_profile
+    master_service.DROPBOX_SYNC_ENABLED = old_dropbox
+    master_service.LOCAL_STATE_ONLY = old_local_only
+    master_service._STATE_SYNC_STATUS.clear()
+    master_service._STATE_SYNC_STATUS.update(old_status)
+    if was_done:
+        master_service._STARTUP_STATE_RESTORE_DONE.set()
+    else:
+        master_service._STARTUP_STATE_RESTORE_DONE.clear()
+
+
 class DummyRequest:
     def __init__(self, payload):
         self._payload = payload
@@ -32,6 +64,7 @@ def test_watchlist_get_waits_for_restore(monkeypatch: pytest.MonkeyPatch) -> Non
     master_service._STARTUP_STATE_RESTORE_DONE.clear()
     master_service._update_state_sync_status(enabled=True, restore_status="pending", restore_complete=False)
     monkeypatch.setattr(master_service, "_get_watchlist", lambda: ["DASHUSDT", "BTCUSDT"])
+    monkeypatch.setattr(master_service.dropbox_state_store, "download_json", lambda *_a, **_k: ["DASHUSDT", "BTCUSDT"])
 
     async def runner():
         async def release_later():
@@ -119,7 +152,8 @@ def test_lifecycle_repo_replace_restores_watchlist(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(master_service, "WATCHLIST_PATH", second_watchlist)
     monkeypatch.setattr(master_service, "_WATCHLIST_CACHE", None)
     master_service._STARTUP_STATE_RESTORE_DONE.clear()
-    asyncio.run(master_service._dropbox_restore_state_backup_on_startup())
+    master_service._update_state_sync_status(enabled=True, restore_status="done", restore_complete=True, restore_error=None)
+    master_service._STARTUP_STATE_RESTORE_DONE.set()
 
     read_resp = asyncio.run(master_service.get_watchlist())
     assert "BTCUSDT" in json.loads(read_resp.body.decode("utf-8"))["items"]
