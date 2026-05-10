@@ -7725,6 +7725,19 @@ async def profile_router_guard(request: Request, call_next: Callable) -> Respons
         wants_json = path.startswith("/api/") or "application/json" in str(request.headers.get("accept", "")).lower()
         return _local_only_disabled_response(path, as_json=wants_json)
     return await call_next(request)
+
+
+@app.middleware("http")
+async def add_local_no_cache_headers(request: Request, call_next: Callable) -> Response:
+    response = await call_next(request)
+    path = request.url.path
+    if APP_PROFILE == "local" and (path == "/" or path.startswith("/static/") or path.startswith("/render/static/")):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 OANDA_HISTORY_JOBS: Dict[str, OandaHistoryJob] = {}
 BYBIT_HISTORY_JOBS: Dict[str, BybitHistoryJob] = {}
 COINSPOT_HISTORY_JOBS: Dict[str, CoinspotHistoryJob] = {}
@@ -15895,16 +15908,9 @@ async def fetch_bybit_balance(
 async def home_page() -> Response:
     if APP_PROFILE == "journal":
         return RedirectResponse(url="/trading-journal", status_code=307)
-    if APP_PROFILE == "local":
-        dashboard_js_version = _static_asset_version("render/static/dashboard.js")
-    else:
-        dashboard_js_version = _static_asset_version("render/static/dashboard.js")
+    dashboard_js_version = _static_asset_version("render/static/dashboard.js")
     page = HTML_TEMPLATE.replace("{{DASHBOARD_JS_URL}}", f"/static/dashboard.js?v={dashboard_js_version}")
-    response = HTMLResponse(page)
-    if APP_PROFILE == "local":
-        response.headers["Cache-Control"] = "no-store, max-age=0"
-        response.headers["Pragma"] = "no-cache"
-    return response
+    return HTMLResponse(page)
 
 
 @app.get("/instrument-specs", response_class=HTMLResponse)
