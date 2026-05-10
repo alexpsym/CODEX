@@ -8257,7 +8257,10 @@ async def _log_local_master_shutdown() -> None:
 
 
 def _log_local_master_atexit() -> None:
-    AUTOSTART_LOGGER.error("LOCAL_MASTER_ATEXIT profile=%s", APP_PROFILE)
+    try:
+        AUTOSTART_LOGGER.error("LOCAL_MASTER_ATEXIT profile=%s", APP_PROFILE)
+    except Exception:
+        pass
 
 
 atexit.register(_log_local_master_atexit)

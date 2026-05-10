@@ -87,11 +87,16 @@ def test_watchlist_mixed_crypto_fx_persists_canonical_values(monkeypatch: pytest
     monkeypatch.setattr(master_service, "_resolve_symbol_payload", fake_resolve)
     monkeypatch.setattr(master_service, "_set_watchlist", fake_set_watchlist)
     monkeypatch.setattr(master_service, "_wait_for_state_restore_or_error", lambda *args, **kwargs: asyncio.sleep(0, result={"enabled": True}))
-    monkeypatch.setattr(
-        master_service,
-        "_upload_and_verify_state_backup_now",
-        lambda *args, **kwargs: asyncio.sleep(0, result={"enabled": True, "last_verified_at": "now", "last_verified_watchlist": ["BRUSDT", "EUR_USD"]}),
-    )
+    def fake_upload_and_verify(_key, payload, verifier=None):
+        if verifier:
+            verifier(payload)
+        return {
+            "enabled": True,
+            "last_verified_at": "now",
+            "last_verified_watchlist": ["BRUSDT", "EUR_USD"],
+        }
+
+    monkeypatch.setattr(master_service.dropbox_state_store, "upload_json_and_verify", fake_upload_and_verify)
 
     response = asyncio.run(master_service.set_watchlist(DummyRequest()))
     payload = response.body.decode("utf-8")
@@ -117,7 +122,7 @@ def test_calculator_instrument_resolves_bybit_full_name(monkeypatch: pytest.Monk
     monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["BTCUSDT"]))
     monkeypatch.setattr(master_service, "_bybit_name_aliases_for_choices", lambda _base_url, _symbols: asyncio.sleep(0, result={"BITCOIN": "BTC"}))
 
-    async def fake_get(_base_url: str, _path: str, _params: dict):
+    async def fake_get(*_args, **_kwargs):
         return {"result": {"list": [{"priceFilter": {"tickSize": "0.1"}, "lotSizeFilter": {"qtyStep": "0.001", "minOrderQty": "0.001"}}]}}
 
     monkeypatch.setattr(master_service, "_bybit_get_async", fake_get)

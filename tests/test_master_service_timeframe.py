@@ -304,6 +304,15 @@ def test_recent_trades_and_journal_backfill_from_trade_context(monkeypatch: pyte
     assert recent["items"][0]["stop_loss"] == 97.5
     assert recent["items"][0]["take_profit"] == 110.0
 
+    snapshot = {
+        "items": recent["items"],
+        "stats": {},
+        "balances": [],
+        "generated_at": "2026-02-01T01:00:00+00:00",
+        "cache_version": "test",
+    }
+    monkeypatch.setattr(master_service, "_load_trading_journal_view_snapshot", lambda force=False: snapshot)
+
     journal = json.loads(asyncio.run(master_service.trading_journal_items()).body.decode("utf-8"))
     assert journal["items"][0]["timeframe"] == "1-hour"
     assert journal["items"][0]["stop_loss"] == 97.5
