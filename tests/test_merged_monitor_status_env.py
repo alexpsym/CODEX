@@ -19,6 +19,16 @@ sys.modules[SPEC.name] = master_service
 SPEC.loader.exec_module(master_service)
 
 
+def test_local_launcher_includes_trading_journal_github_sync_env_defaults() -> None:
+    bat = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
+    assert "TRADING_JOURNAL_GITHUB_SYNC_ENABLED" in bat
+    assert "TRADING_JOURNAL_GITHUB_SYNC_REMOTE" in bat
+    assert "TRADING_JOURNAL_GITHUB_SYNC_BRANCH" in bat
+    assert "TRADING_JOURNAL_GITHUB_SYNC_INCLUDE_SOURCES" in bat
+    assert 'if not defined TRADING_JOURNAL_GITHUB_SYNC_ENABLED set "TRADING_JOURNAL_GITHUB_SYNC_ENABLED=1"' in bat
+    assert "GITHUB_TOKEN" not in bat
+
+
 def test_merged_monitor_html_removed_controls_and_logs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("RENDER", raising=False)
     monkeypatch.delenv("RENDER_SERVICE_ID", raising=False)
