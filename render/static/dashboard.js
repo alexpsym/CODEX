@@ -37,11 +37,17 @@
         const statusPayload = await fetchJson('/api/trading-journal/sync/status');
         if (!statusPayload.running) {
           done = true;
-          if (statusPayload.ok && statusPayload.result?.master_journal_ok !== false) {
-            const p = statusPayload.result?.master_journal_path || 'journal/Master Journal.xlsx';
-            setSyncJournalStatus(`Synced: ${p}`);
+          const result = statusPayload.result || {};
+          const masterOk = result.master_journal_ok === true;
+          const masterPath = result.master_journal_path;
+          const masterExists = result.master_journal_exists !== false;
+          if (statusPayload.ok === true && masterOk && masterPath && masterExists) {
+            setSyncJournalStatus(`Synced: ${masterPath}`);
           } else {
-            const err = statusPayload.result?.master_journal_error || statusPayload.error || 'Sync failed';
+            const err = result.master_journal_error
+              || statusPayload.error
+              || statusPayload.message
+              || 'Sync finished but Master Journal.xlsx was not created. Check the Local Master Control terminal.';
             setSyncJournalStatus(err, true);
           }
           break;
@@ -786,4 +792,3 @@
     });
   });
 })();
-
