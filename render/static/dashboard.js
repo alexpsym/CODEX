@@ -37,11 +37,21 @@
         const statusPayload = await fetchJson('/api/trading-journal/sync/status');
         if (!statusPayload.running) {
           done = true;
-          if (statusPayload.ok && statusPayload.result?.master_journal_ok !== false) {
-            const p = statusPayload.result?.master_journal_path || 'journal/Master Journal.xlsx';
-            setSyncJournalStatus(`Synced: ${p}`);
+          const result = statusPayload.result || {};
+          const masterOk = result.master_journal_ok === true;
+          const masterPath = result.master_journal_path;
+          const masterExists = result.master_journal_exists !== false;
+          if (statusPayload.ok === true && masterOk && masterPath && masterExists) {
+            setSyncJournalStatus(`Synced: ${masterPath}`);
           } else {
-            const err = statusPayload.result?.master_journal_error || statusPayload.error || 'Sync failed';
+            const startupOnlySync = String(statusPayload.message || '').includes('Startup journal sync complete')
+              && result.master_journal_ok === undefined;
+            const err = startupOnlySync
+              ? 'Startup import completed but Master Journal.xlsx was not created. Click Sync Journal again.'
+              : result.master_journal_error
+              || statusPayload.error
+              || statusPayload.message
+              || 'Sync finished but Master Journal.xlsx was not created. Check the Local Master Control terminal.';
             setSyncJournalStatus(err, true);
           }
           break;
@@ -761,6 +771,7 @@
     }
   });
   watchlistClearBtn?.addEventListener('click', () => clearWatchlist());
+  syncJournalBtn?.addEventListener('click', runSyncJournal);
   oandaToggleBtn?.addEventListener('click', () => {
     oandaExpanded = !oandaExpanded;
     syncOandaDetailsVisibility();
@@ -785,5 +796,3 @@
     });
   });
 })();
-
-if (syncJournalBtn) { syncJournalBtn.addEventListener('click', runSyncJournal); }

@@ -73,3 +73,13 @@ def test_dashboard_js_includes_sync_journal_wiring():
     assert '/api/trading-journal/sync' in js
     assert '/api/trading-journal/sync/status' in js
     assert 'sync-journal-btn' in js
+    listener = "syncJournalBtn?.addEventListener('click', runSyncJournal);"
+    assert listener in js
+    assert "if (syncJournalBtn) { syncJournalBtn.addEventListener('click', runSyncJournal); }" not in js
+    assert js.index(listener) < js.rindex('})();')
+    assert "master_journal_ok !== false" not in js
+    assert "const p = statusPayload.result?.master_journal_path || 'journal/Master Journal.xlsx';" not in js
+    assert "master_journal_ok === true" in js
+    assert "master_journal_path" in js
+    assert "master_journal_exists" in js
+    assert "Startup import completed but Master Journal.xlsx was not created. Click Sync Journal again." in js

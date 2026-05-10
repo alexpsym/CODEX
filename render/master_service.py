@@ -497,6 +497,10 @@ TRADING_JOURNAL_DROPBOX_FOLDER = os.getenv(
 TRADING_JOURNAL_LOCAL_DIR = Path(
     os.getenv("TRADING_JOURNAL_LOCAL_DIR", str(BASE_DIR / "journal"))
 ).expanduser()
+
+
+def _master_journal_path() -> Path:
+    return Path(TRADING_JOURNAL_LOCAL_DIR).expanduser().resolve() / MASTER_JOURNAL_FILENAME
 TRADING_JOURNAL_LOCAL_DIR_EXPLICIT = "TRADING_JOURNAL_LOCAL_DIR" in os.environ
 TRADING_JOURNAL_ENABLE_LOCAL_IMPORT = os.getenv("TRADING_JOURNAL_ENABLE_LOCAL_IMPORT", "").strip().lower() in {
     "1",
@@ -7835,22 +7839,38 @@ async def _run_startup_recovery_import_if_needed() -> None:
                 pass
     try:
         result = await asyncio.to_thread(_import_trading_journal_from_sources)
-        ok_flag = bool(result.get("ok", False)) if isinstance(result, dict) else False
+        workbook_sync = await asyncio.to_thread(_sync_master_journal_workbook)
+        if isinstance(result, dict):
+            result.update(workbook_sync)
+        else:
+            result = dict(workbook_sync or {})
+        import_ok = bool(result.get("ok", False)) if isinstance(result, dict) else False
+        workbook_ok = bool((workbook_sync or {}).get("master_journal_ok"))
+        ok_flag = bool(import_ok and workbook_ok)
+        startup_error = (
+            str((workbook_sync or {}).get("master_journal_error") or "").strip()
+            or str((result or {}).get("message") or "Startup import failed.")
+        )
+        final_message = (
+            "Startup journal sync complete. Master Journal.xlsx created."
+            if ok_flag
+            else startup_error
+        )
         diagnostics = result.get("diagnostics") if isinstance(result, dict) else {}
         rows_by_asset_class = diagnostics.get("rows_by_asset_class") if isinstance(diagnostics, dict) else {}
         _record_daily_trade_sync_status(
             last_attempt_at=_utc_now_iso(),
             last_success_at=_utc_now_iso() if ok_flag else None,
-            last_error=None if ok_flag else str((result or {}).get("message") or "Startup import failed."),
+            last_error=None if ok_flag else startup_error,
             last_reason="startup_recovery",
             last_result={**(result or {}), "oanda_recovery": oanda_recovery},
         )
         _set_trading_journal_sync_state(
             running=False,
             progress=100,
-            message="Startup journal sync complete." if ok_flag else str((result or {}).get("message") or "Startup import failed."),
+            message=final_message,
             ok=ok_flag,
-            error=None if ok_flag else str((result or {}).get("message") or "Startup import failed."),
+            error=None if ok_flag else startup_error,
             result=result,
             rows_imported=int((result or {}).get("rows_imported") or 0),
             rows_by_asset_class=rows_by_asset_class if isinstance(rows_by_asset_class, dict) else {},
@@ -23056,6 +23076,19 @@ async def trading_journal_sync_status() -> JSONResponse:
         "local_xls_supported": bool(xlrd_installed),
         "requirements_file": requirements_path,
     }
+    result = snapshot.get("result")
+    if isinstance(result, dict) and result.get("master_journal_ok") is True:
+        path_text = str(result.get("master_journal_path") or "").strip()
+        if not path_text or not Path(path_text).exists():
+            msg = (
+                f"Master Journal.xlsx is missing at {path_text or '<unknown path>'}. "
+                "Click Sync Journal again and check the Local Master Control terminal."
+            )
+            result["master_journal_ok"] = False
+            result["master_journal_exists"] = False
+            result["master_journal_error"] = msg
+            snapshot["ok"] = False
+            snapshot["error"] = msg
     return JSONResponse(snapshot)
 
 
@@ -23280,9 +23313,11 @@ async def _run_trading_journal_sync_job() -> None:
 
 
 def _sync_master_journal_workbook() -> Dict[str, object]:
-    tmp = MASTER_JOURNAL_PATH.with_suffix('.tmp.xlsx')
+    path = _master_journal_path()
+    tmp = path.with_suffix('.tmp.xlsx')
+    path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        overrides = read_master_journal_manual_overrides(MASTER_JOURNAL_PATH)
+        overrides = read_master_journal_manual_overrides(path)
         if overrides:
             rows = _get_trading_journal_rows()
             changed = False
@@ -23309,10 +23344,17 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                     raise RuntimeError(f"Missing required sheet: {req}")
         finally:
             wb.close()
-        os.replace(tmp, MASTER_JOURNAL_PATH)
+        os.replace(tmp, path)
+        if not path.exists():
+            raise RuntimeError(f"Master Journal.xlsx was not created at {path}")
+        size = path.stat().st_size
+        if size <= 0:
+            raise RuntimeError(f"Master Journal.xlsx was created but is empty at {path}")
         return {
             'master_journal_ok': True,
-            'master_journal_path': str(MASTER_JOURNAL_PATH),
+            'master_journal_path': str(path),
+            'master_journal_exists': True,
+            'master_journal_size_bytes': int(size),
             'master_journal_updated_at': _utc_now_iso(),
         }
     except (PermissionError, OSError) as exc:
@@ -23323,7 +23365,8 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
             pass
         return {
             'master_journal_ok': False,
-            'master_journal_path': str(MASTER_JOURNAL_PATH),
+            'master_journal_path': str(path),
+            'master_journal_exists': path.exists(),
             'master_journal_error': f"{exc}. Close Master Journal.xlsx and click Sync Journal again.",
             'master_journal_error_type': type(exc).__name__,
         }
@@ -23335,7 +23378,8 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
             pass
         return {
             'master_journal_ok': False,
-            'master_journal_path': str(MASTER_JOURNAL_PATH),
+            'master_journal_path': str(path),
+            'master_journal_exists': path.exists(),
             'master_journal_error': str(exc),
             'master_journal_error_type': type(exc).__name__,
         }
