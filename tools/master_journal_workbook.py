@@ -63,6 +63,24 @@ def _fmt_duration(seconds: Any) -> str:
     return f"{sec}s"
 
 
+
+def _excel_scalar(value: Any) -> Any:
+    if value is None:
+        return ''
+    if isinstance(value, (int, float, bool, str)):
+        return value
+    if isinstance(value, dict):
+        if 'symbol' in value and any(k in value for k in ('wins','losses','total_trades','trades')):
+            symbol = value.get('symbol') or 'N/A'
+            wins = value.get('wins', '')
+            losses = value.get('losses', '')
+            trades = value.get('total_trades', value.get('trades', ''))
+            return f"{symbol} — wins {wins}, losses {losses}, trades {trades}"
+        return ', '.join(f"{k}={value.get(k)}" for k in sorted(value.keys()))
+    if isinstance(value, (list, tuple, set)):
+        return ', '.join(str(_excel_scalar(v)) for v in value)
+    return str(value)
+
 def stable_row_id(row: Dict[str, Any]) -> str:
     rid=str(row.get('id') or row.get('__row_id') or '').strip()
     if rid:
@@ -129,7 +147,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         ("Duration",[("Avg duration",(groups.get("duration") or {}).get("overall_avg_seconds"),"neutral"),("Overall shortest duration",(groups.get("duration") or {}).get("overall_shortest_seconds"),"neutral"),("Overall longest duration",(groups.get("duration") or {}).get("overall_longest_seconds"),"neutral")]),
         ("FX",[("FX shortest",(groups.get("duration") or {}).get("fx_shortest_seconds"),"neutral"),("FX longest",(groups.get("duration") or {}).get("fx_longest_seconds"),"neutral"),("FX most wins",(groups.get("leaders") or {}).get("fx_most_wins_instrument"),"neutral"),("FX most losses",(groups.get("leaders") or {}).get("fx_most_losses_instrument"),"neutral")]),
         ("Crypto",[("Crypto shortest",(groups.get("duration") or {}).get("crypto_shortest_seconds"),"neutral"),("Crypto longest",(groups.get("duration") or {}).get("crypto_longest_seconds"),"neutral"),("Crypto most wins",(groups.get("leaders") or {}).get("crypto_most_wins_instrument"),"neutral"),("Crypto most losses",(groups.get("leaders") or {}).get("crypto_most_losses_instrument"),"neutral")]),
-        ("Instrument leaders",[("Overall most wins",(groups.get("leaders") or {}).get("overall_most_wins_instrument"),"neutral"),("Overall most losses",(groups.get("leaders") or {}).get("overall_most_losses_instrument"),"neutral")]),
+        ("Instrument leaders",[("Overall most wins",(groups.get("leaders") or {}).get("most_wins_instrument") or (groups.get("leaders") or {}).get("overall_most_wins_instrument"),"neutral"),("Overall most losses",(groups.get("leaders") or {}).get("most_losses_instrument") or (groups.get("leaders") or {}).get("overall_most_losses_instrument"),"neutral")]),
     ]
     grid_cols=[1,5,9]
     start_row=10
@@ -155,13 +173,13 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     dv=DataValidation(type='list',formula1='"Yes,No"',allow_blank=True); ws.add_data_validation(dv); dv.add(f"U2:U{max(2,ws.max_row)}")
 
     inst=wb['Instrument Averages']
-    headers=["Symbol","Class","Trades","Longs","Shorts","Wins","Losses","Break-even","Long wins","Long losses","Short wins","Short losses","Net P/L","Avg P/L","Win Rate %","Avg stop dist (W)","Avg stop dist (L)","Avg target dist (W)","Avg target dist (L)","Avg duration","Shortest","Longest"]
+    headers=["Symbol","Class","Trades","Longs","Shorts","Wins","Losses","Break-even","Long wins","Long losses","Short wins","Short losses","Long break-even","Short break-even","Net P/L","Avg P/L","Win Rate %","Avg stop dist (W)","Avg stop dist (L)","Avg target dist (W)","Avg target dist (L)","Avg duration","Shortest","Longest"]
     inst.append(headers)
     by_instrument=stats.get("by_instrument") or []
     for rec in by_instrument:
         cls=str(rec.get("asset_class") or rec.get("class") or "").lower()
         is_fx=cls=="fx"
-        inst.append([rec.get("symbol"),cls.upper() if cls else None,rec.get("trades"),rec.get("longs"),rec.get("shorts"),rec.get("wins"),rec.get("losses"),rec.get("break_even"),rec.get("long_wins"),rec.get("long_losses"),rec.get("short_wins"),rec.get("short_losses"),rec.get("net_profit_total"),rec.get("avg_net_profit"),rec.get("win_rate_pct"),rec.get("avg_sl_distance_pips_wins") if is_fx else rec.get("avg_sl_distance_quote_wins"),rec.get("avg_sl_distance_pips_losses") if is_fx else rec.get("avg_sl_distance_quote_losses"),rec.get("avg_tp_distance_pips_wins") if is_fx else rec.get("avg_tp_distance_quote_wins"),rec.get("avg_tp_distance_pips_losses") if is_fx else rec.get("avg_tp_distance_quote_losses"),_fmt_duration(rec.get("avg_duration_seconds")),_fmt_duration(rec.get("shortest_duration_seconds")),_fmt_duration(rec.get("longest_duration_seconds"))])
+        inst.append([rec.get("symbol"),cls.upper() if cls else None,rec.get("total_trades", rec.get("trades")),rec.get("long_trades", rec.get("longs")),rec.get("short_trades", rec.get("shorts")),rec.get("wins"),rec.get("losses"),rec.get("break_even"),rec.get("long_wins"),rec.get("long_losses"),rec.get("short_wins"),rec.get("short_losses"),rec.get("long_break_even"),rec.get("short_break_even"),rec.get("net_profit_total"),rec.get("avg_net_profit"),rec.get("win_rate_pct"),rec.get("avg_sl_distance_pips_wins") if is_fx else rec.get("avg_sl_distance_quote_wins"),rec.get("avg_sl_distance_pips_losses") if is_fx else rec.get("avg_sl_distance_quote_losses"),rec.get("avg_tp_distance_pips_wins") if is_fx else rec.get("avg_tp_distance_quote_wins"),rec.get("avg_tp_distance_pips_losses") if is_fx else rec.get("avg_tp_distance_quote_losses"),_fmt_duration(rec.get("avg_trade_duration_seconds", rec.get("avg_duration_seconds"))),_fmt_duration(rec.get("min_trade_duration_seconds", rec.get("shortest_duration_seconds"))),_fmt_duration(rec.get("max_trade_duration_seconds", rec.get("longest_duration_seconds")))])
     if inst.max_row==1: inst.append(['No data available']+['']*(len(headers)-1))
     _style_table_sheet(inst,1,'A2',True)
 
@@ -273,8 +291,9 @@ def _write_stat_section(ws, start_row, start_col, title, rows):
     ws.cell(start_row+1,start_col+2,'Detail').font=Font(bold=True)
     r=start_row+2
     for label,val,sem in rows:
-        ws.cell(r,start_col,label)
-        ws.cell(r,start_col+1,_fmt_duration(val) if 'duration' in label.lower() and isinstance(val,(int,float)) else val)
+        ws.cell(r,start_col,_excel_scalar(label))
+        raw_value = _fmt_duration(val) if 'duration' in str(label).lower() and isinstance(val,(int,float)) else val
+        ws.cell(r,start_col+1,_excel_scalar(raw_value))
         _format_stat_value(ws.cell(r,start_col+1),sem)
         r+=1
     _format_stat_card(ws,start_row,start_col,r-1,start_col+2)
