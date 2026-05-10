@@ -427,12 +427,12 @@ def test_run_local_master_control_waits_for_health_before_opening_browser() -> N
 
 def test_run_trading_journal_local_bat_profile_and_port() -> None:
     content = (ROOT / "run_trading_journal_local.bat").read_text(encoding="utf-8")
-    assert 'set "APP_PROFILE=journal"' in content or 'set "TRADING_JOURNAL_ONLY=1"' in content
-    assert 'set "MASTER_ENV_FILE=C:\\Users\\User\\Documents\\GPT\\env.env"' in content
-    assert 'set "SCANNER_LOCAL_UI_MODE=1"' not in content
-    assert 'set "AUTOSTART_SCRIPTS=bybit_monitor,oanda_monitor"' not in content
-    assert '"%PYTHON_EXE%" -m uvicorn render.master_service:app --host 127.0.0.1 --port 8010' in content
-    assert 'call "%ROOT%tools\\open_edge_url.bat" "%JOURNAL_URL%"' in content
+    assert 'Master Journal.xlsx' in content
+    assert 'Sync Journal' in content
+    assert 'uvicorn render.master_service:app' not in content
+    assert '/trading-journal' not in content
+    assert 'APP_PROFILE=journal' not in content
+    assert 'TRADING_JOURNAL_ONLY=1' not in content
 
 
 

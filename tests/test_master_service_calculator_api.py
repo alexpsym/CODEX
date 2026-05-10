@@ -15,6 +15,28 @@ sys.modules[SPEC.name] = master_service
 SPEC.loader.exec_module(master_service)
 
 
+
+def _clear_calculator_caches() -> None:
+    for name in [
+        "_BYBIT_SYMBOL_LIST_CACHE",
+        "_BYBIT_INSTRUMENT_CACHE",
+        "_BYBIT_TICKER_CACHE",
+        "_BYBIT_WALLET_BALANCE_CACHE",
+        "_OANDA_AUD_USD_CACHE",
+    ]:
+        obj = getattr(master_service, name, None)
+        if isinstance(obj, dict):
+            obj.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_calculator_caches_between_tests():
+    _clear_calculator_caches()
+    yield
+    _clear_calculator_caches()
+
+
+
 def test_scripts_page_contains_calculator_row() -> None:
     response = asyncio.run(master_service.list_scripts())
     payload = json.loads(response.body.decode("utf-8"))
