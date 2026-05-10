@@ -17,11 +17,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from tools.master_journal_workbook import build_master_journal_workbook
 
 try:
-    from openpyxl import Workbook, load_workbook
-    from openpyxl.chart import LineChart, Reference
-    from openpyxl.formatting.rule import CellIsRule
-    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-    from openpyxl.utils import get_column_letter
+    from openpyxl import load_workbook
 except Exception as exc:  # pragma: no cover
     print(f"ERROR: missing openpyxl: {exc}", file=sys.stderr)
     print("Install with: python -m pip install openpyxl xlrd==2.0.1 python-dateutil", file=sys.stderr)
@@ -78,18 +74,6 @@ ALIASES = {
     "early_close": ["early_close"],
 }
 
-DARK = "111827"
-DARK2 = "0F172A"
-PANEL = "1F2937"
-HEADER = "2563EB"
-HEADER2 = "1D4ED8"
-TEXT = "E5E7EB"
-MUTED = "9CA3AF"
-GREEN = "22C55E"
-RED = "F87171"
-AMBER = "F59E0B"
-BORDER = "374151"
-WHITE = "FFFFFF"
 
 
 def norm_col(value: Any) -> str:
@@ -779,92 +763,6 @@ def calendar_rows(trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         out.append(row)
     return out
 
-
-def style_sheet(ws, max_col: int, freeze: Optional[str] = None) -> None:
-    ws.sheet_view.showGridLines = False
-    if freeze:
-        ws.freeze_panes = freeze
-    thin = Side(style="thin", color=BORDER)
-    for row in ws.iter_rows():
-        for cell in row:
-            cell.fill = PatternFill("solid", fgColor=DARK)
-            cell.font = Font(color=TEXT, name="Calibri", size=11)
-            cell.border = Border(bottom=thin)
-            cell.alignment = Alignment(vertical="top")
-    for cell in ws[1]:
-        cell.fill = PatternFill("solid", fgColor=HEADER)
-        cell.font = Font(color=WHITE, bold=True)
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    for col in range(1, max_col + 1):
-        letter = get_column_letter(col)
-        ws.column_dimensions[letter].width = 16
-    ws.auto_filter.ref = ws.dimensions
-
-
-def write_table(ws, headers: List[str], rows: List[Dict[str, Any]], start_row: int = 1, start_col: int = 1) -> None:
-    for j, h in enumerate(headers, start=start_col):
-        ws.cell(start_row, j, h)
-    for i, row in enumerate(rows, start=start_row + 1):
-        for j, h in enumerate(headers, start=start_col):
-            value = row.get(h)
-            c = ws.cell(i, j, value)
-            if isinstance(value, datetime):
-                c.number_format = "yyyy-mm-dd hh:mm"
-            elif h.lower().endswith("rate"):
-                c.number_format = "0.00%"
-            elif isinstance(value, (int, float)):
-                c.number_format = "#,##0.00"
-
-
-def set_pl_format(ws, ranges: Iterable[str]) -> None:
-    for rng in ranges:
-        ws.conditional_formatting.add(rng, CellIsRule(operator="greaterThan", formula=["0"], font=Font(color=GREEN)))
-        ws.conditional_formatting.add(rng, CellIsRule(operator="lessThan", formula=["0"], font=Font(color=RED)))
-
-
-def fmt_duration(seconds: Any) -> str:
-    v=safe_float(seconds)
-    if v is None: return "—"
-    s=int(v)
-    h=s//3600; m=(s%3600)//60
-    if h and m: return f"{h}h {m}m"
-    if h: return f"{h}h"
-    if m: return f"{m}m"
-    return f"{s}s"
-
-def fmt_money_breakdown(bucket: Dict[str, Any], key: str) -> str:
-    m=(bucket.get("money_by_currency") or {}).get(key) or {}
-    if not isinstance(m, dict) or not m: return "—"
-    return " / ".join(f"{c} {m.get(c,0):.2f}" for c in sorted(m.keys()))
-
-def write_dashboard(wb: Workbook, trades: List[Dict[str, Any]], sources: List[Path], warnings: List[str]) -> None:
-    ws = wb.active
-    ws.title = "Dashboard"
-    stats = compute_journal_stats_replica(trades)
-    g = stats["groups"]
-    ws.append(["Trading Journal", "Generated", datetime.now()])
-    ws.append(["Source workbooks", len(sources), "Source folder", str(sources[0].parent if sources else "")])
-    def section(title, rows):
-        ws.append([title, "Value"])
-        for k,v in rows: ws.append([k,v])
-        ws.append([None,None])
-    def market_rows(bucket):
-        return [("Trades",bucket.get("trades")),("Wins",bucket.get("wins")),("Losses",bucket.get("losses")),("Break-even",bucket.get("break_even")),("Win rate",bucket.get("win_rate_pct")),("Net P/L",fmt_money_breakdown(bucket,"net_profit_total")),("Gross gain",fmt_money_breakdown(bucket,"gross_gain")),("Gross loss",fmt_money_breakdown(bucket,"gross_loss")),("Avg result %",bucket.get("avg_result_pct")),("Max loss %",bucket.get("min_result_pct")),("Max win %",bucket.get("max_result_pct")),("Avg R",bucket.get("avg_r_multiple")),("Max R loss",bucket.get("min_r_multiple")),("Max R win",bucket.get("max_r_multiple")),("Max gain",fmt_money_breakdown(bucket,"max_gain")),("Max loss",fmt_money_breakdown(bucket,"max_loss")),("Avg stop %",bucket.get("avg_stop_pct")),("Avg target %",bucket.get("avg_target_pct")),("Avg duration",fmt_duration(bucket.get("avg_duration_seconds")))]
-    bym=g["by_market"]
-    section("Overall", market_rows(bym["overall"]))
-    section("Winners", [("Avg stop %",stats["totals"].get("avg_stop_pct_winners")),("Avg target %",stats["totals"].get("avg_target_pct_winners")),("Avg result %",stats["totals"].get("avg_result_pct_winners")),("Avg R",stats["totals"].get("avg_r_multiple_winners"))])
-    section("Losers", [("Avg stop %",stats["totals"].get("avg_stop_pct_losers")),("Avg target %",stats["totals"].get("avg_target_pct_losers")),("Avg result %",stats["totals"].get("avg_result_pct_losers")),("Avg R",stats["totals"].get("avg_r_multiple_losers"))])
-    section("Drawdown", [("Max drawdown",g["risk_expectancy"].get("max_drawdown_pct")),("Avg drawdown",g["risk_expectancy"].get("avg_drawdown_pct")),("Min drawdown",g["risk_expectancy"].get("min_drawdown_pct"))])
-    section("Duration", [("Overall avg",fmt_duration(stats["totals"].get("avg_duration_seconds"))),("Overall shortest",fmt_duration(stats["totals"].get("min_trade_duration_seconds"))),("Overall longest",fmt_duration(stats["totals"].get("max_trade_duration_seconds"))),("FX shortest",fmt_duration(stats["totals"].get("min_fx_trade_duration_seconds"))),("FX longest",fmt_duration(stats["totals"].get("max_fx_trade_duration_seconds"))),("Crypto shortest",fmt_duration(stats["totals"].get("min_crypto_trade_duration_seconds"))),("Crypto longest",fmt_duration(stats["totals"].get("max_crypto_trade_duration_seconds")))])
-    section("FX", market_rows(bym["fx"]))
-    section("Crypto", market_rows(bym["crypto"]))
-    L=g["leaders"]
-    section("Instrument leaders", [("Overall most wins", (L.get("most_wins_instrument") or {}).get("symbol")),("Overall most losses", (L.get("most_losses_instrument") or {}).get("symbol")),("FX most wins", (L.get("fx_most_wins_instrument") or {}).get("symbol")),("FX most losses", (L.get("fx_most_losses_instrument") or {}).get("symbol")),("Crypto most wins", (L.get("crypto_most_wins_instrument") or {}).get("symbol")),("Crypto most losses", (L.get("crypto_most_losses_instrument") or {}).get("symbol"))])
-    ws.append(["Money by currency","Net","Gross gain","Gross loss"])
-    mb = bym["overall"].get("money_by_currency",{})
-    for c in mb.get("currencies",[]): ws.append([c, mb["net_profit_total"].get(c), mb["gross_gain"].get(c), mb["gross_loss"].get(c)])
-    ws.append(["Diagnostics / warnings", None])
-    for w in warnings: ws.append([w,None])
 
 def build_output(journal_dir: Path, output_path: Path) -> Tuple[int, int, List[str]]:
     sources = list_source_workbooks(journal_dir)

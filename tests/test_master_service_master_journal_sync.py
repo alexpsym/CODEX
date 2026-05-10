@@ -53,3 +53,15 @@ def test_sync_master_journal_validation_failure(tmp_path, monkeypatch):
     r=master_service._sync_master_journal_workbook()
     assert r['master_journal_ok'] is False
     assert r['master_journal_error_type'] == 'RuntimeError'
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_sync_master_journal_temp_cleanup_on_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(master_service, 'MASTER_JOURNAL_PATH', tmp_path/'Master Journal.xlsx')
+    def bad_builder(_snap, out):
+        wb=Workbook(); wb.save(out)
+    monkeypatch.setattr(master_service, 'build_master_journal_workbook', bad_builder)
+    monkeypatch.setattr(master_service, 'SHEET_ORDER', ['Dashboard'])
+    r=master_service._sync_master_journal_workbook()
+    assert r['master_journal_ok'] is False
+    assert not (tmp_path/'Master Journal.tmp.xlsx').exists()

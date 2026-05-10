@@ -113,11 +113,28 @@ def test_section_pnl_colors(tmp_path: Path):
     outp=tmp_path/'Master Journal.xlsx'; build_master_journal_workbook(snap,outp)
     wb=load_workbook(outp)
     inst=wb['Instrument Averages']
-    values=[inst.cell(r,5).value for r in range(2,inst.max_row+1)]
+    neg_inst=next(inst.cell(r,5) for r in range(2,inst.max_row+1) if isinstance(inst.cell(r,5).value,(int,float)) and inst.cell(r,5).value<0)
     cal=wb['P&L Calendar']
-    cal_vals=[cal.cell(r,3).value for r in range(2,cal.max_row+1)]
+    neg_cal=next(cal.cell(r,3) for r in range(2,cal.max_row+1) if isinstance(cal.cell(r,3).value,(int,float)) and cal.cell(r,3).value<0)
     eq=wb['Equity Curve']
-    eq_vals=[eq.cell(r,2).value for r in range(2,eq.max_row+1)]
-    assert any(v < 0 for v in values if isinstance(v,(int,float)))
-    assert any(v < 0 for v in cal_vals if isinstance(v,(int,float)))
-    assert any(v < 0 for v in eq_vals if isinstance(v,(int,float)))
+    neg_eq=next(eq.cell(r,2) for r in range(2,eq.max_row+1) if isinstance(eq.cell(r,2).value,(int,float)) and eq.cell(r,2).value<0)
+    for c in (neg_inst, neg_cal, neg_eq):
+        assert c.font.color is not None
+
+
+def test_headers_and_wrap_and_filters(tmp_path: Path):
+    out=tmp_path/'Master Journal.xlsx'
+    build_master_journal_workbook(sample_snapshot(), out)
+    wb=load_workbook(out)
+    for name in ['Dashboard','All Trades','Instrument Averages','P&L Calendar','Equity Curve','Diagnostics']:
+        ws=wb[name]
+        assert ws['A1'].font.bold
+    for name in ['All Trades','Instrument Averages','P&L Calendar','Equity Curve','Diagnostics']:
+        ws=wb[name]
+        assert ws.freeze_panes == 'A2'
+        assert ws.auto_filter.ref
+    ws=wb['All Trades']
+    assert ws['R2'].alignment.wrap_text is True
+    assert ws['Y2'].alignment.wrap_text is True
+    d=wb['Diagnostics']
+    assert d['B2'].alignment.wrap_text is True

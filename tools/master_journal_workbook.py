@@ -104,8 +104,8 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     ws=wb['All Trades']; headers=['__row_id','Open Time','Close Time','Account','Symbol','Side','Qty','Entry','Exit','Stop Loss','Target','Commission','Net P/L','Profit %','R-Multiple','Balance After','Trade Duration (s)','Source','Order ID','Fill Count']+EDITABLE_COLS; ws.append(headers)
     for row in rows:
         ws.append([stable_row_id(row),row.get('open_time'),row.get('close_time'),row.get('account_label') or row.get('account'),row.get('symbol'),row.get('side'),row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('stop_loss'),row.get('take_profit'),row.get('commission'),row.get('net_profit'),row.get('result_pct'),row.get('r_multiple'),row.get('balance_after_trade'),row.get('trade_duration_seconds'),row.get('source'),row.get('order_id'),row.get('fill_count'),'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',row.get('setup') or '',row.get('timeframe') or '',row.get('breakeven') or '',row.get('notes') or ''])
-    ws.freeze_panes='A2'; ws.auto_filter.ref=f"A1:Y{max(2,ws.max_row)}"; ws.column_dimensions['A'].hidden=True
-    _style_header_row(ws,1)
+    ws.column_dimensions['A'].hidden=True
+    _style_table_sheet(ws,1,'A2',True)
     ws.column_dimensions['R'].width=24
     ws.column_dimensions['Y'].width=30
     _wrap_columns(ws,['R','Y'])
@@ -128,7 +128,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         wins=sum(1 for p in vals if p>0); losses=sum(1 for p in vals if p<0); net=sum(vals) if vals else 0.0
         inst.append([sym,len(grp),wins,losses,net,(net/len(vals)) if vals else None])
     if inst.max_row==1: inst.append(['No data available','','','','',''])
-    inst.freeze_panes='A2'; inst.auto_filter.ref=f"A1:F{max(2,inst.max_row)}"; _style_header_row(inst,1)
+    _style_table_sheet(inst,1,'A2',True)
 
     # P&L Calendar (daily + monthly)
     cal=wb['P&L Calendar']; cal.append(['Type','Date','Net P/L'])
@@ -144,7 +144,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     for d,p in daily.items(): monthly[d[:7]]+=p
     for m,p in sorted(monthly.items()): cal.append(['Monthly',m,p])
     if cal.max_row==1: cal.append(['No data available','',''])
-    cal.freeze_panes='A2'; cal.auto_filter.ref=f"A1:C{max(2,cal.max_row)}"; _style_header_row(cal,1)
+    _style_table_sheet(cal,1,'A2',True)
 
     # Equity Curve
     eq=wb['Equity Curve']; eq.append(['Date','Delta P/L','Equity'])
@@ -153,7 +153,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         running += p
         eq.append([d,p,running])
     if eq.max_row==1: eq.append(['No data available','',''])
-    eq.freeze_panes='A2'; eq.auto_filter.ref=f"A1:C{max(2,eq.max_row)}"; _style_header_row(eq,1)
+    _style_table_sheet(eq,1,'A2',True)
 
     for sheet_name, freeze, filt in [("Instrument Averages","A2","A1:F{row}"),("P&L Calendar","A2","A1:C{row}"),("Equity Curve","A2","A1:C{row}")]:
         sh=wb[sheet_name]
@@ -163,7 +163,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     diag=wb['Diagnostics']
     diagnostics=snapshot.get('diagnostics') if isinstance(snapshot.get('diagnostics'),dict) else {}
     diag.append(['Key','Value'])
-    _style_header_row(diag,1)
+    _style_table_sheet(diag,1,'A2',True)
     diag.column_dimensions['B'].width=60
     _wrap_columns(diag,['B'])
     diag.append(['sync_timestamp',snapshot.get('updated_at') or datetime.utcnow().isoformat()])
@@ -176,6 +176,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         diag.append(['warning',str(w)])
     for e in (diagnostics.get('errors') or []):
         diag.append(['error',str(e)])
+    _wrap_columns(diag,['B'])
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(output_path)
@@ -210,3 +211,20 @@ def _apply_sign_font(cell, *, loss_label: bool = False):
     elif v < 0:
         f.color = Color(rgb='00FF0000')
         cell.font = f
+
+
+def _apply_data_borders(ws):
+    thin=Side(style='thin', color='E5E7EB')
+    for r in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
+        for c in r:
+            c.border=Border(left=thin,right=thin,top=thin,bottom=thin)
+
+def _set_column_widths(ws, widths):
+    for k,v in widths.items(): ws.column_dimensions[k].width=v
+
+def _style_table_sheet(ws, header_row=1, freeze='A2', autofilter=True):
+    _style_header_row(ws, header_row)
+    ws.freeze_panes=freeze
+    if autofilter:
+        ws.auto_filter.ref=f"A{header_row}:{chr(64+ws.max_column)}{max(header_row+1,ws.max_row)}"
+    _apply_data_borders(ws)
