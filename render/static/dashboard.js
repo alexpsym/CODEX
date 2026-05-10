@@ -19,6 +19,7 @@
 
   const syncJournalBtn = document.getElementById('sync-journal-btn');
   const syncJournalStatus = document.getElementById('sync-journal-status');
+  const openMasterJournalBtn = document.getElementById('open-master-journal-btn');
 
   const setSyncJournalStatus = (msg, isErr = false) => {
     if (!syncJournalStatus) return;
@@ -26,9 +27,51 @@
     syncJournalStatus.style.color = isErr ? '#fca5a5' : '#94a3b8';
   };
 
+
+  function setOpenMasterJournalVisible(visible) {
+    if (!openMasterJournalBtn) return;
+    openMasterJournalBtn.hidden = !visible;
+    openMasterJournalBtn.disabled = !visible;
+  }
+
+  async function refreshMasterJournalOpenState() {
+    try {
+      const payload = await fetchJson('/api/trading-journal/sync/status', { headers: { Accept: 'application/json' } });
+      const result = payload.result || {};
+      const canOpen = payload.ok === true
+        && result.master_journal_ok === true
+        && result.master_journal_exists === true
+        && !!result.master_journal_path;
+      setOpenMasterJournalVisible(canOpen);
+    } catch (_err) {
+      setOpenMasterJournalVisible(false);
+    }
+  }
+
+  async function openMasterJournal() {
+    if (!openMasterJournalBtn) return;
+    openMasterJournalBtn.disabled = true;
+    try {
+      const resp = await fetch('/api/trading-journal/open-master-journal', { method: 'POST', headers: { Accept: 'application/json' } });
+      const payload = await resp.json().catch(() => ({}));
+      if (!resp.ok || payload.ok !== true) {
+        throw new Error(payload.detail || payload.error || payload.message || 'Failed to open Master Journal.xlsx');
+      }
+      setSyncJournalStatus(`Opened: ${payload.master_journal_path || 'Master Journal.xlsx'}`);
+      setOpenMasterJournalVisible(true);
+    } catch (err) {
+      setSyncJournalStatus(err?.message || String(err), true);
+      setOpenMasterJournalVisible(false);
+      setOpenMasterJournalVisible(true);
+    } finally {
+      openMasterJournalBtn.disabled = false;
+    }
+  }
+
   const runSyncJournal = async () => {
     if (!syncJournalBtn) return;
     syncJournalBtn.disabled = true;
+    setOpenMasterJournalVisible(false);
     setSyncJournalStatus('Syncing journal...');
     try {
       await fetchJson('/api/trading-journal/sync', { method: 'POST' });
@@ -40,28 +83,27 @@
           const result = statusPayload.result || {};
           const masterOk = result.master_journal_ok === true;
           const masterPath = result.master_journal_path;
-          const masterExists = result.master_journal_exists !== false;
+          const masterExists = result.master_journal_exists === true;
           if (statusPayload.ok === true && masterOk && masterPath && masterExists) {
             setSyncJournalStatus(`Synced: ${masterPath}`);
+            setOpenMasterJournalVisible(true);
           } else {
-            const startupOnlySync = String(statusPayload.message || '').includes('Startup journal sync complete')
-              && result.master_journal_ok === undefined;
-            const err = startupOnlySync
-              ? 'Startup import completed but Master Journal.xlsx was not created. Click Sync Journal again.'
-              : result.master_journal_error
+            const err = result.master_journal_error
               || statusPayload.error
               || statusPayload.message
               || 'Sync finished but Master Journal.xlsx was not created. Check the Local Master Control terminal.';
             setSyncJournalStatus(err, true);
+            setOpenMasterJournalVisible(false);
           }
           break;
         }
         setSyncJournalStatus(statusPayload.message || 'Syncing journal...');
         await new Promise((r) => setTimeout(r, 1000));
       }
-      if (!done) setSyncJournalStatus('Sync still running. Check status again.', true);
+      if (!done) { setSyncJournalStatus('Sync still running. Check status again.', true); setOpenMasterJournalVisible(false); }
     } catch (err) {
       setSyncJournalStatus(err?.message || String(err), true);
+      setOpenMasterJournalVisible(false);
     } finally {
       syncJournalBtn.disabled = false;
     }
@@ -772,11 +814,14 @@
   });
   watchlistClearBtn?.addEventListener('click', () => clearWatchlist());
   syncJournalBtn?.addEventListener('click', runSyncJournal);
+  openMasterJournalBtn?.addEventListener('click', openMasterJournal);
   oandaToggleBtn?.addEventListener('click', () => {
     oandaExpanded = !oandaExpanded;
     syncOandaDetailsVisibility();
   });
 
+  setOpenMasterJournalVisible(false);
+  refreshMasterJournalOpenState();
   restoreActiveWorkspace();
   refreshScripts();
   refreshStateSyncStatus().then(() => {

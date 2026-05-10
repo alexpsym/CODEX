@@ -8990,7 +8990,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
                 <section class="panel" id="journal-sync-widget">
                     <div class="panel-header"><div><h2>Trading Journal</h2></div></div>
-                    <button type="button" id="sync-journal-btn">Sync Journal</button>
+                    <div class="oo-toolbar">
+                        <button type="button" id="sync-journal-btn">Sync Journal</button>
+                        <button type="button" id="open-master-journal-btn" hidden disabled>Open Master Journal</button>
+                    </div>
                     <div class="watchlist-sub" id="sync-journal-status"></div>
                 </section>
 
@@ -23383,6 +23386,29 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
             'master_journal_error': str(exc),
             'master_journal_error_type': type(exc).__name__,
         }
+
+
+
+def _open_path_with_os(path: Path) -> None:
+    if os.name == "nt":
+        os.startfile(str(path))  # type: ignore[attr-defined]
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", str(path)])
+    else:
+        subprocess.Popen(["xdg-open", str(path)])
+
+
+@app.post("/api/trading-journal/open-master-journal")
+async def open_master_journal_file() -> JSONResponse:
+    path = _master_journal_path()
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Master Journal.xlsx does not exist. Click Sync Journal first.")
+    try:
+        _open_path_with_os(path)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to open Master Journal.xlsx: {exc}")
+    return JSONResponse({"ok": True, "master_journal_path": str(path.resolve())})
+
 
 
 
