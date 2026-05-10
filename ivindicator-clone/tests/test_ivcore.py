@@ -1,10 +1,15 @@
-import os, sys
+import os, sys, types
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+if 'requests' not in sys.modules:
+    sys.modules['requests'] = types.SimpleNamespace()
+if 'pytz' not in sys.modules:
+    sys.modules['pytz'] = types.SimpleNamespace(timezone=lambda _n: None, UTC=None)
 import ivcore
 from datetime import datetime, timezone
 
 
-def test_update_scaled_iv():
+def test_update_scaled_iv(monkeypatch):
+    monkeypatch.setattr(ivcore, "compute_snapshot", lambda tf, now=None: {"iv_percent": 1.23})
     val = ivcore.update_scaled_iv("1h")
     assert isinstance(val, float)
     assert val > 0
