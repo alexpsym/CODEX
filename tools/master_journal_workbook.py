@@ -7,9 +7,19 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font
 from openpyxl.worksheet.datavalidation import DataValidation
 import hashlib
+from openpyxl.styles import PatternFill, Border, Side, Alignment
 
 SHEET_ORDER=["Dashboard","All Trades","Instrument Averages","P&L Calendar","Equity Curve","Diagnostics"]
 EDITABLE_COLS=["Test","Setup","Timeframe","Breakeven","Notes"]
+
+
+def _is_test_trade_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return float(value) == 1.0
+    text = str(value or '').strip().lower()
+    return text in {'yes','y','true','1'}
 
 
 def _as_float(v: Any) -> float | None:
@@ -95,8 +105,12 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
 
     ws=wb['All Trades']; headers=['__row_id','Open Time','Close Time','Account','Symbol','Side','Qty','Entry','Exit','Stop Loss','Target','Commission','Net P/L','Profit %','R-Multiple','Balance After','Trade Duration (s)','Source','Order ID','Fill Count']+EDITABLE_COLS; ws.append(headers)
     for row in rows:
-        ws.append([stable_row_id(row),row.get('open_time'),row.get('close_time'),row.get('account_label') or row.get('account'),row.get('symbol'),row.get('side'),row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('stop_loss'),row.get('take_profit'),row.get('commission'),row.get('net_profit'),row.get('result_pct'),row.get('r_multiple'),row.get('balance_after_trade'),row.get('trade_duration_seconds'),row.get('source'),row.get('order_id'),row.get('fill_count'),'Yes' if row.get('is_test_trade') else 'No',row.get('setup') or '',row.get('timeframe') or '',row.get('breakeven') or '',row.get('notes') or ''])
+        ws.append([stable_row_id(row),row.get('open_time'),row.get('close_time'),row.get('account_label') or row.get('account'),row.get('symbol'),row.get('side'),row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('stop_loss'),row.get('take_profit'),row.get('commission'),row.get('net_profit'),row.get('result_pct'),row.get('r_multiple'),row.get('balance_after_trade'),row.get('trade_duration_seconds'),row.get('source'),row.get('order_id'),row.get('fill_count'),'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',row.get('setup') or '',row.get('timeframe') or '',row.get('breakeven') or '',row.get('notes') or ''])
     ws.freeze_panes='A2'; ws.auto_filter.ref=f"A1:Y{max(2,ws.max_row)}"; ws.column_dimensions['A'].hidden=True
+    _style_header_row(ws,1)
+    ws.column_dimensions['R'].width=24
+    ws.column_dimensions['Y'].width=30
+    _wrap_columns(ws,['R','Y'])
     dv=DataValidation(type='list',formula1='"Yes,No"',allow_blank=True); ws.add_data_validation(dv); dv.add(f"U2:U{max(2,ws.max_row)}")
     for i in range(2,ws.max_row+1):
         c=ws.cell(i,13)
@@ -107,7 +121,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     inst=wb['Instrument Averages']; inst.append(['Symbol','Trades','Wins','Losses','Net P/L','Avg P/L'])
     bucket=defaultdict(list)
     for r in rows:
-        if bool(r.get('is_test_trade')):
+        if _is_test_trade_value(r.get('is_test_trade')):
             continue
         bucket[str(r.get('symbol') or 'UNKNOWN')].append(r)
     for sym, grp in sorted(bucket.items()):
@@ -116,12 +130,13 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         wins=sum(1 for p in vals if p>0); losses=sum(1 for p in vals if p<0); net=sum(vals) if vals else 0.0
         inst.append([sym,len(grp),wins,losses,net,(net/len(vals)) if vals else None])
     if inst.max_row==1: inst.append(['No data available','','','','',''])
+    inst.freeze_panes='A2'; inst.auto_filter.ref=f"A1:F{max(2,inst.max_row)}"; _style_header_row(inst,1)
 
     # P&L Calendar (daily + monthly)
     cal=wb['P&L Calendar']; cal.append(['Type','Date','Net P/L'])
     daily=defaultdict(float)
     for r in rows:
-        if bool(r.get('is_test_trade')):
+        if _is_test_trade_value(r.get('is_test_trade')):
             continue
         dt=str(r.get('close_time') or r.get('open_time') or '')[:10]
         pnl=_as_float(r.get('net_profit'))
@@ -131,6 +146,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     for d,p in daily.items(): monthly[d[:7]]+=p
     for m,p in sorted(monthly.items()): cal.append(['Monthly',m,p])
     if cal.max_row==1: cal.append(['No data available','',''])
+    cal.freeze_panes='A2'; cal.auto_filter.ref=f"A1:C{max(2,cal.max_row)}"; _style_header_row(cal,1)
 
     # Equity Curve
     eq=wb['Equity Curve']; eq.append(['Date','Delta P/L','Equity'])
@@ -139,6 +155,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         running += p
         eq.append([d,p,running])
     if eq.max_row==1: eq.append(['No data available','',''])
+    eq.freeze_panes='A2'; eq.auto_filter.ref=f"A1:C{max(2,eq.max_row)}"; _style_header_row(eq,1)
 
     for sheet_name, freeze, filt in [("Instrument Averages","A2","A1:F{row}"),("P&L Calendar","A2","A1:C{row}"),("Equity Curve","A2","A1:C{row}")]:
         sh=wb[sheet_name]
@@ -148,9 +165,12 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     diag=wb['Diagnostics']
     diagnostics=snapshot.get('diagnostics') if isinstance(snapshot.get('diagnostics'),dict) else {}
     diag.append(['Key','Value'])
+    _style_header_row(diag,1)
+    diag.column_dimensions['B'].width=60
+    _wrap_columns(diag,['B'])
     diag.append(['sync_timestamp',snapshot.get('updated_at') or datetime.utcnow().isoformat()])
     diag.append(['visible_trade_count',len(rows)])
-    diag.append(['excluded_test_trade_count',sum(1 for r in rows if bool(r.get('is_test_trade')))])
+    diag.append(['excluded_test_trade_count',sum(1 for r in rows if _is_test_trade_value(r.get('is_test_trade')))])
     diag.append(['blank_pnl_count',sum(1 for r in rows if _as_float(r.get('net_profit')) is None)])
     for name in (diagnostics.get('local_workbook_names') or []):
         diag.append(['local_workbook',name])
@@ -162,3 +182,17 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(output_path)
     return {'ok':True,'path':str(output_path)}
+
+
+def _style_header_row(ws, row=1):
+    fill=PatternFill('solid', fgColor='E5E7EB')
+    thin=Side(style='thin', color='D1D5DB')
+    for c in ws[row]:
+        c.font=Font(bold=True)
+        c.fill=fill
+        c.border=Border(left=thin,right=thin,top=thin,bottom=thin)
+
+def _wrap_columns(ws, letters):
+    for l in letters:
+        for r in range(2, ws.max_row+1):
+            ws[f'{l}{r}'].alignment=Alignment(wrap_text=True, vertical='top')

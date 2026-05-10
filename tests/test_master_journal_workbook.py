@@ -90,3 +90,19 @@ def test_section_sheets_have_filters_and_freeze(tmp_path: Path):
         ws=wb[name]
         assert ws.freeze_panes == 'A2'
         assert ws.auto_filter.ref
+
+
+def test_is_test_trade_string_handling(tmp_path: Path):
+    snap=sample_snapshot()
+    snap['items'][0]['is_test_trade']='No'
+    snap['items'][1]['is_test_trade']='Yes'
+    out=tmp_path/'Master Journal.xlsx'
+    build_master_journal_workbook(snap, out)
+    wb=load_workbook(out)
+    ws=wb['All Trades']
+    assert ws['U2'].value == 'No'
+    assert ws['U3'].value == 'Yes'
+    inst=wb['Instrument Averages']
+    symbols=[inst.cell(r,1).value for r in range(2,inst.max_row+1)]
+    assert 'EURUSD' in symbols
+    assert 'BTCUSDT' not in symbols
