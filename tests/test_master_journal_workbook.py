@@ -36,9 +36,10 @@ def test_all_trades_columns_hidden_id_validation_and_colors(tmp_path: Path):
         assert col in headers
     assert ws.column_dimensions['A'].hidden is True
     assert ws.data_validations.count >= 1
-    colors=[str(ws.cell(r,13).font.color.rgb) for r in range(2,ws.max_row+1) if ws.cell(r,13).font.color]
-    assert colors
-    assert any('FF0000' in c for c in colors)
+    pos=str(ws.cell(2,13).font.color.rgb) if ws.cell(2,13).font.color else ''
+    neg=str(ws.cell(3,13).font.color.rgb) if ws.cell(3,13).font.color else ''
+    assert '008000' in pos
+    assert 'FF0000' in neg
 
 
 def test_manual_overrides_only_whitelist_and_blank_preserved(tmp_path: Path):
@@ -79,3 +80,13 @@ def test_gross_loss_is_red(tmp_path: Path):
             color = ws.cell(r,2).font.color.rgb if ws.cell(r,2).font.color else ''
             break
     assert 'FF0000' in str(color)
+
+
+def test_section_sheets_have_filters_and_freeze(tmp_path: Path):
+    out=tmp_path/'Master Journal.xlsx'
+    build_master_journal_workbook(sample_snapshot(), out)
+    wb=load_workbook(out)
+    for name in ['All Trades','Instrument Averages','P&L Calendar','Equity Curve']:
+        ws=wb[name]
+        assert ws.freeze_panes == 'A2'
+        assert ws.auto_filter.ref

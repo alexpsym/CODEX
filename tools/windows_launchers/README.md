@@ -25,7 +25,6 @@ Do not run:
 ## What gets built
 
 - `.\Local Trading Tools.exe` -> launches `run_local_master_control.bat`
-- `.\Trading Journal.exe` -> launches `run_trading_journal_local.bat`
 
 ## Build order and fallback behavior
 

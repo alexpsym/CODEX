@@ -101,10 +101,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     for i in range(2,ws.max_row+1):
         c=ws.cell(i,13)
         if isinstance(c.value,(int,float)):
-                if k == 'gross_loss':
-                    c.font=Font(color='FF0000')
-                else:
-                    c.font=Font(color='008000' if c.value>0 else 'FF0000' if c.value<0 else None)
+            c.font=Font(color='008000' if c.value>0 else 'FF0000' if c.value<0 else None)
 
     # Instrument Averages
     inst=wb['Instrument Averages']; inst.append(['Symbol','Trades','Wins','Losses','Net P/L','Avg P/L'])
@@ -142,6 +139,11 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         running += p
         eq.append([d,p,running])
     if eq.max_row==1: eq.append(['No data available','',''])
+
+    for sheet_name, freeze, filt in [("Instrument Averages","A2","A1:F{row}"),("P&L Calendar","A2","A1:C{row}"),("Equity Curve","A2","A1:C{row}")]:
+        sh=wb[sheet_name]
+        sh.freeze_panes=freeze
+        sh.auto_filter.ref=filt.format(row=max(2, sh.max_row))
 
     diag=wb['Diagnostics']
     diagnostics=snapshot.get('diagnostics') if isinstance(snapshot.get('diagnostics'),dict) else {}
