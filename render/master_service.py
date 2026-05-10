@@ -8267,7 +8267,8 @@ def _log_local_master_atexit() -> None:
         pass
 
 
-atexit.register(_log_local_master_atexit)
+if os.getenv("LOCAL_MASTER_LOG_ATEXIT", "").strip().lower() in {"1", "true", "yes"}:
+    atexit.register(_log_local_master_atexit)
 
 
 async def _start_oanda_fill_poll_after_delay() -> None:
