@@ -7,11 +7,10 @@ $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyI
 $RepoRoot = (Resolve-Path (Join-Path $ScriptDir "..\..")).Path
 $TemplatePath = Join-Path $ScriptDir "TradingToolsLauncher.cs"
 $LocalMasterBat = Join-Path $RepoRoot "run_local_master_control.bat"
-$TradingJournalBat = Join-Path $RepoRoot "run_trading_journal_local.bat"
 
 Write-Host "Building Windows launchers from repo root: $RepoRoot"
 
-$requiredPaths = @($LocalMasterBat, $TradingJournalBat, $TemplatePath)
+$requiredPaths = @($LocalMasterBat, $TemplatePath)
 $missingRequired = $requiredPaths | Where-Object { -not (Test-Path -LiteralPath $_) }
 if ($missingRequired) {
     Write-Error "ERROR: This script must be run from a valid CODEX-master checkout or via build_windows_launchers.bat."
@@ -22,8 +21,7 @@ if ($missingRequired) {
 }
 
 $launcherTargets = @(
-    @{ ExeName = "Local Trading Tools.exe"; TargetBat = "run_local_master_control.bat"; OutputPath = (Join-Path $RepoRoot "Local Trading Tools.exe") },
-    @{ ExeName = "Trading Journal.exe"; TargetBat = "run_trading_journal_local.bat"; OutputPath = (Join-Path $RepoRoot "Trading Journal.exe") }
+    @{ ExeName = "Local Trading Tools.exe"; TargetBat = "run_local_master_control.bat"; OutputPath = (Join-Path $RepoRoot "Local Trading Tools.exe") }
 )
 
 function Get-CscCompilerCandidates {

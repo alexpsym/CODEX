@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Build a 32-bit-Android-safe Excel replica of the Trading Journal from workbooks in CODEX-master/journal.
+Build the canonical Master Journal workbook from source workbooks in CODEX-master/journal.
 No pandas, no FastAPI, no local web server.
 """
 from __future__ import annotations
@@ -14,6 +14,7 @@ from collections import defaultdict
 from datetime import datetime, date, time, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from tools.master_journal_workbook import build_master_journal_workbook
 
 try:
     from openpyxl import Workbook, load_workbook
@@ -36,9 +37,10 @@ try:
 except Exception:  # pragma: no cover
     xlrd = None
 
-OUTPUT_NAME = "TradingJournal_Android_Replica.xlsx"
+OUTPUT_NAME = "Master Journal.xlsx"
 EXCLUDED_SOURCE_NAMES = {
     OUTPUT_NAME.lower(),
+    "tradingjournal_android_replica.xlsx",
     "account_cashflows.xlsx",
 }
 
@@ -467,7 +469,8 @@ def list_source_workbooks(journal_dir: Path) -> List[Path]:
             continue
         if path.name.lower() in EXCLUDED_SOURCE_NAMES:
             continue
-        if path.name.startswith("~$"):
+        n = path.name.lower()
+        if path.name.startswith("~$") or n.endswith(".tmp.xlsx") or n.endswith(".pending.xlsx"):
             continue
         out.append(path)
     return out
@@ -839,7 +842,7 @@ def write_dashboard(wb: Workbook, trades: List[Dict[str, Any]], sources: List[Pa
     ws.title = "Dashboard"
     stats = compute_journal_stats_replica(trades)
     g = stats["groups"]
-    ws.append(["Trading Journal Android Replica", "Generated", datetime.now()])
+    ws.append(["Trading Journal", "Generated", datetime.now()])
     ws.append(["Source workbooks", len(sources), "Source folder", str(sources[0].parent if sources else "")])
     def section(title, rows):
         ws.append([title, "Value"])
@@ -867,162 +870,26 @@ def build_output(journal_dir: Path, output_path: Path) -> Tuple[int, int, List[s
     sources = list_source_workbooks(journal_dir)
     all_trades: List[Dict[str, Any]] = []
     warnings: List[str] = []
-    if not sources:
-        warnings.append(f"No journal workbooks found in {journal_dir}")
-    rows_by_source = defaultdict(int)
-    for path in sources:
-        try:
-            trades, w = parse_workbook(path)
-            all_trades.extend(trades)
-            rows_by_source[path.name] += len(trades)
-            warnings.extend(w)
-        except Exception as exc:
-            warnings.append(f"{path.name}: {exc}")
-
-    # Dedupe by stable trade signature.
-    seen = set()
-    deduped = []
-    for t in all_trades:
-        key = (t.get("symbol"), t.get("side"), t.get("open_time"), t.get("close_time"), t.get("qty"), t.get("entry"), t.get("exit"), t.get("net_profit"))
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(t)
-    all_trades = deduped
-
-    stats = compute_journal_stats_replica(all_trades)
-    wb = Workbook()
-    write_dashboard(wb, all_trades, sources, warnings)
-
-    trades_ws = wb.create_sheet("All Trades")
-    trade_headers = ["Open Time", "Close Time", "Account", "Symbol", "Side", "Timeframe", "Test", "Setup", "Qty", "Entry", "Exit", "Stop Loss", "Target", "Commission", "Net Profit", "Profit %", "R-Multiple", "Balance After", "Trade Duration", "Breakeven", "Chart", "Actions", "Source", "Notes", "Order ID", "Fill Count"]
-    rows = []
-    for t in sorted_trades(all_trades):
-        rows.append({
-            "Open Time": t.get("open_time"),
-            "Close Time": t.get("close_time"),
-            "Account": t.get("account"),
-            "Symbol": t.get("symbol"),
-            "Side": t.get("side"),
-            "Timeframe": t.get("timeframe"),
-            "Test": t.get("is_test_trade"),
-            "Setup": t.get("setup"),
-            "Qty": t.get("qty"),
-            "Entry": t.get("entry"),
-            "Exit": t.get("exit"),
-            "Stop Loss": t.get("stop_loss"),
-            "Target": t.get("take_profit"),
-            "Commission": t.get("commission"),
-            "Net Profit": t.get("net_profit"),
-            "Profit %": t.get("result_pct"),
-            "R-Multiple": t.get("r_multiple"),
-            "Balance After": t.get("balance_after"),
-            "Trade Duration": t.get("trade_duration_seconds"),
-            "Breakeven": t.get("breakeven"),
-            "Chart": "",
-            "Actions": "",
-            "Source": t.get("import_source") or f"{t.get('source_file')} / {t.get('sheet')} / row {t.get('row')}",
-            "Notes": t.get("notes"),
-            "Order ID": t.get("order_id"),
-            "Fill Count": t.get("fill_count"),
-        })
-    write_table(trades_ws, trade_headers, rows)
-    style_sheet(trades_ws, len(trade_headers), freeze="A2")
-    trades_ws.column_dimensions["A"].width = 20
-    trades_ws.column_dimensions["B"].width = 20
-    trades_ws.column_dimensions["T"].width = 36
-    trades_ws.column_dimensions["U"].width = 44
-    set_pl_format(trades_ws, [f"O2:Q{max(2, len(rows)+1)}"])
-
-    inst_ws = wb.create_sheet("Instrument Averages")
-    inst_headers = ["Symbol", "Asset", "Total Trades", "Long Trades", "Short Trades", "Wins", "Losses", "Breakeven", "Long Wins", "Long Losses", "Short Wins", "Short Losses", "Avg SL W", "Avg SL L", "Avg TP W", "Avg TP L", "Avg Duration", "Shortest Duration", "Longest Duration"]
-    inst_rows = instrument_display_rows(stats["by_instrument"])
-    write_table(inst_ws, inst_headers, inst_rows)
-    style_sheet(inst_ws, len(inst_headers), freeze="A2")
-    set_pl_format(inst_ws, [f"H2:I{max(2, len(inst_rows)+1)}"])
-
-    cal_ws = wb.create_sheet("PL Calendar")
-    cal_headers = ["Month"] + [str(i) for i in range(1, 32)] + ["Monthly Total"]
-    cal_data = calendar_rows(all_trades)
-    write_table(cal_ws, cal_headers, cal_data)
-    style_sheet(cal_ws, len(cal_headers), freeze="B2")
-    for c in range(2, 34):
-        cal_ws.column_dimensions[get_column_letter(c)].width = 9
-    set_pl_format(cal_ws, [f"B2:AF{max(2, len(cal_data)+1)}", f"AG2:AG{max(2, len(cal_data)+1)}"])
-
-    eq_ws = wb.create_sheet("Equity Curve")
-    eq_headers = ["#", "Close Time", "Symbol", "Net P/L", "Equity"]
-    eq_data = equity_rows(all_trades)
-    write_table(eq_ws, eq_headers, eq_data)
-    style_sheet(eq_ws, len(eq_headers), freeze="A2")
-    eq_ws.column_dimensions["B"].width = 20
-    set_pl_format(eq_ws, [f"D2:E{max(2, len(eq_data)+1)}"])
-    if len(eq_data) >= 2:
-        chart = LineChart()
-        chart.title = "Equity Curve"
-        chart.y_axis.title = "Equity"
-        chart.x_axis.title = "Trade #"
-        data = Reference(eq_ws, min_col=5, min_row=1, max_row=len(eq_data)+1)
-        cats = Reference(eq_ws, min_col=1, min_row=2, max_row=len(eq_data)+1)
-        chart.add_data(data, titles_from_data=True)
-        chart.set_categories(cats)
-        chart.height = 12
-        chart.width = 28
-        eq_ws.add_chart(chart, "G2")
-
-    diag_ws = wb.create_sheet("Diagnostics")
-    diag_rows = []
-    diag_rows.append({"Item": "Journal folder", "Value": str(journal_dir)})
-    diag_rows.append({"Item": "Output workbook", "Value": str(output_path)})
-    diag_rows.append({"Item": "Source workbooks", "Value": len(sources)})
-    diag_rows.append({"Item": "Parsed trades", "Value": len(all_trades)})
-    diag_rows.append({"Item": "Test rows excluded from stats", "Value": sum(1 for t in all_trades if is_test_trade_row(t))})
-    bybit_count = sum(c for n, c in rows_by_source.items() if Path(n).stem.lower() == "bybit demo")
-    diag_rows.append({"Item": "Bybit Demo parsed row count", "Value": bybit_count})
-    diag_rows.append({"Item": "Money by currency", "Value": str(stats.get("totals", {}).get("money_by_currency", {}))})
     for src in sources:
-        diag_rows.append({"Item": "Source file", "Value": src.name})
-        diag_rows.append({"Item": f"Parsed rows ({src.name})", "Value": rows_by_source.get(src.name, 0)})
-    diag_rows.append({"Item": "Missing balance_after_trade", "Value": sum(1 for t in all_trades if t.get("balance_after") is None)})
-    diag_rows.append({"Item": "Missing stop_loss", "Value": sum(1 for t in all_trades if t.get("stop_loss") is None)})
-    diag_rows.append({"Item": "Missing take_profit", "Value": sum(1 for t in all_trades if t.get("take_profit") is None)})
-    diag_rows.append({"Item": "Missing result_pct", "Value": sum(1 for t in all_trades if t.get("result_pct") is None)})
-    diag_rows.append({"Item": "Missing r_multiple", "Value": sum(1 for t in all_trades if t.get("r_multiple") is None)})
-    diag_rows.append({"Item": "Missing open_time", "Value": sum(1 for t in all_trades if t.get("open_time") is None)})
-    diag_rows.append({"Item": "Missing close_time", "Value": sum(1 for t in all_trades if t.get("close_time") is None)})
-    for warning in warnings:
-        diag_rows.append({"Item": "Warning", "Value": warning})
-    write_table(diag_ws, ["Item", "Value"], diag_rows)
-    style_sheet(diag_ws, 2, freeze="A2")
-    diag_ws.column_dimensions["A"].width = 24
-    diag_ws.column_dimensions["B"].width = 90
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(output_path)
+        parsed, warns = parse_workbook(src)
+        all_trades.extend(parsed)
+        warnings.extend(warns)
+    all_trades.sort(key=lambda t: t.get("close_time") or datetime.min, reverse=False)
+    stats = compute_journal_stats_replica(all_trades)
+    items=[]
+    for t in all_trades:
+        items.append({
+            'row_type':'trade','id':t.get('id'),'account':t.get('account'),'account_label':t.get('account'),'symbol':t.get('symbol'),'side':t.get('side'),
+            'open_time':t.get('open_time').isoformat() if isinstance(t.get('open_time'), datetime) else t.get('open_time'),
+            'close_time':t.get('close_time').isoformat() if isinstance(t.get('close_time'), datetime) else t.get('close_time'),
+            'qty':t.get('qty'),'entry_price':t.get('entry'),'exit_price':t.get('exit'),'stop_loss':t.get('stop_loss'),'take_profit':t.get('take_profit'),
+            'commission':t.get('commission'),'net_profit':t.get('net_profit'),'result_pct':t.get('result_pct'),'r_multiple':t.get('r_multiple'),
+            'balance_after_trade':t.get('balance_after'),'trade_duration_seconds':t.get('trade_duration_seconds'),'source':t.get('source'),
+            'raw_refs':{'workbook':t.get('source'),'sheet':t.get('sheet'),'source_row':t.get('source_row')},'order_id':t.get('order_id'),'fill_count':t.get('fill_count'),
+            'is_test_trade':is_test_trade_row(t),'setup':t.get('setup'),'timeframe':t.get('timeframe'),'breakeven':t.get('breakeven'),'notes':t.get('notes'),
+        })
+    totals = stats.get('totals', {}) if isinstance(stats, dict) else {}
+    snapshot={'items':items,'stats':{'totals':{'trades':totals.get('trades',len(all_trades)),'wins':totals.get('wins',0),'losses':totals.get('losses',0),'win_rate_pct':totals.get('win_rate_pct',0),'net_profit_total':totals.get('net_profit_total',totals.get('net_pl',0)),'gross_gain':totals.get('gross_gain',totals.get('gross_profit',0)),'gross_loss':totals.get('gross_loss',0)}},'balances':[],'diagnostics':{'local_workbook_names':[p.name for p in sources],'warnings':warnings,'errors':[]},'updated_at':datetime.utcnow().isoformat()}
+    build_master_journal_workbook(snapshot, output_path)
     return len(sources), len(all_trades), warnings
 
-
-def main(argv: Optional[List[str]] = None) -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--repo", default=None, help="Path to CODEX-master repo. Defaults to Downloads/CODEX-master/CODEX-master.")
-    ap.add_argument("--output", default=None, help="Output .xlsx path. Defaults to repo/journal/TradingJournal_Android_Replica.xlsx")
-    args = ap.parse_args(argv)
-    try:
-        journal_dir = find_journal_dir(args.repo)
-        output_path = Path(args.output) if args.output else journal_dir / OUTPUT_NAME
-        source_count, trade_count, warnings = build_output(journal_dir, output_path)
-        print(f"OK: wrote {output_path}")
-        print(f"Source workbooks: {source_count}")
-        print(f"Parsed trades: {trade_count}")
-        if warnings:
-            print("Warnings:")
-            for warning in warnings[:20]:
-                print(f"- {warning}")
-        return 0
-    except Exception as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

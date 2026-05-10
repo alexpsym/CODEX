@@ -17,6 +17,46 @@
   const watchlistItems = document.getElementById('watchlist-items');
   const watchlistEmpty = document.getElementById('watchlist-empty');
 
+  const syncJournalBtn = document.getElementById('sync-journal-btn');
+  const syncJournalStatus = document.getElementById('sync-journal-status');
+
+  const setSyncJournalStatus = (msg, isErr = false) => {
+    if (!syncJournalStatus) return;
+    syncJournalStatus.textContent = msg || '';
+    syncJournalStatus.style.color = isErr ? '#fca5a5' : '#94a3b8';
+  };
+
+  const runSyncJournal = async () => {
+    if (!syncJournalBtn) return;
+    syncJournalBtn.disabled = true;
+    setSyncJournalStatus('Syncing journal...');
+    try {
+      await fetchJson('/api/trading-journal/sync', { method: 'POST' });
+      let done = false;
+      for (let i = 0; i < 60; i += 1) {
+        const statusPayload = await fetchJson('/api/trading-journal/sync/status');
+        if (!statusPayload.running) {
+          done = true;
+          if (statusPayload.ok && statusPayload.result?.master_journal_ok !== false) {
+            const p = statusPayload.result?.master_journal_path || 'journal/Master Journal.xlsx';
+            setSyncJournalStatus(`Synced: ${p}`);
+          } else {
+            const err = statusPayload.result?.master_journal_error || statusPayload.error || 'Sync failed';
+            setSyncJournalStatus(err, true);
+          }
+          break;
+        }
+        setSyncJournalStatus(statusPayload.message || 'Syncing journal...');
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      if (!done) setSyncJournalStatus('Sync still running. Check status again.', true);
+    } catch (err) {
+      setSyncJournalStatus(err?.message || String(err), true);
+    } finally {
+      syncJournalBtn.disabled = false;
+    }
+  };
+
   const oandaHeadline = document.getElementById('oanda-inactivity-headline');
   const oandaDetail = document.getElementById('oanda-inactivity-detail');
   const oandaLastTrade = document.getElementById('oanda-inactivity-last-trade');
@@ -745,3 +785,5 @@
     });
   });
 })();
+
+if (syncJournalBtn) { syncJournalBtn.addEventListener('click', runSyncJournal); }
