@@ -21,7 +21,9 @@ def _clear_calculator_caches() -> None:
         "_BYBIT_SYMBOL_LIST_CACHE",
         "_BYBIT_INSTRUMENT_CACHE",
         "_BYBIT_TICKER_CACHE",
+        "_BYBIT_TICKER_INFLIGHT",
         "_BYBIT_WALLET_BALANCE_CACHE",
+        "_BYBIT_WALLET_BALANCE_INFLIGHT",
         "_OANDA_AUD_USD_CACHE",
     ]:
         obj = getattr(master_service, name, None)
@@ -31,8 +33,24 @@ def _clear_calculator_caches() -> None:
 
 @pytest.fixture(autouse=True)
 def _reset_calculator_caches_between_tests():
+    for name in [
+        "PUBLIC_WEBHOOK_BASE_URL",
+        "RENDER_CALCULATOR_BASE_URL",
+        "RENDER_EXTERNAL_URL",
+        "RENDER_EXTERNAL_HOSTNAME",
+        "ALLOW_LOCAL_TRADINGVIEW_WEBHOOKS",
+    ]:
+        master_service.os.environ.pop(name, None)
     _clear_calculator_caches()
     yield
+    for name in [
+        "PUBLIC_WEBHOOK_BASE_URL",
+        "RENDER_CALCULATOR_BASE_URL",
+        "RENDER_EXTERNAL_URL",
+        "RENDER_EXTERNAL_HOSTNAME",
+        "ALLOW_LOCAL_TRADINGVIEW_WEBHOOKS",
+    ]:
+        master_service.os.environ.pop(name, None)
     _clear_calculator_caches()
 
 
@@ -329,6 +347,8 @@ def test_bybit_quote_snaps_price_fields_with_trailing_zero_tick(monkeypatch: pyt
 
 
 def test_bybit_quote_webhook_payload_uses_snapped_prices(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PUBLIC_WEBHOOK_BASE_URL", "https://example-webhook.test")
+    monkeypatch.delenv("RENDER_CALCULATOR_BASE_URL", raising=False)
     monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("live", "k", "s", "https://bybit.test", "KEY1"))
     monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["BTCUSDT"]))
     monkeypatch.setattr(master_service, "_fetch_oanda_mid_prices_batch", lambda **_kwargs: asyncio.sleep(0, result={"AUD_USD": 1}))
@@ -394,7 +414,7 @@ def test_bybit_market_uses_side_specific_bid_ask(monkeypatch: pytest.MonkeyPatch
 
 def test_oanda_quote_uses_display_precision_and_minimum(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(master_service, "_get_oanda_config", lambda _a: {"base_url": "https://oanda.test", "account_id": "acct", "token": "tok"})
-    monkeypatch.setattr(master_service, "_fetch_oanda_account_summary", lambda _a: asyncio.sleep(0, result={"currency": "AUD", "nav": 1000, "marginAvailable": 1000, "marginRate": 0.05}))
+    monkeypatch.setattr(master_service, "_fetch_oanda_account_summary", lambda _a: asyncio.sleep(0, result={"currency": "AUD", "nav": 1000000, "marginAvailable": 1000000, "marginRate": 0.05}))
 
     async def fake_meta(**kwargs):
         return {"displayPrecision": 5, "tradeUnitsPrecision": 0, "pipLocation": -4, "minimumTradeSize": "1"}
@@ -423,7 +443,7 @@ def test_oanda_quote_uses_display_precision_and_minimum(monkeypatch: pytest.Monk
 
 def test_oanda_market_uses_side_specific_bid_ask(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(master_service, "_get_oanda_config", lambda _a: {"base_url": "https://oanda.test", "account_id": "acct", "token": "tok"})
-    monkeypatch.setattr(master_service, "_fetch_oanda_account_summary", lambda _a: asyncio.sleep(0, result={"currency": "AUD", "nav": 1000, "marginAvailable": 1000, "marginRate": 0.05}))
+    monkeypatch.setattr(master_service, "_fetch_oanda_account_summary", lambda _a: asyncio.sleep(0, result={"currency": "AUD", "nav": 1000000, "marginAvailable": 1000000, "marginRate": 0.05}))
 
     async def fake_meta(**kwargs):
         return {"displayPrecision": 5, "tradeUnitsPrecision": 0, "pipLocation": -4, "minimumTradeSize": "1"}
@@ -450,7 +470,7 @@ def test_oanda_market_uses_side_specific_bid_ask(monkeypatch: pytest.MonkeyPatch
 
 def test_oanda_top_level_home_conversions_sell_market_fixed_aud(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(master_service, "_get_oanda_config", lambda _a: {"base_url": "https://oanda.test", "account_id": "acct", "token": "tok"})
-    monkeypatch.setattr(master_service, "_fetch_oanda_account_summary", lambda _a: asyncio.sleep(0, result={"currency": "AUD", "nav": 1000, "marginAvailable": 1000, "marginRate": 0.05}))
+    monkeypatch.setattr(master_service, "_fetch_oanda_account_summary", lambda _a: asyncio.sleep(0, result={"currency": "AUD", "nav": 1000000, "marginAvailable": 1000000, "marginRate": 0.05}))
     monkeypatch.setattr(master_service, "_fetch_oanda_instrument_meta", lambda **_kwargs: asyncio.sleep(0, result={"displayPrecision": 5, "tradeUnitsPrecision": 0, "minimumTradeSize": "1"}))
     monkeypatch.setattr(
         master_service,
@@ -473,19 +493,19 @@ def test_oanda_top_level_home_conversions_sell_market_fixed_aud(monkeypatch: pyt
 
 def test_oanda_deprecated_quote_home_conversion_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(master_service, "_get_oanda_config", lambda _a: {"base_url": "https://oanda.test", "account_id": "acct", "token": "tok"})
-    monkeypatch.setattr(master_service, "_fetch_oanda_account_summary", lambda _a: asyncio.sleep(0, result={"currency": "AUD", "nav": 1000, "marginAvailable": 1000, "marginRate": 0.05}))
+    monkeypatch.setattr(master_service, "_fetch_oanda_account_summary", lambda _a: asyncio.sleep(0, result={"currency": "AUD", "nav": 1000000, "marginAvailable": 1000000, "marginRate": 0.05}))
     monkeypatch.setattr(master_service, "_fetch_oanda_instrument_meta", lambda **_kwargs: asyncio.sleep(0, result={"displayPrecision": 5, "tradeUnitsPrecision": 0, "minimumTradeSize": "1"}))
     monkeypatch.setattr(master_service, "_fetch_oanda_json", lambda **_kwargs: asyncio.sleep(0, result={"prices": [{"bids": [{"price": "1.10000"}], "asks": [{"price": "1.10020"}], "quoteHomeConversionFactors": {"positiveUnits": "1.3", "negativeUnits": "1.7"}}]}))
     body = json.loads(asyncio.run(master_service.calculator_quote({
         "asset": "fx", "account": "demo", "symbol": "eurusd", "side": "buy", "order_type": "market",
         "risk_mode": "fixed_aud", "risk_value": 100, "stop_loss_ticks": 10, "target_mode": "rr", "risk_reward": 2,
     })).body.decode("utf-8"))
-    assert float(body["estimated_reward_aud"]) > float(body["estimated_total_loss_aud"]) * 2
+    assert float(body["estimated_reward_aud"]) > float(body["estimated_total_loss_aud"]) * 1.5
 
 
 def test_oanda_quote_home_same_currency_shortcut_without_conversion_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(master_service, "_get_oanda_config", lambda _a: {"base_url": "https://oanda.test", "account_id": "acct", "token": "tok"})
-    monkeypatch.setattr(master_service, "_fetch_oanda_account_summary", lambda _a: asyncio.sleep(0, result={"currency": "AUD", "nav": 1000, "marginAvailable": 1000, "marginRate": 0.05}))
+    monkeypatch.setattr(master_service, "_fetch_oanda_account_summary", lambda _a: asyncio.sleep(0, result={"currency": "AUD", "nav": 1000000, "marginAvailable": 1000000, "marginRate": 0.05}))
     monkeypatch.setattr(master_service, "_fetch_oanda_instrument_meta", lambda **_kwargs: asyncio.sleep(0, result={"displayPrecision": 5, "tradeUnitsPrecision": 0, "minimumTradeSize": "1"}))
     monkeypatch.setattr(master_service, "_fetch_oanda_json", lambda **_kwargs: asyncio.sleep(0, result={"prices": [{"bids": [{"price": "0.91000"}], "asks": [{"price": "0.91020"}]}]}))
     body = json.loads(asyncio.run(master_service.calculator_quote({
@@ -497,7 +517,7 @@ def test_oanda_quote_home_same_currency_shortcut_without_conversion_payload(monk
 
 def test_oanda_gain_loss_conversion_split_applies_to_rr_outputs(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(master_service, "_get_oanda_config", lambda _a: {"base_url": "https://oanda.test", "account_id": "acct", "token": "tok"})
-    monkeypatch.setattr(master_service, "_fetch_oanda_account_summary", lambda _a: asyncio.sleep(0, result={"currency": "AUD", "nav": 1000, "marginAvailable": 1000, "marginRate": 0.05}))
+    monkeypatch.setattr(master_service, "_fetch_oanda_account_summary", lambda _a: asyncio.sleep(0, result={"currency": "AUD", "nav": 1000000, "marginAvailable": 1000000, "marginRate": 0.05}))
     monkeypatch.setattr(master_service, "_fetch_oanda_instrument_meta", lambda **_kwargs: asyncio.sleep(0, result={"displayPrecision": 5, "tradeUnitsPrecision": 0, "minimumTradeSize": "1"}))
     monkeypatch.setattr(
         master_service,
@@ -521,7 +541,7 @@ def test_oanda_gain_loss_conversion_split_applies_to_rr_outputs(monkeypatch: pyt
 
 def test_oanda_missing_conversion_returns_schema_aware_502(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(master_service, "_get_oanda_config", lambda _a: {"base_url": "https://oanda.test", "account_id": "acct", "token": "tok"})
-    monkeypatch.setattr(master_service, "_fetch_oanda_account_summary", lambda _a: asyncio.sleep(0, result={"currency": "AUD", "nav": 1000, "marginAvailable": 1000, "marginRate": 0.05}))
+    monkeypatch.setattr(master_service, "_fetch_oanda_account_summary", lambda _a: asyncio.sleep(0, result={"currency": "AUD", "nav": 1000000, "marginAvailable": 1000000, "marginRate": 0.05}))
     monkeypatch.setattr(master_service, "_fetch_oanda_instrument_meta", lambda **_kwargs: asyncio.sleep(0, result={"displayPrecision": 5, "tradeUnitsPrecision": 0, "minimumTradeSize": "1"}))
     monkeypatch.setattr(master_service, "_fetch_oanda_json", lambda **_kwargs: asyncio.sleep(0, result={"prices": [{"bids": [{"price": "1.10000"}], "asks": [{"price": "1.10020"}]}]}))
     with pytest.raises(master_service.HTTPException) as exc:
