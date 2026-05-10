@@ -16875,6 +16875,12 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                 "server": ("localhost", 80),
             }
         )
+    quote_started = time.perf_counter()
+    timings_ms: Dict[str, Any] = {}
+    last_dependency_started: Dict[str, Optional[str]] = {"name": None}
+    pending_dependencies: Set[str] = set()
+    resolved_symbol_for_debug = ""
+    submitted_debug: Dict[str, object] = {}
     try:
         asset = str(payload.get("asset") or "").strip().lower()
         account = str(payload.get("account") or "live").strip().lower()
@@ -16925,12 +16931,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                 raise HTTPException(status_code=400, detail="take_profit_ticks must be greater than zero when target_mode=ticks.")
 
         webhook_enabled = webhook_mode in {"yes", "true", "1"}
-        quote_started = time.perf_counter()
         quote_deadline = quote_started + CALCULATOR_QUOTE_TIMEOUT_S
-        timings_ms: Dict[str, Any] = {}
-        last_dependency_started: Dict[str, Optional[str]] = {"name": None}
-        pending_dependencies: Set[str] = set()
-        resolved_symbol_for_debug = ""
         submitted_debug = _calculator_safe_submitted_payload({"asset": asset, "account": account, "submitted_symbol": symbol_in, "webhook": webhook_mode, "test": "yes" if is_test_trade else "no", "timeframe": _normalize_timeframe(payload.get("timeframe") or ""), "risk_mode": risk_mode, "risk_value": str(payload.get("risk_value") or ""), "stop_loss_ticks": str(payload.get("stop_loss_ticks") or ""), "order_type": order_type, "side": side})
         webhook_capability = _calculator_webhook_capability(request)
         webhook_base_url = str(webhook_capability.get("public_webhook_base_url") or "").strip()
@@ -17707,7 +17708,7 @@ async def calculator_webhook(request: Request, payload: Dict[str, object] = Body
             "payload": dict(payload),
         }
     )
-    logger.info(
+    CALCULATOR_LOGGER.info(
         "WEBHOOK_RECEIVED request_id=%s pending_webhook_id=%s host=%s origin_host=%s endpoint_url=%s symbol=%s account=%s",
         request_id,
         pending_id or "<none>",
@@ -17756,7 +17757,7 @@ async def calculator_webhook(request: Request, payload: Dict[str, object] = Body
         }
 
         if asset == "crypto":
-            logger.info(
+            CALCULATOR_LOGGER.info(
                 "WEBHOOK_BYBIT_SUBMIT request_id=%s account=%s category=%s symbol=%s order_type=%s qty=%s",
                 request_id,
                 str(canonical.get("account") or "").strip().lower() or "<none>",
@@ -17821,7 +17822,7 @@ async def calculator_webhook(request: Request, payload: Dict[str, object] = Body
                     or None,
                 },
             )
-            logger.info(
+            CALCULATOR_LOGGER.info(
                 "WEBHOOK_BYBIT_RESPONSE request_id=%s retCode=%s retMsg=%s orderId=%s orderLinkId=%s",
                 request_id,
                 0,
@@ -17929,7 +17930,7 @@ async def calculator_webhook(request: Request, payload: Dict[str, object] = Body
                 "stack": traceback.format_exc(),
             },
         )
-        logger.warning(
+        CALCULATOR_LOGGER.warning(
             "WEBHOOK_BYBIT_RESPONSE request_id=%s retCode=%s retMsg=%s orderId=%s orderLinkId=%s",
             request_id,
             exc.ret_code,
@@ -18037,6 +18038,12 @@ async def calculator_webhook_attempts(
     account: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
 ) -> JSONResponse:
+    def _plain_optional_query(value: Optional[str]) -> Optional[str]:
+        return value if isinstance(value, str) else None
+    pending_webhook_id = _plain_optional_query(pending_webhook_id)
+    symbol = _plain_optional_query(symbol)
+    account = _plain_optional_query(account)
+    status = _plain_optional_query(status)
     items = list(reversed(_load_webhook_attempts()))
     if pending_webhook_id:
         needle = pending_webhook_id.strip()
