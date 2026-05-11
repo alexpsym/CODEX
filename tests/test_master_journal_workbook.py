@@ -51,6 +51,7 @@ def test_calendar_month_fill_colors(tmp_path: Path):
     assert isinstance(may.value, float) and isinstance(jun.value, float)
     assert may.number_format.endswith('%')
     assert jun.number_format.endswith('%')
+    assert len(cal.conditional_formatting) > 0
     assert mar.value in ('', None)
     heights=[cal.row_dimensions[r].height for r in range(2, cal.max_row+1)]
     assert len(set(heights)) == 1
@@ -85,6 +86,9 @@ def test_all_trades_hidden_row_id_and_override_after_row_swap(tmp_path: Path):
     ws['Q2']='Yes'; wb.save(out)
     ov=read_master_journal_manual_overrides(out)
     assert any(v.get('is_test_trade') is True for v in ov.values())
+    assert len(ws.conditional_formatting) > 0
+    assert ws["M2"].number_format == "0.00%"
+    assert ws["M2"].value in (0.023, -0.011)
 
 def test_balance_after_resolution_and_duration_display(tmp_path: Path):
     s=sample_snapshot()
@@ -112,6 +116,17 @@ def test_sheet_order_and_hidden_meta(tmp_path: Path):
     assert wb.sheetnames == SHEET_ORDER
     assert '_Trade Meta' in wb.sheetnames
     assert wb['_Trade Meta'].sheet_state == 'hidden'
+    assert len(wb["Dashboard"].conditional_formatting) > 0
+    assert len(wb["Instrument Averages"].conditional_formatting) > 0
+    assert len(wb["P&L Calendar"].conditional_formatting) > 0
+
+def test_instrument_currency_and_percent_formats(tmp_path: Path):
+    out=tmp_path/'fmt.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
+    inst = wb["Instrument Averages"]
+    assert inst["Q2"].number_format == "0.00%"
+    assert inst["Q2"].value == 1.0
+    assert ("AUD" in (inst["O2"].number_format or "")) or ("UNKNOWN" in (inst["O2"].number_format or ""))
+    assert inst["O2"].number_format != "General"
 
 def test_dashboard_layout_style_columns(tmp_path: Path):
     out=tmp_path/'db.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)

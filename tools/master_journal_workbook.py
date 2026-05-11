@@ -1,6 +1,5 @@
 from __future__ import annotations
 from collections import defaultdict
-from copy import copy
 from datetime import datetime, date
 from pathlib import Path
 from typing import Any, Dict, List
@@ -8,7 +7,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font
 from openpyxl.worksheet.datavalidation import DataValidation
 import hashlib
-from openpyxl.styles import PatternFill, Border, Side, Alignment, Color
+from openpyxl.styles import PatternFill, Border, Side, Alignment
 from openpyxl.comments import Comment
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.utils import get_column_letter
@@ -111,28 +110,6 @@ def _resolved_all_trade_balances(rows: List[Dict[str, Any]]) -> Dict[str, float]
                 running[acct] = running[acct] + pnl
                 out[str(i)] = running[acct]
     return out
-
-def _fmt_pct(v: Any) -> str:
-    x=_as_float(v)
-    return "—" if x is None else f"{x:.2f}%"
-
-def _fmt_r(v: Any) -> str:
-    x=_as_float(v)
-    return "—" if x is None else f"{x:.3f}R"
-
-def _fmt_money(v: Any, money_map: Any, key: str) -> str:
-    mm=(money_map or {}).get(key) if isinstance(money_map,dict) else None
-    if isinstance(mm,dict) and mm:
-        return ' / '.join(f"{(k or 'UNKNOWN').upper()} {float(val):.2f}" for k,val in sorted(mm.items()))
-    x=_as_float(v)
-    return "—" if x is None else f"UNKNOWN {x:.2f}"
-
-def _fmt_leader(v: Any) -> str:
-    if not isinstance(v,dict):
-        return '—' if not v else str(v)
-    sym=v.get('symbol') or '—'
-    w=v.get('wins'); l=v.get('losses'); t=v.get('total_trades')
-    return f"{sym} — wins {w if w is not None else '—'}, losses {l if l is not None else '—'}, trades {t if t is not None else '—'}"
 
 def _fmt_detail_src(src: Any) -> str:
     if not isinstance(src,dict):
@@ -248,19 +225,24 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         section_height = _write_stat_section(dash, lane_heights[lane], lane_cols[lane], title, srows, use_detail_col=uses_detail)
         lane_heights[lane] += section_height + 1
     _write_instrument_leaders_section(dash, lane_heights[2], lane_cols[2], leaders)
+    _apply_dashboard_conditional_formatting(dash)
 
     resolved_balances = _resolved_all_trade_balances(rows)
     ws=wb['All Trades']; headers=['Open Time','Close Time','Account','Symbol','Side','Qty','Entry Price','Exit Price','Stop Loss Price','Target Price','Commission','Net P/L','Profit %','R-Multiple','Balance After','Trade Duration']+EDITABLE_COLS; ws.append(headers)
     meta=wb['_Trade Meta']; meta.append(['all_trades_row','row_id'])
     for i, row in enumerate(rows):
-        ws.append([row.get('open_time'),row.get('close_time'),row.get('account_label') or row.get('account'),row.get('symbol'),row.get('side'),row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('stop_loss'),row.get('take_profit'),row.get('commission'),row.get('net_profit'),row.get('result_pct'),row.get('r_multiple'),resolved_balances.get(str(i)),_fmt_duration(row.get('trade_duration_seconds')),'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',row.get('setup') or '',row.get('timeframe') or '',row.get('breakeven') or '',row.get('notes') or ''])
+        pct = _as_float(row.get('result_pct'))
+        ws.append([row.get('open_time'),row.get('close_time'),row.get('account_label') or row.get('account'),row.get('symbol'),row.get('side'),row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('stop_loss'),row.get('take_profit'),row.get('commission'),row.get('net_profit'),(pct/100.0 if pct is not None else ''),row.get('r_multiple'),resolved_balances.get(str(i)),_fmt_duration(row.get('trade_duration_seconds')),'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',row.get('setup') or '',row.get('timeframe') or '',row.get('breakeven') or '',row.get('notes') or ''])
         ws.cell(i + 2, 1).comment = Comment(f"row_id:{stable_row_id(row)}", "system")
     _style_table_sheet(ws,1,'A2',True)
     for rr in range(2, ws.max_row + 1):
         ws.cell(rr, 15).number_format = '#,##0.00'
+        ws.cell(rr, 13).number_format = "0.00%"
     for i,row in enumerate(rows,start=2): meta.append([i, stable_row_id(row)])
     meta.sheet_state='hidden'
     dv=DataValidation(type='list',formula1='"Yes,No"',allow_blank=True); ws.add_data_validation(dv); dv.add(f"Q2:Q{max(2,ws.max_row)}")
+    _negative_impact_rule(ws, f"K2:K{max(2, ws.max_row)}")
+    _profit_loss_rules(ws, f"L2:N{max(2, ws.max_row)}")
 
     inst=wb['Instrument Averages']; headers=["Symbol","Class","Trades","Longs","Shorts","Wins","Losses","Break-even","Long wins","Long losses","Short wins","Short losses","Long break-even","Short break-even","Net P/L","Avg P/L","Win Rate %","Avg stop % (W)","Avg stop % (L)","Avg target % (W)","Avg target % (L)","Avg duration","Shortest","Longest"]; inst.append(headers)
     for rec in (stats.get('by_instrument') or []):
@@ -284,7 +266,13 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
                 inst.cell(row_idx, col).number_format = f'"{ccy}" #,##0.00;[Red]-"{ccy}" #,##0.00'
             elif len(mm) > 1:
                 inst.cell(row_idx, col).value = " / ".join(f"{k} {v:.2f}" for k, v in sorted(mm.items()))
+            else:
+                val = _as_float(inst.cell(row_idx, col).value)
+                if val is not None:
+                    inst.cell(row_idx, col).value = val
+                    inst.cell(row_idx, col).number_format = '"UNKNOWN" #,##0.00;[Red]-"UNKNOWN" #,##0.00'
     _style_table_sheet(inst,1,'A2',True)
+    _profit_loss_rules(inst, f"O2:P{max(2, inst.max_row)}")
 
     cal=wb['P&L Calendar']; cal.append(['Year'] + [f"{calendar.month_name[m]} P/L %" for m in range(1,13)]); cal.append(['Trades'] + [calendar.month_name[m] for m in range(1,13)])
     monthly=defaultdict(lambda:{'pct':0.0,'trades':0})
@@ -298,6 +286,10 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     for rr in range(3, cal.max_row + 1, 2):
         for cc in range(2, 14):
             cal.cell(rr, cc).number_format = "0.00%"
+    for rr in range(4, cal.max_row + 1, 2):
+        for cc in range(2, 14):
+            cal.cell(rr, cc).number_format = "0"
+    _profit_loss_rules(cal, f"B3:M{max(3, cal.max_row)}")
 
     output_path.parent.mkdir(parents=True, exist_ok=True); wb.save(output_path)
     return {'ok':True,'path':str(output_path)}
@@ -359,26 +351,28 @@ def _style_header_row(ws, row=1):
         c.fill=fill
         c.border=Border(left=thin,right=thin,top=thin,bottom=thin)
 
-def _wrap_columns(ws, letters):
-    for l in letters:
-        for r in range(2, ws.max_row+1):
-            ws[f'{l}{r}'].alignment=Alignment(wrap_text=True, vertical='top')
+def _profit_loss_rules(ws, cell_range: str):
+    ws.conditional_formatting.add(cell_range, CellIsRule(operator='greaterThan', formula=['0'], fill=PatternFill('solid', fgColor=PROFIT_FILL), font=Font(color=PROFIT_FONT)))
+    ws.conditional_formatting.add(cell_range, CellIsRule(operator='lessThan', formula=['0'], fill=PatternFill('solid', fgColor=LOSS_FILL), font=Font(color=LOSS_FONT)))
 
 
-def _apply_sign_font(cell, *, loss_label: bool = False):
-    v = cell.value
-    if not isinstance(v, (int, float)):
-        return
-    f = copy(cell.font)
-    if loss_label and v >= 0:
-        f.color = Color(rgb='00FF0000')
-        cell.font = f
-    elif v > 0:
-        f.color = Color(rgb='00008000')
-        cell.font = f
-    elif v < 0:
-        f.color = Color(rgb='00FF0000')
-        cell.font = f
+def _negative_impact_rule(ws, cell_range: str):
+    ws.conditional_formatting.add(cell_range, CellIsRule(operator='notEqual', formula=['0'], fill=PatternFill('solid', fgColor=LOSS_FILL), font=Font(color=LOSS_FONT)))
+
+
+def _apply_dashboard_conditional_formatting(ws):
+    max_row = ws.max_row
+    _profit_loss_rules(ws, f"B1:K{max_row}")
+    for r in range(1, max_row + 1):
+        label = str(ws.cell(r, 1).value or "").strip().lower()
+        if label in {"gross loss", "max loss", "max drawdown", "avg drawdown"}:
+            _negative_impact_rule(ws, f"B{r}:B{r}")
+        label_e = str(ws.cell(r, 5).value or "").strip().lower()
+        if label_e in {"gross loss", "max loss", "max drawdown", "avg drawdown"}:
+            _negative_impact_rule(ws, f"F{r}:F{r}")
+        label_i = str(ws.cell(r, 9).value or "").strip().lower()
+        if label_i in {"gross loss", "max loss", "max drawdown", "avg drawdown"}:
+            _negative_impact_rule(ws, f"J{r}:J{r}")
 
 
 def _style_table_sheet(ws, header_row=1, freeze='A2', autofilter=True):
