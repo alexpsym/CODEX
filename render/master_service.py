@@ -19821,18 +19821,6 @@ def _compute_journal_stats(
         item["avg_trade_duration_seconds"] = _avg(dur_vals)
         item["min_trade_duration_seconds"] = min(dur_vals) if dur_vals else None
         item["max_trade_duration_seconds"] = max(dur_vals) if dur_vals else None
-        item["avg_sl_distance_pips"] = _avg(item.pop("sl_distances_pips", []))
-        item["avg_tp_distance_pips"] = _avg(item.pop("tp_distances_pips", []))
-        item["avg_sl_distance_quote"] = _avg(item.pop("sl_distances_quote", []))
-        item["avg_tp_distance_quote"] = _avg(item.pop("tp_distances_quote", []))
-        item["avg_sl_distance_pips_wins"] = _avg(item.pop("sl_distances_pips_wins", []))
-        item["avg_sl_distance_pips_losses"] = _avg(item.pop("sl_distances_pips_losses", []))
-        item["avg_tp_distance_pips_wins"] = _avg(item.pop("tp_distances_pips_wins", []))
-        item["avg_tp_distance_pips_losses"] = _avg(item.pop("tp_distances_pips_losses", []))
-        item["avg_sl_distance_quote_wins"] = _avg(item.pop("sl_distances_quote_wins", []))
-        item["avg_sl_distance_quote_losses"] = _avg(item.pop("sl_distances_quote_losses", []))
-        item["avg_tp_distance_quote_wins"] = _avg(item.pop("tp_distances_quote_wins", []))
-        item["avg_tp_distance_quote_losses"] = _avg(item.pop("tp_distances_quote_losses", []))
         item["asset_class"] = (
             "fx"
             if any(
