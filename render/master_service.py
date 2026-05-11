@@ -10657,7 +10657,7 @@ async def _bybit_signed_get(
         _record_outbound_traffic(
             "bybit",
             bytes_sent=len(url) + sum(len(str(v)) for v in headers.values()),
-            bytes_received=len(resp.content),
+            bytes_received=len(getattr(resp, "content", b"") or b""),
             context=path,
         )
         payload: Dict[str, object] = {}
