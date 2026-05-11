@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 import types
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -139,3 +141,18 @@ def test_signature_uses_header_recv_window(monkeypatch):
     _, headers = calls[0]
     expected = mod._bybit_sign_request(headers["X-BAPI-TIMESTAMP"], "k", "s", "accountType=UNIFIED", recv_window="15000")
     assert headers["X-BAPI-SIGN"] == expected
+
+
+def test_iter_target_months_includes_recent_closed_months():
+    now_local = datetime(2026, 5, 12, 10, 0, tzinfo=ZoneInfo("Australia/Brisbane"))
+    out = mod._iter_target_months([], now_local=now_local)
+    assert "2026-03" in out
+    assert "2026-04" in out
+    assert "2026-05" not in out
+
+
+def test_iter_target_months_skips_existing_month():
+    now_local = datetime(2026, 5, 12, 10, 0, tzinfo=ZoneInfo("Australia/Brisbane"))
+    out = mod._iter_target_months(["2026-03"], now_local=now_local)
+    assert "2026-03" not in out
+    assert "2026-04" in out
