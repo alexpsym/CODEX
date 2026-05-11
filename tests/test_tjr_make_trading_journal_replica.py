@@ -65,8 +65,9 @@ def test_dashboard_does_not_collapse_mixed_currency_money(tmp_path: Path):
     wb.save(j/'BYBIT DEMO.xlsx')
     out=tmp_path/'o.xlsx';build_output(j,out)
     wb2=load_workbook(out, read_only=True, data_only=True); ws2=wb2['Dashboard']
-    labels={(ws2.cell(r,1).value) for r in range(1,60)}
-    assert 'Main Stats' in labels
+    vals=[str(ws2.cell(r,c).value or '') for r in range(1,180) for c in range(1,13)]
+    assert 'Main Stats' not in vals
+    assert any('AUD' in v and 'USDT' in v for v in vals)
 
 
 def test_duration_metric_sources_are_real_refs():
