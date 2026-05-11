@@ -19723,8 +19723,9 @@ def _compute_journal_stats(
                 "break_even": 0,
                 "stop_losses": [],
                 "take_profits": [],
-                "sl_distances": [],
-                "tp_distances": [],
+                "sl_pct": [],
+                "tp_pct": [],
+                "pnl": [],
                 "durations": [],
                 "quote_currency": "USDT" if not _is_fx_asset_class(row.get("asset_class")) else "",
             }
@@ -19787,22 +19788,35 @@ def _compute_journal_stats(
                 elif is_loss:
                     bucket.setdefault(f"{prefix}_quote_losses", []).append(dist)
 
-        if _is_valid_price_level(entry) and _is_valid_price_level(sl):
-            dist = abs(entry - sl)
-            bucket["sl_distances"].append(dist)
-            _append_metric("sl_distances", dist)
-        if _is_valid_price_level(entry) and _is_valid_price_level(tp):
-            dist = abs(tp - entry)
-            bucket["tp_distances"].append(dist)
-            _append_metric("tp_distances", dist)
+        pnl_val=_row_pnl(row)
+        if pnl_val is not None: bucket["pnl"].append(pnl_val)
+        if _is_valid_price_level(entry) and _is_valid_price_level(sl) and entry:
+            pct = abs(entry - sl)/entry*100.0
+            bucket["sl_pct"].append(pct)
+            if is_win: bucket.setdefault("sl_pct_wins",[]).append(pct)
+            elif is_loss: bucket.setdefault("sl_pct_losses",[]).append(pct)
+        if _is_valid_price_level(entry) and _is_valid_price_level(tp) and entry:
+            pct = abs(tp - entry)/entry*100.0
+            bucket["tp_pct"].append(pct)
+            if is_win: bucket.setdefault("tp_pct_wins",[]).append(pct)
+            elif is_loss: bucket.setdefault("tp_pct_losses",[]).append(pct)
 
     out_by_instrument: List[Dict[str, object]] = []
     for _, bucket in by_instrument.items():
         item = dict(bucket)
         item["avg_stop_loss"] = _avg(item.pop("stop_losses"))
         item["avg_take_profit"] = _avg(item.pop("take_profits"))
-        item["avg_sl_distance"] = _avg(item.pop("sl_distances"))
-        item["avg_tp_distance"] = _avg(item.pop("tp_distances"))
+        pnl_list=item.pop("pnl",[])
+        item["net_profit_total"]=sum(pnl_list) if pnl_list else None
+        item["avg_net_profit"]=_avg(pnl_list)
+        denom_inst=(item.get("wins",0) or 0)+(item.get("losses",0) or 0)
+        item["win_rate_pct"]=(item.get("wins",0)/denom_inst*100.0) if denom_inst else None
+        item["avg_sl_pct"]=_avg(item.pop("sl_pct",[]))
+        item["avg_tp_pct"]=_avg(item.pop("tp_pct",[]))
+        item["avg_sl_pct_wins"]=_avg(item.pop("sl_pct_wins",[]))
+        item["avg_sl_pct_losses"]=_avg(item.pop("sl_pct_losses",[]))
+        item["avg_tp_pct_wins"]=_avg(item.pop("tp_pct_wins",[]))
+        item["avg_tp_pct_losses"]=_avg(item.pop("tp_pct_losses",[]))
         dur_vals = item.pop("durations", [])
         item["avg_trade_duration_seconds"] = _avg(dur_vals)
         item["min_trade_duration_seconds"] = min(dur_vals) if dur_vals else None
