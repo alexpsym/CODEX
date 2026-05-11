@@ -110,22 +110,38 @@ def test_unanchored_account_does_not_fabricate_equity(tmp_path: Path):
     assert ws['O3'].value in ('', None)
 
 
-def test_all_trades_hidden_row_id_and_override_after_row_swap(tmp_path: Path):
+def test_all_trades_hidden_row_id_and_unsorted_override(tmp_path: Path):
     out=tmp_path/'Master Journal.xlsx'; build_master_journal_workbook(sample_snapshot(), out)
     wb=load_workbook(out); ws=wb['All Trades']
     headers=[ws.cell(1,c).value for c in range(1,ws.max_column+1)]
     assert '__row_id' not in headers
     assert ws.max_column == 21
-    # swap rows to validate comment-backed row ids preserve manual overrides
-    for c in range(1, ws.max_column+1):
-        ws.cell(2,c).value, ws.cell(3,c).value = ws.cell(3,c).value, ws.cell(2,c).value
-    ws['Q2']='Yes'; wb.save(out)
+    assert ws["A2"].comment is None
+    ws['Q2']='Yes'; ws['R2']='setup-x'; wb.save(out)
     ov=read_master_journal_manual_overrides(out)
-    assert any(v.get('is_test_trade') is True for v in ov.values())
+    assert ov["t1"]["is_test_trade"] is True
+    assert ov["t1"]["setup"] == "setup-x"
     assert len(ws.conditional_formatting) > 0
     assert ws["M2"].number_format == "0.00%"
     assert ws["A2"].comment is None
     assert ws["M2"].value in (0.023, -0.011)
+
+
+def test_legacy_comment_row_id_preferred_over_trade_meta_after_row_move(tmp_path: Path):
+    out=tmp_path/'legacy.xlsx'; build_master_journal_workbook(sample_snapshot(), out)
+    wb=load_workbook(out); ws=wb['All Trades']; meta=wb['_Trade Meta']
+    from openpyxl.comments import Comment
+    ws["A2"].comment = Comment("row_id:t1", "legacy")
+    ws["A3"].comment = Comment("row_id:t2", "legacy")
+    for c in range(1, ws.max_column+1):
+        ws.cell(2,c).value, ws.cell(3,c).value = ws.cell(3,c).value, ws.cell(2,c).value
+    # stale _Trade Meta row mapping now conflicts with moved comments
+    meta["B2"] = "t2"
+    meta["B3"] = "t1"
+    ws["R2"] = "moved-comment-target"
+    wb.save(out)
+    ov=read_master_journal_manual_overrides(out)
+    assert ov["t1"]["setup"] == "moved-comment-target"
 
 def test_balance_after_resolution_and_duration_display(tmp_path: Path):
     s=sample_snapshot()

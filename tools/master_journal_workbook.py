@@ -178,11 +178,12 @@ def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]
         idx={h:i for i,h in enumerate(headers)}
         rid_by_row={int(r[0]):str(r[1] or '').strip() for r in meta.iter_rows(min_row=2,values_only=True) if r and r[0] and r[1]}
         for row_num,r in enumerate(ws.iter_rows(min_row=2, values_only=True),start=2):
-            rid = rid_by_row.get(row_num,'')
-            if not rid:
-                cmt = ws.cell(row_num, 1).comment
-                if cmt and isinstance(cmt.text, str) and cmt.text.startswith("row_id:"):
-                    rid = cmt.text.split("row_id:", 1)[1].strip()
+            comment_rid = ""
+            cmt = ws.cell(row_num, 1).comment
+            if cmt and isinstance(cmt.text, str) and cmt.text.startswith("row_id:"):
+                comment_rid = cmt.text.split("row_id:", 1)[1].strip()
+            meta_rid = rid_by_row.get(row_num,'')
+            rid = comment_rid or meta_rid
             if not rid:
                 continue
             edits={}
