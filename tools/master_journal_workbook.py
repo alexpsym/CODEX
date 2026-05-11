@@ -13,7 +13,7 @@ from openpyxl.styles import PatternFill, Border, Side, Alignment, Color
 from openpyxl.utils import get_column_letter
 import calendar
 
-SHEET_ORDER=["Dashboard","All Trades","Instrument Averages","P&L Calendar","Equity Curve","Diagnostics","_Trade Meta"]
+SHEET_ORDER=["Dashboard","All Trades","Instrument Averages","P&L Calendar","Equity Curve","_Trade Meta"]
 EDITABLE_COLS=["Test","Setup","Timeframe","Breakeven","Notes"]
 
 
@@ -52,33 +52,60 @@ def _as_date(v: Any) -> date | None:
 
 
 def _fmt_duration(seconds: Any) -> str:
-    s = int(_as_float(seconds) or 0)
-    if s <= 0:
-        return "0s"
-    h, rem = divmod(s, 3600)
-    m, sec = divmod(rem, 60)
-    if h:
-        return f"{h}h {m}m"
-    if m:
-        return f"{m}m {sec}s"
-    return f"{sec}s"
+    v = _as_float(seconds)
+    if v is None:
+        return "—"
+    s = max(0, int(v))
+    days, rem = divmod(s, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    parts = []
+    if days:
+        parts.append(f"{days} day" + ("" if days == 1 else "s"))
+    if hours:
+        parts.append(f"{hours} hour" + ("" if hours == 1 else "s"))
+    if minutes:
+        parts.append(f"{minutes} minute" + ("" if minutes == 1 else "s"))
+    if secs or not parts:
+        parts.append(f"{secs} second" + ("" if secs == 1 else "s"))
+    return ", ".join(parts)
 
 
 
 
 
 def _fmt_duration_full(seconds: Any) -> str:
-    v=_as_float(seconds)
-    if v is None:
-        return "—"
-    s=max(0,int(v))
-    h, rem = divmod(s, 3600)
-    m, sec = divmod(rem, 60)
-    parts=[]
-    if h: parts.append(f"{h}h")
-    if m or h: parts.append(f"{m}m")
-    if sec or not parts: parts.append(f"{sec}s")
-    return ' '.join(parts)
+    return _fmt_duration(seconds)
+
+def _resolve_balance_after(row: Dict[str, Any]) -> float | None:
+    for key in ("analysis_balance_after_trade", "balance_after_trade", "cashflow_new_balance"):
+        val = _as_float(row.get(key))
+        if val is not None:
+            return val
+    return None
+
+def _resolved_all_trade_balances(rows: List[Dict[str, Any]]) -> Dict[str, float]:
+    indexed = list(enumerate(rows))
+    running: Dict[str, float] = {}
+    out: Dict[str, float] = {}
+    def _sort_key(item):
+        i, row = item
+        acct = str(row.get("account_label") or row.get("account") or "")
+        ts = str(row.get("close_time") or row.get("open_time") or "")
+        return (acct, ts, i)
+    for i, row in sorted(indexed, key=_sort_key):
+        acct = str(row.get("account_label") or row.get("account") or "")
+        resolved = _resolve_balance_after(row)
+        if resolved is not None:
+            running[acct] = resolved
+            out[str(i)] = resolved
+            continue
+        if acct in running:
+            pnl = _as_float(row.get("net_profit"))
+            if pnl is not None:
+                running[acct] = running[acct] + pnl
+                out[str(i)] = running[acct]
+    return out
 
 def _fmt_pct(v: Any) -> str:
     x=_as_float(v)
@@ -178,12 +205,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     groups = stats.get('groups') or {}
 
     dash=wb['Dashboard']
-    dash.sheet_view.showGridLines=False
     for c,w in [('A',30),('B',22),('C',30),('E',30),('F',22),('G',30),('I',30),('J',22),('K',30)]: dash.column_dimensions[c].width=w
-    for r in range(1,220):
-        for c in range(1,13):
-            dash.cell(r,c).fill=PatternFill('solid',fgColor='000B1220')
-            dash.cell(r,c).font=Font(color='00CBD5E1')
 
     by_market=(groups.get('by_market') or {})
     risk=(groups.get('risk_expectancy') or {})
@@ -211,14 +233,22 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
       ('Crypto', core_rows(by_market.get('crypto') or {}, ((by_market.get('crypto') or {}).get('money_by_currency') or {}))),
       ('Instrument leaders', [('Overall most wins',leaders.get('most_wins_instrument'),'neutral','leader',None,None,{}),('Overall most losses',leaders.get('most_losses_instrument'),'neutral','leader',None,None,{}),('FX most wins',leaders.get('fx_most_wins_instrument'),'neutral','leader',None,None,{}),('FX most losses',leaders.get('fx_most_losses_instrument'),'neutral','leader',None,None,{}),('Crypto most wins',leaders.get('crypto_most_wins_instrument'),'neutral','leader',None,None,{}),('Crypto most losses',leaders.get('crypto_most_losses_instrument'),'neutral','leader',None,None,{})])
     ]
-    for i,(title,srows) in enumerate(section_rows):
-      _write_stat_section(dash,2 + (i//3)*24,[1,5,9][i%3],title,srows)
+    lane_cols=[1,5,9]
+    lane_heights=[2,2,2]
+    for title,srows in section_rows:
+        lane=lane_heights.index(min(lane_heights))
+        uses_detail = title == "Duration" or any(((list(r)+[None]*7)[:7][5] not in (None, "", "—")) for r in srows)
+        section_height = _write_stat_section(dash, lane_heights[lane], lane_cols[lane], title, srows, use_detail_col=uses_detail)
+        lane_heights[lane] += section_height + 1
 
-    ws=wb['All Trades']; headers=['Open Time','Close Time','Account','Symbol','Side','Qty','Entry Price','Exit Price','Stop Loss Price','Target Price','Commission','Net P/L','Profit %','R-Multiple','Balance After','Trade Duration (s)']+EDITABLE_COLS+['__row_id']; ws.append(headers)
+    resolved_balances = _resolved_all_trade_balances(rows)
+    ws=wb['All Trades']; headers=['Open Time','Close Time','Account','Symbol','Side','Qty','Entry Price','Exit Price','Stop Loss Price','Target Price','Commission','Net P/L','Profit %','R-Multiple','Balance After','Trade Duration']+EDITABLE_COLS+['__row_id']; ws.append(headers)
     meta=wb['_Trade Meta']; meta.append(['all_trades_row','row_id'])
-    for row in rows:
-        ws.append([row.get('open_time'),row.get('close_time'),row.get('account_label') or row.get('account'),row.get('symbol'),row.get('side'),row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('stop_loss'),row.get('take_profit'),row.get('commission'),row.get('net_profit'),row.get('result_pct'),row.get('r_multiple'),row.get('balance_after_trade'),row.get('trade_duration_seconds'),'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',row.get('setup') or '',row.get('timeframe') or '',row.get('breakeven') or '',row.get('notes') or '', stable_row_id(row)])
+    for i, row in enumerate(rows):
+        ws.append([row.get('open_time'),row.get('close_time'),row.get('account_label') or row.get('account'),row.get('symbol'),row.get('side'),row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('stop_loss'),row.get('take_profit'),row.get('commission'),row.get('net_profit'),row.get('result_pct'),row.get('r_multiple'),resolved_balances.get(str(i)),_fmt_duration(row.get('trade_duration_seconds')),'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',row.get('setup') or '',row.get('timeframe') or '',row.get('breakeven') or '',row.get('notes') or '', stable_row_id(row)])
     _style_table_sheet(ws,1,'A2',True)
+    for rr in range(2, ws.max_row + 1):
+        ws.cell(rr, 15).number_format = '#,##0.00'
     for i,row in enumerate(rows,start=2): meta.append([i, stable_row_id(row)])
     ws.column_dimensions[get_column_letter(ws.max_column)].hidden=True
     meta.sheet_state='hidden'
@@ -244,15 +274,18 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             if txt.startswith('P/L '):
                 try: pnl=float(txt.split('\n')[0].replace('P/L ','').strip())
                 except Exception: pnl=None
-            if pnl is None:
-                cell.fill=PatternFill('solid',fgColor='00111C2D')
+            if pnl is None or pnl == 0:
+                cell.fill=PatternFill('solid',fgColor='00DDEBF7')
             elif pnl > 0:
-                cell.fill=PatternFill('solid',fgColor='0014532D')
-            elif pnl < 0:
-                cell.fill=PatternFill('solid',fgColor='004F1D1D')
+                cell.fill=PatternFill('solid',fgColor='00E2F0D9')
             else:
-                cell.fill=PatternFill('solid',fgColor='00111C2D')
-            cell.alignment=Alignment(wrap_text=True,vertical='top')
+                cell.fill=PatternFill('solid',fgColor='00FCE4D6')
+            cell.font = Font(color='00000000', bold=True)
+            cell.alignment=Alignment(wrap_text=True,vertical='center',horizontal='center')
+        cal.row_dimensions[rr].height = 30
+    cal.row_dimensions[1].height = 18
+    for cc in range(2, 14):
+        cal.column_dimensions[get_column_letter(cc)].width = 13
 
     eq=wb['Equity Curve']; by_date=defaultdict(dict); accounts=[]; carry={}; observed=defaultdict(int)
     for r in sorted(non_test,key=lambda x: str(x.get('close_time') or x.get('open_time') or '')):
@@ -262,12 +295,14 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         bal=_as_float(r.get('analysis_balance_after_trade'))
         if bal is None: bal=_as_float(r.get('balance_after_trade'))
         if bal is None: bal=_as_float(r.get('cashflow_new_balance'))
-        if bal is None:
-            prev=carry.get(acct)
-            bal=(prev if prev is not None else 0.0)+(_as_float(r.get('net_profit')) or 0.0)
-        carry[acct]=bal
-        by_date[d.isoformat()][acct]=bal
-        observed[acct]+=1
+        if bal is None and acct in carry:
+            pnl = _as_float(r.get('net_profit'))
+            if pnl is not None:
+                bal = carry[acct] + pnl
+        if bal is not None:
+            carry[acct]=bal
+            by_date[d.isoformat()][acct]=bal
+            observed[acct]+=1
     eq.append(['Date']+accounts); points=0; carry={}
     for d in sorted(by_date.keys()):
         row=[d]
@@ -277,17 +312,22 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             if carry.get(a) is not None: points+=1
         eq.append(row)
     _style_table_sheet(eq,1,'A2',True)
-    if points < 2 or len(accounts)==0 or not any(v>=2 for v in observed.values()): eq['A3']='Not enough equity data to chart.'
-    else:
-        chart=LineChart(); chart.title='Equity Curve'; chart.y_axis.title='Equity'; chart.x_axis.title='Date'
-        for col in range(2,2+len(accounts)): chart.add_data(Reference(eq,min_col=col,min_row=1,max_row=eq.max_row),titles_from_data=True)
-        chart.set_categories(Reference(eq,min_col=1,min_row=2,max_row=eq.max_row)); eq.add_chart(chart,f"{get_column_letter(max(2, eq.max_column+2))}2")
-
-    diag=wb['Diagnostics']; diagnostics=snapshot.get('diagnostics') if isinstance(snapshot.get('diagnostics'),dict) else {}
-    diag.append(['Key','Value']); diag.append(['sync_timestamp',snapshot.get('updated_at') or datetime.utcnow().isoformat()]); diag.append(['visible_trade_count',len(rows)])
-    for name in (diagnostics.get('local_workbook_names') or []): diag.append(['local_workbook',name])
-    for e in (diagnostics.get('errors') or []): diag.append(['error',str(e)])
-    _style_table_sheet(diag,1,'A2',True); _wrap_columns(diag,['B'])
+    chart_col = max(2, eq.max_column + 2)
+    made = 0
+    for idx, acct in enumerate(accounts):
+        if observed.get(acct, 0) < 2:
+            continue
+        col = 2 + idx
+        chart=LineChart(); chart.title=f'Equity Curve - {acct}'; chart.y_axis.title='Equity'; chart.x_axis.title='Date'
+        chart.add_data(Reference(eq,min_col=col,min_row=1,max_row=eq.max_row),titles_from_data=True)
+        chart.set_categories(Reference(eq,min_col=1,min_row=2,max_row=eq.max_row))
+        chart.width = 8.5; chart.height = 5.2
+        row_offset = (made // 2) * 16 + 2
+        col_offset = chart_col + (made % 2) * 8
+        eq.add_chart(chart, f"{get_column_letter(col_offset)}{row_offset}")
+        made += 1
+    if made == 0:
+        eq['A3']='Not enough equity data to chart.'
 
     output_path.parent.mkdir(parents=True, exist_ok=True); wb.save(output_path)
     return {'ok':True,'path':str(output_path)}
@@ -311,13 +351,14 @@ def _format_stat_card(ws, top_row, left_col, bottom_row, right_col):
             ws.cell(r,c).border=Border(left=thin,right=thin,top=thin,bottom=thin)
 
 
-def _write_stat_section(ws, start_row, start_col, title, rows):
-    ws.merge_cells(start_row=start_row,start_column=start_col,end_row=start_row,end_column=start_col+2)
-    h=ws.cell(start_row,start_col,title); h.font=Font(bold=True,color='0060A5FA'); h.fill=PatternFill('solid',fgColor='00111C2D')
+def _write_stat_section(ws, start_row, start_col, title, rows, use_detail_col=True):
+    right_col = start_col + (2 if use_detail_col else 1)
+    ws.merge_cells(start_row=start_row,start_column=start_col,end_row=start_row,end_column=right_col)
+    h=ws.cell(start_row,start_col,title); h.font=Font(bold=True,color='00000000'); h.fill=PatternFill('solid',fgColor='00EAF2F8')
     r=start_row+1
     for row in rows:
         label,val,sem,kind,money_key,detail_text,money_map = (list(row)+[None]*7)[:7]
-        ws.cell(r,start_col,_excel_scalar(label)).font=Font(color='00E2E8F0')
+        ws.cell(r,start_col,_excel_scalar(label)).font=Font(color='00000000')
         if kind=='pct': disp=_fmt_pct(val)
         elif kind=='r': disp=_fmt_r(val)
         elif kind=='money': disp=_fmt_money(val, money_map or {}, money_key or '')
@@ -326,11 +367,13 @@ def _write_stat_section(ws, start_row, start_col, title, rows):
         elif kind=='count': disp='—' if val is None else str(val)
         else: disp='—' if val is None else str(val)
         vcell=ws.cell(r,start_col+1,_excel_scalar(disp))
-        dcell=ws.cell(r,start_col+2,_excel_scalar(detail_text or '—')); dcell.alignment=Alignment(wrap_text=True,vertical='center')
+        if use_detail_col:
+            dcell=ws.cell(r,start_col+2,_excel_scalar(detail_text or '—')); dcell.alignment=Alignment(wrap_text=True,vertical='center')
         if sem in {'profit','loss','drawdown'}:
             f=copy(vcell.font); f.color=Color(rgb='00008000' if sem=='profit' else '00FF0000'); vcell.font=f
         r+=1
-    _format_stat_card(ws,start_row,start_col,r-1,start_col+2)
+    _format_stat_card(ws,start_row,start_col,r-1,right_col)
+    return r - start_row
 
 
 def _style_header_row(ws, row=1):
@@ -375,3 +418,7 @@ def _style_table_sheet(ws, header_row=1, freeze='A2', autofilter=True):
     if autofilter:
         ws.auto_filter.ref=f"A{header_row}:{get_column_letter(ws.max_column)}{max(header_row+1,ws.max_row)}"
     _apply_data_borders(ws)
+    for cell in ws[header_row]:
+        cell.font = Font(name='Calibri', size=11, bold=True, color='00000000')
+    for r in range(header_row + 1, ws.max_row + 1):
+        ws.row_dimensions[r].height = 15
