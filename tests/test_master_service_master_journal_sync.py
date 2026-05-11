@@ -392,6 +392,7 @@ def test_signed_get_keeps_valid_json(monkeypatch):
     class Resp:
         status_code=200
         text='ok'
+        content=b'{"retCode":0,"result":{"x":1}}'
         def json(self): return {'retCode':0,'result':{'x':1}}
     class Client:
         async def __aenter__(self): return self
