@@ -222,10 +222,9 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     for title,srows in section_rows:
         lane=lane_heights.index(min(lane_heights))
         uses_detail = title == "Duration" or any(((list(r)+[None]*7)[:7][5] not in (None, "", "—")) for r in srows)
-        section_height = _write_stat_section(dash, lane_heights[lane], lane_cols[lane], title, srows, use_detail_col=uses_detail)
+        section_height = _write_stat_section(dash, lane_heights[lane], lane_cols[lane], title, srows, use_detail_col=uses_detail, apply_semantic_cf=True)
         lane_heights[lane] += section_height + 1
     _write_instrument_leaders_section(dash, lane_heights[2], lane_cols[2], leaders)
-    _apply_dashboard_conditional_formatting(dash)
 
     resolved_balances = _resolved_all_trade_balances(rows)
     ws=wb['All Trades']; headers=['Open Time','Close Time','Account','Symbol','Side','Qty','Entry Price','Exit Price','Stop Loss Price','Target Price','Commission','Net P/L','Profit %','R-Multiple','Balance After','Trade Duration']+EDITABLE_COLS; ws.append(headers)
@@ -289,7 +288,8 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     for rr in range(4, cal.max_row + 1, 2):
         for cc in range(2, 14):
             cal.cell(rr, cc).number_format = "0"
-    _profit_loss_rules(cal, f"B3:M{max(3, cal.max_row)}")
+    for rr in range(3, cal.max_row + 1, 2):
+        _profit_loss_rules(cal, f"B{rr}:M{rr}")
 
     output_path.parent.mkdir(parents=True, exist_ok=True); wb.save(output_path)
     return {'ok':True,'path':str(output_path)}
@@ -307,7 +307,7 @@ def _table_border(ws, top_row, left_col, bottom_row, right_col):
             )
 
 
-def _write_stat_section(ws, start_row, start_col, title, rows, use_detail_col=False):
+def _write_stat_section(ws, start_row, start_col, title, rows, use_detail_col=False, apply_semantic_cf=False):
     right_col = start_col + 1
     ws.merge_cells(start_row=start_row,start_column=start_col,end_row=start_row,end_column=right_col)
     h=ws.cell(start_row,start_col,title); h.font=Font(bold=True,color='00000000'); h.fill=PatternFill('solid',fgColor='00EAF2F8')
@@ -334,6 +334,13 @@ def _write_stat_section(ws, start_row, start_col, title, rows, use_detail_col=Fa
             vcell.value = _fmt_duration_full(val)
         else:
             vcell.value = '—' if val is None else val
+        if apply_semantic_cf and isinstance(vcell.value, (int, float)):
+            if sem == "auto":
+                _profit_loss_rules(ws, f"{vcell.coordinate}:{vcell.coordinate}")
+            elif sem in {"loss", "drawdown"}:
+                _negative_impact_rule(ws, f"{vcell.coordinate}:{vcell.coordinate}")
+            elif sem == "profit" and kind in {"pct", "r", "money"}:
+                _profit_loss_rules(ws, f"{vcell.coordinate}:{vcell.coordinate}")
         if detail_text not in (None, "", "—"):
             r += 1
             ws.cell(r, start_col, "Source").font = Font(bold=True)
@@ -358,21 +365,6 @@ def _profit_loss_rules(ws, cell_range: str):
 
 def _negative_impact_rule(ws, cell_range: str):
     ws.conditional_formatting.add(cell_range, CellIsRule(operator='notEqual', formula=['0'], fill=PatternFill('solid', fgColor=LOSS_FILL), font=Font(color=LOSS_FONT)))
-
-
-def _apply_dashboard_conditional_formatting(ws):
-    max_row = ws.max_row
-    _profit_loss_rules(ws, f"B1:K{max_row}")
-    for r in range(1, max_row + 1):
-        label = str(ws.cell(r, 1).value or "").strip().lower()
-        if label in {"gross loss", "max loss", "max drawdown", "avg drawdown"}:
-            _negative_impact_rule(ws, f"B{r}:B{r}")
-        label_e = str(ws.cell(r, 5).value or "").strip().lower()
-        if label_e in {"gross loss", "max loss", "max drawdown", "avg drawdown"}:
-            _negative_impact_rule(ws, f"F{r}:F{r}")
-        label_i = str(ws.cell(r, 9).value or "").strip().lower()
-        if label_i in {"gross loss", "max loss", "max drawdown", "avg drawdown"}:
-            _negative_impact_rule(ws, f"J{r}:J{r}")
 
 
 def _style_table_sheet(ws, header_row=1, freeze='A2', autofilter=True):

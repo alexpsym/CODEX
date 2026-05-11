@@ -1,6 +1,30 @@
 from pathlib import Path
 from openpyxl import load_workbook
 from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, SHEET_ORDER
+from openpyxl.utils.cell import coordinate_to_tuple
+
+def _cf_ranges(ws):
+    return [str(k.sqref) for k in ws.conditional_formatting._cf_rules.keys()]
+
+def _cell_covered(ranges, cell):
+    row, col = coordinate_to_tuple(cell)
+    from openpyxl.utils.cell import range_boundaries
+    for rg in ranges:
+        for part in rg.split():
+            min_col, min_row, max_col, max_row = range_boundaries(part)
+            if min_row <= row <= max_row and min_col <= col <= max_col:
+                return True
+    return False
+
+def _all_rule_colors(ws):
+    out = []
+    for rules in ws.conditional_formatting._cf_rules.values():
+        for rule in rules:
+            dxf = getattr(rule, "dxf", None)
+            fill = getattr(getattr(dxf, "fill", None), "fgColor", None)
+            font = getattr(getattr(dxf, "font", None), "color", None)
+            out.append(((fill.rgb or "") if fill else "", (font.rgb or "") if font else ""))
+    return out
 
 
 def sample_snapshot():
@@ -31,6 +55,9 @@ def test_dashboard_parity_and_equity(tmp_path: Path):
     assert any('hour' in v or 'minute' in v or 'second' in v for v in vals)
     assert any('· 2026-05-0' in v for v in vals)
     assert 'Equity Curve' not in wb.sheetnames
+    ranges = _cf_ranges(wb["Dashboard"])
+    assert all(not r.startswith("B1:K") for r in ranges)
+    assert not _cell_covered(ranges, "B3")  # Trades count should not be profit/loss colored
 
 
 def test_manual_override_roundtrip(tmp_path: Path):
@@ -39,7 +66,7 @@ def test_manual_override_roundtrip(tmp_path: Path):
     ov=read_master_journal_manual_overrides(out)
     assert ov['t1']['is_test_trade'] is True and ov['t1']['setup']=='AAA'
 
-def test_calendar_month_fill_colors(tmp_path: Path):
+def test_calendar_month_conditional_formatting_rows(tmp_path: Path):
     snap=sample_snapshot()
     snap['items']=[
         {'id':'p','row_type':'trade','account':'A','open_time':'2026-05-01','close_time':'2026-05-01','net_profit':10,'result_pct':1.2,'is_test_trade':False},
@@ -51,7 +78,11 @@ def test_calendar_month_fill_colors(tmp_path: Path):
     assert isinstance(may.value, float) and isinstance(jun.value, float)
     assert may.number_format.endswith('%')
     assert jun.number_format.endswith('%')
-    assert len(cal.conditional_formatting) > 0
+    ranges = _cf_ranges(cal)
+    assert _cell_covered(ranges, "F3")
+    assert _cell_covered(ranges, "G3")
+    assert not _cell_covered(ranges, "F4")
+    assert not _cell_covered(ranges, "G4")
     assert mar.value in ('', None)
     heights=[cal.row_dimensions[r].height for r in range(2, cal.max_row+1)]
     assert len(set(heights)) == 1
@@ -119,6 +150,28 @@ def test_sheet_order_and_hidden_meta(tmp_path: Path):
     assert len(wb["Dashboard"].conditional_formatting) > 0
     assert len(wb["Instrument Averages"].conditional_formatting) > 0
     assert len(wb["P&L Calendar"].conditional_formatting) > 0
+
+def test_conditional_format_colors_and_dashboard_semantics(tmp_path: Path):
+    out=tmp_path/'cf.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
+    dash = wb["Dashboard"]
+    all_trades = wb["All Trades"]
+    # ensure dashboard loss magnitude cells are targeted
+    positions={(r,c):str(dash.cell(r,c).value or "").strip().lower() for r in range(1,200) for c in [1,5,9]}
+    for (r,c),v in positions.items():
+        if v in {"gross loss","max loss","max drawdown","avg drawdown"}:
+            value_col = c+1
+            cell = f"{chr(64+value_col)}{r}"
+            if isinstance(dash.cell(r, value_col).value, (int, float)):
+                assert _cell_covered(_cf_ranges(dash), cell)
+    # leaders numeric counts should not be targeted
+    assert not _cell_covered(_cf_ranges(dash), "K4")
+    # all trades configured ranges exist
+    tr = _cf_ranges(all_trades)
+    assert any("K2:K" in r for r in tr)
+    assert any("L2:N" in r for r in tr)
+    colors = _all_rule_colors(all_trades) + _all_rule_colors(dash) + _all_rule_colors(wb["P&L Calendar"]) + _all_rule_colors(wb["Instrument Averages"])
+    assert any("C6EFCE" in f and "006100" in c for f, c in colors)
+    assert any("FFC7CE" in f and "9C0006" in c for f, c in colors)
 
 def test_instrument_currency_and_percent_formats(tmp_path: Path):
     out=tmp_path/'fmt.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
