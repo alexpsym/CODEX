@@ -99,7 +99,7 @@ def _fmt_leader(v: Any) -> str:
         return '—' if not v else str(v)
     sym=v.get('symbol') or '—'
     w=v.get('wins'); l=v.get('losses'); t=v.get('total_trades')
-    return f"{sym} · W:{w if w is not None else '—'} L:{l if l is not None else '—'} T:{t if t is not None else '—'}"
+    return f"{sym} — wins {w if w is not None else '—'}, losses {l if l is not None else '—'}, trades {t if t is not None else '—'}"
 
 def _fmt_detail_src(src: Any) -> str:
     if not isinstance(src,dict):
