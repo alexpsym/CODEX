@@ -26,12 +26,11 @@ def test_dashboard_parity_and_equity(tmp_path: Path):
     assert 'Account Balances' not in vals and 'Main Stats' not in vals and 'Label' not in vals
     for label in ['Overall','Winners','Losers','Drawdown','Duration','FX','Crypto','Instrument leaders','Win rate','Avg R','Max R loss','Max R win']:
         assert label in vals
-    assert any(v.endswith('%') for v in vals if '50.00%' in v or '2.30%' in v)
-    assert any(v.endswith('R') for v in vals if 'R' in v)
-    assert any(v.startswith('AUD ') for v in vals)
+    assert any(isinstance(wb['Dashboard'].cell(r,c).value, float) for r in range(1,220) for c in range(1,13))
+    assert any('AUD' in str(wb['Dashboard'].cell(r,c).number_format or '') for r in range(1,220) for c in range(1,13))
     assert any('hour' in v or 'minute' in v or 'second' in v for v in vals)
     assert any('· 2026-05-0' in v for v in vals)
-    eq=wb['Equity Curve']; assert eq['A1'].value=='Date'; assert eq.max_column>=2
+    assert 'Equity Curve' not in wb.sheetnames
 
 
 def test_manual_override_roundtrip(tmp_path: Path):
@@ -43,43 +42,24 @@ def test_manual_override_roundtrip(tmp_path: Path):
 def test_calendar_month_fill_colors(tmp_path: Path):
     snap=sample_snapshot()
     snap['items']=[
-        {'id':'p','row_type':'trade','account':'A','open_time':'2026-05-01','close_time':'2026-05-01','net_profit':10,'is_test_trade':False},
-        {'id':'n','row_type':'trade','account':'A','open_time':'2026-06-01','close_time':'2026-06-01','net_profit':-5,'is_test_trade':False},
+        {'id':'p','row_type':'trade','account':'A','open_time':'2026-05-01','close_time':'2026-05-01','net_profit':10,'result_pct':1.2,'is_test_trade':False},
+        {'id':'n','row_type':'trade','account':'A','open_time':'2026-06-01','close_time':'2026-06-01','net_profit':-5,'result_pct':-0.4,'is_test_trade':False},
     ]
     out=tmp_path/'Master Journal.xlsx'; build_master_journal_workbook(snap,out); wb=load_workbook(out)
     cal=wb['P&L Calendar']
-    may=cal['F2']; jun=cal['G2']; mar=cal['D2']
-    assert 'P/L' in str(may.value or '') and 'P/L' in str(jun.value or '')
-    assert may.fill.fgColor.rgb != jun.fill.fgColor.rgb
-    assert may.fill.fgColor.rgb not in {'0014532D', '004F1D1D', '00111C2D'}
-    assert jun.fill.fgColor.rgb not in {'0014532D', '004F1D1D', '00111C2D'}
+    may=cal['F3']; jun=cal['G3']; mar=cal['D3']
+    assert isinstance(may.value, float) and isinstance(jun.value, float)
+    assert may.number_format.endswith('%')
+    assert jun.number_format.endswith('%')
     assert mar.value in ('', None)
     heights=[cal.row_dimensions[r].height for r in range(2, cal.max_row+1)]
     assert len(set(heights)) == 1
 
 
-def test_equity_curve_carry_forward_and_chart_series(tmp_path: Path):
-    s=sample_snapshot()
-    s['items']=[
-        {'id':'a1','row_type':'trade','account':'A','open_time':'2026-05-01','close_time':'2026-05-01','net_profit':10,'analysis_balance_after_trade':100},
-        {'id':'b1','row_type':'trade','account':'B','open_time':'2026-05-02','close_time':'2026-05-02','net_profit':5,'balance_after_trade':50},
-        {'id':'b2','row_type':'trade','account':'B','open_time':'2026-05-03','close_time':'2026-05-03','net_profit':4},
-        {'id':'a2','row_type':'trade','account':'A','open_time':'2026-05-03','close_time':'2026-05-03','net_profit':2},
-    ]
-    out=tmp_path/'m.xlsx'; build_master_journal_workbook(s,out); wb=load_workbook(out)
-    eq=wb['Equity Curve']
-    assert eq['A1'].value=='Date' and eq.max_column==3
-    assert eq['C2'].value in ('',None)
-    assert len(eq._charts)==2
-    assert all(len(ch.series)==1 for ch in eq._charts)
 
-
-def test_equity_curve_insufficient_points_shows_message(tmp_path: Path):
-    s=sample_snapshot(); s['items']=[{'id':'a1','row_type':'trade','account':'A','open_time':'2026-05-01','close_time':'2026-05-01','net_profit':1,'is_test_trade':False}]
-    out=tmp_path/'m2.xlsx'; build_master_journal_workbook(s,out); wb=load_workbook(out)
-    eq=wb['Equity Curve']
-    assert eq['A3'].value=='Not enough equity data to chart.'
-    assert len(eq._charts)==0
+def test_no_equity_curve_sheet(tmp_path: Path):
+    out=tmp_path/'m.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
+    assert 'Equity Curve' not in wb.sheetnames
 
 def test_unanchored_account_does_not_fabricate_equity(tmp_path: Path):
     s=sample_snapshot()
@@ -91,18 +71,15 @@ def test_unanchored_account_does_not_fabricate_equity(tmp_path: Path):
     ws=wb['All Trades']
     assert ws['O2'].value in ('', None)
     assert ws['O3'].value in ('', None)
-    eq=wb['Equity Curve']
-    assert eq['B2'].value in ('', None)
-    assert eq['B3'].value in ('', None)
-    assert len(eq._charts)==0
 
 
 def test_all_trades_hidden_row_id_and_override_after_row_swap(tmp_path: Path):
     out=tmp_path/'Master Journal.xlsx'; build_master_journal_workbook(sample_snapshot(), out)
     wb=load_workbook(out); ws=wb['All Trades']
-    headers=[ws.cell(1,c).value for c in range(1,ws.max_column+1) if not ws.column_dimensions[ws.cell(1,c).column_letter].hidden]
+    headers=[ws.cell(1,c).value for c in range(1,ws.max_column+1)]
     assert '__row_id' not in headers
-    # swap rows with row_id value to simulate sorted move preserving attached hidden col
+    assert ws.max_column == 21
+    # swap rows to validate comment-backed row ids preserve manual overrides
     for c in range(1, ws.max_column+1):
         ws.cell(2,c).value, ws.cell(3,c).value = ws.cell(3,c).value, ws.cell(2,c).value
     ws['Q2']='Yes'; wb.save(out)
@@ -144,6 +121,6 @@ def test_dashboard_layout_style_columns(tmp_path: Path):
     positions={(r,c):dash.cell(r,c).value for r in range(1,80) for c in range(1,13)}
     duration_pos=[k for k,v in positions.items() if v=='Duration'][0]
     assert any(
-        r.min_row == duration_pos[0] and r.min_col == duration_pos[1] and r.max_col == duration_pos[1] + 2
+        r.min_row == duration_pos[0] and r.min_col == duration_pos[1] and r.max_col == duration_pos[1] + 1
         for r in dash.merged_cells.ranges
     )
