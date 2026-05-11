@@ -34,7 +34,8 @@ def sample_snapshot():
             {'id':'t1','row_type':'trade','symbol':'EURUSD','asset_class':'fx','side':'BUY','open_time':'2026-05-01T00:00:00Z','close_time':'2026-05-01T01:00:00Z','net_profit':120.5,'result_pct':2.3,'r_multiple':1.2,'stop_loss':1.09,'take_profit':1.12,'entry_price':1.1,'trade_duration_seconds':3700,'analysis_balance_after_trade':1000,'account':'OANDA DEMO','setup':'S1'},
             {'id':'t2','row_type':'trade','symbol':'BTCUSDT','asset_class':'crypto','side':'SELL','open_time':'2026-05-02T00:00:00Z','close_time':'2026-05-02T02:00:00Z','net_profit':-50.0,'result_pct':-1.1,'r_multiple':-0.8,'stop_loss':61000,'take_profit':59000,'entry_price':60000,'trade_duration_seconds':7215,'analysis_balance_after_trade':950,'account':'BYBIT','setup':'S2'},
         ],
-        'stats':{'totals':{'trades':2,'wins':1,'losses':1,'break_even':0,'win_rate_pct':50.0,'net_profit_total':70.5,'gross_gain':120.5,'gross_loss':50.0,'money_by_currency':{'net_profit_total':{'AUD':70.5},'gross_gain':{'AUD':120.5},'gross_loss':{'AUD':50.0},'max_gain':{'AUD':120.5},'max_loss':{'AUD':50.0}}},'groups':{'by_market':{'overall':{'trades':2,'wins':1,'losses':1,'break_even':0,'win_rate_pct':50.0,'net_profit_total':70.5,'gross_gain':120.5,'gross_loss':50.0,'avg_result_pct':0.6,'min_result_pct':-1.1,'max_result_pct':2.3,'avg_r_multiple':0.2,'min_r_multiple':-0.8,'max_r_multiple':1.2,'max_gain':120.5,'max_loss':50.0,'avg_stop_pct':1.1,'avg_target_pct':2.2,'avg_duration_seconds':5457,'money_by_currency':{'net_profit_total':{'AUD':70.5},'gross_gain':{'AUD':120.5},'gross_loss':{'AUD':50.0},'max_gain':{'AUD':120.5},'max_loss':{'AUD':50.0}},'metric_sources':{'min_result_pct':{'symbol':'BTCUSDT','date':'2026-05-02'},'max_result_pct':{'symbol':'EURUSD','date':'2026-05-01'}}},'fx':{},'crypto':{}},'risk_expectancy':{'avg_stop_pct_winners':1,'avg_stop_pct_losers':2,'avg_target_pct_winners':3,'avg_target_pct_losers':4,'avg_result_pct_winners':2.3,'avg_result_pct_losers':-1.1,'avg_r_multiple_winners':1.2,'avg_r_multiple_losers':-0.8,'max_drawdown_pct':5,'avg_drawdown_pct':2},'duration':{'overall_avg_seconds':5457,'overall_shortest_seconds':3700,'overall_longest_seconds':7215,'fx_shortest_seconds':3700,'fx_longest_seconds':3700,'crypto_shortest_seconds':7215,'crypto_longest_seconds':7215},'leaders':{}},'by_instrument':[{'symbol':'EURUSD','asset_class':'fx','total_trades':1,'long_trades':1,'short_trades':0,'wins':1,'losses':0,'break_even':0,'net_profit_total':120.5,'avg_net_profit':120.5,'win_rate_pct':100,'avg_sl_pct_wins':1,'avg_sl_pct_losses':None,'avg_tp_pct_wins':2,'avg_tp_pct_losses':None,'avg_trade_duration_seconds':3700,'min_trade_duration_seconds':3700,'max_trade_duration_seconds':3700}]}
+        'stats':{'totals':{'trades':2,'wins':1,'losses':1,'break_even':0,'win_rate_pct':50.0,'net_profit_total':70.5,'gross_gain':120.5,'gross_loss':50.0,'money_by_currency':{'net_profit_total':{'AUD':70.5},'gross_gain':{'AUD':120.5},'gross_loss':{'AUD':50.0},'max_gain':{'AUD':120.5},'max_loss':{'AUD':50.0}}},'groups':{'by_market':{'overall':{'trades':2,'wins':1,'losses':1,'break_even':0,'win_rate_pct':50.0,'net_profit_total':70.5,'gross_gain':120.5,'gross_loss':50.0,'avg_result_pct':0.6,'min_result_pct':-1.1,'max_result_pct':2.3,'avg_r_multiple':0.2,'min_r_multiple':-0.8,'max_r_multiple':1.2,'max_gain':120.5,'max_loss':50.0,'avg_stop_pct':1.1,'avg_target_pct':2.2,'avg_duration_seconds':5457,'money_by_currency':{'net_profit_total':{'AUD':70.5},'gross_gain':{'AUD':120.5},'gross_loss':{'AUD':50.0},'max_gain':{'AUD':120.5},'max_loss':{'AUD':50.0}},'metric_sources':{'min_result_pct':{'symbol':'BTCUSDT','date':'2026-05-02'},'max_result_pct':{'symbol':'EURUSD','date':'2026-05-01'}}},'fx':{},'crypto':{}},'risk_expectancy':{'avg_stop_pct_winners':1,'avg_stop_pct_losers':2,'avg_target_pct_winners':3,'avg_target_pct_losers':4,'avg_result_pct_winners':2.3,'avg_result_pct_losers':-1.1,'avg_r_multiple_winners':1.2,'avg_r_multiple_losers':-0.8,'max_drawdown_pct':5,'avg_drawdown_pct':2},'duration':{'overall_avg_seconds':5457,'overall_shortest_seconds':3700,'overall_longest_seconds':7215,'fx_shortest_seconds':3700,'fx_longest_seconds':3700,'crypto_shortest_seconds':7215,'crypto_longest_seconds':7215},'leaders':{}},'by_instrument':[{'symbol':'EURUSD','asset_class':'fx','total_trades':1,'long_trades':1,'short_trades':0,'wins':1,'losses':0,'break_even':0,'net_profit_total':120.5,'avg_net_profit':120.5,'win_rate_pct':100,'avg_sl_pct_wins':1,'avg_sl_pct_losses':None,'avg_tp_pct_wins':2,'avg_tp_pct_losses':None,'avg_trade_duration_seconds':3700,'min_trade_duration_seconds':3700,'max_trade_duration_seconds':3700}]},
+        'balances':[{'account_label':'Bybit Live','balance':10.123456789,'currency':'USDT','as_of':'2026-05-10'}]
     }
 
 
@@ -47,7 +48,7 @@ def test_dashboard_parity_and_equity(tmp_path: Path):
     out=tmp_path/'Master Journal.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
     assert wb.sheetnames == SHEET_ORDER
     vals=[str(wb['Dashboard'].cell(r,c).value or '') for r in range(1,220) for c in range(1,13)]
-    assert 'Account Balances' not in vals and 'Main Stats' not in vals and 'Label' not in vals
+    assert 'Account Balances' in vals and 'Main Stats' not in vals and 'Label' not in vals
     for label in ['Overall','Winners','Losers','Drawdown','Duration','FX','Crypto','Instrument leaders','Win rate','Avg R','Max R loss','Max R win']:
         assert label in vals
     assert any(isinstance(wb['Dashboard'].cell(r,c).value, float) for r in range(1,220) for c in range(1,13))
@@ -123,6 +124,7 @@ def test_all_trades_hidden_row_id_and_override_after_row_swap(tmp_path: Path):
     assert any(v.get('is_test_trade') is True for v in ov.values())
     assert len(ws.conditional_formatting) > 0
     assert ws["M2"].number_format == "0.00%"
+    assert ws["A2"].comment is None
     assert ws["M2"].value in (0.023, -0.011)
 
 def test_balance_after_resolution_and_duration_display(tmp_path: Path):
@@ -205,6 +207,8 @@ def test_instrument_currency_and_percent_formats(tmp_path: Path):
     assert inst["Q2"].value == 1.0
     assert ("AUD" in (inst["O2"].number_format or "")) or ("UNKNOWN" in (inst["O2"].number_format or ""))
     assert inst["O2"].number_format != "General"
+    assert inst["D2"].number_format == "0;-0;;@"
+    assert inst["E2"].number_format == "0;-0;;@"
 
 def test_dashboard_layout_style_columns(tmp_path: Path):
     out=tmp_path/'db.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
@@ -217,3 +221,44 @@ def test_dashboard_layout_style_columns(tmp_path: Path):
         r.min_row == duration_pos[0] and r.min_col == duration_pos[1] and r.max_col == duration_pos[1] + 1
         for r in dash.merged_cells.ranges
     )
+
+
+def test_monthly_aud_row_uses_result_currency_and_excluded_from_metrics(tmp_path: Path):
+    s = sample_snapshot()
+    s["items"] = [
+        {
+            "id": "t1",
+            "row_type": "trade",
+            "symbol": "EURUSD",
+            "account": "OANDA",
+            "open_time": "2026-04-02T00:00:00+10:00",
+            "close_time": "2026-04-02T01:00:00+10:00",
+            "net_profit": 10,
+            "result_pct": 1.0,
+        },
+        {
+            "id": "monthly_aud_reval:bybit_live:2026-04",
+            "row_type": "monthly_aud_reval",
+            "account": "live",
+            "account_label": "Bybit Live",
+            "symbol": "MONTHLY AUD P/L",
+            "open_time": "2026-04-01T00:00:00+10:00",
+            "close_time": "2026-04-30T23:59:59+10:00",
+            "result_cash": 123.45,
+            "result_currency": "AUD",
+        },
+    ]
+    out = tmp_path / "monthly.xlsx"
+    build_master_journal_workbook(s, out)
+    wb = load_workbook(out)
+    ws = wb["All Trades"]
+    monthly_rows = [r for r in range(2, ws.max_row + 1) if ws.cell(r, 4).value == "MONTHLY AUD P/L"]
+    assert len(monthly_rows) == 1
+    mr = monthly_rows[0]
+    assert ws.cell(mr, 12).value == 123.45
+    fmt = str(ws.cell(mr, 12).number_format or "")
+    assert "AUD" in fmt
+    assert "UNKNOWN" not in fmt
+    # metrics remain from trade rows only
+    cal = wb["P&L Calendar"]
+    assert cal["E4"].value == 1  # April trades count

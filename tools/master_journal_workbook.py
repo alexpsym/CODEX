@@ -8,7 +8,6 @@ from openpyxl.styles import Font
 from openpyxl.worksheet.datavalidation import DataValidation
 import hashlib
 from openpyxl.styles import PatternFill, Border, Side, Alignment
-from openpyxl.comments import Comment
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.utils import get_column_letter
 import calendar
@@ -111,6 +110,28 @@ def _resolved_all_trade_balances(rows: List[Dict[str, Any]]) -> Dict[str, float]
                 out[str(i)] = running[acct]
     return out
 
+ZERO_HIDE_FORMAT = "0;-0;;@"
+
+def _currency_code(*values: Any) -> str:
+    for value in values:
+        text = str(value or "").strip().upper()
+        if text:
+            return text
+    return "UNKNOWN"
+
+def _is_crypto_currency(code: str) -> bool:
+    c = str(code or "").upper()
+    return c in {"USDT", "BTC", "ETH", "SOL", "XRP", "USDC"}
+
+def _currency_number_format(code: str, *, force_decimals: int | None = None) -> str:
+    c = _currency_code(code)
+    if force_decimals is not None:
+        decimals = "0" * max(0, force_decimals)
+        return f'#,##0.{decimals} "{c}"'
+    if _is_crypto_currency(c):
+        return f'#,##0.########## "{c}"'
+    return f'#,##0.00 "{c}"'
+
 def _fmt_detail_src(src: Any) -> str:
     if not isinstance(src,dict):
         return '—'
@@ -157,11 +178,11 @@ def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]
         idx={h:i for i,h in enumerate(headers)}
         rid_by_row={int(r[0]):str(r[1] or '').strip() for r in meta.iter_rows(min_row=2,values_only=True) if r and r[0] and r[1]}
         for row_num,r in enumerate(ws.iter_rows(min_row=2, values_only=True),start=2):
-            rid = ""
-            cmt = ws.cell(row_num, 1).comment
-            if cmt and isinstance(cmt.text, str) and cmt.text.startswith("row_id:"):
-                rid = cmt.text.split("row_id:", 1)[1].strip()
-            rid = rid or rid_by_row.get(row_num,'')
+            rid = rid_by_row.get(row_num,'')
+            if not rid:
+                cmt = ws.cell(row_num, 1).comment
+                if cmt and isinstance(cmt.text, str) and cmt.text.startswith("row_id:"):
+                    rid = cmt.text.split("row_id:", 1)[1].strip()
             if not rid:
                 continue
             edits={}
@@ -183,8 +204,9 @@ def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]
 def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -> Dict[str, Any]:
     wb=Workbook(); wb.remove(wb.active)
     for s in SHEET_ORDER: wb.create_sheet(s)
-    rows=[r for r in (snapshot.get('items') or []) if isinstance(r,dict) and str(r.get('row_type') or 'trade')=='trade']
-    non_test=[r for r in rows if not _is_test_trade_value(r.get('is_test_trade'))]
+    rows=[r for r in (snapshot.get('items') or []) if isinstance(r,dict) and str(r.get('row_type') or 'trade') in {'trade','monthly_aud_reval'}]
+    metric_rows=[r for r in rows if str(r.get('row_type') or 'trade')=='trade']
+    non_test=[r for r in metric_rows if not _is_test_trade_value(r.get('is_test_trade'))]
     stats = snapshot.get('stats') or {}
     totals = stats.get('totals') or {}
     groups = stats.get('groups') or {}
@@ -217,25 +239,55 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
       ('FX', core_rows(by_market.get('fx') or {}, ((by_market.get('fx') or {}).get('money_by_currency') or {}))),
       ('Crypto', core_rows(by_market.get('crypto') or {}, ((by_market.get('crypto') or {}).get('money_by_currency') or {}))),
     ]
-    lane_cols=[1,5,9]
-    lane_heights=[2,2,2]
-    for title,srows in section_rows:
-        lane=lane_heights.index(min(lane_heights))
+    fixed_layout = {'Overall': (1,1), 'FX': (1,3), 'Crypto': (1,5), 'Winners': (1,7), 'Losers': (6,7), 'Drawdown': (11,7), 'Duration': (1,9)}
+    end_rows = {}
+    for title, srows in section_rows:
+        sr, sc = fixed_layout[title]
         uses_detail = title == "Duration" or any(((list(r)+[None]*7)[:7][5] not in (None, "", "—")) for r in srows)
-        section_height = _write_stat_section(dash, lane_heights[lane], lane_cols[lane], title, srows, use_detail_col=uses_detail, apply_semantic_cf=True)
-        lane_heights[lane] += section_height + 1
-    _write_instrument_leaders_section(dash, lane_heights[2], lane_cols[2], leaders)
+        end_rows[title] = sr + _write_stat_section(dash, sr, sc, title, srows, use_detail_col=uses_detail, apply_semantic_cf=True)
+    leaders_start = 1
+    leaders_end = _write_instrument_leaders_section(dash, leaders_start, 11, leaders)
+    balances = snapshot.get('balances') or stats.get('balances') or []
+    br = max([leaders_end] + list(end_rows.values()) or [1]) + 2
+    dash.cell(br, 1, "Account Balances").font = Font(bold=True)
+    dash.merge_cells(start_row=br, start_column=1, end_row=br, end_column=4)
+    dash.cell(br+1,1,"Account").font=Font(bold=True)
+    dash.cell(br+1,2,"Balance").font=Font(bold=True)
+    dash.cell(br+1,3,"Currency").font=Font(bold=True)
+    dash.cell(br+1,4,"As Of").font=Font(bold=True)
+    cur = br + 2
+    for rec in balances:
+        if not isinstance(rec, dict):
+            continue
+        ccy = _currency_code(rec.get("currency"), rec.get("account_currency"))
+        dash.cell(cur,1,rec.get("account_label") or rec.get("account") or rec.get("source") or "—")
+        bcell = dash.cell(cur,2,_as_float(rec.get("balance")))
+        bcell.number_format = '#,##0.0000000000' if _is_crypto_currency(ccy) else '#,##0.00'
+        dash.cell(cur,3,ccy)
+        dash.cell(cur,4,rec.get("as_of") or "")
+        cur += 1
 
     resolved_balances = _resolved_all_trade_balances(rows)
     ws=wb['All Trades']; headers=['Open Time','Close Time','Account','Symbol','Side','Qty','Entry Price','Exit Price','Stop Loss Price','Target Price','Commission','Net P/L','Profit %','R-Multiple','Balance After','Trade Duration']+EDITABLE_COLS; ws.append(headers)
     meta=wb['_Trade Meta']; meta.append(['all_trades_row','row_id'])
     for i, row in enumerate(rows):
         pct = _as_float(row.get('result_pct'))
-        ws.append([row.get('open_time'),row.get('close_time'),row.get('account_label') or row.get('account'),row.get('symbol'),row.get('side'),row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('stop_loss'),row.get('take_profit'),row.get('commission'),row.get('net_profit'),(pct/100.0 if pct is not None else ''),row.get('r_multiple'),resolved_balances.get(str(i)),_fmt_duration(row.get('trade_duration_seconds')),'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',row.get('setup') or '',row.get('timeframe') or '',row.get('breakeven') or '',row.get('notes') or ''])
-        ws.cell(i + 2, 1).comment = Comment(f"row_id:{stable_row_id(row)}", "system")
+        is_monthly = str(row.get("row_type") or "") == "monthly_aud_reval"
+        symbol = row.get('symbol') or ("MONTHLY AUD P/L" if is_monthly else "")
+        acct = row.get('account_label') or row.get('account') or ("Bybit Live" if is_monthly else "")
+        notes = row.get('notes') or ('Monthly Bybit Live AUD P/L bookkeeping note (excluded from metrics).' if is_monthly else '')
+        net_pnl = row.get('net_profit') if row.get('net_profit') is not None else row.get('result_cash')
+        ws.append([row.get('open_time') or row.get("period_month"),row.get('close_time') or row.get("period_month"),acct,symbol,row.get('side'),row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('stop_loss'),row.get('take_profit'),row.get('commission'),net_pnl,(pct/100.0 if pct is not None else ''),row.get('r_multiple'),resolved_balances.get(str(i)),_fmt_duration(row.get('trade_duration_seconds')),'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',row.get('setup') or '',row.get('timeframe') or '',row.get('breakeven') or '',notes])
     _style_table_sheet(ws,1,'A2',True)
     for rr in range(2, ws.max_row + 1):
-        ws.cell(rr, 15).number_format = '#,##0.00'
+        ccy_comm = _currency_code(rows[rr-2].get("commission_currency"), rows[rr-2].get("fee_currency"), rows[rr-2].get("realized_pnl_currency"), rows[rr-2].get("currency"), rows[rr-2].get("account_currency"))
+        ccy_pnl = _currency_code(rows[rr-2].get("realized_pnl_currency"), rows[rr-2].get("result_currency"), rows[rr-2].get("currency"), rows[rr-2].get("account_currency"), rows[rr-2].get("balance_after_trade_currency"))
+        ccy_bal = _currency_code(rows[rr-2].get("balance_after_trade_currency"), rows[rr-2].get("result_currency"), rows[rr-2].get("currency"), rows[rr-2].get("account_currency"))
+        ws.cell(rr, 6).number_format = '#,##0.##########'
+        ws.cell(rr, 11).number_format = _currency_number_format(ccy_comm)
+        ws.cell(rr, 12).number_format = _currency_number_format(ccy_pnl)
+        ws.cell(rr, 14).number_format = '0.00'
+        ws.cell(rr, 15).number_format = '#,##0.0000000000' if _is_crypto_currency(ccy_bal) else '#,##0.00'
         ws.cell(rr, 13).number_format = "0.00%"
     for i,row in enumerate(rows,start=2): meta.append([i, stable_row_id(row)])
     meta.sheet_state='hidden'
@@ -254,8 +306,8 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             if val is not None:
                 cell.value = val / 100.0
                 cell.number_format = "0.00%"
-        inst.cell(row_idx, 4).number_format = "0;-0;;@"
-        inst.cell(row_idx, 14).number_format = "0;-0;;@"
+        for zc in [4,5,6,7,8,9,10,11,12,13,14]:
+            inst.cell(row_idx, zc).number_format = ZERO_HIDE_FORMAT
         money = rec.get("money_by_currency") or {}
         for col, key in ((15, "net_profit_total"), (16, "avg_net_profit")):
             mm = (money.get(key) or {}) if isinstance(money, dict) else {}
@@ -399,3 +451,4 @@ def _write_instrument_leaders_section(ws, start_row, start_col, leaders):
         ws.cell(rr,start_col+4,v.get("total_trades"))
         rr += 1
     _table_border(ws,start_row,start_col,rr-1,start_col+4)
+    return rr - 1
