@@ -65,8 +65,9 @@ def test_dashboard_does_not_collapse_mixed_currency_money(tmp_path: Path):
     wb.save(j/'BYBIT DEMO.xlsx')
     out=tmp_path/'o.xlsx';build_output(j,out)
     wb2=load_workbook(out, read_only=True, data_only=True); ws2=wb2['Dashboard']
-    labels={(ws2.cell(r,1).value) for r in range(1,60)}
-    assert 'Main Stats' in labels
+    vals=[str(ws2.cell(r,c).value or '') for r in range(1,180) for c in range(1,13)]
+    assert 'Main Stats' not in vals
+    assert any('AUD' in v and 'USDT' in v for v in vals)
 
 
 def test_duration_metric_sources_are_real_refs():
@@ -123,7 +124,7 @@ def test_tjr_output_uses_canonical_columns(tmp_path: Path):
     out=tmp_path/'o.xlsx'; build_output(j,out)
     wb2=load_workbook(out)
     ws2=wb2['All Trades']
-    headers=[c.value for c in ws2[1]]
+    headers=[ws2.cell(1,c).value for c in range(1,ws2.max_column+1) if not ws2.column_dimensions[ws2.cell(1,c).column_letter].hidden]
     assert '__row_id' not in headers
     assert 'Chart' not in headers and 'Actions' not in headers
     assert ws2.data_validations.count >= 1
