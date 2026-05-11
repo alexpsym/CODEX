@@ -74,3 +74,16 @@ def test_equity_curve_insufficient_points_shows_message(tmp_path: Path):
     eq=wb['Equity Curve']
     assert eq['A3'].value=='Not enough equity data to chart.'
     assert len(eq._charts)==0
+
+
+def test_all_trades_hidden_row_id_and_override_after_row_swap(tmp_path: Path):
+    out=tmp_path/'Master Journal.xlsx'; build_master_journal_workbook(sample_snapshot(), out)
+    wb=load_workbook(out); ws=wb['All Trades']
+    headers=[ws.cell(1,c).value for c in range(1,ws.max_column+1) if not ws.column_dimensions[ws.cell(1,c).column_letter].hidden]
+    assert '__row_id' not in headers
+    # swap rows with row_id value to simulate sorted move preserving attached hidden col
+    for c in range(1, ws.max_column+1):
+        ws.cell(2,c).value, ws.cell(3,c).value = ws.cell(3,c).value, ws.cell(2,c).value
+    ws['Q2']='Yes'; wb.save(out)
+    ov=read_master_journal_manual_overrides(out)
+    assert any(v.get('is_test_trade') is True for v in ov.values())

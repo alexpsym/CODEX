@@ -10,6 +10,7 @@ from openpyxl.styles import Font
 from openpyxl.worksheet.datavalidation import DataValidation
 import hashlib
 from openpyxl.styles import PatternFill, Border, Side, Alignment, Color
+from openpyxl.utils import get_column_letter
 import calendar
 
 SHEET_ORDER=["Dashboard","All Trades","Instrument Averages","P&L Calendar","Equity Curve","Diagnostics","_Trade Meta"]
@@ -146,8 +147,9 @@ def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]
         headers=[str(c.value or '').strip() for c in ws[1]]
         idx={h:i for i,h in enumerate(headers)}
         rid_by_row={int(r[0]):str(r[1] or '').strip() for r in meta.iter_rows(min_row=2,values_only=True) if r and r[0] and r[1]}
+        hidden_i=idx.get('__row_id')
         for row_num,r in enumerate(ws.iter_rows(min_row=2, values_only=True),start=2):
-            rid=rid_by_row.get(row_num,'')
+            rid=(str(r[hidden_i] or '').strip() if hidden_i is not None and hidden_i < len(r) else '') or rid_by_row.get(row_num,'')
             if not rid:
                 continue
             edits={}
@@ -212,12 +214,13 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     for i,(title,srows) in enumerate(section_rows):
       _write_stat_section(dash,2 + (i//3)*24,[1,5,9][i%3],title,srows)
 
-    ws=wb['All Trades']; headers=['Open Time','Close Time','Account','Symbol','Side','Qty','Entry Price','Exit Price','Stop Loss Price','Target Price','Commission','Net P/L','Profit %','R-Multiple','Balance After','Trade Duration (s)']+EDITABLE_COLS; ws.append(headers)
+    ws=wb['All Trades']; headers=['Open Time','Close Time','Account','Symbol','Side','Qty','Entry Price','Exit Price','Stop Loss Price','Target Price','Commission','Net P/L','Profit %','R-Multiple','Balance After','Trade Duration (s)']+EDITABLE_COLS+['__row_id']; ws.append(headers)
     meta=wb['_Trade Meta']; meta.append(['all_trades_row','row_id'])
     for row in rows:
-        ws.append([row.get('open_time'),row.get('close_time'),row.get('account_label') or row.get('account'),row.get('symbol'),row.get('side'),row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('stop_loss'),row.get('take_profit'),row.get('commission'),row.get('net_profit'),row.get('result_pct'),row.get('r_multiple'),row.get('balance_after_trade'),row.get('trade_duration_seconds'),'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',row.get('setup') or '',row.get('timeframe') or '',row.get('breakeven') or '',row.get('notes') or ''])
+        ws.append([row.get('open_time'),row.get('close_time'),row.get('account_label') or row.get('account'),row.get('symbol'),row.get('side'),row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('stop_loss'),row.get('take_profit'),row.get('commission'),row.get('net_profit'),row.get('result_pct'),row.get('r_multiple'),row.get('balance_after_trade'),row.get('trade_duration_seconds'),'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',row.get('setup') or '',row.get('timeframe') or '',row.get('breakeven') or '',row.get('notes') or '', stable_row_id(row)])
     _style_table_sheet(ws,1,'A2',True)
     for i,row in enumerate(rows,start=2): meta.append([i, stable_row_id(row)])
+    ws.column_dimensions[get_column_letter(ws.max_column)].hidden=True
     meta.sheet_state='hidden'
     dv=DataValidation(type='list',formula1='"Yes,No"',allow_blank=True); ws.add_data_validation(dv); dv.add(f"Q2:Q{max(2,ws.max_row)}")
 
@@ -251,15 +254,21 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
                 cell.fill=PatternFill('solid',fgColor='00111C2D')
             cell.alignment=Alignment(wrap_text=True,vertical='top')
 
-    eq=wb['Equity Curve']; by_date=defaultdict(dict); accounts=[]; running=defaultdict(float); carry={}
+    eq=wb['Equity Curve']; by_date=defaultdict(dict); accounts=[]; carry={}; observed=defaultdict(int)
     for r in sorted(non_test,key=lambda x: str(x.get('close_time') or x.get('open_time') or '')):
         d=_as_date(r.get('close_time') or r.get('open_time')); acct=str(r.get('account_label') or r.get('account') or 'Account')
         if not d: continue
         if acct not in accounts: accounts.append(acct)
-        bal=_as_float(r.get('analysis_balance_after_trade')) or _as_float(r.get('balance_after_trade')) or _as_float(r.get('cashflow_new_balance'))
-        if bal is None: running[acct]+=(_as_float(r.get('net_profit')) or 0.0); bal=running[acct]
+        bal=_as_float(r.get('analysis_balance_after_trade'))
+        if bal is None: bal=_as_float(r.get('balance_after_trade'))
+        if bal is None: bal=_as_float(r.get('cashflow_new_balance'))
+        if bal is None:
+            prev=carry.get(acct)
+            bal=(prev if prev is not None else 0.0)+(_as_float(r.get('net_profit')) or 0.0)
+        carry[acct]=bal
         by_date[d.isoformat()][acct]=bal
-    eq.append(['Date']+accounts); points=0
+        observed[acct]+=1
+    eq.append(['Date']+accounts); points=0; carry={}
     for d in sorted(by_date.keys()):
         row=[d]
         for a in accounts:
@@ -268,11 +277,11 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             if carry.get(a) is not None: points+=1
         eq.append(row)
     _style_table_sheet(eq,1,'A2',True)
-    if points < 2 or len(accounts)==0: eq['A3']='Not enough equity data to chart.'
+    if points < 2 or len(accounts)==0 or not any(v>=2 for v in observed.values()): eq['A3']='Not enough equity data to chart.'
     else:
         chart=LineChart(); chart.title='Equity Curve'; chart.y_axis.title='Equity'; chart.x_axis.title='Date'
         for col in range(2,2+len(accounts)): chart.add_data(Reference(eq,min_col=col,min_row=1,max_row=eq.max_row),titles_from_data=True)
-        chart.set_categories(Reference(eq,min_col=1,min_row=2,max_row=eq.max_row)); eq.add_chart(chart,'B2')
+        chart.set_categories(Reference(eq,min_col=1,min_row=2,max_row=eq.max_row)); eq.add_chart(chart,f"{get_column_letter(max(2, eq.max_column+2))}2")
 
     diag=wb['Diagnostics']; diagnostics=snapshot.get('diagnostics') if isinstance(snapshot.get('diagnostics'),dict) else {}
     diag.append(['Key','Value']); diag.append(['sync_timestamp',snapshot.get('updated_at') or datetime.utcnow().isoformat()]); diag.append(['visible_trade_count',len(rows)])
@@ -364,5 +373,5 @@ def _style_table_sheet(ws, header_row=1, freeze='A2', autofilter=True):
     _style_header_row(ws, header_row)
     ws.freeze_panes=freeze
     if autofilter:
-        ws.auto_filter.ref=f"A{header_row}:{chr(64+ws.max_column)}{max(header_row+1,ws.max_row)}"
+        ws.auto_filter.ref=f"A{header_row}:{get_column_letter(ws.max_column)}{max(header_row+1,ws.max_row)}"
     _apply_data_borders(ws)

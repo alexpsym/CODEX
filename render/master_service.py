@@ -624,6 +624,9 @@ MANUAL_SAVE_GITHUB_SYNC_STATE: Dict[str, object] = {
 }
 _MANUAL_SAVE_WATCHER_THREAD: Optional[threading.Thread] = None
 _MANUAL_SAVE_WATCHER_STOP = threading.Event()
+_MANUAL_SAVE_KNOWN_FINGERPRINT = None
+_MANUAL_SAVE_PENDING_FINGERPRINT = None
+_MANUAL_SAVE_PENDING_SINCE = None
 
 def _manual_save_watcher_enabled() -> bool:
     raw = str(os.getenv("TRADING_JOURNAL_GITHUB_SYNC_ON_MANUAL_SAVE_ENABLED", "") or "").strip().lower()
@@ -661,35 +664,66 @@ def _run_manual_save_github_sync_once(master_path: Path) -> Dict[str, object]:
     _manual_save_state_update(manual_save_last_attempt_at=_utc_now_iso())
     res=_sync_journal_excel_files_to_github(master_path)
     err=str((res or {}).get('github_sync_error') or '')
+    enabled=bool((res or {}).get('github_sync_enabled'))
+    ok=bool((res or {}).get('github_sync_ok'))
+    noop=bool((res or {}).get('github_sync_noop'))
+    if not enabled:
+        err = err or 'GitHub sync is disabled.'
+    success_at = _utc_now_iso() if (enabled and ok and not noop and not err) else None
     _manual_save_state_update(
         manual_save_last_error=err,
         manual_save_last_commit=str((res or {}).get('github_sync_commit') or ''),
         manual_save_last_files=list((res or {}).get('github_sync_files') or []),
-        manual_save_last_success_at=_utc_now_iso() if not err and (res or {}).get('github_sync_ok') else None,
+        manual_save_last_success_at=success_at,
     )
     return res
 
+
+def _manual_save_set_known_fingerprint(path: Path) -> None:
+    global _MANUAL_SAVE_KNOWN_FINGERPRINT
+    try:
+        _MANUAL_SAVE_KNOWN_FINGERPRINT = _manual_save_file_fingerprint(path)
+    except Exception:
+        _MANUAL_SAVE_KNOWN_FINGERPRINT = None
+
+def _manual_save_known_fingerprint():
+    return _MANUAL_SAVE_KNOWN_FINGERPRINT
+
+def _manual_save_scan_once(now: float, master_path: Path | None = None) -> None:
+    global _MANUAL_SAVE_PENDING_FINGERPRINT, _MANUAL_SAVE_PENDING_SINCE, _MANUAL_SAVE_KNOWN_FINGERPRINT
+    master_path = master_path or _master_journal_path()
+    if _should_ignore_manual_save_path(master_path) or not master_path.exists():
+        return
+    fp = _manual_save_file_fingerprint(master_path)
+    if _MANUAL_SAVE_KNOWN_FINGERPRINT is None:
+        _MANUAL_SAVE_KNOWN_FINGERPRINT = fp
+        return
+    if fp == _MANUAL_SAVE_KNOWN_FINGERPRINT:
+        _MANUAL_SAVE_PENDING_FINGERPRINT = None; _MANUAL_SAVE_PENDING_SINCE = None
+        return
+    _manual_save_state_update(manual_save_last_detected_save_at=_utc_now_iso())
+    if _MANUAL_SAVE_PENDING_FINGERPRINT != fp:
+        _MANUAL_SAVE_PENDING_FINGERPRINT = fp
+        _MANUAL_SAVE_PENDING_SINCE = now
+        return
+    if (now - float(_MANUAL_SAVE_PENDING_SINCE or now)) < _manual_save_watcher_debounce_seconds():
+        return
+    fp2 = _manual_save_file_fingerprint(master_path)
+    if fp2 != fp:
+        _MANUAL_SAVE_PENDING_FINGERPRINT = fp2
+        _MANUAL_SAVE_PENDING_SINCE = now
+        return
+    _run_manual_save_github_sync_once(master_path)
+    _MANUAL_SAVE_KNOWN_FINGERPRINT = fp2
+    _MANUAL_SAVE_PENDING_FINGERPRINT = None; _MANUAL_SAVE_PENDING_SINCE = None
 def _manual_save_github_sync_watcher_loop() -> None:
     master_path=_master_journal_path()
     if _should_ignore_manual_save_path(master_path):
         return
-    last_fp=None; pending_since=None
+    _manual_save_set_known_fingerprint(master_path)
     while not _MANUAL_SAVE_WATCHER_STOP.is_set():
         try:
-            if master_path.exists():
-                fp=_manual_save_file_fingerprint(master_path)
-                if last_fp is None:
-                    last_fp=fp
-                elif fp != last_fp:
-                    _manual_save_state_update(manual_save_last_detected_save_at=_utc_now_iso())
-                    if pending_since is None: pending_since=time.time()
-                    if time.time()-pending_since >= _manual_save_watcher_debounce_seconds():
-                        fp2=_manual_save_file_fingerprint(master_path)
-                        if fp2==fp:
-                            _run_manual_save_github_sync_once(master_path)
-                            last_fp=fp2; pending_since=None
-                else:
-                    pending_since=None
+            _manual_save_scan_once(time.time(), master_path)
         except Exception as exc:
             _manual_save_state_update(manual_save_last_error=str(exc))
         _MANUAL_SAVE_WATCHER_STOP.wait(_manual_save_watcher_poll_seconds())
@@ -707,7 +741,12 @@ def _start_manual_save_github_sync_watcher_if_needed() -> None:
     _MANUAL_SAVE_WATCHER_THREAD.start()
 
 def _stop_manual_save_github_sync_watcher() -> None:
+    global _MANUAL_SAVE_WATCHER_THREAD
     _MANUAL_SAVE_WATCHER_STOP.set()
+    t=_MANUAL_SAVE_WATCHER_THREAD
+    if t and t.is_alive():
+        t.join(timeout=1.0)
+    _MANUAL_SAVE_WATCHER_THREAD = None
 def _sync_state_snapshot() -> Dict[str, object]:
     data = _load_json_file(TRADING_JOURNAL_SYNC_STATE_PATH, {})
     if not isinstance(data, dict):
@@ -4728,35 +4767,23 @@ def _load_bybit_demo_calc_contexts(active_folder: Optional[str] = None) -> Dict[
             payload = {"version": BYBIT_DEMO_CALC_CONTEXT_VERSION, "updated_at": _utc_now_iso(), "items": []}
         payload.setdefault("version", BYBIT_DEMO_CALC_CONTEXT_VERSION)
         payload.setdefault("updated_at", _utc_now_iso())
-        payload["items"] = payload.get("items") if isinstance(payload.get("items"), list) else []
+        payload.setdefault("items", [])
         return payload
+    dbx = _dropbox_client_or_none()
+    if dbx is None:
+        return {"version": BYBIT_DEMO_CALC_CONTEXT_VERSION, "updated_at": _utc_now_iso(), "items": []}
     path = _bybit_demo_calc_context_path(active_folder)
     try:
-        payload = json.loads(_dropbox_download_bytes(path).decode("utf-8"))
-    except FileNotFoundError:
+        _meta, resp = dbx.files_download(path)
+        payload = json.loads(resp.content.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("invalid payload")
+        payload.setdefault("version", BYBIT_DEMO_CALC_CONTEXT_VERSION)
+        payload.setdefault("updated_at", _utc_now_iso())
+        payload.setdefault("items", [])
+        return payload
+    except Exception:
         return {"version": BYBIT_DEMO_CALC_CONTEXT_VERSION, "updated_at": _utc_now_iso(), "items": []}
-    if not isinstance(payload, dict):
-        return {"version": BYBIT_DEMO_CALC_CONTEXT_VERSION, "updated_at": _utc_now_iso(), "items": []}
-    payload.setdefault("version", BYBIT_DEMO_CALC_CONTEXT_VERSION)
-    payload.setdefault("updated_at", _utc_now_iso())
-    payload["items"] = payload.get("items") if isinstance(payload.get("items"), list) else []
-    return payload
-
-
-def _sanitize_calc_context_obj(value: object) -> object:
-    if isinstance(value, dict):
-        out: Dict[str, object] = {}
-        for k, v in value.items():
-            key = str(k)
-            low = key.lower()
-            if any(x in low for x in ("api_key", "api-secret", "api_secret", "authorization", "auth_header", "token")):
-                continue
-            out[key] = _sanitize_calc_context_obj(v)
-        return out
-    if isinstance(value, list):
-        return [_sanitize_calc_context_obj(v) for v in value]
-    return value
-
 
 def _save_bybit_demo_calc_contexts(payload: Dict[str, object], active_folder: Optional[str] = None) -> None:
     if LOCAL_STATE_ONLY or _trading_journal_local_excel_authoritative():
@@ -8385,6 +8412,7 @@ async def _autostart_scripts() -> None:
 
 @app.on_event("shutdown")
 async def _log_local_master_shutdown() -> None:
+    _stop_manual_save_github_sync_watcher()
     AUTOSTART_LOGGER.error(
         "LOCAL_MASTER_SHUTDOWN profile=%s scripts=%s",
         APP_PROFILE,
@@ -10467,6 +10495,7 @@ async def _fetch_bybit_server_time_ms(base_url: str) -> int:
     try:
         payload = resp.json()
     except Exception:
+        _manual_save_set_known_fingerprint(path)
         payload = {}
     if resp.status_code >= 400:
         raise ValueError(
@@ -10621,7 +10650,8 @@ async def _bybit_signed_get(
         try:
             payload = resp.json()
         except Exception:
-            payload = {}
+            _manual_save_set_known_fingerprint(path)
+        payload = {}
         ret_code = payload.get("retCode")
         ret_msg = payload.get("retMsg") or resp.text
         if resp.status_code >= 400:
@@ -11067,6 +11097,7 @@ def _replace_pending_webhooks(items: object) -> List[Dict[str, object]]:
 def _upsert_pending_webhook(payload: Dict[str, object]) -> Dict[str, object]:
     items = _load_pending_webhooks()
     if not isinstance(payload, dict):
+        _manual_save_set_known_fingerprint(path)
         payload = {}
 
     webhook_id = str(payload.get("id", "")).strip()
@@ -20432,7 +20463,8 @@ def _read_oanda_settings() -> Dict[str, float]:
 def _update_oanda_settings(payload: Dict[str, object]) -> Dict[str, float]:
     try:
         if not isinstance(payload, dict):
-            payload = {}
+            _manual_save_set_known_fingerprint(path)
+        payload = {}
         updates: Dict[str, object] = {}
         for key in (
             "wait_seconds",
@@ -20909,6 +20941,7 @@ async def list_pending_webhooks() -> JSONResponse:
 async def upsert_pending_webhook(request: Request) -> JSONResponse:
     payload = await request.json()
     if payload is None:
+        _manual_save_set_known_fingerprint(path)
         payload = {}
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Pending webhook payload must be an object.")
@@ -20985,6 +21018,7 @@ async def set_watchlist(request: Request) -> JSONResponse:
     await _wait_for_state_restore_or_error()
     payload = await request.json()
     if payload is None:
+        _manual_save_set_known_fingerprint(path)
         payload = {}
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Watchlist payload must be an object.")
@@ -22107,6 +22141,7 @@ async def oanda_inactivity_status() -> JSONResponse:
     except OandaUpstreamHTTPError as exc:
         status_code = 503 if exc.transient else 502
         ttl_seconds = _OANDA_INACTIVITY_ERROR_CACHE_TTL_SECONDS
+        _manual_save_set_known_fingerprint(path)
         payload = {
             "ok": False,
             "mode": "live",
@@ -22130,6 +22165,7 @@ async def oanda_inactivity_status() -> JSONResponse:
     except Exception as exc:
         status_code = 500
         ttl_seconds = _OANDA_INACTIVITY_ERROR_CACHE_TTL_SECONDS
+        _manual_save_set_known_fingerprint(path)
         payload = {
             "ok": False,
             "mode": "live",
@@ -23481,6 +23517,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
         size = path.stat().st_size
         if size <= 0:
             raise RuntimeError(f"Master Journal.xlsx was created but is empty at {path}")
+        _manual_save_set_known_fingerprint(path)
         payload = {
             'master_journal_ok': True,
             'master_journal_path': str(path),

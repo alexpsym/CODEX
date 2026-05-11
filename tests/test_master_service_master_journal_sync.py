@@ -335,3 +335,37 @@ def test_manual_save_ignore_temp_names(tmp_path):
     assert master_service._should_ignore_manual_save_path(tmp_path / '~$Master Journal.xlsx')
     assert master_service._should_ignore_manual_save_path(tmp_path / 'Master Journal.tmp.xlsx')
     assert master_service._should_ignore_manual_save_path(tmp_path / 'Master Journal.pending.xlsx')
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_shutdown_stops_manual_save_watcher(monkeypatch):
+    called={'n':0}
+    monkeypatch.setattr(master_service, '_stop_manual_save_github_sync_watcher', lambda: called.__setitem__('n', called['n']+1))
+    asyncio.run(master_service._log_local_master_shutdown())
+    assert called['n']==1
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_manual_save_scan_debounce_and_service_write_suppression(tmp_path, monkeypatch):
+    p=tmp_path/'Master Journal.xlsx'; p.write_bytes(b'one')
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    calls=[]
+    monkeypatch.setattr(master_service, '_sync_journal_excel_files_to_github', lambda *_: calls.append(1) or {'github_sync_enabled':True,'github_sync_ok':True,'github_sync_noop':False,'github_sync_error':'','github_sync_files':[],'github_sync_commit':'abc'})
+    master_service._manual_save_set_known_fingerprint(p)
+    # service generated write suppression
+    master_service._manual_save_set_known_fingerprint(p)
+    master_service._manual_save_scan_once(10.0, p)
+    assert len(calls)==0
+    p.write_bytes(b'two')
+    master_service._manual_save_scan_once(10.0, p)
+    assert len(calls)==0
+    master_service._manual_save_scan_once(20.0, p)
+    assert len(calls)==1
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_manual_save_disabled_github_no_fake_success(monkeypatch, tmp_path):
+    p=tmp_path/'Master Journal.xlsx'; p.write_bytes(b'x')
+    monkeypatch.setattr(master_service, '_sync_journal_excel_files_to_github', lambda *_: {'github_sync_enabled':False,'github_sync_ok':True,'github_sync_noop':True,'github_sync_error':'','github_sync_files':[],'github_sync_commit':''})
+    master_service._run_manual_save_github_sync_once(p)
+    st=master_service._manual_save_state_snapshot()
+    assert st['manual_save_last_success_at'] is None
+    assert 'disabled' in str(st['manual_save_last_error']).lower()
