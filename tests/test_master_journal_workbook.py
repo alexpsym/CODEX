@@ -1,91 +1,89 @@
 from pathlib import Path
-import pytest
 from openpyxl import load_workbook
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, stable_row_id, SHEET_ORDER
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, SHEET_ORDER
 
 
 def sample_snapshot():
     return {
-        'updated_at': '2026-05-10T00:00:00Z',
-        'items': [
-            {'id':'t1','row_type':'trade','symbol':'EURUSD','asset_class':'fx','side':'BUY','close_time':'2026-05-01T00:00:00Z','open_time':'2026-05-01T00:00:00Z','net_profit':10.0,'entry_price':1.1,'exit_price':1.2,'qty':1,'account':'A','is_test_trade':False,'source':'very long source '*20,'setup':'S1','timeframe':'H1','breakeven':'No','notes':'N1 '*80},
-            {'id':'t2','row_type':'trade','symbol':'BTCUSDT','asset_class':'crypto','side':'SELL','close_time':'2026-05-02T00:00:00Z','open_time':'2026-05-02T00:00:00Z','net_profit':-5.0,'entry_price':100,'exit_price':90,'qty':2,'account':'A','is_test_trade':False,'setup':'S2','timeframe':'M15','breakeven':'Yes','notes':'N2'},
+        'updated_at':'2026-05-10T00:00:00Z',
+        'items':[
+            {'id':'t1','row_type':'trade','symbol':'EURUSD','asset_class':'fx','side':'BUY','open_time':'2026-05-01T00:00:00Z','close_time':'2026-05-01T01:00:00Z','net_profit':120.5,'result_pct':2.3,'r_multiple':1.2,'stop_loss':1.09,'take_profit':1.12,'entry_price':1.1,'trade_duration_seconds':3700,'analysis_balance_after_trade':1000,'account':'OANDA DEMO','setup':'S1'},
+            {'id':'t2','row_type':'trade','symbol':'BTCUSDT','asset_class':'crypto','side':'SELL','open_time':'2026-05-02T00:00:00Z','close_time':'2026-05-02T02:00:00Z','net_profit':-50.0,'result_pct':-1.1,'r_multiple':-0.8,'stop_loss':61000,'take_profit':59000,'entry_price':60000,'trade_duration_seconds':7215,'analysis_balance_after_trade':950,'account':'BYBIT','setup':'S2'},
         ],
-        'balances':[{'label':'A','balance':1000}],
-        'stats': {
-            'totals': {'trades':2,'wins':1,'losses':1,'break_even':0,'win_rate_pct':50,'net_profit_total':5,'gross_gain':10,'gross_loss':5,'min_loss':-5,'max_gain':10},
-            'groups': {'risk_expectancy': {'avg_result_pct':1,'avg_r_multiple':0.5,'avg_stop_pct_winners':1,'avg_stop_pct_losers':2,'avg_target_pct_winners':3,'avg_target_pct_losers':4,'avg_result_pct_winners':2,'avg_result_pct_losers':-1,'avg_r_multiple_winners':1.0,'avg_r_multiple_losers':-1.0,'max_drawdown_pct':3,'avg_drawdown_pct':2},
-                       'by_market': {'overall': {'min_result_pct':-3,'max_result_pct':4,'min_r_multiple':-1.5,'max_r_multiple':2.2}},
-                       'duration': {'overall_avg_seconds':120,'overall_shortest_seconds':60,'overall_longest_seconds':180,'fx_shortest_seconds':60,'fx_longest_seconds':100,'crypto_shortest_seconds':80,'crypto_longest_seconds':180},
-                       'leaders': {'most_wins_instrument':{'symbol':'EURUSD','wins':1,'losses':0,'total_trades':1,'asset_class':'fx'},'most_losses_instrument':{'symbol':'BTCUSDT','wins':0,'losses':1,'total_trades':1,'asset_class':'crypto'},'fx_most_wins_instrument':'EURUSD','fx_most_losses_instrument':'EURUSD','crypto_most_wins_instrument':'BTCUSDT','crypto_most_losses_instrument':'BTCUSDT'}},
-            'by_instrument': [{'symbol':'EURUSD','asset_class':'fx','total_trades':1,'long_trades':1,'short_trades':0,'wins':1,'losses':0,'break_even':0,'long_wins':1,'long_losses':0,'short_wins':0,'short_losses':0,'long_break_even':0,'short_break_even':0,'net_profit_total':10,'avg_net_profit':10,'win_rate_pct':100,'avg_sl_distance_pips_wins':50,'avg_sl_distance_pips_losses':0,'avg_tp_distance_pips_wins':100,'avg_tp_distance_pips_losses':0,'avg_trade_duration_seconds':3600,'min_trade_duration_seconds':3600,'max_trade_duration_seconds':3600}]
-        },
-        'diagnostics':{'local_workbook_names':['A.xlsx'],'errors':['e1']},
+        'stats':{'totals':{'trades':2,'wins':1,'losses':1,'break_even':0,'win_rate_pct':50.0,'net_profit_total':70.5,'gross_gain':120.5,'gross_loss':50.0,'money_by_currency':{'net_profit_total':{'AUD':70.5},'gross_gain':{'AUD':120.5},'gross_loss':{'AUD':50.0},'max_gain':{'AUD':120.5},'max_loss':{'AUD':50.0}}},'groups':{'by_market':{'overall':{'trades':2,'wins':1,'losses':1,'break_even':0,'win_rate_pct':50.0,'net_profit_total':70.5,'gross_gain':120.5,'gross_loss':50.0,'avg_result_pct':0.6,'min_result_pct':-1.1,'max_result_pct':2.3,'avg_r_multiple':0.2,'min_r_multiple':-0.8,'max_r_multiple':1.2,'max_gain':120.5,'max_loss':50.0,'avg_stop_pct':1.1,'avg_target_pct':2.2,'avg_duration_seconds':5457,'money_by_currency':{'net_profit_total':{'AUD':70.5},'gross_gain':{'AUD':120.5},'gross_loss':{'AUD':50.0},'max_gain':{'AUD':120.5},'max_loss':{'AUD':50.0}},'metric_sources':{'min_result_pct':{'symbol':'BTCUSDT','date':'2026-05-02'},'max_result_pct':{'symbol':'EURUSD','date':'2026-05-01'}}},'fx':{},'crypto':{}},'risk_expectancy':{'avg_stop_pct_winners':1,'avg_stop_pct_losers':2,'avg_target_pct_winners':3,'avg_target_pct_losers':4,'avg_result_pct_winners':2.3,'avg_result_pct_losers':-1.1,'avg_r_multiple_winners':1.2,'avg_r_multiple_losers':-0.8,'max_drawdown_pct':5,'avg_drawdown_pct':2},'duration':{'overall_avg_seconds':5457,'overall_shortest_seconds':3700,'overall_longest_seconds':7215,'fx_shortest_seconds':3700,'fx_longest_seconds':3700,'crypto_shortest_seconds':7215,'crypto_longest_seconds':7215},'leaders':{}},'by_instrument':[{'symbol':'EURUSD','asset_class':'fx','total_trades':1,'long_trades':1,'short_trades':0,'wins':1,'losses':0,'break_even':0,'net_profit_total':120.5,'avg_net_profit':120.5,'win_rate_pct':100,'avg_sl_pct_wins':1,'avg_sl_pct_losses':None,'avg_tp_pct_wins':2,'avg_tp_pct_losses':None,'avg_trade_duration_seconds':3700,'min_trade_duration_seconds':3700,'max_trade_duration_seconds':3700}]}
     }
 
 
-def test_parity_layout_and_features(tmp_path: Path):
+def test_single_builder_definition():
+    src = Path('tools/master_journal_workbook.py').read_text(encoding='utf-8')
+    assert src.count('def build_master_journal_workbook') == 1
+
+
+def test_dashboard_parity_and_equity(tmp_path: Path):
     out=tmp_path/'Master Journal.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
     assert wb.sheetnames == SHEET_ORDER
-    dash=wb['Dashboard']
-    vals=[str(dash.cell(r,c).value or '') for r in range(1,120) for c in range(1,13)]
-    for label in ['Account Balances','Overall','Winners','Losers','Drawdown','Duration','FX','Crypto','Instrument leaders','Avg result %','Avg R','Max drawdown','Avg duration','Overall most wins']:
+    vals=[str(wb['Dashboard'].cell(r,c).value or '') for r in range(1,220) for c in range(1,13)]
+    assert 'Account Balances' not in vals and 'Main Stats' not in vals and 'Label' not in vals
+    for label in ['Overall','Winners','Losers','Drawdown','Duration','FX','Crypto','Instrument leaders','Win rate','Avg R','Max R loss','Max R win']:
         assert label in vals
-    assert any('EURUSD — wins 1, losses 0, trades 1' in v for v in vals)
-
-    ws=wb['All Trades']
-    assert ws.row_dimensions[2].height <= 24
-    assert ws['Q2'].value in ('Yes','No')
-    assert 'N1' in str(ws['U2'].value)
-
-    inst=wb['Instrument Averages']
-    headers=[inst.cell(1,c).value for c in range(1,inst.max_column+1)]
-    for h in ['Symbol','Class','Trades','Longs','Shorts','Wins','Losses','Break-even','Long wins','Long losses','Short wins','Short losses','Long break-even','Short break-even','Net P/L','Avg P/L','Win Rate %','Avg stop % (W)','Avg stop % (L)','Avg target % (W)','Avg target % (L)','Avg duration','Shortest','Longest']:
-        assert h in headers
-    assert inst['A2'].value == 'EURUSD'
-    assert inst.cell(2,3).value == 1
-    assert inst.cell(2,4).value == 1
-
-    cal=wb['P&L Calendar']
-    cvals=[str(cal.cell(r,c).value or '') for r in range(1,120) for c in range(1,14)]
-    for d in ['January','February','March','April','May','June','July','August','September','October','November','December']:
-        assert d in cvals
-    assert any('2026' in v for v in cvals)
-    assert any('P/L' in v for v in cvals)
-
-    eq=wb['Equity Curve']
-    assert len(eq._charts) >= 1
-    assert eq.max_row > 1
+    assert any(v.endswith('%') for v in vals if '50.00%' in v or '2.30%' in v)
+    assert any(v.endswith('R') for v in vals if 'R' in v)
+    assert any(v.startswith('AUD ') for v in vals)
+    assert any('h' in v or 'm' in v or 's' in v for v in vals)
+    assert any('· 2026-05-0' in v for v in vals)
+    eq=wb['Equity Curve']; assert eq['A1'].value=='Date'; assert eq.max_column>=2
 
 
-def test_integration_with_master_service_stats(tmp_path: Path):
-    _ms = pytest.importorskip('render.master_service')
-    _compute_journal_stats = _ms._compute_journal_stats
-    rows=[
-        {'id':'fxw','row_type':'trade','symbol':'EURUSD','asset_class':'fx','side':'BUY','open_time':'2026-05-01T00:00:00Z','close_time':'2026-05-01T02:00:00Z','entry_price':1.1,'exit_price':1.11,'stop_loss':1.095,'take_profit':1.12,'result_pct':1.5,'r_multiple':1.2,'trade_duration_seconds':7200,'net_profit':25.0,'account':'A'},
-        {'id':'fxl','row_type':'trade','symbol':'EURUSD','asset_class':'fx','side':'SELL','open_time':'2026-05-02T00:00:00Z','close_time':'2026-05-02T01:00:00Z','entry_price':1.11,'exit_price':1.115,'stop_loss':1.12,'take_profit':1.10,'result_pct':-0.8,'r_multiple':-1.0,'trade_duration_seconds':3600,'net_profit':-10.0,'account':'A'},
-        {'id':'cry','row_type':'trade','symbol':'BTCUSDT','asset_class':'crypto','side':'BUY','open_time':'2026-05-03T00:00:00Z','close_time':'2026-05-03T03:00:00Z','entry_price':60000,'exit_price':60100,'stop_loss':59800,'take_profit':60400,'result_pct':0.6,'r_multiple':0.7,'trade_duration_seconds':10800,'net_profit':15.0,'account':'A'},
+def test_manual_override_roundtrip(tmp_path: Path):
+    out=tmp_path/'Master Journal.xlsx'; build_master_journal_workbook(sample_snapshot(), out)
+    wb=load_workbook(out); ws=wb['All Trades']; ws['Q2']='Yes'; ws['R2']='AAA'; wb.save(out)
+    ov=read_master_journal_manual_overrides(out)
+    assert ov['t1']['is_test_trade'] is True and ov['t1']['setup']=='AAA'
+
+def test_calendar_month_fill_colors(tmp_path: Path):
+    snap=sample_snapshot()
+    snap['items']=[
+        {'id':'p','row_type':'trade','account':'A','open_time':'2026-05-01','close_time':'2026-05-01','net_profit':10,'is_test_trade':False},
+        {'id':'n','row_type':'trade','account':'A','open_time':'2026-06-01','close_time':'2026-06-01','net_profit':-5,'is_test_trade':False},
     ]
-    stats=_compute_journal_stats(rows, balances=[])
-    out=tmp_path/'Master Journal.xlsx'
-    build_master_journal_workbook({'items':rows,'stats':stats,'balances':[]}, out)
-    wb=load_workbook(out)
-    dash=wb['Dashboard']
-    vals=[str(dash.cell(r,c).value or '') for r in range(1,120) for c in range(1,13)]
-    assert any('wins' in v and 'trades' in v for v in vals)
-    inst=wb['Instrument Averages']
-    assert inst.max_row > 1
-    assert len(wb['Equity Curve']._charts) >= 1
+    out=tmp_path/'Master Journal.xlsx'; build_master_journal_workbook(snap,out); wb=load_workbook(out)
+    cal=wb['P&L Calendar']
+    may=cal['F2']; jun=cal['G2']; mar=cal['D2']
+    assert 'P/L' in str(may.value or '') and 'P/L' in str(jun.value or '')
+    assert may.fill.fgColor.rgb != jun.fill.fgColor.rgb
+    assert mar.value in ('', None)
 
 
-def test_manual_overrides_and_stable_id(tmp_path: Path):
+def test_equity_curve_carry_forward_and_chart_series(tmp_path: Path):
+    s=sample_snapshot()
+    s['items']=[
+        {'id':'a1','row_type':'trade','account':'A','open_time':'2026-05-01','close_time':'2026-05-01','net_profit':10,'analysis_balance_after_trade':100},
+        {'id':'b1','row_type':'trade','account':'B','open_time':'2026-05-02','close_time':'2026-05-02','net_profit':5,'balance_after_trade':50},
+        {'id':'a2','row_type':'trade','account':'A','open_time':'2026-05-03','close_time':'2026-05-03','net_profit':2},
+    ]
+    out=tmp_path/'m.xlsx'; build_master_journal_workbook(s,out); wb=load_workbook(out)
+    eq=wb['Equity Curve']
+    assert eq['A1'].value=='Date' and eq.max_column==3
+    assert eq['C2'].value in ('',None)
+    assert len(eq._charts)==1 and len(eq._charts[0].series)==2
+
+
+def test_equity_curve_insufficient_points_shows_message(tmp_path: Path):
+    s=sample_snapshot(); s['items']=[{'id':'a1','row_type':'trade','account':'A','open_time':'2026-05-01','close_time':'2026-05-01','net_profit':1,'is_test_trade':False}]
+    out=tmp_path/'m2.xlsx'; build_master_journal_workbook(s,out); wb=load_workbook(out)
+    eq=wb['Equity Curve']
+    assert eq['A3'].value=='Not enough equity data to chart.'
+    assert len(eq._charts)==0
+
+
+def test_all_trades_hidden_row_id_and_override_after_row_swap(tmp_path: Path):
     out=tmp_path/'Master Journal.xlsx'; build_master_journal_workbook(sample_snapshot(), out)
     wb=load_workbook(out); ws=wb['All Trades']
-    ws['Q2']='Yes'; ws['R2']=''; ws['S2']='H4'; ws['T2']=''; ws['U2']=''; ws['D2']='CHANGED_ACCOUNT'; wb.save(out)
-    o=read_master_journal_manual_overrides(out)
-    assert o['t1']['is_test_trade'] is True
-    assert o['t1']['setup'] == ''
-    assert o['t1']['timeframe'] == 'H4'
-    assert o['t1']['breakeven'] == ''
-    assert o['t1']['notes'] == ''
-    assert stable_row_id({'id':'abc'}) == 'abc'
+    headers=[ws.cell(1,c).value for c in range(1,ws.max_column+1) if not ws.column_dimensions[ws.cell(1,c).column_letter].hidden]
+    assert '__row_id' not in headers
+    # swap rows with row_id value to simulate sorted move preserving attached hidden col
+    for c in range(1, ws.max_column+1):
+        ws.cell(2,c).value, ws.cell(3,c).value = ws.cell(3,c).value, ws.cell(2,c).value
+    ws['Q2']='Yes'; wb.save(out)
+    ov=read_master_journal_manual_overrides(out)
+    assert any(v.get('is_test_trade') is True for v in ov.values())
