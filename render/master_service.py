@@ -611,6 +611,103 @@ _TRADE_CHART_CACHE_TTL_SECONDS = float(os.getenv("TRADE_CHART_CACHE_TTL_SECONDS"
 _TRADE_CHART_CACHE_VERSION = "v2"
 
 
+
+MANUAL_SAVE_GITHUB_SYNC_LOCK = threading.Lock()
+MANUAL_SAVE_GITHUB_SYNC_STATE: Dict[str, object] = {
+    "manual_save_watcher_enabled": False,
+    "manual_save_last_detected_save_at": None,
+    "manual_save_last_attempt_at": None,
+    "manual_save_last_success_at": None,
+    "manual_save_last_error": "",
+    "manual_save_last_commit": "",
+    "manual_save_last_files": [],
+}
+_MANUAL_SAVE_WATCHER_THREAD: Optional[threading.Thread] = None
+_MANUAL_SAVE_WATCHER_STOP = threading.Event()
+
+def _manual_save_watcher_enabled() -> bool:
+    raw = str(os.getenv("TRADING_JOURNAL_GITHUB_SYNC_ON_MANUAL_SAVE_ENABLED", "") or "").strip().lower()
+    if _is_render_env():
+        return False
+    if raw in {"1","true","yes","on"}:
+        return True
+    if raw in {"0","false","no","off"}:
+        return False
+    return bool(_trading_journal_github_sync_enabled())
+
+def _manual_save_watcher_poll_seconds() -> float:
+    return max(0.2, float(str(os.getenv("TRADING_JOURNAL_GITHUB_SYNC_ON_MANUAL_SAVE_POLL_SECONDS", "1.0") or "1.0")))
+
+def _manual_save_watcher_debounce_seconds() -> float:
+    return max(0.2, float(str(os.getenv("TRADING_JOURNAL_GITHUB_SYNC_ON_MANUAL_SAVE_DEBOUNCE_SECONDS", "2.0") or "2.0")))
+
+def _manual_save_state_update(**kw: object) -> None:
+    with MANUAL_SAVE_GITHUB_SYNC_LOCK:
+        MANUAL_SAVE_GITHUB_SYNC_STATE.update(kw)
+
+def _manual_save_state_snapshot() -> Dict[str, object]:
+    with MANUAL_SAVE_GITHUB_SYNC_LOCK:
+        return dict(MANUAL_SAVE_GITHUB_SYNC_STATE)
+
+def _should_ignore_manual_save_path(path: Path) -> bool:
+    n=path.name.lower()
+    return n.startswith('~$') or n.endswith('.tmp.xlsx') or n.endswith('.pending.xlsx')
+
+def _manual_save_file_fingerprint(path: Path):
+    st=path.stat(); h=hashlib.sha256(path.read_bytes()).hexdigest()
+    return (st.st_mtime_ns, st.st_size, h)
+
+def _run_manual_save_github_sync_once(master_path: Path) -> Dict[str, object]:
+    _manual_save_state_update(manual_save_last_attempt_at=_utc_now_iso())
+    res=_sync_journal_excel_files_to_github(master_path)
+    err=str((res or {}).get('github_sync_error') or '')
+    _manual_save_state_update(
+        manual_save_last_error=err,
+        manual_save_last_commit=str((res or {}).get('github_sync_commit') or ''),
+        manual_save_last_files=list((res or {}).get('github_sync_files') or []),
+        manual_save_last_success_at=_utc_now_iso() if not err and (res or {}).get('github_sync_ok') else None,
+    )
+    return res
+
+def _manual_save_github_sync_watcher_loop() -> None:
+    master_path=_master_journal_path()
+    if _should_ignore_manual_save_path(master_path):
+        return
+    last_fp=None; pending_since=None
+    while not _MANUAL_SAVE_WATCHER_STOP.is_set():
+        try:
+            if master_path.exists():
+                fp=_manual_save_file_fingerprint(master_path)
+                if last_fp is None:
+                    last_fp=fp
+                elif fp != last_fp:
+                    _manual_save_state_update(manual_save_last_detected_save_at=_utc_now_iso())
+                    if pending_since is None: pending_since=time.time()
+                    if time.time()-pending_since >= _manual_save_watcher_debounce_seconds():
+                        fp2=_manual_save_file_fingerprint(master_path)
+                        if fp2==fp:
+                            _run_manual_save_github_sync_once(master_path)
+                            last_fp=fp2; pending_since=None
+                else:
+                    pending_since=None
+        except Exception as exc:
+            _manual_save_state_update(manual_save_last_error=str(exc))
+        _MANUAL_SAVE_WATCHER_STOP.wait(_manual_save_watcher_poll_seconds())
+
+def _start_manual_save_github_sync_watcher_if_needed() -> None:
+    global _MANUAL_SAVE_WATCHER_THREAD
+    enabled=_manual_save_watcher_enabled()
+    _manual_save_state_update(manual_save_watcher_enabled=enabled)
+    if not enabled:
+        return
+    if _MANUAL_SAVE_WATCHER_THREAD and _MANUAL_SAVE_WATCHER_THREAD.is_alive():
+        return
+    _MANUAL_SAVE_WATCHER_STOP.clear()
+    _MANUAL_SAVE_WATCHER_THREAD = threading.Thread(target=_manual_save_github_sync_watcher_loop,daemon=True,name='manual-save-github-sync')
+    _MANUAL_SAVE_WATCHER_THREAD.start()
+
+def _stop_manual_save_github_sync_watcher() -> None:
+    _MANUAL_SAVE_WATCHER_STOP.set()
 def _sync_state_snapshot() -> Dict[str, object]:
     data = _load_json_file(TRADING_JOURNAL_SYNC_STATE_PATH, {})
     if not isinstance(data, dict):
@@ -8262,6 +8359,7 @@ async def _autostart_scripts() -> None:
     if os.getenv("ENABLE_OANDA_FILL_POLL", "0") == "1":
         asyncio.create_task(_start_oanda_fill_poll_after_delay())
     _force_fxweekend_enabled_on_startup()
+    _start_manual_save_github_sync_watcher_if_needed()
     autostart_targets = _compute_autostart_scripts()
     AUTOSTART_LOGGER.info(
         "Resolved autostart scripts: %s",
@@ -19821,18 +19919,6 @@ def _compute_journal_stats(
         item["avg_trade_duration_seconds"] = _avg(dur_vals)
         item["min_trade_duration_seconds"] = min(dur_vals) if dur_vals else None
         item["max_trade_duration_seconds"] = max(dur_vals) if dur_vals else None
-        item["avg_sl_distance_pips"] = _avg(item.pop("sl_distances_pips", []))
-        item["avg_tp_distance_pips"] = _avg(item.pop("tp_distances_pips", []))
-        item["avg_sl_distance_quote"] = _avg(item.pop("sl_distances_quote", []))
-        item["avg_tp_distance_quote"] = _avg(item.pop("tp_distances_quote", []))
-        item["avg_sl_distance_pips_wins"] = _avg(item.pop("sl_distances_pips_wins", []))
-        item["avg_sl_distance_pips_losses"] = _avg(item.pop("sl_distances_pips_losses", []))
-        item["avg_tp_distance_pips_wins"] = _avg(item.pop("tp_distances_pips_wins", []))
-        item["avg_tp_distance_pips_losses"] = _avg(item.pop("tp_distances_pips_losses", []))
-        item["avg_sl_distance_quote_wins"] = _avg(item.pop("sl_distances_quote_wins", []))
-        item["avg_sl_distance_quote_losses"] = _avg(item.pop("sl_distances_quote_losses", []))
-        item["avg_tp_distance_quote_wins"] = _avg(item.pop("tp_distances_quote_wins", []))
-        item["avg_tp_distance_quote_losses"] = _avg(item.pop("tp_distances_quote_losses", []))
         item["asset_class"] = (
             "fx"
             if any(
@@ -22340,6 +22426,7 @@ async def api_logs_root(
 
     try:
         snapshot = script_manager.log_snapshot(script_name, cursor)
+        snapshot.update(_manual_save_state_snapshot())
         return JSONResponse(snapshot)
     except HTTPException as exc:
         if exc.status_code == 404:
@@ -22357,6 +22444,7 @@ async def api_logs_root(
 async def api_logs(script_name: str, cursor: int = 0) -> JSONResponse:
     try:
         snapshot = script_manager.log_snapshot(script_name, cursor)
+        snapshot.update(_manual_save_state_snapshot())
         return JSONResponse(snapshot)
     except HTTPException:
         raise
@@ -23117,6 +23205,7 @@ async def trading_journal_sync_status() -> JSONResponse:
             result["master_journal_error"] = msg
             snapshot["ok"] = False
             snapshot["error"] = msg
+    snapshot.update(_manual_save_state_snapshot())
     return JSONResponse(snapshot)
 
 
