@@ -175,6 +175,52 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     totals = stats.get('totals') or {}
     groups = stats.get('groups') or {}
 
+    dash=wb['Dashboard']
+    dash.sheet_view.showGridLines=False
+    for c,w in [('A',30),('B',22),('C',30),('E',30),('F',22),('G',30),('I',30),('J',22),('K',30)]: dash.column_dimensions[c].width=w
+    for r in range(1,220):
+        for c in range(1,13):
+            dash.cell(r,c).fill=PatternFill('solid',fgColor='000B1220')
+            dash.cell(r,c).font=Font(color='00CBD5E1')
+    totals_money=totals.get('money_by_currency') or {}
+    by_market=(groups.get('by_market') or {})
+    risk=(groups.get('risk_expectancy') or {})
+    duration=(groups.get('duration') or {})
+    leaders=(groups.get('leaders') or {})
+
+    def core_rows(mkt, title='overall'):
+        msrc=(mkt.get('metric_sources') or {}) if isinstance(mkt,dict) else {}
+        return [
+            ('Trades', mkt.get('trades'),'neutral','count',None),('Wins', mkt.get('wins'),'profit','count',None),('Losses', mkt.get('losses'),'loss','count',None),('Break-even', mkt.get('break_even'),'neutral','count',None),('Win rate', mkt.get('win_rate_pct'),'neutral','pct',None),
+            ('Net P/L', mkt.get('net_profit_total'),'auto','money','net_profit_total'),('Gross gain', mkt.get('gross_gain'),'profit','money','gross_gain'),('Gross loss', mkt.get('gross_loss'),'loss','money','gross_loss'),
+            ('Avg result %', mkt.get('avg_result_pct'),'neutral','pct',None),('Max loss %', mkt.get('min_result_pct'),'loss','pct', _fmt_detail_src(msrc.get('min_result_pct'))),('Max win %', mkt.get('max_result_pct'),'profit','pct', _fmt_detail_src(msrc.get('max_result_pct'))),
+            ('Avg R', mkt.get('avg_r_multiple'),'neutral','r',None),('Max R loss', mkt.get('min_r_multiple'),'loss','r', _fmt_detail_src(msrc.get('min_r_multiple'))),('Max R win', mkt.get('max_r_multiple'),'profit','r', _fmt_detail_src(msrc.get('max_r_multiple'))),
+            ('Max gain', mkt.get('max_gain'),'profit','money','max_gain'),('Max loss', mkt.get('max_loss'),'loss','money','max_loss'),('Avg stop %', mkt.get('avg_stop_pct'),'neutral','pct',None),('Avg target %', mkt.get('avg_target_pct'),'neutral','pct',None),('Avg duration', mkt.get('avg_duration_seconds'),'neutral','duration',None),
+        ]
+
+    section_rows=[
+      ('Overall', core_rows(by_market.get('overall') or totals)),
+      ('Winners', [('Avg stop %',risk.get('avg_stop_pct_winners'),'neutral','pct',None),('Avg target %',risk.get('avg_target_pct_winners'),'neutral','pct',None),('Avg result %',risk.get('avg_result_pct_winners'),'profit','pct',None),('Avg R',risk.get('avg_r_multiple_winners'),'profit','r',None)]),
+      ('Losers', [('Avg stop %',risk.get('avg_stop_pct_losers'),'neutral','pct',None),('Avg target %',risk.get('avg_target_pct_losers'),'neutral','pct',None),('Avg result %',risk.get('avg_result_pct_losers'),'loss','pct',None),('Avg R',risk.get('avg_r_multiple_losers'),'loss','r',None)]),
+      ('Drawdown', [('Max drawdown',risk.get('max_drawdown_pct'),'drawdown','pct',None),('Avg drawdown',risk.get('avg_drawdown_pct'),'drawdown','pct',None)]),
+      ('Duration', [('Overall avg',duration.get('overall_avg_seconds'),'neutral','duration',None),('Overall shortest',duration.get('overall_shortest_seconds'),'neutral','duration',_fmt_detail_src((duration.get('metric_sources') or {}).get('overall_shortest_seconds'))),('Overall longest',duration.get('overall_longest_seconds'),'neutral','duration',_fmt_detail_src((duration.get('metric_sources') or {}).get('overall_longest_seconds'))),('FX shortest',duration.get('fx_shortest_seconds'),'neutral','duration',_fmt_detail_src((duration.get('metric_sources') or {}).get('fx_shortest_seconds'))),('FX longest',duration.get('fx_longest_seconds'),'neutral','duration',_fmt_detail_src((duration.get('metric_sources') or {}).get('fx_longest_seconds'))),('Crypto shortest',duration.get('crypto_shortest_seconds'),'neutral','duration',_fmt_detail_src((duration.get('metric_sources') or {}).get('crypto_shortest_seconds'))),('Crypto longest',duration.get('crypto_longest_seconds'),'neutral','duration',_fmt_detail_src((duration.get('metric_sources') or {}).get('crypto_longest_seconds')))]),
+      ('FX', core_rows(by_market.get('fx') or {})),
+      ('Crypto', core_rows(by_market.get('crypto') or {})),
+      ('Instrument leaders', [('Overall most wins',leaders.get('most_wins_instrument'),'neutral','leader',None),('Overall most losses',leaders.get('most_losses_instrument'),'neutral','leader',None),('FX most wins',leaders.get('fx_most_wins_instrument'),'neutral','leader',None),('FX most losses',leaders.get('fx_most_losses_instrument'),'neutral','leader',None),('Crypto most wins',leaders.get('crypto_most_wins_instrument'),'neutral','leader',None),('Crypto most losses',leaders.get('crypto_most_losses_instrument'),'neutral','leader',None)])
+    ]
+    grid_cols=[1,5,9]; start_row=2
+    for i,(title,srows) in enumerate(section_rows):
+      col=grid_cols[i%3]; row=start_row + (i//3)*24
+      _write_stat_section(dash,row,col,title,srows,totals_money=totals_money)
+def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -> Dict[str, Any]:
+    wb=Workbook(); wb.remove(wb.active)
+    for s in SHEET_ORDER: wb.create_sheet(s)
+    rows=[r for r in (snapshot.get('items') or []) if isinstance(r,dict) and str(r.get('row_type') or 'trade')=='trade']
+    non_test=[r for r in rows if not _is_test_trade_value(r.get('is_test_trade'))]
+    stats = snapshot.get('stats') or {}
+    totals = stats.get('totals') or {}
+    groups = stats.get('groups') or {}
+
     dash=wb['Dashboard']; dash['A1']='Account Balances'; dash['A1'].font=Font(bold=True)
     rr=2
     for b in (snapshot.get('balances') or []):
