@@ -34,12 +34,12 @@ def test_risk_expectancy_group_matches_render_stats_shape():
     r=compute_journal_stats_replica(rows)['groups']['risk_expectancy']
     for k in ["avg_stop_pct","avg_target_pct","avg_result_pct","avg_r_multiple","avg_stop_pct_winners","avg_stop_pct_losers","avg_target_pct_winners","avg_target_pct_losers","avg_result_pct_winners","avg_result_pct_losers","avg_r_multiple_winners","avg_r_multiple_losers","max_drawdown_pct","avg_drawdown_pct","min_drawdown_pct"]: assert k in r
 
-def test_fx_instrument_distances_are_pips_not_raw_price():
+def test_fx_instrument_distances_are_percentages():
     rows=[{"symbol":"EURUSD","side":"BUY","asset_class":"FX","entry":1.1,"stop_loss":1.095,"take_profit":1.11,"net_profit":10,"trade_duration_seconds":1}]
     first=compute_journal_stats_replica(rows)['by_instrument'][0]
-    assert round(first['avg_sl_distance_pips'],6)==50.0 and round(first['avg_tp_distance_pips'],6)==100.0
+    assert round(first['avg_sl_pct'],6)==round(abs(1.1-1.095)/1.1*100,6) and round(first['avg_tp_pct'],6)==round(abs(1.11-1.1)/1.1*100,6)
     disp=instrument_display_rows([first])[0]
-    assert round(disp['Avg SL W'],6)==50.0 and round(disp['Avg TP W'],6)==100.0
+    assert 'Avg SL % (W)' in disp and 'Avg TP % (W)' in disp
 
 def test_by_instrument_asset_class_is_render_normalized():
     first=compute_journal_stats_replica([{"symbol":"A","side":"BUY","asset_class":"FX","net_profit":1}])['by_instrument'][0]

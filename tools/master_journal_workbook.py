@@ -64,6 +64,50 @@ def _fmt_duration(seconds: Any) -> str:
 
 
 
+
+
+def _fmt_duration_full(seconds: Any) -> str:
+    v=_as_float(seconds)
+    if v is None:
+        return "—"
+    s=max(0,int(v))
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    parts=[]
+    if h: parts.append(f"{h}h")
+    if m or h: parts.append(f"{m}m")
+    if sec or not parts: parts.append(f"{sec}s")
+    return ' '.join(parts)
+
+def _fmt_pct(v: Any) -> str:
+    x=_as_float(v)
+    return "—" if x is None else f"{x:.2f}%"
+
+def _fmt_r(v: Any) -> str:
+    x=_as_float(v)
+    return "—" if x is None else f"{x:.3f}R"
+
+def _fmt_money(v: Any, money_map: Any, key: str) -> str:
+    mm=(money_map or {}).get(key) if isinstance(money_map,dict) else None
+    if isinstance(mm,dict) and mm:
+        return ' / '.join(f"{(k or 'UNKNOWN').upper()} {float(val):.2f}" for k,val in sorted(mm.items()))
+    x=_as_float(v)
+    return "—" if x is None else f"UNKNOWN {x:.2f}"
+
+def _fmt_leader(v: Any) -> str:
+    if not isinstance(v,dict):
+        return '—' if not v else str(v)
+    sym=v.get('symbol') or '—'
+    w=v.get('wins'); l=v.get('losses'); t=v.get('total_trades')
+    return f"{sym} · W:{w if w is not None else '—'} L:{l if l is not None else '—'} T:{t if t is not None else '—'}"
+
+def _fmt_detail_src(src: Any) -> str:
+    if not isinstance(src,dict):
+        return '—'
+    sym=str(src.get('symbol') or src.get('instrument') or '').strip() or '—'
+    d=_as_date(src.get('close_time') or src.get('date') or src.get('open_time'))
+    return f"{sym} · {d.isoformat() if d else '—'}"
+
 def _excel_scalar(value: Any) -> Any:
     if value is None:
         return ''
@@ -122,6 +166,52 @@ def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]
     return out
 
 
+def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -> Dict[str, Any]:
+    wb=Workbook(); wb.remove(wb.active)
+    for s in SHEET_ORDER: wb.create_sheet(s)
+    rows=[r for r in (snapshot.get('items') or []) if isinstance(r,dict) and str(r.get('row_type') or 'trade')=='trade']
+    non_test=[r for r in rows if not _is_test_trade_value(r.get('is_test_trade'))]
+    stats = snapshot.get('stats') or {}
+    totals = stats.get('totals') or {}
+    groups = stats.get('groups') or {}
+
+    dash=wb['Dashboard']
+    dash.sheet_view.showGridLines=False
+    for c,w in [('A',30),('B',22),('C',30),('E',30),('F',22),('G',30),('I',30),('J',22),('K',30)]: dash.column_dimensions[c].width=w
+    for r in range(1,220):
+        for c in range(1,13):
+            dash.cell(r,c).fill=PatternFill('solid',fgColor='000B1220')
+            dash.cell(r,c).font=Font(color='00CBD5E1')
+    totals_money=totals.get('money_by_currency') or {}
+    by_market=(groups.get('by_market') or {})
+    risk=(groups.get('risk_expectancy') or {})
+    duration=(groups.get('duration') or {})
+    leaders=(groups.get('leaders') or {})
+
+    def core_rows(mkt, title='overall'):
+        msrc=(mkt.get('metric_sources') or {}) if isinstance(mkt,dict) else {}
+        return [
+            ('Trades', mkt.get('trades'),'neutral','count',None),('Wins', mkt.get('wins'),'profit','count',None),('Losses', mkt.get('losses'),'loss','count',None),('Break-even', mkt.get('break_even'),'neutral','count',None),('Win rate', mkt.get('win_rate_pct'),'neutral','pct',None),
+            ('Net P/L', mkt.get('net_profit_total'),'auto','money','net_profit_total'),('Gross gain', mkt.get('gross_gain'),'profit','money','gross_gain'),('Gross loss', mkt.get('gross_loss'),'loss','money','gross_loss'),
+            ('Avg result %', mkt.get('avg_result_pct'),'neutral','pct',None),('Max loss %', mkt.get('min_result_pct'),'loss','pct', _fmt_detail_src(msrc.get('min_result_pct'))),('Max win %', mkt.get('max_result_pct'),'profit','pct', _fmt_detail_src(msrc.get('max_result_pct'))),
+            ('Avg R', mkt.get('avg_r_multiple'),'neutral','r',None),('Max R loss', mkt.get('min_r_multiple'),'loss','r', _fmt_detail_src(msrc.get('min_r_multiple'))),('Max R win', mkt.get('max_r_multiple'),'profit','r', _fmt_detail_src(msrc.get('max_r_multiple'))),
+            ('Max gain', mkt.get('max_gain'),'profit','money','max_gain'),('Max loss', mkt.get('max_loss'),'loss','money','max_loss'),('Avg stop %', mkt.get('avg_stop_pct'),'neutral','pct',None),('Avg target %', mkt.get('avg_target_pct'),'neutral','pct',None),('Avg duration', mkt.get('avg_duration_seconds'),'neutral','duration',None),
+        ]
+
+    section_rows=[
+      ('Overall', core_rows(by_market.get('overall') or totals)),
+      ('Winners', [('Avg stop %',risk.get('avg_stop_pct_winners'),'neutral','pct',None),('Avg target %',risk.get('avg_target_pct_winners'),'neutral','pct',None),('Avg result %',risk.get('avg_result_pct_winners'),'profit','pct',None),('Avg R',risk.get('avg_r_multiple_winners'),'profit','r',None)]),
+      ('Losers', [('Avg stop %',risk.get('avg_stop_pct_losers'),'neutral','pct',None),('Avg target %',risk.get('avg_target_pct_losers'),'neutral','pct',None),('Avg result %',risk.get('avg_result_pct_losers'),'loss','pct',None),('Avg R',risk.get('avg_r_multiple_losers'),'loss','r',None)]),
+      ('Drawdown', [('Max drawdown',risk.get('max_drawdown_pct'),'drawdown','pct',None),('Avg drawdown',risk.get('avg_drawdown_pct'),'drawdown','pct',None)]),
+      ('Duration', [('Overall avg',duration.get('overall_avg_seconds'),'neutral','duration',None),('Overall shortest',duration.get('overall_shortest_seconds'),'neutral','duration',_fmt_detail_src((duration.get('metric_sources') or {}).get('overall_shortest_seconds'))),('Overall longest',duration.get('overall_longest_seconds'),'neutral','duration',_fmt_detail_src((duration.get('metric_sources') or {}).get('overall_longest_seconds'))),('FX shortest',duration.get('fx_shortest_seconds'),'neutral','duration',_fmt_detail_src((duration.get('metric_sources') or {}).get('fx_shortest_seconds'))),('FX longest',duration.get('fx_longest_seconds'),'neutral','duration',_fmt_detail_src((duration.get('metric_sources') or {}).get('fx_longest_seconds'))),('Crypto shortest',duration.get('crypto_shortest_seconds'),'neutral','duration',_fmt_detail_src((duration.get('metric_sources') or {}).get('crypto_shortest_seconds'))),('Crypto longest',duration.get('crypto_longest_seconds'),'neutral','duration',_fmt_detail_src((duration.get('metric_sources') or {}).get('crypto_longest_seconds')))]),
+      ('FX', core_rows(by_market.get('fx') or {})),
+      ('Crypto', core_rows(by_market.get('crypto') or {})),
+      ('Instrument leaders', [('Overall most wins',leaders.get('most_wins_instrument'),'neutral','leader',None),('Overall most losses',leaders.get('most_losses_instrument'),'neutral','leader',None),('FX most wins',leaders.get('fx_most_wins_instrument'),'neutral','leader',None),('FX most losses',leaders.get('fx_most_losses_instrument'),'neutral','leader',None),('Crypto most wins',leaders.get('crypto_most_wins_instrument'),'neutral','leader',None),('Crypto most losses',leaders.get('crypto_most_losses_instrument'),'neutral','leader',None)])
+    ]
+    grid_cols=[1,5,9]; start_row=2
+    for i,(title,srows) in enumerate(section_rows):
+      col=grid_cols[i%3]; row=start_row + (i//3)*24
+      _write_stat_section(dash,row,col,title,srows,totals_money=totals_money)
 def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -> Dict[str, Any]:
     wb=Workbook(); wb.remove(wb.active)
     for s in SHEET_ORDER: wb.create_sheet(s)
@@ -206,26 +296,42 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             cell.alignment=Alignment(wrap_text=True,vertical='top')
 
     eq=wb['Equity Curve']
-    eq.append(["Date","Account","Delta P/L","Equity"])
+    by_date=defaultdict(dict)
+    accounts=[]
     acct_running=defaultdict(float)
-    series_rows=[]
+    last_seen=defaultdict(lambda:None)
     for r in sorted(non_test,key=lambda x: str(x.get('close_time') or x.get('open_time') or '')):
         d=_as_date(r.get('close_time') or r.get('open_time'))
         pnl=_as_float(r.get('net_profit'))
-        if not d or pnl is None: continue
+        if not d: continue
         acct=str(r.get('account_label') or r.get('account') or 'Account')
-        bal=_as_float(r.get('analysis_balance_after_trade')) or _as_float(r.get('balance_after_trade')) or _as_float(r.get('cashflow_new_balance'))
+        if acct not in accounts: accounts.append(acct)
+        bal=_as_float(r.get('analysis_balance_after_trade'))
+        if bal is None: bal=_as_float(r.get('balance_after_trade'))
+        if bal is None: bal=_as_float(r.get('cashflow_new_balance'))
         if bal is None:
-            acct_running[acct]+=pnl; bal=acct_running[acct]
-        eq.append([str(d),acct,pnl,bal]); series_rows.append((str(d),acct,bal))
+            acct_running[acct]+= (pnl or 0.0); bal=acct_running[acct]
+        last_seen[acct]=bal
+        by_date[d.isoformat()][acct]=bal
+    eq.append(['Date']+accounts)
+    points=0
+    for d in sorted(by_date.keys()):
+        row=[d]
+        for a in accounts:
+            if a in by_date[d]:
+                last_seen[a]=by_date[d][a]
+            row.append(last_seen[a])
+            if last_seen[a] is not None: points+=1
+        eq.append(row)
     _style_table_sheet(eq,1,'A2',True)
-    if eq.max_row>=2:
-        chart=LineChart(); chart.title="Equity Curve"; chart.y_axis.title="Equity / Balance"; chart.x_axis.title="Date"
-        data=Reference(eq,min_col=4,min_row=1,max_row=eq.max_row)
-        chart.add_data(data,titles_from_data=True)
-        cats=Reference(eq,min_col=1,min_row=2,max_row=eq.max_row)
-        chart.set_categories(cats)
-        eq.add_chart(chart,"E2")
+    if points < 2 or eq.max_row < 3 or len(accounts)==0:
+        eq['A3']='Not enough equity data to chart.'
+    else:
+        chart=LineChart(); chart.title='Equity Curve'; chart.y_axis.title='Equity'; chart.x_axis.title='Date'
+        for col in range(2,1+len(accounts)+1):
+            data=Reference(eq,min_col=col,min_row=1,max_row=eq.max_row)
+            chart.add_data(data,titles_from_data=True)
+        cats=Reference(eq,min_col=1,min_row=2,max_row=eq.max_row); chart.set_categories(cats); eq.add_chart(chart,'B2')
 
     diag=wb['Diagnostics']
     diagnostics=snapshot.get('diagnostics') if isinstance(snapshot.get('diagnostics'),dict) else {}
@@ -264,14 +370,22 @@ def _format_stat_card(ws, top_row, left_col, bottom_row, right_col):
             ws.cell(r,c).border=Border(left=thin,right=thin,top=thin,bottom=thin)
 
 
-def _write_stat_section(ws, start_row, start_col, title, rows):
+def _write_stat_section(ws, start_row, start_col, title, rows, totals_money=None):
     ws.merge_cells(start_row=start_row,start_column=start_col,end_row=start_row,end_column=start_col+2)
-    h=ws.cell(start_row,start_col,title); h.font=Font(bold=True); h.fill=PatternFill('solid',fgColor='00E5E7EB')
+    h=ws.cell(start_row,start_col,title); h.font=Font(bold=True,color='0060A5FA'); h.fill=PatternFill('solid',fgColor='00111C2D')
     r=start_row+1
-    for label,val,sem in rows:
-        ws.cell(r,start_col,_excel_scalar(label))
-        raw_value = _fmt_duration(val) if 'duration' in str(label).lower() and isinstance(val,(int,float)) else val
-        ws.cell(r,start_col+1,_excel_scalar(raw_value))
+    for row in rows:
+        label,val,sem,kind,detail = (list(row)+[None]*5)[:5]
+        ws.cell(r,start_col,_excel_scalar(label)).font=Font(color='00E2E8F0')
+        if kind=='pct': disp=_fmt_pct(val)
+        elif kind=='r': disp=_fmt_r(val)
+        elif kind=='money': disp=_fmt_money(val, totals_money, detail or '')
+        elif kind=='duration': disp=_fmt_duration_full(val)
+        elif kind=='leader': disp=_fmt_leader(val)
+        elif kind=='count': disp='—' if val is None else str(val)
+        else: disp='—' if val is None else str(val)
+        ws.cell(r,start_col+1,_excel_scalar(disp))
+        dcell=ws.cell(r,start_col+2,_excel_scalar(detail or '—')); dcell.alignment=Alignment(wrap_text=True,vertical='center')
         _format_stat_value(ws.cell(r,start_col+1),sem)
         r+=1
     _format_stat_card(ws,start_row,start_col,r-1,start_col+2)
