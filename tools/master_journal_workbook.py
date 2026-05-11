@@ -281,7 +281,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     _style_table_sheet(ws,1,'A2',True)
     for rr in range(2, ws.max_row + 1):
         ccy_comm = _currency_code(rows[rr-2].get("commission_currency"), rows[rr-2].get("fee_currency"), rows[rr-2].get("realized_pnl_currency"), rows[rr-2].get("currency"), rows[rr-2].get("account_currency"))
-        ccy_pnl = _currency_code(rows[rr-2].get("realized_pnl_currency"), rows[rr-2].get("currency"), rows[rr-2].get("account_currency"), rows[rr-2].get("balance_after_trade_currency"))
+        ccy_pnl = _currency_code(rows[rr-2].get("realized_pnl_currency"), rows[rr-2].get("result_currency"), rows[rr-2].get("currency"), rows[rr-2].get("account_currency"), rows[rr-2].get("balance_after_trade_currency"))
         ccy_bal = _currency_code(rows[rr-2].get("balance_after_trade_currency"), rows[rr-2].get("result_currency"), rows[rr-2].get("currency"), rows[rr-2].get("account_currency"))
         ws.cell(rr, 6).number_format = '#,##0.##########'
         ws.cell(rr, 11).number_format = _currency_number_format(ccy_comm)

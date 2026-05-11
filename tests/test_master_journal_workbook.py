@@ -221,3 +221,44 @@ def test_dashboard_layout_style_columns(tmp_path: Path):
         r.min_row == duration_pos[0] and r.min_col == duration_pos[1] and r.max_col == duration_pos[1] + 1
         for r in dash.merged_cells.ranges
     )
+
+
+def test_monthly_aud_row_uses_result_currency_and_excluded_from_metrics(tmp_path: Path):
+    s = sample_snapshot()
+    s["items"] = [
+        {
+            "id": "t1",
+            "row_type": "trade",
+            "symbol": "EURUSD",
+            "account": "OANDA",
+            "open_time": "2026-04-02T00:00:00+10:00",
+            "close_time": "2026-04-02T01:00:00+10:00",
+            "net_profit": 10,
+            "result_pct": 1.0,
+        },
+        {
+            "id": "monthly_aud_reval:bybit_live:2026-04",
+            "row_type": "monthly_aud_reval",
+            "account": "live",
+            "account_label": "Bybit Live",
+            "symbol": "MONTHLY AUD P/L",
+            "open_time": "2026-04-01T00:00:00+10:00",
+            "close_time": "2026-04-30T23:59:59+10:00",
+            "result_cash": 123.45,
+            "result_currency": "AUD",
+        },
+    ]
+    out = tmp_path / "monthly.xlsx"
+    build_master_journal_workbook(s, out)
+    wb = load_workbook(out)
+    ws = wb["All Trades"]
+    monthly_rows = [r for r in range(2, ws.max_row + 1) if ws.cell(r, 4).value == "MONTHLY AUD P/L"]
+    assert len(monthly_rows) == 1
+    mr = monthly_rows[0]
+    assert ws.cell(mr, 12).value == 123.45
+    fmt = str(ws.cell(mr, 12).number_format or "")
+    assert "AUD" in fmt
+    assert "UNKNOWN" not in fmt
+    # metrics remain from trade rows only
+    cal = wb["P&L Calendar"]
+    assert cal["E4"].value == 1  # April trades count
