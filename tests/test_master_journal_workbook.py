@@ -171,6 +171,21 @@ def test_conditional_format_colors_and_dashboard_semantics(tmp_path: Path):
         for lc, vc in ((1, 2), (5, 6), (9, 10)):
             if str(dash.cell(r, lc).value or "").strip().lower() in loss_labels:
                 assert not _cell_covered(_cf_ranges(dash), f"{chr(64+vc)}{r}")
+    # avg result % and avg R should be sign-formatted for dashboard market sections
+    for wanted in {"avg result %", "avg r"}:
+        hits = 0
+        for r in range(1, 220):
+            for lc, vc in ((1, 2), (5, 6), (9, 10)):
+                if str(dash.cell(r, lc).value or "").strip().lower() == wanted and isinstance(dash.cell(r, vc).value, (int, float)):
+                    hits += 1
+                    assert _cell_covered(_cf_ranges(dash), f"{chr(64+vc)}{r}")
+        assert hits >= 1
+    # neutral stop/target metrics should not be sign-formatted
+    for wanted in {"avg stop %", "avg target %"}:
+        for r in range(1, 220):
+            for lc, vc in ((1, 2), (5, 6), (9, 10)):
+                if str(dash.cell(r, lc).value or "").strip().lower() == wanted:
+                    assert not _cell_covered(_cf_ranges(dash), f"{chr(64+vc)}{r}")
     # all trades configured ranges exist
     tr = _cf_ranges(all_trades)
     assert any("K2:K" in r for r in tr)
