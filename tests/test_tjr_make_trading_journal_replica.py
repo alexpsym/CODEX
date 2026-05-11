@@ -124,9 +124,8 @@ def test_tjr_output_uses_canonical_columns(tmp_path: Path):
     wb2=load_workbook(out)
     ws2=wb2['All Trades']
     headers=[c.value for c in ws2[1]]
-    assert '__row_id' in headers
+    assert '__row_id' not in headers
     assert 'Chart' not in headers and 'Actions' not in headers
-    assert ws2.column_dimensions['A'].hidden is True
     assert ws2.data_validations.count >= 1
     dash=wb2['Dashboard']
     vals={str(dash.cell(r,1).value) for r in range(1,20)}

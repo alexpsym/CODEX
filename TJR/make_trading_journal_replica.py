@@ -787,7 +787,7 @@ def build_output(journal_dir: Path, output_path: Path) -> Tuple[int, int, List[s
             'is_test_trade':is_test_trade_row(t),'setup':t.get('setup'),'timeframe':t.get('timeframe'),'breakeven':t.get('breakeven'),'notes':t.get('notes'),
         })
     totals = stats.get('totals', {}) if isinstance(stats, dict) else {}
-    snapshot={'items':items,'stats':{'totals':{'trades':totals.get('trades',len(all_trades)),'wins':totals.get('wins',0),'losses':totals.get('losses',0),'win_rate_pct':totals.get('win_rate_pct',0),'net_profit_total':totals.get('net_profit_total',totals.get('net_pl',0)),'gross_gain':totals.get('gross_gain',totals.get('gross_profit',0)),'gross_loss':totals.get('gross_loss',0)}},'balances':[],'diagnostics':{'local_workbook_names':[p.name for p in sources],'warnings':warnings,'errors':[]},'updated_at':datetime.utcnow().isoformat()}
+    snapshot={'items':items,'stats':stats,'balances':[],'diagnostics':{'local_workbook_names':[p.name for p in sources],'warnings':warnings,'errors':[]},'updated_at':datetime.utcnow().isoformat()}
     build_master_journal_workbook(snapshot, output_path)
     return len(sources), len(all_trades), warnings
 

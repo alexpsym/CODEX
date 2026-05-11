@@ -12,7 +12,7 @@ import hashlib
 from openpyxl.styles import PatternFill, Border, Side, Alignment, Color
 import calendar
 
-SHEET_ORDER=["Dashboard","All Trades","Instrument Averages","P&L Calendar","Equity Curve","Diagnostics"]
+SHEET_ORDER=["Dashboard","All Trades","Instrument Averages","P&L Calendar","Equity Curve","Diagnostics","_Trade Meta"]
 EDITABLE_COLS=["Test","Setup","Timeframe","Breakeven","Notes"]
 
 
@@ -96,16 +96,14 @@ def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]
         return out
     wb=load_workbook(path, data_only=True)
     try:
-        if 'All Trades' not in wb.sheetnames:
+        if 'All Trades' not in wb.sheetnames or '_Trade Meta' not in wb.sheetnames:
             return out
-        ws=wb['All Trades']
+        ws=wb['All Trades']; meta=wb['_Trade Meta']
         headers=[str(c.value or '').strip() for c in ws[1]]
         idx={h:i for i,h in enumerate(headers)}
-        rid_i=idx.get('__row_id')
-        if rid_i is None:
-            return out
-        for r in ws.iter_rows(min_row=2, values_only=True):
-            rid=str(r[rid_i] or '').strip()
+        rid_by_row={int(r[0]):str(r[1] or '').strip() for r in meta.iter_rows(min_row=2,values_only=True) if r and r[0] and r[1]}
+        for row_num,r in enumerate(ws.iter_rows(min_row=2, values_only=True),start=2):
+            rid=rid_by_row.get(row_num,'')
             if not rid:
                 continue
             edits={}
@@ -155,74 +153,57 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         col=grid_cols[i%3]; row=start_row + (i//3)*14
         _write_stat_section(dash,row,col,title,srows)
 
-    ws=wb['All Trades']; headers=['__row_id','Open Time','Close Time','Account','Symbol','Side','Qty','Entry','Exit','Stop Loss','Target','Commission','Net P/L','Profit %','R-Multiple','Balance After','Trade Duration (s)','Source','Order ID','Fill Count']+EDITABLE_COLS; ws.append(headers)
+    ws=wb['All Trades']; headers=['Open Time','Close Time','Account','Symbol','Side','Qty','Entry Price','Exit Price','Stop Loss Price','Target Price','Commission','Net P/L','Profit %','R-Multiple','Balance After','Trade Duration (s)']+EDITABLE_COLS; ws.append(headers)
     ws.row_dimensions[1].height=24
+    meta=wb['_Trade Meta']; meta.append(['all_trades_row','row_id'])
     for row in rows:
-        ws.append([stable_row_id(row),row.get('open_time'),row.get('close_time'),row.get('account_label') or row.get('account'),row.get('symbol'),row.get('side'),row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('stop_loss'),row.get('take_profit'),row.get('commission'),row.get('net_profit'),row.get('result_pct'),row.get('r_multiple'),row.get('balance_after_trade'),row.get('trade_duration_seconds'),row.get('source'),row.get('order_id'),row.get('fill_count'),'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',row.get('setup') or '',row.get('timeframe') or '',row.get('breakeven') or '',row.get('notes') or ''])
-    ws.column_dimensions['A'].hidden=True
+        ws.append([row.get('open_time'),row.get('close_time'),row.get('account_label') or row.get('account'),row.get('symbol'),row.get('side'),row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('stop_loss'),row.get('take_profit'),row.get('commission'),row.get('net_profit'),row.get('result_pct'),row.get('r_multiple'),row.get('balance_after_trade'),row.get('trade_duration_seconds'),'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',row.get('setup') or '',row.get('timeframe') or '',row.get('breakeven') or '',row.get('notes') or ''])
     _style_table_sheet(ws,1,'A2',True)
-    ws.column_dimensions['R'].width=20
-    ws.column_dimensions['Y'].width=40
+    for i,row in enumerate(rows,start=2):
+        meta.append([i, stable_row_id(row)])
+    meta.sheet_state='hidden'
     for i in range(2,ws.max_row+1):
         ws.row_dimensions[i].height=20
-        ws.cell(i,18).alignment=Alignment(wrap_text=False,vertical='center')
-        ws.cell(i,25).alignment=Alignment(wrap_text=False,vertical='center')
-        c=ws.cell(i,13)
+        c=ws.cell(i,12)
         if isinstance(c.value,(int,float)):
             _apply_sign_font(c)
-    dv=DataValidation(type='list',formula1='"Yes,No"',allow_blank=True); ws.add_data_validation(dv); dv.add(f"U2:U{max(2,ws.max_row)}")
+    dv=DataValidation(type='list',formula1='"Yes,No"',allow_blank=True); ws.add_data_validation(dv); dv.add(f"Q2:Q{max(2,ws.max_row)}")
 
     inst=wb['Instrument Averages']
-    headers=["Symbol","Class","Trades","Longs","Shorts","Wins","Losses","Break-even","Long wins","Long losses","Short wins","Short losses","Long break-even","Short break-even","Net P/L","Avg P/L","Win Rate %","Avg stop dist (W)","Avg stop dist (L)","Avg target dist (W)","Avg target dist (L)","Avg duration","Shortest","Longest"]
+    headers=["Symbol","Class","Trades","Longs","Shorts","Wins","Losses","Break-even","Long wins","Long losses","Short wins","Short losses","Long break-even","Short break-even","Net P/L","Avg P/L","Win Rate %","Avg stop % (W)","Avg stop % (L)","Avg target % (W)","Avg target % (L)","Avg duration","Shortest","Longest"]
     inst.append(headers)
     by_instrument=stats.get("by_instrument") or []
     for rec in by_instrument:
         cls=str(rec.get("asset_class") or rec.get("class") or "").lower()
         is_fx=cls=="fx"
-        inst.append([rec.get("symbol"),cls.upper() if cls else None,rec.get("total_trades", rec.get("trades")),rec.get("long_trades", rec.get("longs")),rec.get("short_trades", rec.get("shorts")),rec.get("wins"),rec.get("losses"),rec.get("break_even"),rec.get("long_wins"),rec.get("long_losses"),rec.get("short_wins"),rec.get("short_losses"),rec.get("long_break_even"),rec.get("short_break_even"),rec.get("net_profit_total"),rec.get("avg_net_profit"),rec.get("win_rate_pct"),rec.get("avg_sl_distance_pips_wins") if is_fx else rec.get("avg_sl_distance_quote_wins"),rec.get("avg_sl_distance_pips_losses") if is_fx else rec.get("avg_sl_distance_quote_losses"),rec.get("avg_tp_distance_pips_wins") if is_fx else rec.get("avg_tp_distance_quote_wins"),rec.get("avg_tp_distance_pips_losses") if is_fx else rec.get("avg_tp_distance_quote_losses"),_fmt_duration(rec.get("avg_trade_duration_seconds", rec.get("avg_duration_seconds"))),_fmt_duration(rec.get("min_trade_duration_seconds", rec.get("shortest_duration_seconds"))),_fmt_duration(rec.get("max_trade_duration_seconds", rec.get("longest_duration_seconds")))])
+        inst.append([rec.get("symbol"),cls.upper() if cls else None,rec.get("total_trades", rec.get("trades")),rec.get("long_trades", rec.get("longs")),rec.get("short_trades", rec.get("shorts")),rec.get("wins"),rec.get("losses"),rec.get("break_even"),rec.get("long_wins"),rec.get("long_losses"),rec.get("short_wins"),rec.get("short_losses"),rec.get("long_break_even"),rec.get("short_break_even"),rec.get("net_profit_total"),rec.get("avg_net_profit"),rec.get("win_rate_pct"),rec.get('avg_sl_pct_wins'),rec.get('avg_sl_pct_losses'),rec.get('avg_tp_pct_wins'),rec.get('avg_tp_pct_losses'),_fmt_duration(rec.get("avg_trade_duration_seconds", rec.get("avg_duration_seconds"))),_fmt_duration(rec.get("min_trade_duration_seconds", rec.get("shortest_duration_seconds"))),_fmt_duration(rec.get("max_trade_duration_seconds", rec.get("longest_duration_seconds")))])
     if inst.max_row==1: inst.append(['No data available']+['']*(len(headers)-1))
     _style_table_sheet(inst,1,'A2',True)
 
     cal=wb['P&L Calendar']
-    daily=defaultdict(lambda:{"pnl":0.0,"trades":0,"fx":0,"crypto":0})
+    cal.append(['Year'] + [calendar.month_name[m] for m in range(1,13)])
+    monthly=defaultdict(lambda:{'pnl':0.0,'trades':0})
     for r in non_test:
-        d=_as_date(r.get('close_time') or r.get('open_time'))
-        pnl=_as_float(r.get('net_profit'))
+        d=_as_date(r.get('close_time') or r.get('open_time')); pnl=_as_float(r.get('net_profit'))
         if not d or pnl is None: continue
-        x=daily[d]; x["pnl"]+=pnl; x["trades"]+=1
-        cls=str(r.get("asset_class") or "").lower()
-        if cls=="fx": x["fx"]+=1
-        elif cls=="crypto": x["crypto"]+=1
-    months=defaultdict(list)
-    for d in sorted(daily): months[(d.year,d.month)].append(d)
-    row=1
-    cal.append(["Raw Type","Raw Date","Raw Net P/L"])
-    for d,v in sorted(daily.items()): cal.append(["Daily",str(d),v["pnl"]])
-    for m,v in defaultdict(float,{}).items(): pass
-    row=1
-    for (y,m) in sorted(months.keys()):
-        cal.merge_cells(start_row=row,start_column=1,end_row=row,end_column=7)
-        cal.cell(row,1,f"{calendar.month_name[m]} {y}").font=Font(bold=True)
-        row+=1
-        for i,day in enumerate(["Mon","Tue","Wed","Thu","Fri","Sat","Sun"],start=1): cal.cell(row,i,day).font=Font(bold=True)
-        row+=1
-        month_mat=calendar.monthcalendar(y,m)
-        for wk in month_mat:
-            cal.row_dimensions[row].height=42
-            for c,daynum in enumerate(wk,start=1):
-                cell=cal.cell(row,c)
-                if daynum==0:
-                    cell.fill=PatternFill('solid', fgColor='00F3F4F6'); continue
-                d=date(y,m,daynum); info=daily.get(d)
-                if info:
-                    cell.value=f"{daynum}\nT:{info['trades']} FX:{info['fx']} C:{info['crypto']}\nP/L {round(info['pnl'],2)}"
-                    if info['pnl']>0: cell.fill=PatternFill('solid', fgColor='00DCFCE7')
-                    elif info['pnl']<0: cell.fill=PatternFill('solid', fgColor='00FEE2E2')
-                else:
-                    cell.value=str(daynum); cell.fill=PatternFill('solid', fgColor='00FFFFFF')
-                cell.alignment=Alignment(wrap_text=True,vertical='top')
-            row+=1
-        row+=1
+        x=monthly[(d.year,d.month)]; x['pnl']+=pnl; x['trades']+=1
+    years=sorted({y for y,_ in monthly.keys()})
+    for y in years:
+        row=[y]
+        for m in range(1,13):
+            info=monthly.get((y,m))
+            row.append('' if not info else f"P/L {info['pnl']:.2f}\nT: {info['trades']}")
+        cal.append(row)
+    _style_table_sheet(cal,1,'A2',False)
+    for r in range(2,cal.max_row+1):
+        for c in range(2,14):
+            cell=cal.cell(r,c); txt=str(cell.value or '')
+            if 'P/L ' in txt:
+                try: v=float(txt.split('P/L ')[1].split('\n')[0])
+                except: v=0
+                if v>0: cell.fill=PatternFill('solid', fgColor='00DCFCE7')
+                elif v<0: cell.fill=PatternFill('solid', fgColor='00FEE2E2')
+            cell.alignment=Alignment(wrap_text=True,vertical='top')
 
     eq=wb['Equity Curve']
     eq.append(["Date","Account","Delta P/L","Equity"])
@@ -286,10 +267,7 @@ def _format_stat_card(ws, top_row, left_col, bottom_row, right_col):
 def _write_stat_section(ws, start_row, start_col, title, rows):
     ws.merge_cells(start_row=start_row,start_column=start_col,end_row=start_row,end_column=start_col+2)
     h=ws.cell(start_row,start_col,title); h.font=Font(bold=True); h.fill=PatternFill('solid',fgColor='00E5E7EB')
-    ws.cell(start_row+1,start_col,'Label').font=Font(bold=True)
-    ws.cell(start_row+1,start_col+1,'Value').font=Font(bold=True)
-    ws.cell(start_row+1,start_col+2,'Detail').font=Font(bold=True)
-    r=start_row+2
+    r=start_row+1
     for label,val,sem in rows:
         ws.cell(r,start_col,_excel_scalar(label))
         raw_value = _fmt_duration(val) if 'duration' in str(label).lower() and isinstance(val,(int,float)) else val

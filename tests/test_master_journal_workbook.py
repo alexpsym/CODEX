@@ -35,21 +35,20 @@ def test_parity_layout_and_features(tmp_path: Path):
 
     ws=wb['All Trades']
     assert ws.row_dimensions[2].height <= 24
-    assert ws['R2'].alignment.wrap_text is not True
-    assert ws['Y2'].alignment.wrap_text is not True
-    assert 'N1' in ws['Y2'].value
+    assert ws['Q2'].value in ('Yes','No')
+    assert 'N1' in str(ws['U2'].value)
 
     inst=wb['Instrument Averages']
     headers=[inst.cell(1,c).value for c in range(1,inst.max_column+1)]
-    for h in ['Symbol','Class','Trades','Longs','Shorts','Wins','Losses','Break-even','Long wins','Long losses','Short wins','Short losses','Long break-even','Short break-even','Net P/L','Avg P/L','Win Rate %','Avg stop dist (W)','Avg stop dist (L)','Avg target dist (W)','Avg target dist (L)','Avg duration','Shortest','Longest']:
+    for h in ['Symbol','Class','Trades','Longs','Shorts','Wins','Losses','Break-even','Long wins','Long losses','Short wins','Short losses','Long break-even','Short break-even','Net P/L','Avg P/L','Win Rate %','Avg stop % (W)','Avg stop % (L)','Avg target % (W)','Avg target % (L)','Avg duration','Shortest','Longest']:
         assert h in headers
     assert inst['A2'].value == 'EURUSD'
     assert inst.cell(2,3).value == 1
     assert inst.cell(2,4).value == 1
 
     cal=wb['P&L Calendar']
-    cvals=[str(cal.cell(r,c).value or '') for r in range(1,120) for c in range(1,8)]
-    for d in ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']:
+    cvals=[str(cal.cell(r,c).value or '') for r in range(1,120) for c in range(1,14)]
+    for d in ['January','February','March','April','May','June','July','August','September','October','November','December']:
         assert d in cvals
     assert any('2026' in v for v in cvals)
     assert any('P/L' in v for v in cvals)
@@ -82,7 +81,7 @@ def test_integration_with_master_service_stats(tmp_path: Path):
 def test_manual_overrides_and_stable_id(tmp_path: Path):
     out=tmp_path/'Master Journal.xlsx'; build_master_journal_workbook(sample_snapshot(), out)
     wb=load_workbook(out); ws=wb['All Trades']
-    ws['U2']='Yes'; ws['V2']=''; ws['W2']='H4'; ws['X2']=''; ws['Y2']=''; ws['D2']='CHANGED_ACCOUNT'; wb.save(out)
+    ws['Q2']='Yes'; ws['R2']=''; ws['S2']='H4'; ws['T2']=''; ws['U2']=''; ws['D2']='CHANGED_ACCOUNT'; wb.save(out)
     o=read_master_journal_manual_overrides(out)
     assert o['t1']['is_test_trade'] is True
     assert o['t1']['setup'] == ''
