@@ -10495,7 +10495,6 @@ async def _fetch_bybit_server_time_ms(base_url: str) -> int:
     try:
         payload = resp.json()
     except Exception:
-        _manual_save_set_known_fingerprint(path)
         payload = {}
     if resp.status_code >= 400:
         raise ValueError(
@@ -10650,8 +10649,7 @@ async def _bybit_signed_get(
         try:
             payload = resp.json()
         except Exception:
-            _manual_save_set_known_fingerprint(path)
-        payload = {}
+            payload = {}
         ret_code = payload.get("retCode")
         ret_msg = payload.get("retMsg") or resp.text
         if resp.status_code >= 400:
@@ -11097,7 +11095,6 @@ def _replace_pending_webhooks(items: object) -> List[Dict[str, object]]:
 def _upsert_pending_webhook(payload: Dict[str, object]) -> Dict[str, object]:
     items = _load_pending_webhooks()
     if not isinstance(payload, dict):
-        _manual_save_set_known_fingerprint(path)
         payload = {}
 
     webhook_id = str(payload.get("id", "")).strip()
@@ -20463,8 +20460,7 @@ def _read_oanda_settings() -> Dict[str, float]:
 def _update_oanda_settings(payload: Dict[str, object]) -> Dict[str, float]:
     try:
         if not isinstance(payload, dict):
-            _manual_save_set_known_fingerprint(path)
-        payload = {}
+            payload = {}
         updates: Dict[str, object] = {}
         for key in (
             "wait_seconds",
@@ -20941,7 +20937,6 @@ async def list_pending_webhooks() -> JSONResponse:
 async def upsert_pending_webhook(request: Request) -> JSONResponse:
     payload = await request.json()
     if payload is None:
-        _manual_save_set_known_fingerprint(path)
         payload = {}
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Pending webhook payload must be an object.")
@@ -21018,7 +21013,6 @@ async def set_watchlist(request: Request) -> JSONResponse:
     await _wait_for_state_restore_or_error()
     payload = await request.json()
     if payload is None:
-        _manual_save_set_known_fingerprint(path)
         payload = {}
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Watchlist payload must be an object.")
@@ -22141,7 +22135,6 @@ async def oanda_inactivity_status() -> JSONResponse:
     except OandaUpstreamHTTPError as exc:
         status_code = 503 if exc.transient else 502
         ttl_seconds = _OANDA_INACTIVITY_ERROR_CACHE_TTL_SECONDS
-        _manual_save_set_known_fingerprint(path)
         payload = {
             "ok": False,
             "mode": "live",
@@ -22165,7 +22158,6 @@ async def oanda_inactivity_status() -> JSONResponse:
     except Exception as exc:
         status_code = 500
         ttl_seconds = _OANDA_INACTIVITY_ERROR_CACHE_TTL_SECONDS
-        _manual_save_set_known_fingerprint(path)
         payload = {
             "ok": False,
             "mode": "live",
