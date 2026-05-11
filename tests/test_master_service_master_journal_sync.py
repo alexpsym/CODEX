@@ -384,8 +384,8 @@ def test_bybit_server_time_invalid_json_no_path_nameerror(monkeypatch):
         async def __aexit__(self,*a): return False
         def get(self,*a,**k): return Ctx()
     monkeypatch.setattr(master_service.httpx, 'AsyncClient', lambda **k: Client())
-    out = asyncio.run(master_service._fetch_bybit_server_time_ms('https://api.bybit.com'))
-    assert isinstance(out, int)
+    with pytest.raises(ValueError, match='Bybit server time response is unparseable.'):
+        asyncio.run(master_service._fetch_bybit_server_time_ms('https://api.bybit.com'))
 
 @pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
 def test_signed_get_keeps_valid_json(monkeypatch):
@@ -393,17 +393,14 @@ def test_signed_get_keeps_valid_json(monkeypatch):
         status_code=200
         text='ok'
         def json(self): return {'retCode':0,'result':{'x':1}}
-    class Ctx:
-        async def __aenter__(self): return Resp()
-        async def __aexit__(self,*a): return False
     class Client:
         async def __aenter__(self): return self
         async def __aexit__(self,*a): return False
-        def get(self,*a,**k): return Ctx()
+        async def get(self,*a,**k): return Resp()
     monkeypatch.setattr(master_service.httpx, 'AsyncClient', lambda **k: Client())
-    monkeypatch.setattr(master_service, '_build_bybit_signed_headers', lambda **k: {})
-    monkeypatch.setattr(master_service, '_fetch_bybit_server_time_ms', lambda *_: 1)
-    payload=asyncio.run(master_service._bybit_signed_get(base_url='https://api.bybit.com',api_key='k',api_secret='s',path='/x'))
+    async def fake_headers(**k): return {}
+    monkeypatch.setattr(master_service, '_build_bybit_signed_headers', fake_headers)
+    payload=asyncio.run(master_service._bybit_signed_get(base_url='https://api.bybit.com',api_key='k',api_secret='s',path='/x',params={}))
     assert payload.get('retCode')==0
 
 @pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
