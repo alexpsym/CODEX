@@ -335,7 +335,9 @@ def _write_stat_section(ws, start_row, start_col, title, rows, use_detail_col=Fa
         else:
             vcell.value = '—' if val is None else val
         if apply_semantic_cf and isinstance(vcell.value, (int, float)):
-            if sem == "auto":
+            if kind == "count":
+                pass
+            elif sem == "auto":
                 _profit_loss_rules(ws, f"{vcell.coordinate}:{vcell.coordinate}")
             elif sem in {"loss", "drawdown"}:
                 _negative_impact_rule(ws, f"{vcell.coordinate}:{vcell.coordinate}")

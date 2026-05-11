@@ -165,6 +165,12 @@ def test_conditional_format_colors_and_dashboard_semantics(tmp_path: Path):
                 assert _cell_covered(_cf_ranges(dash), cell)
     # leaders numeric counts should not be targeted
     assert not _cell_covered(_cf_ranges(dash), "K4")
+    # losses count cells should never be targeted by account-impact formatting
+    loss_labels = {"losses"}
+    for r in range(1, 220):
+        for lc, vc in ((1, 2), (5, 6), (9, 10)):
+            if str(dash.cell(r, lc).value or "").strip().lower() in loss_labels:
+                assert not _cell_covered(_cf_ranges(dash), f"{chr(64+vc)}{r}")
     # all trades configured ranges exist
     tr = _cf_ranges(all_trades)
     assert any("K2:K" in r for r in tr)
