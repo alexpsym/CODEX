@@ -29,7 +29,7 @@ def test_dashboard_parity_and_equity(tmp_path: Path):
     assert any(v.endswith('%') for v in vals if '50.00%' in v or '2.30%' in v)
     assert any(v.endswith('R') for v in vals if 'R' in v)
     assert any(v.startswith('AUD ') for v in vals)
-    assert any('h' in v or 'm' in v or 's' in v for v in vals)
+    assert any('hour' in v or 'minute' in v or 'second' in v for v in vals)
     assert any('· 2026-05-0' in v for v in vals)
     eq=wb['Equity Curve']; assert eq['A1'].value=='Date'; assert eq.max_column>=2
 
@@ -51,7 +51,11 @@ def test_calendar_month_fill_colors(tmp_path: Path):
     may=cal['F2']; jun=cal['G2']; mar=cal['D2']
     assert 'P/L' in str(may.value or '') and 'P/L' in str(jun.value or '')
     assert may.fill.fgColor.rgb != jun.fill.fgColor.rgb
+    assert may.fill.fgColor.rgb not in {'0014532D', '004F1D1D', '00111C2D'}
+    assert jun.fill.fgColor.rgb not in {'0014532D', '004F1D1D', '00111C2D'}
     assert mar.value in ('', None)
+    heights=[cal.row_dimensions[r].height for r in range(2, cal.max_row+1)]
+    assert len(set(heights)) == 1
 
 
 def test_equity_curve_carry_forward_and_chart_series(tmp_path: Path):
@@ -59,13 +63,15 @@ def test_equity_curve_carry_forward_and_chart_series(tmp_path: Path):
     s['items']=[
         {'id':'a1','row_type':'trade','account':'A','open_time':'2026-05-01','close_time':'2026-05-01','net_profit':10,'analysis_balance_after_trade':100},
         {'id':'b1','row_type':'trade','account':'B','open_time':'2026-05-02','close_time':'2026-05-02','net_profit':5,'balance_after_trade':50},
+        {'id':'b2','row_type':'trade','account':'B','open_time':'2026-05-03','close_time':'2026-05-03','net_profit':4},
         {'id':'a2','row_type':'trade','account':'A','open_time':'2026-05-03','close_time':'2026-05-03','net_profit':2},
     ]
     out=tmp_path/'m.xlsx'; build_master_journal_workbook(s,out); wb=load_workbook(out)
     eq=wb['Equity Curve']
     assert eq['A1'].value=='Date' and eq.max_column==3
     assert eq['C2'].value in ('',None)
-    assert len(eq._charts)==1 and len(eq._charts[0].series)==2
+    assert len(eq._charts)==2
+    assert all(len(ch.series)==1 for ch in eq._charts)
 
 
 def test_equity_curve_insufficient_points_shows_message(tmp_path: Path):
@@ -87,3 +93,42 @@ def test_all_trades_hidden_row_id_and_override_after_row_swap(tmp_path: Path):
     ws['Q2']='Yes'; wb.save(out)
     ov=read_master_journal_manual_overrides(out)
     assert any(v.get('is_test_trade') is True for v in ov.values())
+
+def test_balance_after_resolution_and_duration_display(tmp_path: Path):
+    s=sample_snapshot()
+    s['items'] = [
+        {'id':'t1','row_type':'trade','account':'A','open_time':'2026-05-01','close_time':'2026-05-01','net_profit':10,'analysis_balance_after_trade':100,'trade_duration_seconds':41},
+        {'id':'t2','row_type':'trade','account':'A','open_time':'2026-05-02','close_time':'2026-05-02','net_profit':5,'trade_duration_seconds':303},
+        {'id':'t3','row_type':'trade','account':'B','open_time':'2026-05-01','close_time':'2026-05-01','net_profit':3,'trade_duration_seconds':3661},
+    ]
+    out=tmp_path/'m3.xlsx'; build_master_journal_workbook(s,out); wb=load_workbook(out)
+    ws=wb['All Trades']
+    assert ws['O2'].value == 100
+    assert ws['O3'].value == 105
+    assert ws['O4'].value in ("", None)
+    assert ws['P1'].value == 'Trade Duration'
+    assert ws['P2'].value == '41 seconds'
+    assert ws['P3'].value == '5 minutes, 3 seconds'
+    inst=wb['Instrument Averages']
+    assert 'hour' in str(inst['V2'].value)
+    assert 'hour' in str(inst['W2'].value)
+    assert 'hour' in str(inst['X2'].value)
+
+def test_sheet_order_and_hidden_meta(tmp_path: Path):
+    out=tmp_path/'x.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
+    assert 'Diagnostics' not in SHEET_ORDER
+    assert wb.sheetnames == SHEET_ORDER
+    assert '_Trade Meta' in wb.sheetnames
+    assert wb['_Trade Meta'].sheet_state == 'hidden'
+
+def test_dashboard_layout_style_columns(tmp_path: Path):
+    out=tmp_path/'db.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
+    dash=wb['Dashboard']
+    assert dash['A1'].fill.fgColor.type != 'rgb' or dash['A1'].fill.fgColor.rgb != '000B1220'
+    assert dash['I2'].value != 'Instrument leaders'
+    positions={(r,c):dash.cell(r,c).value for r in range(1,80) for c in range(1,13)}
+    duration_pos=[k for k,v in positions.items() if v=='Duration'][0]
+    assert any(
+        r.min_row == duration_pos[0] and r.min_col == duration_pos[1] and r.max_col == duration_pos[1] + 2
+        for r in dash.merged_cells.ranges
+    )
