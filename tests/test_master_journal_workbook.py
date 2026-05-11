@@ -39,3 +39,38 @@ def test_manual_override_roundtrip(tmp_path: Path):
     wb=load_workbook(out); ws=wb['All Trades']; ws['Q2']='Yes'; ws['R2']='AAA'; wb.save(out)
     ov=read_master_journal_manual_overrides(out)
     assert ov['t1']['is_test_trade'] is True and ov['t1']['setup']=='AAA'
+
+def test_calendar_month_fill_colors(tmp_path: Path):
+    snap=sample_snapshot()
+    snap['items']=[
+        {'id':'p','row_type':'trade','account':'A','open_time':'2026-05-01','close_time':'2026-05-01','net_profit':10,'is_test_trade':False},
+        {'id':'n','row_type':'trade','account':'A','open_time':'2026-06-01','close_time':'2026-06-01','net_profit':-5,'is_test_trade':False},
+    ]
+    out=tmp_path/'Master Journal.xlsx'; build_master_journal_workbook(snap,out); wb=load_workbook(out)
+    cal=wb['P&L Calendar']
+    may=cal['F2']; jun=cal['G2']; mar=cal['D2']
+    assert 'P/L' in str(may.value or '') and 'P/L' in str(jun.value or '')
+    assert may.fill.fgColor.rgb != jun.fill.fgColor.rgb
+    assert mar.value in ('', None)
+
+
+def test_equity_curve_carry_forward_and_chart_series(tmp_path: Path):
+    s=sample_snapshot()
+    s['items']=[
+        {'id':'a1','row_type':'trade','account':'A','open_time':'2026-05-01','close_time':'2026-05-01','net_profit':10,'analysis_balance_after_trade':100},
+        {'id':'b1','row_type':'trade','account':'B','open_time':'2026-05-02','close_time':'2026-05-02','net_profit':5,'balance_after_trade':50},
+        {'id':'a2','row_type':'trade','account':'A','open_time':'2026-05-03','close_time':'2026-05-03','net_profit':2},
+    ]
+    out=tmp_path/'m.xlsx'; build_master_journal_workbook(s,out); wb=load_workbook(out)
+    eq=wb['Equity Curve']
+    assert eq['A1'].value=='Date' and eq.max_column==3
+    assert eq['C2'].value in ('',None)
+    assert len(eq._charts)==1 and len(eq._charts[0].series)==2
+
+
+def test_equity_curve_insufficient_points_shows_message(tmp_path: Path):
+    s=sample_snapshot(); s['items']=[{'id':'a1','row_type':'trade','account':'A','open_time':'2026-05-01','close_time':'2026-05-01','net_profit':1,'is_test_trade':False}]
+    out=tmp_path/'m2.xlsx'; build_master_journal_workbook(s,out); wb=load_workbook(out)
+    eq=wb['Equity Curve']
+    assert eq['A3'].value=='Not enough equity data to chart.'
+    assert len(eq._charts)==0

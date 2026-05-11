@@ -76,7 +76,7 @@ def test_sync_master_journal_applies_manual_overrides(tmp_path, monkeypatch):
     from tools.master_journal_workbook import build_master_journal_workbook
     build_master_journal_workbook(snap,mj)
     from openpyxl import load_workbook
-    wb=load_workbook(mj); ws=wb['All Trades']; ws['U2']='Yes'; ws['V2']='S'; ws['W2']='M5'; ws['X2']='No'; ws['Y2']='note'; wb.save(mj)
+    wb=load_workbook(mj); ws=wb['All Trades']; ws['Q2']='Yes'; ws['R2']='S'; ws['S2']='M5'; ws['T2']='No'; ws['U2']='note'; wb.save(mj)
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
     rows=[{'id':'r1','row_type':'trade','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0}]
     monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: rows)
@@ -96,7 +96,7 @@ def test_sync_master_journal_test_yes_excluded_from_aggregates(tmp_path, monkeyp
     seed={'items':[{'id':'r1','row_type':'trade','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':10.0,'is_test_trade':False}], 'stats':{'totals':{}}, 'balances':[], 'diagnostics':{}}
     build_master_journal_workbook(seed,mj)
     from openpyxl import load_workbook
-    wb=load_workbook(mj); ws=wb['All Trades']; ws['U2']='Yes'; wb.save(mj)
+    wb=load_workbook(mj); ws=wb['All Trades']; ws['Q2']='Yes'; wb.save(mj)
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
     rows=[{'id':'r1','row_type':'trade','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':10.0}]
     monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: rows)
@@ -105,7 +105,7 @@ def test_sync_master_journal_test_yes_excluded_from_aggregates(tmp_path, monkeyp
     r=master_service._sync_master_journal_workbook()
     assert r['master_journal_ok'] is True
     out=load_workbook(mj)
-    assert out['All Trades']['U2'].value == 'Yes'
+    assert out['All Trades']['Q2'].value == 'Yes'
     inst_symbols=[out['Instrument Averages'].cell(i,1).value for i in range(2,out['Instrument Averages'].max_row+1)]
     assert 'EURUSD' not in inst_symbols
 
@@ -306,3 +306,32 @@ def test_github_sync_stages_only_target_file(monkeypatch, tmp_path):
     assert "~$Master Journal.xlsx" not in added_tokens
     assert ".tmp.xlsx" not in added_tokens
     assert ".pending.xlsx" not in added_tokens
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_manual_save_watcher_enablement(monkeypatch):
+    monkeypatch.setattr(master_service, '_is_render_env', lambda: True)
+    assert master_service._manual_save_watcher_enabled() is False
+    monkeypatch.setattr(master_service, '_is_render_env', lambda: False)
+    monkeypatch.setenv('TRADING_JOURNAL_GITHUB_SYNC_ENABLED','1')
+    monkeypatch.delenv('TRADING_JOURNAL_GITHUB_SYNC_ON_MANUAL_SAVE_ENABLED', raising=False)
+    assert master_service._manual_save_watcher_enabled() is True
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_manual_save_sync_once_records_error_and_no_rebuild(tmp_path, monkeypatch):
+    target = tmp_path / 'Master Journal.xlsx'; target.write_bytes(b'a')
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    called={'sync':0,'build':0}
+    monkeypatch.setattr(master_service, '_sync_journal_excel_files_to_github', lambda p: called.__setitem__('sync', called['sync']+1) or {'github_sync_ok':False,'github_sync_error':'git fail','github_sync_files':['journal/Master Journal.xlsx'],'github_sync_commit':''})
+    monkeypatch.setattr(master_service, 'build_master_journal_workbook', lambda *a, **k: called.__setitem__('build', called['build']+1))
+    master_service._run_manual_save_github_sync_once(target)
+    st=master_service._manual_save_state_snapshot()
+    assert called['sync']==1 and called['build']==0
+    assert st['manual_save_last_error']=='git fail'
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_manual_save_ignore_temp_names(tmp_path):
+    assert master_service._should_ignore_manual_save_path(tmp_path / '~$Master Journal.xlsx')
+    assert master_service._should_ignore_manual_save_path(tmp_path / 'Master Journal.tmp.xlsx')
+    assert master_service._should_ignore_manual_save_path(tmp_path / 'Master Journal.pending.xlsx')

@@ -231,8 +231,25 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     for r in non_test:
         d=_as_date(r.get('close_time') or r.get('open_time')); pnl=_as_float(r.get('net_profit'))
         if d and pnl is not None: monthly[(d.year,d.month)]['pnl']+=pnl; monthly[(d.year,d.month)]['trades']+=1
-    for y in sorted({y for y,_ in monthly.keys()}): cal.append([y]+[('' if (y,m) not in monthly else f"P/L {monthly[(y,m)]['pnl']:.2f}\nT: {monthly[(y,m)]['trades']}") for m in range(1,13)])
+    for y in sorted({y for y,_ in monthly.keys()}):
+        cal.append([y]+[('' if (y,m) not in monthly else f"P/L {monthly[(y,m)]['pnl']:.2f}\nT: {monthly[(y,m)]['trades']}") for m in range(1,13)])
     _style_table_sheet(cal,1,'A2',False)
+    for rr in range(2, cal.max_row+1):
+        for cc in range(2,14):
+            cell=cal.cell(rr,cc); txt=str(cell.value or '')
+            pnl=None
+            if txt.startswith('P/L '):
+                try: pnl=float(txt.split('\n')[0].replace('P/L ','').strip())
+                except Exception: pnl=None
+            if pnl is None:
+                cell.fill=PatternFill('solid',fgColor='00111C2D')
+            elif pnl > 0:
+                cell.fill=PatternFill('solid',fgColor='0014532D')
+            elif pnl < 0:
+                cell.fill=PatternFill('solid',fgColor='004F1D1D')
+            else:
+                cell.fill=PatternFill('solid',fgColor='00111C2D')
+            cell.alignment=Alignment(wrap_text=True,vertical='top')
 
     eq=wb['Equity Curve']; by_date=defaultdict(dict); accounts=[]; running=defaultdict(float); carry={}
     for r in sorted(non_test,key=lambda x: str(x.get('close_time') or x.get('open_time') or '')):
