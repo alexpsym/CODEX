@@ -19868,6 +19868,7 @@ def _compute_journal_stats(
                 "sl_pct": [],
                 "tp_pct": [],
                 "pnl": [],
+                "pnl_by_currency": defaultdict(list),
                 "durations": [],
                 "quote_currency": "USDT" if not _is_fx_asset_class(row.get("asset_class")) else "",
             }
@@ -19931,7 +19932,9 @@ def _compute_journal_stats(
                     bucket.setdefault(f"{prefix}_quote_losses", []).append(dist)
 
         pnl_val=_row_pnl(row)
-        if pnl_val is not None: bucket["pnl"].append(pnl_val)
+        if pnl_val is not None:
+            bucket["pnl"].append(pnl_val)
+            bucket["pnl_by_currency"][_row_pnl_currency(row) or "UNKNOWN"].append(pnl_val)
         if _is_valid_price_level(entry) and _is_valid_price_level(sl) and entry:
             pct = abs(entry - sl)/entry*100.0
             bucket["sl_pct"].append(pct)
@@ -19951,6 +19954,15 @@ def _compute_journal_stats(
         pnl_list=item.pop("pnl",[])
         item["net_profit_total"]=sum(pnl_list) if pnl_list else None
         item["avg_net_profit"]=_avg(pnl_list)
+        pnl_by_ccy = item.pop("pnl_by_currency", {})
+        net_by_ccy = {k: sum(v) for k, v in pnl_by_ccy.items() if v}
+        avg_by_ccy = {k: (_avg(v) or 0.0) for k, v in pnl_by_ccy.items() if v}
+        item["money_by_currency"] = {
+            "net_profit_total": net_by_ccy,
+            "avg_net_profit": avg_by_ccy,
+            "currencies": sorted(net_by_ccy.keys()),
+            "mixed_currency": len(net_by_ccy.keys()) > 1,
+        }
         denom_inst=(item.get("wins",0) or 0)+(item.get("losses",0) or 0)
         item["win_rate_pct"]=(item.get("wins",0)/denom_inst*100.0) if denom_inst else None
         item["avg_sl_pct"]=_avg(item.pop("sl_pct",[]))
