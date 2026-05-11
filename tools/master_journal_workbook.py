@@ -282,6 +282,8 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         cal.append([y]+[(monthly[(y,m)]['pct'] / 100.0 if (y,m) in monthly else '') for m in range(1,13)])
         cal.append([f"{y} Trades"]+[(monthly[(y,m)]['trades'] if (y,m) in monthly else '') for m in range(1,13)])
     _style_table_sheet(cal,1,'A3',False)
+    _style_header_row(cal, 2)
+    _table_border(cal, 1, 1, cal.max_row, cal.max_column)
     for rr in range(3, cal.max_row + 1, 2):
         for cc in range(2, 14):
             cal.cell(rr, cc).number_format = "0.00%"

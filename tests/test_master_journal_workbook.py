@@ -83,6 +83,10 @@ def test_calendar_month_conditional_formatting_rows(tmp_path: Path):
     assert _cell_covered(ranges, "G3")
     assert not _cell_covered(ranges, "F4")
     assert not _cell_covered(ranges, "G4")
+    assert cal.freeze_panes == "A3"
+    for c in range(1, 14):
+        assert cal.cell(1, c).font.bold is True
+        assert cal.cell(2, c).font.bold is True
     assert mar.value in ('', None)
     heights=[cal.row_dimensions[r].height for r in range(2, cal.max_row+1)]
     assert len(set(heights)) == 1
