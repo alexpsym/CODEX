@@ -123,6 +123,7 @@ def test_all_trades_hidden_row_id_and_unsorted_override(tmp_path: Path):
     assert ov["t1"]["setup"] == "setup-x"
     assert len(ws.conditional_formatting) > 0
     assert ws["M2"].number_format == "0.00%"
+    assert ws["A2"].comment is None
     assert ws["M2"].value in (0.023, -0.011)
 
 
