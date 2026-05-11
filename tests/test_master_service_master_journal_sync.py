@@ -411,8 +411,18 @@ def test_update_oanda_settings_passes_payload():
     out=master_service._update_oanda_settings({'wait_seconds':10})
     assert out.get('wait_seconds')==10
 
-@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
 def test_source_guard_manual_save_fingerprint_only_master_journal_sync():
     src=(ROOT/'render'/'master_service.py').read_text(encoding='utf-8')
-    assert src.count('_manual_save_set_known_fingerprint(path)')==1
-    assert '_fetch_bybit_server_time_ms' in src and '_manual_save_set_known_fingerprint(path)' in src[src.index('_sync_master_journal_workbook'):]
+    needle = '_manual_save_set_known_fingerprint(path)'
+    assert src.count(needle) == 1
+    sync_ix = src.index('_sync_master_journal_workbook')
+    only_ix = src.index(needle)
+    assert only_ix > sync_ix
+    for fn in ['_fetch_bybit_server_time_ms','_bybit_signed_get','_upsert_pending_webhook','_update_oanda_settings','async def upsert_pending_webhook','async def set_watchlist','async def oanda_inactivity_status']:
+        a = src.index(fn)
+        b = src.find('\ndef ', a + 1)
+        if b < 0:
+            b = src.find('\n@app', a + 1)
+        if b < 0:
+            b = len(src)
+        assert needle not in src[a:b]
