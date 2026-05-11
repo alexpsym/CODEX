@@ -402,7 +402,7 @@ def test_signed_get_keeps_valid_json(monkeypatch):
     async def fake_headers(**k): return {}
     monkeypatch.setattr(master_service, '_build_bybit_signed_headers', fake_headers)
     payload=asyncio.run(master_service._bybit_signed_get(base_url='https://api.bybit.com',api_key='k',api_secret='s',path='/x',params={}))
-    assert payload.get('retCode')==0
+    assert payload == {'retCode': 0, 'result': {'x': 1}}
 
 @pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
 def test_update_oanda_settings_passes_payload():
