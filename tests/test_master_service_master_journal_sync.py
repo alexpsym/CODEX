@@ -369,3 +369,50 @@ def test_manual_save_disabled_github_no_fake_success(monkeypatch, tmp_path):
     st=master_service._manual_save_state_snapshot()
     assert st['manual_save_last_success_at'] is None
     assert 'disabled' in str(st['manual_save_last_error']).lower()
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_bybit_server_time_invalid_json_no_path_nameerror(monkeypatch):
+    class Resp:
+        status_code=200
+        text='x'
+        def json(self): raise ValueError('bad')
+    class Ctx:
+        async def __aenter__(self): return Resp()
+        async def __aexit__(self,*a): return False
+    class Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self,*a): return False
+        def get(self,*a,**k): return Ctx()
+    monkeypatch.setattr(master_service.httpx, 'AsyncClient', lambda **k: Client())
+    out = asyncio.run(master_service._fetch_bybit_server_time_ms('https://api.bybit.com'))
+    assert isinstance(out, int)
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_signed_get_keeps_valid_json(monkeypatch):
+    class Resp:
+        status_code=200
+        text='ok'
+        def json(self): return {'retCode':0,'result':{'x':1}}
+    class Ctx:
+        async def __aenter__(self): return Resp()
+        async def __aexit__(self,*a): return False
+    class Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self,*a): return False
+        def get(self,*a,**k): return Ctx()
+    monkeypatch.setattr(master_service.httpx, 'AsyncClient', lambda **k: Client())
+    monkeypatch.setattr(master_service, '_build_bybit_signed_headers', lambda **k: {})
+    monkeypatch.setattr(master_service, '_fetch_bybit_server_time_ms', lambda *_: 1)
+    payload=asyncio.run(master_service._bybit_signed_get(base_url='https://api.bybit.com',api_key='k',api_secret='s',path='/x'))
+    assert payload.get('retCode')==0
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_update_oanda_settings_passes_payload():
+    out=master_service._update_oanda_settings({'wait_seconds':10})
+    assert out.get('wait_seconds')==10
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_source_guard_manual_save_fingerprint_only_master_journal_sync():
+    src=(ROOT/'render'/'master_service.py').read_text(encoding='utf-8')
+    assert src.count('_manual_save_set_known_fingerprint(path)')==1
+    assert '_fetch_bybit_server_time_ms' in src and '_manual_save_set_known_fingerprint(path)' in src[src.index('_sync_master_journal_workbook'):]
