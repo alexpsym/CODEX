@@ -10484,23 +10484,29 @@ async def _fetch_bybit_server_time_ms(base_url: str) -> int:
     normalized_base = _normalize_bybit_base_url(base_url)
     url = f"{normalized_base}/v5/market/time"
     async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(url)
+        req = client.get(url)
+        if hasattr(req, "__aenter__"):
+            async with req as resp:
+                response = resp
+        else:
+            response = await req
     _record_outbound_traffic(
         "bybit",
         bytes_sent=len(url),
-        bytes_received=len(resp.content),
+        bytes_received=len(getattr(response, "content", b"") or b""),
         context="/v5/market/time",
     )
     payload: Dict[str, object] = {}
     try:
-        payload = resp.json()
+        payload = response.json()
     except Exception:
-        _manual_save_set_known_fingerprint(path)
         payload = {}
-    if resp.status_code >= 400:
+    if response.status_code >= 400:
         raise ValueError(
-            f"Bybit server time request failed http_status={resp.status_code} retCode={payload.get('retCode')} retMsg={payload.get('retMsg') or resp.text}"
+            f"Bybit server time request failed http_status={response.status_code} retCode={payload.get('retCode')} retMsg={payload.get('retMsg') or response.text}"
         )
+    if not payload:
+        raise ValueError("Bybit server time response is unparseable.")
     if payload.get("retCode") not in (0, "0", None):
         raise ValueError(
             f"Bybit server time request failed retCode={payload.get('retCode')} retMsg={payload.get('retMsg')}"
@@ -10605,6 +10611,19 @@ def _is_bybit_open_order(status: Optional[str]) -> bool:
         return True
     return normalized not in closed_statuses
 
+async def _build_bybit_signed_headers(
+    *, normalized_base: str, api_key: str, api_secret: str, data_str: str, recv_window: str, force_time_sync: bool
+) -> Dict[str, str]:
+    timestamp = await _bybit_timestamp_ms(normalized_base, force_time_sync=force_time_sync)
+    signature = _bybit_sign_request(timestamp, api_key, api_secret, data_str, recv_window=recv_window)
+    return {
+        "X-BAPI-API-KEY": api_key,
+        "X-BAPI-SIGN": signature,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": recv_window,
+        "X-BAPI-SIGN-TYPE": "2",
+    }
+
 
 async def _bybit_signed_get(
     *,
@@ -10624,19 +10643,14 @@ async def _bybit_signed_get(
     if query:
         url = f"{url}?{query}"
     for attempt in range(1, BYBIT_SIGNED_REQUEST_MAX_RETRIES + 1):
-        timestamp = await _bybit_timestamp_ms(
-            normalized_base, force_time_sync=(attempt > 1)
+        headers = await _build_bybit_signed_headers(
+            normalized_base=normalized_base,
+            api_key=api_key,
+            api_secret=api_secret,
+            data_str=query,
+            recv_window=recv_window,
+            force_time_sync=(attempt > 1),
         )
-        signature = _bybit_sign_request(
-            timestamp, api_key, api_secret, query, recv_window=recv_window
-        )
-        headers = {
-            "X-BAPI-API-KEY": api_key,
-            "X-BAPI-SIGN": signature,
-            "X-BAPI-TIMESTAMP": timestamp,
-            "X-BAPI-RECV-WINDOW": recv_window,
-            "X-BAPI-SIGN-TYPE": "2",
-        }
         timeout = httpx.Timeout(timeout_s, connect=connect_s, read=(read_s if read_s is not None else timeout_s), write=timeout_s, pool=2.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.get(url, headers=headers)
@@ -10650,8 +10664,7 @@ async def _bybit_signed_get(
         try:
             payload = resp.json()
         except Exception:
-            _manual_save_set_known_fingerprint(path)
-        payload = {}
+            payload = {}
         ret_code = payload.get("retCode")
         ret_msg = payload.get("retMsg") or resp.text
         if resp.status_code >= 400:
@@ -20463,8 +20476,7 @@ def _read_oanda_settings() -> Dict[str, float]:
 def _update_oanda_settings(payload: Dict[str, object]) -> Dict[str, float]:
     try:
         if not isinstance(payload, dict):
-            _manual_save_set_known_fingerprint(path)
-        payload = {}
+            raise HTTPException(status_code=400, detail="payload must be an object")
         updates: Dict[str, object] = {}
         for key in (
             "wait_seconds",

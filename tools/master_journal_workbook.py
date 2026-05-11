@@ -295,12 +295,14 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         bal=_as_float(r.get('analysis_balance_after_trade'))
         if bal is None: bal=_as_float(r.get('balance_after_trade'))
         if bal is None: bal=_as_float(r.get('cashflow_new_balance'))
-        if bal is None:
-            prev=carry.get(acct)
-            bal=(prev if prev is not None else 0.0)+(_as_float(r.get('net_profit')) or 0.0)
-        carry[acct]=bal
-        by_date[d.isoformat()][acct]=bal
-        observed[acct]+=1
+        if bal is None and acct in carry:
+            pnl = _as_float(r.get('net_profit'))
+            if pnl is not None:
+                bal = carry[acct] + pnl
+        if bal is not None:
+            carry[acct]=bal
+            by_date[d.isoformat()][acct]=bal
+            observed[acct]+=1
     eq.append(['Date']+accounts); points=0; carry={}
     for d in sorted(by_date.keys()):
         row=[d]

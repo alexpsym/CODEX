@@ -81,6 +81,21 @@ def test_equity_curve_insufficient_points_shows_message(tmp_path: Path):
     assert eq['A3'].value=='Not enough equity data to chart.'
     assert len(eq._charts)==0
 
+def test_unanchored_account_does_not_fabricate_equity(tmp_path: Path):
+    s=sample_snapshot()
+    s['items']=[
+        {'id':'u1','row_type':'trade','account':'U','open_time':'2026-05-01','close_time':'2026-05-01','net_profit':10},
+        {'id':'u2','row_type':'trade','account':'U','open_time':'2026-05-02','close_time':'2026-05-02','net_profit':5},
+    ]
+    out=tmp_path/'u.xlsx'; build_master_journal_workbook(s,out); wb=load_workbook(out)
+    ws=wb['All Trades']
+    assert ws['O2'].value in ('', None)
+    assert ws['O3'].value in ('', None)
+    eq=wb['Equity Curve']
+    assert eq['B2'].value in ('', None)
+    assert eq['B3'].value in ('', None)
+    assert len(eq._charts)==0
+
 
 def test_all_trades_hidden_row_id_and_override_after_row_swap(tmp_path: Path):
     out=tmp_path/'Master Journal.xlsx'; build_master_journal_workbook(sample_snapshot(), out)
