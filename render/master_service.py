@@ -69,7 +69,7 @@ from shared.symbol_resolution import (
 from shared.atomic_json import write_json_file
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, stable_row_id, SHEET_ORDER, read_master_journal_source, refresh_master_journal_derived_sheets
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, stable_row_id, SHEET_ORDER, read_master_journal_source, refresh_master_journal_derived_sheets, update_master_journal_workbook_data_only
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -1159,9 +1159,8 @@ def _source_file_fingerprint(path: Path) -> Dict[str, object]:
 
 def _master_journal_authoritative_enabled() -> bool:
     source = str(os.getenv("TRADING_JOURNAL_SOURCE", "") or "").strip().lower()
-    if source in {"legacy", "sources", "import"}:
-        return False
-    return _master_journal_path().exists()
+    explicit = str(os.getenv("TRADING_JOURNAL_MASTER_JOURNAL_AUTHORITATIVE", "0") or "0").strip().lower() in {"1","true","yes","on"}
+    return source == "master_journal" or explicit
 
 def _journal_source_fingerprint() -> dict:
     mode = TRADING_JOURNAL_SOURCE if TRADING_JOURNAL_SOURCE in {"dropbox", "local", "both", "auto"} else "both"
@@ -23688,7 +23687,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                     for row in current_rows
                 ]
                 _set_trading_journal_rows([row for row in merged_rows if isinstance(row, dict)])
-            refresh_master_journal_derived_sheets(path, snapshot)
+            update_master_journal_workbook_data_only(path, snapshot)
             refreshed = read_master_journal_source(path)
             refreshed_items = [r for r in (refreshed.get("items") or []) if isinstance(r, dict)]
             refreshed_trade_rows = [r for r in refreshed_items if _row_type(r) == "trade"]

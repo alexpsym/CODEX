@@ -1,6 +1,6 @@
 from __future__ import annotations
 from collections import defaultdict
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Any, Dict, List
 from openpyxl import Workbook, load_workbook
@@ -458,6 +458,44 @@ def _write_instrument_leaders_section(ws, start_row, start_col, leaders):
     return rr - 1
 
 
+
+
+def _parse_duration_text(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    total = 0.0
+    for n,u in __import__('re').findall(r'([0-9]+(?:\.[0-9]+)?)\s*(day|days|hour|hours|minute|minutes|second|seconds)', text):
+        num = float(n)
+        if u.startswith('day'): total += num*86400
+        elif u.startswith('hour'): total += num*3600
+        elif u.startswith('minute'): total += num*60
+        else: total += num
+    return total or None
+
+def _excel_datetime_to_iso(v: Any) -> str:
+    if isinstance(v, datetime):
+        return v.isoformat()
+    if isinstance(v, date):
+        return datetime(v.year, v.month, v.day).isoformat()
+    if isinstance(v, (int,float)):
+        try:
+            base=datetime(1899,12,30)
+            return (base+timedelta(days=float(v))).isoformat()
+        except Exception:
+            return str(v)
+    return str(v or '')
+
+def _alias_index(idx: Dict[str, int], *names: str) -> int | None:
+    for n in names:
+        if n in idx:
+            return idx[n]
+    return None
+
 def read_master_journal_source(path: Path) -> Dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"Master Journal workbook not found: {path}")
@@ -474,11 +512,13 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
         items=[]; cashflow_ledger=defaultdict(list)
         def _num(v):
             try:
-                if v in (None, ""):
-                    return None
+                if v in (None, ""): return None
                 return float(v)
-            except Exception:
-                return None
+            except Exception: return None
+        i_stop = _alias_index(idx, 'Stop Loss', 'Stop Loss Price')
+        i_tp = _alias_index(idx, 'Take Profit', 'Target Price', 'Target')
+        i_pnl = _alias_index(idx, 'Net P/L', 'Net Profit', 'Realized PnL')
+        i_dur = _alias_index(idx, 'Trade Duration Seconds', 'Trade Duration')
         for r in ws.iter_rows(min_row=2, values_only=True):
             if not any(v not in (None,'') for v in r):
                 continue
@@ -487,27 +527,57 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
             account = str(r[idx.get('Account',2)] or '').strip()
             row_id = str(r[idx.get('Row ID',len(r)-1)] or '').strip() if 'Row ID' in idx else ''
             row_type_raw = str(r[idx.get('Row Type')]).strip().lower() if 'Row Type' in idx and idx.get('Row Type') is not None else ''
-            if row_type_raw in {'cashflow','monthly_aud_reval','trade'}:
-                row_type = row_type_raw
-            else:
-                row_type = 'cashflow' if symbol.upper()=='CASHFLOW' else ('monthly_aud_reval' if symbol.upper()=='MONTHLY AUD P/L' else ('trade' if symbol or account or side else ''))
-            if not row_type:
-                continue
-            open_time = r[idx.get('Open Time',0)]
-            close_time = r[idx.get('Close Time',1)]
-            duration = _num(r[idx.get('Trade Duration Seconds')]) if 'Trade Duration Seconds' in idx else None
-            if duration is None and open_time not in (None, '') and close_time not in (None, ''):
-                try:
-                    duration = int((pd.to_datetime(close_time, utc=True) - pd.to_datetime(open_time, utc=True)).total_seconds())
-                except Exception:
-                    duration = None
-            item={'id': row_id or stable_row_id({'account':account,'symbol':symbol,'side':side,'open_time':open_time,'close_time':close_time}), 'row_type':row_type,'account':account,'symbol':symbol,'side':side,'open_time':open_time,'close_time':close_time,'qty':_num(r[idx.get('Qty')]) if 'Qty' in idx else None,'entry_price':_num(r[idx.get('Entry Price')]) if 'Entry Price' in idx else None,'exit_price':_num(r[idx.get('Exit Price')]) if 'Exit Price' in idx else None,'stop_loss':_num(r[idx.get('Stop Loss')]) if 'Stop Loss' in idx else None,'take_profit':_num(r[idx.get('Take Profit')]) if 'Take Profit' in idx else None,'commission':_num(r[idx.get('Commission')]) if 'Commission' in idx else None,'net_profit':_num(r[idx.get('Net P/L',11)]) if 'Net P/L' in idx else None,'result_pct':_num(r[idx.get('Profit %')]) if 'Profit %' in idx else None,'r_multiple':_num(r[idx.get('R-Multiple')]) if 'R-Multiple' in idx else None,'balance_after_trade':_num(r[idx.get('Balance After')]) if 'Balance After' in idx else None,'trade_duration_seconds':duration,'is_test_trade':str(r[idx.get('Test')]).strip().lower() in {'yes','y','true','1'} if 'Test' in idx else False,'setup':r[idx.get('Setup',17)] if 'Setup' in idx else '','timeframe':r[idx.get('Timeframe',18)] if 'Timeframe' in idx else '','breakeven':r[idx.get('Breakeven',19)] if 'Breakeven' in idx else '','notes':r[idx.get('Notes',20)] if 'Notes' in idx else '','currency':str(r[idx.get('Currency')] or '').strip() if 'Currency' in idx else ''}
+            row_type = row_type_raw if row_type_raw in {'cashflow','monthly_aud_reval','trade'} else ('cashflow' if symbol.upper()=='CASHFLOW' else ('monthly_aud_reval' if symbol.upper()=='MONTHLY AUD P/L' else 'trade'))
+            open_time = _excel_datetime_to_iso(r[idx.get('Open Time',0)])
+            close_time = _excel_datetime_to_iso(r[idx.get('Close Time',1)])
+            duration = _num(r[i_dur]) if i_dur is not None else None
+            if duration is None and i_dur is not None: duration = _parse_duration_text(r[i_dur])
+            asset_class = 'fx' if ('OANDA' in account.upper() or ('/' in symbol and len(symbol.replace('/',''))>=6)) else ('crypto' if symbol else '')
+            item={'id': row_id or stable_row_id({'account':account,'symbol':symbol,'side':side,'open_time':open_time,'close_time':close_time}), 'row_type':row_type,'account':account,'symbol':symbol,'side':side,'open_time':open_time,'close_time':close_time,'qty':_num(r[idx.get('Qty')]) if 'Qty' in idx else None,'entry_price':_num(r[idx.get('Entry Price')]) if 'Entry Price' in idx else None,'exit_price':_num(r[idx.get('Exit Price')]) if 'Exit Price' in idx else None,'stop_loss':_num(r[i_stop]) if i_stop is not None else None,'take_profit':_num(r[i_tp]) if i_tp is not None else None,'commission':_num(r[idx.get('Commission')]) if 'Commission' in idx else None,'net_profit':_num(r[i_pnl]) if i_pnl is not None else None,'result_pct':_num(r[idx.get('Profit %')]) if 'Profit %' in idx else None,'r_multiple':_num(r[idx.get('R-Multiple')]) if 'R-Multiple' in idx else None,'balance_after_trade':_num(r[idx.get('Balance After')]) if 'Balance After' in idx else None,'trade_duration_seconds':duration,'is_test_trade':str(r[idx.get('Test')]).strip().lower() in {'yes','y','true','1'} if 'Test' in idx else False,'setup':r[idx.get('Setup',17)] if 'Setup' in idx else '','timeframe':r[idx.get('Timeframe',18)] if 'Timeframe' in idx else '','breakeven':r[idx.get('Breakeven',19)] if 'Breakeven' in idx else '','notes':r[idx.get('Notes',20)] if 'Notes' in idx else '','currency':str(r[idx.get('Currency')] or '').strip() if 'Currency' in idx else '', 'asset_class': asset_class}
             items.append(item)
             if row_type=='cashflow':
-                cashflow_ledger[account].append({'account':account,'date':item['close_time'] or item['open_time'],'amount':_num(r[idx.get('Cashflow Amount')]) if 'Cashflow Amount' in idx else None,'new_balance':_num(r[idx.get('Cashflow New Balance')]) if 'Cashflow New Balance' in idx else item.get('balance_after_trade'),'currency':str(r[idx.get('Currency')] or '').strip() if 'Currency' in idx else '','reason':item.get('notes') or '', 'side':side})
+                cashflow_ledger[account].append({'account':account,'date':item['close_time'] or item['open_time'],'amount':_num(r[idx.get('Cashflow Amount')]) if 'Cashflow Amount' in idx else _num(r[i_pnl]) if i_pnl is not None else None,'new_balance':_num(r[idx.get('Cashflow New Balance')]) if 'Cashflow New Balance' in idx else item.get('balance_after_trade'),'currency':str(r[idx.get('Currency')] or '').strip() if 'Currency' in idx else '','reason':item.get('notes') or '', 'side':side})
         return {'items':items,'cashflow_ledger':dict(cashflow_ledger)}
     finally:
         wb.close()
+
+def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    wb = load_workbook(path)
+    tmp = path.with_suffix('.data_only.tmp.xlsx')
+    try:
+        build_master_journal_workbook(snapshot, tmp)
+        gen = load_workbook(tmp, data_only=True)
+        try:
+            for name in ['Dashboard','Instrument Averages','P&L Calendar']:
+                if name not in wb.sheetnames or name not in gen.sheetnames:
+                    raise RuntimeError(f'Missing required sheet for data-only update: {name}')
+                dst, src = wb[name], gen[name]
+                for r in range(1, src.max_row+1):
+                    for c in range(1, src.max_column+1):
+                        dst.cell(r,c).value = src.cell(r,c).value
+            if 'All Trades' not in wb.sheetnames or 'All Trades' not in gen.sheetnames:
+                raise RuntimeError('Missing All Trades sheet for data-only update.')
+            dst, src = wb['All Trades'], gen['All Trades']
+            for r in range(2, dst.max_row+1):
+                rid = str(dst.cell(r,26).value or '')
+                if not rid:
+                    continue
+            max_r = src.max_row
+            max_c = min(src.max_column, dst.max_column)
+            for r in range(1, max_r+1):
+                for c in range(1, max_c+1):
+                    if c in (17,18,19,20,21):
+                        continue
+                    dst.cell(r,c).value = src.cell(r,c).value
+            if dst.auto_filter and dst.auto_filter.ref:
+                dst.auto_filter.ref=f"A1:{get_column_letter(dst.max_column)}{max(2,dst.max_row)}"
+        finally:
+            gen.close()
+        wb.save(path)
+        return {'ok': True, 'path': str(path)}
+    finally:
+        wb.close()
+        tmp.unlink(missing_ok=True)
 
 def refresh_master_journal_derived_sheets(path: Path, snapshot: Dict[str, Any]) -> Dict[str, Any]:
     if not path.exists():
