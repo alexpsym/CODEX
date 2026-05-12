@@ -858,8 +858,13 @@ def _set_trading_journal_sync_state(**updates: object) -> None:
         merged = _sync_state_snapshot()
         merged.update(updates)
         merged["updated_at"] = _utc_now_iso()
-        TRADING_JOURNAL_SYNC_STATE.update(merged)
-        _save_json_file(TRADING_JOURNAL_SYNC_STATE_PATH, merged)
+        safe_merged = _json_safe(merged)
+        if isinstance(safe_merged, dict):
+            TRADING_JOURNAL_SYNC_STATE.update(safe_merged)
+            _save_json_file(TRADING_JOURNAL_SYNC_STATE_PATH, safe_merged)
+        else:
+            TRADING_JOURNAL_SYNC_STATE.update(merged)
+            _save_json_file(TRADING_JOURNAL_SYNC_STATE_PATH, merged)
 
 
 def _schedule_trading_journal_sync_job() -> bool:
@@ -884,6 +889,10 @@ def _queue_trading_journal_sync_if_idle(reason: str) -> Dict[str, object]:
         snapshot = _sync_state_snapshot()
         running = bool(snapshot.get("running"))
         if running:
+            safe_snapshot = _json_safe(snapshot)
+            if isinstance(safe_snapshot, dict):
+                TRADING_JOURNAL_SYNC_STATE.update(safe_snapshot)
+                return safe_snapshot
             TRADING_JOURNAL_SYNC_STATE.update(snapshot)
             return snapshot
         snapshot.update(
@@ -901,11 +910,20 @@ def _queue_trading_journal_sync_if_idle(reason: str) -> Dict[str, object]:
                 "updated_at": _utc_now_iso(),
             }
         )
-        TRADING_JOURNAL_SYNC_STATE.update(snapshot)
-        _save_json_file(TRADING_JOURNAL_SYNC_STATE_PATH, snapshot)
+        safe_snapshot = _json_safe(snapshot)
+        if isinstance(safe_snapshot, dict):
+            TRADING_JOURNAL_SYNC_STATE.update(safe_snapshot)
+            _save_json_file(TRADING_JOURNAL_SYNC_STATE_PATH, safe_snapshot)
+        else:
+            TRADING_JOURNAL_SYNC_STATE.update(snapshot)
+            _save_json_file(TRADING_JOURNAL_SYNC_STATE_PATH, snapshot)
     _schedule_trading_journal_sync_job()
     with TRADING_JOURNAL_SYNC_LOCK:
         snapshot = _sync_state_snapshot()
+        safe_snapshot = _json_safe(snapshot)
+        if isinstance(safe_snapshot, dict):
+            TRADING_JOURNAL_SYNC_STATE.update(safe_snapshot)
+            return safe_snapshot
         TRADING_JOURNAL_SYNC_STATE.update(snapshot)
         return snapshot
 
@@ -3360,6 +3378,40 @@ def _record_oanda_fill_diagnostic(account: str, **updates: object) -> None:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _json_safe(value: object) -> object:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, Decimal):
+        if value.is_finite():
+            try:
+                number = float(value)
+            except Exception:
+                return str(value)
+            return number if math.isfinite(number) else None
+        return None
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if hasattr(value, "isoformat") and value.__class__.__module__.startswith(("datetime", "pandas")):
+        try:
+            return value.isoformat()
+        except Exception:
+            pass
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    if hasattr(value, "item") and callable(getattr(value, "item")):
+        try:
+            return _json_safe(value.item())
+        except Exception:
+            pass
+    return str(value)
 
 
 def _load_json_file(path: Path, default):
@@ -23340,7 +23392,7 @@ async def trading_journal_sync_status() -> JSONResponse:
             snapshot["ok"] = False
             snapshot["error"] = msg
     snapshot.update(_manual_save_state_snapshot())
-    return JSONResponse(snapshot)
+    return JSONResponse(_json_safe(snapshot))
 
 
 async def _run_trading_journal_sync_job() -> None:
