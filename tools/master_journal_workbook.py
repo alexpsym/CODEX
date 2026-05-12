@@ -1,6 +1,6 @@
 from __future__ import annotations
 from collections import defaultdict
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Any, Dict, List
 from openpyxl import Workbook, load_workbook
@@ -10,6 +10,7 @@ import hashlib
 from openpyxl.styles import PatternFill, Border, Side, Alignment
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.cell import range_boundaries
 import calendar
 
 SHEET_ORDER=["Dashboard","All Trades","Instrument Averages","P&L Calendar"]
@@ -165,6 +166,11 @@ def stable_row_id(row: Dict[str, Any]) -> str:
     return 'sig:'+hashlib.sha1('|'.join(parts).encode('utf-8')).hexdigest()[:24]
 
 
+
+
+def _all_trades_row_fingerprint_from_map(values: Dict[str, Any]) -> str:
+    parts = [str(values.get(k) or '') for k in ['Account','Symbol','Side','Open Time','Close Time','Qty','Entry Price','Exit Price','Net P/L']]
+    return 'sig:' + hashlib.sha1('|'.join(parts).encode('utf-8')).hexdigest()[:24]
 def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
     if not path.exists():
@@ -190,7 +196,8 @@ def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]
             inline_rid = str(r[rowid_i] or '').strip() if rowid_i is not None and rowid_i < len(r) else ''
             rid = inline_rid or comment_rid or meta_rid
             if not rid:
-                continue
+                row_map = {h: (r[i] if i < len(r) else None) for h, i in idx.items()}
+                rid = _all_trades_row_fingerprint_from_map(row_map)
             edits={}
             test_i=idx.get('Test')
             if test_i is not None:
@@ -458,6 +465,79 @@ def _write_instrument_leaders_section(ws, start_row, start_col, leaders):
     return rr - 1
 
 
+
+
+def _parse_duration_text(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    total = 0.0
+    for n,u in __import__('re').findall(r'([0-9]+(?:\.[0-9]+)?)\s*(day|days|hour|hours|minute|minutes|second|seconds)', text):
+        num = float(n)
+        if u.startswith('day'): total += num*86400
+        elif u.startswith('hour'): total += num*3600
+        elif u.startswith('minute'): total += num*60
+        else: total += num
+    return total or None
+
+def _excel_datetime_to_iso(v: Any) -> str:
+    if isinstance(v, datetime):
+        return v.isoformat()
+    if isinstance(v, date):
+        return datetime(v.year, v.month, v.day).isoformat()
+    if isinstance(v, (int,float)):
+        try:
+            base=datetime(1899,12,30)
+            return (base+timedelta(days=float(v))).isoformat()
+        except Exception:
+            return str(v)
+    return str(v or '')
+
+def _alias_index(idx: Dict[str, int], *names: str) -> int | None:
+    for n in names:
+        if n in idx:
+            return idx[n]
+    return None
+
+
+def _is_merged_non_anchor(ws, row: int, col: int) -> bool:
+    for merged in ws.merged_cells.ranges:
+        if merged.min_row <= row <= merged.max_row and merged.min_col <= col <= merged.max_col:
+            return not (row == merged.min_row and col == merged.min_col)
+    return False
+
+
+def _header_map(ws, header_row: int = 1) -> Dict[str, int]:
+    out: Dict[str, int] = {}
+    for c in range(1, ws.max_column + 1):
+        key = str(ws.cell(header_row, c).value or "").strip()
+        if key and key not in out:
+            out[key] = c
+    return out
+
+
+def _find_label_cell(ws, label: str, search_cols: List[int] | None = None) -> tuple[int, int] | None:
+    wanted = str(label or "").strip().lower()
+    if not wanted:
+        return None
+    cols = search_cols or list(range(1, ws.max_column + 1))
+    for r in range(1, ws.max_row + 1):
+        for c in cols:
+            if str(ws.cell(r, c).value or "").strip().lower() == wanted:
+                return (r, c)
+    return None
+
+
+def _write_value_preserving_cell(ws, row: int, col: int, value: Any) -> bool:
+    if _is_merged_non_anchor(ws, row, col):
+        return False
+    ws.cell(row, col).value = value
+    return True
+
 def read_master_journal_source(path: Path) -> Dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"Master Journal workbook not found: {path}")
@@ -474,11 +554,13 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
         items=[]; cashflow_ledger=defaultdict(list)
         def _num(v):
             try:
-                if v in (None, ""):
-                    return None
+                if v in (None, ""): return None
                 return float(v)
-            except Exception:
-                return None
+            except Exception: return None
+        i_stop = _alias_index(idx, 'Stop Loss', 'Stop Loss Price')
+        i_tp = _alias_index(idx, 'Take Profit', 'Target Price', 'Target')
+        i_pnl = _alias_index(idx, 'Net P/L', 'Net Profit', 'Realized PnL')
+        i_dur = _alias_index(idx, 'Trade Duration Seconds', 'Trade Duration')
         for r in ws.iter_rows(min_row=2, values_only=True):
             if not any(v not in (None,'') for v in r):
                 continue
@@ -487,27 +569,157 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
             account = str(r[idx.get('Account',2)] or '').strip()
             row_id = str(r[idx.get('Row ID',len(r)-1)] or '').strip() if 'Row ID' in idx else ''
             row_type_raw = str(r[idx.get('Row Type')]).strip().lower() if 'Row Type' in idx and idx.get('Row Type') is not None else ''
-            if row_type_raw in {'cashflow','monthly_aud_reval','trade'}:
-                row_type = row_type_raw
-            else:
-                row_type = 'cashflow' if symbol.upper()=='CASHFLOW' else ('monthly_aud_reval' if symbol.upper()=='MONTHLY AUD P/L' else ('trade' if symbol or account or side else ''))
-            if not row_type:
-                continue
-            open_time = r[idx.get('Open Time',0)]
-            close_time = r[idx.get('Close Time',1)]
-            duration = _num(r[idx.get('Trade Duration Seconds')]) if 'Trade Duration Seconds' in idx else None
-            if duration is None and open_time not in (None, '') and close_time not in (None, ''):
-                try:
-                    duration = int((pd.to_datetime(close_time, utc=True) - pd.to_datetime(open_time, utc=True)).total_seconds())
-                except Exception:
-                    duration = None
-            item={'id': row_id or stable_row_id({'account':account,'symbol':symbol,'side':side,'open_time':open_time,'close_time':close_time}), 'row_type':row_type,'account':account,'symbol':symbol,'side':side,'open_time':open_time,'close_time':close_time,'qty':_num(r[idx.get('Qty')]) if 'Qty' in idx else None,'entry_price':_num(r[idx.get('Entry Price')]) if 'Entry Price' in idx else None,'exit_price':_num(r[idx.get('Exit Price')]) if 'Exit Price' in idx else None,'stop_loss':_num(r[idx.get('Stop Loss')]) if 'Stop Loss' in idx else None,'take_profit':_num(r[idx.get('Take Profit')]) if 'Take Profit' in idx else None,'commission':_num(r[idx.get('Commission')]) if 'Commission' in idx else None,'net_profit':_num(r[idx.get('Net P/L',11)]) if 'Net P/L' in idx else None,'result_pct':_num(r[idx.get('Profit %')]) if 'Profit %' in idx else None,'r_multiple':_num(r[idx.get('R-Multiple')]) if 'R-Multiple' in idx else None,'balance_after_trade':_num(r[idx.get('Balance After')]) if 'Balance After' in idx else None,'trade_duration_seconds':duration,'is_test_trade':str(r[idx.get('Test')]).strip().lower() in {'yes','y','true','1'} if 'Test' in idx else False,'setup':r[idx.get('Setup',17)] if 'Setup' in idx else '','timeframe':r[idx.get('Timeframe',18)] if 'Timeframe' in idx else '','breakeven':r[idx.get('Breakeven',19)] if 'Breakeven' in idx else '','notes':r[idx.get('Notes',20)] if 'Notes' in idx else '','currency':str(r[idx.get('Currency')] or '').strip() if 'Currency' in idx else ''}
+            row_type = row_type_raw if row_type_raw in {'cashflow','monthly_aud_reval','trade'} else ('cashflow' if symbol.upper()=='CASHFLOW' else ('monthly_aud_reval' if symbol.upper()=='MONTHLY AUD P/L' else 'trade'))
+            open_time = _excel_datetime_to_iso(r[idx.get('Open Time',0)])
+            close_time = _excel_datetime_to_iso(r[idx.get('Close Time',1)])
+            duration = _num(r[i_dur]) if i_dur is not None else None
+            if duration is None and i_dur is not None: duration = _parse_duration_text(r[i_dur])
+            asset_class = 'fx' if ('OANDA' in account.upper() or ('/' in symbol and len(symbol.replace('/',''))>=6)) else ('crypto' if symbol else '')
+            item={'id': row_id or stable_row_id({'account':account,'symbol':symbol,'side':side,'open_time':open_time,'close_time':close_time}), 'row_type':row_type,'account':account,'symbol':symbol,'side':side,'open_time':open_time,'close_time':close_time,'qty':_num(r[idx.get('Qty')]) if 'Qty' in idx else None,'entry_price':_num(r[idx.get('Entry Price')]) if 'Entry Price' in idx else None,'exit_price':_num(r[idx.get('Exit Price')]) if 'Exit Price' in idx else None,'stop_loss':_num(r[i_stop]) if i_stop is not None else None,'take_profit':_num(r[i_tp]) if i_tp is not None else None,'commission':_num(r[idx.get('Commission')]) if 'Commission' in idx else None,'net_profit':_num(r[i_pnl]) if i_pnl is not None else None,'result_pct':_num(r[idx.get('Profit %')]) if 'Profit %' in idx else None,'r_multiple':_num(r[idx.get('R-Multiple')]) if 'R-Multiple' in idx else None,'balance_after_trade':_num(r[idx.get('Balance After')]) if 'Balance After' in idx else None,'trade_duration_seconds':duration,'is_test_trade':str(r[idx.get('Test')]).strip().lower() in {'yes','y','true','1'} if 'Test' in idx else False,'setup':r[idx.get('Setup',17)] if 'Setup' in idx else '','timeframe':r[idx.get('Timeframe',18)] if 'Timeframe' in idx else '','breakeven':r[idx.get('Breakeven',19)] if 'Breakeven' in idx else '','notes':r[idx.get('Notes',20)] if 'Notes' in idx else '','currency':str(r[idx.get('Currency')] or '').strip() if 'Currency' in idx else '', 'asset_class': asset_class}
             items.append(item)
             if row_type=='cashflow':
-                cashflow_ledger[account].append({'account':account,'date':item['close_time'] or item['open_time'],'amount':_num(r[idx.get('Cashflow Amount')]) if 'Cashflow Amount' in idx else None,'new_balance':_num(r[idx.get('Cashflow New Balance')]) if 'Cashflow New Balance' in idx else item.get('balance_after_trade'),'currency':str(r[idx.get('Currency')] or '').strip() if 'Currency' in idx else '','reason':item.get('notes') or '', 'side':side})
+                cashflow_ledger[account].append({'account':account,'date':item['close_time'] or item['open_time'],'amount':_num(r[idx.get('Cashflow Amount')]) if 'Cashflow Amount' in idx else _num(r[i_pnl]) if i_pnl is not None else None,'new_balance':_num(r[idx.get('Cashflow New Balance')]) if 'Cashflow New Balance' in idx else item.get('balance_after_trade'),'currency':str(r[idx.get('Currency')] or '').strip() if 'Currency' in idx else '','reason':item.get('notes') or '', 'side':side})
         return {'items':items,'cashflow_ledger':dict(cashflow_ledger)}
     finally:
         wb.close()
+
+def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    wb = load_workbook(path)
+    tmp = path.with_suffix('.data_only.tmp.xlsx')
+    try:
+        build_master_journal_workbook(snapshot, tmp)
+        gen = load_workbook(tmp, data_only=True)
+        try:
+            for name in ['Dashboard','Instrument Averages','P&L Calendar']:
+                if name not in wb.sheetnames or name not in gen.sheetnames:
+                    raise RuntimeError(f'Missing required sheet for data-only update: {name}')
+            # Dashboard: metric labels -> adjacent value cell
+            d_dst, d_src = wb['Dashboard'], gen['Dashboard']
+            for r in range(1, d_src.max_row + 1):
+                for c in range(1, d_src.max_column):
+                    label = str(d_src.cell(r, c).value or '').strip()
+                    val = d_src.cell(r, c + 1).value
+                    if not label or label in {'Overall','FX','Crypto','Winners','Losers','Drawdown','Duration','Instrument leaders','Metric','Symbol','Wins','Losses','Trades','Account Balances','Account','Balance','Currency','As Of'}:
+                        continue
+                    found = _find_label_cell(d_dst, label)
+                    if found:
+                        _write_value_preserving_cell(d_dst, found[0], found[1] + 1, val)
+
+            # Instrument averages: match by Symbol + header aliases
+            i_dst, i_src = wb['Instrument Averages'], gen['Instrument Averages']
+            dst_headers = _header_map(i_dst)
+            src_headers = _header_map(i_src)
+            if 'Symbol' not in dst_headers or 'Symbol' not in src_headers:
+                raise RuntimeError('Instrument Averages missing Symbol header.')
+            dst_by_symbol = {str(i_dst.cell(r, dst_headers['Symbol']).value or '').strip(): r for r in range(2, i_dst.max_row + 1)}
+            src_by_symbol = {str(i_src.cell(r, src_headers['Symbol']).value or '').strip(): r for r in range(2, i_src.max_row + 1)}
+            for symbol, src_row in src_by_symbol.items():
+                if not symbol:
+                    continue
+                dst_row = dst_by_symbol.get(symbol)
+                if dst_row is None:
+                    dst_row = i_dst.max_row + 1
+                    # copy style from previous row only
+                    if dst_row > 2:
+                        for c in range(1, i_dst.max_column + 1):
+                            i_dst.cell(dst_row, c)._style = i_dst.cell(dst_row - 1, c)._style
+                    i_dst.cell(dst_row, dst_headers['Symbol']).value = symbol
+                for h, src_col in src_headers.items():
+                    dst_col = dst_headers.get(h)
+                    if dst_col is None:
+                        continue
+                    _write_value_preserving_cell(i_dst, dst_row, dst_col, i_src.cell(src_row, src_col).value)
+
+            # P&L calendar: match by year column A + month header row 2
+            c_dst, c_src = wb['P&L Calendar'], gen['P&L Calendar']
+            months = {str(c_src.cell(2, c).value or '').strip(): c for c in range(2, c_src.max_column + 1)}
+            dst_months = {str(c_dst.cell(2, c).value or '').strip(): c for c in range(2, c_dst.max_column + 1)}
+            dst_year_rows = {str(c_dst.cell(r, 1).value or '').strip(): r for r in range(3, c_dst.max_row + 1)}
+            for sr in range(3, c_src.max_row + 1):
+                year = str(c_src.cell(sr, 1).value or '').strip()
+                if not year:
+                    continue
+                dr = dst_year_rows.get(year)
+                if dr is None:
+                    dr = c_dst.max_row + 1
+                    if dr > 3:
+                        for cc in range(1, c_dst.max_column + 1):
+                            c_dst.cell(dr, cc)._style = c_dst.cell(dr - 1, cc)._style
+                    c_dst.cell(dr, 1).value = year
+                for m, sc in months.items():
+                    dc = dst_months.get(m)
+                    if dc is None:
+                        continue
+                    _write_value_preserving_cell(c_dst, dr, dc, c_src.cell(sr, sc).value)
+            if 'All Trades' not in wb.sheetnames or 'All Trades' not in gen.sheetnames:
+                raise RuntimeError('Missing All Trades sheet for data-only update.')
+            dst, src = wb['All Trades'], gen['All Trades']
+            dst_h = _header_map(dst)
+            src_h = _header_map(src)
+            editable = {'Test','Setup','Timeframe','Breakeven','Notes'}
+            symbol_c = dst_h.get('Symbol')
+            side_c = dst_h.get('Side')
+            open_c = dst_h.get('Open Time')
+            close_c = dst_h.get('Close Time')
+            row_id_c = dst_h.get('Row ID')
+            src_rows = []
+            for r in range(2, src.max_row + 1):
+                src_rows.append({h: src.cell(r, c).value for h, c in src_h.items()})
+            def _finger(v):
+                return _all_trades_row_fingerprint_from_map(v)
+            dst_index = {}
+            for r in range(2, dst.max_row + 1):
+                if row_id_c:
+                    rid = str(dst.cell(r, row_id_c).value or '').strip()
+                    if rid:
+                        dst_index[f'RID:{rid}'] = r
+                rowv = {h: dst.cell(r, c).value for h, c in dst_h.items()}
+                dst_index[f'SIG:{_finger(rowv)}'] = r
+            alias_groups = [
+                ('Stop Loss Price', ['Stop Loss Price','Stop Loss']),
+                ('Target Price', ['Target Price','Take Profit','Target']),
+                ('Trade Duration', ['Trade Duration','Trade Duration Seconds']),
+                ('Net P/L', ['Net P/L','Net Profit','Realized PnL']),
+            ]
+            alias_dst = {}
+            for src_name, names in alias_groups:
+                for n in names:
+                    if n in dst_h:
+                        alias_dst[src_name] = dst_h[n]
+                        break
+            for row in src_rows:
+                key = f"RID:{str(row.get('Row ID') or '').strip()}" if row_id_c and row.get('Row ID') else f"SIG:{_finger(row)}"
+                dr = dst_index.get(key)
+                if dr is None:
+                    dr = dst.max_row + 1
+                    if dr > 2:
+                        for cc in range(1, dst.max_column + 1):
+                            dst.cell(dr, cc)._style = dst.cell(dr - 1, cc)._style
+                    dst_index[key] = dr
+                for h, sv in row.items():
+                    dc = dst_h.get(h) or alias_dst.get(h)
+                    if dc is None or h in editable:
+                        continue
+                    _write_value_preserving_cell(dst, dr, dc, sv)
+                # cashflow visibility fallback for legacy A:U sheets
+                is_cashflow = str(row.get('Symbol') or '').upper() == 'CASHFLOW'
+                if is_cashflow and 'Cashflow Amount' not in dst_h:
+                    pnl_col = dst_h.get('Net P/L') or dst_h.get('Net Profit') or dst_h.get('Realized PnL')
+                    if pnl_col and (dst.cell(dr, pnl_col).value in (None, '')):
+                        _write_value_preserving_cell(dst, dr, pnl_col, row.get('Cashflow Amount') or row.get('Net P/L'))
+                if is_cashflow and 'Cashflow New Balance' not in dst_h:
+                    bal_col = dst_h.get('Balance After')
+                    if bal_col and (dst.cell(dr, bal_col).value in (None, '')):
+                        _write_value_preserving_cell(dst, dr, bal_col, row.get('Cashflow New Balance') or row.get('Balance After'))
+            if dst.auto_filter and dst.auto_filter.ref:
+                dst.auto_filter.ref=f"A1:{get_column_letter(dst.max_column)}{max(2,dst.max_row)}"
+        finally:
+            gen.close()
+        wb.save(path)
+        return {'ok': True, 'path': str(path)}
+    finally:
+        wb.close()
+        tmp.unlink(missing_ok=True)
 
 def refresh_master_journal_derived_sheets(path: Path, snapshot: Dict[str, Any]) -> Dict[str, Any]:
     if not path.exists():

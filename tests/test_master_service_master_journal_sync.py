@@ -284,7 +284,7 @@ def test_github_sync_stages_only_target_file(monkeypatch, tmp_path):
 @pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
 def test_authoritative_snapshot_does_not_scan_legacy_sources(tmp_path, monkeypatch):
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
-    monkeypatch.setenv("TRADING_JOURNAL_SOURCE", "local")
+    monkeypatch.setenv("TRADING_JOURNAL_SOURCE", "master_journal")
     from tools.master_journal_workbook import build_master_journal_workbook
     build_master_journal_workbook({'items':[{'id':'t1','row_type':'trade','account':'A','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0}], 'stats':{'totals':{}}, 'balances':[], 'diagnostics':{}}, tmp_path / "Master Journal.xlsx")
     monkeypatch.setattr(master_service, "_list_local_trading_journal_workbooks", lambda: (_ for _ in ()).throw(AssertionError("should not call")))
@@ -302,6 +302,7 @@ def test_authoritative_fingerprint_excludes_legacy_files(tmp_path, monkeypatch):
     (tmp_path / ".git").mkdir()
     monkeypatch.setattr(master_service, "_repo_root_for_journal_path", lambda _p: tmp_path)
     (tmp_path / "Master Journal.xlsx").write_bytes(b"x")
+    monkeypatch.setenv("TRADING_JOURNAL_MASTER_JOURNAL_AUTHORITATIVE", "1")
     monkeypatch.setattr(master_service, "_list_local_trading_journal_workbooks", lambda: (_ for _ in ()).throw(AssertionError("should not call")))
     fp = master_service._journal_source_fingerprint()
     paths = [str((f or {}).get("path") or "") for f in fp.get("files", [])]
@@ -335,6 +336,18 @@ def test_authoritative_fingerprint_excludes_legacy_files(tmp_path, monkeypatch):
     if add_calls:
         assert all(cmd != ["add", "."] for cmd in add_calls)
 
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_existing_master_journal_does_not_enable_authoritative_mode(tmp_path, monkeypatch):
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
+    monkeypatch.setenv("TRADING_JOURNAL_SOURCE", "local")
+    from tools.master_journal_workbook import build_master_journal_workbook
+    build_master_journal_workbook({'items':[{'id':'t1','row_type':'trade','account':'A','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0}], 'stats':{'totals':{}}, 'balances':[], 'diagnostics':{}}, tmp_path / "Master Journal.xlsx")
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: [])
+    monkeypatch.setattr(master_service, "_load_cashflows_for_active_journal_source", lambda _s: {})
+    snap = master_service._build_trading_journal_view_snapshot(force=True)
+    assert snap["diagnostics"]["authoritative_mode"] is False
 @pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
 def test_manual_save_watcher_enablement(monkeypatch):
     monkeypatch.setattr(master_service, '_is_render_env', lambda: True)
