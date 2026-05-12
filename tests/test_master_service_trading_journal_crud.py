@@ -21,6 +21,7 @@ SPEC.loader.exec_module(master_service)
 
 @pytest.fixture
 def temp_state_paths(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_PATH", tmp_path / "trading_journal.json")
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_STATE_PATH", tmp_path / "trading_journal_state.json")
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_SYNC_STATE_PATH", tmp_path / "trading_journal_sync_state.json")
@@ -1387,6 +1388,7 @@ def test_append_generic_local_broker_rows_does_not_match_blank_ids(tmp_path, mon
     assert set(df["order_id"].astype(str)) >= {"A", "B"}
 
 def test_snapshot_includes_monthly_aud_note_rows_excluded_from_stats(tmp_path, monkeypatch):
+    monkeypatch.setattr(master_service, "_master_journal_authoritative_enabled", lambda: False)
     monthly_path = tmp_path / "monthly_aud_revaluation.json"
     monthly_path.write_text(json.dumps({"items": [{
         "id": "monthly_aud_reval:bybit_live:2026-03",

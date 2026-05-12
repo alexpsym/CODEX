@@ -53,6 +53,7 @@ from fastapi.staticfiles import StaticFiles
 import httpx
 import requests
 import pandas as pd
+from openpyxl import load_workbook
 from PIL import Image, ImageDraw, ImageFont
 from starlette.responses import RedirectResponse
 
@@ -1113,6 +1114,29 @@ def _build_trading_journal_diagnostics_snapshot() -> Dict[str, object]:
     return snapshot
 
 
+def _build_authoritative_trading_journal_diagnostics_snapshot(items: List[Dict[str, object]]) -> Dict[str, object]:
+    visible_rows = [row for row in items if _is_visible_trading_journal_row(row)]
+    visible_trade_rows = [row for row in visible_rows if _row_type(row) == "trade"]
+    rows_by_source: Dict[str, int] = defaultdict(int)
+    rows_by_asset_class: Dict[str, int] = defaultdict(int)
+    for row in visible_rows:
+        rows_by_source[str(row.get("source") or "unknown")] += 1
+        rows_by_asset_class[str(row.get("asset_class") or "unknown")] += 1
+    return {
+        **_default_journal_diagnostics(),
+        "rows_total": len(visible_rows),
+        "journal_rows_total": len(visible_rows),
+        "raw_rows_total": len(items),
+        "visible_rows_total": len(visible_rows),
+        "visible_trade_rows_total": len(visible_trade_rows),
+        "stats_included_trade_rows_total": len([r for r in visible_trade_rows if not _is_test_trade_row(r)]),
+        "excluded_test_trade_rows": len([r for r in visible_trade_rows if _is_test_trade_row(r)]),
+        "rows_by_source": dict(rows_by_source),
+        "rows_by_asset_class": dict(rows_by_asset_class),
+        "errors": [],
+    }
+
+
 _TRADING_JOURNAL_VIEW_CACHE: Dict[str, object] = {"key": None, "payload": None}
 TRADING_JOURNAL_VIEW_CACHE_VERSION = 5
 
@@ -1299,7 +1323,7 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
         cashflow_rows = [r for r in items if _row_type(r) == "cashflow"]
         balances = _build_journal_balance_timelines(trade_items, source_payload.get("cashflow_ledger") or {}, _get_excel_account_balances()).get("balances") or []
         stats = _compute_journal_stats(items, balances)
-        diagnostics = _build_trading_journal_diagnostics_snapshot()
+        diagnostics = _build_authoritative_trading_journal_diagnostics_snapshot(items)
         diagnostics.update({
             "source": "master_journal_authoritative",
             "authoritative_mode": True,
@@ -23647,26 +23671,41 @@ async def _run_trading_journal_sync_job() -> None:
 
 def _sync_master_journal_workbook() -> Dict[str, object]:
     path = _master_journal_path()
-    if not path.exists():
-        return {
-            'master_journal_ok': False,
-            'master_journal_path': str(path),
-            'master_journal_exists': False,
-            'master_journal_error': 'Master Journal.xlsx is missing. Create or restore journal/Master Journal.xlsx and sync again.',
-            'master_journal_error_type': 'FileNotFoundError',
-        }
     tmp = path.with_suffix('.tmp.xlsx')
     try:
-        source_payload = read_master_journal_source(path)
-        parsed_items = [r for r in (source_payload.get("items") or []) if isinstance(r, dict)]
-        parsed_trade_rows = [r for r in parsed_items if _row_type(r) == "trade"]
         snapshot = _build_trading_journal_view_snapshot(force=True)
-        refresh_master_journal_derived_sheets(path, snapshot)
-        refreshed = read_master_journal_source(path)
-        refreshed_items = [r for r in (refreshed.get("items") or []) if isinstance(r, dict)]
-        refreshed_trade_rows = [r for r in refreshed_items if _row_type(r) == "trade"]
-        if parsed_trade_rows and not refreshed_trade_rows:
-            raise RuntimeError("Master Journal derived refresh failed validation: trade rows were lost.")
+        parsed_trade_rows: List[Dict[str, object]] = []
+        if path.exists():
+            source_payload = read_master_journal_source(path)
+            parsed_items = [r for r in (source_payload.get("items") or []) if isinstance(r, dict)]
+            parsed_trade_rows = [r for r in parsed_items if _row_type(r) == "trade"]
+            manual_overrides = read_master_journal_manual_overrides(path)
+            if isinstance(manual_overrides, dict) and manual_overrides:
+                current_rows = _get_trading_journal_rows()
+                merged_rows = [
+                    _apply_trading_journal_manual_overrides(dict(row), manual_overrides.get(str(row.get("id") or ""), {}))
+                    if isinstance(row, dict) else row
+                    for row in current_rows
+                ]
+                _set_trading_journal_rows([row for row in merged_rows if isinstance(row, dict)])
+            refresh_master_journal_derived_sheets(path, snapshot)
+            refreshed = read_master_journal_source(path)
+            refreshed_items = [r for r in (refreshed.get("items") or []) if isinstance(r, dict)]
+            refreshed_trade_rows = [r for r in refreshed_items if _row_type(r) == "trade"]
+            if parsed_trade_rows and not refreshed_trade_rows:
+                raise RuntimeError("Master Journal derived refresh failed validation: trade rows were lost.")
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            build_master_journal_workbook(snapshot, tmp)
+            workbook = load_workbook(tmp, data_only=False, read_only=False)
+            sheet_names = list(workbook.sheetnames)
+            workbook.close()
+            required = [str(name) for name in SHEET_ORDER]
+            if any(name not in sheet_names for name in required):
+                raise RuntimeError("Master Journal workbook validation failed: expected sheets missing.")
+            os.replace(tmp, path)
+        if not path.exists() or path.stat().st_size <= 0:
+            raise RuntimeError("Master Journal.xlsx was not created.")
         size = path.stat().st_size
         payload = {
             'master_journal_ok': True,
