@@ -392,6 +392,122 @@ function Invoke-GitText {
     return $text.Trim()
 }
 
+function ConvertTo-NativeArgumentString {
+    param(
+        [Parameter(Mandatory = $true)] [string[]] $Arguments
+    )
+
+    $quoted = foreach ($arg in $Arguments) {
+        if ($null -eq $arg) { '""'; continue }
+        if ($arg -eq '') { '""'; continue }
+
+        $needsQuotes = $arg -match '[\s"]'
+        if (-not $needsQuotes) {
+            $arg
+            continue
+        }
+
+        $escaped = $arg -replace '(\\*)"', '$1$1\"'
+        $escaped = $escaped -replace '(\\+)$', '$1$1'
+        '"' + $escaped + '"'
+    }
+
+    return ($quoted -join ' ')
+}
+
+function Invoke-GitCommandNoInput {
+    param(
+        [Parameter(Mandatory = $true)] [string] $GitExe,
+        [Parameter(Mandatory = $true)] [string[]] $Arguments,
+        [Parameter(Mandatory = $true)] [string] $WorkingDirectory,
+        [int] $TimeoutSeconds = 120,
+        [switch] $AllowFailure
+    )
+
+    Write-Host ''
+    Write-Host ("git " + ($Arguments -join ' '))
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $GitExe
+    $psi.WorkingDirectory = $WorkingDirectory
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.RedirectStandardInput = $true
+    $psi.Arguments = ConvertTo-NativeArgumentString -Arguments $Arguments
+
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    [void]$proc.Start()
+    $proc.StandardInput.Close()
+    $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+    $stderrTask = $proc.StandardError.ReadToEndAsync()
+
+    if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
+        Stop-ProcessTreeById -ProcessId $proc.Id -Reason "git command timeout after $TimeoutSeconds seconds"
+        throw "git $($Arguments -join ' ') timed out after $TimeoutSeconds seconds."
+    }
+    [void]$proc.WaitForExit()
+    [void][System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), 10000)
+    $stdout = $stdoutTask.Result.Trim()
+    $stderr = $stderrTask.Result.Trim()
+    if ($stdout) { Write-Host $stdout }
+    if ($stderr) { Write-Host $stderr }
+
+    if ($proc.ExitCode -ne 0 -and -not $AllowFailure) {
+        throw "git $($Arguments -join ' ') failed with exit code $($proc.ExitCode). stdout: $stdout stderr: $stderr"
+    }
+
+    return @{
+        ExitCode = $proc.ExitCode
+        StdOut = $stdout
+        StdErr = $stderr
+    }
+}
+
+function Stop-CodexRepoProcessMatches {
+    param(
+        [Parameter(Mandatory = $true)] [string] $RepoDir
+    )
+
+    $normalizedRepo = [IO.Path]::GetFullPath($RepoDir).TrimEnd('\').ToLowerInvariant()
+    $currentPid = $PID
+    $parentPid = 0
+    try { $parentPid = [int](Get-CimInstance Win32_Process -Filter "ProcessId=$currentPid" | Select-Object -ExpandProperty ParentProcessId) } catch {}
+    $safeCurrentBat = $env:__BATFILE
+
+    $candidates = New-Object System.Collections.Generic.List[object]
+    foreach ($process in Get-Win32ProcessesSafe) {
+        $pidValue = [int]$process.ProcessId
+        if ($pidValue -eq $currentPid -or ($parentPid -gt 0 -and $pidValue -eq $parentPid)) { continue }
+        $name = [string]$process.Name
+        $cmd = [string]$process.CommandLine
+        if (-not $cmd) { continue }
+        if ($safeCurrentBat -and $cmd -match [Regex]::Escape($safeCurrentBat)) { continue }
+
+        $cmdLower = $cmd.ToLowerInvariant()
+        $nameMatch = $name -match '(?i)^(python|python3|py|uvicorn|cmd|powershell|pwsh)(\.exe)?$'
+        $repoRef = $cmdLower.Contains($normalizedRepo) -or $cmdLower.Contains('codex-master')
+        $knownLocalRef = ($cmdLower -match 'render\.master_service') -or ($cmdLower -match 'run_local_master_control') -or ($cmdLower -match 'run_trading_journal_local')
+        if ($nameMatch -and ($repoRef -or $knownLocalRef)) {
+            $candidates.Add($process)
+        }
+    }
+
+    if ($candidates.Count -eq 0) {
+        Write-Host 'No repo-specific locking processes were detected.'
+        return
+    }
+
+    Write-Host "Stopping repo-specific processes that may lock files in: $RepoDir"
+    foreach ($match in @($candidates | Sort-Object ProcessId -Unique)) {
+        Write-Host " - PID $($match.ProcessId): $($match.Name) $($match.CommandLine)"
+        Stop-ProcessTreeById -ProcessId ([int]$match.ProcessId) -Reason 'repo-specific cleanup lock'
+    }
+
+    Start-Sleep -Seconds 2
+}
+
 function Copy-DirectoryContentsSafe {
     param(
         [Parameter(Mandatory = $true)] [string] $Source,
@@ -408,13 +524,32 @@ function Copy-DirectoryContentsSafe {
     }
 }
 
+function Copy-FolderTreeWithRoboCopyChecked {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Source,
+        [Parameter(Mandatory = $true)] [string] $Destination
+    )
+
+    if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
+        throw "Backup source folder does not exist: $Source"
+    }
+
+    New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+    Write-Host "Creating full backup copy from '$Source' to '$Destination'..."
+    & robocopy.exe $Source $Destination /E /COPY:DAT /DCOPY:DAT /R:2 /W:2 /NFL /NDL /NP
+    $copyExit = $LASTEXITCODE
+    if ($copyExit -gt 7) {
+        throw "robocopy failed with exit code $copyExit while creating backup."
+    }
+}
+
 function Preserve-LocalFilesFromBackup {
     param(
         [Parameter(Mandatory = $true)] [string] $BackupDir,
         [Parameter(Mandatory = $true)] [string] $NewRepoDir
     )
 
-    Write-Section 'Preserving local files from the previous non-Git CODEX-master folder...'
+    Write-Section 'Preserving local files from backup...'
 
     $backupJournal = Join-Path $BackupDir 'journal'
     $newJournal = Join-Path $NewRepoDir 'journal'
@@ -431,6 +566,29 @@ function Preserve-LocalFilesFromBackup {
         if (Test-Path -LiteralPath $oldFile -PathType Leaf) {
             Copy-Item -LiteralPath $oldFile -Destination $newFile -Force -ErrorAction Stop
             Write-Host "Preserved $fileName"
+        }
+    }
+
+    foreach ($monitorDir in @('bybit_monitor', 'oanda_monitor')) {
+        $backupMonitorDir = Join-Path $BackupDir $monitorDir
+        $newMonitorDir = Join-Path $NewRepoDir $monitorDir
+        if (Test-Path -LiteralPath $backupMonitorDir -PathType Container) {
+            New-Item -ItemType Directory -Force -Path $newMonitorDir | Out-Null
+            $jsonFiles = @(Get-ChildItem -LiteralPath $backupMonitorDir -Filter '*.json' -File -ErrorAction SilentlyContinue)
+            foreach ($json in $jsonFiles) {
+                $destFile = Join-Path $newMonitorDir $json.Name
+                Copy-Item -LiteralPath $json.FullName -Destination $destFile -Force -ErrorAction Stop
+                Write-Host "Preserved ${monitorDir}/$($json.Name)"
+            }
+        }
+    }
+
+    foreach ($dirName in @('render\data', 'render\uploads')) {
+        $backupDataDir = Join-Path $BackupDir $dirName
+        $newDataDir = Join-Path $NewRepoDir $dirName
+        if (Test-Path -LiteralPath $backupDataDir -PathType Container) {
+            Copy-DirectoryContentsSafe -Source $backupDataDir -Destination $newDataDir
+            Write-Host "Preserved folder: $newDataDir"
         }
     }
 }
@@ -471,7 +629,7 @@ function Ensure-CodexGitRepo {
 
     $gitDir = Join-Path $RepoDir '.git'
     if (Test-Path -LiteralPath $gitDir -PathType Container) {
-        Write-Section 'Existing CODEX-master is a Git checkout. Updating it with git pull...'
+        Write-Section 'Existing CODEX-master is a Git checkout. Inspecting and syncing it safely...'
         Write-Host $RepoDir
 
         $originUrl = Invoke-GitText -GitExe $GitExe -Arguments @('remote', 'get-url', 'origin') -WorkingDirectory $RepoDir -AllowFailure
@@ -484,18 +642,78 @@ function Ensure-CodexGitRepo {
         }
 
         Invoke-GitCommand -GitExe $GitExe -Arguments @('fetch', 'origin', $Branch) -WorkingDirectory $RepoDir | Out-Null
+        Invoke-GitCommand -GitExe $GitExe -Arguments @('rev-parse', '--verify', "origin/$Branch") -WorkingDirectory $RepoDir | Out-Null
 
         $currentBranch = Invoke-GitText -GitExe $GitExe -Arguments @('rev-parse', '--abbrev-ref', 'HEAD') -WorkingDirectory $RepoDir
-        if ($currentBranch -ne $Branch) {
-            Write-Host "Switching branch from '$currentBranch' to '$Branch'"
-            $checkoutExit = Invoke-GitCommand -GitExe $GitExe -Arguments @('checkout', $Branch) -WorkingDirectory $RepoDir -AllowFailure
-            if ($checkoutExit -ne 0) {
-                Invoke-GitCommand -GitExe $GitExe -Arguments @('checkout', '-B', $Branch, "origin/$Branch") -WorkingDirectory $RepoDir | Out-Null
+        $statusPorcelain = Invoke-GitText -GitExe $GitExe -Arguments @('status', '--porcelain') -WorkingDirectory $RepoDir -AllowFailure
+        $aheadBehind = Invoke-GitText -GitExe $GitExe -Arguments @('rev-list', '--left-right', '--count', "HEAD...origin/$Branch") -WorkingDirectory $RepoDir
+        $headBefore = Invoke-GitText -GitExe $GitExe -Arguments @('rev-parse', 'HEAD') -WorkingDirectory $RepoDir
+        $originHead = Invoke-GitText -GitExe $GitExe -Arguments @('rev-parse', "origin/$Branch") -WorkingDirectory $RepoDir
+        $counts = $aheadBehind -split '\s+'
+        if ($counts.Count -lt 2) { throw "Unable to parse ahead/behind counts from: $aheadBehind" }
+        $aheadCount = [int]$counts[0]
+        $behindCount = [int]$counts[1]
+        $isDirty = -not [string]::IsNullOrWhiteSpace($statusPorcelain)
+        $needsBackupRecovery = $isDirty -or ($aheadCount -gt 0)
+
+        if (-not $needsBackupRecovery) {
+            Write-Host "Repo is clean and not ahead (behind=$behindCount). Attempting fast-forward sync..."
+            Invoke-GitCommand -GitExe $GitExe -Arguments @('checkout', $Branch) -WorkingDirectory $RepoDir | Out-Null
+            Invoke-GitCommand -GitExe $GitExe -Arguments @('merge', '--ff-only', "origin/$Branch") -WorkingDirectory $RepoDir | Out-Null
+            $headAfterFastForward = Invoke-GitText -GitExe $GitExe -Arguments @('rev-parse', 'HEAD') -WorkingDirectory $RepoDir
+            $originAfterFastForward = Invoke-GitText -GitExe $GitExe -Arguments @('rev-parse', "origin/$Branch") -WorkingDirectory $RepoDir
+            if ($headAfterFastForward -ne $originAfterFastForward) {
+                throw "Fast-forward merge completed but HEAD is not equal to origin/$Branch."
             }
+            Write-Host 'Git checkout updated successfully by fast-forward merge.'
+            return
         }
 
-        Invoke-GitCommand -GitExe $GitExe -Arguments @('pull', '--ff-only', 'origin', $Branch) -WorkingDirectory $RepoDir | Out-Null
-        Write-Host 'Git checkout updated successfully.'
+        Write-Host "Local Git state requires backup recovery (dirty=$isDirty, ahead=$aheadCount, behind=$behindCount)."
+        $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+        $backupDir = Join-Path $DestinationRoot "CODEX-master-git-backup-$timestamp"
+        Copy-FolderTreeWithRoboCopyChecked -Source $RepoDir -Destination $backupDir
+
+        $statusText = Invoke-GitText -GitExe $GitExe -Arguments @('status', '--short', '--branch') -WorkingDirectory $RepoDir -AllowFailure
+        Set-Content -LiteralPath (Join-Path $backupDir 'git-status-before-reset.txt') -Value $statusText -Encoding UTF8 -ErrorAction Stop
+        $aheadLogText = Invoke-GitText -GitExe $GitExe -Arguments @('log', '--oneline', "origin/$Branch..HEAD") -WorkingDirectory $RepoDir -AllowFailure
+        Set-Content -LiteralPath (Join-Path $backupDir 'git-log-local-ahead.txt') -Value $aheadLogText -Encoding UTF8 -ErrorAction Stop
+        $localDiffText = Invoke-GitText -GitExe $GitExe -Arguments @('diff', '--binary') -WorkingDirectory $RepoDir -AllowFailure
+        Set-Content -LiteralPath (Join-Path $backupDir 'local-changes.patch') -Value $localDiffText -Encoding UTF8 -ErrorAction Stop
+        $stagedDiffText = Invoke-GitText -GitExe $GitExe -Arguments @('diff', '--cached', '--binary') -WorkingDirectory $RepoDir -AllowFailure
+        Set-Content -LiteralPath (Join-Path $backupDir 'local-staged-changes.patch') -Value $stagedDiffText -Encoding UTF8 -ErrorAction Stop
+
+        Write-Host "Local Git state was not fast-forwardable. A full backup was created at: $backupDir"
+        Stop-CodexRepoProcessMatches -RepoDir $RepoDir
+        Invoke-GitCommand -GitExe $GitExe -Arguments @('checkout', '-B', $Branch, "origin/$Branch") -WorkingDirectory $RepoDir | Out-Null
+        Invoke-GitCommand -GitExe $GitExe -Arguments @('reset', '--hard', "origin/$Branch") -WorkingDirectory $RepoDir | Out-Null
+        Invoke-GitCommand -GitExe $GitExe -Arguments @('clean', '-fdn') -WorkingDirectory $RepoDir -AllowFailure | Out-Null
+
+        $cleaned = $false
+        for ($attempt = 1; $attempt -le 2; $attempt++) {
+            try {
+                Invoke-GitCommandNoInput -GitExe $GitExe -Arguments @('clean', '-ffd', '-q', '-e', 'journal/', '-e', '.env', '-e', 'env.env', '-e', 'bybit_monitor/*.json', '-e', 'oanda_monitor/*.json', '-e', 'render/data/', '-e', 'render/uploads/') -WorkingDirectory $RepoDir -TimeoutSeconds 120 | Out-Null
+                $cleaned = $true
+                break
+            } catch {
+                Write-Host "WARNING: git clean attempt $attempt failed: $($_.Exception.Message)"
+                if ($attempt -lt 2) {
+                    Stop-CodexRepoProcessMatches -RepoDir $RepoDir
+                }
+            }
+        }
+        if (-not $cleaned) {
+            $remainingStatus = Invoke-GitText -GitExe $GitExe -Arguments @('status', '--short') -WorkingDirectory $RepoDir -AllowFailure
+            throw "ERROR: Non-interactive git cleanup failed after retries. Backup already exists at: $backupDir`nRemaining git status:`n$remainingStatus"
+        }
+        Preserve-LocalFilesFromBackup -BackupDir $backupDir -NewRepoDir $RepoDir
+
+        $headAfterRecovery = Invoke-GitText -GitExe $GitExe -Arguments @('rev-parse', 'HEAD') -WorkingDirectory $RepoDir
+        $originAfterRecovery = Invoke-GitText -GitExe $GitExe -Arguments @('rev-parse', "origin/$Branch") -WorkingDirectory $RepoDir
+        if ($headAfterRecovery -ne $originAfterRecovery) {
+            throw "Git checkout is not synced to origin/$Branch after recovery."
+        }
+        Write-Host "Recovered checkout to origin/$Branch successfully."
         return
     }
 
@@ -561,6 +779,24 @@ try {
     Write-Host $_.Exception.Message
     Write-Host ''
     Write-Host 'No fake success state was applied. Fix the Git error above and run this file again.'
+    exit 1
+}
+
+Write-Section 'Verifying Git sync state before launcher build...'
+try {
+    Invoke-GitCommand -GitExe $gitExe -Arguments @('fetch', 'origin', $repoBranch) -WorkingDirectory $codexDir | Out-Null
+    $headNow = Invoke-GitText -GitExe $gitExe -Arguments @('rev-parse', 'HEAD') -WorkingDirectory $codexDir
+    $originNow = Invoke-GitText -GitExe $gitExe -Arguments @('rev-parse', "origin/$repoBranch") -WorkingDirectory $codexDir
+    Write-Host "HEAD:              $headNow"
+    Write-Host "origin/${repoBranch}: $originNow"
+    if ($headNow -ne $originNow) {
+        throw 'ERROR: Git checkout is not synced to origin/master after recovery.'
+    }
+    Write-Host 'Git status --short output:'
+    Invoke-GitCommand -GitExe $gitExe -Arguments @('status', '--short') -WorkingDirectory $codexDir -AllowFailure | Out-Null
+} catch {
+    Write-Host ''
+    Write-Host $_.Exception.Message
     exit 1
 }
 
