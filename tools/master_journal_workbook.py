@@ -10,6 +10,7 @@ import hashlib
 from openpyxl.styles import PatternFill, Border, Side, Alignment
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.cell import range_boundaries
 import calendar
 
 SHEET_ORDER=["Dashboard","All Trades","Instrument Averages","P&L Calendar"]
@@ -496,6 +497,41 @@ def _alias_index(idx: Dict[str, int], *names: str) -> int | None:
             return idx[n]
     return None
 
+
+def _is_merged_non_anchor(ws, row: int, col: int) -> bool:
+    for merged in ws.merged_cells.ranges:
+        if merged.min_row <= row <= merged.max_row and merged.min_col <= col <= merged.max_col:
+            return not (row == merged.min_row and col == merged.min_col)
+    return False
+
+
+def _header_map(ws, header_row: int = 1) -> Dict[str, int]:
+    out: Dict[str, int] = {}
+    for c in range(1, ws.max_column + 1):
+        key = str(ws.cell(header_row, c).value or "").strip()
+        if key and key not in out:
+            out[key] = c
+    return out
+
+
+def _find_label_cell(ws, label: str, search_cols: List[int] | None = None) -> tuple[int, int] | None:
+    wanted = str(label or "").strip().lower()
+    if not wanted:
+        return None
+    cols = search_cols or list(range(1, ws.max_column + 1))
+    for r in range(1, ws.max_row + 1):
+        for c in cols:
+            if str(ws.cell(r, c).value or "").strip().lower() == wanted:
+                return (r, c)
+    return None
+
+
+def _write_value_preserving_cell(ws, row: int, col: int, value: Any) -> bool:
+    if _is_merged_non_anchor(ws, row, col):
+        return False
+    ws.cell(row, col).value = value
+    return True
+
 def read_master_journal_source(path: Path) -> Dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"Master Journal workbook not found: {path}")
@@ -551,24 +587,102 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             for name in ['Dashboard','Instrument Averages','P&L Calendar']:
                 if name not in wb.sheetnames or name not in gen.sheetnames:
                     raise RuntimeError(f'Missing required sheet for data-only update: {name}')
-                dst, src = wb[name], gen[name]
-                for r in range(1, src.max_row+1):
-                    for c in range(1, src.max_column+1):
-                        dst.cell(r,c).value = src.cell(r,c).value
+            # Dashboard: metric labels -> adjacent value cell
+            d_dst, d_src = wb['Dashboard'], gen['Dashboard']
+            for r in range(1, d_src.max_row + 1):
+                for c in range(1, d_src.max_column):
+                    label = str(d_src.cell(r, c).value or '').strip()
+                    val = d_src.cell(r, c + 1).value
+                    if not label or label in {'Overall','FX','Crypto','Winners','Losers','Drawdown','Duration','Instrument leaders','Metric','Symbol','Wins','Losses','Trades','Account Balances','Account','Balance','Currency','As Of'}:
+                        continue
+                    found = _find_label_cell(d_dst, label)
+                    if found:
+                        _write_value_preserving_cell(d_dst, found[0], found[1] + 1, val)
+
+            # Instrument averages: match by Symbol + header aliases
+            i_dst, i_src = wb['Instrument Averages'], gen['Instrument Averages']
+            dst_headers = _header_map(i_dst)
+            src_headers = _header_map(i_src)
+            if 'Symbol' not in dst_headers or 'Symbol' not in src_headers:
+                raise RuntimeError('Instrument Averages missing Symbol header.')
+            dst_by_symbol = {str(i_dst.cell(r, dst_headers['Symbol']).value or '').strip(): r for r in range(2, i_dst.max_row + 1)}
+            src_by_symbol = {str(i_src.cell(r, src_headers['Symbol']).value or '').strip(): r for r in range(2, i_src.max_row + 1)}
+            for symbol, src_row in src_by_symbol.items():
+                if not symbol:
+                    continue
+                dst_row = dst_by_symbol.get(symbol)
+                if dst_row is None:
+                    dst_row = i_dst.max_row + 1
+                    # copy style from previous row only
+                    if dst_row > 2:
+                        for c in range(1, i_dst.max_column + 1):
+                            i_dst.cell(dst_row, c)._style = i_dst.cell(dst_row - 1, c)._style
+                    i_dst.cell(dst_row, dst_headers['Symbol']).value = symbol
+                for h, src_col in src_headers.items():
+                    dst_col = dst_headers.get(h)
+                    if dst_col is None:
+                        continue
+                    _write_value_preserving_cell(i_dst, dst_row, dst_col, i_src.cell(src_row, src_col).value)
+
+            # P&L calendar: match by year column A + month header row 2
+            c_dst, c_src = wb['P&L Calendar'], gen['P&L Calendar']
+            months = {str(c_src.cell(2, c).value or '').strip(): c for c in range(2, c_src.max_column + 1)}
+            dst_months = {str(c_dst.cell(2, c).value or '').strip(): c for c in range(2, c_dst.max_column + 1)}
+            dst_year_rows = {str(c_dst.cell(r, 1).value or '').strip(): r for r in range(3, c_dst.max_row + 1)}
+            for sr in range(3, c_src.max_row + 1):
+                year = str(c_src.cell(sr, 1).value or '').strip()
+                if not year:
+                    continue
+                dr = dst_year_rows.get(year)
+                if dr is None:
+                    dr = c_dst.max_row + 1
+                    if dr > 3:
+                        for cc in range(1, c_dst.max_column + 1):
+                            c_dst.cell(dr, cc)._style = c_dst.cell(dr - 1, cc)._style
+                    c_dst.cell(dr, 1).value = year
+                for m, sc in months.items():
+                    dc = dst_months.get(m)
+                    if dc is None:
+                        continue
+                    _write_value_preserving_cell(c_dst, dr, dc, c_src.cell(sr, sc).value)
             if 'All Trades' not in wb.sheetnames or 'All Trades' not in gen.sheetnames:
                 raise RuntimeError('Missing All Trades sheet for data-only update.')
             dst, src = wb['All Trades'], gen['All Trades']
-            for r in range(2, dst.max_row+1):
-                rid = str(dst.cell(r,26).value or '')
-                if not rid:
-                    continue
-            max_r = src.max_row
-            max_c = min(src.max_column, dst.max_column)
-            for r in range(1, max_r+1):
-                for c in range(1, max_c+1):
-                    if c in (17,18,19,20,21):
+            dst_h = _header_map(dst)
+            src_h = _header_map(src)
+            editable = {'Test','Setup','Timeframe','Breakeven','Notes'}
+            symbol_c = dst_h.get('Symbol')
+            side_c = dst_h.get('Side')
+            open_c = dst_h.get('Open Time')
+            close_c = dst_h.get('Close Time')
+            row_id_c = dst_h.get('Row ID')
+            src_rows = []
+            for r in range(2, src.max_row + 1):
+                src_rows.append({h: src.cell(r, c).value for h, c in src_h.items()})
+            def _finger(v):
+                return '|'.join(str(v.get(k) or '') for k in ['Account','Symbol','Side','Open Time','Close Time','Qty','Entry Price','Exit Price','Net P/L'])
+            dst_index = {}
+            for r in range(2, dst.max_row + 1):
+                if row_id_c:
+                    rid = str(dst.cell(r, row_id_c).value or '').strip()
+                    if rid:
+                        dst_index[f'RID:{rid}'] = r
+                rowv = {h: dst.cell(r, c).value for h, c in dst_h.items()}
+                dst_index[f'SIG:{_finger(rowv)}'] = r
+            for row in src_rows:
+                key = f"RID:{str(row.get('Row ID') or '').strip()}" if row_id_c and row.get('Row ID') else f"SIG:{_finger(row)}"
+                dr = dst_index.get(key)
+                if dr is None:
+                    dr = dst.max_row + 1
+                    if dr > 2:
+                        for cc in range(1, dst.max_column + 1):
+                            dst.cell(dr, cc)._style = dst.cell(dr - 1, cc)._style
+                    dst_index[key] = dr
+                for h, sv in row.items():
+                    dc = dst_h.get(h)
+                    if dc is None or h in editable:
                         continue
-                    dst.cell(r,c).value = src.cell(r,c).value
+                    _write_value_preserving_cell(dst, dr, dc, sv)
             if dst.auto_filter and dst.auto_filter.ref:
                 dst.auto_filter.ref=f"A1:{get_column_letter(dst.max_column)}{max(2,dst.max_row)}"
         finally:
