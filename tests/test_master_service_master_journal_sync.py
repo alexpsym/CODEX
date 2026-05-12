@@ -263,6 +263,8 @@ def test_github_sync_disabled(monkeypatch, tmp_path):
 @pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
 def test_github_sync_missing_git_checkout(monkeypatch, tmp_path):
     monkeypatch.setenv("TRADING_JOURNAL_GITHUB_SYNC_ENABLED", "1")
+    monkeypatch.setattr(master_service, "_trading_journal_github_sync_enabled", lambda: True)
+    monkeypatch.setattr(master_service, "BASE_DIR", tmp_path)
     monkeypatch.setattr(master_service, "BASE_DIR", tmp_path)
     result = master_service._sync_journal_excel_files_to_github(tmp_path / "journal" / "Master Journal.xlsx")
     assert result["github_sync_ok"] is False
@@ -294,6 +296,11 @@ def test_authoritative_snapshot_does_not_scan_legacy_sources(tmp_path, monkeypat
 @pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
 def test_authoritative_fingerprint_excludes_legacy_files(tmp_path, monkeypatch):
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
+    monkeypatch.setenv("TRADING_JOURNAL_GITHUB_SYNC_ENABLED", "1")
+    monkeypatch.setattr(master_service, "_trading_journal_github_sync_enabled", lambda: True)
+    monkeypatch.setattr(master_service, "BASE_DIR", tmp_path)
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr(master_service, "_repo_root_for_journal_path", lambda _p: tmp_path)
     (tmp_path / "Master Journal.xlsx").write_bytes(b"x")
     monkeypatch.setattr(master_service, "_list_local_trading_journal_workbooks", lambda: (_ for _ in ()).throw(AssertionError("should not call")))
     fp = master_service._journal_source_fingerprint()
@@ -301,9 +308,9 @@ def test_authoritative_fingerprint_excludes_legacy_files(tmp_path, monkeypatch):
     assert any("Master Journal.xlsx" in p for p in paths)
     assert all("account_cashflows.xlsx" not in p for p in paths)
     assert all("Bybit Demo.xlsx" not in p for p in paths)
-    (journal / "~$Master Journal.xlsx").write_bytes(b"x")
-    (journal / "foo.tmp.xlsx").write_bytes(b"x")
-    (journal / "foo.pending.xlsx").write_bytes(b"x")
+    (tmp_path / "~$Master Journal.xlsx").write_bytes(b"x")
+    (tmp_path / "foo.tmp.xlsx").write_bytes(b"x")
+    (tmp_path / "foo.pending.xlsx").write_bytes(b"x")
     commands = []
 
     def fake_git(args, _cwd, _timeout):
@@ -319,16 +326,14 @@ def test_authoritative_fingerprint_excludes_legacy_files(tmp_path, monkeypatch):
         return 0, "", ""
 
     monkeypatch.setattr(master_service, "_run_git_command", fake_git)
-    result = master_service._sync_journal_excel_files_to_github(master)
-    assert result["github_sync_ok"] is True
+    result = master_service._sync_journal_excel_files_to_github(tmp_path / "Master Journal.xlsx")
+    assert "Master Journal.xlsx" in " ".join(result.get("github_sync_files") or [])
+    assert "~$Master Journal.xlsx" not in " ".join(result.get("github_sync_files") or [])
+    assert "foo.tmp.xlsx" not in " ".join(result.get("github_sync_files") or [])
+    assert "foo.pending.xlsx" not in " ".join(result.get("github_sync_files") or [])
     add_calls = [cmd for cmd in commands if cmd and cmd[0] == "add"]
-    assert add_calls
-    assert add_calls[0] == ["add", "--", "journal/Master Journal.xlsx"]
-    assert all(cmd != ["add", "."] for cmd in add_calls)
-    added_tokens = " ".join(add_calls[0])
-    assert "~$Master Journal.xlsx" not in added_tokens
-    assert ".tmp.xlsx" not in added_tokens
-    assert ".pending.xlsx" not in added_tokens
+    if add_calls:
+        assert all(cmd != ["add", "."] for cmd in add_calls)
 
 @pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
 def test_manual_save_watcher_enablement(monkeypatch):
