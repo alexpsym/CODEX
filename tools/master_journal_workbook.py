@@ -12,7 +12,7 @@ from openpyxl.formatting.rule import CellIsRule
 from openpyxl.utils import get_column_letter
 import calendar
 
-SHEET_ORDER=["Dashboard","All Trades","Instrument Averages","P&L Calendar","_Trade Meta"]
+SHEET_ORDER=["Dashboard","All Trades","Instrument Averages","P&L Calendar"]
 EDITABLE_COLS=["Test","Setup","Timeframe","Breakeven","Notes"]
 PROFIT_FILL = "C6EFCE"
 PROFIT_FONT = "006100"
@@ -171,19 +171,24 @@ def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]
         return out
     wb=load_workbook(path, data_only=True)
     try:
-        if 'All Trades' not in wb.sheetnames or '_Trade Meta' not in wb.sheetnames:
+        if 'All Trades' not in wb.sheetnames:
             return out
-        ws=wb['All Trades']; meta=wb['_Trade Meta']
+        ws=wb['All Trades']
         headers=[str(c.value or '').strip() for c in ws[1]]
         idx={h:i for i,h in enumerate(headers)}
-        rid_by_row={int(r[0]):str(r[1] or '').strip() for r in meta.iter_rows(min_row=2,values_only=True) if r and r[0] and r[1]}
+        rid_by_row={}
+        if '_Trade Meta' in wb.sheetnames:
+            meta=wb['_Trade Meta']
+            rid_by_row={int(r[0]):str(r[1] or '').strip() for r in meta.iter_rows(min_row=2,values_only=True) if r and r[0] and r[1]}
         for row_num,r in enumerate(ws.iter_rows(min_row=2, values_only=True),start=2):
             comment_rid = ""
             cmt = ws.cell(row_num, 1).comment
             if cmt and isinstance(cmt.text, str) and cmt.text.startswith("row_id:"):
                 comment_rid = cmt.text.split("row_id:", 1)[1].strip()
             meta_rid = rid_by_row.get(row_num,'')
-            rid = comment_rid or meta_rid
+            rowid_i = idx.get('Row ID')
+            inline_rid = str(r[rowid_i] or '').strip() if rowid_i is not None and rowid_i < len(r) else ''
+            rid = inline_rid or comment_rid or meta_rid
             if not rid:
                 continue
             edits={}
@@ -269,8 +274,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         cur += 1
 
     resolved_balances = _resolved_all_trade_balances(rows)
-    ws=wb['All Trades']; headers=['Open Time','Close Time','Account','Symbol','Side','Qty','Entry Price','Exit Price','Stop Loss Price','Target Price','Commission','Net P/L','Profit %','R-Multiple','Balance After','Trade Duration']+EDITABLE_COLS; ws.append(headers)
-    meta=wb['_Trade Meta']; meta.append(['all_trades_row','row_id'])
+    ws=wb['All Trades']; headers=['Open Time','Close Time','Account','Symbol','Side','Qty','Entry Price','Exit Price','Stop Loss Price','Target Price','Commission','Net P/L','Profit %','R-Multiple','Balance After','Trade Duration']+EDITABLE_COLS+['Row ID']; ws.append(headers)
     for i, row in enumerate(rows):
         pct = _as_float(row.get('result_pct'))
         is_monthly = str(row.get("row_type") or "") == "monthly_aud_reval"
@@ -278,7 +282,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         acct = row.get('account_label') or row.get('account') or ("Bybit Live" if is_monthly else "")
         notes = row.get('notes') or ('Monthly Bybit Live AUD P/L bookkeeping note (excluded from metrics).' if is_monthly else '')
         net_pnl = row.get('net_profit') if row.get('net_profit') is not None else row.get('result_cash')
-        ws.append([row.get('open_time') or row.get("period_month"),row.get('close_time') or row.get("period_month"),acct,symbol,row.get('side'),row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('stop_loss'),row.get('take_profit'),row.get('commission'),net_pnl,(pct/100.0 if pct is not None else ''),row.get('r_multiple'),resolved_balances.get(str(i)),_fmt_duration(row.get('trade_duration_seconds')),'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',row.get('setup') or '',row.get('timeframe') or '',row.get('breakeven') or '',notes])
+        ws.append([row.get('open_time') or row.get("period_month"),row.get('close_time') or row.get("period_month"),acct,symbol,row.get('side'),row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('stop_loss'),row.get('take_profit'),row.get('commission'),net_pnl,(pct/100.0 if pct is not None else ''),row.get('r_multiple'),resolved_balances.get(str(i)),_fmt_duration(row.get('trade_duration_seconds')),'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',row.get('setup') or '',row.get('timeframe') or '',row.get('breakeven') or '',notes, stable_row_id(row)])
     _style_table_sheet(ws,1,'A2',True)
     for rr in range(2, ws.max_row + 1):
         ccy_comm = _currency_code(rows[rr-2].get("commission_currency"), rows[rr-2].get("fee_currency"), rows[rr-2].get("realized_pnl_currency"), rows[rr-2].get("currency"), rows[rr-2].get("account_currency"))
@@ -290,8 +294,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         ws.cell(rr, 14).number_format = '0.00'
         ws.cell(rr, 15).number_format = '#,##0.0000000000' if _is_crypto_currency(ccy_bal) else '#,##0.00'
         ws.cell(rr, 13).number_format = "0.00%"
-    for i,row in enumerate(rows,start=2): meta.append([i, stable_row_id(row)])
-    meta.sheet_state='hidden'
+    ws.column_dimensions['V'].hidden = True
     dv=DataValidation(type='list',formula1='"Yes,No"',allow_blank=True); ws.add_data_validation(dv); dv.add(f"Q2:Q{max(2,ws.max_row)}")
     _negative_impact_rule(ws, f"K2:K{max(2, ws.max_row)}")
     _profit_loss_rules(ws, f"L2:N{max(2, ws.max_row)}")
@@ -453,3 +456,37 @@ def _write_instrument_leaders_section(ws, start_row, start_col, leaders):
         rr += 1
     _table_border(ws,start_row,start_col,rr-1,start_col+4)
     return rr - 1
+
+
+def read_master_journal_source(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        raise FileNotFoundError(f"Master Journal workbook not found: {path}")
+    wb = load_workbook(path, data_only=True)
+    try:
+        if 'All Trades' not in wb.sheetnames:
+            raise RuntimeError('Master Journal is missing required All Trades sheet.')
+        ws = wb['All Trades']
+        headers = [str(c.value or '').strip() for c in ws[1]]
+        idx = {h:i for i,h in enumerate(headers)}
+        required = {'Open Time','Close Time','Account','Symbol','Side'}
+        if not required.issubset(set(idx.keys())):
+            raise RuntimeError('Master Journal All Trades headers are invalid.')
+        items=[]; cashflow_ledger=defaultdict(list)
+        for r in ws.iter_rows(min_row=2, values_only=True):
+            if not any(v not in (None,'') for v in r):
+                continue
+            symbol = str(r[idx.get('Symbol',3)] or '').strip()
+            side = str(r[idx.get('Side',4)] or '').strip()
+            account = str(r[idx.get('Account',2)] or '').strip()
+            row_id = str(r[idx.get('Row ID',len(r)-1)] or '').strip() if 'Row ID' in idx else ''
+            row_type = 'cashflow' if symbol.upper()=='CASHFLOW' else ('monthly_aud_reval' if symbol.upper()=='MONTHLY AUD P/L' else 'trade')
+            item={'id': row_id or stable_row_id({'account':account,'symbol':symbol,'side':side,'open_time':r[idx.get('Open Time',0)],'close_time':r[idx.get('Close Time',1)]}), 'row_type':row_type,'account':account,'symbol':symbol,'side':side,'open_time':r[idx.get('Open Time',0)],'close_time':r[idx.get('Close Time',1)],'net_profit':r[idx.get('Net P/L',11)] if 'Net P/L' in idx else None,'setup':r[idx.get('Setup',17)] if 'Setup' in idx else '','timeframe':r[idx.get('Timeframe',18)] if 'Timeframe' in idx else '','breakeven':r[idx.get('Breakeven',19)] if 'Breakeven' in idx else '','notes':r[idx.get('Notes',20)] if 'Notes' in idx else ''}
+            items.append(item)
+            if row_type=='cashflow':
+                cashflow_ledger[account].append({'account':account,'date':item['close_time'] or item['open_time'],'amount':None,'new_balance':r[idx.get('Balance After',14)] if 'Balance After' in idx else None,'currency':'','reason':item.get('notes') or '', 'side':side})
+        return {'items':items,'cashflow_ledger':dict(cashflow_ledger)}
+    finally:
+        wb.close()
+
+def refresh_master_journal_derived_sheets(path: Path, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    return build_master_journal_workbook(snapshot, path)

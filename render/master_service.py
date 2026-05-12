@@ -68,7 +68,7 @@ from shared.symbol_resolution import (
 from shared.atomic_json import write_json_file
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, stable_row_id, SHEET_ORDER
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, stable_row_id, SHEET_ORDER, read_master_journal_source, refresh_master_journal_derived_sheets
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -1113,12 +1113,21 @@ def _source_file_fingerprint(path: Path) -> Dict[str, object]:
     return info
 
 
+
+
+def _master_journal_authoritative_enabled() -> bool:
+    source = str(os.getenv("TRADING_JOURNAL_SOURCE", "") or "").strip().lower()
+    if source in {"legacy", "sources", "import"}:
+        return False
+    return _master_journal_path().exists()
+
 def _journal_source_fingerprint() -> dict:
     mode = TRADING_JOURNAL_SOURCE if TRADING_JOURNAL_SOURCE in {"dropbox", "local", "both", "auto"} else "both"
     source_files: List[Dict[str, object]] = []
     for path in _list_local_trading_journal_workbooks():
         source_files.append(_source_file_fingerprint(path))
-    source_files.append(_source_file_fingerprint(_resolve_local_journal_file("account_cashflows.xlsx", TRADING_JOURNAL_LOCAL_DIR)))
+    if not _master_journal_authoritative_enabled():
+        source_files.append(_source_file_fingerprint(_resolve_local_journal_file("account_cashflows.xlsx", TRADING_JOURNAL_LOCAL_DIR)))
     source_files.append(_source_file_fingerprint(_resolve_local_journal_file(BYBIT_DEMO_WORKBOOK_NAME, TRADING_JOURNAL_LOCAL_DIR)))
     source_files.append(_source_file_fingerprint(_resolve_local_journal_file(BYBIT_DEMO_TEMPLATE_NAME, TRADING_JOURNAL_LOCAL_DIR)))
     source_files.append(_source_file_fingerprint(TRADING_JOURNAL_PATH))
@@ -23513,7 +23522,7 @@ async def _run_trading_journal_sync_job() -> None:
                     else "Master Journal.xlsx is up to date; no GitHub changes to push."
                 )
             else:
-                msg = "Master Journal.xlsx created. GitHub sync disabled."
+                msg = "Master Journal.xlsx synced. GitHub sync disabled."
         _set_trading_journal_sync_state(
             running=False,
             progress=100,
@@ -23549,43 +23558,19 @@ async def _run_trading_journal_sync_job() -> None:
 
 def _sync_master_journal_workbook() -> Dict[str, object]:
     path = _master_journal_path()
+    if not path.exists():
+        return {
+            'master_journal_ok': False,
+            'master_journal_path': str(path),
+            'master_journal_exists': False,
+            'master_journal_error': 'Master Journal.xlsx is missing. Create or restore journal/Master Journal.xlsx and sync again.',
+            'master_journal_error_type': 'FileNotFoundError',
+        }
     tmp = path.with_suffix('.tmp.xlsx')
-    path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        overrides = read_master_journal_manual_overrides(path)
-        if overrides:
-            rows = _get_trading_journal_rows()
-            changed = False
-            patched = []
-            for row in rows:
-                rid = stable_row_id(row)
-                edit = overrides.get(rid)
-                if isinstance(edit, dict) and edit:
-                    row = dict(row)
-                    row.update({k: v for k, v in edit.items() if k in {'is_test_trade','setup','timeframe','breakeven','notes'}})
-                    changed = True
-                patched.append(row)
-            if changed:
-                _set_trading_journal_rows(patched)
         snapshot = _build_trading_journal_view_snapshot(force=True)
-        build_master_journal_workbook(snapshot, tmp)
-        from openpyxl import load_workbook as _owb
-        wb = _owb(tmp, read_only=True, data_only=True)
-        try:
-            if wb.sheetnames != SHEET_ORDER:
-                raise RuntimeError(f"Unexpected sheet order: {wb.sheetnames}")
-            for req in ('Dashboard', 'All Trades', 'P&L Calendar'):
-                if req not in wb.sheetnames:
-                    raise RuntimeError(f"Missing required sheet: {req}")
-        finally:
-            wb.close()
-        os.replace(tmp, path)
-        if not path.exists():
-            raise RuntimeError(f"Master Journal.xlsx was not created at {path}")
+        refresh_master_journal_derived_sheets(path, snapshot)
         size = path.stat().st_size
-        if size <= 0:
-            raise RuntimeError(f"Master Journal.xlsx was created but is empty at {path}")
-        _manual_save_set_known_fingerprint(path)
         payload = {
             'master_journal_ok': True,
             'master_journal_path': str(path),
@@ -23595,19 +23580,6 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
         }
         payload.update(_sync_journal_excel_files_to_github(path))
         return payload
-    except (PermissionError, OSError) as exc:
-        try:
-            if tmp.exists():
-                tmp.unlink()
-        except Exception:
-            pass
-        return {
-            'master_journal_ok': False,
-            'master_journal_path': str(path),
-            'master_journal_exists': path.exists(),
-            'master_journal_error': f"{exc}. Close Master Journal.xlsx and click Sync Journal again.",
-            'master_journal_error_type': type(exc).__name__,
-        }
     except Exception as exc:
         try:
             if tmp.exists():
@@ -23621,7 +23593,6 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
             'master_journal_error': str(exc),
             'master_journal_error_type': type(exc).__name__,
         }
-
 
 def _trading_journal_github_sync_enabled() -> bool:
     raw = str(os.getenv("TRADING_JOURNAL_GITHUB_SYNC_ENABLED", "") or "").strip().lower()
