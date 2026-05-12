@@ -166,6 +166,11 @@ def stable_row_id(row: Dict[str, Any]) -> str:
     return 'sig:'+hashlib.sha1('|'.join(parts).encode('utf-8')).hexdigest()[:24]
 
 
+
+
+def _all_trades_row_fingerprint_from_map(values: Dict[str, Any]) -> str:
+    parts = [str(values.get(k) or '') for k in ['Account','Symbol','Side','Open Time','Close Time','Qty','Entry Price','Exit Price','Net P/L']]
+    return 'sig:' + hashlib.sha1('|'.join(parts).encode('utf-8')).hexdigest()[:24]
 def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
     if not path.exists():
@@ -191,7 +196,8 @@ def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]
             inline_rid = str(r[rowid_i] or '').strip() if rowid_i is not None and rowid_i < len(r) else ''
             rid = inline_rid or comment_rid or meta_rid
             if not rid:
-                continue
+                row_map = {h: (r[i] if i < len(r) else None) for h, i in idx.items()}
+                rid = _all_trades_row_fingerprint_from_map(row_map)
             edits={}
             test_i=idx.get('Test')
             if test_i is not None:
@@ -660,7 +666,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             for r in range(2, src.max_row + 1):
                 src_rows.append({h: src.cell(r, c).value for h, c in src_h.items()})
             def _finger(v):
-                return '|'.join(str(v.get(k) or '') for k in ['Account','Symbol','Side','Open Time','Close Time','Qty','Entry Price','Exit Price','Net P/L'])
+                return _all_trades_row_fingerprint_from_map(v)
             dst_index = {}
             for r in range(2, dst.max_row + 1):
                 if row_id_c:
@@ -669,6 +675,18 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                         dst_index[f'RID:{rid}'] = r
                 rowv = {h: dst.cell(r, c).value for h, c in dst_h.items()}
                 dst_index[f'SIG:{_finger(rowv)}'] = r
+            alias_groups = [
+                ('Stop Loss Price', ['Stop Loss Price','Stop Loss']),
+                ('Target Price', ['Target Price','Take Profit','Target']),
+                ('Trade Duration', ['Trade Duration','Trade Duration Seconds']),
+                ('Net P/L', ['Net P/L','Net Profit','Realized PnL']),
+            ]
+            alias_dst = {}
+            for src_name, names in alias_groups:
+                for n in names:
+                    if n in dst_h:
+                        alias_dst[src_name] = dst_h[n]
+                        break
             for row in src_rows:
                 key = f"RID:{str(row.get('Row ID') or '').strip()}" if row_id_c and row.get('Row ID') else f"SIG:{_finger(row)}"
                 dr = dst_index.get(key)
@@ -679,10 +697,20 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                             dst.cell(dr, cc)._style = dst.cell(dr - 1, cc)._style
                     dst_index[key] = dr
                 for h, sv in row.items():
-                    dc = dst_h.get(h)
+                    dc = dst_h.get(h) or alias_dst.get(h)
                     if dc is None or h in editable:
                         continue
                     _write_value_preserving_cell(dst, dr, dc, sv)
+                # cashflow visibility fallback for legacy A:U sheets
+                is_cashflow = str(row.get('Symbol') or '').upper() == 'CASHFLOW'
+                if is_cashflow and 'Cashflow Amount' not in dst_h:
+                    pnl_col = dst_h.get('Net P/L') or dst_h.get('Net Profit') or dst_h.get('Realized PnL')
+                    if pnl_col and (dst.cell(dr, pnl_col).value in (None, '')):
+                        _write_value_preserving_cell(dst, dr, pnl_col, row.get('Cashflow Amount') or row.get('Net P/L'))
+                if is_cashflow and 'Cashflow New Balance' not in dst_h:
+                    bal_col = dst_h.get('Balance After')
+                    if bal_col and (dst.cell(dr, bal_col).value in (None, '')):
+                        _write_value_preserving_cell(dst, dr, bal_col, row.get('Cashflow New Balance') or row.get('Balance After'))
             if dst.auto_filter and dst.auto_filter.ref:
                 dst.auto_filter.ref=f"A1:{get_column_letter(dst.max_column)}{max(2,dst.max_row)}"
         finally:
