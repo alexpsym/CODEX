@@ -22858,7 +22858,7 @@ async def coinspot_history_export_status(job_id: str) -> JSONResponse:
         "status": job.status,
         "error": job.error,
     }
-    if job.status == "done" and job.output_path is not None:
+    if job.status == "done" and job.output_path is not None and job.output_path.exists():
         payload["download_url"] = f"/api/coinspot-history/export/{job.job_id}/download"
     return JSONResponse(payload)
 
@@ -22937,7 +22937,7 @@ async def bybit_history_export_status(job_id: str) -> JSONResponse:
         "status": job.status,
         "error": job.error,
     }
-    if job.status == "done" and job.output_path is not None:
+    if job.status == "done" and job.output_path is not None and job.output_path.exists():
         payload["download_url"] = f"/api/bybit-history/export/{job.job_id}/download"
     return JSONResponse(payload)
 

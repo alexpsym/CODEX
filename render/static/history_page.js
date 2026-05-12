@@ -122,6 +122,66 @@
     return data;
   };
 
+
+
+  const getFilenameFromContentDisposition = (headerValue, fallback) => {
+    const safeFallback = String(fallback || 'history_export').replace(/[\/]+/g, '_').trim() || 'history_export';
+    const raw = String(headerValue || '');
+    if (!raw) return safeFallback;
+
+    let filename = '';
+    const utf8Match = raw.match(/filename\*=UTF-8''([^;]+)/i);
+    if (utf8Match && utf8Match[1]) {
+      try {
+        filename = decodeURIComponent(utf8Match[1].trim());
+      } catch {
+        filename = utf8Match[1].trim();
+      }
+    }
+
+    if (!filename) {
+      const plainMatch = raw.match(/filename="?([^";]+)"?/i);
+      if (plainMatch && plainMatch[1]) filename = plainMatch[1].trim();
+    }
+
+    filename = String(filename || '').replace(/[\/]+/g, '_').trim();
+    return filename || safeFallback;
+  };
+
+  const buildFallbackExportFilename = (broker, payload, jobId) => {
+    const safeJobId = String(jobId || 'export').replace(/[^a-zA-Z0-9_-]+/g, '_') || 'export';
+    const safeAccount = String(payload?.account || 'account').replace(/[^a-zA-Z0-9_-]+/g, '_') || 'account';
+    if (broker === 'coinspot') return `coinspot_history_${safeJobId}.zip`;
+    if (broker === 'oanda') return `oanda_history_${safeAccount}_${safeJobId}.csv`;
+    return `bybit_history_${safeAccount}_${safeJobId}.csv`;
+  };
+
+  const downloadExportFile = async (url, fallbackFilename) => {
+    const res = await fetch(url, { method: 'GET', cache: 'no-store', credentials: 'same-origin' });
+    if (!res.ok) {
+      const body = await res.text();
+      const detail = sanitizeStatusMessage(body || `${res.status} ${res.statusText}`) || `${res.status} ${res.statusText}`;
+      throw new Error(`Download failed (HTTP ${res.status}): ${detail}`);
+    }
+
+    const blob = await res.blob();
+    if (!blob || blob.size === 0) throw new Error('Downloaded export was empty.');
+
+    const filename = getFilenameFromContentDisposition(res.headers.get('content-disposition'), fallbackFilename);
+    const objectUrl = URL.createObjectURL(blob);
+    try {
+      const link = document.createElement('a');
+      link.style.display = 'none';
+      link.href = objectUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } finally {
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    }
+    return filename;
+  };
   const runExport = async () => {
     const { broker, payload } = buildPayload();
     const api = API_MAP[broker];
@@ -163,9 +223,25 @@
             }
           }
           const dl = st.download_url;
-          if (dl) {
-            setResult('Download started.');
-            window.open(dl, '_blank', 'noopener');
+          if (!dl) {
+            throw new Error('Export completed but no download URL was returned.');
+          }
+
+          setStatus('Export complete. Downloading file...');
+          try {
+            const filename = await downloadExportFile(dl, buildFallbackExportFilename(broker, payload, jobId));
+            setResult(`Downloaded ${filename}.`);
+          } catch (downloadErr) {
+            setStatus(downloadErr?.message || String(downloadErr), true);
+            if (resultEl) {
+              resultEl.textContent = 'Automatic download failed. Manual download: ';
+              const manual = document.createElement('a');
+              manual.href = dl;
+              manual.download = '';
+              manual.textContent = 'Download export file';
+              resultEl.appendChild(manual);
+            }
+            throw downloadErr;
           }
           return;
         }
