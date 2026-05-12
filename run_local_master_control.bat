@@ -18,8 +18,9 @@ if not exist "%TRADING_JOURNAL_LOCAL_DIR%\" (
   echo [local-master] ERROR: TRADING_JOURNAL_LOCAL_DIR not found at %TRADING_JOURNAL_LOCAL_DIR%
   exit /b 1
 )
-if not exist "%TRADING_JOURNAL_LOCAL_DIR%\account_cashflows.xlsx" (
-  echo [local-master] ERROR: required workbook missing: %TRADING_JOURNAL_LOCAL_DIR%\account_cashflows.xlsx
+if not exist "%TRADING_JOURNAL_LOCAL_DIR%\Master Journal.xlsx" (
+  echo [local-master] ERROR: required workbook missing: %TRADING_JOURNAL_LOCAL_DIR%\Master Journal.xlsx
+  echo [local-master] Restore journal\Master Journal.xlsx before launching Local Trading Tools.
   exit /b 1
 )
 set "CASHFLOW_CACHE_TTL_SECONDS=3600"

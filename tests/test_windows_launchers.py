@@ -35,6 +35,13 @@ def test_windows_launchers_use_repo_journal_dir_and_preflight() -> None:
     assert '[local-master] TRADING_JOURNAL_LOCAL_DIR=%TRADING_JOURNAL_LOCAL_DIR%' in master
 
 
+def test_run_local_master_requires_master_journal_not_legacy_cashflow_workbook() -> None:
+    script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
+    assert 'account_cashflows.xlsx' not in script
+    assert 'Master Journal.xlsx' in script
+    assert 'required workbook missing: %TRADING_JOURNAL_LOCAL_DIR%\\Master Journal.xlsx' in script
+
+
 def test_launcher_builder_only_targets_local_trading_tools() -> None:
     ps1 = (ROOT / 'tools' / 'windows_launchers' / 'build_windows_launchers.ps1').read_text(encoding='utf-8')
     assert 'Local Trading Tools.exe' in ps1
