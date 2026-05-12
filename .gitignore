@@ -1,1 +1,7 @@
 /Local Trading Tools.exe
+journal/*.xls
+journal/*.xlsx
+!journal/Master Journal.xlsx
+journal/~$*.xlsx
+journal/*.tmp.xlsx
+journal/*.pending.xlsx

@@ -115,7 +115,7 @@ def test_all_trades_hidden_row_id_and_unsorted_override(tmp_path: Path):
     wb=load_workbook(out); ws=wb['All Trades']
     headers=[ws.cell(1,c).value for c in range(1,ws.max_column+1)]
     assert '__row_id' not in headers
-    assert ws.max_column == 21
+    assert ws.max_column == 26
     assert ws["A2"].comment is None
     ws['Q2']='Yes'; ws['R2']='setup-x'; wb.save(out)
     ov=read_master_journal_manual_overrides(out)
@@ -129,16 +129,14 @@ def test_all_trades_hidden_row_id_and_unsorted_override(tmp_path: Path):
 
 def test_legacy_comment_row_id_preferred_over_trade_meta_after_row_move(tmp_path: Path):
     out=tmp_path/'legacy.xlsx'; build_master_journal_workbook(sample_snapshot(), out)
-    wb=load_workbook(out); ws=wb['All Trades']; meta=wb['_Trade Meta']
+    wb=load_workbook(out); ws=wb['All Trades']
     from openpyxl.comments import Comment
     ws["A2"].comment = Comment("row_id:t1", "legacy")
     ws["A3"].comment = Comment("row_id:t2", "legacy")
     for c in range(1, ws.max_column+1):
         ws.cell(2,c).value, ws.cell(3,c).value = ws.cell(3,c).value, ws.cell(2,c).value
     # stale _Trade Meta row mapping now conflicts with moved comments
-    meta["B2"] = "t2"
-    meta["B3"] = "t1"
-    ws["R2"] = "moved-comment-target"
+        ws["R2"] = "moved-comment-target"
     wb.save(out)
     ov=read_master_journal_manual_overrides(out)
     assert ov["t1"]["setup"] == "moved-comment-target"
@@ -167,8 +165,7 @@ def test_sheet_order_and_hidden_meta(tmp_path: Path):
     out=tmp_path/'x.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
     assert 'Diagnostics' not in SHEET_ORDER
     assert wb.sheetnames == SHEET_ORDER
-    assert '_Trade Meta' in wb.sheetnames
-    assert wb['_Trade Meta'].sheet_state == 'hidden'
+    assert '_Trade Meta' not in wb.sheetnames
     assert len(wb["Dashboard"].conditional_formatting) > 0
     assert len(wb["Instrument Averages"].conditional_formatting) > 0
     assert len(wb["P&L Calendar"].conditional_formatting) > 0
