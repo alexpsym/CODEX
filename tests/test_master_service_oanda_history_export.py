@@ -69,6 +69,69 @@ def test_get_oanda_history_config_demo_normalizes_v3(monkeypatch: pytest.MonkeyP
     assert config["base_url"] == "https://api-fxpractice.oanda.com/v3"
 
 
+def test_build_oanda_v3_url_normalizes_base_and_endpoint():
+    account_id = "101-001-1234567-001"
+    url_plain = master_service._build_oanda_v3_url(
+        "https://api-fxpractice.oanda.com",
+        "/accounts/{account_id}",
+        account_id=account_id,
+    )
+    url_v3 = master_service._build_oanda_v3_url(
+        "https://api-fxpractice.oanda.com/v3",
+        "/accounts/{account_id}",
+        account_id=account_id,
+    )
+    url_double_v3_input = master_service._build_oanda_v3_url(
+        "https://api-fxpractice.oanda.com/v3/",
+        "/v3/accounts/{account_id}",
+        account_id=account_id,
+    )
+    assert url_plain == f"https://api-fxpractice.oanda.com/v3/accounts/{account_id}"
+    assert url_v3 == f"https://api-fxpractice.oanda.com/v3/accounts/{account_id}"
+    assert url_double_v3_input == f"https://api-fxpractice.oanda.com/v3/accounts/{account_id}"
+    assert "/v3/v3/" not in url_plain
+    assert "/v3/v3/" not in url_v3
+    assert "/v3/v3/" not in url_double_v3_input
+
+
+def test_fetch_oanda_account_created_time_uses_single_v3_prefix(monkeypatch: pytest.MonkeyPatch):
+    seen_urls = []
+
+    class FakeResponse:
+        status_code = 200
+        content = b'{"account":{"createdTime":"2020-01-01T00:00:00.000000000Z"}}'
+        text = '{"account":{"createdTime":"2020-01-01T00:00:00.000000000Z"}}'
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"account": {"createdTime": "2020-01-01T00:00:00.000000000Z"}}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, headers=None):
+            seen_urls.append(url)
+            return FakeResponse()
+
+    monkeypatch.setattr(master_service.httpx, "AsyncClient", lambda *args, **kwargs: FakeClient())
+
+    created = asyncio.run(
+        master_service._fetch_oanda_account_created_time(
+            base_url="https://api-fxpractice.oanda.com/v3",
+            account_id="101-001-1234567-001",
+            api_key="demo-token",
+        )
+    )
+    assert seen_urls == ["https://api-fxpractice.oanda.com/v3/accounts/101-001-1234567-001"]
+    assert created == master_service.datetime(2020, 1, 1, tzinfo=master_service.timezone.utc)
+
+
 def test_run_oanda_history_export_sanitizes_html_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setenv("OANDA_API_KEY_DEMO", "demo-key")
     monkeypatch.setenv("OANDA_ACCOUNT_ID_DEMO", "demo-account")
