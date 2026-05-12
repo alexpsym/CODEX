@@ -392,6 +392,98 @@ function Invoke-GitText {
     return $text.Trim()
 }
 
+function Invoke-GitCommandNoInput {
+    param(
+        [Parameter(Mandatory = $true)] [string] $GitExe,
+        [Parameter(Mandatory = $true)] [string[]] $Arguments,
+        [Parameter(Mandatory = $true)] [string] $WorkingDirectory,
+        [int] $TimeoutSeconds = 120,
+        [switch] $AllowFailure
+    )
+
+    Write-Host ''
+    Write-Host ("git " + ($Arguments -join ' '))
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $GitExe
+    $psi.WorkingDirectory = $WorkingDirectory
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.RedirectStandardInput = $true
+    foreach ($arg in $Arguments) {
+        [void]$psi.ArgumentList.Add($arg)
+    }
+
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    [void]$proc.Start()
+    $proc.StandardInput.Close()
+
+    if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
+        Stop-ProcessTreeById -ProcessId $proc.Id -Reason "git command timeout after $TimeoutSeconds seconds"
+        throw "git $($Arguments -join ' ') timed out after $TimeoutSeconds seconds."
+    }
+
+    $stdout = $proc.StandardOutput.ReadToEnd().Trim()
+    $stderr = $proc.StandardError.ReadToEnd().Trim()
+    if ($stdout) { Write-Host $stdout }
+    if ($stderr) { Write-Host $stderr }
+
+    if ($proc.ExitCode -ne 0 -and -not $AllowFailure) {
+        throw "git $($Arguments -join ' ') failed with exit code $($proc.ExitCode). stdout: $stdout stderr: $stderr"
+    }
+
+    return @{
+        ExitCode = $proc.ExitCode
+        StdOut = $stdout
+        StdErr = $stderr
+    }
+}
+
+function Stop-CodexRepoProcessMatches {
+    param(
+        [Parameter(Mandatory = $true)] [string] $RepoDir
+    )
+
+    $normalizedRepo = [IO.Path]::GetFullPath($RepoDir).TrimEnd('\').ToLowerInvariant()
+    $currentPid = $PID
+    $parentPid = 0
+    try { $parentPid = [int](Get-CimInstance Win32_Process -Filter "ProcessId=$currentPid" | Select-Object -ExpandProperty ParentProcessId) } catch {}
+    $safeCurrentBat = $env:__BATFILE
+
+    $candidates = New-Object System.Collections.Generic.List[object]
+    foreach ($process in Get-Win32ProcessesSafe) {
+        $pidValue = [int]$process.ProcessId
+        if ($pidValue -eq $currentPid -or ($parentPid -gt 0 -and $pidValue -eq $parentPid)) { continue }
+        $name = [string]$process.Name
+        $cmd = [string]$process.CommandLine
+        if (-not $cmd) { continue }
+        if ($safeCurrentBat -and $cmd -match [Regex]::Escape($safeCurrentBat)) { continue }
+
+        $cmdLower = $cmd.ToLowerInvariant()
+        $nameMatch = $name -match '(?i)^(python|python3|py|uvicorn|cmd|powershell|pwsh)(\.exe)?$'
+        $repoRef = $cmdLower.Contains($normalizedRepo) -or $cmdLower.Contains('codex-master')
+        $knownLocalRef = ($cmdLower -match 'render\.master_service') -or ($cmdLower -match 'run_local_master_control') -or ($cmdLower -match 'run_trading_journal_local')
+        if ($nameMatch -and ($repoRef -or $knownLocalRef)) {
+            $candidates.Add($process)
+        }
+    }
+
+    if ($candidates.Count -eq 0) {
+        Write-Host 'No repo-specific locking processes were detected.'
+        return
+    }
+
+    Write-Host "Stopping repo-specific processes that may lock files in: $RepoDir"
+    foreach ($match in @($candidates | Sort-Object ProcessId -Unique)) {
+        Write-Host " - PID $($match.ProcessId): $($match.Name) $($match.CommandLine)"
+        Stop-ProcessTreeById -ProcessId ([int]$match.ProcessId) -Reason 'repo-specific cleanup lock'
+    }
+
+    Start-Sleep -Seconds 2
+}
+
 function Copy-DirectoryContentsSafe {
     param(
         [Parameter(Mandatory = $true)] [string] $Source,
@@ -545,9 +637,28 @@ function Ensure-CodexGitRepo {
         Set-Content -LiteralPath (Join-Path $backupDir 'local-staged-changes.patch') -Value $stagedDiffText -Encoding UTF8 -ErrorAction Stop
 
         Write-Host "Local Git state was not fast-forwardable. A full backup was created at: $backupDir"
+        Stop-CodexRepoProcessMatches -RepoDir $RepoDir
         Invoke-GitCommand -GitExe $GitExe -Arguments @('checkout', '-B', $Branch, "origin/$Branch") -WorkingDirectory $RepoDir | Out-Null
         Invoke-GitCommand -GitExe $GitExe -Arguments @('reset', '--hard', "origin/$Branch") -WorkingDirectory $RepoDir | Out-Null
-        Invoke-GitCommand -GitExe $GitExe -Arguments @('clean', '-fd') -WorkingDirectory $RepoDir | Out-Null
+        Invoke-GitCommand -GitExe $GitExe -Arguments @('clean', '-fdn') -WorkingDirectory $RepoDir -AllowFailure | Out-Null
+
+        $cleaned = $false
+        for ($attempt = 1; $attempt -le 2; $attempt++) {
+            try {
+                Invoke-GitCommandNoInput -GitExe $GitExe -Arguments @('clean', '-ffd', '-q') -WorkingDirectory $RepoDir -TimeoutSeconds 120 | Out-Null
+                $cleaned = $true
+                break
+            } catch {
+                Write-Host "WARNING: git clean attempt $attempt failed: $($_.Exception.Message)"
+                if ($attempt -lt 2) {
+                    Stop-CodexRepoProcessMatches -RepoDir $RepoDir
+                }
+            }
+        }
+        if (-not $cleaned) {
+            $remainingStatus = Invoke-GitText -GitExe $GitExe -Arguments @('status', '--short') -WorkingDirectory $RepoDir -AllowFailure
+            throw "ERROR: Non-interactive git cleanup failed after retries. Backup already exists at: $backupDir`nRemaining git status:`n$remainingStatus"
+        }
         Preserve-LocalFilesFromBackup -BackupDir $backupDir -NewRepoDir $RepoDir
 
         $headAfterRecovery = Invoke-GitText -GitExe $GitExe -Arguments @('rev-parse', 'HEAD') -WorkingDirectory $RepoDir
