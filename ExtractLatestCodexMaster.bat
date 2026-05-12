@@ -630,7 +630,7 @@ try {
     $headNow = Invoke-GitText -GitExe $gitExe -Arguments @('rev-parse', 'HEAD') -WorkingDirectory $codexDir
     $originNow = Invoke-GitText -GitExe $gitExe -Arguments @('rev-parse', "origin/$repoBranch") -WorkingDirectory $codexDir
     Write-Host "HEAD:              $headNow"
-    Write-Host "origin/$repoBranch: $originNow"
+    Write-Host "origin/${repoBranch}: $originNow"
     if ($headNow -ne $originNow) {
         throw 'ERROR: Git checkout is not synced to origin/master after recovery.'
     }
