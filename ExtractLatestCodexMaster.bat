@@ -392,6 +392,29 @@ function Invoke-GitText {
     return $text.Trim()
 }
 
+function ConvertTo-NativeArgumentString {
+    param(
+        [Parameter(Mandatory = $true)] [string[]] $Arguments
+    )
+
+    $quoted = foreach ($arg in $Arguments) {
+        if ($null -eq $arg) { '""'; continue }
+        if ($arg -eq '') { '""'; continue }
+
+        $needsQuotes = $arg -match '[\s"]'
+        if (-not $needsQuotes) {
+            $arg
+            continue
+        }
+
+        $escaped = $arg -replace '(\\*)"', '$1$1\"'
+        $escaped = $escaped -replace '(\\+)$', '$1$1'
+        '"' + $escaped + '"'
+    }
+
+    return ($quoted -join ' ')
+}
+
 function Invoke-GitCommandNoInput {
     param(
         [Parameter(Mandatory = $true)] [string] $GitExe,
@@ -411,22 +434,23 @@ function Invoke-GitCommandNoInput {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.RedirectStandardInput = $true
-    foreach ($arg in $Arguments) {
-        [void]$psi.ArgumentList.Add($arg)
-    }
+    $psi.Arguments = ConvertTo-NativeArgumentString -Arguments $Arguments
 
     $proc = New-Object System.Diagnostics.Process
     $proc.StartInfo = $psi
     [void]$proc.Start()
     $proc.StandardInput.Close()
+    $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+    $stderrTask = $proc.StandardError.ReadToEndAsync()
 
     if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
         Stop-ProcessTreeById -ProcessId $proc.Id -Reason "git command timeout after $TimeoutSeconds seconds"
         throw "git $($Arguments -join ' ') timed out after $TimeoutSeconds seconds."
     }
-
-    $stdout = $proc.StandardOutput.ReadToEnd().Trim()
-    $stderr = $proc.StandardError.ReadToEnd().Trim()
+    [void]$proc.WaitForExit()
+    [void][System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), 10000)
+    $stdout = $stdoutTask.Result.Trim()
+    $stderr = $stderrTask.Result.Trim()
     if ($stdout) { Write-Host $stdout }
     if ($stderr) { Write-Host $stderr }
 
@@ -544,6 +568,29 @@ function Preserve-LocalFilesFromBackup {
             Write-Host "Preserved $fileName"
         }
     }
+
+    foreach ($monitorDir in @('bybit_monitor', 'oanda_monitor')) {
+        $backupMonitorDir = Join-Path $BackupDir $monitorDir
+        $newMonitorDir = Join-Path $NewRepoDir $monitorDir
+        if (Test-Path -LiteralPath $backupMonitorDir -PathType Container) {
+            New-Item -ItemType Directory -Force -Path $newMonitorDir | Out-Null
+            $jsonFiles = @(Get-ChildItem -LiteralPath $backupMonitorDir -Filter '*.json' -File -ErrorAction SilentlyContinue)
+            foreach ($json in $jsonFiles) {
+                $destFile = Join-Path $newMonitorDir $json.Name
+                Copy-Item -LiteralPath $json.FullName -Destination $destFile -Force -ErrorAction Stop
+                Write-Host "Preserved ${monitorDir}/$($json.Name)"
+            }
+        }
+    }
+
+    foreach ($dirName in @('render\data', 'render\uploads')) {
+        $backupDataDir = Join-Path $BackupDir $dirName
+        $newDataDir = Join-Path $NewRepoDir $dirName
+        if (Test-Path -LiteralPath $backupDataDir -PathType Container) {
+            Copy-DirectoryContentsSafe -Source $backupDataDir -Destination $newDataDir
+            Write-Host "Preserved folder: $newDataDir"
+        }
+    }
 }
 
 function Remove-OldCodexZipsFromDownloads {
@@ -645,7 +692,7 @@ function Ensure-CodexGitRepo {
         $cleaned = $false
         for ($attempt = 1; $attempt -le 2; $attempt++) {
             try {
-                Invoke-GitCommandNoInput -GitExe $GitExe -Arguments @('clean', '-ffd', '-q') -WorkingDirectory $RepoDir -TimeoutSeconds 120 | Out-Null
+                Invoke-GitCommandNoInput -GitExe $GitExe -Arguments @('clean', '-ffd', '-q', '-e', 'journal/', '-e', '.env', '-e', 'env.env', '-e', 'bybit_monitor/*.json', '-e', 'oanda_monitor/*.json', '-e', 'render/data/', '-e', 'render/uploads/') -WorkingDirectory $RepoDir -TimeoutSeconds 120 | Out-Null
                 $cleaned = $true
                 break
             } catch {
