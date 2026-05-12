@@ -33,6 +33,9 @@ def test_windows_launchers_use_repo_journal_dir_and_preflight() -> None:
     assert 'Master Journal.xlsx' in journal
     assert 'Sync Journal' in journal
     assert '[local-master] TRADING_JOURNAL_LOCAL_DIR=%TRADING_JOURNAL_LOCAL_DIR%' in master
+    assert 'required workbook missing' not in master
+    assert 'tools\\ensure_local_journal_templates.py' in master
+    assert master.find('tools\\ensure_local_journal_templates.py') < master.find('start "Local Master Control"')
 
 
 def test_launcher_builder_only_targets_local_trading_tools() -> None:
