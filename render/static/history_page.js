@@ -178,7 +178,7 @@
       link.click();
       link.remove();
     } finally {
-      URL.revokeObjectURL(objectUrl);
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
     }
     return filename;
   };

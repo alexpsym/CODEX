@@ -17,6 +17,8 @@ def test_history_page_uses_blob_download_and_no_window_open() -> None:
     assert 'window.open(' not in js
     assert 'downloadExportFile' in js
     assert 'URL.createObjectURL' in js
+    assert 'URL.revokeObjectURL' in js
+    assert 'setTimeout(() => URL.revokeObjectURL' in js
     assert '.download =' in js
     assert 'Export completed but no download URL was returned' in js
     assert 'Automatic download failed' in js
