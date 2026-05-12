@@ -9638,7 +9638,7 @@ def _normalize_oanda_v3_base_url(value: Optional[str]) -> tuple[str, bool]:
     return f"{normalized_base}/v3", base != normalized_base
 
 
-def _build_oanda_v3_url(base_url: str, endpoint: str, *, account_id: Optional[str] = None) -> str:
+def _build_oanda_v3_url(base_url: str, endpoint: str, **path_params: object) -> str:
     raw_base = (base_url or "").strip().rstrip("/")
     parsed = urlparse(raw_base)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -9649,7 +9649,7 @@ def _build_oanda_v3_url(base_url: str, endpoint: str, *, account_id: Optional[st
         normalized_path = normalized_path[: -len("/v3")]
 
     raw_endpoint = endpoint or ""
-    formatted_endpoint = raw_endpoint.format(account_id=account_id) if "{account_id}" in raw_endpoint else raw_endpoint
+    formatted_endpoint = raw_endpoint.format(**path_params) if path_params else raw_endpoint
     formatted_endpoint = formatted_endpoint.strip()
     if not formatted_endpoint.startswith("/"):
         formatted_endpoint = f"/{formatted_endpoint}"
@@ -13388,7 +13388,11 @@ async def _place_oanda_order(
         (order_payload.get("takeProfitOnFill") or {}).get("price"),
     )
 
-    url = f"{cfg['base_url'].rstrip('/')}/v3/accounts/{cfg['account_id']}/orders"
+    url = _build_oanda_v3_url(
+        cfg["base_url"],
+        "/accounts/{account_id}/orders",
+        account_id=cfg["account_id"],
+    )
     headers = {
         "Authorization": f"Bearer {cfg['token']}",
         "Content-Type": "application/json",
@@ -13717,7 +13721,11 @@ async def _fetch_oanda_mid_price(
 ) -> float:
     token = cfg["token"]
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    url = f"{cfg['base_url'].rstrip('/')}/v3/accounts/{cfg['account_id']}/pricing"
+    url = _build_oanda_v3_url(
+        cfg["base_url"],
+        "/accounts/{account_id}/pricing",
+        account_id=cfg["account_id"],
+    )
     params = {"instruments": instrument}
     timeout = httpx.Timeout(timeout_s, connect=connect_s, read=(read_s if read_s is not None else timeout_s), write=timeout_s, pool=2.0)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
@@ -13752,7 +13760,11 @@ async def _fetch_oanda_mid_prices_batch(
         return {}
     token = cfg["token"]
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    url = f"{cfg['base_url'].rstrip('/')}/v3/accounts/{cfg['account_id']}/pricing"
+    url = _build_oanda_v3_url(
+        cfg["base_url"],
+        "/accounts/{account_id}/pricing",
+        account_id=cfg["account_id"],
+    )
     params = {"instruments": ",".join(unique)}
     timeout = httpx.Timeout(timeout_s, connect=connect_s, read=(read_s if read_s is not None else timeout_s), write=timeout_s, pool=2.0)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
@@ -13912,8 +13924,12 @@ async def _cancel_oanda_order(*, cfg: Dict[str, str], order_id: str, mode: str, 
     target_account_id = str(account_id or cfg.get("account_id") or "").strip()
     if not target_account_id:
         raise ValueError("OANDA account_id is missing.")
-    endpoint = f"/v3/accounts/{target_account_id}/orders/{order_id}/cancel"
-    url = f"{cfg['base_url'].rstrip('/')}{endpoint}"
+    url = _build_oanda_v3_url(
+        cfg["base_url"],
+        "/accounts/{account_id}/orders/{order_id}/cancel",
+        account_id=target_account_id,
+        order_id=order_id,
+    )
     async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
         resp = await client.put(url, headers=headers)
     if resp.status_code >= 400:
@@ -13928,8 +13944,12 @@ async def _close_oanda_trade(*, cfg: Dict[str, str], trade_id: str, mode: str, a
     target_account_id = str(account_id or cfg.get("account_id") or "").strip()
     if not target_account_id:
         raise ValueError("OANDA account_id is missing.")
-    endpoint = f"/v3/accounts/{target_account_id}/trades/{trade_id}/close"
-    url = f"{cfg['base_url'].rstrip('/')}{endpoint}"
+    url = _build_oanda_v3_url(
+        cfg["base_url"],
+        "/accounts/{account_id}/trades/{trade_id}/close",
+        account_id=target_account_id,
+        trade_id=trade_id,
+    )
     async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
         resp = await client.put(url, headers=headers, json={"units": "ALL"})
     if resp.status_code >= 400:

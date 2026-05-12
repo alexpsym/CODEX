@@ -132,6 +132,67 @@ def test_fetch_oanda_account_created_time_uses_single_v3_prefix(monkeypatch: pyt
     assert created == master_service.datetime(2020, 1, 1, tzinfo=master_service.timezone.utc)
 
 
+def test_oanda_trade_endpoints_use_helper_without_double_v3(monkeypatch: pytest.MonkeyPatch):
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.status_code = 200
+            self.text = "{}"
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            calls.append(("POST", url))
+            return FakeResponse({"orderCreateTransaction": {"id": "ord-1"}})
+
+        async def get(self, url, headers=None, params=None):
+            calls.append(("GET", url))
+            return FakeResponse({"prices": [{"bids": [{"price": "1.0"}], "asks": [{"price": "1.2"}], "instrument": "EUR_USD"}]})
+
+        async def put(self, url, headers=None, json=None):
+            calls.append(("PUT", url))
+            return FakeResponse({"ok": True})
+
+    monkeypatch.setattr(master_service.httpx, "AsyncClient", lambda *a, **k: FakeClient())
+    async def fake_meta(**_k):
+        return {"displayPrecision": 5, "tradeUnitsPrecision": 0}
+
+    monkeypatch.setattr(master_service, "_fetch_oanda_instrument_meta", fake_meta)
+    monkeypatch.setattr(master_service, "_upsert_trade_context", lambda *_a, **_k: None)
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda *_a, **_k: None)
+    monkeypatch.setattr(master_service, "_parse_limit_cancel_settings", lambda *_a, **_k: (None, None))
+
+    monkeypatch.setattr(master_service, "timeout_s", 10.0, raising=False)
+    monkeypatch.setattr(master_service, "connect_s", 2.0, raising=False)
+    monkeypatch.setattr(master_service, "read_s", None, raising=False)
+
+    cfg = {"base_url": "https://api-fxpractice.oanda.com/v3", "account_id": "acc-1", "token": "t", "mode": "demo"}
+    monkeypatch.setattr(master_service, "_get_oanda_config", lambda *_a, **_k: cfg)
+
+    asyncio.run(master_service._place_oanda_order({"action": "buy", "symbol": "EUR_USD", "quantity": 1, "account": "demo", "order_type": "market"}, request_id="r1"))
+    asyncio.run(master_service._fetch_oanda_mid_price(cfg=cfg, instrument="EUR_USD", mode="demo"))
+    asyncio.run(master_service._fetch_oanda_mid_prices_batch(cfg=cfg, instruments=["EUR_USD"]))
+    asyncio.run(master_service._cancel_oanda_order(cfg=cfg, order_id="ord-2", mode="demo"))
+    asyncio.run(master_service._close_oanda_trade(cfg=cfg, trade_id="trd-3", mode="demo"))
+
+    urls = [url for _, url in calls]
+    assert "https://api-fxpractice.oanda.com/v3/accounts/acc-1/orders" in urls
+    assert "https://api-fxpractice.oanda.com/v3/accounts/acc-1/pricing" in urls
+    assert "https://api-fxpractice.oanda.com/v3/accounts/acc-1/orders/ord-2/cancel" in urls
+    assert "https://api-fxpractice.oanda.com/v3/accounts/acc-1/trades/trd-3/close" in urls
+    assert all("/v3/v3/" not in url for url in urls)
+
+
 def test_run_oanda_history_export_sanitizes_html_errors(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setenv("OANDA_API_KEY_DEMO", "demo-key")
     monkeypatch.setenv("OANDA_ACCOUNT_ID_DEMO", "demo-account")
