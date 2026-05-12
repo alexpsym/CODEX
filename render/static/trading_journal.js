@@ -195,8 +195,12 @@
     const res = await fetch(url, { cache: 'no-store', ...options });
     const text = await res.text();
     let payload = {};
-    try { payload = text ? JSON.parse(text) : {}; } catch {}
+    let parsed = true;
+    try { payload = text ? JSON.parse(text) : {}; } catch { parsed = false; }
     if (!res.ok) {
+      if (!parsed && text) {
+        throw new Error(`${res.status} Sync failed: server returned non-JSON error`);
+      }
       const detail = payload?.detail ?? payload;
       throw new Error(`${res.status} ${compactErrorMessage(detail, text || res.statusText || 'Request failed')}`);
     }
