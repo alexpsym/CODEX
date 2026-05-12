@@ -1124,12 +1124,15 @@ def _master_journal_authoritative_enabled() -> bool:
 def _journal_source_fingerprint() -> dict:
     mode = TRADING_JOURNAL_SOURCE if TRADING_JOURNAL_SOURCE in {"dropbox", "local", "both", "auto"} else "both"
     source_files: List[Dict[str, object]] = []
-    for path in _list_local_trading_journal_workbooks():
-        source_files.append(_source_file_fingerprint(path))
-    if not _master_journal_authoritative_enabled():
+    authoritative = _master_journal_authoritative_enabled()
+    if authoritative:
+        source_files.append(_source_file_fingerprint(_master_journal_path()))
+    else:
+        for path in _list_local_trading_journal_workbooks():
+            source_files.append(_source_file_fingerprint(path))
         source_files.append(_source_file_fingerprint(_resolve_local_journal_file("account_cashflows.xlsx", TRADING_JOURNAL_LOCAL_DIR)))
-    source_files.append(_source_file_fingerprint(_resolve_local_journal_file(BYBIT_DEMO_WORKBOOK_NAME, TRADING_JOURNAL_LOCAL_DIR)))
-    source_files.append(_source_file_fingerprint(_resolve_local_journal_file(BYBIT_DEMO_TEMPLATE_NAME, TRADING_JOURNAL_LOCAL_DIR)))
+        source_files.append(_source_file_fingerprint(_resolve_local_journal_file(BYBIT_DEMO_WORKBOOK_NAME, TRADING_JOURNAL_LOCAL_DIR)))
+        source_files.append(_source_file_fingerprint(_resolve_local_journal_file(BYBIT_DEMO_TEMPLATE_NAME, TRADING_JOURNAL_LOCAL_DIR)))
     source_files.append(_source_file_fingerprint(TRADING_JOURNAL_PATH))
     source_files.append(_source_file_fingerprint(TRADING_JOURNAL_STATE_PATH))
     source_files.append(_source_file_fingerprint(OANDA_FILL_STATE_PATH))
@@ -1264,6 +1267,24 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
     fingerprint = _journal_source_fingerprint()
     if not force and isinstance(existing, dict) and existing.get("source_fingerprints") == fingerprint:
         return existing
+    if _master_journal_authoritative_enabled():
+        source_payload = read_master_journal_source(_master_journal_path())
+        items = [dict(r) for r in (source_payload.get("items") or []) if isinstance(r, dict)]
+        trade_items = [r for r in items if _row_type(r) == "trade"]
+        cashflow_rows = [r for r in items if _row_type(r) == "cashflow"]
+        balances = _build_journal_balance_timelines(trade_items, source_payload.get("cashflow_ledger") or {}, _get_excel_account_balances()).get("balances") or []
+        stats = _compute_journal_stats(items, balances)
+        diagnostics = _build_trading_journal_diagnostics_snapshot()
+        diagnostics.update({
+            "source": "master_journal_authoritative",
+            "authoritative_mode": True,
+            "source_workbooks_scanned": 0,
+            "parsed_trade_rows": len(trade_items),
+            "parsed_cashflow_rows": len(cashflow_rows),
+        })
+        result = {"cache_version": TRADING_JOURNAL_VIEW_CACHE_VERSION, "generated_at": _utc_now_iso(), "items": sorted(items, key=_row_sort_dt, reverse=True), "balances": balances, "stats": stats, "diagnostics": diagnostics, "source_fingerprints": fingerprint}
+        _save_trading_journal_view_snapshot(result)
+        return result
     rows = [
         _backfill_trade_row_context_fields(r)
         for r in _get_trading_journal_rows()
@@ -23568,8 +23589,16 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
         }
     tmp = path.with_suffix('.tmp.xlsx')
     try:
+        source_payload = read_master_journal_source(path)
+        parsed_items = [r for r in (source_payload.get("items") or []) if isinstance(r, dict)]
+        parsed_trade_rows = [r for r in parsed_items if _row_type(r) == "trade"]
         snapshot = _build_trading_journal_view_snapshot(force=True)
         refresh_master_journal_derived_sheets(path, snapshot)
+        refreshed = read_master_journal_source(path)
+        refreshed_items = [r for r in (refreshed.get("items") or []) if isinstance(r, dict)]
+        refreshed_trade_rows = [r for r in refreshed_items if _row_type(r) == "trade"]
+        if parsed_trade_rows and not refreshed_trade_rows:
+            raise RuntimeError("Master Journal derived refresh failed validation: trade rows were lost.")
         size = path.stat().st_size
         payload = {
             'master_journal_ok': True,
@@ -23577,6 +23606,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
             'master_journal_exists': True,
             'master_journal_size_bytes': int(size),
             'master_journal_updated_at': _utc_now_iso(),
+            'parsed_trade_rows': len(parsed_trade_rows),
         }
         payload.update(_sync_journal_excel_files_to_github(path))
         return payload

@@ -472,6 +472,13 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
         if not required.issubset(set(idx.keys())):
             raise RuntimeError('Master Journal All Trades headers are invalid.')
         items=[]; cashflow_ledger=defaultdict(list)
+        def _num(v):
+            try:
+                if v in (None, ""):
+                    return None
+                return float(v)
+            except Exception:
+                return None
         for r in ws.iter_rows(min_row=2, values_only=True):
             if not any(v not in (None,'') for v in r):
                 continue
@@ -479,11 +486,25 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
             side = str(r[idx.get('Side',4)] or '').strip()
             account = str(r[idx.get('Account',2)] or '').strip()
             row_id = str(r[idx.get('Row ID',len(r)-1)] or '').strip() if 'Row ID' in idx else ''
-            row_type = 'cashflow' if symbol.upper()=='CASHFLOW' else ('monthly_aud_reval' if symbol.upper()=='MONTHLY AUD P/L' else 'trade')
-            item={'id': row_id or stable_row_id({'account':account,'symbol':symbol,'side':side,'open_time':r[idx.get('Open Time',0)],'close_time':r[idx.get('Close Time',1)]}), 'row_type':row_type,'account':account,'symbol':symbol,'side':side,'open_time':r[idx.get('Open Time',0)],'close_time':r[idx.get('Close Time',1)],'net_profit':r[idx.get('Net P/L',11)] if 'Net P/L' in idx else None,'setup':r[idx.get('Setup',17)] if 'Setup' in idx else '','timeframe':r[idx.get('Timeframe',18)] if 'Timeframe' in idx else '','breakeven':r[idx.get('Breakeven',19)] if 'Breakeven' in idx else '','notes':r[idx.get('Notes',20)] if 'Notes' in idx else ''}
+            row_type_raw = str(r[idx.get('Row Type')]).strip().lower() if 'Row Type' in idx and idx.get('Row Type') is not None else ''
+            if row_type_raw in {'cashflow','monthly_aud_reval','trade'}:
+                row_type = row_type_raw
+            else:
+                row_type = 'cashflow' if symbol.upper()=='CASHFLOW' else ('monthly_aud_reval' if symbol.upper()=='MONTHLY AUD P/L' else ('trade' if symbol or account or side else ''))
+            if not row_type:
+                continue
+            open_time = r[idx.get('Open Time',0)]
+            close_time = r[idx.get('Close Time',1)]
+            duration = _num(r[idx.get('Trade Duration Seconds')]) if 'Trade Duration Seconds' in idx else None
+            if duration is None and open_time not in (None, '') and close_time not in (None, ''):
+                try:
+                    duration = int((pd.to_datetime(close_time, utc=True) - pd.to_datetime(open_time, utc=True)).total_seconds())
+                except Exception:
+                    duration = None
+            item={'id': row_id or stable_row_id({'account':account,'symbol':symbol,'side':side,'open_time':open_time,'close_time':close_time}), 'row_type':row_type,'account':account,'symbol':symbol,'side':side,'open_time':open_time,'close_time':close_time,'qty':_num(r[idx.get('Qty')]) if 'Qty' in idx else None,'entry_price':_num(r[idx.get('Entry Price')]) if 'Entry Price' in idx else None,'exit_price':_num(r[idx.get('Exit Price')]) if 'Exit Price' in idx else None,'stop_loss':_num(r[idx.get('Stop Loss')]) if 'Stop Loss' in idx else None,'take_profit':_num(r[idx.get('Take Profit')]) if 'Take Profit' in idx else None,'commission':_num(r[idx.get('Commission')]) if 'Commission' in idx else None,'net_profit':_num(r[idx.get('Net P/L',11)]) if 'Net P/L' in idx else None,'result_pct':_num(r[idx.get('Profit %')]) if 'Profit %' in idx else None,'r_multiple':_num(r[idx.get('R-Multiple')]) if 'R-Multiple' in idx else None,'balance_after_trade':_num(r[idx.get('Balance After')]) if 'Balance After' in idx else None,'trade_duration_seconds':duration,'is_test_trade':str(r[idx.get('Test')]).strip().lower() in {'yes','y','true','1'} if 'Test' in idx else False,'setup':r[idx.get('Setup',17)] if 'Setup' in idx else '','timeframe':r[idx.get('Timeframe',18)] if 'Timeframe' in idx else '','breakeven':r[idx.get('Breakeven',19)] if 'Breakeven' in idx else '','notes':r[idx.get('Notes',20)] if 'Notes' in idx else '','currency':str(r[idx.get('Currency')] or '').strip() if 'Currency' in idx else ''}
             items.append(item)
             if row_type=='cashflow':
-                cashflow_ledger[account].append({'account':account,'date':item['close_time'] or item['open_time'],'amount':None,'new_balance':r[idx.get('Balance After',14)] if 'Balance After' in idx else None,'currency':'','reason':item.get('notes') or '', 'side':side})
+                cashflow_ledger[account].append({'account':account,'date':item['close_time'] or item['open_time'],'amount':_num(r[idx.get('Cashflow Amount')]) if 'Cashflow Amount' in idx else None,'new_balance':_num(r[idx.get('Cashflow New Balance')]) if 'Cashflow New Balance' in idx else item.get('balance_after_trade'),'currency':str(r[idx.get('Currency')] or '').strip() if 'Currency' in idx else '','reason':item.get('notes') or '', 'side':side})
         return {'items':items,'cashflow_ledger':dict(cashflow_ledger)}
     finally:
         wb.close()

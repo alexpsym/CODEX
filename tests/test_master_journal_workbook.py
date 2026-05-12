@@ -1,6 +1,6 @@
 from pathlib import Path
 from openpyxl import load_workbook
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, SHEET_ORDER
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, SHEET_ORDER
 from openpyxl.utils.cell import coordinate_to_tuple
 
 def _cf_ranges(ws):
@@ -234,6 +234,16 @@ def test_dashboard_layout_style_columns(tmp_path: Path):
         r.min_row == duration_pos[0] and r.min_col == duration_pos[1] and r.max_col == duration_pos[1] + 1
         for r in dash.merged_cells.ranges
     )
+
+def test_read_master_journal_source_parses_core_fields(tmp_path: Path):
+    out = tmp_path / "Master Journal.xlsx"
+    build_master_journal_workbook(sample_snapshot(), out)
+    parsed = read_master_journal_source(out)
+    trades = [r for r in parsed["items"] if r.get("row_type") == "trade"]
+    assert trades
+    row = trades[0]
+    for key in ("id", "qty", "entry_price", "exit_price", "stop_loss", "take_profit", "net_profit", "result_pct", "r_multiple", "trade_duration_seconds", "is_test_trade"):
+        assert key in row
 
 
 def test_monthly_aud_row_uses_result_currency_and_excluded_from_metrics(tmp_path: Path):

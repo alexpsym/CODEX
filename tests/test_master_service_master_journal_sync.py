@@ -278,6 +278,29 @@ def test_github_sync_stages_only_target_file(monkeypatch, tmp_path):
     journal.mkdir()
     master = journal / "Master Journal.xlsx"
     master.write_bytes(b"x")
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_authoritative_snapshot_does_not_scan_legacy_sources(tmp_path, monkeypatch):
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
+    monkeypatch.setenv("TRADING_JOURNAL_SOURCE", "local")
+    from tools.master_journal_workbook import build_master_journal_workbook
+    build_master_journal_workbook({'items':[{'id':'t1','row_type':'trade','account':'A','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0}], 'stats':{'totals':{}}, 'balances':[], 'diagnostics':{}}, tmp_path / "Master Journal.xlsx")
+    monkeypatch.setattr(master_service, "_list_local_trading_journal_workbooks", lambda: (_ for _ in ()).throw(AssertionError("should not call")))
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: (_ for _ in ()).throw(AssertionError("should not call")))
+    monkeypatch.setattr(master_service, "_load_cashflows_for_active_journal_source", lambda _s: (_ for _ in ()).throw(AssertionError("should not call")))
+    snap = master_service._build_trading_journal_view_snapshot(force=True)
+    assert snap["diagnostics"]["authoritative_mode"] is True
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_authoritative_fingerprint_excludes_legacy_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
+    (tmp_path / "Master Journal.xlsx").write_bytes(b"x")
+    monkeypatch.setattr(master_service, "_list_local_trading_journal_workbooks", lambda: (_ for _ in ()).throw(AssertionError("should not call")))
+    fp = master_service._journal_source_fingerprint()
+    paths = [str((f or {}).get("path") or "") for f in fp.get("files", [])]
+    assert any("Master Journal.xlsx" in p for p in paths)
+    assert all("account_cashflows.xlsx" not in p for p in paths)
+    assert all("Bybit Demo.xlsx" not in p for p in paths)
     (journal / "~$Master Journal.xlsx").write_bytes(b"x")
     (journal / "foo.tmp.xlsx").write_bytes(b"x")
     (journal / "foo.pending.xlsx").write_bytes(b"x")
