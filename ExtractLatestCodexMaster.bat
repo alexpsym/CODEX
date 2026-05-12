@@ -509,7 +509,10 @@ function Stop-CodexRepoProcessMatches {
 }
 
 function Test-GitStatusOnlyAllowedLocalData {
-    param([string]$StatusText)
+    param(
+        [string]$StatusText,
+        [string[]]$AllowedRootGeneratedFiles = @()
+    )
     $result = @{ IsOnlyAllowed = $true; DisallowedLines = @() }
     if ([string]::IsNullOrWhiteSpace($StatusText)) { return $result }
     $lines = $StatusText -split "(`r`n|`n|`r)" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
@@ -521,6 +524,7 @@ function Test-GitStatusOnlyAllowedLocalData {
         $path = $line.Substring(3).Trim()
         if ($path.StartsWith('"') -and $path.EndsWith('"') -and $path.Length -ge 2) { $path = $path.Substring(1, $path.Length - 2) }
         $p = $path.Replace('\','/')
+        $isAllowedGeneratedRootFile = ($p -notmatch '/') -and ($AllowedRootGeneratedFiles -contains $p)
         $allowed =
             ($p -eq '.env') -or
             ($p -eq 'env.env') -or
@@ -528,7 +532,8 @@ function Test-GitStatusOnlyAllowedLocalData {
             ($p -like 'bybit_monitor/*.json') -or
             ($p -like 'oanda_monitor/*.json') -or
             ($p -eq 'render/data') -or ($p -eq 'render/data/') -or ($p -like 'render/data/*') -or
-            ($p -eq 'render/uploads') -or ($p -eq 'render/uploads/') -or ($p -like 'render/uploads/*')
+            ($p -eq 'render/uploads') -or ($p -eq 'render/uploads/') -or ($p -like 'render/uploads/*') -or
+            $isAllowedGeneratedRootFile
         if (($p -like '*__pycache__*') -or -not $allowed) {
             $result.IsOnlyAllowed = $false
             $result.DisallowedLines += $line
@@ -878,6 +883,7 @@ $buildLaunchersBat = Join-Path $codexDir 'build_windows_launchers.bat'
 $expectedLaunchers = @(
     (Join-Path $codexDir 'Local Trading Tools.exe')
 )
+$allowedGeneratedRootFiles = @($expectedLaunchers | ForEach-Object { Split-Path -Leaf $_ } | Select-Object -Unique)
 
 if (-not (Test-Path -LiteralPath $buildLaunchersBat -PathType Leaf)) {
     Write-Host ''
@@ -928,7 +934,7 @@ Write-Section 'Git status summary:'
 try {
     $finalStatus = Invoke-GitText -GitExe $gitExe -Arguments @('status', '--short') -WorkingDirectory $codexDir -AllowFailure
     if ($finalStatus) { Write-Host $finalStatus }
-    $finalStatusCheck = Test-GitStatusOnlyAllowedLocalData -StatusText $finalStatus
+    $finalStatusCheck = Test-GitStatusOnlyAllowedLocalData -StatusText $finalStatus -AllowedRootGeneratedFiles $allowedGeneratedRootFiles
     if ($finalStatusCheck.IsOnlyAllowed) {
         Write-Host 'Only allowed local runtime/user data is present in git status.'
     } else {
