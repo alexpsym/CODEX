@@ -115,7 +115,7 @@ def test_all_trades_hidden_row_id_and_unsorted_override(tmp_path: Path):
     wb=load_workbook(out); ws=wb['All Trades']
     headers=[ws.cell(1,c).value for c in range(1,ws.max_column+1)]
     assert '__row_id' not in headers
-    assert ws.max_column == 22
+    assert ws.max_column == 26
     assert ws["A2"].comment is None
     ws['Q2']='Yes'; ws['R2']='setup-x'; wb.save(out)
     ov=read_master_journal_manual_overrides(out)

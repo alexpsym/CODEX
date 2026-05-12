@@ -210,7 +210,7 @@ def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]
 def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -> Dict[str, Any]:
     wb=Workbook(); wb.remove(wb.active)
     for s in SHEET_ORDER: wb.create_sheet(s)
-    rows=[r for r in (snapshot.get('items') or []) if isinstance(r,dict) and str(r.get('row_type') or 'trade') in {'trade','monthly_aud_reval'}]
+    rows=[r for r in (snapshot.get('items') or []) if isinstance(r,dict) and str(r.get('row_type') or 'trade') in {'trade','monthly_aud_reval','cashflow'}]
     metric_rows=[r for r in rows if str(r.get('row_type') or 'trade')=='trade']
     non_test=[r for r in metric_rows if not _is_test_trade_value(r.get('is_test_trade'))]
     stats = snapshot.get('stats') or {}
@@ -274,7 +274,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         cur += 1
 
     resolved_balances = _resolved_all_trade_balances(rows)
-    ws=wb['All Trades']; headers=['Open Time','Close Time','Account','Symbol','Side','Qty','Entry Price','Exit Price','Stop Loss Price','Target Price','Commission','Net P/L','Profit %','R-Multiple','Balance After','Trade Duration']+EDITABLE_COLS+['Row ID']; ws.append(headers)
+    ws=wb['All Trades']; headers=['Open Time','Close Time','Account','Symbol','Side','Qty','Entry Price','Exit Price','Stop Loss Price','Target Price','Commission','Net P/L','Profit %','R-Multiple','Balance After','Trade Duration']+EDITABLE_COLS+['Cashflow Amount','Cashflow New Balance','Currency','Row Type','Row ID']; ws.append(headers)
     for i, row in enumerate(rows):
         pct = _as_float(row.get('result_pct'))
         is_monthly = str(row.get("row_type") or "") == "monthly_aud_reval"
@@ -282,7 +282,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         acct = row.get('account_label') or row.get('account') or ("Bybit Live" if is_monthly else "")
         notes = row.get('notes') or ('Monthly Bybit Live AUD P/L bookkeeping note (excluded from metrics).' if is_monthly else '')
         net_pnl = row.get('net_profit') if row.get('net_profit') is not None else row.get('result_cash')
-        ws.append([row.get('open_time') or row.get("period_month"),row.get('close_time') or row.get("period_month"),acct,symbol,row.get('side'),row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('stop_loss'),row.get('take_profit'),row.get('commission'),net_pnl,(pct/100.0 if pct is not None else ''),row.get('r_multiple'),resolved_balances.get(str(i)),_fmt_duration(row.get('trade_duration_seconds')),'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',row.get('setup') or '',row.get('timeframe') or '',row.get('breakeven') or '',notes, stable_row_id(row)])
+        ws.append([row.get('open_time') or row.get("period_month"),row.get('close_time') or row.get("period_month"),acct,symbol,row.get('side'),row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('stop_loss'),row.get('take_profit'),row.get('commission'),net_pnl,(pct/100.0 if pct is not None else ''),row.get('r_multiple'),resolved_balances.get(str(i)),_fmt_duration(row.get('trade_duration_seconds')),'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',row.get('setup') or '',row.get('timeframe') or '',row.get('breakeven') or '',notes,row.get('cashflow_amount'),row.get('cashflow_new_balance'),row.get('currency') or row.get('account_currency') or row.get('result_currency') or '',row.get('row_type') or 'trade', stable_row_id(row)])
     _style_table_sheet(ws,1,'A2',True)
     for rr in range(2, ws.max_row + 1):
         ccy_comm = _currency_code(rows[rr-2].get("commission_currency"), rows[rr-2].get("fee_currency"), rows[rr-2].get("realized_pnl_currency"), rows[rr-2].get("currency"), rows[rr-2].get("account_currency"))
@@ -294,7 +294,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         ws.cell(rr, 14).number_format = '0.00'
         ws.cell(rr, 15).number_format = '#,##0.0000000000' if _is_crypto_currency(ccy_bal) else '#,##0.00'
         ws.cell(rr, 13).number_format = "0.00%"
-    ws.column_dimensions['V'].hidden = True
+    ws.column_dimensions['Z'].hidden = True
     dv=DataValidation(type='list',formula1='"Yes,No"',allow_blank=True); ws.add_data_validation(dv); dv.add(f"Q2:Q{max(2,ws.max_row)}")
     _negative_impact_rule(ws, f"K2:K{max(2, ws.max_row)}")
     _profit_loss_rules(ws, f"L2:N{max(2, ws.max_row)}")
@@ -489,4 +489,40 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
         wb.close()
 
 def refresh_master_journal_derived_sheets(path: Path, snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    return build_master_journal_workbook(snapshot, path)
+    if not path.exists():
+        raise FileNotFoundError(f"Master Journal workbook not found: {path}")
+    wb = load_workbook(path)
+    try:
+        if 'All Trades' not in wb.sheetnames:
+            raise RuntimeError('Master Journal missing All Trades sheet.')
+        all_trades = wb['All Trades']
+        # remove derived and legacy sheets
+        for name in ['Dashboard','Instrument Averages','P&L Calendar','_Trade Meta']:
+            if name in wb.sheetnames:
+                wb.remove(wb[name])
+        wb.create_sheet('Dashboard',0)
+        wb._sheets.insert(1, wb._sheets.pop(wb._sheets.index(all_trades)))
+        wb.create_sheet('Instrument Averages',2)
+        wb.create_sheet('P&L Calendar',3)
+        # fill derived sheets by building temp and copying values/styles
+        tmp = path.with_suffix('.derived.tmp.xlsx')
+        build_master_journal_workbook(snapshot, tmp)
+        gen = load_workbook(tmp)
+        try:
+            for n in ['Dashboard','Instrument Averages','P&L Calendar']:
+                src=gen[n]; dst=wb[n]
+                for r in src.iter_rows(min_row=1,max_row=src.max_row,min_col=1,max_col=src.max_column):
+                    for c in r:
+                        d=dst.cell(c.row,c.column,c.value); d.number_format=c.number_format; d.font=c.font.copy(); d.fill=c.fill.copy(); d.border=c.border.copy(); d.alignment=c.alignment.copy()
+                dst.freeze_panes = src.freeze_panes
+                dst.auto_filter.ref = src.auto_filter.ref
+                for k,v in src.column_dimensions.items(): dst.column_dimensions[k].width=v.width
+        finally:
+            gen.close()
+            tmp.unlink(missing_ok=True)
+        tmp_out = path.with_suffix('.pending.xlsx')
+        wb.save(tmp_out)
+        tmp_out.replace(path)
+        return {'ok': True, 'path': str(path)}
+    finally:
+        wb.close()
