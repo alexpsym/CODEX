@@ -517,13 +517,15 @@ function Test-GitStatusOnlyAllowedLocalData {
     if ([string]::IsNullOrWhiteSpace($StatusText)) { return $result }
     $lines = $StatusText -split "(`r`n|`n|`r)" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
     foreach ($lineRaw in $lines) {
-        $line = $lineRaw.Trim()
-        if ($line.Length -lt 4) { $result.IsOnlyAllowed = $false; $result.DisallowedLines += $line; continue }
-        $xy = $line.Substring(0,2)
-        if ($xy -ne '??') { $result.IsOnlyAllowed = $false; $result.DisallowedLines += $line; continue }
-        $path = $line.Substring(3).Trim()
+        if ($lineRaw.Length -lt 4) { $result.IsOnlyAllowed = $false; $result.DisallowedLines += $lineRaw; continue }
+        $xy = $lineRaw.Substring(0,2)
+        $pathRaw = $lineRaw.Substring(3)
+        if ([string]::IsNullOrWhiteSpace($pathRaw)) { $result.IsOnlyAllowed = $false; $result.DisallowedLines += $lineRaw; continue }
+        if (($xy -ne '??') -and ($xy -ne ' M')) { $result.IsOnlyAllowed = $false; $result.DisallowedLines += $lineRaw; continue }
+        $path = $pathRaw.Trim()
         if ($path.StartsWith('"') -and $path.EndsWith('"') -and $path.Length -ge 2) { $path = $path.Substring(1, $path.Length - 2) }
         $p = $path.Replace('\','/')
+        if ([string]::IsNullOrWhiteSpace($p)) { $result.IsOnlyAllowed = $false; $result.DisallowedLines += $lineRaw; continue }
         $isAllowedGeneratedRootFile = ($p -notmatch '/') -and ($AllowedRootGeneratedFiles -contains $p)
         $allowed =
             ($p -eq '.env') -or
@@ -536,7 +538,7 @@ function Test-GitStatusOnlyAllowedLocalData {
             $isAllowedGeneratedRootFile
         if (($p -like '*__pycache__*') -or -not $allowed) {
             $result.IsOnlyAllowed = $false
-            $result.DisallowedLines += $line
+            $result.DisallowedLines += $lineRaw
         }
     }
     return $result
