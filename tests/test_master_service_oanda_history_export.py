@@ -448,3 +448,67 @@ def test_oanda_transaction_history_uses_client_order_stop_target():
     row = parsed['rows'][0]
     assert row['stop_loss'] == pytest.approx(0.57864)
     assert row['take_profit'] == pytest.approx(0.58888)
+
+
+def test_bybit_history_export_status_download_url_requires_existing_file(tmp_path: Path):
+    missing = tmp_path / "missing-bybit.csv"
+    missing_job = master_service.BybitHistoryJob(
+        job_id="bybit-missing",
+        status="done",
+        created_at=0,
+        updated_at=0,
+        params={"account": "demo"},
+        output_path=missing,
+    )
+    existing = tmp_path / "existing-bybit.csv"
+    existing.write_text("id\n1\n", encoding="utf-8")
+    present_job = master_service.BybitHistoryJob(
+        job_id="bybit-present",
+        status="done",
+        created_at=0,
+        updated_at=0,
+        params={"account": "demo"},
+        output_path=existing,
+    )
+    master_service.BYBIT_HISTORY_JOBS[missing_job.job_id] = missing_job
+    master_service.BYBIT_HISTORY_JOBS[present_job.job_id] = present_job
+    try:
+        missing_payload = asyncio.run(master_service.bybit_history_export_status(missing_job.job_id)).body.decode("utf-8")
+        present_payload = asyncio.run(master_service.bybit_history_export_status(present_job.job_id)).body.decode("utf-8")
+        assert "download_url" not in missing_payload
+        assert f"/api/bybit-history/export/{present_job.job_id}/download" in present_payload
+    finally:
+        master_service.BYBIT_HISTORY_JOBS.pop(missing_job.job_id, None)
+        master_service.BYBIT_HISTORY_JOBS.pop(present_job.job_id, None)
+
+
+def test_coinspot_history_export_status_download_url_requires_existing_file(tmp_path: Path):
+    missing = tmp_path / "missing-coinspot.zip"
+    missing_job = master_service.CoinspotHistoryJob(
+        job_id="coinspot-missing",
+        status="done",
+        created_at=0,
+        updated_at=0,
+        params={},
+        output_path=missing,
+    )
+    existing = tmp_path / "existing-coinspot.zip"
+    existing.write_bytes(b"PK\x03\x04")
+    present_job = master_service.CoinspotHistoryJob(
+        job_id="coinspot-present",
+        status="done",
+        created_at=0,
+        updated_at=0,
+        params={},
+        output_path=existing,
+    )
+    master_service.COINSPOT_HISTORY_JOBS[missing_job.job_id] = missing_job
+    master_service.COINSPOT_HISTORY_JOBS[present_job.job_id] = present_job
+    try:
+        missing_payload = asyncio.run(master_service.coinspot_history_export_status(missing_job.job_id)).body.decode("utf-8")
+        present_payload = asyncio.run(master_service.coinspot_history_export_status(present_job.job_id)).body.decode("utf-8")
+        assert "download_url" not in missing_payload
+        assert f"/api/coinspot-history/export/{present_job.job_id}/download" in present_payload
+    finally:
+        master_service.COINSPOT_HISTORY_JOBS.pop(missing_job.job_id, None)
+        master_service.COINSPOT_HISTORY_JOBS.pop(present_job.job_id, None)
