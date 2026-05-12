@@ -4,6 +4,7 @@ import json
 import sqlite3
 import sys
 import threading
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -339,6 +340,78 @@ def test_sync_status_dependency_flags_reflect_missing_xlrd(monkeypatch: pytest.M
     payload = _json(asyncio.run(master_service.trading_journal_sync_status()))
     assert payload["dependencies"]["xlrd_installed"] is False
     assert payload["dependencies"]["local_xls_supported"] is False
+
+
+def test_sync_status_serializes_nested_datetime_values(monkeypatch: pytest.MonkeyPatch, temp_state_paths):
+    master_service.TRADING_JOURNAL_SYNC_STATE.clear()
+    master_service.TRADING_JOURNAL_SYNC_STATE.update(
+        {
+            "running": False,
+            "ok": False,
+            "result": {
+                "nested": {
+                    "when": datetime(2026, 5, 1, 12, 30, tzinfo=timezone.utc),
+                    "trade_date": date(2026, 5, 1),
+                }
+            },
+        }
+    )
+    response = asyncio.run(master_service.trading_journal_sync_status())
+    assert response.status_code == 200
+    payload = json.loads(response.body.decode("utf-8"))
+    assert payload["ok"] is False
+    assert payload["result"]["nested"]["when"] == "2026-05-01T12:30:00+00:00"
+    assert payload["result"]["nested"]["trade_date"] == "2026-05-01"
+    assert "Object of type datetime is not JSON serializable" not in response.body.decode("utf-8")
+
+
+def test_set_trading_journal_sync_state_persists_json_safe_datetime(temp_state_paths):
+    master_service._set_trading_journal_sync_state(
+        running=False,
+        ok=False,
+        result={"nested": {"when": datetime.now(timezone.utc)}},
+    )
+    saved = json.loads(master_service.TRADING_JOURNAL_SYNC_STATE_PATH.read_text(encoding="utf-8"))
+    assert isinstance(saved["result"]["nested"]["when"], str)
+    assert "T" in saved["result"]["nested"]["when"]
+
+
+def test_save_trading_journal_view_snapshot_sanitizes_datetime(temp_state_paths):
+    payload = {
+        "cache_version": master_service.TRADING_JOURNAL_VIEW_CACHE_VERSION,
+        "generated_at": datetime(2026, 5, 2, 10, 0, tzinfo=timezone.utc),
+        "items": [{"id": "x", "when": datetime(2026, 5, 2, 11, 0, tzinfo=timezone.utc)}],
+        "balances": [],
+        "stats": {"as_of": date(2026, 5, 2)},
+        "diagnostics": {"errors": [], "updated": datetime(2026, 5, 2, 12, 0, tzinfo=timezone.utc)},
+        "source_fingerprints": {"files": []},
+    }
+    master_service._save_trading_journal_view_snapshot(payload)
+    stored = json.loads(master_service.TRADING_JOURNAL_VIEW_CACHE_PATH.read_text(encoding="utf-8"))
+    assert stored["generated_at"] == "2026-05-02T10:00:00+00:00"
+    assert stored["items"][0]["when"] == "2026-05-02T11:00:00+00:00"
+    assert stored["stats"]["as_of"] == "2026-05-02"
+
+
+def test_persist_trading_journal_sqlite_sanitizes_datetime_values(monkeypatch: pytest.MonkeyPatch, temp_state_paths):
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_SQLITE_PATH", temp_state_paths / "journal.sqlite3")
+    snapshot = {
+        "generated_at": datetime(2026, 5, 2, 9, 0, tzinfo=timezone.utc),
+        "items": [{"id": "t1", "row_type": "trade", "metrics": {"updated": datetime(2026, 5, 2, tzinfo=timezone.utc)}}],
+        "balances": [{"account": "OANDA DEMO", "as_of": datetime(2026, 5, 2, tzinfo=timezone.utc)}],
+        "stats": {"as_of": date(2026, 5, 2)},
+        "diagnostics": {"errors": [], "updated": datetime(2026, 5, 2, tzinfo=timezone.utc)},
+        "source_fingerprints": {"files": [{"path": temp_state_paths / "x.xlsx", "mtime": 1.2, "size": 3}]},
+    }
+    master_service._persist_trading_journal_sqlite(snapshot, import_meta={"warnings": [datetime(2026, 5, 2, tzinfo=timezone.utc)], "errors": []})
+    conn = sqlite3.connect(master_service.TRADING_JOURNAL_SQLITE_PATH)
+    try:
+        row = conn.execute("SELECT payload_json FROM journal_trades WHERE id='t1'").fetchone()
+        assert row is not None
+        payload = json.loads(row[0])
+        assert payload["metrics"]["updated"].startswith("2026-05-02T")
+    finally:
+        conn.close()
 
 
 def test_local_xls_missing_xlrd_returns_hard_failure(monkeypatch: pytest.MonkeyPatch, temp_state_paths):

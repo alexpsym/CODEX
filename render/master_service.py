@@ -858,8 +858,13 @@ def _set_trading_journal_sync_state(**updates: object) -> None:
         merged = _sync_state_snapshot()
         merged.update(updates)
         merged["updated_at"] = _utc_now_iso()
-        TRADING_JOURNAL_SYNC_STATE.update(merged)
-        _save_json_file(TRADING_JOURNAL_SYNC_STATE_PATH, merged)
+        safe_merged = _json_safe(merged)
+        if isinstance(safe_merged, dict):
+            TRADING_JOURNAL_SYNC_STATE.update(safe_merged)
+            _save_json_file(TRADING_JOURNAL_SYNC_STATE_PATH, safe_merged)
+        else:
+            TRADING_JOURNAL_SYNC_STATE.update(merged)
+            _save_json_file(TRADING_JOURNAL_SYNC_STATE_PATH, merged)
 
 
 def _schedule_trading_journal_sync_job() -> bool:
@@ -884,6 +889,10 @@ def _queue_trading_journal_sync_if_idle(reason: str) -> Dict[str, object]:
         snapshot = _sync_state_snapshot()
         running = bool(snapshot.get("running"))
         if running:
+            safe_snapshot = _json_safe(snapshot)
+            if isinstance(safe_snapshot, dict):
+                TRADING_JOURNAL_SYNC_STATE.update(safe_snapshot)
+                return safe_snapshot
             TRADING_JOURNAL_SYNC_STATE.update(snapshot)
             return snapshot
         snapshot.update(
@@ -901,11 +910,20 @@ def _queue_trading_journal_sync_if_idle(reason: str) -> Dict[str, object]:
                 "updated_at": _utc_now_iso(),
             }
         )
-        TRADING_JOURNAL_SYNC_STATE.update(snapshot)
-        _save_json_file(TRADING_JOURNAL_SYNC_STATE_PATH, snapshot)
+        safe_snapshot = _json_safe(snapshot)
+        if isinstance(safe_snapshot, dict):
+            TRADING_JOURNAL_SYNC_STATE.update(safe_snapshot)
+            _save_json_file(TRADING_JOURNAL_SYNC_STATE_PATH, safe_snapshot)
+        else:
+            TRADING_JOURNAL_SYNC_STATE.update(snapshot)
+            _save_json_file(TRADING_JOURNAL_SYNC_STATE_PATH, snapshot)
     _schedule_trading_journal_sync_job()
     with TRADING_JOURNAL_SYNC_LOCK:
         snapshot = _sync_state_snapshot()
+        safe_snapshot = _json_safe(snapshot)
+        if isinstance(safe_snapshot, dict):
+            TRADING_JOURNAL_SYNC_STATE.update(safe_snapshot)
+            return safe_snapshot
         TRADING_JOURNAL_SYNC_STATE.update(snapshot)
         return snapshot
 
@@ -1169,7 +1187,8 @@ def _snapshot_balance_items(snapshot: object) -> List[Dict[str, object]]:
 
 
 def _save_trading_journal_view_snapshot(payload: dict) -> None:
-    _save_json_file(TRADING_JOURNAL_VIEW_CACHE_PATH, payload if isinstance(payload, dict) else {})
+    safe_payload = _json_safe(payload if isinstance(payload, dict) else {})
+    _save_json_file(TRADING_JOURNAL_VIEW_CACHE_PATH, safe_payload if isinstance(safe_payload, dict) else {})
 
 
 def _invalidate_trading_journal_view_snapshot() -> None:
@@ -1199,15 +1218,21 @@ def _ensure_trading_journal_sqlite_schema(conn: sqlite3.Connection) -> None:
 
 
 def _persist_trading_journal_sqlite(snapshot: Dict[str, object], import_meta: Optional[Dict[str, object]] = None) -> None:
+    safe_snapshot = _json_safe(snapshot)
+    if not isinstance(safe_snapshot, dict):
+        safe_snapshot = {}
+    safe_import_meta = _json_safe(import_meta) if isinstance(import_meta, dict) else None
+    if safe_import_meta is not None and not isinstance(safe_import_meta, dict):
+        safe_import_meta = {}
     TRADING_JOURNAL_SQLITE_PATH.parent.mkdir(parents=True, exist_ok=True)
     now_iso = _utc_now_iso()
     conn = sqlite3.connect(TRADING_JOURNAL_SQLITE_PATH)
     try:
         _ensure_trading_journal_sqlite_schema(conn)
-        items = snapshot.get("items") if isinstance(snapshot.get("items"), list) else []
-        balances = snapshot.get("balances") if isinstance(snapshot.get("balances"), list) else []
-        diagnostics = snapshot.get("diagnostics") if isinstance(snapshot.get("diagnostics"), dict) else {}
-        stats = snapshot.get("stats") if isinstance(snapshot.get("stats"), dict) else {}
+        items = safe_snapshot.get("items") if isinstance(safe_snapshot.get("items"), list) else []
+        balances = safe_snapshot.get("balances") if isinstance(safe_snapshot.get("balances"), list) else []
+        diagnostics = safe_snapshot.get("diagnostics") if isinstance(safe_snapshot.get("diagnostics"), dict) else {}
+        stats = safe_snapshot.get("stats") if isinstance(safe_snapshot.get("stats"), dict) else {}
         conn.execute("DELETE FROM journal_trades")
         conn.execute("DELETE FROM journal_cashflows")
         conn.execute("DELETE FROM journal_balances")
@@ -1232,29 +1257,29 @@ def _persist_trading_journal_sqlite(snapshot: Dict[str, object], import_meta: Op
                 continue
             account_key = _norm_account_key(str(bal.get("account") or bal.get("label") or uuid4().hex))
             conn.execute("INSERT OR REPLACE INTO journal_balances(account_key,payload_json,imported_at) VALUES(?,?,?)", (account_key, json.dumps(bal, ensure_ascii=False), now_iso))
-        snapshot_id = str(snapshot.get("generated_at") or now_iso)
+        snapshot_id = str(safe_snapshot.get("generated_at") or now_iso)
         conn.execute("INSERT OR REPLACE INTO journal_stats(snapshot_id,payload_json,imported_at) VALUES(?,?,?)", (snapshot_id, json.dumps(stats, ensure_ascii=False), now_iso))
         conn.execute("INSERT OR REPLACE INTO journal_diagnostics(snapshot_id,payload_json,imported_at) VALUES(?,?,?)", (snapshot_id, json.dumps(diagnostics, ensure_ascii=False), now_iso))
-        for src in (snapshot.get("source_fingerprints") or {}).get("files", []):
+        for src in (safe_snapshot.get("source_fingerprints") or {}).get("files", []):
             if not isinstance(src, dict):
                 continue
             conn.execute(
                 "INSERT OR REPLACE INTO source_files(absolute_path,file_size,modified_at,content_hash,last_imported_at) VALUES(?,?,?,?,?)",
                 (str(src.get("path") or ""), int(src.get("size") or 0), float(src.get("mtime") or 0.0), str(src.get("sha256") or ""), now_iso),
             )
-        if isinstance(import_meta, dict):
+        if isinstance(safe_import_meta, dict):
             conn.execute(
                 "INSERT INTO import_runs(started_at,finished_at,source_mode,workbooks_scanned,workbooks_changed,rows_imported,cashflow_rows_loaded,warnings_json,errors_json) VALUES(?,?,?,?,?,?,?,?,?)",
                 (
-                    str(import_meta.get("started_at") or now_iso),
+                    str(safe_import_meta.get("started_at") or now_iso),
                     now_iso,
-                    str(import_meta.get("source_mode") or ""),
-                    int(import_meta.get("workbooks_scanned") or 0),
-                    int(import_meta.get("workbooks_changed") or 0),
-                    int(import_meta.get("rows_imported") or 0),
-                    int(import_meta.get("cashflow_rows_loaded") or 0),
-                    json.dumps(import_meta.get("warnings") or [], ensure_ascii=False),
-                    json.dumps(import_meta.get("errors") or [], ensure_ascii=False),
+                    str(safe_import_meta.get("source_mode") or ""),
+                    int(safe_import_meta.get("workbooks_scanned") or 0),
+                    int(safe_import_meta.get("workbooks_changed") or 0),
+                    int(safe_import_meta.get("rows_imported") or 0),
+                    int(safe_import_meta.get("cashflow_rows_loaded") or 0),
+                    json.dumps(safe_import_meta.get("warnings") or [], ensure_ascii=False),
+                    json.dumps(safe_import_meta.get("errors") or [], ensure_ascii=False),
                 ),
             )
         conn.commit()
@@ -1283,8 +1308,14 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
             "parsed_cashflow_rows": len(cashflow_rows),
         })
         result = {"cache_version": TRADING_JOURNAL_VIEW_CACHE_VERSION, "generated_at": _utc_now_iso(), "items": sorted(items, key=_row_sort_dt, reverse=True), "balances": balances, "stats": stats, "diagnostics": diagnostics, "source_fingerprints": fingerprint}
-        _save_trading_journal_view_snapshot(result)
-        return result
+        safe_result = _json_safe(result)
+        if not isinstance(safe_result, dict):
+            safe_result = {}
+        _save_trading_journal_view_snapshot(safe_result)
+        _persist_trading_journal_sqlite(safe_result)
+        _TRADING_JOURNAL_VIEW_CACHE["key"] = "snapshot"
+        _TRADING_JOURNAL_VIEW_CACHE["payload"] = safe_result
+        return safe_result
     rows = [
         _backfill_trade_row_context_fields(r)
         for r in _get_trading_journal_rows()
@@ -1417,11 +1448,14 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
         "warnings": diagnostics.get("errors") if isinstance(diagnostics.get("errors"), list) else [],
         "source_fingerprints": fingerprint,
     }
-    _save_trading_journal_view_snapshot(payload)
-    _persist_trading_journal_sqlite(payload)
+    safe_payload = _json_safe(payload)
+    if not isinstance(safe_payload, dict):
+        safe_payload = {}
+    _save_trading_journal_view_snapshot(safe_payload)
+    _persist_trading_journal_sqlite(safe_payload)
     _TRADING_JOURNAL_VIEW_CACHE["key"] = "snapshot"
-    _TRADING_JOURNAL_VIEW_CACHE["payload"] = payload
-    return payload
+    _TRADING_JOURNAL_VIEW_CACHE["payload"] = safe_payload
+    return safe_payload
 
 
 def _reconcile_oanda_export_balance_labels(
@@ -3360,6 +3394,40 @@ def _record_oanda_fill_diagnostic(account: str, **updates: object) -> None:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _json_safe(value: object) -> object:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, Decimal):
+        if value.is_finite():
+            try:
+                number = float(value)
+            except Exception:
+                return str(value)
+            return number if math.isfinite(number) else None
+        return None
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if hasattr(value, "isoformat") and value.__class__.__module__.startswith(("datetime", "pandas")):
+        try:
+            return value.isoformat()
+        except Exception:
+            pass
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    if hasattr(value, "item") and callable(getattr(value, "item")):
+        try:
+            return _json_safe(value.item())
+        except Exception:
+            pass
+    return str(value)
 
 
 def _load_json_file(path: Path, default):
@@ -20951,7 +21019,7 @@ async def state_sync_status() -> JSONResponse:
     payload = _state_sync_status_snapshot()
     payload.update(dropbox_state_store.state_store_summary())
     payload["effective_state_source"] = "dropbox" if dropbox_state_store.dropbox_state_enabled() and not LOCAL_STATE_ONLY else "local"
-    return JSONResponse(payload)
+    return JSONResponse(_json_safe(payload))
 
 
 @app.get("/api/state-sync/remote-backup-summary")
@@ -22831,8 +22899,8 @@ async def trading_journal_repair_oanda_demo_balance() -> JSONResponse:
     balances = _snapshot_balance_items(snap)
     demo = next((b for b in balances if str((b or {}).get("label") or "").upper() == "OANDA DEMO"), None)
     if not isinstance(demo, dict) or str(demo.get("balance_source") or "") == "cashflow_anchor_plus_trades":
-        return JSONResponse({"ok": False, "error": "OANDA_BACKFILL_NOT_VISIBLE_IN_JOURNAL_SNAPSHOT", "sync": sync}, status_code=409)
-    return JSONResponse({"ok": True, "stats": stats, "source_path": str(source_path), "balance": balance, "sync": sync})
+        return JSONResponse(_json_safe({"ok": False, "error": "OANDA_BACKFILL_NOT_VISIBLE_IN_JOURNAL_SNAPSHOT", "sync": sync}), status_code=409)
+    return JSONResponse(_json_safe({"ok": True, "stats": stats, "source_path": str(source_path), "balance": balance, "sync": sync}))
 
 
 @app.post("/api/coinspot-history/export")
@@ -23041,12 +23109,12 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
         sync_status = _sync_state_snapshot()
         if bool(sync_status.get("running")):
             return JSONResponse(
-                {"ok": False, "pending": True, "warning": "journal cache building", "items": [], "count": 0, "stats": {}, "sync_status": sync_status},
+                _json_safe({"ok": False, "pending": True, "warning": "journal cache building", "items": [], "count": 0, "stats": {}, "sync_status": sync_status}),
                 status_code=202,
             )
         if sync_status.get("ok") is False:
             return JSONResponse(
-                {
+                _json_safe({
                     "ok": False,
                     "pending": False,
                     "warning": "journal cache build failed",
@@ -23055,12 +23123,12 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
                     "count": 0,
                     "stats": {},
                     "sync_status": sync_status,
-                },
+                }),
                 status_code=503,
             )
         sync_status = _queue_trading_journal_sync_if_idle("first_api_request")
         return JSONResponse(
-            {"ok": False, "pending": True, "warning": "journal cache building", "items": [], "count": 0, "stats": {}, "sync_status": sync_status},
+            _json_safe({"ok": False, "pending": True, "warning": "journal cache building", "items": [], "count": 0, "stats": {}, "sync_status": sync_status}),
             status_code=202,
         )
     fingerprint_now = _journal_source_fingerprint()
@@ -23147,8 +23215,8 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
         )
         payload["sync_status"] = sync_status
     _TRADING_JOURNAL_VIEW_CACHE["key"] = "snapshot"
-    _TRADING_JOURNAL_VIEW_CACHE["payload"] = snapshot
-    return JSONResponse(payload)
+    _TRADING_JOURNAL_VIEW_CACHE["payload"] = _json_safe(snapshot)
+    return JSONResponse(_json_safe(payload))
 
 
 @app.get("/api/trading-journal/diagnostics")
@@ -23161,12 +23229,12 @@ async def trading_journal_diagnostics() -> JSONResponse:
         diagnostics = _build_trading_journal_diagnostics_snapshot()
         diagnostics["pending"] = bool(sync_status.get("running") or sync_status.get("ok") is None)
         diagnostics["sync_status"] = sync_status
-        return JSONResponse(diagnostics, status_code=202 if diagnostics["pending"] else 503)
+        return JSONResponse(_json_safe(diagnostics), status_code=202 if diagnostics["pending"] else 503)
     payload = snapshot.get("diagnostics") if isinstance(snapshot.get("diagnostics"), dict) else _build_trading_journal_diagnostics_snapshot()
     payload["source_mode"] = _trading_journal_source_mode()
     payload["excel_only"] = _trading_journal_excel_only_mode()
     payload["local_dir"] = str(TRADING_JOURNAL_LOCAL_DIR)
-    return JSONResponse(payload)
+    return JSONResponse(_json_safe(payload))
 @app.get("/api/trading-journal/balances")
 async def trading_journal_balances() -> JSONResponse:
     snapshot = _TRADING_JOURNAL_VIEW_CACHE.get("payload") if _TRADING_JOURNAL_VIEW_CACHE.get("key") == "snapshot" else None
@@ -23176,7 +23244,7 @@ async def trading_journal_balances() -> JSONResponse:
         sync_status = _sync_state_snapshot()
         pending = bool(sync_status.get("running") or sync_status.get("ok") is None)
         status_code = 202 if pending else 503
-        return JSONResponse({"items": [], "pending": pending, "sync_status": sync_status}, status_code=status_code)
+        return JSONResponse(_json_safe({"items": [], "pending": pending, "sync_status": sync_status}), status_code=status_code)
     items = snapshot.get("balances") if isinstance(snapshot.get("balances"), list) else []
     diagnostics = snapshot.get("diagnostics") if isinstance(snapshot.get("diagnostics"), dict) else {}
     errors = diagnostics.get("errors") if isinstance(diagnostics.get("errors"), list) else []
@@ -23187,7 +23255,7 @@ async def trading_journal_balances() -> JSONResponse:
         if can_queue and not bool(sync_status.get("running")):
             sync_status = _queue_trading_journal_sync_if_idle("bybit_demo_missing_balance_anchor")
         return JSONResponse(
-            {
+            _json_safe({
                 "items": items,
                 "ok": False,
                 "pending": bool(can_queue),
@@ -23200,14 +23268,14 @@ async def trading_journal_balances() -> JSONResponse:
                 "diagnostics": diagnostics,
                 "errors": errors,
                 "sync_status": sync_status,
-            },
+            }),
             status_code=202 if can_queue else 200,
         )
     if items:
-        return JSONResponse({"items": items, "ok": not bool(errors), "diagnostics": diagnostics, "errors": errors}, status_code=200)
+        return JSONResponse(_json_safe({"items": items, "ok": not bool(errors), "diagnostics": diagnostics, "errors": errors}), status_code=200)
     if errors:
-        return JSONResponse({"items": items, "ok": False, "diagnostics": diagnostics, "errors": errors}, status_code=503)
-    return JSONResponse({"items": items, "ok": True, "diagnostics": diagnostics})
+        return JSONResponse(_json_safe({"items": items, "ok": False, "diagnostics": diagnostics, "errors": errors}), status_code=503)
+    return JSONResponse(_json_safe({"items": items, "ok": True, "diagnostics": diagnostics}))
 
 
 @app.post("/api/trading-journal/rows")
@@ -23340,7 +23408,7 @@ async def trading_journal_sync_status() -> JSONResponse:
             snapshot["ok"] = False
             snapshot["error"] = msg
     snapshot.update(_manual_save_state_snapshot())
-    return JSONResponse(snapshot)
+    return JSONResponse(_json_safe(snapshot))
 
 
 async def _run_trading_journal_sync_job() -> None:
