@@ -508,6 +508,61 @@ function Stop-CodexRepoProcessMatches {
     Start-Sleep -Seconds 2
 }
 
+function Test-GitStatusOnlyAllowedLocalData {
+    param([string]$StatusText)
+    $result = @{ IsOnlyAllowed = $true; DisallowedLines = @() }
+    if ([string]::IsNullOrWhiteSpace($StatusText)) { return $result }
+    $lines = $StatusText -split "(`r`n|`n|`r)" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    foreach ($lineRaw in $lines) {
+        $line = $lineRaw.Trim()
+        if ($line.Length -lt 4) { $result.IsOnlyAllowed = $false; $result.DisallowedLines += $line; continue }
+        $xy = $line.Substring(0,2)
+        if ($xy -ne '??') { $result.IsOnlyAllowed = $false; $result.DisallowedLines += $line; continue }
+        $path = $line.Substring(3).Trim()
+        if ($path.StartsWith('"') -and $path.EndsWith('"') -and $path.Length -ge 2) { $path = $path.Substring(1, $path.Length - 2) }
+        $p = $path.Replace('\','/')
+        $allowed =
+            ($p -eq '.env') -or
+            ($p -eq 'env.env') -or
+            ($p -eq 'journal') -or ($p -eq 'journal/') -or ($p -like 'journal/*') -or
+            ($p -like 'bybit_monitor/*.json') -or
+            ($p -like 'oanda_monitor/*.json') -or
+            ($p -eq 'render/data') -or ($p -eq 'render/data/') -or ($p -like 'render/data/*') -or
+            ($p -eq 'render/uploads') -or ($p -eq 'render/uploads/') -or ($p -like 'render/uploads/*')
+        if (($p -like '*__pycache__*') -or -not $allowed) {
+            $result.IsOnlyAllowed = $false
+            $result.DisallowedLines += $line
+        }
+    }
+    return $result
+}
+
+function Test-GitCleanFailureIsOnlyPythonCachePermissionDenied {
+    param([string]$OutputText, [string]$StatusText, [bool]$HeadsSynced)
+    if (-not $HeadsSynced) { return $false }
+    $statusCheck = Test-GitStatusOnlyAllowedLocalData -StatusText $StatusText
+    if (-not $statusCheck.IsOnlyAllowed) { return $false }
+    $text = [string]$OutputText
+    if ([string]::IsNullOrWhiteSpace($text)) { return $false }
+    $lines = $text -split "(`r`n|`n|`r)" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    $warnCount = 0
+    foreach ($ln in $lines) {
+        $t = $ln.Trim()
+        if ($t -match '(?i)warning:\s*failed to remove .+__pycache__.+(permission denied|access is denied)') { $warnCount++; continue }
+        if ($t -match '(?i)^git clean ') { continue }
+        return $false
+    }
+    return ($warnCount -gt 0)
+}
+
+function Remove-PythonCacheDirsBestEffort {
+    param([string]$RepoDir)
+    $cacheDirs = @(Get-ChildItem -LiteralPath $RepoDir -Directory -Recurse -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq '__pycache__' })
+    foreach ($dir in $cacheDirs) {
+        try { Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction Stop } catch { Write-Host "WARNING: Could not remove Python cache folder: $($dir.FullName) - $($_.Exception.Message)" }
+    }
+}
+
 function Copy-DirectoryContentsSafe {
     param(
         [Parameter(Mandatory = $true)] [string] $Source,
@@ -653,10 +708,16 @@ function Ensure-CodexGitRepo {
         if ($counts.Count -lt 2) { throw "Unable to parse ahead/behind counts from: $aheadBehind" }
         $aheadCount = [int]$counts[0]
         $behindCount = [int]$counts[1]
+        $statusClassification = Test-GitStatusOnlyAllowedLocalData -StatusText $statusPorcelain
         $isDirty = -not [string]::IsNullOrWhiteSpace($statusPorcelain)
         $needsBackupRecovery = $isDirty -or ($aheadCount -gt 0)
 
-        if (-not $needsBackupRecovery) {
+        if ($aheadCount -eq 0 -and $behindCount -eq 0 -and $headBefore -eq $originHead -and $statusClassification.IsOnlyAllowed) {
+            Write-Host "Repo is already synced to origin/$Branch; only preserved local runtime data is present."
+            return
+        }
+
+        if ((-not $needsBackupRecovery) -or ($behindCount -gt 0 -and $aheadCount -eq 0 -and $statusClassification.IsOnlyAllowed)) {
             Write-Host "Repo is clean and not ahead (behind=$behindCount). Attempting fast-forward sync..."
             Invoke-GitCommand -GitExe $GitExe -Arguments @('checkout', $Branch) -WorkingDirectory $RepoDir | Out-Null
             Invoke-GitCommand -GitExe $GitExe -Arguments @('merge', '--ff-only', "origin/$Branch") -WorkingDirectory $RepoDir | Out-Null
@@ -687,24 +748,37 @@ function Ensure-CodexGitRepo {
         Stop-CodexRepoProcessMatches -RepoDir $RepoDir
         Invoke-GitCommand -GitExe $GitExe -Arguments @('checkout', '-B', $Branch, "origin/$Branch") -WorkingDirectory $RepoDir | Out-Null
         Invoke-GitCommand -GitExe $GitExe -Arguments @('reset', '--hard', "origin/$Branch") -WorkingDirectory $RepoDir | Out-Null
-        Invoke-GitCommand -GitExe $GitExe -Arguments @('clean', '-fdn') -WorkingDirectory $RepoDir -AllowFailure | Out-Null
+        Remove-PythonCacheDirsBestEffort -RepoDir $RepoDir
+        Invoke-GitCommand -GitExe $GitExe -Arguments @('clean', '-ffdn', '-e', 'journal/', '-e', '.env', '-e', 'env.env', '-e', 'bybit_monitor/*.json', '-e', 'oanda_monitor/*.json', '-e', 'render/data/', '-e', 'render/uploads/') -WorkingDirectory $RepoDir -AllowFailure | Out-Null
 
         $cleaned = $false
+        $lastCleanFailure = ''
         for ($attempt = 1; $attempt -le 2; $attempt++) {
             try {
                 Invoke-GitCommandNoInput -GitExe $GitExe -Arguments @('clean', '-ffd', '-q', '-e', 'journal/', '-e', '.env', '-e', 'env.env', '-e', 'bybit_monitor/*.json', '-e', 'oanda_monitor/*.json', '-e', 'render/data/', '-e', 'render/uploads/') -WorkingDirectory $RepoDir -TimeoutSeconds 120 | Out-Null
                 $cleaned = $true
                 break
             } catch {
-                Write-Host "WARNING: git clean attempt $attempt failed: $($_.Exception.Message)"
+                $lastCleanFailure = $_.Exception.Message
+                Write-Host "WARNING: git clean attempt $attempt failed: $lastCleanFailure"
+                $statusNow = Invoke-GitText -GitExe $GitExe -Arguments @('status', '--short') -WorkingDirectory $RepoDir -AllowFailure
+                $headNow = Invoke-GitText -GitExe $GitExe -Arguments @('rev-parse', 'HEAD') -WorkingDirectory $RepoDir -AllowFailure
+                $originNow = Invoke-GitText -GitExe $GitExe -Arguments @('rev-parse', "origin/$Branch") -WorkingDirectory $RepoDir -AllowFailure
+                $headsSynced = ($headNow -and $originNow -and $headNow -eq $originNow)
+                if (Test-GitCleanFailureIsOnlyPythonCachePermissionDenied -OutputText $lastCleanFailure -StatusText $statusNow -HeadsSynced $headsSynced) {
+                    Write-Host 'WARNING: git clean could not remove locked Python cache folders, but no unsafe Git state remains. Continuing.'
+                    $cleaned = $true
+                    break
+                }
                 if ($attempt -lt 2) {
                     Stop-CodexRepoProcessMatches -RepoDir $RepoDir
+                    Remove-PythonCacheDirsBestEffort -RepoDir $RepoDir
                 }
             }
         }
         if (-not $cleaned) {
             $remainingStatus = Invoke-GitText -GitExe $GitExe -Arguments @('status', '--short') -WorkingDirectory $RepoDir -AllowFailure
-            throw "ERROR: Non-interactive git cleanup failed after retries. Backup already exists at: $backupDir`nRemaining git status:`n$remainingStatus"
+            throw "ERROR: Non-interactive git cleanup failed after retries. Backup already exists at: $backupDir`nFailure: $lastCleanFailure`nRemaining git status:`n$remainingStatus"
         }
         Preserve-LocalFilesFromBackup -BackupDir $backupDir -NewRepoDir $RepoDir
 
@@ -852,8 +926,18 @@ try {
 
 Write-Section 'Git status summary:'
 try {
-    Invoke-GitCommand -GitExe $gitExe -Arguments @('status', '--short') -WorkingDirectory $codexDir -AllowFailure | Out-Null
-} catch {}
+    $finalStatus = Invoke-GitText -GitExe $gitExe -Arguments @('status', '--short') -WorkingDirectory $codexDir -AllowFailure
+    if ($finalStatus) { Write-Host $finalStatus }
+    $finalStatusCheck = Test-GitStatusOnlyAllowedLocalData -StatusText $finalStatus
+    if ($finalStatusCheck.IsOnlyAllowed) {
+        Write-Host 'Only allowed local runtime/user data is present in git status.'
+    } else {
+        throw "ERROR: Disallowed Git status entries remain:`n$($finalStatusCheck.DisallowedLines -join [Environment]::NewLine)"
+    }
+} catch {
+    Write-Host $_.Exception.Message
+    exit 1
+}
 
 Write-Host ''
 Write-Host 'Everything completed successfully.'
