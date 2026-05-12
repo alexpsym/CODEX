@@ -333,7 +333,7 @@ def test_sync_status_exposes_source_and_flags(monkeypatch: pytest.MonkeyPatch, t
     assert isinstance(payload["dependencies"], dict)
     assert "xlrd_installed" in payload["dependencies"]
     assert "local_xls_supported" in payload["dependencies"]
-    assert payload["dependencies"]["requirements_file"].endswith("render/requirements.txt")
+    assert payload["dependencies"]["requirements_file"].replace("\\", "/").endswith("render/requirements.txt")
 
 
 def test_sync_status_dependency_flags_reflect_missing_xlrd(monkeypatch: pytest.MonkeyPatch, temp_state_paths):
