@@ -9638,6 +9638,30 @@ def _normalize_oanda_v3_base_url(value: Optional[str]) -> tuple[str, bool]:
     return f"{normalized_base}/v3", base != normalized_base
 
 
+def _build_oanda_v3_url(base_url: str, endpoint: str, *, account_id: Optional[str] = None) -> str:
+    raw_base = (base_url or "").strip().rstrip("/")
+    parsed = urlparse(raw_base)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"Invalid OANDA API base URL: {base_url or '(empty)'}")
+
+    normalized_path = parsed.path.rstrip("/")
+    while normalized_path.endswith("/v3"):
+        normalized_path = normalized_path[: -len("/v3")]
+
+    raw_endpoint = endpoint or ""
+    formatted_endpoint = raw_endpoint.format(account_id=account_id) if "{account_id}" in raw_endpoint else raw_endpoint
+    formatted_endpoint = formatted_endpoint.strip()
+    if not formatted_endpoint.startswith("/"):
+        formatted_endpoint = f"/{formatted_endpoint}"
+    if formatted_endpoint == "/v3":
+        formatted_endpoint = "/"
+    elif formatted_endpoint.startswith("/v3/"):
+        formatted_endpoint = formatted_endpoint[len("/v3") :]
+
+    normalized_base = f"{parsed.scheme}://{parsed.netloc}{normalized_path}"
+    return f"{normalized_base}/v3{formatted_endpoint}"
+
+
 def _resolve_oanda_api_base_url(mode: str) -> tuple[str, str]:
     normalized_mode = (mode or "live").strip().lower()
     if normalized_mode not in {"live", "demo", "practice"}:
@@ -9996,7 +10020,7 @@ async def _fetch_oanda_json(
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
-    url = f"{base_url.rstrip('/')}/v3{endpoint.format(account_id=account_id)}"
+    url = _build_oanda_v3_url(base_url, endpoint, account_id=account_id)
     timeout = httpx.Timeout(timeout_s, connect=min(3.0, timeout_s), read=timeout_s, write=timeout_s, pool=2.0)
     max_attempts = 3
     transient_statuses = _OANDA_TRANSIENT_HTTP_STATUS_CODES
@@ -10146,7 +10170,7 @@ async def _oanda_preflight(
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
-    url = f"{base_url.rstrip('/')}/v3/accounts"
+    url = _build_oanda_v3_url(base_url, "/accounts")
     token_last4 = token[-4:] if token else None
     BYBIT_LOGGER.info(
         "OANDA_CFG mode=%s base=%s account_id=%s token_last4=%s",
@@ -10326,7 +10350,7 @@ async def _list_oanda_accounts(*, base_url: str, api_key: str) -> List[Dict[str,
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
-    url = f"{base_url.rstrip('/')}/v3/accounts"
+    url = _build_oanda_v3_url(base_url, "/accounts")
     timeout_s = 6.0
     timeout = httpx.Timeout(timeout_s, connect=min(3.0, timeout_s), read=timeout_s, write=timeout_s, pool=2.0)
     max_attempts = 3
