@@ -1391,6 +1391,8 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
             bal["repair_blocked_reason"] = blocked_reason
             bal["latest_oanda_demo_export_path"] = str(latest_export) if latest_export else ""
     diagnostics = _build_trading_journal_diagnostics_snapshot()
+    diagnostics['authoritative_mode'] = False
+    diagnostics['source'] = diagnostics.get('source') or 'trading_journal_sources'
     diagnostics["monthly_aud_revaluation_rows_visible"] = len(monthly_note_rows)
     diagnostics["monthly_aud_revaluation_latest_month"] = max((str((r.get("raw_refs") or {}).get("period_month") or "") for r in monthly_note_rows), default="")
     diagnostics["monthly_aud_revaluation_source_path"] = str(MONTHLY_AUD_REVALUATION_PATH)
@@ -23672,7 +23674,6 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
     path = _master_journal_path()
     tmp = path.with_suffix('.tmp.xlsx')
     try:
-        snapshot = _build_trading_journal_view_snapshot(force=True)
         parsed_trade_rows: List[Dict[str, object]] = []
         if path.exists():
             source_payload = read_master_journal_source(path)
@@ -23681,12 +23682,27 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
             manual_overrides = read_master_journal_manual_overrides(path)
             if isinstance(manual_overrides, dict) and manual_overrides:
                 current_rows = _get_trading_journal_rows()
-                merged_rows = [
-                    _apply_trading_journal_manual_overrides(dict(row), manual_overrides.get(str(row.get("id") or ""), {}))
-                    if isinstance(row, dict) else row
-                    for row in current_rows
-                ]
-                _set_trading_journal_rows([row for row in merged_rows if isinstance(row, dict)])
+                merged_rows = []
+                from tools.master_journal_workbook import _all_trades_row_fingerprint_from_map
+                for row in current_rows:
+                    if not isinstance(row, dict):
+                        continue
+                    key_id = str(row.get('id') or '')
+                    key_sig = _all_trades_row_fingerprint_from_map({
+                        'Account': row.get('account_label') or row.get('account'),
+                        'Symbol': row.get('symbol'),
+                        'Side': row.get('side'),
+                        'Open Time': row.get('open_time'),
+                        'Close Time': row.get('close_time'),
+                        'Qty': row.get('qty'),
+                        'Entry Price': row.get('entry_price'),
+                        'Exit Price': row.get('exit_price'),
+                        'Net P/L': row.get('net_profit'),
+                    })
+                    ov = manual_overrides.get(key_id) or manual_overrides.get(key_sig) or {}
+                    merged_rows.append(_apply_trading_journal_manual_overrides(dict(row), ov) if ov else dict(row))
+                _set_trading_journal_rows(merged_rows)
+            snapshot = _build_trading_journal_view_snapshot(force=True)
             update_master_journal_workbook_data_only(path, snapshot)
             refreshed = read_master_journal_source(path)
             refreshed_items = [r for r in (refreshed.get("items") or []) if isinstance(r, dict)]
@@ -23694,6 +23710,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
             if parsed_trade_rows and not refreshed_trade_rows:
                 raise RuntimeError("Master Journal derived refresh failed validation: trade rows were lost.")
         else:
+            snapshot = _build_trading_journal_view_snapshot(force=True)
             path.parent.mkdir(parents=True, exist_ok=True)
             build_master_journal_workbook(snapshot, tmp)
             workbook = load_workbook(tmp, data_only=False, read_only=False)
