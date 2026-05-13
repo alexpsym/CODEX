@@ -285,3 +285,92 @@ def test_monthly_aud_row_uses_result_currency_and_excluded_from_metrics(tmp_path
     # metrics remain from trade rows only
     cal = wb["P&L Calendar"]
     assert cal["E4"].value == 1  # April trades count
+
+def test_metric_refresh_same_row_sections_and_non_a_balance_block(tmp_path: Path):
+    from openpyxl import Workbook
+    from tools.master_journal_workbook import update_master_journal_workbook_data_only
+    p = tmp_path/'mj.xlsx'
+    wb=Workbook(); ws=wb.active; ws.title='Dashboard'; wb.create_sheet('All Trades'); wb.create_sheet('Instrument Averages')
+    # anchors on same row
+    ws['A1']='Overall'; ws['D1']='FX'; ws['G1']='Crypto'; ws['J1']='Winners'; ws['J8']='Losers'; ws['J14']='Drawdown'; ws['M1']='Instrument leaders'
+    ws['P1']='Account Balances'
+    # labels
+    for base in ['A','D','G']:
+        ws[f'{base}2']='Trades'; ws[f'{base}3']='Avg R'; ws[f'{base}4']='Win rate'; ws[f'{base}5']='Max loss %'; ws[f'{base}6']='Source'
+    ws['P2']='Account'; ws['Q2']='Balance'; ws['R2']='Currency'; ws['S2']='As Of'; ws['P3']='Bybit Live'
+    ws['B4'].number_format='0.00%'; ws['E4'].number_format='0.00%'; ws['H4'].number_format='0.00%'
+    wb.save(p)
+    snap={'stats':{'totals':{},'groups':{'by_market':{'overall':{'trades':1,'avg_r_multiple':2.0,'win_rate_pct':50.0,'min_result_pct':-1.25,'metric_sources':{'min_result_pct':{'symbol':'EURUSD','date':'2026-01-01'}}},'fx':{'trades':2,'avg_r_multiple':3.0,'win_rate_pct':25.0,'min_result_pct':-2.0,'metric_sources':{'min_result_pct':{'symbol':'GBPUSD','date':'2026-01-02'}}},'crypto':{'trades':3,'avg_r_multiple':4.0,'win_rate_pct':75.0,'min_result_pct':-3.0,'metric_sources':{'min_result_pct':{'symbol':'BTCUSDT','date':'2026-01-03'}}}},'risk_expectancy':{},'leaders':{}}},'balances':[{'account_label':'Bybit Live','balance':12.5,'currency':'USDT','as_of':'2026-01-04'}]}
+    update_master_journal_workbook_data_only(p,snap)
+    out=load_workbook(p)
+    d=out['Dashboard']
+    assert d['B2'].value==1 and d['E2'].value==2 and d['H2'].value==3
+    assert d['B3'].value==2.0 and d['E3'].value==3.0 and d['H3'].value==4.0
+    assert d['B4'].value==0.5 and d['E4'].value==0.25 and d['H4'].value==0.75
+    assert d['Q3'].value==12.5 and d['R3'].value=='USDT'
+    assert 'GBPUSD' in str(d['E6'].value)
+
+def test_embedded_fx_crypto_duration_without_duration_section(tmp_path: Path):
+    from openpyxl import Workbook
+    from tools.master_journal_workbook import update_master_journal_workbook_data_only
+    p=tmp_path/'d.xlsx'
+    wb=Workbook(); ws=wb.active; ws.title='Dashboard'; wb.create_sheet('All Trades'); wb.create_sheet('Instrument Averages')
+    ws['A1']='Overall'; ws['D1']='FX'; ws['G1']='Crypto'; ws['J1']='Winners'; ws['J8']='Losers'; ws['J14']='Drawdown'; ws['M1']='Instrument leaders'; ws['T1']='Account Balances'
+    ws['D2']='FX shortest'; ws['D3']='Source'; ws['D4']='FX longest'; ws['D5']='Source'
+    ws['G2']='Crypto shortest'; ws['G3']='Source'; ws['G4']='Crypto longest'; ws['G5']='Source'
+    ws['T2']='Account'; ws['U2']='Balance'; ws['V2']='Currency'; ws['T3']='Bybit Live'
+    wb.save(p)
+    snap={'stats':{'totals':{},'groups':{'by_market':{'overall':{},'fx':{},'crypto':{}},'risk_expectancy':{},'leaders':{},'duration':{'fx_shortest_seconds':10,'fx_longest_seconds':20,'crypto_shortest_seconds':30,'crypto_longest_seconds':40,'metric_sources':{'fx_shortest_seconds':{'symbol':'EURUSD','date':'2026-01-01'},'fx_longest_seconds':{'symbol':'GBPUSD','date':'2026-01-02'},'crypto_shortest_seconds':{'symbol':'BTCUSDT','date':'2026-01-03'},'crypto_longest_seconds':{'symbol':'ETHUSDT','date':'2026-01-04'}}}}},'balances':[{'account_label':'Bybit Live','balance':1,'currency':'USDT'}]}
+    update_master_journal_workbook_data_only(p,snap)
+    out=load_workbook(p)['Dashboard']
+    assert 'second' in str(out['E2'].value) and 'second' in str(out['E4'].value)
+    assert 'second' in str(out['H2'].value) and 'second' in str(out['H4'].value)
+    assert 'EURUSD' in str(out['E3'].value) and 'ETHUSDT' in str(out['H5'].value)
+
+def test_read_master_journal_source_asset_class_regressions(tmp_path: Path):
+    from openpyxl import Workbook
+    p = tmp_path / 'asset_class.xlsx'
+    wb = Workbook(); ws = wb.active; ws.title = 'All Trades'
+    headers = ['Open Time','Close Time','Account','Symbol','Side']
+    ws.append(headers)
+    ws.append(['2026-01-01','2026-01-01','UNKNOWN','ABCDEF','BUY'])
+    ws.append(['2026-01-01','2026-01-01','UNKNOWN','ABC/DEF','BUY'])
+    ws.append(['2026-01-01','2026-01-01','PEPPERSTONE LIVE','EURUSD','BUY'])
+    ws.append(['2026-01-01','2026-01-01','OANDA LIVE','EUR/USD','BUY'])
+    ws.append(['2026-01-01','2026-01-01','BYBIT LIVE','BTCUSD','BUY'])
+    ws.append(['2026-01-01','2026-01-01','BINANCE LIVE','ETHUSD','BUY'])
+    wb.save(p)
+    parsed = read_master_journal_source(p)
+    rows = parsed['items']
+    assert rows[0]['asset_class'] == ''
+    assert rows[1]['asset_class'] == ''
+    assert rows[2]['asset_class'] == 'fx'
+    assert rows[3]['asset_class'] == 'fx'
+    assert rows[4]['asset_class'] == 'crypto'
+    assert rows[5]['asset_class'] == 'crypto'
+
+def test_instrument_leaders_updates_full_row_and_reports_missing(tmp_path: Path):
+    from openpyxl import Workbook
+    from tools.master_journal_workbook import update_master_journal_workbook_data_only
+    p=tmp_path/'leaders.xlsx'
+    wb=Workbook(); ws=wb.active; ws.title='Dashboard'; wb.create_sheet('All Trades'); wb.create_sheet('Instrument Averages')
+    ws['A1']='Overall'; ws['D1']='FX'; ws['G1']='Crypto'; ws['J1']='Winners'; ws['J8']='Losers'; ws['J14']='Drawdown'; ws['M1']='Instrument leaders'; ws['T1']='Account Balances'
+    ws['M2']='Metric'; ws['N2']='Symbol'; ws['O2']='Wins'; ws['P2']='Losses'; ws['Q2']='Trades'
+    ws['M3']='Overall most wins'; ws['M4']='Overall most losses'; ws['M5']='FX most wins'; ws['M6']='FX most losses'; ws['M7']='Crypto most wins'  # missing crypto most losses row intentionally
+    ws['T2']='Account'; ws['U2']='Balance'; ws['V2']='Currency'
+    ws['T3']='Bybit Live'; ws['U3']='1'; ws['V3']='USDT'
+    wb.save(p)
+    snap={'stats':{'totals':{},'groups':{'by_market':{'overall':{},'fx':{},'crypto':{}},'risk_expectancy':{},'duration':{},'leaders':{
+        'most_wins_instrument':{'symbol':'EURUSD','wins':4,'losses':1,'trades':5},
+        'most_losses_instrument':{'symbol':'GBPUSD','wins':1,'losses':4,'trades':5},
+        'fx_most_wins_instrument':{'symbol':'EURUSD','wins':3,'losses':1,'trades':4},
+        'fx_most_losses_instrument':{'symbol':'XAUUSD','wins':1,'losses':3,'trades':4},
+        'crypto_most_wins_instrument':{'symbol':'BTCUSDT','wins':6,'losses':2,'trades':8},
+        'crypto_most_losses_instrument':{'symbol':'ETHUSDT','wins':2,'losses':6,'trades':8},
+    }}},'balances':[{'account_label':'Bybit Live','balance':2,'currency':'USDT'}]}
+    result=update_master_journal_workbook_data_only(p,snap)
+    out=load_workbook(p)['Dashboard']
+    assert out['N3'].value=='EURUSD' and out['O3'].value==4 and out['P3'].value==1 and out['Q3'].value==5
+    assert out['N4'].value=='GBPUSD' and out['O4'].value==1 and out['P4'].value==4 and out['Q4'].value==5
+    assert 'crypto most losses' in [x.lower() for x in result['diagnostics']['missing_leader_rows']]
+    assert result['diagnostics']['updated_cells'] > 0
