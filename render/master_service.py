@@ -69,7 +69,7 @@ from shared.symbol_resolution import (
 from shared.atomic_json import write_json_file
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, stable_row_id, SHEET_ORDER, read_master_journal_source, refresh_master_journal_derived_sheets, update_master_journal_workbook_data_only
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, stable_row_id, SHEET_ORDER, read_master_journal_source, update_master_journal_workbook_data_only
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -19826,12 +19826,40 @@ def _is_crypto_asset_class(value: object) -> bool:
     return text in {"crypto", "cryptocurrency", "digital_asset", "digitalasset"}
 
 
+def _canonical_market_for_row(row: Dict[str, object]) -> str:
+    asset = str(row.get("asset_class") or "").strip().lower()
+    account = str(row.get("account_label") or row.get("account") or "").upper()
+    symbol = str(row.get("symbol") or "").upper()
+    # explicit account/symbol hints take precedence over stale parsed asset_class
+    if any(t in account for t in ("BYBIT", "BINANCE", "COINSPOT")):
+        return "crypto"
+    if any(t in symbol for t in ("USDT", "USDC", "BTC", "ETH", "PERP")):
+        return "crypto"
+    if any(t in account for t in ("OANDA", "PEPPERSTONE", "FOREX", " FX")):
+        return "fx"
+    if asset in {"crypto", "cryptocurrency", "digital_asset", "digitalasset"}:
+        return "crypto"
+    if asset in {"fx", "forex", "foreign_exchange"}:
+        return "fx"
+    if symbol and is_likely_oanda_pair(symbol):
+        return "fx"
+    return ""
+
+
+def _is_fx_like_row(row: Dict[str, object]) -> bool:
+    return _canonical_market_for_row(row) == "fx"
+
+
+def _is_crypto_like_row(row: Dict[str, object]) -> bool:
+    return _canonical_market_for_row(row) == "crypto"
+
+
 def _compute_journal_stats(
     rows: List[Dict[str, object]], balances: List[Dict[str, object]]
 ) -> Dict[str, object]:
     trade_rows = [dict(r) for r in rows if _is_trade_row(r) and not _is_test_trade_row(r)]
-    fx_rows = [r for r in trade_rows if _is_fx_asset_class(r.get("asset_class"))]
-    crypto_rows = [r for r in trade_rows if _is_crypto_asset_class(r.get("asset_class"))]
+    fx_rows = [r for r in trade_rows if _canonical_market_for_row(r) == "fx"]
+    crypto_rows = [r for r in trade_rows if _canonical_market_for_row(r) == "crypto"]
 
     def _is_valid_price_level(val: Optional[float]) -> bool:
         # Some imports represent missing SL/TP/entry as 0.0, which explodes distance metrics.
@@ -23702,24 +23730,23 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                     ov = manual_overrides.get(key_id) or manual_overrides.get(key_sig) or {}
                     merged_rows.append(_apply_trading_journal_manual_overrides(dict(row), ov) if ov else dict(row))
                 _set_trading_journal_rows(merged_rows)
-            snapshot = _build_trading_journal_view_snapshot(force=True)
-            update_master_journal_workbook_data_only(path, snapshot)
+            workbook_items = [dict(r) for r in parsed_items]
+            workbook_trade_rows = [r for r in workbook_items if _row_type(r) == "trade"]
+            balances = _build_journal_balance_timelines(workbook_trade_rows, source_payload.get("cashflow_ledger") or {}, _get_excel_account_balances()).get("balances") or []
+            snapshot = {
+                "items": workbook_items,
+                "balances": balances,
+                "stats": _compute_journal_stats(workbook_items, balances),
+                "diagnostics": {"source": "master_journal_workbook"},
+            }
+            update_result = update_master_journal_workbook_data_only(path, snapshot)
             refreshed = read_master_journal_source(path)
             refreshed_items = [r for r in (refreshed.get("items") or []) if isinstance(r, dict)]
             refreshed_trade_rows = [r for r in refreshed_items if _row_type(r) == "trade"]
             if parsed_trade_rows and not refreshed_trade_rows:
                 raise RuntimeError("Master Journal derived refresh failed validation: trade rows were lost.")
         else:
-            snapshot = _build_trading_journal_view_snapshot(force=True)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            build_master_journal_workbook(snapshot, tmp)
-            workbook = load_workbook(tmp, data_only=False, read_only=False)
-            sheet_names = list(workbook.sheetnames)
-            workbook.close()
-            required = [str(name) for name in SHEET_ORDER]
-            if any(name not in sheet_names for name in required):
-                raise RuntimeError("Master Journal workbook validation failed: expected sheets missing.")
-            os.replace(tmp, path)
+            raise FileNotFoundError(f"Master Journal workbook not found for metric refresh: {path}")
         if not path.exists() or path.stat().st_size <= 0:
             raise RuntimeError("Master Journal.xlsx was not created.")
         size = path.stat().st_size
@@ -23730,6 +23757,8 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
             'master_journal_size_bytes': int(size),
             'master_journal_updated_at': _utc_now_iso(),
             'parsed_trade_rows': len(parsed_trade_rows),
+            'master_journal_metric_refresh': update_result,
+            'master_journal_metric_refresh_diagnostics': (update_result or {}).get('diagnostics') if isinstance(update_result, dict) else {},
         }
         payload.update(_sync_journal_excel_files_to_github(path))
         return payload

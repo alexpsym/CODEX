@@ -2,7 +2,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime, date, timedelta
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font
 from openpyxl.worksheet.datavalidation import DataValidation
@@ -520,6 +520,65 @@ def _header_map(ws, header_row: int = 1) -> Dict[str, int]:
     return out
 
 
+
+
+def _snapshot_invariants(wb) -> Dict[str, Any]:
+    out: Dict[str, Any] = {"sheetnames": list(wb.sheetnames)}
+    dash = wb["Dashboard"] if "Dashboard" in wb.sheetnames else None
+    if dash is not None:
+        out["dash_merged"] = [str(r) for r in dash.merged_cells.ranges]
+        out["dash_row_heights"] = {k: v.height for k, v in dash.row_dimensions.items()}
+        out["dash_col_widths"] = {k: v.width for k, v in dash.column_dimensions.items()}
+        out["dash_cf"] = [str(k.sqref) for k in dash.conditional_formatting._cf_rules.keys()]
+        out["dash_freeze"] = dash.freeze_panes
+    for name, key in (("All Trades", "all_trades_filter"), ("Instrument Averages", "instrument_filter")):
+        ws = wb[name] if name in wb.sheetnames else None
+        out[key] = (ws.auto_filter.ref if ws and ws.auto_filter else None)
+    return out
+
+
+def _assert_invariants_unchanged(before: Dict[str, Any], after: Dict[str, Any]) -> None:
+    for key in ("sheetnames","dash_merged","dash_row_heights","dash_col_widths","dash_cf","dash_freeze","all_trades_filter","instrument_filter"):
+        if before.get(key) != after.get(key):
+            raise RuntimeError(f"Workbook structural invariant changed: {key}")
+
+
+def _find_anchor_sections(ws, anchors: List[str], optional: List[str] | None = None) -> Dict[str, Dict[str, int]]:
+    optional = optional or []
+    all_anchors = list(dict.fromkeys([*anchors, *optional]))
+    found: Dict[str, Dict[str, int]] = {}
+    for r in range(1, ws.max_row + 1):
+        for c in range(1, ws.max_column + 1):
+            text = str(ws.cell(r, c).value or "").strip().lower()
+            for a in all_anchors:
+                if text == a.lower() and a not in found:
+                    found[a] = {"anchor_row": r, "anchor_col": c}
+    missing = [a for a in anchors if a not in found]
+    if missing:
+        raise RuntimeError(f"Dashboard section anchors missing: {', '.join(missing)}")
+
+    for name, meta in list(found.items()):
+        ar, ac = meta["anchor_row"], meta["anchor_col"]
+        same_row_right = [m["anchor_col"] for n,m in found.items() if m["anchor_row"] == ar and m["anchor_col"] > ac]
+        end_col = (min(same_row_right)-1) if same_row_right else ws.max_column
+        same_band_below = []
+        for n,m in found.items():
+            if m["anchor_row"] <= ar:
+                continue
+            if ac <= m["anchor_col"] <= end_col:
+                same_band_below.append(m["anchor_row"])
+        end_row = (min(same_band_below)-1) if same_band_below else ws.max_row
+        found[name].update({"start_row": ar+1, "end_row": end_row, "start_col": ac, "end_col": end_col})
+    return found
+
+
+def _find_label_in_section(ws, label: str, section: Dict[str, int]) -> Tuple[int, int] | None:
+    wanted = str(label or "").strip().lower()
+    for r in range(max(1, section.get("start_row",1)), min(ws.max_row, section.get("end_row", ws.max_row))+1):
+        for c in range(max(1, section.get("start_col",1)), min(ws.max_column, section.get("end_col", ws.max_column)-1)+1):
+            if str(ws.cell(r,c).value or "").strip().lower() == wanted:
+                return r,c
+    return None
 def _find_label_cell(ws, label: str, search_cols: List[int] | None = None) -> tuple[int, int] | None:
     wanted = str(label or "").strip().lower()
     if not wanted:
@@ -574,7 +633,16 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
             close_time = _excel_datetime_to_iso(r[idx.get('Close Time',1)])
             duration = _num(r[i_dur]) if i_dur is not None else None
             if duration is None and i_dur is not None: duration = _parse_duration_text(r[i_dur])
-            asset_class = 'fx' if ('OANDA' in account.upper() or ('/' in symbol and len(symbol.replace('/',''))>=6)) else ('crypto' if symbol else '')
+            account_u = account.upper()
+            symbol_u = symbol.upper().replace('_','/').replace('-','/')
+            if any(t in account_u for t in ('OANDA','PEPPERSTONE','FOREX',' FX')):
+                asset_class = 'fx'
+            elif any(t in account_u for t in ('BYBIT','BINANCE','COINSPOT')):
+                asset_class = 'crypto'
+            elif any(t in symbol_u for t in ('USDT','USDC','BTC','ETH','PERP')):
+                asset_class = 'crypto'
+            else:
+                asset_class = ''
             item={'id': row_id or stable_row_id({'account':account,'symbol':symbol,'side':side,'open_time':open_time,'close_time':close_time}), 'row_type':row_type,'account':account,'symbol':symbol,'side':side,'open_time':open_time,'close_time':close_time,'qty':_num(r[idx.get('Qty')]) if 'Qty' in idx else None,'entry_price':_num(r[idx.get('Entry Price')]) if 'Entry Price' in idx else None,'exit_price':_num(r[idx.get('Exit Price')]) if 'Exit Price' in idx else None,'stop_loss':_num(r[i_stop]) if i_stop is not None else None,'take_profit':_num(r[i_tp]) if i_tp is not None else None,'commission':_num(r[idx.get('Commission')]) if 'Commission' in idx else None,'net_profit':_num(r[i_pnl]) if i_pnl is not None else None,'result_pct':_num(r[idx.get('Profit %')]) if 'Profit %' in idx else None,'r_multiple':_num(r[idx.get('R-Multiple')]) if 'R-Multiple' in idx else None,'balance_after_trade':_num(r[idx.get('Balance After')]) if 'Balance After' in idx else None,'trade_duration_seconds':duration,'is_test_trade':str(r[idx.get('Test')]).strip().lower() in {'yes','y','true','1'} if 'Test' in idx else False,'setup':r[idx.get('Setup',17)] if 'Setup' in idx else '','timeframe':r[idx.get('Timeframe',18)] if 'Timeframe' in idx else '','breakeven':r[idx.get('Breakeven',19)] if 'Breakeven' in idx else '','notes':r[idx.get('Notes',20)] if 'Notes' in idx else '','currency':str(r[idx.get('Currency')] or '').strip() if 'Currency' in idx else '', 'asset_class': asset_class}
             items.append(item)
             if row_type=='cashflow':
@@ -585,141 +653,218 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
 
 def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any]) -> Dict[str, Any]:
     wb = load_workbook(path)
-    tmp = path.with_suffix('.data_only.tmp.xlsx')
+    diagnostics: Dict[str, Any] = {"missing_accounts": [], "updated_cells": 0}
     try:
-        build_master_journal_workbook(snapshot, tmp)
-        gen = load_workbook(tmp, data_only=True)
-        try:
-            for name in ['Dashboard','Instrument Averages','P&L Calendar']:
-                if name not in wb.sheetnames or name not in gen.sheetnames:
-                    raise RuntimeError(f'Missing required sheet for data-only update: {name}')
-            # Dashboard: metric labels -> adjacent value cell
-            d_dst, d_src = wb['Dashboard'], gen['Dashboard']
-            for r in range(1, d_src.max_row + 1):
-                for c in range(1, d_src.max_column):
-                    label = str(d_src.cell(r, c).value or '').strip()
-                    val = d_src.cell(r, c + 1).value
-                    if not label or label in {'Overall','FX','Crypto','Winners','Losers','Drawdown','Duration','Instrument leaders','Metric','Symbol','Wins','Losses','Trades','Account Balances','Account','Balance','Currency','As Of'}:
-                        continue
-                    found = _find_label_cell(d_dst, label)
-                    if found:
-                        _write_value_preserving_cell(d_dst, found[0], found[1] + 1, val)
+        if "Dashboard" not in wb.sheetnames:
+            raise RuntimeError("Master Journal missing Dashboard sheet.")
+        dash = wb["Dashboard"]
+        before = _snapshot_invariants(wb)
 
-            # Instrument averages: match by Symbol + header aliases
-            i_dst, i_src = wb['Instrument Averages'], gen['Instrument Averages']
-            dst_headers = _header_map(i_dst)
-            src_headers = _header_map(i_src)
-            if 'Symbol' not in dst_headers or 'Symbol' not in src_headers:
-                raise RuntimeError('Instrument Averages missing Symbol header.')
-            dst_by_symbol = {str(i_dst.cell(r, dst_headers['Symbol']).value or '').strip(): r for r in range(2, i_dst.max_row + 1)}
-            src_by_symbol = {str(i_src.cell(r, src_headers['Symbol']).value or '').strip(): r for r in range(2, i_src.max_row + 1)}
-            for symbol, src_row in src_by_symbol.items():
-                if not symbol:
-                    continue
-                dst_row = dst_by_symbol.get(symbol)
-                if dst_row is None:
-                    dst_row = i_dst.max_row + 1
-                    # copy style from previous row only
-                    if dst_row > 2:
-                        for c in range(1, i_dst.max_column + 1):
-                            i_dst.cell(dst_row, c)._style = i_dst.cell(dst_row - 1, c)._style
-                    i_dst.cell(dst_row, dst_headers['Symbol']).value = symbol
-                for h, src_col in src_headers.items():
-                    dst_col = dst_headers.get(h)
-                    if dst_col is None:
-                        continue
-                    _write_value_preserving_cell(i_dst, dst_row, dst_col, i_src.cell(src_row, src_col).value)
+        stats = snapshot.get("stats") or {}
+        groups = stats.get("groups") or {}
+        by_market = groups.get("by_market") or {}
+        risk = groups.get("risk_expectancy") or {}
+        leaders = groups.get("leaders") or {}
+        totals = stats.get("totals") or {}
 
-            # P&L calendar: match by year column A + month header row 2
-            c_dst, c_src = wb['P&L Calendar'], gen['P&L Calendar']
-            months = {str(c_src.cell(2, c).value or '').strip(): c for c in range(2, c_src.max_column + 1)}
-            dst_months = {str(c_dst.cell(2, c).value or '').strip(): c for c in range(2, c_dst.max_column + 1)}
-            dst_year_rows = {str(c_dst.cell(r, 1).value or '').strip(): r for r in range(3, c_dst.max_row + 1)}
-            for sr in range(3, c_src.max_row + 1):
-                year = str(c_src.cell(sr, 1).value or '').strip()
-                if not year:
+        anchors = _find_anchor_sections(dash, ["Account Balances", "Instrument leaders", "Overall", "Winners", "Losers", "Drawdown", "FX", "Crypto"], optional=["Duration"])
+
+        def write_metric(section: str, label: str, value: Any, metric_type: str = "raw"):
+            if value is None:
+                return
+            pos = _find_label_in_section(dash, label, anchors[section])
+            if not pos:
+                return
+            out = value
+            if metric_type == "pct":
+                pct = _as_float(value)
+                if pct is None:
+                    return
+                out = pct / 100.0
+            elif metric_type == "duration":
+                out = _fmt_duration_full(value)
+            elif metric_type == "count":
+                f = _as_float(value)
+                out = int(f) if f is not None else value
+            elif metric_type == "source":
+                out = _fmt_detail_src(value)
+            if _write_value_preserving_cell(dash, pos[0], pos[1]+1, out):
+                diagnostics["updated_cells"] += 1
+
+        def write_source_below(section: str, metric_label: str, source_val: Any):
+            if source_val is None:
+                return
+            pos = _find_label_in_section(dash, metric_label, anchors[section])
+            if not pos:
+                return
+            sr = pos[0] + 1
+            if sr > anchors[section]["end_row"]:
+                return
+            if str(dash.cell(sr, pos[1]).value or "").strip().lower() == "source":
+                _write_value_preserving_cell(dash, sr, pos[1] + 1, _fmt_detail_src(source_val))
+                diagnostics["updated_cells"] += 1
+
+        section_maps = {
+            "Overall": by_market.get("overall") or totals,
+            "FX": by_market.get("fx") or {},
+            "Crypto": by_market.get("crypto") or {},
+        }
+        for section, bucket in section_maps.items():
+            write_metric(section, "Trades", bucket.get("trades"), "count")
+            write_metric(section, "Wins", bucket.get("wins"), "count")
+            write_metric(section, "Losses", bucket.get("losses"), "count")
+            write_metric(section, "Break-even", bucket.get("break_even"), "count")
+            write_metric(section, "Win rate", bucket.get("win_rate_pct"), "pct")
+            write_metric(section, "Net P/L", bucket.get("net_profit_total"))
+            write_metric(section, "Avg result %", bucket.get("avg_result_pct"), "pct")
+            write_metric(section, "Avg R", bucket.get("avg_r_multiple"), "raw")
+            write_metric(section, "Gross gain", bucket.get("gross_gain"))
+            write_metric(section, "Gross loss", bucket.get("gross_loss"))
+            write_metric(section, "Max loss %", bucket.get("min_result_pct"), "pct")
+            write_metric(section, "Max win %", bucket.get("max_result_pct"), "pct")
+            write_metric(section, "Max R loss", bucket.get("min_r_multiple"))
+            write_metric(section, "Max R win", bucket.get("max_r_multiple"))
+            write_metric(section, "Max gain", bucket.get("max_gain"))
+            write_metric(section, "Max loss", bucket.get("max_loss"))
+            write_metric(section, "Avg stop %", bucket.get("avg_stop_pct"), "pct")
+            write_metric(section, "Avg target %", bucket.get("avg_target_pct"), "pct")
+            write_metric(section, "Avg duration", bucket.get("avg_duration_seconds"), "duration")
+            msrc = bucket.get("metric_sources") or {}
+            write_source_below(section, "Max loss %", msrc.get("min_result_pct"))
+            write_source_below(section, "Max win %", msrc.get("max_result_pct"))
+            write_source_below(section, "Max R loss", msrc.get("min_r_multiple"))
+            write_source_below(section, "Max R win", msrc.get("max_r_multiple"))
+            write_source_below(section, "Max gain", msrc.get("max_gain"))
+            write_source_below(section, "Max loss", msrc.get("max_loss"))
+
+
+        write_metric("Winners", "Avg result %", risk.get("avg_result_pct_winners"), "pct")
+        write_metric("Winners", "Avg R", risk.get("avg_r_multiple_winners"))
+        write_metric("Winners", "Avg stop %", risk.get("avg_stop_pct_winners"), "pct")
+        write_metric("Winners", "Avg target %", risk.get("avg_target_pct_winners"), "pct")
+        write_metric("Losers", "Avg result %", risk.get("avg_result_pct_losers"), "pct")
+        write_metric("Losers", "Avg R", risk.get("avg_r_multiple_losers"))
+        write_metric("Losers", "Avg stop %", risk.get("avg_stop_pct_losers"), "pct")
+        write_metric("Losers", "Avg target %", risk.get("avg_target_pct_losers"), "pct")
+        write_metric("Drawdown", "Max drawdown", risk.get("max_drawdown_pct"), "pct")
+        write_metric("Drawdown", "Avg drawdown", risk.get("avg_drawdown_pct"), "pct")
+        duration = groups.get("duration") or {}
+        write_metric("FX", "FX shortest", duration.get("fx_shortest_seconds"), "duration")
+        write_metric("FX", "FX longest", duration.get("fx_longest_seconds"), "duration")
+        write_metric("Crypto", "Crypto shortest", duration.get("crypto_shortest_seconds"), "duration")
+        write_metric("Crypto", "Crypto longest", duration.get("crypto_longest_seconds"), "duration")
+        dsrc = duration.get("metric_sources") or {}
+        write_source_below("FX", "FX shortest", dsrc.get("fx_shortest_seconds"))
+        write_source_below("FX", "FX longest", dsrc.get("fx_longest_seconds"))
+        write_source_below("Crypto", "Crypto shortest", dsrc.get("crypto_shortest_seconds"))
+        write_source_below("Crypto", "Crypto longest", dsrc.get("crypto_longest_seconds"))
+        if "Duration" in anchors:
+            write_metric("Duration", "Overall avg", duration.get("overall_avg_seconds"), "duration")
+            write_metric("Duration", "Overall shortest", duration.get("overall_shortest_seconds"), "duration")
+            write_metric("Duration", "Overall longest", duration.get("overall_longest_seconds"), "duration")
+            write_metric("Duration", "FX shortest", duration.get("fx_shortest_seconds"), "duration")
+            write_metric("Duration", "FX longest", duration.get("fx_longest_seconds"), "duration")
+            write_metric("Duration", "Crypto shortest", duration.get("crypto_shortest_seconds"), "duration")
+            write_metric("Duration", "Crypto longest", duration.get("crypto_longest_seconds"), "duration")
+            dsrc = duration.get("metric_sources") or {}
+            write_source_below("Duration", "Overall shortest", dsrc.get("overall_shortest_seconds"))
+            write_source_below("Duration", "Overall longest", dsrc.get("overall_longest_seconds"))
+            write_source_below("Duration", "FX shortest", dsrc.get("fx_shortest_seconds"))
+            write_source_below("Duration", "FX longest", dsrc.get("fx_longest_seconds"))
+            write_source_below("Duration", "Crypto shortest", dsrc.get("crypto_shortest_seconds"))
+            write_source_below("Duration", "Crypto longest", dsrc.get("crypto_longest_seconds"))
+
+        diagnostics.setdefault("missing_leader_headers", [])
+        diagnostics.setdefault("missing_leader_rows", [])
+        leader_section = anchors["Instrument leaders"]
+        leader_headers = {}
+        leader_header_row = None
+        for r in range(leader_section["start_row"], leader_section["end_row"] + 1):
+            row_map = {}
+            for c in range(leader_section["start_col"], leader_section["end_col"] + 1):
+                hv = str(dash.cell(r, c).value or "").strip().lower()
+                if hv in {"metric", "symbol", "wins", "losses", "trades"}:
+                    row_map[hv] = c
+            if {"metric", "symbol", "wins", "losses", "trades"}.issubset(row_map.keys()):
+                leader_headers = row_map
+                leader_header_row = r
+                break
+        if not leader_headers:
+            diagnostics["missing_leader_headers"].append("Metric/Symbol/Wins/Losses/Trades")
+        else:
+            label_to_key = {
+                "overall most wins": "most_wins_instrument",
+                "overall most losses": "most_losses_instrument",
+                "fx most wins": "fx_most_wins_instrument",
+                "fx most losses": "fx_most_losses_instrument",
+                "crypto most wins": "crypto_most_wins_instrument",
+                "crypto most losses": "crypto_most_losses_instrument",
+            }
+            metric_rows = {}
+            for r in range((leader_header_row or leader_section["start_row"]) + 1, leader_section["end_row"] + 1):
+                metric_label = str(dash.cell(r, leader_headers["metric"]).value or "").strip().lower()
+                if metric_label:
+                    metric_rows[metric_label] = r
+            for metric_label, key in label_to_key.items():
+                row_idx = metric_rows.get(metric_label)
+                if not row_idx:
+                    diagnostics["missing_leader_rows"].append(metric_label)
                     continue
-                dr = dst_year_rows.get(year)
-                if dr is None:
-                    dr = c_dst.max_row + 1
-                    if dr > 3:
-                        for cc in range(1, c_dst.max_column + 1):
-                            c_dst.cell(dr, cc)._style = c_dst.cell(dr - 1, cc)._style
-                    c_dst.cell(dr, 1).value = year
-                for m, sc in months.items():
-                    dc = dst_months.get(m)
-                    if dc is None:
+                payload = leaders.get(key) or {}
+                for fld, col_name in (("symbol", "symbol"), ("wins", "wins"), ("losses", "losses"), ("trades", "trades")):
+                    if fld not in payload or payload.get(fld) is None:
                         continue
-                    _write_value_preserving_cell(c_dst, dr, dc, c_src.cell(sr, sc).value)
-            if 'All Trades' not in wb.sheetnames or 'All Trades' not in gen.sheetnames:
-                raise RuntimeError('Missing All Trades sheet for data-only update.')
-            dst, src = wb['All Trades'], gen['All Trades']
-            dst_h = _header_map(dst)
-            src_h = _header_map(src)
-            editable = {'Test','Setup','Timeframe','Breakeven','Notes'}
-            symbol_c = dst_h.get('Symbol')
-            side_c = dst_h.get('Side')
-            open_c = dst_h.get('Open Time')
-            close_c = dst_h.get('Close Time')
-            row_id_c = dst_h.get('Row ID')
-            src_rows = []
-            for r in range(2, src.max_row + 1):
-                src_rows.append({h: src.cell(r, c).value for h, c in src_h.items()})
-            def _finger(v):
-                return _all_trades_row_fingerprint_from_map(v)
-            dst_index = {}
-            for r in range(2, dst.max_row + 1):
-                if row_id_c:
-                    rid = str(dst.cell(r, row_id_c).value or '').strip()
-                    if rid:
-                        dst_index[f'RID:{rid}'] = r
-                rowv = {h: dst.cell(r, c).value for h, c in dst_h.items()}
-                dst_index[f'SIG:{_finger(rowv)}'] = r
-            alias_groups = [
-                ('Stop Loss Price', ['Stop Loss Price','Stop Loss']),
-                ('Target Price', ['Target Price','Take Profit','Target']),
-                ('Trade Duration', ['Trade Duration','Trade Duration Seconds']),
-                ('Net P/L', ['Net P/L','Net Profit','Realized PnL']),
-            ]
-            alias_dst = {}
-            for src_name, names in alias_groups:
-                for n in names:
-                    if n in dst_h:
-                        alias_dst[src_name] = dst_h[n]
-                        break
-            for row in src_rows:
-                key = f"RID:{str(row.get('Row ID') or '').strip()}" if row_id_c and row.get('Row ID') else f"SIG:{_finger(row)}"
-                dr = dst_index.get(key)
-                if dr is None:
-                    dr = dst.max_row + 1
-                    if dr > 2:
-                        for cc in range(1, dst.max_column + 1):
-                            dst.cell(dr, cc)._style = dst.cell(dr - 1, cc)._style
-                    dst_index[key] = dr
-                for h, sv in row.items():
-                    dc = dst_h.get(h) or alias_dst.get(h)
-                    if dc is None or h in editable:
-                        continue
-                    _write_value_preserving_cell(dst, dr, dc, sv)
-                # cashflow visibility fallback for legacy A:U sheets
-                is_cashflow = str(row.get('Symbol') or '').upper() == 'CASHFLOW'
-                if is_cashflow and 'Cashflow Amount' not in dst_h:
-                    pnl_col = dst_h.get('Net P/L') or dst_h.get('Net Profit') or dst_h.get('Realized PnL')
-                    if pnl_col and (dst.cell(dr, pnl_col).value in (None, '')):
-                        _write_value_preserving_cell(dst, dr, pnl_col, row.get('Cashflow Amount') or row.get('Net P/L'))
-                if is_cashflow and 'Cashflow New Balance' not in dst_h:
-                    bal_col = dst_h.get('Balance After')
-                    if bal_col and (dst.cell(dr, bal_col).value in (None, '')):
-                        _write_value_preserving_cell(dst, dr, bal_col, row.get('Cashflow New Balance') or row.get('Balance After'))
-            if dst.auto_filter and dst.auto_filter.ref:
-                dst.auto_filter.ref=f"A1:{get_column_letter(dst.max_column)}{max(2,dst.max_row)}"
-        finally:
-            gen.close()
+                    if _write_value_preserving_cell(dash, row_idx, leader_headers[col_name], payload.get(fld)):
+                        diagnostics["updated_cells"] += 1
+
+        balances = snapshot.get("balances") or []
+        diagnostics.setdefault("non_numeric_balance_accounts", [])
+        section = anchors["Account Balances"]
+        header_row = section["start_row"]
+        col_map = {}
+        for c in range(section["start_col"], section["end_col"] + 1):
+            h = str(dash.cell(header_row, c).value or "").strip().lower()
+            if h in {"account"}: col_map["account"] = c
+            elif h in {"balance"}: col_map["balance"] = c
+            elif h in {"currency"}: col_map["currency"] = c
+            elif h in {"as of", "as_of"}: col_map["as_of"] = c
+        if "account" not in col_map or "balance" not in col_map or "currency" not in col_map:
+            raise RuntimeError("Account Balances headers missing in section.")
+        account_rows = {}
+        for r in range(header_row + 1, section["end_row"] + 1):
+            lbl = str(dash.cell(r,col_map["account"]).value or "").strip()
+            if lbl:
+                account_rows[lbl.upper()] = r
+        for b in balances:
+            label = str(b.get("account_label") or b.get("account") or "").strip()
+            if not label:
+                continue
+            row = account_rows.get(label.upper())
+            if not row:
+                diagnostics["missing_accounts"].append(label)
+                continue
+            bal_num = _as_float(b.get("balance"))
+            if bal_num is None:
+                diagnostics["non_numeric_balance_accounts"].append(label)
+                continue
+            if _write_value_preserving_cell(dash, row, col_map["balance"], bal_num):
+                diagnostics["updated_cells"] += 1
+            curr = str(b.get("currency") or "").strip()
+            if curr:
+                if _write_value_preserving_cell(dash, row, col_map["currency"], curr):
+                    diagnostics["updated_cells"] += 1
+            if "as_of" in col_map:
+                as_of = str(b.get("as_of") or "").strip()
+                if as_of:
+                    if _write_value_preserving_cell(dash, row, col_map["as_of"], as_of):
+                        diagnostics["updated_cells"] += 1
+
+        after = _snapshot_invariants(wb)
+        _assert_invariants_unchanged(before, after)
         wb.save(path)
-        return {'ok': True, 'path': str(path)}
+        return {"ok": True, "path": str(path), "diagnostics": diagnostics}
     finally:
         wb.close()
-        tmp.unlink(missing_ok=True)
 
 def refresh_master_journal_derived_sheets(path: Path, snapshot: Dict[str, Any]) -> Dict[str, Any]:
     if not path.exists():
