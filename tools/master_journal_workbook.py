@@ -811,10 +811,15 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                     diagnostics["missing_leader_rows"].append(metric_label)
                     continue
                 payload = leaders.get(key) or {}
+                normalized_payload = dict(payload)
+                if normalized_payload.get("trades") is None and normalized_payload.get("total_trades") is not None:
+                    normalized_payload["trades"] = normalized_payload.get("total_trades")
+                if normalized_payload.get("total_trades") is None and normalized_payload.get("trades") is not None:
+                    normalized_payload["total_trades"] = normalized_payload.get("trades")
                 for fld, col_name in (("symbol", "symbol"), ("wins", "wins"), ("losses", "losses"), ("trades", "trades")):
-                    if fld not in payload or payload.get(fld) is None:
+                    if fld not in normalized_payload or normalized_payload.get(fld) is None:
                         continue
-                    if _write_value_preserving_cell(dash, row_idx, leader_headers[col_name], payload.get(fld)):
+                    if _write_value_preserving_cell(dash, row_idx, leader_headers[col_name], normalized_payload.get(fld)):
                         diagnostics["updated_cells"] += 1
 
         balances = snapshot.get("balances") or []

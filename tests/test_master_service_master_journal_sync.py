@@ -121,11 +121,222 @@ def test_sync_master_journal_success_reports_existing_file_and_size(tmp_path, mo
 
 
 @pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
-def test_sync_master_journal_replace_without_final_file_is_error(tmp_path, monkeypatch):
+def test_sync_master_journal_rebuilds_when_master_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    snap = {'items':[{'id':'r1','row_type':'trade','account':'A','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01 10:00:00','close_time':'2026-01-01 11:00:00','net_profit':10.0,'result_pct':1.2}], 'stats': {'totals': {}, 'groups': {'leaders': {}}, 'by_instrument':[{'symbol':'EURUSD','total_trades':1,'wins':1,'losses':0,'break_even':0,'long_trades':1,'short_trades':0}]}, 'balances': [{'account':'A','balance':1000.0,'currency':'USD'}], 'diagnostics': {}}
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
+    monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: snap['items'])
+    result = master_service._sync_master_journal_workbook()
+    assert result['master_journal_ok'] is True
+    assert (tmp_path/'Master Journal.xlsx').exists()
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_sync_master_journal_rebuilds_blanked_workbook_sections(tmp_path, monkeypatch):
+    from tools.master_journal_workbook import build_master_journal_workbook
+    from openpyxl import load_workbook
+
+    source_rows = [
+        {'id': 'r1', 'row_type': 'trade', 'account': 'A', 'symbol': 'EURUSD', 'side': 'BUY', 'open_time': '2026-01-01 10:00:00', 'close_time': '2026-01-01 11:00:00', 'net_profit': 10.0, 'result_pct': 1.2, 'is_test_trade': False},
+        {'id': 'r2', 'row_type': 'trade', 'account': 'A', 'symbol': 'BTCUSDT', 'side': 'SELL', 'open_time': '2026-01-02 10:00:00', 'close_time': '2026-01-02 11:00:00', 'net_profit': -5.0, 'result_pct': -0.6, 'is_test_trade': False},
+    ]
+    snap = {
+        'items': source_rows,
+        'stats': {
+            'totals': {},
+            'by_instrument': [
+                {'symbol': 'EURUSD', 'total_trades': 1, 'wins': 1, 'losses': 0, 'break_even': 0, 'long_trades': 1, 'short_trades': 0},
+                {'symbol': 'BTCUSDT', 'total_trades': 1, 'wins': 0, 'losses': 1, 'break_even': 0, 'long_trades': 0, 'short_trades': 1},
+            ],
+            'groups': {
+                'leaders': {
+                    'most_wins_instrument': {'symbol': 'EURUSD', 'wins': 1, 'losses': 0, 'total_trades': 1},
+                    'most_losses_instrument': {'symbol': 'BTCUSDT', 'wins': 0, 'losses': 1, 'total_trades': 1},
+                }
+            }
+        },
+        'balances': [{'account': 'A', 'account_label': 'A', 'balance': 1234.56, 'currency': 'USD', 'as_of': '2026-01-03'}],
+        'diagnostics': {},
+    }
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    mj = tmp_path / 'Master Journal.xlsx'
+    build_master_journal_workbook(snap, mj)
+    wb = load_workbook(mj)
+    # blank generated sections
+    for ws_name in ['All Trades', 'Instrument Averages', 'P&L Calendar']:
+        ws = wb[ws_name]
+        for r in range(2, ws.max_row + 1):
+            for c in range(1, ws.max_column + 1):
+                ws.cell(r, c).value = None
+    dash = wb['Dashboard']
+    for r in range(1, dash.max_row + 1):
+        for c in range(1, dash.max_column + 1):
+            v = str(dash.cell(r, c).value or '').strip().lower()
+            if v == 'instrument leaders':
+                for rr in range(r + 1, min(dash.max_row + 1, r + 16)):
+                    for cc in range(c, min(dash.max_column + 1, c + 6)):
+                        if rr != r + 1:  # keep leader headers
+                            dash.cell(rr, cc).value = None
+            if v == 'account balances':
+                for rr in range(r + 2, min(dash.max_row + 1, r + 16)):
+                    dash.cell(rr, c + 1).value = None
+    wb.save(mj)
+    wb.close()
+
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
+    monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: source_rows)
+    result = master_service._sync_master_journal_workbook()
+    assert result['master_journal_ok'] is True
+
+    rebuilt = load_workbook(mj, data_only=True)
+    try:
+        all_trades = rebuilt['All Trades']
+        all_trades_headers = [str(c.value or '').strip() for c in all_trades[1]]
+        all_trades_symbol_col = all_trades_headers.index('Symbol') + 1
+        trade_symbols = [str(all_trades.cell(r, all_trades_symbol_col).value or '').strip() for r in range(2, all_trades.max_row + 1)]
+        assert 'EURUSD' in trade_symbols
+        assert 'BTCUSDT' in trade_symbols
+
+        inst = rebuilt['Instrument Averages']
+        inst_headers = [str(c.value or '').strip() for c in inst[1]]
+        symbol_col = inst_headers.index('Symbol') + 1
+        trades_col = inst_headers.index('Trades') + 1
+        inst_rows = {}
+        for r in range(2, inst.max_row + 1):
+            sym = str(inst.cell(r, symbol_col).value or '').strip()
+            if sym:
+                inst_rows[sym] = inst.cell(r, trades_col).value
+        assert isinstance(inst_rows.get('EURUSD'), (int, float))
+        assert isinstance(inst_rows.get('BTCUSDT'), (int, float))
+
+        cal = rebuilt['P&L Calendar']
+        has_2026_jan = False
+        for r in range(3, cal.max_row + 1):
+            if str(cal.cell(r, 1).value or '').strip() == '2026' and isinstance(cal.cell(r, 2).value, (int, float)):
+                has_2026_jan = True
+                break
+        assert has_2026_jan
+
+        dash = rebuilt['Dashboard']
+        balance_anchor = None
+        for r in range(1, dash.max_row + 1):
+            for c in range(1, dash.max_column + 1):
+                if str(dash.cell(r, c).value or '').strip().lower() == 'account balances':
+                    balance_anchor = (r, c)
+                    break
+            if balance_anchor:
+                break
+        assert balance_anchor is not None
+        balance_header_map = {}
+        balance_header_row = None
+        for r in range(balance_anchor[0] + 1, min(dash.max_row + 1, balance_anchor[0] + 12)):
+            row_map = {}
+            for c in range(balance_anchor[1], min(dash.max_column + 1, balance_anchor[1] + 8)):
+                token = str(dash.cell(r, c).value or '').strip().lower()
+                if token in {'account', 'balance', 'currency', 'as of', 'as_of'}:
+                    if token == 'as_of':
+                        token = 'as of'
+                    row_map[token] = c
+            if {'account', 'balance', 'currency'}.issubset(set(row_map.keys())):
+                balance_header_row = r
+                balance_header_map = row_map
+                balance_row = r
+                break
+        assert balance_header_row is not None
+        found_account_balance = False
+        for r in range((balance_header_row or 0) + 1, min(dash.max_row + 1, (balance_header_row or 0) + 20)):
+            acct = str(dash.cell(r, balance_header_map['account']).value or '').strip()
+            bal = dash.cell(r, balance_header_map['balance']).value
+            if acct == 'A' and isinstance(bal, (int, float)) and abs(float(bal) - 1234.56) < 1e-6:
+                found_account_balance = True
+                break
+        assert found_account_balance
+
+        leaders_anchor = None
+        for r in range(1, dash.max_row + 1):
+            for c in range(1, dash.max_column + 1):
+                if str(dash.cell(r, c).value or '').strip().lower() == 'instrument leaders':
+                    leaders_anchor = (r, c)
+                    break
+            if leaders_anchor:
+                break
+        assert leaders_anchor is not None
+        header_map = {}
+        header_row = None
+        for r in range(leaders_anchor[0] + 1, min(dash.max_row + 1, leaders_anchor[0] + 12)):
+            row_map = {}
+            for c in range(leaders_anchor[1], min(dash.max_column + 1, leaders_anchor[1] + 8)):
+                token = str(dash.cell(r, c).value or '').strip().lower()
+                if token in {'metric', 'symbol', 'wins', 'losses', 'trades'}:
+                    row_map[token] = c
+            if {'metric', 'symbol', 'wins', 'losses', 'trades'}.issubset(set(row_map.keys())):
+                header_row = r
+                header_map = row_map
+                break
+        assert header_row is not None
+        metrics = {}
+        for r in range((header_row or 0) + 1, min(dash.max_row + 1, (header_row or 0) + 20)):
+            label = str(dash.cell(r, header_map['metric']).value or '').strip().lower()
+            if label:
+                metrics[label] = {
+                    'symbol': str(dash.cell(r, header_map['symbol']).value or '').strip(),
+                    'trades': dash.cell(r, header_map['trades']).value,
+                }
+        assert metrics['overall most wins']['symbol'] == 'EURUSD'
+        assert float(metrics['overall most wins']['trades']) == 1.0
+        assert metrics['overall most losses']['symbol'] == 'BTCUSDT'
+        assert float(metrics['overall most losses']['trades']) == 1.0
+    finally:
+        rebuilt.close()
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_sync_master_journal_fails_when_expected_balance_account_missing(tmp_path, monkeypatch):
+    from tools.master_journal_workbook import build_master_journal_workbook
+    from openpyxl import load_workbook
+
+    source_rows = [
+        {'id': 'r1', 'row_type': 'trade', 'account': 'A', 'symbol': 'EURUSD', 'side': 'BUY', 'open_time': '2026-01-01 10:00:00', 'close_time': '2026-01-01 11:00:00', 'net_profit': 10.0, 'result_pct': 1.2, 'is_test_trade': False},
+    ]
+    snap = {
+        'items': source_rows,
+        'stats': {'totals': {}, 'by_instrument': [{'symbol': 'EURUSD', 'total_trades': 1, 'wins': 1, 'losses': 0, 'break_even': 0}], 'groups': {'leaders': {}}},
+        'balances': [
+            {'account': 'A', 'account_label': 'A', 'balance': 1234.56, 'currency': 'USD', 'as_of': '2026-01-03'},
+            {'account': 'B', 'account_label': 'B', 'balance': 999.99, 'currency': 'USD', 'as_of': '2026-01-03'},
+        ],
+        'diagnostics': {},
+    }
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    mj = tmp_path / 'Master Journal.xlsx'
+    build_master_journal_workbook(snap, mj)
+    wb = load_workbook(mj)
+    dash = wb['Dashboard']
+    # remove account B row from balances section
+    anchor = None
+    for r in range(1, dash.max_row + 1):
+        for c in range(1, dash.max_column + 1):
+            if str(dash.cell(r, c).value or '').strip().lower() == 'account balances':
+                anchor = (r, c)
+                break
+        if anchor:
+            break
+    assert anchor is not None
+    header_row = anchor[0] + 1
+    for r in range(header_row + 1, min(dash.max_row + 1, header_row + 20)):
+        if str(dash.cell(r, anchor[1]).value or '').strip() == 'B':
+            dash.cell(r, anchor[1]).value = None
+            dash.cell(r, anchor[1] + 1).value = None
+            break
+    wb.save(mj)
+    wb.close()
+
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
+    monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: source_rows)
     result = master_service._sync_master_journal_workbook()
     assert result['master_journal_ok'] is False
-    assert result['master_journal_error_type'] == 'FileNotFoundError'
+    assert 'Account Balances missing numeric values' in str(result.get('master_journal_error') or '')
+    assert 'B' in str(result.get('master_journal_error') or '')
 
 
 @pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')

@@ -69,7 +69,7 @@ from shared.symbol_resolution import (
 from shared.atomic_json import write_json_file
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, stable_row_id, SHEET_ORDER, read_master_journal_source, update_master_journal_workbook_data_only
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, stable_row_id, SHEET_ORDER
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -23702,51 +23702,223 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
     path = _master_journal_path()
     tmp = path.with_suffix('.tmp.xlsx')
     try:
-        parsed_trade_rows: List[Dict[str, object]] = []
-        if path.exists():
-            source_payload = read_master_journal_source(path)
-            parsed_items = [r for r in (source_payload.get("items") or []) if isinstance(r, dict)]
-            parsed_trade_rows = [r for r in parsed_items if _row_type(r) == "trade"]
-            manual_overrides = read_master_journal_manual_overrides(path)
-            if isinstance(manual_overrides, dict) and manual_overrides:
-                current_rows = _get_trading_journal_rows()
-                merged_rows = []
-                from tools.master_journal_workbook import _all_trades_row_fingerprint_from_map
-                for row in current_rows:
-                    if not isinstance(row, dict):
-                        continue
-                    key_id = str(row.get('id') or '')
-                    key_sig = _all_trades_row_fingerprint_from_map({
-                        'Account': row.get('account_label') or row.get('account'),
-                        'Symbol': row.get('symbol'),
-                        'Side': row.get('side'),
-                        'Open Time': row.get('open_time'),
-                        'Close Time': row.get('close_time'),
-                        'Qty': row.get('qty'),
-                        'Entry Price': row.get('entry_price'),
-                        'Exit Price': row.get('exit_price'),
-                        'Net P/L': row.get('net_profit'),
-                    })
-                    ov = manual_overrides.get(key_id) or manual_overrides.get(key_sig) or {}
-                    merged_rows.append(_apply_trading_journal_manual_overrides(dict(row), ov) if ov else dict(row))
+        snapshot = _build_trading_journal_view_snapshot(force=True) or {}
+        source_items = [r for r in (snapshot.get("items") or []) if isinstance(r, dict)]
+        source_trade_rows = [r for r in source_items if _row_type(r) == "trade"]
+
+        manual_overrides = read_master_journal_manual_overrides(path) if path.exists() else {}
+        if isinstance(manual_overrides, dict) and manual_overrides:
+            from tools.master_journal_workbook import _all_trades_row_fingerprint_from_map
+            current_rows = [r for r in _get_trading_journal_rows() if isinstance(r, dict)]
+            merged_rows: List[Dict[str, object]] = []
+            overrides_applied = 0
+            for row in current_rows:
+                key_id = str(row.get('id') or row.get('__row_id') or '').strip()
+                key_sig = _all_trades_row_fingerprint_from_map({
+                    'Account': row.get('account_label') or row.get('account'),
+                    'Symbol': row.get('symbol'),
+                    'Side': row.get('side'),
+                    'Open Time': row.get('open_time'),
+                    'Close Time': row.get('close_time'),
+                    'Qty': row.get('qty'),
+                    'Entry Price': row.get('entry_price'),
+                    'Exit Price': row.get('exit_price'),
+                    'Net P/L': row.get('net_profit'),
+                })
+                ov = manual_overrides.get(key_id) or manual_overrides.get(key_sig) or {}
+                if ov:
+                    overrides_applied += 1
+                merged_rows.append(_apply_trading_journal_manual_overrides(dict(row), ov) if ov else dict(row))
+            if overrides_applied > 0:
                 _set_trading_journal_rows(merged_rows)
-            workbook_items = [dict(r) for r in parsed_items]
-            workbook_trade_rows = [r for r in workbook_items if _row_type(r) == "trade"]
-            balances = _build_journal_balance_timelines(workbook_trade_rows, source_payload.get("cashflow_ledger") or {}, _get_excel_account_balances()).get("balances") or []
-            snapshot = {
-                "items": workbook_items,
-                "balances": balances,
-                "stats": _compute_journal_stats(workbook_items, balances),
-                "diagnostics": {"source": "master_journal_workbook"},
+                snapshot = _build_trading_journal_view_snapshot(force=True) or {}
+                source_items = [r for r in (snapshot.get("items") or []) if isinstance(r, dict)]
+                source_trade_rows = [r for r in source_items if _row_type(r) == "trade"]
+
+        build_master_journal_workbook(snapshot, tmp)
+        if not tmp.exists() or tmp.stat().st_size <= 0:
+            raise RuntimeError("Master Journal temporary workbook was not created.")
+
+        from openpyxl import load_workbook as _load_wb
+        wb = _load_wb(tmp, data_only=True)
+        try:
+            for sheet in SHEET_ORDER:
+                if sheet not in wb.sheetnames:
+                    raise RuntimeError(f"Master Journal validation failed: missing required sheet '{sheet}'.")
+            all_trades = wb["All Trades"]
+            inst = wb["Instrument Averages"]
+            cal = wb["P&L Calendar"]
+            dash = wb["Dashboard"]
+            if not all_trades.auto_filter or not all_trades.auto_filter.ref:
+                raise RuntimeError("Master Journal validation failed: All Trades filter missing.")
+            if not inst.auto_filter or not inst.auto_filter.ref:
+                raise RuntimeError("Master Journal validation failed: Instrument Averages filter missing.")
+            def _is_hidden_trade_row(row: Dict[str, object]) -> bool:
+                metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+                for key in ("is_hidden", "hidden", "_hidden"):
+                    if _is_test_trade_value(row.get(key)) or _is_test_trade_value(metrics.get(key)):
+                        return True
+                return False
+
+            visible_trade_rows = [r for r in (snapshot.get("items") or []) if isinstance(r, dict) and _row_type(r) == "trade" and not _is_hidden_trade_row(r)]
+            if visible_trade_rows:
+                headers = [str(c.value or "").strip() for c in all_trades[1]]
+                symbol_col = headers.index("Symbol") + 1 if "Symbol" in headers else None
+                if not symbol_col:
+                    raise RuntimeError("Master Journal validation failed: All Trades Symbol column missing.")
+                populated_symbol_rows = 0
+                for rr in range(2, all_trades.max_row + 1):
+                    symbol = str(all_trades.cell(rr, symbol_col).value or "").strip()
+                    if symbol:
+                        populated_symbol_rows += 1
+                if populated_symbol_rows <= 0:
+                    raise RuntimeError("Master Journal validation failed: All Trades is blank despite source rows.")
+            stats = snapshot.get("stats") or {}
+            by_instrument = stats.get("by_instrument") or []
+            if by_instrument:
+                inst_headers = [str(c.value or "").strip().lower() for c in inst[1]]
+                symbol_idx = (inst_headers.index("symbol") + 1) if "symbol" in inst_headers else None
+                trades_idx = None
+                for candidate in ("trades", "total trades", "total_trades"):
+                    if candidate in inst_headers:
+                        trades_idx = inst_headers.index(candidate) + 1
+                        break
+                if not symbol_idx or not trades_idx:
+                    raise RuntimeError("Master Journal validation failed: Instrument Averages Symbol/Trades headers missing.")
+                has_instrument_data = False
+                for rr in range(2, inst.max_row + 1):
+                    symbol = str(inst.cell(rr, symbol_idx).value or "").strip()
+                    trades = _safe_float(inst.cell(rr, trades_idx).value)
+                    if symbol and trades is not None:
+                        has_instrument_data = True
+                        break
+                if not has_instrument_data:
+                    raise RuntimeError("Master Journal validation failed: Instrument Averages is blank despite instrument stats.")
+            non_test_with_results = []
+            from tools.master_journal_workbook import _as_date as _journal_as_date
+            for r in visible_trade_rows:
+                if _is_test_trade_value(r.get("is_test_trade")):
+                    continue
+                ts_value = r.get("close_time") or r.get("open_time")
+                dt = _journal_as_date(ts_value) if ts_value else None
+                if not dt:
+                    continue
+                if _safe_float(r.get("result_pct")) is None:
+                    continue
+                non_test_with_results.append(r)
+            if non_test_with_results:
+                has_calendar_data = False
+                for row in cal.iter_rows(min_row=3, min_col=1, max_col=13, values_only=True):
+                    if not row:
+                        continue
+                    year_val = _safe_float(row[0]) if len(row) > 0 else None
+                    month_values = [v for v in row[1:13] if isinstance(v, (int, float))]
+                    if year_val is not None and month_values:
+                        has_calendar_data = True
+                        break
+                if not has_calendar_data:
+                    raise RuntimeError("Master Journal validation failed: P&L Calendar is blank despite dated result rows.")
+            balances = snapshot.get("balances") or []
+            if balances:
+                anchor = None
+                for rr in range(1, dash.max_row + 1):
+                    for cc in range(1, dash.max_column + 1):
+                        if str(dash.cell(rr, cc).value or "").strip().lower() == "account balances":
+                            anchor = (rr, cc)
+                            break
+                    if anchor:
+                        break
+                if not anchor:
+                    raise RuntimeError("Master Journal validation failed: Account Balances section anchor missing.")
+                header_row = None
+                header_map: Dict[str, int] = {}
+                for rr in range(anchor[0] + 1, min(dash.max_row + 1, anchor[0] + 12)):
+                    row_map: Dict[str, int] = {}
+                    for cc in range(anchor[1], min(dash.max_column + 1, anchor[1] + 8)):
+                        token = str(dash.cell(rr, cc).value or "").strip().lower()
+                        if token in {"account", "balance", "currency", "as of", "as_of"}:
+                            if token == "as_of":
+                                token = "as of"
+                            row_map[token] = cc
+                    if {"account", "balance", "currency"}.issubset(set(row_map.keys())):
+                        header_row = rr
+                        header_map = row_map
+                        break
+                if not header_row:
+                    raise RuntimeError("Master Journal validation failed: Account Balances headers missing.")
+                expected_accounts = {
+                    str(b.get("account_label") or b.get("account") or "").strip().upper()
+                    for b in balances if isinstance(b, dict) and str(b.get("account_label") or b.get("account") or "").strip()
+                }
+                matched_numeric_accounts: Set[str] = set()
+                for rr in range(header_row + 1, min(dash.max_row + 1, header_row + 80)):
+                    account = str(dash.cell(rr, header_map["account"]).value or "").strip().upper()
+                    if not account or account not in expected_accounts:
+                        continue
+                    bal = dash.cell(rr, header_map["balance"]).value
+                    if isinstance(bal, (int, float)):
+                        matched_numeric_accounts.add(account)
+                missing_accounts = sorted(expected_accounts.difference(matched_numeric_accounts))
+                if missing_accounts:
+                    raise RuntimeError(
+                        "Master Journal validation failed: Account Balances missing numeric values for expected accounts: "
+                        + ", ".join(missing_accounts)
+                    )
+            leaders = ((stats.get("groups") or {}).get("leaders") or {})
+            expected_leaders = {
+                "overall most wins": "most_wins_instrument",
+                "overall most losses": "most_losses_instrument",
+                "fx most wins": "fx_most_wins_instrument",
+                "fx most losses": "fx_most_losses_instrument",
+                "crypto most wins": "crypto_most_wins_instrument",
+                "crypto most losses": "crypto_most_losses_instrument",
             }
-            update_result = update_master_journal_workbook_data_only(path, snapshot)
-            refreshed = read_master_journal_source(path)
-            refreshed_items = [r for r in (refreshed.get("items") or []) if isinstance(r, dict)]
-            refreshed_trade_rows = [r for r in refreshed_items if _row_type(r) == "trade"]
-            if parsed_trade_rows and not refreshed_trade_rows:
-                raise RuntimeError("Master Journal derived refresh failed validation: trade rows were lost.")
-        else:
-            raise FileNotFoundError(f"Master Journal workbook not found for metric refresh: {path}")
+            expected_payloads = {
+                label: (leaders.get(key) or {}) for label, key in expected_leaders.items()
+                if isinstance(leaders.get(key), dict) and any((leaders.get(key) or {}).get(k) is not None for k in ("symbol", "wins", "losses", "trades", "total_trades"))
+            }
+            if expected_payloads:
+                section_anchor = None
+                for rr in range(1, dash.max_row + 1):
+                    for cc in range(1, dash.max_column + 1):
+                        if str(dash.cell(rr, cc).value or "").strip().lower() == "instrument leaders":
+                            section_anchor = (rr, cc)
+                            break
+                    if section_anchor:
+                        break
+                if not section_anchor:
+                    raise RuntimeError("Master Journal validation failed: Instrument leaders section anchor missing.")
+                header_row = None
+                header_map: Dict[str, int] = {}
+                for rr in range(section_anchor[0] + 1, min(dash.max_row + 1, section_anchor[0] + 12)):
+                    row_map: Dict[str, int] = {}
+                    for cc in range(section_anchor[1], min(dash.max_column + 1, section_anchor[1] + 8)):
+                        token = str(dash.cell(rr, cc).value or "").strip().lower()
+                        if token in {"metric", "symbol", "wins", "losses", "trades"}:
+                            row_map[token] = cc
+                    if {"metric", "symbol", "wins", "losses", "trades"}.issubset(set(row_map.keys())):
+                        header_row = rr
+                        header_map = row_map
+                        break
+                if not header_row:
+                    raise RuntimeError("Master Journal validation failed: Instrument leaders headers missing.")
+                metric_rows: Dict[str, int] = {}
+                for rr in range(header_row + 1, min(dash.max_row + 1, header_row + 24)):
+                    label = str(dash.cell(rr, header_map["metric"]).value or "").strip().lower()
+                    if label:
+                        metric_rows[label] = rr
+                for metric_label in expected_payloads:
+                    row_idx = metric_rows.get(metric_label)
+                    if not row_idx:
+                        raise RuntimeError(f"Master Journal validation failed: Instrument leaders row missing for '{metric_label}'.")
+                    symbol = str(dash.cell(row_idx, header_map["symbol"]).value or "").strip()
+                    trades_num = _safe_float(dash.cell(row_idx, header_map["trades"]).value)
+                    if not symbol or symbol == "—" or trades_num is None:
+                        raise RuntimeError("Master Journal validation failed: Instrument leaders section is blank despite leader stats.")
+        finally:
+            wb.close()
+
+        os.replace(tmp, path)
         if not path.exists() or path.stat().st_size <= 0:
             raise RuntimeError("Master Journal.xlsx was not created.")
         size = path.stat().st_size
@@ -23756,9 +23928,13 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
             'master_journal_exists': True,
             'master_journal_size_bytes': int(size),
             'master_journal_updated_at': _utc_now_iso(),
-            'parsed_trade_rows': len(parsed_trade_rows),
-            'master_journal_metric_refresh': update_result,
-            'master_journal_metric_refresh_diagnostics': (update_result or {}).get('diagnostics') if isinstance(update_result, dict) else {},
+            'source_trade_rows': len(source_trade_rows),
+            'source_rows_total': len(source_items),
+            'master_journal_diagnostics': {
+                'source_rows_total': len(source_items),
+                'source_trade_rows': len(source_trade_rows),
+                'source_balances': len(snapshot.get('balances') or []),
+            },
         }
         payload.update(_sync_journal_excel_files_to_github(path))
         return payload
