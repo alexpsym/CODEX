@@ -65,6 +65,13 @@ def test_master_journal_import_reads_master_journal_not_legacy_workbooks(tmp_pat
     result = master_service._import_trading_journal_from_sources()
     assert result["ok"] is True
     assert [r["row_type"] for r in captured["rows"]] == ["trade", "cashflow"]
+    assert (master_service.TRADING_JOURNAL_IMPORT_DIAGNOSTICS or {}).get("source_mode") == "master_journal"
+
+
+def test_no_undefined_save_journal_diagnostics_helper_reference():
+    src = (ROOT / 'render' / 'master_service.py').read_text(encoding='utf-8')
+    assert "_save_journal_diagnostics(" not in src
+    assert "_set_trading_journal_diagnostics(" in src
 
 
 @pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')

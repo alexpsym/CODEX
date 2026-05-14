@@ -6100,7 +6100,7 @@ def _import_trading_journal_from_sources(
         diagnostics["source_mode"] = "master_journal"
         diagnostics["local_dir"] = str(TRADING_JOURNAL_LOCAL_DIR)
         diagnostics["local_workbooks_seen"] = 1 if _master_journal_path().exists() else 0
-        _save_journal_diagnostics(diagnostics)
+        _set_trading_journal_diagnostics(diagnostics)
         post = _enforce_single_master_journal_xlsx(TRADING_JOURNAL_LOCAL_DIR, cleanup_known_generated=True)
         if not post.get("ok"):
             msg = "Unknown extra Excel files in journal directory after import: " + ", ".join(post.get("unknown_extra_excel_files") or [])
