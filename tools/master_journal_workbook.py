@@ -532,16 +532,45 @@ def _snapshot_invariants(wb) -> Dict[str, Any]:
         out["dash_col_widths"] = {k: v.width for k, v in dash.column_dimensions.items()}
         out["dash_cf"] = [str(k.sqref) for k in dash.conditional_formatting._cf_rules.keys()]
         out["dash_freeze"] = dash.freeze_panes
-    for name, key in (("All Trades", "all_trades_filter"), ("Instrument Averages", "instrument_filter")):
+    for name, prefix in (("All Trades", "all_trades"), ("Instrument Averages", "instrument")):
         ws = wb[name] if name in wb.sheetnames else None
-        out[key] = (ws.auto_filter.ref if ws and ws.auto_filter else None)
+        ref = ws.auto_filter.ref if ws and ws.auto_filter else None
+        out[f"{prefix}_filter_present"] = bool(ref)
+        if ref:
+            min_col, min_row, _, _ = range_boundaries(ref)
+            out[f"{prefix}_filter_min_col"] = min_col
+            out[f"{prefix}_filter_min_row"] = min_row
+        else:
+            out[f"{prefix}_filter_min_col"] = None
+            out[f"{prefix}_filter_min_row"] = None
     return out
 
 
 def _assert_invariants_unchanged(before: Dict[str, Any], after: Dict[str, Any]) -> None:
-    for key in ("sheetnames","dash_merged","dash_row_heights","dash_col_widths","dash_cf","dash_freeze","all_trades_filter","instrument_filter"):
+    for key in ("sheetnames","dash_merged","dash_row_heights","dash_col_widths","dash_cf","dash_freeze"):
         if before.get(key) != after.get(key):
             raise RuntimeError(f"Workbook structural invariant changed: {key}")
+
+
+def _assert_filter_covers_data(ws, *, sheet_name: str, header_row: int = 1, required_headers: List[str] | None = None) -> None:
+    ref = ws.auto_filter.ref if ws.auto_filter else None
+    if not ref:
+        raise RuntimeError(f"{sheet_name} filter missing.")
+    min_col, min_row, max_col, max_row = range_boundaries(ref)
+    if min_row != header_row or min_col != 1:
+        raise RuntimeError(f"{sheet_name} filter starts at invalid range {ref}.")
+    headers = _header_map(ws, header_row=header_row)
+    required_headers = required_headers or []
+    for h in required_headers:
+        col = headers.get(h)
+        if col and col > max_col:
+            raise RuntimeError(f"{sheet_name} filter does not include required column '{h}'.")
+    last_row = header_row
+    for r in range(header_row + 1, ws.max_row + 1):
+        if any(ws.cell(r, c).value not in (None, "") for c in range(1, ws.max_column + 1)):
+            last_row = r
+    if max_row < last_row:
+        raise RuntimeError(f"{sheet_name} filter excludes populated rows.")
 
 
 def _find_anchor_sections(ws, anchors: List[str], optional: List[str] | None = None) -> Dict[str, Dict[str, int]]:
@@ -898,10 +927,9 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                         dc.protection = copy(sc.protection)
                         dc.comment = copy(sc.comment) if sc.comment else None
                         dc.hyperlink = copy(sc.hyperlink) if sc.hyperlink else None
-                if dst_ws.auto_filter and dst_ws.auto_filter.ref:
-                    last_row = max(start_row - 1, src_ws.max_row)
-                    last_col_letter = get_column_letter(max_col)
-                    dst_ws.auto_filter.ref = f"A1:{last_col_letter}{max(1,last_row)}"
+                last_row = max(start_row - 1, src_ws.max_row)
+                last_col_letter = get_column_letter(max_col)
+                dst_ws.auto_filter.ref = f"A1:{last_col_letter}{max(1,last_row)}"
 
             if "All Trades" in wb.sheetnames and "All Trades" in gen.sheetnames:
                 _copy_data_rows(gen["All Trades"], wb["All Trades"], 2, force_all_columns=True)
@@ -912,6 +940,9 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
         finally:
             gen.close()
             tmp.unlink(missing_ok=True)
+
+        _assert_filter_covers_data(wb["All Trades"], sheet_name="All Trades", header_row=1, required_headers=["Open Time", "Close Time", "Row ID"])
+        _assert_filter_covers_data(wb["Instrument Averages"], sheet_name="Instrument Averages", header_row=1, required_headers=["Symbol", "Trades"])
 
         after = _snapshot_invariants(wb)
         _assert_invariants_unchanged(before, after)

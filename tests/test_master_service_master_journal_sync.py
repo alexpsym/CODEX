@@ -180,6 +180,8 @@ def test_existing_master_journal_preserves_restored_layout_and_populates_stats(t
     dash["A1"] = "Account Balances"
     dash["A11"] = "Instrument leaders"
     dash["G1"] = "Overall"; dash["J1"] = "FX"; dash["M1"] = "Crypto"
+    wb["All Trades"].auto_filter.ref = "A1:Z1511"
+    wb["Instrument Averages"].auto_filter.ref = "A1:X126"
     wb.save(mj); wb.close()
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
     out = master_service._sync_master_journal_workbook()
@@ -209,6 +211,33 @@ def test_existing_master_journal_preserves_restored_layout_and_populates_stats(t
     wb2.close()
     kept = [p.name for p in tmp_path.glob("*.xls*") if not p.name.startswith("~$") and not p.name.endswith(".tmp.xlsx") and not p.name.endswith(".pending.xlsx")]
     assert kept == ["Master Journal.xlsx"]
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_existing_master_journal_all_trades_filter_range_can_update_without_invariant_failure(tmp_path, monkeypatch):
+    from tools.master_journal_workbook import build_master_journal_workbook
+    from openpyxl import load_workbook
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    mj = tmp_path / "Master Journal.xlsx"
+    snap = {'items':[{'id':'t1','row_type':'trade','account':'A','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1,'result_pct':1.0},
+                     {'id':'t2','row_type':'trade','account':'A','symbol':'BTCUSDT','side':'SELL','open_time':'2026-01-02','close_time':'2026-01-02','net_profit':-1,'result_pct':-1.0},
+                     {'id':'c1','row_type':'cashflow','account':'A','symbol':'CASHFLOW','side':'DEPOSIT','open_time':'2026-01-03','close_time':'2026-01-03','net_profit':100}],
+            'stats':{'totals':{},'groups':{'leaders':{}},'by_instrument':[{'symbol':'EURUSD','trades':1}]},'balances':[],'diagnostics':{}}
+    build_master_journal_workbook(snap, mj)
+    wb = load_workbook(mj); wb["All Trades"].auto_filter.ref = "A1:Z1511"; wb.save(mj); wb.close()
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
+    result = master_service._sync_master_journal_workbook()
+    assert result["master_journal_ok"] is True
+    out = load_workbook(mj, data_only=True)
+    at = out["All Trades"]; ref = at.auto_filter.ref
+    assert ref and ref.startswith("A1:")
+    headers=[str(c.value or "") for c in at[1]]
+    rid_col = headers.index("Row ID")+1
+    from openpyxl.utils import get_column_letter
+    assert get_column_letter(rid_col) in ref
+    assert str(at.max_row) in ref
+    out.close()
 
 
 @pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
