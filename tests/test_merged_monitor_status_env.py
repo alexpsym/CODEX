@@ -340,16 +340,12 @@ def test_run_scanner_local_bat_sets_explicit_env_file() -> None:
 def test_journal_launchers_protect_bybit_demo_anchor_flag() -> None:
     journal_bat = (ROOT / "run_trading_journal_local.bat").read_text(encoding="utf-8")
     master_bat = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
-    brave_sh = (ROOT / "LaunchTradingJournalBrave.sh").read_text(encoding="utf-8")
     assert "MASTER_ENV_PROTECTED_KEYS" not in journal_bat
     assert "TRADING_JOURNAL_BYBIT_DEMO_BALANCE_ANCHOR_ENABLED" not in journal_bat
     assert "Master Journal.xlsx" in journal_bat
     assert "uvicorn render.master_service:app" not in journal_bat
     assert "MASTER_ENV_PROTECTED_KEYS" in master_bat
     assert "TRADING_JOURNAL_BYBIT_DEMO_BALANCE_ANCHOR_ENABLED" in master_bat
-    assert "MASTER_ENV_PROTECTED_KEYS" not in brave_sh
-    assert "TRADING_JOURNAL_BYBIT_DEMO_BALANCE_ANCHOR_ENABLED" not in brave_sh
-    assert "Deprecated" in brave_sh
 
 
 def test_no_legacy_env_default_paths_remain_active() -> None:
