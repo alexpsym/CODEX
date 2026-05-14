@@ -301,7 +301,7 @@ def test_metric_refresh_same_row_sections_and_non_a_balance_block(tmp_path: Path
     ws['B4'].number_format='0.00%'; ws['E4'].number_format='0.00%'; ws['H4'].number_format='0.00%'
     wb.save(p)
     snap={'stats':{'totals':{},'groups':{'by_market':{'overall':{'trades':1,'avg_r_multiple':2.0,'win_rate_pct':50.0,'min_result_pct':-1.25,'metric_sources':{'min_result_pct':{'symbol':'EURUSD','date':'2026-01-01'}}},'fx':{'trades':2,'avg_r_multiple':3.0,'win_rate_pct':25.0,'min_result_pct':-2.0,'metric_sources':{'min_result_pct':{'symbol':'GBPUSD','date':'2026-01-02'}}},'crypto':{'trades':3,'avg_r_multiple':4.0,'win_rate_pct':75.0,'min_result_pct':-3.0,'metric_sources':{'min_result_pct':{'symbol':'BTCUSDT','date':'2026-01-03'}}}},'risk_expectancy':{},'leaders':{}}},'balances':[{'account_label':'Bybit Live','balance':12.5,'currency':'USDT','as_of':'2026-01-04'}]}
-    update_master_journal_workbook_data_only(p,snap)
+    res = update_master_journal_workbook_data_only(p,snap); Path(res["candidate_path"]).replace(p)
     out=load_workbook(p)
     d=out['Dashboard']
     assert d['B2'].value==1 and d['E2'].value==2 and d['H2'].value==3
@@ -321,7 +321,7 @@ def test_embedded_fx_crypto_duration_without_duration_section(tmp_path: Path):
     ws['T2']='Account'; ws['U2']='Balance'; ws['V2']='Currency'; ws['T3']='Bybit Live'
     wb.save(p)
     snap={'stats':{'totals':{},'groups':{'by_market':{'overall':{},'fx':{},'crypto':{}},'risk_expectancy':{},'leaders':{},'duration':{'fx_shortest_seconds':10,'fx_longest_seconds':20,'crypto_shortest_seconds':30,'crypto_longest_seconds':40,'metric_sources':{'fx_shortest_seconds':{'symbol':'EURUSD','date':'2026-01-01'},'fx_longest_seconds':{'symbol':'GBPUSD','date':'2026-01-02'},'crypto_shortest_seconds':{'symbol':'BTCUSDT','date':'2026-01-03'},'crypto_longest_seconds':{'symbol':'ETHUSDT','date':'2026-01-04'}}}}},'balances':[{'account_label':'Bybit Live','balance':1,'currency':'USDT'}]}
-    update_master_journal_workbook_data_only(p,snap)
+    res = update_master_journal_workbook_data_only(p,snap); Path(res["candidate_path"]).replace(p)
     out=load_workbook(p)['Dashboard']
     assert 'second' in str(out['E2'].value) and 'second' in str(out['E4'].value)
     assert 'second' in str(out['H2'].value) and 'second' in str(out['H4'].value)
@@ -368,7 +368,7 @@ def test_instrument_leaders_updates_full_row_and_reports_missing(tmp_path: Path)
         'crypto_most_wins_instrument':{'symbol':'BTCUSDT','wins':6,'losses':2,'trades':8},
         'crypto_most_losses_instrument':{'symbol':'ETHUSDT','wins':2,'losses':6,'trades':8},
     }}},'balances':[{'account_label':'Bybit Live','balance':2,'currency':'USDT'}]}
-    result=update_master_journal_workbook_data_only(p,snap)
+    result=update_master_journal_workbook_data_only(p,snap); Path(result["candidate_path"]).replace(p)
     out=load_workbook(p)['Dashboard']
     assert out['N3'].value=='EURUSD' and out['O3'].value==4 and out['P3'].value==1 and out['Q3'].value==5
     assert out['N4'].value=='GBPUSD' and out['O4'].value==1 and out['P4'].value==4 and out['Q4'].value==5

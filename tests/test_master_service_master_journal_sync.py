@@ -26,6 +26,192 @@ def test_master_service_sync_test_bootstrap():
 
 
 @pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_master_journal_mode_accepts_source_mode(monkeypatch):
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
+    assert master_service._trading_journal_source_mode() == 'master_journal'
+    assert master_service._trading_journal_uses_dropbox_journal_import() is False
+    assert master_service._trading_journal_uses_local_only_source() is False
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_master_journal_single_file_enforcement(tmp_path):
+    journal = tmp_path
+    (journal / "Master Journal.xlsx").write_bytes(b"x")
+    (journal / "account_cashflows.xlsx").write_bytes(b"x")
+    (journal / "Bybit Demo.xlsx").write_bytes(b"x")
+    res = master_service._enforce_single_master_journal_xlsx(journal, cleanup_known_generated=True)
+    assert res["ok"] is True
+    assert (journal / "Master Journal.xlsx").exists()
+    assert not (journal / "account_cashflows.xlsx").exists()
+    (journal / "unknown.xlsx").write_bytes(b"x")
+    res2 = master_service._enforce_single_master_journal_xlsx(journal, cleanup_known_generated=True)
+    assert res2["ok"] is False
+    assert "unknown.xlsx" in res2["unknown_extra_excel_files"]
+    assert (journal / "unknown.xlsx").exists()
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_master_journal_import_reads_master_journal_not_legacy_workbooks(tmp_path, monkeypatch):
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    (tmp_path / "Master Journal.xlsx").write_bytes(b"x")
+    monkeypatch.setattr(master_service, '_ensure_trading_journal_local_templates', lambda: (_ for _ in ()).throw(AssertionError("no templates")))
+    monkeypatch.setattr(master_service, '_list_local_trading_journal_workbooks', lambda: (_ for _ in ()).throw(AssertionError("no local scan")))
+    monkeypatch.setattr(master_service, '_import_trading_journal_from_dropbox_excel', lambda *a, **k: (_ for _ in ()).throw(AssertionError("no dropbox")))
+    payload = {"items": [{"id": "t1", "row_type": "trade"}, {"id": "c1", "row_type": "cashflow"}], "balances": []}
+    monkeypatch.setattr(master_service, 'read_master_journal_source', lambda _p: payload)
+    captured = {}
+    monkeypatch.setattr(master_service, '_set_trading_journal_rows', lambda rows: captured.setdefault("rows", rows))
+    result = master_service._import_trading_journal_from_sources()
+    assert result["ok"] is True
+    assert [r["row_type"] for r in captured["rows"]] == ["trade", "cashflow"]
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_master_journal_sync_does_not_delete_existing_workbook_on_validation_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    mj = tmp_path / "Master Journal.xlsx"
+    from tools.master_journal_workbook import build_master_journal_workbook
+    build_master_journal_workbook({'items': [], 'stats': {'totals': {}, 'groups': {}}, 'balances': []}, mj)
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: {'items': [{'id': 'r1', 'row_type': 'trade'}], 'stats': {'by_instrument': [{'symbol': 'EURUSD'}]}, 'balances': [], 'diagnostics': {}})
+    monkeypatch.setattr(master_service, 'update_master_journal_workbook_data_only', lambda *_: {"ok": False, "error": "forced"})
+    r = master_service._sync_master_journal_workbook()
+    assert r["master_journal_ok"] is False
+    assert mj.exists()
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_master_journal_source_fingerprint_mode_is_master_journal(monkeypatch):
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
+    fp = master_service._journal_source_fingerprint()
+    assert fp["source_mode"] == "master_journal"
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_manual_sync_skips_broker_refresh_in_master_journal_mode(tmp_path, monkeypatch):
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    from tools.master_journal_workbook import build_master_journal_workbook
+    build_master_journal_workbook({'items': [], 'stats': {'totals': {}, 'groups': {}}, 'balances': []}, tmp_path / "Master Journal.xlsx")
+    monkeypatch.setattr(master_service, '_run_bybit_closed_pnl_sync', lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not call")))
+    monkeypatch.setattr(master_service, '_recover_oanda_recent_fills', lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not call")))
+    monkeypatch.setattr(master_service, '_import_trading_journal_from_sources', lambda *a, **k: {"ok": True, "rows_imported": 0, "rows_by_asset_class": {}, "local_workbooks_seen": 1, "dropbox_workbooks_seen": 0})
+    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda: {"master_journal_ok": True})
+    asyncio.run(master_service._run_trading_journal_sync_job())
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_existing_master_journal_not_modified_on_validation_failure(tmp_path, monkeypatch):
+    from tools.master_journal_workbook import build_master_journal_workbook
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    mj = tmp_path / "Master Journal.xlsx"
+    snap = {'items':[{'id':'r1','row_type':'trade','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0,'result_pct':1.0}], 'stats':{'totals':{}, 'groups':{}, 'by_instrument':[{'symbol':'EURUSD','trades':1}]}, 'balances':[]}
+    build_master_journal_workbook(snap, mj)
+    before = mj.read_bytes()
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
+    monkeypatch.setattr(master_service, 'update_master_journal_workbook_data_only', lambda *_: {"ok": False, "error": "forced"})
+    out = master_service._sync_master_journal_workbook()
+    assert out["master_journal_ok"] is False
+    assert mj.read_bytes() == before
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_existing_master_journal_update_is_atomic_on_post_update_validation_failure(tmp_path, monkeypatch):
+    from tools.master_journal_workbook import build_master_journal_workbook
+    from openpyxl import load_workbook
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    mj = tmp_path / "Master Journal.xlsx"
+    snap = {'items':[{'id':'r1','row_type':'trade','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0,'result_pct':1.0}], 'stats':{'totals':{}, 'groups':{}, 'by_instrument':[{'symbol':'EURUSD','trades':1}]}, 'balances':[]}
+    build_master_journal_workbook(snap, mj)
+    wb = load_workbook(mj); wb["Dashboard"]["A1"] = "ORIGINAL_SENTINEL"; wb.save(mj); wb.close()
+    before = mj.read_bytes()
+    snap2 = dict(snap)
+    snap2["items"] = snap["items"] + [{'id':'new-row-should-not-survive','row_type':'trade','symbol':'BTCUSDT','side':'SELL','open_time':'2026-01-02','close_time':'2026-01-02','net_profit':2.0,'result_pct':2.0}]
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap2)
+    monkeypatch.setattr(master_service.os, "replace", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("forced replace fail")))
+    out = master_service._sync_master_journal_workbook()
+    assert out["master_journal_ok"] is False
+    assert mj.read_bytes() == before
+    live = load_workbook(mj, data_only=True)
+    vals = [str(c.value or "") for row in live["All Trades"].iter_rows(min_row=2, values_only=False) for c in row]
+    live.close()
+    assert "new-row-should-not-survive" not in "".join(vals)
+    assert not any(p.name.endswith(".update-candidate.tmp.xlsx") or p.name.endswith(".update.tmp.xlsx") for p in tmp_path.glob("*.xlsx"))
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_master_journal_requires_row_id_validation(tmp_path, monkeypatch):
+    from tools.master_journal_workbook import build_master_journal_workbook
+    from openpyxl import load_workbook
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    mj = tmp_path / "Master Journal.xlsx"
+    snap = {'items':[{'id':'r1','row_type':'trade','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0,'result_pct':1.0}], 'stats':{'totals':{}, 'groups':{}, 'by_instrument':[{'symbol':'EURUSD','trades':1}]}, 'balances':[]}
+    build_master_journal_workbook(snap, mj)
+    wb = load_workbook(mj); ws = wb["All Trades"]; headers=[c.value for c in ws[1]]; ws.cell(2, headers.index("Row ID")+1).value=None; wb.save(mj); wb.close()
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
+    out = master_service._sync_master_journal_workbook()
+    assert out["master_journal_ok"] is False
+    assert "Row ID metadata is required" in str(out.get("master_journal_error") or "")
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_existing_master_journal_preserves_restored_layout_and_populates_stats(tmp_path, monkeypatch):
+    from tools.master_journal_workbook import build_master_journal_workbook
+    from openpyxl import load_workbook
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    mj = tmp_path / "Master Journal.xlsx"
+    snap = {
+        'items': [
+            {'id':'t1','row_type':'trade','account':'A','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01 10:00:00','close_time':'2026-01-01 11:00:00','net_profit':10.0,'result_pct':1.2,'is_test_trade':False},
+            {'id':'t2','row_type':'trade','account':'A','symbol':'BTCUSDT','side':'SELL','open_time':'2026-01-02 10:00:00','close_time':'2026-01-02 11:00:00','net_profit':-5.0,'result_pct':-0.6,'is_test_trade':False},
+            {'id':'c1','row_type':'cashflow','account':'A','symbol':'CASHFLOW','side':'DEPOSIT','open_time':'2026-01-02 12:00:00','close_time':'2026-01-02 12:00:00','cashflow_amount':100.0,'cashflow_new_balance':1105.0,'currency':'USD','net_profit':100.0}
+        ],
+        'stats': {'totals': {}, 'groups': {'leaders': {}}, 'by_instrument':[{'symbol':'EURUSD','trades':1},{'symbol':'BTCUSDT','trades':1}]},
+        'balances': [{'account':'A','account_label':'A','balance':1105.0,'currency':'USD'}],
+        'diagnostics': {}
+    }
+    build_master_journal_workbook(snap, mj)
+    wb = load_workbook(mj)
+    dash = wb["Dashboard"]
+    dash["A1"] = "Account Balances"
+    dash["A11"] = "Instrument leaders"
+    dash["G1"] = "Overall"; dash["J1"] = "FX"; dash["M1"] = "Crypto"
+    wb.save(mj); wb.close()
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
+    out = master_service._sync_master_journal_workbook()
+    assert out["master_journal_ok"] is True
+    wb2 = load_workbook(mj, data_only=True)
+    dash2 = wb2["Dashboard"]
+    assert str(dash2["A1"].value) == "Account Balances"
+    assert str(dash2["A11"].value) == "Instrument leaders"
+    assert str(dash2["G1"].value) == "Overall" and str(dash2["J1"].value) == "FX" and str(dash2["M1"].value) == "Crypto"
+    at = wb2["All Trades"]; headers=[str(c.value or "") for c in at[1]]
+    rid_col = headers.index("Row ID")+1
+    ids={str(at.cell(r,rid_col).value or "") for r in range(2, at.max_row+1)}
+    assert {"t1","t2","c1"}.issubset(ids)
+    assert at.auto_filter and at.auto_filter.ref and f"{at.max_row}" in at.auto_filter.ref
+    ot_col = headers.index("Open Time")+1; ct_col = headers.index("Close Time")+1
+    assert at.cell(2, ot_col).number_format != "General"
+    assert at.cell(2, ct_col).number_format != "General"
+    inst = wb2["Instrument Averages"]
+    inst_headers=[str(c.value or "") for c in inst[1]]
+    s_col = inst_headers.index("Symbol")+1
+    t_col = inst_headers.index("Trades")+1
+    assert any(str(inst.cell(r,s_col).value or "").strip() and isinstance(inst.cell(r,t_col).value,(int,float)) for r in range(2, inst.max_row+1))
+    cal = wb2["P&L Calendar"]
+    assert any(isinstance(cal.cell(r,c).value,(int,float)) for r in range(3, cal.max_row+1) for c in range(2,13))
+    if "_Trade Meta" in wb2.sheetnames:
+        assert wb2["_Trade Meta"].sheet_state == "hidden"
+    wb2.close()
+    kept = [p.name for p in tmp_path.glob("*.xls*") if not p.name.startswith("~$") and not p.name.endswith(".tmp.xlsx") and not p.name.endswith(".pending.xlsx")]
+    assert kept == ["Master Journal.xlsx"]
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
 def test_sync_master_journal_permission_error(tmp_path, monkeypatch):
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
     monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: [])

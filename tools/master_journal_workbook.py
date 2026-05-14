@@ -12,6 +12,7 @@ from openpyxl.formatting.rule import CellIsRule
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries
 import calendar
+from copy import copy
 
 SHEET_ORDER=["Dashboard","All Trades","Instrument Averages","P&L Calendar"]
 EDITABLE_COLS=["Test","Setup","Timeframe","Breakeven","Notes"]
@@ -864,10 +865,59 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                     if _write_value_preserving_cell(dash, row, col_map["as_of"], as_of):
                         diagnostics["updated_cells"] += 1
 
+        tmp = path.with_suffix(".update.tmp.xlsx")
+        build_master_journal_workbook(snapshot, tmp)
+        gen = load_workbook(tmp, data_only=False)
+        try:
+            def _copy_data_rows(src_ws, dst_ws, start_row: int, *, force_all_columns: bool = False):
+                max_col = src_ws.max_column if force_all_columns else min(src_ws.max_column, dst_ws.max_column)
+                if force_all_columns and dst_ws.max_column < src_ws.max_column:
+                    for c in range(dst_ws.max_column + 1, src_ws.max_column + 1):
+                        src_letter = get_column_letter(c)
+                        dst_letter = get_column_letter(c)
+                        dst_ws.cell(1, c).value = src_ws.cell(1, c).value
+                        if dst_ws.column_dimensions[dst_letter].width in (None, 0):
+                            dst_ws.column_dimensions[dst_letter].width = src_ws.column_dimensions[src_letter].width
+                        dst_ws.column_dimensions[dst_letter].hidden = bool(src_ws.column_dimensions[src_letter].hidden)
+                for r in range(start_row, dst_ws.max_row + 1):
+                    for c in range(1, max_col + 1):
+                        dc = dst_ws.cell(r, c)
+                        dc.value = None
+                        dc.comment = None
+                        dc.hyperlink = None
+                for r in range(start_row, src_ws.max_row + 1):
+                    for c in range(1, max_col + 1):
+                        sc = src_ws.cell(r, c)
+                        dc = dst_ws.cell(r, c)
+                        dc.value = sc.value
+                        dc.number_format = sc.number_format
+                        dc.alignment = copy(sc.alignment)
+                        dc.font = copy(sc.font)
+                        dc.fill = copy(sc.fill)
+                        dc.border = copy(sc.border)
+                        dc.protection = copy(sc.protection)
+                        dc.comment = copy(sc.comment) if sc.comment else None
+                        dc.hyperlink = copy(sc.hyperlink) if sc.hyperlink else None
+                if dst_ws.auto_filter and dst_ws.auto_filter.ref:
+                    last_row = max(start_row - 1, src_ws.max_row)
+                    last_col_letter = get_column_letter(max_col)
+                    dst_ws.auto_filter.ref = f"A1:{last_col_letter}{max(1,last_row)}"
+
+            if "All Trades" in wb.sheetnames and "All Trades" in gen.sheetnames:
+                _copy_data_rows(gen["All Trades"], wb["All Trades"], 2, force_all_columns=True)
+            if "Instrument Averages" in wb.sheetnames and "Instrument Averages" in gen.sheetnames:
+                _copy_data_rows(gen["Instrument Averages"], wb["Instrument Averages"], 2)
+            if "P&L Calendar" in wb.sheetnames and "P&L Calendar" in gen.sheetnames:
+                _copy_data_rows(gen["P&L Calendar"], wb["P&L Calendar"], 3)
+        finally:
+            gen.close()
+            tmp.unlink(missing_ok=True)
+
         after = _snapshot_invariants(wb)
         _assert_invariants_unchanged(before, after)
-        wb.save(path)
-        return {"ok": True, "path": str(path), "diagnostics": diagnostics}
+        candidate = path.with_suffix(".update-candidate.tmp.xlsx")
+        wb.save(candidate)
+        return {"ok": True, "path": str(path), "candidate_path": str(candidate), "diagnostics": diagnostics}
     finally:
         wb.close()
 
