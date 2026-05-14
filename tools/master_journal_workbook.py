@@ -12,6 +12,7 @@ from openpyxl.formatting.rule import CellIsRule
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries
 import calendar
+from copy import copy
 
 SHEET_ORDER=["Dashboard","All Trades","Instrument Averages","P&L Calendar"]
 EDITABLE_COLS=["Test","Setup","Timeframe","Breakeven","Notes"]
@@ -531,16 +532,45 @@ def _snapshot_invariants(wb) -> Dict[str, Any]:
         out["dash_col_widths"] = {k: v.width for k, v in dash.column_dimensions.items()}
         out["dash_cf"] = [str(k.sqref) for k in dash.conditional_formatting._cf_rules.keys()]
         out["dash_freeze"] = dash.freeze_panes
-    for name, key in (("All Trades", "all_trades_filter"), ("Instrument Averages", "instrument_filter")):
+    for name, prefix in (("All Trades", "all_trades"), ("Instrument Averages", "instrument")):
         ws = wb[name] if name in wb.sheetnames else None
-        out[key] = (ws.auto_filter.ref if ws and ws.auto_filter else None)
+        ref = ws.auto_filter.ref if ws and ws.auto_filter else None
+        out[f"{prefix}_filter_present"] = bool(ref)
+        if ref:
+            min_col, min_row, _, _ = range_boundaries(ref)
+            out[f"{prefix}_filter_min_col"] = min_col
+            out[f"{prefix}_filter_min_row"] = min_row
+        else:
+            out[f"{prefix}_filter_min_col"] = None
+            out[f"{prefix}_filter_min_row"] = None
     return out
 
 
 def _assert_invariants_unchanged(before: Dict[str, Any], after: Dict[str, Any]) -> None:
-    for key in ("sheetnames","dash_merged","dash_row_heights","dash_col_widths","dash_cf","dash_freeze","all_trades_filter","instrument_filter"):
+    for key in ("sheetnames","dash_merged","dash_row_heights","dash_col_widths","dash_cf","dash_freeze"):
         if before.get(key) != after.get(key):
             raise RuntimeError(f"Workbook structural invariant changed: {key}")
+
+
+def _assert_filter_covers_data(ws, *, sheet_name: str, header_row: int = 1, required_headers: List[str] | None = None) -> None:
+    ref = ws.auto_filter.ref if ws.auto_filter else None
+    if not ref:
+        raise RuntimeError(f"{sheet_name} filter missing.")
+    min_col, min_row, max_col, max_row = range_boundaries(ref)
+    if min_row != header_row or min_col != 1:
+        raise RuntimeError(f"{sheet_name} filter starts at invalid range {ref}.")
+    headers = _header_map(ws, header_row=header_row)
+    required_headers = required_headers or []
+    for h in required_headers:
+        col = headers.get(h)
+        if col and col > max_col:
+            raise RuntimeError(f"{sheet_name} filter does not include required column '{h}'.")
+    last_row = header_row
+    for r in range(header_row + 1, ws.max_row + 1):
+        if any(ws.cell(r, c).value not in (None, "") for c in range(1, ws.max_column + 1)):
+            last_row = r
+    if max_row < last_row:
+        raise RuntimeError(f"{sheet_name} filter excludes populated rows.")
 
 
 def _find_anchor_sections(ws, anchors: List[str], optional: List[str] | None = None) -> Dict[str, Dict[str, int]]:
@@ -864,10 +894,61 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                     if _write_value_preserving_cell(dash, row, col_map["as_of"], as_of):
                         diagnostics["updated_cells"] += 1
 
+        tmp = path.with_suffix(".update.tmp.xlsx")
+        build_master_journal_workbook(snapshot, tmp)
+        gen = load_workbook(tmp, data_only=False)
+        try:
+            def _copy_data_rows(src_ws, dst_ws, start_row: int, *, force_all_columns: bool = False):
+                max_col = src_ws.max_column if force_all_columns else min(src_ws.max_column, dst_ws.max_column)
+                if force_all_columns and dst_ws.max_column < src_ws.max_column:
+                    for c in range(dst_ws.max_column + 1, src_ws.max_column + 1):
+                        src_letter = get_column_letter(c)
+                        dst_letter = get_column_letter(c)
+                        dst_ws.cell(1, c).value = src_ws.cell(1, c).value
+                        if dst_ws.column_dimensions[dst_letter].width in (None, 0):
+                            dst_ws.column_dimensions[dst_letter].width = src_ws.column_dimensions[src_letter].width
+                        dst_ws.column_dimensions[dst_letter].hidden = bool(src_ws.column_dimensions[src_letter].hidden)
+                for r in range(start_row, dst_ws.max_row + 1):
+                    for c in range(1, max_col + 1):
+                        dc = dst_ws.cell(r, c)
+                        dc.value = None
+                        dc.comment = None
+                        dc.hyperlink = None
+                for r in range(start_row, src_ws.max_row + 1):
+                    for c in range(1, max_col + 1):
+                        sc = src_ws.cell(r, c)
+                        dc = dst_ws.cell(r, c)
+                        dc.value = sc.value
+                        dc.number_format = sc.number_format
+                        dc.alignment = copy(sc.alignment)
+                        dc.font = copy(sc.font)
+                        dc.fill = copy(sc.fill)
+                        dc.border = copy(sc.border)
+                        dc.protection = copy(sc.protection)
+                        dc.comment = copy(sc.comment) if sc.comment else None
+                        dc.hyperlink = copy(sc.hyperlink) if sc.hyperlink else None
+                last_row = max(start_row - 1, src_ws.max_row)
+                last_col_letter = get_column_letter(max_col)
+                dst_ws.auto_filter.ref = f"A1:{last_col_letter}{max(1,last_row)}"
+
+            if "All Trades" in wb.sheetnames and "All Trades" in gen.sheetnames:
+                _copy_data_rows(gen["All Trades"], wb["All Trades"], 2, force_all_columns=True)
+            if "Instrument Averages" in wb.sheetnames and "Instrument Averages" in gen.sheetnames:
+                _copy_data_rows(gen["Instrument Averages"], wb["Instrument Averages"], 2)
+            if "P&L Calendar" in wb.sheetnames and "P&L Calendar" in gen.sheetnames:
+                _copy_data_rows(gen["P&L Calendar"], wb["P&L Calendar"], 3)
+        finally:
+            gen.close()
+            tmp.unlink(missing_ok=True)
+
+        _assert_filter_covers_data(wb["All Trades"], sheet_name="All Trades", header_row=1, required_headers=["Open Time", "Close Time", "Row ID"])
+        _assert_filter_covers_data(wb["Instrument Averages"], sheet_name="Instrument Averages", header_row=1, required_headers=["Symbol", "Trades"])
+
         after = _snapshot_invariants(wb)
         _assert_invariants_unchanged(before, after)
-        wb.save(path)
-        return {"ok": True, "path": str(path), "diagnostics": diagnostics}
+        candidate = path.with_suffix(".update-candidate.tmp.xlsx")
+        wb.save(candidate)
+        return {"ok": True, "path": str(path), "candidate_path": str(candidate), "diagnostics": diagnostics}
     finally:
         wb.close()
 
