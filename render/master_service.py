@@ -1358,7 +1358,7 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
     fingerprint = _journal_source_fingerprint()
     if not force and isinstance(existing, dict) and existing.get("source_fingerprints") == fingerprint:
         return existing
-    if _master_journal_authoritative_enabled():
+    if _master_journal_single_file_mode():
         source_payload = read_master_journal_source(_master_journal_path())
         items = [dict(r) for r in (source_payload.get("items") or []) if isinstance(r, dict)]
         trade_items = [r for r in items if _row_type(r) == "trade"]
@@ -8146,7 +8146,9 @@ async def _run_startup_recovery_import_if_needed() -> None:
         result=None,
     )
     oanda_recovery: Dict[str, object] = {}
-    if _trading_journal_excel_only_mode():
+    if _master_journal_single_file_mode():
+        pass
+    elif _trading_journal_excel_only_mode():
         _set_trading_journal_sync_state(message="Importing local journal workbooks…")
     elif not _trading_journal_local_excel_authoritative():
         for account in ("live", "demo"):
@@ -8550,7 +8552,9 @@ async def _autostart_scripts() -> None:
     if not DROPBOX_SYNC_ENABLED:
         _STARTUP_STATE_RESTORE_DONE.set()
     asyncio.create_task(_dropbox_restore_state_backup_on_startup())
-    if TRADING_JOURNAL_SOURCE == "local":
+    if _master_journal_single_file_mode():
+        pass
+    elif TRADING_JOURNAL_SOURCE == "local":
         try:
             _ensure_trading_journal_local_templates()
         except Exception as exc:
@@ -8559,17 +8563,17 @@ async def _autostart_scripts() -> None:
         asyncio.create_task(_ensure_trading_journal_dropbox_templates())
     asyncio.create_task(_log_outbound_traffic_summary())
     asyncio.create_task(_start_startup_recovery_import_after_restore())
-    if not _trading_journal_excel_only_mode():
+    if (not _trading_journal_excel_only_mode()) and (not _master_journal_single_file_mode()):
         asyncio.create_task(_schedule_daily_trade_history_sync())
     asyncio.create_task(_schedule_monthly_aud_revaluation_sync())
     asyncio.create_task(_poll_pending_webhook_invalidations())
-    if (not _trading_journal_excel_only_mode()) and ENABLE_BYBIT_DEMO_JOURNAL and ENABLE_BYBIT_DEMO_CLOSED_PNL_POLL:
+    if (not _trading_journal_excel_only_mode()) and (not _master_journal_single_file_mode()) and ENABLE_BYBIT_DEMO_JOURNAL and ENABLE_BYBIT_DEMO_CLOSED_PNL_POLL:
         asyncio.create_task(_start_bybit_demo_closed_pnl_poll_after_restore())
     if not ENABLE_BYBIT_DEMO_JOURNAL:
         _purge_bybit_demo_journal_state()
-    if (not _trading_journal_excel_only_mode()) and os.getenv("ENABLE_BYBIT_FILL_POLL", "0") == "1":
+    if (not _trading_journal_excel_only_mode()) and (not _master_journal_single_file_mode()) and os.getenv("ENABLE_BYBIT_FILL_POLL", "0") == "1":
         asyncio.create_task(_poll_bybit_fills())
-    if os.getenv("ENABLE_OANDA_FILL_POLL", "0") == "1":
+    if (not _master_journal_single_file_mode()) and os.getenv("ENABLE_OANDA_FILL_POLL", "0") == "1":
         asyncio.create_task(_start_oanda_fill_poll_after_delay())
     _force_fxweekend_enabled_on_startup()
     _start_manual_save_github_sync_watcher_if_needed()

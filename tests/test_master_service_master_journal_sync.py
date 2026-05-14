@@ -241,6 +241,40 @@ def test_existing_master_journal_all_trades_filter_range_can_update_without_inva
 
 
 @pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_startup_recovery_skips_broker_refresh_in_master_journal_mode(monkeypatch):
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
+    monkeypatch.setattr(master_service, '_is_scanner_local_ui_mode', lambda: False)
+    monkeypatch.setattr(master_service, '_import_trading_journal_from_sources', lambda: {"ok": True})
+    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda: {"master_journal_ok": True})
+    monkeypatch.setattr(master_service, '_recover_oanda_recent_fills', lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("should not call")))
+    monkeypatch.setattr(master_service, '_run_bybit_closed_pnl_sync', lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("should not call")))
+    asyncio.run(master_service._run_startup_recovery_import_if_needed())
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_autostart_skips_fill_polls_in_master_journal_mode(monkeypatch):
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
+    monkeypatch.setenv('TRADING_JOURNAL_MASTER_JOURNAL_AUTHORITATIVE', '1')
+    monkeypatch.setenv('ENABLE_BYBIT_FILL_POLL', '1')
+    monkeypatch.setenv('ENABLE_OANDA_FILL_POLL', '1')
+    monkeypatch.setattr(master_service, '_dropbox_restore_state_backup_on_startup', lambda: asyncio.sleep(0))
+    monkeypatch.setattr(master_service, '_start_startup_recovery_import_after_restore', lambda: asyncio.sleep(0))
+    monkeypatch.setattr(master_service, '_schedule_monthly_aud_revaluation_sync', lambda: asyncio.sleep(0))
+    monkeypatch.setattr(master_service, '_poll_pending_webhook_invalidations', lambda: asyncio.sleep(0))
+    monkeypatch.setattr(master_service, '_log_outbound_traffic_summary', lambda: asyncio.sleep(0))
+    scheduled = []
+    def _fake_create_task(coro):
+        scheduled.append(getattr(getattr(coro, "cr_code", None), "co_name", ""))
+        class _Dummy:
+            def cancel(self): ...
+        return _Dummy()
+    monkeypatch.setattr(master_service.asyncio, 'create_task', _fake_create_task)
+    asyncio.run(master_service._autostart_scripts())
+    assert '_poll_bybit_fills' not in scheduled
+    assert '_start_oanda_fill_poll_after_delay' not in scheduled
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
 def test_sync_master_journal_permission_error(tmp_path, monkeypatch):
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
     monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: [])
