@@ -69,7 +69,7 @@ from shared.symbol_resolution import (
 from shared.atomic_json import write_json_file
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, stable_row_id, SHEET_ORDER
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, stable_row_id, SHEET_ORDER
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -759,7 +759,11 @@ def _sync_state_snapshot() -> Dict[str, object]:
 
 def _trading_journal_source_mode() -> str:
     mode = str(TRADING_JOURNAL_SOURCE or "").strip().lower()
-    return mode if mode in {"dropbox", "local", "both", "auto"} else "both"
+    return mode if mode in {"dropbox", "local", "both", "auto", "master_journal"} else "both"
+
+
+def _master_journal_single_file_mode() -> bool:
+    return _master_journal_authoritative_enabled() or _trading_journal_source_mode() == "master_journal"
 
 
 def _trading_journal_uses_dropbox_journal_import() -> bool:
@@ -778,6 +782,8 @@ def _trading_journal_excel_only_mode() -> bool:
 
 
 def _trading_journal_broker_refresh_enabled() -> bool:
+    if _master_journal_single_file_mode():
+        return False
     if _trading_journal_excel_only_mode():
         return TRADING_JOURNAL_BROKER_REFRESH_ENABLED
     return True
@@ -1162,8 +1168,45 @@ def _master_journal_authoritative_enabled() -> bool:
     explicit = str(os.getenv("TRADING_JOURNAL_MASTER_JOURNAL_AUTHORITATIVE", "0") or "0").strip().lower() in {"1","true","yes","on"}
     return source == "master_journal" or explicit
 
+
+def _enforce_single_master_journal_xlsx(journal_dir: Path, *, cleanup_known_generated: bool) -> dict:
+    known_generated = {
+        "account_cashflows.xlsx",
+        "bybit demo.xlsx",
+        "bybit live.xlsx",
+        "oanda demo.xlsx",
+        "oanda live.xlsx",
+    }
+    found: List[Path] = []
+    removed: List[str] = []
+    unknown: List[str] = []
+    for pattern in ("*.xlsx", "*.xlsm", "*.xls"):
+        for p in sorted(journal_dir.glob(pattern)):
+            name = p.name
+            lname = name.lower()
+            if lname.startswith("~$") or lname.endswith(".tmp.xlsx") or lname.endswith(".pending.xlsx"):
+                continue
+            found.append(p)
+    for p in found:
+        if p.name == "Master Journal.xlsx":
+            continue
+        if p.name.lower() in known_generated and cleanup_known_generated:
+            try:
+                p.unlink(missing_ok=True)
+                removed.append(p.name)
+                continue
+            except Exception:
+                pass
+        unknown.append(p.name)
+    return {
+        "ok": len(unknown) == 0,
+        "journal_dir": str(journal_dir),
+        "removed_known_generated": removed,
+        "unknown_extra_excel_files": sorted(unknown),
+    }
+
 def _journal_source_fingerprint() -> dict:
-    mode = TRADING_JOURNAL_SOURCE if TRADING_JOURNAL_SOURCE in {"dropbox", "local", "both", "auto"} else "both"
+    mode = TRADING_JOURNAL_SOURCE if TRADING_JOURNAL_SOURCE in {"dropbox", "local", "both", "auto", "master_journal"} else "both"
     source_files: List[Dict[str, object]] = []
     authoritative = _master_journal_authoritative_enabled()
     if authoritative:
@@ -1315,7 +1358,7 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
     fingerprint = _journal_source_fingerprint()
     if not force and isinstance(existing, dict) and existing.get("source_fingerprints") == fingerprint:
         return existing
-    if _master_journal_authoritative_enabled():
+    if _master_journal_single_file_mode():
         source_payload = read_master_journal_source(_master_journal_path())
         items = [dict(r) for r in (source_payload.get("items") or []) if isinstance(r, dict)]
         trade_items = [r for r in items if _row_type(r) == "trade"]
@@ -4850,7 +4893,7 @@ def _write_excel_atomic(path: Path, sheet_name: str, frame: pd.DataFrame) -> Non
         os.replace(tmp, path)
     except Exception:
         try:
-            if tmp.exists():
+            if tmp != path and tmp.exists():
                 tmp.unlink()
         except Exception:
             pass
@@ -6016,13 +6059,14 @@ def _import_trading_journal_from_sources(
     started_at = _utc_now_iso()
     source_mode = _trading_journal_source_mode()
     local_authoritative = _trading_journal_local_excel_authoritative()
+    single_file_mode = _master_journal_single_file_mode()
     include_dropbox = (source_mode in {"dropbox", "both", "auto"}) and not local_authoritative
     include_local = source_mode in {"local", "both", "auto"}
     local_enabled = _local_journal_import_enabled()
     template_result: Dict[str, object] = {"errors": []}
     warnings: List[str] = []
 
-    if include_local and local_enabled and (source_mode == "local" or local_authoritative):
+    if include_local and local_enabled and (source_mode == "local" or local_authoritative) and not single_file_mode:
         template_result = _ensure_trading_journal_local_templates()
         for err in template_result.get("errors") or []:
             warnings.append(str(err))
@@ -6045,6 +6089,24 @@ def _import_trading_journal_from_sources(
     bybit_demo_workbook_cleared = False
     bybit_demo_rows_purged = 0
 
+    if single_file_mode:
+        pre = _enforce_single_master_journal_xlsx(TRADING_JOURNAL_LOCAL_DIR, cleanup_known_generated=True)
+        if not pre.get("ok"):
+            msg = "Unknown extra Excel files in journal directory: " + ", ".join(pre.get("unknown_extra_excel_files") or [])
+            return {"ok": False, "source_mode": "master_journal", "source": "master_journal", "errors": [{"path": str(TRADING_JOURNAL_LOCAL_DIR), "error": msg}], "warnings": warnings, "started_at": started_at, "finished_at": _utc_now_iso()}
+        source_payload = read_master_journal_source(_master_journal_path())
+        rows = [r for r in (source_payload.get("items") or []) if isinstance(r, dict)]
+        _set_trading_journal_rows(rows)
+        diagnostics["source_mode"] = "master_journal"
+        diagnostics["local_dir"] = str(TRADING_JOURNAL_LOCAL_DIR)
+        diagnostics["local_workbooks_seen"] = 1 if _master_journal_path().exists() else 0
+        _save_journal_diagnostics(diagnostics)
+        post = _enforce_single_master_journal_xlsx(TRADING_JOURNAL_LOCAL_DIR, cleanup_known_generated=True)
+        if not post.get("ok"):
+            msg = "Unknown extra Excel files in journal directory after import: " + ", ".join(post.get("unknown_extra_excel_files") or [])
+            return {"ok": False, "source_mode": "master_journal", "source": "master_journal", "errors": [{"path": str(TRADING_JOURNAL_LOCAL_DIR), "error": msg}], "warnings": warnings, "started_at": started_at, "finished_at": _utc_now_iso()}
+        return {"ok": True, "source_mode": "master_journal", "source": "master_journal", "rows_imported": len(rows), "balances_found": len(source_payload.get("balances") or []), "errors": [], "warnings": warnings, "started_at": started_at, "finished_at": _utc_now_iso(), "diagnostics": diagnostics}
+
     if include_dropbox:
         try:
             dropbox_result = _import_trading_journal_from_dropbox_excel(progress_cb=progress_cb)
@@ -6065,7 +6127,7 @@ def _import_trading_journal_from_sources(
         except Exception as exc:
             errors.append({"file": "", "path": "dropbox", "error": str(exc)})
 
-    local_files = _list_local_trading_journal_workbooks() if include_local else []
+    local_files = _list_local_trading_journal_workbooks() if (include_local and not single_file_mode) else []
     local_oanda_csvs = _list_local_oanda_history_exports() if include_local else []
     for csv_path in local_oanda_csvs:
         if csv_path not in local_files:
@@ -8084,7 +8146,9 @@ async def _run_startup_recovery_import_if_needed() -> None:
         result=None,
     )
     oanda_recovery: Dict[str, object] = {}
-    if _trading_journal_excel_only_mode():
+    if _master_journal_single_file_mode():
+        pass
+    elif _trading_journal_excel_only_mode():
         _set_trading_journal_sync_state(message="Importing local journal workbooks…")
     elif not _trading_journal_local_excel_authoritative():
         for account in ("live", "demo"):
@@ -8265,24 +8329,25 @@ async def _run_daily_trade_history_sync(*, reason: str) -> Dict[str, object]:
             last_error=None,
         )
 
-        if not _trading_journal_local_excel_authoritative():
+        if not _trading_journal_local_excel_authoritative() and not _master_journal_single_file_mode():
             for account in ("live", "demo"):
                 try:
                     oanda_result[account] = await _recover_oanda_recent_fills(account)
                 except Exception as exc:
                     errors.append(f"OANDA {account} recovery failed: {exc}")
                     oanda_result[account] = {"ok": False, "error": str(exc)}
-            if ENABLE_BYBIT_DEMO_JOURNAL:
+            if ENABLE_BYBIT_DEMO_JOURNAL and not _master_journal_single_file_mode():
                 try:
                     bybit_result["demo"] = await _run_bybit_closed_pnl_sync(account_mode="demo", reason=reason)
                 except Exception as exc:
                     errors.append(f"Bybit demo sync failed: {exc}")
                     bybit_result["demo"] = {"ok": False, "error": str(exc)}
-            try:
-                bybit_result["live"] = await _run_bybit_closed_pnl_sync(account_mode="live", reason=reason)
-            except Exception as exc:
-                errors.append(f"Bybit live sync failed: {exc}")
-                bybit_result["live"] = {"ok": False, "error": str(exc)}
+            if not _master_journal_single_file_mode():
+                try:
+                    bybit_result["live"] = await _run_bybit_closed_pnl_sync(account_mode="live", reason=reason)
+                except Exception as exc:
+                    errors.append(f"Bybit live sync failed: {exc}")
+                    bybit_result["live"] = {"ok": False, "error": str(exc)}
 
         try:
             import_result = await asyncio.to_thread(_import_trading_journal_from_sources)
@@ -8487,7 +8552,9 @@ async def _autostart_scripts() -> None:
     if not DROPBOX_SYNC_ENABLED:
         _STARTUP_STATE_RESTORE_DONE.set()
     asyncio.create_task(_dropbox_restore_state_backup_on_startup())
-    if TRADING_JOURNAL_SOURCE == "local":
+    if _master_journal_single_file_mode():
+        pass
+    elif TRADING_JOURNAL_SOURCE == "local":
         try:
             _ensure_trading_journal_local_templates()
         except Exception as exc:
@@ -8496,17 +8563,17 @@ async def _autostart_scripts() -> None:
         asyncio.create_task(_ensure_trading_journal_dropbox_templates())
     asyncio.create_task(_log_outbound_traffic_summary())
     asyncio.create_task(_start_startup_recovery_import_after_restore())
-    if not _trading_journal_excel_only_mode():
+    if (not _trading_journal_excel_only_mode()) and (not _master_journal_single_file_mode()):
         asyncio.create_task(_schedule_daily_trade_history_sync())
     asyncio.create_task(_schedule_monthly_aud_revaluation_sync())
     asyncio.create_task(_poll_pending_webhook_invalidations())
-    if (not _trading_journal_excel_only_mode()) and ENABLE_BYBIT_DEMO_JOURNAL and ENABLE_BYBIT_DEMO_CLOSED_PNL_POLL:
+    if (not _trading_journal_excel_only_mode()) and (not _master_journal_single_file_mode()) and ENABLE_BYBIT_DEMO_JOURNAL and ENABLE_BYBIT_DEMO_CLOSED_PNL_POLL:
         asyncio.create_task(_start_bybit_demo_closed_pnl_poll_after_restore())
     if not ENABLE_BYBIT_DEMO_JOURNAL:
         _purge_bybit_demo_journal_state()
-    if (not _trading_journal_excel_only_mode()) and os.getenv("ENABLE_BYBIT_FILL_POLL", "0") == "1":
+    if (not _trading_journal_excel_only_mode()) and (not _master_journal_single_file_mode()) and os.getenv("ENABLE_BYBIT_FILL_POLL", "0") == "1":
         asyncio.create_task(_poll_bybit_fills())
-    if os.getenv("ENABLE_OANDA_FILL_POLL", "0") == "1":
+    if (not _master_journal_single_file_mode()) and os.getenv("ENABLE_OANDA_FILL_POLL", "0") == "1":
         asyncio.create_task(_start_oanda_fill_poll_after_delay())
     _force_fxweekend_enabled_on_startup()
     _start_manual_save_github_sync_watcher_if_needed()
@@ -23701,7 +23768,12 @@ async def _run_trading_journal_sync_job() -> None:
 def _sync_master_journal_workbook() -> Dict[str, object]:
     path = _master_journal_path()
     tmp = path.with_suffix('.tmp.xlsx')
+    created_tmp = False
     try:
+        if _master_journal_single_file_mode():
+            enforce_pre = _enforce_single_master_journal_xlsx(TRADING_JOURNAL_LOCAL_DIR, cleanup_known_generated=True)
+            if not enforce_pre.get("ok"):
+                raise RuntimeError("Unknown extra Excel files in journal directory: " + ", ".join(enforce_pre.get("unknown_extra_excel_files") or []))
         snapshot = _build_trading_journal_view_snapshot(force=True) or {}
         source_items = [r for r in (snapshot.get("items") or []) if isinstance(r, dict)]
         source_trade_rows = [r for r in source_items if _row_type(r) == "trade"]
@@ -23735,12 +23807,25 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                 source_items = [r for r in (snapshot.get("items") or []) if isinstance(r, dict)]
                 source_trade_rows = [r for r in source_items if _row_type(r) == "trade"]
 
-        build_master_journal_workbook(snapshot, tmp)
-        if not tmp.exists() or tmp.stat().st_size <= 0:
-            raise RuntimeError("Master Journal temporary workbook was not created.")
+        if path.exists():
+            update_result = update_master_journal_workbook_data_only(path, snapshot)
+            if not bool((update_result or {}).get("ok")):
+                raise RuntimeError(str((update_result or {}).get("error") or "Master Journal data-only update failed."))
+            candidate_path = str((update_result or {}).get("candidate_path") or "").strip()
+            if not candidate_path:
+                raise RuntimeError("Master Journal data-only update failed: candidate workbook path missing.")
+            tmp = Path(candidate_path)
+            created_tmp = True
+            validate_path = tmp
+        else:
+            build_master_journal_workbook(snapshot, tmp)
+            created_tmp = True
+            if not tmp.exists() or tmp.stat().st_size <= 0:
+                raise RuntimeError("Master Journal temporary workbook was not created.")
+            validate_path = tmp
 
         from openpyxl import load_workbook as _load_wb
-        wb = _load_wb(tmp, data_only=True)
+        wb = _load_wb(validate_path, data_only=True)
         try:
             for sheet in SHEET_ORDER:
                 if sheet not in wb.sheetnames:
@@ -23764,15 +23849,26 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
             if visible_trade_rows:
                 headers = [str(c.value or "").strip() for c in all_trades[1]]
                 symbol_col = headers.index("Symbol") + 1 if "Symbol" in headers else None
+                row_id_col = headers.index("Row ID") + 1 if "Row ID" in headers else None
                 if not symbol_col:
                     raise RuntimeError("Master Journal validation failed: All Trades Symbol column missing.")
                 populated_symbol_rows = 0
+                workbook_row_ids: Set[str] = set()
                 for rr in range(2, all_trades.max_row + 1):
                     symbol = str(all_trades.cell(rr, symbol_col).value or "").strip()
                     if symbol:
                         populated_symbol_rows += 1
+                    if row_id_col:
+                        rid = str(all_trades.cell(rr, row_id_col).value or "").strip()
+                        if rid:
+                            workbook_row_ids.add(rid)
                 if populated_symbol_rows <= 0:
                     raise RuntimeError("Master Journal validation failed: All Trades is blank despite source rows.")
+                expected_ids = {str(r.get("id") or "").strip() for r in visible_trade_rows if str(r.get("id") or "").strip()}
+                if _master_journal_single_file_mode() and expected_ids and (not row_id_col or not workbook_row_ids):
+                    raise RuntimeError("Master Journal validation failed: Row ID metadata is required in master_journal mode.")
+                if expected_ids and not expected_ids.issubset(workbook_row_ids):
+                    raise RuntimeError("Master Journal validation failed: All Trades row IDs do not match source snapshot.")
             stats = snapshot.get("stats") or {}
             by_instrument = stats.get("by_instrument") or []
             if by_instrument:
@@ -23918,9 +24014,14 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
         finally:
             wb.close()
 
-        os.replace(tmp, path)
+        if created_tmp:
+            os.replace(tmp, path)
         if not path.exists() or path.stat().st_size <= 0:
             raise RuntimeError("Master Journal.xlsx was not created.")
+        if _master_journal_single_file_mode():
+            enforce_post = _enforce_single_master_journal_xlsx(TRADING_JOURNAL_LOCAL_DIR, cleanup_known_generated=True)
+            if not enforce_post.get("ok"):
+                raise RuntimeError("Unknown extra Excel files in journal directory after workbook sync: " + ", ".join(enforce_post.get("unknown_extra_excel_files") or []))
         size = path.stat().st_size
         payload = {
             'master_journal_ok': True,
@@ -23936,11 +24037,15 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                 'source_balances': len(snapshot.get('balances') or []),
             },
         }
+        if _master_journal_single_file_mode():
+            enforce_github = _enforce_single_master_journal_xlsx(TRADING_JOURNAL_LOCAL_DIR, cleanup_known_generated=True)
+            if not enforce_github.get("ok"):
+                raise RuntimeError("Unknown extra Excel files in journal directory before GitHub sync: " + ", ".join(enforce_github.get("unknown_extra_excel_files") or []))
         payload.update(_sync_journal_excel_files_to_github(path))
         return payload
     except Exception as exc:
         try:
-            if tmp.exists():
+            if created_tmp and tmp.exists():
                 tmp.unlink()
         except Exception:
             pass

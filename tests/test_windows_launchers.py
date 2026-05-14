@@ -42,6 +42,35 @@ def test_run_local_master_requires_master_journal_not_legacy_cashflow_workbook()
     assert 'required workbook missing: %TRADING_JOURNAL_LOCAL_DIR%\\Master Journal.xlsx' in script
 
 
+def test_run_local_master_control_uses_master_journal_source() -> None:
+    script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
+    assert 'set "TRADING_JOURNAL_SOURCE=master_journal"' in script
+    assert 'set "TRADING_JOURNAL_SOURCE=local"' not in script
+    assert 'set "TRADING_JOURNAL_MASTER_JOURNAL_AUTHORITATIVE=1"' in script
+    assert 'set "TRADING_JOURNAL_ENABLE_LOCAL_IMPORT=0"' in script
+
+
+def test_run_local_master_control_protects_master_journal_env() -> None:
+    script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
+    assert 'TRADING_JOURNAL_SOURCE' in script
+    assert 'TRADING_JOURNAL_MASTER_JOURNAL_AUTHORITATIVE' in script
+    assert 'TRADING_JOURNAL_LOCAL_DIR' in script
+    assert 'TRADING_JOURNAL_ENABLE_LOCAL_IMPORT' in script
+    assert 'TRADING_JOURNAL_BROKER_REFRESH_ENABLED' in script
+
+
+def test_run_local_master_control_disables_fill_polls() -> None:
+    script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
+    assert 'set "ENABLE_BYBIT_FILL_POLL=0"' in script
+    assert 'set "ENABLE_OANDA_FILL_POLL=0"' in script
+
+
+def test_run_local_master_control_protects_fill_poll_env() -> None:
+    script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
+    assert 'ENABLE_BYBIT_FILL_POLL' in script
+    assert 'ENABLE_OANDA_FILL_POLL' in script
+
+
 def test_launcher_builder_only_targets_local_trading_tools() -> None:
     ps1 = (ROOT / 'tools' / 'windows_launchers' / 'build_windows_launchers.ps1').read_text(encoding='utf-8')
     assert 'Local Trading Tools.exe' in ps1
