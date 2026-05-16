@@ -379,7 +379,7 @@ def test_account_balances_restores_missing_rows_without_layout_mutation(tmp_path
     from tools.master_journal_workbook import update_master_journal_workbook_data_only
     from openpyxl import Workbook
     src = tmp_path / "m.xlsx"
-    wb = Workbook(); ws = wb.active; ws.title = "Dashboard"; wb.create_sheet("All Trades"); wb.create_sheet("Instrument Averages")
+    wb = Workbook(); ws = wb.active; ws.title = "Dashboard"; wb.create_sheet("All Trades"); wb.create_sheet("Instrument Averages"); wb.create_sheet("P&L Calendar")
     ws["A1"]="Overall"; ws["D1"]="FX"; ws["G1"]="Crypto"; ws["J1"]="Winners"; ws["J8"]="Losers"; ws["J14"]="Drawdown"; ws["M1"]="Instrument leaders"; ws["T1"]="Account Balances"
     ws["T2"]="Account"; ws["U2"]="Balance"; ws["V2"]="Currency"; ws["W2"]="As Of"
     wb.save(src)
@@ -400,14 +400,14 @@ def test_account_balances_restores_missing_rows_without_layout_mutation(tmp_path
     assert isinstance(d.cell(found["Bybit Demo"], 21).value, (int, float))
     assert d.cell(found["Bybit Demo"], 22).value == "USDT"
     assert str(d.cell(found["Bybit Demo"], 23).value) == "2026-05-16"
-    assert out.sheetnames == ["Dashboard", "All Trades", "Instrument Averages"]
+    assert out.sheetnames == ["Dashboard", "All Trades", "Instrument Averages", "P&L Calendar"]
     out.close()
 
 def test_account_balances_reuses_blank_row_before_append(tmp_path: Path):
     from tools.master_journal_workbook import update_master_journal_workbook_data_only
     from openpyxl import Workbook
     p = tmp_path / "reuse.xlsx"
-    wb = Workbook(); ws = wb.active; ws.title = "Dashboard"; wb.create_sheet("All Trades"); wb.create_sheet("Instrument Averages")
+    wb = Workbook(); ws = wb.active; ws.title = "Dashboard"; wb.create_sheet("All Trades"); wb.create_sheet("Instrument Averages"); wb.create_sheet("P&L Calendar")
     ws["A1"]="Overall"; ws["D1"]="FX"; ws["G1"]="Crypto"; ws["J1"]="Winners"; ws["J8"]="Losers"; ws["J14"]="Drawdown"; ws["M1"]="Instrument leaders"; ws["T1"]="Account Balances"
     ws["T2"]="Account"; ws["U2"]="Balance"; ws["V2"]="Currency"; ws["W2"]="As Of"
     ws["T3"]="Bybit Live"; ws["U3"]=1.0; ws["V3"]="USDT"

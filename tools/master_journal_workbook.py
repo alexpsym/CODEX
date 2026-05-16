@@ -660,7 +660,12 @@ def _ensure_account_balance_row(ws, section: Dict[str, int], header_row: int, co
             return r
     for r in range(header_row + 1, section["end_row"] + 1):
         lbl = str(ws.cell(r, account_col).value or "").strip()
-        if not lbl:
+        if lbl:
+            continue
+        bal_blank = ws.cell(r, col_map["balance"]).value in (None, "")
+        cur_blank = ws.cell(r, col_map["currency"]).value in (None, "")
+        asof_blank = ("as_of" not in col_map) or (ws.cell(r, col_map["as_of"]).value in (None, ""))
+        if bal_blank and cur_blank and asof_blank:
             return r
 
     if section["end_row"] < ws.max_row:

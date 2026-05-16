@@ -639,11 +639,39 @@ def test_sync_master_journal_repairs_missing_expected_balance_account_row(tmp_pa
     result = master_service._sync_master_journal_workbook()
     assert result['master_journal_ok'] is True
     repaired = load_workbook(mj, data_only=True)["Dashboard"]
-    found_b = False
+    anchor = None
     for r in range(1, repaired.max_row + 1):
-        if str(repaired.cell(r, 1).value or "").strip() == "B":
+        for c in range(1, repaired.max_column + 1):
+            if str(repaired.cell(r, c).value or "").strip().lower() == "account balances":
+                anchor = (r, c)
+                break
+        if anchor:
+            break
+    assert anchor is not None
+    header_row = None
+    col_map = {}
+    for r in range(anchor[0] + 1, min(repaired.max_row + 1, anchor[0] + 12)):
+        row_map = {}
+        for c in range(anchor[1], min(repaired.max_column + 1, anchor[1] + 8)):
+            token = str(repaired.cell(r, c).value or "").strip().lower()
+            if token == "account":
+                row_map["account"] = c
+            elif token == "balance":
+                row_map["balance"] = c
+            elif token == "currency":
+                row_map["currency"] = c
+            elif token in {"as of", "as_of"}:
+                row_map["as_of"] = c
+        if {"account", "balance", "currency"}.issubset(row_map.keys()):
+            header_row = r
+            col_map = row_map
+            break
+    assert header_row is not None
+    found_b = False
+    for r in range((header_row or 0) + 1, min(repaired.max_row + 1, (header_row or 0) + 50)):
+        if str(repaired.cell(r, col_map["account"]).value or "").strip() == "B":
             found_b = True
-            assert isinstance(repaired.cell(r, 2).value, (int, float))
+            assert isinstance(repaired.cell(r, col_map["balance"]).value, (int, float))
             break
     assert found_b
 
