@@ -1,5 +1,6 @@
 from pathlib import Path
 from openpyxl import load_workbook
+import pytest
 from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, SHEET_ORDER
 from openpyxl.utils.cell import coordinate_to_tuple
 
@@ -63,7 +64,7 @@ def test_dashboard_parity_and_equity(tmp_path: Path):
 
 def test_manual_override_roundtrip(tmp_path: Path):
     out=tmp_path/'Master Journal.xlsx'; build_master_journal_workbook(sample_snapshot(), out)
-    wb=load_workbook(out); ws=wb['Trade Log']; ws['Q2']='Yes'; ws['R2']='AAA'; wb.save(out)
+    wb=load_workbook(out); ws=wb['All Trades']; ws['Q2']='Yes'; ws['R2']='AAA'; wb.save(out)
     ov=read_master_journal_manual_overrides(out)
     assert ov['t1']['is_test_trade'] is True and ov['t1']['setup']=='AAA'
 
@@ -105,14 +106,14 @@ def test_unanchored_account_does_not_fabricate_equity(tmp_path: Path):
         {'id':'u2','row_type':'trade','account':'U','open_time':'2026-05-02','close_time':'2026-05-02','net_profit':5},
     ]
     out=tmp_path/'u.xlsx'; build_master_journal_workbook(s,out); wb=load_workbook(out)
-    ws=wb['Trade Log']
+    ws=wb['All Trades']
     assert ws['O2'].value in ('', None)
     assert ws['O3'].value in ('', None)
 
 
 def test_all_trades_hidden_row_id_and_unsorted_override(tmp_path: Path):
     out=tmp_path/'Master Journal.xlsx'; build_master_journal_workbook(sample_snapshot(), out)
-    wb=load_workbook(out); ws=wb['Trade Log']
+    wb=load_workbook(out); ws=wb['All Trades']
     headers=[ws.cell(1,c).value for c in range(1,ws.max_column+1)]
     assert '__row_id' not in headers
     assert ws.max_column == 26
@@ -129,7 +130,7 @@ def test_all_trades_hidden_row_id_and_unsorted_override(tmp_path: Path):
 
 def test_legacy_comment_row_id_preferred_over_trade_meta_after_row_move(tmp_path: Path):
     out=tmp_path/'legacy.xlsx'; build_master_journal_workbook(sample_snapshot(), out)
-    wb=load_workbook(out); ws=wb['Trade Log']
+    wb=load_workbook(out); ws=wb['All Trades']
     from openpyxl.comments import Comment
     ws["A2"].comment = Comment("row_id:t1", "legacy")
     ws["A3"].comment = Comment("row_id:t2", "legacy")
@@ -149,7 +150,7 @@ def test_balance_after_resolution_and_duration_display(tmp_path: Path):
         {'id':'t3','row_type':'trade','account':'B','open_time':'2026-05-01','close_time':'2026-05-01','net_profit':3,'trade_duration_seconds':3661},
     ]
     out=tmp_path/'m3.xlsx'; build_master_journal_workbook(s,out); wb=load_workbook(out)
-    ws=wb['Trade Log']
+    ws=wb['All Trades']
     assert ws['O2'].value == 100
     assert ws['O3'].value == 105
     assert ws['O4'].value in ("", None)
@@ -173,7 +174,7 @@ def test_sheet_order_and_hidden_meta(tmp_path: Path):
 def test_conditional_format_colors_and_dashboard_semantics(tmp_path: Path):
     out=tmp_path/'cf.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
     dash = wb["Dashboard"]
-    all_trades = wb["Trade Log"]
+    all_trades = wb["All Trades"]
     # ensure dashboard loss magnitude cells are targeted
     positions={(r,c):str(dash.cell(r,c).value or "").strip().lower() for r in range(1,200) for c in [1,5,9]}
     for (r,c),v in positions.items():
@@ -274,7 +275,7 @@ def test_monthly_aud_row_uses_result_currency_and_excluded_from_metrics(tmp_path
     out = tmp_path / "monthly.xlsx"
     build_master_journal_workbook(s, out)
     wb = load_workbook(out)
-    ws = wb["Trade Log"]
+    ws = wb["All Trades"]
     monthly_rows = [r for r in range(2, ws.max_row + 1) if ws.cell(r, 4).value == "MONTHLY AUD P/L"]
     assert len(monthly_rows) == 1
     mr = monthly_rows[0]
@@ -290,7 +291,7 @@ def test_metric_refresh_same_row_sections_and_non_a_balance_block(tmp_path: Path
     from openpyxl import Workbook
     from tools.master_journal_workbook import update_master_journal_workbook_data_only
     p = tmp_path/'mj.xlsx'
-    wb=Workbook(); ws=wb.active; ws.title='Dashboard'; wb.create_sheet('Trade Log'); wb.create_sheet('Instrument Averages')
+    wb=Workbook(); ws=wb.active; ws.title='Dashboard'; wb.create_sheet('All Trades'); wb.create_sheet('Instrument Averages')
     # anchors on same row
     ws['A1']='Overall'; ws['D1']='FX'; ws['G1']='Crypto'; ws['J1']='Winners'; ws['J8']='Losers'; ws['J14']='Drawdown'; ws['M1']='Instrument leaders'
     ws['P1']='Account Balances'
@@ -314,7 +315,7 @@ def test_embedded_fx_crypto_duration_without_duration_section(tmp_path: Path):
     from openpyxl import Workbook
     from tools.master_journal_workbook import update_master_journal_workbook_data_only
     p=tmp_path/'d.xlsx'
-    wb=Workbook(); ws=wb.active; ws.title='Dashboard'; wb.create_sheet('Trade Log'); wb.create_sheet('Instrument Averages')
+    wb=Workbook(); ws=wb.active; ws.title='Dashboard'; wb.create_sheet('All Trades'); wb.create_sheet('Instrument Averages')
     ws['A1']='Overall'; ws['D1']='FX'; ws['G1']='Crypto'; ws['J1']='Winners'; ws['J8']='Losers'; ws['J14']='Drawdown'; ws['M1']='Instrument leaders'; ws['T1']='Account Balances'
     ws['D2']='FX shortest'; ws['D3']='Source'; ws['D4']='FX longest'; ws['D5']='Source'
     ws['G2']='Crypto shortest'; ws['G3']='Source'; ws['G4']='Crypto longest'; ws['G5']='Source'
@@ -330,7 +331,7 @@ def test_embedded_fx_crypto_duration_without_duration_section(tmp_path: Path):
 def test_read_master_journal_source_asset_class_regressions(tmp_path: Path):
     from openpyxl import Workbook
     p = tmp_path / 'asset_class.xlsx'
-    wb = Workbook(); ws = wb.active; ws.title = 'Trade Log'
+    wb = Workbook(); ws = wb.active; ws.title = 'All Trades'
     headers = ['Open Time','Close Time','Account','Symbol','Side']
     ws.append(headers)
     ws.append(['2026-01-01','2026-01-01','UNKNOWN','ABCDEF','BUY'])
@@ -353,7 +354,7 @@ def test_instrument_leaders_updates_full_row_and_reports_missing(tmp_path: Path)
     from openpyxl import Workbook
     from tools.master_journal_workbook import update_master_journal_workbook_data_only
     p=tmp_path/'leaders.xlsx'
-    wb=Workbook(); ws=wb.active; ws.title='Dashboard'; wb.create_sheet('Trade Log'); wb.create_sheet('Instrument Averages')
+    wb=Workbook(); ws=wb.active; ws.title='Dashboard'; wb.create_sheet('All Trades'); wb.create_sheet('Instrument Averages')
     ws['A1']='Overall'; ws['D1']='FX'; ws['G1']='Crypto'; ws['J1']='Winners'; ws['J8']='Losers'; ws['J14']='Drawdown'; ws['M1']='Instrument leaders'; ws['T1']='Account Balances'
     ws['M2']='Metric'; ws['N2']='Symbol'; ws['O2']='Wins'; ws['P2']='Losses'; ws['Q2']='Trades'
     ws['M3']='Overall most wins'; ws['M4']='Overall most losses'; ws['M5']='FX most wins'; ws['M6']='FX most losses'; ws['M7']='Crypto most wins'  # missing crypto most losses row intentionally
@@ -379,7 +380,7 @@ def test_account_balances_restores_missing_rows_without_layout_mutation(tmp_path
     from tools.master_journal_workbook import update_master_journal_workbook_data_only
     from openpyxl import Workbook
     src = tmp_path / "m.xlsx"
-    wb = Workbook(); ws = wb.active; ws.title = "Dashboard"; wb.create_sheet("Trade Log"); wb.create_sheet("Instrument Averages"); wb.create_sheet("P&L Calendar")
+    wb = Workbook(); ws = wb.active; ws.title = "Dashboard"; wb.create_sheet("All Trades"); wb.create_sheet("Instrument Averages"); wb.create_sheet("P&L Calendar")
     ws["A1"]="Overall"; ws["D1"]="FX"; ws["G1"]="Crypto"; ws["J1"]="Winners"; ws["J8"]="Losers"; ws["J14"]="Drawdown"; ws["M1"]="Instrument leaders"; ws["T1"]="Account Balances"
     ws["T2"]="Account"; ws["U2"]="Balance"; ws["V2"]="Currency"; ws["W2"]="As Of"
     wb.save(src)
@@ -400,14 +401,14 @@ def test_account_balances_restores_missing_rows_without_layout_mutation(tmp_path
     assert isinstance(d.cell(found["Bybit Demo"], 21).value, (int, float))
     assert d.cell(found["Bybit Demo"], 22).value == "USDT"
     assert str(d.cell(found["Bybit Demo"], 23).value) == "2026-05-16"
-    assert out.sheetnames == ["Dashboard", "Trade Log", "Instrument Averages", "P&L Calendar"]
+    assert out.sheetnames == ["Dashboard", "All Trades", "Instrument Averages", "P&L Calendar"]
     out.close()
 
 def test_account_balances_reuses_blank_row_before_append(tmp_path: Path):
     from tools.master_journal_workbook import update_master_journal_workbook_data_only
     from openpyxl import Workbook
     p = tmp_path / "reuse.xlsx"
-    wb = Workbook(); ws = wb.active; ws.title = "Dashboard"; wb.create_sheet("Trade Log"); wb.create_sheet("Instrument Averages"); wb.create_sheet("P&L Calendar")
+    wb = Workbook(); ws = wb.active; ws.title = "Dashboard"; wb.create_sheet("All Trades"); wb.create_sheet("Instrument Averages"); wb.create_sheet("P&L Calendar")
     ws["A1"]="Overall"; ws["D1"]="FX"; ws["G1"]="Crypto"; ws["J1"]="Winners"; ws["J8"]="Losers"; ws["J14"]="Drawdown"; ws["M1"]="Instrument leaders"; ws["T1"]="Account Balances"
     ws["T2"]="Account"; ws["U2"]="Balance"; ws["V2"]="Currency"; ws["W2"]="As Of"
     ws["T3"]="Bybit Live"; ws["U3"]=1.0; ws["V3"]="USDT"
@@ -423,7 +424,7 @@ def test_update_data_only_preserves_calendar_merges_and_skips_non_anchor_writes(
     from openpyxl import Workbook
     from tools.master_journal_workbook import update_master_journal_workbook_data_only
     p = tmp_path / "merged-calendar.xlsx"
-    wb = Workbook(); dash = wb.active; dash.title = "Dashboard"; wb.create_sheet("Trade Log"); wb.create_sheet("Instrument Averages"); cal = wb.create_sheet("P&L Calendar")
+    wb = Workbook(); dash = wb.active; dash.title = "Dashboard"; wb.create_sheet("All Trades"); wb.create_sheet("Instrument Averages"); cal = wb.create_sheet("P&L Calendar")
     dash["A1"]="Overall"; dash["D1"]="FX"; dash["G1"]="Crypto"; dash["J1"]="Winners"; dash["J8"]="Losers"; dash["J14"]="Drawdown"; dash["M1"]="Instrument leaders"; dash["T1"]="Account Balances"
     dash["T2"]="Account"; dash["U2"]="Balance"; dash["V2"]="Currency"; dash["W2"]="As Of"
     months = ["January","February","March","April","May","June","July","August","September","October","November","December"]
@@ -457,7 +458,7 @@ def test_update_data_only_appends_missing_calendar_year_block(tmp_path: Path):
     from openpyxl import Workbook
     from tools.master_journal_workbook import update_master_journal_workbook_data_only
     p = tmp_path / "append-year.xlsx"
-    wb = Workbook(); dash = wb.active; dash.title = "Dashboard"; wb.create_sheet("Trade Log"); wb.create_sheet("Instrument Averages"); cal = wb.create_sheet("P&L Calendar")
+    wb = Workbook(); dash = wb.active; dash.title = "Dashboard"; wb.create_sheet("All Trades"); wb.create_sheet("Instrument Averages"); cal = wb.create_sheet("P&L Calendar")
     dash["A1"]="Overall"; dash["D1"]="FX"; dash["G1"]="Crypto"; dash["J1"]="Winners"; dash["J8"]="Losers"; dash["J14"]="Drawdown"; dash["M1"]="Instrument leaders"; dash["T1"]="Account Balances"
     dash["T2"]="Account"; dash["U2"]="Balance"; dash["V2"]="Currency"; dash["W2"]="As Of"
     for i, m in enumerate(["January","February","March","April","May","June","July","August","September","October","November","December"], start=3):
@@ -478,7 +479,7 @@ def test_instrument_leaders_custom_layout_populates_values(tmp_path: Path):
     from openpyxl import Workbook
     from tools.master_journal_workbook import update_master_journal_workbook_data_only
     p = tmp_path / "leaders-layout.xlsx"
-    wb = Workbook(); d = wb.active; d.title = "Dashboard"; wb.create_sheet("Trade Log"); wb.create_sheet("Instrument Averages"); cal = wb.create_sheet("P&L Calendar")
+    wb = Workbook(); d = wb.active; d.title = "Dashboard"; wb.create_sheet("All Trades"); wb.create_sheet("Instrument Averages"); cal = wb.create_sheet("P&L Calendar")
     d["A1"]="Account Balances"; d["A2"]="Account"; d["B2"]="Balance"; d["C2"]="Currency"; d["A3"]="BYBIT DEMO"
     d["G1"]="Overall"; d["J1"]="FX"; d["M1"]="Crypto"; d["A11"]="Instrument leaders"; d["G12"]="Winners"; d["G17"]="Losers"; d["G22"]="Drawdown"
     d["A12"]="Metric"; d["B12"]="Symbol"; d["C12"]="Wins"; d["D12"]="Losses"; d["E12"]="Trades"
@@ -514,3 +515,30 @@ def test_instrument_leaders_custom_layout_populates_values(tmp_path: Path):
         assert out.cell(row, 4).value == losses
         assert out.cell(row, 5).value == trades
     assert not res["diagnostics"]["missing_leader_headers"]
+
+def test_legacy_trade_log_sheet_migrates_to_all_trades(tmp_path: Path):
+    from tools.master_journal_workbook import update_master_journal_workbook_data_only, build_master_journal_workbook
+    p = tmp_path / "legacy.xlsx"
+    build_master_journal_workbook(sample_snapshot(), p)
+    wb = load_workbook(p)
+    wb["All Trades"].title = "Trade Log"
+    wb.save(p)
+    snap={"items":[],"stats":{"totals":{},"groups":{"by_market":{"overall":{},"fx":{},"crypto":{}},"risk_expectancy":{},"leaders":{},"duration":{}}},"balances":[]}
+    res=update_master_journal_workbook_data_only(p,snap)
+    assert res["ok"] is True
+    assert res["diagnostics"].get("migrated_trade_log_sheet") is True
+    Path(res["candidate_path"]).replace(p)
+    out=load_workbook(p)
+    assert "All Trades" in out.sheetnames and "Trade Log" not in out.sheetnames
+    out.close()
+
+def test_both_all_trades_and_trade_log_fails_ambiguous(tmp_path: Path):
+    from tools.master_journal_workbook import update_master_journal_workbook_data_only
+    from openpyxl import Workbook
+    p = tmp_path / "ambiguous.xlsx"
+    wb = Workbook(); wb.remove(wb.active)
+    wb.create_sheet("Dashboard"); wb.create_sheet("All Trades"); wb.create_sheet("Trade Log"); wb.create_sheet("Instrument Averages"); wb.create_sheet("P&L Calendar")
+    wb.save(p)
+    snap={"items":[],"stats":{"totals":{},"groups":{"by_market":{"overall":{},"fx":{},"crypto":{}},"risk_expectancy":{},"leaders":{},"duration":{}}},"balances":[]}
+    with pytest.raises(RuntimeError, match="ambiguous trade sheets"):
+        update_master_journal_workbook_data_only(p,snap)

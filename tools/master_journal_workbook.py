@@ -14,7 +14,9 @@ from openpyxl.utils.cell import range_boundaries
 import calendar
 from copy import copy
 
-SHEET_ORDER=["Dashboard","Trade Log","Instrument Averages","P&L Calendar"]
+ALL_TRADES_SHEET = "All Trades"
+LEGACY_TRADE_LOG_SHEET = "Trade Log"
+SHEET_ORDER=["Dashboard",ALL_TRADES_SHEET,"Instrument Averages","P&L Calendar"]
 EDITABLE_COLS=["Test","Setup","Timeframe","Breakeven","Notes"]
 PROFIT_FILL = "C6EFCE"
 PROFIT_FONT = "006100"
@@ -24,14 +26,33 @@ LOSS_FONT = "9C0006"
 
 
 
+def _get_all_trades_sheet(wb: Workbook, *, allow_legacy: bool = True):
+    has_all = ALL_TRADES_SHEET in wb.sheetnames
+    has_legacy = LEGACY_TRADE_LOG_SHEET in wb.sheetnames
+    if has_all and has_legacy:
+        raise RuntimeError("Master Journal has ambiguous trade sheets: both 'All Trades' and legacy 'Trade Log' exist.")
+    if has_all:
+        return wb[ALL_TRADES_SHEET]
+    if allow_legacy and has_legacy:
+        return wb[LEGACY_TRADE_LOG_SHEET]
+    raise RuntimeError("Master Journal is missing required All Trades sheet.")
+
 def _get_trade_log_sheet(wb: Workbook):
-    if "Trade Log" in wb.sheetnames:
-        return wb["Trade Log"]
-    if "All Trades" in wb.sheetnames:
-        ws = wb["All Trades"]
-        ws.title = "Trade Log"
-        return ws
-    raise RuntimeError("Master Journal is missing required Trade Log sheet.")
+    return _get_all_trades_sheet(wb, allow_legacy=True)
+
+def _migrate_legacy_trade_log_sheet_name(wb: Workbook, diagnostics: Dict[str, Any] | None = None) -> None:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    has_all = ALL_TRADES_SHEET in wb.sheetnames
+    has_legacy = LEGACY_TRADE_LOG_SHEET in wb.sheetnames
+    if has_all and has_legacy:
+        raise RuntimeError("Master Journal has ambiguous trade sheets: both 'All Trades' and legacy 'Trade Log' exist.")
+    if has_all:
+        return
+    if has_legacy:
+        wb[LEGACY_TRADE_LOG_SHEET].title = ALL_TRADES_SHEET
+        diagnostics["migrated_trade_log_sheet"] = True
+        return
+    raise RuntimeError("Master Journal is missing required All Trades sheet.")
 
 def _pct_points_to_excel_fraction(value: Any) -> float | None:
     num = _as_float(value)
@@ -206,7 +227,7 @@ def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]
     wb=load_workbook(path, data_only=True)
     try:
         try:
-            ws=_get_trade_log_sheet(wb)
+            ws=_get_all_trades_sheet(wb)
         except RuntimeError:
             return out
         headers=[str(c.value or '').strip() for c in ws[1]]
@@ -310,7 +331,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         cur += 1
 
     resolved_balances = _resolved_all_trade_balances(rows)
-    ws=_get_trade_log_sheet(wb); headers=['Open Time','Close Time','Account','Symbol','Side','Qty','Entry Price','Exit Price','Stop Loss Price','Target Price','Commission','Net P/L','Profit %','R-Multiple','Balance After','Trade Duration']+EDITABLE_COLS+['Cashflow Amount','Cashflow New Balance','Currency','Row Type','Row ID']; ws.append(headers)
+    ws=_get_all_trades_sheet(wb); headers=['Open Time','Close Time','Account','Symbol','Side','Qty','Entry Price','Exit Price','Stop Loss Price','Target Price','Commission','Net P/L','Profit %','R-Multiple','Balance After','Trade Duration']+EDITABLE_COLS+['Cashflow Amount','Cashflow New Balance','Currency','Row Type','Row ID']; ws.append(headers)
     for i, row in enumerate(rows):
         pct = _as_float(row.get('result_pct'))
         is_monthly = str(row.get("row_type") or "") == "monthly_aud_reval"
@@ -560,8 +581,8 @@ def _snapshot_invariants(wb) -> Dict[str, Any]:
         out["dash_col_widths"] = {k: v.width for k, v in dash.column_dimensions.items()}
         out["dash_cf"] = [str(k.sqref) for k in dash.conditional_formatting._cf_rules.keys()]
         out["dash_freeze"] = dash.freeze_panes
-    for name, prefix in (("All Trades", "all_trades"), ("Instrument Averages", "instrument")):
-        ws = wb[name] if name in wb.sheetnames else None
+    for name, prefix in ((ALL_TRADES_SHEET, "all_trades"), ("Instrument Averages", "instrument")):
+        ws = _get_all_trades_sheet(wb) if prefix == "all_trades" else (wb[name] if name in wb.sheetnames else None)
         ref = ws.auto_filter.ref if ws and ws.auto_filter else None
         out[f"{prefix}_filter_present"] = bool(ref)
         if ref:
@@ -822,12 +843,12 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
         raise FileNotFoundError(f"Master Journal workbook not found: {path}")
     wb = load_workbook(path, data_only=True)
     try:
-        ws = _get_trade_log_sheet(wb)
+        ws = _get_all_trades_sheet(wb)
         headers = [str(c.value or '').strip() for c in ws[1]]
         idx = {h:i for i,h in enumerate(headers)}
         required = {'Open Time','Close Time','Account','Symbol','Side'}
         if not required.issubset(set(idx.keys())):
-            raise RuntimeError('Master Journal Trade Log headers are invalid.')
+            raise RuntimeError('Master Journal All Trades headers are invalid.')
         items=[]; cashflow_ledger=defaultdict(list)
         def _num(v):
             try:
@@ -875,6 +896,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
     wb = load_workbook(path)
     diagnostics: Dict[str, Any] = {"missing_accounts": [], "updated_cells": 0}
     try:
+        _migrate_legacy_trade_log_sheet_name(wb, diagnostics)
         if "Dashboard" not in wb.sheetnames:
             raise RuntimeError("Master Journal missing Dashboard sheet.")
         dash = wb["Dashboard"]
@@ -1123,8 +1145,8 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 last_col_letter = get_column_letter(max_col)
                 dst_ws.auto_filter.ref = f"A1:{last_col_letter}{max(1,last_row)}"
 
-            gen_trade_log = _get_trade_log_sheet(gen)
-            live_trade_log = _get_trade_log_sheet(wb)
+            gen_trade_log = _get_all_trades_sheet(gen, allow_legacy=False)
+            live_trade_log = _get_all_trades_sheet(wb, allow_legacy=False)
             _copy_data_rows(gen_trade_log, live_trade_log, 2, force_all_columns=True)
             if "Instrument Averages" in wb.sheetnames and "Instrument Averages" in gen.sheetnames:
                 _copy_data_rows(gen["Instrument Averages"], wb["Instrument Averages"], 2)
@@ -1138,8 +1160,8 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             gen.close()
             tmp.unlink(missing_ok=True)
 
-        trade_log = _get_trade_log_sheet(wb)
-        _assert_filter_covers_data(trade_log, sheet_name="Trade Log", header_row=1, required_headers=["Open Time", "Close Time", "Row ID"])
+        trade_log = _get_all_trades_sheet(wb, allow_legacy=False)
+        _assert_filter_covers_data(trade_log, sheet_name="All Trades", header_row=1, required_headers=["Open Time", "Close Time", "Row ID"])
         _assert_filter_covers_data(wb["Instrument Averages"], sheet_name="Instrument Averages", header_row=1, required_headers=["Symbol", "Trades"])
 
         after = _snapshot_invariants(wb)
@@ -1155,7 +1177,7 @@ def refresh_master_journal_derived_sheets(path: Path, snapshot: Dict[str, Any]) 
         raise FileNotFoundError(f"Master Journal workbook not found: {path}")
     wb = load_workbook(path)
     try:
-        all_trades = _get_trade_log_sheet(wb)
+        all_trades = _get_all_trades_sheet(wb, allow_legacy=False)
         # remove derived and legacy sheets
         for name in ['Dashboard','Instrument Averages','P&L Calendar','_Trade Meta']:
             if name in wb.sheetnames:
