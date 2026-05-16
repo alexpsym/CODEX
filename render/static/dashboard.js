@@ -76,7 +76,7 @@
     try {
       await fetchJson('/api/trading-journal/sync', { method: 'POST' });
       let done = false;
-      for (let i = 0; i < 60; i += 1) {
+      for (let i = 0; i < 7200; i += 1) {
         const statusPayload = await fetchJson('/api/trading-journal/sync/status');
         if (!statusPayload.running) {
           done = true;
@@ -105,10 +105,14 @@
           }
           break;
         }
-        setSyncJournalStatus(statusPayload.message || 'Syncing journal...');
+        const elapsed = Number(statusPayload.elapsed_seconds || 0);
+        const mm = String(Math.floor(elapsed / 60)).padStart(2, '0');
+        const ss = String(Math.floor(elapsed % 60)).padStart(2, '0');
+        const stale = statusPayload.stale_warning ? ` ${statusPayload.stale_warning}` : '';
+        setSyncJournalStatus(`Syncing journal… elapsed ${mm}:${ss}. Last update ${statusPayload.heartbeat_at || statusPayload.updated_at || '—'} — ${statusPayload.stage || ''} ${statusPayload.message || ''}${stale}`.trim());
         await new Promise((r) => setTimeout(r, 1000));
       }
-      if (!done) { setSyncJournalStatus('Sync still running. Check status again.', true); setOpenMasterJournalVisible(false); }
+      if (!done) { setSyncJournalStatus('Sync polling timed out. Check Local Master Control logs.', true); setOpenMasterJournalVisible(false); }
     } catch (err) {
       setSyncJournalStatus(err?.message || String(err), true);
       setOpenMasterJournalVisible(false);
