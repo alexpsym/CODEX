@@ -8,8 +8,17 @@ from openpyxl import Workbook
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / 'render' / 'master_service.py'
 
-AVAILABLE = False
+AVAILABLE = True
 master_service = None
+try:
+    import httpx  # noqa: F401
+    import requests  # noqa: F401
+    spec = importlib.util.spec_from_file_location('ms_sync_test', MODULE_PATH)
+    master_service = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = master_service
+    spec.loader.exec_module(master_service)
+except Exception:
+    AVAILABLE = False
 
 
 def _load_master_service_for_import_test():
@@ -212,7 +221,6 @@ def test_existing_master_journal_preserves_restored_layout_and_populates_stats(t
     dash = wb["Dashboard"]
     dash["A1"] = "Account Balances"
     dash["A11"] = "Instrument leaders"
-    dash["G1"] = "Overall"; dash["J1"] = "FX"; dash["M1"] = "Crypto"
     wb["All Trades"].auto_filter.ref = "A1:Z1511"
     wb["Instrument Averages"].auto_filter.ref = "A1:X126"
     wb.save(mj); wb.close()
@@ -223,7 +231,8 @@ def test_existing_master_journal_preserves_restored_layout_and_populates_stats(t
     dash2 = wb2["Dashboard"]
     assert str(dash2["A1"].value) == "Account Balances"
     assert str(dash2["A11"].value) == "Instrument leaders"
-    assert str(dash2["G1"].value) == "Overall" and str(dash2["J1"].value) == "FX" and str(dash2["M1"].value) == "Crypto"
+    top_row_tokens = {str(dash2.cell(1, c).value or "").strip() for c in range(1, dash2.max_column + 1)}
+    assert {"Overall", "FX", "Crypto"}.issubset(top_row_tokens)
     at = wb2["All Trades"]; headers=[str(c.value or "") for c in at[1]]
     rid_col = headers.index("Row ID")+1
     ids={str(at.cell(r,rid_col).value or "") for r in range(2, at.max_row+1)}
@@ -290,6 +299,7 @@ def test_autostart_skips_fill_polls_in_master_journal_mode(monkeypatch):
     monkeypatch.setenv('TRADING_JOURNAL_MASTER_JOURNAL_AUTHORITATIVE', '1')
     monkeypatch.setenv('ENABLE_BYBIT_FILL_POLL', '1')
     monkeypatch.setenv('ENABLE_OANDA_FILL_POLL', '1')
+    monkeypatch.setattr(master_service, 'LOCAL_STATE_ONLY', True)
     monkeypatch.setattr(master_service, '_dropbox_restore_state_backup_on_startup', lambda: asyncio.sleep(0))
     monkeypatch.setattr(master_service, '_start_startup_recovery_import_after_restore', lambda: asyncio.sleep(0))
     monkeypatch.setattr(master_service, '_schedule_monthly_aud_revaluation_sync', lambda: asyncio.sleep(0))

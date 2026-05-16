@@ -797,6 +797,14 @@ def _trading_journal_bybit_demo_balance_anchor_enabled() -> bool:
     return bool(TRADING_JOURNAL_BYBIT_DEMO_BALANCE_ANCHOR_ENABLED)
 
 
+def _is_test_trade_value(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return float(value) == 1.0
+    return str(value or "").strip().lower() in {"yes", "y", "true", "1"}
+
+
 def _save_broker_balance_diagnostics_state(
     broker_account_balances: List[Dict[str, object]],
     broker_balance_warnings: List[str],
