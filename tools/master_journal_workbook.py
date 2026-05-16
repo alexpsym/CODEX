@@ -620,6 +620,32 @@ def _find_label_cell(ws, label: str, search_cols: List[int] | None = None) -> tu
                 return (r, c)
     return None
 
+def _find_instrument_leaders_table(ws) -> tuple[int | None, Dict[str, int], Dict[str, int], int]:
+    anchor = _find_label_cell(ws, "Instrument leaders")
+    if not anchor:
+        return None, {}, {}, 1
+    ar, ac = anchor
+    header_row = None
+    header_map: Dict[str, int] = {}
+    for r in range(ar + 1, min(ws.max_row, ar + 12) + 1):
+        row_map: Dict[str, int] = {}
+        for c in range(ac, min(ws.max_column, ac + 8) + 1):
+            token = str(ws.cell(r, c).value or "").strip().lower()
+            if token in {"metric", "symbol", "wins", "losses", "trades"}:
+                row_map[token] = c
+        if {"metric", "symbol", "wins", "losses", "trades"}.issubset(row_map.keys()):
+            header_row = r
+            header_map = row_map
+            break
+    if not header_row:
+        return None, {}, {}, ac
+    metric_rows: Dict[str, int] = {}
+    for r in range(header_row + 1, min(ws.max_row, header_row + 24) + 1):
+        label = str(ws.cell(r, header_map["metric"]).value or "").strip().lower()
+        if label:
+            metric_rows[label] = r
+    return header_row, header_map, metric_rows, ac
+
 
 def _write_value_preserving_cell(ws, row: int, col: int, value: Any) -> bool:
     if _is_merged_non_anchor(ws, row, col):
@@ -942,19 +968,9 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
 
         diagnostics.setdefault("missing_leader_headers", [])
         diagnostics.setdefault("missing_leader_rows", [])
-        leader_section = anchors["Instrument leaders"]
-        leader_headers = {}
-        leader_header_row = None
-        for r in range(leader_section["start_row"], leader_section["end_row"] + 1):
-            row_map = {}
-            for c in range(leader_section["start_col"], leader_section["end_col"] + 1):
-                hv = str(dash.cell(r, c).value or "").strip().lower()
-                if hv in {"metric", "symbol", "wins", "losses", "trades"}:
-                    row_map[hv] = c
-            if {"metric", "symbol", "wins", "losses", "trades"}.issubset(row_map.keys()):
-                leader_headers = row_map
-                leader_header_row = r
-                break
+        diagnostics.setdefault("leader_write_errors", [])
+        diagnostics.setdefault("leader_payload_keys", [])
+        leader_header_row, leader_headers, metric_rows, leader_anchor_col = _find_instrument_leaders_table(dash)
         if not leader_headers:
             diagnostics["missing_leader_headers"].append("Metric/Symbol/Wins/Losses/Trades")
         else:
@@ -966,17 +982,25 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 "crypto most wins": "crypto_most_wins_instrument",
                 "crypto most losses": "crypto_most_losses_instrument",
             }
-            metric_rows = {}
-            for r in range((leader_header_row or leader_section["start_row"]) + 1, leader_section["end_row"] + 1):
-                metric_label = str(dash.cell(r, leader_headers["metric"]).value or "").strip().lower()
-                if metric_label:
-                    metric_rows[metric_label] = r
             for metric_label, key in label_to_key.items():
+                payload = leaders.get(key) or {}
+                if payload:
+                    diagnostics["leader_payload_keys"].append(key)
                 row_idx = metric_rows.get(metric_label)
                 if not row_idx:
-                    diagnostics["missing_leader_rows"].append(metric_label)
-                    continue
-                payload = leaders.get(key) or {}
+                    # safe local append/reuse only below table, before other section columns
+                    candidate = (max(metric_rows.values()) + 1) if metric_rows else ((leader_header_row or 0) + 1)
+                    if candidate <= dash.max_row and str(dash.cell(candidate, leader_headers["metric"]).value or "").strip() == "":
+                        if leader_anchor_col < 7 and any(str(dash.cell(candidate, c).value or "").strip() for c in range(7, dash.max_column + 1)):
+                            diagnostics["missing_leader_rows"].append(metric_label)
+                            diagnostics["leader_write_errors"].append(f"unsafe restore for {metric_label}")
+                            continue
+                        _write_value_preserving_cell(dash, candidate, leader_headers["metric"], metric_label.title().replace("Fx","FX"))
+                        metric_rows[metric_label] = candidate
+                        row_idx = candidate
+                    else:
+                        diagnostics["missing_leader_rows"].append(metric_label)
+                        continue
                 normalized_payload = dict(payload)
                 if normalized_payload.get("trades") is None and normalized_payload.get("total_trades") is not None:
                     normalized_payload["trades"] = normalized_payload.get("total_trades")

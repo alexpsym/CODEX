@@ -717,6 +717,25 @@ def test_sync_master_journal_succeeds_with_merged_calendar_cells(tmp_path, monke
     result = master_service._sync_master_journal_workbook()
     assert result["master_journal_ok"] is True
 
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_sync_master_journal_populates_instrument_leaders_custom_layout(tmp_path, monkeypatch):
+    from tools.master_journal_workbook import build_master_journal_workbook
+    from openpyxl import load_workbook
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    mj = tmp_path / "Master Journal.xlsx"
+    snap = {"items":[{"id":"t1","row_type":"trade","account":"A","symbol":"EURUSD","side":"BUY","open_time":"2026-05-01","close_time":"2026-05-01","net_profit":1.0,"result_pct":1.0}],
+            "stats":{"totals":{},"by_instrument":[{"symbol":"EURUSD","total_trades":1}],"groups":{"leaders":{"most_wins_instrument":{"symbol":"EURUSD","wins":1,"losses":0,"trades":1}}}},
+            "balances":[{"account_label":"A","balance":100.0,"currency":"USD"}],"diagnostics":{}}
+    build_master_journal_workbook(snap, mj)
+    wb=load_workbook(mj); d=wb["Dashboard"]; d["A11"]="Instrument leaders"; d["A12"]="Metric"; d["B12"]="Symbol"; d["C12"]="Wins"; d["D12"]="Losses"; d["E12"]="Trades"; d["A13"]="Overall most wins"; wb.save(mj); wb.close()
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
+    monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: snap["items"])
+    result = master_service._sync_master_journal_workbook()
+    assert result["master_journal_ok"] is True
+    out=load_workbook(mj, data_only=True)["Dashboard"]
+    assert out["B13"].value == "EURUSD"
+    assert isinstance(out["E13"].value, (int, float))
+
 
 @pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
 def test_sync_status_marks_abandoned_running_state_without_active_task(monkeypatch):

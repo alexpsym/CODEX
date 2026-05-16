@@ -372,7 +372,7 @@ def test_instrument_leaders_updates_full_row_and_reports_missing(tmp_path: Path)
     out=load_workbook(p)['Dashboard']
     assert out['N3'].value=='EURUSD' and out['O3'].value==4 and out['P3'].value==1 and out['Q3'].value==5
     assert out['N4'].value=='GBPUSD' and out['O4'].value==1 and out['P4'].value==4 and out['Q4'].value==5
-    assert 'crypto most losses' in [x.lower() for x in result['diagnostics']['missing_leader_rows']]
+    assert out['N8'].value=='ETHUSDT' and out['O8'].value==2 and out['P8'].value==6 and out['Q8'].value==8
     assert result['diagnostics']['updated_cells'] > 0
 
 def test_account_balances_restores_missing_rows_without_layout_mutation(tmp_path: Path):
@@ -473,3 +473,44 @@ def test_update_data_only_appends_missing_calendar_year_block(tmp_path: Path):
     assert int(out["A4"].value) == 2027
     assert float(out["C4"].value) == 0.02
     assert int(out["C5"].value) == 1
+
+def test_instrument_leaders_custom_layout_populates_values(tmp_path: Path):
+    from openpyxl import Workbook
+    from tools.master_journal_workbook import update_master_journal_workbook_data_only
+    p = tmp_path / "leaders-layout.xlsx"
+    wb = Workbook(); d = wb.active; d.title = "Dashboard"; wb.create_sheet("All Trades"); wb.create_sheet("Instrument Averages"); cal = wb.create_sheet("P&L Calendar")
+    d["A1"]="Account Balances"; d["A2"]="Account"; d["B2"]="Balance"; d["C2"]="Currency"; d["A3"]="BYBIT DEMO"
+    d["G1"]="Overall"; d["J1"]="FX"; d["M1"]="Crypto"; d["A11"]="Instrument leaders"; d["G12"]="Winners"; d["G17"]="Losers"; d["G22"]="Drawdown"
+    d["A12"]="Metric"; d["B12"]="Symbol"; d["C12"]="Wins"; d["D12"]="Losses"; d["E12"]="Trades"
+    labels=["Overall most wins","Overall most losses","FX most wins","FX most losses","Crypto most wins","Crypto most losses"]
+    for i, lbl in enumerate(labels, start=13): d.cell(i,1).value=lbl
+    for i,m in enumerate(["January","February","March","April","May","June","July","August","September","October","November","December"], start=3): cal.cell(1,i).value=m
+    cal.merge_cells("A2:A3"); cal["A2"]=2026; cal["B2"]="P/L %"; cal["B3"]="Total Trades"
+    wb.save(p)
+    snap={"items":[{"id":"t1","row_type":"trade","close_time":"2026-05-01","result_pct":1.0}],
+          "stats":{"totals":{},"groups":{"by_market":{"overall":{},"fx":{},"crypto":{}},"risk_expectancy":{},"duration":{},"leaders":{
+              "most_wins_instrument":{"symbol":"EURUSD","wins":5,"losses":1,"trades":6},
+              "most_losses_instrument":{"symbol":"BTCUSDT","wins":1,"losses":5,"trades":6},
+              "fx_most_wins_instrument":{"symbol":"EURUSD","wins":5,"losses":1,"trades":6},
+              "fx_most_losses_instrument":{"symbol":"GBPUSD","wins":1,"losses":5,"trades":6},
+              "crypto_most_wins_instrument":{"symbol":"ETHUSDT","wins":4,"losses":2,"trades":6},
+              "crypto_most_losses_instrument":{"symbol":"SOLUSDT","wins":1,"losses":5,"trades":6},
+          }}},
+          "balances":[{"account_label":"BYBIT DEMO","balance":100.0,"currency":"USDT"}]}
+    res=update_master_journal_workbook_data_only(p,snap); Path(res["candidate_path"]).replace(p)
+    out=load_workbook(p)["Dashboard"]
+    expected = [
+        ("EURUSD", 5, 1, 6),
+        ("BTCUSDT", 1, 5, 6),
+        ("EURUSD", 5, 1, 6),
+        ("GBPUSD", 1, 5, 6),
+        ("ETHUSDT", 4, 2, 6),
+        ("SOLUSDT", 1, 5, 6),
+    ]
+    for offset, (sym, wins, losses, trades) in enumerate(expected):
+        row = 13 + offset
+        assert out.cell(row, 2).value == sym
+        assert out.cell(row, 3).value == wins
+        assert out.cell(row, 4).value == losses
+        assert out.cell(row, 5).value == trades
+    assert not res["diagnostics"]["missing_leader_headers"]
