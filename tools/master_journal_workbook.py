@@ -968,12 +968,16 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                         dst_ws.column_dimensions[dst_letter].hidden = bool(src_ws.column_dimensions[src_letter].hidden)
                 for r in range(start_row, dst_ws.max_row + 1):
                     for c in range(1, max_col + 1):
+                        if _is_merged_non_anchor(dst_ws, r, c):
+                            continue
                         dc = dst_ws.cell(r, c)
                         dc.value = None
                         dc.comment = None
                         dc.hyperlink = None
                 for r in range(start_row, src_ws.max_row + 1):
                     for c in range(1, max_col + 1):
+                        if _is_merged_non_anchor(dst_ws, r, c):
+                            continue
                         sc = src_ws.cell(r, c)
                         dc = dst_ws.cell(r, c)
                         dc.value = sc.value

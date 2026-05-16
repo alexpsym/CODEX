@@ -692,6 +692,30 @@ def test_sync_master_journal_fails_when_expected_balance_non_numeric(tmp_path, m
 
 
 @pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_sync_master_journal_succeeds_with_merged_calendar_cells(tmp_path, monkeypatch):
+    from tools.master_journal_workbook import build_master_journal_workbook
+    from openpyxl import load_workbook
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    mj = tmp_path / "Master Journal.xlsx"
+    snap = {
+        "items": [{"id":"t1","row_type":"trade","account":"BYBIT DEMO","symbol":"BTCUSDT","side":"BUY","open_time":"2026-05-01","close_time":"2026-05-01","net_profit":10.0,"result_pct":1.0}],
+        "stats": {"totals": {}, "groups": {"leaders": {}}, "by_instrument": [{"symbol": "BTCUSDT", "total_trades": 1}]},
+        "balances": [{"account":"BYBIT DEMO","account_label":"BYBIT DEMO","balance":100.0,"currency":"USDT","as_of":"2026-05-16"}],
+        "diagnostics": {},
+    }
+    build_master_journal_workbook(snap, mj)
+    wb = load_workbook(mj)
+    cal = wb["P&L Calendar"]
+    cal.merge_cells("A2:A3"); cal.merge_cells("A4:A5"); cal.merge_cells("A6:A7")
+    cal["A2"] = "2026"; cal["A4"] = "2025"; cal["A6"] = "2024"
+    wb.save(mj); wb.close()
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
+    monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: snap["items"])
+    result = master_service._sync_master_journal_workbook()
+    assert result["master_journal_ok"] is True
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
 def test_trading_journal_sync_status_rejects_stale_master_journal_success(tmp_path, monkeypatch):
     missing = tmp_path / 'Master Journal.xlsx'
     state_payload = dict(master_service.TRADING_JOURNAL_SYNC_STATE)

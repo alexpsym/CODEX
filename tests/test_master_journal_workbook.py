@@ -418,3 +418,29 @@ def test_account_balances_reuses_blank_row_before_append(tmp_path: Path):
     out = load_workbook(p)["Dashboard"]
     assert out["T4"].value == "Bybit Demo"
     assert out["U4"].value == 2.5
+
+def test_update_data_only_preserves_calendar_merges_and_skips_non_anchor_writes(tmp_path: Path):
+    from openpyxl import Workbook
+    from tools.master_journal_workbook import update_master_journal_workbook_data_only
+    p = tmp_path / "merged-calendar.xlsx"
+    wb = Workbook(); dash = wb.active; dash.title = "Dashboard"; wb.create_sheet("All Trades"); wb.create_sheet("Instrument Averages"); cal = wb.create_sheet("P&L Calendar")
+    dash["A1"]="Overall"; dash["D1"]="FX"; dash["G1"]="Crypto"; dash["J1"]="Winners"; dash["J8"]="Losers"; dash["J14"]="Drawdown"; dash["M1"]="Instrument leaders"; dash["T1"]="Account Balances"
+    dash["T2"]="Account"; dash["U2"]="Balance"; dash["V2"]="Currency"; dash["W2"]="As Of"
+    cal.merge_cells("A2:A3"); cal.merge_cells("A4:A5"); cal.merge_cells("A6:A7")
+    cal["A2"]="2026"; cal["A4"]="2025"; cal["A6"]="2024"
+    cal["B2"]="P/L %"; cal["B3"]="Total Trades"; cal["B4"]="P/L %"; cal["B5"]="Total Trades"
+    wb.save(p)
+    snap = {
+        "items": [{"id":"t1","row_type":"trade","account":"BYBIT DEMO","symbol":"BTCUSDT","side":"BUY","open_time":"2026-05-01","close_time":"2026-05-01","net_profit":10.0,"result_pct":1.0}],
+        "stats":{"totals":{},"groups":{"by_market":{"overall":{},"fx":{},"crypto":{}},"risk_expectancy":{},"leaders":{},"duration":{}}},
+        "balances":[{"account_label":"BYBIT DEMO","balance":100.0,"currency":"USDT","as_of":"2026-05-16"}],
+    }
+    res = update_master_journal_workbook_data_only(p, snap)
+    Path(res["candidate_path"]).replace(p)
+    out = load_workbook(p, data_only=True)
+    out_cal = out["P&L Calendar"]
+    merged = {str(rng) for rng in out_cal.merged_cells.ranges}
+    assert {"A2:A3", "A4:A5", "A6:A7"}.issubset(merged)
+    assert out_cal["A3"].value in (None, "")
+    assert out_cal["A5"].value in (None, "")
+    out.close()
