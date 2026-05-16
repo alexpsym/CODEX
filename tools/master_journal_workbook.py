@@ -14,7 +14,7 @@ from openpyxl.utils.cell import range_boundaries
 import calendar
 from copy import copy
 
-SHEET_ORDER=["Dashboard","All Trades","Instrument Averages","P&L Calendar"]
+SHEET_ORDER=["Dashboard","Trade Log","Instrument Averages","P&L Calendar"]
 EDITABLE_COLS=["Test","Setup","Timeframe","Breakeven","Notes"]
 PROFIT_FILL = "C6EFCE"
 PROFIT_FONT = "006100"
@@ -22,6 +22,33 @@ LOSS_FILL = "FFC7CE"
 LOSS_FONT = "9C0006"
 
 
+
+
+def _get_trade_log_sheet(wb: Workbook):
+    if "Trade Log" in wb.sheetnames:
+        return wb["Trade Log"]
+    if "All Trades" in wb.sheetnames:
+        ws = wb["All Trades"]
+        ws.title = "Trade Log"
+        return ws
+    raise RuntimeError("Master Journal is missing required Trade Log sheet.")
+
+def _pct_points_to_excel_fraction(value: Any) -> float | None:
+    num = _as_float(value)
+    return None if num is None else num / 100.0
+
+def _excel_fraction_to_pct_points(value: Any) -> float | None:
+    num = _as_float(value)
+    return None if num is None else num * 100.0
+
+
+def _is_likely_fx_pair(value: str) -> bool:
+    token = str(value or '').upper().replace('/','').replace('-','').replace('_','')
+    
+    if not (len(token) == 6 and token.isalpha()):
+        return False
+    known = {"USD","EUR","GBP","JPY","AUD","NZD","CAD","CHF"}
+    return token[:3] in known and token[3:] in known
 def _is_test_trade_value(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -178,9 +205,10 @@ def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]
         return out
     wb=load_workbook(path, data_only=True)
     try:
-        if 'All Trades' not in wb.sheetnames:
+        try:
+            ws=_get_trade_log_sheet(wb)
+        except RuntimeError:
             return out
-        ws=wb['All Trades']
         headers=[str(c.value or '').strip() for c in ws[1]]
         idx={h:i for i,h in enumerate(headers)}
         rid_by_row={}
@@ -282,7 +310,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         cur += 1
 
     resolved_balances = _resolved_all_trade_balances(rows)
-    ws=wb['All Trades']; headers=['Open Time','Close Time','Account','Symbol','Side','Qty','Entry Price','Exit Price','Stop Loss Price','Target Price','Commission','Net P/L','Profit %','R-Multiple','Balance After','Trade Duration']+EDITABLE_COLS+['Cashflow Amount','Cashflow New Balance','Currency','Row Type','Row ID']; ws.append(headers)
+    ws=_get_trade_log_sheet(wb); headers=['Open Time','Close Time','Account','Symbol','Side','Qty','Entry Price','Exit Price','Stop Loss Price','Target Price','Commission','Net P/L','Profit %','R-Multiple','Balance After','Trade Duration']+EDITABLE_COLS+['Cashflow Amount','Cashflow New Balance','Currency','Row Type','Row ID']; ws.append(headers)
     for i, row in enumerate(rows):
         pct = _as_float(row.get('result_pct'))
         is_monthly = str(row.get("row_type") or "") == "monthly_aud_reval"
@@ -794,14 +822,12 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
         raise FileNotFoundError(f"Master Journal workbook not found: {path}")
     wb = load_workbook(path, data_only=True)
     try:
-        if 'All Trades' not in wb.sheetnames:
-            raise RuntimeError('Master Journal is missing required All Trades sheet.')
-        ws = wb['All Trades']
+        ws = _get_trade_log_sheet(wb)
         headers = [str(c.value or '').strip() for c in ws[1]]
         idx = {h:i for i,h in enumerate(headers)}
         required = {'Open Time','Close Time','Account','Symbol','Side'}
         if not required.issubset(set(idx.keys())):
-            raise RuntimeError('Master Journal All Trades headers are invalid.')
+            raise RuntimeError('Master Journal Trade Log headers are invalid.')
         items=[]; cashflow_ledger=defaultdict(list)
         def _num(v):
             try:
@@ -831,11 +857,13 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
                 asset_class = 'fx'
             elif any(t in account_u for t in ('BYBIT','BINANCE','COINSPOT')):
                 asset_class = 'crypto'
+            elif _is_likely_fx_pair(symbol_u):
+                asset_class = 'fx'
             elif any(t in symbol_u for t in ('USDT','USDC','BTC','ETH','PERP')):
                 asset_class = 'crypto'
             else:
                 asset_class = ''
-            item={'id': row_id or stable_row_id({'account':account,'symbol':symbol,'side':side,'open_time':open_time,'close_time':close_time}), 'row_type':row_type,'account':account,'symbol':symbol,'side':side,'open_time':open_time,'close_time':close_time,'qty':_num(r[idx.get('Qty')]) if 'Qty' in idx else None,'entry_price':_num(r[idx.get('Entry Price')]) if 'Entry Price' in idx else None,'exit_price':_num(r[idx.get('Exit Price')]) if 'Exit Price' in idx else None,'stop_loss':_num(r[i_stop]) if i_stop is not None else None,'take_profit':_num(r[i_tp]) if i_tp is not None else None,'commission':_num(r[idx.get('Commission')]) if 'Commission' in idx else None,'net_profit':_num(r[i_pnl]) if i_pnl is not None else None,'result_pct':_num(r[idx.get('Profit %')]) if 'Profit %' in idx else None,'r_multiple':_num(r[idx.get('R-Multiple')]) if 'R-Multiple' in idx else None,'balance_after_trade':_num(r[idx.get('Balance After')]) if 'Balance After' in idx else None,'trade_duration_seconds':duration,'is_test_trade':str(r[idx.get('Test')]).strip().lower() in {'yes','y','true','1'} if 'Test' in idx else False,'setup':r[idx.get('Setup',17)] if 'Setup' in idx else '','timeframe':r[idx.get('Timeframe',18)] if 'Timeframe' in idx else '','breakeven':r[idx.get('Breakeven',19)] if 'Breakeven' in idx else '','notes':r[idx.get('Notes',20)] if 'Notes' in idx else '','currency':str(r[idx.get('Currency')] or '').strip() if 'Currency' in idx else '', 'asset_class': asset_class}
+            item={'id': row_id or stable_row_id({'account':account,'symbol':symbol,'side':side,'open_time':open_time,'close_time':close_time}), 'row_type':row_type,'account':account,'symbol':symbol,'side':side,'open_time':open_time,'close_time':close_time,'qty':_num(r[idx.get('Qty')]) if 'Qty' in idx else None,'entry_price':_num(r[idx.get('Entry Price')]) if 'Entry Price' in idx else None,'exit_price':_num(r[idx.get('Exit Price')]) if 'Exit Price' in idx else None,'stop_loss':_num(r[i_stop]) if i_stop is not None else None,'take_profit':_num(r[i_tp]) if i_tp is not None else None,'commission':_num(r[idx.get('Commission')]) if 'Commission' in idx else None,'net_profit':_num(r[i_pnl]) if i_pnl is not None else None,'result_pct':_excel_fraction_to_pct_points(r[idx.get('Profit %')]) if 'Profit %' in idx else None,'r_multiple':_num(r[idx.get('R-Multiple')]) if 'R-Multiple' in idx else None,'balance_after_trade':_num(r[idx.get('Balance After')]) if 'Balance After' in idx else None,'trade_duration_seconds':duration,'is_test_trade':str(r[idx.get('Test')]).strip().lower() in {'yes','y','true','1'} if 'Test' in idx else False,'setup':r[idx.get('Setup',17)] if 'Setup' in idx else '','timeframe':r[idx.get('Timeframe',18)] if 'Timeframe' in idx else '','breakeven':r[idx.get('Breakeven',19)] if 'Breakeven' in idx else '','notes':r[idx.get('Notes',20)] if 'Notes' in idx else '','currency':str(r[idx.get('Currency')] or '').strip() if 'Currency' in idx else '', 'asset_class': asset_class}
             items.append(item)
             if row_type=='cashflow':
                 cashflow_ledger[account].append({'account':account,'date':item['close_time'] or item['open_time'],'amount':_num(r[idx.get('Cashflow Amount')]) if 'Cashflow Amount' in idx else _num(r[i_pnl]) if i_pnl is not None else None,'new_balance':_num(r[idx.get('Cashflow New Balance')]) if 'Cashflow New Balance' in idx else item.get('balance_after_trade'),'currency':str(r[idx.get('Currency')] or '').strip() if 'Currency' in idx else '','reason':item.get('notes') or '', 'side':side})
@@ -872,7 +900,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 pct = _as_float(value)
                 if pct is None:
                     return
-                out = pct / 100.0
+                out = _pct_points_to_excel_fraction(pct)
             elif metric_type == "duration":
                 out = _fmt_duration_full(value)
             elif metric_type == "count":
@@ -1095,8 +1123,9 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 last_col_letter = get_column_letter(max_col)
                 dst_ws.auto_filter.ref = f"A1:{last_col_letter}{max(1,last_row)}"
 
-            if "All Trades" in wb.sheetnames and "All Trades" in gen.sheetnames:
-                _copy_data_rows(gen["All Trades"], wb["All Trades"], 2, force_all_columns=True)
+            gen_trade_log = _get_trade_log_sheet(gen)
+            live_trade_log = _get_trade_log_sheet(wb)
+            _copy_data_rows(gen_trade_log, live_trade_log, 2, force_all_columns=True)
             if "Instrument Averages" in wb.sheetnames and "Instrument Averages" in gen.sheetnames:
                 _copy_data_rows(gen["Instrument Averages"], wb["Instrument Averages"], 2)
             if "P&L Calendar" in wb.sheetnames and "P&L Calendar" in gen.sheetnames:
@@ -1109,7 +1138,8 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             gen.close()
             tmp.unlink(missing_ok=True)
 
-        _assert_filter_covers_data(wb["All Trades"], sheet_name="All Trades", header_row=1, required_headers=["Open Time", "Close Time", "Row ID"])
+        trade_log = _get_trade_log_sheet(wb)
+        _assert_filter_covers_data(trade_log, sheet_name="Trade Log", header_row=1, required_headers=["Open Time", "Close Time", "Row ID"])
         _assert_filter_covers_data(wb["Instrument Averages"], sheet_name="Instrument Averages", header_row=1, required_headers=["Symbol", "Trades"])
 
         after = _snapshot_invariants(wb)
@@ -1125,9 +1155,7 @@ def refresh_master_journal_derived_sheets(path: Path, snapshot: Dict[str, Any]) 
         raise FileNotFoundError(f"Master Journal workbook not found: {path}")
     wb = load_workbook(path)
     try:
-        if 'All Trades' not in wb.sheetnames:
-            raise RuntimeError('Master Journal missing All Trades sheet.')
-        all_trades = wb['All Trades']
+        all_trades = _get_trade_log_sheet(wb)
         # remove derived and legacy sheets
         for name in ['Dashboard','Instrument Averages','P&L Calendar','_Trade Meta']:
             if name in wb.sheetnames:
