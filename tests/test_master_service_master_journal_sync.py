@@ -594,7 +594,7 @@ def test_sync_master_journal_rebuilds_blanked_workbook_sections(tmp_path, monkey
 
 
 @pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
-def test_sync_master_journal_fails_when_expected_balance_account_missing(tmp_path, monkeypatch):
+def test_sync_master_journal_repairs_missing_expected_balance_account_row(tmp_path, monkeypatch):
     from tools.master_journal_workbook import build_master_journal_workbook
     from openpyxl import load_workbook
 
@@ -637,9 +637,30 @@ def test_sync_master_journal_fails_when_expected_balance_account_missing(tmp_pat
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
     monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: source_rows)
     result = master_service._sync_master_journal_workbook()
+    assert result['master_journal_ok'] is True
+    repaired = load_workbook(mj, data_only=True)["Dashboard"]
+    found_b = False
+    for r in range(1, repaired.max_row + 1):
+        if str(repaired.cell(r, 1).value or "").strip() == "B":
+            found_b = True
+            assert isinstance(repaired.cell(r, 2).value, (int, float))
+            break
+    assert found_b
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_sync_master_journal_fails_when_expected_balance_non_numeric(tmp_path, monkeypatch):
+    from tools.master_journal_workbook import build_master_journal_workbook
+    source_rows = [{'id': 'r1', 'row_type': 'trade', 'account': 'BYBIT DEMO', 'symbol': 'BTCUSDT', 'side': 'BUY', 'open_time': '2026-01-01', 'close_time': '2026-01-01', 'net_profit': 1.0, 'result_pct': 0.1}]
+    snap = {'items': source_rows, 'stats': {'totals': {}, 'by_instrument': [{'symbol': 'BTCUSDT', 'total_trades': 1}], 'groups': {'leaders': {}}}, 'balances': [{'account': 'BYBIT DEMO', 'account_label': 'BYBIT DEMO', 'balance': None, 'currency': 'USDT'}], 'diagnostics': {}}
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    mj = tmp_path / 'Master Journal.xlsx'
+    build_master_journal_workbook(snap, mj)
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
+    monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: source_rows)
+    result = master_service._sync_master_journal_workbook()
     assert result['master_journal_ok'] is False
     assert 'Account Balances missing numeric values' in str(result.get('master_journal_error') or '')
-    assert 'B' in str(result.get('master_journal_error') or '')
 
 
 @pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')

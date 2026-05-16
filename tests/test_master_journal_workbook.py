@@ -374,3 +374,47 @@ def test_instrument_leaders_updates_full_row_and_reports_missing(tmp_path: Path)
     assert out['N4'].value=='GBPUSD' and out['O4'].value==1 and out['P4'].value==4 and out['Q4'].value==5
     assert 'crypto most losses' in [x.lower() for x in result['diagnostics']['missing_leader_rows']]
     assert result['diagnostics']['updated_cells'] > 0
+
+def test_account_balances_restores_missing_rows_without_layout_mutation(tmp_path: Path):
+    from tools.master_journal_workbook import update_master_journal_workbook_data_only
+    from openpyxl import Workbook
+    src = tmp_path / "m.xlsx"
+    wb = Workbook(); ws = wb.active; ws.title = "Dashboard"; wb.create_sheet("All Trades"); wb.create_sheet("Instrument Averages")
+    ws["A1"]="Overall"; ws["D1"]="FX"; ws["G1"]="Crypto"; ws["J1"]="Winners"; ws["J8"]="Losers"; ws["J14"]="Drawdown"; ws["M1"]="Instrument leaders"; ws["T1"]="Account Balances"
+    ws["T2"]="Account"; ws["U2"]="Balance"; ws["V2"]="Currency"; ws["W2"]="As Of"
+    wb.save(src)
+    snap = {'stats':{'totals':{},'groups':{'by_market':{'overall':{},'fx':{},'crypto':{}},'risk_expectancy':{},'leaders':{},'duration':{}}},'balances':[
+        {"account_label": "Bybit Demo", "balance": 123.456789, "currency": "USDT", "as_of": "2026-05-16"},
+        {"account_label": "Bybit Live", "balance": 10.123456789, "currency": "USDT", "as_of": "2026-05-16"},
+    ]}
+    res = update_master_journal_workbook_data_only(src, snap)
+    Path(res["candidate_path"]).replace(src)
+    out = load_workbook(src)
+    d = out["Dashboard"]
+    found = {}
+    for r in range(3, d.max_row + 1):
+        label = str(d.cell(r, 20).value or "").strip()
+        if label in {"Bybit Demo", "Bybit Live"}:
+            found[label] = r
+    assert "Bybit Demo" in found and "Bybit Live" in found
+    assert isinstance(d.cell(found["Bybit Demo"], 21).value, (int, float))
+    assert d.cell(found["Bybit Demo"], 22).value == "USDT"
+    assert str(d.cell(found["Bybit Demo"], 23).value) == "2026-05-16"
+    assert out.sheetnames == ["Dashboard", "All Trades", "Instrument Averages"]
+    out.close()
+
+def test_account_balances_reuses_blank_row_before_append(tmp_path: Path):
+    from tools.master_journal_workbook import update_master_journal_workbook_data_only
+    from openpyxl import Workbook
+    p = tmp_path / "reuse.xlsx"
+    wb = Workbook(); ws = wb.active; ws.title = "Dashboard"; wb.create_sheet("All Trades"); wb.create_sheet("Instrument Averages")
+    ws["A1"]="Overall"; ws["D1"]="FX"; ws["G1"]="Crypto"; ws["J1"]="Winners"; ws["J8"]="Losers"; ws["J14"]="Drawdown"; ws["M1"]="Instrument leaders"; ws["T1"]="Account Balances"
+    ws["T2"]="Account"; ws["U2"]="Balance"; ws["V2"]="Currency"; ws["W2"]="As Of"
+    ws["T3"]="Bybit Live"; ws["U3"]=1.0; ws["V3"]="USDT"
+    ws["T4"]=None; ws["U4"]=None; ws["V4"]=None
+    wb.save(p)
+    snap={'stats':{'totals':{},'groups':{'by_market':{'overall':{},'fx':{},'crypto':{}},'risk_expectancy':{},'leaders':{},'duration':{}}},'balances':[{'account_label':'Bybit Demo','balance':2.5,'currency':'USDT','as_of':'2026-05-16'}]}
+    res = update_master_journal_workbook_data_only(p, snap); Path(res["candidate_path"]).replace(p)
+    out = load_workbook(p)["Dashboard"]
+    assert out["T4"].value == "Bybit Demo"
+    assert out["U4"].value == 2.5
