@@ -57,6 +57,23 @@ def _migrate_legacy_trade_log_sheet_name(wb: Workbook, diagnostics: Dict[str, An
         return
     raise RuntimeError("Master Journal is missing required Trade Log sheet.")
 
+def _remove_legacy_trade_meta_sheet(wb: Workbook, diagnostics: Dict[str, Any] | None = None) -> None:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    if "_Trade Meta" in wb.sheetnames:
+        wb.remove(wb["_Trade Meta"])
+        diagnostics["removed_legacy_trade_meta"] = True
+
+def _repair_legacy_instrument_averages_freeze_pane(wb: Workbook, diagnostics: Dict[str, Any] | None = None) -> None:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    if "Instrument Averages" not in wb.sheetnames:
+        return
+    ws = wb["Instrument Averages"]
+    previous = str(ws.freeze_panes or "")
+    if previous != "A2":
+        ws.freeze_panes = "A2"
+        diagnostics["repaired_instrument_averages_freeze_pane"] = True
+        diagnostics["previous_instrument_averages_freeze_pane"] = previous
+
 def _pct_points_to_excel_fraction(value: Any) -> float | None:
     num = _as_float(value)
     return None if num is None else num / 100.0
@@ -168,6 +185,44 @@ def _currency_code(*values: Any) -> str:
         if text:
             return text
     return "UNKNOWN"
+
+def _symbol_quote_currency(symbol: Any) -> str:
+    token = str(symbol or "").upper().replace("/", "").replace("-", "").replace("_", "").strip()
+    if not token:
+        return ""
+    for quote in ("USDT", "USDC", "USD", "BTC", "ETH", "AUD"):
+        if token.endswith(quote) and len(token) > len(quote):
+            return quote
+    return ""
+
+def _infer_trade_log_currency(row: Dict[str, Any], *, field: str) -> str:
+    row_type = str(row.get("row_type") or "").strip().lower()
+    symbol = str(row.get("symbol") or "").strip().upper()
+    if row_type == "monthly_aud_reval" or symbol == "MONTHLY AUD P/L":
+        return "AUD"
+    explicit_fields = {
+        "commission": ("commission_currency", "fee_currency", "currency", "account_currency"),
+        "net_pnl": ("realized_pnl_currency", "result_currency", "currency", "account_currency"),
+        "balance_after": ("balance_after_trade_currency", "account_currency", "currency", "result_currency"),
+    }.get(field, ())
+    explicit = _currency_code(*(row.get(k) for k in explicit_fields))
+    if explicit != "UNKNOWN":
+        return explicit
+    account_fingerprint = " ".join(
+        str(row.get(k) or "").upper() for k in ("account", "account_label", "source")
+    )
+    if any(tok in account_fingerprint for tok in ("OANDA", "PEPPERSTONE", "FOREX", " FX")):
+        return "AUD"
+    normalized_symbol = symbol.replace("/", "").replace("-", "").replace("_", "")
+    if _is_likely_fx_pair(normalized_symbol):
+        return "AUD"
+    is_crypto_account = any(tok in account_fingerprint for tok in ("BYBIT", "BINANCE", "COINSPOT"))
+    is_crypto_row = is_crypto_account or str(row.get("asset_class") or "").strip().lower() == "crypto"
+    if is_crypto_row:
+        quote = _symbol_quote_currency(symbol)
+        if quote in {"USDT", "USDC", "USD", "BTC", "ETH"}:
+            return quote
+    return ""
 
 def _is_crypto_currency(code: str) -> bool:
     c = str(code or "").upper()
@@ -352,16 +407,20 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         ws.append([otv,ctv,acct,symbol,row.get('side'),row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('stop_loss'),row.get('take_profit'),comm_val,net_pnl,(pct/100.0 if pct is not None else ''),row.get('r_multiple'),resolved_balances.get(str(i)),_fmt_duration_full(row.get('trade_duration_seconds')),'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',row.get('setup') or '',row.get('timeframe') or '',row.get('breakeven') or '',notes,row.get('cashflow_amount'),row.get('cashflow_new_balance'),row.get('currency') or row.get('account_currency') or row.get('result_currency') or '',row.get('row_type') or 'trade', stable_row_id(row)])
     _style_table_sheet(ws,1,'A2',True)
     for rr in range(2, ws.max_row + 1):
-        ccy_comm = _currency_code(rows[rr-2].get("commission_currency"), rows[rr-2].get("fee_currency"), rows[rr-2].get("realized_pnl_currency"), rows[rr-2].get("currency"), rows[rr-2].get("account_currency"))
-        ccy_pnl = _currency_code(rows[rr-2].get("realized_pnl_currency"), rows[rr-2].get("result_currency"), rows[rr-2].get("currency"), rows[rr-2].get("account_currency"), rows[rr-2].get("balance_after_trade_currency"))
-        ccy_bal = _currency_code(rows[rr-2].get("balance_after_trade_currency"), rows[rr-2].get("result_currency"), rows[rr-2].get("currency"), rows[rr-2].get("account_currency"))
+        row_ctx = rows[rr - 2] if rr - 2 < len(rows) else {}
+        ccy_comm = _infer_trade_log_currency(row_ctx, field="commission")
+        ccy_pnl = _infer_trade_log_currency(row_ctx, field="net_pnl")
+        ccy_bal = _infer_trade_log_currency(row_ctx, field="balance_after")
         ws.cell(rr, 6).number_format = '#,##0.##########'
         ws.cell(rr, 1).number_format = 'yyyy-mm-dd hh:mm:ss'
         ws.cell(rr, 2).number_format = 'yyyy-mm-dd hh:mm:ss'
-        ws.cell(rr, 11).number_format = _currency_number_format(ccy_comm)
-        ws.cell(rr, 12).number_format = _currency_number_format(ccy_pnl)
+        if ccy_comm:
+            ws.cell(rr, 11).number_format = _currency_number_format(ccy_comm)
+        if ccy_pnl:
+            ws.cell(rr, 12).number_format = _currency_number_format(ccy_pnl)
         ws.cell(rr, 14).number_format = '0.00'
-        ws.cell(rr, 15).number_format = '#,##0.0000000000' if _is_crypto_currency(ccy_bal) else '#,##0.00'
+        if ccy_bal:
+            ws.cell(rr, 15).number_format = '#,##0.0000000000' if _is_crypto_currency(ccy_bal) else '#,##0.00'
         ws.cell(rr, 13).number_format = "0.00%"
         ws.cell(rr, 16).number_format = r'00\:00\:00\:00'
     ws.column_dimensions['Z'].hidden = True
@@ -917,12 +976,36 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
     diagnostics: Dict[str, Any] = {"missing_accounts": [], "updated_cells": 0}
     try:
         _migrate_legacy_trade_log_sheet_name(wb, diagnostics)
+        _remove_legacy_trade_meta_sheet(wb, diagnostics)
+        _repair_legacy_instrument_averages_freeze_pane(wb, diagnostics)
+        def _repair_trade_log_unknown_currency_formats(ws, rows: List[Dict[str, Any]], diagnostics: Dict[str, Any] | None = None) -> None:
+            diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+            repaired = 0
+            for rr in range(2, ws.max_row + 1):
+                row_ctx = rows[rr - 2] if rr - 2 < len(rows) else {}
+                for col, field in ((11, "commission"), (12, "net_pnl")):
+                    cell = ws.cell(rr, col)
+                    fmt = str(cell.number_format or "")
+                    if "UNKNOWN" not in fmt:
+                        continue
+                    ccy = _infer_trade_log_currency(row_ctx, field=field)
+                    if not ccy:
+                        continue
+                    cell.number_format = _currency_number_format(ccy)
+                    repaired += 1
+            if repaired:
+                diagnostics["repaired_trade_log_unknown_currency_formats"] = True
+                diagnostics["repaired_trade_log_unknown_currency_format_cells"] = repaired
         if "Dashboard" not in wb.sheetnames:
             raise RuntimeError("Master Journal missing Dashboard sheet.")
         dash = wb["Dashboard"]
         before = _snapshot_invariants(wb)
 
         stats = snapshot.get("stats") or {}
+        rows = [
+            r for r in (snapshot.get("items") or [])
+            if isinstance(r, dict) and str(r.get("row_type") or "trade") in {"trade", "monthly_aud_reval", "cashflow"}
+        ]
         groups = stats.get("groups") or {}
         by_market = groups.get("by_market") or {}
         risk = groups.get("risk_expectancy") or {}
@@ -1165,6 +1248,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             gen_trade_log = _get_all_trades_sheet(gen, allow_legacy=False)
             live_trade_log = _get_all_trades_sheet(wb, allow_legacy=False)
             _copy_data_rows(gen_trade_log, live_trade_log, 2, force_all_columns=True)
+            _repair_trade_log_unknown_currency_formats(live_trade_log, rows, diagnostics)
             if "Instrument Averages" in wb.sheetnames and "Instrument Averages" in gen.sheetnames:
                 _copy_data_rows(gen["Instrument Averages"], wb["Instrument Averages"], 2)
             if "P&L Calendar" in wb.sheetnames and "P&L Calendar" in gen.sheetnames:
