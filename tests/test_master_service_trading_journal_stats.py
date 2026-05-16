@@ -2,7 +2,7 @@ import pytest
 
 pytest.importorskip("httpx")
 
-from render.master_service import _compute_journal_stats
+from render.master_service import _compute_journal_stats, _build_journal_balance_timelines
 
 
 def test_compute_journal_stats_winner_loser_splits_and_durations() -> None:
@@ -181,3 +181,30 @@ def test_compute_journal_stats_streaks_and_money_by_currency() -> None:
     assert by_market["overall"]["money_by_currency"]["mixed_currency"] is True
     assert by_market["fx"]["money_by_currency"]["currencies"] == ["AUD"]
     assert by_market["crypto"]["money_by_currency"]["currencies"] == ["USDT"]
+
+
+def test_oanda_demo_newer_authoritative_balance_overrides_stale_cashflow() -> None:
+    rows = [
+        {
+            "row_type": "trade",
+            "account_label": "OANDA DEMO",
+            "source": "oanda",
+            "symbol": "EURUSD",
+            "open_time": "2026-05-10T00:00:00Z",
+            "close_time": "2026-05-10T01:00:00Z",
+            "net_profit": 10.0,
+            "balance_after_trade": 1500.65,
+        }
+    ]
+    ledger = {
+        "OANDA DEMO": [
+            {"account": "OANDA DEMO", "date": "2026-04-01T00:00:00Z", "new_balance": 200.589, "currency": "AUD"}
+        ]
+    }
+    out = _build_journal_balance_timelines(rows, ledger, excel_balances=[])
+    bal = next(b for b in out["balances"] if str(b.get("label")).upper() == "OANDA DEMO")
+    assert bal["balance"] == 1500.65
+    assert bal["balance_source"] != "cashflow_anchor_plus_trades"
+    diag = out["diagnostics"]["OANDA DEMO"]
+    assert diag["stale_cashflow_overridden"] is True
+    assert diag["previous_cashflow_balance"] == 200.589

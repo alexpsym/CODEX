@@ -23939,14 +23939,20 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
             for sheet in SHEET_ORDER:
                 if sheet not in wb.sheetnames:
                     raise RuntimeError(f"Master Journal validation failed: missing required sheet '{sheet}'.")
-            all_trades = _get_all_trades_sheet(wb, allow_legacy=False)
+            trade_log = _get_all_trades_sheet(wb, allow_legacy=False)
             inst = wb["Instrument Averages"]
             cal = wb["P&L Calendar"]
             dash = wb["Dashboard"]
-            if not all_trades.auto_filter or not all_trades.auto_filter.ref:
-                raise RuntimeError("Master Journal validation failed: All Trades filter missing.")
+            if "All Trades" in wb.sheetnames:
+                raise RuntimeError("Master Journal validation failed: legacy 'All Trades' sheet remains after migration.")
+            if "_Trade Meta" in wb.sheetnames:
+                raise RuntimeError("Master Journal validation failed: '_Trade Meta' must not be present.")
+            if not trade_log.auto_filter or not trade_log.auto_filter.ref:
+                raise RuntimeError("Master Journal validation failed: Trade Log filter missing.")
             if not inst.auto_filter or not inst.auto_filter.ref:
                 raise RuntimeError("Master Journal validation failed: Instrument Averages filter missing.")
+            if str(inst.freeze_panes or "") != "A2":
+                raise RuntimeError("Master Journal validation failed: Instrument Averages freeze pane must be A2.")
             def _is_hidden_trade_row(row: Dict[str, object]) -> bool:
                 metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
                 for key in ("is_hidden", "hidden", "_hidden"):
@@ -23956,28 +23962,50 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
 
             visible_trade_rows = [r for r in (snapshot.get("items") or []) if isinstance(r, dict) and _row_type(r) == "trade" and not _is_hidden_trade_row(r)]
             if visible_trade_rows:
-                headers = [str(c.value or "").strip() for c in all_trades[1]]
+                headers = [str(c.value or "").strip() for c in trade_log[1]]
                 symbol_col = headers.index("Symbol") + 1 if "Symbol" in headers else None
                 row_id_col = headers.index("Row ID") + 1 if "Row ID" in headers else None
                 if not symbol_col:
-                    raise RuntimeError("Master Journal validation failed: All Trades Symbol column missing.")
+                    raise RuntimeError("Master Journal validation failed: Trade Log Symbol column missing.")
                 populated_symbol_rows = 0
                 workbook_row_ids: Set[str] = set()
-                for rr in range(2, all_trades.max_row + 1):
-                    symbol = str(all_trades.cell(rr, symbol_col).value or "").strip()
+                for rr in range(2, trade_log.max_row + 1):
+                    symbol = str(trade_log.cell(rr, symbol_col).value or "").strip()
                     if symbol:
                         populated_symbol_rows += 1
                     if row_id_col:
-                        rid = str(all_trades.cell(rr, row_id_col).value or "").strip()
+                        rid = str(trade_log.cell(rr, row_id_col).value or "").strip()
                         if rid:
                             workbook_row_ids.add(rid)
                 if populated_symbol_rows <= 0:
-                    raise RuntimeError("Master Journal validation failed: All Trades is blank despite source rows.")
+                    raise RuntimeError("Master Journal validation failed: Trade Log is blank despite source rows.")
                 expected_ids = {str(r.get("id") or "").strip() for r in visible_trade_rows if str(r.get("id") or "").strip()}
                 if _master_journal_single_file_mode() and expected_ids and (not row_id_col or not workbook_row_ids):
                     raise RuntimeError("Master Journal validation failed: Row ID metadata is required in master_journal mode.")
                 if expected_ids and not expected_ids.issubset(workbook_row_ids):
-                    raise RuntimeError("Master Journal validation failed: All Trades row IDs do not match source snapshot.")
+                    raise RuntimeError("Master Journal validation failed: Trade Log row IDs do not match source snapshot.")
+                open_col = headers.index("Open Time") + 1 if "Open Time" in headers else None
+                close_col = headers.index("Close Time") + 1 if "Close Time" in headers else None
+                dur_col = headers.index("Trade Duration (DD:HH:MM:SS)") + 1 if "Trade Duration (DD:HH:MM:SS)" in headers else None
+                currency_cols = [headers.index("Commission") + 1 if "Commission" in headers else None, headers.index("Net P/L") + 1 if "Net P/L" in headers else None]
+                for rr in range(2, trade_log.max_row + 1):
+                    if open_col:
+                        ov = trade_log.cell(rr, open_col).value
+                        if isinstance(ov, str) and "T" in ov:
+                            raise RuntimeError("Master Journal validation failed: Trade Log Open Time contains ISO 'T' string.")
+                    if close_col:
+                        cv = trade_log.cell(rr, close_col).value
+                        if isinstance(cv, str) and "T" in cv:
+                            raise RuntimeError("Master Journal validation failed: Trade Log Close Time contains ISO 'T' string.")
+                    if dur_col:
+                        dv = trade_log.cell(rr, dur_col).value
+                        if dv not in (None, "") and not isinstance(dv, (int, float)):
+                            raise RuntimeError("Master Journal validation failed: Trade Log duration cells must be numeric DDHHMMSS.")
+                for cc in [c for c in currency_cols if c]:
+                    for rr in range(2, trade_log.max_row + 1):
+                        fmt = str(trade_log.cell(rr, cc).number_format or "")
+                        if "UNKNOWN" in fmt:
+                            raise RuntimeError("Master Journal validation failed: Trade Log currency format contains UNKNOWN.")
             stats = snapshot.get("stats") or {}
             by_instrument = stats.get("by_instrument") or []
             if by_instrument:
@@ -23999,6 +24027,18 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                         break
                 if not has_instrument_data:
                     raise RuntimeError("Master Journal validation failed: Instrument Averages is blank despite instrument stats.")
+                inst_dur_cols = []
+                for token in ("shortest duration (dd:hh:mm:ss)", "avg duration (dd:hh:mm:ss)", "longest duration (dd:hh:mm:ss)"):
+                    if token in inst_headers:
+                        inst_dur_cols.append(inst_headers.index(token) + 1)
+                if len(inst_dur_cols) == 3:
+                    for rr in range(2, inst.max_row + 1):
+                        vals = [inst.cell(rr, c).value for c in inst_dur_cols]
+                        nums = [v for v in vals if isinstance(v, (int, float))]
+                        if nums and len(nums) != len(vals):
+                            raise RuntimeError("Master Journal validation failed: Instrument durations must be numeric DDHHMMSS.")
+                        if len(nums) == 3 and not (nums[0] <= nums[1] <= nums[2]):
+                            raise RuntimeError("Master Journal validation failed: Instrument duration order must satisfy Shortest <= Avg <= Longest.")
             non_test_with_results = []
             from tools.master_journal_workbook import _as_date as _journal_as_date
             for r in visible_trade_rows:
