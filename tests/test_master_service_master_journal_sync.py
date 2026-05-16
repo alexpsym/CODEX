@@ -249,6 +249,34 @@ def test_sync_master_journal_repairs_legacy_instrument_averages_freeze_pane(tmp_
 
 
 @pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_sync_master_journal_repairs_unknown_trade_log_currency_formats(tmp_path, monkeypatch):
+    from tools.master_journal_workbook import build_master_journal_workbook
+    from openpyxl import load_workbook
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    mj = tmp_path / "Master Journal.xlsx"
+    snap = {'items':[
+        {'id':'o1','row_type':'trade','account':'OANDA DEMO','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0,'result_pct':1.0},
+        {'id':'b1','row_type':'trade','account':'BYBIT','symbol':'BTCUSDT','side':'SELL','open_time':'2026-01-02','close_time':'2026-01-02','net_profit':2.0,'result_pct':2.0},
+    ], 'stats':{'totals':{}, 'groups':{}, 'by_instrument':[{'symbol':'EURUSD','trades':1}]}, 'balances':[]}
+    build_master_journal_workbook(snap, mj)
+    wb = load_workbook(mj); ws = wb["Trade Log"]
+    ws["K2"].number_format = '#,##0.00 "UNKNOWN"'
+    ws["L2"].number_format = '#,##0.00 "UNKNOWN"'
+    ws["L3"].number_format = '#,##0.00 "UNKNOWN"'
+    wb.save(mj); wb.close()
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
+    out = master_service._sync_master_journal_workbook()
+    assert out["master_journal_ok"] is True
+    repaired = load_workbook(mj)
+    ws2 = repaired["Trade Log"]
+    for r in range(2, ws2.max_row + 1):
+        assert "UNKNOWN" not in str(ws2.cell(r, 11).number_format or "")
+        assert "UNKNOWN" not in str(ws2.cell(r, 12).number_format or "")
+    repaired.close()
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
 def test_existing_master_journal_preserves_restored_layout_and_populates_stats(tmp_path, monkeypatch):
     from tools.master_journal_workbook import build_master_journal_workbook
     from openpyxl import load_workbook

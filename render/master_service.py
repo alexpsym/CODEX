@@ -24005,7 +24005,14 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                     for rr in range(2, trade_log.max_row + 1):
                         fmt = str(trade_log.cell(rr, cc).number_format or "")
                         if "UNKNOWN" in fmt:
-                            raise RuntimeError("Master Journal validation failed: Trade Log currency format contains UNKNOWN.")
+                            col_name = headers[cc - 1] if cc - 1 < len(headers) else f"col_{cc}"
+                            sym = str(trade_log.cell(rr, headers.index("Symbol") + 1).value or "").strip() if "Symbol" in headers else ""
+                            acct = str(trade_log.cell(rr, headers.index("Account") + 1).value or "").strip() if "Account" in headers else ""
+                            row_type = str(trade_log.cell(rr, headers.index("Row Type") + 1).value or "").strip() if "Row Type" in headers else ""
+                            raise RuntimeError(
+                                "Master Journal validation failed: Trade Log currency format contains UNKNOWN "
+                                f"(row={rr}, column={col_name}, account={acct or '—'}, symbol={sym or '—'}, row_type={row_type or '—'})."
+                            )
             stats = snapshot.get("stats") or {}
             by_instrument = stats.get("by_instrument") or []
             if by_instrument:

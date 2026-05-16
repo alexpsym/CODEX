@@ -356,6 +356,57 @@ def test_trade_log_commission_zero_none_blank_and_nonzero(tmp_path: Path):
     assert ws["K5"].value == 1.25
     assert "AUD" in str(ws["K5"].number_format or "")
 
+def test_trade_log_currency_inference_avoids_unknown_and_respects_fx_vs_crypto(tmp_path: Path):
+    s = sample_snapshot()
+    s["items"] = [
+        {"id":"o1","row_type":"trade","account":"OANDA DEMO","symbol":"EURUSD","side":"BUY","open_time":"2026-01-01","close_time":"2026-01-01","commission":None,"net_profit":1.0,"result_pct":1.0},
+        {"id":"p1","row_type":"trade","account":"PEPPERSTONE LIVE","symbol":"GBPUSD","side":"BUY","open_time":"2026-01-02","close_time":"2026-01-02","net_profit":2.0,"result_pct":2.0},
+        {"id":"m1","row_type":"monthly_aud_reval","account":"Bybit Live","symbol":"MONTHLY AUD P/L","side":"","open_time":"2026-01-31","close_time":"2026-01-31","result_cash":3.0,"net_profit":3.0},
+        {"id":"b1","row_type":"trade","account":"BYBIT","symbol":"BTCUSDT","side":"SELL","open_time":"2026-01-03","close_time":"2026-01-03","net_profit":4.0,"result_pct":4.0},
+        {"id":"f1","row_type":"trade","account":"OANDA DEMO","symbol":"USDCAD","side":"BUY","open_time":"2026-01-04","close_time":"2026-01-04","net_profit":5.0,"result_pct":5.0},
+        {"id":"f2","row_type":"trade","account":"OANDA DEMO","symbol":"USDCHF","side":"BUY","open_time":"2026-01-05","close_time":"2026-01-05","net_profit":6.0,"result_pct":6.0},
+    ]
+    out = tmp_path / "currency_infer.xlsx"
+    build_master_journal_workbook(s, out)
+    ws = load_workbook(out)["Trade Log"]
+    headers = [str(c.value or "") for c in ws[1]]
+    row_id_col = headers.index("Row ID") + 1
+    row_map = {str(ws.cell(r, row_id_col).value): r for r in range(2, ws.max_row + 1)}
+    for rid in ("o1","p1","m1","b1","f1","f2"):
+        assert rid in row_map
+        assert "UNKNOWN" not in str(ws.cell(row_map[rid], 11).number_format or "")
+        assert "UNKNOWN" not in str(ws.cell(row_map[rid], 12).number_format or "")
+    assert "AUD" in str(ws.cell(row_map["o1"], 12).number_format or "")
+    assert "AUD" in str(ws.cell(row_map["p1"], 12).number_format or "")
+    assert "AUD" in str(ws.cell(row_map["m1"], 12).number_format or "")
+    assert "USDT" in str(ws.cell(row_map["b1"], 12).number_format or "")
+    assert "AUD" in str(ws.cell(row_map["f1"], 12).number_format or "")
+    assert "AUD" in str(ws.cell(row_map["f2"], 12).number_format or "")
+    assert ws.cell(row_map["o1"], 11).value in ("", None)
+
+def test_update_data_only_repairs_unknown_trade_log_currency_formats(tmp_path: Path):
+    s = sample_snapshot()
+    s["items"] = [
+        {"id":"o1","row_type":"trade","account":"OANDA DEMO","symbol":"EURUSD","side":"BUY","open_time":"2026-01-01","close_time":"2026-01-01","net_profit":1.0,"result_pct":1.0},
+        {"id":"b1","row_type":"trade","account":"BYBIT","symbol":"BTCUSDT","side":"SELL","open_time":"2026-01-02","close_time":"2026-01-02","net_profit":2.0,"result_pct":2.0},
+        {"id":"m1","row_type":"monthly_aud_reval","account":"Bybit Live","symbol":"MONTHLY AUD P/L","open_time":"2026-01-31","close_time":"2026-01-31","result_cash":3.0,"net_profit":3.0},
+    ]
+    out = tmp_path / "repair_unknown.xlsx"
+    build_master_journal_workbook(s, out)
+    wb = load_workbook(out); ws = wb["Trade Log"]
+    ws["K2"].number_format = '#,##0.00 "UNKNOWN"'
+    ws["L2"].number_format = '#,##0.00 "UNKNOWN"'
+    ws["L3"].number_format = '#,##0.00 "UNKNOWN"'
+    ws["L4"].number_format = '#,##0.00 "UNKNOWN"'
+    wb.save(out); wb.close()
+    res = update_master_journal_workbook_data_only(out, s)
+    assert res["ok"] is True
+    Path(res["candidate_path"]).replace(out)
+    ws2 = load_workbook(out)["Trade Log"]
+    for r in range(2, ws2.max_row + 1):
+        assert "UNKNOWN" not in str(ws2.cell(r, 11).number_format or "")
+        assert "UNKNOWN" not in str(ws2.cell(r, 12).number_format or "")
+
 def test_metric_refresh_same_row_sections_and_non_a_balance_block(tmp_path: Path):
     from openpyxl import Workbook
     from tools.master_journal_workbook import update_master_journal_workbook_data_only
