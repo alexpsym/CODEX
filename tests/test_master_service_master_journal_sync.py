@@ -8,17 +8,43 @@ from openpyxl import Workbook
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / 'render' / 'master_service.py'
 
-AVAILABLE = True
+AVAILABLE = False
 master_service = None
-try:
-    import httpx  # noqa: F401
-    import requests  # noqa: F401
-    spec = importlib.util.spec_from_file_location('ms_sync_test', MODULE_PATH)
-    master_service = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = master_service
-    spec.loader.exec_module(master_service)
-except Exception:
-    AVAILABLE = False
+
+
+def _load_master_service_for_import_test():
+    import types
+    bm_pkg = types.ModuleType("bybit_monitor")
+    bm_mod = types.ModuleType("bybit_monitor.bybit_altcoin_monitor")
+    bm_mod.__getattr__ = lambda _name: (lambda *a, **k: None)  # type: ignore[attr-defined]
+    bm_pkg.bybit_altcoin_monitor = bm_mod
+    sys.modules.setdefault("bybit_monitor", bm_pkg)
+    sys.modules.setdefault("bybit_monitor.bybit_altcoin_monitor", bm_mod)
+    om_pkg = types.ModuleType("oanda_monitor")
+    om_mod = types.ModuleType("oanda_monitor.oanda_forex_monitor")
+    om_mod.__getattr__ = lambda _name: (lambda *a, **k: None)  # type: ignore[attr-defined]
+    om_pkg.oanda_forex_monitor = om_mod
+    sys.modules.setdefault("oanda_monitor", om_pkg)
+    sys.modules.setdefault("oanda_monitor.oanda_forex_monitor", om_mod)
+    mp_pkg = types.ModuleType("multipart")
+    mp_pkg.__version__ = "0.0-test"
+    mp_sub = types.ModuleType("multipart.multipart")
+    mp_sub.parse_options_header = lambda *args, **kwargs: ("", {})
+    sys.modules.setdefault("multipart", mp_pkg)
+    sys.modules.setdefault("multipart.multipart", mp_sub)
+    for _ in range(8):
+        try:
+            spec = importlib.util.spec_from_file_location('ms_sync_test_min', MODULE_PATH)
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = mod
+            spec.loader.exec_module(mod)
+            return mod
+        except ModuleNotFoundError as exc:
+            missing = str(getattr(exc, "name", "") or "").strip()
+            if not missing:
+                raise
+            sys.modules.setdefault(missing, types.ModuleType(missing))
+    raise RuntimeError("unable to import master_service for targeted import-path test")
 
 
 def test_master_service_sync_test_bootstrap():
@@ -50,22 +76,22 @@ def test_master_journal_single_file_enforcement(tmp_path):
     assert (journal / "unknown.xlsx").exists()
 
 
-@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
 def test_master_journal_import_reads_master_journal_not_legacy_workbooks(tmp_path, monkeypatch):
-    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
-    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    ms = _load_master_service_for_import_test()
+    monkeypatch.setattr(ms, 'TRADING_JOURNAL_SOURCE', 'master_journal')
+    monkeypatch.setattr(ms, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
     (tmp_path / "Master Journal.xlsx").write_bytes(b"x")
-    monkeypatch.setattr(master_service, '_ensure_trading_journal_local_templates', lambda: (_ for _ in ()).throw(AssertionError("no templates")))
-    monkeypatch.setattr(master_service, '_list_local_trading_journal_workbooks', lambda: (_ for _ in ()).throw(AssertionError("no local scan")))
-    monkeypatch.setattr(master_service, '_import_trading_journal_from_dropbox_excel', lambda *a, **k: (_ for _ in ()).throw(AssertionError("no dropbox")))
+    monkeypatch.setattr(ms, '_ensure_trading_journal_local_templates', lambda: (_ for _ in ()).throw(AssertionError("no templates")))
+    monkeypatch.setattr(ms, '_list_local_trading_journal_workbooks', lambda: (_ for _ in ()).throw(AssertionError("no local scan")))
+    monkeypatch.setattr(ms, '_import_trading_journal_from_dropbox_excel', lambda *a, **k: (_ for _ in ()).throw(AssertionError("no dropbox")))
     payload = {"items": [{"id": "t1", "row_type": "trade"}, {"id": "c1", "row_type": "cashflow"}], "balances": []}
-    monkeypatch.setattr(master_service, 'read_master_journal_source', lambda _p: payload)
+    monkeypatch.setattr(ms, 'read_master_journal_source', lambda _p: payload)
     captured = {}
-    monkeypatch.setattr(master_service, '_set_trading_journal_rows', lambda rows: captured.setdefault("rows", rows))
-    result = master_service._import_trading_journal_from_sources()
+    monkeypatch.setattr(ms, '_set_trading_journal_rows', lambda rows: captured.setdefault("rows", rows))
+    result = ms._import_trading_journal_from_sources()
     assert result["ok"] is True
     assert [r["row_type"] for r in captured["rows"]] == ["trade", "cashflow"]
-    assert (master_service.TRADING_JOURNAL_IMPORT_DIAGNOSTICS or {}).get("source_mode") == "master_journal"
+    assert (ms.TRADING_JOURNAL_IMPORT_DIAGNOSTICS or {}).get("source_mode") == "master_journal"
 
 
 def test_no_undefined_save_journal_diagnostics_helper_reference():
