@@ -716,6 +716,39 @@ def test_sync_master_journal_succeeds_with_merged_calendar_cells(tmp_path, monke
 
 
 @pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_sync_status_marks_abandoned_running_state_without_active_task(monkeypatch):
+    state = dict(master_service.TRADING_JOURNAL_SYNC_STATE)
+    state.update({"running": True, "started_at": "2020-01-01T00:00:00Z", "message": "old"})
+    monkeypatch.setattr(master_service, "_sync_state_snapshot", lambda: state)
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_SYNC_TASK", None)
+    payload = asyncio.run(master_service.trading_journal_sync_status()).body.decode("utf-8")
+    import json
+    data = json.loads(payload)
+    assert data["running"] is False
+    assert data["ok"] is False
+    assert data["abandoned_running_state"] is True
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_sync_status_stale_warning_when_running_and_heartbeat_old(monkeypatch):
+    state = dict(master_service.TRADING_JOURNAL_SYNC_STATE)
+    state.update({"running": True, "started_at": "2020-01-01T00:00:00Z", "heartbeat_at": "2020-01-01T00:00:00Z"})
+    monkeypatch.setattr(master_service, "_sync_state_snapshot", lambda: state)
+    async def _run():
+        sleeper = asyncio.create_task(asyncio.sleep(0.2))
+        monkeypatch.setattr(master_service, "TRADING_JOURNAL_SYNC_TASK", sleeper)
+        payload = (await master_service.trading_journal_sync_status()).body.decode("utf-8")
+        sleeper.cancel()
+        return payload
+    payload = asyncio.run(_run())
+    import json
+    data = json.loads(payload)
+    assert data["running"] is True
+    assert isinstance(data.get("elapsed_seconds"), (int, float))
+    assert data.get("stale_warning")
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
 def test_trading_journal_sync_status_rejects_stale_master_journal_success(tmp_path, monkeypatch):
     missing = tmp_path / 'Master Journal.xlsx'
     state_payload = dict(master_service.TRADING_JOURNAL_SYNC_STATE)

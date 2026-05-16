@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -75,3 +76,20 @@ def test_launcher_builder_only_targets_local_trading_tools() -> None:
     ps1 = (ROOT / 'tools' / 'windows_launchers' / 'build_windows_launchers.ps1').read_text(encoding='utf-8')
     assert 'Local Trading Tools.exe' in ps1
     assert 'Trading Journal.exe' not in ps1
+
+
+def test_local_uvicorn_log_config_exists_and_has_timestamped_access() -> None:
+    cfg_path = ROOT / 'render' / 'local_uvicorn_log_config.json'
+    assert cfg_path.exists()
+    cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+    fmt = cfg.get('formatters', {}).get('access', {}).get('fmt', '')
+    assert '%(asctime)s' in fmt
+    assert '%(client_addr)s' in fmt
+    assert '%(request_line)s' in fmt
+    assert '%(status_code)s' in fmt
+
+
+def test_run_local_master_uses_uvicorn_log_config_and_access_log_enabled() -> None:
+    script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
+    assert '--log-config "%ROOT%render\\local_uvicorn_log_config.json"' in script
+    assert '--no-access-log' not in script
