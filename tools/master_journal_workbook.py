@@ -57,6 +57,12 @@ def _migrate_legacy_trade_log_sheet_name(wb: Workbook, diagnostics: Dict[str, An
         return
     raise RuntimeError("Master Journal is missing required Trade Log sheet.")
 
+def _remove_legacy_trade_meta_sheet(wb: Workbook, diagnostics: Dict[str, Any] | None = None) -> None:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    if "_Trade Meta" in wb.sheetnames:
+        wb.remove(wb["_Trade Meta"])
+        diagnostics["removed_legacy_trade_meta"] = True
+
 def _pct_points_to_excel_fraction(value: Any) -> float | None:
     num = _as_float(value)
     return None if num is None else num / 100.0
@@ -917,6 +923,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
     diagnostics: Dict[str, Any] = {"missing_accounts": [], "updated_cells": 0}
     try:
         _migrate_legacy_trade_log_sheet_name(wb, diagnostics)
+        _remove_legacy_trade_meta_sheet(wb, diagnostics)
         if "Dashboard" not in wb.sheetnames:
             raise RuntimeError("Master Journal missing Dashboard sheet.")
         dash = wb["Dashboard"]
