@@ -594,7 +594,7 @@ def test_sync_master_journal_rebuilds_blanked_workbook_sections(tmp_path, monkey
 
 
 @pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
-def test_sync_master_journal_fails_when_expected_balance_account_missing(tmp_path, monkeypatch):
+def test_sync_master_journal_repairs_missing_expected_balance_account_row(tmp_path, monkeypatch):
     from tools.master_journal_workbook import build_master_journal_workbook
     from openpyxl import load_workbook
 
@@ -637,9 +637,82 @@ def test_sync_master_journal_fails_when_expected_balance_account_missing(tmp_pat
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
     monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: source_rows)
     result = master_service._sync_master_journal_workbook()
+    assert result['master_journal_ok'] is True
+    repaired = load_workbook(mj, data_only=True)["Dashboard"]
+    anchor = None
+    for r in range(1, repaired.max_row + 1):
+        for c in range(1, repaired.max_column + 1):
+            if str(repaired.cell(r, c).value or "").strip().lower() == "account balances":
+                anchor = (r, c)
+                break
+        if anchor:
+            break
+    assert anchor is not None
+    header_row = None
+    col_map = {}
+    for r in range(anchor[0] + 1, min(repaired.max_row + 1, anchor[0] + 12)):
+        row_map = {}
+        for c in range(anchor[1], min(repaired.max_column + 1, anchor[1] + 8)):
+            token = str(repaired.cell(r, c).value or "").strip().lower()
+            if token == "account":
+                row_map["account"] = c
+            elif token == "balance":
+                row_map["balance"] = c
+            elif token == "currency":
+                row_map["currency"] = c
+            elif token in {"as of", "as_of"}:
+                row_map["as_of"] = c
+        if {"account", "balance", "currency"}.issubset(row_map.keys()):
+            header_row = r
+            col_map = row_map
+            break
+    assert header_row is not None
+    found_b = False
+    for r in range((header_row or 0) + 1, min(repaired.max_row + 1, (header_row or 0) + 50)):
+        if str(repaired.cell(r, col_map["account"]).value or "").strip() == "B":
+            found_b = True
+            assert isinstance(repaired.cell(r, col_map["balance"]).value, (int, float))
+            break
+    assert found_b
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_sync_master_journal_fails_when_expected_balance_non_numeric(tmp_path, monkeypatch):
+    from tools.master_journal_workbook import build_master_journal_workbook
+    source_rows = [{'id': 'r1', 'row_type': 'trade', 'account': 'BYBIT DEMO', 'symbol': 'BTCUSDT', 'side': 'BUY', 'open_time': '2026-01-01', 'close_time': '2026-01-01', 'net_profit': 1.0, 'result_pct': 0.1}]
+    snap = {'items': source_rows, 'stats': {'totals': {}, 'by_instrument': [{'symbol': 'BTCUSDT', 'total_trades': 1}], 'groups': {'leaders': {}}}, 'balances': [{'account': 'BYBIT DEMO', 'account_label': 'BYBIT DEMO', 'balance': None, 'currency': 'USDT'}], 'diagnostics': {}}
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    mj = tmp_path / 'Master Journal.xlsx'
+    build_master_journal_workbook(snap, mj)
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
+    monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: source_rows)
+    result = master_service._sync_master_journal_workbook()
     assert result['master_journal_ok'] is False
     assert 'Account Balances missing numeric values' in str(result.get('master_journal_error') or '')
-    assert 'B' in str(result.get('master_journal_error') or '')
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_sync_master_journal_succeeds_with_merged_calendar_cells(tmp_path, monkeypatch):
+    from tools.master_journal_workbook import build_master_journal_workbook
+    from openpyxl import load_workbook
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    mj = tmp_path / "Master Journal.xlsx"
+    snap = {
+        "items": [{"id":"t1","row_type":"trade","account":"BYBIT DEMO","symbol":"BTCUSDT","side":"BUY","open_time":"2026-05-01","close_time":"2026-05-01","net_profit":10.0,"result_pct":1.0}],
+        "stats": {"totals": {}, "groups": {"leaders": {}}, "by_instrument": [{"symbol": "BTCUSDT", "total_trades": 1}]},
+        "balances": [{"account":"BYBIT DEMO","account_label":"BYBIT DEMO","balance":100.0,"currency":"USDT","as_of":"2026-05-16"}],
+        "diagnostics": {},
+    }
+    build_master_journal_workbook(snap, mj)
+    wb = load_workbook(mj)
+    cal = wb["P&L Calendar"]
+    cal.merge_cells("A2:A3"); cal.merge_cells("A4:A5"); cal.merge_cells("A6:A7")
+    cal["A2"] = "2026"; cal["A4"] = "2025"; cal["A6"] = "2024"
+    wb.save(mj); wb.close()
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
+    monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: snap["items"])
+    result = master_service._sync_master_journal_workbook()
+    assert result["master_journal_ok"] is True
 
 
 @pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
