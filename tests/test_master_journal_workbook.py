@@ -1,7 +1,7 @@
 from pathlib import Path
 from openpyxl import load_workbook
 import pytest
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, SHEET_ORDER
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, SHEET_ORDER
 from openpyxl.utils.cell import coordinate_to_tuple
 
 def _cf_ranges(ws):
@@ -176,6 +176,52 @@ def test_sheet_order_and_hidden_meta(tmp_path: Path):
     assert len(wb["Dashboard"].conditional_formatting) > 0
     assert len(wb["Instrument Averages"].conditional_formatting) > 0
     assert len(wb["P&L Calendar"].conditional_formatting) > 0
+
+def test_update_data_only_migrates_legacy_all_trades_and_removes_trade_meta(tmp_path: Path):
+    out = tmp_path / "Master Journal.xlsx"
+    snap = sample_snapshot()
+    build_master_journal_workbook(snap, out)
+    wb = load_workbook(out)
+    wb["Trade Log"].title = "All Trades"
+    meta = wb.create_sheet("_Trade Meta")
+    meta.sheet_state = "hidden"
+    wb.save(out)
+    wb.close()
+
+    result = update_master_journal_workbook_data_only(out, snap)
+    assert result["ok"] is True
+    assert result["diagnostics"].get("migrated_trade_log_sheet") is True
+    assert result["diagnostics"].get("removed_legacy_trade_meta") is True
+    candidate = Path(result["candidate_path"])
+    candidate.replace(out)
+
+    migrated = load_workbook(out)
+    assert migrated.sheetnames == ["Dashboard", "Trade Log", "Instrument Averages", "P&L Calendar"]
+    assert "All Trades" not in migrated.sheetnames
+    assert "_Trade Meta" not in migrated.sheetnames
+    migrated.close()
+
+def test_update_data_only_repairs_legacy_instrument_averages_freeze_pane(tmp_path: Path):
+    out = tmp_path / "Master Journal.xlsx"
+    snap = sample_snapshot()
+    build_master_journal_workbook(snap, out)
+    wb = load_workbook(out)
+    wb["Instrument Averages"].freeze_panes = "X111"
+    wb.save(out)
+    wb.close()
+
+    result = update_master_journal_workbook_data_only(out, snap)
+    assert result["ok"] is True
+    assert result["diagnostics"].get("repaired_instrument_averages_freeze_pane") is True
+    assert result["diagnostics"].get("previous_instrument_averages_freeze_pane") == "X111"
+    Path(result["candidate_path"]).replace(out)
+
+    repaired = load_workbook(out)
+    assert repaired["Instrument Averages"].freeze_panes == "A2"
+    assert repaired.sheetnames == ["Dashboard", "Trade Log", "Instrument Averages", "P&L Calendar"]
+    assert "_Trade Meta" not in repaired.sheetnames
+    assert "All Trades" not in repaired.sheetnames
+    repaired.close()
 
 def test_conditional_format_colors_and_dashboard_semantics(tmp_path: Path):
     out=tmp_path/'cf.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
