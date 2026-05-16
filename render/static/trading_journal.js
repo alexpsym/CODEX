@@ -289,6 +289,9 @@
         if (st?.ok === false) throw new Error(st?.error || st?.message || 'Sync failed');
         return st;
       }
+      const elapsed = Number(st?.elapsed_seconds || 0);
+      const stale = st?.stale_warning ? ` ${st.stale_warning}` : '';
+      setStatus(`Syncing… ${Math.floor(elapsed)}s elapsed. ${st?.stage || ''} ${st?.message || ''}${stale}`.trim());
       await sleep(500);
     }
   }
@@ -299,6 +302,9 @@
       try {
         const st = await fetchJson('/api/trading-journal/sync/status');
         if (st?.running) {
+          const elapsed = Number(st?.elapsed_seconds || 0);
+          const stale = st?.stale_warning ? ` ${st.stale_warning}` : '';
+          setStatus(`Background sync running… ${Math.floor(elapsed)}s elapsed. ${st?.stage || ''} ${st?.message || ''}${stale}`.trim());
           syncWatchTimer = setTimeout(poll, 900);
           return;
         }

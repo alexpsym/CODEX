@@ -152,7 +152,7 @@ if /I "!LOCAL_STATE_ONLY!"=="1" echo [local-master] WARNING: Local-only mode ena
 
 :restart_master
 echo [local-master] starting uvicorn at !DATE! !TIME!
-"%PYTHON_EXE%" -m uvicorn render.master_service:app --host 127.0.0.1 --port 8000
+"%PYTHON_EXE%" -m uvicorn render.master_service:app --host 127.0.0.1 --port 8000 --log-config "%ROOT%render\local_uvicorn_log_config.json"
 set "EXIT_CODE=!ERRORLEVEL!"
 echo [local-master] uvicorn exited with !EXIT_CODE! at !DATE! !TIME!
 echo [local-master] restarting in 3 seconds. Close this window to stop local master.

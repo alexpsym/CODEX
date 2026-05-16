@@ -529,9 +529,23 @@ TRADING_JOURNAL_SYNC_STATE: Dict[str, object] = {
     "started_at": None,
     "finished_at": None,
     "updated_at": None,
+    "reason": "",
+    "stage": "",
+    "last_progress_at": None,
+    "heartbeat_at": None,
+    "elapsed_seconds": 0.0,
+    "stale_seconds": 0.0,
+    "stale_warning": "",
+    "active_task_known": False,
+    "abandoned_running_state": False,
 }
 TRADING_JOURNAL_SYNC_LOCK = threading.Lock()
 TRADING_JOURNAL_SYNC_TASK: Optional[asyncio.Task] = None
+TRADING_JOURNAL_SYNC_THREAD: Optional[threading.Thread] = None
+TRADING_JOURNAL_SYNC_LOGGER = logging.getLogger("uvicorn.error")
+TRADING_JOURNAL_SYNC_STALE_SECONDS = max(10, int(os.getenv("TRADING_JOURNAL_SYNC_STALE_SECONDS", "90") or "90"))
+TRADING_JOURNAL_SYNC_ABANDONED_SECONDS = max(5, int(os.getenv("TRADING_JOURNAL_SYNC_ABANDONED_SECONDS", "15") or "15"))
+TRADING_JOURNAL_SYNC_HEARTBEAT_SECONDS = max(2, int(os.getenv("TRADING_JOURNAL_SYNC_HEARTBEAT_SECONDS", "10") or "10"))
 TRADING_JOURNAL_IMPORT_DIAGNOSTICS: Dict[str, object] = {
     "rows_total": 0,
     "rows_by_source": {},
@@ -871,7 +885,19 @@ def _should_auto_queue_bybit_demo_anchor_repair() -> bool:
 def _set_trading_journal_sync_state(**updates: object) -> None:
     with TRADING_JOURNAL_SYNC_LOCK:
         merged = _sync_state_snapshot()
+        prev_message = str(merged.get("message") or "")
+        prev_progress = merged.get("progress")
+        prev_stage = str(merged.get("stage") or "")
         merged.update(updates)
+        if updates.get("started_at") is None and updates.get("running") is True and not merged.get("started_at"):
+            merged["started_at"] = _utc_now_iso()
+        if any(k in updates for k in ("message", "progress", "stage")):
+            if (
+                str(updates.get("message") or prev_message) != prev_message
+                or updates.get("progress", prev_progress) != prev_progress
+                or str(updates.get("stage") or prev_stage) != prev_stage
+            ):
+                merged["last_progress_at"] = _utc_now_iso()
         merged["updated_at"] = _utc_now_iso()
         safe_merged = _json_safe(merged)
         if isinstance(safe_merged, dict):
@@ -882,15 +908,24 @@ def _set_trading_journal_sync_state(**updates: object) -> None:
             _save_json_file(TRADING_JOURNAL_SYNC_STATE_PATH, merged)
 
 
+def _log_trading_journal_sync_event(event: str, **fields: object) -> None:
+    payload = {"event": event, **fields}
+    body = " ".join(f"{k}={payload.get(k)!r}" for k in sorted(payload.keys()))
+    TRADING_JOURNAL_SYNC_LOGGER.info("TRADING_JOURNAL_SYNC %s %s", event, body)
+
+
 def _schedule_trading_journal_sync_job() -> bool:
-    global TRADING_JOURNAL_SYNC_TASK
+    global TRADING_JOURNAL_SYNC_TASK, TRADING_JOURNAL_SYNC_THREAD
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        threading.Thread(
+        if isinstance(TRADING_JOURNAL_SYNC_THREAD, threading.Thread) and TRADING_JOURNAL_SYNC_THREAD.is_alive():
+            return False
+        TRADING_JOURNAL_SYNC_THREAD = threading.Thread(
             target=lambda: asyncio.run(_run_trading_journal_sync_job()),
             daemon=True,
-        ).start()
+        )
+        TRADING_JOURNAL_SYNC_THREAD.start()
         return True
     task = TRADING_JOURNAL_SYNC_TASK
     if isinstance(task, asyncio.Task) and not task.done():
@@ -922,6 +957,9 @@ def _queue_trading_journal_sync_if_idle(reason: str) -> Dict[str, object]:
                 "finished_at": None,
                 "source_mode": _trading_journal_source_mode(),
                 "local_dir": str(TRADING_JOURNAL_LOCAL_DIR),
+                "reason": reason,
+                "stage": "queued",
+                "heartbeat_at": _utc_now_iso(),
                 "updated_at": _utc_now_iso(),
             }
         )
@@ -933,6 +971,7 @@ def _queue_trading_journal_sync_if_idle(reason: str) -> Dict[str, object]:
             TRADING_JOURNAL_SYNC_STATE.update(snapshot)
             _save_json_file(TRADING_JOURNAL_SYNC_STATE_PATH, snapshot)
     _schedule_trading_journal_sync_job()
+    _log_trading_journal_sync_event("queued", reason=reason, source_mode=_trading_journal_source_mode(), local_dir=str(TRADING_JOURNAL_LOCAL_DIR))
     with TRADING_JOURNAL_SYNC_LOCK:
         snapshot = _sync_state_snapshot()
         safe_snapshot = _json_safe(snapshot)
@@ -8570,7 +8609,8 @@ async def _autostart_scripts() -> None:
     else:
         asyncio.create_task(_ensure_trading_journal_dropbox_templates())
     asyncio.create_task(_log_outbound_traffic_summary())
-    asyncio.create_task(_start_startup_recovery_import_after_restore())
+    global TRADING_JOURNAL_SYNC_TASK
+    TRADING_JOURNAL_SYNC_TASK = asyncio.create_task(_start_startup_recovery_import_after_restore())
     if (not _trading_journal_excel_only_mode()) and (not _master_journal_single_file_mode()):
         asyncio.create_task(_schedule_daily_trade_history_sync())
     asyncio.create_task(_schedule_monthly_aud_revaluation_sync())
@@ -23489,9 +23529,43 @@ async def trading_journal_delete_row(row_id: str) -> JSONResponse:
 
 @app.get("/api/trading-journal/sync/status")
 async def trading_journal_sync_status() -> JSONResponse:
+    global TRADING_JOURNAL_SYNC_TASK, TRADING_JOURNAL_SYNC_THREAD
     with TRADING_JOURNAL_SYNC_LOCK:
         snapshot = _sync_state_snapshot()
         TRADING_JOURNAL_SYNC_STATE.update(snapshot)
+    started_at_raw = snapshot.get("started_at")
+    started_dt = _parse_iso_datetime(started_at_raw)
+    now_dt = datetime.now(timezone.utc)
+    elapsed_seconds = max(0.0, (now_dt - started_dt).total_seconds()) if started_dt else 0.0
+    snapshot["elapsed_seconds"] = float(elapsed_seconds)
+    task = TRADING_JOURNAL_SYNC_TASK
+    thread_active = isinstance(TRADING_JOURNAL_SYNC_THREAD, threading.Thread) and TRADING_JOURNAL_SYNC_THREAD.is_alive()
+    task_active = bool(task is not None and hasattr(task, "done") and not bool(task.done()))
+    active_task_known = bool(task_active or thread_active)
+    snapshot["active_task_known"] = bool(active_task_known)
+    hb_dt = _parse_iso_datetime(snapshot.get("heartbeat_at") or snapshot.get("last_progress_at") or snapshot.get("updated_at"))
+    stale_seconds = max(0.0, (now_dt - hb_dt).total_seconds()) if hb_dt else float(elapsed_seconds)
+    snapshot["stale_seconds"] = float(stale_seconds)
+    if bool(snapshot.get("running")) and stale_seconds > float(TRADING_JOURNAL_SYNC_STALE_SECONDS):
+        snapshot["stale_warning"] = f"No heartbeat/progress update for {int(stale_seconds)}s."
+    else:
+        snapshot["stale_warning"] = ""
+
+    if bool(snapshot.get("running")) and bool(task is not None and hasattr(task, "done") and bool(task.done())):
+        err = None
+        try:
+            err = task.exception()
+        except Exception as exc:
+            err = exc
+        msg = str(err or "Sync task ended without clearing running state.")
+        snapshot.update({"running": False, "ok": False, "error": msg, "message": f"Failed: {msg}", "abandoned_running_state": False, "finished_at": _utc_now_iso()})
+        _set_trading_journal_sync_state(**snapshot)
+        _log_trading_journal_sync_event("failed", reason="task_done_state_stale", error=msg)
+    elif bool(snapshot.get("running")) and not active_task_known and elapsed_seconds > float(TRADING_JOURNAL_SYNC_ABANDONED_SECONDS):
+        msg = "Trading Journal sync was marked running, but no active sync task exists. Previous process likely exited or task died."
+        snapshot.update({"running": False, "ok": False, "error": msg, "message": f"Failed: {msg}", "abandoned_running_state": True, "finished_at": _utc_now_iso()})
+        _set_trading_journal_sync_state(**snapshot)
+        _log_trading_journal_sync_event("failed", reason="abandoned_running_state", error=msg)
     state = _load_trading_journal_state()
     bybit_demo_sync = state.get("bybit_demo_sync")
     snapshot["bybit_demo_sync"] = bybit_demo_sync if isinstance(bybit_demo_sync, dict) else {}
@@ -23545,6 +23619,8 @@ async def _run_trading_journal_sync_job() -> None:
             running=True,
             progress=int(progress),
             message=str(message or ""),
+            stage=str((_sync_state_snapshot().get("stage") or "")),
+            heartbeat_at=_utc_now_iso(),
             ok=None,
             error=None,
             result=None,
@@ -23554,6 +23630,7 @@ async def _run_trading_journal_sync_job() -> None:
         running=True,
         progress=0,
         message="Starting…",
+        stage="started",
         ok=None,
         error=None,
         result=None,
@@ -23562,12 +23639,23 @@ async def _run_trading_journal_sync_job() -> None:
         source_mode=_trading_journal_source_mode(),
         local_dir=str(TRADING_JOURNAL_LOCAL_DIR),
     )
+    _log_trading_journal_sync_event("started", source_mode=_trading_journal_source_mode(), local_dir=str(TRADING_JOURNAL_LOCAL_DIR))
+    heartbeat_stop = asyncio.Event()
+    async def _heartbeat() -> None:
+        while not heartbeat_stop.is_set():
+            await asyncio.sleep(TRADING_JOURNAL_SYNC_HEARTBEAT_SECONDS)
+            st = _sync_state_snapshot()
+            if not bool(st.get("running")):
+                return
+            _set_trading_journal_sync_state(heartbeat_at=_utc_now_iso(), stage=str(st.get("stage") or ""), message=str(st.get("message") or ""))
+    hb_task = asyncio.create_task(_heartbeat())
 
     try:
         broker_balance_warnings: List[str] = []
         broker_account_balances: List[Dict[str, object]] = []
         broker_refresh_enabled = _trading_journal_broker_refresh_enabled()
         if broker_refresh_enabled:
+            _set_trading_journal_sync_state(stage="fetching_broker_balances", message="Fetching broker balances…")
             for account_mode in ("demo", "live"):
                 if account_mode == "demo" and not ENABLE_BYBIT_DEMO_JOURNAL:
                     continue
@@ -23613,6 +23701,7 @@ async def _run_trading_journal_sync_job() -> None:
             and _trading_journal_bybit_demo_balance_anchor_enabled()
             and _trading_journal_local_excel_authoritative()
         ):
+            _set_trading_journal_sync_state(stage="sanitizing_bybit_demo_workbook", message="Sanitizing Bybit Demo workbook…")
             try:
                 workbook_path = _resolve_local_journal_file(BYBIT_DEMO_WORKBOOK_NAME, TRADING_JOURNAL_LOCAL_DIR)
                 wb_frame = _coerce_bybit_demo_workbook_frame(
@@ -23662,11 +23751,13 @@ async def _run_trading_journal_sync_job() -> None:
             _cb(25, "Importing Dropbox journal workbooks…")
         else:
             _cb(25, "Importing journal workbooks…")
+        _set_trading_journal_sync_state(stage="importing_journal_workbooks")
         result = await asyncio.to_thread(_import_trading_journal_from_sources, progress_cb=_cb)
         bybit_demo = None
         bybit_live = None
         oanda_sync: Dict[str, object] = {}
         if broker_refresh_enabled:
+            _set_trading_journal_sync_state(stage="syncing_broker_closed_pnl", message="Syncing broker closed P/L…")
             skip_demo = bool((result or {}).get("diagnostics", {}).get("bybit_demo_workbook_cleared"))
             if skip_demo:
                 bybit_demo = {"ok": True, "skipped": True, "reason": "bybit_demo_workbook_cleared"}
@@ -23686,6 +23777,7 @@ async def _run_trading_journal_sync_job() -> None:
                     oanda_sync[acct] = {"ok": False, "error": str(exc)}
         if _trading_journal_local_excel_authoritative() and broker_refresh_enabled:
             result = await asyncio.to_thread(_import_trading_journal_from_sources, progress_cb=_cb)
+        _set_trading_journal_sync_state(stage="updating_master_journal", message="Updating Master Journal.xlsx…")
         workbook_sync = await asyncio.to_thread(_sync_master_journal_workbook)
         if isinstance(result, dict):
             result.update(workbook_sync)
@@ -23755,6 +23847,9 @@ async def _run_trading_journal_sync_job() -> None:
             local_dir=str(TRADING_JOURNAL_LOCAL_DIR),
             finished_at=_utc_now_iso(),
         )
+        started_dt = _parse_iso_datetime(_sync_state_snapshot().get("started_at"))
+        elapsed = max(0.0, (datetime.now(timezone.utc) - started_dt).total_seconds()) if started_dt else 0.0
+        _log_trading_journal_sync_event("completed", ok=ok_flag, elapsed_seconds=elapsed, message=msg)
     except Exception as exc:
         _set_trading_journal_sync_state(
             running=False,
@@ -23771,6 +23866,10 @@ async def _run_trading_journal_sync_job() -> None:
             local_dir=str(TRADING_JOURNAL_LOCAL_DIR),
             finished_at=_utc_now_iso(),
         )
+        _log_trading_journal_sync_event("failed", error=str(exc), error_type=type(exc).__name__)
+    finally:
+        heartbeat_stop.set()
+        hb_task.cancel()
 
 
 def _sync_master_journal_workbook() -> Dict[str, object]:
@@ -23912,12 +24011,18 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                 non_test_with_results.append(r)
             if non_test_with_results:
                 has_calendar_data = False
-                for row in cal.iter_rows(min_row=3, min_col=1, max_col=13, values_only=True):
-                    if not row:
+                month_name_to_idx = {calendar.month_name[i].lower(): i for i in range(1, 13)}
+                month_cols = []
+                for cc in range(1, cal.max_column + 1):
+                    token = str(cal.cell(1, cc).value or "").strip().lower()
+                    if token in month_name_to_idx:
+                        month_cols.append(cc)
+                for rr in range(2, cal.max_row + 1):
+                    year_val = _safe_float(cal.cell(rr, 1).value)
+                    label = str(cal.cell(rr, 2).value or "").strip().lower()
+                    if year_val is None or label != "p/l %":
                         continue
-                    year_val = _safe_float(row[0]) if len(row) > 0 else None
-                    month_values = [v for v in row[1:13] if isinstance(v, (int, float))]
-                    if year_val is not None and month_values:
+                    if any(isinstance(cal.cell(rr, cc).value, (int, float)) for cc in month_cols):
                         has_calendar_data = True
                         break
                 if not has_calendar_data:
