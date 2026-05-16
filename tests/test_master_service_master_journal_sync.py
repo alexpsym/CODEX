@@ -706,8 +706,11 @@ def test_sync_master_journal_succeeds_with_merged_calendar_cells(tmp_path, monke
     build_master_journal_workbook(snap, mj)
     wb = load_workbook(mj)
     cal = wb["P&L Calendar"]
+    for i, m in enumerate(["January","February","March","April","May","June","July","August","September","October","November","December"], start=3):
+        cal.cell(1, i).value = m
     cal.merge_cells("A2:A3"); cal.merge_cells("A4:A5"); cal.merge_cells("A6:A7")
-    cal["A2"] = "2026"; cal["A4"] = "2025"; cal["A6"] = "2024"
+    cal["A2"] = 2026; cal["A4"] = 2025; cal["A6"] = 2024
+    cal["B2"] = "P/L %"; cal["B3"] = "Total Trades"; cal["B4"] = "P/L %"; cal["B5"] = "Total Trades"; cal["B6"] = "P/L %"; cal["B7"] = "Total Trades"
     wb.save(mj); wb.close()
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
     monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: snap["items"])

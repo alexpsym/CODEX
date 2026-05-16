@@ -627,6 +627,84 @@ def _write_value_preserving_cell(ws, row: int, col: int, value: Any) -> bool:
     ws.cell(row, col).value = value
     return True
 
+def _detect_calendar_month_columns(ws) -> Dict[int, int]:
+    month_cols: Dict[int, int] = {}
+    names = {calendar.month_name[i].lower(): i for i in range(1, 13)}
+    for c in range(1, ws.max_column + 1):
+        token = str(ws.cell(1, c).value or "").strip().lower()
+        if token in names:
+            month_cols[names[token]] = c
+    return month_cols
+
+def _update_pnl_calendar_preserving_layout(dst_ws, snapshot: Dict[str, Any], diagnostics: Dict[str, Any] | None = None) -> None:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    month_cols = _detect_calendar_month_columns(dst_ws)
+    if not month_cols:
+        return
+    year_blocks: Dict[int, Tuple[int, int]] = {}
+    for r in range(2, dst_ws.max_row + 1):
+        yv = _as_float(dst_ws.cell(r, 1).value)
+        if yv is None:
+            continue
+        y = int(yv)
+        lbl = str(dst_ws.cell(r, 2).value or "").strip().lower()
+        if lbl == "p/l %":
+            trades_row = r + 1
+            if str(dst_ws.cell(trades_row, 2).value or "").strip().lower() == "total trades":
+                year_blocks[y] = (r, trades_row)
+    monthly: Dict[Tuple[int, int], Dict[str, float]] = {}
+    for row in (snapshot.get("items") or []):
+        if not isinstance(row, dict) or _is_test_trade_value(row.get("is_test_trade")):
+            continue
+        if str(row.get("row_type") or "trade").strip().lower() != "trade":
+            continue
+        d = _as_date(row.get("close_time") or row.get("open_time"))
+        pct = _as_float(row.get("result_pct"))
+        if not d or pct is None:
+            continue
+        key = (d.year, d.month)
+        acc = monthly.setdefault(key, {"pct": 0.0, "count": 0.0})
+        acc["pct"] += float(pct) / 100.0
+        acc["count"] += 1.0
+    years_needed = sorted({y for (y, _m) in monthly.keys()})
+    if years_needed and year_blocks:
+        for y in years_needed:
+            if y in year_blocks:
+                continue
+            last_year = max(year_blocks.keys())
+            p_row, t_row = year_blocks[last_year]
+            new_p, new_t = t_row + 1, t_row + 2
+            if any(dst_ws.cell(rr, cc).value not in (None, "") for rr in (new_p, new_t) for cc in range(1, max(month_cols.values()) + 1)):
+                raise RuntimeError(f"P&L Calendar append unsafe for missing year {y}.")
+            dst_ws.merge_cells(start_row=new_p, start_column=1, end_row=new_t, end_column=1)
+            dst_ws.cell(new_p, 1).value = y
+            dst_ws.cell(new_p, 2).value = "P/L %"
+            dst_ws.cell(new_t, 2).value = "Total Trades"
+            for c in range(1, max(month_cols.values()) + 1):
+                for rr, src_rr in ((new_p, p_row), (new_t, t_row)):
+                    dst = dst_ws.cell(rr, c); src = dst_ws.cell(src_rr, c)
+                    dst.number_format = src.number_format
+                    dst.font = copy(src.font); dst.fill = copy(src.fill); dst.border = copy(src.border); dst.alignment = copy(src.alignment); dst.protection = copy(src.protection)
+            year_blocks[y] = (new_p, new_t)
+    for y, (p_row, t_row) in year_blocks.items():
+        for m, c in month_cols.items():
+            if not _is_merged_non_anchor(dst_ws, p_row, c):
+                dst_ws.cell(p_row, c).value = None
+            if not _is_merged_non_anchor(dst_ws, t_row, c):
+                dst_ws.cell(t_row, c).value = None
+    for (y, m), vals in monthly.items():
+        block = year_blocks.get(y)
+        if not block or m not in month_cols:
+            continue
+        p_row, t_row = block
+        c = month_cols[m]
+        if not _is_merged_non_anchor(dst_ws, p_row, c):
+            dst_ws.cell(p_row, c).value = vals["pct"]
+            dst_ws.cell(p_row, c).number_format = "0.00%"
+        if not _is_merged_non_anchor(dst_ws, t_row, c):
+            dst_ws.cell(t_row, c).value = int(vals["count"])
+            dst_ws.cell(t_row, c).number_format = "0"
+
 def _find_dashboard_table_headers(ws, section: Dict[str, int], *, scan_rows: int = 8) -> tuple[int | None, Dict[str, int]]:
     required = {"account", "balance", "currency"}
     header_row = None
@@ -998,7 +1076,11 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             if "Instrument Averages" in wb.sheetnames and "Instrument Averages" in gen.sheetnames:
                 _copy_data_rows(gen["Instrument Averages"], wb["Instrument Averages"], 2)
             if "P&L Calendar" in wb.sheetnames and "P&L Calendar" in gen.sheetnames:
-                _copy_data_rows(gen["P&L Calendar"], wb["P&L Calendar"], 3)
+                cal_ws = wb["P&L Calendar"]
+                if _detect_calendar_month_columns(cal_ws):
+                    _update_pnl_calendar_preserving_layout(cal_ws, snapshot, diagnostics)
+                else:
+                    _copy_data_rows(gen["P&L Calendar"], cal_ws, 3)
         finally:
             gen.close()
             tmp.unlink(missing_ok=True)

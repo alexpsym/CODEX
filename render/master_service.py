@@ -24011,12 +24011,18 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                 non_test_with_results.append(r)
             if non_test_with_results:
                 has_calendar_data = False
-                for row in cal.iter_rows(min_row=3, min_col=1, max_col=13, values_only=True):
-                    if not row:
+                month_name_to_idx = {calendar.month_name[i].lower(): i for i in range(1, 13)}
+                month_cols = []
+                for cc in range(1, cal.max_column + 1):
+                    token = str(cal.cell(1, cc).value or "").strip().lower()
+                    if token in month_name_to_idx:
+                        month_cols.append(cc)
+                for rr in range(2, cal.max_row + 1):
+                    year_val = _safe_float(cal.cell(rr, 1).value)
+                    label = str(cal.cell(rr, 2).value or "").strip().lower()
+                    if year_val is None or label != "p/l %":
                         continue
-                    year_val = _safe_float(row[0]) if len(row) > 0 else None
-                    month_values = [v for v in row[1:13] if isinstance(v, (int, float))]
-                    if year_val is not None and month_values:
+                    if any(isinstance(cal.cell(rr, cc).value, (int, float)) for cc in month_cols):
                         has_calendar_data = True
                         break
                 if not has_calendar_data:
