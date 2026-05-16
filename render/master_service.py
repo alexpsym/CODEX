@@ -797,6 +797,14 @@ def _trading_journal_bybit_demo_balance_anchor_enabled() -> bool:
     return bool(TRADING_JOURNAL_BYBIT_DEMO_BALANCE_ANCHOR_ENABLED)
 
 
+def _is_test_trade_value(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return float(value) == 1.0
+    return str(value or "").strip().lower() in {"yes", "y", "true", "1"}
+
+
 def _save_broker_balance_diagnostics_state(
     broker_account_balances: List[Dict[str, object]],
     broker_balance_warnings: List[str],
@@ -6100,7 +6108,7 @@ def _import_trading_journal_from_sources(
         diagnostics["source_mode"] = "master_journal"
         diagnostics["local_dir"] = str(TRADING_JOURNAL_LOCAL_DIR)
         diagnostics["local_workbooks_seen"] = 1 if _master_journal_path().exists() else 0
-        _save_journal_diagnostics(diagnostics)
+        _set_trading_journal_diagnostics(diagnostics)
         post = _enforce_single_master_journal_xlsx(TRADING_JOURNAL_LOCAL_DIR, cleanup_known_generated=True)
         if not post.get("ok"):
             msg = "Unknown extra Excel files in journal directory after import: " + ", ".join(post.get("unknown_extra_excel_files") or [])
