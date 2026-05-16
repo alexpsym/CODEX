@@ -225,6 +225,30 @@ def test_sync_master_journal_migrates_legacy_all_trades_and_removes_trade_meta(t
 
 
 @pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_sync_master_journal_repairs_legacy_instrument_averages_freeze_pane(tmp_path, monkeypatch):
+    from tools.master_journal_workbook import build_master_journal_workbook
+    from openpyxl import load_workbook
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    mj = tmp_path / "Master Journal.xlsx"
+    snap = {'items':[{'id':'r1','row_type':'trade','account':'A','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0,'result_pct':1.0}], 'stats':{'totals':{}, 'groups':{}, 'by_instrument':[{'symbol':'EURUSD','trades':1}]}, 'balances':[]}
+    build_master_journal_workbook(snap, mj)
+    wb = load_workbook(mj)
+    wb["Instrument Averages"].freeze_panes = "X111"
+    wb.save(mj)
+    wb.close()
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
+    out = master_service._sync_master_journal_workbook()
+    assert out["master_journal_ok"] is True
+    repaired = load_workbook(mj)
+    assert repaired["Instrument Averages"].freeze_panes == "A2"
+    assert repaired.sheetnames == ["Dashboard", "Trade Log", "Instrument Averages", "P&L Calendar"]
+    assert "_Trade Meta" not in repaired.sheetnames
+    assert "All Trades" not in repaired.sheetnames
+    repaired.close()
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
 def test_existing_master_journal_preserves_restored_layout_and_populates_stats(tmp_path, monkeypatch):
     from tools.master_journal_workbook import build_master_journal_workbook
     from openpyxl import load_workbook
