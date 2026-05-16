@@ -69,7 +69,7 @@ from shared.symbol_resolution import (
 from shared.atomic_json import write_json_file
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, stable_row_id, SHEET_ORDER
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, stable_row_id, SHEET_ORDER, _get_all_trades_sheet
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -23939,12 +23939,12 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
             for sheet in SHEET_ORDER:
                 if sheet not in wb.sheetnames:
                     raise RuntimeError(f"Master Journal validation failed: missing required sheet '{sheet}'.")
-            all_trades = wb["Trade Log"] if "Trade Log" in wb.sheetnames else wb["Trade Log"]
+            all_trades = _get_all_trades_sheet(wb, allow_legacy=False)
             inst = wb["Instrument Averages"]
             cal = wb["P&L Calendar"]
             dash = wb["Dashboard"]
             if not all_trades.auto_filter or not all_trades.auto_filter.ref:
-                raise RuntimeError("Master Journal validation failed: Trade Log filter missing.")
+                raise RuntimeError("Master Journal validation failed: All Trades filter missing.")
             if not inst.auto_filter or not inst.auto_filter.ref:
                 raise RuntimeError("Master Journal validation failed: Instrument Averages filter missing.")
             def _is_hidden_trade_row(row: Dict[str, object]) -> bool:
@@ -23960,7 +23960,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                 symbol_col = headers.index("Symbol") + 1 if "Symbol" in headers else None
                 row_id_col = headers.index("Row ID") + 1 if "Row ID" in headers else None
                 if not symbol_col:
-                    raise RuntimeError("Master Journal validation failed: Trade Log Symbol column missing.")
+                    raise RuntimeError("Master Journal validation failed: All Trades Symbol column missing.")
                 populated_symbol_rows = 0
                 workbook_row_ids: Set[str] = set()
                 for rr in range(2, all_trades.max_row + 1):
@@ -23972,12 +23972,12 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                         if rid:
                             workbook_row_ids.add(rid)
                 if populated_symbol_rows <= 0:
-                    raise RuntimeError("Master Journal validation failed: Trade Log is blank despite source rows.")
+                    raise RuntimeError("Master Journal validation failed: All Trades is blank despite source rows.")
                 expected_ids = {str(r.get("id") or "").strip() for r in visible_trade_rows if str(r.get("id") or "").strip()}
                 if _master_journal_single_file_mode() and expected_ids and (not row_id_col or not workbook_row_ids):
                     raise RuntimeError("Master Journal validation failed: Row ID metadata is required in master_journal mode.")
                 if expected_ids and not expected_ids.issubset(workbook_row_ids):
-                    raise RuntimeError("Master Journal validation failed: Trade Log row IDs do not match source snapshot.")
+                    raise RuntimeError("Master Journal validation failed: All Trades row IDs do not match source snapshot.")
             stats = snapshot.get("stats") or {}
             by_instrument = stats.get("by_instrument") or []
             if by_instrument:
