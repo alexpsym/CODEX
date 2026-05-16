@@ -627,6 +627,64 @@ def _write_value_preserving_cell(ws, row: int, col: int, value: Any) -> bool:
     ws.cell(row, col).value = value
     return True
 
+def _find_dashboard_table_headers(ws, section: Dict[str, int], *, scan_rows: int = 8) -> tuple[int | None, Dict[str, int]]:
+    required = {"account", "balance", "currency"}
+    header_row = None
+    col_map: Dict[str, int] = {}
+    start_row = max(1, section.get("start_row", 1))
+    end_row = min(section.get("end_row", ws.max_row), start_row + max(1, scan_rows) - 1)
+    for r in range(start_row, end_row + 1):
+        row_map: Dict[str, int] = {}
+        for c in range(section["start_col"], section["end_col"] + 1):
+            h = str(ws.cell(r, c).value or "").strip().lower()
+            if h == "account":
+                row_map["account"] = c
+            elif h == "balance":
+                row_map["balance"] = c
+            elif h == "currency":
+                row_map["currency"] = c
+            elif h in {"as of", "as_of"}:
+                row_map["as_of"] = c
+        if required.issubset(row_map.keys()):
+            header_row = r
+            col_map = row_map
+            break
+    return header_row, col_map
+
+def _ensure_account_balance_row(ws, section: Dict[str, int], header_row: int, col_map: Dict[str, int], account_label: str) -> int:
+    account_col = col_map["account"]
+    wanted = str(account_label or "").strip().upper()
+    for r in range(header_row + 1, section["end_row"] + 1):
+        lbl = str(ws.cell(r, account_col).value or "").strip().upper()
+        if lbl and lbl == wanted:
+            return r
+    for r in range(header_row + 1, section["end_row"] + 1):
+        lbl = str(ws.cell(r, account_col).value or "").strip()
+        if lbl:
+            continue
+        bal_blank = ws.cell(r, col_map["balance"]).value in (None, "")
+        cur_blank = ws.cell(r, col_map["currency"]).value in (None, "")
+        asof_blank = ("as_of" not in col_map) or (ws.cell(r, col_map["as_of"]).value in (None, ""))
+        if bal_blank and cur_blank and asof_blank:
+            return r
+
+    if section["end_row"] < ws.max_row:
+        raise RuntimeError(f"Account Balances section has no writable row for '{account_label}' without shifting dashboard layout.")
+
+    row = section["end_row"] + 1
+    template_row = section["end_row"] if section["end_row"] > header_row else header_row + 1
+    for c in range(section["start_col"], section["end_col"] + 1):
+        src = ws.cell(template_row, c)
+        dst = ws.cell(row, c)
+        dst.number_format = src.number_format
+        dst.font = copy(src.font)
+        dst.fill = copy(src.fill)
+        dst.border = copy(src.border)
+        dst.alignment = copy(src.alignment)
+        dst.protection = copy(src.protection)
+    section["end_row"] = row
+    return row
+
 def read_master_journal_source(path: Path) -> Dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"Master Journal workbook not found: {path}")
@@ -855,36 +913,36 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
         balances = snapshot.get("balances") or []
         diagnostics.setdefault("non_numeric_balance_accounts", [])
         section = anchors["Account Balances"]
-        header_row = section["start_row"]
-        col_map = {}
-        for c in range(section["start_col"], section["end_col"] + 1):
-            h = str(dash.cell(header_row, c).value or "").strip().lower()
-            if h in {"account"}: col_map["account"] = c
-            elif h in {"balance"}: col_map["balance"] = c
-            elif h in {"currency"}: col_map["currency"] = c
-            elif h in {"as of", "as_of"}: col_map["as_of"] = c
-        if "account" not in col_map or "balance" not in col_map or "currency" not in col_map:
+        header_row, col_map = _find_dashboard_table_headers(dash, section)
+        if not header_row or "account" not in col_map or "balance" not in col_map or "currency" not in col_map:
             raise RuntimeError("Account Balances headers missing in section.")
-        account_rows = {}
-        for r in range(header_row + 1, section["end_row"] + 1):
-            lbl = str(dash.cell(r,col_map["account"]).value or "").strip()
-            if lbl:
-                account_rows[lbl.upper()] = r
         for b in balances:
             label = str(b.get("account_label") or b.get("account") or "").strip()
             if not label:
-                continue
-            row = account_rows.get(label.upper())
-            if not row:
-                diagnostics["missing_accounts"].append(label)
                 continue
             bal_num = _as_float(b.get("balance"))
             if bal_num is None:
                 diagnostics["non_numeric_balance_accounts"].append(label)
                 continue
+            try:
+                row = _ensure_account_balance_row(dash, section, header_row, col_map, label)
+            except Exception as exc:
+                diagnostics["missing_accounts"].append(label)
+                diagnostics.setdefault("account_balance_write_errors", []).append(str(exc))
+                continue
+            if _write_value_preserving_cell(dash, row, col_map["account"], label):
+                diagnostics["updated_cells"] += 1
             if _write_value_preserving_cell(dash, row, col_map["balance"], bal_num):
                 diagnostics["updated_cells"] += 1
             curr = str(b.get("currency") or "").strip()
+            existing_fmt = str(dash.cell(row, col_map["balance"]).number_format or "")
+            if curr:
+                if not existing_fmt or existing_fmt == "General":
+                    dash.cell(row, col_map["balance"]).number_format = _currency_number_format(curr)
+                elif _is_crypto_currency(curr) and "#" not in existing_fmt:
+                    dash.cell(row, col_map["balance"]).number_format = _currency_number_format(curr, force_decimals=10)
+                elif (not _is_crypto_currency(curr)) and "#" not in existing_fmt:
+                    dash.cell(row, col_map["balance"]).number_format = _currency_number_format(curr, force_decimals=2)
             if curr:
                 if _write_value_preserving_cell(dash, row, col_map["currency"], curr):
                     diagnostics["updated_cells"] += 1
