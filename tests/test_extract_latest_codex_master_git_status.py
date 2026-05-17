@@ -41,6 +41,7 @@ def classify_status(status_text: str, allowed_root_generated_files=None):
         allowed = (
             p == ".env"
             or p == "env.env"
+            or p in {"watchlist.json", "state_manifest.json", "stateManifest.json", "state_backup.json"}
             or p in {"journal", "journal/"}
             or p.startswith("journal/")
             or (p.startswith("bybit_monitor/") and p.endswith(".json"))
@@ -104,3 +105,17 @@ def test_rejects_unsafe_statuses_and_paths():
 def test_allowed_generated_root_file_example():
     result = classify_status("?? Local Trading Tools.exe", ["Local Trading Tools.exe"])
     assert result["IsOnlyAllowed"] is True
+
+
+def test_allows_relocated_state_root_files_only():
+    ok = classify_status("\n".join(["?? watchlist.json", " M state_manifest.json", "?? state_backup.json"]))
+    assert ok["IsOnlyAllowed"] is True
+    bad = classify_status("?? random.json")
+    assert bad["IsOnlyAllowed"] is False
+
+
+def test_preserve_local_files_from_backup_includes_relocated_root_state_files():
+    text = Path("ExtractLatestCodexMaster.bat").read_text(encoding="utf-8")
+    assert "function Preserve-LocalFilesFromBackup" in text
+    for file_name in ("watchlist.json", "state_manifest.json", "stateManifest.json", "state_backup.json"):
+        assert file_name in text

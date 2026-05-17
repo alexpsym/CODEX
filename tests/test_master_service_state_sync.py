@@ -9,11 +9,15 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-SPEC = importlib.util.spec_from_file_location("render_master_service_state_sync", ROOT / "render" / "master_service.py")
-master_service = importlib.util.module_from_spec(SPEC)
-assert SPEC and SPEC.loader
-sys.modules[SPEC.name] = master_service
-SPEC.loader.exec_module(master_service)
+HTTPX_AVAILABLE = importlib.util.find_spec("httpx") is not None
+pytestmark = pytest.mark.skipif(not HTTPX_AVAILABLE, reason="httpx is not installed")
+
+if HTTPX_AVAILABLE:
+    SPEC = importlib.util.spec_from_file_location("render_master_service_state_sync", ROOT / "render" / "master_service.py")
+    master_service = importlib.util.module_from_spec(SPEC)
+    assert SPEC and SPEC.loader
+    sys.modules[SPEC.name] = master_service
+    SPEC.loader.exec_module(master_service)
 
 
 @pytest.fixture(autouse=True)
@@ -269,3 +273,224 @@ def test_repo_local_custom_alert_get_error_code(monkeypatch: pytest.MonkeyPatch)
     with pytest.raises(master_service.HTTPException) as excinfo:
         asyncio.run(master_service.bybit_monitor_custom_alerts())
     assert excinfo.value.detail["error"] == "repo_local_state_unavailable"
+
+
+def test_state_manifest_migrates_legacy_camel_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    legacy = tmp_path / "stateManifest.json"
+    legacy.write_text(json.dumps({"watchlist": {"key": "watchlist"}}), encoding="utf-8")
+    monkeypatch.setattr(master_service, "STATE_MANIFEST_PATH", tmp_path / "state_manifest.json")
+    monkeypatch.setattr(master_service, "LEGACY_STATE_MANIFEST_CAMEL_PATH", legacy)
+    loaded = master_service._load_state_manifest()
+    assert loaded["watchlist"]["key"] == "watchlist"
+    assert (tmp_path / "state_manifest.json").exists()
+
+
+def test_watchlist_write_updates_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "WATCHLIST_PATH", tmp_path / "watchlist.json")
+    monkeypatch.setattr(master_service, "STATE_MANIFEST_PATH", tmp_path / "state_manifest.json")
+    monkeypatch.setattr(master_service, "LEGACY_STATE_MANIFEST_CAMEL_PATH", tmp_path / "stateManifest.json")
+    master_service.write_repo_state_json_and_verify("watchlist", ["BTCUSDT"])
+    manifest = json.loads((tmp_path / "state_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["watchlist"]["key"] == "watchlist"
+    assert manifest["watchlist"]["sha256"]
+
+
+def test_state_file_path_mapping_uses_monkeypatched_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    watchlist_path = tmp_path / "watchlist.json"
+    manifest_path = tmp_path / "state_manifest.json"
+    repo_root_watchlist = master_service.BASE_DIR / "watchlist.json"
+    before = repo_root_watchlist.read_text(encoding="utf-8") if repo_root_watchlist.exists() else None
+    monkeypatch.setattr(master_service, "WATCHLIST_PATH", watchlist_path)
+    monkeypatch.setattr(master_service, "STATE_MANIFEST_PATH", manifest_path)
+    monkeypatch.setattr(master_service, "LEGACY_STATE_MANIFEST_CAMEL_PATH", tmp_path / "stateManifest.json")
+    master_service.write_repo_state_json_and_verify("watchlist", ["BTCUSDT"])
+    assert watchlist_path.exists()
+    assert json.loads(watchlist_path.read_text(encoding="utf-8")) == ["BTCUSDT"]
+    after = repo_root_watchlist.read_text(encoding="utf-8") if repo_root_watchlist.exists() else None
+    assert before == after
+
+
+def test_repo_state_writes_alerts_settings_and_manifest_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "STATE_MANIFEST_PATH", tmp_path / "state_manifest.json")
+    monkeypatch.setattr(master_service, "LEGACY_STATE_MANIFEST_CAMEL_PATH", tmp_path / "stateManifest.json")
+    monkeypatch.setattr(master_service, "BYBIT_CUSTOM_ALERTS_PATH", tmp_path / "bybit_custom_alerts.json")
+    monkeypatch.setattr(master_service, "OANDA_CUSTOM_ALERTS_PATH", tmp_path / "oanda_custom_alerts.json")
+    monkeypatch.setattr(master_service, "BYBIT_SETTINGS_PATH", tmp_path / "bybit_settings.json")
+    monkeypatch.setattr(master_service, "OANDA_SETTINGS_PATH", tmp_path / "oanda_settings.json")
+    master_service.write_repo_state_json_and_verify("bybit_alerts", [{"id": "b1"}])
+    master_service.write_repo_state_json_and_verify("oanda_alerts", [{"id": "o1"}])
+    master_service.write_repo_state_json_and_verify("bybit_settings", {"wait_seconds": 30})
+    master_service.write_repo_state_json_and_verify("oanda_settings", {"wait_seconds": 10})
+    assert (tmp_path / "bybit_custom_alerts.json").exists()
+    assert (tmp_path / "oanda_custom_alerts.json").exists()
+    assert (tmp_path / "bybit_settings.json").exists()
+    assert (tmp_path / "oanda_settings.json").exists()
+    manifest = json.loads((tmp_path / "state_manifest.json").read_text(encoding="utf-8"))
+    for key in ("bybit_alerts", "oanda_alerts", "bybit_settings", "oanda_settings"):
+        assert key in manifest
+        assert manifest[key]["sha256"]
+        assert manifest[key]["updated_at"]
+        assert manifest[key]["source_host"]
+        assert manifest[key]["app_profile"]
+
+
+def test_startup_repo_local_existing_state_wins_over_stale_backup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "LOCAL_STATE_ONLY", True)
+    monkeypatch.setattr(master_service, "DROPBOX_SYNC_ENABLED", False)
+    monkeypatch.setattr(master_service, "_load_local_state_backup", lambda: json.dumps({"watchlist": ["STALEUSDT"]}).encode("utf-8"))
+    monkeypatch.setattr(master_service, "_restore_alerts_payload", lambda _data: {"bybit_restored": 0, "oanda_restored": 0, "watchlist_restored": 0, "pending_webhooks_restored": 0})
+    monkeypatch.setattr(master_service, "_resolve_trading_journal_dropbox_folder", lambda: ("/tmp", []))
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_workbook", lambda _folder: {"deduped_by_order_id": 0, "deduped_by_fingerprint": 0})
+    monkeypatch.setattr(master_service, "_repair_persisted_oanda_trade_rows", lambda: 0)
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setattr(master_service.bybit_monitor, "replace_custom_alerts", lambda alerts, strict=False: alerts)
+    monkeypatch.setattr(master_service.oanda_monitor, "replace_custom_alerts", lambda alerts: alerts)
+    monkeypatch.setattr(master_service.dropbox_state_store, "upload_json_and_verify", lambda *_a, **_k: None)
+    monkeypatch.setattr(master_service, "read_repo_state_json", lambda key: ["LOCALUSDT"] if key == "watchlist" else [])
+    captured = {"watchlist": None}
+    monkeypatch.setattr(master_service, "_set_watchlist_local_mirror", lambda items: captured.__setitem__("watchlist", list(items)) or list(items))
+    asyncio.run(master_service._dropbox_restore_state_backup_on_startup())
+    assert captured["watchlist"] == ["LOCALUSDT"]
+
+
+def test_startup_bootstraps_missing_repo_local_state_from_backup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "LOCAL_STATE_ONLY", True)
+    monkeypatch.setattr(master_service, "DROPBOX_SYNC_ENABLED", False)
+    monkeypatch.setattr(master_service, "_load_local_state_backup", lambda: json.dumps({"watchlist": ["BOOTUSDT"]}).encode("utf-8"))
+    monkeypatch.setattr(master_service, "_restore_alerts_payload", lambda _data: {"bybit_restored": 0, "oanda_restored": 0, "watchlist_restored": 0, "pending_webhooks_restored": 0})
+    monkeypatch.setattr(master_service, "_resolve_trading_journal_dropbox_folder", lambda: ("/tmp", []))
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_workbook", lambda _folder: {"deduped_by_order_id": 0, "deduped_by_fingerprint": 0})
+    monkeypatch.setattr(master_service, "_repair_persisted_oanda_trade_rows", lambda: 0)
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setattr(master_service.bybit_monitor, "replace_custom_alerts", lambda alerts, strict=False: alerts)
+    monkeypatch.setattr(master_service.oanda_monitor, "replace_custom_alerts", lambda alerts: alerts)
+    monkeypatch.setattr(master_service.dropbox_state_store, "upload_json_and_verify", lambda *_a, **_k: None)
+    monkeypatch.setattr(master_service, "read_repo_state_json", lambda _key: (_ for _ in ()).throw(FileNotFoundError()))
+    captured = {"watchlist": None}
+    monkeypatch.setattr(master_service, "_set_watchlist_local_mirror", lambda items: captured.__setitem__("watchlist", list(items)) or list(items))
+    asyncio.run(master_service._dropbox_restore_state_backup_on_startup())
+    assert captured["watchlist"] == ["BOOTUSDT"]
+
+
+def test_empty_repo_local_states_are_authoritative_over_stale_backup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "LOCAL_STATE_ONLY", True)
+    monkeypatch.setattr(master_service, "DROPBOX_SYNC_ENABLED", False)
+    monkeypatch.setattr(
+        master_service,
+        "_load_local_state_backup",
+        lambda: json.dumps({"watchlist": ["BTCUSDT"], "alerts": {"bybit": {"alerts": [{"id": "b1"}]}, "oanda": {"alerts": [{"id": "o1"}]}}}).encode("utf-8"),
+    )
+    monkeypatch.setattr(master_service, "_restore_alerts_payload", lambda _data: {"bybit_restored": 0, "oanda_restored": 0, "watchlist_restored": 0, "pending_webhooks_restored": 0})
+    monkeypatch.setattr(master_service, "_resolve_trading_journal_dropbox_folder", lambda: ("/tmp", []))
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_workbook", lambda _folder: {"deduped_by_order_id": 0, "deduped_by_fingerprint": 0})
+    monkeypatch.setattr(master_service, "_repair_persisted_oanda_trade_rows", lambda: 0)
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setattr(master_service, "_restore_alerts_payload", lambda _data: (_ for _ in ()).throw(AssertionError("must not replay state_backup in repo-local mode")))
+    seen = {"watchlist": None, "bybit": None, "oanda": None}
+    monkeypatch.setattr(master_service, "read_repo_state_json", lambda key: [] if key in {"watchlist", "bybit_alerts", "oanda_alerts"} else {})
+    monkeypatch.setattr(master_service, "_set_watchlist_local_mirror", lambda items: seen.__setitem__("watchlist", list(items)) or list(items))
+    monkeypatch.setattr(master_service.bybit_monitor, "replace_custom_alerts", lambda alerts, strict=False: seen.__setitem__("bybit", list(alerts)))
+    monkeypatch.setattr(master_service.oanda_monitor, "replace_custom_alerts", lambda alerts: seen.__setitem__("oanda", list(alerts)))
+    asyncio.run(master_service._dropbox_restore_state_backup_on_startup())
+    assert seen["watchlist"] == []
+    assert seen["bybit"] == []
+    assert seen["oanda"] == []
+
+
+def test_invalid_repo_local_json_surfaces_restore_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "LOCAL_STATE_ONLY", True)
+    monkeypatch.setattr(master_service, "DROPBOX_SYNC_ENABLED", False)
+    monkeypatch.setattr(master_service, "_load_local_state_backup", lambda: json.dumps({"watchlist": []}).encode("utf-8"))
+    monkeypatch.setattr(master_service, "_restore_alerts_payload", lambda _data: {"bybit_restored": 0, "oanda_restored": 0, "watchlist_restored": 0, "pending_webhooks_restored": 0})
+    monkeypatch.setattr(master_service, "_resolve_trading_journal_dropbox_folder", lambda: ("/tmp", []))
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_workbook", lambda _folder: {"deduped_by_order_id": 0, "deduped_by_fingerprint": 0})
+    monkeypatch.setattr(master_service, "_repair_persisted_oanda_trade_rows", lambda: 0)
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setattr(master_service.bybit_monitor, "replace_custom_alerts", lambda alerts, strict=False: alerts)
+    monkeypatch.setattr(master_service.oanda_monitor, "replace_custom_alerts", lambda alerts: alerts)
+    monkeypatch.setattr(master_service, "read_repo_state_json", lambda key: (_ for _ in ()).throw(ValueError("bad json")) if key == "watchlist" else [])
+    asyncio.run(master_service._dropbox_restore_state_backup_on_startup())
+    status = master_service._state_sync_status_snapshot()
+    assert status["restore_status"] == "failed"
+    assert "Invalid repo-local state for keys" in str(status.get("restore_error") or "")
+
+
+def test_invalid_repo_local_file_not_overwritten_in_same_startup_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "LOCAL_STATE_ONLY", True)
+    monkeypatch.setattr(master_service, "DROPBOX_SYNC_ENABLED", False)
+    monkeypatch.setattr(master_service, "_load_local_state_backup", lambda: json.dumps({"watchlist": ["BTCUSDT"]}).encode("utf-8"))
+    monkeypatch.setattr(master_service, "_resolve_trading_journal_dropbox_folder", lambda: ("/tmp", []))
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_workbook", lambda _folder: {"deduped_by_order_id": 0, "deduped_by_fingerprint": 0})
+    monkeypatch.setattr(master_service, "_repair_persisted_oanda_trade_rows", lambda: 0)
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setattr(master_service.bybit_monitor, "replace_custom_alerts", lambda alerts, strict=False: alerts)
+    monkeypatch.setattr(master_service.oanda_monitor, "replace_custom_alerts", lambda alerts: alerts)
+    monkeypatch.setattr(master_service, "read_repo_state_json", lambda key: (_ for _ in ()).throw(ValueError("bad json")) if key == "watchlist" else [])
+    writes = []
+    monkeypatch.setattr(master_service, "write_repo_state_json_and_verify", lambda key, payload: writes.append((key, payload)) or {"ok": True})
+    asyncio.run(master_service._dropbox_restore_state_backup_on_startup())
+    assert all(key != "watchlist" for key, _ in writes)
+
+
+def test_repo_local_ready_without_state_backup_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "LOCAL_STATE_ONLY", True)
+    monkeypatch.setattr(master_service, "DROPBOX_SYNC_ENABLED", False)
+    monkeypatch.setattr(master_service, "_load_local_state_backup", lambda: (_ for _ in ()).throw(FileNotFoundError()))
+    monkeypatch.setattr(master_service, "_resolve_trading_journal_dropbox_folder", lambda: ("/tmp", []))
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_workbook", lambda _folder: {"deduped_by_order_id": 0, "deduped_by_fingerprint": 0})
+    monkeypatch.setattr(master_service, "_repair_persisted_oanda_trade_rows", lambda: 0)
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setattr(master_service.bybit_monitor, "replace_custom_alerts", lambda alerts, strict=False: alerts)
+    monkeypatch.setattr(master_service.oanda_monitor, "replace_custom_alerts", lambda alerts: alerts)
+    monkeypatch.setattr(master_service, "read_repo_state_json", lambda key: [] if key in {"watchlist", "bybit_alerts", "oanda_alerts"} else {"wait_seconds": 30})
+    asyncio.run(master_service._dropbox_restore_state_backup_on_startup())
+    status = master_service._state_sync_status_snapshot()
+    assert status["restore_status"] == "done"
+    assert status["restore_error"] is None
+    assert status["per_file_state_ready"] is True
+    assert status["remote_backup_hash"] is None
+
+
+def test_invalid_repo_local_without_state_backup_still_reports_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "LOCAL_STATE_ONLY", True)
+    monkeypatch.setattr(master_service, "DROPBOX_SYNC_ENABLED", False)
+    monkeypatch.setattr(master_service, "_load_local_state_backup", lambda: (_ for _ in ()).throw(FileNotFoundError()))
+    monkeypatch.setattr(master_service, "_resolve_trading_journal_dropbox_folder", lambda: ("/tmp", []))
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_workbook", lambda _folder: {"deduped_by_order_id": 0, "deduped_by_fingerprint": 0})
+    monkeypatch.setattr(master_service, "_repair_persisted_oanda_trade_rows", lambda: 0)
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setattr(master_service.bybit_monitor, "replace_custom_alerts", lambda alerts, strict=False: alerts)
+    monkeypatch.setattr(master_service.oanda_monitor, "replace_custom_alerts", lambda alerts: alerts)
+    monkeypatch.setattr(master_service, "read_repo_state_json", lambda key: (_ for _ in ()).throw(ValueError("bad")) if key == "watchlist" else [])
+    asyncio.run(master_service._dropbox_restore_state_backup_on_startup())
+    status = master_service._state_sync_status_snapshot()
+    assert status["restore_status"] == "failed"
+    assert "watchlist" in str(status["restore_error"])
+    assert status["per_file_state_ready"] is False
+
+
+def test_missing_repo_local_files_bootstrap_writes_relocated_files(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "LOCAL_STATE_ONLY", True)
+    monkeypatch.setattr(master_service, "DROPBOX_SYNC_ENABLED", False)
+    backup = {
+        "watchlist": ["WIFUSDT"],
+        "alerts": {"bybit": {"alerts": [{"id": "b1"}]}, "oanda": {"alerts": [{"id": "o1"}]}},
+        "bybit_settings": {"wait_seconds": 30},
+        "oanda_settings": {"wait_seconds": 20},
+    }
+    monkeypatch.setattr(master_service, "_load_local_state_backup", lambda: json.dumps(backup).encode("utf-8"))
+    monkeypatch.setattr(master_service, "_restore_alerts_payload", lambda _data: {"bybit_restored": 0, "oanda_restored": 0, "watchlist_restored": 0, "pending_webhooks_restored": 0})
+    monkeypatch.setattr(master_service, "_resolve_trading_journal_dropbox_folder", lambda: ("/tmp", []))
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_workbook", lambda _folder: {"deduped_by_order_id": 0, "deduped_by_fingerprint": 0})
+    monkeypatch.setattr(master_service, "_repair_persisted_oanda_trade_rows", lambda: 0)
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setattr(master_service.bybit_monitor, "replace_custom_alerts", lambda alerts, strict=False: alerts)
+    monkeypatch.setattr(master_service.oanda_monitor, "replace_custom_alerts", lambda alerts: alerts)
+    monkeypatch.setattr(master_service, "read_repo_state_json", lambda _key: (_ for _ in ()).throw(FileNotFoundError()))
+    written = []
+    monkeypatch.setattr(master_service, "write_repo_state_json_and_verify", lambda key, payload: written.append((key, payload)) or {"ok": True})
+    asyncio.run(master_service._dropbox_restore_state_backup_on_startup())
+    keys = [k for k, _ in written]
+    assert "watchlist" in keys
+    assert "bybit_alerts" in keys
+    assert "oanda_alerts" in keys

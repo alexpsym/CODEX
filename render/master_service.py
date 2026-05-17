@@ -478,7 +478,13 @@ PENDING_WEBHOOKS_PATH = BASE_DIR / "render" / "data" / "pending_webhooks.json"
 TRADE_CONTEXTS_PATH = BASE_DIR / "render" / "data" / "trade_contexts.json"
 WEBHOOK_ATTEMPTS_PATH = BASE_DIR / "render" / "data" / "webhook_attempts.json"
 BOUNCE_TRADERS_PATH = BASE_DIR / "render" / "data" / "bounce_traders.json"
-WATCHLIST_PATH = BASE_DIR / "render" / "data" / "watchlist.json"
+WATCHLIST_PATH = BASE_DIR / "watchlist.json"
+STATE_MANIFEST_PATH = BASE_DIR / "state_manifest.json"
+LEGACY_STATE_MANIFEST_CAMEL_PATH = BASE_DIR / "stateManifest.json"
+BYBIT_CUSTOM_ALERTS_PATH = bybit_monitor.CUSTOM_ALERTS_PATH
+BYBIT_SETTINGS_PATH = bybit_monitor.SETTINGS_PATH
+OANDA_CUSTOM_ALERTS_PATH = oanda_monitor.CUSTOM_ALERTS_PATH
+OANDA_SETTINGS_PATH = oanda_monitor.SETTINGS_PATH
 TRADING_JOURNAL_PATH = BASE_DIR / "render" / "data" / "trading_journal.json"
 TRADING_JOURNAL_STATE_PATH = BASE_DIR / "render" / "data" / "trading_journal_state.json"
 TRADING_JOURNAL_SYNC_STATE_PATH = BASE_DIR / "render" / "data" / "trading_journal_sync_state.json"
@@ -3102,6 +3108,69 @@ def _set_watchlist(items: Iterable[object]) -> List[str]:
 
 def _set_watchlist_local_mirror(items: Iterable[object]) -> List[str]:
     return _set_watchlist(items)
+
+
+def state_file_path_for_key(key: str) -> Path:
+    mapping = {
+        "watchlist": WATCHLIST_PATH,
+        "bybit_alerts": BYBIT_CUSTOM_ALERTS_PATH,
+        "oanda_alerts": OANDA_CUSTOM_ALERTS_PATH,
+        "bybit_settings": BYBIT_SETTINGS_PATH,
+        "oanda_settings": OANDA_SETTINGS_PATH,
+        "state_manifest": STATE_MANIFEST_PATH,
+    }
+    if key not in mapping:
+        raise KeyError(f"Unknown repo state key: {key}")
+    return mapping[key]
+
+
+def _load_state_manifest() -> Dict[str, Any]:
+    if STATE_MANIFEST_PATH.exists():
+        payload = json.loads(STATE_MANIFEST_PATH.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    if LEGACY_STATE_MANIFEST_CAMEL_PATH.exists():
+        legacy = json.loads(LEGACY_STATE_MANIFEST_CAMEL_PATH.read_text(encoding="utf-8"))
+        manifest = legacy if isinstance(legacy, dict) else {}
+        write_json_file(STATE_MANIFEST_PATH, manifest, sort_keys=True, indent=2)
+        return manifest
+    return {}
+
+
+def _update_repo_state_manifest_entry(key: str, payload: object) -> None:
+    manifest = _load_state_manifest()
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    manifest[key] = {
+        "key": key,
+        "updated_at": _utc_now_iso(),
+        "sha256": hashlib.sha256(blob).hexdigest(),
+        "source_host": socket.gethostname(),
+        "app_profile": APP_PROFILE,
+    }
+    write_json_file(STATE_MANIFEST_PATH, manifest, sort_keys=True, indent=2)
+
+
+def read_repo_state_json(key: str) -> object:
+    path = state_file_path_for_key(key)
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _is_valid_repo_state_value(key: str, value: object) -> bool:
+    if key in {"watchlist", "bybit_alerts", "oanda_alerts"}:
+        return isinstance(value, list)
+    if key in {"bybit_settings", "oanda_settings", "state_manifest"}:
+        return isinstance(value, dict)
+    return False
+
+
+def write_repo_state_json_and_verify(key: str, payload: object) -> Dict[str, object]:
+    path = state_file_path_for_key(key)
+    write_json_file(path, payload, sort_keys=True, indent=2)
+    roundtrip = json.loads(path.read_text(encoding="utf-8"))
+    if roundtrip != payload:
+        raise RuntimeError(f"Repo-local state verification failed for key '{key}' at {path}")
+    if key != "state_manifest":
+        _update_repo_state_manifest_entry(key, payload)
+    return {"ok": True, "path": str(path), "verified": True}
 
 
 def _load_trading_journal() -> List[Dict[str, object]]:
@@ -7599,59 +7668,8 @@ def _restore_alerts_payload(data: Dict[str, object]) -> Dict[str, object]:
 
 
 async def _dropbox_restore_state_backup_on_startup() -> None:
-    if _state_backup_uses_local_repo_file():
-        _update_state_sync_status(
-            enabled=True,
-            restore_complete=False,
-            restore_status="pending",
-            restore_error=None,
-            backup_path=str(STATE_BACKUP_LOCAL_PATH),
-        )
-        try:
-            payload = await asyncio.to_thread(_load_local_state_backup)
-            data = json.loads(payload.decode("utf-8")) if payload else {}
-            restored = _restore_alerts_payload(data if isinstance(data, dict) else {})
-            _schedule_dropbox_upload_state_backup()
-            BYBIT_LOGGER.info(
-                "Repo-local restore complete: bybit=%s oanda=%s watchlist=%s pending=%s",
-                restored.get("bybit_restored", 0),
-                restored.get("oanda_restored", 0),
-                restored.get("watchlist_restored", 0),
-                restored.get("pending_webhooks_restored", 0),
-            )
-            _update_state_sync_status(
-                restore_complete=True,
-                restore_status="done",
-                restore_error=None,
-                last_restore_at=_utc_now_iso(),
-                remote_backup_hash=hashlib.sha256(payload).hexdigest() if payload else None,
-                per_file_state_ready=True,
-                missing_state_keys=[],
-                migrated_state_keys=[],
-            )
-        except FileNotFoundError:
-            BYBIT_LOGGER.info("Repo-local restore skipped; no backup found at %s", STATE_BACKUP_LOCAL_PATH)
-            _update_state_sync_status(
-                restore_complete=True,
-                restore_status="done",
-                restore_error=None,
-                last_restore_at=_utc_now_iso(),
-                remote_backup_hash=None,
-                per_file_state_ready=False,
-            )
-        except Exception as exc:  # pragma: no cover - startup failure
-            BYBIT_LOGGER.error("Repo-local restore failed: %s", exc)
-            _update_state_sync_status(
-                restore_complete=True,
-                restore_status="failed",
-                restore_error=str(exc),
-                last_restore_at=_utc_now_iso(),
-            )
-        finally:
-            _STARTUP_STATE_RESTORE_DONE.set()
-        return
-
-    if (not DROPBOX_SYNC_ENABLED) and (not _state_backup_uses_local_repo_file()):
+    local_repo_mode = _state_backup_uses_local_repo_file()
+    if (not DROPBOX_SYNC_ENABLED) and (not local_repo_mode):
         _update_state_sync_status(
             enabled=False,
             restore_complete=True,
@@ -7666,7 +7684,7 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
         restore_complete=False,
         restore_status="pending",
         restore_error=None,
-        backup_path=DROPBOX_BACKUP_PATH,
+        backup_path=(str(STATE_BACKUP_LOCAL_PATH) if local_repo_mode else DROPBOX_BACKUP_PATH),
     )
     def _legacy_local_state_for_key(key: str) -> object:
         if key == "watchlist":
@@ -7699,6 +7717,7 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
         required_keys = keys or ["watchlist", "bybit_alerts", "oanda_alerts", "bybit_settings", "oanda_settings"]
         missing: List[str] = []
         migrated: List[str] = []
+        invalid: List[str] = []
         remote_backup: dict = {}
         try:
             payload = await asyncio.to_thread(_load_local_state_backup) if _state_backup_uses_local_repo_file() else await asyncio.to_thread(download_bytes, DROPBOX_BACKUP_PATH)
@@ -7706,9 +7725,34 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
         except FileNotFoundError:
             remote_backup = {}
         for key in required_keys:
-            existing = dropbox_state_store.download_json(key, default=None, required=False)
-            if existing is not None:
-                continue
+            existing = None
+            local_existing = None
+            if _state_backup_uses_local_repo_file():
+                try:
+                    local_existing = read_repo_state_json(key)
+                except FileNotFoundError:
+                    local_existing = None
+                except Exception as exc:
+                    BYBIT_LOGGER.warning("Repo-local state for key '%s' is unreadable: %s", key, exc)
+                    invalid.append(key)
+                    local_existing = None
+                if local_existing is not None and _is_valid_repo_state_value(key, local_existing):
+                    existing = local_existing
+                    if key == "watchlist":
+                        _set_watchlist_local_mirror(existing if isinstance(existing, list) else [])
+                    elif key == "bybit_alerts":
+                        bybit_monitor.replace_custom_alerts(existing if isinstance(existing, list) else [], strict=False)
+                    elif key == "oanda_alerts":
+                        oanda_monitor.replace_custom_alerts(existing if isinstance(existing, list) else [])
+                    continue
+                if local_existing is not None and not _is_valid_repo_state_value(key, local_existing):
+                    BYBIT_LOGGER.warning("Repo-local state for key '%s' has invalid type: %s", key, type(local_existing).__name__)
+                    invalid.append(key)
+                    continue
+            else:
+                existing = dropbox_state_store.download_json(key, default=None, required=False)
+                if existing is not None:
+                    continue
             from_backup = _backup_state_for_key(remote_backup, key)
             candidate = from_backup
             if candidate in (None, []) or (isinstance(candidate, dict) and not candidate):
@@ -7722,7 +7766,10 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
                     candidate = _read_bybit_settings()
                 elif key == "oanda_settings":
                     candidate = _read_oanda_settings()
-            dropbox_state_store.upload_json_and_verify(key, candidate)
+            if _state_backup_uses_local_repo_file():
+                write_repo_state_json_and_verify(key, candidate)
+            else:
+                dropbox_state_store.upload_json_and_verify(key, candidate)
             migrated.append(key)
             existing = candidate
             if existing is None:
@@ -7734,14 +7781,34 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
                 bybit_monitor.replace_custom_alerts(existing if isinstance(existing, list) else [], strict=False)
             elif key == "oanda_alerts":
                 oanda_monitor.replace_custom_alerts(existing if isinstance(existing, list) else [])
-        return {"missing": missing, "migrated": migrated}
+        return {"missing": missing, "migrated": migrated, "invalid": invalid}
 
     try:
         bootstrap = await _bootstrap_dropbox_primary_state()
-        payload = await asyncio.to_thread(_load_local_state_backup) if _state_backup_uses_local_repo_file() else await asyncio.to_thread(download_bytes, DROPBOX_BACKUP_PATH)
-        remote_hash = hashlib.sha256(payload).hexdigest()
-        data = json.loads(payload.decode("utf-8"))
-        restored = _restore_alerts_payload(data)
+        if local_repo_mode:
+            try:
+                payload = await asyncio.to_thread(_load_local_state_backup)
+                remote_hash = hashlib.sha256(payload).hexdigest() if payload else None
+            except FileNotFoundError:
+                payload = b""
+                remote_hash = None
+        else:
+            payload = await asyncio.to_thread(download_bytes, DROPBOX_BACKUP_PATH)
+            remote_hash = hashlib.sha256(payload).hexdigest()
+        restored = {
+            "bybit_restored": 0,
+            "bybit_invalid_skipped": 0,
+            "oanda_restored": 0,
+            "watchlist_restored": 0,
+            "pending_webhooks_restored": 0,
+            "trade_contexts_restored": 0,
+            "oanda_fill_state_restored": False,
+            "journal_rows_restored": 0,
+            "journal_rows_sanitized": 0,
+        }
+        if not local_repo_mode:
+            data = json.loads(payload.decode("utf-8"))
+            restored = _restore_alerts_payload(data)
         active_folder, _ = await asyncio.to_thread(_resolve_trading_journal_dropbox_folder)
         workbook_stats = await asyncio.to_thread(_sanitize_bybit_demo_workbook, active_folder)
         oanda_repaired_rows = _repair_persisted_oanda_trade_rows()
@@ -7760,13 +7827,14 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
             int(workbook_stats.get("deduped_by_order_id", 0)) + int(workbook_stats.get("deduped_by_fingerprint", 0)),
             oanda_repaired_rows,
         )
+        invalid_keys = list(bootstrap.get("invalid") or [])
         _update_state_sync_status(
             restore_complete=True,
-            restore_status="done",
-            restore_error=None,
+            restore_status="failed" if invalid_keys else "done",
+            restore_error=(f"Invalid repo-local state for keys: {', '.join(invalid_keys)}" if invalid_keys else None),
             last_restore_at=_utc_now_iso(),
             remote_backup_hash=remote_hash,
-            per_file_state_ready=not bool(bootstrap.get("missing")),
+            per_file_state_ready=(not bool(bootstrap.get("missing"))) and (not bool(invalid_keys)),
             missing_state_keys=list(bootstrap.get("missing") or []),
             migrated_state_keys=list(bootstrap.get("migrated") or []),
         )
@@ -21000,10 +21068,12 @@ def _update_bybit_settings(payload: Dict[str, object]) -> Dict[str, float]:
     try:
         wait_seconds = payload.get("wait_seconds") if isinstance(payload, dict) else None
         percent_threshold = payload.get("percent_threshold") if isinstance(payload, dict) else None
-        return bybit_monitor.update_runtime_settings(
+        updated = bybit_monitor.update_runtime_settings(
             wait_seconds=int(wait_seconds) if wait_seconds is not None else None,
             percent_threshold=float(percent_threshold) if percent_threshold is not None else None,
         )
+        write_repo_state_json_and_verify("bybit_settings", updated)
+        return updated
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover - defensive
@@ -21030,7 +21100,9 @@ def _update_oanda_settings(payload: Dict[str, object]) -> Dict[str, float]:
         ):
             if key in payload:
                 updates[key] = payload.get(key)
-        return oanda_monitor.update_runtime_settings(**updates)
+        updated = oanda_monitor.update_runtime_settings(**updates)
+        write_repo_state_json_and_verify("oanda_settings", updated)
+        return updated
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover - defensive
@@ -21276,6 +21348,7 @@ async def upsert_bybit_monitor_custom_alert(request: Request) -> JSONResponse:
     normalized["source"] = _state_source_label()
     updated = [a for a in existing if str(a.get("id")) != str(normalized.get("id"))] + [normalized]
     bybit_monitor.replace_custom_alerts(updated, strict=False)
+    write_repo_state_json_and_verify("bybit_alerts", updated)
     if DROPBOX_SYNC_ENABLED or _state_backup_uses_local_repo_file():
         _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "alert": normalized, "state_sync": _state_sync_status_snapshot()})
@@ -21288,6 +21361,7 @@ async def delete_bybit_monitor_custom_alert(alert_id: str) -> JSONResponse:
     existing = bybit_monitor.get_custom_alerts(force=True)
     updated = [a for a in (existing if isinstance(existing, list) else []) if str(a.get("id")) != str(alert_id)]
     bybit_monitor.replace_custom_alerts(updated, strict=False)
+    write_repo_state_json_and_verify("bybit_alerts", updated)
     if DROPBOX_SYNC_ENABLED or _state_backup_uses_local_repo_file():
         _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "alert_id": alert_id, "state_sync": _state_sync_status_snapshot()})
@@ -21315,6 +21389,7 @@ async def set_bybit_monitor_custom_alert_enabled(
     if not found:
         raise HTTPException(status_code=404, detail="Unknown alert id")
     bybit_monitor.replace_custom_alerts(alerts, strict=False)
+    write_repo_state_json_and_verify("bybit_alerts", alerts)
     if DROPBOX_SYNC_ENABLED or _state_backup_uses_local_repo_file():
         _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "alert": found, "state_sync": _state_sync_status_snapshot()})
@@ -21346,6 +21421,7 @@ async def upsert_oanda_monitor_custom_alert(request: Request) -> JSONResponse:
     normalized["source"] = _state_source_label()
     updated = [a for a in (existing if isinstance(existing, list) else []) if str(a.get("id")) != str(normalized.get("id"))] + [normalized]
     oanda_monitor.replace_custom_alerts(updated)
+    write_repo_state_json_and_verify("oanda_alerts", updated)
     if DROPBOX_SYNC_ENABLED or _state_backup_uses_local_repo_file():
         _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "alert": normalized, "state_sync": _state_sync_status_snapshot()})
@@ -21358,6 +21434,7 @@ async def delete_oanda_monitor_custom_alert(alert_id: str) -> JSONResponse:
     existing = oanda_monitor.get_custom_alerts(force=True)
     updated = [a for a in (existing if isinstance(existing, list) else []) if str(a.get("id")) != str(alert_id)]
     oanda_monitor.replace_custom_alerts(updated)
+    write_repo_state_json_and_verify("oanda_alerts", updated)
     if DROPBOX_SYNC_ENABLED or _state_backup_uses_local_repo_file():
         _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "alert_id": alert_id, "state_sync": _state_sync_status_snapshot()})
@@ -21385,6 +21462,7 @@ async def set_oanda_monitor_custom_alert_enabled(
     if not found:
         raise HTTPException(status_code=404, detail="Unknown alert id")
     oanda_monitor.replace_custom_alerts(alerts)
+    write_repo_state_json_and_verify("oanda_alerts", alerts)
     if DROPBOX_SYNC_ENABLED or _state_backup_uses_local_repo_file():
         _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "alert": found, "state_sync": _state_sync_status_snapshot()})
@@ -21601,6 +21679,7 @@ async def set_watchlist(request: Request) -> JSONResponse:
         resolved_items.append(resolved_symbol)
     normalized = _normalize_watchlist(resolved_items)
     normalized = _set_watchlist_local_mirror(normalized)
+    write_repo_state_json_and_verify("watchlist", normalized)
     should_upload = DROPBOX_SYNC_ENABLED and not LOCAL_STATE_ONLY
     sync_status = _mark_primary_state_local_committed("watchlist", normalized, pending_upload=should_upload)
     if should_upload:
