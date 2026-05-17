@@ -1,0 +1,5 @@
+{
+  "percent_threshold": 0.4,
+  "push_ready": true,
+  "wait_seconds": 60.0
+}
