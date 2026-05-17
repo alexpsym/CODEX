@@ -69,7 +69,7 @@ from shared.symbol_resolution import (
 from shared.atomic_json import write_json_file
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, stable_row_id, SHEET_ORDER, _get_all_trades_sheet
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, stable_row_id, SHEET_ORDER, _get_all_trades_sheet, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -7146,6 +7146,43 @@ def _update_state_sync_status(**updates: object) -> Dict[str, object]:
         _STATE_SYNC_STATUS.update(updates)
         return dict(_STATE_SYNC_STATUS)
 
+def _calendar_has_expected_pl_cells(cal_ws, expected_year_months: Set[Tuple[int, int]]) -> bool:
+    month_to_col_default: Dict[int, int] = {}
+    month_to_col_custom: Dict[int, int] = {}
+    for cc in range(1, cal_ws.max_column + 1):
+        token = str(cal_ws.cell(1, cc).value or "").strip().lower()
+        for mm in range(1, 13):
+            name = calendar.month_name[mm].lower()
+            if token == name:
+                month_to_col_custom[mm] = cc
+            if token == f"{name} p/l %":
+                month_to_col_default[mm] = cc
+    default_year_rows: Dict[int, int] = {}
+    custom_year_rows: Dict[int, int] = {}
+    for rr in range(2, cal_ws.max_row + 1):
+        yv = _safe_float(cal_ws.cell(rr, 1).value)
+        if yv is None:
+            continue
+        year = int(yv)
+        default_year_rows.setdefault(year, rr)
+        if str(cal_ws.cell(rr, 2).value or "").strip().lower() == "p/l %":
+            custom_year_rows[year] = rr
+    for year, month in expected_year_months:
+        found_numeric = False
+        col_default = month_to_col_default.get(month)
+        row_default = default_year_rows.get(year)
+        if col_default and row_default:
+            if isinstance(cal_ws.cell(row_default, col_default).value, (int, float)):
+                found_numeric = True
+        col_custom = month_to_col_custom.get(month)
+        row_custom = custom_year_rows.get(year)
+        if col_custom and row_custom:
+            if isinstance(cal_ws.cell(row_custom, col_custom).value, (int, float)):
+                found_numeric = True
+        if not found_numeric:
+            return False
+    return True
+
 
 def _mark_primary_state_verified(key: str, payload: object) -> Dict[str, object]:
     now = _utc_now_iso()
@@ -7162,6 +7199,22 @@ def _mark_primary_state_verified(key: str, payload: object) -> Dict[str, object]
     }
     if key == "watchlist":
         updates["last_verified_at"] = now
+        updates["last_verified_watchlist"] = _normalize_watchlist(payload if isinstance(payload, list) else [])
+    return _update_state_sync_status(**updates)
+
+def _mark_primary_state_local_committed(key: str, payload: object, *, pending_upload: bool) -> Dict[str, object]:
+    now = _utc_now_iso()
+    status = _state_sync_status_snapshot()
+    missing_keys = [str(item) for item in (status.get("missing_state_keys") or []) if str(item)]
+    if key in missing_keys:
+        missing_keys = [item for item in missing_keys if item != key]
+    updates: Dict[str, object] = {
+        "last_local_write_at": now,
+        "pending_upload": bool(pending_upload),
+        "missing_state_keys": missing_keys,
+        "per_file_state_ready": not bool(missing_keys),
+    }
+    if key == "watchlist":
         updates["last_verified_watchlist"] = _normalize_watchlist(payload if isinstance(payload, list) else [])
     return _update_state_sync_status(**updates)
 
@@ -21056,17 +21109,6 @@ async def oanda_monitor_runtime_status() -> JSONResponse:
 async def bybit_monitor_custom_alerts() -> JSONResponse:
     await _wait_for_state_restore_or_error()
     try:
-        alerts = dropbox_state_store.download_json("bybit_alerts", default=None, required=False)
-        if alerts is None:
-            try:
-                backup = json.loads((await asyncio.to_thread(download_bytes, DROPBOX_BACKUP_PATH)).decode("utf-8"))
-                alerts = (((backup.get("alerts") or {}).get("bybit") or {}).get("alerts") or [])
-                dropbox_state_store.upload_json_and_verify("bybit_alerts", alerts)
-            except Exception:
-                raise HTTPException(status_code=503, detail={"error": "dropbox_state_unavailable", "message": "Dropbox bybit alerts state is missing and bootstrap failed.", "state_sync": _state_sync_status_snapshot()})
-        if not isinstance(alerts, list):
-            raise ValueError("Dropbox bybit_alerts must be a list")
-        bybit_monitor.replace_custom_alerts(alerts, strict=False)
         return JSONResponse({"alerts": bybit_monitor.get_custom_alerts(force=True), "state_sync": _state_sync_status_snapshot()})
     except Exception as exc:
         raise HTTPException(status_code=503, detail={"error": "dropbox_state_unavailable", "message": str(exc), "state_sync": _state_sync_status_snapshot()}) from exc
@@ -21078,9 +21120,7 @@ async def upsert_bybit_monitor_custom_alert(request: Request) -> JSONResponse:
     await _wait_for_state_restore_or_error()
     payload = await request.json()
     now = _utc_now_iso()
-    existing = dropbox_state_store.download_json("bybit_alerts", default=[], required=True)
-    if not isinstance(existing, list):
-        raise HTTPException(status_code=503, detail={"error": "dropbox_state_unavailable", "message": "Dropbox bybit_alerts is invalid", "state_sync": _state_sync_status_snapshot()})
+    existing = bybit_monitor.get_custom_alerts(force=True)
     incoming = dict(payload or {})
     match = next((a for a in existing if str(a.get("id")) == str(incoming.get("id") or "")), None)
     normalized = bybit_monitor._coerce_alert({**incoming, "id": (match or {}).get("id") or incoming.get("id")})
@@ -21088,8 +21128,9 @@ async def upsert_bybit_monitor_custom_alert(request: Request) -> JSONResponse:
     normalized["updated_at"] = now
     normalized["source"] = "dropbox"
     updated = [a for a in existing if str(a.get("id")) != str(normalized.get("id"))] + [normalized]
-    dropbox_state_store.upload_json_and_verify("bybit_alerts", updated, verifier=lambda remote: any(str(a.get("id")) == str(normalized.get("id")) for a in (remote or [])))
     bybit_monitor.replace_custom_alerts(updated, strict=False)
+    if DROPBOX_SYNC_ENABLED and not LOCAL_STATE_ONLY:
+        _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "alert": normalized, "state_sync": _state_sync_status_snapshot()})
 
 
@@ -21097,10 +21138,11 @@ async def upsert_bybit_monitor_custom_alert(request: Request) -> JSONResponse:
 @app.delete("/api/bybit-monitor/custom-alerts/{alert_id}")
 async def delete_bybit_monitor_custom_alert(alert_id: str) -> JSONResponse:
     await _wait_for_state_restore_or_error()
-    existing = dropbox_state_store.download_json("bybit_alerts", default=[], required=True)
+    existing = bybit_monitor.get_custom_alerts(force=True)
     updated = [a for a in (existing if isinstance(existing, list) else []) if str(a.get("id")) != str(alert_id)]
-    dropbox_state_store.upload_json_and_verify("bybit_alerts", updated, verifier=lambda remote: all(str(a.get("id")) != str(alert_id) for a in (remote or [])))
     bybit_monitor.replace_custom_alerts(updated, strict=False)
+    if DROPBOX_SYNC_ENABLED and not LOCAL_STATE_ONLY:
+        _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "alert_id": alert_id, "state_sync": _state_sync_status_snapshot()})
 
 
@@ -21112,7 +21154,7 @@ async def set_bybit_monitor_custom_alert_enabled(
     await _wait_for_state_restore_or_error()
     payload = await request.json()
     enabled = bool((payload or {}).get("enabled", True))
-    existing = dropbox_state_store.download_json("bybit_alerts", default=[], required=True)
+    existing = bybit_monitor.get_custom_alerts(force=True)
     now = _utc_now_iso()
     alerts = []
     found = None
@@ -21125,8 +21167,9 @@ async def set_bybit_monitor_custom_alert_enabled(
         alerts.append(cloned)
     if not found:
         raise HTTPException(status_code=404, detail="Unknown alert id")
-    dropbox_state_store.upload_json_and_verify("bybit_alerts", alerts, verifier=lambda remote: any(str(a.get("id")) == alert_id and bool(a.get("enabled")) == enabled for a in (remote or [])))
     bybit_monitor.replace_custom_alerts(alerts, strict=False)
+    if DROPBOX_SYNC_ENABLED and not LOCAL_STATE_ONLY:
+        _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "alert": found, "state_sync": _state_sync_status_snapshot()})
 
 
@@ -21135,17 +21178,6 @@ async def set_bybit_monitor_custom_alert_enabled(
 async def oanda_monitor_custom_alerts() -> JSONResponse:
     await _wait_for_state_restore_or_error()
     try:
-        alerts = dropbox_state_store.download_json("oanda_alerts", default=None, required=False)
-        if alerts is None:
-            try:
-                backup = json.loads((await asyncio.to_thread(download_bytes, DROPBOX_BACKUP_PATH)).decode("utf-8"))
-                alerts = (((backup.get("alerts") or {}).get("oanda") or {}).get("alerts") or [])
-                dropbox_state_store.upload_json_and_verify("oanda_alerts", alerts)
-            except Exception:
-                raise HTTPException(status_code=503, detail={"error": "dropbox_state_unavailable", "message": "Dropbox OANDA alerts state is missing and bootstrap failed.", "state_sync": _state_sync_status_snapshot()})
-        if not isinstance(alerts, list):
-            raise ValueError("Dropbox oanda_alerts must be a list")
-        oanda_monitor.replace_custom_alerts(alerts)
         return JSONResponse({"alerts": oanda_monitor.get_custom_alerts(force=True), "state_sync": _state_sync_status_snapshot()})
     except Exception as exc:
         raise HTTPException(status_code=503, detail={"error": "dropbox_state_unavailable", "message": str(exc), "state_sync": _state_sync_status_snapshot()}) from exc
@@ -21157,7 +21189,7 @@ async def upsert_oanda_monitor_custom_alert(request: Request) -> JSONResponse:
     await _wait_for_state_restore_or_error()
     payload = await request.json()
     now = _utc_now_iso()
-    existing = dropbox_state_store.download_json("oanda_alerts", default=[], required=True)
+    existing = oanda_monitor.get_custom_alerts(force=True)
     incoming = dict(payload or {})
     match = next((a for a in (existing if isinstance(existing, list) else []) if str(a.get("id")) == str(incoming.get("id") or "")), None)
     normalized = oanda_monitor._coerce_alert({**incoming, "id": (match or {}).get("id") or incoming.get("id")})
@@ -21165,8 +21197,9 @@ async def upsert_oanda_monitor_custom_alert(request: Request) -> JSONResponse:
     normalized["updated_at"] = now
     normalized["source"] = "dropbox"
     updated = [a for a in (existing if isinstance(existing, list) else []) if str(a.get("id")) != str(normalized.get("id"))] + [normalized]
-    dropbox_state_store.upload_json_and_verify("oanda_alerts", updated, verifier=lambda remote: any(str(a.get("id")) == str(normalized.get("id")) for a in (remote or [])))
     oanda_monitor.replace_custom_alerts(updated)
+    if DROPBOX_SYNC_ENABLED and not LOCAL_STATE_ONLY:
+        _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "alert": normalized, "state_sync": _state_sync_status_snapshot()})
 
 
@@ -21174,10 +21207,11 @@ async def upsert_oanda_monitor_custom_alert(request: Request) -> JSONResponse:
 @app.delete("/api/oanda-monitor/custom-alerts/{alert_id}")
 async def delete_oanda_monitor_custom_alert(alert_id: str) -> JSONResponse:
     await _wait_for_state_restore_or_error()
-    existing = dropbox_state_store.download_json("oanda_alerts", default=[], required=True)
+    existing = oanda_monitor.get_custom_alerts(force=True)
     updated = [a for a in (existing if isinstance(existing, list) else []) if str(a.get("id")) != str(alert_id)]
-    dropbox_state_store.upload_json_and_verify("oanda_alerts", updated, verifier=lambda remote: all(str(a.get("id")) != str(alert_id) for a in (remote or [])))
     oanda_monitor.replace_custom_alerts(updated)
+    if DROPBOX_SYNC_ENABLED and not LOCAL_STATE_ONLY:
+        _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "alert_id": alert_id, "state_sync": _state_sync_status_snapshot()})
 
 
@@ -21189,7 +21223,7 @@ async def set_oanda_monitor_custom_alert_enabled(
     await _wait_for_state_restore_or_error()
     payload = await request.json()
     enabled = bool((payload or {}).get("enabled", True))
-    existing = dropbox_state_store.download_json("oanda_alerts", default=[], required=True)
+    existing = oanda_monitor.get_custom_alerts(force=True)
     now = _utc_now_iso()
     alerts = []
     found = None
@@ -21202,8 +21236,9 @@ async def set_oanda_monitor_custom_alert_enabled(
         alerts.append(cloned)
     if not found:
         raise HTTPException(status_code=404, detail="Unknown alert id")
-    dropbox_state_store.upload_json_and_verify("oanda_alerts", alerts, verifier=lambda remote: any(str(a.get("id")) == alert_id and bool(a.get("enabled")) == enabled for a in (remote or [])))
     oanda_monitor.replace_custom_alerts(alerts)
+    if DROPBOX_SYNC_ENABLED and not LOCAL_STATE_ONLY:
+        _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "alert": found, "state_sync": _state_sync_status_snapshot()})
 
 
@@ -21349,17 +21384,7 @@ async def set_pending_webhook_enabled(
 async def get_watchlist() -> JSONResponse:
     sync_status = await _wait_for_state_restore_or_error()
     try:
-        remote_items = dropbox_state_store.download_json("watchlist", default=None, required=False)
-        if remote_items is None:
-            try:
-                backup = json.loads((await asyncio.to_thread(download_bytes, DROPBOX_BACKUP_PATH)).decode("utf-8"))
-                remote_items = _normalize_watchlist(backup.get("watchlist") if isinstance(backup.get("watchlist"), list) else [])
-                dropbox_state_store.upload_json_and_verify("watchlist", remote_items)
-            except Exception:
-                raise HTTPException(status_code=503, detail={"error": "dropbox_state_unavailable", "message": "Dropbox watchlist state is missing and bootstrap failed.", "state_sync": sync_status})
-        if not isinstance(remote_items, list):
-            raise ValueError("Dropbox watchlist must be a list")
-        normalized = _set_watchlist_local_mirror(remote_items)
+        normalized = _get_watchlist()
         status = _state_sync_status_snapshot()
         missing_keys = [str(item) for item in (status.get("missing_state_keys") or []) if str(item)]
         if "watchlist" in missing_keys:
@@ -21377,7 +21402,6 @@ async def set_watchlist(request: Request) -> JSONResponse:
     await _wait_for_state_restore_or_error()
     payload = await request.json()
     if payload is None:
-        _manual_save_set_known_fingerprint(path)
         payload = {}
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Watchlist payload must be an object.")
@@ -21399,12 +21423,11 @@ async def set_watchlist(request: Request) -> JSONResponse:
             raise HTTPException(status_code=400, detail=f"Unable to resolve watchlist symbol: {token}")
         resolved_items.append(resolved_symbol)
     normalized = _normalize_watchlist(resolved_items)
-    try:
-        dropbox_state_store.upload_json_and_verify("watchlist", normalized, verifier=lambda remote: _normalize_watchlist(remote or []) == normalized)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail={"error": "dropbox_watchlist_verify_failed", "message": str(exc), "state_sync": _state_sync_status_snapshot()}) from exc
     normalized = _set_watchlist_local_mirror(normalized)
-    sync_status = _mark_primary_state_verified("watchlist", normalized)
+    should_upload = DROPBOX_SYNC_ENABLED and not LOCAL_STATE_ONLY
+    sync_status = _mark_primary_state_local_committed("watchlist", normalized, pending_upload=should_upload)
+    if should_upload:
+        _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "items": normalized, "state_sync": sync_status})
 
 
@@ -24135,23 +24158,14 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                     continue
                 non_test_with_results.append(r)
             if non_test_with_results:
-                has_calendar_data = False
-                month_name_to_idx = {calendar.month_name[i].lower(): i for i in range(1, 13)}
-                month_cols = []
-                for cc in range(1, cal.max_column + 1):
-                    token = str(cal.cell(1, cc).value or "").strip().lower()
-                    if token in month_name_to_idx:
-                        month_cols.append(cc)
-                for rr in range(2, cal.max_row + 1):
-                    year_val = _safe_float(cal.cell(rr, 1).value)
-                    label = str(cal.cell(rr, 2).value or "").strip().lower()
-                    if year_val is None or label != "p/l %":
-                        continue
-                    if any(isinstance(cal.cell(rr, cc).value, (int, float)) for cc in month_cols):
-                        has_calendar_data = True
-                        break
-                if not has_calendar_data:
-                    raise RuntimeError("Master Journal validation failed: P&L Calendar is blank despite dated result rows.")
+                expected_year_months: Set[Tuple[int, int]] = set()
+                for row in non_test_with_results:
+                    ts_value = row.get("close_time") or row.get("open_time")
+                    dt = _journal_as_date(ts_value) if ts_value else None
+                    if dt:
+                        expected_year_months.add((int(dt.year), int(dt.month)))
+                if expected_year_months and not _calendar_has_expected_pl_cells(cal, expected_year_months):
+                    raise RuntimeError("Master Journal validation failed: P&L Calendar missing expected dated P/L cells.")
             balances = snapshot.get("balances") or []
             if balances:
                 anchor = None
@@ -24199,6 +24213,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                         "balance": dash.cell(rr, header_map["balance"]).value,
                         "currency": str(dash.cell(rr, header_map["currency"]).value or "").strip(),
                     }
+                nonnumeric: List[str] = []
                 mismatches: List[str] = []
                 for account_key, expected in expected_balances.items():
                     expected_balance = _to_float(expected.get("balance"))
@@ -24211,7 +24226,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                     actual_balance = _to_float(actual.get("balance"))
                     actual_currency = str(actual.get("currency") or "").strip()
                     if expected_balance is None or actual_balance is None:
-                        mismatches.append(
+                        nonnumeric.append(
                             f"{actual.get('account')}: expected_balance={expected_balance}, actual_balance={actual.get('balance')}, expected_currency={expected_currency}, actual_currency={actual_currency}, balance_source={expected_source}"
                         )
                         continue
@@ -24219,59 +24234,28 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                         mismatches.append(
                             f"{actual.get('account')}: expected_balance={expected_balance}, actual_balance={actual_balance}, expected_currency={expected_currency}, actual_currency={actual_currency}, balance_source={expected_source}"
                         )
+                if nonnumeric:
+                    raise RuntimeError("Master Journal validation failed: Account Balances missing numeric values: " + " | ".join(nonnumeric[:20]))
                 if mismatches:
                     raise RuntimeError("Master Journal validation failed: Account Balances mismatch vs snapshot: " + " | ".join(mismatches[:20]))
             leaders = ((stats.get("groups") or {}).get("leaders") or {})
-            expected_leaders = {
-                "overall most wins": "most_wins_instrument",
-                "overall most losses": "most_losses_instrument",
-                "fx most wins": "fx_most_wins_instrument",
-                "fx most losses": "fx_most_losses_instrument",
-                "crypto most wins": "crypto_most_wins_instrument",
-                "crypto most losses": "crypto_most_losses_instrument",
-            }
             expected_payloads = {
-                label: (leaders.get(key) or {}) for label, key in expected_leaders.items()
+                label: (leaders.get(key) or {}) for label, key in LEADER_LABEL_TO_KEY.items()
                 if isinstance(leaders.get(key), dict) and any((leaders.get(key) or {}).get(k) is not None for k in ("symbol", "wins", "losses", "trades", "total_trades"))
             }
             if expected_payloads:
-                section_anchor = None
-                for rr in range(1, dash.max_row + 1):
-                    for cc in range(1, dash.max_column + 1):
-                        if str(dash.cell(rr, cc).value or "").strip().lower() == "instrument leaders":
-                            section_anchor = (rr, cc)
-                            break
-                    if section_anchor:
-                        break
-                if not section_anchor:
-                    raise RuntimeError("Master Journal validation failed: Instrument leaders section anchor missing.")
-                header_row = None
-                header_map: Dict[str, int] = {}
-                for rr in range(section_anchor[0] + 1, min(dash.max_row + 1, section_anchor[0] + 12)):
-                    row_map: Dict[str, int] = {}
-                    for cc in range(section_anchor[1], min(dash.max_column + 1, section_anchor[1] + 8)):
-                        token = str(dash.cell(rr, cc).value or "").strip().lower()
-                        if token in {"metric", "symbol", "wins", "losses", "trades"}:
-                            row_map[token] = cc
-                    if {"metric", "symbol", "wins", "losses", "trades"}.issubset(set(row_map.keys())):
-                        header_row = rr
-                        header_map = row_map
-                        break
-                if not header_row:
+                _, header_map, metric_rows, _ = _find_instrument_leaders_table(dash)
+                if not header_map:
                     raise RuntimeError("Master Journal validation failed: Instrument leaders headers missing.")
-                metric_rows: Dict[str, int] = {}
-                for rr in range(header_row + 1, min(dash.max_row + 1, header_row + 24)):
-                    label = str(dash.cell(rr, header_map["metric"]).value or "").strip().lower()
-                    if label:
-                        metric_rows[label] = rr
-                for metric_label in expected_payloads:
+                present_expected_payloads = {label: payload for label, payload in expected_payloads.items() if metric_rows.get(label)}
+                if not present_expected_payloads:
+                    raise RuntimeError("Master Journal validation failed: Instrument leaders section has no recognized metric rows despite leader stats.")
+                for metric_label in present_expected_payloads:
                     row_idx = metric_rows.get(metric_label)
-                    if not row_idx:
-                        raise RuntimeError(f"Master Journal validation failed: Instrument leaders row missing for '{metric_label}'.")
                     symbol = str(dash.cell(row_idx, header_map["symbol"]).value or "").strip()
                     trades_num = _safe_float(dash.cell(row_idx, header_map["trades"]).value)
                     if not symbol or symbol == "—" or trades_num is None:
-                        raise RuntimeError("Master Journal validation failed: Instrument leaders section is blank despite leader stats.")
+                        raise RuntimeError(f"Master Journal validation failed: Instrument leaders row '{metric_label}' is present but blank/invalid; user-deleted rows are skipped.")
         finally:
             wb.close()
 

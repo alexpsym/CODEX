@@ -13,6 +13,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries
 import calendar
 from copy import copy
+import math
 
 TRADE_LOG_SHEET = "All Trades"
 LEGACY_ALL_TRADES_SHEET = "Trade Log"
@@ -26,8 +27,14 @@ PROFIT_FONT = "006100"
 LOSS_FILL = "FFC7CE"
 LOSS_FONT = "9C0006"
 
-
-
+LEADER_LABEL_TO_KEY = {
+    "overall most wins": "most_wins_instrument",
+    "overall most losses": "most_losses_instrument",
+    "fx most wins": "fx_most_wins_instrument",
+    "fx most losses": "fx_most_losses_instrument",
+    "crypto most wins": "crypto_most_wins_instrument",
+    "crypto most losses": "crypto_most_losses_instrument",
+}
 
 def _get_all_trades_sheet(wb: Workbook, *, allow_legacy: bool = True):
     has_trade_log = TRADE_LOG_SHEET in wb.sheetnames
@@ -168,6 +175,50 @@ def _fmt_duration(seconds: Any) -> str:
 
 def _fmt_duration_full(seconds: Any) -> int | None:
     return _duration_seconds_to_ddhhmmss_number(seconds)
+
+def _as_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, date):
+        dt = datetime.combine(value, datetime.min.time())
+    elif isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        raw = raw.replace("Z", "")
+        dt = None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+            try:
+                dt = datetime.strptime(raw, fmt)
+                break
+            except Exception:
+                continue
+        if dt is None:
+            try:
+                dt = datetime.fromisoformat(raw)
+            except Exception:
+                return None
+    else:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone().replace(tzinfo=None)
+    return dt
+
+def _infer_trade_duration_seconds(row: Dict[str, Any]) -> int | None:
+    if str(row.get("row_type") or "trade").strip().lower() != "trade":
+        return None
+    for key in ("trade_duration_seconds", "duration_seconds"):
+        val = _as_float(row.get(key))
+        if val is not None and val >= 0:
+            return max(1, int(math.ceil(val)))
+    ot = _as_datetime(row.get("open_time"))
+    ct = _as_datetime(row.get("close_time"))
+    if not ot or not ct:
+        return None
+    delta = (ct - ot).total_seconds()
+    if delta < 0:
+        return None
+    return max(1, int(math.ceil(delta)))
 
 def _resolve_balance_after(row: Dict[str, Any]) -> float | None:
     for key in ("analysis_balance_after_trade", "balance_after_trade", "cashflow_new_balance"):
@@ -426,7 +477,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             ctv = ctv.replace(tzinfo=None)
         comm = _as_float(row.get('commission'))
         comm_val = '' if comm in (None, 0.0) else comm
-        ws.append([otv,ctv,acct,symbol,row.get('side'),row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('stop_loss'),row.get('take_profit'),comm_val,net_pnl,(pct/100.0 if pct is not None else ''),row.get('r_multiple'),resolved_balances.get(str(i)),_fmt_duration_full(row.get('trade_duration_seconds')),'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',row.get('setup') or '',row.get('timeframe') or '',row.get('breakeven') or '',notes,row.get('cashflow_amount'),row.get('cashflow_new_balance'),row.get('currency') or row.get('account_currency') or row.get('result_currency') or '',row.get('row_type') or 'trade', stable_row_id(row)])
+        ws.append([otv,ctv,acct,symbol,row.get('side'),row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('stop_loss'),row.get('take_profit'),comm_val,net_pnl,(pct/100.0 if pct is not None else ''),row.get('r_multiple'),resolved_balances.get(str(i)),_fmt_duration_full(_infer_trade_duration_seconds(row)),'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',row.get('setup') or '',row.get('timeframe') or '',row.get('breakeven') or '',notes,row.get('cashflow_amount'),row.get('cashflow_new_balance'),row.get('currency') or row.get('account_currency') or row.get('result_currency') or '',row.get('row_type') or 'trade', stable_row_id(row)])
     _style_table_sheet(ws,1,'A2',True)
     for rr in range(2, ws.max_row + 1):
         row_ctx = rows[rr - 2] if rr - 2 < len(rows) else {}
@@ -771,30 +822,40 @@ def _find_label_cell(ws, label: str, search_cols: List[int] | None = None) -> tu
     return None
 
 def _find_instrument_leaders_table(ws) -> tuple[int | None, Dict[str, int], Dict[str, int], int]:
-    anchor = _find_label_cell(ws, "Instrument leaders")
-    if not anchor:
+    anchors: List[tuple[int, int]] = []
+    for r in range(1, ws.max_row + 1):
+        for c in range(1, ws.max_column + 1):
+            if str(ws.cell(r, c).value or "").strip().lower() == "instrument leaders":
+                anchors.append((r, c))
+    if not anchors:
         return None, {}, {}, 1
-    ar, ac = anchor
-    header_row = None
-    header_map: Dict[str, int] = {}
-    for r in range(ar + 1, min(ws.max_row, ar + 12) + 1):
-        row_map: Dict[str, int] = {}
-        for c in range(ac, min(ws.max_column, ac + 8) + 1):
-            token = str(ws.cell(r, c).value or "").strip().lower()
-            if token in {"metric", "symbol", "wins", "losses", "trades"}:
-                row_map[token] = c
-        if {"metric", "symbol", "wins", "losses", "trades"}.issubset(row_map.keys()):
-            header_row = r
-            header_map = row_map
-            break
-    if not header_row:
-        return None, {}, {}, ac
-    metric_rows: Dict[str, int] = {}
-    for r in range(header_row + 1, min(ws.max_row, header_row + 24) + 1):
-        label = str(ws.cell(r, header_map["metric"]).value or "").strip().lower()
-        if label:
-            metric_rows[label] = r
-    return header_row, header_map, metric_rows, ac
+    candidates: List[tuple[int, int, int, Dict[str, int], Dict[str, int]]] = []
+    for ar, ac in anchors:
+        header_row = None
+        header_map: Dict[str, int] = {}
+        for r in range(ar + 1, min(ws.max_row, ar + 12) + 1):
+            row_map: Dict[str, int] = {}
+            for c in range(ac, min(ws.max_column, ac + 8) + 1):
+                token = str(ws.cell(r, c).value or "").strip().lower()
+                if token in {"metric", "symbol", "wins", "losses", "trades"}:
+                    row_map[token] = c
+            if {"metric", "symbol", "wins", "losses", "trades"}.issubset(row_map.keys()):
+                header_row = r
+                header_map = row_map
+                break
+        if not header_row:
+            continue
+        metric_rows: Dict[str, int] = {}
+        for r in range(header_row + 1, min(ws.max_row, header_row + 24) + 1):
+            label = str(ws.cell(r, header_map["metric"]).value or "").strip().lower()
+            if label:
+                metric_rows[label] = r
+        candidates.append((ac, ar, header_row, header_map, metric_rows))
+    if candidates:
+        ac, ar, header_row, header_map, metric_rows = sorted(candidates, key=lambda t: (t[0], t[1]))[0]
+        return header_row, header_map, metric_rows, ac
+    first_anchor = sorted(anchors, key=lambda t: (t[1], t[0]))[0]
+    return None, {}, {}, first_anchor[1]
 
 
 def _write_value_preserving_cell(ws, row: int, col: int, value: Any) -> bool:
@@ -976,14 +1037,8 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
             if duration is None and i_dur is not None:
                 duration = _parse_duration_text(r[i_dur])
             if duration is None and row_type == "trade":
-                ot = None
-                ct = None
-                try:
-                    ot = datetime.fromisoformat(str(open_time).replace("Z", "")) if open_time else None
-                    ct = datetime.fromisoformat(str(close_time).replace("Z", "")) if close_time else None
-                except Exception:
-                    ot = None
-                    ct = None
+                ot = _as_datetime(open_time)
+                ct = _as_datetime(close_time)
                 if ot and ct:
                     sec = int((ct - ot).total_seconds())
                     duration = max(1, sec) if sec >= 0 else None
@@ -1158,40 +1213,22 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             write_source_below("Duration", "Crypto longest", dsrc.get("crypto_longest_seconds"))
 
         diagnostics.setdefault("missing_leader_headers", [])
-        diagnostics.setdefault("missing_leader_rows", [])
+        diagnostics.setdefault("skipped_optional_leader_rows", [])
         diagnostics.setdefault("leader_write_errors", [])
         diagnostics.setdefault("leader_payload_keys", [])
-        leader_header_row, leader_headers, metric_rows, leader_anchor_col = _find_instrument_leaders_table(dash)
+        _, leader_headers, metric_rows, _ = _find_instrument_leaders_table(dash)
         if not leader_headers:
             diagnostics["missing_leader_headers"].append("Metric/Symbol/Wins/Losses/Trades")
         else:
-            label_to_key = {
-                "overall most wins": "most_wins_instrument",
-                "overall most losses": "most_losses_instrument",
-                "fx most wins": "fx_most_wins_instrument",
-                "fx most losses": "fx_most_losses_instrument",
-                "crypto most wins": "crypto_most_wins_instrument",
-                "crypto most losses": "crypto_most_losses_instrument",
-            }
-            for metric_label, key in label_to_key.items():
+            for metric_label, key in LEADER_LABEL_TO_KEY.items():
                 payload = leaders.get(key) or {}
-                if payload:
-                    diagnostics["leader_payload_keys"].append(key)
+                if not payload:
+                    continue
+                diagnostics["leader_payload_keys"].append(key)
                 row_idx = metric_rows.get(metric_label)
                 if not row_idx:
-                    # safe local append/reuse only below table, before other section columns
-                    candidate = (max(metric_rows.values()) + 1) if metric_rows else ((leader_header_row or 0) + 1)
-                    if candidate <= dash.max_row and str(dash.cell(candidate, leader_headers["metric"]).value or "").strip() == "":
-                        if leader_anchor_col < 7 and any(str(dash.cell(candidate, c).value or "").strip() for c in range(7, dash.max_column + 1)):
-                            diagnostics["missing_leader_rows"].append(metric_label)
-                            diagnostics["leader_write_errors"].append(f"unsafe restore for {metric_label}")
-                            continue
-                        _write_value_preserving_cell(dash, candidate, leader_headers["metric"], metric_label.title().replace("Fx","FX"))
-                        metric_rows[metric_label] = candidate
-                        row_idx = candidate
-                    else:
-                        diagnostics["missing_leader_rows"].append(metric_label)
-                        continue
+                    diagnostics["skipped_optional_leader_rows"].append(metric_label)
+                    continue
                 normalized_payload = dict(payload)
                 if normalized_payload.get("trades") is None and normalized_payload.get("total_trades") is not None:
                     normalized_payload["trades"] = normalized_payload.get("total_trades")

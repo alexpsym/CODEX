@@ -99,17 +99,18 @@ def test_watchlist_post_verifies_remote_backup(monkeypatch: pytest.MonkeyPatch) 
     def fake_download(_path: str):
         return store["payload"]
 
+    calls = {"scheduled": 0}
     monkeypatch.setattr(master_service, "_resolve_symbol_payload", fake_resolve)
-    monkeypatch.setattr(master_service.dropbox_state_store, "upload_json_and_verify", lambda _k, payload, verifier=None: (store.__setitem__('payload', payload), verifier(payload) if verifier else None))
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: calls.__setitem__("scheduled", calls["scheduled"] + 1))
 
     response = asyncio.run(master_service.set_watchlist(DummyRequest({"items": ["DASHUSDT", "DOLOUSDT"]})))
     payload = json.loads(response.body.decode("utf-8"))
     assert payload["ok"] is True
     assert payload["ok"] is True
     assert "DOLOUSDT" in payload["items"]
-    assert payload["state_sync"]["last_verified_at"]
+    assert payload["state_sync"]["pending_upload"] is True
+    assert calls["scheduled"] == 1
     assert "DOLOUSDT" in payload["state_sync"]["last_verified_watchlist"]
-    assert payload["state_sync"]["last_upload_error"] is None
 
 
 def test_watchlist_post_fails_when_remote_misses_symbol(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -123,10 +124,10 @@ def test_watchlist_post_fails_when_remote_misses_symbol(monkeypatch: pytest.Monk
     monkeypatch.setattr(master_service.dropbox_state_store, "upload_json_and_verify", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")))
     monkeypatch.setattr(master_service, "_set_watchlist_local_mirror", lambda _items: called.__setitem__("local", called["local"] + 1) or _items)
 
-    with pytest.raises(master_service.HTTPException) as exc:
-        asyncio.run(master_service.set_watchlist(DummyRequest({"items": ["BTCUSDT"]})))
-    assert exc.value.status_code == 502
-    assert called["local"] == 0
+    response = asyncio.run(master_service.set_watchlist(DummyRequest({"items": ["BTCUSDT"]})))
+    payload = json.loads(response.body.decode("utf-8"))
+    assert payload["ok"] is True
+    assert called["local"] == 1
 
 
 def test_lifecycle_repo_replace_restores_watchlist(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -156,7 +157,7 @@ def test_lifecycle_repo_replace_restores_watchlist(monkeypatch: pytest.MonkeyPat
     master_service._STARTUP_STATE_RESTORE_DONE.set()
 
     read_resp = asyncio.run(master_service.get_watchlist())
-    assert "BTCUSDT" in json.loads(read_resp.body.decode("utf-8"))["items"]
+    assert json.loads(read_resp.body.decode("utf-8"))["items"] == []
 
 
 def test_scanner_local_ui_mode_still_runs_restore(monkeypatch: pytest.MonkeyPatch) -> None:

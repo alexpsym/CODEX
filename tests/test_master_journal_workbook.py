@@ -553,7 +553,7 @@ def test_read_master_journal_source_asset_class_regressions(tmp_path: Path):
     assert rows[4]['asset_class'] == 'crypto'
     assert rows[5]['asset_class'] == 'crypto'
 
-def test_instrument_leaders_updates_full_row_and_reports_missing(tmp_path: Path):
+def test_instrument_leaders_skips_missing_optional_rows(tmp_path: Path):
     from openpyxl import Workbook
     from tools.master_journal_workbook import update_master_journal_workbook_data_only
     p=tmp_path/'leaders.xlsx'
@@ -576,7 +576,9 @@ def test_instrument_leaders_updates_full_row_and_reports_missing(tmp_path: Path)
     out=load_workbook(p)['Dashboard']
     assert out['N3'].value=='EURUSD' and out['O3'].value==4 and out['P3'].value==1 and out['Q3'].value==5
     assert out['N4'].value=='GBPUSD' and out['O4'].value==1 and out['P4'].value==4 and out['Q4'].value==5
-    assert out['N8'].value=='ETHUSDT' and out['O8'].value==2 and out['P8'].value==6 and out['Q8'].value==8
+    assert out['N8'].value is None and out['O8'].value is None and out['P8'].value is None and out['Q8'].value is None
+    assert 'crypto most losses' in result['diagnostics'].get('skipped_optional_leader_rows', [])
+    assert 'crypto most losses' not in result['diagnostics'].get('missing_leader_rows', [])
     assert result['diagnostics']['updated_cells'] > 0
 
 def test_account_balances_restores_missing_rows_without_layout_mutation(tmp_path: Path):
