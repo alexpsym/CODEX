@@ -1338,3 +1338,44 @@ def test_merge_missing_timeline_balances_with_broker_zero_overrides_stale_timeli
     bal = next(b for b in merged if str(b.get('label')) == 'BINANCE')
     assert bal['balance'] == 0
     assert bal['balance_source'] == 'broker_account_summary'
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_sync_master_journal_uses_zero_cashflow_anchor_when_cashflow_new_balance_blank(tmp_path, monkeypatch):
+    from tools.master_journal_workbook import build_master_journal_workbook
+    from openpyxl import load_workbook
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    mj = tmp_path / 'Master Journal.xlsx'
+    rows = [
+        {'id':'t1','row_type':'trade','account':'BINANCE','symbol':'BTCUSDT','side':'BUY','open_time':'2020-10-01','close_time':'2020-10-01','net_profit':1.0,'balance_after_trade':396.65720524,'currency':'USDT'},
+        {'id':'c1','row_type':'cashflow','account':'BINANCE','symbol':'CASHFLOW','side':'WITHDRAWAL','open_time':'2020-10-26','close_time':'2020-10-26','cashflow_amount':-396.65720524,'balance_after_trade':0,'cashflow_new_balance':'','currency':'USDT','notes':'Withdrawal -396.65720524 USDT'},
+        {'id':'t2','row_type':'trade','account':'PEPPERSTONE DEMO','symbol':'EURUSD','side':'BUY','open_time':'2022-10-01','close_time':'2022-10-01','net_profit':1.0,'balance_after_trade':4.78,'currency':'AUD'},
+        {'id':'c2','row_type':'cashflow','account':'PEPPERSTONE DEMO','symbol':'CASHFLOW','side':'WITHDRAWAL','open_time':'2022-12-16','close_time':'2022-12-16','cashflow_amount':-4.78,'balance_after_trade':0,'cashflow_new_balance':'','currency':'AUD','notes':'Withdrawal -4.78 AUD'},
+    ]
+    snap = {'items': rows, 'stats': {'totals': {}, 'by_instrument': [], 'groups': {'leaders': {}}}, 'balances': [
+        {'account_label': 'BINANCE', 'balance': 396.65720524, 'currency': 'USDT'},
+        {'account_label': 'PEPPERSTONE DEMO', 'balance': 4.78, 'currency': 'AUD'},
+    ], 'diagnostics': {}}
+    build_master_journal_workbook(snap, mj)
+    wb = load_workbook(mj)
+    ws = wb['All Trades']
+    headers = {str(ws.cell(1, c).value): c for c in range(1, ws.max_column + 1)}
+    for rr in range(2, ws.max_row + 1):
+        if str(ws.cell(rr, headers['Row Type']).value).strip().lower() == 'cashflow':
+            ws.cell(rr, headers['Cashflow New Balance']).value = None
+    wb.save(mj); wb.close()
+
+    snap2 = master_service._build_trading_journal_view_snapshot(force=True)
+    balances = {str(b.get('label') or b.get('account')): b for b in (snap2.get('balances') or [])}
+    assert balances['BINANCE']['balance'] == 0
+    assert balances['PEPPERSTONE DEMO']['balance'] == 0
+    assert balances['BINANCE'].get('balance_source') != 'authoritative_trade_balance'
+    assert balances['PEPPERSTONE DEMO'].get('balance_source') != 'authoritative_trade_balance'
+
+    result = master_service._sync_master_journal_workbook()
+    assert result['master_journal_ok'] is True
+    synced = load_workbook(mj, data_only=True)
+    dash = synced['Dashboard']
+    dash_map = {str(dash.cell(r,1).value or '').strip(): dash.cell(r,2).value for r in range(1, dash.max_row+1)}
+    assert dash_map['BINANCE'] == 0
+    assert dash_map['PEPPERSTONE DEMO'] == 0
+    synced.close()
