@@ -177,7 +177,7 @@ def test_existing_master_journal_update_is_atomic_on_post_update_validation_fail
     assert out["master_journal_ok"] is False
     assert mj.read_bytes() == before
     live = load_workbook(mj, data_only=True)
-    vals = [str(c.value or "") for row in live["Trade Log"].iter_rows(min_row=2, values_only=False) for c in row]
+    vals = [str(c.value or "") for row in live["All Trades"].iter_rows(min_row=2, values_only=False) for c in row]
     live.close()
     assert "new-row-should-not-survive" not in "".join(vals)
     assert not any(p.name.endswith(".update-candidate.tmp.xlsx") or p.name.endswith(".update.tmp.xlsx") for p in tmp_path.glob("*.xlsx"))
@@ -192,7 +192,7 @@ def test_master_journal_requires_row_id_validation(tmp_path, monkeypatch):
     mj = tmp_path / "Master Journal.xlsx"
     snap = {'items':[{'id':'r1','row_type':'trade','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0,'result_pct':1.0}], 'stats':{'totals':{}, 'groups':{}, 'by_instrument':[{'symbol':'EURUSD','trades':1}]}, 'balances':[]}
     build_master_journal_workbook(snap, mj)
-    wb = load_workbook(mj); ws = wb["Trade Log"]; headers=[c.value for c in ws[1]]; ws.cell(2, headers.index("Row ID")+1).value=None; wb.save(mj); wb.close()
+    wb = load_workbook(mj); ws = wb["All Trades"]; headers=[c.value for c in ws[1]]; ws.cell(2, headers.index("Row ID")+1).value=None; wb.save(mj); wb.close()
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
     out = master_service._sync_master_journal_workbook()
     # Data-only updater may self-heal missing Row ID by restoring generated metadata columns.
@@ -209,7 +209,7 @@ def test_sync_master_journal_migrates_legacy_all_trades_and_removes_trade_meta(t
     snap = {'items':[{'id':'r1','row_type':'trade','account':'A','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0,'result_pct':1.0}], 'stats':{'totals':{}, 'groups':{}, 'by_instrument':[{'symbol':'EURUSD','trades':1}]}, 'balances':[]}
     build_master_journal_workbook(snap, mj)
     wb = load_workbook(mj)
-    wb["Trade Log"].title = "All Trades"
+    wb["All Trades"].title = "Trade Log"
     meta = wb.create_sheet("_Trade Meta")
     meta.sheet_state = "hidden"
     wb.save(mj)
@@ -219,8 +219,8 @@ def test_sync_master_journal_migrates_legacy_all_trades_and_removes_trade_meta(t
     assert out["master_journal_ok"] is True
     migrated = load_workbook(mj)
     assert "_Trade Meta" not in migrated.sheetnames
-    assert "All Trades" not in migrated.sheetnames
-    assert "Trade Log" in migrated.sheetnames
+    assert "All Trades" in migrated.sheetnames
+    assert "Trade Log" not in migrated.sheetnames
     migrated.close()
 
 
@@ -242,9 +242,9 @@ def test_sync_master_journal_repairs_legacy_instrument_averages_freeze_pane(tmp_
     assert out["master_journal_ok"] is True
     repaired = load_workbook(mj)
     assert repaired["Instrument Averages"].freeze_panes == "A2"
-    assert repaired.sheetnames == ["Dashboard", "Trade Log", "Instrument Averages", "P&L Calendar"]
+    assert repaired.sheetnames == ["Dashboard", "All Trades", "Instrument Averages", "P&L Calendar"]
     assert "_Trade Meta" not in repaired.sheetnames
-    assert "All Trades" not in repaired.sheetnames
+    assert "Trade Log" not in repaired.sheetnames
     repaired.close()
 
 
@@ -260,7 +260,7 @@ def test_sync_master_journal_repairs_unknown_trade_log_currency_formats(tmp_path
         {'id':'b1','row_type':'trade','account':'BYBIT','symbol':'BTCUSDT','side':'SELL','open_time':'2026-01-02','close_time':'2026-01-02','net_profit':2.0,'result_pct':2.0},
     ], 'stats':{'totals':{}, 'groups':{}, 'by_instrument':[{'symbol':'EURUSD','trades':1}]}, 'balances':[]}
     build_master_journal_workbook(snap, mj)
-    wb = load_workbook(mj); ws = wb["Trade Log"]
+    wb = load_workbook(mj); ws = wb["All Trades"]
     ws["K2"].number_format = '#,##0.00 "UNKNOWN"'
     ws["L2"].number_format = '#,##0.00 "UNKNOWN"'
     ws["L3"].number_format = '#,##0.00 "UNKNOWN"'
@@ -269,11 +269,43 @@ def test_sync_master_journal_repairs_unknown_trade_log_currency_formats(tmp_path
     out = master_service._sync_master_journal_workbook()
     assert out["master_journal_ok"] is True
     repaired = load_workbook(mj)
-    ws2 = repaired["Trade Log"]
+    ws2 = repaired["All Trades"]
     for r in range(2, ws2.max_row + 1):
         assert "UNKNOWN" not in str(ws2.cell(r, 11).number_format or "")
         assert "UNKNOWN" not in str(ws2.cell(r, 12).number_format or "")
     repaired.close()
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_sync_validation_detects_instrument_duration_alias_columns_blank(tmp_path, monkeypatch):
+    from tools.master_journal_workbook import build_master_journal_workbook
+    from openpyxl import load_workbook
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    mj = tmp_path / "Master Journal.xlsx"
+    snap = {'items':[{'id':'r1','row_type':'trade','account':'A','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01T00:00:00Z','close_time':'2026-01-01T01:00:00Z','net_profit':1.0,'result_pct':1.0,'trade_duration_seconds':3600}], 'stats':{'totals':{}, 'groups':{}, 'by_instrument':[{'symbol':'EURUSD','trades':1,'min_trade_duration_seconds':3600,'avg_trade_duration_seconds':3600,'max_trade_duration_seconds':3600}]}, 'balances':[]}
+    build_master_journal_workbook(snap, mj)
+
+    real_update = master_service.update_master_journal_workbook_data_only
+    def fake_update(path, snapshot):
+        out = real_update(path, snapshot)
+        cand = Path(out["candidate_path"])
+        wb = load_workbook(cand)
+        inst = wb["Instrument Averages"]
+        headers = [str(c.value or "") for c in inst[1]]
+        inst.cell(1, headers.index("Shortest duration (DD:HH:MM:SS)") + 1).value = "Shortest (DD:HH:MM:SS)"
+        inst.cell(1, headers.index("Longest duration (DD:HH:MM:SS)") + 1).value = "Longest (DD:HH:MM:SS)"
+        for r in range(2, inst.max_row + 1):
+            for name in ("Shortest (DD:HH:MM:SS)", "Avg duration (DD:HH:MM:SS)", "Longest (DD:HH:MM:SS)"):
+                c = [str(x.value or "") for x in inst[1]].index(name) + 1
+                inst.cell(r, c).value = None
+        wb.save(cand); wb.close()
+        return out
+    monkeypatch.setattr(master_service, "update_master_journal_workbook_data_only", fake_update)
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
+    out = master_service._sync_master_journal_workbook()
+    assert out["master_journal_ok"] is False
+    assert "duration columns are blank despite duration stats" in str(out.get("master_journal_error") or "").lower()
 
 
 @pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
@@ -298,7 +330,7 @@ def test_existing_master_journal_preserves_restored_layout_and_populates_stats(t
     dash = wb["Dashboard"]
     dash["A1"] = "Account Balances"
     dash["A11"] = "Instrument leaders"
-    wb["Trade Log"].auto_filter.ref = "A1:Z1511"
+    wb["All Trades"].auto_filter.ref = "A1:Z1511"
     wb["Instrument Averages"].auto_filter.ref = "A1:X126"
     wb.save(mj); wb.close()
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
@@ -313,7 +345,7 @@ def test_existing_master_journal_preserves_restored_layout_and_populates_stats(t
     assert str(dash2["A11"].value) == "Instrument leaders"
     top_row_tokens = {str(dash2.cell(1, c).value or "").strip() for c in range(1, dash2.max_column + 1)}
     assert {"FX", "Crypto"}.issubset(top_row_tokens)
-    at = wb2["Trade Log"]; headers=[str(c.value or "") for c in at[1]]
+    at = wb2["All Trades"]; headers=[str(c.value or "") for c in at[1]]
     rid_col = headers.index("Row ID")+1
     ids={str(at.cell(r,rid_col).value or "") for r in range(2, at.max_row+1)}
     assert {"t1","t2","c1"}.issubset(ids)
@@ -347,13 +379,13 @@ def test_existing_master_journal_trade_log_filter_range_can_update_without_invar
                      {'id':'c1','row_type':'cashflow','account':'A','symbol':'CASHFLOW','side':'DEPOSIT','open_time':'2026-01-03','close_time':'2026-01-03','net_profit':100}],
             'stats':{'totals':{},'groups':{'leaders':{}},'by_instrument':[{'symbol':'EURUSD','trades':1}]},'balances':[],'diagnostics':{}}
     build_master_journal_workbook(snap, mj)
-    wb = load_workbook(mj); wb["Trade Log"].auto_filter.ref = "A1:Z1511"; wb.save(mj); wb.close()
+    wb = load_workbook(mj); wb["All Trades"].auto_filter.ref = "A1:Z1511"; wb.save(mj); wb.close()
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
     monkeypatch.setattr(master_service, '_get_excel_account_balances', lambda: [])
     result = master_service._sync_master_journal_workbook()
     assert result["master_journal_ok"] is True
     out = load_workbook(mj, data_only=True)
-    at = out["Trade Log"]; ref = at.auto_filter.ref
+    at = out["All Trades"]; ref = at.auto_filter.ref
     assert ref and ref.startswith("A1:")
     headers=[str(c.value or "") for c in at[1]]
     rid_col = headers.index("Row ID")+1
@@ -450,7 +482,7 @@ def test_sync_master_journal_applies_manual_overrides(tmp_path, monkeypatch):
     from tools.master_journal_workbook import build_master_journal_workbook
     build_master_journal_workbook(snap,mj)
     from openpyxl import load_workbook
-    wb=load_workbook(mj); ws=wb['Trade Log']; ws['Q2']='Yes'; ws['R2']='S'; ws['S2']='M5'; ws['T2']='No'; ws['U2']='note'; wb.save(mj)
+    wb=load_workbook(mj); ws=wb['All Trades']; ws['Q2']='Yes'; ws['R2']='S'; ws['S2']='M5'; ws['T2']='No'; ws['U2']='note'; wb.save(mj)
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
     rows=[{'id':'r1','row_type':'trade','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0}]
     monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: rows)
@@ -470,13 +502,13 @@ def test_sync_master_journal_test_yes_excluded_from_aggregates(tmp_path, monkeyp
     seed={'items':[{'id':'r1','row_type':'trade','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':10.0,'is_test_trade':False}], 'stats':{'totals':{}, 'groups':{}}, 'balances':[], 'diagnostics':{}}
     build_master_journal_workbook(seed,mj)
     from openpyxl import load_workbook
-    wb=load_workbook(mj); ws=wb['Trade Log']; ws['Q2']='Yes'; before=[c.value for c in ws[2]]; wb.save(mj)
+    wb=load_workbook(mj); ws=wb['All Trades']; ws['Q2']='Yes'; before=[c.value for c in ws[2]]; wb.save(mj)
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: {'items': seed['items'], 'stats': {'totals': {}, 'groups': {}}, 'balances': [], 'diagnostics': {}})
     r=master_service._sync_master_journal_workbook()
     assert r['master_journal_ok'] is True
     out=load_workbook(mj)
-    after = [c.value for c in out['Trade Log'][2]]
+    after = [c.value for c in out['All Trades'][2]]
     assert after[:16] == before[:16]
     assert str(after[16] or "").strip().lower() in {"yes", "no"}
 
@@ -540,7 +572,7 @@ def test_sync_master_journal_rebuilds_blanked_workbook_sections(tmp_path, monkey
     build_master_journal_workbook(snap, mj)
     wb = load_workbook(mj)
     # blank generated sections
-    for ws_name in ['Trade Log', 'Instrument Averages', 'P&L Calendar']:
+    for ws_name in ['All Trades', 'Instrument Averages', 'P&L Calendar']:
         ws = wb[ws_name]
         for r in range(2, ws.max_row + 1):
             for c in range(1, ws.max_column + 1):
@@ -570,7 +602,7 @@ def test_sync_master_journal_rebuilds_blanked_workbook_sections(tmp_path, monkey
 
     rebuilt = load_workbook(mj, data_only=True)
     try:
-        trade_log = rebuilt['Trade Log']
+        trade_log = rebuilt['All Trades']
         trade_log_headers = [str(c.value or '').strip() for c in trade_log[1]]
         trade_log_symbol_col = trade_log_headers.index('Symbol') + 1
         trade_symbols = [str(trade_log.cell(r, trade_log_symbol_col).value or '').strip() for r in range(2, trade_log.max_row + 1)]

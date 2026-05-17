@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException
 
+pytest.importorskip("httpx")
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 SPEC = importlib.util.spec_from_file_location("render_master_service_journal_crud", ROOT / "render" / "master_service.py")
@@ -1357,6 +1359,31 @@ def test_trading_journal_balances_snapshot_expected_values(temp_state_paths, mon
     assert by_label["OANDA LIVE"]["balance"] == pytest.approx(1479.31)
     assert by_label["PEPPERSTONE LIVE"]["balance"] == pytest.approx(2508.73)
     assert by_label["PEPPERSTONE DEMO"]["balance"] == pytest.approx(0.0)
+
+
+def test_master_journal_authoritative_snapshot_preserves_monthly_aud_reval(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_load_trading_journal_view_snapshot", lambda: None)
+    monkeypatch.setattr(master_service, "_journal_source_fingerprint", lambda: {"source_mode": "master_journal", "files": []})
+    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_a, **_k: None)
+    monkeypatch.setattr(master_service, "_save_trading_journal_view_snapshot", lambda *_a, **_k: None)
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: True)
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: Path("/tmp/Master Journal.xlsx"))
+    monkeypatch.setattr(master_service, "_get_excel_account_balances", lambda: [])
+    monkeypatch.setattr(master_service, "_load_json_file", lambda *_a, **_k: {})
+    monkeypatch.setattr(
+        master_service,
+        "read_master_journal_source",
+        lambda _p: {
+            "items": [
+                {"id": "t1", "row_type": "trade", "account": "OANDA DEMO", "symbol": "EURUSD", "side": "BUY", "open_time": "2026-04-30T09:45:41Z", "close_time": "2026-04-30T09:46:41Z", "net_profit": 1.0, "result_pct": 0.5},
+                {"id": "m1", "row_type": "monthly_aud_reval", "account": "Bybit Live", "symbol": "MONTHLY AUD P/L", "open_time": "2026-04-01T00:00:00Z", "close_time": "2026-04-30T23:59:59Z", "result_cash": 25.0, "result_currency": "AUD"},
+            ],
+            "cashflow_ledger": {},
+        },
+    )
+    snap = master_service._build_trading_journal_view_snapshot(force=True)
+    ids = {str(r.get("id")) for r in snap.get("items", [])}
+    assert "m1" in ids
 
 
 def test_persist_trading_journal_sqlite_cashflow_no_name_error(tmp_path, monkeypatch: pytest.MonkeyPatch):

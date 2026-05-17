@@ -1408,9 +1408,17 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
     if _master_journal_single_file_mode():
         source_payload = read_master_journal_source(_master_journal_path())
         items = [dict(r) for r in (source_payload.get("items") or []) if isinstance(r, dict)]
-        trade_items = [r for r in items if _row_type(r) == "trade"]
-        cashflow_rows = [r for r in items if _row_type(r) == "cashflow"]
-        balances = _build_journal_balance_timelines(trade_items, source_payload.get("cashflow_ledger") or {}, _get_excel_account_balances()).get("balances") or []
+        trade_items = _enrich_trade_row_metrics([r for r in items if _row_type(r) == "trade"])
+        non_trade_items = [r for r in items if _row_type(r) != "trade"]
+        timeline = _build_journal_balance_timelines(trade_items, source_payload.get("cashflow_ledger") or {}, _get_excel_account_balances())
+        trade_items = _enrich_trade_row_metrics(timeline.get("rows") if isinstance(timeline.get("rows"), list) else trade_items)
+        items = sorted([*trade_items, *non_trade_items], key=_row_sort_dt, reverse=True)
+        balances = timeline.get("balances") or []
+        state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
+        broker_balances = (state or {}).get("broker_account_balances") if isinstance(state, dict) else []
+        if not isinstance(broker_balances, list):
+            broker_balances = []
+        balances = _merge_missing_timeline_balances_with_broker(balances, broker_balances)
         stats = _compute_journal_stats(items, balances)
         diagnostics = _build_authoritative_trading_journal_diagnostics_snapshot(items)
         diagnostics.update({
@@ -1418,9 +1426,9 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
             "authoritative_mode": True,
             "source_workbooks_scanned": 0,
             "parsed_trade_rows": len(trade_items),
-            "parsed_cashflow_rows": len(cashflow_rows),
+            "parsed_cashflow_rows": len([r for r in non_trade_items if _row_type(r) == "cashflow"]),
         })
-        result = {"cache_version": TRADING_JOURNAL_VIEW_CACHE_VERSION, "generated_at": _utc_now_iso(), "items": sorted(items, key=_row_sort_dt, reverse=True), "balances": balances, "stats": stats, "diagnostics": diagnostics, "source_fingerprints": fingerprint}
+        result = {"cache_version": TRADING_JOURNAL_VIEW_CACHE_VERSION, "generated_at": _utc_now_iso(), "items": items, "balances": balances, "stats": stats, "diagnostics": diagnostics, "source_fingerprints": fingerprint}
         safe_result = _json_safe(result)
         if not isinstance(safe_result, dict):
             safe_result = {}
@@ -5235,7 +5243,10 @@ def _build_journal_balance_timelines(
         if bal is None:
             return None
         source = str(row.get("source") or "").strip().lower()
-        if source in {"oanda", "excel", "local_excel"}:
+        if source in {"oanda", "excel", "local_excel", "master_journal"}:
+            return bal
+        bal_source = str(row.get("balance_after_trade_source") or "").strip().lower()
+        if bal_source == "master_journal":
             return bal
         raw_refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
         raw_excel = row.get("raw_excel") if isinstance(row.get("raw_excel"), dict) else {}
@@ -6142,7 +6153,10 @@ def _import_trading_journal_from_sources(
             msg = "Unknown extra Excel files in journal directory: " + ", ".join(pre.get("unknown_extra_excel_files") or [])
             return {"ok": False, "source_mode": "master_journal", "source": "master_journal", "errors": [{"path": str(TRADING_JOURNAL_LOCAL_DIR), "error": msg}], "warnings": warnings, "started_at": started_at, "finished_at": _utc_now_iso()}
         source_payload = read_master_journal_source(_master_journal_path())
-        rows = [r for r in (source_payload.get("items") or []) if isinstance(r, dict)]
+        raw_rows = [dict(r) for r in (source_payload.get("items") or []) if isinstance(r, dict)]
+        trade_rows = _enrich_trade_row_metrics([r for r in raw_rows if _row_type(r) == "trade"])
+        non_trade_rows = [r for r in raw_rows if _row_type(r) != "trade"]
+        rows = sorted([*trade_rows, *non_trade_rows], key=_row_sort_dt, reverse=True)
         _set_trading_journal_rows(rows)
         diagnostics["source_mode"] = "master_journal"
         diagnostics["local_dir"] = str(TRADING_JOURNAL_LOCAL_DIR)
@@ -20180,6 +20194,7 @@ def _compute_journal_stats(
                 "sl_pct": [],
                 "tp_pct": [],
                 "pnl": [],
+                "result_pct": [],
                 "pnl_by_currency": defaultdict(list),
                 "durations": [],
                 "quote_currency": "USDT" if not _is_fx_asset_class(row.get("asset_class")) else "",
@@ -20247,6 +20262,9 @@ def _compute_journal_stats(
         if pnl_val is not None:
             bucket["pnl"].append(pnl_val)
             bucket["pnl_by_currency"][_row_pnl_currency(row) or "UNKNOWN"].append(pnl_val)
+        rp = _to_float(row.get("result_pct"))
+        if rp is not None:
+            bucket["result_pct"].append(rp)
         if _is_valid_price_level(entry) and _is_valid_price_level(sl) and entry:
             pct = abs(entry - sl)/entry*100.0
             bucket["sl_pct"].append(pct)
@@ -20264,8 +20282,11 @@ def _compute_journal_stats(
         item["avg_stop_loss"] = _avg(item.pop("stop_losses"))
         item["avg_take_profit"] = _avg(item.pop("take_profits"))
         pnl_list=item.pop("pnl",[])
+        result_pct_list=item.pop("result_pct",[])
         item["net_profit_total"]=sum(pnl_list) if pnl_list else None
         item["avg_net_profit"]=_avg(pnl_list)
+        item["net_result_pct"] = sum(result_pct_list) if result_pct_list else None
+        item["avg_result_pct"] = _avg(result_pct_list)
         pnl_by_ccy = item.pop("pnl_by_currency", {})
         net_by_ccy = {k: sum(v) for k, v in pnl_by_ccy.items() if v}
         avg_by_ccy = {k: (_avg(v) or 0.0) for k, v in pnl_by_ccy.items() if v}
@@ -23943,12 +23964,12 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
             inst = wb["Instrument Averages"]
             cal = wb["P&L Calendar"]
             dash = wb["Dashboard"]
-            if "All Trades" in wb.sheetnames:
-                raise RuntimeError("Master Journal validation failed: legacy 'All Trades' sheet remains after migration.")
+            if "Trade Log" in wb.sheetnames:
+                raise RuntimeError("Master Journal validation failed: legacy 'Trade Log' sheet remains after migration.")
             if "_Trade Meta" in wb.sheetnames:
                 raise RuntimeError("Master Journal validation failed: '_Trade Meta' must not be present.")
             if not trade_log.auto_filter or not trade_log.auto_filter.ref:
-                raise RuntimeError("Master Journal validation failed: Trade Log filter missing.")
+                raise RuntimeError("Master Journal validation failed: All Trades filter missing.")
             if not inst.auto_filter or not inst.auto_filter.ref:
                 raise RuntimeError("Master Journal validation failed: Instrument Averages filter missing.")
             if str(inst.freeze_panes or "") != "A2":
@@ -23966,7 +23987,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                 symbol_col = headers.index("Symbol") + 1 if "Symbol" in headers else None
                 row_id_col = headers.index("Row ID") + 1 if "Row ID" in headers else None
                 if not symbol_col:
-                    raise RuntimeError("Master Journal validation failed: Trade Log Symbol column missing.")
+                    raise RuntimeError("Master Journal validation failed: All Trades Symbol column missing.")
                 populated_symbol_rows = 0
                 workbook_row_ids: Set[str] = set()
                 for rr in range(2, trade_log.max_row + 1):
@@ -23978,12 +23999,12 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                         if rid:
                             workbook_row_ids.add(rid)
                 if populated_symbol_rows <= 0:
-                    raise RuntimeError("Master Journal validation failed: Trade Log is blank despite source rows.")
+                    raise RuntimeError("Master Journal validation failed: All Trades is blank despite source rows.")
                 expected_ids = {str(r.get("id") or "").strip() for r in visible_trade_rows if str(r.get("id") or "").strip()}
                 if _master_journal_single_file_mode() and expected_ids and (not row_id_col or not workbook_row_ids):
                     raise RuntimeError("Master Journal validation failed: Row ID metadata is required in master_journal mode.")
                 if expected_ids and not expected_ids.issubset(workbook_row_ids):
-                    raise RuntimeError("Master Journal validation failed: Trade Log row IDs do not match source snapshot.")
+                    raise RuntimeError("Master Journal validation failed: All Trades row IDs do not match source snapshot.")
                 open_col = headers.index("Open Time") + 1 if "Open Time" in headers else None
                 close_col = headers.index("Close Time") + 1 if "Close Time" in headers else None
                 dur_col = headers.index("Trade Duration (DD:HH:MM:SS)") + 1 if "Trade Duration (DD:HH:MM:SS)" in headers else None
@@ -23992,15 +24013,37 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                     if open_col:
                         ov = trade_log.cell(rr, open_col).value
                         if isinstance(ov, str) and "T" in ov:
-                            raise RuntimeError("Master Journal validation failed: Trade Log Open Time contains ISO 'T' string.")
+                            raise RuntimeError("Master Journal validation failed: All Trades Open Time contains ISO 'T' string.")
                     if close_col:
                         cv = trade_log.cell(rr, close_col).value
                         if isinstance(cv, str) and "T" in cv:
-                            raise RuntimeError("Master Journal validation failed: Trade Log Close Time contains ISO 'T' string.")
+                            raise RuntimeError("Master Journal validation failed: All Trades Close Time contains ISO 'T' string.")
                     if dur_col:
                         dv = trade_log.cell(rr, dur_col).value
                         if dv not in (None, "") and not isinstance(dv, (int, float)):
-                            raise RuntimeError("Master Journal validation failed: Trade Log duration cells must be numeric DDHHMMSS.")
+                            raise RuntimeError("Master Journal validation failed: All Trades duration cells must be numeric DDHHMMSS.")
+                if open_col and close_col and dur_col:
+                    expected_duration_ids: Set[str] = set()
+                    for row in visible_trade_rows:
+                        rid = str(row.get("id") or "").strip()
+                        if not rid:
+                            continue
+                        if str(row.get("open_time") or "").strip() and str(row.get("close_time") or "").strip():
+                            expected_duration_ids.add(rid)
+                    if expected_duration_ids and row_id_col:
+                        missing_duration_ids: List[str] = []
+                        for rr in range(2, trade_log.max_row + 1):
+                            rid = str(trade_log.cell(rr, row_id_col).value or "").strip()
+                            if rid not in expected_duration_ids:
+                                continue
+                            dv = trade_log.cell(rr, dur_col).value
+                            if not isinstance(dv, (int, float)):
+                                missing_duration_ids.append(rid)
+                        if missing_duration_ids:
+                            raise RuntimeError(
+                                "Master Journal validation failed: All Trades duration column blank/non-numeric for trade rows with valid open/close timestamps "
+                                f"(sample row IDs: {', '.join(missing_duration_ids[:5])})."
+                            )
                 for cc in [c for c in currency_cols if c]:
                     for rr in range(2, trade_log.max_row + 1):
                         fmt = str(trade_log.cell(rr, cc).number_format or "")
@@ -24010,7 +24053,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                             acct = str(trade_log.cell(rr, headers.index("Account") + 1).value or "").strip() if "Account" in headers else ""
                             row_type = str(trade_log.cell(rr, headers.index("Row Type") + 1).value or "").strip() if "Row Type" in headers else ""
                             raise RuntimeError(
-                                "Master Journal validation failed: Trade Log currency format contains UNKNOWN "
+                                "Master Journal validation failed: All Trades currency format contains UNKNOWN "
                                 f"(row={rr}, column={col_name}, account={acct or '—'}, symbol={sym or '—'}, row_type={row_type or '—'})."
                             )
             stats = snapshot.get("stats") or {}
@@ -24034,18 +24077,49 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                         break
                 if not has_instrument_data:
                     raise RuntimeError("Master Journal validation failed: Instrument Averages is blank despite instrument stats.")
-                inst_dur_cols = []
-                for token in ("shortest duration (dd:hh:mm:ss)", "avg duration (dd:hh:mm:ss)", "longest duration (dd:hh:mm:ss)"):
-                    if token in inst_headers:
-                        inst_dur_cols.append(inst_headers.index(token) + 1)
-                if len(inst_dur_cols) == 3:
+                def _inst_col(*aliases: str) -> int | None:
+                    for a in aliases:
+                        if a in inst_headers:
+                            return inst_headers.index(a) + 1
+                    return None
+                inst_dur_cols = [
+                    _inst_col("shortest duration (dd:hh:mm:ss)", "shortest (dd:hh:mm:ss)"),
+                    _inst_col("avg duration (dd:hh:mm:ss)"),
+                    _inst_col("longest duration (dd:hh:mm:ss)", "longest (dd:hh:mm:ss)"),
+                ]
+                if all(c is not None for c in inst_dur_cols):
+                    inst_dur_cols = [int(c) for c in inst_dur_cols]
+                    has_any_duration_stat = any(
+                        any(_safe_float(rec.get(k)) is not None for k in ("min_trade_duration_seconds", "avg_trade_duration_seconds", "max_trade_duration_seconds"))
+                        for rec in by_instrument if isinstance(rec, dict)
+                    )
+                    any_duration_cells = False
                     for rr in range(2, inst.max_row + 1):
                         vals = [inst.cell(rr, c).value for c in inst_dur_cols]
                         nums = [v for v in vals if isinstance(v, (int, float))]
+                        if nums:
+                            any_duration_cells = True
                         if nums and len(nums) != len(vals):
                             raise RuntimeError("Master Journal validation failed: Instrument durations must be numeric DDHHMMSS.")
                         if len(nums) == 3 and not (nums[0] <= nums[1] <= nums[2]):
                             raise RuntimeError("Master Journal validation failed: Instrument duration order must satisfy Shortest <= Avg <= Longest.")
+                    if has_any_duration_stat and not any_duration_cells:
+                        raise RuntimeError("Master Journal validation failed: Instrument Averages duration columns are blank despite duration stats.")
+                net_col = (inst_headers.index("net p/l %") + 1) if "net p/l %" in inst_headers else None
+                avg_col = (inst_headers.index("avg p/l %") + 1) if "avg p/l %" in inst_headers else None
+                if net_col and avg_col:
+                    has_result_pct_stats = any(
+                        (_safe_float(rec.get("net_result_pct")) is not None) or (_safe_float(rec.get("avg_result_pct")) is not None)
+                        for rec in by_instrument if isinstance(rec, dict)
+                    )
+                    if has_result_pct_stats:
+                        has_op = False
+                        for rr in range(2, inst.max_row + 1):
+                            if isinstance(inst.cell(rr, net_col).value, (int, float)) or isinstance(inst.cell(rr, avg_col).value, (int, float)):
+                                has_op = True
+                                break
+                        if not has_op:
+                            raise RuntimeError("Master Journal validation failed: Instrument Averages Net/Avg P/L % columns are blank despite result_pct stats.")
             non_test_with_results = []
             from tools.master_journal_workbook import _as_date as _journal_as_date
             for r in visible_trade_rows:

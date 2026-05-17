@@ -1,8 +1,15 @@
+import importlib.util
 import pytest
 
-pytest.importorskip("httpx")
+_httpx_spec = importlib.util.find_spec("httpx")
+AVAILABLE = _httpx_spec is not None
+if AVAILABLE:
+    from render.master_service import _compute_journal_stats, _build_journal_balance_timelines
+else:
+    _compute_journal_stats = None  # type: ignore[assignment]
+    _build_journal_balance_timelines = None  # type: ignore[assignment]
 
-from render.master_service import _compute_journal_stats, _build_journal_balance_timelines
+pytestmark = pytest.mark.skipif(not AVAILABLE, reason="master_service optional deps unavailable")
 
 
 def test_compute_journal_stats_winner_loser_splits_and_durations() -> None:
