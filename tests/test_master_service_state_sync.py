@@ -171,9 +171,101 @@ def test_scanner_local_ui_mode_still_runs_restore(monkeypatch: pytest.MonkeyPatc
     assert called["restore"] == 1
 
 
+def test_autostart_normal_path_uses_repo_local_backup_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "_is_scanner_local_ui_mode", lambda: False)
+    monkeypatch.setattr(master_service, "DROPBOX_SYNC_ENABLED", False)
+    monkeypatch.setattr(master_service, "LOCAL_STATE_ONLY", True)
+    monkeypatch.setattr(master_service, "_restore_bybit_closed_pnl_last_seen_from_state", lambda: None)
+    monkeypatch.setattr(master_service, "_restore_oanda_fill_state_on_startup", lambda: None)
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: True)
+    monkeypatch.setattr(master_service, "_compute_autostart_scripts", lambda: [])
+    monkeypatch.setattr(master_service, "_dropbox_restore_state_backup_on_startup", lambda: asyncio.sleep(0))
+    monkeypatch.setattr(master_service, "_start_startup_recovery_import_after_restore", lambda: asyncio.sleep(0))
+    monkeypatch.setattr(master_service, "_schedule_monthly_aud_revaluation_sync", lambda: asyncio.sleep(0))
+    monkeypatch.setattr(master_service, "_poll_pending_webhook_invalidations", lambda: asyncio.sleep(0))
+    monkeypatch.setattr(master_service, "_log_outbound_traffic_summary", lambda: asyncio.sleep(0))
+    monkeypatch.setattr(master_service, "_start_manual_save_github_sync_watcher_if_needed", lambda: None)
+    monkeypatch.setattr(master_service.asyncio, "create_task", lambda coro: type("D", (), {"cancel": lambda self: None, "done": lambda self: False})())
+    asyncio.run(master_service._autostart_scripts())
+    status = master_service._state_sync_status_snapshot()
+    assert status["backup_path"] == str(master_service.STATE_BACKUP_LOCAL_PATH)
+    assert status["enabled"] is True
+
+
 def test_state_sync_status_blocks_when_dropbox_disabled_and_not_local_only(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(master_service, "APP_PROFILE", "local")
     monkeypatch.setattr(master_service, "DROPBOX_SYNC_ENABLED", False)
     monkeypatch.setattr(master_service, "LOCAL_STATE_ONLY", False)
     payload = master_service._state_sync_status_snapshot()
     assert payload["restore_status"] == "failed"
+
+
+def test_oanda_alert_enabled_schedules_repo_local_backup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "DROPBOX_SYNC_ENABLED", False)
+    monkeypatch.setattr(master_service, "LOCAL_STATE_ONLY", True)
+    master_service._STARTUP_STATE_RESTORE_DONE.set()
+    master_service._update_state_sync_status(enabled=True, restore_status="done", restore_complete=True)
+    monkeypatch.setattr(master_service.oanda_monitor, "get_custom_alerts", lambda force=True: [{"id": "a1", "enabled": False}])
+    captured = {}
+    monkeypatch.setattr(master_service.oanda_monitor, "replace_custom_alerts", lambda alerts: captured.__setitem__("alerts", alerts))
+    calls = {"n": 0}
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: calls.__setitem__("n", calls["n"] + 1))
+    resp = asyncio.run(master_service.set_oanda_monitor_custom_alert_enabled("a1", DummyRequest({"enabled": True})))
+    payload = json.loads(resp.body.decode("utf-8"))
+    assert payload["ok"] is True
+    assert calls["n"] == 1
+    assert captured["alerts"][0]["enabled"] is True
+
+
+def test_wait_for_state_restore_local_messages(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "LOCAL_STATE_ONLY", True)
+    monkeypatch.setattr(master_service, "DROPBOX_SYNC_ENABLED", False)
+    master_service._STARTUP_STATE_RESTORE_DONE = asyncio.Event()
+    master_service._STARTUP_STATE_RESTORE_DONE.clear()
+    master_service._update_state_sync_status(enabled=True, restore_status="pending", restore_complete=False)
+    with pytest.raises(master_service.HTTPException) as excinfo:
+        asyncio.run(master_service._wait_for_state_restore_or_error(timeout=0.01))
+    detail = excinfo.value.detail
+    assert detail["error"] == "repo_local_restore_timeout"
+    assert "Repo-local state restore is still pending." in detail["message"]
+
+
+def test_upsert_bybit_custom_alert_source_repo_local(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "LOCAL_STATE_ONLY", True)
+    monkeypatch.setattr(master_service, "DROPBOX_SYNC_ENABLED", False)
+    master_service._STARTUP_STATE_RESTORE_DONE.set()
+    master_service._update_state_sync_status(enabled=True, restore_status="done", restore_complete=True)
+    monkeypatch.setattr(master_service.bybit_monitor, "get_custom_alerts", lambda force=True: [])
+    monkeypatch.setattr(master_service.bybit_monitor, "_coerce_alert", lambda payload: {**payload, "id": payload.get("id") or "b1"})
+    captured = {}
+    monkeypatch.setattr(master_service.bybit_monitor, "replace_custom_alerts", lambda alerts, strict=False: captured.__setitem__("alerts", alerts))
+    resp = asyncio.run(master_service.upsert_bybit_monitor_custom_alert(DummyRequest({"symbol": "BTCUSDT", "direction": "above", "target": 1.0})))
+    payload = json.loads(resp.body.decode("utf-8"))
+    assert payload["ok"] is True
+    assert captured["alerts"][0]["source"] == "repo_local"
+
+
+def test_upsert_oanda_custom_alert_source_repo_local(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "LOCAL_STATE_ONLY", True)
+    monkeypatch.setattr(master_service, "DROPBOX_SYNC_ENABLED", False)
+    master_service._STARTUP_STATE_RESTORE_DONE.set()
+    master_service._update_state_sync_status(enabled=True, restore_status="done", restore_complete=True)
+    monkeypatch.setattr(master_service.oanda_monitor, "get_custom_alerts", lambda force=True: [])
+    monkeypatch.setattr(master_service.oanda_monitor, "_coerce_alert", lambda payload: {**payload, "id": payload.get("id") or "o1"})
+    captured = {}
+    monkeypatch.setattr(master_service.oanda_monitor, "replace_custom_alerts", lambda alerts: captured.__setitem__("alerts", alerts))
+    resp = asyncio.run(master_service.upsert_oanda_monitor_custom_alert(DummyRequest({"instrument": "EUR_USD", "direction": "above", "target": 1.0})))
+    payload = json.loads(resp.body.decode("utf-8"))
+    assert payload["ok"] is True
+    assert captured["alerts"][0]["source"] == "repo_local"
+
+
+def test_repo_local_custom_alert_get_error_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "LOCAL_STATE_ONLY", True)
+    monkeypatch.setattr(master_service, "DROPBOX_SYNC_ENABLED", False)
+    master_service._STARTUP_STATE_RESTORE_DONE.set()
+    master_service._update_state_sync_status(enabled=True, restore_status="done", restore_complete=True)
+    monkeypatch.setattr(master_service.bybit_monitor, "get_custom_alerts", lambda force=True: (_ for _ in ()).throw(RuntimeError("offline")))
+    with pytest.raises(master_service.HTTPException) as excinfo:
+        asyncio.run(master_service.bybit_monitor_custom_alerts())
+    assert excinfo.value.detail["error"] == "repo_local_state_unavailable"

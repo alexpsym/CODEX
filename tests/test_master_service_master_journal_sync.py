@@ -1379,3 +1379,17 @@ def test_sync_master_journal_uses_zero_cashflow_anchor_when_cashflow_new_balance
     assert dash_map['BINANCE'] == 0
     assert dash_map['PEPPERSTONE DEMO'] == 0
     synced.close()
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_repo_state_files_for_github_dedupes_master_journal(tmp_path, monkeypatch):
+    monkeypatch.setattr(master_service, "BASE_DIR", tmp_path)
+    journal_dir = tmp_path / "journal"
+    journal_dir.mkdir(parents=True, exist_ok=True)
+    master = journal_dir / "Master Journal.xlsx"
+    master.write_bytes(b"x")
+    (journal_dir / "5-digit-demo-calculation-context.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "state_backup.json").write_text("{}", encoding="utf-8")
+    files = master_service._repo_state_files_for_github(master)
+    rel = [str(p.relative_to(tmp_path)).replace("\\", "/") for p in files]
+    assert rel.count("journal/Master Journal.xlsx") == 1

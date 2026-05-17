@@ -51,12 +51,12 @@ def test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls() -> No
     assert "syncWorkspaceSelectionFromScripts();\n        renderScripts();" in js
     assert "if (isMonitor) {" in js
     assert "cache: 'no-store'" in js
-    assert "Loading Dropbox state…" in js
+    assert "Loading state…" in js
     assert "Saved locally only (repo deletion can lose local state)" in js
-    assert "Synced with Dropbox" in js
-    assert "Dropbox sync error" in js
-    assert "Dropbox sync verification missing; save not confirmed durable." in js
-    assert "Watchlist edits blocked until Dropbox restore/sync is healthy." in js
+    assert "State synced" in js
+    assert "State sync error" in js
+    assert "State sync verification missing; save not confirmed durable." in js
+    assert "Watchlist edits blocked until state restore/sync is healthy." in js
     assert "dotTitle = 'Inactive view';" not in js
     assert "dotTitle = 'Active view loaded';" not in js
     assert "Inactive view" not in js
