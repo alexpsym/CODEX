@@ -563,18 +563,18 @@
     const restoreStatus = String(payload?.restore_status || '').toLowerCase();
     const hasError = Boolean(payload?.restore_error) || Boolean(payload?.last_upload_error) || restoreStatus === 'failed';
     if (!enabled) {
-      watchlistSyncMode.textContent = 'Saved locally only (repo deletion can lose local state)';
+      watchlistSyncMode.textContent = (String(payload?.effective_state_source || '').toLowerCase() === 'repo_local' || String(payload?.effective_state_source || '').toLowerCase() === 'local') ? 'Saved to repo-local state files' : 'Saved locally only (repo deletion can lose local state)';
       return;
     }
     if (restoreStatus === 'pending') {
-      watchlistSyncMode.textContent = 'Loading Dropbox state…';
+      watchlistSyncMode.textContent = 'Loading state…';
       return;
     }
     if (hasError) {
-      watchlistSyncMode.textContent = 'Dropbox sync error';
+      watchlistSyncMode.textContent = 'State sync error';
       return;
     }
-    watchlistSyncMode.textContent = 'Synced with Dropbox';
+    watchlistSyncMode.textContent = 'State synced';
   };
 
   const watchlistEditingBlocked = () => {
@@ -607,7 +607,7 @@
     if (watchlistCount) watchlistCount.textContent = String(list.length);
     const restorePending = String(stateSyncState?.restore_status || '').toLowerCase() === 'pending';
     if (watchlistEmpty) {
-      watchlistEmpty.textContent = restorePending && !watchlistLoaded ? 'Loading Dropbox state…' : 'No items yet.';
+      watchlistEmpty.textContent = restorePending && !watchlistLoaded ? 'Loading state…' : 'No items yet.';
       watchlistEmpty.style.display = list.length ? 'none' : 'block';
     }
     if (watchlistClearBtn) watchlistClearBtn.disabled = !list.length || Boolean(watchlistInFlight);
@@ -669,25 +669,25 @@
           const verifiedAt = stateSyncState?.last_verified_at;
           const verifiedWatchlist = Array.isArray(stateSyncState?.last_verified_watchlist) ? stateSyncState.last_verified_watchlist : [];
           if (stateSyncState?.enabled === true && !verifiedAt) {
-            setWatchlistStatus('Dropbox sync verification missing; save not confirmed durable.', true);
+            setWatchlistStatus('State sync verification missing; save not confirmed durable.', true);
             return;
           }
           if (uploadError) {
-            setWatchlistStatus(`Saved locally, Dropbox sync failed: ${uploadError}`, true);
+            setWatchlistStatus((String(stateSyncState?.effective_state_source || '').toLowerCase() === 'repo_local' || String(stateSyncState?.effective_state_source || '').toLowerCase() === 'local') ? `Repo-local state write failed: ${uploadError}` : `Saved locally, Dropbox sync failed: ${uploadError}`, true);
             return;
           }
           if (stateSyncState?.enabled === true) {
             if (verifiedAt && verifiedWatchlist.length) {
-              setWatchlistStatus(`Dropbox verified: ${verifiedWatchlist.join(', ') || '(empty)'}`, false);
+              setWatchlistStatus((String(stateSyncState?.effective_state_source || '').toLowerCase() === 'repo_local' || String(stateSyncState?.effective_state_source || '').toLowerCase() === 'local') ? `Repo-local verified: ${verifiedWatchlist.join(', ') || '(empty)'}` : `Dropbox verified: ${verifiedWatchlist.join(', ') || '(empty)'}`, false);
               return;
             }
             const remoteSummary = await fetchRemoteBackupSummary();
             const remoteWatchlist = Array.isArray(remoteSummary?.watchlist) ? remoteSummary.watchlist : [];
             if (verifiedAt && remoteWatchlist.length) {
-              setWatchlistStatus(`Dropbox verified: ${remoteWatchlist.join(', ') || '(empty)'}`, false);
+              setWatchlistStatus((String(stateSyncState?.effective_state_source || '').toLowerCase() === 'repo_local' || String(stateSyncState?.effective_state_source || '').toLowerCase() === 'local') ? `Repo-local verified: ${remoteWatchlist.join(', ') || '(empty)'}` : `Dropbox verified: ${remoteWatchlist.join(', ') || '(empty)'}`, false);
               return;
             }
-            setWatchlistStatus('Dropbox sync verification missing; save not confirmed durable.', true);
+            setWatchlistStatus('State sync verification missing; save not confirmed durable.', true);
             return;
           }
           setWatchlistStatus(successMessage, false);
@@ -730,11 +730,11 @@
         if (restoreStatus === 'pending') {
           watchlistLoaded = false;
           renderWatchlist(watchlistState);
-          setWatchlistStatus('Loading Dropbox state…', false);
+          setWatchlistStatus('Loading state…', false);
         } else if (restoreStatus === 'failed') {
-          setWatchlistStatus(`Dropbox restore failed: ${stateSyncState?.restore_error || 'unknown error'}`, true);
+          setWatchlistStatus((String(stateSyncState?.effective_state_source || '').toLowerCase() === 'repo_local' || String(stateSyncState?.effective_state_source || '').toLowerCase() === 'local') ? `Repo-local restore failed: ${stateSyncState?.restore_error || 'unknown error'}` : `Dropbox restore failed: ${stateSyncState?.restore_error || 'unknown error'}`, true);
         } else if (stateSyncState?.enabled === false) {
-          setWatchlistStatus('Saved locally only; repo deletion can lose unsynced state.', false);
+          setWatchlistStatus((String(stateSyncState?.effective_state_source || '').toLowerCase() === 'repo_local' || String(stateSyncState?.effective_state_source || '').toLowerCase() === 'local') ? 'Saved to repo-local state files.' : 'Saved locally only; repo deletion can lose unsynced state.', false);
         }
       } catch (err) {
         console.error(err);
@@ -769,7 +769,7 @@
 
   const addWatchlistItems = async () => {
     if (watchlistEditingBlocked()) {
-      setWatchlistStatus('Watchlist edits blocked until Dropbox restore/sync is healthy.', true);
+      setWatchlistStatus('Watchlist edits blocked until state restore/sync is healthy.', true);
       return;
     }
     const rawAdditions = normalizeWatchlistInput(watchlistInput?.value);
@@ -795,7 +795,7 @@
 
   const clearWatchlist = async () => {
     if (watchlistEditingBlocked()) {
-      setWatchlistStatus('Watchlist edits blocked until Dropbox restore/sync is healthy.', true);
+      setWatchlistStatus('Watchlist edits blocked until state restore/sync is healthy.', true);
       return;
     }
     if (!watchlistState.length || watchlistInFlight) return;

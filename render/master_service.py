@@ -560,7 +560,13 @@ BYBIT_DEMO_WORKBOOK_NAME = "Bybit Demo.xlsx"
 BYBIT_DEMO_CALC_CONTEXT_NAME = "Bybit Demo Calculation Context.json"
 BYBIT_DEMO_CALC_CONTEXT_VERSION = 1
 BYBIT_DEMO_CALC_CONTEXT_DROPBOX_PATH = os.getenv("BYBIT_DEMO_CALC_CONTEXT_DROPBOX_PATH", "").strip()
-BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH = BASE_DIR / "render" / "data" / "bybit_demo_calc_contexts.json"
+_BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH_ENV = str(os.getenv("BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH", "") or "").strip()
+BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH = (
+    ((BASE_DIR / _BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH_ENV).resolve() if not Path(_BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH_ENV).expanduser().is_absolute() else Path(_BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH_ENV).expanduser())
+    if _BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH_ENV
+    else (BASE_DIR / "journal" / "5-digit-demo-calculation-context.json")
+)
+BYBIT_DEMO_CALC_CONTEXT_LEGACY_LOCAL_PATH = BASE_DIR / "render" / "data" / "bybit_demo_calc_contexts.json"
 BYBIT_DEMO_WORKBOOK_SHEET = "Trades"
 BYBIT_DEMO_WORKBOOK_COLUMNS = [
     "opening_time",
@@ -1405,7 +1411,18 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
     fingerprint = _journal_source_fingerprint()
     if not force and isinstance(existing, dict) and existing.get("source_fingerprints") == fingerprint:
         return existing
-    if _master_journal_single_file_mode():
+    source_mode_runtime = str(os.getenv("TRADING_JOURNAL_SOURCE", TRADING_JOURNAL_SOURCE) or "").strip().lower()
+    if source_mode_runtime not in {"dropbox", "local", "both", "auto", "master_journal"}:
+        source_mode_runtime = _trading_journal_source_mode()
+    use_master_journal_snapshot = _master_journal_single_file_mode()
+    if (
+        not use_master_journal_snapshot
+        and force
+        and source_mode_runtime in {"both", "master_journal"}
+        and _master_journal_path().exists()
+    ):
+        use_master_journal_snapshot = True
+    if use_master_journal_snapshot:
         source_payload = read_master_journal_source(_master_journal_path())
         items = [dict(r) for r in (source_payload.get("items") or []) if isinstance(r, dict)]
         trade_items = _enrich_trade_row_metrics([r for r in items if _row_type(r) == "trade"])
@@ -1675,6 +1692,12 @@ LOCAL_STATE_ONLY = os.getenv("LOCAL_STATE_ONLY", "").strip().lower() in {
 DROPBOX_BACKUP_PATH = os.getenv(
     "DROPBOX_BACKUP_PATH", "/codex/master_control_backup.json"
 ).strip()
+_STATE_BACKUP_LOCAL_PATH_ENV = str(os.getenv("STATE_BACKUP_LOCAL_PATH", "") or "").strip()
+STATE_BACKUP_LOCAL_PATH = (
+    ((BASE_DIR / _STATE_BACKUP_LOCAL_PATH_ENV).resolve() if not Path(_STATE_BACKUP_LOCAL_PATH_ENV).expanduser().is_absolute() else Path(_STATE_BACKUP_LOCAL_PATH_ENV).expanduser())
+    if _STATE_BACKUP_LOCAL_PATH_ENV
+    else (BASE_DIR / "state_backup.json")
+)
 DROPBOX_SYNC_DEBOUNCE_SECONDS = float(
     os.getenv("DROPBOX_SYNC_DEBOUNCE_SECONDS", "2")
 )
@@ -1750,10 +1773,17 @@ _DROPBOX_UPLOAD_TASK: Optional[asyncio.Task] = None
 _DROPBOX_UPLOAD_TIMER: Optional[threading.Timer] = None
 _DROPBOX_UPLOAD_TIMER_LOCK = threading.Lock()
 _STATE_SYNC_STATUS_LOCK = threading.Lock()
+_STATE_BACKUP_LOCAL_ACTIVE = bool(
+    LOCAL_STATE_ONLY
+    or APP_PROFILE == "local"
+    or _master_journal_authoritative_enabled()
+    or _master_journal_single_file_mode()
+    or _trading_journal_local_excel_authoritative()
+)
 _STATE_SYNC_STATUS: Dict[str, object] = {
-    "enabled": DROPBOX_SYNC_ENABLED,
-    "restore_complete": not DROPBOX_SYNC_ENABLED,
-    "restore_status": "pending" if DROPBOX_SYNC_ENABLED else "skipped",
+    "enabled": bool(DROPBOX_SYNC_ENABLED or _STATE_BACKUP_LOCAL_ACTIVE),
+    "restore_complete": not bool(DROPBOX_SYNC_ENABLED or _STATE_BACKUP_LOCAL_ACTIVE),
+    "restore_status": "pending" if bool(DROPBOX_SYNC_ENABLED or _STATE_BACKUP_LOCAL_ACTIVE) else "skipped",
     "restore_error": None,
     "last_restore_at": None,
     "last_upload_at": None,
@@ -1762,7 +1792,7 @@ _STATE_SYNC_STATUS: Dict[str, object] = {
     "last_verified_watchlist": [],
     "remote_backup_hash": None,
     "pending_upload": False,
-    "backup_path": DROPBOX_BACKUP_PATH,
+    "backup_path": str(STATE_BACKUP_LOCAL_PATH) if _STATE_BACKUP_LOCAL_ACTIVE else DROPBOX_BACKUP_PATH,
     "env_loaded_file": _MASTER_ENV_INFO.get("loaded_file") or "",
     "effective_local_state_mode": (
         "local-only"
@@ -3553,6 +3583,20 @@ def _json_safe(value: object) -> object:
     return str(value)
 
 
+def _resolve_base_path_env(env_name: str, default_path: Path) -> Path:
+    raw = str(os.getenv(env_name, "") or "").strip()
+    if not raw:
+        return default_path
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = (BASE_DIR / candidate).resolve()
+    return candidate
+
+
+def _sanitize_calc_context_obj(obj: object) -> object:
+    return _json_safe(obj)
+
+
 def _load_json_file(path: Path, default):
     try:
         if not path.exists():
@@ -4955,6 +4999,17 @@ def _write_excel_atomic(path: Path, sheet_name: str, frame: pd.DataFrame) -> Non
         raise
 
 
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    path = path.expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp-{uuid4().hex}")
+    with open(tmp, "wb") as fh:
+        fh.write(data)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
 def _read_excel_sheet_or_empty(path: Path, sheet_name: str, columns: List[str]) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame(columns=columns)
@@ -4967,7 +5022,13 @@ def _read_excel_sheet_or_empty(path: Path, sheet_name: str, columns: List[str]) 
     return frame
 
 
+def _calc_context_uses_repo_local() -> bool:
+    return bool(LOCAL_STATE_ONLY or APP_PROFILE == "local" or _master_journal_authoritative_enabled() or _master_journal_single_file_mode() or _trading_journal_local_excel_authoritative())
+
+
 def _bybit_demo_calc_context_path(active_folder: Optional[str] = None) -> str:
+    if _calc_context_uses_repo_local():
+        return str(BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH)
     override = BYBIT_DEMO_CALC_CONTEXT_DROPBOX_PATH
     if override:
         return override
@@ -4975,50 +5036,43 @@ def _bybit_demo_calc_context_path(active_folder: Optional[str] = None) -> str:
     return _join_dropbox_path(folder, BYBIT_DEMO_CALC_CONTEXT_NAME)
 
 
+def _normalize_bybit_demo_calc_context_payload(payload: object) -> Dict[str, object]:
+    base = {"version": BYBIT_DEMO_CALC_CONTEXT_VERSION, "updated_at": _utc_now_iso(), "items": []}
+    if not isinstance(payload, dict):
+        return base
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    base["items"] = items
+    return base
+
+
 def _load_bybit_demo_calc_contexts(active_folder: Optional[str] = None) -> Dict[str, object]:
-    if LOCAL_STATE_ONLY or _trading_journal_local_excel_authoritative():
-        try:
-            if BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH.exists():
-                payload = json.loads(BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH.read_text(encoding="utf-8"))
-            else:
-                payload = {"version": BYBIT_DEMO_CALC_CONTEXT_VERSION, "updated_at": _utc_now_iso(), "items": []}
-        except Exception:
-            payload = {"version": BYBIT_DEMO_CALC_CONTEXT_VERSION, "updated_at": _utc_now_iso(), "items": []}
-        if not isinstance(payload, dict):
-            payload = {"version": BYBIT_DEMO_CALC_CONTEXT_VERSION, "updated_at": _utc_now_iso(), "items": []}
-        payload.setdefault("version", BYBIT_DEMO_CALC_CONTEXT_VERSION)
-        payload.setdefault("updated_at", _utc_now_iso())
-        payload.setdefault("items", [])
-        return payload
+    if _calc_context_uses_repo_local():
+        src = BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH
+        if not src.exists() and BYBIT_DEMO_CALC_CONTEXT_LEGACY_LOCAL_PATH.exists():
+            src.parent.mkdir(parents=True, exist_ok=True)
+            src.write_text(BYBIT_DEMO_CALC_CONTEXT_LEGACY_LOCAL_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+        if src.exists():
+            return _normalize_bybit_demo_calc_context_payload(json.loads(src.read_text(encoding="utf-8")))
+        return _normalize_bybit_demo_calc_context_payload({})
     dbx = _dropbox_client_or_none()
     if dbx is None:
-        return {"version": BYBIT_DEMO_CALC_CONTEXT_VERSION, "updated_at": _utc_now_iso(), "items": []}
+        return _normalize_bybit_demo_calc_context_payload({})
     path = _bybit_demo_calc_context_path(active_folder)
     try:
         _meta, resp = dbx.files_download(path)
-        payload = json.loads(resp.content.decode("utf-8"))
-        if not isinstance(payload, dict):
-            raise ValueError("invalid payload")
-        payload.setdefault("version", BYBIT_DEMO_CALC_CONTEXT_VERSION)
-        payload.setdefault("updated_at", _utc_now_iso())
-        payload.setdefault("items", [])
-        return payload
+        return _normalize_bybit_demo_calc_context_payload(json.loads(resp.content.decode("utf-8")))
     except Exception:
-        return {"version": BYBIT_DEMO_CALC_CONTEXT_VERSION, "updated_at": _utc_now_iso(), "items": []}
+        return _normalize_bybit_demo_calc_context_payload({})
 
 def _save_bybit_demo_calc_contexts(payload: Dict[str, object], active_folder: Optional[str] = None) -> None:
-    if LOCAL_STATE_ONLY or _trading_journal_local_excel_authoritative():
-        payload["version"] = BYBIT_DEMO_CALC_CONTEXT_VERSION
-        payload["updated_at"] = _utc_now_iso()
-        BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH.parent.mkdir(parents=True, exist_ok=True)
-        BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH.write_text(
-            json.dumps(_sanitize_calc_context_obj(payload), ensure_ascii=False, separators=(",", ":")),
-            encoding="utf-8",
-        )
+    payload = _normalize_bybit_demo_calc_context_payload(payload)
+    payload["updated_at"] = _utc_now_iso()
+    if _calc_context_uses_repo_local():
+        path = BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_bytes(path, json.dumps(_sanitize_calc_context_obj(payload), ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
         return
     path = _bybit_demo_calc_context_path(active_folder)
-    payload["version"] = BYBIT_DEMO_CALC_CONTEXT_VERSION
-    payload["updated_at"] = _utc_now_iso()
     _dropbox_upload_bytes(path, json.dumps(_sanitize_calc_context_obj(payload), ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
@@ -7221,6 +7275,11 @@ def _mark_primary_state_local_committed(key: str, payload: object, *, pending_up
 
 async def _wait_for_state_restore_or_error(timeout: float = 20.0) -> Dict[str, object]:
     status = _state_sync_status_snapshot()
+    local_mode = _state_backup_uses_local_repo_file()
+    restore_failed_error = "repo_local_restore_failed" if local_mode else "dropbox_restore_failed"
+    restore_failed_message = "Repo-local state restore failed during startup." if local_mode else "Dropbox restore failed during startup."
+    restore_timeout_error = "repo_local_restore_timeout" if local_mode else "dropbox_restore_timeout"
+    restore_timeout_message = "Repo-local state restore is still pending." if local_mode else "Dropbox restore is still pending."
     if APP_PROFILE == "local" and not bool(status.get("enabled")) and not LOCAL_STATE_ONLY:
         raise HTTPException(
             status_code=503,
@@ -7238,8 +7297,8 @@ async def _wait_for_state_restore_or_error(timeout: float = 20.0) -> Dict[str, o
         raise HTTPException(
             status_code=503,
             detail={
-                "error": "dropbox_restore_failed",
-                "message": "Dropbox restore failed during startup.",
+                "error": restore_failed_error,
+                "message": restore_failed_message,
                 "state_sync": status,
             },
         )
@@ -7251,8 +7310,8 @@ async def _wait_for_state_restore_or_error(timeout: float = 20.0) -> Dict[str, o
         raise HTTPException(
             status_code=503,
             detail={
-                "error": "dropbox_restore_timeout",
-                "message": "Dropbox restore is still pending.",
+                "error": restore_timeout_error,
+                "message": restore_timeout_message,
                 "state_sync": _state_sync_status_snapshot(),
             },
         ) from exc
@@ -7261,8 +7320,8 @@ async def _wait_for_state_restore_or_error(timeout: float = 20.0) -> Dict[str, o
         raise HTTPException(
             status_code=503,
             detail={
-                "error": "dropbox_restore_failed",
-                "message": "Dropbox restore failed during startup.",
+                "error": restore_failed_error,
+                "message": restore_failed_message,
                 "state_sync": status,
             },
         )
@@ -7273,6 +7332,32 @@ async def _upload_state_backup_now(timeout: float = 10.0) -> Dict[str, object]:
     return await _upload_and_verify_state_backup_now(timeout=timeout)
 
 
+
+
+def _state_backup_uses_local_repo_file() -> bool:
+    return bool(LOCAL_STATE_ONLY or APP_PROFILE == "local" or _master_journal_authoritative_enabled() or _master_journal_single_file_mode() or _trading_journal_local_excel_authoritative())
+
+
+def _state_backup_display_path() -> str:
+    return str(STATE_BACKUP_LOCAL_PATH) if _state_backup_uses_local_repo_file() else DROPBOX_BACKUP_PATH
+
+
+def _state_source_label() -> str:
+    if _state_backup_uses_local_repo_file():
+        return "repo_local"
+    if bool(DROPBOX_SYNC_ENABLED):
+        return "dropbox"
+    return "local"
+
+
+def _load_local_state_backup() -> bytes:
+    return STATE_BACKUP_LOCAL_PATH.read_bytes()
+
+
+def _write_local_state_backup_bytes_or_payload(payload: object) -> None:
+    STATE_BACKUP_LOCAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    raw = payload if isinstance(payload, (bytes, bytearray)) else json.dumps(_json_safe(payload), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    _atomic_write_bytes(STATE_BACKUP_LOCAL_PATH, bytes(raw))
 def _extract_remote_backup_summary(raw: bytes) -> Dict[str, object]:
     try:
         data = json.loads(raw.decode("utf-8"))
@@ -7292,7 +7377,7 @@ def _extract_remote_backup_summary(raw: bytes) -> Dict[str, object]:
     watchlist = _normalize_watchlist(data.get("watchlist", [])) if isinstance(data.get("watchlist"), list) else []
     summary = {
         "ok": True,
-        "backup_path": DROPBOX_BACKUP_PATH,
+        "backup_path": _state_backup_display_path(),
         "savedAt": data.get("savedAt"),
         "updatedAt": data.get("updatedAt"),
         "watchlist": watchlist,
@@ -7308,7 +7393,7 @@ def _extract_remote_backup_summary(raw: bytes) -> Dict[str, object]:
 
 async def _download_remote_backup_summary(timeout: float = 10.0) -> Dict[str, object]:
     raw = await asyncio.wait_for(
-        asyncio.to_thread(_dropbox_download_bytes, DROPBOX_BACKUP_PATH),
+        asyncio.to_thread(_load_local_state_backup if _state_backup_uses_local_repo_file() else _dropbox_download_bytes, *([] if _state_backup_uses_local_repo_file() else [DROPBOX_BACKUP_PATH])),
         timeout=max(0.1, float(timeout)),
     )
     return _extract_remote_backup_summary(raw)
@@ -7339,7 +7424,11 @@ async def _upload_and_verify_state_backup_now(
     try:
         payload = await asyncio.to_thread(_build_state_backup_payload)
         await asyncio.wait_for(
-            asyncio.to_thread(_dropbox_upload_bytes, DROPBOX_BACKUP_PATH, payload),
+            asyncio.to_thread(
+                _write_local_state_backup_bytes_or_payload if _state_backup_uses_local_repo_file() else _dropbox_upload_bytes,
+                payload if _state_backup_uses_local_repo_file() else DROPBOX_BACKUP_PATH,
+                *([] if _state_backup_uses_local_repo_file() else [payload]),
+            ),
             timeout=max(0.1, float(timeout)),
         )
         remote_summary = await _download_remote_backup_summary(timeout=timeout)
@@ -7364,26 +7453,30 @@ async def _upload_and_verify_state_backup_now(
             last_verified_watchlist=list(remote_summary.get("watchlist") or []),
             remote_backup_hash=remote_summary.get("hash"),
         )
-        BYBIT_LOGGER.info("Dropbox backup uploaded to %s", DROPBOX_BACKUP_PATH)
+        BYBIT_LOGGER.info("State backup saved to %s", _state_backup_display_path())
         return status
     except Exception as exc:
         status = _update_state_sync_status(
             pending_upload=False,
             last_upload_error=str(exc),
         )
-        BYBIT_LOGGER.error("Dropbox backup failed: %s", exc)
+        BYBIT_LOGGER.error("%s backup failed: %s", "Local state" if _state_backup_uses_local_repo_file() else "Dropbox", exc)
         raise HTTPException(
             status_code=502,
             detail={
-                "error": "dropbox_upload_failed",
-                "message": f"Dropbox backup upload failed: {exc}",
+                "error": "local_backup_write_failed" if _state_backup_uses_local_repo_file() else "dropbox_upload_failed",
+                "message": (
+                    f"Repo-local state backup write failed: {exc}"
+                    if _state_backup_uses_local_repo_file()
+                    else f"Dropbox backup upload failed: {exc}"
+                ),
                 "state_sync": status,
             },
         ) from exc
 
 
 def _schedule_dropbox_upload_state_backup() -> None:
-    if not DROPBOX_SYNC_ENABLED:
+    if (not DROPBOX_SYNC_ENABLED) and (not _state_backup_uses_local_repo_file()):
         return
 
     global _DROPBOX_UPLOAD_TIMER
@@ -7399,19 +7492,19 @@ def _schedule_dropbox_upload_state_backup() -> None:
             _update_state_sync_status(pending_upload=True, last_upload_error=None)
             try:
                 payload = _build_state_backup_payload()
-                _dropbox_upload_bytes(DROPBOX_BACKUP_PATH, payload)
+                _write_local_state_backup_bytes_or_payload(payload) if _state_backup_uses_local_repo_file() else _dropbox_upload_bytes(DROPBOX_BACKUP_PATH, payload)
                 _update_state_sync_status(
                     pending_upload=False,
                     last_upload_at=_utc_now_iso(),
                     last_upload_error=None,
                 )
-                BYBIT_LOGGER.info("Dropbox backup uploaded to %s", DROPBOX_BACKUP_PATH)
+                BYBIT_LOGGER.info("State backup saved to %s", _state_backup_display_path())
             except Exception as exc:  # pragma: no cover - network failure
                 _update_state_sync_status(
                     pending_upload=False,
                     last_upload_error=str(exc),
                 )
-                BYBIT_LOGGER.error("Dropbox backup failed: %s", exc)
+                BYBIT_LOGGER.error("%s backup failed: %s", "Repo-local state" if _state_backup_uses_local_repo_file() else "Dropbox", exc)
 
         t = threading.Timer(DROPBOX_SYNC_DEBOUNCE_SECONDS, _run_upload)
         t.daemon = True
@@ -7506,7 +7599,59 @@ def _restore_alerts_payload(data: Dict[str, object]) -> Dict[str, object]:
 
 
 async def _dropbox_restore_state_backup_on_startup() -> None:
-    if not DROPBOX_SYNC_ENABLED:
+    if _state_backup_uses_local_repo_file():
+        _update_state_sync_status(
+            enabled=True,
+            restore_complete=False,
+            restore_status="pending",
+            restore_error=None,
+            backup_path=str(STATE_BACKUP_LOCAL_PATH),
+        )
+        try:
+            payload = await asyncio.to_thread(_load_local_state_backup)
+            data = json.loads(payload.decode("utf-8")) if payload else {}
+            restored = _restore_alerts_payload(data if isinstance(data, dict) else {})
+            _schedule_dropbox_upload_state_backup()
+            BYBIT_LOGGER.info(
+                "Repo-local restore complete: bybit=%s oanda=%s watchlist=%s pending=%s",
+                restored.get("bybit_restored", 0),
+                restored.get("oanda_restored", 0),
+                restored.get("watchlist_restored", 0),
+                restored.get("pending_webhooks_restored", 0),
+            )
+            _update_state_sync_status(
+                restore_complete=True,
+                restore_status="done",
+                restore_error=None,
+                last_restore_at=_utc_now_iso(),
+                remote_backup_hash=hashlib.sha256(payload).hexdigest() if payload else None,
+                per_file_state_ready=True,
+                missing_state_keys=[],
+                migrated_state_keys=[],
+            )
+        except FileNotFoundError:
+            BYBIT_LOGGER.info("Repo-local restore skipped; no backup found at %s", STATE_BACKUP_LOCAL_PATH)
+            _update_state_sync_status(
+                restore_complete=True,
+                restore_status="done",
+                restore_error=None,
+                last_restore_at=_utc_now_iso(),
+                remote_backup_hash=None,
+                per_file_state_ready=False,
+            )
+        except Exception as exc:  # pragma: no cover - startup failure
+            BYBIT_LOGGER.error("Repo-local restore failed: %s", exc)
+            _update_state_sync_status(
+                restore_complete=True,
+                restore_status="failed",
+                restore_error=str(exc),
+                last_restore_at=_utc_now_iso(),
+            )
+        finally:
+            _STARTUP_STATE_RESTORE_DONE.set()
+        return
+
+    if (not DROPBOX_SYNC_ENABLED) and (not _state_backup_uses_local_repo_file()):
         _update_state_sync_status(
             enabled=False,
             restore_complete=True,
@@ -7556,7 +7701,7 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
         migrated: List[str] = []
         remote_backup: dict = {}
         try:
-            payload = await asyncio.to_thread(download_bytes, DROPBOX_BACKUP_PATH)
+            payload = await asyncio.to_thread(_load_local_state_backup) if _state_backup_uses_local_repo_file() else await asyncio.to_thread(download_bytes, DROPBOX_BACKUP_PATH)
             remote_backup = json.loads(payload.decode("utf-8")) if payload else {}
         except FileNotFoundError:
             remote_backup = {}
@@ -7593,7 +7738,7 @@ async def _dropbox_restore_state_backup_on_startup() -> None:
 
     try:
         bootstrap = await _bootstrap_dropbox_primary_state()
-        payload = await asyncio.to_thread(download_bytes, DROPBOX_BACKUP_PATH)
+        payload = await asyncio.to_thread(_load_local_state_backup) if _state_backup_uses_local_repo_file() else await asyncio.to_thread(download_bytes, DROPBOX_BACKUP_PATH)
         remote_hash = hashlib.sha256(payload).hexdigest()
         data = json.loads(payload.decode("utf-8"))
         restored = _restore_alerts_payload(data)
@@ -8629,14 +8774,15 @@ async def _autostart_scripts() -> None:
         _MASTER_ENV_INFO.get("loaded_file") or "<none>",
     )
     if _is_scanner_local_ui_mode():
+        local_state_mode = _state_backup_uses_local_repo_file()
         _update_state_sync_status(
-            enabled=DROPBOX_SYNC_ENABLED,
-            restore_complete=not DROPBOX_SYNC_ENABLED,
-            restore_status="pending" if DROPBOX_SYNC_ENABLED else "skipped",
+            enabled=bool(DROPBOX_SYNC_ENABLED or local_state_mode),
+            restore_complete=not bool(DROPBOX_SYNC_ENABLED or local_state_mode),
+            restore_status="pending" if bool(DROPBOX_SYNC_ENABLED or local_state_mode) else "skipped",
             restore_error=None,
-            backup_path=DROPBOX_BACKUP_PATH,
+            backup_path=_state_backup_display_path(),
         )
-        if DROPBOX_SYNC_ENABLED:
+        if DROPBOX_SYNC_ENABLED or local_state_mode:
             asyncio.create_task(_dropbox_restore_state_backup_on_startup())
         else:
             _STARTUP_STATE_RESTORE_DONE.set()
@@ -8659,13 +8805,13 @@ async def _autostart_scripts() -> None:
         finished_at=None,
     )
     _update_state_sync_status(
-        enabled=DROPBOX_SYNC_ENABLED,
-        restore_complete=not DROPBOX_SYNC_ENABLED,
-        restore_status="pending" if DROPBOX_SYNC_ENABLED else "skipped",
+        enabled=bool(DROPBOX_SYNC_ENABLED or _state_backup_uses_local_repo_file()),
+        restore_complete=not bool(DROPBOX_SYNC_ENABLED or _state_backup_uses_local_repo_file()),
+        restore_status="pending" if bool(DROPBOX_SYNC_ENABLED or _state_backup_uses_local_repo_file()) else "skipped",
         restore_error=None,
-        backup_path=DROPBOX_BACKUP_PATH,
+        backup_path=_state_backup_display_path(),
     )
-    if not DROPBOX_SYNC_ENABLED:
+    if (not DROPBOX_SYNC_ENABLED) and (not _state_backup_uses_local_repo_file()):
         _STARTUP_STATE_RESTORE_DONE.set()
     asyncio.create_task(_dropbox_restore_state_backup_on_startup())
     if _master_journal_single_file_mode():
@@ -11786,7 +11932,7 @@ def _prune_trade_contexts(items: List[Dict[str, object]]) -> List[Dict[str, obje
     return kept
 
 
-def _upsert_bybit_demo_calc_context(context: Dict[str, object], active_folder: Optional[str] = None, require_dropbox: bool = True) -> Dict[str, object]:
+def _upsert_bybit_demo_calc_context(context: Dict[str, object], active_folder: Optional[str] = None, require_durable: bool = True) -> Dict[str, object]:
     now = _utc_now_iso()
     ctx = dict(_sanitize_calc_context_obj(context) if isinstance(context, dict) else {})
     ctx["calculation_context_id"] = str(ctx.get("calculation_context_id") or "").strip() or f"calcctx_bybit_demo_{uuid4().hex}"
@@ -11803,7 +11949,7 @@ def _upsert_bybit_demo_calc_context(context: Dict[str, object], active_folder: O
     try:
         _save_bybit_demo_calc_contexts(state, active_folder)
     except Exception:
-        if require_dropbox:
+        if require_durable:
             raise
     return ctx
 
@@ -11838,7 +11984,7 @@ def _merge_bybit_demo_calc_context_into_row(row: Dict[str, object], ctx: Dict[st
             out[k] = ctx.get(k)
     out["calculation_context_id"] = out.get("calculation_context_id") or ctx.get("calculation_context_id")
     refs = out.get("raw_refs") if isinstance(out.get("raw_refs"), dict) else {}
-    refs["calculation_context_source"] = "dropbox_calculation_context"
+    refs["calculation_context_source"] = "repo_calculation_context" if _calc_context_uses_repo_local() else "dropbox_calculation_context"
     out["raw_refs"] = refs
     return out
 
@@ -15617,7 +15763,7 @@ async def _sync_bybit_closed_pnl_window(
                             "order_id": order_id,
                             "close_time": row.get("close_time"),
                         },
-                        require_dropbox=False,
+                        require_durable=False,
                     )
                 rows.append(row)
         cursor = str(result.get("nextPageCursor") or "").strip() or None
@@ -17824,11 +17970,11 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                             "quote_payload": payload,
                             "quote_result": response_payload,
                         },
-                        require_dropbox=True,
+                        require_durable=True,
                     )
                     response_payload["calculation_context_saved"] = True
                 except Exception as exc:
-                    raise HTTPException(status_code=502, detail={"code": "BYBIT_DEMO_CALC_CONTEXT_SAVE_FAILED", "message": "Bybit Demo calculation was not saved to Dropbox, so the journal cannot safely enrich the completed trade.", "debug": {"dropbox_path": _bybit_demo_calc_context_path(), "error": str(exc), "symbol": resolved_symbol, "account": "demo"}}) from exc
+                    raise HTTPException(status_code=502, detail={"code": "BYBIT_DEMO_CALC_CONTEXT_SAVE_FAILED", "message": ("Bybit Demo calculation was not saved to the repo-local calculation context file, so the journal cannot safely enrich the completed trade." if _calc_context_uses_repo_local() else "Bybit Demo calculation was not saved to Dropbox, so the journal cannot safely enrich the completed trade."), "debug": {"context_path": _bybit_demo_calc_context_path(), "state_source": ("repo_local" if _calc_context_uses_repo_local() else "dropbox"), "error": str(exc), "symbol": resolved_symbol, "account": "demo"}}) from exc
 
             if webhook_enabled:
                 pending_id = existing_pending_id or f"calc_bybit_{uuid4().hex[:16]}"
@@ -21111,7 +21257,8 @@ async def bybit_monitor_custom_alerts() -> JSONResponse:
     try:
         return JSONResponse({"alerts": bybit_monitor.get_custom_alerts(force=True), "state_sync": _state_sync_status_snapshot()})
     except Exception as exc:
-        raise HTTPException(status_code=503, detail={"error": "dropbox_state_unavailable", "message": str(exc), "state_sync": _state_sync_status_snapshot()}) from exc
+        err_code = "repo_local_state_unavailable" if _state_source_label() == "repo_local" else ("dropbox_state_unavailable" if _state_source_label() == "dropbox" else "local_state_unavailable")
+        raise HTTPException(status_code=503, detail={"error": err_code, "message": str(exc), "state_sync": _state_sync_status_snapshot()}) from exc
 
 
 @app.post("/api/bybit-alerts/custom-alerts")
@@ -21126,10 +21273,10 @@ async def upsert_bybit_monitor_custom_alert(request: Request) -> JSONResponse:
     normalized = bybit_monitor._coerce_alert({**incoming, "id": (match or {}).get("id") or incoming.get("id")})
     normalized["created_at"] = str((match or {}).get("created_at") or now)
     normalized["updated_at"] = now
-    normalized["source"] = "dropbox"
+    normalized["source"] = _state_source_label()
     updated = [a for a in existing if str(a.get("id")) != str(normalized.get("id"))] + [normalized]
     bybit_monitor.replace_custom_alerts(updated, strict=False)
-    if DROPBOX_SYNC_ENABLED and not LOCAL_STATE_ONLY:
+    if DROPBOX_SYNC_ENABLED or _state_backup_uses_local_repo_file():
         _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "alert": normalized, "state_sync": _state_sync_status_snapshot()})
 
@@ -21141,7 +21288,7 @@ async def delete_bybit_monitor_custom_alert(alert_id: str) -> JSONResponse:
     existing = bybit_monitor.get_custom_alerts(force=True)
     updated = [a for a in (existing if isinstance(existing, list) else []) if str(a.get("id")) != str(alert_id)]
     bybit_monitor.replace_custom_alerts(updated, strict=False)
-    if DROPBOX_SYNC_ENABLED and not LOCAL_STATE_ONLY:
+    if DROPBOX_SYNC_ENABLED or _state_backup_uses_local_repo_file():
         _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "alert_id": alert_id, "state_sync": _state_sync_status_snapshot()})
 
@@ -21168,7 +21315,7 @@ async def set_bybit_monitor_custom_alert_enabled(
     if not found:
         raise HTTPException(status_code=404, detail="Unknown alert id")
     bybit_monitor.replace_custom_alerts(alerts, strict=False)
-    if DROPBOX_SYNC_ENABLED and not LOCAL_STATE_ONLY:
+    if DROPBOX_SYNC_ENABLED or _state_backup_uses_local_repo_file():
         _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "alert": found, "state_sync": _state_sync_status_snapshot()})
 
@@ -21180,7 +21327,8 @@ async def oanda_monitor_custom_alerts() -> JSONResponse:
     try:
         return JSONResponse({"alerts": oanda_monitor.get_custom_alerts(force=True), "state_sync": _state_sync_status_snapshot()})
     except Exception as exc:
-        raise HTTPException(status_code=503, detail={"error": "dropbox_state_unavailable", "message": str(exc), "state_sync": _state_sync_status_snapshot()}) from exc
+        err_code = "repo_local_state_unavailable" if _state_source_label() == "repo_local" else ("dropbox_state_unavailable" if _state_source_label() == "dropbox" else "local_state_unavailable")
+        raise HTTPException(status_code=503, detail={"error": err_code, "message": str(exc), "state_sync": _state_sync_status_snapshot()}) from exc
 
 
 @app.post("/api/oanda-alerts/custom-alerts")
@@ -21195,10 +21343,10 @@ async def upsert_oanda_monitor_custom_alert(request: Request) -> JSONResponse:
     normalized = oanda_monitor._coerce_alert({**incoming, "id": (match or {}).get("id") or incoming.get("id")})
     normalized["created_at"] = str((match or {}).get("created_at") or now)
     normalized["updated_at"] = now
-    normalized["source"] = "dropbox"
+    normalized["source"] = _state_source_label()
     updated = [a for a in (existing if isinstance(existing, list) else []) if str(a.get("id")) != str(normalized.get("id"))] + [normalized]
     oanda_monitor.replace_custom_alerts(updated)
-    if DROPBOX_SYNC_ENABLED and not LOCAL_STATE_ONLY:
+    if DROPBOX_SYNC_ENABLED or _state_backup_uses_local_repo_file():
         _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "alert": normalized, "state_sync": _state_sync_status_snapshot()})
 
@@ -21210,7 +21358,7 @@ async def delete_oanda_monitor_custom_alert(alert_id: str) -> JSONResponse:
     existing = oanda_monitor.get_custom_alerts(force=True)
     updated = [a for a in (existing if isinstance(existing, list) else []) if str(a.get("id")) != str(alert_id)]
     oanda_monitor.replace_custom_alerts(updated)
-    if DROPBOX_SYNC_ENABLED and not LOCAL_STATE_ONLY:
+    if DROPBOX_SYNC_ENABLED or _state_backup_uses_local_repo_file():
         _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "alert_id": alert_id, "state_sync": _state_sync_status_snapshot()})
 
@@ -21237,7 +21385,7 @@ async def set_oanda_monitor_custom_alert_enabled(
     if not found:
         raise HTTPException(status_code=404, detail="Unknown alert id")
     oanda_monitor.replace_custom_alerts(alerts)
-    if DROPBOX_SYNC_ENABLED and not LOCAL_STATE_ONLY:
+    if DROPBOX_SYNC_ENABLED or _state_backup_uses_local_repo_file():
         _schedule_dropbox_upload_state_backup()
     return JSONResponse({"ok": True, "alert": found, "state_sync": _state_sync_status_snapshot()})
 
@@ -21246,17 +21394,19 @@ async def set_oanda_monitor_custom_alert_enabled(
 async def state_sync_status() -> JSONResponse:
     payload = _state_sync_status_snapshot()
     payload.update(dropbox_state_store.state_store_summary())
-    payload["effective_state_source"] = "dropbox" if dropbox_state_store.dropbox_state_enabled() and not LOCAL_STATE_ONLY else "local"
+    payload["effective_state_source"] = (
+        "repo_local" if _state_backup_uses_local_repo_file() else ("dropbox" if dropbox_state_store.dropbox_state_enabled() else "local")
+    )
     return JSONResponse(_json_safe(payload))
 
 
 @app.get("/api/state-sync/remote-backup-summary")
 async def state_sync_remote_backup_summary() -> JSONResponse:
-    if not DROPBOX_SYNC_ENABLED:
+    if (not DROPBOX_SYNC_ENABLED) and (not _state_backup_uses_local_repo_file()):
         return JSONResponse(
             {
                 "ok": False,
-                "backup_path": DROPBOX_BACKUP_PATH,
+                "backup_path": _state_backup_display_path(),
                 "error": "dropbox_sync_disabled",
                 "downloaded_at": _utc_now_iso(),
             },
@@ -21268,6 +21418,32 @@ async def state_sync_remote_backup_summary() -> JSONResponse:
         backup_summary = await _download_remote_backup_summary()
     except Exception as exc:
         backup_error = str(exc)
+    if _state_backup_uses_local_repo_file():
+        if backup_summary is not None:
+            payload = dict(backup_summary)
+            payload.update(
+                {
+                    "ok": True,
+                    "state_source": "repo_local",
+                    "watchlist_source": "repo_local_state_backup",
+                    "backup_path": str(STATE_BACKUP_LOCAL_PATH),
+                    "downloaded_at": _utc_now_iso(),
+                }
+            )
+            return JSONResponse(payload)
+        return JSONResponse(
+            {
+                "ok": False,
+                "state_source": "repo_local",
+                "watchlist_source": "repo_local_state_backup",
+                "backup_path": str(STATE_BACKUP_LOCAL_PATH),
+                "error": "repo_local_backup_unavailable",
+                "backup_error": backup_error,
+                "downloaded_at": _utc_now_iso(),
+            },
+            status_code=502,
+        )
+
     primary_error: Optional[str] = None
     primary_watchlist: Optional[List[str]] = None
     try:
@@ -21299,7 +21475,7 @@ async def state_sync_remote_backup_summary() -> JSONResponse:
     return JSONResponse(
         {
             "ok": False,
-            "backup_path": DROPBOX_BACKUP_PATH,
+            "backup_path": _state_backup_display_path(),
             "error": "dropbox_watchlist_summary_unavailable",
             "primary_error": primary_error,
             "backup_error": backup_error,
@@ -21394,7 +21570,8 @@ async def get_watchlist() -> JSONResponse:
             )
         return JSONResponse({"items": normalized, "state_sync": status})
     except Exception as exc:
-        raise HTTPException(status_code=503, detail={"error": "dropbox_state_unavailable", "message": str(exc), "state_sync": sync_status}) from exc
+        err_code = "repo_local_state_unavailable" if _state_source_label() == "repo_local" else ("dropbox_state_unavailable" if _state_source_label() == "dropbox" else "local_state_unavailable")
+        raise HTTPException(status_code=503, detail={"error": err_code, "message": str(exc), "state_sync": sync_status}) from exc
 
 
 @app.post("/api/watchlist")
@@ -23866,7 +24043,7 @@ async def _run_trading_journal_sync_job() -> None:
             and workbook_sync.get("github_sync_enabled")
             and workbook_sync.get("github_sync_ok") is False
         )
-        ok_flag = bool(base_ok and not broker_failed and not local_workbook_failed and not github_sync_failed)
+        ok_flag = bool(base_ok and not broker_failed and not local_workbook_failed)
         if not ok_flag:
             msg = f"Failed: {str((result or {}).get('message') or (result or {}).get('error') or '; '.join(warnings) or 'sync failed')}"
         elif has_warnings:
@@ -24333,34 +24510,29 @@ def _run_git_command(args: List[str], cwd: Path, timeout_s: int) -> Tuple[int, s
         return 1, "", str(exc)
 
 
-def _journal_excel_files_for_github(master_path: Path) -> List[Path]:
-    master_path = master_path.expanduser().resolve()
-    journal_dir = master_path.parent
-    files: List[Path] = [master_path]
-    include_sources = str(os.getenv("TRADING_JOURNAL_GITHUB_SYNC_INCLUDE_SOURCES", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
-    if include_sources:
-        for p in sorted(journal_dir.glob("*.xlsx")):
-            name = p.name
-            if name.startswith("~$") or name.endswith(".tmp.xlsx") or name.endswith(".pending.xlsx"):
-                continue
-            if p.is_file():
-                files.append(p)
-    unique: List[Path] = []
+def _repo_state_files_for_github(master_path: Path) -> List[Path]:
+    repo_root = _repo_root_for_journal_path(master_path).resolve()
+    master_resolved = master_path.expanduser().resolve()
+    allowlist = [
+        master_resolved,
+        repo_root / "journal" / "Master Journal.xlsx",
+        repo_root / "journal" / "5-digit-demo-calculation-context.json",
+        repo_root / "state_backup.json",
+    ]
+    files: List[Path] = []
     seen: Set[Path] = set()
-    repo_root = BASE_DIR.resolve()
-    for p in files:
+    for p in allowlist:
+        rp = p.expanduser().resolve()
         try:
-            rp = p.expanduser().resolve()
             rp.relative_to(repo_root)
-            rp.relative_to(journal_dir.resolve())
-            if rp.suffix.lower() != ".xlsx":
-                continue
-            if rp not in seen:
-                seen.add(rp)
-                unique.append(rp)
         except Exception:
             continue
-    return unique
+        if rp.exists() and rp.is_file():
+            if rp in seen:
+                continue
+            seen.add(rp)
+            files.append(rp)
+    return files
 
 
 def _sync_journal_excel_files_to_github(master_path: Path) -> Dict[str, object]:
@@ -24384,9 +24556,9 @@ def _sync_journal_excel_files_to_github(master_path: Path) -> Dict[str, object]:
     repo_root = _repo_root_for_journal_path(master_path)
     if not (repo_root / ".git").exists():
         return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": "local repo is not a Git checkout.", "github_sync_error_type": "NotGitRepo"}
-    files = _journal_excel_files_for_github(master_path)
+    files = _repo_state_files_for_github(master_path)
     if not files:
-        return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": "No eligible journal Excel files found to sync.", "github_sync_error_type": "NoEligibleFiles"}
+        return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": "No eligible repo state files found to sync.", "github_sync_error_type": "NoEligibleFiles"}
     rel_files = [str(p.relative_to(repo_root)).replace("\\", "/") for p in files]
     base["github_sync_files"] = rel_files
     code, _, err = _run_git_command(["--version"], repo_root, timeout_s)
@@ -24410,7 +24582,7 @@ def _sync_journal_excel_files_to_github(master_path: Path) -> Dict[str, object]:
     code, _, _ = _run_git_command(["diff", "--cached", "--quiet", "--", *rel_files], repo_root, timeout_s)
     if code == 0:
         return base
-    code, _, err = _run_git_command(["commit", "-m", "Update Master Journal workbook"], repo_root, timeout_s)
+    code, _, err = _run_git_command(["commit", "-m", "Update trading journal state"], repo_root, timeout_s)
     if code != 0:
         return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": f"Git commit failed: {err.strip()}", "github_sync_error_type": "GitCommitFailed"}
     code, out, err = _run_git_command(["rev-parse", "--short", "HEAD"], repo_root, timeout_s)
