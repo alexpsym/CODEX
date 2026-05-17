@@ -745,3 +745,27 @@ def test_both_all_trades_and_trade_log_fails_ambiguous(tmp_path: Path):
     snap={"items":[],"stats":{"totals":{},"groups":{"by_market":{"overall":{},"fx":{},"crypto":{}},"risk_expectancy":{},"leaders":{},"duration":{}}},"balances":[]}
     with pytest.raises(RuntimeError, match="ambiguous trade sheets"):
         update_master_journal_workbook_data_only(p,snap)
+
+
+def test_update_data_only_overwrites_stale_dashboard_account_balances_with_zero(tmp_path: Path):
+    out = tmp_path / "Master Journal.xlsx"
+    stale = sample_snapshot()
+    stale["balances"] = [
+        {"account_label": "PEPPERSTONE DEMO", "balance": 4.78, "currency": "AUD", "as_of": "2026-05-10"},
+        {"account_label": "BINANCE", "balance": 396.65720524, "currency": "USDT", "as_of": "2026-05-10"},
+    ]
+    build_master_journal_workbook(stale, out)
+    snap = sample_snapshot()
+    snap["balances"] = [
+        {"account_label": "PEPPERSTONE DEMO", "balance": 0, "currency": "AUD", "as_of": "2026-05-11", "balance_source": "broker_account_summary"},
+        {"account_label": "BINANCE", "balance": 0, "currency": "USDT", "as_of": "2026-05-11", "balance_source": "broker_account_summary"},
+    ]
+    res = update_master_journal_workbook_data_only(out, snap)
+    Path(res["candidate_path"]).replace(out)
+    wb = load_workbook(out, data_only=True)
+    assert wb.sheetnames == SHEET_ORDER
+    dash = wb["Dashboard"]
+    vals = {str(dash.cell(r,1).value or "").strip(): dash.cell(r,2).value for r in range(1, dash.max_row+1)}
+    assert vals.get("PEPPERSTONE DEMO") == 0
+    assert vals.get("BINANCE") == 0
+    wb.close()

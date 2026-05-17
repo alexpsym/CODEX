@@ -5455,9 +5455,9 @@ def _build_journal_balance_timelines(
             authoritative_balance_used = selected_authoritative_balance
             authoritative_balance_source = selected_authoritative_source
             latest_authoritative_at = as_of
-        elif _to_float(bucket.get("excel_balance")) is not None:
+        elif _to_float(bucket.get("excel_balance")) is not None and bool(bucket.get("excel_balance_authoritative")):
             display_balance = _to_float(bucket.get("excel_balance"))
-            balance_source = "excel_account_balance"
+            balance_source = str(bucket.get("excel_balance_source") or "excel_account_balance")
 
         latest_cashflow = events[-1] if events else {}
         label = str(latest_cashflow.get("account") or bucket.get("excel_label") or (bucket.get("labels")[-1][0] if bucket.get("labels") else account_key))
@@ -5592,8 +5592,10 @@ def _merge_missing_timeline_balances_with_broker(
         if existing_balance is not None and not bool(existing.get("missing_balance")):
             existing_source = str(existing.get("balance_source") or existing.get("source") or "").lower()
             broker_source = str(broker.get("balance_source") or broker.get("source") or "").lower()
-            is_oanda_broker = broker_source == "oanda_account_summary"
-            can_override = "cashflow" in existing_source or (is_oanda_broker and existing_source == "authoritative_trade_balance")
+            trusted_broker_sources = {"oanda_account_summary", "broker_account_summary", "bybit_wallet_balance", "bybit_demo_wallet_balance_anchor"}
+            can_override = "cashflow" in existing_source or existing_source in {"timeline_missing", "excel_account_balance", "trade_timeline"}
+            if existing_source == "authoritative_trade_balance":
+                can_override = broker_source in trusted_broker_sources
             if not can_override:
                 continue
             if existing_as_of_ts is not None and broker_as_of_ts is not None and existing_as_of_ts > broker_as_of_ts:
@@ -24178,24 +24180,47 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                         break
                 if not header_row:
                     raise RuntimeError("Master Journal validation failed: Account Balances headers missing.")
-                expected_accounts = {
-                    str(b.get("account_label") or b.get("account") or "").strip().upper()
-                    for b in balances if isinstance(b, dict) and str(b.get("account_label") or b.get("account") or "").strip()
-                }
-                matched_numeric_accounts: Set[str] = set()
-                for rr in range(header_row + 1, min(dash.max_row + 1, header_row + 80)):
-                    account = str(dash.cell(rr, header_map["account"]).value or "").strip().upper()
-                    if not account or account not in expected_accounts:
+                expected_balances: Dict[str, Dict[str, object]] = {}
+                for b in balances:
+                    if not isinstance(b, dict):
                         continue
-                    bal = dash.cell(rr, header_map["balance"]).value
-                    if isinstance(bal, (int, float)):
-                        matched_numeric_accounts.add(account)
-                missing_accounts = sorted(expected_accounts.difference(matched_numeric_accounts))
-                if missing_accounts:
-                    raise RuntimeError(
-                        "Master Journal validation failed: Account Balances missing numeric values for expected accounts: "
-                        + ", ".join(missing_accounts)
-                    )
+                    account_label = str(b.get("account_label") or b.get("account") or "").strip()
+                    if not account_label:
+                        continue
+                    expected_balances[account_label.upper()] = b
+                actual_rows: Dict[str, Dict[str, object]] = {}
+                for rr in range(header_row + 1, min(dash.max_row + 1, header_row + 80)):
+                    account = str(dash.cell(rr, header_map["account"]).value or "").strip()
+                    if not account:
+                        continue
+                    actual_rows[account.upper()] = {
+                        "row": rr,
+                        "account": account,
+                        "balance": dash.cell(rr, header_map["balance"]).value,
+                        "currency": str(dash.cell(rr, header_map["currency"]).value or "").strip(),
+                    }
+                mismatches: List[str] = []
+                for account_key, expected in expected_balances.items():
+                    expected_balance = _to_float(expected.get("balance"))
+                    expected_currency = str(expected.get("currency") or "").strip()
+                    expected_source = str(expected.get("balance_source") or expected.get("source") or "unknown")
+                    actual = actual_rows.get(account_key)
+                    if actual is None:
+                        mismatches.append(f"{account_key}: missing account row; expected={expected_balance} {expected_currency} source={expected_source}")
+                        continue
+                    actual_balance = _to_float(actual.get("balance"))
+                    actual_currency = str(actual.get("currency") or "").strip()
+                    if expected_balance is None or actual_balance is None:
+                        mismatches.append(
+                            f"{actual.get('account')}: expected_balance={expected_balance}, actual_balance={actual.get('balance')}, expected_currency={expected_currency}, actual_currency={actual_currency}, balance_source={expected_source}"
+                        )
+                        continue
+                    if abs(actual_balance - expected_balance) > 1e-9 or actual_currency.upper() != expected_currency.upper():
+                        mismatches.append(
+                            f"{actual.get('account')}: expected_balance={expected_balance}, actual_balance={actual_balance}, expected_currency={expected_currency}, actual_currency={actual_currency}, balance_source={expected_source}"
+                        )
+                if mismatches:
+                    raise RuntimeError("Master Journal validation failed: Account Balances mismatch vs snapshot: " + " | ".join(mismatches[:20]))
             leaders = ((stats.get("groups") or {}).get("leaders") or {})
             expected_leaders = {
                 "overall most wins": "most_wins_instrument",

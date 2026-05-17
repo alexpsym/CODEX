@@ -1233,3 +1233,108 @@ def test_canonical_market_precedence_cases():
     assert cm({'account':'BINANCE','symbol':'ETHUSD','asset_class':'fx'}) == 'crypto'
     assert cm({'account':'BYBIT','symbol':'BTCUSDT','asset_class':''}) == 'crypto'
     assert cm({'account':'UNKNOWN','symbol':'ABCDEF','asset_class':''}) == ''
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_sync_master_journal_writes_zero_balances_and_validation_detects_mismatch(tmp_path, monkeypatch):
+    from tools.master_journal_workbook import build_master_journal_workbook
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    mj = tmp_path / 'Master Journal.xlsx'
+    source_rows = [{'id':'r1','row_type':'trade','account':'PEPPERSTONE DEMO','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0,'result_pct':0.1}]
+    stale_snap = {'items': source_rows, 'stats': {'totals': {}, 'by_instrument': [{'symbol': 'EURUSD', 'total_trades': 1}], 'groups': {'leaders': {}}}, 'balances': [
+        {'account_label': 'PEPPERSTONE DEMO', 'balance': 4.78, 'currency': 'AUD'},
+        {'account_label': 'BINANCE', 'balance': 396.65720524, 'currency': 'USDT'},
+    ], 'diagnostics': {}}
+    build_master_journal_workbook(stale_snap, mj)
+    zero_snap = {'items': source_rows, 'stats': stale_snap['stats'], 'balances': [
+        {'account_label': 'PEPPERSTONE DEMO', 'balance': 0, 'currency': 'AUD', 'balance_source': 'broker_account_summary'},
+        {'account_label': 'BINANCE', 'balance': 0, 'currency': 'USDT', 'balance_source': 'broker_account_summary'},
+    ], 'diagnostics': {}}
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: zero_snap)
+    monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: source_rows)
+    result = master_service._sync_master_journal_workbook()
+    assert result['master_journal_ok'] is True
+
+    from openpyxl import load_workbook
+    wb = load_workbook(mj, data_only=True)
+    dash = wb['Dashboard']
+    pairs = {str(dash.cell(r,1).value or '').strip(): dash.cell(r,2).value for r in range(1,dash.max_row+1)}
+    assert pairs['PEPPERSTONE DEMO'] == 0
+    assert pairs['BINANCE'] == 0
+    wb.close()
+
+    # Force workbook-vs-snapshot mismatch by corrupting the candidate workbook after data-only update.
+    import tools.master_journal_workbook as mjw
+    real_update = mjw.update_master_journal_workbook_data_only
+
+    def _corrupting_update(path, snapshot):
+        payload = real_update(path, snapshot)
+        candidate_path = Path(payload['candidate_path'])
+        bad_wb = load_workbook(candidate_path)
+        try:
+            bad_dash = bad_wb['Dashboard']
+            for r in range(1, bad_dash.max_row + 1):
+                if str(bad_dash.cell(r, 1).value or '').strip() == 'PEPPERSTONE DEMO':
+                    bad_dash.cell(r, 2).value = 4.78
+                    break
+            bad_wb.save(candidate_path)
+        finally:
+            bad_wb.close()
+        return payload
+
+    monkeypatch.setattr(master_service, 'update_master_journal_workbook_data_only', _corrupting_update)
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: zero_snap)
+    bad = master_service._sync_master_journal_workbook()
+    assert bad['master_journal_ok'] is False
+    assert 'Account Balances mismatch vs snapshot' in str(bad.get('master_journal_error') or '')
+    assert 'PEPPERSTONE DEMO' in str(bad.get('master_journal_error') or '')
+    assert 'expected_balance=0.0' in str(bad.get('master_journal_error') or '')
+    assert 'actual_balance=4.78' in str(bad.get('master_journal_error') or '')
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_build_journal_balance_timelines_rejects_non_authoritative_stale_excel_seed():
+    rows = []
+    cashflows = {}
+    excel_balances = [{'account': 'BINANCE', 'label': 'BINANCE', 'balance': 396.65720524, 'currency': 'USDT', 'balance_source': 'excel_account_balance'}]
+    out = master_service._build_journal_balance_timelines(rows, cashflows, excel_balances)
+    bal = next(b for b in out['balances'] if str(b.get('label')) == 'BINANCE')
+    assert bal['balance'] is None
+    assert bal['balance_source'] == 'timeline_missing'
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_balance_regression_stale_excel_binance_overridden_by_authoritative_zero_source():
+    rows = []
+    cashflows = {}
+    excel_balances = [
+        {'account': 'BINANCE', 'label': 'BINANCE', 'balance': 396.65720524, 'currency': 'USDT', 'balance_source': 'excel_account_balance'}
+    ]
+    timeline = master_service._build_journal_balance_timelines(rows, cashflows, excel_balances)
+    merged = master_service._merge_missing_timeline_balances_with_broker(
+        timeline['balances'],
+        [
+            {
+                'account': 'BINANCE',
+                'label': 'BINANCE',
+                'balance': 0,
+                'currency': 'USDT',
+                'balance_source': 'broker_account_summary',
+                'source': 'broker_account_summary',
+                'as_of': '2026-05-11T00:00:00Z',
+            }
+        ],
+    )
+    bal = next(b for b in merged if str(b.get('label')) == 'BINANCE')
+    assert bal['balance'] == 0
+    assert bal['balance_source'] == 'broker_account_summary'
+
+
+@pytest.mark.skipif(not AVAILABLE, reason='master_service optional deps unavailable')
+def test_merge_missing_timeline_balances_with_broker_zero_overrides_stale_timeline():
+    timeline = [{'account': 'BINANCE', 'label': 'BINANCE', 'balance': 396.65720524, 'currency': 'USDT', 'balance_source': 'trade_timeline', 'missing_balance': False}]
+    broker = [{'account': 'BINANCE', 'label': 'BINANCE', 'balance': 0, 'currency': 'USDT', 'balance_source': 'broker_account_summary', 'as_of': '2026-05-10T00:00:00Z'}]
+    merged = master_service._merge_missing_timeline_balances_with_broker(timeline, broker)
+    bal = next(b for b in merged if str(b.get('label')) == 'BINANCE')
+    assert bal['balance'] == 0
+    assert bal['balance_source'] == 'broker_account_summary'
