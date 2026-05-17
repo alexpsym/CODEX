@@ -11,11 +11,15 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-SPEC = importlib.util.spec_from_file_location("render_master_service_bybit_sync", ROOT / "render" / "master_service.py")
-master_service = importlib.util.module_from_spec(SPEC)
-assert SPEC and SPEC.loader
-sys.modules[SPEC.name] = master_service
-SPEC.loader.exec_module(master_service)
+HTTPX_AVAILABLE = importlib.util.find_spec("httpx") is not None
+pytestmark = pytest.mark.skipif(not HTTPX_AVAILABLE, reason="httpx is not installed")
+
+if HTTPX_AVAILABLE:
+    SPEC = importlib.util.spec_from_file_location("render_master_service_bybit_sync", ROOT / "render" / "master_service.py")
+    master_service = importlib.util.module_from_spec(SPEC)
+    assert SPEC and SPEC.loader
+    sys.modules[SPEC.name] = master_service
+    SPEC.loader.exec_module(master_service)
 
 
 def test_save_json_file_retries_transient_permission_error(tmp_path, monkeypatch) -> None:

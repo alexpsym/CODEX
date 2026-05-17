@@ -530,6 +530,10 @@ function Test-GitStatusOnlyAllowedLocalData {
         $allowed =
             ($p -eq '.env') -or
             ($p -eq 'env.env') -or
+            ($p -eq 'watchlist.json') -or
+            ($p -eq 'state_manifest.json') -or
+            ($p -eq 'stateManifest.json') -or
+            ($p -eq 'state_backup.json') -or
             ($p -eq 'journal') -or ($p -eq 'journal/') -or ($p -like 'journal/*') -or
             ($p -like 'bybit_monitor/*.json') -or
             ($p -like 'oanda_monitor/*.json') -or
@@ -628,6 +632,15 @@ function Preserve-LocalFilesFromBackup {
         if (Test-Path -LiteralPath $oldFile -PathType Leaf) {
             Copy-Item -LiteralPath $oldFile -Destination $newFile -Force -ErrorAction Stop
             Write-Host "Preserved $fileName"
+        }
+    }
+
+    foreach ($stateFile in @('watchlist.json', 'state_manifest.json', 'stateManifest.json', 'state_backup.json')) {
+        $oldStateFile = Join-Path $BackupDir $stateFile
+        $newStateFile = Join-Path $NewRepoDir $stateFile
+        if (Test-Path -LiteralPath $oldStateFile -PathType Leaf) {
+            Copy-Item -LiteralPath $oldStateFile -Destination $newStateFile -Force -ErrorAction Stop
+            Write-Host "Preserved $stateFile"
         }
     }
 
@@ -756,13 +769,13 @@ function Ensure-CodexGitRepo {
         Invoke-GitCommand -GitExe $GitExe -Arguments @('checkout', '-B', $Branch, "origin/$Branch") -WorkingDirectory $RepoDir | Out-Null
         Invoke-GitCommand -GitExe $GitExe -Arguments @('reset', '--hard', "origin/$Branch") -WorkingDirectory $RepoDir | Out-Null
         Remove-PythonCacheDirsBestEffort -RepoDir $RepoDir
-        Invoke-GitCommand -GitExe $GitExe -Arguments @('clean', '-ffdn', '-e', 'journal/', '-e', '.env', '-e', 'env.env', '-e', 'bybit_monitor/*.json', '-e', 'oanda_monitor/*.json', '-e', 'render/data/', '-e', 'render/uploads/') -WorkingDirectory $RepoDir -AllowFailure | Out-Null
+        Invoke-GitCommand -GitExe $GitExe -Arguments @('clean', '-ffdn', '-e', 'journal/', '-e', '.env', '-e', 'env.env', '-e', 'watchlist.json', '-e', 'state_manifest.json', '-e', 'stateManifest.json', '-e', 'state_backup.json', '-e', 'bybit_monitor/*.json', '-e', 'oanda_monitor/*.json', '-e', 'render/data/', '-e', 'render/uploads/') -WorkingDirectory $RepoDir -AllowFailure | Out-Null
 
         $cleaned = $false
         $lastCleanFailure = ''
         for ($attempt = 1; $attempt -le 2; $attempt++) {
             try {
-                Invoke-GitCommandNoInput -GitExe $GitExe -Arguments @('clean', '-ffd', '-q', '-e', 'journal/', '-e', '.env', '-e', 'env.env', '-e', 'bybit_monitor/*.json', '-e', 'oanda_monitor/*.json', '-e', 'render/data/', '-e', 'render/uploads/') -WorkingDirectory $RepoDir -TimeoutSeconds 120 | Out-Null
+                Invoke-GitCommandNoInput -GitExe $GitExe -Arguments @('clean', '-ffd', '-q', '-e', 'journal/', '-e', '.env', '-e', 'env.env', '-e', 'watchlist.json', '-e', 'state_manifest.json', '-e', 'stateManifest.json', '-e', 'state_backup.json', '-e', 'bybit_monitor/*.json', '-e', 'oanda_monitor/*.json', '-e', 'render/data/', '-e', 'render/uploads/') -WorkingDirectory $RepoDir -TimeoutSeconds 120 | Out-Null
                 $cleaned = $true
                 break
             } catch {
