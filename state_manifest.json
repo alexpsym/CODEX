@@ -1,0 +1,37 @@
+{
+  "bybit_alerts": {
+    "app_profile": "local",
+    "key": "bybit_alerts",
+    "sha256": "81c697cbb025111269961acb28a4f4bc3ee36e5c279a9026fcf4a5823e0edaa1",
+    "source_host": "DESKTOP-1B14EQ6",
+    "updated_at": "2026-05-04T02:26:43.997911+00:00"
+  },
+  "bybit_settings": {
+    "app_profile": "local",
+    "key": "bybit_settings",
+    "sha256": "90b48f727623c07e42de3c3bbad9c7391f9fae194012a5581e52ceab2d28cd6f",
+    "source_host": "DESKTOP-1B14EQ6",
+    "updated_at": "2026-04-29T10:45:53.424712+00:00"
+  },
+  "oanda_alerts": {
+    "app_profile": "local",
+    "key": "oanda_alerts",
+    "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "source_host": "DESKTOP-1B14EQ6",
+    "updated_at": "2026-04-29T10:45:46.966178+00:00"
+  },
+  "oanda_settings": {
+    "app_profile": "local",
+    "key": "oanda_settings",
+    "sha256": "24056e34fdbd71558251cde0ce7a46bb9509ceff62adb17f41a601fb8c073d82",
+    "source_host": "DESKTOP-1B14EQ6",
+    "updated_at": "2026-04-29T10:45:59.927676+00:00"
+  },
+  "watchlist": {
+    "app_profile": "local",
+    "key": "watchlist",
+    "sha256": "853ebd2f8c98c80758cff63b38d8d7603d51933dcd5d7eeccb919d9bd65d5d99",
+    "source_host": "DESKTOP-1B14EQ6",
+    "updated_at": "2026-05-07T11:46:22.780563+00:00"
+  }
+}
