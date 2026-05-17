@@ -266,6 +266,27 @@ def test_conditional_format_colors_and_dashboard_semantics(tmp_path: Path):
     assert any("C6EFCE" in f and "006100" in c for f, c in colors)
     assert any("FFC7CE" in f and "9C0006" in c for f, c in colors)
 
+def test_read_source_cashflow_new_balance_falls_back_to_balance_after_zero(tmp_path: Path):
+    snap = sample_snapshot()
+    snap["items"] = [
+        {'id':'t1','row_type':'trade','account':'BINANCE','symbol':'BTCUSDT','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0,'balance_after_trade':396.65720524,'currency':'USDT'},
+        {'id':'c1','row_type':'cashflow','account':'BINANCE','symbol':'CASHFLOW','side':'WITHDRAWAL','open_time':'2026-01-02','close_time':'2026-01-02','net_profit':-396.65720524,'balance_after_trade':0,'cashflow_amount':-396.65720524,'cashflow_new_balance':'','currency':'USDT'},
+    ]
+    out = tmp_path / "Master Journal.xlsx"
+    build_master_journal_workbook(snap, out)
+    wb = load_workbook(out)
+    ws = wb["All Trades"]
+    headers = {str(ws.cell(1, c).value): c for c in range(1, ws.max_column + 1)}
+    ws.cell(3, headers["Cashflow New Balance"]).value = None
+    wb.save(out)
+    wb.close()
+
+    parsed = read_master_journal_source(out)
+    cashflow_row = next(i for i in parsed["items"] if i.get("row_type") == "cashflow")
+    assert cashflow_row["cashflow_new_balance"] == 0
+    assert cashflow_row["cashflow_new_balance"] is not None
+    assert parsed["cashflow_ledger"]["BINANCE"][-1]["new_balance"] == 0
+
 def test_instrument_currency_and_percent_formats(tmp_path: Path):
     out=tmp_path/'fmt.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
     inst = wb["Instrument Averages"]
