@@ -2292,6 +2292,39 @@ def _classify_bybit_api_key_expired(error_text: object, *, account: str = "", ke
         "retMsg": ret_msg or "Your api key has expired",
         "message": f"Bybit {account_label} API key has expired. Replace {env_hint}, then restart Local Trading Tools.",
     }
+
+
+def _build_bybit_demo_calc_context_save_error(
+    *,
+    error: Exception,
+    resolved_symbol: str,
+    account: str,
+    timings_ms: Dict[str, Any],
+    quote_started: Optional[float],
+    submitted_payload: Dict[str, object],
+    pending_dependencies: Set[str],
+) -> Dict[str, object]:
+    return {
+        "code": "BYBIT_DEMO_CALC_CONTEXT_SAVE_FAILED",
+        "message": (
+            "Bybit Demo calculation was not saved to the repo-local calculation context file, so the journal cannot safely enrich the completed trade."
+            if _calc_context_uses_repo_local()
+            else "Bybit Demo calculation was not saved to Dropbox, so the journal cannot safely enrich the completed trade."
+        ),
+        "debug": {
+            "context_path": _bybit_demo_calc_context_path(),
+            "state_source": ("repo_local" if _calc_context_uses_repo_local() else "dropbox"),
+            "error": str(error),
+            "symbol": resolved_symbol,
+            "account": account,
+            "quote_latency_ms": _calculator_quote_elapsed_ms(quote_started),
+            "upstream_timings_ms": timings_ms or {},
+            "submitted_payload": submitted_payload or {},
+            "resolved_symbol": resolved_symbol or "",
+            "pending_dependencies": sorted(pending_dependencies or set()),
+        },
+    }
+
 def _calculator_quote_error_detail(
     code: str,
     message: str,
@@ -18197,7 +18230,18 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                     )
                     response_payload["calculation_context_saved"] = True
                 except Exception as exc:
-                    raise HTTPException(status_code=502, detail={"code": "BYBIT_DEMO_CALC_CONTEXT_SAVE_FAILED", "message": ("Bybit Demo calculation was not saved to the repo-local calculation context file, so the journal cannot safely enrich the completed trade." if _calc_context_uses_repo_local() else "Bybit Demo calculation was not saved to Dropbox, so the journal cannot safely enrich the completed trade."), "debug": {"context_path": _bybit_demo_calc_context_path(), "state_source": ("repo_local" if _calc_context_uses_repo_local() else "dropbox"), "error": str(exc), "symbol": resolved_symbol, "account": "demo"}}) from exc
+                    raise HTTPException(
+                        status_code=502,
+                        detail=_build_bybit_demo_calc_context_save_error(
+                            error=exc,
+                            resolved_symbol=resolved_symbol,
+                            account="demo",
+                            timings_ms=timings_ms,
+                            quote_started=quote_started,
+                            submitted_payload=submitted_debug,
+                            pending_dependencies=pending_dependencies,
+                        ),
+                    ) from exc
 
             if webhook_enabled:
                 pending_id = existing_pending_id or f"calc_bybit_{uuid4().hex[:16]}"

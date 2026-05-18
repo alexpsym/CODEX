@@ -509,3 +509,55 @@ def test_journal_summary_default_prompt_replaced_after_resolved_symbol_failure()
 
 def test_expired_key_error_does_not_reintroduce_prewarm_gate() -> None:
     assert "please wait for wallet/ticker prewarm" not in JS_PATH.read_text(encoding='utf-8').lower()
+
+
+def test_render_error_debug_escapes_html_values() -> None:
+    script = JS_PATH.read_text(encoding="utf-8")
+    assert "replace(/</g, '&lt;')" in script
+    assert "replace(/>/g, '&gt;')" in script
+    assert "escapeHtml(k)" in script
+
+
+def test_render_error_debug_escapes_runtime_html_payload() -> None:
+    node = shutil.which("node")
+    assert node
+    harness = r'''
+const fs=require('fs');const source=fs.readFileSync(process.argv[1],'utf8');
+class E{constructor(i){this.id=i;this.value='';this.textContent='';this.innerHTML='';this.dataset={};this.style={};this.listeners={};this.buttons=[];this.classList={toggle:()=>{},add:()=>{},remove:()=>{}};this.disabled=false;}addEventListener(e,c){this.listeners[e]=c;}querySelectorAll(s){return s==='button'?this.buttons:[];}}
+class B{constructor(v){this.dataset={v};this.listeners={};this.classList={toggle:()=>{},add:()=>{},remove:()=>{}};this.disabled=false;this._attrs={};}addEventListener(e,c){this.listeners[e]=c;}click(){if(this.listeners.click)this.listeners.click();}setAttribute(k,v){this._attrs[k]=String(v);}getAttribute(k){return this._attrs[k];}removeAttribute(k){delete this._attrs[k];}}
+const ids=['calc-error','calc-error-debug','calc-success','calc-results','calc-request-summary','calc-canonical-symbol','calc-journal-summary','calc-instrument-specs','risk-toggle-wrap','calc-webhook-panel','calc-webhook-url','calc-webhook-json','calc-webhook-copy','calc-webhook-copy-url','risk-toggle','calc-risk-label','limit-wrap','account-toggle','asset-toggle','side-toggle','order-toggle','webhook-toggle','test-toggle','timeframe-toggle','calc-symbol','calc-limit','calc-sl-ticks','calc-rr','calc-risk','calc-quote','calc-submit','calc-quote-status','calc-webhook-status'];
+const el=Object.fromEntries(ids.map(i=>[i,new E(i)])); const mk=(v)=>v.map(x=>new B(x));
+el['risk-toggle'].buttons=mk(['fixed_aud','percent']);el['asset-toggle'].buttons=mk(['crypto','fx']);el['account-toggle'].buttons=mk(['live','demo']);el['side-toggle'].buttons=mk(['buy','sell']);el['order-toggle'].buttons=mk(['market','limit']);el['webhook-toggle'].buttons=mk(['no','yes']);el['test-toggle'].buttons=mk(['no','yes']);
+el['calc-symbol'].value='BTC';el['calc-sl-ticks'].value='1111';el['calc-rr'].value='2';el['calc-risk'].value='1';
+global.fetch=async (url)=>{ if(url.includes('/quote')) return {ok:false,status:502,statusText:'bad',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({detail:{code:'BYBIT_DEMO_CALC_CONTEXT_SAVE_FAILED',message:'save failed',debug:{'<img src=x onerror=alert(1)>':{value:'<script>x</script>'}}}})}; return {ok:true,status:200,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({symbol:'BTCUSDT'})}; };
+global.document={getElementById:(id)=>el[id]};global.navigator={clipboard:{writeText:async()=>{}}};global.setTimeout=(f)=>{f();return 1;};global.clearTimeout=()=>{};eval(source);
+(async()=>{await el['calc-quote'].listeners.click();const out=el['calc-error-debug'].innerHTML;console.log(JSON.stringify({html:out,hasRawImg:out.includes('<img'),hasRawScript:out.includes('<script'),hasEscapedImg:out.includes('&lt;img'),hasEscapedScript:out.includes('&lt;script&gt;')}));})();
+'''
+    out = subprocess.run([node, "-e", harness, str(JS_PATH)], check=True, capture_output=True, text=True)
+    data = json.loads(out.stdout.strip().splitlines()[-1])
+    assert data["hasRawImg"] is False
+    assert data["hasRawScript"] is False
+    assert data["hasEscapedImg"] is True
+    assert data["hasEscapedScript"] is True
+
+
+def test_quote_failure_overwrites_stale_prewarm_ready_status_and_renders_debug() -> None:
+    node = shutil.which("node")
+    assert node
+    harness = r'''
+const fs=require('fs');const source=fs.readFileSync(process.argv[1],'utf8');
+class E{constructor(i){this.id=i;this.value='';this.textContent='';this.innerHTML='';this.dataset={};this.style={};this.listeners={};this.buttons=[];this.classList={toggle:()=>{},add:()=>{},remove:()=>{}};this.disabled=false;}addEventListener(e,c){this.listeners[e]=c;}querySelectorAll(s){return s==='button'?this.buttons:[];}}
+class B{constructor(v){this.dataset={v};this.listeners={};this.classList={toggle:()=>{},add:()=>{},remove:()=>{}};this.disabled=false;this._attrs={};}addEventListener(e,c){this.listeners[e]=c;}click(){if(this.listeners.click)this.listeners.click();}setAttribute(k,v){this._attrs[k]=String(v);}getAttribute(k){return this._attrs[k];}removeAttribute(k){delete this._attrs[k];}}
+const ids=['calc-error','calc-error-debug','calc-success','calc-results','calc-request-summary','calc-canonical-symbol','calc-journal-summary','calc-instrument-specs','risk-toggle-wrap','calc-webhook-panel','calc-webhook-url','calc-webhook-json','calc-webhook-copy','calc-webhook-copy-url','risk-toggle','calc-risk-label','limit-wrap','account-toggle','asset-toggle','side-toggle','order-toggle','webhook-toggle','test-toggle','timeframe-toggle','calc-symbol','calc-limit','calc-sl-ticks','calc-rr','calc-risk','calc-quote','calc-submit','calc-quote-status','calc-webhook-status'];
+const el=Object.fromEntries(ids.map(i=>[i,new E(i)])); const mk=(v)=>v.map(x=>new B(x));
+el['risk-toggle'].buttons=mk(['fixed_aud','percent']);el['asset-toggle'].buttons=mk(['crypto','fx']);el['account-toggle'].buttons=mk(['live','demo']);el['side-toggle'].buttons=mk(['buy','sell']);el['order-toggle'].buttons=mk(['market','limit']);el['webhook-toggle'].buttons=mk(['no','yes']);el['test-toggle'].buttons=mk(['no','yes']);
+el['calc-symbol'].value='BTC';el['calc-sl-ticks'].value='1111';el['calc-rr'].value='2';el['calc-risk'].value='1';
+global.fetch=async (url,opts={})=>{if(url.includes('/instrument')) return {ok:true,status:200,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({symbol:'BTCUSDT'})}; if(url.includes('/prewarm')) return {ok:true,status:200,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({ready_for_quote:true,asset:'crypto',account:'demo',symbol:'BTCUSDT'})}; if(url.includes('/quote')) return {ok:false,status:502,statusText:'bad',headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({detail:{code:'BYBIT_DEMO_CALC_CONTEXT_SAVE_FAILED',message:'save failed',debug:{nested:{reason:'disk locked'}}}})}; return {ok:true,status:200,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({status:'no_data'})};};
+global.document={getElementById:(id)=>el[id]};global.navigator={clipboard:{writeText:async()=>{}}};global.setTimeout=(f)=>{f();return 1;};global.clearTimeout=()=>{};eval(source);
+(async()=>{await el['calc-symbol'].listeners.input();await Promise.resolve();await Promise.resolve();await el['calc-quote'].listeners.click();console.log(JSON.stringify({status:el['calc-quote-status'].textContent,error:el['calc-error'].textContent,debug:el['calc-error-debug'].innerHTML}));})();
+'''
+    out = subprocess.run([node, "-e", harness, str(JS_PATH)], check=True, capture_output=True, text=True)
+    data = json.loads(out.stdout.strip().splitlines()[-1])
+    assert "Quote data ready" not in data["status"]
+    assert "save failed" in data["error"] or "BYBIT_DEMO_CALC_CONTEXT_SAVE_FAILED" in data["error"]
+    assert "disk locked" in data["debug"] or "nested" in data["debug"]
