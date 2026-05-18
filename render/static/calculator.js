@@ -841,6 +841,14 @@
       const adj = submitResp?.submit_level_adjustments || {};
       if (adj && adj.submit_take_profit_auto_adjusted) okEl.textContent = `Order submitted. TP adjusted from ${adj.original_take_profit_price} to ${adj.adjusted_take_profit_price} because LastPrice moved since quote.`;
       else okEl.textContent = 'Order submitted successfully.';
+      const submitWarnings = [];
+      if (submitResp?.journal_context_saved === false) submitWarnings.push('Order may have been submitted, but journal enrichment context was not safely saved. Sync Journal may not be able to fill SL/target/timeframe/test/risk fields.');
+      if (submitResp?.context_save_error) submitWarnings.push(String(submitResp.context_save_error));
+      if (Array.isArray(submitResp?.warnings)) submitWarnings.push(...submitResp.warnings.map((w)=>String(w||'')).filter(Boolean));
+      if (submitWarnings.length) {
+        okEl.textContent = 'Order submitted, but journal context warning requires attention.';
+        errorEl.textContent = submitWarnings.join(' ');
+      }
     } catch (e) {
       okEl.textContent = '';
       errorEl.textContent = String(e.message || e);

@@ -324,6 +324,82 @@ def test_bybit_quote_uses_tick_step_fee_and_no_oversize(monkeypatch: pytest.Monk
     assert "estimated_reward" in body
 
 
+def test_place_bybit_order_returns_context_failure_warning_on_first_save_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("demo", "k", "s", "https://bybit.test", "KEY1"))
+    monkeypatch.setattr(master_service, "_bybit_position_idx_for_order", lambda **_kwargs: 0)
+    monkeypatch.setattr(master_service, "_parse_limit_cancel_settings", lambda _payload: (None, None))
+    monkeypatch.setattr(master_service, "_delete_pending_webhook", lambda _id: False)
+    monkeypatch.setattr(master_service, "_invalidate_open_orders_cache", lambda: None)
+
+    async def fake_get(_base, path, _params, **_kwargs):
+        if path.endswith("instruments-info"):
+            return {"result": {"list": [{"priceFilter": {"tickSize": "0.1"}}]}}
+        if path.endswith("tickers"):
+            return {"result": {"list": [{"lastPrice": "100"}]}}
+        return {"result": {"list": []}}
+
+    async def fake_signed_post(**_kwargs):
+        return {"retCode": 0, "retMsg": "OK", "result": {"orderId": "oid-1", "orderLinkId": "ol-1"}}
+
+    monkeypatch.setattr(master_service, "_bybit_get_async", fake_get)
+    monkeypatch.setattr(master_service, "_bybit_signed_post", fake_signed_post)
+    monkeypatch.setattr(master_service, "_upsert_calculator_trade_context", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("ctxfail")))
+
+    result = asyncio.run(master_service._place_bybit_order({
+        "symbol": "BTCUSDT", "action": "buy", "quantity": "0.01", "account": "demo", "order_type": "market"
+    }, request_id="rid-first-fail"))
+    assert result.get("journal_context_saved") is False
+    assert result.get("context_save_error")
+    assert result.get("warnings")
+
+
+def test_place_bybit_order_secondary_context_failure_adds_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("demo", "k", "s", "https://bybit.test", "KEY1"))
+    monkeypatch.setattr(master_service, "_bybit_position_idx_for_order", lambda **_kwargs: 0)
+    monkeypatch.setattr(master_service, "_parse_limit_cancel_settings", lambda _payload: (None, None))
+    monkeypatch.setattr(master_service, "_delete_pending_webhook", lambda _id: False)
+    monkeypatch.setattr(master_service, "_invalidate_open_orders_cache", lambda: None)
+
+    async def fake_get(_base, path, _params, **_kwargs):
+        if path.endswith("instruments-info"):
+            return {"result": {"list": [{"priceFilter": {"tickSize": "0.1"}}]}}
+        if path.endswith("tickers"):
+            return {"result": {"list": [{"lastPrice": "100"}]}}
+        return {"result": {"list": []}}
+
+    async def fake_signed_post(**_kwargs):
+        return {"retCode": 0, "retMsg": "OK", "result": {"orderId": "oid-2", "orderLinkId": "ol-2"}}
+
+    async def fake_wait_position(**_kwargs):
+        return {"avgPrice": "100", "positionIdx": 0, "size": "1"}
+
+    async def fake_set_tpsl(**_kwargs):
+        return {"retCode": 0}
+
+    async def fake_fetch_positions(**_kwargs):
+        return [{"size": "1", "takeProfit": "110", "stopLoss": "95"}]
+
+    calls = {"n": 0}
+    def fake_upsert(_payload, require_durable=True):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("secondary-fail")
+        return _payload
+
+    monkeypatch.setattr(master_service, "_bybit_get_async", fake_get)
+    monkeypatch.setattr(master_service, "_bybit_signed_post", fake_signed_post)
+    monkeypatch.setattr(master_service, "_wait_for_position_entry", fake_wait_position)
+    monkeypatch.setattr(master_service, "_set_bybit_trading_stop", fake_set_tpsl)
+    monkeypatch.setattr(master_service, "_fetch_bybit_positions", fake_fetch_positions)
+    monkeypatch.setattr(master_service, "_upsert_calculator_trade_context", fake_upsert)
+
+    result = asyncio.run(master_service._place_bybit_order({
+        "symbol": "BTCUSDT", "action": "buy", "quantity": "0.01", "account": "demo", "order_type": "market",
+        "stop_loss_price": "95", "take_profit_price": "110"
+    }, request_id="rid-second-fail"))
+    assert result.get("journal_context_saved") is True
+    assert any("secondary journal context update failed" in str(w).lower() for w in (result.get("warnings") or []))
+
 def test_bybit_quote_snaps_price_fields_with_trailing_zero_tick(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("live", "k", "s", "https://bybit.test", "KEY1"))
     monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["BTCUSDT"]))
@@ -667,6 +743,32 @@ def test_submit_routes_to_existing_order_helpers(monkeypatch: pytest.MonkeyPatch
         "entry_price": "1.2", "stop_loss_price": "1.3", "take_profit_price": "1.1", "quantity": "1000", "timeframe": "1h",
     }))
     assert calls == {"bybit": 1, "oanda": 1}
+
+
+def test_submit_and_webhook_bubble_context_warning_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_bybit(payload, *, request_id):
+        return {"order": {"orderId": "oid"}, "journal_context_saved": False, "warnings": ["warn"], "context_save_error": "boom"}
+
+    monkeypatch.setattr(master_service, "_place_bybit_order", fake_bybit)
+    monkeypatch.setattr(master_service, "_assert_pending_webhook_executable", lambda _payload: None)
+    monkeypatch.setattr(master_service, "_update_pending_webhook", lambda _wid, _updates: {"id": _wid})
+    monkeypatch.setattr(master_service, "_update_webhook_attempt", lambda *_a, **_k: None)
+    monkeypatch.setattr(master_service, "_consume_pending_webhook", lambda *_a, **_k: True)
+    monkeypatch.setattr(master_service, "list_open_orders", lambda force=False: asyncio.sleep(0, result=master_service.JSONResponse({"items": []})))
+
+    submit = json.loads(asyncio.run(master_service.calculator_submit({
+        "asset": "crypto", "account": "demo", "symbol": "BTCUSDT", "action": "buy", "order_type": "market", "quantity": "0.01"
+    })).body.decode("utf-8"))
+    assert submit["journal_context_saved"] is False
+    assert submit["warnings"] == ["warn"]
+    assert submit["context_save_error"] == "boom"
+
+    webhook = json.loads(asyncio.run(master_service.calculator_webhook({
+        "asset": "crypto", "pending_webhook_id": "wh-ctx", "account": "demo", "symbol": "BTCUSDT", "action": "buy", "order_type": "market", "quantity": "0.01"
+    })).body.decode("utf-8"))
+    assert webhook["journal_context_saved"] is False
+    assert webhook["warnings"] == ["warn"]
+    assert webhook["context_save_error"] == "boom"
 
 
 def test_journal_summary_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -8,6 +8,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+if importlib.util.find_spec("httpx") is None:
+    pytest.skip("httpx is not installed in this environment", allow_module_level=True)
 sys.modules.setdefault("dotenv", types.SimpleNamespace(load_dotenv=lambda *args, **kwargs: None))
 SPEC = importlib.util.spec_from_file_location(
     "render_master_service_oanda_fill_recovery", ROOT / "render" / "master_service.py"
