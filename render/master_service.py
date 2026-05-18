@@ -7093,6 +7093,7 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
                 "symbol": symbol,
                 "account": account,
                 "timeframe": _normalize_timeframe((trade_ctx or {}).get("timeframe")),
+                "calculation_context_id": (trade_ctx or {}).get("calculation_context_id") or (trade_ctx or {}).get("context_id"),
                 "is_test_trade": _normalize_test_trade_flag((trade_ctx or {}).get("is_test_trade")),
                 "stop_loss": (trade_ctx or {}).get("stop_loss"),
                 "take_profit": (trade_ctx or {}).get("take_profit"),
@@ -11707,6 +11708,17 @@ def _upsert_pending_webhook(payload: Dict[str, object]) -> Dict[str, object]:
             "is_test_trade": entry.get("is_test_trade"),
             "open_time": opened_at_iso,
             "status": "ACTIVE",
+                "calculation_context_id": payload.get("calculation_context_id"),
+                "quote_created_at_ms": payload.get("quote_created_at_ms"),
+                "risk_mode": payload.get("risk_mode"),
+                "risk_value": payload.get("risk_value"),
+                "stop_loss_ticks": payload.get("stop_loss_ticks"),
+                "take_profit_ticks": payload.get("take_profit_ticks"),
+                "target_mode": payload.get("target_mode"),
+                "risk_reward": payload.get("risk_reward"),
+                "planned_entry_price": payload.get("planned_entry_price"),
+                "planned_stop_price": payload.get("planned_stop_price"),
+                "planned_target_price": payload.get("planned_target_price"),
             "cancel_if_touched_price": entry.get("cancel_if_touched_price"),
             "cancel_if_touched_operator": entry.get("cancel_if_touched_operator"),
             "setup_reference_price": entry.get("setup_reference_price"),
@@ -11862,6 +11874,23 @@ def _load_trade_contexts() -> List[Dict[str, object]]:
 def _save_trade_contexts(items: List[Dict[str, object]]) -> None:
     _save_json_file(TRADE_CONTEXTS_PATH, {"items": items, "updated_at": _utc_now_iso()})
     _schedule_dropbox_upload_state_backup()
+
+def _calculator_context_path() -> Path:
+    return TRADE_CONTEXTS_PATH
+
+def _load_calculator_trade_contexts() -> List[Dict[str, object]]:
+    return _load_trade_contexts()
+
+def _save_calculator_trade_contexts(items: List[Dict[str, object]]) -> None:
+    _save_trade_contexts(items)
+
+def _upsert_calculator_trade_context(payload: Dict[str, object], require_durable: bool = True) -> Dict[str, object]:
+    try:
+        return _upsert_trade_context(payload)
+    except Exception:
+        if require_durable:
+            raise
+        return dict(payload or {})
 
 
 def _load_webhook_attempts() -> List[Dict[str, object]]:
@@ -12070,8 +12099,10 @@ def _upsert_trade_context(payload: Dict[str, object]) -> Dict[str, object]:
     def _is_blank(value: object) -> bool:
         return value is None or (isinstance(value, str) and value.strip() == "")
 
-    id_fields = ("pending_webhook_id", "order_id", "order_link_id", "parent_order_link_id", "trade_id", "transaction_id")
+    id_fields = ("calculation_context_id", "context_id", "pending_webhook_id", "order_id", "order_link_id", "parent_order_link_id", "trade_id", "transaction_id")
     incoming_ids = {
+        "calculation_context_id": str(payload.get("calculation_context_id") or payload.get("context_id") or "").strip(),
+        "context_id": str(payload.get("context_id") or payload.get("calculation_context_id") or "").strip(),
         "pending_webhook_id": pending_id,
         "order_id": order_id,
         "order_link_id": order_link_id,
@@ -12187,10 +12218,18 @@ def _mark_trade_context_closed_or_cancelled(*, pending_webhook_id: Optional[str]
 
 def _lookup_trade_context_for_open_item(item: Dict[str, object]) -> Optional[Dict[str, object]]:
     contexts = _load_trade_contexts()
+    refs = item.get("raw_refs") if isinstance(item.get("raw_refs"), dict) else {}
     broker = str(item.get("broker") or "").strip().lower()
     account = str(item.get("account") or "").strip().lower()
     instrument = str(item.get("instrument") or "").strip().upper()
     side = _normalize_side_for_comparison(item.get("side"))
+    calculation_context_id = str(
+        item.get("calculation_context_id")
+        or item.get("context_id")
+        or refs.get("calculation_context_id")
+        or refs.get("context_id")
+        or ""
+    ).strip()
     order_id = str(item.get("id") or item.get("order_id") or "").strip()
     order_link_id = str(item.get("order_link_id") or item.get("orderLinkId") or "").strip()
     parent_order_link_id = str(
@@ -12198,6 +12237,9 @@ def _lookup_trade_context_for_open_item(item: Dict[str, object]) -> Optional[Dic
     ).strip()
     trade_id = str(item.get("trade_id") or "").strip()
 
+    for ctx in contexts:
+        if calculation_context_id and str(ctx.get("calculation_context_id") or ctx.get("context_id") or "").strip() == calculation_context_id:
+            return ctx
     for ctx in contexts:
         if order_id and str(ctx.get("order_id") or "").strip() == order_id:
             return ctx
@@ -12275,6 +12317,10 @@ def _lookup_trade_context_for_journal_row(row: Dict[str, object]) -> Optional[Di
         or ""
     ).strip()
     pending_webhook_id = str(refs.get("pending_webhook_id") or row.get("pending_webhook_id") or "").strip()
+    calculation_context_id = str(refs.get("calculation_context_id") or row.get("calculation_context_id") or row.get("context_id") or "").strip()
+    for ctx in contexts:
+        if calculation_context_id and str(ctx.get("calculation_context_id") or ctx.get("context_id") or "").strip() == calculation_context_id:
+            return ctx
     for ctx in contexts:
         if order_id and str(ctx.get("order_id") or "").strip() == order_id:
             return ctx
@@ -13432,9 +13478,15 @@ async def _place_bybit_order(
     order_id = order_result.get("orderId")
     attached_tp = _normalize_linear_price(_parse_bybit_price_level(body.get("takeProfit")))
     attached_sl = _normalize_linear_price(_parse_bybit_price_level(body.get("stopLoss")))
+    initial_stop_loss = attached_sl if attached_sl is not None else planned_stop_price
+    initial_take_profit = attached_tp if attached_tp is not None else planned_target_price
     has_attached_order_create_tpsl = attached_tp is not None or attached_sl is not None
-    _upsert_trade_context(
-        {
+    context_save_error: Optional[str] = None
+    post_submit_warnings: List[str] = []
+    journal_context_saved = True
+    try:
+        _upsert_calculator_trade_context(
+            {
             "pending_webhook_id": str(payload.get("pending_webhook_id") or "").strip(),
             "broker": "bybit",
             "account": account,
@@ -13451,8 +13503,27 @@ async def _place_bybit_order(
             "order_id": str(order_id or "").strip(),
             "order_link_id": str(order_result.get("orderLinkId") or body.get("orderLinkId") or "").strip(),
             "status": "PENDING_ENTRY" if (category == "linear" and order_type == "limit" and has_attached_order_create_tpsl) else "ACTIVE",
+            "calculation_context_id": payload.get("calculation_context_id"),
+            "quote_created_at_ms": payload.get("quote_created_at_ms"),
+            "risk_mode": payload.get("risk_mode"),
+            "risk_value": payload.get("risk_value"),
+            "stop_loss_ticks": payload.get("stop_loss_ticks"),
+            "take_profit_ticks": payload.get("take_profit_ticks"),
+            "target_mode": payload.get("target_mode"),
+            "risk_reward": payload.get("risk_reward"),
+            "planned_entry_price": planned_entry_price,
+            "planned_stop_price": planned_stop_price,
+            "planned_target_price": planned_target_price,
+            "stop_loss": initial_stop_loss,
+            "take_profit": initial_take_profit,
         }
-    )
+        )
+    except Exception as exc:
+        journal_context_saved = False
+        context_save_error = str(exc)
+        post_submit_warnings.append(
+            "Order may have been submitted, but journal enrichment context was not safely saved."
+        )
     if account == "demo" and category == "linear":
         cache_bybit_demo_tpsl_request(
             order_id=str(order_id or ""),
@@ -13661,8 +13732,10 @@ async def _place_bybit_order(
                     stop_loss=_parse_bybit_price_level(sl_target),
                     source="trading_stop_computed",
                 )
-            _upsert_trade_context(
-                {
+            secondary_ctx_update_failed = False
+            try:
+                _upsert_calculator_trade_context(
+                    {
                     "pending_webhook_id": str(payload.get("pending_webhook_id") or "").strip(),
                     "broker": "bybit",
                     "account": account,
@@ -13680,8 +13753,36 @@ async def _place_bybit_order(
                     "order_id": str(order_id or "").strip(),
                     "order_link_id": str(order_result.get("orderLinkId") or body.get("orderLinkId") or "").strip(),
                     "status": "ACTIVE",
-                }
-            )
+                "calculation_context_id": payload.get("calculation_context_id"),
+                "quote_created_at_ms": payload.get("quote_created_at_ms"),
+                "risk_mode": payload.get("risk_mode"),
+                "risk_value": payload.get("risk_value"),
+                "stop_loss_ticks": payload.get("stop_loss_ticks"),
+                "take_profit_ticks": payload.get("take_profit_ticks"),
+                "target_mode": payload.get("target_mode"),
+                "risk_reward": payload.get("risk_reward"),
+                "planned_entry_price": payload.get("planned_entry_price"),
+                    "planned_stop_price": payload.get("planned_stop_price"),
+                    "planned_target_price": payload.get("planned_target_price"),
+                    },
+                    require_durable=True,
+                )
+            except Exception:
+                secondary_ctx_update_failed = True
+                BYBIT_LOGGER.exception(
+                    "BYBIT_CONTEXT_SECONDARY_UPDATE_FAILED request_id=%s order_id=%s symbol=%s account=%s",
+                    request_id,
+                    order_id,
+                    symbol,
+                    account,
+                )
+            if secondary_ctx_update_failed and journal_context_saved and (
+                (initial_stop_loss is None and sl_target is not None)
+                or (initial_take_profit is None and tp_target is not None)
+            ):
+                post_submit_warnings.append(
+                    "Order submitted, but a secondary journal context update failed while refining TP/SL values."
+                )
         except Exception as exc:
             tpsl_error = tpsl_error or str(exc)
             BYBIT_LOGGER.exception(
@@ -13794,6 +13895,9 @@ async def _place_bybit_order(
         "planned_target_price": planned_target_price,
         "submit_level_adjustments": payload.get("_submit_level_adjustments"),
         "status_message": "Limit order accepted by Bybit. TP/SL was attached to the entry order; live position verification will only be possible after fill." if (category == "linear" and order_type == "limit" and has_attached_order_create_tpsl) else "",
+        "journal_context_saved": journal_context_saved,
+        "warnings": post_submit_warnings,
+        "context_save_error": context_save_error,
     }
 
 
@@ -13961,8 +14065,10 @@ async def _place_oanda_order(
     limit_cancel_offset, limit_cancel_pct = _parse_limit_cancel_settings(payload)
     pending_id = str(payload.get("pending_webhook_id") or "").strip()
     post_submit_warnings: List[str] = []
+    context_save_error: Optional[str] = None
+    context_persist_ok = True
     try:
-        _upsert_trade_context(
+        _upsert_calculator_trade_context(
             {
                 "pending_webhook_id": pending_id or None,
                 "broker": "oanda",
@@ -13980,6 +14086,17 @@ async def _place_oanda_order(
                 "trade_id": str(trade_id or "").strip(),
                 "transaction_id": fill_tx_id or str(result.get("lastTransactionID") or "").strip(),
                 "status": "ACTIVE",
+                "calculation_context_id": payload.get("calculation_context_id"),
+                "quote_created_at_ms": payload.get("quote_created_at_ms"),
+                "risk_mode": payload.get("risk_mode"),
+                "risk_value": payload.get("risk_value"),
+                "stop_loss_ticks": payload.get("stop_loss_ticks"),
+                "take_profit_ticks": payload.get("take_profit_ticks"),
+                "target_mode": payload.get("target_mode"),
+                "risk_reward": payload.get("risk_reward"),
+                "planned_entry_price": payload.get("planned_entry_price"),
+                "planned_stop_price": payload.get("planned_stop_price"),
+                "planned_target_price": payload.get("planned_target_price"),
             }
         )
         _schedule_dropbox_upload_state_backup()
@@ -13996,9 +14113,11 @@ async def _place_oanda_order(
             # in the Open Orders / Positions table.
             if _delete_pending_webhook(pending_id):
                 _schedule_dropbox_upload_state_backup()
-    except Exception:
+    except Exception as exc:
         warning = "Order accepted by OANDA, but post-submit bookkeeping failed."
         post_submit_warnings.append(warning)
+        context_save_error = str(exc)
+        context_persist_ok = False
         BYBIT_LOGGER.exception(
             "OANDA post-submit bookkeeping failed request_id=%s order_id=%s",
             request_id,
@@ -14034,6 +14153,11 @@ async def _place_oanda_order(
 
     if post_submit_warnings:
         result["warnings"] = post_submit_warnings
+        result["journal_context_saved"] = context_persist_ok
+        if context_save_error:
+            result["context_save_error"] = context_save_error
+    else:
+        result["journal_context_saved"] = True
 
     return result
 
@@ -18495,7 +18619,15 @@ async def calculator_webhook(request: Request, payload: Dict[str, object] = Body
             "take_profit_price": payload.get("take_profit_price") or payload.get("planned_target_price"),
             "quantity": payload.get("quantity"),
             "timeframe": payload.get("timeframe"),
-            "is_test_trade": _normalize_test_trade_flag(
+            "calculation_context_id": payload.get("calculation_context_id") or payload.get("context_id"),
+        "quote_created_at_ms": payload.get("quote_created_at_ms"),
+        "risk_mode": payload.get("risk_mode"),
+        "risk_value": payload.get("risk_value"),
+        "stop_loss_ticks": payload.get("stop_loss_ticks"),
+        "take_profit_ticks": payload.get("take_profit_ticks"),
+        "target_mode": payload.get("target_mode"),
+        "risk_reward": payload.get("risk_reward"),
+        "is_test_trade": _normalize_test_trade_flag(
                 payload.get("is_test_trade", payload.get("test_trade", payload.get("test")))
             ),
             "pending_webhook_id": pending_id or None,
@@ -18585,14 +18717,28 @@ async def calculator_webhook(request: Request, payload: Dict[str, object] = Body
                     request_id=request_id,
                     reason="order_accepted",
                 )
-            return JSONResponse({"ok": True, "broker": "bybit", "result": result})
+            return JSONResponse({
+                "ok": True,
+                "broker": "bybit",
+                "result": result,
+                "journal_context_saved": result.get("journal_context_saved", True),
+                "warnings": result.get("warnings"),
+                "context_save_error": result.get("context_save_error"),
+            })
         if asset == "fx":
             result = await _place_oanda_order(
                 canonical,
                 request_id=request_id,
             )
             _update_webhook_attempt(request_id, {"status": "CONSUMED"})
-            return JSONResponse({"ok": True, "broker": "oanda", "result": result})
+            return JSONResponse({
+                "ok": True,
+                "broker": "oanda",
+                "result": result,
+                "journal_context_saved": result.get("journal_context_saved", True),
+                "warnings": result.get("warnings"),
+                "context_save_error": result.get("context_save_error"),
+            })
 
         raise HTTPException(status_code=400, detail="asset must be crypto or fx.")
     except BybitPreSubmitValidationError as exc:
@@ -18873,6 +19019,14 @@ async def calculator_submit(payload: Dict[str, object] = Body(default={})) -> JS
         "level_anchor_mode": payload.get("level_anchor_mode"),
         "pending_webhook_id": payload.get("pending_webhook_id"),
         "previous_pending_webhook_id": payload.get("previous_pending_webhook_id"),
+        "calculation_context_id": payload.get("calculation_context_id") or payload.get("context_id"),
+        "quote_created_at_ms": payload.get("quote_created_at_ms"),
+        "risk_mode": payload.get("risk_mode"),
+        "risk_value": payload.get("risk_value"),
+        "stop_loss_ticks": payload.get("stop_loss_ticks"),
+        "take_profit_ticks": payload.get("take_profit_ticks"),
+        "target_mode": payload.get("target_mode"),
+        "risk_reward": payload.get("risk_reward"),
         "is_test_trade": _normalize_test_trade_flag(
             payload.get("is_test_trade", payload.get("test_trade", payload.get("test")))
         ),
@@ -18884,13 +19038,28 @@ async def calculator_submit(payload: Dict[str, object] = Body(default={})) -> JS
                 canonical,
                 request_id=request_id,
             )
-            return JSONResponse({"ok": True, "broker": "bybit", "result": result, "submit_level_adjustments": canonical.get("_submit_level_adjustments")})
+            return JSONResponse({
+                "ok": True,
+                "broker": "bybit",
+                "result": result,
+                "submit_level_adjustments": canonical.get("_submit_level_adjustments"),
+                "journal_context_saved": result.get("journal_context_saved", True),
+                "warnings": result.get("warnings"),
+                "context_save_error": result.get("context_save_error"),
+            })
         if asset == "fx":
             result = await _place_oanda_order(
                 canonical,
                 request_id=request_id,
             )
-            return JSONResponse({"ok": True, "broker": "oanda", "result": result})
+            return JSONResponse({
+                "ok": True,
+                "broker": "oanda",
+                "result": result,
+                "journal_context_saved": result.get("journal_context_saved", True),
+                "warnings": result.get("warnings"),
+                "context_save_error": result.get("context_save_error"),
+            })
         raise HTTPException(status_code=400, detail="asset must be crypto or fx.")
     except HTTPException:
         raise
@@ -24060,7 +24229,10 @@ async def _run_trading_journal_sync_job() -> None:
         bybit_demo = None
         bybit_live = None
         oanda_sync: Dict[str, object] = {}
-        if broker_refresh_enabled:
+        run_closed_trade_capture = bool(
+            broker_refresh_enabled or TRADING_JOURNAL_SYNC_CALCULATOR_TRADES_ON_MANUAL
+        )
+        if run_closed_trade_capture:
             _set_trading_journal_sync_state(stage="syncing_broker_closed_pnl", message="Syncing broker closed P/L…")
             skip_demo = bool((result or {}).get("diagnostics", {}).get("bybit_demo_workbook_cleared"))
             if skip_demo:
@@ -24079,7 +24251,7 @@ async def _run_trading_journal_sync_job() -> None:
                     oanda_sync[acct] = await _recover_oanda_recent_fills(acct)
                 except Exception as exc:
                     oanda_sync[acct] = {"ok": False, "error": str(exc)}
-        if _trading_journal_local_excel_authoritative() and broker_refresh_enabled:
+        if _trading_journal_local_excel_authoritative() and run_closed_trade_capture:
             result = await asyncio.to_thread(_import_trading_journal_from_sources, progress_cb=_cb)
         _set_trading_journal_sync_state(stage="updating_master_journal", message="Updating Master Journal.xlsx…")
         workbook_sync = await asyncio.to_thread(_sync_master_journal_workbook)

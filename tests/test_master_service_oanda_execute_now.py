@@ -7,6 +7,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+if importlib.util.find_spec("httpx") is None:
+    pytest.skip("httpx is not installed in this environment", allow_module_level=True)
 SPEC = importlib.util.spec_from_file_location("render_master_service_oanda", ROOT / "render" / "master_service.py")
 master_service = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader
@@ -71,13 +73,15 @@ def test_place_oanda_order_without_pending_webhook_id_does_not_raise(oanda_order
 
 
 def test_bookkeeping_failure_does_not_convert_success_to_error(oanda_order_mocks, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(master_service, "_upsert_trade_context", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(master_service, "_upsert_calculator_trade_context", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
 
     result = asyncio.run(master_service._place_oanda_order(_base_payload(), request_id="req-2"))
 
     assert result["orderCreateTransaction"]["id"] == "12345"
+    assert result.get("journal_context_saved") is False
     assert "warnings" in result
     assert any("bookkeeping failed" in warning.lower() for warning in result["warnings"])
+    assert "context_save_error" in result
 
 
 def test_oanda_context_upsert_always_schedules_backup(oanda_order_mocks, monkeypatch: pytest.MonkeyPatch):
