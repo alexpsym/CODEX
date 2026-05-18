@@ -124,6 +124,23 @@
     }
     else setQuoteStatus('Quote data prewarm incomplete; Calculate will retry live.');
   }
+
+  function expiredKeyActionableMessage(accountHint) {
+    const acct = String(accountHint || state.account || '').toLowerCase();
+    if (acct === 'demo') return 'Bybit Demo API key expired. Replace BYBIT_API_KEY2/BYBIT_API_SECRET2, then restart Local Trading Tools.';
+    return 'Bybit Live API key expired. Replace BYBIT_API_KEY1/BYBIT_API_SECRET1, then restart Local Trading Tools.';
+  }
+
+  function extractExpiredBybitKeyMessage(detail) {
+    const dbg = (detail && detail.debug) || {};
+    const code = String((detail && detail.code) || (dbg && dbg.code) || '').toUpperCase();
+    const blob = JSON.stringify(detail || {}).toLowerCase();
+    if (code === 'BYBIT_API_KEY_EXPIRED' || blob.includes('retcode=33004') || blob.includes('"retcode":33004') || blob.includes('api key has expired')) {
+      return expiredKeyActionableMessage((detail && detail.account) || dbg.account || state.account);
+    }
+    return '';
+  }
+
   function refreshPrewarmSchedule() {
     if (walletPrewarmInterval) {
       clearInterval(walletPrewarmInterval);
@@ -609,7 +626,7 @@
         const specs = await request(`/api/instrument-specs?query=${encodeURIComponent(instrument.symbol)}${prefer}`, { signal: resolveController.signal });
         renderSpecs(specs);
       } catch (_specErr) {
-        setSpecsState('error', `Unable to load instrument specs for ${instrument.symbol}.`);
+        setSpecsState('error', `Instrument specs unavailable for ${instrument.symbol}.`);
       }
       setJournalState('loading', 'Loading journal summary...');
       if (journalController) journalController.abort();
@@ -622,10 +639,16 @@
           renderJournalStats(j);
         }
       } catch (_journalErr) {
-        setJournalState('error', `Unable to load journal summary for ${instrument.symbol}.`);
+        setJournalState('error', `Journal summary unavailable for ${instrument.symbol}.`);
       }
     } catch (e) {
-      if (e.name === 'AbortError') return;
+      if (e.name === 'AbortError') {
+        if (state.resolvedSymbol) {
+          setSpecsState('error', `Instrument specs unavailable for ${state.resolvedSymbol}.`);
+          setJournalState('error', `Journal summary unavailable for ${state.resolvedSymbol}.`);
+        }
+        return;
+      }
       state.resolvedSymbol = '';
       setJournalState('unresolved', `Unresolved symbol: ${symbol}`);
       setSpecsState('unresolved', `Unresolved symbol: ${symbol}`);
@@ -815,8 +838,10 @@
       toggleWebhookPanel(false);
       state.pendingWebhookId = '';
       state.pendingWebhookDeleteUrl = '';
-      errorEl.textContent = String(e.message || e);
-      renderErrorDebug(e.detail || null);
+      const detailObj = e.detail || null;
+      const actionable = extractExpiredBybitKeyMessage(detailObj);
+      errorEl.textContent = actionable || String(e.message || e);
+      renderErrorDebug(detailObj);
     } finally {
       clearTimeout(softTimeoutId);
       clearTimeout(timeoutId);
