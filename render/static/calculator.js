@@ -21,6 +21,7 @@
     webhookCapability: null,
     quotePrewarmStatus: null,
     quotePrewarmPromise: null,
+    quotePrewarmContext: null,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -112,10 +113,16 @@
   }
   function setPrewarmStatus(status) {
     state.quotePrewarmStatus = status || null;
+    state.quotePrewarmContext = status
+      ? { account: String(status.account || state.account || '').toLowerCase(), asset: String(status.asset || state.asset || '').toLowerCase(), symbol: String(status.symbol || '').toUpperCase() }
+      : null;
     if (!status) return;
     if (status.ready_for_quote) setQuoteStatus('Quote data ready');
-    else if ((status.missing_required || []).includes('wallet')) setQuoteStatus('Wallet unavailable');
-    else setQuoteStatus('Preparing quote data…');
+    else if ((status.missing_required || []).includes('wallet')) {
+      const walletErr = String(status.wallet_error || '').trim();
+      setQuoteStatus(walletErr ? `Wallet prewarm unavailable; Calculate will retry live. (${walletErr})` : 'Wallet prewarm unavailable; Calculate will retry live.');
+    }
+    else setQuoteStatus('Quote data prewarm incomplete; Calculate will retry live.');
   }
   function refreshPrewarmSchedule() {
     if (walletPrewarmInterval) {
@@ -151,6 +158,8 @@
     else if (status === 'error') setQuoteStatus('Quote failed. Recalculate before submitting.');
     else if (status === 'idle') setQuoteStatus('');
     if (clearResults) resultEl.innerHTML = status === 'calculating' ? '<div class="card"><div class="muted">Calculating position…</div></div>' : '';
+    state.quotePrewarmStatus = null;
+    state.quotePrewarmContext = null;
   }
 
   function renderSpecs(specs) {
@@ -628,18 +637,42 @@
 
 
   async function prewarmQuoteDependencies(symbol) {
+    const expectedContext = {
+      account: String(state.account || '').toLowerCase(),
+      asset: String(state.asset || '').toLowerCase(),
+      symbol: String(symbol || '').toUpperCase(),
+    };
     try {
       if (!symbol) return;
-      state.quotePrewarmPromise = post('/api/calculator/prewarm', { asset: state.asset, account: state.account, symbol });
-      setPrewarmStatus(await state.quotePrewarmPromise);
+      state.quotePrewarmPromise = post('/api/calculator/prewarm', { asset: state.asset, account: state.account, symbol: expectedContext.symbol });
+      const status = await state.quotePrewarmPromise;
+      const currentContext = {
+        account: String(state.account || '').toLowerCase(),
+        asset: String(state.asset || '').toLowerCase(),
+        symbol: String(state.resolvedSymbol || '').toUpperCase(),
+      };
+      if (currentContext.account !== expectedContext.account || currentContext.asset !== expectedContext.asset || currentContext.symbol !== expectedContext.symbol) return;
+      setPrewarmStatus(status);
     } catch (_e) {}
     finally { state.quotePrewarmPromise = null; }
   }
   async function prewarmAccountDependencies() {
+    const expectedContext = {
+      account: String(state.account || '').toLowerCase(),
+      asset: String(state.asset || '').toLowerCase(),
+      symbol: '',
+    };
     try {
       if (state.asset !== 'crypto') return;
       state.quotePrewarmPromise = post('/api/calculator/prewarm-account', { asset: state.asset, account: state.account });
-      setPrewarmStatus(await state.quotePrewarmPromise);
+      const status = await state.quotePrewarmPromise;
+      const currentContext = {
+        account: String(state.account || '').toLowerCase(),
+        asset: String(state.asset || '').toLowerCase(),
+        symbol: '',
+      };
+      if (currentContext.account !== expectedContext.account || currentContext.asset !== expectedContext.asset) return;
+      setPrewarmStatus(status);
     } catch (_e) {}
     finally { state.quotePrewarmPromise = null; }
   }
@@ -731,9 +764,6 @@
         try { await Promise.race([resolveInFlight, new Promise((r) => setTimeout(r, 800))]); } catch (_e) {}
       }
       if (state.asset === 'crypto' && state.quotePrewarmPromise) setQuoteStatus('Preparing quote data…');
-      if (state.asset === 'crypto' && state.quotePrewarmStatus && state.quotePrewarmStatus.ready_for_quote === false) {
-        throw new Error('Preparing quote data… please wait for wallet/ticker prewarm.');
-      }
       const payload = {
         ...state,
         submitted_symbol: $('calc-symbol').value,
