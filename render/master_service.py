@@ -2565,9 +2565,15 @@ async def _bybit_resolve_and_fetch_specs(query: str, *, include_btc_reference: b
     ticker = None
     try:
         payload = await _bybit_get_async(base_url, "/v5/market/tickers", {"category": category, "symbol": symbol})
-        items = (payload.get("result") or {}).get("list") or []
-        if isinstance(items, list) and items and isinstance(items[0], dict):
-            ticker = items[0]
+        ticker_row = _extract_valid_bybit_ticker_row(payload, symbol)
+        if ticker_row:
+            _cache_bybit_ticker_payload(base_url, category, symbol, payload, "instrument_specs")
+            ticker = ticker_row
+        else:
+            items = (payload.get("result") or {}).get("list") or []
+            if isinstance(items, list) and items and isinstance(items[0], dict):
+                ticker = items[0]
+            warnings.append({"scope": "ticker", "symbol": symbol, "field": "tickers", "message": f"Bybit ticker payload invalid for {symbol}"})
     except Exception as exc:
         warnings.append({"scope": "ticker", "symbol": symbol, "field": "tickers", "message": str(exc)})
     specs: Dict[str, object] = {
@@ -17302,28 +17308,98 @@ async def _bybit_name_aliases_for_choices(base_url: str, symbols: List[str] | Se
     return out
 
 
+
+
+def _safe_exception_message(exc: Exception) -> str:
+    if isinstance(exc, HTTPException):
+        detail = exc.detail
+        if isinstance(detail, dict):
+            code = str(detail.get("code") or "").strip()
+            msg = str(detail.get("message") or "").strip()
+            if code and msg:
+                return f"{code}: {msg}"
+            if msg:
+                return msg
+            if code:
+                return code
+        else:
+            txt = str(detail or "").strip()
+            if txt:
+                return txt
+    txt = str(exc or "").strip()
+    if isinstance(exc, httpx.TimeoutException):
+        return f"{exc.__class__.__name__}: {txt}" if txt else exc.__class__.__name__
+    return txt or exc.__class__.__name__
+
+
+def _extract_valid_bybit_ticker_row(payload: Dict[str, object], symbol: str) -> Optional[Dict[str, object]]:
+    rows = ((payload or {}).get("result") or {}).get("list") or []
+    if not isinstance(rows, list) or not rows:
+        return None
+    want = str(symbol or "").upper()
+    row = None
+    for item in rows:
+        if isinstance(item, dict) and str(item.get("symbol") or "").upper() == want:
+            row = item
+            break
+    if row is None and isinstance(rows[0], dict):
+        row = rows[0]
+    if not isinstance(row, dict):
+        return None
+    try:
+        last = Decimal(str(row.get("lastPrice") or "0"))
+        bid = Decimal(str(row.get("bid1Price") or "0"))
+        ask = Decimal(str(row.get("ask1Price") or "0"))
+    except Exception:
+        return None
+    if last <= 0 or bid <= 0 or ask <= 0:
+        return None
+    return row
+
+
+def _cache_bybit_ticker_payload(base_url: str, category: str, symbol: str, payload: Dict[str, object], source: str) -> None:
+    key = f"{_bybit_base_key(base_url)}:{category}:{str(symbol or '').upper()}"
+    _BYBIT_TICKER_CACHE[key] = {"ts": time.time(), "payload": payload, "source": source}
 def _bybit_wallet_cache_key(account: str, base_url: str, api_key: str) -> str:
     return f"{account}:{_bybit_base_key(base_url)}:{hashlib.sha1(str(api_key).encode()).hexdigest()[:8]}"
 
-async def _fetch_bybit_ticker_cached(base_url: str, category: str, symbol: str, *, max_age_s: float = _BYBIT_TICKER_CACHE_TTL_SECONDS, timeout_s: float = 1.5) -> Dict[str, object]:
+async def _fetch_bybit_ticker_cached(base_url: str, category: str, symbol: str, *, max_age_s: float = _BYBIT_TICKER_CACHE_TTL_SECONDS, allow_stale_s: float = 45.0, timeout_s: float = 1.5, public_fallback_base_url: Optional[str] = None) -> Dict[str, object]:
     key = f"{_bybit_base_key(base_url)}:{category}:{symbol.upper()}"
     now = time.time()
     entry = _BYBIT_TICKER_CACHE.get(key) or {}
     ts = float(entry.get("ts") or 0.0)
-    if entry.get("payload") and (now - ts) <= max_age_s:
-        return {"payload": entry["payload"], "cache_status": "fresh", "cache_age_ms": int((now-ts)*1000), "joined_inflight": False}
+    age_s = now - ts
+    if entry.get("payload") and age_s <= max_age_s and _extract_valid_bybit_ticker_row(entry.get("payload") or {}, symbol):
+        return {"payload": entry["payload"], "cache_status": "fresh", "cache_age_ms": int(age_s*1000), "joined_inflight": False, "ticker_source": str(entry.get("source") or "account_base")}
     task = _BYBIT_TICKER_INFLIGHT.get(key)
     joined = bool(task and not task.done())
     if not joined:
         task = asyncio.create_task(_bybit_get_async(base_url, "/v5/market/tickers", {"category": category, "symbol": symbol}, timeout_s=timeout_s, connect_s=0.5, read_s=timeout_s))
         _BYBIT_TICKER_INFLIGHT[key] = task
+    primary_exc: Optional[Exception] = None
     try:
         payload = await task
-        _BYBIT_TICKER_CACHE[key] = {"ts": time.time(), "payload": payload}
-        return {"payload": payload, "cache_status": ("joined_live" if joined else "live"), "cache_age_ms": 0, "joined_inflight": joined}
+        if not _extract_valid_bybit_ticker_row(payload, symbol):
+            raise RuntimeError(f"Bybit ticker payload invalid for {symbol}")
+        _cache_bybit_ticker_payload(base_url, category, symbol, payload, "account_base")
+        return {"payload": payload, "cache_status": ("joined_live" if joined else "live"), "cache_age_ms": 0, "joined_inflight": joined, "ticker_source": "account_base"}
+    except Exception as exc:
+        primary_exc = exc
     finally:
         if _BYBIT_TICKER_INFLIGHT.get(key) is task and task.done():
             _BYBIT_TICKER_INFLIGHT.pop(key, None)
+    if public_fallback_base_url and _bybit_base_key(public_fallback_base_url) != _bybit_base_key(base_url):
+        fallback_timeout = max(0.25, min(1.0, timeout_s))
+        try:
+            payload = await _bybit_get_async(public_fallback_base_url, "/v5/market/tickers", {"category": category, "symbol": symbol}, timeout_s=fallback_timeout, connect_s=0.4, read_s=fallback_timeout)
+            if _extract_valid_bybit_ticker_row(payload, symbol):
+                _cache_bybit_ticker_payload(public_fallback_base_url, category, symbol, payload, "public_market_fallback")
+                return {"payload": payload, "cache_status": "live_fallback", "cache_age_ms": 0, "joined_inflight": False, "ticker_source": "public_market_fallback"}
+        except Exception:
+            pass
+    if entry.get("payload") and age_s <= allow_stale_s and _extract_valid_bybit_ticker_row(entry.get("payload") or {}, symbol):
+        return {"payload": entry["payload"], "cache_status": "stale_fallback", "cache_age_ms": int(age_s*1000), "joined_inflight": joined, "ticker_cache_error": _safe_exception_message(primary_exc or Exception("ticker fetch failed")), "ticker_source": "stale_fallback"}
+    raise primary_exc or RuntimeError("Bybit ticker fetch failed")
 
 async def _fetch_bybit_balance_usdt_cached(account: str, *, max_age_s: float = _BYBIT_WALLET_BALANCE_CACHE_TTL_SECONDS, allow_stale_s: float = 120.0, timeout_s: float = 2.5, connect_s: float = 1.0, read_s: float = 2.5) -> Tuple[Dict[str, Decimal], Dict[str, object]]:
     _mode, api_key, _api_secret, base_url, _src = resolve_bybit_credentials_for(account)
@@ -17345,7 +17421,7 @@ async def _fetch_bybit_balance_usdt_cached(account: str, *, max_age_s: float = _
         return snap, {"wallet_cache_status": ("joined_live" if joined else "live"), "wallet_cache_age_ms": 0, "joined_inflight": joined}
     except Exception as exc:
         if entry.get("snapshot") and age <= allow_stale_s:
-            return entry["snapshot"], {"wallet_cache_status": "stale_fallback", "wallet_cache_age_ms": int(age*1000), "wallet_cache_error": str(exc), "joined_inflight": joined}
+            return entry["snapshot"], {"wallet_cache_status": "stale_fallback", "wallet_cache_age_ms": int(age*1000), "wallet_cache_error": _safe_exception_message(exc), "joined_inflight": joined}
         raise
     finally:
         if _BYBIT_WALLET_BALANCE_INFLIGHT.get(key) is task and task.done():
@@ -17371,7 +17447,7 @@ async def _fetch_bybit_balance_usdt(account: str, timeout_s: float = 5.0, connec
         classified = _classify_bybit_api_key_expired(exc, account=account, key_source=key_source, path=path)
         if classified:
             raise HTTPException(status_code=502, detail=classified) from exc
-        raise HTTPException(status_code=502, detail=f"Bybit balance lookup failed path={path}: {exc}") from exc
+        raise HTTPException(status_code=502, detail=f"Bybit balance lookup failed path={path}: {_safe_exception_message(exc)}") from exc
     rows = (payload.get("result") or {}).get("list") or []
     for row in rows:
         total_equity = Decimal(str(row.get("totalEquity") or "0"))
@@ -17770,9 +17846,9 @@ async def calculator_prewarm(payload: Dict[str, object] = Body(default={})) -> J
         for idx, res in enumerate(results):
             if isinstance(res, Exception):
                 if idx == 1:
-                    out["ticker_status"] = "error"; out["ticker_error"] = str(res)
+                    out["ticker_status"] = "error"; out["ticker_error"] = _safe_exception_message(res)
                 elif idx == 2:
-                    out["wallet_status"] = "error"; out["wallet_error"] = str(res)
+                    out["wallet_status"] = "error"; out["wallet_error"] = _safe_exception_message(res)
                 else:
                     out["instrument_status"] = "error"; out["instrument_error"] = str(res)
         out["time_offset_status"] = ("ready" if api_key else "missing_credentials")
@@ -17957,7 +18033,7 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             inst_task = None
             if not resolved_inst_row:
                 inst_task = asyncio.create_task(_calculator_timed_dependency("bybit_instruments_info", _bybit_get_instrument_info_cached(base_url, "linear", resolved_symbol), timings_ms, 3.0, "/v5/market/instruments-info", pending_dependencies=pending_dependencies, last_dependency_started=last_dependency_started))
-            ticker_task = asyncio.create_task(_calculator_timed_dependency("bybit_ticker", _fetch_bybit_ticker_cached(base_url, "linear", resolved_symbol, timeout_s=1.5), timings_ms, 2.0, "/v5/market/tickers", pending_dependencies=pending_dependencies, last_dependency_started=last_dependency_started, deadline=quote_deadline))
+            ticker_task = asyncio.create_task(_calculator_timed_dependency("bybit_ticker", _fetch_bybit_ticker_cached(base_url, "linear", resolved_symbol, timeout_s=1.5, allow_stale_s=45.0, public_fallback_base_url=((os.getenv("BYBIT_PUBLIC_MARKET_BASE_URL") or "https://api.bybit.com") if account == "demo" else None)), timings_ms, 2.0, "/v5/market/tickers", pending_dependencies=pending_dependencies, last_dependency_started=last_dependency_started, deadline=quote_deadline))
             balance_task = asyncio.create_task(_calculator_timed_dependency("bybit_wallet_balance", _fetch_bybit_balance_usdt_cached(account, timeout_s=2.5, connect_s=1.0, read_s=2.5), timings_ms, 3.0, "/v5/account/wallet-balance", pending_dependencies=pending_dependencies, last_dependency_started=last_dependency_started, deadline=quote_deadline))
             async def _fetch_aud_usd_cached() -> Dict[str, float]:
                 now = time.time()
@@ -18005,24 +18081,28 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
             if isinstance(ticker_wrapped, dict):
                 timings_ms["ticker_cache_status"] = ticker_wrapped.get("cache_status")
                 timings_ms["ticker_cache_age_ms"] = ticker_wrapped.get("cache_age_ms")
+                timings_ms["ticker_source"] = ticker_wrapped.get("ticker_source")
             timings_ms["bybit_ticker_ms"] = int((time.perf_counter() - ticker_started) * 1000)
-            ticker_rows = (tickers.get("result") or {}).get("list") or []
-            if not ticker_rows:
-                raise HTTPException(status_code=502, detail="Bybit ticker fetch failed.")
-            row = ticker_rows[0]
-            bid = Decimal(str(row.get("bid1Price") or row.get("lastPrice") or "0"))
-            ask = Decimal(str(row.get("ask1Price") or row.get("lastPrice") or "0"))
+            row = _extract_valid_bybit_ticker_row(tickers, resolved_symbol)
+            if not row:
+                ticker_status_code = "BYBIT_TICKER_TIMEOUT"
+                ticker_message = f"Bybit ticker timed out for {resolved_symbol}."
+                ticker_cache_error = str((ticker_wrapped or {}).get("ticker_cache_error") or "") if isinstance(ticker_wrapped, dict) else ""
+                if "payload invalid" in ticker_cache_error.lower():
+                    ticker_status_code = "BYBIT_TICKER_INVALID"
+                    ticker_message = f"Bybit ticker payload invalid for {resolved_symbol}."
+                raise HTTPException(status_code=504, detail=_calculator_quote_error_detail(ticker_status_code, ticker_message, dependency="bybit_ticker", timings_ms=timings_ms, quote_started=quote_started, submitted_payload=submitted_debug, resolved_symbol=resolved_symbol_for_debug, pending_dependencies=pending_dependencies))
+            bid = Decimal(str(row.get("bid1Price") or "0"))
+            ask = Decimal(str(row.get("ask1Price") or "0"))
             last = Decimal(str(row.get("lastPrice") or "0"))
-            if bid <= 0 or ask <= 0:
-                raise HTTPException(status_code=502, detail="Bybit pricing unavailable.")
-            if last <= 0:
-                raise HTTPException(status_code=502, detail="Bybit lastPrice unavailable.")
             entry = _dec(limit_entry, "entry_price") if order_type == "limit" else (ask if side == "buy" else bid)
             if entry <= 0:
                 raise HTTPException(status_code=400, detail="entry_price must be greater than zero.")
             stop_distance = stop_ticks * tick_size
             sl = (entry - stop_distance) if side == "buy" else (entry + stop_distance)
             warnings: List[str] = []
+            if isinstance(ticker_wrapped, dict) and ticker_wrapped.get("cache_status") == "stale_fallback":
+                warnings.append("Using recent cached Bybit ticker because live ticker fetch timed out.")
             fallback_taker = Decimal(str(os.getenv("CALCULATOR_BYBIT_TAKER_FEE_FALLBACK", "0.0006") or "0.0006"))
             fallback_maker = Decimal(str(os.getenv("CALCULATOR_BYBIT_MAKER_FEE_FALLBACK", "0.0006") or "0.0006"))
             maker = fallback_maker

@@ -117,12 +117,21 @@
       ? { account: String(status.account || state.account || '').toLowerCase(), asset: String(status.asset || state.asset || '').toLowerCase(), symbol: String(status.symbol || '').toUpperCase() }
       : null;
     if (!status) return;
-    if (status.ready_for_quote) setQuoteStatus('Quote data ready');
-    else if ((status.missing_required || []).includes('wallet')) {
-      const walletErr = String(status.wallet_error || '').trim();
+    const missing = new Set((status.missing_required || []).map((x) => String(x || '').toLowerCase()));
+    const walletErr = String(status.wallet_error || '').trim();
+    const tickerErr = String(status.ticker_error || '').trim();
+    if (status.ready_for_quote) {
+      setQuoteStatus('Quote data ready');
+    } else if (missing.has('wallet') && missing.has('ticker')) {
+      const detail = [walletErr, tickerErr].filter(Boolean).join('; ');
+      setQuoteStatus(detail ? `Quote prewarm unavailable for wallet/ticker; Calculate will retry live. (${detail})` : 'Quote prewarm unavailable for wallet/ticker; Calculate will retry live.');
+    } else if (missing.has('ticker')) {
+      setQuoteStatus(tickerErr ? `Ticker prewarm unavailable; Calculate will retry live. (${tickerErr})` : 'Ticker prewarm unavailable; Calculate will retry live.');
+    } else if (missing.has('wallet')) {
       setQuoteStatus(walletErr ? `Wallet prewarm unavailable; Calculate will retry live. (${walletErr})` : 'Wallet prewarm unavailable; Calculate will retry live.');
+    } else {
+      setQuoteStatus('Quote data prewarm incomplete; Calculate will retry live.');
     }
-    else setQuoteStatus('Quote data prewarm incomplete; Calculate will retry live.');
   }
 
   function expiredKeyActionableMessage(accountHint) {

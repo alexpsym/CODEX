@@ -1666,3 +1666,125 @@ def test_demo_quote_context_save_failure_returns_structured_debug(monkeypatch: p
     assert detail["debug"]["resolved_symbol"] == "BTCUSDT"
     assert "bybit_wallet_balance" in detail["debug"]["upstream_timings_ms"]
     assert detail["debug"]["upstream_timings_ms"]["bybit_wallet_balance"]["status"] == "ok"
+
+def test_fetch_bybit_ticker_cached_invalid_live_uses_stale_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    key = f"{master_service._bybit_base_key('https://api-demo.bybit.com')}:linear:BTCUSDT"
+    valid_payload = {"result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "100", "bid1Price": "99", "ask1Price": "101"}]}}
+    master_service._BYBIT_TICKER_CACHE[key] = {"ts": master_service.time.time(), "payload": valid_payload, "source": "seed"}
+
+    async def fake_get(*_args, **_kwargs):
+        return {"result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "100"}]}}
+
+    monkeypatch.setattr(master_service, "_bybit_get_async", fake_get)
+    out = asyncio.run(master_service._fetch_bybit_ticker_cached("https://api-demo.bybit.com", "linear", "BTCUSDT", max_age_s=0.0, allow_stale_s=45.0, timeout_s=0.1))
+    assert out["cache_status"] == "stale_fallback"
+    assert "invalid" in str(out.get("ticker_cache_error", "")).lower()
+    assert master_service._BYBIT_TICKER_CACHE[key]["payload"] == valid_payload
+
+
+def test_fetch_bybit_ticker_cached_invalid_live_uses_public_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    async def fake_get(base_url, path, params, **_kwargs):
+        calls.append(base_url)
+        if "demo" in base_url:
+            return {"result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "100"}]}}
+        return {"result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "100", "bid1Price": "99", "ask1Price": "101"}]}}
+
+    monkeypatch.setattr(master_service, "_bybit_get_async", fake_get)
+    out = asyncio.run(master_service._fetch_bybit_ticker_cached("https://api-demo.bybit.com", "linear", "BTCUSDT", max_age_s=0.0, allow_stale_s=0.0, timeout_s=0.1, public_fallback_base_url="https://api.bybit.com"))
+    assert out["cache_status"] == "live_fallback"
+    assert out["ticker_source"] == "public_market_fallback"
+    assert any("api-demo" in c for c in calls) and any("api.bybit.com" in c for c in calls)
+
+
+def test_calculator_quote_invalid_ticker_payload_without_fallback_fails_precisely(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("demo", "k2", "s2", "https://api-demo.bybit.com", "KEY2"))
+
+    async def fake_symbols(*_args, **_kwargs):
+        return ["BTCUSDT"]
+
+    async def fake_inst(*_args, **_kwargs):
+        return {"symbol": "BTCUSDT", "priceFilter": {"tickSize": "0.1"}, "lotSizeFilter": {"qtyStep": "0.001", "minOrderQty": "0.001", "maxOrderQty": "1000", "maxMktOrderQty": "1000", "minNotionalValue": "1"}, "leverageFilter": {"maxLeverage": "100"}}
+
+    async def fake_ticker(*_args, **_kwargs):
+        return {"result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "100"}]}}
+
+    async def fake_wallet(*_args, **_kwargs):
+        return ({"available_usdt": master_service.Decimal("1000"), "total_equity": master_service.Decimal("1000")}, {"wallet_cache_status": "live"})
+
+    monkeypatch.setattr(master_service, "_resolve_bybit_calculator_symbol_fast", lambda *_args, **_kwargs: asyncio.sleep(0, result=("BTCUSDT", None, {})))
+    monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", fake_symbols)
+    monkeypatch.setattr(master_service, "_bybit_get_instrument_info_cached", fake_inst)
+    async def fake_ticker_cached(*_args, **_kwargs):
+        return {"payload": {"result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "100"}]}}, "cache_status": "live", "ticker_cache_error": "Bybit ticker payload invalid for BTCUSDT"}
+
+    monkeypatch.setattr(master_service, "_fetch_bybit_ticker_cached", fake_ticker_cached)
+    monkeypatch.setattr(master_service, "_fetch_bybit_balance_usdt_cached", fake_wallet)
+
+    with pytest.raises(master_service.HTTPException) as exc:
+        asyncio.run(master_service.calculator_quote({"asset": "crypto", "account": "demo", "symbol": "BTC", "side": "buy", "order_type": "market", "risk_mode": "percent", "risk_value": 1, "stop_loss_ticks": 10, "take_profit_ticks": 20}))
+    detail = exc.value.detail
+    assert isinstance(detail, dict)
+    assert detail.get("dependency") == "bybit_ticker"
+    assert detail.get("code") in {"BYBIT_TICKER_INVALID", "BYBIT_TICKER_TIMEOUT"}
+    assert "wallet" not in str(detail).lower()
+
+
+def test_calculator_quote_invalid_ticker_payload_from_real_fetch_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("demo", "k2", "s2", "https://api-demo.bybit.com", "KEY2"))
+
+    async def fake_get(base_url, path, params, **_kwargs):
+        if path == "/v5/market/tickers":
+            return {"result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "100"}]}}
+        return {"result": {"list": []}}
+
+    async def fake_wallet(*_args, **_kwargs):
+        return ({"available_usdt": master_service.Decimal("1000"), "total_equity": master_service.Decimal("1000")}, {"wallet_cache_status": "live"})
+
+    monkeypatch.setattr(master_service, "_bybit_get_async", fake_get)
+    monkeypatch.setattr(master_service, "_resolve_bybit_calculator_symbol_fast", lambda *_args, **_kwargs: asyncio.sleep(0, result=("BTCUSDT", None, {})))
+    monkeypatch.setattr(master_service, "_bybit_get_instrument_info_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result={"symbol": "BTCUSDT", "priceFilter": {"tickSize": "0.1"}, "lotSizeFilter": {"qtyStep": "0.001", "minOrderQty": "0.001", "maxOrderQty": "1000", "maxMktOrderQty": "1000", "minNotionalValue": "1"}, "leverageFilter": {"maxLeverage": "100"}}))
+    monkeypatch.setattr(master_service, "_fetch_bybit_balance_usdt_cached", fake_wallet)
+
+    with pytest.raises(master_service.HTTPException) as exc:
+        asyncio.run(master_service.calculator_quote({"asset": "crypto", "account": "demo", "symbol": "BTC", "side": "buy", "order_type": "market", "risk_mode": "percent", "risk_value": 1, "stop_loss_ticks": 10, "take_profit_ticks": 20}))
+    detail = exc.value.detail
+    assert isinstance(detail, dict)
+    assert detail.get("code") == "BYBIT_TICKER_INVALID"
+    assert detail.get("dependency") == "bybit_ticker"
+    assert "wallet" not in str(detail).lower()
+
+
+def test_specs_invalid_ticker_payload_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: {"base_url": "https://api-demo.bybit.com"})
+    monkeypatch.setattr(master_service, "_bybit_lookup_symbol", lambda *_args, **_kwargs: asyncio.sleep(0, result={"_category": "linear", "symbol": "BTCUSDT", "baseCoin": "BTC"}))
+    monkeypatch.setattr(master_service, "_bybit_avg_7d_turnover_usd_async", lambda *_args, **_kwargs: asyncio.sleep(0, result=None))
+    monkeypatch.setattr(master_service, "_bybit_fetch_range_specs_async", lambda *_args, **_kwargs: asyncio.sleep(0, result=({}, [])))
+
+    async def fake_get(base_url, path, params, **_kwargs):
+        if path == "/v5/market/tickers":
+            return {"result": {"list": [{"symbol": "BTCUSDT", "lastPrice": "100"}]}}
+        return {"result": {"list": []}}
+
+    monkeypatch.setattr(master_service, "_bybit_get_async", fake_get)
+    asyncio.run(master_service._bybit_resolve_and_fetch_specs("BTCUSDT", include_btc_reference=False))
+    key = f"{master_service._bybit_base_key('https://api-demo.bybit.com')}:linear:BTCUSDT"
+    assert key not in master_service._BYBIT_TICKER_CACHE
+
+
+def test_no_calculator_ticker_error_strings_in_non_calculator_blocks() -> None:
+    src = (ROOT / "render" / "master_service.py").read_text(encoding="utf-8")
+    checks = ["BYBIT_TICKER_INVALID", "ticker payload invalid", "submitted_debug", "quote_started"]
+    blocks = [
+        ("async def script_view_page", '@app.get("/bybit-history")'),
+        ("async def trade_chart_page", '@app.get("/api/logs")'),
+        ("async def api_logs_root", '@app.get("/api/logs/{script_name:path}")'),
+        ("async def read_script_results", '@app.post("/api/oanda-history/export")'),
+    ]
+    for start, end in blocks:
+        i = src.index(start)
+        j = src.index(end, i)
+        block = src[i:j]
+        for token in checks:
+            assert token not in block
