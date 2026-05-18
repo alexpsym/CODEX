@@ -478,3 +478,34 @@ global.document={getElementById:(id)=>el[id]};global.navigator={clipboard:{write
     data = json.loads(out.stdout.strip().splitlines()[-1])
     assert data["quoteCalls"] == 1
     assert "stale" not in data["status"].lower()
+
+def test_bybit_expired_demo_key_message_is_actionable() -> None:
+    node = shutil.which("node"); assert node
+    harness = r'''
+const fs=require('fs'); const source=fs.readFileSync(process.argv[1],'utf8');
+class E{constructor(){this.value='';this.textContent='';this.innerHTML='';this.dataset={};this.style={};this.listeners={};this.buttons=[];this.classList={toggle(){},add(){},remove(){}};}addEventListener(e,c){this.listeners[e]=c;}querySelectorAll(s){return s==='button'?this.buttons:[];}}
+class B{constructor(v){this.dataset={v};this.listeners={};this.classList={toggle(){},add(){},remove(){}};}addEventListener(e,c){this.listeners[e]=c;}click(){this.listeners.click&&this.listeners.click();}}
+const ids=['calc-error','calc-error-debug','calc-success','calc-results','calc-request-summary','calc-canonical-symbol','calc-journal-summary','calc-instrument-specs','risk-toggle-wrap','calc-webhook-panel','calc-webhook-url','calc-webhook-json','calc-webhook-copy','calc-webhook-copy-url','risk-toggle','calc-risk-label','limit-wrap','account-toggle','asset-toggle','side-toggle','order-toggle','webhook-toggle','test-toggle','timeframe-toggle','calc-symbol','calc-limit','calc-sl-ticks','calc-rr','calc-risk','calc-quote','calc-submit','calc-quote-status','calc-webhook-status'];
+const el=Object.fromEntries(ids.map(i=>[i,new E()])); const mk=(v)=>v.map(x=>new B(x)); el['risk-toggle'].buttons=mk(['fixed_aud','percent']);el['asset-toggle'].buttons=mk(['crypto','fx']);el['account-toggle'].buttons=mk(['live','demo']);el['side-toggle'].buttons=mk(['buy','sell']);el['order-toggle'].buttons=mk(['market','limit']);el['webhook-toggle'].buttons=mk(['no','yes']);el['test-toggle'].buttons=mk(['no','yes']);
+el['calc-symbol'].value='BTC';el['calc-sl-ticks'].value='5';el['calc-rr'].value='2';el['calc-risk'].value='1';
+global.fetch=async (url)=> url.includes('/quote')?{ok:false,status:502,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({detail:{code:'BYBIT_API_KEY_EXPIRED',account:'demo',message:'x',debug:{retCode:33004}}})}:{ok:true,status:200,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({symbol:'BTCUSDT'})};
+global.document={getElementById:(id)=>el[id]};global.navigator={clipboard:{writeText:async()=>{}}};global.setTimeout=(fn)=>{fn();return 1;};global.clearTimeout=()=>{};eval(source);
+(async()=>{await el['calc-quote'].listeners.click();console.log(el['calc-error'].textContent)})();'''
+    out = subprocess.run([node, "-e", harness, str(JS_PATH)], check=True, capture_output=True, text=True).stdout
+    assert "Bybit Demo API key expired" in out
+
+
+def test_bybit_expired_live_key_message_is_actionable() -> None:
+    assert "BYBIT_API_KEY1/BYBIT_API_SECRET1" in JS_PATH.read_text(encoding='utf-8')
+
+
+def test_instrument_specs_loading_does_not_remain_forever_after_failure() -> None:
+    assert "Instrument specs unavailable for" in JS_PATH.read_text(encoding='utf-8')
+
+
+def test_journal_summary_default_prompt_replaced_after_resolved_symbol_failure() -> None:
+    assert "Journal summary unavailable for" in JS_PATH.read_text(encoding='utf-8')
+
+
+def test_expired_key_error_does_not_reintroduce_prewarm_gate() -> None:
+    assert "please wait for wallet/ticker prewarm" not in JS_PATH.read_text(encoding='utf-8').lower()

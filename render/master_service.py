@@ -2266,6 +2266,32 @@ def _calculator_safe_submitted_payload(payload: Dict[str, object]) -> Dict[str, 
     return safe
 
 
+
+
+def _classify_bybit_api_key_expired(error_text: object, *, account: str = "", key_source: str = "", dependency: str = "bybit_wallet_balance", path: str = "/v5/account/wallet-balance") -> Optional[Dict[str, object]]:
+    text = str(error_text or "")
+    low = text.lower()
+    ret_match = re.search(r"retCode=([0-9-]+)", text)
+    ret_code = ret_match.group(1) if ret_match else ""
+    msg_match = re.search(r"retMsg=([^\n\r]+)", text)
+    ret_msg = (msg_match.group(1).strip() if msg_match else "")
+    if ret_msg:
+        ret_msg = ret_msg.split(" recv_window=")[0].strip()
+    if ret_code != "33004" and "api key has expired" not in low:
+        return None
+    acct = str(account or "live").strip().lower()
+    account_label = "Demo" if acct == "demo" else "Live"
+    env_hint = "BYBIT_API_KEY2/BYBIT_API_SECRET2" if acct == "demo" else "BYBIT_API_KEY1/BYBIT_API_SECRET1"
+    return {
+        "code": "BYBIT_API_KEY_EXPIRED",
+        "dependency": dependency,
+        "account": acct,
+        "key_source": str(key_source or ""),
+        "path": path,
+        "retCode": 33004,
+        "retMsg": ret_msg or "Your api key has expired",
+        "message": f"Bybit {account_label} API key has expired. Replace {env_hint}, then restart Local Trading Tools.",
+    }
 def _calculator_quote_error_detail(
     code: str,
     message: str,
@@ -17293,7 +17319,7 @@ async def _fetch_bybit_balance_usdt_cached(account: str, *, max_age_s: float = _
             _BYBIT_WALLET_BALANCE_INFLIGHT.pop(key, None)
 
 async def _fetch_bybit_balance_usdt(account: str, timeout_s: float = 5.0, connect_s: float = 2.0, read_s: Optional[float] = None) -> Dict[str, Decimal]:
-    _mode, api_key, api_secret, base_url, _src = resolve_bybit_credentials_for(account)
+    _mode, api_key, api_secret, base_url, key_source = resolve_bybit_credentials_for(account)
     if not api_key or not api_secret:
         raise HTTPException(status_code=500, detail="Bybit credentials are missing for selected account.")
     path = "/v5/account/wallet-balance"
@@ -17309,6 +17335,9 @@ async def _fetch_bybit_balance_usdt(account: str, timeout_s: float = 5.0, connec
             read_s=(read_s if read_s is not None else timeout_s),
         )
     except Exception as exc:
+        classified = _classify_bybit_api_key_expired(exc, account=account, key_source=key_source, path=path)
+        if classified:
+            raise HTTPException(status_code=502, detail=classified) from exc
         raise HTTPException(status_code=502, detail=f"Bybit balance lookup failed path={path}: {exc}") from exc
     rows = (payload.get("result") or {}).get("list") or []
     for row in rows:
@@ -17998,6 +18027,8 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                 else:
                     balance_snapshot = bal_wrapped
             except HTTPException as exc:
+                if isinstance(exc.detail, dict):
+                    raise HTTPException(status_code=502, detail=exc.detail) from exc
                 raise HTTPException(
                     status_code=502,
                     detail=f"Bybit risk sizing dependency failed path=/v5/account/wallet-balance: {exc.detail}",

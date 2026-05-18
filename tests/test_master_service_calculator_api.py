@@ -1611,3 +1611,37 @@ def test_bybit_buy_limit_auto_adjusts_take_profit_above_last(monkeypatch):
     assert float(body['target_price']) > float(body['last_price'])
     assert float(body['target_price']) > float(body['entry_price'])
     assert body['take_profit_adjusted'] is True
+
+def test_bybit_wallet_retcode_33004_maps_to_api_key_expired_demo(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_signed_get(**_kwargs):
+        raise ValueError("Bybit signed GET failed path=/v5/account/wallet-balance retCode=33004 retMsg=Your api key has expired. recv_window=15000")
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("demo", "k", "s", "https://bybit.test", "KEY2"))
+    monkeypatch.setattr(master_service, "_bybit_signed_get", fake_signed_get)
+    with pytest.raises(master_service.HTTPException) as exc:
+        asyncio.run(master_service._fetch_bybit_balance_usdt("demo"))
+    d = exc.value.detail
+    assert d["code"] == "BYBIT_API_KEY_EXPIRED" and d["account"] == "demo" and d["key_source"] == "KEY2"
+    assert "BYBIT_API_KEY2/BYBIT_API_SECRET2" in d["message"]
+
+
+def test_bybit_wallet_retcode_33004_maps_to_api_key_expired_live(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_signed_get(**_kwargs):
+        raise ValueError("retCode=33004 retMsg=Your api key has expired")
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("live", "k", "s", "https://bybit.test", "KEY1"))
+    monkeypatch.setattr(master_service, "_bybit_signed_get", fake_signed_get)
+    with pytest.raises(master_service.HTTPException) as exc:
+        asyncio.run(master_service._fetch_bybit_balance_usdt("live"))
+    d = exc.value.detail
+    assert d["code"] == "BYBIT_API_KEY_EXPIRED" and d["account"] == "live" and d["key_source"] == "KEY1"
+    assert "BYBIT_API_KEY1/BYBIT_API_SECRET1" in d["message"]
+
+
+def test_bybit_expired_key_error_includes_key_source_without_secret() -> None:
+    d = master_service._classify_bybit_api_key_expired("retCode=33004 retMsg=Your api key has expired", account="demo", key_source="LEGACY")
+    assert d and d["key_source"] == "LEGACY"
+    assert "secret" not in json.dumps(d).lower()
+
+
+def test_bybit_expired_key_error_prioritized_over_ticker_timeout() -> None:
+    detail = master_service._calculator_quote_error_detail("BYBIT_API_KEY_EXPIRED", "x", dependency="bybit_wallet_balance", timings_ms={"bybit_ticker": {"status": "timeout"}})
+    assert detail["code"] == "BYBIT_API_KEY_EXPIRED"
