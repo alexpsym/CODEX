@@ -375,21 +375,83 @@ function Invoke-GitText {
         [switch] $AllowFailure
     )
 
-    Push-Location -LiteralPath $WorkingDirectory
-    try {
-        $output = & $GitExe @Arguments 2>&1
-        $exitCode = $LASTEXITCODE
-    } finally {
-        Pop-Location
-    }
+    Write-Host ''
+    Write-Host ("git " + ($Arguments -join ' '))
 
-    $text = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $GitExe
+    $psi.WorkingDirectory = $WorkingDirectory
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.RedirectStandardInput = $true
+    $psi.Arguments = ConvertTo-NativeArgumentString -Arguments $Arguments
+
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    [void]$proc.Start()
+    $proc.StandardInput.Close()
+    $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+    $stderrTask = $proc.StandardError.ReadToEndAsync()
+
+    $timeoutSeconds = 120
+    if (-not $proc.WaitForExit($timeoutSeconds * 1000)) {
+        Stop-ProcessTreeById -ProcessId $proc.Id -Reason "git command timeout after $timeoutSeconds seconds"
+        throw "git $($Arguments -join ' ') timed out after $timeoutSeconds seconds."
+    }
+    [void]$proc.WaitForExit()
+    [void][System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), 10000)
+
+    $stdout = Remove-TrailingLineTerminators -Text $stdoutTask.Result
+    $stderr = Remove-TrailingLineTerminators -Text $stderrTask.Result
+    $exitCode = $proc.ExitCode
+    if ($stdout) { Write-Host $stdout }
+    if ($stderr -and $exitCode -eq 0) {
+        Write-Host ("WARNING: git " + ($Arguments -join ' ') + " stderr: " + $stderr)
+    }
+    if ($stderr -and $exitCode -ne 0) {
+        Write-Host $stderr
+    }
 
     if ($exitCode -ne 0 -and -not $AllowFailure) {
-        throw "git $($Arguments -join ' ') failed with exit code $exitCode. $text"
+        throw "git $($Arguments -join ' ') failed with exit code $exitCode. stdout: $stdout stderr: $stderr"
     }
 
-    return $text.Trim()
+    if ($exitCode -ne 0 -and $AllowFailure) {
+        return ("stdout: $stdout`nstderr: $stderr").Trim()
+    }
+
+    return $stdout
+}
+
+function Remove-TrailingLineTerminators {
+    param([AllowNull()] [string] $Text)
+    if ($null -eq $Text) { return '' }
+    return [Regex]::Replace($Text, "(`r`n|`n|`r)+$", "")
+}
+
+function Write-GitDiagnosticFile {
+    param(
+        [Parameter(Mandatory = $true)] [string] $GitExe,
+        [Parameter(Mandatory = $true)] [string[]] $Arguments,
+        [Parameter(Mandatory = $true)] [string] $WorkingDirectory,
+        [Parameter(Mandatory = $true)] [string] $DestinationPath
+    )
+
+    try {
+        $diagnosticText = Invoke-GitText -GitExe $GitExe -Arguments $Arguments -WorkingDirectory $WorkingDirectory -AllowFailure
+        Set-Content -LiteralPath $DestinationPath -Value $diagnosticText -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        $errorPath = "$DestinationPath.error.txt"
+        $errorText = "Failed diagnostic command: git $($Arguments -join ' ')`nError: $($_.Exception.Message)"
+        try {
+            Set-Content -LiteralPath $errorPath -Value $errorText -Encoding UTF8 -ErrorAction Stop
+        } catch {
+            Write-Host "WARNING: Could not write backup diagnostic $DestinationPath; continuing because full backup already exists."
+            return
+        }
+        Write-Host "WARNING: Could not write backup diagnostic $DestinationPath; continuing because full backup already exists."
+    }
 }
 
 function ConvertTo-NativeArgumentString {
@@ -755,26 +817,26 @@ function Ensure-CodexGitRepo {
         $backupDir = Join-Path $DestinationRoot "CODEX-master-git-backup-$timestamp"
         Copy-FolderTreeWithRoboCopyChecked -Source $RepoDir -Destination $backupDir
 
-        $statusText = Invoke-GitText -GitExe $GitExe -Arguments @('status', '--short', '--branch') -WorkingDirectory $RepoDir -AllowFailure
-        Set-Content -LiteralPath (Join-Path $backupDir 'git-status-before-reset.txt') -Value $statusText -Encoding UTF8 -ErrorAction Stop
-        $aheadLogText = Invoke-GitText -GitExe $GitExe -Arguments @('log', '--oneline', "origin/$Branch..HEAD") -WorkingDirectory $RepoDir -AllowFailure
-        Set-Content -LiteralPath (Join-Path $backupDir 'git-log-local-ahead.txt') -Value $aheadLogText -Encoding UTF8 -ErrorAction Stop
-        $localDiffText = Invoke-GitText -GitExe $GitExe -Arguments @('diff', '--binary') -WorkingDirectory $RepoDir -AllowFailure
-        Set-Content -LiteralPath (Join-Path $backupDir 'local-changes.patch') -Value $localDiffText -Encoding UTF8 -ErrorAction Stop
-        $stagedDiffText = Invoke-GitText -GitExe $GitExe -Arguments @('diff', '--cached', '--binary') -WorkingDirectory $RepoDir -AllowFailure
-        Set-Content -LiteralPath (Join-Path $backupDir 'local-staged-changes.patch') -Value $stagedDiffText -Encoding UTF8 -ErrorAction Stop
+        Write-GitDiagnosticFile -GitExe $GitExe -Arguments @('status', '--short', '--branch') -WorkingDirectory $RepoDir -DestinationPath (Join-Path $backupDir 'git-status-before-reset.txt')
+        Write-GitDiagnosticFile -GitExe $GitExe -Arguments @('log', '--oneline', "origin/$Branch..HEAD") -WorkingDirectory $RepoDir -DestinationPath (Join-Path $backupDir 'git-log-local-ahead.txt')
+        Write-GitDiagnosticFile -GitExe $GitExe -Arguments @('diff', '--binary') -WorkingDirectory $RepoDir -DestinationPath (Join-Path $backupDir 'local-changes.patch')
+        Write-GitDiagnosticFile -GitExe $GitExe -Arguments @('diff', '--cached', '--binary') -WorkingDirectory $RepoDir -DestinationPath (Join-Path $backupDir 'local-staged-changes.patch')
 
         Write-Host "Local Git state was not fast-forwardable. A full backup was created at: $backupDir"
         Stop-CodexRepoProcessMatches -RepoDir $RepoDir
+        Write-Host "Recovery command: git checkout -B $Branch origin/$Branch"
         Invoke-GitCommand -GitExe $GitExe -Arguments @('checkout', '-B', $Branch, "origin/$Branch") -WorkingDirectory $RepoDir | Out-Null
+        Write-Host "Recovery command: git reset --hard origin/$Branch"
         Invoke-GitCommand -GitExe $GitExe -Arguments @('reset', '--hard', "origin/$Branch") -WorkingDirectory $RepoDir | Out-Null
         Remove-PythonCacheDirsBestEffort -RepoDir $RepoDir
+        Write-Host "Recovery command: git clean -ffdn (preview)"
         Invoke-GitCommand -GitExe $GitExe -Arguments @('clean', '-ffdn', '-e', 'journal/', '-e', '.env', '-e', 'env.env', '-e', 'watchlist.json', '-e', 'state_manifest.json', '-e', 'stateManifest.json', '-e', 'state_backup.json', '-e', 'bybit_monitor/*.json', '-e', 'oanda_monitor/*.json', '-e', 'render/data/', '-e', 'render/uploads/') -WorkingDirectory $RepoDir -AllowFailure | Out-Null
 
         $cleaned = $false
         $lastCleanFailure = ''
         for ($attempt = 1; $attempt -le 2; $attempt++) {
             try {
+                Write-Host "Recovery command: git clean -ffd -q"
                 Invoke-GitCommandNoInput -GitExe $GitExe -Arguments @('clean', '-ffd', '-q', '-e', 'journal/', '-e', '.env', '-e', 'env.env', '-e', 'watchlist.json', '-e', 'state_manifest.json', '-e', 'stateManifest.json', '-e', 'state_backup.json', '-e', 'bybit_monitor/*.json', '-e', 'oanda_monitor/*.json', '-e', 'render/data/', '-e', 'render/uploads/') -WorkingDirectory $RepoDir -TimeoutSeconds 120 | Out-Null
                 $cleaned = $true
                 break

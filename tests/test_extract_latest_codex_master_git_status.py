@@ -89,6 +89,7 @@ def test_allows_required_runtime_entries_including_leading_space_m():
 def test_rejects_unsafe_statuses_and_paths():
     cases = [
         " M render/master_service.py",
+        "M  bybit_monitor/custom_alerts.json",
         "M  render/data/monthly_aud_revaluation.json",
         " D render/data/monthly_aud_revaluation.json",
         "R  old -> new",
@@ -119,3 +120,61 @@ def test_preserve_local_files_from_backup_includes_relocated_root_state_files():
     assert "function Preserve-LocalFilesFromBackup" in text
     for file_name in ("watchlist.json", "state_manifest.json", "stateManifest.json", "state_backup.json"):
         assert file_name in text
+
+
+def test_invoke_git_text_uses_process_start_info_and_separate_stderr():
+    text = Path("ExtractLatestCodexMaster.bat").read_text(encoding="utf-8")
+    assert "function Invoke-GitText" in text
+    assert "System.Diagnostics.ProcessStartInfo" in text
+    assert "$psi.RedirectStandardError = $true" in text
+    assert "& $GitExe @Arguments 2>&1" not in text
+
+
+def test_backup_diagnostics_use_best_effort_helper():
+    text = Path("ExtractLatestCodexMaster.bat").read_text(encoding="utf-8")
+    assert "function Write-GitDiagnosticFile" in text
+    assert "WARNING: Could not write backup diagnostic" in text
+    assert "git-status-before-reset.txt" in text
+    assert "git-log-local-ahead.txt" in text
+    assert "local-changes.patch" in text
+    assert "local-staged-changes.patch" in text
+
+
+def test_classifier_allows_modified_state_backup_file():
+    result = classify_status(" M state_backup.json")
+    assert result["IsOnlyAllowed"] is True
+
+
+def test_classifier_rejects_modified_render_master_service():
+    result = classify_status(" M render/master_service.py")
+    assert result["IsOnlyAllowed"] is False
+
+
+def test_invoke_git_text_does_not_trim_stdout_leading_columns():
+    text = Path("ExtractLatestCodexMaster.bat").read_text(encoding="utf-8")
+    invoke_git_text_start = text.index("function Invoke-GitText")
+    invoke_git_text_end = text.index("function Remove-TrailingLineTerminators")
+    invoke_git_text_body = text[invoke_git_text_start:invoke_git_text_end]
+    assert "$stdoutTask.Result.Trim()" not in invoke_git_text_body
+    assert "Remove-TrailingLineTerminators" in text
+    assert "$stdout = Remove-TrailingLineTerminators -Text $stdoutTask.Result" in text
+
+
+def test_classifier_allows_bybit_custom_alerts_modified_worktree():
+    result = classify_status(" M bybit_monitor/custom_alerts.json")
+    assert result["IsOnlyAllowed"] is True
+
+
+def test_classifier_allows_leading_space_first_line_mixed_allowed_runtime_entries():
+    status = "\n".join(
+        [
+            " M bybit_monitor/custom_alerts.json",
+            " M render/data/monthly_aud_revaluation.json",
+            " M render/data/monthly_aud_revaluation_state.json",
+            " M state_backup.json",
+            "?? bybit_monitor/runtime_status.json",
+            "?? render/data/trading_journal.json",
+        ]
+    )
+    result = classify_status(status)
+    assert result["IsOnlyAllowed"] is True
