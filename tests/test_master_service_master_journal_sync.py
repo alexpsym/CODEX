@@ -130,13 +130,102 @@ def test_master_journal_source_fingerprint_mode_is_master_journal(monkeypatch):
 def test_manual_sync_skips_broker_refresh_in_master_journal_mode(tmp_path, monkeypatch):
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SYNC_CALCULATOR_TRADES_ON_MANUAL', False)
     from tools.master_journal_workbook import build_master_journal_workbook
     build_master_journal_workbook({'items': [], 'stats': {'totals': {}, 'groups': {}}, 'balances': []}, tmp_path / "Master Journal.xlsx")
+    state_calls = []
+    real_state_setter = master_service._set_trading_journal_sync_state
+    def _capture_sync_state(**kwargs):
+        state_calls.append(dict(kwargs))
+        return real_state_setter(**kwargs)
+    monkeypatch.setattr(master_service, '_set_trading_journal_sync_state', _capture_sync_state)
     monkeypatch.setattr(master_service, '_run_bybit_closed_pnl_sync', lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not call")))
     monkeypatch.setattr(master_service, '_recover_oanda_recent_fills', lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not call")))
     monkeypatch.setattr(master_service, '_import_trading_journal_from_sources', lambda *a, **k: {"ok": True, "rows_imported": 0, "rows_by_asset_class": {}, "local_workbooks_seen": 1, "dropbox_workbooks_seen": 0})
     monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda: {"master_journal_ok": True})
     asyncio.run(master_service._run_trading_journal_sync_job())
+    assert state_calls
+    final_state = state_calls[-1]
+    assert final_state.get("ok") is True
+    assert "TRADING_JOURNAL_SYNC_CALCULATOR_TRADES_ON_MANUAL" not in str(final_state.get("error") or "")
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+def test_manual_sync_calculator_trades_flag_runs_closed_capture_when_broker_refresh_disabled(tmp_path, monkeypatch):
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SYNC_CALCULATOR_TRADES_ON_MANUAL', True)
+    monkeypatch.setattr(master_service, '_trading_journal_broker_refresh_enabled', lambda: False)
+    from tools.master_journal_workbook import build_master_journal_workbook
+    build_master_journal_workbook({'items': [], 'stats': {'totals': {}, 'groups': {}}, 'balances': []}, tmp_path / "Master Journal.xlsx")
+    state_calls = []
+    real_state_setter = master_service._set_trading_journal_sync_state
+    def _capture_sync_state(**kwargs):
+        state_calls.append(dict(kwargs))
+        return real_state_setter(**kwargs)
+    monkeypatch.setattr(master_service, '_set_trading_journal_sync_state', _capture_sync_state)
+    bybit_calls = []
+    async def _fake_bybit(account_mode: str, **_kwargs):
+        bybit_calls.append(account_mode)
+        return {"ok": True}
+    oanda_calls = []
+    async def _fake_oanda(account_mode: str, **_kwargs):
+        oanda_calls.append(account_mode)
+        return {"ok": True}
+    monkeypatch.setattr(master_service, '_run_bybit_closed_pnl_sync', _fake_bybit)
+    monkeypatch.setattr(master_service, '_recover_oanda_recent_fills', _fake_oanda)
+    monkeypatch.setattr(master_service, '_import_trading_journal_from_sources', lambda *a, **k: {"ok": True, "rows_imported": 0, "rows_by_asset_class": {}, "local_workbooks_seen": 1, "dropbox_workbooks_seen": 0})
+    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda: {"master_journal_ok": True})
+
+    asyncio.run(master_service._run_trading_journal_sync_job())
+
+    assert bybit_calls == ["demo", "live"]
+    assert oanda_calls == ["demo", "live"]
+    assert state_calls
+    final_state = state_calls[-1]
+    assert final_state.get("ok") is True
+    assert "TRADING_JOURNAL_SYNC_CALCULATOR_TRADES_ON_MANUAL" not in str(final_state.get("error") or "")
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+def test_manual_sync_calculator_trades_flag_broker_failure_not_fake_green(tmp_path, monkeypatch):
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SYNC_CALCULATOR_TRADES_ON_MANUAL', True)
+    monkeypatch.setattr(master_service, '_trading_journal_broker_refresh_enabled', lambda: False)
+    from tools.master_journal_workbook import build_master_journal_workbook
+    build_master_journal_workbook({'items': [], 'stats': {'totals': {}, 'groups': {}}, 'balances': []}, tmp_path / "Master Journal.xlsx")
+    state_calls = []
+    real_state_setter = master_service._set_trading_journal_sync_state
+    def _capture_sync_state(**kwargs):
+        state_calls.append(dict(kwargs))
+        return real_state_setter(**kwargs)
+    monkeypatch.setattr(master_service, '_set_trading_journal_sync_state', _capture_sync_state)
+    async def _fake_bybit(account_mode: str, **_kwargs):
+        if account_mode == "live":
+            return {"ok": False, "error": "live bybit failure"}
+        return {"ok": True}
+    async def _fake_oanda(_account_mode: str, **_kwargs):
+        return {"ok": True}
+    monkeypatch.setattr(master_service, '_run_bybit_closed_pnl_sync', _fake_bybit)
+    monkeypatch.setattr(master_service, '_recover_oanda_recent_fills', _fake_oanda)
+    monkeypatch.setattr(master_service, '_import_trading_journal_from_sources', lambda *a, **k: {"ok": True, "rows_imported": 0, "rows_by_asset_class": {}, "local_workbooks_seen": 1, "dropbox_workbooks_seen": 0})
+    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda: {"master_journal_ok": True})
+
+    asyncio.run(master_service._run_trading_journal_sync_job())
+
+    assert state_calls
+    final_state = state_calls[-1]
+    assert final_state.get("ok") is False
+    assert "failed" in str(final_state.get("message") or "").lower()
+    assert "live bybit failure" in str(final_state.get("error") or "").lower()
+
+
+def test_manual_sync_calculator_trades_flag_defined_before_sync_job():
+    src = (ROOT / 'render' / 'master_service.py').read_text(encoding='utf-8')
+    const_idx = src.index("TRADING_JOURNAL_SYNC_CALCULATOR_TRADES_ON_MANUAL")
+    fn_idx = src.index("async def _run_trading_journal_sync_job() -> None:")
+    assert const_idx < fn_idx
 
 
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
