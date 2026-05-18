@@ -390,12 +390,13 @@
     const detail = bodyJson?.detail;
     if (typeof detail === 'string' && detail.trim()) return new Error(detail.trim());
     if (detail && typeof detail === 'object') {
-      const err = new Error(detail.message || detail.error || `${method} ${url} failed: ${status}`);
-      err.detail = detail;
+      const err = new Error(detail.message || detail.error || detail.code || `${method} ${url} failed: ${status}`);
+      err.detail = { ...detail, code: detail.code, message: detail.message || detail.error, debug: detail.debug };
+      err.debug = detail.debug;
       return err;
     }
     if (bodyJson && typeof bodyJson === 'object' && (bodyJson.message || bodyJson.code || bodyJson.debug)) {
-      const err = new Error(bodyJson.message || `${method} ${url} failed: ${status}`);
+      const err = new Error(bodyJson.message || bodyJson.code || `${method} ${url} failed: ${status}`);
       err.detail = { code: bodyJson.code, message: bodyJson.message, debug: bodyJson.debug };
       err.debug = bodyJson.debug;
       return err;
@@ -410,9 +411,20 @@
       errorDebugEl.innerHTML = '';
       return;
     }
-    const formatDebugValue = (v) => (v && typeof v === "object" ? `<pre>${JSON.stringify(v, null, 2)}</pre>` : (v ?? "-"));
+    const escapeHtml = (value) => String(value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+    const formatDebugValue = (v) => {
+      if (v && typeof v === "object") {
+        try { return `<pre>${escapeHtml(JSON.stringify(v, null, 2))}</pre>`; } catch (_err) { return '<pre>[unserializable debug value]</pre>'; }
+      }
+      return escapeHtml(v ?? '-');
+    };
     const rows = Object.entries(debug)
-      .map(([k, v]) => `<div class="card"><div class="muted">${k}</div><div>${formatDebugValue(v)}</div></div>`)
+      .map(([k, v]) => `<div class="card"><div class="muted">${escapeHtml(k)}</div><div>${formatDebugValue(v)}</div></div>`)
       .join('');
     errorDebugEl.innerHTML = rows;
   }
@@ -831,6 +843,7 @@
         toggleWebhookPanel(false);
         state.pendingWebhookId = '';
         state.pendingWebhookDeleteUrl = '';
+        setQuoteStatus('Quote failed. Recalculate before submitting.');
         errorEl.textContent = 'Quote timed out after 15s. Upstream dependencies did not complete within the hard cap.';
         return;
       }
@@ -840,6 +853,8 @@
       state.pendingWebhookDeleteUrl = '';
       const detailObj = e.detail || null;
       const actionable = extractExpiredBybitKeyMessage(detailObj);
+      const backendMessage = detailObj?.message || detailObj?.code || '';
+      setQuoteStatus(backendMessage ? `Quote failed: ${backendMessage}` : 'Quote failed. Recalculate before submitting.');
       errorEl.textContent = actionable || String(e.message || e);
       renderErrorDebug(detailObj);
     } finally {

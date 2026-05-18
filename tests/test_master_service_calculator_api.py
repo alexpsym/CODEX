@@ -1645,3 +1645,24 @@ def test_bybit_expired_key_error_includes_key_source_without_secret() -> None:
 def test_bybit_expired_key_error_prioritized_over_ticker_timeout() -> None:
     detail = master_service._calculator_quote_error_detail("BYBIT_API_KEY_EXPIRED", "x", dependency="bybit_wallet_balance", timings_ms={"bybit_ticker": {"status": "timeout"}})
     assert detail["code"] == "BYBIT_API_KEY_EXPIRED"
+
+
+def test_demo_quote_context_save_failure_returns_structured_debug(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("demo", "k", "s", "https://bybit.test", "KEY2"))
+    monkeypatch.setattr(master_service, "_upsert_bybit_demo_calc_context", lambda *_a, **_k: (_ for _ in ()).throw(PermissionError("disk locked")))
+    monkeypatch.setattr(master_service, "_fetch_oanda_mid_prices_batch", lambda **_kwargs: asyncio.sleep(0, result={"AUD_USD": 1}))
+    monkeypatch.setattr(master_service, "_resolve_bybit_calculator_symbol_fast", lambda *_a, **_k: asyncio.sleep(0, result=("BTCUSDT", {"priceFilter": {"tickSize": "0.1"}, "lotSizeFilter": {"qtyStep": "0.001", "minOrderQty": "0.001", "maxOrderQty": "999", "maxMktOrderQty": "999", "minNotionalValue": "1"}, "leverageFilter": {"maxLeverage": "100"}}, {"resolution_status": "exact"})))
+    monkeypatch.setattr(master_service, "_fetch_bybit_ticker_cached", lambda *_a, **_k: asyncio.sleep(0, result={"payload": {"result": {"list": [{"bid1Price": "65000", "ask1Price": "65001", "lastPrice": "65000.5"}]}}}))
+    monkeypatch.setattr(master_service, "_fetch_bybit_balance_usdt_cached", lambda *_a, **_k: asyncio.sleep(0, result=({"available_usdt": "10000", "total_equity": "10000"}, {"wallet_cache_status": "hit", "wallet_cache_age_ms": 1})))
+
+    payload = {"asset": "crypto", "account": "demo", "symbol": "BTCUSDT", "webhook": "no", "test": "yes", "timeframe": "1h", "risk_mode": "percent", "risk_value": 1, "stop_loss_ticks": 1111, "risk_reward": 2, "order_type": "market", "side": "buy"}
+    with pytest.raises(master_service.HTTPException) as exc:
+        asyncio.run(master_service.calculator_quote(payload))
+    assert exc.value.status_code == 502
+    detail = exc.value.detail
+    assert detail["code"] == "BYBIT_DEMO_CALC_CONTEXT_SAVE_FAILED"
+    assert detail["debug"]["pending_dependencies"] == []
+    assert detail["debug"]["submitted_payload"]["account"] == "demo"
+    assert detail["debug"]["resolved_symbol"] == "BTCUSDT"
+    assert "bybit_wallet_balance" in detail["debug"]["upstream_timings_ms"]
+    assert detail["debug"]["upstream_timings_ms"]["bybit_wallet_balance"]["status"] == "ok"
