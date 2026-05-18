@@ -119,3 +119,31 @@ def test_preserve_local_files_from_backup_includes_relocated_root_state_files():
     assert "function Preserve-LocalFilesFromBackup" in text
     for file_name in ("watchlist.json", "state_manifest.json", "stateManifest.json", "state_backup.json"):
         assert file_name in text
+
+
+def test_invoke_git_text_uses_process_start_info_and_separate_stderr():
+    text = Path("ExtractLatestCodexMaster.bat").read_text(encoding="utf-8")
+    assert "function Invoke-GitText" in text
+    assert "System.Diagnostics.ProcessStartInfo" in text
+    assert "$psi.RedirectStandardError = $true" in text
+    assert "& $GitExe @Arguments 2>&1" not in text
+
+
+def test_backup_diagnostics_use_best_effort_helper():
+    text = Path("ExtractLatestCodexMaster.bat").read_text(encoding="utf-8")
+    assert "function Write-GitDiagnosticFile" in text
+    assert "WARNING: Could not write backup diagnostic" in text
+    assert "git-status-before-reset.txt" in text
+    assert "git-log-local-ahead.txt" in text
+    assert "local-changes.patch" in text
+    assert "local-staged-changes.patch" in text
+
+
+def test_classifier_allows_modified_state_backup_file():
+    result = classify_status(" M state_backup.json")
+    assert result["IsOnlyAllowed"] is True
+
+
+def test_classifier_rejects_modified_render_master_service():
+    result = classify_status(" M render/master_service.py")
+    assert result["IsOnlyAllowed"] is False
