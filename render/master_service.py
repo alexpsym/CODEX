@@ -522,6 +522,9 @@ TRADING_JOURNAL_BROKER_REFRESH_ENABLED = os.getenv("TRADING_JOURNAL_BROKER_REFRE
     "yes",
     "on",
 }
+TRADING_JOURNAL_SYNC_CALCULATOR_TRADES_ON_MANUAL = os.getenv(
+    "TRADING_JOURNAL_SYNC_CALCULATOR_TRADES_ON_MANUAL", ""
+).strip().lower() in {"1", "true", "yes", "on"}
 TRADING_JOURNAL_BYBIT_DEMO_BALANCE_ANCHOR_ENABLED = str(
     os.getenv("TRADING_JOURNAL_BYBIT_DEMO_BALANCE_ANCHOR_ENABLED", "1") or "1"
 ).strip().lower() not in {"0", "false", "no", "off"}
