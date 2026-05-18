@@ -89,6 +89,7 @@ def test_allows_required_runtime_entries_including_leading_space_m():
 def test_rejects_unsafe_statuses_and_paths():
     cases = [
         " M render/master_service.py",
+        "M  bybit_monitor/custom_alerts.json",
         "M  render/data/monthly_aud_revaluation.json",
         " D render/data/monthly_aud_revaluation.json",
         "R  old -> new",
@@ -147,3 +148,33 @@ def test_classifier_allows_modified_state_backup_file():
 def test_classifier_rejects_modified_render_master_service():
     result = classify_status(" M render/master_service.py")
     assert result["IsOnlyAllowed"] is False
+
+
+def test_invoke_git_text_does_not_trim_stdout_leading_columns():
+    text = Path("ExtractLatestCodexMaster.bat").read_text(encoding="utf-8")
+    invoke_git_text_start = text.index("function Invoke-GitText")
+    invoke_git_text_end = text.index("function Remove-TrailingLineTerminators")
+    invoke_git_text_body = text[invoke_git_text_start:invoke_git_text_end]
+    assert "$stdoutTask.Result.Trim()" not in invoke_git_text_body
+    assert "Remove-TrailingLineTerminators" in text
+    assert "$stdout = Remove-TrailingLineTerminators -Text $stdoutTask.Result" in text
+
+
+def test_classifier_allows_bybit_custom_alerts_modified_worktree():
+    result = classify_status(" M bybit_monitor/custom_alerts.json")
+    assert result["IsOnlyAllowed"] is True
+
+
+def test_classifier_allows_leading_space_first_line_mixed_allowed_runtime_entries():
+    status = "\n".join(
+        [
+            " M bybit_monitor/custom_alerts.json",
+            " M render/data/monthly_aud_revaluation.json",
+            " M render/data/monthly_aud_revaluation_state.json",
+            " M state_backup.json",
+            "?? bybit_monitor/runtime_status.json",
+            "?? render/data/trading_journal.json",
+        ]
+    )
+    result = classify_status(status)
+    assert result["IsOnlyAllowed"] is True

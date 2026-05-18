@@ -402,8 +402,8 @@ function Invoke-GitText {
     [void]$proc.WaitForExit()
     [void][System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), 10000)
 
-    $stdout = $stdoutTask.Result.Trim()
-    $stderr = $stderrTask.Result.Trim()
+    $stdout = Remove-TrailingLineTerminators -Text $stdoutTask.Result
+    $stderr = Remove-TrailingLineTerminators -Text $stderrTask.Result
     $exitCode = $proc.ExitCode
     if ($stdout) { Write-Host $stdout }
     if ($stderr -and $exitCode -eq 0) {
@@ -422,6 +422,12 @@ function Invoke-GitText {
     }
 
     return $stdout
+}
+
+function Remove-TrailingLineTerminators {
+    param([AllowNull()] [string] $Text)
+    if ($null -eq $Text) { return '' }
+    return [Regex]::Replace($Text, "(`r`n|`n|`r)+$", "")
 }
 
 function Write-GitDiagnosticFile {
