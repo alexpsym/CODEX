@@ -100,3 +100,5 @@ def test_run_local_master_migrates_legacy_master_journal_name() -> None:
     assert "LEGACY_JOURNAL=%TRADING_JOURNAL_LOCAL_DIR%\\Master Journal.xlsx" in script
     assert 'move /Y "%LEGACY_JOURNAL%" "%CANONICAL_JOURNAL%"' in script
     assert "ambiguous workbook names found" in script
+    assert "Keep only journal\\Trading Journal.xlsx in the journal folder." in script
+    assert "Move backups outside journal\\ or rename them so they do not end in .xlsx/.xls/.xlsm." in script
