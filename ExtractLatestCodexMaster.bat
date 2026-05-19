@@ -740,7 +740,7 @@ function Resolve-JournalWorkbookCollision {
     }
 
     Move-Item -LiteralPath $legacy -Destination $canonical -Force -ErrorAction Stop
-    Write-Host "Migrated legacy workbook during $Context: Master Journal.xlsx -> Trading Journal.xlsx"
+    Write-Host ("Migrated legacy workbook during {0}: Master Journal.xlsx -> Trading Journal.xlsx" -f $Context)
 }
 
 function Preserve-LocalFilesFromBackup {

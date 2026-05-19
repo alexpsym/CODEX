@@ -1,5 +1,9 @@
 from pathlib import Path
 import json
+import re
+import shutil
+import subprocess
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -156,3 +160,31 @@ def test_extract_latest_transcript_logging_paths_and_messages_present() -> None:
     assert 'Start-Transcript -LiteralPath $timestampedLogPath -Force' in script
     assert 'Stop-Transcript' in script
     assert 'Full log written to: $timestampedLogPath' in script
+
+
+def test_extract_latest_has_no_invalid_variable_scope_tokens_in_double_quoted_strings() -> None:
+    script = (ROOT / 'ExtractLatestCodexMaster.bat').read_text(encoding='utf-8')
+    double_quoted_strings = re.findall(r'"(?:[^"\\]|\\.)*"', script)
+    invalid_hits: list[str] = []
+    for s in double_quoted_strings:
+        for m in re.finditer(r'\$([A-Za-z_][A-Za-z0-9_]*)\:', s):
+            if m.group(1).lower() not in {'env', 'script', 'global', 'local', 'private'}:
+                invalid_hits.append(s)
+    assert not invalid_hits, f"Invalid $var: token(s) found in double-quoted strings: {invalid_hits}"
+
+
+def test_extract_latest_embedded_powershell_parses_without_errors() -> None:
+    ps_exe = shutil.which('pwsh') or shutil.which('powershell')
+    if not ps_exe:
+        pytest.skip('PowerShell executable not available in test environment')
+
+    script_path = ROOT / 'ExtractLatestCodexMaster.bat'
+    parse_cmd = (
+        "$content = Get-Content -LiteralPath '" + str(script_path).replace("'", "''") + "';"
+        "$ps = ($content | Select-Object -Skip 7) -join \"`n\";"
+        "$tokens = $null; $errors = $null;"
+        "[System.Management.Automation.Language.Parser]::ParseInput($ps,[ref]$tokens,[ref]$errors) | Out-Null;"
+        "if ($errors.Count -gt 0) { $errors | ForEach-Object { $_.ToString() }; exit 1 }"
+    )
+    result = subprocess.run([ps_exe, "-NoProfile", "-Command", parse_cmd], capture_output=True, text=True)
+    assert result.returncode == 0, f"PowerShell parse errors:\n{result.stdout}\n{result.stderr}"
