@@ -1442,6 +1442,7 @@ def test_manual_sync_demo_live_successful_row_id_verification(tmp_path, monkeypa
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SYNC_CALCULATOR_TRADES_ON_MANUAL', True)
     monkeypatch.setattr(master_service, '_trading_journal_broker_refresh_enabled', lambda: False)
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    monkeypatch.setattr(master_service, '_master_journal_path', lambda: tmp_path / 'Trading Journal.xlsx')
     from tools.master_journal_workbook import build_master_journal_workbook
     snap={'items':[{'id':'demo-row-1','row_type':'trade','symbol':'BTCUSDT','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0},{'id':'live-row-1','row_type':'trade','symbol':'ETHUSDT','side':'SELL','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0}], 'stats': {'totals': {}, 'groups': {}}, 'balances': []}
     build_master_journal_workbook(snap, tmp_path / 'Trading Journal.xlsx')
