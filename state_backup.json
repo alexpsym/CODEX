@@ -85,7 +85,7 @@
     "updated_at": "2026-05-19T12:06:17.242581+00:00"
   },
   "pending_webhooks": [],
-  "savedAt": "2026-05-19T12:07:37.172209+00:00",
+  "savedAt": "2026-05-19T12:07:39.299026+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [
@@ -181,7 +181,7 @@
           "setup": "",
           "timeframe": ""
         },
-        "manual_updated_at": "2026-05-19T12:07:35.163963+00:00",
+        "manual_updated_at": "2026-05-19T12:07:37.288001+00:00",
         "net_profit": 1.0,
         "notes": "",
         "open_time": "2026-01-01",
@@ -194,7 +194,7 @@
         "timeframe": ""
       }
     ],
-    "updated_at": "2026-05-19T12:07:35.163995+00:00"
+    "updated_at": "2026-05-19T12:07:37.288031+00:00"
   },
   "trading_journal_import_cache": {},
   "trading_journal_state": {
