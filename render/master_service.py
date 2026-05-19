@@ -3955,6 +3955,17 @@ def _bybit_demo_order_identity(row: Dict[str, object]) -> str:
     return str(refs.get("orderId") or row.get("order_id") or "").strip()
 
 
+def _is_bybit_execution_history_row(row: Dict[str, object]) -> bool:
+    source = str(row.get("source") or "").strip().lower()
+    if source == "bybit_execution_history":
+        return True
+    rid = str(row.get("id") or "").strip().lower()
+    if rid.startswith("bybit:demo:execution:") or rid.startswith("bybit:live:execution:"):
+        return True
+    refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+    return bool(str(refs.get("execId") or refs.get("exec_id") or "").strip())
+
+
 def _bybit_demo_trade_score(row: Dict[str, object]) -> Tuple[int, int, int, int, int, int]:
     refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
     has_order_id = int(bool(_bybit_demo_order_identity(row)))
@@ -3981,7 +3992,16 @@ def _sanitize_bybit_demo_rows(rows: List[Dict[str, object]]) -> tuple[List[Dict[
         if isinstance(row, dict) and _is_bybit_demo_trade_row(row):
             close_ts = _canonical_trade_epoch_second(row.get("close_time"))
             open_ts = _canonical_trade_epoch_second(row.get("open_time"))
+            is_exec_row = _is_bybit_execution_history_row(row)
             if close_ts is not None and open_ts is not None and close_ts <= open_ts:
+                if is_exec_row and close_ts == open_ts:
+                    kept = dict(row)
+                    kept["status"] = str(kept.get("status") or "closed")
+                    kept["row_type"] = "trade"
+                    if kept.get("trade_duration_seconds") is None:
+                        kept["trade_duration_seconds"] = 0
+                    bybit_rows.append(kept)
+                    continue
                 source = str(row.get("source") or "").strip().lower()
                 if source in {"bybit", "excel", "local_excel"}:
                     swapped_open = row.get("close_time")
@@ -4019,7 +4039,11 @@ def _sanitize_bybit_demo_rows(rows: List[Dict[str, object]]) -> tuple[List[Dict[
     dedup_order: Dict[str, Dict[str, object]] = {}
     order_dropped = 0
     orderless: List[Dict[str, object]] = []
+    execution_rows: List[Dict[str, object]] = []
     for row in bybit_rows:
+        if _is_bybit_execution_history_row(row):
+            execution_rows.append(row)
+            continue
         order_id = _bybit_demo_order_identity(row)
         if not order_id:
             orderless.append(row)
@@ -4032,13 +4056,34 @@ def _sanitize_bybit_demo_rows(rows: List[Dict[str, object]]) -> tuple[List[Dict[
         dedup_order[order_id] = _merge_row_notes_comments(winner, loser)
         order_dropped += 1
 
-    after_order = list(dedup_order.values()) + orderless
+    after_order = list(dedup_order.values()) + orderless + execution_rows
     dedup_fallback: Dict[str, Dict[str, object]] = {}
     fallback_dropped = 0
     for row in after_order:
-        key = _canonical_bybit_demo_trade_signature(row)
-        if not key:
-            key = f"rowid:{str(row.get('id') or '')}"
+        if _is_bybit_execution_history_row(row):
+            refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+            exec_id = str(refs.get("execId") or refs.get("exec_id") or "").strip()
+            row_id = str(row.get("id") or "").strip()
+            if row_id or exec_id:
+                key = f"execution:{row_id or exec_id}"
+            else:
+                key = "|".join(
+                    [
+                        "execution",
+                        str(row.get("account") or row.get("account_label") or "").strip().lower(),
+                        str(row.get("symbol") or "").strip().upper(),
+                        str(refs.get("orderId") or row.get("order_id") or "").strip(),
+                        _normalize_side_for_comparison(row.get("side")),
+                        str(_canonical_trade_epoch_second(row.get("open_time")) or ""),
+                        _num_bucket(row.get("qty"), 8),
+                        _num_bucket(row.get("entry_price"), 8),
+                        _num_bucket(row.get("exit_price"), 8),
+                    ]
+                )
+        else:
+            key = _canonical_bybit_demo_trade_signature(row)
+            if not key:
+                key = f"rowid:{str(row.get('id') or '')}"
         prev = dedup_fallback.get(key)
         if prev is None:
             dedup_fallback[key] = row
@@ -4060,6 +4105,8 @@ def _sanitize_bybit_demo_rows(rows: List[Dict[str, object]]) -> tuple[List[Dict[
                 _num_bucket(row.get("qty"), 8),
             ]
         )
+        if _is_bybit_execution_history_row(row):
+            gk = f"{gk}|{str((row.get('raw_refs') or {}).get('execId') or row.get('id') or '')}"
         prev = grouped.get(gk)
         if prev is None:
             grouped[gk] = row
@@ -14837,6 +14884,18 @@ async def _fetch_bybit_executions(
 _BYBIT_MAX_WINDOW_MS = (7 * 24 * 60 * 60 * 1000) - 1
 
 
+def _ts_to_iso(epoch_seconds: object) -> Optional[str]:
+    try:
+        if epoch_seconds in (None, ""):
+            return None
+        ts = float(epoch_seconds)
+        if ts > 10_000_000_000:
+            ts = ts / 1000.0
+        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    except Exception:
+        return None
+
+
 def _iter_bybit_time_chunks(start_time: int, end_time: int) -> List[Tuple[int, int]]:
     start = int(start_time)
     end = int(end_time)
@@ -16220,7 +16279,7 @@ async def _sync_bybit_closed_pnl_window(
     ]
     execution_timestamps = [int(x) for x in execution_timestamps if x is not None]
     if execution_timestamps:
-        latest_execution_time = _ts_to_iso(max(execution_timestamps))
+        latest_execution_time = _ms_to_iso(max(execution_timestamps) * 1000)
 
     if not final_rows:
         if mode == "demo":
@@ -16333,8 +16392,10 @@ async def _sync_bybit_closed_pnl_window(
         last_invalid_time_row_details=dropped_invalid_rows,
     )
     persisted_ids = {str(r.get("id") or "").strip() for r in _get_trading_journal_rows() if isinstance(r, dict)}
+    expected_execution_ids = [str(r.get("id") or "").strip() for r in execution_rows if str(r.get("id") or "").strip()]
+    missing_execution_row_ids = [rid for rid in expected_execution_ids if rid not in persisted_ids]
     execution_rows_upserted = len([r for r in execution_rows if str(r.get("id") or "").strip() in persisted_ids])
-    return {"max_seen": max_seen, "rows_seen": len(final_rows), "rows_upserted": int(changed if not local_authoritative else local_workbook_changed), "rows_deduped": int(sanitize_stats.get("deduped_by_order_id",0))+int(sanitize_stats.get("deduped_by_fingerprint",0)), "single_file_mode": bool(local_authoritative and _master_journal_single_file_mode()), "warning": run_warning, "captured_row_ids": [str(r.get("id") or "").strip() for r in final_rows if str(r.get("id") or "").strip()], "execution_rows_seen": len(execution_entries), "execution_rows_normalized": len(execution_rows), "execution_rows_upserted": execution_rows_upserted, "latest_execution_time": latest_execution_time, "execution_fetch_error": execution_fetch_error}
+    return {"max_seen": max_seen, "rows_seen": len(final_rows), "rows_upserted": int(changed if not local_authoritative else local_workbook_changed), "rows_deduped": int(sanitize_stats.get("deduped_by_order_id",0))+int(sanitize_stats.get("deduped_by_fingerprint",0)), "single_file_mode": bool(local_authoritative and _master_journal_single_file_mode()), "warning": run_warning, "captured_row_ids": [str(r.get("id") or "").strip() for r in final_rows if str(r.get("id") or "").strip()], "execution_rows_seen": len(execution_entries), "execution_rows_normalized": len(execution_rows), "execution_rows_upserted": execution_rows_upserted, "latest_execution_time": latest_execution_time, "execution_fetch_error": execution_fetch_error, "missing_execution_row_ids": missing_execution_row_ids, "sanitize_stats": sanitize_stats}
 
 
 async def _poll_bybit_fills() -> None:
@@ -16496,6 +16557,15 @@ async def _run_bybit_closed_pnl_sync(
     ):
         ok_flag = False
         err_msg = str(sync_diag.get("execution_fetch_error") or "")
+    if (
+        mode == "demo"
+        and reason == "manual"
+        and isinstance(sync_diag, dict)
+        and int(sync_diag.get("execution_rows_normalized") or 0) > 0
+        and len(sync_diag.get("missing_execution_row_ids") or []) > 0
+    ):
+        ok_flag = False
+        err_msg = "Bybit execution rows were sanitized/removed before persistence."
     return {
         "ok": ok_flag,
         "account_mode": mode,
@@ -16516,6 +16586,8 @@ async def _run_bybit_closed_pnl_sync(
         "execution_rows_upserted": int((sync_diag or {}).get("execution_rows_upserted") or 0) if isinstance(sync_diag, dict) else 0,
         "latest_execution_time": (sync_diag or {}).get("latest_execution_time") if isinstance(sync_diag, dict) else None,
         "execution_fetch_error": (sync_diag or {}).get("execution_fetch_error") if isinstance(sync_diag, dict) else None,
+        "missing_execution_row_ids": (sync_diag or {}).get("missing_execution_row_ids") if isinstance(sync_diag, dict) else [],
+        "sanitize_stats": (sync_diag or {}).get("sanitize_stats") if isinstance(sync_diag, dict) else {},
     }
 
 
@@ -24497,7 +24569,7 @@ async def _run_trading_journal_sync_job() -> None:
         latest_trade_time = None
         try:
             wb = load_workbook(_master_journal_path(), data_only=True)
-            tl = _get_trade_log_sheet(wb, allow_legacy=False)
+            tl = _get_trade_log_sheet(wb, allow_legacy=True)
             headers = [str(c.value or "").strip() for c in tl[1]]
             ridx = headers.index("Row ID") + 1 if "Row ID" in headers else None
             cidx = headers.index("Close Time") + 1 if "Close Time" in headers else None
@@ -24730,7 +24802,7 @@ async def _run_trading_journal_sync_job() -> None:
             verified = True
             try:
                 wb = load_workbook(_master_journal_path(), data_only=True)
-                tl = _get_trade_log_sheet(wb, allow_legacy=False)
+                tl = _get_trade_log_sheet(wb, allow_legacy=True)
                 headers = [str(c.value or "").strip() for c in tl[1]]
                 ridx = headers.index("Row ID") + 1 if "Row ID" in headers else None
                 workbook_ids = set()
@@ -24892,7 +24964,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
             for sheet in SHEET_ORDER:
                 if sheet not in wb.sheetnames:
                     raise RuntimeError(f"Trading Journal validation failed: missing required sheet '{sheet}'.")
-            trade_log = _get_trade_log_sheet(wb, allow_legacy=False)
+            trade_log = _get_trade_log_sheet(wb, allow_legacy=True)
             inst = wb["Instrument Averages"]
             cal = wb["P&L Calendar"]
             dash = wb["Dashboard"]

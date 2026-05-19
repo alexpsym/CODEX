@@ -1420,7 +1420,7 @@ def test_resolve_local_journal_file_case_insensitive_and_append_reuses_existing(
     changed = master_service._append_bybit_demo_rows_to_local_workbook(local_dir, rows)
     assert changed == 1
     assert existing.exists()
-    assert not (local_dir / "Bybit Demo.xlsx").exists()
+    assert len([p for p in local_dir.iterdir() if p.suffix.lower() == ".xlsx"]) == 1
 
 def test_backfill_bybit_demo_balances_reverse_pnl_ordering() -> None:
     rows = [
@@ -1616,7 +1616,7 @@ def test_sync_bybit_closed_pnl_window_uses_execution_rows_when_closed_pnl_empty(
     monkeypatch.setattr(master_service, "_append_bybit_demo_rows_to_workbook", lambda *_a, **_k: 0)
     monkeypatch.setattr(master_service, "_sanitize_bybit_demo_workbook", lambda *_a, **_k: {"changed": 0})
     monkeypatch.setattr(master_service, "_sanitize_bybit_demo_rows", lambda rows: (rows, {"changed": 0, "deduped_by_order_id": 0, "deduped_by_fingerprint": 0}))
-    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: [])
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: list(captured["rows"] or []))
     monkeypatch.setattr(master_service, "_record_bybit_demo_sync_status", lambda **_k: None)
     monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
     monkeypatch.setattr(master_service, "_fetch_bybit_demo_current_balance_snapshot", lambda: asyncio.sleep(0, result={}))
@@ -1653,8 +1653,12 @@ def test_manual_sync_fails_when_captured_bybit_rows_missing_from_workbook(tmp_pa
     monkeypatch.setattr(master_service, "_import_trading_journal_from_sources", lambda *a, **k: {"ok": True, "rows_imported": 0, "rows_by_asset_class": {}, "local_workbooks_seen": 1, "dropbox_workbooks_seen": 0})
     monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"master_journal_ok": True})
     monkeypatch.setattr(master_service, "_trading_journal_broker_refresh_enabled", lambda: True)
-    monkeypatch.setattr(master_service, "_run_bybit_closed_pnl_sync", lambda *a, **k: {"ok": True, "rows_seen": 2, "captured_row_ids": ["bybit:demo:execution:BTCUSDT:E1", "bybit:demo:execution:BTCUSDT:E2"], "execution_rows_seen": 2, "execution_rows_normalized": 2, "latest_execution_time": "2026-05-19T01:13:00+10:00"})
-    monkeypatch.setattr(master_service, "_recover_oanda_recent_fills", lambda *a, **k: {"ok": True, "rows_seen": 0, "captured_row_ids": []})
+    async def _bybit_closed_pnl_sync_stub(*a, **k):
+        return {"ok": True, "rows_seen": 2, "captured_row_ids": ["bybit:demo:execution:BTCUSDT:E1", "bybit:demo:execution:BTCUSDT:E2"], "execution_rows_seen": 2, "execution_rows_normalized": 2, "latest_execution_time": "2026-05-19T01:13:00+10:00"}
+    monkeypatch.setattr(master_service, "_run_bybit_closed_pnl_sync", _bybit_closed_pnl_sync_stub)
+    async def _recover_oanda_recent_fills_stub(*a, **k):
+        return {"ok": True, "rows_seen": 0, "captured_row_ids": []}
+    monkeypatch.setattr(master_service, "_recover_oanda_recent_fills", _recover_oanda_recent_fills_stub)
     asyncio.run(master_service._run_trading_journal_sync_job())
     st = master_service._sync_state_snapshot()
     assert st.get("ok") is False
@@ -1670,8 +1674,12 @@ def test_manual_sync_fails_when_bybit_execution_prefetch_fails(tmp_path: Path, m
     monkeypatch.setattr(master_service, "_import_trading_journal_from_sources", lambda *a, **k: {"ok": True, "rows_imported": 0, "rows_by_asset_class": {}, "local_workbooks_seen": 1, "dropbox_workbooks_seen": 0})
     monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"master_journal_ok": True})
     monkeypatch.setattr(master_service, "_trading_journal_broker_refresh_enabled", lambda: True)
-    monkeypatch.setattr(master_service, "_run_bybit_closed_pnl_sync", lambda *a, **k: {"ok": False, "rows_seen": 0, "execution_rows_seen": 0, "error": "Bybit execution prefetch failed: Bybit execution API failed"})
-    monkeypatch.setattr(master_service, "_recover_oanda_recent_fills", lambda *a, **k: {"ok": True, "rows_seen": 0, "captured_row_ids": []})
+    async def _bybit_closed_pnl_sync_fail_stub(*a, **k):
+        return {"ok": False, "rows_seen": 0, "execution_rows_seen": 0, "error": "Bybit execution prefetch failed: Bybit execution API failed"}
+    monkeypatch.setattr(master_service, "_run_bybit_closed_pnl_sync", _bybit_closed_pnl_sync_fail_stub)
+    async def _recover_oanda_recent_fills_stub(*a, **k):
+        return {"ok": True, "rows_seen": 0, "captured_row_ids": []}
+    monkeypatch.setattr(master_service, "_recover_oanda_recent_fills", _recover_oanda_recent_fills_stub)
     asyncio.run(master_service._run_trading_journal_sync_job())
     st = master_service._sync_state_snapshot()
     assert st.get("ok") is False
@@ -1703,3 +1711,38 @@ def test_run_bybit_closed_pnl_sync_propagates_execution_diagnostics(monkeypatch)
     assert out["execution_rows_upserted"] == 1
     assert out["latest_execution_time"] == "2026-05-19T01:13:00+10:00"
     assert out["execution_fetch_error"] is None
+
+
+def test_sanitize_equal_time_execution_row_survives() -> None:
+    raw = {"symbol": "BTCUSDT", "orderId": "OID-1", "execId": "E1", "execQty": "0.1", "execPrice": "100", "execTime": "1779199199000", "side": "Buy"}
+    row = master_service._normalize_bybit_execution_history_row(raw, "demo")
+    assert row["open_time"] == row["close_time"]
+    sanitized, stats = master_service._sanitize_bybit_demo_rows([row])
+    assert len(sanitized) == 1
+    assert str(sanitized[0].get("row_type") or "").lower() != "quarantine"
+    assert stats["quarantined_invalid_time"] == 0
+    assert sanitized[0]["id"] == "bybit:demo:execution:BTCUSDT:E1"
+
+
+def test_sanitize_same_order_multiple_exec_ids_preserved() -> None:
+    r1 = master_service._normalize_bybit_execution_history_row({"symbol": "BTCUSDT", "orderId": "OID-1", "execId": "E1", "execQty": "0.1", "execPrice": "100", "execTime": "1779199199000", "side": "Buy"}, "demo")
+    r2 = master_service._normalize_bybit_execution_history_row({"symbol": "BTCUSDT", "orderId": "OID-1", "execId": "E2", "execQty": "0.1", "execPrice": "101", "execTime": "1779199199000", "side": "Buy"}, "demo")
+    sanitized, stats = master_service._sanitize_bybit_demo_rows([r1, r2])
+    assert len(sanitized) == 2
+    assert stats["deduped_by_order_id"] == 0
+    assert {x["id"] for x in sanitized} == {"bybit:demo:execution:BTCUSDT:E1", "bybit:demo:execution:BTCUSDT:E2"}
+
+
+def test_sanitize_full_23_row_csv_fixture_survives(tmp_path: Path) -> None:
+    headers = ["contracts","Order No.","Direction","Order Type","Filled Qty","Filled Price","Order Price","Filled Type","Trading Fee Rate","Fees Paid","Trasaction ID","Transaction Time(UTC+10)","Final Balance (USDT)"]
+    lines = [",".join(headers)]
+    for i in range(23):
+        lines.append(f"BTCUSDT,OID-1,Buy,Market,0.001,100000,100000,Trade,0.00055,0.01,EX{i:03d},2026-05-19 01:13:00+10:00,1000.{i}")
+    p = tmp_path / "hist.csv"
+    p.write_text("\n".join(lines), encoding="utf-8")
+    rows = master_service._parse_bybit_trade_history_csv(p, account_mode="demo")
+    sanitized, stats = master_service._sanitize_bybit_demo_rows(rows)
+    assert len(sanitized) == 23
+    assert stats["quarantined_invalid_time"] == 0
+    assert stats["deduped_by_order_id"] == 0
+    assert stats["trade_group_merged"] == 0
