@@ -85,7 +85,7 @@
     "updated_at": "2026-05-19T09:45:08.677953+00:00"
   },
   "pending_webhooks": [],
-  "savedAt": "2026-05-19T09:46:33.086509+00:00",
+  "savedAt": "2026-05-19T09:46:36.008008+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [
@@ -130,11 +130,11 @@
   "trading_journal": {
     "items": [
       {
-        "account": "PEPPERSTONE DEMO",
+        "account": "A",
         "breakeven": "",
-        "close_time": "2026-01-01",
+        "close_time": "2026-01-01 11:00:00",
         "id": "r1",
-        "is_test_trade": true,
+        "is_test_trade": false,
         "manual_override_fields": [
           "breakeven",
           "is_test_trade",
@@ -144,17 +144,17 @@
         ],
         "manual_overrides": {
           "breakeven": "",
-          "is_test_trade": true,
+          "is_test_trade": false,
           "notes": "",
           "setup": "",
           "timeframe": ""
         },
-        "manual_updated_at": "2026-05-19T09:46:30.952258+00:00",
-        "net_profit": 1.0,
+        "manual_updated_at": "2026-05-19T09:46:33.995239+00:00",
+        "net_profit": 10.0,
         "notes": "",
-        "open_time": "2026-01-01",
-        "realized_pnl": 1.0,
-        "result_pct": 0.1,
+        "open_time": "2026-01-01 10:00:00",
+        "realized_pnl": 10.0,
+        "result_pct": 1.2,
         "row_type": "trade",
         "setup": "",
         "side": "BUY",
@@ -162,7 +162,7 @@
         "timeframe": ""
       }
     ],
-    "updated_at": "2026-05-19T09:46:30.952279+00:00"
+    "updated_at": "2026-05-19T09:46:33.995270+00:00"
   },
   "trading_journal_import_cache": {},
   "trading_journal_state": {
