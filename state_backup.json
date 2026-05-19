@@ -85,7 +85,7 @@
     "updated_at": "2026-05-19T09:26:50.889073+00:00"
   },
   "pending_webhooks": [],
-  "savedAt": "2026-05-19T09:28:57.809006+00:00",
+  "savedAt": "2026-05-19T09:33:39.835716+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [
@@ -106,7 +106,7 @@
       "timeframe": "1-hour",
       "trade_id": null,
       "transaction_id": null,
-      "updated_at": "2026-05-19T09:26:44.252737+00:00"
+      "updated_at": "2026-05-19T09:33:36.339453+00:00"
     },
     {
       "account": "live",
@@ -221,15 +221,30 @@
         "close_time_ms": null,
         "open_time_ms": null,
         "order_id": "oid-123",
-        "order_link_id": "f52400f4151c4041917d9bfa1220ecce",
+        "order_link_id": "0e29303456274752a00e7cb04c653d7c",
         "parent_order_link_id": "",
         "side": "Buy",
         "source": "trading_stop_computed",
         "stop_loss": 95.0,
         "symbol": "DASHUSDT",
         "take_profit": 110.0,
-        "updated_at": "2026-05-19T09:26:44.232056+00:00",
-        "updated_ts": 1779182804.2320666
+        "updated_at": "2026-05-19T09:33:36.314941+00:00",
+        "updated_ts": 1779183216.3149617
+      },
+      "order_link_id:0e29303456274752a00e7cb04c653d7c": {
+        "account": "demo",
+        "close_time_ms": null,
+        "open_time_ms": null,
+        "order_id": "oid-123",
+        "order_link_id": "0e29303456274752a00e7cb04c653d7c",
+        "parent_order_link_id": "",
+        "side": "Buy",
+        "source": "trading_stop_computed",
+        "stop_loss": 95.0,
+        "symbol": "DASHUSDT",
+        "take_profit": 110.0,
+        "updated_at": "2026-05-19T09:33:36.314941+00:00",
+        "updated_ts": 1779183216.3149617
       },
       "order_link_id:5c17b2cb8de94e1bb87b7af6d6ebf192": {
         "account": "demo",
