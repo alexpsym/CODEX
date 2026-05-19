@@ -27,7 +27,7 @@ set "LEGACY_JOURNAL=%TRADING_JOURNAL_LOCAL_DIR%\Master Journal.xlsx"
 if exist "%CANONICAL_JOURNAL%" (
   if exist "%LEGACY_JOURNAL%" (
     echo [local-master] ERROR: ambiguous workbook names found: %CANONICAL_JOURNAL% and %LEGACY_JOURNAL%
-    echo [local-master] Keep only Trading Journal.xlsx.
+    echo [local-master] Keep only journal\Trading Journal.xlsx in the journal folder. Move backups outside journal\ or rename them so they do not end in .xlsx/.xls/.xlsm.
     exit /b 1
   )
 ) else (

@@ -1547,3 +1547,19 @@ def test_github_sync_stages_legacy_master_journal_deletion_when_tracked_and_miss
     add_joined = " ".join(add_calls[0])
     assert "journal/Trading Journal.xlsx" in add_joined
     assert "journal/Master Journal.xlsx" in add_joined
+
+
+@pytest.mark.skipif(master_service is None, reason="master_service import unavailable")
+def test_enforce_single_master_journal_rejects_legacy_backup_excel_name(tmp_path):
+    journal = tmp_path / "journal"
+    journal.mkdir()
+    (journal / "Trading Journal.xlsx").write_bytes(b"x")
+    (journal / "Master Journal.legacy.bak.xlsx").write_bytes(b"x")
+    res = master_service._enforce_single_master_journal_xlsx(journal, cleanup_known_generated=True)
+    assert res["ok"] is False
+    assert "Master Journal.legacy.bak.xlsx" in (res.get("unknown_extra_excel_files") or [])
+
+
+def test_single_file_enforcement_error_includes_backup_move_guidance():
+    src = (ROOT / "render" / "master_service.py").read_text(encoding="utf-8")
+    assert "Move legacy backups outside journal/. Keep only journal/Trading Journal.xlsx." in src

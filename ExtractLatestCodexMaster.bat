@@ -671,6 +671,38 @@ function Copy-FolderTreeWithRoboCopyChecked {
     }
 }
 
+
+function Resolve-JournalWorkbookCollision {
+    param(
+        [Parameter(Mandatory = $true)] [string] $JournalDir,
+        [string] $Context = 'journal normalization'
+    )
+
+    if (-not (Test-Path -LiteralPath $JournalDir -PathType Container)) {
+        return
+    }
+
+    $canonical = Join-Path $JournalDir 'Trading Journal.xlsx'
+    $legacy = Join-Path $JournalDir 'Master Journal.xlsx'
+    if (-not (Test-Path -LiteralPath $legacy -PathType Leaf)) {
+        return
+    }
+
+    if (Test-Path -LiteralPath $canonical -PathType Leaf) {
+        $journalRoot = Split-Path -Parent $JournalDir
+        $legacyBackupDir = Join-Path $journalRoot 'journal_legacy_backups'
+        New-Item -ItemType Directory -Force -Path $legacyBackupDir | Out-Null
+        $legacyBackupName = "Master Journal.legacy.$((Get-Date).ToString('yyyyMMdd-HHmmss')).xlsx"
+        $legacyBackup = Join-Path $legacyBackupDir $legacyBackupName
+        Move-Item -LiteralPath $legacy -Destination $legacyBackup -Force -ErrorAction Stop
+        Write-Host "Quarantined legacy workbook during $Context outside active journal folder: $legacy -> $legacyBackup"
+        return
+    }
+
+    Move-Item -LiteralPath $legacy -Destination $canonical -Force -ErrorAction Stop
+    Write-Host "Migrated legacy workbook during $Context: Master Journal.xlsx -> Trading Journal.xlsx"
+}
+
 function Preserve-LocalFilesFromBackup {
     param(
         [Parameter(Mandatory = $true)] [string] $BackupDir,
@@ -683,6 +715,7 @@ function Preserve-LocalFilesFromBackup {
     $newJournal = Join-Path $NewRepoDir 'journal'
     if (Test-Path -LiteralPath $backupJournal -PathType Container) {
         Copy-DirectoryContentsSafe -Source $backupJournal -Destination $newJournal
+        Resolve-JournalWorkbookCollision -JournalDir $newJournal -Context "backup journal preservation"
         Write-Host "Preserved journal folder: $newJournal"
     } else {
         Write-Host 'No previous journal folder was found to preserve.'

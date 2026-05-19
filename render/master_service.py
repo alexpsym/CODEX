@@ -6362,7 +6362,7 @@ def _import_trading_journal_from_sources(
     if single_file_mode:
         pre = _enforce_single_master_journal_xlsx(TRADING_JOURNAL_LOCAL_DIR, cleanup_known_generated=True)
         if not pre.get("ok"):
-            msg = "Unknown extra Excel files in journal directory: " + ", ".join(pre.get("unknown_extra_excel_files") or [])
+            msg = "Unknown extra Excel files in journal directory: " + ", ".join(pre.get("unknown_extra_excel_files") or []) + ". Move legacy backups outside journal/. Keep only journal/Trading Journal.xlsx."
             return {"ok": False, "source_mode": "master_journal", "source": "master_journal", "errors": [{"path": str(TRADING_JOURNAL_LOCAL_DIR), "error": msg}], "warnings": warnings, "started_at": started_at, "finished_at": _utc_now_iso()}
         source_payload = read_master_journal_source(_master_journal_path())
         raw_rows = [dict(r) for r in (source_payload.get("items") or []) if isinstance(r, dict)]
@@ -6376,7 +6376,7 @@ def _import_trading_journal_from_sources(
         _set_trading_journal_diagnostics(diagnostics)
         post = _enforce_single_master_journal_xlsx(TRADING_JOURNAL_LOCAL_DIR, cleanup_known_generated=True)
         if not post.get("ok"):
-            msg = "Unknown extra Excel files in journal directory after import: " + ", ".join(post.get("unknown_extra_excel_files") or [])
+            msg = "Unknown extra Excel files in journal directory after import: " + ", ".join(post.get("unknown_extra_excel_files") or []) + ". Move legacy backups outside journal/. Keep only journal/Trading Journal.xlsx."
             return {"ok": False, "source_mode": "master_journal", "source": "master_journal", "errors": [{"path": str(TRADING_JOURNAL_LOCAL_DIR), "error": msg}], "warnings": warnings, "started_at": started_at, "finished_at": _utc_now_iso()}
         return {"ok": True, "source_mode": "master_journal", "source": "master_journal", "rows_imported": len(rows), "balances_found": len(source_payload.get("balances") or []), "errors": [], "warnings": warnings, "started_at": started_at, "finished_at": _utc_now_iso(), "diagnostics": diagnostics}
 
@@ -24651,7 +24651,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
         if _master_journal_single_file_mode():
             enforce_pre = _enforce_single_master_journal_xlsx(TRADING_JOURNAL_LOCAL_DIR, cleanup_known_generated=True)
             if not enforce_pre.get("ok"):
-                raise RuntimeError("Unknown extra Excel files in journal directory: " + ", ".join(enforce_pre.get("unknown_extra_excel_files") or []))
+                raise RuntimeError("Unknown extra Excel files in journal directory: " + ", ".join(enforce_pre.get("unknown_extra_excel_files") or []) + ". Move legacy backups outside journal/. Keep only journal/Trading Journal.xlsx.")
         snapshot = _build_trading_journal_view_snapshot(force=True) or {}
         source_items = [r for r in (snapshot.get("items") or []) if isinstance(r, dict)]
         source_trade_rows = [r for r in source_items if _row_type(r) == "trade"]
@@ -24989,7 +24989,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
         if _master_journal_single_file_mode():
             enforce_post = _enforce_single_master_journal_xlsx(TRADING_JOURNAL_LOCAL_DIR, cleanup_known_generated=True)
             if not enforce_post.get("ok"):
-                raise RuntimeError("Unknown extra Excel files in journal directory after workbook sync: " + ", ".join(enforce_post.get("unknown_extra_excel_files") or []))
+                raise RuntimeError("Unknown extra Excel files in journal directory after workbook sync: " + ", ".join(enforce_post.get("unknown_extra_excel_files") or []) + ". Move legacy backups outside journal/. Keep only journal/Trading Journal.xlsx.")
         size = path.stat().st_size
         payload = {
             'master_journal_ok': True,
@@ -25008,7 +25008,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
         if _master_journal_single_file_mode():
             enforce_github = _enforce_single_master_journal_xlsx(TRADING_JOURNAL_LOCAL_DIR, cleanup_known_generated=True)
             if not enforce_github.get("ok"):
-                raise RuntimeError("Unknown extra Excel files in journal directory before GitHub sync: " + ", ".join(enforce_github.get("unknown_extra_excel_files") or []))
+                raise RuntimeError("Unknown extra Excel files in journal directory before GitHub sync: " + ", ".join(enforce_github.get("unknown_extra_excel_files") or []) + ". Move legacy backups outside journal/. Keep only journal/Trading Journal.xlsx.")
         payload.update(_sync_journal_excel_files_to_github(path))
         return payload
     except Exception as exc:
