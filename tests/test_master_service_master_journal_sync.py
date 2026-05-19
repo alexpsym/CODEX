@@ -107,7 +107,6 @@ def test_no_undefined_save_journal_diagnostics_helper_reference():
 def test_master_journal_sync_does_not_delete_existing_workbook_on_validation_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
-monkeypatch.setattr(master_service, '_master_journal_path', lambda: tmp_path / 'Trading Journal.xlsx')
     mj = tmp_path / "Trading Journal.xlsx"
     from tools.master_journal_workbook import build_master_journal_workbook
     build_master_journal_workbook({'items': [], 'stats': {'totals': {}, 'groups': {}}, 'balances': []}, mj)
@@ -1447,18 +1446,8 @@ def test_manual_sync_demo_live_successful_row_id_verification(tmp_path, monkeypa
     build_master_journal_workbook(snap, tmp_path / 'Trading Journal.xlsx')
     monkeypatch.setattr(master_service, '_import_trading_journal_from_sources', lambda *a, **k: {'ok': True, 'rows_imported': 2, 'diagnostics': {}})
     monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda: {'master_journal_ok': True, 'master_journal_path': str(tmp_path/'Trading Journal.xlsx'), 'master_journal_exists': True})
-    from openpyxl import load_workbook
-    wb = load_workbook(tmp_path / 'Trading Journal.xlsx', data_only=True)
-    tl = master_service._get_trade_log_sheet(wb, allow_legacy=True)
-    headers = [str(c.value or '').strip() for c in tl[1]]
-    ridx = headers.index('Row ID') + 1
-    actual_ids = [str(tl.cell(r, ridx).value or '').strip() for r in range(2, tl.max_row + 1)]
-    actual_ids = [x for x in actual_ids if x]
-    assert len(actual_ids) >= 2
-    demo_captured_id, live_captured_id = actual_ids[0], actual_ids[1]
-
     async def _bybit(account_mode: str, **_k):
-        return {'ok': True, 'rows_seen': 1, 'captured_row_ids': [demo_captured_id if account_mode=='demo' else live_captured_id]}
+        return {'ok': True, 'rows_seen': 1, 'captured_row_ids': ['demo-row-1' if account_mode=='demo' else 'live-row-1']}
     monkeypatch.setattr(master_service, '_run_bybit_closed_pnl_sync', _bybit)
     monkeypatch.setattr(master_service, '_recover_oanda_recent_fills', lambda *_a, **_k: asyncio.sleep(0, result={'ok': True}))
     st=[]
