@@ -498,7 +498,7 @@ def test_sync_bybit_closed_pnl_window_stale_context_does_not_raise(monkeypatch) 
     monkeypatch.setattr(master_service, "_fetch_bybit_transaction_log", fake_empty_payload)
     monkeypatch.setattr(master_service, "_upsert_trading_journal_rows", lambda rows, **_k: len(rows))
     monkeypatch.setattr(master_service, "_sanitize_bybit_demo_rows", lambda rows: (rows, {"changed": 0}))
-    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: [])
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: list(captured["rows"] or []))
     monkeypatch.setattr(master_service, "_append_bybit_demo_rows_to_workbook", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(master_service, "_sanitize_bybit_demo_workbook", lambda *_args, **_kwargs: {"deduped_by_order_id": 0, "deduped_by_fingerprint": 0})
     monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
@@ -1420,7 +1420,7 @@ def test_resolve_local_journal_file_case_insensitive_and_append_reuses_existing(
     changed = master_service._append_bybit_demo_rows_to_local_workbook(local_dir, rows)
     assert changed == 1
     assert existing.exists()
-    assert not any(p.name == "Bybit Demo.xlsx" for p in local_dir.iterdir())
+    assert len([p for p in local_dir.iterdir() if p.suffix.lower() == ".xlsx"]) == 1
 
 def test_backfill_bybit_demo_balances_reverse_pnl_ordering() -> None:
     rows = [
@@ -1616,7 +1616,7 @@ def test_sync_bybit_closed_pnl_window_uses_execution_rows_when_closed_pnl_empty(
     monkeypatch.setattr(master_service, "_append_bybit_demo_rows_to_workbook", lambda *_a, **_k: 0)
     monkeypatch.setattr(master_service, "_sanitize_bybit_demo_workbook", lambda *_a, **_k: {"changed": 0})
     monkeypatch.setattr(master_service, "_sanitize_bybit_demo_rows", lambda rows: (rows, {"changed": 0, "deduped_by_order_id": 0, "deduped_by_fingerprint": 0}))
-    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: [])
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: list(captured["rows"] or []))
     monkeypatch.setattr(master_service, "_record_bybit_demo_sync_status", lambda **_k: None)
     monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
     monkeypatch.setattr(master_service, "_fetch_bybit_demo_current_balance_snapshot", lambda: asyncio.sleep(0, result={}))

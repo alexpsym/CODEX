@@ -16279,7 +16279,7 @@ async def _sync_bybit_closed_pnl_window(
     ]
     execution_timestamps = [int(x) for x in execution_timestamps if x is not None]
     if execution_timestamps:
-        latest_execution_time = _ts_to_iso(max(execution_timestamps))
+        latest_execution_time = _ms_to_iso(max(execution_timestamps) * 1000)
 
     if not final_rows:
         if mode == "demo":
