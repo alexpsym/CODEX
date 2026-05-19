@@ -60,18 +60,18 @@
       "demo": {
         "last_error": null,
         "last_seen_transaction_id": "624",
-        "last_success_at": "2026-05-19T09:21:40.495683+00:00",
+        "last_success_at": "2026-05-19T09:26:50.068682+00:00",
         "startup_recovered_rows": 0,
         "startup_skipped_duplicates": 0,
-        "updated_at": "2026-05-19T09:21:40.495693+00:00"
+        "updated_at": "2026-05-19T09:26:50.068693+00:00"
       },
       "live": {
         "last_error": null,
         "last_seen_transaction_id": "471",
-        "last_success_at": "2026-05-19T09:21:41.241607+00:00",
+        "last_success_at": "2026-05-19T09:26:50.889055+00:00",
         "startup_recovered_rows": 0,
         "startup_skipped_duplicates": 0,
-        "updated_at": "2026-05-19T09:21:41.241618+00:00"
+        "updated_at": "2026-05-19T09:26:50.889067+00:00"
       }
     },
     "last_seen_transaction_id": {
@@ -82,16 +82,49 @@
       "demo": {},
       "live": {}
     },
-    "updated_at": "2026-05-19T09:21:41.241622+00:00"
+    "updated_at": "2026-05-19T09:26:50.889073+00:00"
   },
   "pending_webhooks": [],
-  "savedAt": "2026-05-19T09:26:46.263983+00:00",
+  "savedAt": "2026-05-19T09:28:10.232344+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [
     {
-      "open_time": "2026-04-11T06:10:46+00:00",
-      "order_id": "oid-stale"
+      "account": "demo",
+      "broker": "bybit",
+      "created_at": "2026-05-19T09:21:33.650468+00:00",
+      "instrument": "BTCUSDT",
+      "is_test_trade": null,
+      "open_time": null,
+      "order_id": "abc123",
+      "order_link_id": "link-1",
+      "parent_order_link_id": null,
+      "side": "Buy",
+      "status": "CLOSED",
+      "stop_loss": "99.5",
+      "take_profit": "110.2",
+      "timeframe": "1-hour",
+      "trade_id": null,
+      "transaction_id": null,
+      "updated_at": "2026-05-19T09:26:44.252737+00:00"
+    },
+    {
+      "account": "live",
+      "broker": "bybit",
+      "created_at": "2026-05-19T09:22:45.841695+00:00",
+      "instrument": "BTCUSDT",
+      "open_time": null,
+      "order_id": "1",
+      "order_link_id": null,
+      "parent_order_link_id": "",
+      "side": "Buy",
+      "status": "CLOSED",
+      "stop_loss": null,
+      "take_profit": null,
+      "timeframe": "",
+      "trade_id": null,
+      "transaction_id": null,
+      "updated_at": "2026-05-19T09:27:57.677620+00:00"
     }
   ],
   "trading_journal": {
@@ -116,7 +149,7 @@
           "setup": "",
           "timeframe": ""
         },
-        "manual_updated_at": "2026-05-19T09:23:21.681233+00:00",
+        "manual_updated_at": "2026-05-19T09:28:08.209102+00:00",
         "net_profit": 1.0,
         "notes": "",
         "open_time": "2026-01-01",
@@ -129,7 +162,7 @@
         "timeframe": ""
       }
     ],
-    "updated_at": "2026-05-19T09:23:21.681287+00:00"
+    "updated_at": "2026-05-19T09:28:08.209125+00:00"
   },
   "trading_journal_import_cache": {},
   "trading_journal_state": {
@@ -137,7 +170,7 @@
       {
         "account": "Bybit Demo",
         "account_mode": "demo",
-        "as_of": "2026-05-19T09:22:52.984520+00:00",
+        "as_of": "2026-05-19T09:28:03.997023+00:00",
         "balance": 323.37610044,
         "balance_source": "bybit_wallet_balance",
         "currency": "USDT",
@@ -147,8 +180,8 @@
       {
         "account": "Bybit Live",
         "account_mode": "live",
-        "as_of": "2026-05-19T09:22:53.611947+00:00",
-        "balance": 224.70341856,
+        "as_of": "2026-05-19T09:28:04.779699+00:00",
+        "balance": 224.69869613,
         "balance_source": "bybit_wallet_balance",
         "currency": "USDT",
         "label": "Bybit Live",
@@ -157,7 +190,7 @@
       {
         "account": "OANDA DEMO",
         "account_mode": "demo",
-        "as_of": "2026-05-19T09:22:54.336352+00:00",
+        "as_of": "2026-05-19T09:28:05.848932+00:00",
         "balance": 1500.6539,
         "balance_source": "oanda_account_summary",
         "currency": "AUD",
@@ -168,7 +201,7 @@
       {
         "account": "OANDA LIVE",
         "account_mode": "live",
-        "as_of": "2026-05-19T09:22:55.035942+00:00",
+        "as_of": "2026-05-19T09:28:06.656466+00:00",
         "balance": 1479.3098,
         "balance_source": "oanda_account_summary",
         "currency": "AUD",
@@ -178,8 +211,8 @@
       }
     ],
     "broker_balance_diagnostics": {
-      "bybit_demo_anchor_fingerprint": "a55d8a3fcf73aabdd5017f25199fd532ad3d44be9943c94b99e5bfb38d1992f0",
-      "updated_at": "2026-05-19T09:22:55.050323+00:00",
+      "bybit_demo_anchor_fingerprint": "00c1f2d606a5dec85b6b66ebe6b8d43604860c3938d2f3622aefcedb6597eade",
+      "updated_at": "2026-05-19T09:28:06.674196+00:00",
       "warnings": []
     },
     "bybit_demo_tpsl_cache": {
@@ -246,7 +279,7 @@
     "unresolved_registry": {
       "bybit_demo_tpsl": {
         "demo|oid-b|||BTCUSDT|": {
-          "count": 1,
+          "count": 2,
           "details": {
             "cache_hit": false,
             "cache_match_type": "none",
@@ -254,13 +287,13 @@
             "context_fallback_matched": false
           },
           "first_seen_at": "2026-05-19T09:22:33.636836+00:00",
-          "last_seen_at": "2026-05-19T09:22:33.636836+00:00",
+          "last_seen_at": "2026-05-19T09:27:46.430135+00:00",
           "last_signature": "{\"cache_hit\": false, \"cache_match_type\": \"none\", \"context_fallback_attempted\": false, \"context_fallback_matched\": false}",
           "resolution_source": null,
           "resolved": false
         },
         "demo|oid-real-1|||BTCUSDT|": {
-          "count": 1,
+          "count": 2,
           "details": {
             "cache_hit": false,
             "cache_match_type": "none",
@@ -268,13 +301,13 @@
             "context_fallback_matched": false
           },
           "first_seen_at": "2026-05-19T09:22:33.998849+00:00",
-          "last_seen_at": "2026-05-19T09:22:33.998849+00:00",
+          "last_seen_at": "2026-05-19T09:27:46.577502+00:00",
           "last_signature": "{\"cache_hit\": false, \"cache_match_type\": \"none\", \"context_fallback_attempted\": false, \"context_fallback_matched\": false}",
           "resolution_source": null,
           "resolved": false
         },
         "live|1|||BTCUSDT|": {
-          "count": 2,
+          "count": 4,
           "details": {
             "cache_hit": false,
             "cache_match_type": "none",
@@ -282,7 +315,7 @@
             "context_fallback_matched": false
           },
           "first_seen_at": "2026-05-19T09:22:45.836507+00:00",
-          "last_seen_at": "2026-05-19T09:22:45.869240+00:00",
+          "last_seen_at": "2026-05-19T09:27:57.676509+00:00",
           "last_signature": "{\"cache_hit\": false, \"cache_match_type\": \"none\", \"context_fallback_attempted\": true, \"context_fallback_matched\": false}",
           "resolution_source": null,
           "resolved": false
