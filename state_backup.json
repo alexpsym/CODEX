@@ -85,7 +85,7 @@
     "updated_at": "2026-05-19T09:26:50.889073+00:00"
   },
   "pending_webhooks": [],
-  "savedAt": "2026-05-19T09:28:28.221411+00:00",
+  "savedAt": "2026-05-19T09:28:36.229501+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [
@@ -134,7 +134,7 @@
         "breakeven": "",
         "close_time": "2026-01-01",
         "id": "r1",
-        "is_test_trade": false,
+        "is_test_trade": true,
         "manual_override_fields": [
           "breakeven",
           "is_test_trade",
@@ -144,12 +144,12 @@
         ],
         "manual_overrides": {
           "breakeven": "",
-          "is_test_trade": false,
+          "is_test_trade": true,
           "notes": "",
           "setup": "",
           "timeframe": ""
         },
-        "manual_updated_at": "2026-05-19T09:28:26.216042+00:00",
+        "manual_updated_at": "2026-05-19T09:28:34.213478+00:00",
         "net_profit": 1.0,
         "notes": "",
         "open_time": "2026-01-01",
@@ -162,7 +162,7 @@
         "timeframe": ""
       }
     ],
-    "updated_at": "2026-05-19T09:28:26.216065+00:00"
+    "updated_at": "2026-05-19T09:28:34.213501+00:00"
   },
   "trading_journal_import_cache": {},
   "trading_journal_state": {
@@ -263,18 +263,16 @@
       }
     },
     "daily_trade_sync": {
-      "last_attempt_at": "2026-05-19T09:23:18.644359+00:00",
-      "last_error": "boom",
+      "last_attempt_at": "2026-05-19T09:28:32.328241+00:00",
+      "last_error": null,
       "last_reason": "startup_recovery",
       "last_result": {
-        "master_journal_error": "boom",
-        "master_journal_ok": false,
+        "master_journal_ok": true,
         "oanda_recovery": {},
-        "ok": true,
-        "rows_imported": 1
+        "ok": true
       },
-      "last_success_at": null,
-      "updated_at": "2026-05-19T09:23:18.653978+00:00"
+      "last_success_at": "2026-05-19T09:28:32.328259+00:00",
+      "updated_at": "2026-05-19T09:28:32.328978+00:00"
     },
     "unresolved_registry": {
       "bybit_demo_tpsl": {
