@@ -55,9 +55,9 @@
       const resp = await fetch('/api/trading-journal/open-master-journal', { method: 'POST', headers: { Accept: 'application/json' } });
       const payload = await resp.json().catch(() => ({}));
       if (!resp.ok || payload.ok !== true) {
-        throw new Error(payload.detail || payload.error || payload.message || 'Failed to open Master Journal.xlsx');
+        throw new Error(payload.detail || payload.error || payload.message || 'Failed to open Trading Journal.xlsx');
       }
-      setSyncJournalStatus(`Opened: ${payload.master_journal_path || 'Master Journal.xlsx'}`);
+      setSyncJournalStatus(`Opened: ${payload.master_journal_path || 'Trading Journal.xlsx'}`);
       setOpenMasterJournalVisible(true);
     } catch (err) {
       setSyncJournalStatus(err?.message || String(err), true);

@@ -48,6 +48,20 @@ def _load_master_service_for_import_test():
     raise RuntimeError("unable to import master_service for targeted import-path test")
 def test_master_service_sync_test_bootstrap():
     assert True
+
+
+def test_user_facing_wording_does_not_use_master_journal_labels() -> None:
+    src = (ROOT / 'render' / 'master_service.py').read_text(encoding='utf-8')
+    blocked = [
+        'Open Master Journal',
+        'Failed to open Master Journal.xlsx',
+        'Master Journal data-only update failed',
+        'Master Journal temporary workbook was not created',
+        'Master journal workbook generation failed',
+    ]
+    for token in blocked:
+        assert token not in src
+
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_master_journal_mode_accepts_source_mode(monkeypatch):
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
@@ -1316,6 +1330,15 @@ def test_sync_master_journal_uses_zero_cashflow_anchor_when_cashflow_new_balance
     assert dash_map['PEPPERSTONE DEMO'] == 0
     synced.close()
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+
+
+def test_gitignore_trading_journal_exception_rules() -> None:
+    gi = (ROOT / '.gitignore').read_text(encoding='utf-8')
+    assert 'journal/*.xlsx' in gi
+    assert '!journal/Trading Journal.xlsx' in gi
+    assert '!journal/Master Journal.xlsx' not in gi
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_repo_state_files_for_github_dedupes_master_journal(tmp_path, monkeypatch):
     monkeypatch.setattr(master_service, "BASE_DIR", tmp_path)
     journal_dir = tmp_path / "journal"
@@ -1474,3 +1497,53 @@ def test_manual_sync_oanda_row_ids_present_pass(tmp_path, monkeypatch):
     out=(st[-1].get('result') or {}).get('oanda') or {}
     assert out['demo']['final_trade_log_row_ids_verified'] is True
     assert out['live']['final_trade_log_row_ids_verified'] is True
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+def test_repo_state_files_for_github_includes_legacy_master_journal_when_tracked_and_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(master_service, "BASE_DIR", tmp_path)
+    journal_dir = tmp_path / "journal"
+    journal_dir.mkdir(parents=True, exist_ok=True)
+    master = journal_dir / "Trading Journal.xlsx"
+    master.write_bytes(b"x")
+    monkeypatch.setattr(master_service, "_run_git_command", lambda args, _cwd, _timeout: (0, "", "") if args[:2] == ["ls-files", "--error-unmatch"] else (1, "", ""))
+    files = master_service._repo_state_files_for_github(master)
+    rel = [str(p.relative_to(tmp_path)).replace("\\", "/") for p in files]
+    assert "journal/Trading Journal.xlsx" in rel
+    assert "journal/Master Journal.xlsx" in rel
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+def test_github_sync_stages_legacy_master_journal_deletion_when_tracked_and_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRADING_JOURNAL_GITHUB_SYNC_ENABLED", "1")
+    monkeypatch.setattr(master_service, "_trading_journal_github_sync_enabled", lambda: True)
+    monkeypatch.setattr(master_service, "BASE_DIR", tmp_path)
+    (tmp_path / ".git").mkdir()
+    journal = tmp_path / "journal"
+    journal.mkdir()
+    (journal / "Trading Journal.xlsx").write_bytes(b"x")
+    commands = []
+    def fake_git(args, _cwd, _timeout):
+        commands.append(args)
+        if args == ["--version"]:
+            return 0, "git version 2", ""
+        if args[:2] == ["rev-parse", "--abbrev-ref"]:
+            return 0, "main\n", ""
+        if args[:3] == ["remote", "get-url", "origin"]:
+            return 0, "x\n", ""
+        if args[:2] == ["ls-files", "--error-unmatch"]:
+            return 0, "journal/Master Journal.xlsx\n", ""
+        if args[:2] == ["diff", "--cached"]:
+            return 1, "", ""
+        if args and args[0] in {"add", "commit", "push", "rev-parse"}:
+            return 0, "", ""
+        return 0, "", ""
+    monkeypatch.setattr(master_service, "_run_git_command", fake_git)
+    result = master_service._sync_journal_excel_files_to_github(journal / "Trading Journal.xlsx")
+    assert result["github_sync_ok"] is True
+    assert "journal/Trading Journal.xlsx" in result["github_sync_files"]
+    assert "journal/Master Journal.xlsx" in result["github_sync_files"]
+    add_calls = [cmd for cmd in commands if cmd and cmd[0] == "add"]
+    assert add_calls
+    add_joined = " ".join(add_calls[0])
+    assert "journal/Trading Journal.xlsx" in add_joined
+    assert "journal/Master Journal.xlsx" in add_joined

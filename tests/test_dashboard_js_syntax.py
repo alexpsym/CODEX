@@ -100,3 +100,11 @@ def test_dashboard_js_open_master_journal_wiring():
     assert "openMasterJournalBtn?.addEventListener('click', openMasterJournal);" in js
     assert 'master_journal_ok !== false' not in js
     assert 'Startup journal sync complete' not in js
+
+
+def test_dashboard_js_user_facing_trading_journal_wording():
+    js = JS_PATH.read_text(encoding='utf-8')
+    assert 'Failed to open Master Journal.xlsx' not in js
+    assert "'Master Journal.xlsx'" not in js
+    assert 'Failed to open Trading Journal.xlsx' in js
+    assert "'Trading Journal.xlsx'" in js
