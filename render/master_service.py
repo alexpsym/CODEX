@@ -3955,6 +3955,17 @@ def _bybit_demo_order_identity(row: Dict[str, object]) -> str:
     return str(refs.get("orderId") or row.get("order_id") or "").strip()
 
 
+def _is_bybit_execution_history_row(row: Dict[str, object]) -> bool:
+    source = str(row.get("source") or "").strip().lower()
+    if source == "bybit_execution_history":
+        return True
+    rid = str(row.get("id") or "").strip().lower()
+    if rid.startswith("bybit:demo:execution:") or rid.startswith("bybit:live:execution:"):
+        return True
+    refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+    return bool(str(refs.get("execId") or refs.get("exec_id") or "").strip())
+
+
 def _bybit_demo_trade_score(row: Dict[str, object]) -> Tuple[int, int, int, int, int, int]:
     refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
     has_order_id = int(bool(_bybit_demo_order_identity(row)))
@@ -3981,7 +3992,16 @@ def _sanitize_bybit_demo_rows(rows: List[Dict[str, object]]) -> tuple[List[Dict[
         if isinstance(row, dict) and _is_bybit_demo_trade_row(row):
             close_ts = _canonical_trade_epoch_second(row.get("close_time"))
             open_ts = _canonical_trade_epoch_second(row.get("open_time"))
+            is_exec_row = _is_bybit_execution_history_row(row)
             if close_ts is not None and open_ts is not None and close_ts <= open_ts:
+                if is_exec_row and close_ts == open_ts:
+                    kept = dict(row)
+                    kept["status"] = str(kept.get("status") or "closed")
+                    kept["row_type"] = "trade"
+                    if kept.get("trade_duration_seconds") is None:
+                        kept["trade_duration_seconds"] = 0
+                    bybit_rows.append(kept)
+                    continue
                 source = str(row.get("source") or "").strip().lower()
                 if source in {"bybit", "excel", "local_excel"}:
                     swapped_open = row.get("close_time")
@@ -4019,7 +4039,11 @@ def _sanitize_bybit_demo_rows(rows: List[Dict[str, object]]) -> tuple[List[Dict[
     dedup_order: Dict[str, Dict[str, object]] = {}
     order_dropped = 0
     orderless: List[Dict[str, object]] = []
+    execution_rows: List[Dict[str, object]] = []
     for row in bybit_rows:
+        if _is_bybit_execution_history_row(row):
+            execution_rows.append(row)
+            continue
         order_id = _bybit_demo_order_identity(row)
         if not order_id:
             orderless.append(row)
@@ -4032,7 +4056,7 @@ def _sanitize_bybit_demo_rows(rows: List[Dict[str, object]]) -> tuple[List[Dict[
         dedup_order[order_id] = _merge_row_notes_comments(winner, loser)
         order_dropped += 1
 
-    after_order = list(dedup_order.values()) + orderless
+    after_order = list(dedup_order.values()) + orderless + execution_rows
     dedup_fallback: Dict[str, Dict[str, object]] = {}
     fallback_dropped = 0
     for row in after_order:
@@ -4060,6 +4084,8 @@ def _sanitize_bybit_demo_rows(rows: List[Dict[str, object]]) -> tuple[List[Dict[
                 _num_bucket(row.get("qty"), 8),
             ]
         )
+        if _is_bybit_execution_history_row(row):
+            gk = f"{gk}|{str((row.get('raw_refs') or {}).get('execId') or row.get('id') or '')}"
         prev = grouped.get(gk)
         if prev is None:
             grouped[gk] = row
@@ -6021,9 +6047,66 @@ def _merge_duplicate_import_rows(primary: Dict[str, object], incoming: Dict[str,
     return merged
 
 
+
+
+BYBIT_TRADE_HISTORY_REQUIRED_HEADERS = ["contracts","Order No.","Direction","Order Type","Filled Qty","Filled Price","Order Price","Filled Type","Trading Fee Rate","Fees Paid","Trasaction ID","Transaction Time(UTC+10)","Final Balance (USDT)"]
+
+def _is_bybit_trade_history_csv(path_or_headers: object) -> bool:
+    headers=[]
+    if isinstance(path_or_headers, Path):
+        import pandas as _pd
+        try:
+            headers=[str(h).strip() for h in (_pd.read_csv(path_or_headers, nrows=0, encoding='utf-8-sig').columns.tolist())]
+        except Exception:
+            return False
+    elif isinstance(path_or_headers, (list, tuple, set)):
+        headers=[str(h).strip() for h in path_or_headers]
+    else:
+        return False
+    hs={h.lower() for h in headers}
+    req={h.lower() for h in BYBIT_TRADE_HISTORY_REQUIRED_HEADERS}
+    req.add('transaction id')
+    req.discard('trasaction id')
+    return req.issubset(hs | {'transaction id' if 'trasaction id' in hs else ''})
+
+def _normalize_bybit_execution_history_row(raw: Dict[str, object], account_mode: str, source_path: Optional[str]=None, source_row: Optional[int]=None) -> Optional[Dict[str, object]]:
+    symbol=str(raw.get('contracts') or raw.get('symbol') or '').strip().upper()
+    side=str(raw.get('Direction') or raw.get('side') or '').strip().title()
+    order_id=str(raw.get('Order No.') or raw.get('orderId') or '').strip()
+    exec_id=str(raw.get('Trasaction ID') or raw.get('Transaction ID') or raw.get('execId') or '').strip()
+    qty=_to_float(raw.get('Filled Qty') if raw.get('Filled Qty') not in (None,'') else raw.get('execQty'))
+    price=_to_float(raw.get('Filled Price') if raw.get('Filled Price') not in (None,'') else raw.get('execPrice'))
+    if not symbol or (not exec_id and not order_id):
+        return None
+    t = raw.get('Transaction Time(UTC+10)') if raw.get('Transaction Time(UTC+10)') not in (None,'') else raw.get('execTime')
+    open_time = _epoch_or_iso_to_iso(t)
+    if isinstance(t,str) and '+' in t and 'T' not in t:
+        try:
+            open_time=t.replace(' ','T')
+        except Exception:
+            pass
+    fee=_to_float(raw.get('Fees Paid') if raw.get('Fees Paid') not in (None,'') else raw.get('execFee'))
+    fee_rate=_to_float(raw.get('Trading Fee Rate') if raw.get('Trading Fee Rate') not in (None,'') else raw.get('feeRate'))
+    bal=_to_float(raw.get('Final Balance (USDT)')) if str(raw.get('Final Balance (USDT)') or '').strip() else None
+    mode='demo' if str(account_mode).lower().strip()=='demo' else 'live'
+    rid = f'bybit:{mode}:execution:{symbol}:{exec_id}' if exec_id else f"bybit:{mode}:execution:{symbol}:{order_id}:{open_time}:{side}:{qty}:{price}"
+    return {'id': rid,'row_type':'trade','asset_class':'crypto','account':'Bybit Demo' if mode=='demo' else 'Bybit Live','account_label':'Bybit Demo' if mode=='demo' else 'Bybit Live','symbol':symbol,'side':side,'qty':qty,'entry_price':price,'exit_price':price,'open_time':open_time,'close_time':open_time,'commission':fee,'fee_rate':fee_rate,'net_profit':None,'balance_after_trade':bal,'currency':'USDT' if symbol.endswith('USDT') else '', 'source':'bybit_execution_history','notes':'Bybit execution-history row; closed PnL unavailable unless matched to closed-PnL/transaction-log data.','raw_refs':{'orderId':order_id or None,'execId':exec_id or None,'source_file':source_path,'source_row':source_row}}
+
+def _parse_bybit_trade_history_csv(path: Path, account_mode: str='demo') -> List[Dict[str, object]]:
+    df = pd.read_csv(path, encoding='utf-8-sig')
+    rows=[]
+    for i, rec in enumerate(df.to_dict(orient='records'), start=2):
+        row=_normalize_bybit_execution_history_row(rec, account_mode, str(path), i)
+        if row:
+            rows.append(row)
+    return rows
+
+
 def _parse_local_trading_journal_workbook(path: Path) -> Tuple[List[Dict[str, object]], Optional[Dict[str, object]]]:
     if path.suffix.lower() == ".csv":
         df = pd.read_csv(path, encoding="utf-8-sig")
+        if _is_bybit_trade_history_csv(list(df.columns)):
+            return _parse_bybit_trade_history_csv(path, account_mode='demo'), None
         if _is_oanda_transaction_history_frame(df):
             lower = path.name.lower()
             hinted_mode = "demo" if "demo" in lower else ("live" if "live" in lower else "")
@@ -14777,6 +14860,73 @@ async def _fetch_bybit_executions(
     return rows
 
 
+_BYBIT_MAX_WINDOW_MS = (7 * 24 * 60 * 60 * 1000) - 1
+
+
+def _iter_bybit_time_chunks(start_time: int, end_time: int) -> List[Tuple[int, int]]:
+    start = int(start_time)
+    end = int(end_time)
+    if end < start:
+        return []
+    chunks: List[Tuple[int, int]] = []
+    cursor = start
+    while cursor <= end:
+        chunk_end = min(end, cursor + _BYBIT_MAX_WINDOW_MS)
+        chunks.append((cursor, chunk_end))
+        cursor = chunk_end + 1
+    return chunks
+
+
+def _bybit_execution_dedupe_key(entry: Dict[str, object]) -> str:
+    exec_id = str(entry.get("execId") or "").strip()
+    if exec_id:
+        return f"exec:{exec_id}"
+    return "|".join(
+        [
+            str(entry.get("symbol") or "").strip().upper(),
+            str(entry.get("orderId") or "").strip(),
+            str(entry.get("execTime") or "").strip(),
+            str(entry.get("side") or "").strip().lower(),
+            str(entry.get("execQty") or "").strip(),
+            str(entry.get("execPrice") or "").strip(),
+        ]
+    )
+
+
+async def _fetch_bybit_executions_chunked(
+    *,
+    base_url: str,
+    api_key: str,
+    api_secret: str,
+    category: str,
+    start_time: int,
+    end_time: int,
+) -> List[Dict[str, object]]:
+    deduped: Dict[str, Dict[str, object]] = {}
+    for chunk_start, chunk_end in _iter_bybit_time_chunks(start_time, end_time):
+        entries = await _fetch_bybit_executions(
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            category=category,
+            start_time=chunk_start,
+            end_time=chunk_end,
+        )
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            deduped[_bybit_execution_dedupe_key(entry)] = entry
+    rows = list(deduped.values())
+    rows.sort(
+        key=lambda item: (
+            int(_to_float(item.get("execTime")) or 0),
+            str(item.get("execId") or ""),
+            str(item.get("orderId") or ""),
+        )
+    )
+    return rows
+
+
 async def _fetch_bybit_closed_pnl(
     *,
     base_url: str,
@@ -15789,9 +15939,11 @@ async def _sync_bybit_closed_pnl_window(
 
     tx_by_order: Dict[str, Dict[str, object]] = {}
     execution_entries: List[Dict[str, object]] = []
+    execution_rows: List[Dict[str, object]] = []
     executions_by_order_id: Dict[str, List[int]] = defaultdict(list)
+    execution_fetch_error: Optional[str] = None
     try:
-        execution_entries = await _fetch_bybit_executions(
+        execution_entries = await _fetch_bybit_executions_chunked(
             base_url=base_url,
             api_key=api_key,
             api_secret=api_secret,
@@ -15807,274 +15959,296 @@ async def _sync_bybit_closed_pnl_window(
             if oid and ets > 0:
                 executions_by_order_id[oid].append(ets)
     except Exception as exc:
-        BYBIT_LOGGER.warning("Bybit execution prefetch failed: %s", exc)
-    tx_cursor: Optional[str] = None
-    while True:
-        tx_payload = await _fetch_bybit_transaction_log(
-            base_url=base_url,
-            api_key=api_key,
-            api_secret=api_secret,
-            start_time=start_time,
-            end_time=end_time,
-            cursor=tx_cursor,
-        )
-        tx_result = (tx_payload.get("result") or {})
-        for item in tx_result.get("list") or []:
-            if not isinstance(item, dict):
-                continue
-            order_id = str(item.get("orderId") or "").strip()
-            if order_id and order_id not in tx_by_order:
-                tx_by_order[order_id] = item
-        tx_cursor = str(tx_result.get("nextPageCursor") or "").strip() or None
-        if not tx_cursor:
-            break
+        execution_fetch_error = f"Bybit execution prefetch failed: {exc}"
+        BYBIT_LOGGER.warning("%s", execution_fetch_error)
+    for ex in execution_entries:
+        if isinstance(ex, dict):
+            nr = _normalize_bybit_execution_history_row(ex, mode)
+            if nr:
+                execution_rows.append(nr)
+    for chunk_start, chunk_end in _iter_bybit_time_chunks(start_time, end_time):
+        tx_cursor: Optional[str] = None
+        while True:
+            tx_payload = await _fetch_bybit_transaction_log(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                start_time=chunk_start,
+                end_time=chunk_end,
+                cursor=tx_cursor,
+            )
+            tx_result = (tx_payload.get("result") or {})
+            for item in tx_result.get("list") or []:
+                if not isinstance(item, dict):
+                    continue
+                order_id = str(item.get("orderId") or "").strip()
+                if order_id and order_id not in tx_by_order:
+                    tx_by_order[order_id] = item
+            tx_cursor = str(tx_result.get("nextPageCursor") or "").strip() or None
+            if not tx_cursor:
+                break
 
     rows: List[Dict[str, object]] = []
     dropped_invalid_rows: List[Dict[str, object]] = []
     tpsl_cache = load_bybit_demo_tpsl_cache() if mode == "demo" else {}
-    cursor: Optional[str] = None
     max_seen = start_time
-    while True:
-        payload = await _fetch_bybit_closed_pnl(
-            base_url=base_url,
-            api_key=api_key,
-            api_secret=api_secret,
-            start_time=start_time,
-            end_time=end_time,
-            cursor=cursor,
-        )
-        result = (payload.get("result") or {})
-        for entry in result.get("list") or []:
-            if not isinstance(entry, dict):
-                continue
-            updated_ms = int(_to_float(entry.get("updatedTime")) or 0)
-            if updated_ms < start_time:
-                continue
-            max_seen = max(max_seen, updated_ms)
-            order_id = str(entry.get("orderId") or "").strip()
-            order_link_id = str(entry.get("orderLinkId") or "").strip()
-            tx_match = tx_by_order.get(order_id, {})
-            order_candidates = list(orders_by_id.get(order_id, []))
-            if order_link_id:
-                order_candidates.extend(orders_by_link_id.get(order_link_id, []))
-            order_match = max(order_candidates, key=_score_bybit_tpsl_candidate) if order_candidates else {}
-            parent_link_id = str(
-                order_match.get("parentOrderLinkId")
-                or order_match.get("orderLinkId")
-                or order_link_id
-            ).strip()
-            linked_orders = orders_by_parent_link_id.get(parent_link_id, [])
-            entry_side = str(entry.get("side") or "").strip().lower()
-            opposite_side = "sell" if entry_side in {"buy", "long"} else "buy"
-            fallback_candidates = _candidate_buckets(
-                str(entry.get("symbol") or ""),
-                opposite_side,
-                updated_ms,
+    for chunk_start, chunk_end in _iter_bybit_time_chunks(start_time, end_time):
+        cursor: Optional[str] = None
+        while True:
+            payload = await _fetch_bybit_closed_pnl(
+                base_url=base_url,
+                api_key=api_key,
+                api_secret=api_secret,
+                start_time=chunk_start,
+                end_time=chunk_end,
+                cursor=cursor,
             )
-            cache_entry: Optional[Dict[str, object]] = None
-            cache_match_type = "none"
-            if mode == "demo":
-                cache_entry, cache_match_type = resolve_cached_bybit_demo_tpsl(
-                    cache=tpsl_cache,
+            result = (payload.get("result") or {})
+            for entry in result.get("list") or []:
+                if not isinstance(entry, dict):
+                    continue
+                updated_ms = int(_to_float(entry.get("updatedTime")) or 0)
+                if updated_ms < start_time:
+                    continue
+                max_seen = max(max_seen, updated_ms)
+                order_id = str(entry.get("orderId") or "").strip()
+                order_link_id = str(entry.get("orderLinkId") or "").strip()
+                tx_match = tx_by_order.get(order_id, {})
+                order_candidates = list(orders_by_id.get(order_id, []))
+                if order_link_id:
+                    order_candidates.extend(orders_by_link_id.get(order_link_id, []))
+                order_match = max(order_candidates, key=_score_bybit_tpsl_candidate) if order_candidates else {}
+                parent_link_id = str(
+                    order_match.get("parentOrderLinkId")
+                    or order_match.get("orderLinkId")
+                    or order_link_id
+                ).strip()
+                linked_orders = orders_by_parent_link_id.get(parent_link_id, [])
+                entry_side = str(entry.get("side") or "").strip().lower()
+                opposite_side = "sell" if entry_side in {"buy", "long"} else "buy"
+                fallback_candidates = _candidate_buckets(
+                    str(entry.get("symbol") or ""),
+                    opposite_side,
+                    updated_ms,
+                )
+                cache_entry: Optional[Dict[str, object]] = None
+                cache_match_type = "none"
+                if mode == "demo":
+                    cache_entry, cache_match_type = resolve_cached_bybit_demo_tpsl(
+                        cache=tpsl_cache,
+                        order_id=order_id,
+                        order_link_id=order_link_id,
+                        parent_order_link_id=parent_link_id,
+                        symbol=str(entry.get("symbol") or "").strip().upper(),
+                        side=str(entry.get("side") or "").strip().title(),
+                        open_time_ms=int(_to_float(entry.get("createdTime")) or 0) or None,
+                        close_time_ms=updated_ms or None,
+                    )
+                stop_loss, take_profit, tpsl_source_raw, tpsl_debug = _resolve_bybit_tpsl(
+                    entry=entry,
+                    order_candidates=order_candidates,
+                    order_match=order_match,
+                    linked_orders=linked_orders,
+                    orders_by_link_id=orders_by_link_id,
+                    orders_by_parent_link_id=orders_by_parent_link_id,
+                    fallback_candidates=fallback_candidates,
+                    cache_entry=cache_entry,
+                )
+                tpsl_source = tpsl_source_raw
+                if tpsl_source_raw.startswith("cached_request:"):
+                    tpsl_source = f"{tpsl_source_raw}:{cache_match_type}"
+                cache_hit = cache_entry is not None
+                balance_after_trade = _to_float(tx_match.get("cashBalance"))
+                resolved_side, side_source = _resolve_bybit_demo_display_side(
+                    entry=entry,
+                    order_match=order_match,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                )
+                resolved_ctx = _resolve_bybit_closed_pnl_trade_context(
+                    account_mode=mode,
+                    symbol=str(entry.get("symbol") or "").strip().upper(),
+                    side=resolved_side,
                     order_id=order_id,
                     order_link_id=order_link_id,
                     parent_order_link_id=parent_link_id,
-                    symbol=str(entry.get("symbol") or "").strip().upper(),
-                    side=str(entry.get("side") or "").strip().title(),
-                    open_time_ms=int(_to_float(entry.get("createdTime")) or 0) or None,
-                    close_time_ms=updated_ms or None,
+                    trade_id=str(entry.get("tradeId") or entry.get("execId") or "").strip(),
+                    transaction_id=str(entry.get("transactionId") or "").strip(),
+                    close_time=_ms_to_iso(entry.get("updatedTime")),
                 )
-            stop_loss, take_profit, tpsl_source_raw, tpsl_debug = _resolve_bybit_tpsl(
-                entry=entry,
-                order_candidates=order_candidates,
-                order_match=order_match,
-                linked_orders=linked_orders,
-                orders_by_link_id=orders_by_link_id,
-                orders_by_parent_link_id=orders_by_parent_link_id,
-                fallback_candidates=fallback_candidates,
-                cache_entry=cache_entry,
-            )
-            tpsl_source = tpsl_source_raw
-            if tpsl_source_raw.startswith("cached_request:"):
-                tpsl_source = f"{tpsl_source_raw}:{cache_match_type}"
-            cache_hit = cache_entry is not None
-            balance_after_trade = _to_float(tx_match.get("cashBalance"))
-            resolved_side, side_source = _resolve_bybit_demo_display_side(
-                entry=entry,
-                order_match=order_match,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-            )
-            resolved_ctx = _resolve_bybit_closed_pnl_trade_context(
-                account_mode=mode,
-                symbol=str(entry.get("symbol") or "").strip().upper(),
-                side=resolved_side,
-                order_id=order_id,
-                order_link_id=order_link_id,
-                parent_order_link_id=parent_link_id,
-                trade_id=str(entry.get("tradeId") or entry.get("execId") or "").strip(),
-                transaction_id=str(entry.get("transactionId") or "").strip(),
-                close_time=_ms_to_iso(entry.get("updatedTime")),
-            )
-            resolved_open_time = (
-                _epoch_or_iso_to_iso(resolved_ctx.get("open_time")) if isinstance(resolved_ctx, dict) else None
-            ) or (
-                _epoch_or_iso_to_iso(resolved_ctx.get("created_at")) if isinstance(resolved_ctx, dict) else None
-            )
-            execution_times = sorted(executions_by_order_id.get(order_id) or [])
-            if not resolved_open_time and execution_times:
-                resolved_open_time = _ms_to_iso(execution_times[0])
-            order_time_candidates = [
-                int(_to_float(item.get("createdTime")) or 0)
-                for item in order_candidates
-                if isinstance(item, dict)
-            ]
-            order_update_candidates = [
-                int(_to_float(item.get("updatedTime")) or 0)
-                for item in order_candidates
-                if isinstance(item, dict)
-            ]
-            row = _normalize_bybit_closed_pnl_row(
-                entry,
-                account_mode=mode,
-                balance_after_trade=balance_after_trade,
-                display_side=resolved_side,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-                resolved_trade_context=resolved_ctx,
-                resolved_open_time=resolved_open_time,
-                execution_times={
-                    "open_time": _ms_to_iso(execution_times[0]) if execution_times else None,
-                    "close_time": _ms_to_iso(execution_times[-1]) if execution_times else None,
-                },
-                order_times={
-                    "created_time": _ms_to_iso(min([x for x in order_time_candidates if x > 0])) if any(x > 0 for x in order_time_candidates) else None,
-                    "updated_time": _ms_to_iso(max([x for x in order_update_candidates if x > 0])) if any(x > 0 for x in order_update_candidates) else None,
-                },
-                raw_refs_extra={
-                    "orderLinkId": order_link_id or order_match.get("orderLinkId"),
-                    "parentOrderLinkId": order_match.get("parentOrderLinkId"),
-                    "tpsl_source": tpsl_source,
-                    "side_source": side_source,
-                    "tpsl_unresolved_context": {
-                        "order_id": order_id,
-                        "order_link_id": order_link_id,
-                        "parent_order_link_id": parent_link_id,
-                        **tpsl_debug,
-                        "cache_hit": cache_hit,
-                        "cache_match_type": cache_match_type,
-                        "open_time_derived_from_execution": bool(resolved_open_time),
+                resolved_open_time = (
+                    _epoch_or_iso_to_iso(resolved_ctx.get("open_time")) if isinstance(resolved_ctx, dict) else None
+                ) or (
+                    _epoch_or_iso_to_iso(resolved_ctx.get("created_at")) if isinstance(resolved_ctx, dict) else None
+                )
+                execution_times = sorted(executions_by_order_id.get(order_id) or [])
+                if not resolved_open_time and execution_times:
+                    resolved_open_time = _ms_to_iso(execution_times[0])
+                order_time_candidates = [
+                    int(_to_float(item.get("createdTime")) or 0)
+                    for item in order_candidates
+                    if isinstance(item, dict)
+                ]
+                order_update_candidates = [
+                    int(_to_float(item.get("updatedTime")) or 0)
+                    for item in order_candidates
+                    if isinstance(item, dict)
+                ]
+                row = _normalize_bybit_closed_pnl_row(
+                    entry,
+                    account_mode=mode,
+                    balance_after_trade=balance_after_trade,
+                    display_side=resolved_side,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    resolved_trade_context=resolved_ctx,
+                    resolved_open_time=resolved_open_time,
+                    execution_times={
+                        "open_time": _ms_to_iso(execution_times[0]) if execution_times else None,
+                        "close_time": _ms_to_iso(execution_times[-1]) if execution_times else None,
                     },
-                },
-            )
-            if row and mode == "demo":
-                ctx = _lookup_bybit_demo_calc_context_for_row(
-                    {
-                        "order_id": order_id,
-                        "orderLinkId": order_link_id,
-                        "calculation_context_id": (row.get("raw_refs") or {}).get("calculation_context_id") if isinstance(row.get("raw_refs"), dict) else None,
-                    }
-                )
-                if ctx:
-                    row = _merge_bybit_demo_calc_context_into_row(row, ctx)
-            if row:
-                row_status = str(row.get("status") or "").strip().lower()
-                row_type = str(row.get("row_type") or "").strip().lower()
-                if row_status == "invalid_time_order" or row_type == "quarantine":
-                    refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
-                    dropped_invalid_rows.append(
-                        {
-                            "symbol": row.get("symbol"),
-                            "side": row.get("side"),
-                            "orderId": refs.get("orderId"),
-                            "open_time": row.get("open_time"),
-                            "close_time": row.get("close_time"),
-                            "reason": refs.get("time_warning_code") or row_status or row_type or "invalid_time_order",
-                        }
-                    )
-                    continue
-                refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
-                unresolved_key = _stable_registry_key(
-                    [
-                        mode,
-                        order_id,
-                        order_link_id,
-                        parent_link_id,
-                        str(entry.get("symbol") or "").strip().upper(),
-                        str(order_match.get("stopOrderType") or entry.get("stopOrderType") or "").strip(),
-                    ]
-                )
-                if tpsl_source != "unresolved":
-                    _update_unresolved_registry(
-                        family="bybit_demo_tpsl",
-                        key=unresolved_key,
-                        details={"status": "resolved"},
-                        resolved=True,
-                        resolution_source=tpsl_source,
-                    )
-                else:
-                    should_warn, _ = _update_unresolved_registry(
-                        family="bybit_demo_tpsl",
-                        key=unresolved_key,
-                        details={
+                    order_times={
+                        "created_time": _ms_to_iso(min([x for x in order_time_candidates if x > 0])) if any(x > 0 for x in order_time_candidates) else None,
+                        "updated_time": _ms_to_iso(max([x for x in order_update_candidates if x > 0])) if any(x > 0 for x in order_update_candidates) else None,
+                    },
+                    raw_refs_extra={
+                        "orderLinkId": order_link_id or order_match.get("orderLinkId"),
+                        "parentOrderLinkId": order_match.get("parentOrderLinkId"),
+                        "tpsl_source": tpsl_source,
+                        "side_source": side_source,
+                        "tpsl_unresolved_context": {
+                            "order_id": order_id,
+                            "order_link_id": order_link_id,
+                            "parent_order_link_id": parent_link_id,
+                            **tpsl_debug,
                             "cache_hit": cache_hit,
                             "cache_match_type": cache_match_type,
-                            "context_fallback_attempted": bool(refs.get("trade_context_tpsl_fallback_attempted")),
-                            "context_fallback_matched": bool(refs.get("trade_context_tpsl_fallback_matched")),
+                            "open_time_derived_from_execution": bool(resolved_open_time),
                         },
-                        resolved=False,
+                    },
+                )
+                if row and mode == "demo":
+                    ctx = _lookup_bybit_demo_calc_context_for_row(
+                        {
+                            "order_id": order_id,
+                            "orderLinkId": order_link_id,
+                            "calculation_context_id": (row.get("raw_refs") or {}).get("calculation_context_id") if isinstance(row.get("raw_refs"), dict) else None,
+                        }
                     )
-                    if _STARTUP_STATE_RESTORE_DONE.is_set() and should_warn:
-                        BYBIT_LOGGER.warning(
-                            "BYBIT_DEMO_TPSL unresolved order_id=%s order_link_id=%s parent_order_link_id=%s stop_order_type=%s cache_hit=%s cache_match_type=%s context_fallback_attempted=%s context_fallback_matched=%s",
+                    if ctx:
+                        row = _merge_bybit_demo_calc_context_into_row(row, ctx)
+                if row:
+                    row_status = str(row.get("status") or "").strip().lower()
+                    row_type = str(row.get("row_type") or "").strip().lower()
+                    if row_status == "invalid_time_order" or row_type == "quarantine":
+                        refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+                        dropped_invalid_rows.append(
+                            {
+                                "symbol": row.get("symbol"),
+                                "side": row.get("side"),
+                                "orderId": refs.get("orderId"),
+                                "open_time": row.get("open_time"),
+                                "close_time": row.get("close_time"),
+                                "reason": refs.get("time_warning_code") or row_status or row_type or "invalid_time_order",
+                            }
+                        )
+                        continue
+                    refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+                    unresolved_key = _stable_registry_key(
+                        [
+                            mode,
                             order_id,
                             order_link_id,
                             parent_link_id,
-                            str(order_match.get("stopOrderType") or entry.get("stopOrderType") or ""),
-                            cache_hit,
-                            cache_match_type,
-                            bool(refs.get("trade_context_tpsl_fallback_attempted")),
-                            bool(refs.get("trade_context_tpsl_fallback_matched")),
-                        )
-                _upsert_trade_context(
-                    {
-                        "broker": "bybit",
-                        "account": mode,
-                        "instrument": str(entry.get("symbol") or "").strip().upper(),
-                        "side": resolved_side,
-                        "order_id": order_id,
-                        "order_link_id": order_link_id or order_match.get("orderLinkId"),
-                        "parent_order_link_id": parent_link_id,
-                        "trade_id": str(entry.get("tradeId") or entry.get("execId") or "").strip() or None,
-                        "transaction_id": str(entry.get("transactionId") or "").strip() or None,
-                        "stop_loss": stop_loss,
-                        "take_profit": take_profit,
-                        "open_time": resolved_open_time,
-                        "timeframe": row.get("timeframe"),
-                        "status": "CLOSED",
-                    }
-                )
-                if mode == "demo" and ctx:
-                    _upsert_bybit_demo_calc_context(
-                        {
-                            "calculation_context_id": ctx.get("calculation_context_id"),
-                            "status": "CLOSED",
-                            "order_id": order_id,
-                            "close_time": row.get("close_time"),
-                        },
-                        require_durable=False,
+                            str(entry.get("symbol") or "").strip().upper(),
+                            str(order_match.get("stopOrderType") or entry.get("stopOrderType") or "").strip(),
+                        ]
                     )
-                rows.append(row)
-        cursor = str(result.get("nextPageCursor") or "").strip() or None
-        if not cursor:
-            break
+                    if tpsl_source != "unresolved":
+                        _update_unresolved_registry(
+                            family="bybit_demo_tpsl",
+                            key=unresolved_key,
+                            details={"status": "resolved"},
+                            resolved=True,
+                            resolution_source=tpsl_source,
+                        )
+                    else:
+                        should_warn, _ = _update_unresolved_registry(
+                            family="bybit_demo_tpsl",
+                            key=unresolved_key,
+                            details={
+                                "cache_hit": cache_hit,
+                                "cache_match_type": cache_match_type,
+                                "context_fallback_attempted": bool(refs.get("trade_context_tpsl_fallback_attempted")),
+                                "context_fallback_matched": bool(refs.get("trade_context_tpsl_fallback_matched")),
+                            },
+                            resolved=False,
+                        )
+                        if _STARTUP_STATE_RESTORE_DONE.is_set() and should_warn:
+                            BYBIT_LOGGER.warning(
+                                "BYBIT_DEMO_TPSL unresolved order_id=%s order_link_id=%s parent_order_link_id=%s stop_order_type=%s cache_hit=%s cache_match_type=%s context_fallback_attempted=%s context_fallback_matched=%s",
+                                order_id,
+                                order_link_id,
+                                parent_link_id,
+                                str(order_match.get("stopOrderType") or entry.get("stopOrderType") or ""),
+                                cache_hit,
+                                cache_match_type,
+                                bool(refs.get("trade_context_tpsl_fallback_attempted")),
+                                bool(refs.get("trade_context_tpsl_fallback_matched")),
+                            )
+                    _upsert_trade_context(
+                        {
+                            "broker": "bybit",
+                            "account": mode,
+                            "instrument": str(entry.get("symbol") or "").strip().upper(),
+                            "side": resolved_side,
+                            "order_id": order_id,
+                            "order_link_id": order_link_id or order_match.get("orderLinkId"),
+                            "parent_order_link_id": parent_link_id,
+                            "trade_id": str(entry.get("tradeId") or entry.get("execId") or "").strip() or None,
+                            "transaction_id": str(entry.get("transactionId") or "").strip() or None,
+                            "stop_loss": stop_loss,
+                            "take_profit": take_profit,
+                            "open_time": resolved_open_time,
+                            "timeframe": row.get("timeframe"),
+                            "status": "CLOSED",
+                        }
+                    )
+                    if mode == "demo" and ctx:
+                        _upsert_bybit_demo_calc_context(
+                            {
+                                "calculation_context_id": ctx.get("calculation_context_id"),
+                                "status": "CLOSED",
+                                "order_id": order_id,
+                                "close_time": row.get("close_time"),
+                            },
+                            require_durable=False,
+                        )
+                    rows.append(row)
+            cursor = str(result.get("nextPageCursor") or "").strip() or None
+            if not cursor:
+                break
 
-    if not rows:
-        if mode == "demo" and execution_entries:
-            run_warning = (
-                    "Bybit Demo executions were found but no closed PnL rows were returned; Trade Log cannot create final closed trades from executions alone."
-                )
-            _record_bybit_demo_sync_status(bybit_demo_execution_warning=run_warning)
+    final_rows_by_id: Dict[str, Dict[str, object]] = {}
+    for row in [*rows, *execution_rows]:
+        if not isinstance(row, dict):
+            continue
+        rid = str(row.get("id") or "").strip()
+        if not rid:
+            continue
+        final_rows_by_id[rid] = row
+    final_rows = list(final_rows_by_id.values())
+    latest_execution_time = None
+    execution_timestamps = [
+        _canonical_trade_epoch_second(r.get("open_time"))
+        for r in execution_rows
+        if isinstance(r, dict)
+    ]
+    execution_timestamps = [int(x) for x in execution_timestamps if x is not None]
+    if execution_timestamps:
+        latest_execution_time = _ts_to_iso(max(execution_timestamps))
+
+    if not final_rows:
         if mode == "demo":
             sanitized_rows, sanitize_stats = _sanitize_bybit_demo_rows(_get_trading_journal_rows())
             snapshot = {}
@@ -16119,10 +16293,10 @@ async def _sync_bybit_closed_pnl_window(
         last_invalid_time_rows_dropped=len(dropped_invalid_rows),
             last_invalid_time_row_details=dropped_invalid_rows,
         )
-        return {"max_seen": max_seen, "rows_seen": 0, "rows_upserted": 0, "rows_deduped": 0, "single_file_mode": bool(local_authoritative and _master_journal_single_file_mode()), "warning": run_warning, "captured_row_ids": []}
+        return {"max_seen": max_seen, "rows_seen": 0, "rows_upserted": 0, "rows_deduped": 0, "single_file_mode": bool(local_authoritative and _master_journal_single_file_mode()), "warning": run_warning, "captured_row_ids": [], "execution_rows_seen": len(execution_entries), "execution_rows_normalized": len(execution_rows), "execution_rows_upserted": 0, "latest_execution_time": latest_execution_time, "execution_fetch_error": execution_fetch_error}
 
     if (not local_authoritative or _master_journal_single_file_mode()):
-        changed = _upsert_trading_journal_rows(rows, allow_broker_rows_in_single_file=(local_authoritative and _master_journal_single_file_mode()))
+        changed = _upsert_trading_journal_rows(final_rows, allow_broker_rows_in_single_file=(local_authoritative and _master_journal_single_file_mode()))
     else:
         changed = 0
     sanitize_stats: Dict[str, int] = {"deduped_by_order_id": 0, "deduped_by_fingerprint": 0}
@@ -16132,7 +16306,7 @@ async def _sync_bybit_closed_pnl_window(
         sanitized_rows, sanitize_stats = _sanitize_bybit_demo_rows(_get_trading_journal_rows())
         backfill_stats: Dict[str, object] = {"balance_rows_seen": 0, "balance_rows_backfilled": 0, "changed": False}
         snapshot = {}
-        has_demo_rows = any(_is_bybit_demo_trade_row(r) for r in sanitized_rows) or bool(rows)
+        has_demo_rows = any(_is_bybit_demo_trade_row(r) for r in sanitized_rows) or bool(final_rows)
         if has_demo_rows:
             try:
                 snapshot = await _fetch_bybit_demo_current_balance_snapshot()
@@ -16148,10 +16322,10 @@ async def _sync_bybit_closed_pnl_window(
             else:
                 local_dir = TRADING_JOURNAL_LOCAL_DIR
                 await asyncio.to_thread(_ensure_local_bybit_demo_files, local_dir)
-                local_workbook_changed = await asyncio.to_thread(_append_bybit_demo_rows_to_local_workbook, local_dir, rows)
+                local_workbook_changed = await asyncio.to_thread(_append_bybit_demo_rows_to_local_workbook, local_dir, final_rows)
                 workbook_stats = await asyncio.to_thread(_sanitize_bybit_demo_local_workbook, local_dir, snapshot)
         elif active_folder:
-            await asyncio.to_thread(_append_bybit_demo_rows_to_workbook, active_folder, rows)
+            await asyncio.to_thread(_append_bybit_demo_rows_to_workbook, active_folder, final_rows)
             workbook_stats = await asyncio.to_thread(_sanitize_bybit_demo_workbook, active_folder, snapshot)
         _record_bybit_demo_sync_status(
             bybit_demo_balance_backfill_rows_seen=int(backfill_stats.get("balance_rows_seen", 0)),
@@ -16164,13 +16338,13 @@ async def _sync_bybit_closed_pnl_window(
         if _master_journal_single_file_mode():
             local_workbook_changed = changed
         else:
-            local_workbook_changed = await asyncio.to_thread(_append_generic_local_broker_rows, "Bybit Live.xlsx", rows, "bybit_closed_pnl")
+            local_workbook_changed = await asyncio.to_thread(_append_generic_local_broker_rows, "Bybit Live.xlsx", final_rows, "bybit_closed_pnl")
     _schedule_dropbox_upload_state_backup()
     _record_bybit_demo_sync_status(
         last_checked_at=_utc_now_iso(),
         last_success_at=_utc_now_iso(),
         last_error=balance_backfill_error,
-        last_rows_seen=len(rows),
+        last_rows_seen=len(final_rows),
         last_rows_upserted=changed if not local_authoritative else local_workbook_changed,
         last_local_workbook_path=(None if (local_authoritative and _master_journal_single_file_mode()) else (str((_local_journal_workbook_path(BYBIT_DEMO_WORKBOOK_NAME) if mode == "demo" else _local_journal_workbook_path("Bybit Live.xlsx"))) if local_authoritative else None)),
         last_local_workbook_rows_upserted=local_workbook_changed if local_authoritative else 0,
@@ -16180,11 +16354,15 @@ async def _sync_bybit_closed_pnl_window(
         last_workbook_rows_deduped=int(workbook_stats.get("deduped_by_order_id", 0))
         + int(workbook_stats.get("deduped_by_fingerprint", 0)),
         single_file_mode=bool(local_authoritative and _master_journal_single_file_mode()),
-        last_captured_row_ids=[str(r.get("id") or "").strip() for r in rows if str(r.get("id") or "").strip()],
+        last_captured_row_ids=[str(r.get("id") or "").strip() for r in final_rows if str(r.get("id") or "").strip()],
         last_invalid_time_rows_dropped=len(dropped_invalid_rows),
         last_invalid_time_row_details=dropped_invalid_rows,
     )
-    return {"max_seen": max_seen, "rows_seen": len(rows), "rows_upserted": int(changed if not local_authoritative else local_workbook_changed), "rows_deduped": int(sanitize_stats.get("deduped_by_order_id",0))+int(sanitize_stats.get("deduped_by_fingerprint",0)), "single_file_mode": bool(local_authoritative and _master_journal_single_file_mode()), "warning": run_warning, "captured_row_ids": [str(r.get("id") or "").strip() for r in rows if str(r.get("id") or "").strip()]}
+    persisted_ids = {str(r.get("id") or "").strip() for r in _get_trading_journal_rows() if isinstance(r, dict)}
+    expected_execution_ids = [str(r.get("id") or "").strip() for r in execution_rows if str(r.get("id") or "").strip()]
+    missing_execution_row_ids = [rid for rid in expected_execution_ids if rid not in persisted_ids]
+    execution_rows_upserted = len([r for r in execution_rows if str(r.get("id") or "").strip() in persisted_ids])
+    return {"max_seen": max_seen, "rows_seen": len(final_rows), "rows_upserted": int(changed if not local_authoritative else local_workbook_changed), "rows_deduped": int(sanitize_stats.get("deduped_by_order_id",0))+int(sanitize_stats.get("deduped_by_fingerprint",0)), "single_file_mode": bool(local_authoritative and _master_journal_single_file_mode()), "warning": run_warning, "captured_row_ids": [str(r.get("id") or "").strip() for r in final_rows if str(r.get("id") or "").strip()], "execution_rows_seen": len(execution_entries), "execution_rows_normalized": len(execution_rows), "execution_rows_upserted": execution_rows_upserted, "latest_execution_time": latest_execution_time, "execution_fetch_error": execution_fetch_error, "missing_execution_row_ids": missing_execution_row_ids, "sanitize_stats": sanitize_stats}
 
 
 async def _poll_bybit_fills() -> None:
@@ -16335,11 +16513,31 @@ async def _run_bybit_closed_pnl_sync(
         _persist_bybit_closed_pnl_last_seen()
         _BYBIT_CLOSED_PNL_SYNC_LAST_RUN_AT[mode] = time.time()
 
+    ok_flag = True
+    err_msg = None
+    if (
+        mode == "demo"
+        and reason == "manual"
+        and isinstance(sync_diag, dict)
+        and str(sync_diag.get("execution_fetch_error") or "").strip()
+        and int(sync_diag.get("execution_rows_seen") or 0) <= 0
+    ):
+        ok_flag = False
+        err_msg = str(sync_diag.get("execution_fetch_error") or "")
+    if (
+        mode == "demo"
+        and reason == "manual"
+        and isinstance(sync_diag, dict)
+        and int(sync_diag.get("execution_rows_normalized") or 0) > 0
+        and len(sync_diag.get("missing_execution_row_ids") or []) > 0
+    ):
+        ok_flag = False
+        err_msg = "Bybit execution rows were sanitized/removed before persistence."
     return {
-        "ok": True,
+        "ok": ok_flag,
         "account_mode": mode,
         "reason": reason,
-        "message": f"Bybit {mode} sync completed.",
+        "message": (f"Bybit {mode} sync completed." if ok_flag else f"Bybit {mode} execution-history sync failed."),
         "start_time": start_time,
         "end_time": end_time,
         "max_seen": max_seen,
@@ -16348,7 +16546,15 @@ async def _run_bybit_closed_pnl_sync(
         "rows_deduped": int((sync_diag or {}).get("rows_deduped") or 0) if isinstance(sync_diag, dict) else 0,
         "single_file_mode": bool((sync_diag or {}).get("single_file_mode")) if isinstance(sync_diag, dict) else False,
         "warning": (sync_diag or {}).get("warning") if isinstance(sync_diag, dict) else None,
+        "error": err_msg,
         "captured_row_ids": (sync_diag or {}).get("captured_row_ids") if isinstance(sync_diag, dict) else [],
+        "execution_rows_seen": int((sync_diag or {}).get("execution_rows_seen") or 0) if isinstance(sync_diag, dict) else 0,
+        "execution_rows_normalized": int((sync_diag or {}).get("execution_rows_normalized") or 0) if isinstance(sync_diag, dict) else 0,
+        "execution_rows_upserted": int((sync_diag or {}).get("execution_rows_upserted") or 0) if isinstance(sync_diag, dict) else 0,
+        "latest_execution_time": (sync_diag or {}).get("latest_execution_time") if isinstance(sync_diag, dict) else None,
+        "execution_fetch_error": (sync_diag or {}).get("execution_fetch_error") if isinstance(sync_diag, dict) else None,
+        "missing_execution_row_ids": (sync_diag or {}).get("missing_execution_row_ids") if isinstance(sync_diag, dict) else [],
+        "sanitize_stats": (sync_diag or {}).get("sanitize_stats") if isinstance(sync_diag, dict) else {},
     }
 
 
@@ -24322,6 +24528,38 @@ async def trading_journal_sync_status() -> JSONResponse:
 
 
 async def _run_trading_journal_sync_job() -> None:
+    def _verify_captured_rows_persisted_to_master_journal(captured_row_ids: List[str]) -> Dict[str, object]:
+        expected = [str(x).strip() for x in (captured_row_ids or []) if str(x).strip()]
+        if not expected:
+            return {"ok": True, "missing_row_ids": [], "persisted_row_ids": [], "workbook_latest_trade_time": None}
+        workbook_ids: Set[str] = set()
+        latest_trade_time = None
+        try:
+            wb = load_workbook(_master_journal_path(), data_only=True)
+            tl = _get_trade_log_sheet(wb, allow_legacy=False)
+            headers = [str(c.value or "").strip() for c in tl[1]]
+            ridx = headers.index("Row ID") + 1 if "Row ID" in headers else None
+            cidx = headers.index("Close Time") + 1 if "Close Time" in headers else None
+            for rr in range(2, tl.max_row + 1):
+                if ridx:
+                    v = str(tl.cell(rr, ridx).value or "").strip()
+                    if v:
+                        workbook_ids.add(v)
+                if cidx:
+                    tv = _excel_datetime_to_iso(tl.cell(rr, cidx).value)
+                    tsec = _canonical_trade_epoch_second(tv)
+                    if tsec is not None and (latest_trade_time is None or tsec > latest_trade_time):
+                        latest_trade_time = tsec
+        except Exception:
+            return {"ok": False, "missing_row_ids": expected, "persisted_row_ids": [], "workbook_latest_trade_time": None}
+        missing = [rid for rid in expected if rid not in workbook_ids]
+        persisted = [rid for rid in expected if rid in workbook_ids]
+        return {
+            "ok": len(missing) == 0,
+            "missing_row_ids": missing,
+            "persisted_row_ids": persisted,
+            "workbook_latest_trade_time": _ts_to_iso(latest_trade_time) if latest_trade_time is not None else None,
+        }
     def _cb(progress: int, message: str) -> None:
         _set_trading_journal_sync_state(
             running=True,
@@ -24510,27 +24748,12 @@ async def _run_trading_journal_sync_job() -> None:
             if isinstance(payload, dict) and payload.get("ok") is False:
                 warnings.append(f"OANDA {acct} failed: {payload.get('error') or payload.get('message') or 'unknown'}")
         def _verify_bybit_payload_row_ids(mode_name: str, payload: Dict[str, object]) -> None:
-            captured_row_ids = set(str(x).strip() for x in (payload.get("captured_row_ids") or []) if str(x).strip())
-            if not captured_row_ids:
-                payload["final_trade_log_row_ids_verified"] = True
-                return
-            final_trade_log_row_ids_verified = True
-            try:
-                wb = load_workbook(_master_journal_path(), data_only=True)
-                tl = _get_trade_log_sheet(wb, allow_legacy=False)
-                headers = [str(c.value or "").strip() for c in tl[1]]
-                ridx = headers.index("Row ID") + 1 if "Row ID" in headers else None
-                workbook_ids = set()
-                if ridx:
-                    for rr in range(2, tl.max_row + 1):
-                        v = str(tl.cell(rr, ridx).value or "").strip()
-                        if v:
-                            workbook_ids.add(v)
-                final_trade_log_row_ids_verified = captured_row_ids.issubset(workbook_ids)
-            except Exception:
-                final_trade_log_row_ids_verified = False
-            payload["final_trade_log_row_ids_verified"] = final_trade_log_row_ids_verified
-            if payload.get("rows_seen", 0) > 0 and not final_trade_log_row_ids_verified:
+            verification = _verify_captured_rows_persisted_to_master_journal(payload.get("captured_row_ids") or [])
+            payload["final_trade_log_row_ids_verified"] = bool(verification.get("ok"))
+            payload["missing_execution_row_ids"] = verification.get("missing_row_ids") or []
+            payload["persisted_execution_row_ids"] = verification.get("persisted_row_ids") or []
+            payload["workbook_latest_trade_time"] = verification.get("workbook_latest_trade_time")
+            if payload.get("rows_seen", 0) > 0 and not payload["final_trade_log_row_ids_verified"]:
                 payload["ok"] = False
                 payload["error"] = f"Bybit {mode_name.title()} sync captured rows that were not persisted to Trade Log."
                 warnings.append(str(payload["error"]))
