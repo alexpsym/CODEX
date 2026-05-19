@@ -15,12 +15,12 @@ import calendar
 from copy import copy
 import math
 
-TRADE_LOG_SHEET = "All Trades"
-LEGACY_ALL_TRADES_SHEET = "Trade Log"
+TRADE_LOG_SHEET = "Trade Log"
+LEGACY_ALL_TRADES_SHEET = "All Trades"
 # Backward-compatible aliases (do not remove yet; external imports may still reference these).
-ALL_TRADES_SHEET = TRADE_LOG_SHEET
+ALL_TRADES_SHEET = LEGACY_ALL_TRADES_SHEET
 LEGACY_TRADE_LOG_SHEET = LEGACY_ALL_TRADES_SHEET
-SHEET_ORDER=["Dashboard","All Trades","Instrument Averages","P&L Calendar"]
+SHEET_ORDER=["Dashboard","Trade Log","Instrument Averages","P&L Calendar"]
 EDITABLE_COLS=["Test","Setup","Timeframe","Breakeven","Notes"]
 PROFIT_FILL = "C6EFCE"
 PROFIT_FONT = "006100"
@@ -40,29 +40,29 @@ def _get_all_trades_sheet(wb: Workbook, *, allow_legacy: bool = True):
     has_trade_log = TRADE_LOG_SHEET in wb.sheetnames
     has_legacy_all_trades = LEGACY_ALL_TRADES_SHEET in wb.sheetnames
     if has_trade_log and has_legacy_all_trades:
-        raise RuntimeError("Master Journal has ambiguous trade sheets: both 'All Trades' and legacy 'Trade Log' exist.")
+        raise RuntimeError("Master Journal has ambiguous trade sheets: both 'Trade Log' and legacy 'All Trades' exist.")
     if has_trade_log:
         return wb[TRADE_LOG_SHEET]
     if allow_legacy and has_legacy_all_trades:
         return wb[LEGACY_ALL_TRADES_SHEET]
-    raise RuntimeError("Master Journal is missing required All Trades sheet.")
+    raise RuntimeError("Master Journal is missing required Trade Log sheet.")
 
-def _get_trade_log_sheet(wb: Workbook):
-    return _get_all_trades_sheet(wb, allow_legacy=True)
+def _get_trade_log_sheet(wb: Workbook, *, allow_legacy: bool = True):
+    return _get_all_trades_sheet(wb, allow_legacy=allow_legacy)
 
 def _migrate_legacy_trade_log_sheet_name(wb: Workbook, diagnostics: Dict[str, Any] | None = None) -> None:
     diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
     has_trade_log = TRADE_LOG_SHEET in wb.sheetnames
     has_legacy_all_trades = LEGACY_ALL_TRADES_SHEET in wb.sheetnames
     if has_trade_log and has_legacy_all_trades:
-        raise RuntimeError("Master Journal has ambiguous trade sheets: both 'All Trades' and legacy 'Trade Log' exist.")
+        raise RuntimeError("Master Journal has ambiguous trade sheets: both 'Trade Log' and legacy 'All Trades' exist.")
     if has_trade_log:
         return
     if has_legacy_all_trades:
         wb[LEGACY_ALL_TRADES_SHEET].title = TRADE_LOG_SHEET
         diagnostics["migrated_trade_log_sheet"] = True
         return
-    raise RuntimeError("Master Journal is missing required All Trades sheet.")
+    raise RuntimeError("Master Journal is missing required Trade Log sheet.")
 
 def _remove_legacy_trade_meta_sheet(wb: Workbook, diagnostics: Dict[str, Any] | None = None) -> None:
     diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
@@ -1015,7 +1015,7 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
         idx = {h:i for i,h in enumerate(headers)}
         required = {'Open Time','Close Time','Account','Symbol','Side'}
         if not required.issubset(set(idx.keys())):
-            raise RuntimeError('Master Journal All Trades headers are invalid.')
+            raise RuntimeError('Master Journal Trade Log headers are invalid.')
         items=[]; cashflow_ledger=defaultdict(list)
         def _num(v):
             try:

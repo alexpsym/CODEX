@@ -69,7 +69,7 @@ from shared.symbol_resolution import (
 from shared.atomic_json import write_json_file
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, stable_row_id, SHEET_ORDER, _get_all_trades_sheet, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, stable_row_id, SHEET_ORDER, _get_all_trades_sheet, _get_trade_log_sheet, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -491,7 +491,7 @@ TRADING_JOURNAL_SYNC_STATE_PATH = BASE_DIR / "render" / "data" / "trading_journa
 TRADING_JOURNAL_IMPORT_CACHE_PATH = BASE_DIR / "render" / "data" / "trading_journal_import_cache.json"
 TRADING_JOURNAL_VIEW_CACHE_PATH = BASE_DIR / "render" / "data" / "trading_journal_view_cache.json"
 TRADING_JOURNAL_SQLITE_PATH = BASE_DIR / "render" / "data" / "trading_journal.sqlite"
-MASTER_JOURNAL_FILENAME = "Master Journal.xlsx"
+MASTER_JOURNAL_FILENAME = "Trading Journal.xlsx"
 MASTER_JOURNAL_PATH = BASE_DIR / "journal" / MASTER_JOURNAL_FILENAME
 
 MONTHLY_AUD_REVALUATION_PATH = BASE_DIR / "render" / "data" / "monthly_aud_revaluation.json"
@@ -1242,6 +1242,7 @@ def _enforce_single_master_journal_xlsx(journal_dir: Path, *, cleanup_known_gene
     found: List[Path] = []
     removed: List[str] = []
     unknown: List[str] = []
+    migrated_legacy_master_journal = False
     for pattern in ("*.xlsx", "*.xlsm", "*.xls"):
         for p in sorted(journal_dir.glob(pattern)):
             name = p.name
@@ -1249,8 +1250,17 @@ def _enforce_single_master_journal_xlsx(journal_dir: Path, *, cleanup_known_gene
             if lname.startswith("~$") or lname.endswith(".tmp.xlsx") or lname.endswith(".pending.xlsx"):
                 continue
             found.append(p)
+
+    canonical = journal_dir / "Trading Journal.xlsx"
+    legacy = journal_dir / "Master Journal.xlsx"
+    if canonical.exists() and legacy.exists():
+        unknown.extend([legacy.name])
+    elif (not canonical.exists()) and legacy.exists():
+        legacy.replace(canonical)
+        migrated_legacy_master_journal = True
+
     for p in found:
-        if p.name == "Master Journal.xlsx":
+        if p.name == "Trading Journal.xlsx" or p.name == "Master Journal.xlsx":
             continue
         if p.name.lower() in known_generated and cleanup_known_generated:
             try:
@@ -1264,7 +1274,8 @@ def _enforce_single_master_journal_xlsx(journal_dir: Path, *, cleanup_known_gene
         "ok": len(unknown) == 0,
         "journal_dir": str(journal_dir),
         "removed_known_generated": removed,
-        "unknown_extra_excel_files": sorted(unknown),
+        "unknown_extra_excel_files": sorted(set(unknown)),
+        "migrated_legacy_master_journal": migrated_legacy_master_journal,
     }
 
 def _journal_source_fingerprint() -> dict:
@@ -3199,7 +3210,7 @@ def _load_state_manifest() -> Dict[str, Any]:
     if LEGACY_STATE_MANIFEST_CAMEL_PATH.exists():
         legacy = json.loads(LEGACY_STATE_MANIFEST_CAMEL_PATH.read_text(encoding="utf-8"))
         manifest = legacy if isinstance(legacy, dict) else {}
-        write_json_file(STATE_MANIFEST_PATH, manifest, sort_keys=True, indent=2)
+        write_json_file(STATE_MANIFEST_PATH, manifest, sort_keys=True)
         return manifest
     return {}
 
@@ -3214,7 +3225,7 @@ def _update_repo_state_manifest_entry(key: str, payload: object) -> None:
         "source_host": socket.gethostname(),
         "app_profile": APP_PROFILE,
     }
-    write_json_file(STATE_MANIFEST_PATH, manifest, sort_keys=True, indent=2)
+    write_json_file(STATE_MANIFEST_PATH, manifest, sort_keys=True)
 
 
 def read_repo_state_json(key: str) -> object:
@@ -3232,7 +3243,7 @@ def _is_valid_repo_state_value(key: str, value: object) -> bool:
 
 def write_repo_state_json_and_verify(key: str, payload: object) -> Dict[str, object]:
     path = state_file_path_for_key(key)
-    write_json_file(path, payload, sort_keys=True, indent=2)
+    write_json_file(path, payload, sort_keys=True)
     roundtrip = json.loads(path.read_text(encoding="utf-8"))
     if roundtrip != payload:
         raise RuntimeError(f"Repo-local state verification failed for key '{key}' at {path}")
@@ -3454,12 +3465,20 @@ def _find_journal_row_index(row_id: str) -> int:
     return -1
 
 
-def _upsert_trading_journal_rows(rows: Iterable[Dict[str, object]]) -> int:
+def _upsert_trading_journal_rows(rows: Iterable[Dict[str, object]], *, allow_broker_rows_in_single_file: bool = False) -> int:
     if _trading_journal_local_excel_authoritative():
         blocked = 0
+        allow_broker = bool(allow_broker_rows_in_single_file and _master_journal_single_file_mode())
         for raw in rows:
-            if isinstance(raw, dict) and str(raw.get("source") or "").strip().lower() != "local_excel":
-                blocked += 1
+            if not isinstance(raw, dict):
+                continue
+            src = str(raw.get("source") or "").strip().lower()
+            acct = str(raw.get("account") or "").strip().lower()
+            if src == "local_excel":
+                continue
+            if allow_broker and src in {"bybit", "oanda"} and acct in {"demo", "live", "practice"}:
+                continue
+            blocked += 1
         if blocked:
             BYBIT_LOGGER.info("trading_journal upsert blocked in local authoritative mode blocked_rows=%s", blocked)
             return 0
@@ -8579,7 +8598,7 @@ async def _run_startup_recovery_import_if_needed() -> None:
             or str((result or {}).get("message") or "Startup import failed.")
         )
         final_message = (
-            "Startup journal sync complete. Master Journal.xlsx created."
+            "Startup journal sync complete. Trading Journal.xlsx created."
             if ok_flag
             else startup_error
         )
@@ -14729,19 +14748,33 @@ async def _fetch_bybit_executions(
     api_secret: str,
     category: str,
     start_time: int,
+    end_time: int,
+    cursor: Optional[str] = None,
 ) -> List[Dict[str, object]]:
-    payload = await _bybit_signed_get(
-        base_url=base_url,
-        api_key=api_key,
-        api_secret=api_secret,
-        path="/v5/execution/list",
-        params={
+    rows: List[Dict[str, object]] = []
+    next_cursor: Optional[str] = cursor
+    while True:
+        params = {
             "category": category,
             "startTime": str(start_time),
-            "limit": "50",
-        },
-    )
-    return (payload.get("result") or {}).get("list", []) or []
+            "endTime": str(end_time),
+            "limit": "100",
+        }
+        if next_cursor:
+            params["cursor"] = next_cursor
+        payload = await _bybit_signed_get(
+            base_url=base_url,
+            api_key=api_key,
+            api_secret=api_secret,
+            path="/v5/execution/list",
+            params=params,
+        )
+        result = (payload.get("result") or {})
+        rows.extend(result.get("list") or [])
+        next_cursor = str(result.get("nextPageCursor") or "").strip() or None
+        if not next_cursor:
+            break
+    return rows
 
 
 async def _fetch_bybit_closed_pnl(
@@ -15660,17 +15693,21 @@ async def _sync_bybit_closed_pnl_window(
     api_secret: str,
     start_time: int,
     end_time: int,
-) -> int:
+) -> Dict[str, object]:
     mode = "demo" if str(account_mode).strip().lower() == "demo" else "live"
     local_authoritative = _trading_journal_local_excel_authoritative()
     active_folder: Optional[str] = None
     if mode == "demo":
-        if local_authoritative:
+        if local_authoritative and _master_journal_single_file_mode():
+            active_folder = None
+        elif local_authoritative:
             await asyncio.to_thread(_ensure_local_bybit_demo_files, TRADING_JOURNAL_LOCAL_DIR)
         else:
             active_folder, _entries = await asyncio.to_thread(_resolve_trading_journal_dropbox_folder)
             await asyncio.to_thread(_ensure_bybit_demo_dropbox_files, active_folder)
     balance_backfill_error: Optional[str] = None
+    run_warning: Optional[str] = None
+    _record_bybit_demo_sync_status(last_rows_seen=0,last_rows_upserted=0,last_rows_deduped=0,last_captured_row_ids=[],bybit_demo_execution_warning=None) if mode=="demo" else None
 
     orders_by_id: Dict[str, List[Dict[str, object]]] = defaultdict(list)
     orders_by_link_id: Dict[str, List[Dict[str, object]]] = defaultdict(list)
@@ -15751,6 +15788,7 @@ async def _sync_bybit_closed_pnl_window(
                 )
 
     tx_by_order: Dict[str, Dict[str, object]] = {}
+    execution_entries: List[Dict[str, object]] = []
     executions_by_order_id: Dict[str, List[int]] = defaultdict(list)
     try:
         execution_entries = await _fetch_bybit_executions(
@@ -15759,6 +15797,7 @@ async def _sync_bybit_closed_pnl_window(
             api_secret=api_secret,
             category="linear",
             start_time=start_time,
+            end_time=end_time,
         )
         for ex in execution_entries:
             if not isinstance(ex, dict):
@@ -16031,12 +16070,17 @@ async def _sync_bybit_closed_pnl_window(
             break
 
     if not rows:
+        if mode == "demo" and execution_entries:
+            run_warning = (
+                    "Bybit Demo executions were found but no closed PnL rows were returned; Trade Log cannot create final closed trades from executions alone."
+                )
+            _record_bybit_demo_sync_status(bybit_demo_execution_warning=run_warning)
         if mode == "demo":
             sanitized_rows, sanitize_stats = _sanitize_bybit_demo_rows(_get_trading_journal_rows())
             snapshot = {}
             backfill_stats = {"balance_rows_seen": 0, "balance_rows_backfilled": 0, "changed": False}
             has_demo_rows = any(_is_bybit_demo_trade_row(r) for r in sanitized_rows)
-            if local_authoritative:
+            if local_authoritative and not _master_journal_single_file_mode():
                 workbook_path = _resolve_local_journal_file(BYBIT_DEMO_WORKBOOK_NAME, TRADING_JOURNAL_LOCAL_DIR)
                 wb_frame = _coerce_bybit_demo_workbook_frame(_read_excel_sheet_or_empty(workbook_path, BYBIT_DEMO_WORKBOOK_SHEET, BYBIT_DEMO_WORKBOOK_COLUMNS))
                 has_demo_rows = has_demo_rows or _bybit_demo_workbook_has_rows_needing_balance(wb_frame)
@@ -16057,7 +16101,7 @@ async def _sync_bybit_closed_pnl_window(
             if int(sanitize_stats.get("changed", 0)) or bool(backfill_stats.get("changed")):
                 _set_trading_journal_rows(sanitized_rows)
             if has_demo_rows:
-                if local_authoritative:
+                if local_authoritative and not _master_journal_single_file_mode():
                     await asyncio.to_thread(_sanitize_bybit_demo_local_workbook, TRADING_JOURNAL_LOCAL_DIR, snapshot)
                 elif active_folder:
                     await asyncio.to_thread(_sanitize_bybit_demo_workbook, active_folder, snapshot)
@@ -16070,12 +16114,17 @@ async def _sync_bybit_closed_pnl_window(
         _record_bybit_demo_sync_status(
             last_checked_at=_utc_now_iso(),
                 last_error=balance_backfill_error,
-            last_invalid_time_rows_dropped=len(dropped_invalid_rows),
+            single_file_mode=bool(local_authoritative and _master_journal_single_file_mode()),
+        last_captured_row_ids=[str(r.get("id") or "").strip() for r in rows if str(r.get("id") or "").strip()],
+        last_invalid_time_rows_dropped=len(dropped_invalid_rows),
             last_invalid_time_row_details=dropped_invalid_rows,
         )
-        return max_seen
+        return {"max_seen": max_seen, "rows_seen": 0, "rows_upserted": 0, "rows_deduped": 0, "single_file_mode": bool(local_authoritative and _master_journal_single_file_mode()), "warning": run_warning, "captured_row_ids": []}
 
-    changed = 0 if local_authoritative else _upsert_trading_journal_rows(rows)
+    if (not local_authoritative or _master_journal_single_file_mode()):
+        changed = _upsert_trading_journal_rows(rows, allow_broker_rows_in_single_file=(local_authoritative and _master_journal_single_file_mode()))
+    else:
+        changed = 0
     sanitize_stats: Dict[str, int] = {"deduped_by_order_id": 0, "deduped_by_fingerprint": 0}
     workbook_stats: Dict[str, int] = {"deduped_by_order_id": 0, "deduped_by_fingerprint": 0}
     local_workbook_changed = 0
@@ -16094,10 +16143,13 @@ async def _sync_bybit_closed_pnl_window(
         if int(sanitize_stats.get("changed", 0)) or bool(backfill_stats.get("changed")):
             _set_trading_journal_rows(sanitized_rows)
         if local_authoritative:
-            local_dir = TRADING_JOURNAL_LOCAL_DIR
-            await asyncio.to_thread(_ensure_local_bybit_demo_files, local_dir)
-            local_workbook_changed = await asyncio.to_thread(_append_bybit_demo_rows_to_local_workbook, local_dir, rows)
-            workbook_stats = await asyncio.to_thread(_sanitize_bybit_demo_local_workbook, local_dir, snapshot)
+            if _master_journal_single_file_mode():
+                local_workbook_changed = changed
+            else:
+                local_dir = TRADING_JOURNAL_LOCAL_DIR
+                await asyncio.to_thread(_ensure_local_bybit_demo_files, local_dir)
+                local_workbook_changed = await asyncio.to_thread(_append_bybit_demo_rows_to_local_workbook, local_dir, rows)
+                workbook_stats = await asyncio.to_thread(_sanitize_bybit_demo_local_workbook, local_dir, snapshot)
         elif active_folder:
             await asyncio.to_thread(_append_bybit_demo_rows_to_workbook, active_folder, rows)
             workbook_stats = await asyncio.to_thread(_sanitize_bybit_demo_workbook, active_folder, snapshot)
@@ -16109,7 +16161,10 @@ async def _sync_bybit_closed_pnl_window(
             bybit_demo_balance_backfill_error=balance_backfill_error,
         )
     elif local_authoritative:
-        local_workbook_changed = await asyncio.to_thread(_append_generic_local_broker_rows, "Bybit Live.xlsx", rows, "bybit_closed_pnl")
+        if _master_journal_single_file_mode():
+            local_workbook_changed = changed
+        else:
+            local_workbook_changed = await asyncio.to_thread(_append_generic_local_broker_rows, "Bybit Live.xlsx", rows, "bybit_closed_pnl")
     _schedule_dropbox_upload_state_backup()
     _record_bybit_demo_sync_status(
         last_checked_at=_utc_now_iso(),
@@ -16117,17 +16172,19 @@ async def _sync_bybit_closed_pnl_window(
         last_error=balance_backfill_error,
         last_rows_seen=len(rows),
         last_rows_upserted=changed if not local_authoritative else local_workbook_changed,
-        last_local_workbook_path=str((_local_journal_workbook_path(BYBIT_DEMO_WORKBOOK_NAME) if mode == "demo" else _local_journal_workbook_path("Bybit Live.xlsx"))) if local_authoritative else None,
+        last_local_workbook_path=(None if (local_authoritative and _master_journal_single_file_mode()) else (str((_local_journal_workbook_path(BYBIT_DEMO_WORKBOOK_NAME) if mode == "demo" else _local_journal_workbook_path("Bybit Live.xlsx"))) if local_authoritative else None)),
         last_local_workbook_rows_upserted=local_workbook_changed if local_authoritative else 0,
         last_local_workbook_sanitized=int(workbook_stats.get("changed", 0)) if local_authoritative else 0,
         last_rows_deduped=int(sanitize_stats.get("deduped_by_order_id", 0))
         + int(sanitize_stats.get("deduped_by_fingerprint", 0)),
         last_workbook_rows_deduped=int(workbook_stats.get("deduped_by_order_id", 0))
         + int(workbook_stats.get("deduped_by_fingerprint", 0)),
+        single_file_mode=bool(local_authoritative and _master_journal_single_file_mode()),
+        last_captured_row_ids=[str(r.get("id") or "").strip() for r in rows if str(r.get("id") or "").strip()],
         last_invalid_time_rows_dropped=len(dropped_invalid_rows),
         last_invalid_time_row_details=dropped_invalid_rows,
     )
-    return max_seen
+    return {"max_seen": max_seen, "rows_seen": len(rows), "rows_upserted": int(changed if not local_authoritative else local_workbook_changed), "rows_deduped": int(sanitize_stats.get("deduped_by_order_id",0))+int(sanitize_stats.get("deduped_by_fingerprint",0)), "single_file_mode": bool(local_authoritative and _master_journal_single_file_mode()), "warning": run_warning, "captured_row_ids": [str(r.get("id") or "").strip() for r in rows if str(r.get("id") or "").strip()]}
 
 
 async def _poll_bybit_fills() -> None:
@@ -16154,6 +16211,7 @@ async def _poll_bybit_fills() -> None:
                             api_secret=api_secret,
                             category=category,
                             start_time=last_seen,
+                            end_time=int(time.time() * 1000),
                         )
                     except Exception:
                         continue
@@ -16252,7 +16310,7 @@ async def _run_bybit_closed_pnl_sync(
             start_time = max(last_seen - (backfill_seconds * 1000), earliest)
         end_time = now_ms
         try:
-            max_seen = await _sync_bybit_closed_pnl_window(
+            sync_diag = await _sync_bybit_closed_pnl_window(
                 account_mode=mode,
                 base_url=base_url,
                 api_key=api_key,
@@ -16272,6 +16330,7 @@ async def _run_bybit_closed_pnl_sync(
                 )
             raise
         previous_seen = int(last_seen or 0)
+        max_seen = int(sync_diag.get("max_seen") or start_time) if isinstance(sync_diag, dict) else int(sync_diag or start_time)
         _BYBIT_CLOSED_PNL_LAST_SEEN[mode] = max(max_seen, previous_seen)
         _persist_bybit_closed_pnl_last_seen()
         _BYBIT_CLOSED_PNL_SYNC_LAST_RUN_AT[mode] = time.time()
@@ -16284,6 +16343,12 @@ async def _run_bybit_closed_pnl_sync(
         "start_time": start_time,
         "end_time": end_time,
         "max_seen": max_seen,
+        "rows_seen": int((sync_diag or {}).get("rows_seen") or 0) if isinstance(sync_diag, dict) else 0,
+        "rows_upserted": int((sync_diag or {}).get("rows_upserted") or 0) if isinstance(sync_diag, dict) else 0,
+        "rows_deduped": int((sync_diag or {}).get("rows_deduped") or 0) if isinstance(sync_diag, dict) else 0,
+        "single_file_mode": bool((sync_diag or {}).get("single_file_mode")) if isinstance(sync_diag, dict) else False,
+        "warning": (sync_diag or {}).get("warning") if isinstance(sync_diag, dict) else None,
+        "captured_row_ids": (sync_diag or {}).get("captured_row_ids") if isinstance(sync_diag, dict) else [],
     }
 
 
@@ -16579,7 +16644,10 @@ async def _recover_oanda_recent_fills(account: str, lookback_hours: int = 72) ->
         ),
     )
     recovered_rows = 0
+    rows_seen = 0
     skipped_duplicates = 0
+    captured_row_ids: List[str] = []
+    single_file_mode = bool(_trading_journal_local_excel_authoritative() and _master_journal_single_file_mode())
     max_seen = int(_to_float(_OANDA_TX_LAST_SEEN.get(account)) or 0)
     for entry in sorted_transactions:
         tx_id = str(entry.get("id") or "").strip()
@@ -16591,12 +16659,17 @@ async def _recover_oanda_recent_fills(account: str, lookback_hours: int = 72) ->
             max_seen = max(max_seen, int(_to_float(tx_id) or 0))
         journal_rows = _journal_rows_from_oanda_order_fill({**entry, "account": account})
         if journal_rows:
+            rows_seen += len(journal_rows)
+            captured_row_ids.extend([str(r.get("id") or "").strip() for r in journal_rows if isinstance(r, dict) and str(r.get("id") or "").strip()])
             if _trading_journal_local_excel_authoritative():
-                recovered_rows += _append_generic_local_broker_rows(
-                    _canonical_local_oanda_workbook_name(account),
-                    journal_rows,
-                    "oanda_order_fill",
-                )
+                if single_file_mode:
+                    recovered_rows += _upsert_trading_journal_rows(journal_rows, allow_broker_rows_in_single_file=True)
+                else:
+                    recovered_rows += _append_generic_local_broker_rows(
+                        _canonical_local_oanda_workbook_name(account),
+                        journal_rows,
+                        "oanda_order_fill",
+                    )
             else:
                 recovered_rows += _upsert_trading_journal_rows(journal_rows)
     if last_transaction_id:
@@ -16624,6 +16697,10 @@ async def _recover_oanda_recent_fills(account: str, lookback_hours: int = 72) ->
         "ok": True,
         "account": account,
         "transactions": len(sorted_transactions),
+        "rows_seen": rows_seen,
+        "rows_upserted": recovered_rows,
+        "captured_row_ids": list(dict.fromkeys(captured_row_ids)),
+        "single_file_mode": single_file_mode,
         "recovered_rows": recovered_rows,
         "skipped_duplicates": skipped_duplicates,
         "last_seen_transaction_id": _OANDA_TX_LAST_SEEN.get(account),
@@ -24232,7 +24309,7 @@ async def trading_journal_sync_status() -> JSONResponse:
         path_text = str(result.get("master_journal_path") or "").strip()
         if not path_text or not Path(path_text).exists():
             msg = (
-                f"Master Journal.xlsx is missing at {path_text or '<unknown path>'}. "
+                f"Trading Journal.xlsx is missing at {path_text or '<unknown path>'}. "
                 "Click Sync Journal again and check the Local Master Control terminal."
             )
             result["master_journal_ok"] = False
@@ -24409,9 +24486,9 @@ async def _run_trading_journal_sync_job() -> None:
                     oanda_sync[acct] = await _recover_oanda_recent_fills(acct)
                 except Exception as exc:
                     oanda_sync[acct] = {"ok": False, "error": str(exc)}
-        if _trading_journal_local_excel_authoritative() and run_closed_trade_capture:
+        if _trading_journal_local_excel_authoritative() and run_closed_trade_capture and not _master_journal_single_file_mode():
             result = await asyncio.to_thread(_import_trading_journal_from_sources, progress_cb=_cb)
-        _set_trading_journal_sync_state(stage="updating_master_journal", message="Updating Master Journal.xlsx…")
+        _set_trading_journal_sync_state(stage="updating_master_journal", message="Updating Trading Journal.xlsx…")
         workbook_sync = await asyncio.to_thread(_sync_master_journal_workbook)
         if isinstance(result, dict):
             result.update(workbook_sync)
@@ -24422,6 +24499,8 @@ async def _run_trading_journal_sync_job() -> None:
             warnings.append(str(workbook_sync.get("github_sync_error") or "GitHub sync failed"))
         warnings.extend(broker_balance_warnings)
         for mode_name, mode_payload in {"demo": bybit_demo, "live": bybit_live}.items():
+            if isinstance(mode_payload, dict) and mode_payload.get("warning"):
+                warnings.append(str(mode_payload.get("warning")))
             if isinstance(mode_payload, dict):
                 if mode_payload.get("cooldown_active"):
                     warnings.append(f"Bybit {mode_name} skipped by cooldown")
@@ -24430,6 +24509,64 @@ async def _run_trading_journal_sync_job() -> None:
         for acct, payload in oanda_sync.items():
             if isinstance(payload, dict) and payload.get("ok") is False:
                 warnings.append(f"OANDA {acct} failed: {payload.get('error') or payload.get('message') or 'unknown'}")
+        def _verify_bybit_payload_row_ids(mode_name: str, payload: Dict[str, object]) -> None:
+            captured_row_ids = set(str(x).strip() for x in (payload.get("captured_row_ids") or []) if str(x).strip())
+            if not captured_row_ids:
+                payload["final_trade_log_row_ids_verified"] = True
+                return
+            final_trade_log_row_ids_verified = True
+            try:
+                wb = load_workbook(_master_journal_path(), data_only=True)
+                tl = _get_trade_log_sheet(wb, allow_legacy=False)
+                headers = [str(c.value or "").strip() for c in tl[1]]
+                ridx = headers.index("Row ID") + 1 if "Row ID" in headers else None
+                workbook_ids = set()
+                if ridx:
+                    for rr in range(2, tl.max_row + 1):
+                        v = str(tl.cell(rr, ridx).value or "").strip()
+                        if v:
+                            workbook_ids.add(v)
+                final_trade_log_row_ids_verified = captured_row_ids.issubset(workbook_ids)
+            except Exception:
+                final_trade_log_row_ids_verified = False
+            payload["final_trade_log_row_ids_verified"] = final_trade_log_row_ids_verified
+            if payload.get("rows_seen", 0) > 0 and not final_trade_log_row_ids_verified:
+                payload["ok"] = False
+                payload["error"] = f"Bybit {mode_name.title()} sync captured rows that were not persisted to Trade Log."
+                warnings.append(str(payload["error"]))
+
+        for mode_name, mode_payload in {"demo": bybit_demo, "live": bybit_live}.items():
+            if isinstance(mode_payload, dict):
+                _verify_bybit_payload_row_ids(mode_name, mode_payload)
+        def _verify_oanda_payload_row_ids(mode_name: str, payload: Dict[str, object]) -> None:
+            captured_row_ids = set(str(x).strip() for x in (payload.get("captured_row_ids") or []) if str(x).strip())
+            if not captured_row_ids:
+                payload["final_trade_log_row_ids_verified"] = True
+                return
+            verified = True
+            try:
+                wb = load_workbook(_master_journal_path(), data_only=True)
+                tl = _get_trade_log_sheet(wb, allow_legacy=False)
+                headers = [str(c.value or "").strip() for c in tl[1]]
+                ridx = headers.index("Row ID") + 1 if "Row ID" in headers else None
+                workbook_ids = set()
+                if ridx:
+                    for rr in range(2, tl.max_row + 1):
+                        v = str(tl.cell(rr, ridx).value or "").strip()
+                        if v:
+                            workbook_ids.add(v)
+                verified = captured_row_ids.issubset(workbook_ids)
+            except Exception:
+                verified = False
+            payload["final_trade_log_row_ids_verified"] = verified
+            if payload.get("rows_seen", 0) > 0 and not verified:
+                payload["ok"] = False
+                payload["error"] = f"OANDA {mode_name.title()} sync captured rows that were not persisted to Trade Log."
+                warnings.append(str(payload["error"]))
+
+        for mode_name, mode_payload in oanda_sync.items():
+            if isinstance(mode_payload, dict):
+                _verify_oanda_payload_row_ids(mode_name, mode_payload)
         if isinstance(result, dict):
             result["bybit"] = {"demo": bybit_demo, "live": bybit_live}
             result["oanda"] = oanda_sync
@@ -24460,12 +24597,12 @@ async def _run_trading_journal_sync_job() -> None:
         else:
             if isinstance(workbook_sync, dict) and workbook_sync.get("github_sync_enabled"):
                 msg = (
-                    "Synced Master Journal.xlsx and pushed to GitHub."
+                    "Synced Trading Journal.xlsx and pushed to GitHub."
                     if not workbook_sync.get("github_sync_noop")
-                    else "Master Journal.xlsx is up to date; no GitHub changes to push."
+                    else "Trading Journal.xlsx is up to date; no GitHub changes to push."
                 )
             else:
-                msg = "Master Journal.xlsx synced. GitHub sync disabled."
+                msg = "Trading Journal.xlsx synced. GitHub sync disabled."
         _set_trading_journal_sync_state(
             running=False,
             progress=100,
@@ -24570,21 +24707,21 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
         try:
             for sheet in SHEET_ORDER:
                 if sheet not in wb.sheetnames:
-                    raise RuntimeError(f"Master Journal validation failed: missing required sheet '{sheet}'.")
-            trade_log = _get_all_trades_sheet(wb, allow_legacy=False)
+                    raise RuntimeError(f"Trading Journal validation failed: missing required sheet '{sheet}'.")
+            trade_log = _get_trade_log_sheet(wb, allow_legacy=False)
             inst = wb["Instrument Averages"]
             cal = wb["P&L Calendar"]
             dash = wb["Dashboard"]
-            if "Trade Log" in wb.sheetnames:
-                raise RuntimeError("Master Journal validation failed: legacy 'Trade Log' sheet remains after migration.")
+            if "All Trades" in wb.sheetnames:
+                raise RuntimeError("Trading Journal validation failed: legacy 'All Trades' sheet remains after migration.")
             if "_Trade Meta" in wb.sheetnames:
-                raise RuntimeError("Master Journal validation failed: '_Trade Meta' must not be present.")
+                raise RuntimeError("Trading Journal validation failed: '_Trade Meta' must not be present.")
             if not trade_log.auto_filter or not trade_log.auto_filter.ref:
-                raise RuntimeError("Master Journal validation failed: All Trades filter missing.")
+                raise RuntimeError("Trading Journal validation failed: Trade Log filter missing.")
             if not inst.auto_filter or not inst.auto_filter.ref:
-                raise RuntimeError("Master Journal validation failed: Instrument Averages filter missing.")
+                raise RuntimeError("Trading Journal validation failed: Instrument Averages filter missing.")
             if str(inst.freeze_panes or "") != "A2":
-                raise RuntimeError("Master Journal validation failed: Instrument Averages freeze pane must be A2.")
+                raise RuntimeError("Trading Journal validation failed: Instrument Averages freeze pane must be A2.")
             def _is_hidden_trade_row(row: Dict[str, object]) -> bool:
                 metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
                 for key in ("is_hidden", "hidden", "_hidden"):
@@ -24598,7 +24735,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                 symbol_col = headers.index("Symbol") + 1 if "Symbol" in headers else None
                 row_id_col = headers.index("Row ID") + 1 if "Row ID" in headers else None
                 if not symbol_col:
-                    raise RuntimeError("Master Journal validation failed: All Trades Symbol column missing.")
+                    raise RuntimeError("Trading Journal validation failed: Trade Log Symbol column missing.")
                 populated_symbol_rows = 0
                 workbook_row_ids: Set[str] = set()
                 for rr in range(2, trade_log.max_row + 1):
@@ -24610,12 +24747,12 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                         if rid:
                             workbook_row_ids.add(rid)
                 if populated_symbol_rows <= 0:
-                    raise RuntimeError("Master Journal validation failed: All Trades is blank despite source rows.")
+                    raise RuntimeError("Trading Journal validation failed: Trade Log is blank despite source rows.")
                 expected_ids = {str(r.get("id") or "").strip() for r in visible_trade_rows if str(r.get("id") or "").strip()}
                 if _master_journal_single_file_mode() and expected_ids and (not row_id_col or not workbook_row_ids):
-                    raise RuntimeError("Master Journal validation failed: Row ID metadata is required in master_journal mode.")
+                    raise RuntimeError("Trading Journal validation failed: Row ID metadata is required in master_journal mode.")
                 if expected_ids and not expected_ids.issubset(workbook_row_ids):
-                    raise RuntimeError("Master Journal validation failed: All Trades row IDs do not match source snapshot.")
+                    raise RuntimeError("Trading Journal validation failed: Trade Log row IDs do not match source snapshot.")
                 open_col = headers.index("Open Time") + 1 if "Open Time" in headers else None
                 close_col = headers.index("Close Time") + 1 if "Close Time" in headers else None
                 dur_col = headers.index("Trade Duration (DD:HH:MM:SS)") + 1 if "Trade Duration (DD:HH:MM:SS)" in headers else None
@@ -24624,15 +24761,15 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                     if open_col:
                         ov = trade_log.cell(rr, open_col).value
                         if isinstance(ov, str) and "T" in ov:
-                            raise RuntimeError("Master Journal validation failed: All Trades Open Time contains ISO 'T' string.")
+                            raise RuntimeError("Trading Journal validation failed: Trade Log Open Time contains ISO 'T' string.")
                     if close_col:
                         cv = trade_log.cell(rr, close_col).value
                         if isinstance(cv, str) and "T" in cv:
-                            raise RuntimeError("Master Journal validation failed: All Trades Close Time contains ISO 'T' string.")
+                            raise RuntimeError("Trading Journal validation failed: Trade Log Close Time contains ISO 'T' string.")
                     if dur_col:
                         dv = trade_log.cell(rr, dur_col).value
                         if dv not in (None, "") and not isinstance(dv, (int, float)):
-                            raise RuntimeError("Master Journal validation failed: All Trades duration cells must be numeric DDHHMMSS.")
+                            raise RuntimeError("Trading Journal validation failed: Trade Log duration cells must be numeric DDHHMMSS.")
                 if open_col and close_col and dur_col:
                     expected_duration_ids: Set[str] = set()
                     for row in visible_trade_rows:
@@ -24652,7 +24789,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                                 missing_duration_ids.append(rid)
                         if missing_duration_ids:
                             raise RuntimeError(
-                                "Master Journal validation failed: All Trades duration column blank/non-numeric for trade rows with valid open/close timestamps "
+                                "Trading Journal validation failed: Trade Log duration column blank/non-numeric for trade rows with valid open/close timestamps "
                                 f"(sample row IDs: {', '.join(missing_duration_ids[:5])})."
                             )
                 for cc in [c for c in currency_cols if c]:
@@ -24664,7 +24801,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                             acct = str(trade_log.cell(rr, headers.index("Account") + 1).value or "").strip() if "Account" in headers else ""
                             row_type = str(trade_log.cell(rr, headers.index("Row Type") + 1).value or "").strip() if "Row Type" in headers else ""
                             raise RuntimeError(
-                                "Master Journal validation failed: All Trades currency format contains UNKNOWN "
+                                "Trading Journal validation failed: Trade Log currency format contains UNKNOWN "
                                 f"(row={rr}, column={col_name}, account={acct or '—'}, symbol={sym or '—'}, row_type={row_type or '—'})."
                             )
             stats = snapshot.get("stats") or {}
@@ -24678,7 +24815,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                         trades_idx = inst_headers.index(candidate) + 1
                         break
                 if not symbol_idx or not trades_idx:
-                    raise RuntimeError("Master Journal validation failed: Instrument Averages Symbol/Trades headers missing.")
+                    raise RuntimeError("Trading Journal validation failed: Instrument Averages Symbol/Trades headers missing.")
                 has_instrument_data = False
                 for rr in range(2, inst.max_row + 1):
                     symbol = str(inst.cell(rr, symbol_idx).value or "").strip()
@@ -24687,7 +24824,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                         has_instrument_data = True
                         break
                 if not has_instrument_data:
-                    raise RuntimeError("Master Journal validation failed: Instrument Averages is blank despite instrument stats.")
+                    raise RuntimeError("Trading Journal validation failed: Instrument Averages is blank despite instrument stats.")
                 def _inst_col(*aliases: str) -> int | None:
                     for a in aliases:
                         if a in inst_headers:
@@ -24711,11 +24848,11 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                         if nums:
                             any_duration_cells = True
                         if nums and len(nums) != len(vals):
-                            raise RuntimeError("Master Journal validation failed: Instrument durations must be numeric DDHHMMSS.")
+                            raise RuntimeError("Trading Journal validation failed: Instrument durations must be numeric DDHHMMSS.")
                         if len(nums) == 3 and not (nums[0] <= nums[1] <= nums[2]):
-                            raise RuntimeError("Master Journal validation failed: Instrument duration order must satisfy Shortest <= Avg <= Longest.")
+                            raise RuntimeError("Trading Journal validation failed: Instrument duration order must satisfy Shortest <= Avg <= Longest.")
                     if has_any_duration_stat and not any_duration_cells:
-                        raise RuntimeError("Master Journal validation failed: Instrument Averages duration columns are blank despite duration stats.")
+                        raise RuntimeError("Trading Journal validation failed: Instrument Averages duration columns are blank despite duration stats.")
                 net_col = (inst_headers.index("net p/l %") + 1) if "net p/l %" in inst_headers else None
                 avg_col = (inst_headers.index("avg p/l %") + 1) if "avg p/l %" in inst_headers else None
                 if net_col and avg_col:
@@ -24730,7 +24867,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                                 has_op = True
                                 break
                         if not has_op:
-                            raise RuntimeError("Master Journal validation failed: Instrument Averages Net/Avg P/L % columns are blank despite result_pct stats.")
+                            raise RuntimeError("Trading Journal validation failed: Instrument Averages Net/Avg P/L % columns are blank despite result_pct stats.")
             non_test_with_results = []
             from tools.master_journal_workbook import _as_date as _journal_as_date
             for r in visible_trade_rows:
@@ -24751,7 +24888,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                     if dt:
                         expected_year_months.add((int(dt.year), int(dt.month)))
                 if expected_year_months and not _calendar_has_expected_pl_cells(cal, expected_year_months):
-                    raise RuntimeError("Master Journal validation failed: P&L Calendar missing expected dated P/L cells.")
+                    raise RuntimeError("Trading Journal validation failed: P&L Calendar missing expected dated P/L cells.")
             balances = snapshot.get("balances") or []
             if balances:
                 anchor = None
@@ -24763,7 +24900,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                     if anchor:
                         break
                 if not anchor:
-                    raise RuntimeError("Master Journal validation failed: Account Balances section anchor missing.")
+                    raise RuntimeError("Trading Journal validation failed: Account Balances section anchor missing.")
                 header_row = None
                 header_map: Dict[str, int] = {}
                 for rr in range(anchor[0] + 1, min(dash.max_row + 1, anchor[0] + 12)):
@@ -24779,7 +24916,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                         header_map = row_map
                         break
                 if not header_row:
-                    raise RuntimeError("Master Journal validation failed: Account Balances headers missing.")
+                    raise RuntimeError("Trading Journal validation failed: Account Balances headers missing.")
                 expected_balances: Dict[str, Dict[str, object]] = {}
                 for b in balances:
                     if not isinstance(b, dict):
@@ -24821,9 +24958,9 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                             f"{actual.get('account')}: expected_balance={expected_balance}, actual_balance={actual_balance}, expected_currency={expected_currency}, actual_currency={actual_currency}, balance_source={expected_source}"
                         )
                 if nonnumeric:
-                    raise RuntimeError("Master Journal validation failed: Account Balances missing numeric values: " + " | ".join(nonnumeric[:20]))
+                    raise RuntimeError("Trading Journal validation failed: Account Balances missing numeric values: " + " | ".join(nonnumeric[:20]))
                 if mismatches:
-                    raise RuntimeError("Master Journal validation failed: Account Balances mismatch vs snapshot: " + " | ".join(mismatches[:20]))
+                    raise RuntimeError("Trading Journal validation failed: Account Balances mismatch vs snapshot: " + " | ".join(mismatches[:20]))
             leaders = ((stats.get("groups") or {}).get("leaders") or {})
             expected_payloads = {
                 label: (leaders.get(key) or {}) for label, key in LEADER_LABEL_TO_KEY.items()
@@ -24832,23 +24969,23 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
             if expected_payloads:
                 _, header_map, metric_rows, _ = _find_instrument_leaders_table(dash)
                 if not header_map:
-                    raise RuntimeError("Master Journal validation failed: Instrument leaders headers missing.")
+                    raise RuntimeError("Trading Journal validation failed: Instrument leaders headers missing.")
                 present_expected_payloads = {label: payload for label, payload in expected_payloads.items() if metric_rows.get(label)}
                 if not present_expected_payloads:
-                    raise RuntimeError("Master Journal validation failed: Instrument leaders section has no recognized metric rows despite leader stats.")
+                    raise RuntimeError("Trading Journal validation failed: Instrument leaders section has no recognized metric rows despite leader stats.")
                 for metric_label in present_expected_payloads:
                     row_idx = metric_rows.get(metric_label)
                     symbol = str(dash.cell(row_idx, header_map["symbol"]).value or "").strip()
                     trades_num = _safe_float(dash.cell(row_idx, header_map["trades"]).value)
                     if not symbol or symbol == "—" or trades_num is None:
-                        raise RuntimeError(f"Master Journal validation failed: Instrument leaders row '{metric_label}' is present but blank/invalid; user-deleted rows are skipped.")
+                        raise RuntimeError(f"Trading Journal validation failed: Instrument leaders row '{metric_label}' is present but blank/invalid; user-deleted rows are skipped.")
         finally:
             wb.close()
 
         if created_tmp:
             os.replace(tmp, path)
         if not path.exists() or path.stat().st_size <= 0:
-            raise RuntimeError("Master Journal.xlsx was not created.")
+            raise RuntimeError("Trading Journal.xlsx was not created.")
         if _master_journal_single_file_mode():
             enforce_post = _enforce_single_master_journal_xlsx(TRADING_JOURNAL_LOCAL_DIR, cleanup_known_generated=True)
             if not enforce_post.get("ok"):
@@ -24924,7 +25061,7 @@ def _repo_state_files_for_github(master_path: Path) -> List[Path]:
     master_resolved = master_path.expanduser().resolve()
     allowlist = [
         master_resolved,
-        repo_root / "journal" / "Master Journal.xlsx",
+        repo_root / "journal" / "Trading Journal.xlsx",
         repo_root / "journal" / "5-digit-demo-calculation-context.json",
         repo_root / "state_backup.json",
     ]
@@ -25016,11 +25153,11 @@ def _open_path_with_os(path: Path) -> None:
 async def open_master_journal_file() -> JSONResponse:
     path = _master_journal_path()
     if not path.exists():
-        raise HTTPException(status_code=404, detail="Master Journal.xlsx does not exist. Click Sync Journal first.")
+        raise HTTPException(status_code=404, detail="Trading Journal.xlsx does not exist. Click Sync Journal first.")
     try:
         _open_path_with_os(path)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to open Master Journal.xlsx: {exc}")
+        raise HTTPException(status_code=500, detail=f"Failed to open Trading Journal.xlsx: {exc}")
     return JSONResponse({"ok": True, "master_journal_path": str(path.resolve())})
 
 

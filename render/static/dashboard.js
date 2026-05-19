@@ -93,13 +93,13 @@
             setOpenMasterJournalVisible(true);
           } else if (masterOk && masterPath && masterExists && githubEnabled && !githubOk) {
             const err = result.github_sync_error || statusPayload.error || statusPayload.message || 'Unknown GitHub sync error';
-            setSyncJournalStatus(`Master Journal.xlsx created, but GitHub sync failed: ${err}`, true);
+            setSyncJournalStatus(`Trading Journal.xlsx created, but GitHub sync failed: ${err}`, true);
             setOpenMasterJournalVisible(true);
           } else {
             const err = result.master_journal_error
               || statusPayload.error
               || statusPayload.message
-              || 'Sync finished but Master Journal.xlsx was not created. Check the Local Master Control terminal.';
+              || 'Sync finished but Trading Journal.xlsx was not created. Check the Local Master Control terminal.';
             setSyncJournalStatus(err, true);
             setOpenMasterJournalVisible(false);
           }

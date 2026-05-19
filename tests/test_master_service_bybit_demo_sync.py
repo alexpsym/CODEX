@@ -496,7 +496,7 @@ def test_sync_bybit_closed_pnl_window_stale_context_does_not_raise(monkeypatch) 
     monkeypatch.setattr(master_service, "_fetch_bybit_order_history", fake_empty_payload)
     monkeypatch.setattr(master_service, "_fetch_bybit_order_realtime", fake_empty_payload)
     monkeypatch.setattr(master_service, "_fetch_bybit_transaction_log", fake_empty_payload)
-    monkeypatch.setattr(master_service, "_upsert_trading_journal_rows", lambda rows: len(rows))
+    monkeypatch.setattr(master_service, "_upsert_trading_journal_rows", lambda rows, **_k: len(rows))
     monkeypatch.setattr(master_service, "_sanitize_bybit_demo_rows", lambda rows: (rows, {"changed": 0}))
     monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: [])
     monkeypatch.setattr(master_service, "_append_bybit_demo_rows_to_workbook", lambda *_args, **_kwargs: 0)
@@ -927,7 +927,7 @@ def test_bybit_unresolved_tpsl_warns_once_and_persists_registry(tmp_path, monkey
     monkeypatch.setattr(master_service, "_fetch_bybit_order_history", fake_empty_payload)
     monkeypatch.setattr(master_service, "_fetch_bybit_order_realtime", fake_empty_payload)
     monkeypatch.setattr(master_service, "_fetch_bybit_transaction_log", fake_empty_payload)
-    monkeypatch.setattr(master_service, "_upsert_trading_journal_rows", lambda rows: len(rows))
+    monkeypatch.setattr(master_service, "_upsert_trading_journal_rows", lambda rows, **_k: len(rows))
     monkeypatch.setattr(master_service, "_sanitize_bybit_demo_rows", lambda rows: (rows, {"changed": 0}))
     monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: [])
     monkeypatch.setattr(master_service, "_append_bybit_demo_rows_to_workbook", lambda *_args, **_kwargs: 0)
@@ -1469,3 +1469,103 @@ def test_wallet_snapshot_prefers_total_wallet_when_coin_wallet_missing(monkeypat
     monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("demo", "k", "s", "https://api-demo.bybit.com", "env"))
     snap = asyncio.run(master_service._fetch_bybit_balance_usdt("demo"))
     assert "wallet_balance_usdt" not in snap
+
+
+def test_single_file_broker_upsert_bypass_only_for_explicit_flag(monkeypatch):
+    monkeypatch.setattr(master_service, "_trading_journal_local_excel_authoritative", lambda: True)
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: True)
+    saved={"rows":[]}
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: list(saved["rows"]))
+    monkeypatch.setattr(master_service, "_save_trading_journal", lambda rows: saved.update({"rows":list(rows)}))
+    row={"id":"x1","source":"bybit","account":"demo"}
+    assert master_service._upsert_trading_journal_rows([row]) == 0
+    assert master_service._upsert_trading_journal_rows([row], allow_broker_rows_in_single_file=True) == 1
+
+
+def test_single_file_mode_no_side_workbook_touches(monkeypatch):
+    monkeypatch.setattr(master_service, "_trading_journal_local_excel_authoritative", lambda: True)
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: True)
+    calls={"ensure_local":0,"ensure_dropbox":0,"resolve_dropbox":0,"sanitize_local":0,"sanitize_dropbox":0}
+    monkeypatch.setattr(master_service, "_ensure_local_bybit_demo_files", lambda *_: calls.__setitem__("ensure_local", calls["ensure_local"]+1))
+    monkeypatch.setattr(master_service, "_ensure_bybit_demo_dropbox_files", lambda *_: calls.__setitem__("ensure_dropbox", calls["ensure_dropbox"]+1))
+    monkeypatch.setattr(master_service, "_resolve_trading_journal_dropbox_folder", lambda: calls.__setitem__("resolve_dropbox", calls["resolve_dropbox"]+1) or ("/tmp", []))
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_local_workbook", lambda *_: calls.__setitem__("sanitize_local", calls["sanitize_local"]+1) or {"changed":0})
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_workbook", lambda *_: calls.__setitem__("sanitize_dropbox", calls["sanitize_dropbox"]+1) or {"changed":0})
+    async def _empty(**_): return {"result":{"list":[]}}
+    monkeypatch.setattr(master_service, "_fetch_bybit_order_history", _empty)
+    monkeypatch.setattr(master_service, "_fetch_bybit_order_realtime", _empty)
+    monkeypatch.setattr(master_service, "_fetch_bybit_transaction_log", _empty)
+    monkeypatch.setattr(master_service, "_fetch_bybit_closed_pnl", _empty)
+    monkeypatch.setattr(master_service, "_fetch_bybit_executions", lambda **_: [])
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: [])
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_rows", lambda rows: (rows, {"changed":0}))
+    monkeypatch.setattr(master_service, "_record_bybit_demo_sync_status", lambda **_: None)
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    out=asyncio.run(master_service._sync_bybit_closed_pnl_window(account_mode="demo", base_url="u", api_key="k", api_secret="s", start_time=0, end_time=1))
+    assert out["rows_seen"] == 0
+    assert calls == {"ensure_local":0,"ensure_dropbox":0,"resolve_dropbox":0,"sanitize_local":0,"sanitize_dropbox":0}
+
+
+def test_single_file_live_does_not_append_side_workbook_and_uses_upsert(monkeypatch):
+    monkeypatch.setattr(master_service, "_trading_journal_local_excel_authoritative", lambda: True)
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: True)
+    calls={"append_live":0, "upsert_kwargs":None}
+    async def _empty(**_): return {"result":{"list":[], "nextPageCursor":""}}
+    async def _closed(**_):
+        return {"result":{"list":[{"symbol":"BTCUSDT","orderId":"1","side":"Buy","createdTime":1000,"updatedTime":2000,"avgEntryPrice":"1","avgExitPrice":"2","closedSize":"1","closedPnl":"1","openFee":"0","closeFee":"0"}], "nextPageCursor":""}}
+    monkeypatch.setattr(master_service, "_fetch_bybit_order_history", _empty)
+    monkeypatch.setattr(master_service, "_fetch_bybit_order_realtime", _empty)
+    monkeypatch.setattr(master_service, "_fetch_bybit_transaction_log", _empty)
+    monkeypatch.setattr(master_service, "_fetch_bybit_closed_pnl", _closed)
+    monkeypatch.setattr(master_service, "_fetch_bybit_executions", lambda **_: [])
+    monkeypatch.setattr(master_service, "_append_generic_local_broker_rows", lambda *_a, **_k: calls.__setitem__("append_live", calls["append_live"]+1) or 0)
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setattr(master_service, "_record_bybit_demo_sync_status", lambda **_: None)
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_rows", lambda rows: (rows, {"changed":0, "deduped_by_order_id":0, "deduped_by_fingerprint":0}))
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: [])
+    monkeypatch.setattr(master_service, "_upsert_trading_journal_rows", lambda rows, **k: calls.__setitem__("upsert_kwargs", k) or len(rows))
+    out=asyncio.run(master_service._sync_bybit_closed_pnl_window(account_mode="live", base_url="u", api_key="k", api_secret="s", start_time=0, end_time=3000))
+    assert calls["append_live"] == 0
+    assert calls["upsert_kwargs"] == {"allow_broker_rows_in_single_file": True}
+    assert out["rows_seen"] > 0 and out["rows_upserted"] > 0
+
+
+def test_single_file_live_status_has_no_local_workbook_path(monkeypatch):
+    monkeypatch.setattr(master_service, "_trading_journal_local_excel_authoritative", lambda: True)
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: True)
+    captured=[]
+    async def _empty(**_): return {"result":{"list":[], "nextPageCursor":""}}
+    async def _closed(**_):
+        return {"result":{"list":[{"symbol":"BTCUSDT","orderId":"1","side":"Buy","createdTime":1000,"updatedTime":2000,"avgEntryPrice":"1","avgExitPrice":"2","closedSize":"1","closedPnl":"1","openFee":"0","closeFee":"0"}], "nextPageCursor":""}}
+    monkeypatch.setattr(master_service, "_fetch_bybit_order_history", _empty)
+    monkeypatch.setattr(master_service, "_fetch_bybit_order_realtime", _empty)
+    monkeypatch.setattr(master_service, "_fetch_bybit_transaction_log", _empty)
+    monkeypatch.setattr(master_service, "_fetch_bybit_closed_pnl", _closed)
+    monkeypatch.setattr(master_service, "_fetch_bybit_executions", lambda **_: [])
+    monkeypatch.setattr(master_service, "_schedule_dropbox_upload_state_backup", lambda: None)
+    monkeypatch.setattr(master_service, "_record_bybit_demo_sync_status", lambda **k: captured.append(k))
+    monkeypatch.setattr(master_service, "_sanitize_bybit_demo_rows", lambda rows: (rows, {"changed":0, "deduped_by_order_id":0, "deduped_by_fingerprint":0}))
+    monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: [])
+    monkeypatch.setattr(master_service, "_upsert_trading_journal_rows", lambda rows, **k: len(rows))
+    asyncio.run(master_service._sync_bybit_closed_pnl_window(account_mode="live", base_url="u", api_key="k", api_secret="s", start_time=0, end_time=3000))
+    assert any(c.get("last_local_workbook_path") in {None, ""} for c in captured if "last_local_workbook_path" in c)
+
+
+def test_oanda_single_file_demo_live_no_side_workbook_append(monkeypatch):
+    monkeypatch.setattr(master_service, '_trading_journal_local_excel_authoritative', lambda: True)
+    monkeypatch.setattr(master_service, '_master_journal_single_file_mode', lambda: True)
+    monkeypatch.setattr(master_service, '_get_oanda_config', lambda a: {'mode':a,'base_url':'u','account_id':'i','token':'t'})
+    async def _tx(**_): return ([{'id':'1','time':'2026-01-01T00:00:00Z'}], '1')
+    monkeypatch.setattr(master_service, '_fetch_oanda_transactions', _tx)
+    monkeypatch.setattr(master_service, '_journal_rows_from_oanda_order_fill', lambda e: [{'id':f"o-{e.get('account')}-1",'source':'oanda','account':e.get('account')}])
+    calls={'append':0,'upsert':0,'kw':None}
+    monkeypatch.setattr(master_service, '_append_generic_local_broker_rows', lambda *a, **k: calls.__setitem__('append', calls['append']+1) or 0)
+    monkeypatch.setattr(master_service, '_upsert_trading_journal_rows', lambda rows, **k: calls.__setitem__('upsert', calls['upsert']+len(rows)) or calls.__setitem__('kw', k) or len(rows))
+    monkeypatch.setattr(master_service, '_record_oanda_fill_diagnostic', lambda *a, **k: None)
+    out_d = asyncio.run(master_service._recover_oanda_recent_fills('demo'))
+    out_l = asyncio.run(master_service._recover_oanda_recent_fills('live'))
+    assert calls['append'] == 0
+    assert calls['upsert'] >= 2
+    assert calls['kw'] == {'allow_broker_rows_in_single_file': True}
+    assert out_d['rows_seen'] > 0 and out_d['rows_upserted'] > 0
+    assert out_l['rows_seen'] > 0 and out_l['rows_upserted'] > 0
