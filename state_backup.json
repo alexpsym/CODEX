@@ -85,7 +85,7 @@
     "updated_at": "2026-05-19T12:06:17.242581+00:00"
   },
   "pending_webhooks": [],
-  "savedAt": "2026-05-19T12:07:51.389828+00:00",
+  "savedAt": "2026-05-19T12:08:00.663238+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [
@@ -130,43 +130,11 @@
   "trading_journal": {
     "items": [
       {
-        "account": "Bybit Demo",
-        "account_label": "Bybit Demo",
-        "asset_class": "crypto",
-        "close_time": "2026-05-19T01:13:00+10:00",
-        "entry_price": 100001,
-        "exit_price": 100001,
-        "id": "bybit:demo:execution:BTCUSDT:E2",
-        "open_time": "2026-05-19T01:13:00+10:00",
-        "qty": 0.1,
-        "row_type": "trade",
-        "side": "Buy",
-        "source": "bybit_execution_history",
-        "symbol": "BTCUSDT",
-        "updated_at": "2026-05-19T12:07:24.185621+00:00"
-      },
-      {
-        "account": "Bybit Demo",
-        "account_label": "Bybit Demo",
-        "asset_class": "crypto",
-        "close_time": "2026-05-17T01:13:00+10:00",
-        "entry_price": 100000,
-        "exit_price": 100000,
-        "id": "bybit:demo:execution:BTCUSDT:E1",
-        "open_time": "2026-05-17T01:13:00+10:00",
-        "qty": 0.1,
-        "row_type": "trade",
-        "side": "Buy",
-        "source": "bybit_execution_history",
-        "symbol": "BTCUSDT",
-        "updated_at": "2026-05-19T12:07:24.185592+00:00"
-      },
-      {
-        "account": "PEPPERSTONE DEMO",
+        "account": "A",
         "breakeven": "",
-        "close_time": "2026-01-01",
-        "id": "r1",
-        "is_test_trade": true,
+        "close_time": "2026-05-01",
+        "id": "t1",
+        "is_test_trade": false,
         "manual_override_fields": [
           "breakeven",
           "is_test_trade",
@@ -176,17 +144,17 @@
         ],
         "manual_overrides": {
           "breakeven": "",
-          "is_test_trade": true,
+          "is_test_trade": false,
           "notes": "",
           "setup": "",
           "timeframe": ""
         },
-        "manual_updated_at": "2026-05-19T12:07:49.382317+00:00",
+        "manual_updated_at": "2026-05-19T12:07:58.653472+00:00",
         "net_profit": 1.0,
         "notes": "",
-        "open_time": "2026-01-01",
+        "open_time": "2026-05-01",
         "realized_pnl": 1.0,
-        "result_pct": 0.1,
+        "result_pct": 1.0,
         "row_type": "trade",
         "setup": "",
         "side": "BUY",
@@ -194,7 +162,7 @@
         "timeframe": ""
       }
     ],
-    "updated_at": "2026-05-19T12:07:49.382344+00:00"
+    "updated_at": "2026-05-19T12:07:58.653502+00:00"
   },
   "trading_journal_import_cache": {},
   "trading_journal_state": {
@@ -457,16 +425,18 @@
       }
     },
     "daily_trade_sync": {
-      "last_attempt_at": "2026-05-19T12:07:43.178989+00:00",
-      "last_error": null,
+      "last_attempt_at": "2026-05-19T12:08:00.622232+00:00",
+      "last_error": "boom",
       "last_reason": "startup_recovery",
       "last_result": {
-        "master_journal_ok": true,
+        "master_journal_error": "boom",
+        "master_journal_ok": false,
         "oanda_recovery": {},
-        "ok": true
+        "ok": true,
+        "rows_imported": 1
       },
-      "last_success_at": "2026-05-19T12:07:43.179013+00:00",
-      "updated_at": "2026-05-19T12:07:43.179756+00:00"
+      "last_success_at": null,
+      "updated_at": "2026-05-19T12:08:00.632796+00:00"
     },
     "unresolved_registry": {
       "bybit_demo_tpsl": {
