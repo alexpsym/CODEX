@@ -102,3 +102,57 @@ def test_run_local_master_migrates_legacy_master_journal_name() -> None:
     assert "ambiguous workbook names found" in script
     assert "Keep only journal\\Trading Journal.xlsx in the journal folder." in script
     assert "Move backups outside journal\\ or rename them so they do not end in .xlsx/.xls/.xlsm." in script
+
+
+def test_extract_latest_moves_checkout_blocking_untracked_journal_workbooks_before_checkout() -> None:
+    script = (ROOT / 'ExtractLatestCodexMaster.bat').read_text(encoding='utf-8')
+    assert 'function Move-CheckoutBlockingUntrackedFilesBeforeGitUpdate' in script
+    assert "'journal/Trading Journal.xlsx'" in script
+    assert "'journal/Master Journal.xlsx'" in script
+    assert "@('ls-files', '--others', '--exclude-standard', '--', $relativePath)" in script
+    assert "checkout-blockers" in script
+    assert 'Move-Item -LiteralPath $fullPath -Destination $destPath -Force -ErrorAction Stop' in script
+    assert 'Moved checkout-blocking untracked file to backup before recovery' in script
+    helper_idx = script.find('Move-CheckoutBlockingUntrackedFilesBeforeGitUpdate -GitExe $GitExe -RepoDir $RepoDir -BackupDir $backupDir')
+    checkout_idx = script.find("Invoke-GitCommand -GitExe $GitExe -Arguments @('checkout', '-B', $Branch, \"origin/$Branch\")")
+    assert helper_idx != -1
+    assert checkout_idx != -1
+    assert helper_idx < checkout_idx
+
+
+def test_extract_latest_calls_blocker_helper_before_fast_forward_checkout_merge() -> None:
+    script = (ROOT / 'ExtractLatestCodexMaster.bat').read_text(encoding='utf-8')
+    ff_helper_idx = script.find('Move-CheckoutBlockingUntrackedFilesBeforeGitUpdate -GitExe $GitExe -RepoDir $RepoDir -BackupDir $ffBlockerBackupDir')
+    ff_checkout_idx = script.find("Invoke-GitCommand -GitExe $GitExe -Arguments @('checkout', $Branch)")
+    ff_merge_idx = script.find("Invoke-GitCommand -GitExe $GitExe -Arguments @('merge', '--ff-only', \"origin/$Branch\")")
+    assert ff_helper_idx != -1
+    assert ff_checkout_idx != -1
+    assert ff_merge_idx != -1
+    assert ff_helper_idx < ff_checkout_idx < ff_merge_idx
+    assert 'CODEX-master-fastforward-blockers-' in script
+    assert 'Move-Item -LiteralPath $fullPath -Destination $destPath -Force -ErrorAction Stop' in script
+
+
+def test_extract_latest_fast_forward_restores_preserved_workbook_and_resolves_collision() -> None:
+    script = (ROOT / 'ExtractLatestCodexMaster.bat').read_text(encoding='utf-8')
+    assert 'if ($ffMovedBlockers -gt 0) {' in script
+    assert "$ffRestoreRoot = Join-Path $ffBlockerBackupDir 'checkout-blockers'" in script
+    assert 'Preserve-LocalFilesFromBackup -BackupDir $ffRestoreRoot -NewRepoDir $RepoDir' in script
+    assert 'Resolve-JournalWorkbookCollision -JournalDir $newJournal -Context "backup journal preservation"' in script
+
+
+def test_extract_latest_git_diagnostic_writes_quiet_files_and_logs_only_summary() -> None:
+    script = (ROOT / 'ExtractLatestCodexMaster.bat').read_text(encoding='utf-8')
+    assert 'Invoke-GitText -GitExe $GitExe -Arguments $Arguments -WorkingDirectory $WorkingDirectory -AllowFailure -Quiet' in script
+    assert 'Wrote diagnostic: $DestinationPath' in script
+    assert "Write-GitDiagnosticFile -GitExe $GitExe -Arguments @('diff', '--binary')" in script
+    assert "Write-GitDiagnosticFile -GitExe $GitExe -Arguments @('diff', '--cached', '--binary')" in script
+
+
+def test_extract_latest_transcript_logging_paths_and_messages_present() -> None:
+    script = (ROOT / 'ExtractLatestCodexMaster.bat').read_text(encoding='utf-8')
+    assert "ExtractLatestCodexMaster-latest.log" in script
+    assert "ExtractLatestCodexMaster-{0}.log" in script
+    assert 'Start-Transcript -LiteralPath $timestampedLogPath -Force' in script
+    assert 'Stop-Transcript' in script
+    assert 'Full log written to: $timestampedLogPath' in script
