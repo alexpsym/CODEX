@@ -14,7 +14,7 @@ demo domain.
 from __future__ import annotations
 
 import os
-from typing import Dict, Tuple
+from typing import Dict, Tuple, List
 
 
 def _coerce_base_url(env_mode: str, candidate: str) -> str:
@@ -89,8 +89,18 @@ def resolve_bybit_credentials_for(mode: str) -> Tuple[str, str, str, str, str]:
 
     normalized = (mode or "live").strip().lower()
     if normalized in {"demo", "testnet", "paper"}:
-        key = os.getenv("BYBIT_API_KEY2") or os.getenv("BYBIT_API_KEY") or ""
-        secret = os.getenv("BYBIT_API_SECRET2") or os.getenv("BYBIT_API_SECRET") or ""
+        key = (
+            os.getenv("BYBIT_DEMO_API_KEY")
+            or os.getenv("BYBIT_API_KEY2")
+            or os.getenv("BYBIT_API_KEY")
+            or ""
+        )
+        secret = (
+            os.getenv("BYBIT_DEMO_API_SECRET")
+            or os.getenv("BYBIT_API_SECRET2")
+            or os.getenv("BYBIT_API_SECRET")
+            or ""
+        )
         if normalized == "testnet":
             base_url = _coerce_base_url(
                 "testnet",
@@ -107,11 +117,12 @@ def resolve_bybit_credentials_for(mode: str) -> Tuple[str, str, str, str, str]:
                 or "https://api-demo.bybit.com",
             )
             env_label = "demo"
-        key_source = (
-            "KEY2"
-            if os.getenv("BYBIT_API_KEY2") or os.getenv("BYBIT_API_SECRET2")
-            else "LEGACY"
-        )
+        if os.getenv("BYBIT_DEMO_API_KEY") or os.getenv("BYBIT_DEMO_API_SECRET"):
+            key_source = "DEMO_EXPLICIT"
+        elif os.getenv("BYBIT_API_KEY2") or os.getenv("BYBIT_API_SECRET2"):
+            key_source = "KEY2"
+        else:
+            key_source = "LEGACY"
         return env_label, key, secret, base_url.rstrip("/"), key_source
 
     key = os.getenv("BYBIT_API_KEY1") or os.getenv("BYBIT_API_KEY") or ""
@@ -140,4 +151,26 @@ def summarize_bybit_auth() -> Dict[str, str]:
         "base_url": base_url,
         "auth": "yes" if key and secret else "no",
         "key_source": key_source,
+    }
+
+
+def describe_bybit_credentials_for(mode: str) -> Dict[str, object]:
+    env_label, key, secret, base_url, key_source = resolve_bybit_credentials_for(mode)
+    missing: List[str] = []
+    if env_label == "demo":
+        if not key:
+            missing.append("BYBIT_DEMO_API_KEY|BYBIT_API_KEY2|BYBIT_API_KEY")
+        if not secret:
+            missing.append("BYBIT_DEMO_API_SECRET|BYBIT_API_SECRET2|BYBIT_API_SECRET")
+    elif env_label == "live":
+        if not key:
+            missing.append("BYBIT_API_KEY1|BYBIT_API_KEY")
+        if not secret:
+            missing.append("BYBIT_API_SECRET1|BYBIT_API_SECRET")
+    return {
+        "mode": env_label,
+        "base_url": base_url,
+        "key_source": key_source,
+        "credentials_available": bool(key and secret),
+        "missing_env_vars": missing,
     }

@@ -177,6 +177,36 @@ def test_sheet_order_and_hidden_meta(tmp_path: Path):
     assert len(wb["Instrument Averages"].conditional_formatting) > 0
     assert len(wb["P&L Calendar"].conditional_formatting) > 0
 
+
+def test_trade_log_preserves_explicit_bybit_execution_row_id(tmp_path: Path):
+    out = tmp_path / "Trading Journal.xlsx"
+    snap = sample_snapshot()
+    snap["items"] = [
+        {
+            "id": "bybit:demo:execution:BTCUSDT:E1",
+            "row_type": "trade",
+            "source": "bybit_execution_history",
+            "account": "Bybit Demo",
+            "account_label": "Bybit Demo",
+            "symbol": "BTCUSDT",
+            "side": "Buy",
+            "open_time": "2026-05-19T01:13:00+10:00",
+            "close_time": "2026-05-19T01:13:00+10:00",
+            "qty": 0.1,
+            "entry_price": 100000.0,
+            "exit_price": 100000.0,
+            "commission": 0.01,
+            "net_profit": None,
+            "currency": "USDT",
+            "asset_class": "crypto",
+        }
+    ]
+    build_master_journal_workbook(snap, out)
+    ws = load_workbook(out)["Trade Log"]
+    headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+    rid_col = headers.index("Row ID") + 1
+    assert ws.cell(2, rid_col).value == "bybit:demo:execution:BTCUSDT:E1"
+
 def test_update_data_only_migrates_legacy_all_trades_and_removes_trade_meta(tmp_path: Path):
     out = tmp_path / "Trading Journal.xlsx"
     snap = sample_snapshot()
