@@ -372,11 +372,14 @@ function Invoke-GitText {
         [Parameter(Mandatory = $true)] [string] $GitExe,
         [Parameter(Mandatory = $true)] [string[]] $Arguments,
         [Parameter(Mandatory = $true)] [string] $WorkingDirectory,
-        [switch] $AllowFailure
+        [switch] $AllowFailure,
+        [switch] $Quiet
     )
 
-    Write-Host ''
-    Write-Host ("git " + ($Arguments -join ' '))
+    if (-not $Quiet) {
+        Write-Host ''
+        Write-Host ("git " + ($Arguments -join ' '))
+    }
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $GitExe
@@ -405,12 +408,16 @@ function Invoke-GitText {
     $stdout = Remove-TrailingLineTerminators -Text $stdoutTask.Result
     $stderr = Remove-TrailingLineTerminators -Text $stderrTask.Result
     $exitCode = $proc.ExitCode
-    if ($stdout) { Write-Host $stdout }
-    if ($stderr -and $exitCode -eq 0) {
+    if ($stdout -and -not $Quiet) { Write-Host $stdout }
+    if ($stderr -and $exitCode -eq 0 -and -not $Quiet) {
         Write-Host ("WARNING: git " + ($Arguments -join ' ') + " stderr: " + $stderr)
     }
     if ($stderr -and $exitCode -ne 0) {
-        Write-Host $stderr
+        if ($Quiet) {
+            Write-Host ("ERROR: git " + ($Arguments -join ' ') + " failed with exit code $exitCode")
+        } else {
+            Write-Host $stderr
+        }
     }
 
     if ($exitCode -ne 0 -and -not $AllowFailure) {
@@ -439,8 +446,9 @@ function Write-GitDiagnosticFile {
     )
 
     try {
-        $diagnosticText = Invoke-GitText -GitExe $GitExe -Arguments $Arguments -WorkingDirectory $WorkingDirectory -AllowFailure
+        $diagnosticText = Invoke-GitText -GitExe $GitExe -Arguments $Arguments -WorkingDirectory $WorkingDirectory -AllowFailure -Quiet
         Set-Content -LiteralPath $DestinationPath -Value $diagnosticText -Encoding UTF8 -ErrorAction Stop
+        Write-Host "Wrote diagnostic: $DestinationPath"
     } catch {
         $errorPath = "$DestinationPath.error.txt"
         $errorText = "Failed diagnostic command: git $($Arguments -join ' ')`nError: $($_.Exception.Message)"
@@ -452,6 +460,38 @@ function Write-GitDiagnosticFile {
         }
         Write-Host "WARNING: Could not write backup diagnostic $DestinationPath; continuing because full backup already exists."
     }
+}
+
+function Move-CheckoutBlockingUntrackedFilesBeforeGitUpdate {
+    param(
+        [Parameter(Mandatory = $true)] [string] $GitExe,
+        [Parameter(Mandatory = $true)] [string] $RepoDir,
+        [Parameter(Mandatory = $true)] [string] $BackupDir
+    )
+
+    $blockerPaths = @('journal/Trading Journal.xlsx', 'journal/Master Journal.xlsx')
+    $targetRoot = Join-Path $BackupDir 'checkout-blockers'
+    $movedCount = 0
+    foreach ($relativePath in $blockerPaths) {
+        $fullPath = Join-Path $RepoDir $relativePath
+        if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+            continue
+        }
+
+        $untrackedCheck = Invoke-GitText -GitExe $GitExe -Arguments @('ls-files', '--others', '--exclude-standard', '--', $relativePath) -WorkingDirectory $RepoDir -AllowFailure -Quiet
+        if ([string]::IsNullOrWhiteSpace($untrackedCheck)) {
+            continue
+        }
+
+        $destPath = Join-Path $targetRoot $relativePath.Replace('/', '\')
+        $destDir = Split-Path -Parent $destPath
+        New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+        Move-Item -LiteralPath $fullPath -Destination $destPath -Force -ErrorAction Stop
+        Write-Host "Moved checkout-blocking untracked file to backup before recovery: $fullPath -> $destPath"
+        $movedCount++
+    }
+
+    return $movedCount
 }
 
 function ConvertTo-NativeArgumentString {
@@ -834,8 +874,15 @@ function Ensure-CodexGitRepo {
 
         if ((-not $needsBackupRecovery) -or ($behindCount -gt 0 -and $aheadCount -eq 0 -and $statusClassification.IsOnlyAllowed)) {
             Write-Host "Repo is clean and not ahead (behind=$behindCount). Attempting fast-forward sync..."
+            $ffTimestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+            $ffBlockerBackupDir = Join-Path $DestinationRoot "CODEX-master-fastforward-blockers-$ffTimestamp"
+            $ffMovedBlockers = Move-CheckoutBlockingUntrackedFilesBeforeGitUpdate -GitExe $GitExe -RepoDir $RepoDir -BackupDir $ffBlockerBackupDir
             Invoke-GitCommand -GitExe $GitExe -Arguments @('checkout', $Branch) -WorkingDirectory $RepoDir | Out-Null
             Invoke-GitCommand -GitExe $GitExe -Arguments @('merge', '--ff-only', "origin/$Branch") -WorkingDirectory $RepoDir | Out-Null
+            if ($ffMovedBlockers -gt 0) {
+                $ffRestoreRoot = Join-Path $ffBlockerBackupDir 'checkout-blockers'
+                Preserve-LocalFilesFromBackup -BackupDir $ffRestoreRoot -NewRepoDir $RepoDir
+            }
             $headAfterFastForward = Invoke-GitText -GitExe $GitExe -Arguments @('rev-parse', 'HEAD') -WorkingDirectory $RepoDir
             $originAfterFastForward = Invoke-GitText -GitExe $GitExe -Arguments @('rev-parse', "origin/$Branch") -WorkingDirectory $RepoDir
             if ($headAfterFastForward -ne $originAfterFastForward) {
@@ -857,6 +904,7 @@ function Ensure-CodexGitRepo {
 
         Write-Host "Local Git state was not fast-forwardable. A full backup was created at: $backupDir"
         Stop-CodexRepoProcessMatches -RepoDir $RepoDir
+        Move-CheckoutBlockingUntrackedFilesBeforeGitUpdate -GitExe $GitExe -RepoDir $RepoDir -BackupDir $backupDir | Out-Null
         Write-Host "Recovery command: git checkout -B $Branch origin/$Branch"
         Invoke-GitCommand -GitExe $GitExe -Arguments @('checkout', '-B', $Branch, "origin/$Branch") -WorkingDirectory $RepoDir | Out-Null
         Write-Host "Recovery command: git reset --hard origin/$Branch"
@@ -954,40 +1002,54 @@ Set-Location -LiteralPath $dest
 
 $codexDir = Join-Path $dest $repoFolderName
 $gitExe = Get-GitExecutable
+$latestLogPath = Join-Path $dest 'ExtractLatestCodexMaster-latest.log'
+$timestampedLogPath = Join-Path $dest ("ExtractLatestCodexMaster-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
 
 Write-Section 'Using Git instead of ZIP download/extraction.'
 Write-Host "Destination root: $dest"
 Write-Host "CODEX folder:     $codexDir"
 Write-Host "Git executable:   $gitExe"
+Write-Host "Log file (latest): $latestLogPath"
+Write-Host "Log file (run):    $timestampedLogPath"
 
+$transcriptStarted = $false
 try {
-    Ensure-CodexGitRepo -GitExe $gitExe -DestinationRoot $dest -RepoDir $codexDir -RepoUrl $repoUrl -Branch $repoBranch
+    Start-Transcript -LiteralPath $timestampedLogPath -Force | Out-Null
+    $transcriptStarted = $true
 } catch {
-    Write-Host ''
-    Write-Host 'ERROR: Git clone/update failed.'
-    Write-Host $_.Exception.Message
-    Write-Host ''
-    Write-Host 'No fake success state was applied. Fix the Git error above and run this file again.'
-    exit 1
+    Write-Host "WARNING: Unable to start transcript log: $($_.Exception.Message)"
 }
 
-Write-Section 'Verifying Git sync state before launcher build...'
 try {
-    Invoke-GitCommand -GitExe $gitExe -Arguments @('fetch', 'origin', $repoBranch) -WorkingDirectory $codexDir | Out-Null
-    $headNow = Invoke-GitText -GitExe $gitExe -Arguments @('rev-parse', 'HEAD') -WorkingDirectory $codexDir
-    $originNow = Invoke-GitText -GitExe $gitExe -Arguments @('rev-parse', "origin/$repoBranch") -WorkingDirectory $codexDir
-    Write-Host "HEAD:              $headNow"
-    Write-Host "origin/${repoBranch}: $originNow"
-    if ($headNow -ne $originNow) {
-        throw 'ERROR: Git checkout is not synced to origin/master after recovery.'
+    try {
+        Ensure-CodexGitRepo -GitExe $gitExe -DestinationRoot $dest -RepoDir $codexDir -RepoUrl $repoUrl -Branch $repoBranch
+    } catch {
+        Write-Host ''
+        Write-Host 'ERROR: Git clone/update failed.'
+        Write-Host $_.Exception.Message
+        Write-Host "Full log written to: $timestampedLogPath"
+        Write-Host ''
+        Write-Host 'No fake success state was applied. Fix the Git error above and run this file again.'
+        exit 1
     }
-    Write-Host 'Git status --short output:'
-    Invoke-GitCommand -GitExe $gitExe -Arguments @('status', '--short') -WorkingDirectory $codexDir -AllowFailure | Out-Null
-} catch {
-    Write-Host ''
-    Write-Host $_.Exception.Message
-    exit 1
-}
+
+    Write-Section 'Verifying Git sync state before launcher build...'
+    try {
+        Invoke-GitCommand -GitExe $gitExe -Arguments @('fetch', 'origin', $repoBranch) -WorkingDirectory $codexDir | Out-Null
+        $headNow = Invoke-GitText -GitExe $gitExe -Arguments @('rev-parse', 'HEAD') -WorkingDirectory $codexDir
+        $originNow = Invoke-GitText -GitExe $gitExe -Arguments @('rev-parse', "origin/$repoBranch") -WorkingDirectory $codexDir
+        Write-Host "HEAD:              $headNow"
+        Write-Host "origin/${repoBranch}: $originNow"
+        if ($headNow -ne $originNow) {
+            throw 'ERROR: Git checkout is not synced to origin/master after recovery.'
+        }
+        Write-Host 'Git status --short output:'
+        Invoke-GitCommand -GitExe $gitExe -Arguments @('status', '--short') -WorkingDirectory $codexDir -AllowFailure | Out-Null
+    } catch {
+        Write-Host ''
+        Write-Host $_.Exception.Message
+        exit 1
+    }
 
 $buildLaunchersBat = Join-Path $codexDir 'build_windows_launchers.bat'
 $expectedLaunchers = @(
@@ -1065,4 +1127,16 @@ Write-Host ''
 Write-Host 'Launcher executable:'
 $expectedLaunchers | ForEach-Object { Write-Host " - $_" }
 
-exit 0
+    exit 0
+} finally {
+    if ($transcriptStarted) {
+        try { Stop-Transcript | Out-Null } catch {}
+        try {
+            Copy-Item -LiteralPath $timestampedLogPath -Destination $latestLogPath -Force -ErrorAction Stop
+        } catch {
+            Write-Host "WARNING: Unable to refresh latest log copy: $($_.Exception.Message)"
+        }
+        Write-Host "Full log written to: $timestampedLogPath"
+        Write-Host "Latest log path: $latestLogPath"
+    }
+}
