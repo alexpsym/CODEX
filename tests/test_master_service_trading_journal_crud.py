@@ -1367,7 +1367,7 @@ def test_master_journal_authoritative_snapshot_preserves_monthly_aud_reval(monke
     monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_a, **_k: None)
     monkeypatch.setattr(master_service, "_save_trading_journal_view_snapshot", lambda *_a, **_k: None)
     monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: True)
-    monkeypatch.setattr(master_service, "_master_journal_path", lambda: Path("/tmp/Master Journal.xlsx"))
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: Path("/tmp/Trading Journal.xlsx"))
     monkeypatch.setattr(master_service, "_get_excel_account_balances", lambda: [])
     monkeypatch.setattr(master_service, "_load_json_file", lambda *_a, **_k: {})
     monkeypatch.setattr(

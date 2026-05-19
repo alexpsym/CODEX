@@ -49,7 +49,7 @@ def test_active_paths_do_not_reference_obsolete_android_replica_strings() -> Non
 
 def test_run_trading_journal_local_opens_master_journal_directly() -> None:
     journal = (ROOT / "run_trading_journal_local.bat").read_text(encoding="utf-8")
-    assert "Master Journal.xlsx" in journal
+    assert "Trading Journal.xlsx" in journal
     assert "start \"\" \"%JOURNAL%\"" in journal
     assert "uvicorn render.master_service:app" not in journal
     assert "/trading-journal" not in journal

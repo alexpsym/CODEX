@@ -31,7 +31,7 @@ def test_windows_launchers_use_repo_journal_dir_and_preflight() -> None:
     master = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
     assert 'set "TRADING_JOURNAL_LOCAL_DIR=%ROOT%journal"' in master
     assert 'C:\\Users\\User\\Documents\\TRADING' not in journal
-    assert 'Master Journal.xlsx' in journal
+    assert 'Trading Journal.xlsx' in journal
     assert 'Sync Journal' in journal
     assert '[local-master] TRADING_JOURNAL_LOCAL_DIR=%TRADING_JOURNAL_LOCAL_DIR%' in master
 
@@ -39,8 +39,8 @@ def test_windows_launchers_use_repo_journal_dir_and_preflight() -> None:
 def test_run_local_master_requires_master_journal_not_legacy_cashflow_workbook() -> None:
     script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
     assert 'account_cashflows.xlsx' not in script
-    assert 'Master Journal.xlsx' in script
-    assert 'required workbook missing: %TRADING_JOURNAL_LOCAL_DIR%\\Master Journal.xlsx' in script
+    assert 'Trading Journal.xlsx' in script
+    assert 'required workbook missing: %CANONICAL_JOURNAL%' in script
 
 
 def test_run_local_master_control_uses_master_journal_source() -> None:
@@ -93,3 +93,10 @@ def test_run_local_master_uses_uvicorn_log_config_and_access_log_enabled() -> No
     script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
     assert '--log-config "%ROOT%render\\local_uvicorn_log_config.json"' in script
     assert '--no-access-log' not in script
+
+
+def test_run_local_master_migrates_legacy_master_journal_name() -> None:
+    script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
+    assert "LEGACY_JOURNAL=%TRADING_JOURNAL_LOCAL_DIR%\\Master Journal.xlsx" in script
+    assert 'move /Y "%LEGACY_JOURNAL%" "%CANONICAL_JOURNAL%"' in script
+    assert "ambiguous workbook names found" in script

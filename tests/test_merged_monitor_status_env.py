@@ -342,7 +342,7 @@ def test_journal_launchers_protect_bybit_demo_anchor_flag() -> None:
     master_bat = (ROOT / "run_local_master_control.bat").read_text(encoding="utf-8")
     assert "MASTER_ENV_PROTECTED_KEYS" not in journal_bat
     assert "TRADING_JOURNAL_BYBIT_DEMO_BALANCE_ANCHOR_ENABLED" not in journal_bat
-    assert "Master Journal.xlsx" in journal_bat
+    assert "Trading Journal.xlsx" in journal_bat
     assert "uvicorn render.master_service:app" not in journal_bat
     assert "MASTER_ENV_PROTECTED_KEYS" in master_bat
     assert "TRADING_JOURNAL_BYBIT_DEMO_BALANCE_ANCHOR_ENABLED" in master_bat
@@ -438,7 +438,7 @@ def test_run_local_master_control_waits_for_health_before_opening_browser() -> N
 
 def test_run_trading_journal_local_bat_profile_and_port() -> None:
     content = (ROOT / "run_trading_journal_local.bat").read_text(encoding="utf-8")
-    assert 'Master Journal.xlsx' in content
+    assert 'Trading Journal.xlsx' in content
     assert 'Sync Journal' in content
     assert 'uvicorn render.master_service:app' not in content
     assert '/trading-journal' not in content
@@ -457,7 +457,7 @@ def test_all_local_bat_launchers_use_consistent_default_master_env_file() -> Non
         content = (ROOT / name).read_text(encoding="utf-8")
         assert expected in content, f"{name} should default MASTER_ENV_FILE to Documents/GPT env.env"
     journal = (ROOT / "run_trading_journal_local.bat").read_text(encoding="utf-8")
-    assert "Master Journal.xlsx" in journal
+    assert "Trading Journal.xlsx" in journal
     assert "MASTER_ENV_FILE" not in journal
     assert "uvicorn render.master_service:app" not in journal
     assert "/trading-journal" not in journal

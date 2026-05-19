@@ -22,10 +22,27 @@ if not exist "%TRADING_JOURNAL_LOCAL_DIR%\" (
   echo [local-master] ERROR: TRADING_JOURNAL_LOCAL_DIR not found at %TRADING_JOURNAL_LOCAL_DIR%
   exit /b 1
 )
-if not exist "%TRADING_JOURNAL_LOCAL_DIR%\Master Journal.xlsx" (
-  echo [local-master] ERROR: required workbook missing: %TRADING_JOURNAL_LOCAL_DIR%\Master Journal.xlsx
-  echo [local-master] Restore journal\Master Journal.xlsx before launching Local Trading Tools.
-  exit /b 1
+set "CANONICAL_JOURNAL=%TRADING_JOURNAL_LOCAL_DIR%\Trading Journal.xlsx"
+set "LEGACY_JOURNAL=%TRADING_JOURNAL_LOCAL_DIR%\Master Journal.xlsx"
+if exist "%CANONICAL_JOURNAL%" (
+  if exist "%LEGACY_JOURNAL%" (
+    echo [local-master] ERROR: ambiguous workbook names found: %CANONICAL_JOURNAL% and %LEGACY_JOURNAL%
+    echo [local-master] Keep only Trading Journal.xlsx.
+    exit /b 1
+  )
+) else (
+  if exist "%LEGACY_JOURNAL%" (
+    move /Y "%LEGACY_JOURNAL%" "%CANONICAL_JOURNAL%" >nul
+    if errorlevel 1 (
+      echo [local-master] ERROR: failed migrating legacy workbook to Trading Journal.xlsx
+      exit /b 1
+    )
+    echo [local-master] Migrated legacy workbook: Master Journal.xlsx ^> Trading Journal.xlsx
+  ) else (
+    echo [local-master] ERROR: required workbook missing: %CANONICAL_JOURNAL%
+    echo [local-master] Restore journal\Trading Journal.xlsx before launching Local Trading Tools.
+    exit /b 1
+  )
 )
 set "CASHFLOW_CACHE_TTL_SECONDS=3600"
 if not defined DROPBOX_SYNC_ENABLED set "DROPBOX_SYNC_ENABLED=0"
