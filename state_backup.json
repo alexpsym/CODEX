@@ -85,7 +85,7 @@
     "updated_at": "2026-05-19T09:33:44.655182+00:00"
   },
   "pending_webhooks": [],
-  "savedAt": "2026-05-19T09:35:17.292066+00:00",
+  "savedAt": "2026-05-19T09:35:26.267673+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [
@@ -130,10 +130,10 @@
   "trading_journal": {
     "items": [
       {
-        "account": "A",
+        "account": "PEPPERSTONE DEMO",
         "breakeven": "",
-        "close_time": "2026-05-01",
-        "id": "t1",
+        "close_time": "2026-01-01",
+        "id": "r1",
         "is_test_trade": false,
         "manual_override_fields": [
           "breakeven",
@@ -149,12 +149,12 @@
           "setup": "",
           "timeframe": ""
         },
-        "manual_updated_at": "2026-05-19T09:35:15.284224+00:00",
+        "manual_updated_at": "2026-05-19T09:35:24.257017+00:00",
         "net_profit": 1.0,
         "notes": "",
-        "open_time": "2026-05-01",
+        "open_time": "2026-01-01",
         "realized_pnl": 1.0,
-        "result_pct": 1.0,
+        "result_pct": 0.1,
         "row_type": "trade",
         "setup": "",
         "side": "BUY",
@@ -162,7 +162,7 @@
         "timeframe": ""
       }
     ],
-    "updated_at": "2026-05-19T09:35:15.284278+00:00"
+    "updated_at": "2026-05-19T09:35:24.257077+00:00"
   },
   "trading_journal_import_cache": {},
   "trading_journal_state": {
@@ -278,16 +278,18 @@
       }
     },
     "daily_trade_sync": {
-      "last_attempt_at": "2026-05-19T09:35:03.894947+00:00",
-      "last_error": null,
+      "last_attempt_at": "2026-05-19T09:35:21.363673+00:00",
+      "last_error": "boom",
       "last_reason": "startup_recovery",
       "last_result": {
-        "master_journal_ok": true,
+        "master_journal_error": "boom",
+        "master_journal_ok": false,
         "oanda_recovery": {},
-        "ok": true
+        "ok": true,
+        "rows_imported": 1
       },
-      "last_success_at": "2026-05-19T09:35:03.894958+00:00",
-      "updated_at": "2026-05-19T09:35:03.895395+00:00"
+      "last_success_at": null,
+      "updated_at": "2026-05-19T09:35:21.372544+00:00"
     },
     "unresolved_registry": {
       "bybit_demo_tpsl": {
