@@ -9745,7 +9745,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <div class="panel-header"><div><h2>Trading Journal</h2></div></div>
                     <div class="oo-toolbar">
                         <button type="button" id="sync-journal-btn">Sync Journal</button>
-                        <button type="button" id="open-master-journal-btn" hidden disabled>Open Master Journal</button>
+                        <button type="button" id="open-master-journal-btn" hidden disabled>Open Trading Journal</button>
                     </div>
                     <div class="watchlist-sub" id="sync-journal-status"></div>
                 </section>
@@ -24494,7 +24494,7 @@ async def _run_trading_journal_sync_job() -> None:
             result.update(workbook_sync)
         warnings: List[str] = list((result or {}).get("warnings") or [])
         if isinstance(workbook_sync, dict) and not workbook_sync.get('master_journal_ok'):
-            warnings.append(str(workbook_sync.get('master_journal_error') or 'Master journal workbook generation failed'))
+            warnings.append(str(workbook_sync.get('master_journal_error') or 'Trading Journal workbook generation failed'))
         if isinstance(workbook_sync, dict) and workbook_sync.get("github_sync_enabled") and workbook_sync.get("github_sync_ok") is False:
             warnings.append(str(workbook_sync.get("github_sync_error") or "GitHub sync failed"))
         warnings.extend(broker_balance_warnings)
@@ -24688,10 +24688,10 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
         if path.exists():
             update_result = update_master_journal_workbook_data_only(path, snapshot)
             if not bool((update_result or {}).get("ok")):
-                raise RuntimeError(str((update_result or {}).get("error") or "Master Journal data-only update failed."))
+                raise RuntimeError(str((update_result or {}).get("error") or "Trading Journal data-only update failed."))
             candidate_path = str((update_result or {}).get("candidate_path") or "").strip()
             if not candidate_path:
-                raise RuntimeError("Master Journal data-only update failed: candidate workbook path missing.")
+                raise RuntimeError("Trading Journal data-only update failed: candidate workbook path missing.")
             tmp = Path(candidate_path)
             created_tmp = True
             validate_path = tmp
@@ -24699,7 +24699,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
             build_master_journal_workbook(snapshot, tmp)
             created_tmp = True
             if not tmp.exists() or tmp.stat().st_size <= 0:
-                raise RuntimeError("Master Journal temporary workbook was not created.")
+                raise RuntimeError("Trading Journal temporary workbook was not created.")
             validate_path = tmp
 
         from openpyxl import load_workbook as _load_wb
@@ -25056,7 +25056,16 @@ def _run_git_command(args: List[str], cwd: Path, timeout_s: int) -> Tuple[int, s
         return 1, "", str(exc)
 
 
-def _repo_state_files_for_github(master_path: Path) -> List[Path]:
+def _legacy_master_journal_tracked_and_missing(repo_root: Path, timeout_s: int) -> bool:
+    legacy_rel = "journal/Master Journal.xlsx"
+    legacy_abs = (repo_root / legacy_rel).resolve()
+    if legacy_abs.exists():
+        return False
+    code, _, _ = _run_git_command(["ls-files", "--error-unmatch", "--", legacy_rel], repo_root, timeout_s)
+    return code == 0
+
+
+def _repo_state_files_for_github(master_path: Path, timeout_s: int = 60) -> List[Path]:
     repo_root = _repo_root_for_journal_path(master_path).resolve()
     master_resolved = master_path.expanduser().resolve()
     allowlist = [
@@ -25078,6 +25087,8 @@ def _repo_state_files_for_github(master_path: Path) -> List[Path]:
                 continue
             seen.add(rp)
             files.append(rp)
+    if _legacy_master_journal_tracked_and_missing(repo_root, timeout_s):
+        files.append((repo_root / "journal" / "Master Journal.xlsx").resolve())
     return files
 
 
@@ -25102,7 +25113,7 @@ def _sync_journal_excel_files_to_github(master_path: Path) -> Dict[str, object]:
     repo_root = _repo_root_for_journal_path(master_path)
     if not (repo_root / ".git").exists():
         return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": "local repo is not a Git checkout.", "github_sync_error_type": "NotGitRepo"}
-    files = _repo_state_files_for_github(master_path)
+    files = _repo_state_files_for_github(master_path, timeout_s=timeout_s)
     if not files:
         return {**base, "github_sync_ok": False, "github_sync_noop": False, "github_sync_error": "No eligible repo state files found to sync.", "github_sync_error_type": "NoEligibleFiles"}
     rel_files = [str(p.relative_to(repo_root)).replace("\\", "/") for p in files]

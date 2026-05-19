@@ -50,11 +50,12 @@ def test_calculator_specs_markup_and_endpoint_are_preserved() -> None:
     assert '/api/instrument-specs?query=' in calculator_js
 
 
-def test_dashboard_home_has_open_master_journal_button_hidden_default() -> None:
+def test_dashboard_home_has_open_trading_journal_button_hidden_default() -> None:
     source = MASTER_SERVICE_PATH.read_text(encoding='utf-8')
     html = _extract_html_template(source)
     assert 'id="open-master-journal-btn"' in html
-    assert 'Open Master Journal' in html
+    assert 'Open Trading Journal' in html
+    assert 'Open Master Journal' not in html
     assert 'id="sync-journal-btn"' in html
     assert html.index('sync-journal-btn') < html.index('open-master-journal-btn') < html.index('sync-journal-status')
     assert 'id="open-master-journal-btn" hidden disabled' in html
