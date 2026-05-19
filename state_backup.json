@@ -85,46 +85,13 @@
     "updated_at": "2026-05-19T09:45:08.677953+00:00"
   },
   "pending_webhooks": [],
-  "savedAt": "2026-05-19T09:46:58.380066+00:00",
+  "savedAt": "2026-05-19T09:48:59.792271+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [
     {
-      "account": "demo",
-      "broker": "bybit",
-      "created_at": "2026-05-19T09:44:57.568531+00:00",
-      "instrument": "BTCUSDT",
-      "is_test_trade": null,
-      "open_time": null,
-      "order_id": "abc123",
-      "order_link_id": "link-1",
-      "parent_order_link_id": null,
-      "side": "Buy",
-      "status": "CLOSED",
-      "stop_loss": "99.5",
-      "take_profit": "110.2",
-      "timeframe": "1-hour",
-      "trade_id": null,
-      "transaction_id": null,
-      "updated_at": "2026-05-19T09:44:57.568531+00:00"
-    },
-    {
-      "account": "live",
-      "broker": "bybit",
-      "created_at": "2026-05-19T09:46:07.534833+00:00",
-      "instrument": "BTCUSDT",
-      "open_time": null,
-      "order_id": "1",
-      "order_link_id": null,
-      "parent_order_link_id": "",
-      "side": "Buy",
-      "status": "CLOSED",
-      "stop_loss": null,
-      "take_profit": null,
-      "timeframe": "",
-      "trade_id": null,
-      "transaction_id": null,
-      "updated_at": "2026-05-19T09:46:07.563519+00:00"
+      "open_time": "2026-04-11T06:10:46+00:00",
+      "order_id": "oid-stale"
     }
   ],
   "trading_journal": {
@@ -221,15 +188,15 @@
         "close_time_ms": null,
         "open_time_ms": null,
         "order_id": "oid-123",
-        "order_link_id": "4c83d1e852274f2cae37b38fbba808f7",
+        "order_link_id": "1787df9c201f4feb9ee02cf70e7c1659",
         "parent_order_link_id": "",
         "side": "Buy",
         "source": "trading_stop_computed",
         "stop_loss": 95.0,
         "symbol": "DASHUSDT",
         "take_profit": 110.0,
-        "updated_at": "2026-05-19T09:44:57.540633+00:00",
-        "updated_ts": 1779183897.54065
+        "updated_at": "2026-05-19T09:48:57.751960+00:00",
+        "updated_ts": 1779184137.7519732
       },
       "order_link_id:0e29303456274752a00e7cb04c653d7c": {
         "account": "demo",
@@ -245,6 +212,21 @@
         "take_profit": 110.0,
         "updated_at": "2026-05-19T09:33:36.314941+00:00",
         "updated_ts": 1779183216.3149617
+      },
+      "order_link_id:1787df9c201f4feb9ee02cf70e7c1659": {
+        "account": "demo",
+        "close_time_ms": null,
+        "open_time_ms": null,
+        "order_id": "oid-123",
+        "order_link_id": "1787df9c201f4feb9ee02cf70e7c1659",
+        "parent_order_link_id": "",
+        "side": "Buy",
+        "source": "trading_stop_computed",
+        "stop_loss": 95.0,
+        "symbol": "DASHUSDT",
+        "take_profit": 110.0,
+        "updated_at": "2026-05-19T09:48:57.751960+00:00",
+        "updated_ts": 1779184137.7519732
       },
       "order_link_id:4c83d1e852274f2cae37b38fbba808f7": {
         "account": "demo",
