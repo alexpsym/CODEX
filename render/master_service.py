@@ -4060,9 +4060,30 @@ def _sanitize_bybit_demo_rows(rows: List[Dict[str, object]]) -> tuple[List[Dict[
     dedup_fallback: Dict[str, Dict[str, object]] = {}
     fallback_dropped = 0
     for row in after_order:
-        key = _canonical_bybit_demo_trade_signature(row)
-        if not key:
-            key = f"rowid:{str(row.get('id') or '')}"
+        if _is_bybit_execution_history_row(row):
+            refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+            exec_id = str(refs.get("execId") or refs.get("exec_id") or "").strip()
+            row_id = str(row.get("id") or "").strip()
+            if row_id or exec_id:
+                key = f"execution:{row_id or exec_id}"
+            else:
+                key = "|".join(
+                    [
+                        "execution",
+                        str(row.get("account") or row.get("account_label") or "").strip().lower(),
+                        str(row.get("symbol") or "").strip().upper(),
+                        str(refs.get("orderId") or row.get("order_id") or "").strip(),
+                        _normalize_side_for_comparison(row.get("side")),
+                        str(_canonical_trade_epoch_second(row.get("open_time")) or ""),
+                        _num_bucket(row.get("qty"), 8),
+                        _num_bucket(row.get("entry_price"), 8),
+                        _num_bucket(row.get("exit_price"), 8),
+                    ]
+                )
+        else:
+            key = _canonical_bybit_demo_trade_signature(row)
+            if not key:
+                key = f"rowid:{str(row.get('id') or '')}"
         prev = dedup_fallback.get(key)
         if prev is None:
             dedup_fallback[key] = row
@@ -14863,6 +14884,18 @@ async def _fetch_bybit_executions(
 _BYBIT_MAX_WINDOW_MS = (7 * 24 * 60 * 60 * 1000) - 1
 
 
+def _ts_to_iso(epoch_seconds: object) -> Optional[str]:
+    try:
+        if epoch_seconds in (None, ""):
+            return None
+        ts = float(epoch_seconds)
+        if ts > 10_000_000_000:
+            ts = ts / 1000.0
+        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    except Exception:
+        return None
+
+
 def _iter_bybit_time_chunks(start_time: int, end_time: int) -> List[Tuple[int, int]]:
     start = int(start_time)
     end = int(end_time)
@@ -24536,7 +24569,7 @@ async def _run_trading_journal_sync_job() -> None:
         latest_trade_time = None
         try:
             wb = load_workbook(_master_journal_path(), data_only=True)
-            tl = _get_trade_log_sheet(wb, allow_legacy=False)
+            tl = _get_trade_log_sheet(wb, allow_legacy=True)
             headers = [str(c.value or "").strip() for c in tl[1]]
             ridx = headers.index("Row ID") + 1 if "Row ID" in headers else None
             cidx = headers.index("Close Time") + 1 if "Close Time" in headers else None
@@ -24769,7 +24802,7 @@ async def _run_trading_journal_sync_job() -> None:
             verified = True
             try:
                 wb = load_workbook(_master_journal_path(), data_only=True)
-                tl = _get_trade_log_sheet(wb, allow_legacy=False)
+                tl = _get_trade_log_sheet(wb, allow_legacy=True)
                 headers = [str(c.value or "").strip() for c in tl[1]]
                 ridx = headers.index("Row ID") + 1 if "Row ID" in headers else None
                 workbook_ids = set()
@@ -24931,7 +24964,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
             for sheet in SHEET_ORDER:
                 if sheet not in wb.sheetnames:
                     raise RuntimeError(f"Trading Journal validation failed: missing required sheet '{sheet}'.")
-            trade_log = _get_trade_log_sheet(wb, allow_legacy=False)
+            trade_log = _get_trade_log_sheet(wb, allow_legacy=True)
             inst = wb["Instrument Averages"]
             cal = wb["P&L Calendar"]
             dash = wb["Dashboard"]

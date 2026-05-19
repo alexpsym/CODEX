@@ -1420,7 +1420,7 @@ def test_resolve_local_journal_file_case_insensitive_and_append_reuses_existing(
     changed = master_service._append_bybit_demo_rows_to_local_workbook(local_dir, rows)
     assert changed == 1
     assert existing.exists()
-    assert not (local_dir / "Bybit Demo.xlsx").exists()
+    assert not any(p.name == "Bybit Demo.xlsx" for p in local_dir.iterdir())
 
 def test_backfill_bybit_demo_balances_reverse_pnl_ordering() -> None:
     rows = [
@@ -1653,8 +1653,12 @@ def test_manual_sync_fails_when_captured_bybit_rows_missing_from_workbook(tmp_pa
     monkeypatch.setattr(master_service, "_import_trading_journal_from_sources", lambda *a, **k: {"ok": True, "rows_imported": 0, "rows_by_asset_class": {}, "local_workbooks_seen": 1, "dropbox_workbooks_seen": 0})
     monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"master_journal_ok": True})
     monkeypatch.setattr(master_service, "_trading_journal_broker_refresh_enabled", lambda: True)
-    monkeypatch.setattr(master_service, "_run_bybit_closed_pnl_sync", lambda *a, **k: {"ok": True, "rows_seen": 2, "captured_row_ids": ["bybit:demo:execution:BTCUSDT:E1", "bybit:demo:execution:BTCUSDT:E2"], "execution_rows_seen": 2, "execution_rows_normalized": 2, "latest_execution_time": "2026-05-19T01:13:00+10:00"})
-    monkeypatch.setattr(master_service, "_recover_oanda_recent_fills", lambda *a, **k: {"ok": True, "rows_seen": 0, "captured_row_ids": []})
+    async def _bybit_closed_pnl_sync_stub(*a, **k):
+        return {"ok": True, "rows_seen": 2, "captured_row_ids": ["bybit:demo:execution:BTCUSDT:E1", "bybit:demo:execution:BTCUSDT:E2"], "execution_rows_seen": 2, "execution_rows_normalized": 2, "latest_execution_time": "2026-05-19T01:13:00+10:00"}
+    monkeypatch.setattr(master_service, "_run_bybit_closed_pnl_sync", _bybit_closed_pnl_sync_stub)
+    async def _recover_oanda_recent_fills_stub(*a, **k):
+        return {"ok": True, "rows_seen": 0, "captured_row_ids": []}
+    monkeypatch.setattr(master_service, "_recover_oanda_recent_fills", _recover_oanda_recent_fills_stub)
     asyncio.run(master_service._run_trading_journal_sync_job())
     st = master_service._sync_state_snapshot()
     assert st.get("ok") is False
@@ -1670,8 +1674,12 @@ def test_manual_sync_fails_when_bybit_execution_prefetch_fails(tmp_path: Path, m
     monkeypatch.setattr(master_service, "_import_trading_journal_from_sources", lambda *a, **k: {"ok": True, "rows_imported": 0, "rows_by_asset_class": {}, "local_workbooks_seen": 1, "dropbox_workbooks_seen": 0})
     monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"master_journal_ok": True})
     monkeypatch.setattr(master_service, "_trading_journal_broker_refresh_enabled", lambda: True)
-    monkeypatch.setattr(master_service, "_run_bybit_closed_pnl_sync", lambda *a, **k: {"ok": False, "rows_seen": 0, "execution_rows_seen": 0, "error": "Bybit execution prefetch failed: Bybit execution API failed"})
-    monkeypatch.setattr(master_service, "_recover_oanda_recent_fills", lambda *a, **k: {"ok": True, "rows_seen": 0, "captured_row_ids": []})
+    async def _bybit_closed_pnl_sync_fail_stub(*a, **k):
+        return {"ok": False, "rows_seen": 0, "execution_rows_seen": 0, "error": "Bybit execution prefetch failed: Bybit execution API failed"}
+    monkeypatch.setattr(master_service, "_run_bybit_closed_pnl_sync", _bybit_closed_pnl_sync_fail_stub)
+    async def _recover_oanda_recent_fills_stub(*a, **k):
+        return {"ok": True, "rows_seen": 0, "captured_row_ids": []}
+    monkeypatch.setattr(master_service, "_recover_oanda_recent_fills", _recover_oanda_recent_fills_stub)
     asyncio.run(master_service._run_trading_journal_sync_job())
     st = master_service._sync_state_snapshot()
     assert st.get("ok") is False
