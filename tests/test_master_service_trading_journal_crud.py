@@ -678,6 +678,27 @@ def test_merge_missing_timeline_balances_with_broker_preserves_resolution_metada
     assert resolved["last_trade_at"] == "2026-01-01T00:00:00Z"
 
 
+def test_merge_missing_timeline_balances_with_broker_canonicalizes_bybit_live_broker_only():
+    merged = master_service._merge_missing_timeline_balances_with_broker(
+        [],
+        [{"account": "Bybit Live", "label": "Bybit Live", "balance": 10.0, "source": "bybit_wallet_balance"}],
+    )
+    assert len(merged) == 1
+    assert merged[0]["label"] == "BYBIT"
+    assert merged[0]["account"] == "BYBIT"
+
+
+def test_merge_missing_timeline_balances_with_broker_preserves_existing_bybit():
+    merged = master_service._merge_missing_timeline_balances_with_broker(
+        [{"account": "BYBIT", "label": "BYBIT", "balance": 22.0, "source": "excel_account_balance", "balance_source": "excel_account_balance"}],
+        [{"account": "Bybit Live", "label": "Bybit Live", "balance": 11.0, "source": "bybit_wallet_balance"}],
+    )
+    assert len(merged) == 1
+    assert merged[0]["label"] == "BYBIT"
+    assert merged[0]["balance"] == 22.0
+    assert merged[0]["skipped_broker_balance_reason"] == "existing_bybit_balance_preserved"
+
+
 def test_diagnostics_does_not_report_zero_when_journal_items_exist(temp_state_paths):
     master_service._set_trading_journal_rows(
         [
@@ -1492,6 +1513,26 @@ def test_monthly_aud_revaluation_rows_for_journal_view_keeps_zero_result(tmp_pat
     assert len(rows) == 1
     assert rows[0]["id"] == "monthly_aud_reval:bybit_live:2026-04"
     assert rows[0]["result_cash"] == pytest.approx(0.0)
+    assert rows[0]["account"] == "BYBIT"
+    assert rows[0]["account_label"] == "BYBIT"
+
+
+def test_monthly_aud_revaluation_rows_for_journal_view_accepts_canonical_bybit(tmp_path, monkeypatch):
+    monthly_path = tmp_path / "monthly_aud_revaluation.json"
+    monthly_path.write_text(json.dumps({"items": [{
+        "id": "monthly_aud_reval:bybit_live:2026-05",
+        "row_type": "monthly_aud_reval",
+        "account": "BYBIT",
+        "account_label": "BYBIT",
+        "close_time": "2026-05-31T23:59:59Z",
+        "result_cash": 1.0,
+        "result_currency": "AUD",
+    }]}), encoding="utf-8")
+    monkeypatch.setattr(master_service, "MONTHLY_AUD_REVALUATION_PATH", monthly_path)
+    rows = master_service._monthly_aud_revaluation_rows_for_journal_view()
+    assert len(rows) == 1
+    assert rows[0]["account"] == "BYBIT"
+    assert rows[0]["account_label"] == "BYBIT"
 
 
 def test_persist_trading_journal_sqlite_routes_monthly_rows_to_journal_notes(tmp_path, monkeypatch):

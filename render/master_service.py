@@ -69,7 +69,7 @@ from shared.symbol_resolution import (
 from shared.atomic_json import write_json_file
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, stable_row_id, SHEET_ORDER, _get_all_trades_sheet, _get_trade_log_sheet, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, stable_row_id, SHEET_ORDER, _get_all_trades_sheet, _get_trade_log_sheet, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -3826,19 +3826,33 @@ def _monthly_aud_revaluation_rows_for_journal_view() -> List[Dict[str, object]]:
         close_time = row.get("close_time")
         result_cash = _to_float(row.get("result_cash"))
         result_currency = str(row.get("result_currency") or "").strip().upper()
-        account = str(row.get("account") or "").strip().lower()
-        account_label = str(row.get("account_label") or "").strip().lower()
+        account = _canonical_journal_account_label(
+            row.get("account"),
+            source=row.get("source"),
+            account_mode=row.get("account_mode"),
+        )
+        account_label = _canonical_journal_account_label(
+            row.get("account_label"),
+            source=row.get("source"),
+            account_mode=row.get("account_mode"),
+        )
         if not row_id or not close_time or result_cash is None or not math.isfinite(result_cash):
             continue
         if result_currency != "AUD":
             continue
-        if "bybit live" not in {account, account_label}:
+        if "bybit" not in {
+            _norm_account_key(account),
+            _norm_account_key(account_label),
+        }:
             continue
         out = dict(row)
         out["row_type"] = "monthly_aud_reval"
         out["source"] = out.get("source") or "bybit_monthly_aud_reval"
         out["symbol"] = out.get("symbol") or "MONTHLY AUD P/L"
-        out["setup"] = out.get("setup") or "Monthly Bybit Live AUD P/L note - excluded from metrics"
+        out["account"] = "BYBIT"
+        out["account_label"] = "BYBIT"
+        out["setup"] = out.get("setup") or "Monthly BYBIT AUD P/L note - excluded from metrics"
+        out["notes"] = out.get("notes") or "Monthly BYBIT AUD P/L note; excluded from trading metrics."
         out["chart_available"] = False
         out.pop("net_profit", None)
         out.pop("realized_pnl", None)
@@ -5768,13 +5782,30 @@ def _latest_balances_from_cashflows(ledger: Dict[str, List[Dict[str, object]]]) 
     return sorted(items, key=lambda x: str(x.get("label") or ""))
 
 
+
+
+def _canonical_journal_account_label(label: object, *, source: object=None, account_mode: object=None) -> str:
+    raw = str(label or "").strip()
+    low = raw.lower().replace("_", " ").replace("-", " ")
+    src = str(source or "").strip().lower()
+    mode = str(account_mode or "").strip().lower()
+    parts = {p for p in low.split() if p}
+    has_bybit = "bybit" in parts
+    has_demo = "demo" in parts
+    has_live = "live" in parts
+    if (has_bybit and has_demo) or ("bybit" in src and mode == "demo"):
+        return "Bybit Demo"
+    if (has_bybit and not has_demo and (has_live or len(parts) == 1)) or ("bybit" in src and mode == "live"):
+        return "BYBIT"
+    return raw
+
 def _merge_display_balances(*groups: List[Dict[str, object]]) -> List[Dict[str, object]]:
     merged: Dict[str, Dict[str, object]] = {}
     for group in groups:
         for item in group or []:
             if not isinstance(item, dict):
                 continue
-            label = str(item.get("label") or item.get("account") or "").strip()
+            label = _canonical_journal_account_label(item.get("label") or item.get("account"), source=item.get("source"), account_mode=item.get("account_mode"))
             if not label:
                 continue
             if _is_bybit_demo_account_label(label) and not ENABLE_BYBIT_DEMO_JOURNAL:
@@ -5785,8 +5816,8 @@ def _merge_display_balances(*groups: List[Dict[str, object]]) -> List[Dict[str, 
             if balance is None:
                 balance = _to_float(item.get("nav"))
             payload = dict(existing)
-            payload["account"] = str(item.get("account") or existing.get("account") or label)
-            payload["label"] = str(item.get("label") or existing.get("label") or label)
+            payload["account"] = _canonical_journal_account_label(item.get("account") or existing.get("account") or label, source=item.get("source"), account_mode=item.get("account_mode"))
+            payload["label"] = _canonical_journal_account_label(item.get("label") or existing.get("label") or label, source=item.get("source"), account_mode=item.get("account_mode"))
             if balance is not None:
                 payload["balance"] = balance
             payload["currency"] = str(item.get("currency") or existing.get("currency") or _infer_account_currency(label))
@@ -5805,10 +5836,24 @@ def _merge_missing_timeline_balances_with_broker(
     balances: List[Dict[str, object]],
     broker_balances: List[Dict[str, object]],
 ) -> List[Dict[str, object]]:
-    merged: List[Dict[str, object]] = [dict(item) for item in (balances or []) if isinstance(item, dict)]
+    merged: List[Dict[str, object]] = []
     by_key: Dict[str, int] = {}
+    for item in (balances or []):
+        if not isinstance(item, dict):
+            continue
+        normalized = dict(item)
+        canonical = _canonical_journal_account_label(
+            normalized.get("label") or normalized.get("account"),
+            source=normalized.get("source"),
+            account_mode=normalized.get("account_mode"),
+        )
+        if canonical:
+            normalized["label"] = canonical
+            normalized["account"] = canonical
+            normalized["account_label"] = canonical
+        merged.append(normalized)
     for idx, item in enumerate(merged):
-        label = str(item.get("label") or item.get("account") or "").strip()
+        label = _canonical_journal_account_label(item.get("label") or item.get("account"), source=item.get("source"), account_mode=item.get("account_mode"))
         if _is_bybit_demo_account_label(label) and not ENABLE_BYBIT_DEMO_JOURNAL:
             continue
         key = _norm_account_key(label)
@@ -5817,7 +5862,7 @@ def _merge_missing_timeline_balances_with_broker(
     for broker in broker_balances or []:
         if not isinstance(broker, dict):
             continue
-        label = str(broker.get("label") or broker.get("account") or "").strip()
+        label = _canonical_journal_account_label(broker.get("label") or broker.get("account"), source=broker.get("source"), account_mode=broker.get("account_mode"))
         if not label:
             continue
         if _is_bybit_demo_account_label(label) and not ENABLE_BYBIT_DEMO_JOURNAL:
@@ -5829,6 +5874,9 @@ def _merge_missing_timeline_balances_with_broker(
         existing_idx = by_key.get(key)
         if existing_idx is None:
             broker_payload = dict(broker)
+            broker_payload["label"] = label
+            broker_payload["account"] = label
+            broker_payload["account_label"] = label
             broker_payload["missing_balance"] = _to_float(broker_payload.get("balance")) is None
             merged.append(broker_payload)
             by_key[key] = len(merged) - 1
@@ -5846,6 +5894,13 @@ def _merge_missing_timeline_balances_with_broker(
             can_override = "cashflow" in existing_source or existing_source in {"timeline_missing", "excel_account_balance", "trade_timeline"}
             if existing_source == "authoritative_trade_balance":
                 can_override = broker_source in trusted_broker_sources
+            if key == _norm_account_key('BYBIT') and broker_source == 'bybit_wallet_balance':
+                existing["label"] = "BYBIT"
+                existing["account"] = "BYBIT"
+                existing["account_label"] = "BYBIT"
+                existing['skipped_broker_balance_reason'] = 'existing_bybit_balance_preserved'
+                merged[existing_idx] = existing
+                continue
             if not can_override:
                 continue
             if existing_as_of_ts is not None and broker_as_of_ts is not None and existing_as_of_ts > broker_as_of_ts:
@@ -5853,6 +5908,9 @@ def _merge_missing_timeline_balances_with_broker(
         resolved = dict(existing)
         resolved["previous_balance"] = existing_balance
         resolved["balance"] = broker_balance
+        resolved["label"] = label
+        resolved["account"] = label
+        resolved["account_label"] = label
         resolved["currency"] = str(broker.get("currency") or existing.get("currency") or _infer_account_currency(label))
         source = str(broker.get("source") or broker.get("balance_source") or "bybit_wallet_balance")
         resolved["source"] = source
@@ -6104,7 +6162,7 @@ def _normalize_bybit_execution_history_row(raw: Dict[str, object], account_mode:
     bal=_to_float(raw.get('Final Balance (USDT)')) if str(raw.get('Final Balance (USDT)') or '').strip() else None
     mode='demo' if str(account_mode).lower().strip()=='demo' else 'live'
     rid = f'bybit:{mode}:execution:{symbol}:{exec_id}' if exec_id else f"bybit:{mode}:execution:{symbol}:{order_id}:{open_time}:{side}:{qty}:{price}"
-    return {'id': rid,'row_type':'trade','asset_class':'crypto','account':'Bybit Demo' if mode=='demo' else 'Bybit Live','account_label':'Bybit Demo' if mode=='demo' else 'Bybit Live','symbol':symbol,'side':side,'qty':qty,'entry_price':price,'exit_price':price,'open_time':open_time,'close_time':open_time,'commission':fee,'fee_rate':fee_rate,'net_profit':None,'balance_after_trade':bal,'currency':'USDT' if symbol.endswith('USDT') else '', 'source':'bybit_execution_history','notes':'Bybit execution-history row; closed PnL unavailable unless matched to closed-PnL/transaction-log data.','raw_refs':{'orderId':order_id or None,'execId':exec_id or None,'source_file':source_path,'source_row':source_row}}
+    return {'id': rid,'row_type':'trade','asset_class':'crypto','account':_canonical_journal_account_label('Bybit Demo' if mode=='demo' else 'Bybit Live', source='bybit', account_mode=mode),'account_label':_canonical_journal_account_label('Bybit Demo' if mode=='demo' else 'Bybit Live', source='bybit', account_mode=mode),'symbol':symbol,'side':side,'qty':qty,'entry_price':price,'exit_price':price,'open_time':open_time,'close_time':open_time,'commission':fee,'fee_rate':fee_rate,'net_profit':None,'balance_after_trade':bal,'currency':'USDT' if symbol.endswith('USDT') else '', 'source':'bybit_execution_history','notes':'Bybit execution-history row; closed PnL unavailable unless matched to closed-PnL/transaction-log data.','raw_refs':{'orderId':order_id or None,'execId':exec_id or None,'source_file':source_path,'source_row':source_row}}
 
 def _parse_bybit_trade_history_csv(path: Path, account_mode: str='demo') -> List[Dict[str, object]]:
     df = pd.read_csv(path, encoding='utf-8-sig')
@@ -25013,7 +25071,30 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                         return True
                 return False
 
-            visible_trade_rows = [r for r in (snapshot.get("items") or []) if isinstance(r, dict) and _row_type(r) == "trade" and not _is_hidden_trade_row(r)]
+            visible_trade_rows = [
+                _repair_or_flag_zero_trade_qty(dict(r))
+                for r in (snapshot.get("items") or [])
+                if isinstance(r, dict) and _row_type(r) == "trade" and not _is_hidden_trade_row(r)
+            ]
+            crypto_zero_qty_ids: List[str] = []
+            fx_zero_qty_ids: List[str] = []
+            for row in visible_trade_rows:
+                qty = _to_float(row.get("qty"))
+                if qty != 0:
+                    continue
+                acct = str(row.get("account") or row.get("account_label") or "").upper()
+                sym = str(row.get("symbol") or "").upper()
+                rid = str(row.get("id") or sym or "?")
+                is_fx = any(x in acct for x in ("OANDA", "PEPPERSTONE")) or ("/" in sym and len(sym) == 7)
+                if is_fx:
+                    fx_zero_qty_ids.append(rid)
+                else:
+                    crypto_zero_qty_ids.append(rid)
+            if crypto_zero_qty_ids:
+                raise RuntimeError(
+                    "Trading Journal validation failed: unrepaired crypto Qty=0 rows detected "
+                    f"(sample row IDs: {', '.join(crypto_zero_qty_ids[:5])})."
+                )
             if visible_trade_rows:
                 headers = [str(c.value or "").strip() for c in trade_log[1]]
                 symbol_col = headers.index("Symbol") + 1 if "Symbol" in headers else None

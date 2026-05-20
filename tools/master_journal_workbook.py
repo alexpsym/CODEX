@@ -252,6 +252,102 @@ def _resolved_all_trade_balances(rows: List[Dict[str, Any]]) -> Dict[str, float]
 
 ZERO_HIDE_FORMAT = "0;-0;;@"
 
+def _canonical_account_label(label: Any) -> str:
+    raw = str(label or "").strip()
+    low = raw.lower().replace("_", " ").replace("-", " ")
+    parts = {p for p in low.split() if p}
+    if "bybit" in parts and "demo" in parts:
+        return "Bybit Demo"
+    if "bybit" in parts and ("live" in parts or len(parts) == 1):
+        return "BYBIT"
+    return raw
+
+def _repair_or_flag_zero_trade_qty(row: Dict[str, Any]) -> Dict[str, Any]:
+    if str(row.get("row_type") or "trade").lower() != "trade":
+        return row
+    qty=_as_float(row.get("qty"))
+    if qty is None or qty!=0:
+        return row
+    refs=row.get("raw_refs") if isinstance(row.get("raw_refs"),dict) else {}
+    for k in ("qty_raw","closedSize","closed_size","execQty","exec_qty","cumExecQty","qty","size","Filled Qty","Size Quantity"):
+        cand=_as_float(row.get(k) if k in row else refs.get(k))
+        if cand is not None and cand>0:
+            row["qty"]=cand; row.setdefault("diagnostics",[]).append("qty_repaired_from_source")
+            return row
+    sym=str(row.get("symbol") or "").upper()
+    acct=str(row.get("account") or row.get("account_label") or "").upper()
+    if any(x in acct for x in ("OANDA","PEPPERSTONE")) or ("/" in sym and len(sym)==6):
+        row.setdefault("diagnostics",[]).append("zero_qty_unrepaired_fx")
+        return row
+    ep=_as_float(row.get("entry_price")); xp=_as_float(row.get("exit_price")); np=_as_float(row.get("net_profit")); fee=_as_float(row.get("commission") if row.get("commission") is not None else row.get("fees")) or 0.0
+    side=str(row.get("side") or "").upper()
+    if (sym.endswith("USDT") or sym.endswith("USDC")) and None not in (ep,xp,np) and side in {"BUY","SELL"}:
+        den=(xp-ep) if side=="BUY" else (ep-xp)
+        if den and den!=0:
+            q=(np+abs(fee))/den
+            if q>0 and math.isfinite(q):
+                chk=(q*den)-abs(fee)
+                if abs(chk-np)<=max(1e-6,abs(np)*1e-5):
+                    row["qty"]=q; row.setdefault("diagnostics",[]).append("qty_inferred_from_pnl")
+                    return row
+    row.setdefault("diagnostics",[]).append("zero_qty_unrepaired")
+    return row
+
+
+def _collect_zero_qty_validation(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    out = {"crypto_zero_qty_unrepaired": [], "fx_zero_qty_unrepaired": []}
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("row_type") or "trade").lower() != "trade":
+            continue
+        qty = _as_float(row.get("qty"))
+        if qty != 0:
+            continue
+        diag = row.get("diagnostics") if isinstance(row.get("diagnostics"), list) else []
+        entry = {
+            "id": row.get("id"),
+            "account": row.get("account_label") or row.get("account"),
+            "symbol": row.get("symbol"),
+            "open_time": row.get("open_time"),
+            "close_time": row.get("close_time"),
+            "source": row.get("source"),
+            "diagnostics": list(diag),
+        }
+        acct = str(row.get("account") or row.get("account_label") or "").upper()
+        sym = str(row.get("symbol") or "").upper()
+        is_fx = any(x in acct for x in ("OANDA", "PEPPERSTONE")) or ("/" in sym and len(sym) == 7)
+        if is_fx:
+            out["fx_zero_qty_unrepaired"].append(entry)
+        else:
+            out["crypto_zero_qty_unrepaired"].append(entry)
+    return out
+
+
+def _canonicalize_and_dedupe_balances(balances: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    merged: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+    for rec in balances or []:
+        if not isinstance(rec, dict):
+            continue
+        label = _canonical_account_label(rec.get("account_label") or rec.get("account") or rec.get("label"))
+        if not label:
+            continue
+        key = label.upper()
+        payload = dict(rec)
+        payload["account_label"] = label
+        payload["account"] = label
+        if key not in merged:
+            order.append(key)
+            merged[key] = payload
+            continue
+        prev = merged[key]
+        prev_bal = _as_float(prev.get("balance"))
+        now_bal = _as_float(payload.get("balance"))
+        if prev_bal is None and now_bal is not None:
+            merged[key] = payload
+    return [merged[k] for k in order]
+
 def _currency_code(*values: Any) -> str:
     for value in values:
         text = str(value or "").strip().upper()
@@ -395,7 +491,7 @@ def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]
 def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -> Dict[str, Any]:
     wb=Workbook(); wb.remove(wb.active)
     for s in SHEET_ORDER: wb.create_sheet(s)
-    rows=[r for r in (snapshot.get('items') or []) if isinstance(r,dict) and str(r.get('row_type') or 'trade') in {'trade','monthly_aud_reval','cashflow'}]
+    rows=[_repair_or_flag_zero_trade_qty(dict(r)) for r in (snapshot.get('items') or []) if isinstance(r,dict) and str(r.get('row_type') or 'trade') in {'trade','monthly_aud_reval','cashflow'}]
     metric_rows=[r for r in rows if str(r.get('row_type') or 'trade')=='trade']
     non_test=[r for r in metric_rows if not _is_test_trade_value(r.get('is_test_trade'))]
     stats = snapshot.get('stats') or {}
@@ -438,7 +534,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         end_rows[title] = sr + _write_stat_section(dash, sr, sc, title, srows, use_detail_col=uses_detail, apply_semantic_cf=True)
     leaders_start = 1
     leaders_end = _write_instrument_leaders_section(dash, leaders_start, 11, leaders)
-    balances = snapshot.get('balances') or stats.get('balances') or []
+    balances = _canonicalize_and_dedupe_balances(snapshot.get('balances') or stats.get('balances') or [])
     br = max([leaders_end] + list(end_rows.values()) or [1]) + 2
     dash.cell(br, 1, "Account Balances").font = Font(bold=True)
     dash.merge_cells(start_row=br, start_column=1, end_row=br, end_column=4)
@@ -451,7 +547,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         if not isinstance(rec, dict):
             continue
         ccy = _currency_code(rec.get("currency"), rec.get("account_currency"))
-        dash.cell(cur,1,rec.get("account_label") or rec.get("account") or rec.get("source") or "—")
+        dash.cell(cur,1,_canonical_account_label(rec.get("account_label") or rec.get("account") or rec.get("source") or "—"))
         bcell = dash.cell(cur,2,_as_float(rec.get("balance")))
         bcell.number_format = '#,##0.0000000000' if _is_crypto_currency(ccy) else '#,##0.00'
         dash.cell(cur,3,ccy)
@@ -464,8 +560,8 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         pct = _as_float(row.get('result_pct'))
         is_monthly = str(row.get("row_type") or "") == "monthly_aud_reval"
         symbol = row.get('symbol') or ("MONTHLY AUD P/L" if is_monthly else "")
-        acct = row.get('account_label') or row.get('account') or ("Bybit Live" if is_monthly else "")
-        notes = row.get('notes') or ('Monthly Bybit Live AUD P/L bookkeeping note (excluded from metrics).' if is_monthly else '')
+        acct = row.get('account_label') or row.get('account') or ("BYBIT" if is_monthly else "")
+        notes = row.get('notes') or ('Monthly BYBIT AUD P/L bookkeeping note (excluded from metrics).' if is_monthly else '')
         net_pnl = row.get('net_profit') if row.get('net_profit') is not None else row.get('result_cash')
         ot = row.get('open_time') or row.get("period_month")
         ct = row.get('close_time') or row.get("period_month")
@@ -973,9 +1069,9 @@ def _find_dashboard_table_headers(ws, section: Dict[str, int], *, scan_rows: int
 
 def _ensure_account_balance_row(ws, section: Dict[str, int], header_row: int, col_map: Dict[str, int], account_label: str) -> int:
     account_col = col_map["account"]
-    wanted = str(account_label or "").strip().upper()
+    wanted = _canonical_account_label(account_label)
     for r in range(header_row + 1, section["end_row"] + 1):
-        lbl = str(ws.cell(r, account_col).value or "").strip().upper()
+        lbl = _canonical_account_label(ws.cell(r, account_col).value)
         if lbl and lbl == wanted:
             return r
     for r in range(header_row + 1, section["end_row"] + 1):
@@ -1004,6 +1100,14 @@ def _ensure_account_balance_row(ws, section: Dict[str, int], header_row: int, co
         dst.protection = copy(src.protection)
     section["end_row"] = row
     return row
+
+
+def _clear_account_balance_row(ws, row: int, col_map: Dict[str, int]) -> None:
+    ws.cell(row, col_map["account"]).value = None
+    ws.cell(row, col_map["balance"]).value = None
+    ws.cell(row, col_map["currency"]).value = None
+    if "as_of" in col_map:
+        ws.cell(row, col_map["as_of"]).value = None
 
 
 
@@ -1128,7 +1232,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
 
         stats = snapshot.get("stats") or {}
         rows = [
-            r for r in (snapshot.get("items") or [])
+            _repair_or_flag_zero_trade_qty(dict(r)) for r in (snapshot.get("items") or [])
             if isinstance(r, dict) and str(r.get("row_type") or "trade") in {"trade", "monthly_aud_reval", "cashflow"}
         ]
         groups = stats.get("groups") or {}
@@ -1274,20 +1378,40 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                     if _write_value_preserving_cell(dash, row_idx, leader_headers[col_name], normalized_payload.get(fld)):
                         diagnostics["updated_cells"] += 1
 
-        balances = snapshot.get("balances") or []
+        balances = _canonicalize_and_dedupe_balances(snapshot.get("balances") or [])
         diagnostics.setdefault("non_numeric_balance_accounts", [])
         section = anchors["Account Balances"]
         header_row, col_map = _find_dashboard_table_headers(dash, section)
         if not header_row or "account" not in col_map or "balance" not in col_map or "currency" not in col_map:
             raise RuntimeError("Account Balances headers missing in section.")
+        diagnostics.setdefault("stale_account_balance_rows_cleared", 0)
+        account_col = col_map["account"]
+        existing_rows_by_canonical: Dict[str, List[int]] = {}
+        existing_rows_by_raw: Dict[str, List[int]] = {}
+        for rr in range(header_row + 1, section["end_row"] + 1):
+            raw_label = str(dash.cell(rr, account_col).value or "").strip()
+            if not raw_label:
+                continue
+            canonical_label = _canonical_account_label(raw_label)
+            existing_rows_by_raw.setdefault(raw_label, []).append(rr)
+            existing_rows_by_canonical.setdefault(canonical_label, []).append(rr)
         for b in balances:
-            label = str(b.get("account_label") or b.get("account") or "").strip()
+            label = _canonical_account_label(b.get("account_label") or b.get("account"))
             if not label:
                 continue
             bal_num = _as_float(b.get("balance"))
             if bal_num is None:
                 diagnostics["non_numeric_balance_accounts"].append(label)
                 continue
+            if label == "BYBIT":
+                bybit_rows = existing_rows_by_canonical.get("BYBIT", [])
+                bybit_live_rows = [rr for rr in range(header_row + 1, section["end_row"] + 1) if _canonical_account_label(dash.cell(rr, account_col).value) == "BYBIT" and str(dash.cell(rr, account_col).value or "").strip() != "BYBIT"]
+                if not bybit_rows and bybit_live_rows:
+                    target = bybit_live_rows[0]
+                    if _write_value_preserving_cell(dash, target, col_map["account"], "BYBIT"):
+                        diagnostics["updated_cells"] += 1
+                    existing_rows_by_canonical.setdefault("BYBIT", []).append(target)
+                    bybit_rows = existing_rows_by_canonical["BYBIT"]
             try:
                 row = _ensure_account_balance_row(dash, section, header_row, col_map, label)
             except Exception as exc:
@@ -1315,6 +1439,21 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 if as_of:
                     if _write_value_preserving_cell(dash, row, col_map["as_of"], as_of):
                         diagnostics["updated_cells"] += 1
+            if label == "BYBIT":
+                stale_rows = []
+                for rr in range(header_row + 1, section["end_row"] + 1):
+                    raw_here = str(dash.cell(rr, account_col).value or "").strip()
+                    if _canonical_account_label(raw_here) == "BYBIT" and raw_here != "BYBIT" and rr != row:
+                        stale_rows.append(rr)
+                for stale_row in stale_rows:
+                    _clear_account_balance_row(dash, stale_row, col_map)
+                    diagnostics["stale_account_balance_rows_cleared"] += 1
+
+        zero_qty = _collect_zero_qty_validation(rows)
+        diagnostics.update(zero_qty)
+        if zero_qty["crypto_zero_qty_unrepaired"]:
+            sample = ", ".join(str(x.get("id") or x.get("symbol") or "?") for x in zero_qty["crypto_zero_qty_unrepaired"][:5])
+            return {"ok": False, "error": f"Unrepaired crypto zero-quantity trade rows detected: {sample}", "diagnostics": diagnostics}
 
         tmp = path.with_suffix(".update.tmp.xlsx")
         build_master_journal_workbook(snapshot, tmp)
