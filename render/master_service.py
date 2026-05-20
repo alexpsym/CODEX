@@ -57,7 +57,7 @@ from openpyxl import load_workbook
 from PIL import Image, ImageDraw, ImageFont
 from starlette.responses import RedirectResponse
 
-from bybit_credentials import resolve_bybit_credentials_for
+from bybit_credentials import resolve_bybit_credentials_for, describe_bybit_credentials_for
 from render.monthly_aud_revaluation import MonthlyAudRevalError, sync_monthly_aud_revaluation
 from shared.bybit_option_resolver import resolve_option_by_target_risk
 from shared.symbol_resolution import (
@@ -1206,6 +1206,7 @@ def _build_authoritative_trading_journal_diagnostics_snapshot(items: List[Dict[s
 
 
 _TRADING_JOURNAL_VIEW_CACHE: Dict[str, object] = {"key": None, "payload": None}
+_PENDING_MANUAL_SYNC_ROWS: List[Dict[str, object]] = []
 TRADING_JOURNAL_VIEW_CACHE_VERSION = 5
 
 
@@ -1445,6 +1446,19 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
     if use_master_journal_snapshot:
         source_payload = read_master_journal_source(_master_journal_path())
         items = [dict(r) for r in (source_payload.get("items") or []) if isinstance(r, dict)]
+        if _PENDING_MANUAL_SYNC_ROWS:
+            merged: Dict[str, Dict[str, object]] = {}
+            for row in items:
+                rid = str(row.get("id") or "").strip()
+                if rid:
+                    merged[rid] = row
+            for row in _PENDING_MANUAL_SYNC_ROWS:
+                if not isinstance(row, dict):
+                    continue
+                rid = str(row.get("id") or "").strip()
+                if rid:
+                    merged[rid] = dict(row)
+            items = list(merged.values())
         trade_items = _enrich_trade_row_metrics([r for r in items if _row_type(r) == "trade"])
         non_trade_items = [r for r in items if _row_type(r) != "trade"]
         timeline = _build_journal_balance_timelines(trade_items, source_payload.get("cashflow_ledger") or {}, _get_excel_account_balances())
@@ -4060,30 +4074,9 @@ def _sanitize_bybit_demo_rows(rows: List[Dict[str, object]]) -> tuple[List[Dict[
     dedup_fallback: Dict[str, Dict[str, object]] = {}
     fallback_dropped = 0
     for row in after_order:
-        if _is_bybit_execution_history_row(row):
-            refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
-            exec_id = str(refs.get("execId") or refs.get("exec_id") or "").strip()
-            row_id = str(row.get("id") or "").strip()
-            if row_id or exec_id:
-                key = f"execution:{row_id or exec_id}"
-            else:
-                key = "|".join(
-                    [
-                        "execution",
-                        str(row.get("account") or row.get("account_label") or "").strip().lower(),
-                        str(row.get("symbol") or "").strip().upper(),
-                        str(refs.get("orderId") or row.get("order_id") or "").strip(),
-                        _normalize_side_for_comparison(row.get("side")),
-                        str(_canonical_trade_epoch_second(row.get("open_time")) or ""),
-                        _num_bucket(row.get("qty"), 8),
-                        _num_bucket(row.get("entry_price"), 8),
-                        _num_bucket(row.get("exit_price"), 8),
-                    ]
-                )
-        else:
-            key = _canonical_bybit_demo_trade_signature(row)
-            if not key:
-                key = f"rowid:{str(row.get('id') or '')}"
+        key = _canonical_bybit_demo_trade_signature(row)
+        if not key:
+            key = f"rowid:{str(row.get('id') or '')}"
         prev = dedup_fallback.get(key)
         if prev is None:
             dedup_fallback[key] = row
@@ -14884,18 +14877,6 @@ async def _fetch_bybit_executions(
 _BYBIT_MAX_WINDOW_MS = (7 * 24 * 60 * 60 * 1000) - 1
 
 
-def _ts_to_iso(epoch_seconds: object) -> Optional[str]:
-    try:
-        if epoch_seconds in (None, ""):
-            return None
-        ts = float(epoch_seconds)
-        if ts > 10_000_000_000:
-            ts = ts / 1000.0
-        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat().replace("+00:00", "Z")
-    except Exception:
-        return None
-
-
 def _iter_bybit_time_chunks(start_time: int, end_time: int) -> List[Tuple[int, int]]:
     start = int(start_time)
     end = int(end_time)
@@ -16279,7 +16260,7 @@ async def _sync_bybit_closed_pnl_window(
     ]
     execution_timestamps = [int(x) for x in execution_timestamps if x is not None]
     if execution_timestamps:
-        latest_execution_time = _ms_to_iso(max(execution_timestamps) * 1000)
+        latest_execution_time = _ts_to_iso(max(execution_timestamps))
 
     if not final_rows:
         if mode == "demo":
@@ -16326,7 +16307,7 @@ async def _sync_bybit_closed_pnl_window(
         last_invalid_time_rows_dropped=len(dropped_invalid_rows),
             last_invalid_time_row_details=dropped_invalid_rows,
         )
-        return {"max_seen": max_seen, "rows_seen": 0, "rows_upserted": 0, "rows_deduped": 0, "single_file_mode": bool(local_authoritative and _master_journal_single_file_mode()), "warning": run_warning, "captured_row_ids": [], "execution_rows_seen": len(execution_entries), "execution_rows_normalized": len(execution_rows), "execution_rows_upserted": 0, "latest_execution_time": latest_execution_time, "execution_fetch_error": execution_fetch_error}
+        return {"max_seen": max_seen, "rows_seen": 0, "rows_upserted": 0, "rows_deduped": 0, "single_file_mode": bool(local_authoritative and _master_journal_single_file_mode()), "warning": run_warning, "captured_row_ids": [], "captured_rows": [], "execution_rows_seen": len(execution_entries), "execution_rows_normalized": len(execution_rows), "execution_rows_upserted": 0, "latest_execution_time": latest_execution_time, "execution_fetch_error": execution_fetch_error}
 
     if (not local_authoritative or _master_journal_single_file_mode()):
         changed = _upsert_trading_journal_rows(final_rows, allow_broker_rows_in_single_file=(local_authoritative and _master_journal_single_file_mode()))
@@ -16395,7 +16376,7 @@ async def _sync_bybit_closed_pnl_window(
     expected_execution_ids = [str(r.get("id") or "").strip() for r in execution_rows if str(r.get("id") or "").strip()]
     missing_execution_row_ids = [rid for rid in expected_execution_ids if rid not in persisted_ids]
     execution_rows_upserted = len([r for r in execution_rows if str(r.get("id") or "").strip() in persisted_ids])
-    return {"max_seen": max_seen, "rows_seen": len(final_rows), "rows_upserted": int(changed if not local_authoritative else local_workbook_changed), "rows_deduped": int(sanitize_stats.get("deduped_by_order_id",0))+int(sanitize_stats.get("deduped_by_fingerprint",0)), "single_file_mode": bool(local_authoritative and _master_journal_single_file_mode()), "warning": run_warning, "captured_row_ids": [str(r.get("id") or "").strip() for r in final_rows if str(r.get("id") or "").strip()], "execution_rows_seen": len(execution_entries), "execution_rows_normalized": len(execution_rows), "execution_rows_upserted": execution_rows_upserted, "latest_execution_time": latest_execution_time, "execution_fetch_error": execution_fetch_error, "missing_execution_row_ids": missing_execution_row_ids, "sanitize_stats": sanitize_stats}
+    return {"max_seen": max_seen, "rows_seen": len(final_rows), "rows_upserted": int(changed if not local_authoritative else local_workbook_changed), "rows_deduped": int(sanitize_stats.get("deduped_by_order_id",0))+int(sanitize_stats.get("deduped_by_fingerprint",0)), "single_file_mode": bool(local_authoritative and _master_journal_single_file_mode()), "warning": run_warning, "captured_row_ids": [str(r.get("id") or "").strip() for r in final_rows if str(r.get("id") or "").strip()], "captured_rows": [dict(r) for r in final_rows if isinstance(r, dict)], "execution_rows_seen": len(execution_entries), "execution_rows_normalized": len(execution_rows), "execution_rows_upserted": execution_rows_upserted, "latest_execution_time": latest_execution_time, "execution_fetch_error": execution_fetch_error, "missing_execution_row_ids": missing_execution_row_ids, "sanitize_stats": sanitize_stats}
 
 
 async def _poll_bybit_fills() -> None:
@@ -16548,6 +16529,8 @@ async def _run_bybit_closed_pnl_sync(
 
     ok_flag = True
     err_msg = None
+    cred_diag = describe_bybit_credentials_for(mode)
+    demo_missing_vars: List[str] = [str(x) for x in (cred_diag.get("missing_env_vars") or [])] if mode == "demo" else []
     if (
         mode == "demo"
         and reason == "manual"
@@ -16581,6 +16564,7 @@ async def _run_bybit_closed_pnl_sync(
         "warning": (sync_diag or {}).get("warning") if isinstance(sync_diag, dict) else None,
         "error": err_msg,
         "captured_row_ids": (sync_diag or {}).get("captured_row_ids") if isinstance(sync_diag, dict) else [],
+        "captured_rows": (sync_diag or {}).get("captured_rows") if isinstance(sync_diag, dict) else [],
         "execution_rows_seen": int((sync_diag or {}).get("execution_rows_seen") or 0) if isinstance(sync_diag, dict) else 0,
         "execution_rows_normalized": int((sync_diag or {}).get("execution_rows_normalized") or 0) if isinstance(sync_diag, dict) else 0,
         "execution_rows_upserted": int((sync_diag or {}).get("execution_rows_upserted") or 0) if isinstance(sync_diag, dict) else 0,
@@ -16588,6 +16572,10 @@ async def _run_bybit_closed_pnl_sync(
         "execution_fetch_error": (sync_diag or {}).get("execution_fetch_error") if isinstance(sync_diag, dict) else None,
         "missing_execution_row_ids": (sync_diag or {}).get("missing_execution_row_ids") if isinstance(sync_diag, dict) else [],
         "sanitize_stats": (sync_diag or {}).get("sanitize_stats") if isinstance(sync_diag, dict) else {},
+        "bybit_demo_execution_capture_expected": bool(mode == "demo" and reason == "manual"),
+        "bybit_demo_credentials_available": bool(cred_diag.get("credentials_available")) if mode == "demo" else True,
+        "bybit_demo_credential_source": str(cred_diag.get("key_source") or "NONE") if mode == "demo" else "KEY1",
+        "bybit_demo_missing_env_vars": demo_missing_vars if mode == "demo" else [],
     }
 
 
@@ -24569,7 +24557,7 @@ async def _run_trading_journal_sync_job() -> None:
         latest_trade_time = None
         try:
             wb = load_workbook(_master_journal_path(), data_only=True)
-            tl = _get_trade_log_sheet(wb, allow_legacy=True)
+            tl = _get_trade_log_sheet(wb, allow_legacy=False)
             headers = [str(c.value or "").strip() for c in tl[1]]
             ridx = headers.index("Row ID") + 1 if "Row ID" in headers else None
             cidx = headers.index("Close Time") + 1 if "Close Time" in headers else None
@@ -24735,6 +24723,11 @@ async def _run_trading_journal_sync_job() -> None:
         bybit_demo = None
         bybit_live = None
         oanda_sync: Dict[str, object] = {}
+        pending_rows_for_workbook: List[Dict[str, object]] = []
+        bybit_demo_execution_capture_expected = bool(
+            _trading_journal_source_mode() == "master_journal"
+            and TRADING_JOURNAL_SYNC_CALCULATOR_TRADES_ON_MANUAL
+        )
         run_closed_trade_capture = bool(
             broker_refresh_enabled or TRADING_JOURNAL_SYNC_CALCULATOR_TRADES_ON_MANUAL
         )
@@ -24747,7 +24740,19 @@ async def _run_trading_journal_sync_job() -> None:
                 try:
                     bybit_demo = await _run_bybit_closed_pnl_sync(account_mode="demo", reason="manual", enforce_manual_cooldown=False)
                 except Exception as exc:
-                    bybit_demo = {"ok": False, "error": str(exc)}
+                    cred_diag = describe_bybit_credentials_for("demo")
+                    missing_vars: List[str] = [str(x) for x in (cred_diag.get("missing_env_vars") or [])]
+                    bybit_demo = {
+                        "ok": False,
+                        "error": str(exc),
+                        "bybit_demo_execution_capture_expected": bybit_demo_execution_capture_expected,
+                        "bybit_demo_credentials_available": bool(cred_diag.get("credentials_available")),
+                        "bybit_demo_credential_source": str(cred_diag.get("key_source") or "NONE"),
+                        "bybit_demo_missing_env_vars": missing_vars,
+                        "base_url": cred_diag.get("base_url"),
+                        "execution_rows_seen": 0,
+                        "latest_execution_time": None,
+                    }
             try:
                 bybit_live = await _run_bybit_closed_pnl_sync(account_mode="live", reason="manual", enforce_manual_cooldown=False)
             except Exception as exc:
@@ -24757,10 +24762,19 @@ async def _run_trading_journal_sync_job() -> None:
                     oanda_sync[acct] = await _recover_oanda_recent_fills(acct)
                 except Exception as exc:
                     oanda_sync[acct] = {"ok": False, "error": str(exc)}
+        for payload in [bybit_demo, bybit_live, *list(oanda_sync.values())]:
+            if not isinstance(payload, dict):
+                continue
+            for row in (payload.get("captured_rows") or []):
+                if isinstance(row, dict) and str(row.get("id") or "").strip():
+                    pending_rows_for_workbook.append(dict(row))
+        global _PENDING_MANUAL_SYNC_ROWS
+        _PENDING_MANUAL_SYNC_ROWS = pending_rows_for_workbook
         if _trading_journal_local_excel_authoritative() and run_closed_trade_capture and not _master_journal_single_file_mode():
             result = await asyncio.to_thread(_import_trading_journal_from_sources, progress_cb=_cb)
         _set_trading_journal_sync_state(stage="updating_master_journal", message="Updating Trading Journal.xlsx…")
         workbook_sync = await asyncio.to_thread(_sync_master_journal_workbook)
+        _PENDING_MANUAL_SYNC_ROWS = []
         if isinstance(result, dict):
             result.update(workbook_sync)
         warnings: List[str] = list((result or {}).get("warnings") or [])
@@ -24782,13 +24796,27 @@ async def _run_trading_journal_sync_job() -> None:
                 warnings.append(f"OANDA {acct} failed: {payload.get('error') or payload.get('message') or 'unknown'}")
         def _verify_bybit_payload_row_ids(mode_name: str, payload: Dict[str, object]) -> None:
             verification = _verify_captured_rows_persisted_to_master_journal(payload.get("captured_row_ids") or [])
-            payload["final_trade_log_row_ids_verified"] = bool(verification.get("ok"))
+            expected_capture = bool(payload.get("bybit_demo_execution_capture_expected")) if mode_name == "demo" else False
+            creds_available = bool(payload.get("bybit_demo_credentials_available", True)) if mode_name == "demo" else True
+            verified = bool(verification.get("ok"))
+            if expected_capture and (not creds_available):
+                verified = False
+            if expected_capture and int(payload.get("execution_rows_seen") or 0) <= 0 and str(payload.get("execution_fetch_error") or payload.get("error") or "").strip():
+                verified = False
+            payload["final_trade_log_row_ids_verified"] = verified
             payload["missing_execution_row_ids"] = verification.get("missing_row_ids") or []
             payload["persisted_execution_row_ids"] = verification.get("persisted_row_ids") or []
             payload["workbook_latest_trade_time"] = verification.get("workbook_latest_trade_time")
-            if payload.get("rows_seen", 0) > 0 and not payload["final_trade_log_row_ids_verified"]:
+            if expected_capture:
+                payload.setdefault("bybit_demo_execution_capture_expected", True)
+                payload.setdefault("bybit_demo_credentials_available", creds_available)
+                payload.setdefault("bybit_demo_credential_source", payload.get("bybit_demo_credential_source"))
+                payload.setdefault("bybit_demo_missing_env_vars", payload.get("bybit_demo_missing_env_vars") or [])
+            if (payload.get("rows_seen", 0) > 0 or expected_capture) and not payload["final_trade_log_row_ids_verified"]:
                 payload["ok"] = False
                 payload["error"] = f"Bybit {mode_name.title()} sync captured rows that were not persisted to Trade Log."
+                if expected_capture and not creds_available:
+                    payload["error"] = "Bybit Demo API credentials are not configured for local manual sync"
                 warnings.append(str(payload["error"]))
 
         for mode_name, mode_payload in {"demo": bybit_demo, "live": bybit_live}.items():
@@ -24802,7 +24830,7 @@ async def _run_trading_journal_sync_job() -> None:
             verified = True
             try:
                 wb = load_workbook(_master_journal_path(), data_only=True)
-                tl = _get_trade_log_sheet(wb, allow_legacy=True)
+                tl = _get_trade_log_sheet(wb, allow_legacy=False)
                 headers = [str(c.value or "").strip() for c in tl[1]]
                 ridx = headers.index("Row ID") + 1 if "Row ID" in headers else None
                 workbook_ids = set()
@@ -24964,7 +24992,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
             for sheet in SHEET_ORDER:
                 if sheet not in wb.sheetnames:
                     raise RuntimeError(f"Trading Journal validation failed: missing required sheet '{sheet}'.")
-            trade_log = _get_trade_log_sheet(wb, allow_legacy=True)
+            trade_log = _get_trade_log_sheet(wb, allow_legacy=False)
             inst = wb["Instrument Averages"]
             cal = wb["P&L Calendar"]
             dash = wb["Dashboard"]
