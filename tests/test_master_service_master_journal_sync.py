@@ -1249,6 +1249,61 @@ def test_sync_master_journal_writes_zero_balances_and_validation_detects_mismatc
     assert 'PEPPERSTONE DEMO' in str(bad.get('master_journal_error') or '')
     assert 'expected_balance=0.0' in str(bad.get('master_journal_error') or '')
     assert 'actual_balance=4.78' in str(bad.get('master_journal_error') or '')
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+def test_sync_master_journal_zero_qty_repairable_crypto_passes(tmp_path, monkeypatch):
+    from openpyxl import load_workbook
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    rows = [{
+        'id': 'btc-repairable',
+        'row_type': 'trade',
+        'account': 'BYBIT',
+        'symbol': 'BTCUSDT',
+        'side': 'BUY',
+        'qty': 0,
+        'entry_price': 100.0,
+        'exit_price': 101.0,
+        'open_time': '2026-01-01T00:00:00Z',
+        'close_time': '2026-01-01T01:00:00Z',
+        'net_profit': 1.0,
+        'raw_refs': {'closedSize': '0.015'},
+    }]
+    snap = {'items': rows, 'stats': {'totals': {}, 'by_instrument': [{'symbol': 'BTCUSDT', 'total_trades': 1}], 'groups': {'leaders': {}}}, 'balances': [{'account_label': 'BYBIT', 'balance': 1.0, 'currency': 'USDT'}], 'diagnostics': {}}
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
+    monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: rows)
+    result = master_service._sync_master_journal_workbook()
+    assert result['master_journal_ok'] is True
+    wb = load_workbook(tmp_path / 'Trading Journal.xlsx', data_only=True)
+    tl = master_service._get_trade_log_sheet(wb, allow_legacy=False)
+    headers = [str(c.value or '').strip() for c in tl[1]]
+    qty_col = headers.index('Qty') + 1
+    assert float(tl.cell(2, qty_col).value) == pytest.approx(0.015)
+    wb.close()
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+def test_sync_master_journal_zero_qty_unrepairable_crypto_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    rows = [{
+        'id': 'btc-unrepairable',
+        'row_type': 'trade',
+        'account': 'BYBIT',
+        'symbol': 'BTCUSDT',
+        'side': 'BUY',
+        'qty': 0,
+        'entry_price': None,
+        'exit_price': None,
+        'open_time': '2026-01-01T00:00:00Z',
+        'close_time': '2026-01-01T01:00:00Z',
+        'net_profit': None,
+    }]
+    snap = {'items': rows, 'stats': {'totals': {}, 'by_instrument': [{'symbol': 'BTCUSDT', 'total_trades': 1}], 'groups': {'leaders': {}}}, 'balances': [{'account_label': 'BYBIT', 'balance': 1.0, 'currency': 'USDT'}], 'diagnostics': {}}
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
+    monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: rows)
+    result = master_service._sync_master_journal_workbook()
+    assert result['master_journal_ok'] is False
+    assert 'unrepaired crypto Qty=0' in str(result.get('master_journal_error') or '')
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_build_journal_balance_timelines_rejects_non_authoritative_stale_excel_seed():
     rows = []

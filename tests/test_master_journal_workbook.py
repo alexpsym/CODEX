@@ -36,7 +36,7 @@ def sample_snapshot():
             {'id':'t2','row_type':'trade','symbol':'BTCUSDT','asset_class':'crypto','side':'SELL','open_time':'2026-05-02T00:00:00Z','close_time':'2026-05-02T02:00:00Z','net_profit':-50.0,'result_pct':-1.1,'r_multiple':-0.8,'stop_loss':61000,'take_profit':59000,'entry_price':60000,'trade_duration_seconds':7215,'analysis_balance_after_trade':950,'account':'BYBIT','setup':'S2'},
         ],
         'stats':{'totals':{'trades':2,'wins':1,'losses':1,'break_even':0,'win_rate_pct':50.0,'net_profit_total':70.5,'gross_gain':120.5,'gross_loss':50.0,'money_by_currency':{'net_profit_total':{'AUD':70.5},'gross_gain':{'AUD':120.5},'gross_loss':{'AUD':50.0},'max_gain':{'AUD':120.5},'max_loss':{'AUD':50.0}}},'groups':{'by_market':{'overall':{'trades':2,'wins':1,'losses':1,'break_even':0,'win_rate_pct':50.0,'net_profit_total':70.5,'gross_gain':120.5,'gross_loss':50.0,'avg_result_pct':0.6,'min_result_pct':-1.1,'max_result_pct':2.3,'avg_r_multiple':0.2,'min_r_multiple':-0.8,'max_r_multiple':1.2,'max_gain':120.5,'max_loss':50.0,'avg_stop_pct':1.1,'avg_target_pct':2.2,'avg_duration_seconds':5457,'money_by_currency':{'net_profit_total':{'AUD':70.5},'gross_gain':{'AUD':120.5},'gross_loss':{'AUD':50.0},'max_gain':{'AUD':120.5},'max_loss':{'AUD':50.0}},'metric_sources':{'min_result_pct':{'symbol':'BTCUSDT','date':'2026-05-02'},'max_result_pct':{'symbol':'EURUSD','date':'2026-05-01'}}},'fx':{},'crypto':{}},'risk_expectancy':{'avg_stop_pct_winners':1,'avg_stop_pct_losers':2,'avg_target_pct_winners':3,'avg_target_pct_losers':4,'avg_result_pct_winners':2.3,'avg_result_pct_losers':-1.1,'avg_r_multiple_winners':1.2,'avg_r_multiple_losers':-0.8,'max_drawdown_pct':5,'avg_drawdown_pct':2},'duration':{'overall_avg_seconds':5457,'overall_shortest_seconds':3700,'overall_longest_seconds':7215,'fx_shortest_seconds':3700,'fx_longest_seconds':3700,'crypto_shortest_seconds':7215,'crypto_longest_seconds':7215},'leaders':{}},'by_instrument':[{'symbol':'EURUSD','asset_class':'fx','total_trades':1,'long_trades':1,'short_trades':0,'wins':1,'losses':0,'break_even':0,'net_profit_total':120.5,'avg_net_profit':120.5,'win_rate_pct':100,'avg_sl_pct_wins':1,'avg_sl_pct_losses':None,'avg_tp_pct_wins':2,'avg_tp_pct_losses':None,'avg_trade_duration_seconds':3700,'min_trade_duration_seconds':3700,'max_trade_duration_seconds':3700}]},
-        'balances':[{'account_label':'Bybit Live','balance':10.123456789,'currency':'USDT','as_of':'2026-05-10'}]
+        'balances':[{'account_label':'BYBIT','balance':10.123456789,'currency':'USDT','as_of':'2026-05-10'}]
     }
 
 
@@ -550,17 +550,18 @@ def test_metric_refresh_same_row_sections_and_non_a_balance_block(tmp_path: Path
     # labels
     for base in ['A','D','G']:
         ws[f'{base}2']='Trades'; ws[f'{base}3']='Avg R'; ws[f'{base}4']='Win rate'; ws[f'{base}5']='Max loss %'; ws[f'{base}6']='Source'
-    ws['P2']='Account'; ws['Q2']='Balance'; ws['R2']='Currency'; ws['S2']='As Of'; ws['P3']='Bybit Live'
+    ws['P2']='Account'; ws['Q2']='Balance'; ws['R2']='Currency'; ws['S2']='As Of'; ws['P3']='BYBIT'
     ws['B4'].number_format='0.00%'; ws['E4'].number_format='0.00%'; ws['H4'].number_format='0.00%'
     wb.save(p)
-    snap={'stats':{'totals':{},'groups':{'by_market':{'overall':{'trades':1,'avg_r_multiple':2.0,'win_rate_pct':50.0,'min_result_pct':-1.25,'metric_sources':{'min_result_pct':{'symbol':'EURUSD','date':'2026-01-01'}}},'fx':{'trades':2,'avg_r_multiple':3.0,'win_rate_pct':25.0,'min_result_pct':-2.0,'metric_sources':{'min_result_pct':{'symbol':'GBPUSD','date':'2026-01-02'}}},'crypto':{'trades':3,'avg_r_multiple':4.0,'win_rate_pct':75.0,'min_result_pct':-3.0,'metric_sources':{'min_result_pct':{'symbol':'BTCUSDT','date':'2026-01-03'}}}},'risk_expectancy':{},'leaders':{}}},'balances':[{'account_label':'Bybit Live','balance':12.5,'currency':'USDT','as_of':'2026-01-04'}]}
+    snap={'stats':{'totals':{},'groups':{'by_market':{'overall':{'trades':1,'avg_r_multiple':2.0,'win_rate_pct':50.0,'min_result_pct':-1.25,'metric_sources':{'min_result_pct':{'symbol':'EURUSD','date':'2026-01-01'}}},'fx':{'trades':2,'avg_r_multiple':3.0,'win_rate_pct':25.0,'min_result_pct':-2.0,'metric_sources':{'min_result_pct':{'symbol':'GBPUSD','date':'2026-01-02'}}},'crypto':{'trades':3,'avg_r_multiple':4.0,'win_rate_pct':75.0,'min_result_pct':-3.0,'metric_sources':{'min_result_pct':{'symbol':'BTCUSDT','date':'2026-01-03'}}}},'risk_expectancy':{},'leaders':{}}},'balances':[{'account_label':'BYBIT','balance':12.5,'currency':'USDT','as_of':'2026-01-04'}]}
     res = update_master_journal_workbook_data_only(p,snap); Path(res["candidate_path"]).replace(p)
     out=load_workbook(p)
     d=out['Dashboard']
     assert d['B2'].value==1 and d['E2'].value==2 and d['H2'].value==3
     assert d['B3'].value==2.0 and d['E3'].value==3.0 and d['H3'].value==4.0
     assert d['B4'].value==0.5 and d['E4'].value==0.25 and d['H4'].value==0.75
-    assert d['Q3'].value==12.5 and d['R3'].value=='USDT'
+    assert d['Q3'].value == 12.5
+    assert d['R3'].value == 'USDT'
     assert 'GBPUSD' in str(d['E6'].value)
 
 def test_embedded_fx_crypto_duration_without_duration_section(tmp_path: Path):
@@ -573,7 +574,7 @@ def test_embedded_fx_crypto_duration_without_duration_section(tmp_path: Path):
     ws['G2']='Crypto shortest'; ws['G3']='Source'; ws['G4']='Crypto longest'; ws['G5']='Source'
     ws['T2']='Account'; ws['U2']='Balance'; ws['V2']='Currency'; ws['T3']='Bybit Live'
     wb.save(p)
-    snap={'stats':{'totals':{},'groups':{'by_market':{'overall':{},'fx':{},'crypto':{}},'risk_expectancy':{},'leaders':{},'duration':{'fx_shortest_seconds':10,'fx_longest_seconds':20,'crypto_shortest_seconds':30,'crypto_longest_seconds':40,'metric_sources':{'fx_shortest_seconds':{'symbol':'EURUSD','date':'2026-01-01'},'fx_longest_seconds':{'symbol':'GBPUSD','date':'2026-01-02'},'crypto_shortest_seconds':{'symbol':'BTCUSDT','date':'2026-01-03'},'crypto_longest_seconds':{'symbol':'ETHUSDT','date':'2026-01-04'}}}}},'balances':[{'account_label':'Bybit Live','balance':1,'currency':'USDT'}]}
+    snap={'stats':{'totals':{},'groups':{'by_market':{'overall':{},'fx':{},'crypto':{}},'risk_expectancy':{},'leaders':{},'duration':{'fx_shortest_seconds':10,'fx_longest_seconds':20,'crypto_shortest_seconds':30,'crypto_longest_seconds':40,'metric_sources':{'fx_shortest_seconds':{'symbol':'EURUSD','date':'2026-01-01'},'fx_longest_seconds':{'symbol':'GBPUSD','date':'2026-01-02'},'crypto_shortest_seconds':{'symbol':'BTCUSDT','date':'2026-01-03'},'crypto_longest_seconds':{'symbol':'ETHUSDT','date':'2026-01-04'}}}}},'balances':[{'account_label':'BYBIT','balance':1,'currency':'USDT'}]}
     res = update_master_journal_workbook_data_only(p,snap); Path(res["candidate_path"]).replace(p)
     out=load_workbook(p)['Dashboard']
     assert isinstance(out['E2'].value, (int, float)) and out['E2'].number_format == r'00\:00\:00\:00'
@@ -622,7 +623,7 @@ def test_instrument_leaders_skips_missing_optional_rows(tmp_path: Path):
         'fx_most_losses_instrument':{'symbol':'XAUUSD','wins':1,'losses':3,'trades':4},
         'crypto_most_wins_instrument':{'symbol':'BTCUSDT','wins':6,'losses':2,'trades':8},
         'crypto_most_losses_instrument':{'symbol':'ETHUSDT','wins':2,'losses':6,'trades':8},
-    }}},'balances':[{'account_label':'Bybit Live','balance':2,'currency':'USDT'}]}
+    }}},'balances':[{'account_label':'BYBIT','balance':2,'currency':'USDT'}]}
     result=update_master_journal_workbook_data_only(p,snap); Path(result["candidate_path"]).replace(p)
     out=load_workbook(p)['Dashboard']
     assert out['N3'].value=='EURUSD' and out['O3'].value==4 and out['P3'].value==1 and out['Q3'].value==5
@@ -642,7 +643,7 @@ def test_account_balances_restores_missing_rows_without_layout_mutation(tmp_path
     wb.save(src)
     snap = {'stats':{'totals':{},'groups':{'by_market':{'overall':{},'fx':{},'crypto':{}},'risk_expectancy':{},'leaders':{},'duration':{}}},'balances':[
         {"account_label": "Bybit Demo", "balance": 123.456789, "currency": "USDT", "as_of": "2026-05-16"},
-        {"account_label": "Bybit Live", "balance": 10.123456789, "currency": "USDT", "as_of": "2026-05-16"},
+        {"account_label": "BYBIT", "balance": 10.123456789, "currency": "USDT", "as_of": "2026-05-16"},
     ]}
     res = update_master_journal_workbook_data_only(src, snap)
     Path(res["candidate_path"]).replace(src)
@@ -651,9 +652,9 @@ def test_account_balances_restores_missing_rows_without_layout_mutation(tmp_path
     found = {}
     for r in range(3, d.max_row + 1):
         label = str(d.cell(r, 20).value or "").strip()
-        if label in {"Bybit Demo", "Bybit Live"}:
+        if label in {"Bybit Demo", "BYBIT"}:
             found[label] = r
-    assert "Bybit Demo" in found and "Bybit Live" in found
+    assert "Bybit Demo" in found and "BYBIT" in found
     assert isinstance(d.cell(found["Bybit Demo"], 21).value, (int, float))
     assert d.cell(found["Bybit Demo"], 22).value == "USDT"
     assert str(d.cell(found["Bybit Demo"], 23).value) == "2026-05-16"
@@ -667,7 +668,7 @@ def test_account_balances_reuses_blank_row_before_append(tmp_path: Path):
     wb = Workbook(); ws = wb.active; ws.title = "Dashboard"; wb.create_sheet("Trade Log"); wb.create_sheet("Instrument Averages"); wb.create_sheet("P&L Calendar")
     ws["A1"]="Overall"; ws["D1"]="FX"; ws["G1"]="Crypto"; ws["J1"]="Winners"; ws["J8"]="Losers"; ws["J14"]="Drawdown"; ws["M1"]="Instrument leaders"; ws["T1"]="Account Balances"
     ws["T2"]="Account"; ws["U2"]="Balance"; ws["V2"]="Currency"; ws["W2"]="As Of"
-    ws["T3"]="Bybit Live"; ws["U3"]=1.0; ws["V3"]="USDT"
+    ws["T3"]="BYBIT"; ws["U3"]=1.0; ws["V3"]="USDT"
     ws["T4"]=None; ws["U4"]=None; ws["V4"]=None
     wb.save(p)
     snap={'stats':{'totals':{},'groups':{'by_market':{'overall':{},'fx':{},'crypto':{}},'risk_expectancy':{},'leaders':{},'duration':{}}},'balances':[{'account_label':'Bybit Demo','balance':2.5,'currency':'USDT','as_of':'2026-05-16'}]}
@@ -675,6 +676,61 @@ def test_account_balances_reuses_blank_row_before_append(tmp_path: Path):
     out = load_workbook(p)["Dashboard"]
     assert out["T4"].value == "Bybit Demo"
     assert out["U4"].value == 2.5
+
+
+def test_account_balances_renames_stale_bybit_live_row_to_bybit(tmp_path: Path):
+    from tools.master_journal_workbook import update_master_journal_workbook_data_only
+    from openpyxl import Workbook
+    p = tmp_path / "stale_only.xlsx"
+    wb = Workbook(); ws = wb.active; ws.title = "Dashboard"; wb.create_sheet("Trade Log"); wb.create_sheet("Instrument Averages"); wb.create_sheet("P&L Calendar")
+    ws["A1"]="Overall"; ws["D1"]="FX"; ws["G1"]="Crypto"; ws["J1"]="Winners"; ws["J8"]="Losers"; ws["J14"]="Drawdown"; ws["M1"]="Instrument leaders"; ws["T1"]="Account Balances"
+    ws["T2"]="Account"; ws["U2"]="Balance"; ws["V2"]="Currency"; ws["W2"]="As Of"
+    ws["T3"]="Bybit Live"; ws["U3"]=1.0; ws["V3"]="USDT"
+    wb.save(p)
+    snap={"stats":{"totals":{},"groups":{"by_market":{"overall":{},"fx":{},"crypto":{}},"risk_expectancy":{},"leaders":{},"duration":{}}},"balances":[{"account_label":"BYBIT","balance":9.5,"currency":"USDT","as_of":"2026-05-16"}]}
+    res = update_master_journal_workbook_data_only(p, snap); Path(res["candidate_path"]).replace(p)
+    out = load_workbook(p)["Dashboard"]
+    assert out["T3"].value == "BYBIT"
+    assert out["U3"].value == 9.5
+    assert out["V3"].value == "USDT"
+    labels = [str(out.cell(r, 20).value or "").strip() for r in range(3, out.max_row + 1)]
+    assert "Bybit Live" not in labels
+
+
+def test_account_balances_clears_duplicate_stale_bybit_live_row(tmp_path: Path):
+    from tools.master_journal_workbook import update_master_journal_workbook_data_only
+    from openpyxl import Workbook
+    p = tmp_path / "stale_dup.xlsx"
+    wb = Workbook(); ws = wb.active; ws.title = "Dashboard"; wb.create_sheet("Trade Log"); wb.create_sheet("Instrument Averages"); wb.create_sheet("P&L Calendar")
+    ws["A1"]="Overall"; ws["D1"]="FX"; ws["G1"]="Crypto"; ws["J1"]="Winners"; ws["J8"]="Losers"; ws["J14"]="Drawdown"; ws["M1"]="Instrument leaders"; ws["T1"]="Account Balances"
+    ws["T2"]="Account"; ws["U2"]="Balance"; ws["V2"]="Currency"; ws["W2"]="As Of"
+    ws["T3"]="BYBIT"; ws["U3"]=3.0; ws["V3"]="USDT"
+    ws["T4"]="Bybit Live"; ws["U4"]=2.0; ws["V4"]="USDT"
+    wb.save(p)
+    snap={"stats":{"totals":{},"groups":{"by_market":{"overall":{},"fx":{},"crypto":{}},"risk_expectancy":{},"leaders":{},"duration":{}}},"balances":[{"account_label":"BYBIT","balance":7.0,"currency":"USDT"}]}
+    res = update_master_journal_workbook_data_only(p, snap); Path(res["candidate_path"]).replace(p)
+    out = load_workbook(p)["Dashboard"]
+    assert out["T3"].value == "BYBIT"
+    assert out["U3"].value == 7.0
+    assert out["T4"].value in (None, "")
+    assert out["U4"].value in (None, "")
+
+
+def test_account_balances_clears_duplicate_stale_bybit_live_alias_row(tmp_path: Path):
+    from tools.master_journal_workbook import update_master_journal_workbook_data_only
+    from openpyxl import Workbook
+    p = tmp_path / "stale_dup_alias.xlsx"
+    wb = Workbook(); ws = wb.active; ws.title = "Dashboard"; wb.create_sheet("Trade Log"); wb.create_sheet("Instrument Averages"); wb.create_sheet("P&L Calendar")
+    ws["A1"]="Overall"; ws["D1"]="FX"; ws["G1"]="Crypto"; ws["J1"]="Winners"; ws["J8"]="Losers"; ws["J14"]="Drawdown"; ws["M1"]="Instrument leaders"; ws["T1"]="Account Balances"
+    ws["T2"]="Account"; ws["U2"]="Balance"; ws["V2"]="Currency"; ws["W2"]="As Of"
+    ws["T3"]="BYBIT"; ws["U3"]=3.0; ws["V3"]="USDT"
+    ws["T4"]="bybit_live"; ws["U4"]=2.0; ws["V4"]="USDT"
+    wb.save(p)
+    snap={"stats":{"totals":{},"groups":{"by_market":{"overall":{},"fx":{},"crypto":{}},"risk_expectancy":{},"leaders":{},"duration":{}}},"balances":[{"account_label":"BYBIT","balance":7.0,"currency":"USDT"}]}
+    res = update_master_journal_workbook_data_only(p, snap); Path(res["candidate_path"]).replace(p)
+    out = load_workbook(p)["Dashboard"]
+    assert out["T3"].value == "BYBIT"
+    assert out["T4"].value in (None, "")
 
 def test_update_data_only_preserves_calendar_merges_and_skips_non_anchor_writes(tmp_path: Path):
     from openpyxl import Workbook
@@ -706,9 +762,45 @@ def test_update_data_only_preserves_calendar_merges_and_skips_non_anchor_writes(
     assert float(out_cal["G2"].value) == 0.01
     assert int(out_cal["G3"].value) == 1
     d = out["Dashboard"]
-    assert d["T3"].value == "BYBIT DEMO"
+    assert d["T3"].value == "Bybit Demo"
     assert isinstance(d["U3"].value, (int, float))
     out.close()
+
+
+def test_update_data_only_fails_on_unrepaired_crypto_zero_qty(tmp_path: Path):
+    from openpyxl import Workbook
+    from tools.master_journal_workbook import update_master_journal_workbook_data_only
+    p = tmp_path / "zero_qty_fail.xlsx"
+    wb=Workbook(); ws=wb.active; ws.title='Dashboard'; wb.create_sheet('Trade Log'); wb.create_sheet('Instrument Averages'); wb.create_sheet('P&L Calendar')
+    ws["A1"]="Overall"; ws["D1"]="FX"; ws["G1"]="Crypto"; ws["J1"]="Winners"; ws["J8"]="Losers"; ws["J14"]="Drawdown"; ws["M1"]="Instrument leaders"; ws["T1"]="Account Balances"
+    ws["T2"]="Account"; ws["U2"]="Balance"; ws["V2"]="Currency"; ws["W2"]="As Of"
+    wb.save(p)
+    snap={"items":[{"id":"z1","row_type":"trade","account":"BYBIT","symbol":"BTCUSDT","side":"BUY","qty":0,"entry_price":100,"exit_price":100,"net_profit":0,"open_time":"2026-01-01","close_time":"2026-01-01"}],"stats":{"totals":{},"groups":{"by_market":{"overall":{},"fx":{},"crypto":{}},"risk_expectancy":{},"leaders":{},"duration":{}}},"balances":[]}
+    out = update_master_journal_workbook_data_only(p, snap)
+    assert out["ok"] is False
+    assert "Unrepaired crypto zero-quantity" in str(out.get("error"))
+
+
+def test_zero_qty_repair_from_raw_refs_closed_size():
+    from tools.master_journal_workbook import _repair_or_flag_zero_trade_qty
+    row = {"id":"r1","row_type":"trade","account":"BYBIT","symbol":"BTCUSDT","qty":0,"raw_refs":{"closedSize":"0.015"}}
+    fixed = _repair_or_flag_zero_trade_qty(dict(row))
+    assert fixed["qty"] == 0.015
+
+
+def test_zero_qty_repair_from_pnl_inference_crypto():
+    from tools.master_journal_workbook import _repair_or_flag_zero_trade_qty
+    row = {"id":"r2","row_type":"trade","account":"BYBIT","symbol":"BTCUSDT","side":"BUY","qty":0,"entry_price":100.0,"exit_price":110.0,"commission":1.0,"net_profit":9.0}
+    fixed = _repair_or_flag_zero_trade_qty(dict(row))
+    assert fixed["qty"] == 1.0
+
+
+def test_zero_qty_fx_is_diagnosed_not_inferred():
+    from tools.master_journal_workbook import _repair_or_flag_zero_trade_qty
+    row = {"id":"r3","row_type":"trade","account":"OANDA LIVE","symbol":"EUR/USD","side":"BUY","qty":0,"entry_price":1.1,"exit_price":1.2,"commission":0.1,"net_profit":1.0}
+    fixed = _repair_or_flag_zero_trade_qty(dict(row))
+    assert fixed["qty"] == 0
+    assert "zero_qty_unrepaired_fx" in (fixed.get("diagnostics") or [])
 
 def test_update_data_only_appends_missing_calendar_year_block(tmp_path: Path):
     from openpyxl import Workbook
