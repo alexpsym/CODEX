@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import pytest
 from openpyxl import Workbook
+from openpyxl import load_workbook
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / 'render' / 'master_service.py'
 HTTPX_AVAILABLE = importlib.util.find_spec("httpx") is not None
@@ -50,6 +51,288 @@ def test_master_service_sync_test_bootstrap():
     assert True
 
 
+def test_manual_sync_default_bybit_demo_capture_gate() -> None:
+    ms = _load_master_service_for_import_test()
+
+    ms.TRADING_JOURNAL_SOURCE = "master_journal"
+    ms.ENABLE_BYBIT_DEMO_JOURNAL = True
+    ms._master_journal_single_file_mode = lambda: True
+    ms.describe_bybit_credentials_for = lambda _mode: {"credentials_available": True}
+    assert ms._manual_sync_should_capture_bybit_demo_recent_history() is True
+
+    ms.TRADING_JOURNAL_SOURCE = "local"
+    assert ms._manual_sync_should_capture_bybit_demo_recent_history() is False
+    ms.TRADING_JOURNAL_SOURCE = "master_journal"
+    ms._master_journal_single_file_mode = lambda: False
+    assert ms._manual_sync_should_capture_bybit_demo_recent_history() is False
+    ms._master_journal_single_file_mode = lambda: True
+    ms.ENABLE_BYBIT_DEMO_JOURNAL = False
+    assert ms._manual_sync_should_capture_bybit_demo_recent_history() is False
+    ms.ENABLE_BYBIT_DEMO_JOURNAL = True
+    ms.describe_bybit_credentials_for = lambda _mode: {"credentials_available": False}
+    assert ms._manual_sync_should_capture_bybit_demo_recent_history() is False
+
+def test_allow_manual_bybit_demo_broker_rows_in_single_file_gate() -> None:
+    ms = _load_master_service_for_import_test()
+    ms.TRADING_JOURNAL_SOURCE = "master_journal"
+    ms.ENABLE_BYBIT_DEMO_JOURNAL = True
+    ms._master_journal_single_file_mode = lambda: True
+    ms.describe_bybit_credentials_for = lambda _mode: {"credentials_available": True}
+    assert ms._allow_manual_bybit_demo_broker_rows_in_single_file(account_mode="demo", reason="manual") is True
+    assert ms._allow_manual_bybit_demo_broker_rows_in_single_file(account_mode="live", reason="manual") is False
+    assert ms._allow_manual_bybit_demo_broker_rows_in_single_file(account_mode="demo", reason="automatic") is False
+    ms.TRADING_JOURNAL_SOURCE = "local"
+    assert ms._allow_manual_bybit_demo_broker_rows_in_single_file(account_mode="demo", reason="manual") is False
+    ms.TRADING_JOURNAL_SOURCE = "master_journal"
+    ms.describe_bybit_credentials_for = lambda _mode: {"credentials_available": False}
+    assert ms._allow_manual_bybit_demo_broker_rows_in_single_file(account_mode="demo", reason="manual") is False
+
+
+def test_manual_sync_orchestration_runs_demo_capture_on_default_gate(tmp_path) -> None:
+    ms = _load_master_service_for_import_test()
+    from tools.master_journal_workbook import build_master_journal_workbook
+
+    ms.TRADING_JOURNAL_SOURCE = "master_journal"
+    ms.TRADING_JOURNAL_LOCAL_DIR = tmp_path
+    ms.TRADING_JOURNAL_BROKER_REFRESH_ENABLED = False
+    ms.TRADING_JOURNAL_SYNC_CALCULATOR_TRADES_ON_MANUAL = False
+    ms.ENABLE_BYBIT_DEMO_JOURNAL = True
+    ms.describe_bybit_credentials_for = lambda _mode: {"credentials_available": True, "key_source": "env", "missing_env_vars": [], "base_url": "https://api-demo.bybit.com"}
+    ms.resolve_bybit_credentials_for = lambda mode: (mode, "k", "s", "https://api-demo.bybit.com" if mode == "demo" else "https://api.bybit.com", "env")
+    build_master_journal_workbook({"items": [], "stats": {"totals": {}, "groups": {}}, "balances": []}, tmp_path / "Trading Journal.xlsx")
+    ms._import_trading_journal_from_sources = lambda *a, **k: {"ok": True, "diagnostics": {}, "rows_imported": 0}
+    calls = []
+    async def _fake_bybit(account_mode: str, reason: str, enforce_manual_cooldown: bool = True):
+        calls.append((account_mode, reason, enforce_manual_cooldown))
+        if account_mode == "demo":
+            row = {"id": "bybit:demo:execution:BTCUSDT:E2", "row_type": "trade", "source": "bybit_execution_history", "account": "Bybit Demo", "account_label": "Bybit Demo", "symbol": "BTCUSDT", "side": "Buy", "open_time": "2026-05-19T01:13:00+10:00", "close_time": "2026-05-19T01:13:00+10:00", "qty": 0.1, "entry_price": 100001, "exit_price": 100001, "asset_class": "crypto"}
+            ms._upsert_trading_journal_rows([row], allow_broker_rows_in_single_file=True)
+            return {"ok": True, "rows_seen": 1, "captured_rows": [row], "captured_row_ids": [row["id"]], "bybit_demo_execution_capture_expected": True, "bybit_demo_credentials_available": True}
+        return {"ok": True, "rows_seen": 0, "captured_rows": [], "captured_row_ids": []}
+    ms._run_bybit_closed_pnl_sync = _fake_bybit
+    async def _fake_oanda(*_a, **_k):
+        return {"ok": True, "rows_seen": 0, "captured_row_ids": []}
+    ms._recover_oanda_recent_fills = _fake_oanda
+    asyncio.run(ms._run_trading_journal_sync_job())
+    st = ms._sync_state_snapshot()
+    demo = (((st.get("result") or {}).get("bybit") or {}).get("demo") or {})
+    assert ("demo", "manual", False) in calls
+    assert demo.get("bybit_demo_capture_enabled_reason") == "manual_master_journal_single_file_default"
+    assert demo.get("bybit_demo_execution_capture_expected") is True
+
+def test_manual_sync_stamps_expected_capture_flag_and_fails_on_fetch_error(tmp_path) -> None:
+    ms = _load_master_service_for_import_test()
+    from tools.master_journal_workbook import build_master_journal_workbook
+    ms.TRADING_JOURNAL_SOURCE = "master_journal"
+    ms.TRADING_JOURNAL_LOCAL_DIR = tmp_path
+    ms.TRADING_JOURNAL_BROKER_REFRESH_ENABLED = False
+    ms.TRADING_JOURNAL_SYNC_CALCULATOR_TRADES_ON_MANUAL = False
+    ms.ENABLE_BYBIT_DEMO_JOURNAL = True
+    ms.describe_bybit_credentials_for = lambda _mode: {"credentials_available": True}
+    build_master_journal_workbook({"items": [], "stats": {"totals": {}, "groups": {}}, "balances": []}, tmp_path / "Trading Journal.xlsx")
+    ms._import_trading_journal_from_sources = lambda *a, **k: {"ok": True, "diagnostics": {}, "rows_imported": 0}
+    async def _fake_bybit(account_mode: str, **_kwargs):
+        if account_mode == "demo":
+            return {"ok": True, "rows_seen": 0, "captured_row_ids": [], "execution_rows_seen": 0, "execution_fetch_error": "forced endpoint failure path=/v5/execution/list"}
+        return {"ok": True, "rows_seen": 0, "captured_row_ids": []}
+    ms._run_bybit_closed_pnl_sync = _fake_bybit
+    async def _fake_oanda(*_a, **_k):
+        return {"ok": True, "rows_seen": 0, "captured_row_ids": []}
+    ms._recover_oanda_recent_fills = _fake_oanda
+    asyncio.run(ms._run_trading_journal_sync_job())
+    st = ms._sync_state_snapshot()
+    demo = (((st.get("result") or {}).get("bybit") or {}).get("demo") or {})
+    assert demo.get("bybit_demo_execution_capture_expected") is True
+    assert demo.get("ok") is False
+    assert "execution history fetch failed" in str(demo.get("error") or "")
+    assert "/v5/execution/list" in str(demo.get("error") or "")
+    assert st.get("ok") is False
+
+def test_manual_sync_endpoint_path_writes_rows_and_is_idempotent(tmp_path) -> None:
+    ms = _load_master_service_for_import_test()
+    from tools.master_journal_workbook import build_master_journal_workbook
+    seed = {"items": [{"id": "sig:existing", "row_type": "trade", "account": "Bybit Demo", "account_label": "Bybit Demo", "symbol": "BTCUSDT", "side": "Buy", "open_time": "2026-05-04T11:16:00+00:00", "close_time": "2026-05-04T11:16:00+00:00", "qty": 0.1, "entry_price": 100, "exit_price": 101, "net_profit": 1.0}], "stats": {"totals": {}, "groups": {}}, "balances": [{"account": "Bybit Demo", "account_label": "Bybit Demo", "balance": 1000.0, "currency": "USDT"}]}
+    build_master_journal_workbook(seed, tmp_path / "Trading Journal.xlsx")
+    ms.TRADING_JOURNAL_SOURCE = "master_journal"
+    ms.TRADING_JOURNAL_LOCAL_DIR = tmp_path
+    ms.TRADING_JOURNAL_BROKER_REFRESH_ENABLED = False
+    ms.TRADING_JOURNAL_SYNC_CALCULATOR_TRADES_ON_MANUAL = False
+    ms.ENABLE_BYBIT_DEMO_JOURNAL = True
+    ms.describe_bybit_credentials_for = lambda mode: {
+        "credentials_available": mode == "demo",
+        "base_url": "https://api-demo.bybit.com" if mode == "demo" else "https://api.bybit.com",
+        "key_source": "env" if mode == "demo" else "NONE",
+        "missing_env_vars": [] if mode == "demo" else ["BYBIT_API_KEY"],
+    }
+    ms.resolve_bybit_credentials_for = lambda mode: (mode, "k", "s", "https://api-demo.bybit.com", "env") if mode == "demo" else (mode, "", "", "https://api.bybit.com", "NONE")
+    ms._master_journal_single_file_mode = lambda: True
+    ms._trading_journal_local_excel_authoritative = lambda: True
+    ms._import_trading_journal_from_sources = lambda *a, **k: {
+        "ok": True,
+        "diagnostics": {},
+        "rows_imported": 0,
+        "local_workbooks_seen": 1,
+        "dropbox_workbooks_seen": 0,
+    }
+    ms.load_bybit_demo_tpsl_cache = lambda: {}
+    ms.save_bybit_demo_tpsl_cache = lambda *_a, **_k: None
+    ms._trading_journal_github_sync_enabled = lambda: False
+    debug_seen = {"pending_ids": [], "snapshot_ids": []}
+    _real_sync_master = ms._sync_master_journal_workbook
+    def _sync_master_with_debug():
+        debug_seen["pending_ids"] = [
+            str(r.get("id") or "").strip()
+            for r in (ms._PENDING_MANUAL_SYNC_ROWS or [])
+            if isinstance(r, dict)
+        ]
+        snap = ms._build_trading_journal_view_snapshot(force=True) or {}
+        debug_seen["snapshot_ids"] = [
+            str(r.get("id") or "").strip()
+            for r in (snap.get("items") or [])
+            if isinstance(r, dict)
+        ]
+        return _real_sync_master()
+    ms._sync_master_journal_workbook = _sync_master_with_debug
+    calls = {"exec": 0}
+    async def _fake_exec_chunked(**_kwargs):
+        calls["exec"] += 1
+        return [
+            {"symbol": "BTCUSDT", "orderId": "OID1", "execId": "E1", "execQty": "0.10", "execPrice": "100000", "execFee": "0.01", "execTime": str(1778980380000), "side": "Buy"},
+            {"symbol": "BTCUSDT", "orderId": "OID2", "execId": "E2", "execQty": "0.10", "execPrice": "100100", "execFee": "0.01", "execTime": str(1779153180000), "side": "Sell"},
+        ]
+    async def _empty_payload(**_kwargs):
+        return {"result": {"list": [], "nextPageCursor": ""}}
+    async def _tx_payload(**_kwargs):
+        return {
+            "result": {
+                "list": [
+                    {"orderId": "OID1", "cashBalance": "1000.10"},
+                    {"orderId": "OID2", "cashBalance": "1000.20"},
+                ],
+                "nextPageCursor": "",
+            }
+        }
+    ms._fetch_bybit_executions_chunked = _fake_exec_chunked
+    ms._fetch_bybit_closed_pnl = _empty_payload
+    ms._fetch_bybit_transaction_log = _tx_payload
+    ms._fetch_bybit_order_history = _empty_payload
+    ms._fetch_bybit_order_realtime = _empty_payload
+    async def _fake_balance(_mode):
+        return {"available_usdt": 1000}
+    ms._fetch_bybit_balance_usdt = _fake_balance
+    async def _fake_oanda(*_a, **_k):
+        return {"ok": True, "rows_seen": 0, "captured_row_ids": []}
+    ms._recover_oanda_recent_fills = _fake_oanda
+    real_run_bybit = ms._run_bybit_closed_pnl_sync
+    async def _run_demo_only(*args, **kwargs):
+        if kwargs.get("account_mode") == "live":
+            return {"ok": True, "rows_seen": 0, "captured_row_ids": [], "captured_rows": []}
+        return await real_run_bybit(*args, **kwargs)
+    ms._run_bybit_closed_pnl_sync = _run_demo_only
+
+    asyncio.run(ms._run_trading_journal_sync_job())
+    st1 = ms._sync_state_snapshot()
+    d1 = (((st1.get("result") or {}).get("bybit") or {}).get("demo") or {})
+    assert st1.get("ok") is True
+    assert d1.get("ok") is True
+    assert int(d1.get("bybit_demo_execution_rows_seen") or 0) > 0
+    assert int(d1.get("bybit_demo_captured_rows_count") or 0) > 0
+    assert int(d1.get("bybit_demo_pending_rows_for_workbook_count") or 0) > 0
+    ids1 = [str(x).strip() for x in (d1.get("captured_row_ids") or []) if str(x).strip()]
+    assert len(ids1) > 0
+    assert len(d1.get("captured_rows") or []) > 0
+    assert d1.get("final_trade_log_row_ids_verified") is True
+    assert {"bybit:demo:execution:BTCUSDT:E1", "bybit:demo:execution:BTCUSDT:E2"}.issubset(set(d1.get("persisted_execution_row_ids") or []))
+    assert (d1.get("missing_execution_row_ids") or []) == []
+    assert not str(d1.get("verification_error") or "").strip()
+    assert d1.get("verification_path") == str(tmp_path / "Trading Journal.xlsx")
+    assert any(i.startswith("bybit:demo:execution:BTCUSDT:E") for i in ids1)
+    assert {"bybit:demo:execution:BTCUSDT:E1", "bybit:demo:execution:BTCUSDT:E2"}.issubset(set(debug_seen["pending_ids"]))
+    assert {"bybit:demo:execution:BTCUSDT:E1", "bybit:demo:execution:BTCUSDT:E2"}.issubset(set(debug_seen["snapshot_ids"]))
+
+    wb1 = load_workbook(tmp_path / "Trading Journal.xlsx", data_only=True)
+    ws1 = wb1["Trade Log"]
+    headers1 = [str(c.value or "").strip() for c in ws1[1]]
+    ridx1 = headers1.index("Row ID") + 1
+    aidx1 = headers1.index("Account") + 1
+    cidx1 = headers1.index("Close Time") + 1
+    workbook_ids1 = [str(ws1.cell(r, ridx1).value or "").strip() for r in range(2, ws1.max_row + 1)]
+    assert set(ids1).issubset(set(workbook_ids1))
+    assert "bybit:demo:execution:BTCUSDT:E1" in workbook_ids1
+    assert "bybit:demo:execution:BTCUSDT:E2" in workbook_ids1
+    assert workbook_ids1.count("sig:existing") == 1
+    demo_close_values_1 = []
+    for r in range(2, ws1.max_row + 1):
+        if str(ws1.cell(r, aidx1).value or "").strip() != "Bybit Demo":
+            continue
+        cv = ws1.cell(r, cidx1).value
+        if hasattr(cv, "year"):
+            demo_close_values_1.append((cv.year, cv.month, cv.day))
+    assert demo_close_values_1
+    latest_close_1 = max(demo_close_values_1)
+    assert latest_close_1 >= (2026, 5, 19)
+    assert latest_close_1 > (2026, 5, 4)
+    api_demo_count_1 = sum(1 for rid in workbook_ids1 if rid in set(ids1))
+    assert api_demo_count_1 == len(ids1)
+
+    asyncio.run(ms._run_trading_journal_sync_job())
+    st2 = ms._sync_state_snapshot()
+    d2 = (((st2.get("result") or {}).get("bybit") or {}).get("demo") or {})
+    assert st2.get("ok") is True
+    assert d2.get("ok") is True
+    ids2 = [str(x).strip() for x in (d2.get("captured_row_ids") or []) if str(x).strip()]
+    assert sorted(ids1) == sorted(ids2)
+    wb2 = load_workbook(tmp_path / "Trading Journal.xlsx", data_only=True)
+    ws2 = wb2["Trade Log"]
+    headers2 = [str(c.value or "").strip() for c in ws2[1]]
+    ridx2 = headers2.index("Row ID") + 1
+    workbook_ids2 = [str(ws2.cell(r, ridx2).value or "").strip() for r in range(2, ws2.max_row + 1)]
+    for rid in ids1:
+        assert workbook_ids2.count(rid) == 1
+    api_demo_count_2 = sum(1 for rid in workbook_ids2 if rid in set(ids1))
+    assert api_demo_count_2 == api_demo_count_1
+    assert workbook_ids2.count("sig:existing") == 1
+    assert workbook_ids2.count("bybit:demo:execution:BTCUSDT:E1") == 1
+    assert workbook_ids2.count("bybit:demo:execution:BTCUSDT:E2") == 1
+    assert len([rid for rid in workbook_ids2 if rid.startswith("bybit:demo:execution:")]) == 2
+    demo_close_values_2 = []
+    for r in range(2, ws2.max_row + 1):
+        if str(ws2.cell(r, headers2.index("Account") + 1).value or "").strip() != "Bybit Demo":
+            continue
+        cv = ws2.cell(r, headers2.index("Close Time") + 1).value
+        if hasattr(cv, "year"):
+            demo_close_values_2.append((cv.year, cv.month, cv.day))
+    assert demo_close_values_2
+    assert max(demo_close_values_2) >= (2026, 5, 19)
+
+def test_manual_sync_captured_rows_dropped_fails_with_counts(tmp_path) -> None:
+    ms = _load_master_service_for_import_test()
+    from tools.master_journal_workbook import build_master_journal_workbook
+    ms.TRADING_JOURNAL_SOURCE = "master_journal"
+    ms.TRADING_JOURNAL_LOCAL_DIR = tmp_path
+    ms.TRADING_JOURNAL_BROKER_REFRESH_ENABLED = False
+    ms.TRADING_JOURNAL_SYNC_CALCULATOR_TRADES_ON_MANUAL = False
+    ms.ENABLE_BYBIT_DEMO_JOURNAL = True
+    ms.describe_bybit_credentials_for = lambda _mode: {"credentials_available": True}
+    build_master_journal_workbook({"items": [], "stats": {"totals": {}, "groups": {}}, "balances": []}, tmp_path / "Trading Journal.xlsx")
+    ms._import_trading_journal_from_sources = lambda *a, **k: {"ok": True, "diagnostics": {}, "rows_imported": 0}
+    async def _fake_bybit(account_mode: str, **_kwargs):
+        if account_mode == "demo":
+            row = {"id": "bybit:demo:execution:BTCUSDT:E-drop", "row_type": "trade", "account": "Bybit Demo", "account_label": "Bybit Demo", "symbol": "BTCUSDT", "side": "Buy", "open_time": "2026-05-19T01:13:00+10:00", "close_time": "2026-05-19T01:13:00+10:00", "qty": 0.1, "entry_price": 1, "exit_price": 1}
+            return {"ok": True, "rows_seen": 1, "captured_rows": [row], "captured_row_ids": [row["id"]]}
+        return {"ok": True, "rows_seen": 0, "captured_rows": [], "captured_row_ids": []}
+    ms._run_bybit_closed_pnl_sync = _fake_bybit
+    ms._sync_master_journal_workbook = lambda: {"master_journal_ok": True}
+    async def _fake_oanda(*_a, **_k):
+        return {"ok": True, "rows_seen": 0, "captured_row_ids": []}
+    ms._recover_oanda_recent_fills = _fake_oanda
+    asyncio.run(ms._run_trading_journal_sync_job())
+    st = ms._sync_state_snapshot()
+    demo = (((st.get("result") or {}).get("bybit") or {}).get("demo") or {})
+    assert demo.get("ok") is False
+    err = str(demo.get("error") or "")
+    assert "captured_count=" in err and "persisted_count=" in err and "missing_row_ids=" in err
+    assert st.get("ok") is False
 def test_user_facing_wording_does_not_use_master_journal_labels() -> None:
     src = (ROOT / 'render' / 'master_service.py').read_text(encoding='utf-8')
     blocked = [

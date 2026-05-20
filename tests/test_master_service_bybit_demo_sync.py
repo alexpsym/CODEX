@@ -1735,12 +1735,12 @@ def test_manual_sync_writes_execution_ids_to_master_workbook(tmp_path: Path, mon
     assert any(str(v or "").startswith("2026-05-19") for v in close_vals)
 
 
-def test_manual_sync_real_path_with_demo_credentials_writes_execution_ids(tmp_path: Path, monkeypatch) -> None:
+def test_manual_sync_real_path_with_demo_credentials_writes_execution_ids_without_manual_override_flag(tmp_path: Path, monkeypatch) -> None:
     from tools.master_journal_workbook import build_master_journal_workbook
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_SOURCE", "master_journal")
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_ENABLE_LOCAL_IMPORT", False)
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_BROKER_REFRESH_ENABLED", False)
-    monkeypatch.setattr(master_service, "TRADING_JOURNAL_SYNC_CALCULATOR_TRADES_ON_MANUAL", True)
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_SYNC_CALCULATOR_TRADES_ON_MANUAL", False)
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
     build_master_journal_workbook({"items": [], "stats": {"totals": {}, "groups": {}}, "balances": []}, tmp_path / "Trading Journal.xlsx")
     monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda mode: (mode, "k", "s", "https://api-demo.bybit.com" if mode == "demo" else "https://api.bybit.com", "KEY2" if mode == "demo" else "KEY1"))
