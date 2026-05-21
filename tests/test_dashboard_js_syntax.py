@@ -68,43 +68,54 @@ def test_dashboard_js_prefers_post_verified_watchlist_before_remote_summary() ->
     assert "const remoteSummary = await fetchRemoteBackupSummary();" in js
 
 
-def test_dashboard_js_includes_sync_journal_wiring():
+def test_dashboard_js_removed_sync_journal_wiring():
     js = (ROOT / 'render' / 'static' / 'dashboard.js').read_text(encoding='utf-8')
-    assert '/api/trading-journal/sync' in js
-    assert '/api/trading-journal/sync/status' in js
-    assert 'sync-journal-btn' in js
-    listener = "syncJournalBtn?.addEventListener('click', runSyncJournal);"
-    assert listener in js
-    assert "if (syncJournalBtn) { syncJournalBtn.addEventListener('click', runSyncJournal); }" not in js
-    assert js.index(listener) < js.rindex('})();')
-    assert "master_journal_ok !== false" not in js
-    assert "const p = statusPayload.result?.master_journal_path || 'journal/Trading Journal.xlsx';" not in js
-    assert "master_journal_ok === true" in js
-    assert "master_journal_path" in js
-    assert "master_journal_exists" in js
-    assert "github_sync_ok" in js
-    assert "github_sync_error" in js
-    assert "GitHub updated" in js
-    assert "GitHub already up to date" in js
-    assert "Trading Journal.xlsx created, but GitHub sync failed" in js
+    assert '/api/trading-journal/sync' not in js
+    assert '/api/trading-journal/sync/status' not in js
+    assert 'sync-journal-btn' not in js
 
-
-def test_dashboard_js_open_master_journal_wiring():
-    js = JS_PATH.read_text(encoding='utf-8')
-    assert 'open-master-journal-btn' in js
-    assert '/api/trading-journal/open-master-journal' in js
-    assert 'master_journal_ok === true' in js
-    assert 'master_journal_exists' in js
-    assert 'setOpenMasterJournalVisible(false)' in js
-    assert 'setOpenMasterJournalVisible(true)' in js
-    assert "openMasterJournalBtn?.addEventListener('click', openMasterJournal);" in js
-    assert 'master_journal_ok !== false' not in js
-    assert 'Startup journal sync complete' not in js
 
 
 def test_dashboard_js_user_facing_trading_journal_wording():
     js = JS_PATH.read_text(encoding='utf-8')
     assert 'Failed to open Master Journal.xlsx' not in js
     assert "'Master Journal.xlsx'" not in js
-    assert 'Failed to open Trading Journal.xlsx' in js
-    assert "'Trading Journal.xlsx'" in js
+    assert 'Failed to open Trading Journal.xlsx' not in js
+
+
+def test_trading_journal_actions_js_parses_with_node():
+    node = shutil.which('node')
+    assert node
+    subprocess.run([node, '--check', str(ROOT / 'render' / 'static' / 'trading_journal_actions.js')], check=True)
+
+
+def test_trading_journal_actions_js_wiring():
+    js = (ROOT / "render" / "static" / "trading_journal_actions.js").read_text(encoding="utf-8")
+    assert "/api/trading-journal/open-master-journal" in js
+    assert "/api/trading-journal/import-file" in js
+    assert "/api/trading-journal/crypto-monthly-pnl" in js
+
+
+def test_trading_journal_actions_listener_inside_iife():
+    js = (ROOT / "render" / "static" / "trading_journal_actions.js").read_text(encoding="utf-8")
+    close_idx = js.rfind('})();')
+    listener_idx = js.find('cryptoMonthlyBtn?.addEventListener')
+    assert listener_idx != -1 and listener_idx < close_idx
+    assert "})();\n\n\ncryptoMonthlyBtn?.addEventListener" not in js
+
+
+
+def test_trading_journal_js_removed_retired_auto_sync_block():
+    js = (ROOT / "render" / "static" / "trading_journal.js").read_text(encoding="utf-8")
+    for token in [
+        "localLast",
+        "syncStatusPromise",
+        "Auto-sync from configured journal sources",
+        "manual Sync now remains available",
+        "backgroundSyncLabel",
+        "syncWatchTimer",
+        "const sleep = ",
+        "Journal cache is building/syncing",
+        "Sync required",
+    ]:
+        assert token not in js

@@ -246,6 +246,7 @@ def _profile_main_buttons() -> List[Dict[str, object]]:
                 {"id": "open-orders", "name": "open-orders", "label": "Open Orders and Positions", "open_url": "/merged/open-orders", "dashboard_main_view": True},
                 {"id": "history", "name": "history", "label": "History", "open_url": "/merged/history", "dashboard_main_view": True},
                 {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor", "dashboard_main_view": True},
+                {"id": "trading-journal", "name": "trading-journal", "label": "Trading Journal", "open_url": "/merged/trading-journal", "dashboard_main_view": True},
             ]
         )
     return buttons
@@ -9932,15 +9933,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <p class="meta" id="watchlist-empty" style="display:none;">No items yet.</p>
                 </section>
 
-
-                <section class="panel" id="journal-sync-widget">
-                    <div class="panel-header"><div><h2>Trading Journal</h2></div></div>
-                    <div class="oo-toolbar">
-                        <button type="button" id="sync-journal-btn">Sync Journal</button>
-                        <button type="button" id="open-master-journal-btn" hidden disabled>Open Trading Journal</button>
-                    </div>
-                    <div class="watchlist-sub" id="sync-journal-status"></div>
-                </section>
 
                 <section class="panel" id="oanda-inactivity-widget">
                     <div class="panel-header">
@@ -24568,6 +24560,9 @@ async def trading_journal_delete_row(row_id: str) -> JSONResponse:
 
 @app.get("/api/trading-journal/sync/status")
 async def trading_journal_sync_status() -> JSONResponse:
+    return JSONResponse({"ok": False, "message": "Trading Journal sync has been retired. Use Import on the Trading Journal workspace."}, status_code=410)
+
+async def _legacy_trading_journal_sync_status() -> JSONResponse:
     global TRADING_JOURNAL_SYNC_TASK, TRADING_JOURNAL_SYNC_THREAD
     with TRADING_JOURNAL_SYNC_LOCK:
         snapshot = _sync_state_snapshot()
@@ -25743,11 +25738,153 @@ def _open_path_with_os(path: Path) -> None:
         subprocess.Popen(["xdg-open", str(path)])
 
 
+
+TRADING_JOURNAL_ACTIONS_TEMPLATE = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Trading Journal Workspace</title>
+<style>body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}.wrap{min-height:100vh;display:flex;align-items:center;justify-content:center}.stack{display:flex;flex-direction:column;gap:12px;min-width:280px}button{padding:12px 14px;border-radius:10px;border:1px solid #334155;background:#1f2937;color:#e2e8f0;font-weight:700;cursor:pointer}.status{margin-top:8px;white-space:pre-wrap;color:#94a3b8}</style></head>
+<body><div class="wrap"><div class="stack"><button id="open-journal-btn">Open Journal</button><button id="import-journal-btn">Import</button><button id="crypto-monthly-pnl-btn">Crypto Monthly P&L</button><input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls" hidden/><div id="journal-actions-status" class="status"></div></div></div><script src="/static/trading_journal_actions.js"></script></body></html>"""
+
+@app.get("/merged/trading-journal")
+async def merged_trading_journal_workspace() -> HTMLResponse:
+    return HTMLResponse(TRADING_JOURNAL_ACTIONS_TEMPLATE)
+
+@app.post("/api/trading-journal/import-file")
+async def trading_journal_import_file(file: UploadFile = File(...)) -> JSONResponse:
+    return JSONResponse({"ok": False, "message": "Manual history import is not implemented yet."}, status_code=501)
+
+
+
+def _verify_trade_log_row_ids_in_workbook(workbook_path: Path, expected_row_ids: List[str]) -> Dict[str, object]:
+    expected = [str(x).strip() for x in (expected_row_ids or []) if str(x).strip()]
+    if not workbook_path.exists():
+        return {"ok": False, "expected_row_ids": expected, "found_row_ids_count": 0, "missing_row_ids": expected, "error": "Workbook does not exist."}
+    try:
+        wb = load_workbook(workbook_path, data_only=True, read_only=True)
+    except Exception as exc:
+        return {"ok": False, "expected_row_ids": expected, "found_row_ids_count": 0, "missing_row_ids": expected, "error": f"Failed to open workbook: {exc}"}
+    found: List[str] = []
+    try:
+        try:
+            ws = _get_trade_log_sheet(wb, allow_legacy=False)
+        except Exception as exc:
+            return {"ok": False, "expected_row_ids": expected, "found_row_ids_count": 0, "missing_row_ids": expected, "error": f"Trade Log sheet missing: {exc}"}
+        headers = [str(c.value or "").strip() for c in ws[1]]
+        if "Row ID" not in headers:
+            return {"ok": False, "expected_row_ids": expected, "found_row_ids_count": 0, "missing_row_ids": expected, "error": "Trade Log Row ID column missing."}
+        ridx = headers.index("Row ID") + 1
+        for rr in range(2, ws.max_row + 1):
+            rid = str(ws.cell(rr, ridx).value or "").strip()
+            if rid:
+                found.append(rid)
+    finally:
+        wb.close()
+    missing = [rid for rid in expected if rid not in set(found)]
+    return {"ok": len(missing) == 0, "expected_row_ids": expected, "found_row_ids_count": len(found), "missing_row_ids": missing}
+
+
+
+
+def _read_monthly_aud_reval_months_from_workbook(workbook_path: Path) -> Dict[str, object]:
+    if not workbook_path.exists():
+        return {"ok": True, "months": [], "row_ids": [], "error": "", "workbook_exists": False, "trade_log_exists": False, "row_id_column_exists": False}
+    try:
+        wb = load_workbook(workbook_path, data_only=True, read_only=True)
+    except Exception as exc:
+        return {"ok": False, "months": [], "row_ids": [], "error": f"Failed to open workbook: {exc}", "workbook_exists": True, "trade_log_exists": False, "row_id_column_exists": False}
+    try:
+        try:
+            ws = _get_trade_log_sheet(wb, allow_legacy=False)
+        except Exception as exc:
+            return {"ok": False, "months": [], "row_ids": [], "error": f"Trade Log sheet missing: {exc}", "workbook_exists": True, "trade_log_exists": False, "row_id_column_exists": False}
+        headers = [str(c.value or "").strip() for c in ws[1]]
+        if "Row ID" not in headers:
+            return {"ok": False, "months": [], "row_ids": [], "error": "Trade Log Row ID column missing.", "workbook_exists": True, "trade_log_exists": True, "row_id_column_exists": False}
+        idx = headers.index("Row ID") + 1
+        row_ids=[]
+        months=[]
+        for rr in range(2, ws.max_row + 1):
+            rid = str(ws.cell(rr, idx).value or "").strip()
+            if rid.startswith("monthly_aud_reval:bybit_live:"):
+                row_ids.append(rid)
+                months.append(rid.split(":")[-1])
+        return {"ok": True, "months": sorted(set(months)), "row_ids": row_ids, "error": "", "workbook_exists": True, "trade_log_exists": True, "row_id_column_exists": True}
+    finally:
+        wb.close()
+
+def _brisbane_now() -> datetime:
+    return datetime.now(ZoneInfo("Australia/Brisbane"))
+
+
+def _ym_iter(start_ym: str, end_ym: str) -> List[str]:
+    out: List[str] = []
+    cur = datetime.strptime(start_ym + "-01", "%Y-%m-%d")
+    end = datetime.strptime(end_ym + "-01", "%Y-%m-%d")
+    while cur <= end:
+        out.append(cur.strftime("%Y-%m"))
+        y = cur.year + (1 if cur.month == 12 else 0)
+        m = 1 if cur.month == 12 else cur.month + 1
+        cur = cur.replace(year=y, month=m)
+    return out
+
+
+def _monthly_months_from_rows(rows: List[Dict[str, object]]) -> Set[str]:
+    months: Set[str] = set()
+    for r in rows or []:
+        rid = str(r.get("id") or "")
+        if rid.startswith("monthly_aud_reval:bybit_live:"):
+            months.add(rid.split(":")[-1])
+        pm = str((r.get("raw_refs") or {}).get("period_month") or "")
+        if pm:
+            months.add(pm)
+    return months
+
+
+@app.post("/api/trading-journal/crypto-monthly-pnl")
+async def trading_journal_crypto_monthly_pnl() -> JSONResponse:
+    now_bne = _brisbane_now()
+    current_month = now_bne.strftime("%Y-%m")
+    dt = datetime.strptime(current_month + "-01", "%Y-%m-%d")
+    prev = dt.replace(year=dt.year-1, month=12) if dt.month == 1 else dt.replace(month=dt.month-1)
+    last_completed = prev.strftime("%Y-%m")
+
+    pre_state_rows = _monthly_aud_revaluation_rows_for_journal_view()
+    pre_months = set(_monthly_months_from_rows(pre_state_rows))
+    wb_path = _master_journal_path()
+    workbook_anchor = _read_monthly_aud_reval_months_from_workbook(wb_path)
+    if workbook_anchor.get("workbook_exists") and not workbook_anchor.get("ok"):
+        return JSONResponse({"ok": False, "button": "crypto_monthly_pnl", "message": "Failed to inspect workbook monthly anchors.", "workbook_anchor": workbook_anchor, "master_journal_path": str(wb_path)}, status_code=500)
+    pre_wb_months: Set[str] = set(str(m) for m in (workbook_anchor.get("months") or []) if str(m))
+    existing = sorted(pre_months | pre_wb_months)
+    if not existing:
+        return JSONResponse({"ok": False, "button": "crypto_monthly_pnl", "target_months": [], "processed_months": [], "inserted_months": [], "skipped_existing_months": [], "rows_inserted": 0, "verified_row_ids": [], "master_journal_path": str(wb_path), "message": "Bootstrap required: no existing crypto monthly AUD P&L anchor row found."}, status_code=422)
+    latest = existing[-1]
+    due = [] if latest > last_completed else _ym_iter(latest, last_completed)
+    if due and due[0] == latest:
+        due = due[1:]
+    due = [m for m in due if m < current_month]
+    if not due:
+        return JSONResponse({"ok": True, "button": "crypto_monthly_pnl", "target_months": [], "processed_months": [], "inserted_months": [], "skipped_existing_months": [], "rows_inserted": 0, "verified_row_ids": [], "master_journal_path": str(wb_path), "message": "No completed crypto monthly AUD P&L month is due."})
+
+    run = await _run_monthly_aud_revaluation_sync(reason="manual_crypto_monthly_pnl")
+    if not run.get("ok"):
+        return JSONResponse({"ok": False, "button": "crypto_monthly_pnl", **run}, status_code=500)
+    workbook_sync = _sync_master_journal_workbook()
+    path = Path(str(workbook_sync.get("master_journal_path") or wb_path))
+    expected_ids = [f"monthly_aud_reval:bybit_live:{m}" for m in due]
+    verification = _verify_trade_log_row_ids_in_workbook(path, expected_ids)
+    post_months = _monthly_months_from_rows(_monthly_aud_revaluation_rows_for_journal_view())
+    inserted = [m for m in due if m in post_months and m not in pre_months]
+    missing = [m for m in due if m not in post_months]
+    if missing or not verification.get("ok"):
+        return JSONResponse({"ok": False, "button": "crypto_monthly_pnl", "target_months": due, "processed_months": due, "inserted_months": inserted, "skipped_existing_months": [m for m in due if m in pre_months], "rows_inserted": len(inserted), "verified_row_ids": [f"monthly_aud_reval:bybit_live:{m}" for m in inserted], "missing_months": missing, "missing_row_ids": verification.get("missing_row_ids") or [], "master_journal_path": str(path), "message": "Crypto monthly AUD P&L update incomplete."}, status_code=500)
+    return JSONResponse({"ok": True, "button": "crypto_monthly_pnl", "target_months": due, "processed_months": due, "inserted_months": inserted, "skipped_existing_months": [m for m in due if m in pre_months], "rows_inserted": len(inserted), "verified_row_ids": [f"monthly_aud_reval:bybit_live:{m}" for m in inserted], "master_journal_path": str(path), "message": f"Inserted crypto monthly AUD P&L for {', '.join(inserted)}."})
+
 @app.post("/api/trading-journal/open-master-journal")
 async def open_master_journal_file() -> JSONResponse:
     path = _master_journal_path()
     if not path.exists():
-        raise HTTPException(status_code=404, detail="Trading Journal.xlsx does not exist. Click Sync Journal first.")
+        raise HTTPException(status_code=404, detail="Trading Journal.xlsx does not exist. Import history or create the journal workbook first.")
     try:
         _open_path_with_os(path)
     except Exception as exc:
@@ -25759,8 +25896,7 @@ async def open_master_journal_file() -> JSONResponse:
 
 @app.post("/api/trading-journal/sync")
 async def trading_journal_sync() -> JSONResponse:
-    _queue_trading_journal_sync_if_idle("manual_sync")
-    return await trading_journal_sync_status()
+    return JSONResponse({"ok": False, "message": "Trading Journal sync has been retired. Use Import on the Trading Journal workspace."}, status_code=410)
 def _runtime_is_render() -> bool:
     return _resolve_app_profile() == "render"
 
