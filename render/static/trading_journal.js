@@ -10,7 +10,6 @@
   const loadingBar = q('#tj-loading-bar');
   const loadingPct = q('#tj-loading-pct');
   const addBtn = q('#tj-add-btn');
-  const syncBtn = q('#tj-sync-btn');
   const editorModal = q('#tj-editor-modal');
   const editorForm = q('#tj-editor-form');
   const editorTitle = q('#tj-editor-title');
@@ -33,7 +32,6 @@
   const AUTO_REFRESH_MS = 60 * 60 * 1000;
   let loadInFlight = false;
   let activeAbort = null;
-  let syncWatchTimer = null;
   const TJ_CACHE_DB = 'trading_journal_cache_v1';
   const TJ_CACHE_SCHEMA_VERSION = 2;
   const TJ_JS_VERSION = String(window.TRADING_JOURNAL_JS_VERSION || '');
@@ -58,7 +56,6 @@
     editingIsCreate: false,
     diagnostics: null,
     renderedRows: [],
-    manualSyncInFlight: false,
     statTradeFilter: null,
     oandaRepairAttempted: false,
     oandaRepairRefreshPending: false,
@@ -142,7 +139,7 @@
   ];
 
   const setStatus = (msg) => { status.textContent = msg || ''; };
-  const MISSING_XLRD_STATUS = 'Sync failed: Local .xls journal workbooks require xlrd. Restart the journal launcher so dependencies can be installed automatically.';
+  const MISSING_XLRD_STATUS = 'Local .xls journal workbooks require xlrd. Restart the journal launcher so dependencies can be installed automatically.';
   const isMissingXlrdError = (value) => String(value ?? '').toUpperCase().includes('MISSING_XLRD_FOR_XLS');
   const diagnosticsErrorText = (value) => String(value?.message ?? value ?? '').trim();
   const isBalanceAnchorWarning = (value) => diagnosticsErrorText(value).toLowerCase().includes('missing balance anchor');
@@ -152,7 +149,7 @@
     if (isMissingXlrdError(raw) || raw.toLowerCase().includes('local .xls journal workbooks require xlrd')) {
       return MISSING_XLRD_STATUS;
     }
-    return `Sync failed: ${compactErrorMessage(raw, 'Sync failed')}`;
+    return compactErrorMessage(raw, 'Request failed');
   };
   const compactErrorMessage = (detail, fallback = 'Request failed') => {
     const pick = (obj, keys) => {
@@ -186,7 +183,6 @@
   };
 
   function syncActionButtons() {
-    if (syncBtn) syncBtn.disabled = state.editorOpen || state.editorDirty || state.saveInFlight;
     if (addBtn) addBtn.disabled = state.saveInFlight;
     if (editorSaveBtn) editorSaveBtn.disabled = state.saveInFlight;
   }
@@ -275,83 +271,6 @@
         tx.onerror = () => reject(tx.error || new Error('IndexedDB write failed'));
       });
     } catch {}
-  }
-
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-  async function waitForSync(signal) {
-    while (true) {
-      const st = await fetchJson('/api/trading-journal/sync/status', { signal });
-      const p = Number(st?.progress);
-      const msg = st?.message || 'Syncing…';
-      setLoading(Number.isFinite(p) ? p : 20, msg);
-      if (!st?.running) {
-        if (st?.ok === false) throw new Error(st?.error || st?.message || 'Sync failed');
-        return st;
-      }
-      const elapsed = Number(st?.elapsed_seconds || 0);
-      const stale = st?.stale_warning ? ` ${st.stale_warning}` : '';
-      setStatus(`Syncing… ${Math.floor(elapsed)}s elapsed. ${st?.stage || ''} ${st?.message || ''}${stale}`.trim());
-      await sleep(500);
-    }
-  }
-
-  function watchSyncCompletion() {
-    if (syncWatchTimer) return;
-    const poll = async () => {
-      try {
-        const st = await fetchJson('/api/trading-journal/sync/status');
-        if (st?.running) {
-          const elapsed = Number(st?.elapsed_seconds || 0);
-          const stale = st?.stale_warning ? ` ${st.stale_warning}` : '';
-          setStatus(`Background sync running… ${Math.floor(elapsed)}s elapsed. ${st?.stage || ''} ${st?.message || ''}${stale}`.trim());
-          syncWatchTimer = setTimeout(poll, 900);
-          return;
-        }
-        syncWatchTimer = null;
-        if (st?.ok === false) {
-          const diagnosticsErrors = Array.isArray(st?.result?.diagnostics?.errors) ? st.result.diagnostics.errors : [];
-          const hasMissingXlrd = diagnosticsErrors.some((err) => isMissingXlrdError(err?.code));
-          if (hasMissingXlrd || isMissingXlrdError(st?.error) || isMissingXlrdError(st?.message)) {
-            setStatus(MISSING_XLRD_STATUS);
-          } else {
-            setStatus(`Background sync failed: ${compactErrorMessage(st?.error || st?.message || 'unknown error')}`);
-          }
-          return;
-        }
-        if (state.manualSyncInFlight || loadInFlight) {
-          syncWatchTimer = setTimeout(poll, 900);
-          return;
-        }
-        localStorage.setItem('tj_last_auto_sync_ms', String(Date.now()));
-        await load({ silent: true, skipAutoSync: true });
-      } catch (e) {
-        syncWatchTimer = setTimeout(poll, 1500);
-      }
-    };
-    syncWatchTimer = setTimeout(poll, 800);
-  }
-
-  function backgroundSyncLabel(syncStatus) {
-    const mode = String(syncStatus?.source_mode || '').toLowerCase();
-    const usesDropbox = Boolean(syncStatus?.uses_dropbox_journal_import);
-    if (mode === 'local') return 'Background local journal import running…';
-    if (mode === 'dropbox' || usesDropbox) return 'Background Dropbox journal import running…';
-    if (mode === 'both' || mode === 'auto') return 'Background journal source sync running…';
-    return 'Background journal cache build running…';
-  }
-
-  async function triggerBackgroundSync() {
-    try {
-      const st = await fetchJson('/api/trading-journal/sync/status');
-      if (!st?.running) {
-        await fetchJson('/api/trading-journal/sync', { method: 'POST' });
-      }
-      setStatus(backgroundSyncLabel(st));
-      watchSyncCompletion();
-    } catch (e) {
-      console.warn('Background sync skipped:', e);
-    }
   }
 
   function applyTextFilter(rows) {
@@ -1432,37 +1351,8 @@
       const journalPromise = fetchNamedJson('/api/trading-journal', '/api/trading-journal', { signal });
       const diagnosticsPromise = fetchNamedJson('/api/trading-journal/diagnostics', '/api/trading-journal/diagnostics', { signal });
       const balancesPromise = fetchNamedJson('/api/trading-journal/balances', '/api/trading-journal/balances', { signal });
-      const syncStatusPromise = fetchNamedJson('/api/trading-journal/sync/status', '/api/trading-journal/sync/status', { signal });
       let journal = await journalPromise;
       const journalPending = Number(journal?.pending ? 1 : 0) === 1;
-      if (silent || skipAutoSync) {
-        await syncStatusPromise;
-      }
-
-      // Auto-sync from configured journal sources on load (throttled) so workbook updates are picked up even when
-      // live webhook trades already exist. This runs in the background and does not block UI load.
-      if (!silent && !skipAutoSync) {
-        try {
-          const st = await syncStatusPromise;
-          const lastFinished = new Date(st?.finished_at || 0).getTime() || 0;
-          const localLast = Number(localStorage.getItem('tj_last_auto_sync_ms') || 0) || 0;
-          const now = Date.now();
-          const minMs = AUTO_REFRESH_MS;
-          const anchor = Math.max(lastFinished, localLast);
-          if (!st?.running && (now - anchor > minMs)) {
-            triggerBackgroundSync();
-          }
-        } catch (e) {
-          // Ignore auto-sync errors; manual Sync now remains available.
-          console.warn('Auto-sync skipped:', e);
-        }
-      }
-
-      const hasItems = Array.isArray(journal?.items) && journal.items.length > 0;
-      if (!hasItems && !silent && !skipAutoSync) {
-        // Empty journal should still render immediately; sync in background and refresh when ready.
-        triggerBackgroundSync();
-      }
 
       if (!silent) setLoading(80, 'Fetching diagnostics…');
       const diagnostics = await diagnosticsPromise;
@@ -1520,17 +1410,17 @@
           if (Array.isArray(state.rows) && state.rows.length > 0) {
             setStatus('Cached browser data shown while journal cache is building. This will refresh automatically.');
           } else {
-            setStatus('Journal cache is building/syncing. Data will appear automatically when ready.');
+            setStatus('Journal data is still being prepared. Please refresh shortly.');
           }
-          watchSyncCompletion();
+          
         } else if (journal?.snapshot_stale) {
-          setStatus('Cached journal shown. Sync required to include latest workbook changes.');
+          setStatus('Cached journal shown. Refresh to load latest workbook changes.');
         } else if (journal?.warning) {
           setStatus(String(journal.warning));
         } else
         if (hasParseSyncErrors || hasBalanceAnchorWarnings || rowsTotal === 0 || lowRowCount || shouldWarnZeroFx) {
           const reasons = [];
-          if (hasParseSyncErrors) reasons.push('parse/sync errors');
+          if (hasParseSyncErrors) reasons.push('parse/import errors');
           if (hasBalanceAnchorWarnings) reasons.push('balance anchor missing');
           if (rowsTotal === 0) reasons.push('no journal rows loaded');
           if (lowRowCount) reasons.push('suspiciously low row count');
@@ -1593,11 +1483,11 @@
     autoRefreshTimer = setTimeout(() => load({ silent: true }), AUTO_REFRESH_MS);
   }
 
-  // When the tab is hidden we stop the timer. Background refreshes may abort; manual sync must continue.
+  // When the tab is hidden we stop the timer.
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
       stopAutoRefresh();
-      if (activeAbort && !state.manualSyncInFlight) { try { activeAbort.abort(); } catch {} }
+      if (activeAbort) { try { activeAbort.abort(); } catch {} }
       return;
     }
     scheduleAutoRefresh();
@@ -1606,7 +1496,7 @@
   // Also clean up on navigation away so no refresh request survives route changes.
   window.addEventListener('pagehide', () => {
     stopAutoRefresh();
-    if (activeAbort && !state.manualSyncInFlight) { try { activeAbort.abort(); } catch {} }
+    if (activeAbort) { try { activeAbort.abort(); } catch {} }
   });
 
   q('#tj-filter-btn')?.addEventListener('click', () => { state.statTradeFilter = null; persistUiState(); renderAll(); });
@@ -1623,57 +1513,7 @@
     openEditor(null);
     stopAutoRefresh();
   });
-  q('#tj-sync-btn')?.addEventListener('click', async () => {
-    if (state.editorOpen || state.editorDirty || state.saveInFlight) {
-      setStatus('Close or save the editor before syncing.');
-      return;
-    }
-    stopAutoRefresh();
-    state.manualSyncInFlight = true;
-    try {
-      setStatus('Syncing…');
-      setLoading(10, 'Syncing journal sources…');
-      await fetchJson('/api/trading-journal/sync', { method: 'POST' });
-      const syncResult = await waitForSync();
-      if (syncResult?.ok === false) {
-        throw new Error(syncResult?.error || syncResult?.message || 'Sync failed');
-      }
-      const diagnosticsErrors = Array.isArray(syncResult?.result?.diagnostics?.errors) ? syncResult.result.diagnostics.errors : [];
-      const parseSyncErrors = diagnosticsErrors.filter((err) => isParseSyncError(err));
-      const missingXlrd = diagnosticsErrors.some((err) => isMissingXlrdError(err?.code));
-      if (missingXlrd) {
-        throw new Error(MISSING_XLRD_STATUS);
-      }
-      const loadResult = await load({ skipAutoSync: true, preserveStatus: true });
-      if (loadResult?.ok === false) {
-        throw new Error(`Sync finished but reload failed: ${loadResult?.error || 'unknown error'}`);
-      }
-      const loadedRows = Number(state?.rows?.length || 0);
-      const warnings = Array.isArray(syncResult?.result?.warnings) ? syncResult.result.warnings : [];
-      const importedRows = Number(syncResult?.result?.rows_imported || 0);
-      const snapshotError = syncResult?.result?.snapshot_error;
-      if (snapshotError) throw new Error(snapshotError);
-      if (parseSyncErrors.length > 0 || (loadedRows <= 0 && importedRows <= 0)) {
-        throw new Error(compactErrorMessage(parseSyncErrors[0] ?? diagnosticsErrors[0], 'Sync failed to import workbook rows'));
-      }
-      const suffix = warnings.length ? ` (warnings: ${warnings.join('; ')})` : '';
-      const cleared = Boolean(syncResult?.result?.diagnostics?.bybit_demo_workbook_cleared);
-      const purged = Number(syncResult?.result?.diagnostics?.bybit_demo_rows_purged || 0);
-      if (cleared) {
-        setStatus(`Sync complete: Bybit Demo workbook is blank; old Bybit Demo rows purged (${purged}); ${loadedRows} rows loaded${suffix}`);
-      } else {
-        setStatus(`Sync complete: ${loadedRows} rows loaded${suffix}`);
-      }
-    } catch (e) {
-      hideLoading();
-      setStatus(formatSyncFailureStatus(e));
-    } finally {
-      state.manualSyncInFlight = false;
-      scheduleAutoRefresh();
-    }
-  });
-
-  editorCancelBtn?.addEventListener('click', () => {
+    editorCancelBtn?.addEventListener('click', () => {
     closeEditor();
     scheduleAutoRefresh();
   });

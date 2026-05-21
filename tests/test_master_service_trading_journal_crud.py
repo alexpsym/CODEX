@@ -251,10 +251,11 @@ def test_trading_journal_js_contains_crud_controls_and_endpoints():
     assert "location.reload" not in js
     assert "Cached data shown, refreshing…" in js
     assert "writeCachedPayload({" in js
-    assert "/api/trading-journal/sync/status" in js
+    assert "/api/trading-journal/sync/status" not in js
+    assert "/api/trading-journal/readiness" not in js
     assert "isAbortError" in js
     assert "fetchNamedJson" in js
-    assert "manualSyncInFlight" in js
+    assert "manualSyncInFlight" not in js
     assert "skipAutoSync: true" in js
     assert "const AUTO_REFRESH_MS = 60 * 60 * 1000;" in js
     assert "preserveStatus" in js
@@ -1559,3 +1560,86 @@ def test_persist_trading_journal_sqlite_routes_monthly_rows_to_journal_notes(tmp
         assert conn.execute("SELECT COUNT(*) FROM journal_metrics WHERE id='trade:1'").fetchone()[0] == 1
     finally:
         conn.close()
+
+
+def test_crypto_monthly_pnl_endpoint_no_anchor_returns_bootstrap_required(monkeypatch):
+    from fastapi.testclient import TestClient
+    client = TestClient(master_service.app)
+    monkeypatch.setattr(master_service, "_run_monthly_aud_revaluation_sync", lambda reason: {"ok": True})
+    monkeypatch.setattr(master_service, "_monthly_aud_revaluation_rows_for_journal_view", lambda: [])
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"master_journal_path": str(master_service._master_journal_path())})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda p,e: {"ok": True, "missing_row_ids": []})
+    r = client.post("/api/trading-journal/crypto-monthly-pnl")
+    assert r.status_code == 422
+    payload = r.json()
+    assert payload["ok"] is False
+    assert 'Bootstrap required' in payload["message"]
+
+
+def test_crypto_monthly_pnl_due_month_april_2026(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+    from tools.master_journal_workbook import build_master_journal_workbook
+    client = TestClient(master_service.app)
+    monkeypatch.setattr(master_service, '_brisbane_now', lambda: __import__('datetime').datetime(2026,5,21))
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    build_master_journal_workbook({'items':[{'id':'monthly_aud_reval:bybit_live:2026-03','row_type':'monthly_aud_reval','source':'bybit_monthly_aud_reval','symbol':'MONTHLY AUD P/L','result_currency':'AUD','raw_refs':{'period_month':'2026-03'},'close_time':'2026-03-31T23:59:59Z'}],'stats':{'totals':{},'groups':{}},'balances':[]}, tmp_path / 'Trading Journal.xlsx')
+    monkeypatch.setattr(master_service, '_monthly_aud_revaluation_rows_for_journal_view', lambda: [{'id':'monthly_aud_reval:bybit_live:2026-03','row_type':'monthly_aud_reval','raw_refs':{'period_month':'2026-03'}}])
+    async def fake_run(reason): return {'ok': True}
+    monkeypatch.setattr(master_service, '_run_monthly_aud_revaluation_sync', fake_run)
+    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda: {'master_journal_path': str(tmp_path / 'Trading Journal.xlsx')})
+    monkeypatch.setattr(master_service, '_verify_trade_log_row_ids_in_workbook', lambda p,e: {'ok': True, 'missing_row_ids': []})
+    monkeypatch.setattr(master_service, '_monthly_aud_revaluation_rows_for_journal_view', lambda: [{'id':'monthly_aud_reval:bybit_live:2026-03','row_type':'monthly_aud_reval','raw_refs':{'period_month':'2026-03'}},{'id':'monthly_aud_reval:bybit_live:2026-04','row_type':'monthly_aud_reval','raw_refs':{'period_month':'2026-04'}}])
+    r = client.post('/api/trading-journal/crypto-monthly-pnl')
+    assert r.status_code == 200
+    j = r.json()
+    assert j['target_months'] == ['2026-04']
+
+
+def test_history_page_no_post_diagnostics_or_sync():
+    js = (ROOT / 'render' / 'static' / 'history_page.js').read_text(encoding='utf-8')
+    assert "fetchJson('/api/trading-journal/diagnostics', { method: 'POST' })" not in js
+    assert '/api/trading-journal/sync' not in js
+    assert '/api/trading-journal/readiness' not in js
+    assert 'Trading Journal sync reported failure after OANDA backfill' not in js
+
+
+def test_trading_journal_js_sync_code_removed():
+    js = (ROOT / 'render' / 'static' / 'trading_journal.js').read_text(encoding='utf-8')
+    for token in ['/api/trading-journal/sync','/api/trading-journal/readiness','waitForSync','watchSyncCompletion','triggerBackgroundSync','Syncing journal sources','Sync complete:','syncResult','localLast','syncStatusPromise','Auto-sync from configured journal sources','manual Sync now remains available','backgroundSyncLabel','syncWatchTimer','Journal cache is building/syncing','Sync required','manualSyncInFlight','const sleep = ']:
+        assert token not in js
+
+
+def test_read_monthly_anchor_helper_missing_trade_log(tmp_path):
+    from openpyxl import Workbook
+    wb=Workbook()
+    wb.active.title='Not Trade Log'
+    path=tmp_path/'x.xlsx'
+    wb.save(path)
+    out = master_service._read_monthly_aud_reval_months_from_workbook(path)
+    assert out['ok'] is False
+    assert out['trade_log_exists'] is False
+
+
+def test_read_monthly_anchor_helper_missing_row_id(tmp_path):
+    from openpyxl import Workbook
+    wb=Workbook()
+    ws=wb.active
+    ws.title='Trade Log'
+    ws['A1']='Close Time'
+    path=tmp_path/'x2.xlsx'
+    wb.save(path)
+    out = master_service._read_monthly_aud_reval_months_from_workbook(path)
+    assert out['ok'] is False
+    assert out['row_id_column_exists'] is False
+
+
+def test_crypto_monthly_endpoint_fails_when_workbook_anchor_read_fails(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+    client=TestClient(master_service.app)
+    monkeypatch.setattr(master_service, '_brisbane_now', lambda: __import__('datetime').datetime(2026,5,21))
+    monkeypatch.setattr(master_service, '_master_journal_path', lambda: tmp_path/'Trading Journal.xlsx')
+    monkeypatch.setattr(master_service, '_monthly_aud_revaluation_rows_for_journal_view', lambda: [{'id':'monthly_aud_reval:bybit_live:2026-03','raw_refs':{'period_month':'2026-03'}}])
+    monkeypatch.setattr(master_service, '_read_monthly_aud_reval_months_from_workbook', lambda _p: {'ok':False,'workbook_exists':True,'error':'boom','months':[],'row_ids':[],'trade_log_exists':False,'row_id_column_exists':False})
+    r=client.post('/api/trading-journal/crypto-monthly-pnl')
+    assert r.status_code==500
+    assert r.json()['ok'] is False

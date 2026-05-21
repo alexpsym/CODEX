@@ -31,9 +31,9 @@ def test_dashboard_home_removes_instrument_specs_recent_trades_open_orders() -> 
     assert 'id="dashboard-workspace-empty"' in html
     assert 'id="dashboard-workspace-frame"' in html
 
-    assert 'id="sync-journal-btn"' in html
-    assert 'Sync Journal' in html
-    assert 'id="sync-journal-status"' in html
+    assert 'id="journal-sync-widget"' not in html
+    assert 'id="sync-journal-btn"' not in html
+    assert 'id="sync-journal-status"' not in html
 
     scripts_idx = html.find('Scripts')
     watchlist_idx = html.find('Watchlist')
@@ -50,15 +50,10 @@ def test_calculator_specs_markup_and_endpoint_are_preserved() -> None:
     assert '/api/instrument-specs?query=' in calculator_js
 
 
-def test_dashboard_home_has_open_trading_journal_button_hidden_default() -> None:
+def test_dashboard_home_removed_legacy_open_trading_journal_panel() -> None:
     source = MASTER_SERVICE_PATH.read_text(encoding='utf-8')
     html = _extract_html_template(source)
-    assert 'id="open-master-journal-btn"' in html
-    assert 'Open Trading Journal' in html
-    assert 'Open Master Journal' not in html
-    assert 'id="sync-journal-btn"' in html
-    assert html.index('sync-journal-btn') < html.index('open-master-journal-btn') < html.index('sync-journal-status')
-    assert 'id="open-master-journal-btn" hidden disabled' in html
+    assert 'id="open-master-journal-btn"' not in html
 
 
 def _load_master_service_module():
@@ -93,3 +88,17 @@ def test_local_profile_sets_no_cache_for_home_and_static_assets(monkeypatch) -> 
     static = client.get('/static/dashboard.js')
     static_cache = static.headers.get('cache-control', '')
     assert 'no-store' in static_cache or 'no-cache' in static_cache
+
+
+def test_local_profile_buttons_include_trading_journal_source() -> None:
+    source = MASTER_SERVICE_PATH.read_text(encoding='utf-8')
+    assert '"id": "trading-journal"' in source
+    assert '"open_url": "/merged/trading-journal"' in source
+
+
+def test_trading_journal_workspace_contains_three_buttons_in_order():
+    source = MASTER_SERVICE_PATH.read_text(encoding='utf-8')
+    assert "open-journal-btn" in source
+    assert "import-journal-btn" in source
+    assert "crypto-monthly-pnl-btn" in source
+    assert source.index("open-journal-btn") < source.index("import-journal-btn") < source.index("crypto-monthly-pnl-btn")
