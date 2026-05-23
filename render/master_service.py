@@ -1575,7 +1575,25 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
     trade_items = _enrich_trade_row_metrics(timeline.get("rows") if isinstance(timeline.get("rows"), list) else rows)
     cashflow_rows = [r for r in _cashflow_rows_for_journal(ledger) if isinstance(r, dict) and not _exclude_bybit_demo_row(r)]
     stats_items = sorted([*trade_items, *cashflow_rows], key=_row_sort_dt, reverse=True)
-    monthly_note_rows = _monthly_aud_revaluation_rows_for_journal_view()
+    monthly_note_rows_raw = _monthly_aud_revaluation_rows_for_journal_view()
+    monthly_note_rows: List[Dict[str, object]] = []
+    for row in monthly_note_rows_raw:
+        if not isinstance(row, dict):
+            continue
+        if _row_type(row) != "monthly_aud_reval":
+            monthly_note_rows.append(dict(row))
+            continue
+        normalized_note = dict(row)
+        normalized_note["row_type"] = "monthly_aud_reval"
+        normalized_note["source"] = normalized_note.get("source") or "bybit_monthly_aud_reval"
+        normalized_note["symbol"] = normalized_note.get("symbol") or "MONTHLY AUD P/L"
+        normalized_note["account"] = normalized_note.get("account") or "BYBIT"
+        normalized_note["account_label"] = normalized_note.get("account_label") or "BYBIT"
+        normalized_note["result_currency"] = str(normalized_note.get("result_currency") or "AUD").strip().upper()
+        normalized_note["result_cash"] = _to_float(normalized_note.get("result_cash"))
+        normalized_note["raw_refs"] = normalized_note.get("raw_refs") if isinstance(normalized_note.get("raw_refs"), dict) else {}
+        normalized_note["close_time"] = normalized_note.get("close_time") or ""
+        monthly_note_rows.append(normalized_note)
     combined_items = sorted([*trade_items, *cashflow_rows, *monthly_note_rows], key=_row_sort_dt, reverse=True)
     balances = timeline.get("balances") if isinstance(timeline.get("balances"), list) else []
     stats = _compute_journal_stats(stats_items, balances)
