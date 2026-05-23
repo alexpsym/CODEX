@@ -15,6 +15,11 @@ sys.modules[SPEC.name] = master_service
 SPEC.loader.exec_module(master_service)
 
 
+def test_app_logger_defined() -> None:
+    assert hasattr(master_service, "APP_LOGGER")
+    assert hasattr(master_service.APP_LOGGER, "info")
+
+
 def test_local_exit_success(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     client = TestClient(master_service.app)
     calls: list[str] = []
@@ -27,7 +32,9 @@ def test_local_exit_success(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     monkeypatch.setattr(master_service, "_schedule_local_master_process_exit", lambda delay_seconds=0.75: calls.append("schedule"))
     res = client.post("/api/local-exit", json={"url": "http://127.0.0.1:8000/"})
     assert res.status_code == 200
-    assert res.json().get("ok") is True
+    body = res.json()
+    assert body.get("ok") is True
+    assert body.get("sentinel") == str(sentinel)
     assert calls == ["close", "sentinel", "schedule"]
 
 
