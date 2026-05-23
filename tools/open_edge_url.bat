@@ -2,6 +2,8 @@
 setlocal EnableExtensions
 
 set "TARGET_URL=%~1"
+set "DEBUG_PORT=%~2"
+set "PROFILE_DIR=%~3"
 if not defined TARGET_URL (
   echo [open-edge-url] ERROR: missing URL argument. Microsoft Edge launch requires a URL.
   exit /b 1
@@ -27,7 +29,11 @@ if not defined EDGE_EXE (
   exit /b 1
 )
 
-start "Microsoft Edge" "%EDGE_EXE%" "%TARGET_URL%"
+if defined DEBUG_PORT if defined PROFILE_DIR (
+  start "Microsoft Edge" "%EDGE_EXE%" --new-window --remote-debugging-port=%DEBUG_PORT% --user-data-dir="%PROFILE_DIR%" --no-first-run "%TARGET_URL%"
+) else (
+  start "Microsoft Edge" "%EDGE_EXE%" "%TARGET_URL%"
+)
 if errorlevel 1 (
   echo [open-edge-url] ERROR: failed to launch Microsoft Edge using "%EDGE_EXE%".
   exit /b 1
