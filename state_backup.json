@@ -176,30 +176,13 @@
     "updated_at": "2026-05-23T12:46:01.776047+00:00"
   },
   "pending_webhooks": [],
-  "savedAt": "2026-05-23T12:53:53.026424+00:00",
+  "savedAt": "2026-05-23T12:54:00.215808+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [],
   "trading_journal": {
-    "items": [
-      {
-        "account": "Bybit Demo",
-        "account_label": "Bybit Demo",
-        "asset_class": "crypto",
-        "close_time": "2026-05-19T01:13:00+10:00",
-        "entry_price": 100001,
-        "exit_price": 100001,
-        "id": "bybit:demo:execution:BTCUSDT:E2",
-        "open_time": "2026-05-19T01:13:00+10:00",
-        "qty": 0.1,
-        "row_type": "trade",
-        "side": "Buy",
-        "source": "bybit_execution_history",
-        "symbol": "BTCUSDT",
-        "updated_at": "2026-05-23T12:53:51.021023+00:00"
-      }
-    ],
-    "updated_at": "2026-05-23T12:53:51.021048+00:00"
+    "items": [],
+    "updated_at": "2026-05-23T12:53:58.209735+00:00"
   },
   "trading_journal_import_cache": {},
   "trading_journal_state": {
@@ -251,6 +234,36 @@
       "bybit_demo_anchor_fingerprint": "06359c2d2c9fe4a3cce2c349922721278d153c077876f45426bef890a87f90b3",
       "updated_at": "2026-05-23T12:45:59.006829+00:00",
       "warnings": []
+    },
+    "bybit_closed_pnl_last_seen": {
+      "demo": 1778936097950,
+      "live": null
+    },
+    "bybit_demo_sync": {
+      "bybit_demo_balance_backfill_changed": false,
+      "bybit_demo_balance_backfill_error": null,
+      "bybit_demo_balance_backfill_rows_backfilled": 0,
+      "bybit_demo_balance_backfill_rows_seen": 2,
+      "bybit_demo_balance_backfill_snapshot_at": "2026-05-23T12:53:57.975942+00:00",
+      "bybit_demo_execution_warning": null,
+      "last_captured_row_ids": [
+        "bybit:demo:execution:BTCUSDT:E1",
+        "bybit:demo:execution:BTCUSDT:E2"
+      ],
+      "last_checked_at": "2026-05-23T12:53:57.988181+00:00",
+      "last_error": null,
+      "last_invalid_time_row_details": [],
+      "last_invalid_time_rows_dropped": 0,
+      "last_local_workbook_path": null,
+      "last_local_workbook_rows_upserted": 2,
+      "last_local_workbook_sanitized": 0,
+      "last_rows_deduped": 0,
+      "last_rows_seen": 2,
+      "last_rows_upserted": 2,
+      "last_success_at": "2026-05-23T12:53:57.988192+00:00",
+      "last_workbook_rows_deduped": 0,
+      "single_file_mode": true,
+      "updated_at": "2026-05-23T12:53:58.002546+00:00"
     },
     "daily_trade_sync": {
       "last_attempt_at": "2026-05-23T12:23:51.076603+00:00",
