@@ -85,13 +85,46 @@
     "updated_at": "2026-05-23T14:02:32.119151+00:00"
   },
   "pending_webhooks": [],
-  "savedAt": "2026-05-23T14:11:38.716908+00:00",
+  "savedAt": "2026-05-23T14:11:58.192873+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [],
   "trading_journal": {
-    "items": [],
-    "updated_at": "2026-05-23T14:11:36.672861+00:00"
+    "items": [
+      {
+        "account": "A",
+        "breakeven": "",
+        "close_time": "2026-05-01",
+        "id": "t1",
+        "is_test_trade": false,
+        "manual_override_fields": [
+          "breakeven",
+          "is_test_trade",
+          "notes",
+          "setup",
+          "timeframe"
+        ],
+        "manual_overrides": {
+          "breakeven": "",
+          "is_test_trade": false,
+          "notes": "",
+          "setup": "",
+          "timeframe": ""
+        },
+        "manual_updated_at": "2026-05-23T14:11:56.175867+00:00",
+        "net_profit": 1.0,
+        "notes": "",
+        "open_time": "2026-05-01",
+        "realized_pnl": 1.0,
+        "result_pct": 1.0,
+        "row_type": "trade",
+        "setup": "",
+        "side": "BUY",
+        "symbol": "EURUSD",
+        "timeframe": ""
+      }
+    ],
+    "updated_at": "2026-05-23T14:11:56.175896+00:00"
   },
   "trading_journal_import_cache": {},
   "trading_journal_state": {
@@ -175,7 +208,7 @@
       "updated_at": "2026-05-23T14:11:36.476551+00:00"
     },
     "daily_trade_sync": {
-      "last_attempt_at": "2026-05-23T14:02:07.549409+00:00",
+      "last_attempt_at": "2026-05-23T14:11:58.131766+00:00",
       "last_error": "boom",
       "last_reason": "startup_recovery",
       "last_result": {
@@ -186,7 +219,7 @@
         "rows_imported": 1
       },
       "last_success_at": null,
-      "updated_at": "2026-05-23T14:02:07.565810+00:00"
+      "updated_at": "2026-05-23T14:11:58.144474+00:00"
     }
   },
   "version": 4,
