@@ -8,6 +8,12 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _installer_script_path() -> Path:
+    modern = ROOT / 'INSTALL.bat'
+    legacy = ROOT / 'ExtractLatestCodexMaster.bat'
+    return modern if modern.exists() else legacy
+
+
 def test_run_local_master_loads_env_before_render_url_check() -> None:
     script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
     assert 'call :load_master_env_vars' in script
@@ -139,7 +145,7 @@ def test_run_local_master_migrates_legacy_master_journal_name() -> None:
 
 
 def test_extract_latest_moves_checkout_blocking_untracked_journal_workbooks_before_checkout() -> None:
-    script = (ROOT / 'ExtractLatestCodexMaster.bat').read_text(encoding='utf-8')
+    script = _installer_script_path().read_text(encoding='utf-8')
     assert 'function Move-CheckoutBlockingUntrackedFilesBeforeGitUpdate' in script
     assert "'journal/Trading Journal.xlsx'" in script
     assert "'journal/Master Journal.xlsx'" in script
@@ -155,7 +161,7 @@ def test_extract_latest_moves_checkout_blocking_untracked_journal_workbooks_befo
 
 
 def test_extract_latest_calls_blocker_helper_before_fast_forward_checkout_merge() -> None:
-    script = (ROOT / 'ExtractLatestCodexMaster.bat').read_text(encoding='utf-8')
+    script = _installer_script_path().read_text(encoding='utf-8')
     ff_helper_idx = script.find('Move-CheckoutBlockingUntrackedFilesBeforeGitUpdate -GitExe $GitExe -RepoDir $RepoDir -BackupDir $ffBlockerBackupDir')
     ff_checkout_idx = script.find("Invoke-GitCommand -GitExe $GitExe -Arguments @('checkout', $Branch)")
     ff_merge_idx = script.find("Invoke-GitCommand -GitExe $GitExe -Arguments @('merge', '--ff-only', \"origin/$Branch\")")
@@ -168,7 +174,7 @@ def test_extract_latest_calls_blocker_helper_before_fast_forward_checkout_merge(
 
 
 def test_extract_latest_fast_forward_restores_preserved_workbook_and_resolves_collision() -> None:
-    script = (ROOT / 'ExtractLatestCodexMaster.bat').read_text(encoding='utf-8')
+    script = _installer_script_path().read_text(encoding='utf-8')
     assert 'if ($ffMovedBlockers -gt 0) {' in script
     assert "$ffRestoreRoot = Join-Path $ffBlockerBackupDir 'checkout-blockers'" in script
     assert 'Preserve-LocalFilesFromBackup -BackupDir $ffRestoreRoot -NewRepoDir $RepoDir' in script
@@ -176,7 +182,7 @@ def test_extract_latest_fast_forward_restores_preserved_workbook_and_resolves_co
 
 
 def test_extract_latest_git_diagnostic_writes_quiet_files_and_logs_only_summary() -> None:
-    script = (ROOT / 'ExtractLatestCodexMaster.bat').read_text(encoding='utf-8')
+    script = _installer_script_path().read_text(encoding='utf-8')
     assert 'Invoke-GitText -GitExe $GitExe -Arguments $Arguments -WorkingDirectory $WorkingDirectory -AllowFailure -Quiet' in script
     assert 'Wrote diagnostic: $DestinationPath' in script
     assert "Write-GitDiagnosticFile -GitExe $GitExe -Arguments @('diff', '--binary')" in script
@@ -184,16 +190,20 @@ def test_extract_latest_git_diagnostic_writes_quiet_files_and_logs_only_summary(
 
 
 def test_extract_latest_transcript_logging_paths_and_messages_present() -> None:
-    script = (ROOT / 'ExtractLatestCodexMaster.bat').read_text(encoding='utf-8')
-    assert "ExtractLatestCodexMaster-latest.log" in script
-    assert "ExtractLatestCodexMaster-{0}.log" in script
+    script = _installer_script_path().read_text(encoding='utf-8')
+    assert "$scriptLogStem = 'INSTALL'" in script
+    assert "[IO.Path]::GetFileNameWithoutExtension($env:__BATFILE)" in script
+    assert '"{0}-latest.log" -f $scriptLogStem' in script
+    assert '"{0}-{1}.log" -f $scriptLogStem' in script
+    assert "ExtractLatestCodexMaster-latest.log" not in script
+    assert "ExtractLatestCodexMaster-{0}.log" not in script
     assert 'Start-Transcript -LiteralPath $timestampedLogPath -Force' in script
     assert 'Stop-Transcript' in script
     assert 'Full log written to: $timestampedLogPath' in script
 
 
 def test_extract_latest_has_no_invalid_variable_scope_tokens_in_double_quoted_strings() -> None:
-    script = (ROOT / 'ExtractLatestCodexMaster.bat').read_text(encoding='utf-8')
+    script = _installer_script_path().read_text(encoding='utf-8')
     double_quoted_strings = re.findall(r'"(?:[^"\\]|\\.)*"', script)
     invalid_hits: list[str] = []
     for s in double_quoted_strings:
@@ -208,7 +218,7 @@ def test_extract_latest_embedded_powershell_parses_without_errors() -> None:
     if not ps_exe:
         pytest.skip('PowerShell executable not available in test environment')
 
-    script_path = ROOT / 'ExtractLatestCodexMaster.bat'
+    script_path = _installer_script_path()
     parse_cmd = (
         "$content = Get-Content -LiteralPath '" + str(script_path).replace("'", "''") + "';"
         "$ps = ($content | Select-Object -Skip 7) -join \"`n\";"
