@@ -1390,6 +1390,55 @@ def test_import_file_bybit_csv_parses_once_with_explicit_account_mode(temp_state
     assert calls["local"] == 0
 
 
+def test_import_file_bridges_pending_rows_during_sync_and_restores_after(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    seen = {"during": []}
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    monkeypatch.setattr(master_service, "_PENDING_MANUAL_SYNC_ROWS", [{"id": "existing:pending"}], raising=False)
+    def _fake_sync():
+        seen["during"] = [str(r.get("id") or "") for r in (master_service._PENDING_MANUAL_SYNC_ROWS or []) if isinstance(r, dict)]
+        return {"ok": True}
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", _fake_sync)
+    payload = master_service._import_uploaded_trading_journal_file("bybit_demo.csv", _bybit_csv_sample(1).encode("utf-8"), account_mode="demo")
+    assert payload["ok"] is True
+    assert any(x.startswith("bybit:demo:execution:") for x in seen["during"])
+    assert "existing:pending" in seen["during"]
+    assert [str(r.get("id") or "") for r in (master_service._PENDING_MANUAL_SYNC_ROWS or []) if isinstance(r, dict)] == ["existing:pending"]
+    assert isinstance(payload.get("import_timings"), dict)
+
+
+def test_import_file_does_not_build_snapshot_before_sync(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    calls = {"snap": 0, "sync": 0}
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    def _fake_snap(*_a, **_k):
+        calls["snap"] += 1
+        return {"items": master_service._get_trading_journal_rows(), "stats": {}, "balances": []}
+    def _fake_sync():
+        calls["sync"] += 1
+        return {"ok": True}
+    monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", _fake_snap)
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", _fake_sync)
+    payload = master_service._import_uploaded_trading_journal_file("bybit_demo.csv", _bybit_csv_sample(1).encode("utf-8"), account_mode="demo")
+    assert payload["ok"] is True
+    assert calls["sync"] == 1
+    assert calls["snap"] == 1
+    assert isinstance(payload.get("import_timings"), dict)
+
+
+def test_build_journal_balance_timelines_timestamp_cache_bounds_to_datetime_calls(monkeypatch: pytest.MonkeyPatch):
+    real_to_datetime = master_service.pd.to_datetime
+    calls = {"n": 0}
+    def _counted(*args, **kwargs):
+        calls["n"] += 1
+        return real_to_datetime(*args, **kwargs)
+    monkeypatch.setattr(master_service.pd, "to_datetime", _counted)
+    rows = []
+    for i in range(120):
+        rows.append({"id": f"r{i}", "row_type": "trade", "account": "Bybit Demo", "account_label": "Bybit Demo", "open_time": "2026-05-17T12:00:00Z", "close_time": "2026-05-17T12:00:00Z", "net_profit": 1.0, "currency": "USDT"})
+    ledger = {master_service._norm_account_key("Bybit Demo"): [{"date": "2026-05-17T11:00:00Z", "new_balance": 1000.0, "currency": "USDT"} for _ in range(120)]}
+    _ = master_service._build_journal_balance_timelines(rows, ledger, [])
+    assert calls["n"] < 50
+
+
 def test_global_pnl_inference_bybit_from_balance_continuity(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
     existing = [{"id": "anchor:1", "row_type": "trade", "account": "Bybit Demo", "account_label": "Bybit Demo", "balance_after_trade": 1000.0, "open_time": "2026-05-17T12:00:00Z"}]
     master_service._set_trading_journal_rows(existing)
