@@ -89,12 +89,20 @@ echo [local-master] BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH=%BYBIT_DEMO_CALC_CONTEXT_
 echo [local-master] User state source: Repo local files
 if /I "%LOCAL_STATE_ONLY%"=="1" echo [local-master] Repo-local state enabled. Ensure Git sync succeeds before replacing the repo clone.
 
-start "Local Master Control" /D "%ROOT%" cmd /d /v:on /k ""%~f0" __worker"
 set "MASTER_URL=http://127.0.0.1:8000"
 set "MASTER_HEALTH_URL=http://127.0.0.1:8000/health"
 set "MASTER_SCRIPTS_URL=http://127.0.0.1:8000/scripts"
 for /f %%I in ('powershell -NoProfile -Command "[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()"') do set "LOCAL_LAUNCH_TS=%%I"
 set "MASTER_BROWSER_URL=%MASTER_URL%/?local_launch=%LOCAL_LAUNCH_TS%"
+for /f %%I in ('powershell -NoProfile -Command "try { $l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback,0); $l.Start(); $p = $l.LocalEndpoint.Port; $l.Stop(); if($p -gt 0){Write-Output $p; exit 0}; exit 1 } catch { exit 1 }"') do set "LOCAL_MASTER_EDGE_DEBUG_PORT=%%I"
+if not defined LOCAL_MASTER_EDGE_DEBUG_PORT (
+  echo [local-master] ERROR: failed to allocate LOCAL_MASTER_EDGE_DEBUG_PORT.
+  exit /b 1
+)
+set "LOCAL_MASTER_EDGE_PROFILE_DIR=%TEMP%\LocalTradingToolsEdge-%LOCAL_LAUNCH_TS%"
+set "LOCAL_MASTER_EXIT_REQUEST=%TEMP%\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.flag"
+if exist "%LOCAL_MASTER_EXIT_REQUEST%" del /q "%LOCAL_MASTER_EXIT_REQUEST%" >nul 2>nul
+start "Local Master Control" /D "%ROOT%" cmd /d /v:on /c ""%~f0" __worker"
 set "MASTER_READY_TIMEOUT_SECONDS=60"
 set "SCANNER_READY_TIMEOUT_SECONDS=90"
 echo [local-master] waiting for %MASTER_HEALTH_URL% ...
@@ -125,7 +133,7 @@ goto wait_for_scanner_ready
 
 :scanner_ready
 echo [local-master] scanner ready after !SCANNER_READY_WAITED! seconds.
-call "%ROOT%tools\open_edge_url.bat" "%MASTER_BROWSER_URL%"
+call "%ROOT%tools\open_edge_url.bat" "%MASTER_BROWSER_URL%" "%LOCAL_MASTER_EDGE_DEBUG_PORT%" "%LOCAL_MASTER_EDGE_PROFILE_DIR%"
 if errorlevel 1 (
   echo [local-master] ERROR: failed to open Microsoft Edge for %MASTER_BROWSER_URL%.
   exit /b 1
@@ -179,6 +187,13 @@ echo [local-master] starting uvicorn at !DATE! !TIME!
 "%PYTHON_EXE%" -m uvicorn render.master_service:app --host 127.0.0.1 --port 8000 --log-config "%ROOT%render\local_uvicorn_log_config.json"
 set "EXIT_CODE=!ERRORLEVEL!"
 echo [local-master] uvicorn exited with !EXIT_CODE! at !DATE! !TIME!
+if defined LOCAL_MASTER_EXIT_REQUEST if exist "!LOCAL_MASTER_EXIT_REQUEST!" (
+  echo [local-master] local exit requested; closing worker window.
+  del /q "!LOCAL_MASTER_EXIT_REQUEST!" >nul 2>nul
+  if defined LOCAL_MASTER_EDGE_PROFILE_DIR if exist "!LOCAL_MASTER_EDGE_PROFILE_DIR!\" rmdir /s /q "!LOCAL_MASTER_EDGE_PROFILE_DIR!" >nul 2>nul
+  echo [local-master] closing Local Master Control command prompt.
+  exit /b 0
+)
 echo [local-master] restarting in 3 seconds. Close this window to stop local master.
 timeout /t 3 /nobreak >nul
 goto restart_master

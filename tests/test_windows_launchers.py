@@ -99,6 +99,36 @@ def test_run_local_master_uses_uvicorn_log_config_and_access_log_enabled() -> No
     assert '--no-access-log' not in script
 
 
+def test_run_local_master_exit_wiring_and_ordering() -> None:
+    script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
+    assert 'set "LOCAL_MASTER_EXIT_REQUEST=%TEMP%\\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.flag"' in script
+    assert 'set "LOCAL_MASTER_EDGE_DEBUG_PORT=' in script
+    assert 'start "Local Master Control" /D "%ROOT%" cmd /d /v:on /c ""%~f0" __worker"' in script
+    assert '/k ""%~f0" __worker"' not in script
+    assert 'call "%ROOT%tools\\open_edge_url.bat" "%MASTER_BROWSER_URL%" "%LOCAL_MASTER_EDGE_DEBUG_PORT%" "%LOCAL_MASTER_EDGE_PROFILE_DIR%"' in script
+    assert 'if defined LOCAL_MASTER_EXIT_REQUEST if exist "!LOCAL_MASTER_EXIT_REQUEST!" (' in script
+    assert 'goto restart_master' in script
+    worker_idx = script.find('start "Local Master Control"')
+    health_idx = script.find(':wait_for_master_ready')
+    open_idx = script.find('call "%ROOT%tools\\open_edge_url.bat"')
+    assert worker_idx != -1 and health_idx != -1 and open_idx != -1
+    assert worker_idx < health_idx < open_idx
+    exit_branch_idx = script.find('if defined LOCAL_MASTER_EXIT_REQUEST if exist "!LOCAL_MASTER_EXIT_REQUEST!" (')
+    restart_idx = script.find('goto restart_master')
+    assert exit_branch_idx != -1 and restart_idx != -1 and exit_branch_idx < restart_idx
+    assert '\n  exit /b 0\n)' in script
+
+
+def test_open_edge_url_supports_optional_debugging_profile_args() -> None:
+    script = (ROOT / 'tools' / 'open_edge_url.bat').read_text(encoding='utf-8')
+    assert 'where msedge.exe' in script
+    assert '--remote-debugging-port=%DEBUG_PORT%' in script
+    assert '--user-data-dir="%PROFILE_DIR%"' in script
+    assert 'chrome' not in script.lower()
+    assert 'brave' not in script.lower()
+    assert 'start "" "%TARGET_URL%"' not in script
+
+
 def test_run_local_master_migrates_legacy_master_journal_name() -> None:
     script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
     assert "LEGACY_JOURNAL=%TRADING_JOURNAL_LOCAL_DIR%\\Master Journal.xlsx" in script

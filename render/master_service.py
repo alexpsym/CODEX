@@ -9716,9 +9716,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             color: #e2e8f0;
         }
         .script-stack{
-            display:grid;
-            grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+            display:flex;
+            flex-direction:column;
             gap:0.65rem;
+        }
+        .local-exit-btn{
+            margin-top:2.25rem;
         }
         
         .script-btn {
@@ -25907,3 +25910,80 @@ def _scanner_local_only_response(path: str) -> PlainTextResponse:
         status_code=410,
         headers={"cache-control": "no-store, max-age=0", "x-disabled-path": path},
     )
+def _is_local_exit_allowed() -> bool:
+    return _resolve_app_profile() == "local"
+
+
+def _close_local_master_edge_target(current_url: Optional[str]) -> Dict[str, object]:
+    debug_port_raw = str(os.getenv("LOCAL_MASTER_EDGE_DEBUG_PORT") or "").strip()
+    if not debug_port_raw.isdigit():
+        raise HTTPException(status_code=500, detail="LOCAL_MASTER_EDGE_DEBUG_PORT is missing or invalid.")
+    debug_port = int(debug_port_raw)
+    response = requests.get(f"http://127.0.0.1:{debug_port}/json", timeout=2.5)
+    response.raise_for_status()
+    targets = response.json()
+    if not isinstance(targets, list):
+        raise HTTPException(status_code=500, detail="Edge DevTools target list was malformed.")
+    wanted = {str(current_url or "").strip(), "http://127.0.0.1:8000/", "http://localhost:8000/"}
+    page_targets = [t for t in targets if isinstance(t, dict) and str(t.get("type", "")).lower() == "page"]
+    matched = None
+    for target in page_targets:
+        target_url = str(target.get("url") or "").strip()
+        if target_url in wanted:
+            matched = target
+            break
+    if matched is None:
+        for target in page_targets:
+            target_url = str(target.get("url") or "").strip().lower()
+            if target_url.startswith("http://127.0.0.1:8000/") or target_url.startswith("http://localhost:8000/"):
+                matched = target
+                break
+    if matched is None:
+        raise HTTPException(status_code=409, detail="Local Trading Tools Edge tab was not found; app was not shut down.")
+    target_id = str(matched.get("id") or "").strip()
+    if not target_id:
+        raise HTTPException(status_code=500, detail="Edge DevTools target id missing.")
+    close_response = requests.get(f"http://127.0.0.1:{debug_port}/json/close/{quote(target_id, safe='')}", timeout=2.5)
+    if close_response.status_code >= 400:
+        raise HTTPException(status_code=409, detail="Failed to close Local Trading Tools Edge tab; app was not shut down.")
+    return {"ok": True, "target_id": target_id, "target_url": str(matched.get("url") or "")}
+
+
+def _write_local_exit_sentinel() -> Path:
+    sentinel_raw = str(os.getenv("LOCAL_MASTER_EXIT_REQUEST") or "").strip()
+    if not sentinel_raw:
+        raise HTTPException(status_code=500, detail="LOCAL_MASTER_EXIT_REQUEST is missing.")
+    sentinel_path = Path(sentinel_raw)
+    sentinel_path.parent.mkdir(parents=True, exist_ok=True)
+    sentinel_path.write_text(f"exit requested at {datetime.now(timezone.utc).isoformat()}\n", encoding="utf-8")
+    return sentinel_path
+
+
+def _schedule_local_master_process_exit(delay_seconds: float = 0.75) -> None:
+    def _shutdown() -> None:
+        time.sleep(max(0.0, float(delay_seconds)))
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    threading.Thread(target=_shutdown, name="local-master-exit", daemon=True).start()
+
+
+@app.post("/api/local-exit")
+async def local_exit(payload: Dict[str, object] = Body(default_factory=dict)) -> JSONResponse:
+    if not _is_local_exit_allowed():
+        raise HTTPException(status_code=404, detail="Local exit is only available in local profile.")
+    current_url = str((payload or {}).get("url") or "").strip() or None
+    try:
+        close_info = _close_local_master_edge_target(current_url)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=f"Failed to close Local Trading Tools Edge tab: {exc}") from exc
+    try:
+        sentinel_path = _write_local_exit_sentinel()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to schedule local shutdown: {exc}") from exc
+    _schedule_local_master_process_exit()
+    APP_LOGGER.info("LOCAL_EXIT_REQUESTED target=%s sentinel=%s", close_info.get("target_url"), sentinel_path)
+    return JSONResponse({"ok": True, "target": close_info, "sentinel": str(sentinel_path)})

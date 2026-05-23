@@ -30,6 +30,9 @@ def test_dashboard_home_removes_instrument_specs_recent_trades_open_orders() -> 
     assert 'id="dashboard-workspace-status"' in html
     assert 'id="dashboard-workspace-empty"' in html
     assert 'id="dashboard-workspace-frame"' in html
+    assert '.local-exit-btn' in html
+    assert 'id="scripts-grid" class="script-stack"' in html
+    assert 'id="exit-panel"' not in html
 
     assert 'id="journal-sync-widget"' not in html
     assert 'id="sync-journal-btn"' not in html
