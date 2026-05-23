@@ -3919,6 +3919,10 @@ def _monthly_aud_revaluation_rows_for_journal_view() -> List[Dict[str, object]]:
         out["row_type"] = "monthly_aud_reval"
         out["source"] = out.get("source") or "bybit_monthly_aud_reval"
         out["symbol"] = out.get("symbol") or "MONTHLY AUD P/L"
+        out["result_currency"] = str(out.get("result_currency") or "AUD").strip().upper()
+        out["result_cash"] = result_cash
+        out["raw_refs"] = out.get("raw_refs") if isinstance(out.get("raw_refs"), dict) else {}
+        out["close_time"] = out.get("close_time") or close_time
         out["account"] = "BYBIT"
         out["account_label"] = "BYBIT"
         out["setup"] = out.get("setup") or "Monthly BYBIT AUD P/L note - excluded from metrics"
@@ -24853,12 +24857,15 @@ async def _legacy_trading_journal_sync_status() -> JSONResponse:
         snapshot["stale_warning"] = ""
 
     if bool(snapshot.get("running")) and bool(task is not None and hasattr(task, "done") and bool(task.done())):
+        task_cancelled = bool(hasattr(task, "cancelled") and task.cancelled())
+        if task_cancelled:
+            snapshot["stale_warning"] = snapshot.get("stale_warning") or "Sync task was cancelled; awaiting state reconciliation."
+            snapshot.update({"active_task_known": False})
+            snapshot.update(_manual_save_state_snapshot())
+            return JSONResponse(_json_safe(snapshot))
         err = None
         try:
-            if bool(hasattr(task, "cancelled") and task.cancelled()):
-                err = RuntimeError("Sync task was cancelled before completion.")
-            else:
-                err = task.exception()
+            err = task.exception()
         except asyncio.CancelledError:
             err = RuntimeError("Sync task was cancelled before completion.")
         except Exception as exc:
