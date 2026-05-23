@@ -57,18 +57,18 @@
   "monthly_aud_revaluation_state": {},
   "oanda_fill_state": {},
   "pending_webhooks": [],
-  "savedAt": "2026-05-23T13:09:59.011118+00:00",
+  "savedAt": "2026-05-23T13:19:10.430625+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [],
   "trading_journal": {
     "items": [],
-    "updated_at": "2026-05-23T13:09:57.005165+00:00"
+    "updated_at": "2026-05-23T13:19:08.356968+00:00"
   },
   "trading_journal_import_cache": {},
   "trading_journal_state": {
     "bybit_closed_pnl_last_seen": {
-      "demo": 1778937000780,
+      "demo": 1778937608023,
       "live": null
     },
     "bybit_demo_sync": {
@@ -76,13 +76,13 @@
       "bybit_demo_balance_backfill_error": null,
       "bybit_demo_balance_backfill_rows_backfilled": 0,
       "bybit_demo_balance_backfill_rows_seen": 2,
-      "bybit_demo_balance_backfill_snapshot_at": "2026-05-23T13:09:00.810600+00:00",
+      "bybit_demo_balance_backfill_snapshot_at": "2026-05-23T13:19:08.052687+00:00",
       "bybit_demo_execution_warning": null,
       "last_captured_row_ids": [
         "bybit:demo:execution:BTCUSDT:E1",
         "bybit:demo:execution:BTCUSDT:E2"
       ],
-      "last_checked_at": "2026-05-23T13:09:00.829676+00:00",
+      "last_checked_at": "2026-05-23T13:19:08.064264+00:00",
       "last_error": null,
       "last_invalid_time_row_details": [],
       "last_invalid_time_rows_dropped": 0,
@@ -92,24 +92,10 @@
       "last_rows_deduped": 0,
       "last_rows_seen": 2,
       "last_rows_upserted": 2,
-      "last_success_at": "2026-05-23T13:09:00.829695+00:00",
+      "last_success_at": "2026-05-23T13:19:08.064287+00:00",
       "last_workbook_rows_deduped": 0,
       "single_file_mode": true,
-      "updated_at": "2026-05-23T13:09:00.840017+00:00"
-    },
-    "daily_trade_sync": {
-      "last_attempt_at": "2026-05-23T13:09:39.973377+00:00",
-      "last_error": "boom",
-      "last_reason": "startup_recovery",
-      "last_result": {
-        "master_journal_error": "boom",
-        "master_journal_ok": false,
-        "oanda_recovery": {},
-        "ok": true,
-        "rows_imported": 1
-      },
-      "last_success_at": null,
-      "updated_at": "2026-05-23T13:09:39.983971+00:00"
+      "updated_at": "2026-05-23T13:19:08.079272+00:00"
     }
   },
   "version": 4,
