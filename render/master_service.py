@@ -1564,8 +1564,10 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
                     continue
                 row_id = str(item.get("id") or "")
                 fallback = monthly_note_by_id.get(row_id)
-                normalized_note = _normalize_monthly_aud_reval_snapshot_row(item, fallback=fallback)
-                normalized_items.append(normalized_note)
+                if fallback is not None:
+                    normalized_items.append(dict(fallback))
+                else:
+                    normalized_items.append(_normalize_monthly_aud_reval_snapshot_row(item))
             safe_result["items"] = normalized_items
         _save_trading_journal_view_snapshot(safe_result)
         _persist_trading_journal_sqlite(safe_result)
@@ -1725,8 +1727,10 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
                 continue
             row_id = str(item.get("id") or "")
             fallback = monthly_note_by_id.get(row_id)
-            normalized_note = _normalize_monthly_aud_reval_snapshot_row(item, fallback=fallback)
-            normalized_items.append(normalized_note)
+            if fallback is not None:
+                normalized_items.append(dict(fallback))
+            else:
+                normalized_items.append(_normalize_monthly_aud_reval_snapshot_row(item))
         safe_payload["items"] = normalized_items
     _save_trading_journal_view_snapshot(safe_payload)
     _persist_trading_journal_sqlite(safe_payload)
