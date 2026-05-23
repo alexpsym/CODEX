@@ -1637,6 +1637,13 @@ def test_sync_master_journal_uses_zero_cashflow_anchor_when_cashflow_new_balance
     from openpyxl import load_workbook
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
     mj = tmp_path / 'Trading Journal.xlsx'
+    monkeypatch.setattr(master_service, "_master_journal_authoritative_enabled", lambda: True)
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: False)
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: mj)
+    monkeypatch.setenv("TRADING_JOURNAL_SOURCE", "master_journal")
+    monkeypatch.setattr(master_service, "_load_trading_journal_view_snapshot", lambda: None)
+    monkeypatch.setattr(master_service, "_save_trading_journal_view_snapshot", lambda *_a, **_k: None)
+    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_a, **_k: None)
     rows = [
         {'id':'t1','row_type':'trade','account':'BINANCE','symbol':'BTCUSDT','side':'BUY','open_time':'2020-10-01','close_time':'2020-10-01','net_profit':1.0,'balance_after_trade':396.65720524,'currency':'USDT'},
         {'id':'c1','row_type':'cashflow','account':'BINANCE','symbol':'CASHFLOW','side':'WITHDRAWAL','open_time':'2020-10-26','close_time':'2020-10-26','cashflow_amount':-396.65720524,'balance_after_trade':0,'cashflow_new_balance':'','currency':'USDT','notes':'Withdrawal -396.65720524 USDT'},

@@ -471,6 +471,33 @@ def test_monthly_aud_row_uses_result_currency_and_excluded_from_metrics(tmp_path
     cal = wb["P&L Calendar"]
     assert cal["E4"].value == 1  # April trades count
 
+
+def test_read_master_journal_source_monthly_aud_roundtrip_fields(tmp_path: Path):
+    snapshot = {
+        "items": [{
+            "id": "monthly_aud_reval:bybit_live:2026-04",
+            "row_type": "monthly_aud_reval",
+            "account": "Bybit Live",
+            "account_label": "Bybit Live",
+            "symbol": "MONTHLY AUD P/L",
+            "open_time": "2026-04-01T00:00:00+10:00",
+            "close_time": "2026-04-30T23:59:59+10:00",
+            "result_cash": 123.45,
+            "result_currency": "AUD",
+        }],
+        "stats": {"totals": {}, "groups": {}},
+        "balances": [],
+    }
+    out = tmp_path / "monthly_roundtrip.xlsx"
+    build_master_journal_workbook(snapshot, out)
+    parsed = read_master_journal_source(out)
+    monthly = next(r for r in parsed["items"] if r.get("row_type") == "monthly_aud_reval")
+    assert monthly["result_cash"] == pytest.approx(123.45)
+    assert monthly["result_currency"] == "AUD"
+    assert (monthly.get("raw_refs") or {}).get("period_month") == "2026-04"
+    assert monthly.get("net_profit") in (None, "")
+    assert monthly.get("realized_pnl") in (None, "")
+
 def test_trade_log_commission_zero_none_blank_and_nonzero(tmp_path: Path):
     s = sample_snapshot()
     s["items"] = [

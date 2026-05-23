@@ -1500,9 +1500,11 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
     source_mode_runtime = str(os.getenv("TRADING_JOURNAL_SOURCE", TRADING_JOURNAL_SOURCE) or "").strip().lower()
     if source_mode_runtime not in {"dropbox", "local", "both", "auto", "master_journal"}:
         source_mode_runtime = _trading_journal_source_mode()
+    authoritative_enabled = _master_journal_authoritative_enabled()
     use_master_journal_snapshot = _master_journal_single_file_mode()
     if (
         not use_master_journal_snapshot
+        and authoritative_enabled
         and force
         and source_mode_runtime in {"both", "master_journal"}
         and _master_journal_path().exists()
@@ -1511,6 +1513,12 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
     if use_master_journal_snapshot:
         source_payload = read_master_journal_source(_master_journal_path())
         items = [dict(r) for r in (source_payload.get("items") or []) if isinstance(r, dict)]
+        monthly_note_rows = _monthly_aud_revaluation_rows_for_journal_view()
+        monthly_fallback_by_id = {
+            str(row.get("id") or "").strip(): _normalize_monthly_aud_reval_snapshot_row(row)
+            for row in monthly_note_rows
+            if _is_monthly_aud_reval_row(row) and str(row.get("id") or "").strip()
+        }
         if _PENDING_MANUAL_SYNC_ROWS:
             merged: Dict[str, Dict[str, object]] = {}
             for row in items:
@@ -1524,6 +1532,22 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
                 if rid:
                     merged[rid] = dict(row)
             items = list(merged.values())
+        merged_items: List[Dict[str, object]] = []
+        seen_monthly_ids: Set[str] = set()
+        for row in items:
+            if not _is_monthly_aud_reval_row(row):
+                merged_items.append(row)
+                continue
+            row_id = str(row.get("id") or "").strip()
+            fallback = monthly_fallback_by_id.get(row_id)
+            merged_items.append(_normalize_monthly_aud_reval_snapshot_row(row, fallback=fallback))
+            if row_id:
+                seen_monthly_ids.add(row_id)
+        for row_id, fallback_row in monthly_fallback_by_id.items():
+            if row_id in seen_monthly_ids:
+                continue
+            merged_items.append(dict(fallback_row))
+        items = merged_items
         trade_items = _enrich_trade_row_metrics([r for r in items if _row_type(r) == "trade"])
         non_trade_items = [r for r in items if _row_type(r) != "trade"]
         timeline = _build_journal_balance_timelines(trade_items, source_payload.get("cashflow_ledger") or {}, _get_excel_account_balances())
@@ -20729,6 +20753,8 @@ def _normalize_monthly_aud_reval_snapshot_row(
         if "chart_available" in backup
         else False
     )
+    out.pop("net_profit", None)
+    out.pop("realized_pnl", None)
     return out
 
 
