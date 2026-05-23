@@ -197,6 +197,62 @@ def test_trading_journal_actions_listener_inside_iife():
     assert "})();\n\n\ncryptoMonthlyBtn?.addEventListener" not in js
 
 
+def test_trading_journal_actions_bybit_ambiguity_preflight_blocks_without_account_mode():
+    node = shutil.which('node')
+    assert node
+    js_path = ROOT / 'render' / 'static' / 'trading_journal_actions.js'
+    harness = r"""
+const fs = require('fs'); const vm = require('vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const handlers = {};
+const status = { textContent: '', style: {}, focus: () => {} };
+const importBtn = { disabled: false, addEventListener: () => {} };
+const fileInput = { value: '', files: [], addEventListener: (ev, cb) => { handlers[ev] = cb; } };
+const account = { value: '', addEventListener: () => {}, focus: () => {} };
+const els = { 'open-journal-btn': { addEventListener: () => {} }, 'import-journal-btn': importBtn, 'journal-file-input': fileInput, 'crypto-monthly-pnl-btn': { addEventListener: () => {} }, 'journal-account-mode': account, 'journal-actions-status': status };
+const fetchCalls = [];
+class FakeFormData { constructor(){ this.entries=[]; } append(k,v){ this.entries.push([k,v]); } }
+const context = { console, FormData: FakeFormData, document: { getElementById: (id) => els[id] || null }, fetch: async (...args) => { fetchCalls.push(args); return { ok: true, json: async () => ({ ok: true }) }; } };
+context.window = context; context.globalThis = context;
+vm.createContext(context); vm.runInContext(source, context);
+fileInput.files = [{ name: 'bybit.csv', slice: () => ({ text: async () => 'Contracts,Order No.,Direction,Order Type,Filled Qty,Filled Price,Order Price,Filled Type,Trading Fee Rate,Fees Paid,Trasaction ID,Transaction Time,Final Balance' }) }];
+Promise.resolve(handlers.change()).then(() => {
+  if (fetchCalls.length !== 0) throw new Error('fetch should not be called');
+  if (!String(status.textContent).includes('Select Demo or Live')) throw new Error('status missing guidance');
+});
+"""
+    subprocess.run([node, '-e', harness, str(js_path)], check=True)
+
+
+def test_trading_journal_actions_bybit_preflight_posts_with_explicit_account_mode():
+    node = shutil.which('node')
+    assert node
+    js_path = ROOT / 'render' / 'static' / 'trading_journal_actions.js'
+    harness = r"""
+const fs = require('fs'); const vm = require('vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const handlers = {};
+const status = { textContent: '', style: {}, focus: () => {} };
+const importBtn = { disabled: false, addEventListener: () => {} };
+const fileInput = { value: '', files: [], addEventListener: (ev, cb) => { handlers[ev] = cb; } };
+const account = { value: 'demo', addEventListener: () => {}, focus: () => {} };
+const els = { 'open-journal-btn': { addEventListener: () => {} }, 'import-journal-btn': importBtn, 'journal-file-input': fileInput, 'crypto-monthly-pnl-btn': { addEventListener: () => {} }, 'journal-account-mode': account, 'journal-actions-status': status };
+const fetchCalls = [];
+class FakeFormData { constructor(){ this.entries=[]; } append(k,v){ this.entries.push([k,v]); } }
+const context = { console, FormData: FakeFormData, document: { getElementById: (id) => els[id] || null }, fetch: async (url, opts) => { fetchCalls.push([url, opts]); return { ok: true, json: async () => ({ ok: true, rows_parsed: 1, rows_upserted: 1 }) }; } };
+context.window = context; context.globalThis = context;
+vm.createContext(context); vm.runInContext(source, context);
+fileInput.files = [{ name: 'bybit.csv', slice: () => ({ text: async () => 'Contracts,Order No.,Direction,Order Type,Filled Qty,Filled Price,Order Price,Filled Type,Trading Fee Rate,Fees Paid,Transaction ID,Transaction Time,Final Balance' }) }];
+Promise.resolve(handlers.change()).then(() => {
+  if (fetchCalls.length !== 1) throw new Error('fetch should be called once');
+  const form = fetchCalls[0][1].body;
+  const mode = form.entries.find((it) => it[0] === 'account_mode');
+  if (!mode || mode[1] !== 'demo') throw new Error('account_mode=demo missing');
+});
+"""
+    subprocess.run([node, '-e', harness, str(js_path)], check=True)
+
+
 
 def test_trading_journal_js_removed_retired_auto_sync_block():
     js = (ROOT / "render" / "static" / "trading_journal.js").read_text(encoding="utf-8")

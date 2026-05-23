@@ -105,3 +105,12 @@ def test_trading_journal_workspace_contains_three_buttons_in_order():
     assert "import-journal-btn" in source
     assert "crypto-monthly-pnl-btn" in source
     assert source.index("open-journal-btn") < source.index("import-journal-btn") < source.index("crypto-monthly-pnl-btn")
+
+
+def test_trading_journal_workspace_bybit_account_dropdown_has_no_auto_option():
+    source = MASTER_SERVICE_PATH.read_text(encoding='utf-8')
+    assert '>Auto<' not in source
+    assert '<option value="">Auto</option>' not in source
+    assert '<option value="" selected disabled>Select Demo or Live</option>' in source
+    assert '<option value="demo">Demo</option>' in source
+    assert '<option value="live">Live</option>' in source

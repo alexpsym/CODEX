@@ -6433,15 +6433,19 @@ def _infer_realized_net_profit_from_balance_continuity(
     return out, warnings, diag
 
 
-def _parse_local_trading_journal_workbook(path: Path, *, original_name: Optional[str] = None) -> Tuple[List[Dict[str, object]], Optional[Dict[str, object]]]:
+def _parse_local_trading_journal_workbook(path: Path, *, original_name: Optional[str] = None, account_mode: Optional[str] = None) -> Tuple[List[Dict[str, object]], Optional[Dict[str, object]]]:
     if path.suffix.lower() == ".csv":
         df = pd.read_csv(path, encoding="utf-8-sig")
+        stem = Path(str(original_name or path.name)).stem.lower()
+        tokens = {t for t in re.split(r"[^a-z0-9]+", stem) if t}
+        hinted_mode = "demo" if "demo" in tokens else ("live" if "live" in tokens else "")
+        explicit_mode = str(account_mode or "").strip().lower()
+        resolved_mode = explicit_mode if explicit_mode in {"demo", "live"} else hinted_mode
         if _is_bybit_trade_history_csv(list(df.columns)):
-            return _parse_bybit_trade_history_csv(path, account_mode='demo'), None
+            if not resolved_mode:
+                raise ValueError("Bybit history CSV account is ambiguous. Select Demo or Live before importing.")
+            return _parse_bybit_trade_history_csv(path, account_mode=resolved_mode), None
         if _is_oanda_transaction_history_frame(df):
-            stem = Path(str(original_name or path.name)).stem.lower()
-            tokens = {t for t in re.split(r"[^a-z0-9]+", stem) if t}
-            hinted_mode = "demo" if "demo" in tokens else ("live" if "live" in tokens else "")
             if not hinted_mode:
                 raise ValueError("OANDA CSV account is ambiguous; include demo/live in filename.")
             account_mode = hinted_mode or "demo"
@@ -25964,7 +25968,7 @@ TRADING_JOURNAL_ACTIONS_TEMPLATE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Trading Journal Workspace</title>
 <style>body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}.wrap{min-height:100vh;display:flex;align-items:center;justify-content:center}.stack{display:flex;flex-direction:column;gap:12px;min-width:280px}button{padding:12px 14px;border-radius:10px;border:1px solid #334155;background:#1f2937;color:#e2e8f0;font-weight:700;cursor:pointer}.status{margin-top:8px;white-space:pre-wrap;color:#94a3b8}</style></head>
-<body><div class="wrap"><div class="stack"><button id="open-journal-btn">Open Journal</button><button id="import-journal-btn">Import</button><label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode" style="margin-left:8px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"><option value="">Auto</option><option value="demo">Demo</option><option value="live">Live</option></select></label><button id="crypto-monthly-pnl-btn">Crypto Monthly P&L</button><input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv" hidden/><div id="journal-actions-status" class="status"></div></div></div><script src="/static/trading_journal_actions.js"></script></body></html>"""
+<body><div class="wrap"><div class="stack"><button id="open-journal-btn">Open Journal</button><button id="import-journal-btn">Import</button><label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode" style="margin-left:8px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"><option value="" selected disabled>Select Demo or Live</option><option value="demo">Demo</option><option value="live">Live</option></select></label><button id="crypto-monthly-pnl-btn">Crypto Monthly P&L</button><input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv" hidden/><div id="journal-actions-status" class="status"></div></div></div><script src="/static/trading_journal_actions.js"></script></body></html>"""
 
 @app.get("/merged/trading-journal")
 async def merged_trading_journal_workspace() -> HTMLResponse:
@@ -26001,7 +26005,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
         }
         if is_bybit_csv:
             if not mode:
-                return {"ok": False, "status_code": 422, "message": "Bybit history CSV account is ambiguous. Select Demo or Live before importing.", "uploaded_name": name, "file_type": suffix, "errors": ["ambiguous_bybit_account"], "warnings": []}
+                return {"ok": False, "status_code": 422, "message": "Bybit history CSV account is ambiguous. Select Demo or Live before importing.", "uploaded_name": name, "file_type": suffix, "errors": ["ambiguous_bybit_account"], "requires_account_mode": True, "detected_file_kind": "bybit_history_csv", "account_mode_options": ["demo", "live"], "warnings": []}
             try:
                 rows = _parse_bybit_trade_history_csv(tmp_path, account_mode=mode)
             except Exception as exc:
@@ -26009,7 +26013,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             balance = None
         else:
             try:
-                rows, balance = _parse_local_trading_journal_workbook(tmp_path, original_name=name)
+                rows, balance = _parse_local_trading_journal_workbook(tmp_path, original_name=name, account_mode=mode or None)
             except Exception as exc:
                 return {"ok": False, "status_code": 422, "message": f"Failed to parse {name}: {exc}", "uploaded_name": name, "file_type": suffix, "errors": [str(exc)], "warnings": []}
         existing_rows = _get_trading_journal_rows()
