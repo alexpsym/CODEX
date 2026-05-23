@@ -57,7 +57,7 @@
   "monthly_aud_revaluation_state": {},
   "oanda_fill_state": {},
   "pending_webhooks": [],
-  "savedAt": "2026-05-23T13:09:25.363985+00:00",
+  "savedAt": "2026-05-23T13:09:27.376284+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [],
@@ -66,8 +66,8 @@
       {
         "account": "BYBIT DEMO",
         "breakeven": "",
-        "close_time": "2026-01-01",
-        "id": "r1",
+        "close_time": "2026-05-01",
+        "id": "t1",
         "is_test_trade": false,
         "manual_override_fields": [
           "breakeven",
@@ -83,12 +83,12 @@
           "setup": "",
           "timeframe": ""
         },
-        "manual_updated_at": "2026-05-23T13:09:23.294055+00:00",
-        "net_profit": 1.0,
+        "manual_updated_at": "2026-05-23T13:09:25.362700+00:00",
+        "net_profit": 10.0,
         "notes": "",
-        "open_time": "2026-01-01",
-        "realized_pnl": 1.0,
-        "result_pct": 0.1,
+        "open_time": "2026-05-01",
+        "realized_pnl": 10.0,
+        "result_pct": 1.0,
         "row_type": "trade",
         "setup": "",
         "side": "BUY",
@@ -96,7 +96,7 @@
         "timeframe": ""
       }
     ],
-    "updated_at": "2026-05-23T13:09:23.294202+00:00"
+    "updated_at": "2026-05-23T13:09:25.362746+00:00"
   },
   "trading_journal_import_cache": {},
   "trading_journal_state": {
