@@ -85,17 +85,17 @@
     "updated_at": "2026-05-23T15:44:37.243167+00:00"
   },
   "pending_webhooks": [],
-  "savedAt": "2026-05-23T15:54:18.800659+00:00",
+  "savedAt": "2026-05-23T15:54:22.405704+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [],
   "trading_journal": {
     "items": [
       {
-        "account": "A",
+        "account": "BYBIT DEMO",
         "breakeven": "",
-        "close_time": "2026-01-01 11:00:00",
-        "id": "r1",
+        "close_time": "2026-05-01",
+        "id": "t1",
         "is_test_trade": false,
         "manual_override_fields": [
           "breakeven",
@@ -111,20 +111,20 @@
           "setup": "",
           "timeframe": ""
         },
-        "manual_updated_at": "2026-05-23T15:54:16.735527+00:00",
+        "manual_updated_at": "2026-05-23T15:54:20.393285+00:00",
         "net_profit": 10.0,
         "notes": "",
-        "open_time": "2026-01-01 10:00:00",
+        "open_time": "2026-05-01",
         "realized_pnl": 10.0,
-        "result_pct": 1.2,
+        "result_pct": 1.0,
         "row_type": "trade",
         "setup": "",
         "side": "BUY",
-        "symbol": "EURUSD",
+        "symbol": "BTCUSDT",
         "timeframe": ""
       }
     ],
-    "updated_at": "2026-05-23T15:54:16.735584+00:00"
+    "updated_at": "2026-05-23T15:54:20.393316+00:00"
   },
   "trading_journal_import_cache": {},
   "trading_journal_state": {
