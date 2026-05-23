@@ -25,10 +25,16 @@ def test_local_exit_success(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     monkeypatch.setattr(master_service, "_close_local_master_edge_target", lambda _url: calls.append("close") or {"ok": True})
     monkeypatch.setattr(master_service, "_write_local_exit_sentinel", lambda: calls.append("sentinel") or sentinel)
     monkeypatch.setattr(master_service, "_schedule_local_master_process_exit", lambda delay_seconds=0.75: calls.append("schedule"))
+
+    class FakeLogger:
+        def info(self, _msg: str, *_args: object) -> None:
+            calls.append("log")
+
+    monkeypatch.setattr(master_service, "APP_LOGGER", FakeLogger())
     res = client.post("/api/local-exit", json={"url": "http://127.0.0.1:8000/"})
     assert res.status_code == 200
     assert res.json().get("ok") is True
-    assert calls == ["close", "sentinel", "schedule"]
+    assert calls == ["close", "sentinel", "log", "schedule"]
 
 
 def test_local_exit_rejected_when_not_local(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -67,3 +73,27 @@ def test_local_exit_missing_env(monkeypatch: pytest.MonkeyPatch) -> None:
     res = client.post("/api/local-exit", json={"url": "http://127.0.0.1:8000/"})
     assert res.status_code >= 400
     assert calls == []
+
+
+def test_local_exit_uses_defined_app_logger(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    client = TestClient(master_service.app)
+    monkeypatch.setattr(master_service, "_resolve_app_profile", lambda: "local")
+    monkeypatch.setenv("LOCAL_MASTER_EDGE_DEBUG_PORT", "9222")
+    sentinel = tmp_path / "exit.flag"
+    monkeypatch.setenv("LOCAL_MASTER_EXIT_REQUEST", str(sentinel))
+    monkeypatch.setattr(master_service, "_close_local_master_edge_target", lambda _url: {"ok": True, "target_url": "http://127.0.0.1:8000/"})
+    monkeypatch.setattr(master_service, "_write_local_exit_sentinel", lambda: sentinel)
+    monkeypatch.setattr(master_service, "_schedule_local_master_process_exit", lambda delay_seconds=0.75: None)
+
+    class FakeLogger:
+        def __init__(self) -> None:
+            self.logged = False
+
+        def info(self, _msg: str, *_args: object) -> None:
+            self.logged = True
+
+    fake_logger = FakeLogger()
+    monkeypatch.setattr(master_service, "APP_LOGGER", fake_logger)
+    res = client.post("/api/local-exit", json={"url": "http://127.0.0.1:8000/"})
+    assert res.status_code == 200
+    assert fake_logger.logged is True
