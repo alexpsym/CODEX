@@ -5,6 +5,7 @@ import math
 import atexit
 import calendar
 import asyncio
+import copy
 import importlib.util
 import threading
 import base64
@@ -21,6 +22,7 @@ import socket
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 from collections import Counter, defaultdict
@@ -47,7 +49,7 @@ except Exception:  # pragma: no cover - optional in test envs
     matplotlib = None
     mdates = None
     plt = None
-from fastapi import Body, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 import httpx
@@ -6181,6 +6183,20 @@ def _normalize_bybit_execution_history_row(raw: Dict[str, object], account_mode:
         return None
     t = raw.get('Transaction Time(UTC+10)') if raw.get('Transaction Time(UTC+10)') not in (None,'') else raw.get('execTime')
     open_time = _epoch_or_iso_to_iso(t)
+    if raw.get('Transaction Time(UTC+10)') not in (None, '') and isinstance(t, str):
+        ts = str(t).strip()
+        if ts:
+            try:
+                parsed = pd.to_datetime(ts, errors="coerce")
+                if pd.notna(parsed):
+                    brisbane = ZoneInfo("Australia/Brisbane")
+                    if getattr(parsed, "tzinfo", None) is None:
+                        parsed = parsed.tz_localize(brisbane)
+                    else:
+                        parsed = parsed.tz_convert(brisbane)
+                    open_time = parsed.isoformat()
+            except Exception:
+                pass
     if isinstance(t,str) and '+' in t and 'T' not in t:
         try:
             open_time=t.replace(' ','T')
@@ -25746,15 +25762,121 @@ TRADING_JOURNAL_ACTIONS_TEMPLATE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Trading Journal Workspace</title>
 <style>body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}.wrap{min-height:100vh;display:flex;align-items:center;justify-content:center}.stack{display:flex;flex-direction:column;gap:12px;min-width:280px}button{padding:12px 14px;border-radius:10px;border:1px solid #334155;background:#1f2937;color:#e2e8f0;font-weight:700;cursor:pointer}.status{margin-top:8px;white-space:pre-wrap;color:#94a3b8}</style></head>
-<body><div class="wrap"><div class="stack"><button id="open-journal-btn">Open Journal</button><button id="import-journal-btn">Import</button><button id="crypto-monthly-pnl-btn">Crypto Monthly P&L</button><input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls" hidden/><div id="journal-actions-status" class="status"></div></div></div><script src="/static/trading_journal_actions.js"></script></body></html>"""
+<body><div class="wrap"><div class="stack"><button id="open-journal-btn">Open Journal</button><button id="import-journal-btn">Import</button><label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode" style="margin-left:8px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"><option value="">Auto</option><option value="demo">Demo</option><option value="live">Live</option></select></label><button id="crypto-monthly-pnl-btn">Crypto Monthly P&L</button><input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv" hidden/><div id="journal-actions-status" class="status"></div></div></div><script src="/static/trading_journal_actions.js"></script></body></html>"""
 
 @app.get("/merged/trading-journal")
 async def merged_trading_journal_workspace() -> HTMLResponse:
     return HTMLResponse(TRADING_JOURNAL_ACTIONS_TEMPLATE)
 
+def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, account_mode: Optional[str] = None) -> Dict[str, object]:
+    name = str(upload_name or "upload").strip() or "upload"
+    suffix = Path(name).suffix.lower()
+    allowed = {".xlsx", ".xlsm", ".xls", ".csv"}
+    mode = str(account_mode or "").strip().lower()
+    if suffix not in allowed:
+        return {"ok": False, "status_code": 415, "message": f"Unsupported file type: {suffix or 'unknown'}", "uploaded_name": name, "file_type": suffix or "unknown", "errors": ["unsupported_file_type"], "warnings": []}
+    if not payload:
+        return {"ok": False, "status_code": 400, "message": "Uploaded file is empty.", "uploaded_name": name, "file_type": suffix, "errors": ["empty_upload"], "warnings": []}
+    if mode and mode not in {"demo", "live"}:
+        return {"ok": False, "status_code": 422, "message": "account_mode must be demo or live.", "uploaded_name": name, "file_type": suffix, "errors": ["invalid_account_mode"], "warnings": []}
+    stem = Path(name).stem.lower()
+    tokens = [t for t in re.split(r"[^a-z0-9]+", stem) if t]
+    inferred_mode = "demo" if "demo" in tokens else ("live" if "live" in tokens else "")
+    if not mode:
+        mode = inferred_mode
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tf:
+        tf.write(payload)
+        tmp_path = Path(tf.name)
+    try:
+        rows: List[Dict[str, object]] = []
+        balance: Optional[Dict[str, object]] = None
+        is_bybit_csv = bool(suffix == ".csv" and _is_bybit_trade_history_csv(tmp_path))
+        if is_bybit_csv:
+            if not mode:
+                return {"ok": False, "status_code": 422, "message": "Bybit history CSV account is ambiguous. Select Demo or Live before importing.", "uploaded_name": name, "file_type": suffix, "errors": ["ambiguous_bybit_account"], "warnings": []}
+            try:
+                rows = _parse_bybit_trade_history_csv(tmp_path, account_mode=mode)
+            except Exception as exc:
+                return {"ok": False, "status_code": 422, "message": f"Failed to parse {name}: {exc}", "uploaded_name": name, "file_type": suffix, "errors": [str(exc)], "warnings": []}
+            balance = None
+        else:
+            try:
+                rows, balance = _parse_local_trading_journal_workbook(tmp_path)
+            except Exception as exc:
+                return {"ok": False, "status_code": 422, "message": f"Failed to parse {name}: {exc}", "uploaded_name": name, "file_type": suffix, "errors": [str(exc)], "warnings": []}
+        rows = [r for r in (rows or []) if isinstance(r, dict)]
+        missing_ids = [r for r in rows if str((r or {}).get("row_type") or "trade").strip().lower() == "trade" and not str((r or {}).get("id") or "").strip()]
+        if missing_ids:
+            return {"ok": False, "status_code": 422, "message": "Parsed trade rows are missing stable row IDs.", "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "errors": ["missing_trade_row_ids"], "warnings": []}
+        if not rows and balance:
+            return {"ok": False, "status_code": 422, "message": "Balance-only import is not implemented yet for manual uploads.", "uploaded_name": name, "file_type": suffix, "rows_parsed": 0, "rows_upserted": 0, "balance_parsed": True, "errors": ["balance_only_not_supported"], "warnings": []}
+        if not rows:
+            return {"ok": False, "status_code": 422, "message": "No trade rows or account balance found in uploaded file.", "uploaded_name": name, "file_type": suffix, "rows_parsed": 0, "errors": ["zero_rows"], "warnings": []}
+        previous_rows = copy.deepcopy([r for r in _get_trading_journal_rows() if isinstance(r, dict)])
+        existing_ids = {str((r or {}).get("id") or "").strip() for r in previous_rows}
+        parsed_ids = [str(r.get("id") or "").strip() for r in rows if str(r.get("id") or "").strip()]
+        if rows and not parsed_ids:
+            return {"ok": False, "status_code": 422, "message": "No verifiable row IDs were parsed from trade rows.", "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "errors": ["no_verifiable_row_ids"], "warnings": []}
+        duplicate_rows_merged = sum(1 for rid in parsed_ids if rid in existing_ids)
+        rows_upserted = 0
+        workbook_path = _master_journal_path()
+        workbook_backup_bytes: Optional[bytes] = None
+        workbook_had_original = workbook_path.exists()
+        if workbook_had_original:
+            workbook_backup_bytes = workbook_path.read_bytes()
+        verify_result: Optional[Dict[str, object]] = None
+        try:
+            rows_upserted = _upsert_trading_journal_rows(rows, allow_broker_rows_in_single_file=True)
+            snapshot = _build_trading_journal_view_snapshot(force=True)
+            _persist_trading_journal_sqlite(snapshot, import_meta={"source_mode": "manual_upload", "rows_imported": len(rows), "warnings": [], "errors": []})
+            sync_result = _sync_master_journal_workbook()
+            if not bool((sync_result or {}).get("ok")):
+                raise RuntimeError(f"Workbook sync failed: {(sync_result or {}).get('error') or 'unknown error'}")
+            verify_result = _verify_trade_log_row_ids_in_workbook(_master_journal_path(), parsed_ids)
+            if not bool((verify_result or {}).get("ok")):
+                raise RuntimeError(f"Workbook verification failed after import. missing_row_ids={(verify_result or {}).get('missing_row_ids') or []}")
+        except Exception as exc:
+            rollback_errors: List[str] = []
+            try:
+                _set_trading_journal_rows(previous_rows)
+            except Exception as row_restore_exc:
+                rollback_errors.append(f"could not restore journal rows: {row_restore_exc}")
+            try:
+                if workbook_had_original and workbook_backup_bytes is not None:
+                    workbook_path.parent.mkdir(parents=True, exist_ok=True)
+                    workbook_path.write_bytes(workbook_backup_bytes)
+                elif not workbook_had_original and workbook_path.exists():
+                    workbook_path.unlink()
+            except Exception as restore_exc:
+                rollback_errors.append(f"could not restore workbook: {restore_exc}")
+            try:
+                rollback_snapshot = _build_trading_journal_view_snapshot(force=True)
+                _persist_trading_journal_sqlite(rollback_snapshot, import_meta={"source_mode": "manual_upload_rollback", "rows_imported": 0, "warnings": [], "errors": [str(exc), *rollback_errors]})
+            except Exception as persist_rollback_exc:
+                rollback_errors.append(f"could not persist rollback snapshot: {persist_rollback_exc}")
+            code = 500
+            msg = str(exc)
+            missing = (verify_result or {}).get("missing_row_ids") or []
+            if rollback_errors:
+                msg = f"{msg} | rollback failed: {'; '.join(rollback_errors)}"
+            return {"ok": False, "status_code": code, "message": msg, "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": 0, "missing_row_ids": missing, "errors": [msg, *rollback_errors], "warnings": []}
+        return {"ok": True, "status_code": 200, "message": "Import complete.", "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": rows_upserted, "duplicate_rows_merged": duplicate_rows_merged, "balance_parsed": bool(balance), "master_journal_path": str(_master_journal_path()), "verified_row_ids_count": len(parsed_ids), "missing_row_ids": [], "warnings": [], "errors": []}
+    except Exception as exc:
+        return {"ok": False, "status_code": 500, "message": f"Unexpected import error for {name}.", "uploaded_name": name, "file_type": suffix or "unknown", "rows_parsed": 0, "rows_upserted": 0, "duplicate_rows_merged": 0, "balance_parsed": False, "master_journal_path": str(_master_journal_path()), "verified_row_ids_count": 0, "missing_row_ids": [], "warnings": [], "errors": [str(exc)]}
+    finally:
+        try: tmp_path.unlink(missing_ok=True)
+        except Exception: pass
+
 @app.post("/api/trading-journal/import-file")
-async def trading_journal_import_file(file: UploadFile = File(...)) -> JSONResponse:
-    return JSONResponse({"ok": False, "message": "Manual history import is not implemented yet."}, status_code=501)
+async def trading_journal_import_file(file: UploadFile = File(...), account_mode: Optional[str] = Form(None)) -> JSONResponse:
+    try:
+        payload = await file.read()
+    except Exception as exc:
+        result = {"ok": False, "status_code": 400, "message": "Failed to read uploaded file.", "uploaded_name": str(getattr(file, "filename", "") or "upload"), "file_type": Path(str(getattr(file, "filename", "") or "")).suffix.lower() or "unknown", "errors": [str(exc)], "warnings": []}
+        return JSONResponse(result, status_code=400)
+    result = _import_uploaded_trading_journal_file(file.filename or "upload", payload, account_mode=account_mode)
+    status_code = int(result.get("status_code") or (200 if result.get("ok") else 422))
+    return JSONResponse(result, status_code=status_code)
 
 
 
