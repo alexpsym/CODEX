@@ -57,17 +57,17 @@
   "monthly_aud_revaluation_state": {},
   "oanda_fill_state": {},
   "pending_webhooks": [],
-  "savedAt": "2026-05-23T13:51:08.687443+00:00",
+  "savedAt": "2026-05-23T13:51:19.336938+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [],
   "trading_journal": {
     "items": [
       {
-        "account": "A",
+        "account": "PEPPERSTONE DEMO",
         "breakeven": "",
-        "close_time": "2026-05-01",
-        "id": "t1",
+        "close_time": "2026-01-01",
+        "id": "r1",
         "is_test_trade": false,
         "manual_override_fields": [
           "breakeven",
@@ -83,12 +83,12 @@
           "setup": "",
           "timeframe": ""
         },
-        "manual_updated_at": "2026-05-23T13:51:06.621262+00:00",
+        "manual_updated_at": "2026-05-23T13:51:17.329441+00:00",
         "net_profit": 1.0,
         "notes": "",
-        "open_time": "2026-05-01",
+        "open_time": "2026-01-01",
         "realized_pnl": 1.0,
-        "result_pct": 1.0,
+        "result_pct": 0.1,
         "row_type": "trade",
         "setup": "",
         "side": "BUY",
@@ -96,7 +96,7 @@
         "timeframe": ""
       }
     ],
-    "updated_at": "2026-05-23T13:51:06.621322+00:00"
+    "updated_at": "2026-05-23T13:51:17.329481+00:00"
   },
   "trading_journal_import_cache": {},
   "trading_journal_state": {
@@ -131,16 +131,18 @@
       "updated_at": "2026-05-23T13:50:37.851342+00:00"
     },
     "daily_trade_sync": {
-      "last_attempt_at": "2026-05-23T13:50:54.382675+00:00",
-      "last_error": null,
+      "last_attempt_at": "2026-05-23T13:51:14.130537+00:00",
+      "last_error": "boom",
       "last_reason": "startup_recovery",
       "last_result": {
-        "master_journal_ok": true,
+        "master_journal_error": "boom",
+        "master_journal_ok": false,
         "oanda_recovery": {},
-        "ok": true
+        "ok": true,
+        "rows_imported": 1
       },
-      "last_success_at": "2026-05-23T13:50:54.382687+00:00",
-      "updated_at": "2026-05-23T13:50:54.383501+00:00"
+      "last_success_at": null,
+      "updated_at": "2026-05-23T13:51:14.141413+00:00"
     }
   },
   "version": 4,
