@@ -1708,6 +1708,31 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
     safe_payload = _json_safe(payload)
     if not isinstance(safe_payload, dict):
         safe_payload = {}
+    safe_items = safe_payload.get("items")
+    if isinstance(safe_items, list):
+        normalized_items: List[Dict[str, object]] = []
+        for item in safe_items:
+            if not isinstance(item, dict):
+                continue
+            if _row_type(item) != "monthly_aud_reval":
+                normalized_items.append(item)
+                continue
+            normalized_note = dict(item)
+            normalized_note["id"] = str(normalized_note.get("id") or "")
+            normalized_note["row_type"] = "monthly_aud_reval"
+            normalized_note["source"] = normalized_note.get("source") or "bybit_monthly_aud_reval"
+            normalized_note["symbol"] = normalized_note.get("symbol") or "MONTHLY AUD P/L"
+            normalized_note["account"] = normalized_note.get("account") or "BYBIT"
+            normalized_note["account_label"] = normalized_note.get("account_label") or "BYBIT"
+            normalized_note["result_currency"] = str(normalized_note.get("result_currency") or "AUD").strip().upper()
+            normalized_note["result_cash"] = _to_float(normalized_note.get("result_cash"))
+            normalized_note["raw_refs"] = normalized_note.get("raw_refs") if isinstance(normalized_note.get("raw_refs"), dict) else {}
+            normalized_note["close_time"] = normalized_note.get("close_time") or ""
+            normalized_note["setup"] = normalized_note.get("setup") or "Monthly BYBIT AUD P/L note - excluded from metrics"
+            normalized_note["notes"] = normalized_note.get("notes") or "Monthly BYBIT AUD P/L note; excluded from trading metrics."
+            normalized_note["chart_available"] = bool(normalized_note.get("chart_available")) if "chart_available" in normalized_note else False
+            normalized_items.append(normalized_note)
+        safe_payload["items"] = normalized_items
     _save_trading_journal_view_snapshot(safe_payload)
     _persist_trading_journal_sqlite(safe_payload)
     _TRADING_JOURNAL_VIEW_CACHE["key"] = "snapshot"
