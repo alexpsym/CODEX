@@ -212,7 +212,7 @@ const account = { value: '', addEventListener: () => {}, focus: () => {} };
 const els = { 'open-journal-btn': { addEventListener: () => {} }, 'import-journal-btn': importBtn, 'journal-file-input': fileInput, 'crypto-monthly-pnl-btn': { addEventListener: () => {} }, 'journal-account-mode': account, 'journal-actions-status': status };
 const fetchCalls = [];
 class FakeFormData { constructor(){ this.entries=[]; } append(k,v){ this.entries.push([k,v]); } }
-const context = { console, FormData: FakeFormData, document: { getElementById: (id) => els[id] || null }, fetch: async (...args) => { fetchCalls.push(args); return { ok: true, json: async () => ({ ok: true }) }; } };
+const context = { console, FormData: FakeFormData, document: { getElementById: (id) => els[id] || null }, fetch: async (...args) => { fetchCalls.push(args); return { ok: true, json: async () => ({ ok: true }) }; }, setTimeout: () => 1, clearTimeout: () => {} };
 context.window = context; context.globalThis = context;
 vm.createContext(context); vm.runInContext(source, context);
 fileInput.files = [{ name: 'bybit.csv', slice: () => ({ text: async () => 'Contracts,Order No.,Direction,Order Type,Filled Qty,Filled Price,Order Price,Filled Type,Trading Fee Rate,Fees Paid,Trasaction ID,Transaction Time,Final Balance' }) }];
@@ -239,7 +239,7 @@ const account = { value: 'demo', addEventListener: () => {}, focus: () => {} };
 const els = { 'open-journal-btn': { addEventListener: () => {} }, 'import-journal-btn': importBtn, 'journal-file-input': fileInput, 'crypto-monthly-pnl-btn': { addEventListener: () => {} }, 'journal-account-mode': account, 'journal-actions-status': status };
 const fetchCalls = [];
 class FakeFormData { constructor(){ this.entries=[]; } append(k,v){ this.entries.push([k,v]); } }
-const context = { console, FormData: FakeFormData, document: { getElementById: (id) => els[id] || null }, fetch: async (url, opts) => { fetchCalls.push([url, opts]); return { ok: true, json: async () => ({ ok: true, rows_parsed: 1, rows_upserted: 1 }) }; } };
+const context = { console, FormData: FakeFormData, document: { getElementById: (id) => els[id] || null }, fetch: async (url, opts) => { fetchCalls.push([url, opts]); return { ok: true, json: async () => ({ ok: true, rows_parsed: 1, rows_upserted: 1 }) }; }, setTimeout: () => 1, clearTimeout: () => {} };
 context.window = context; context.globalThis = context;
 vm.createContext(context); vm.runInContext(source, context);
 fileInput.files = [{ name: 'bybit.csv', slice: () => ({ text: async () => 'Contracts,Order No.,Direction,Order Type,Filled Qty,Filled Price,Order Price,Filled Type,Trading Fee Rate,Fees Paid,Transaction ID,Transaction Time,Final Balance' }) }];
