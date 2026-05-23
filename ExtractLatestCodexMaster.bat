@@ -712,6 +712,140 @@ function Copy-FolderTreeWithRoboCopyChecked {
 }
 
 
+
+
+function Resolve-ExtractLatestInterruptedBackupPublish {
+    param([Parameter(Mandatory = $true)] [string] $DestinationRoot)
+
+    $finalBackupPath = Join-Path $DestinationRoot 'CODEX-master-backup'
+    $rollbackCandidates = @(Get-ChildItem -LiteralPath $DestinationRoot -Directory -Filter 'CODEX-master-backup.rollback-*' -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc -Descending)
+    $tempCandidates = @(Get-ChildItem -LiteralPath $DestinationRoot -Directory -Filter 'CODEX-master-backup.tmp-*' -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc -Descending)
+
+    if (-not (Test-Path -LiteralPath $finalBackupPath -PathType Container)) {
+        if ($rollbackCandidates.Count -gt 0) {
+            $rollbackToPromote = $rollbackCandidates[0]
+            Move-Item -LiteralPath $rollbackToPromote.FullName -Destination $finalBackupPath -ErrorAction Stop
+            Write-Host "Recovered interrupted backup publish by promoting rollback folder: $($rollbackToPromote.FullName) -> $finalBackupPath"
+            return
+        }
+
+        if ($tempCandidates.Count -gt 0) {
+            throw "Interrupted backup publish detected: CODEX-master-backup is missing, rollback backups are missing, and temp backup folder(s) remain ($($tempCandidates.Name -join ', ')). Manual inspection is required before cleanup."
+        }
+    }
+}
+
+function Remove-ExtractLatestLegacyBackupFolders {
+    param([Parameter(Mandatory = $true)] [string] $DestinationRoot)
+
+    $legacyPatterns = @(
+        ('CODEX-master-' + 'git-backup-*'),
+        ('CODEX-master-' + 'zip-backup-*'),
+        ('CODEX-master-' + 'fastforward-blockers-*'),
+        'CODEX-master-backup.tmp-*',
+        'CODEX-master-backup.rollback-*'
+    )
+
+    foreach ($pattern in $legacyPatterns) {
+        $matches = @(Get-ChildItem -LiteralPath $DestinationRoot -Directory -Filter $pattern -ErrorAction SilentlyContinue)
+        foreach ($item in $matches) {
+            if ($item.Name -ieq 'CODEX-master') { continue }
+            Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop
+            Write-Host "Removed legacy backup folder: $($item.FullName)"
+        }
+    }
+}
+
+function Remove-ExtractLatestLegacyLogFiles {
+    param([Parameter(Mandatory = $true)] [string] $DestinationRoot)
+
+    $legacyLogs = @(Get-ChildItem -LiteralPath $DestinationRoot -File -Filter 'ExtractLatestCodexMaster-*.log' -ErrorAction SilentlyContinue | Where-Object { $_.Name -ine 'ExtractLatestCodexMaster-latest.log' })
+    foreach ($log in $legacyLogs) {
+        Remove-Item -LiteralPath $log.FullName -Force -ErrorAction Stop
+        Write-Host "Removed legacy log file: $($log.FullName)"
+    }
+}
+
+function New-TemporaryExtractLatestBackupPath {
+    param([Parameter(Mandatory = $true)] [string] $DestinationRoot)
+    return (Join-Path $DestinationRoot ("CODEX-master-backup.tmp-{0}" -f (Get-Date -Format 'yyyyMMdd-HHmmss')))
+}
+
+function Publish-SingleExtractLatestBackup {
+    param(
+        [Parameter(Mandatory = $true)] [string] $DestinationRoot,
+        [Parameter(Mandatory = $true)] [string] $TempBackupPath
+    )
+
+    if (-not (Test-Path -LiteralPath $TempBackupPath -PathType Container)) {
+        throw "Temporary backup folder was not found: $TempBackupPath"
+    }
+
+    $finalBackupPath = Join-Path $DestinationRoot 'CODEX-master-backup'
+    $rollbackBackupPath = Join-Path $DestinationRoot ("CODEX-master-backup.rollback-{0}" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+
+    if (Test-Path -LiteralPath $rollbackBackupPath) {
+        Remove-Item -LiteralPath $rollbackBackupPath -Recurse -Force -ErrorAction Stop
+    }
+
+    if (Test-Path -LiteralPath $finalBackupPath -PathType Container) {
+        Move-Item -LiteralPath $finalBackupPath -Destination $rollbackBackupPath -ErrorAction Stop
+    }
+
+    try {
+        Move-Item -LiteralPath $TempBackupPath -Destination $finalBackupPath -ErrorAction Stop
+    } catch {
+        $publishFailure = $_.Exception.Message
+        try {
+            if ((Test-Path -LiteralPath $rollbackBackupPath -PathType Container) -and -not (Test-Path -LiteralPath $finalBackupPath)) {
+                Move-Item -LiteralPath $rollbackBackupPath -Destination $finalBackupPath -ErrorAction Stop
+            }
+        } catch {
+            throw "Backup publish failed and rollback restore also failed. Publish failure: $publishFailure`nRollback failure: $($_.Exception.Message)"
+        }
+        throw "Backup publish failed while moving temp backup into fixed path: $publishFailure"
+    }
+
+    if (-not (Test-Path -LiteralPath $finalBackupPath -PathType Container)) {
+        throw "Failed to publish fixed backup folder at: $finalBackupPath"
+    }
+
+    if (Test-Path -LiteralPath $rollbackBackupPath -PathType Container) {
+        Remove-Item -LiteralPath $rollbackBackupPath -Recurse -Force -ErrorAction Stop
+    }
+
+    Remove-ExtractLatestLegacyBackupFolders -DestinationRoot $DestinationRoot
+
+    if (-not (Test-Path -LiteralPath $finalBackupPath -PathType Container)) {
+        throw "Failed to validate fixed backup folder at: $finalBackupPath"
+    }
+
+    return $finalBackupPath
+}
+
+function Assert-ExtractLatestRetentionState {
+    param([Parameter(Mandatory = $true)] [string] $DestinationRoot)
+
+    $violations = New-Object System.Collections.Generic.List[string]
+    foreach ($pattern in @(('CODEX-master-' + 'git-backup-*'),('CODEX-master-' + 'zip-backup-*'),('CODEX-master-' + 'fastforward-blockers-*'),'CODEX-master-backup.tmp-*','CODEX-master-backup.rollback-*')) {
+        $count = @(Get-ChildItem -LiteralPath $DestinationRoot -Directory -Filter $pattern -ErrorAction SilentlyContinue).Count
+        if ($count -gt 0) { $violations.Add("Found $count folder(s) matching $pattern") }
+    }
+
+    $timestampedLogs = @(Get-ChildItem -LiteralPath $DestinationRoot -File -Filter 'ExtractLatestCodexMaster-*.log' -ErrorAction SilentlyContinue | Where-Object { $_.Name -ine 'ExtractLatestCodexMaster-latest.log' })
+    if ($timestampedLogs.Count -gt 0) { $violations.Add("Found timestamped ExtractLatest log files: $($timestampedLogs.Name -join ', ')") }
+
+    $fixedBackupCount = @(Get-ChildItem -LiteralPath $DestinationRoot -Directory -Filter 'CODEX-master-backup' -ErrorAction SilentlyContinue).Count
+    if ($fixedBackupCount -gt 1) { $violations.Add("Expected at most one CODEX-master-backup folder, found $fixedBackupCount") }
+
+    $latestLogCount = @(Get-ChildItem -LiteralPath $DestinationRoot -File -Filter 'ExtractLatestCodexMaster-latest.log' -ErrorAction SilentlyContinue).Count
+    if ($latestLogCount -gt 1) { $violations.Add("Expected at most one ExtractLatestCodexMaster-latest.log file, found $latestLogCount") }
+
+    if ($violations.Count -gt 0) {
+        throw "Retention policy validation failed:`n$($violations -join [Environment]::NewLine)"
+    }
+}
+
 function Resolve-JournalWorkbookCollision {
     param(
         [Parameter(Mandatory = $true)] [string] $JournalDir,
@@ -874,13 +1008,35 @@ function Ensure-CodexGitRepo {
 
         if ((-not $needsBackupRecovery) -or ($behindCount -gt 0 -and $aheadCount -eq 0 -and $statusClassification.IsOnlyAllowed)) {
             Write-Host "Repo is clean and not ahead (behind=$behindCount). Attempting fast-forward sync..."
-            $ffTimestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-            $ffBlockerBackupDir = Join-Path $DestinationRoot "CODEX-master-fastforward-blockers-$ffTimestamp"
-            $ffMovedBlockers = Move-CheckoutBlockingUntrackedFilesBeforeGitUpdate -GitExe $GitExe -RepoDir $RepoDir -BackupDir $ffBlockerBackupDir
+            $ffTempBackupDir = New-TemporaryExtractLatestBackupPath -DestinationRoot $DestinationRoot
+            $ffMovedBlockers = 0
+            $ffRestoreRoot = $null
+            try {
+                $ffMovedBlockers = Move-CheckoutBlockingUntrackedFilesBeforeGitUpdate -GitExe $GitExe -RepoDir $RepoDir -BackupDir $ffTempBackupDir
+                if ($ffMovedBlockers -gt 0) {
+                    $publishedBackupDir = Publish-SingleExtractLatestBackup -DestinationRoot $DestinationRoot -TempBackupPath $ffTempBackupDir
+                    $ffRestoreRoot = Join-Path $publishedBackupDir 'checkout-blockers'
+                }
+            } catch {
+                $ffTempRestoreRoot = Join-Path $ffTempBackupDir 'checkout-blockers'
+                $ffPublishedRestoreRoot = Join-Path (Join-Path $DestinationRoot 'CODEX-master-backup') 'checkout-blockers'
+                if (Test-Path -LiteralPath $ffTempRestoreRoot -PathType Container) {
+                    Preserve-LocalFilesFromBackup -BackupDir $ffTempRestoreRoot -NewRepoDir $RepoDir
+                } elseif (Test-Path -LiteralPath $ffPublishedRestoreRoot -PathType Container) {
+                    Preserve-LocalFilesFromBackup -BackupDir $ffPublishedRestoreRoot -NewRepoDir $RepoDir
+                }
+                try {
+                    if (Test-Path -LiteralPath $ffTempBackupDir -PathType Container) {
+                        Remove-Item -LiteralPath $ffTempBackupDir -Recurse -Force -ErrorAction Stop
+                    }
+                } catch {
+                    Write-Host "WARNING: Unable to clean temporary fast-forward blocker backup after restore: $($_.Exception.Message)"
+                }
+                throw
+            }
             Invoke-GitCommand -GitExe $GitExe -Arguments @('checkout', $Branch) -WorkingDirectory $RepoDir | Out-Null
             Invoke-GitCommand -GitExe $GitExe -Arguments @('merge', '--ff-only', "origin/$Branch") -WorkingDirectory $RepoDir | Out-Null
             if ($ffMovedBlockers -gt 0) {
-                $ffRestoreRoot = Join-Path $ffBlockerBackupDir 'checkout-blockers'
                 Preserve-LocalFilesFromBackup -BackupDir $ffRestoreRoot -NewRepoDir $RepoDir
             }
             $headAfterFastForward = Invoke-GitText -GitExe $GitExe -Arguments @('rev-parse', 'HEAD') -WorkingDirectory $RepoDir
@@ -893,15 +1049,15 @@ function Ensure-CodexGitRepo {
         }
 
         Write-Host "Local Git state requires backup recovery (dirty=$isDirty, ahead=$aheadCount, behind=$behindCount)."
-        $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-        $backupDir = Join-Path $DestinationRoot "CODEX-master-git-backup-$timestamp"
-        Copy-FolderTreeWithRoboCopyChecked -Source $RepoDir -Destination $backupDir
+        $tempBackupDir = New-TemporaryExtractLatestBackupPath -DestinationRoot $DestinationRoot
+        Copy-FolderTreeWithRoboCopyChecked -Source $RepoDir -Destination $tempBackupDir
 
-        Write-GitDiagnosticFile -GitExe $GitExe -Arguments @('status', '--short', '--branch') -WorkingDirectory $RepoDir -DestinationPath (Join-Path $backupDir 'git-status-before-reset.txt')
-        Write-GitDiagnosticFile -GitExe $GitExe -Arguments @('log', '--oneline', "origin/$Branch..HEAD") -WorkingDirectory $RepoDir -DestinationPath (Join-Path $backupDir 'git-log-local-ahead.txt')
-        Write-GitDiagnosticFile -GitExe $GitExe -Arguments @('diff', '--binary') -WorkingDirectory $RepoDir -DestinationPath (Join-Path $backupDir 'local-changes.patch')
-        Write-GitDiagnosticFile -GitExe $GitExe -Arguments @('diff', '--cached', '--binary') -WorkingDirectory $RepoDir -DestinationPath (Join-Path $backupDir 'local-staged-changes.patch')
+        Write-GitDiagnosticFile -GitExe $GitExe -Arguments @('status', '--short', '--branch') -WorkingDirectory $RepoDir -DestinationPath (Join-Path $tempBackupDir 'git-status-before-reset.txt')
+        Write-GitDiagnosticFile -GitExe $GitExe -Arguments @('log', '--oneline', "origin/$Branch..HEAD") -WorkingDirectory $RepoDir -DestinationPath (Join-Path $tempBackupDir 'git-log-local-ahead.txt')
+        Write-GitDiagnosticFile -GitExe $GitExe -Arguments @('diff', '--binary') -WorkingDirectory $RepoDir -DestinationPath (Join-Path $tempBackupDir 'local-changes.patch')
+        Write-GitDiagnosticFile -GitExe $GitExe -Arguments @('diff', '--cached', '--binary') -WorkingDirectory $RepoDir -DestinationPath (Join-Path $tempBackupDir 'local-staged-changes.patch')
 
+        $backupDir = Publish-SingleExtractLatestBackup -DestinationRoot $DestinationRoot -TempBackupPath $tempBackupDir
         Write-Host "Local Git state was not fast-forwardable. A full backup was created at: $backupDir"
         Stop-CodexRepoProcessMatches -RepoDir $RepoDir
         Move-CheckoutBlockingUntrackedFilesBeforeGitUpdate -GitExe $GitExe -RepoDir $RepoDir -BackupDir $backupDir | Out-Null
@@ -957,9 +1113,16 @@ function Ensure-CodexGitRepo {
     $backupDir = $null
     if (Test-Path -LiteralPath $RepoDir -PathType Container) {
         Write-Section 'Existing CODEX-master folder is not a Git checkout. Moving it aside before clone...'
-        $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-        $backupDir = Join-Path $DestinationRoot "CODEX-master-zip-backup-$timestamp"
-        Move-Item -LiteralPath $RepoDir -Destination $backupDir -ErrorAction Stop
+        $tempBackupDir = New-TemporaryExtractLatestBackupPath -DestinationRoot $DestinationRoot
+        Move-Item -LiteralPath $RepoDir -Destination $tempBackupDir -ErrorAction Stop
+        try {
+            $backupDir = Publish-SingleExtractLatestBackup -DestinationRoot $DestinationRoot -TempBackupPath $tempBackupDir
+        } catch {
+            if (-not (Test-Path -LiteralPath $RepoDir -PathType Container) -and (Test-Path -LiteralPath $tempBackupDir -PathType Container)) {
+                Move-Item -LiteralPath $tempBackupDir -Destination $RepoDir -ErrorAction SilentlyContinue
+            }
+            throw
+        }
         Write-Host "Moved old ZIP-style folder to: $backupDir"
     }
 
@@ -999,22 +1162,23 @@ if (-not (Test-Path -LiteralPath $dest -PathType Container)) {
 }
 
 Set-Location -LiteralPath $dest
+Resolve-ExtractLatestInterruptedBackupPublish -DestinationRoot $dest
+Remove-ExtractLatestLegacyLogFiles -DestinationRoot $dest
+Remove-ExtractLatestLegacyBackupFolders -DestinationRoot $dest
 
 $codexDir = Join-Path $dest $repoFolderName
 $gitExe = Get-GitExecutable
 $latestLogPath = Join-Path $dest 'ExtractLatestCodexMaster-latest.log'
-$timestampedLogPath = Join-Path $dest ("ExtractLatestCodexMaster-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
 
 Write-Section 'Using Git instead of ZIP download/extraction.'
 Write-Host "Destination root: $dest"
 Write-Host "CODEX folder:     $codexDir"
 Write-Host "Git executable:   $gitExe"
 Write-Host "Log file (latest): $latestLogPath"
-Write-Host "Log file (run):    $timestampedLogPath"
 
 $transcriptStarted = $false
 try {
-    Start-Transcript -LiteralPath $timestampedLogPath -Force | Out-Null
+    Start-Transcript -LiteralPath $latestLogPath -Force
     $transcriptStarted = $true
 } catch {
     Write-Host "WARNING: Unable to start transcript log: $($_.Exception.Message)"
@@ -1027,7 +1191,7 @@ try {
         Write-Host ''
         Write-Host 'ERROR: Git clone/update failed.'
         Write-Host $_.Exception.Message
-        Write-Host "Full log written to: $timestampedLogPath"
+        Write-Host "Full log written to: $latestLogPath"
         Write-Host ''
         Write-Host 'No fake success state was applied. Fix the Git error above and run this file again.'
         exit 1
@@ -1117,6 +1281,8 @@ try {
     exit 1
 }
 
+Assert-ExtractLatestRetentionState -DestinationRoot $dest
+
 Write-Host ''
 Write-Host 'Everything completed successfully.'
 Write-Host "CODEX-master is ready as a real Git checkout at: $codexDir"
@@ -1131,12 +1297,7 @@ $expectedLaunchers | ForEach-Object { Write-Host " - $_" }
 } finally {
     if ($transcriptStarted) {
         try { Stop-Transcript | Out-Null } catch {}
-        try {
-            Copy-Item -LiteralPath $timestampedLogPath -Destination $latestLogPath -Force -ErrorAction Stop
-        } catch {
-            Write-Host "WARNING: Unable to refresh latest log copy: $($_.Exception.Message)"
-        }
-        Write-Host "Full log written to: $timestampedLogPath"
+        Write-Host "Full log written to: $latestLogPath"
         Write-Host "Latest log path: $latestLogPath"
     }
 }
