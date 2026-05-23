@@ -176,13 +176,46 @@
     "updated_at": "2026-05-23T12:46:01.776047+00:00"
   },
   "pending_webhooks": [],
-  "savedAt": "2026-05-23T12:54:00.215808+00:00",
+  "savedAt": "2026-05-23T12:54:23.545214+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [],
   "trading_journal": {
-    "items": [],
-    "updated_at": "2026-05-23T12:53:58.209735+00:00"
+    "items": [
+      {
+        "account": "A",
+        "breakeven": "",
+        "close_time": "2026-05-01",
+        "id": "t1",
+        "is_test_trade": false,
+        "manual_override_fields": [
+          "breakeven",
+          "is_test_trade",
+          "notes",
+          "setup",
+          "timeframe"
+        ],
+        "manual_overrides": {
+          "breakeven": "",
+          "is_test_trade": false,
+          "notes": "",
+          "setup": "",
+          "timeframe": ""
+        },
+        "manual_updated_at": "2026-05-23T12:54:21.535656+00:00",
+        "net_profit": 1.0,
+        "notes": "",
+        "open_time": "2026-05-01",
+        "realized_pnl": 1.0,
+        "result_pct": 1.0,
+        "row_type": "trade",
+        "setup": "",
+        "side": "BUY",
+        "symbol": "EURUSD",
+        "timeframe": ""
+      }
+    ],
+    "updated_at": "2026-05-23T12:54:21.535706+00:00"
   },
   "trading_journal_import_cache": {},
   "trading_journal_state": {
@@ -266,71 +299,16 @@
       "updated_at": "2026-05-23T12:53:58.002546+00:00"
     },
     "daily_trade_sync": {
-      "last_attempt_at": "2026-05-23T12:23:51.076603+00:00",
+      "last_attempt_at": "2026-05-23T12:54:12.149748+00:00",
       "last_error": null,
       "last_reason": "startup_recovery",
       "last_result": {
-        "balances_found": 0,
-        "diagnostics": {
-          "blank_pnl_trade_rows": 0,
-          "cashflow_rows_total": 0,
-          "dedupe_groups": 0,
-          "dropbox_workbooks_seen": 0,
-          "duplicate_rows_dropped": 0,
-          "errors": [],
-          "excluded_test_trade_rows": 0,
-          "ignored_local_workbooks": [],
-          "last_sync": {},
-          "local_dir": "C:\\Users\\User\\Documents\\GPT\\CODEX-master\\journal",
-          "local_workbooks_seen": 1,
-          "quarantined_invalid_time_rows": 0,
-          "quarantined_rows": 0,
-          "raw_workbook_rows_total": 0,
-          "rows_by_account": {},
-          "rows_by_asset_class": {},
-          "rows_by_source": {},
-          "rows_total": 0,
-          "source_duplicate_rows_dropped": 0,
-          "source_mode": "master_journal",
-          "visible_trade_rows_total": 0
-        },
-        "errors": [],
-        "finished_at": "2026-05-23T12:22:41.724423+00:00",
-        "github_sync_branch": "master",
-        "github_sync_commit": "dbb7c73",
-        "github_sync_enabled": true,
-        "github_sync_error": "",
-        "github_sync_error_type": "",
-        "github_sync_files": [
-          "journal/Trading Journal.xlsx",
-          "journal/5-digit-demo-calculation-context.json",
-          "state_backup.json"
-        ],
-        "github_sync_noop": false,
-        "github_sync_ok": true,
-        "github_sync_remote": "origin",
-        "master_journal_diagnostics": {
-          "source_balances": 7,
-          "source_rows_total": 1510,
-          "source_trade_rows": 1413
-        },
-        "master_journal_exists": true,
         "master_journal_ok": true,
-        "master_journal_path": "C:\\Users\\User\\Documents\\GPT\\CODEX-master\\journal\\Trading Journal.xlsx",
-        "master_journal_size_bytes": 297113,
-        "master_journal_updated_at": "2026-05-23T12:23:19.197362+00:00",
         "oanda_recovery": {},
-        "ok": true,
-        "rows_imported": 1510,
-        "source": "master_journal",
-        "source_mode": "master_journal",
-        "source_rows_total": 1510,
-        "source_trade_rows": 1413,
-        "started_at": "2026-05-23T12:22:36.964349+00:00",
-        "warnings": []
+        "ok": true
       },
-      "last_success_at": "2026-05-23T12:23:51.076611+00:00",
-      "updated_at": "2026-05-23T12:23:51.077047+00:00"
+      "last_success_at": "2026-05-23T12:54:12.149765+00:00",
+      "updated_at": "2026-05-23T12:54:12.151062+00:00"
     }
   },
   "version": 4,
