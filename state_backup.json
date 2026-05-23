@@ -4,35 +4,44 @@
       "alerts": [
         {
           "cooldown_seconds": 0,
+          "created_at": "2026-05-03T04:24:24.975767+00:00",
           "direction": "either",
           "enabled": true,
           "id": "d7f56968ece04ddbac72e8b6f8478a7d",
           "kind": "move",
+          "source": "dropbox",
           "symbol": "BRUSDT",
           "threshold": 10.0,
           "unit": "pct",
+          "updated_at": "2026-05-03T04:24:24.975767+00:00",
           "window_seconds": 60
         },
         {
           "cooldown_seconds": 0,
+          "created_at": "2026-05-03T04:46:04.185272+00:00",
           "direction": "either",
           "enabled": true,
           "id": "3e7bc55e3e994d9ebc4bc95ebff0e4a3",
           "kind": "move",
+          "source": "dropbox",
           "symbol": "AKTUSDT",
           "threshold": 6.0,
           "unit": "pct",
+          "updated_at": "2026-05-03T04:46:04.185272+00:00",
           "window_seconds": 60
         },
         {
           "cooldown_seconds": 0,
+          "created_at": "2026-05-04T02:26:40.799665+00:00",
           "direction": "either",
           "enabled": true,
           "id": "8b3273b6594b406c8f0aeb951d38a1a6",
           "kind": "move",
+          "source": "dropbox",
           "symbol": "DOGEUSDT",
           "threshold": 1.5,
           "unit": "pct",
+          "updated_at": "2026-05-04T02:26:40.799665+00:00",
           "window_seconds": 60
         }
       ]
@@ -42,234 +51,24 @@
     }
   },
   "monthly_aud_revaluation": {
-    "items": [
-      {
-        "account": "live",
-        "account_label": "Bybit Live",
-        "close_time": "2026-04-30T23:59:59+10:00",
-        "duration_seconds": "",
-        "entry_price": 0.68842,
-        "exit_price": 0.716215,
-        "fees": "",
-        "id": "monthly_aud_reval:bybit_live:2026-04",
-        "open_time": "2026-04-01T00:00:00+10:00",
-        "outcome": "",
-        "raw_refs": {
-          "computed_result_pct": -3.882838484018658,
-          "end_balance_source": "current_balance_no_activity_after_boundary",
-          "end_balance_usdt": 224.6424767,
-          "end_fx_close": 0.71623,
-          "end_fx_next_open": 0.7162,
-          "end_rate": 0.716215,
-          "fx_close": 0.68843,
-          "fx_next_open": 0.68841,
-          "period_month": "2026-04",
-          "start_balance_source": "current_balance_no_activity_after_boundary",
-          "start_balance_usdt": 224.64719913,
-          "start_rate": 0.68842
-        },
-        "result_cash": -12.68,
-        "result_currency": "AUD",
-        "result_pct": "",
-        "row_type": "monthly_aud_reval",
-        "side": "",
-        "source": "bybit_monthly_aud_reval",
-        "status": "closed",
-        "stop_loss": "",
-        "symbol": "MONTHLY AUD P/L",
-        "take_profit": "",
-        "updated_at": "2026-05-23T08:49:16.551440+00:00"
-      },
-      {
-        "account": "live",
-        "account_label": "Bybit Live",
-        "close_time": "2026-03-31T23:59:59+10:00",
-        "duration_seconds": "",
-        "entry_price": 0.70807,
-        "exit_price": 0.68842,
-        "fees": "",
-        "id": "monthly_aud_reval:bybit_live:2026-03",
-        "open_time": "2026-03-01T00:00:00+10:00",
-        "outcome": "",
-        "raw_refs": {
-          "computed_result_pct": 2.8541562475361015,
-          "end_balance_source": "current_balance_no_activity_after_boundary",
-          "end_balance_usdt": 224.65417034,
-          "end_fx_close": 0.68843,
-          "end_fx_next_open": 0.68841,
-          "end_rate": 0.68842,
-          "fx_close": 0.7116,
-          "fx_next_open": 0.70454,
-          "period_month": "2026-03",
-          "start_balance_source": "current_balance_no_activity_after_boundary",
-          "start_balance_usdt": 224.6546201,
-          "start_rate": 0.70807
-        },
-        "result_cash": 9.06,
-        "result_currency": "AUD",
-        "result_pct": "",
-        "row_type": "monthly_aud_reval",
-        "side": "",
-        "source": "bybit_monthly_aud_reval",
-        "status": "closed",
-        "stop_loss": "",
-        "symbol": "MONTHLY AUD P/L",
-        "take_profit": "",
-        "updated_at": "2026-05-23T08:48:47.644447+00:00"
-      }
-    ],
-    "updated_at": "2026-05-23T08:49:16.581485+00:00"
+    "items": [],
+    "updated_at": null
   },
-  "monthly_aud_revaluation_state": {
-    "error_detail": null,
-    "last_boundary_resolution": {},
-    "last_error": null,
-    "last_error_code": null,
-    "last_oanda_window": {},
-    "last_result": {
-      "changed": 0,
-      "failed_months": [],
-      "failures": [],
-      "finished_at": "2026-05-23T12:22:37.135501+00:00",
-      "mandatory_row_id": "monthly_aud_reval:bybit_live:2026-03",
-      "partial": false,
-      "processed_months": [],
-      "rows": 2,
-      "started_at": "2026-05-23T12:22:36.964239+00:00",
-      "succeeded_months": [],
-      "target_months": []
-    },
-    "last_synced_at": "2026-05-23T12:22:37.135469+00:00",
-    "month_key": null,
-    "ok": true,
-    "stage": "complete",
-    "traceback": null,
-    "updated_at": "2026-05-23T12:22:37.135495+00:00"
-  },
-  "oanda_fill_state": {
-    "diagnostics": {
-      "demo": {
-        "last_error": null,
-        "last_seen_transaction_id": "624",
-        "last_success_at": "2026-05-23T12:46:01.034971+00:00",
-        "startup_recovered_rows": 0,
-        "startup_skipped_duplicates": 0,
-        "updated_at": "2026-05-23T12:46:01.034981+00:00"
-      },
-      "live": {
-        "last_error": null,
-        "last_seen_transaction_id": "471",
-        "last_success_at": "2026-05-23T12:46:01.776009+00:00",
-        "startup_recovered_rows": 0,
-        "startup_skipped_duplicates": 0,
-        "updated_at": "2026-05-23T12:46:01.776035+00:00"
-      }
-    },
-    "last_seen_transaction_id": {
-      "demo": "624",
-      "live": "471"
-    },
-    "open_trade_legs": {
-      "demo": {},
-      "live": {}
-    },
-    "updated_at": "2026-05-23T12:46:01.776047+00:00"
-  },
+  "monthly_aud_revaluation_state": {},
+  "oanda_fill_state": {},
   "pending_webhooks": [],
-  "savedAt": "2026-05-23T12:54:32.996469+00:00",
+  "savedAt": "2026-05-23T13:09:03.073164+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [],
   "trading_journal": {
-    "items": [
-      {
-        "account": "PEPPERSTONE DEMO",
-        "breakeven": "",
-        "close_time": "2026-01-01",
-        "id": "r1",
-        "is_test_trade": false,
-        "manual_override_fields": [
-          "breakeven",
-          "is_test_trade",
-          "notes",
-          "setup",
-          "timeframe"
-        ],
-        "manual_overrides": {
-          "breakeven": "",
-          "is_test_trade": false,
-          "notes": "",
-          "setup": "",
-          "timeframe": ""
-        },
-        "manual_updated_at": "2026-05-23T12:54:30.991972+00:00",
-        "net_profit": 1.0,
-        "notes": "",
-        "open_time": "2026-01-01",
-        "realized_pnl": 1.0,
-        "result_pct": 0.1,
-        "row_type": "trade",
-        "setup": "",
-        "side": "BUY",
-        "symbol": "EURUSD",
-        "timeframe": ""
-      }
-    ],
-    "updated_at": "2026-05-23T12:54:30.992005+00:00"
+    "items": [],
+    "updated_at": "2026-05-23T13:09:01.054208+00:00"
   },
   "trading_journal_import_cache": {},
   "trading_journal_state": {
-    "broker_account_balances": [
-      {
-        "account": "Bybit Demo",
-        "account_mode": "demo",
-        "as_of": "2026-05-23T12:45:55.714270+00:00",
-        "balance": 323.30279685,
-        "balance_source": "bybit_wallet_balance",
-        "currency": "USDT",
-        "label": "Bybit Demo",
-        "source": "bybit_wallet_balance"
-      },
-      {
-        "account": "Bybit Live",
-        "account_mode": "live",
-        "as_of": "2026-05-23T12:45:56.972426+00:00",
-        "balance": 224.66631374,
-        "balance_source": "bybit_wallet_balance",
-        "currency": "USDT",
-        "label": "Bybit Live",
-        "source": "bybit_wallet_balance"
-      },
-      {
-        "account": "OANDA DEMO",
-        "account_mode": "demo",
-        "as_of": "2026-05-23T12:45:58.173149+00:00",
-        "balance": 1500.6539,
-        "balance_source": "oanda_account_summary",
-        "currency": "AUD",
-        "label": "OANDA DEMO",
-        "nav": 1500.6539,
-        "source": "oanda_account_summary"
-      },
-      {
-        "account": "OANDA LIVE",
-        "account_mode": "live",
-        "as_of": "2026-05-23T12:45:58.977913+00:00",
-        "balance": 1479.3098,
-        "balance_source": "oanda_account_summary",
-        "currency": "AUD",
-        "label": "OANDA LIVE",
-        "nav": 1479.3098,
-        "source": "oanda_account_summary"
-      }
-    ],
-    "broker_balance_diagnostics": {
-      "bybit_demo_anchor_fingerprint": "06359c2d2c9fe4a3cce2c349922721278d153c077876f45426bef890a87f90b3",
-      "updated_at": "2026-05-23T12:45:59.006829+00:00",
-      "warnings": []
-    },
     "bybit_closed_pnl_last_seen": {
-      "demo": 1778936097950,
+      "demo": 1778937000780,
       "live": null
     },
     "bybit_demo_sync": {
@@ -277,13 +76,13 @@
       "bybit_demo_balance_backfill_error": null,
       "bybit_demo_balance_backfill_rows_backfilled": 0,
       "bybit_demo_balance_backfill_rows_seen": 2,
-      "bybit_demo_balance_backfill_snapshot_at": "2026-05-23T12:53:57.975942+00:00",
+      "bybit_demo_balance_backfill_snapshot_at": "2026-05-23T13:09:00.810600+00:00",
       "bybit_demo_execution_warning": null,
       "last_captured_row_ids": [
         "bybit:demo:execution:BTCUSDT:E1",
         "bybit:demo:execution:BTCUSDT:E2"
       ],
-      "last_checked_at": "2026-05-23T12:53:57.988181+00:00",
+      "last_checked_at": "2026-05-23T13:09:00.829676+00:00",
       "last_error": null,
       "last_invalid_time_row_details": [],
       "last_invalid_time_rows_dropped": 0,
@@ -293,24 +92,10 @@
       "last_rows_deduped": 0,
       "last_rows_seen": 2,
       "last_rows_upserted": 2,
-      "last_success_at": "2026-05-23T12:53:57.988192+00:00",
+      "last_success_at": "2026-05-23T13:09:00.829695+00:00",
       "last_workbook_rows_deduped": 0,
       "single_file_mode": true,
-      "updated_at": "2026-05-23T12:53:58.002546+00:00"
-    },
-    "daily_trade_sync": {
-      "last_attempt_at": "2026-05-23T12:54:27.146443+00:00",
-      "last_error": "boom",
-      "last_reason": "startup_recovery",
-      "last_result": {
-        "master_journal_error": "boom",
-        "master_journal_ok": false,
-        "oanda_recovery": {},
-        "ok": true,
-        "rows_imported": 1
-      },
-      "last_success_at": null,
-      "updated_at": "2026-05-23T12:54:27.156563+00:00"
+      "updated_at": "2026-05-23T13:09:00.840017+00:00"
     }
   },
   "version": 4,
