@@ -4,6 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 JS_PATH = ROOT / "render" / "static" / "trading_journal.js"
+ACTIONS_JS_PATH = ROOT / "render" / "static" / "trading_journal_actions.js"
 
 
 def test_trading_journal_js_parses_with_node() -> None:
@@ -123,3 +124,18 @@ def test_monthly_aud_reval_rendering_hooks_present() -> None:
     assert "r?.id" in js
     assert "{ key: 'chart', header: 'Chart', value: (r) => { if (isMonthlyAudRevalRow(r)) return '';" in js
     assert "{ key: 'actions', header: 'Actions', value: (r) => { if (isMonthlyAudRevalRow(r)) return '';" in js
+
+
+def test_trading_journal_actions_import_error_shows_payload_errors_and_keeps_bybit_ambiguity_message() -> None:
+    js = ACTIONS_JS_PATH.read_text(encoding="utf-8")
+    assert "const formatImportError = (payload, fallback) =>" in js
+    assert "payload?.detail || payload?.message || fallback" in js
+    assert "Array.isArray(payload?.errors)" in js
+    assert "Errors: ${payload.errors" in js
+    assert "Array.isArray(payload?.missing_row_ids)" in js
+    assert "Missing Row IDs: ${payload.missing_row_ids" in js
+    assert "throw new Error(formatImportError(payload, 'Import failed.'))" in js
+    assert "const BYBIT_AMBIGUITY_MSG = 'Select Demo or Live in Bybit CSV account, then import this file again.';" in js
+    assert "Import is still running longer than expected. Waiting for backend result..." in js
+    assert "IMPORT_WATCHDOG_MS" in js
+    assert "if (!res.ok || payload.ok !== true)" in js

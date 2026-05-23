@@ -29,6 +29,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP, ROUND_UP
 from datetime import datetime, timedelta, timezone
+from datetime import date as _date
 from dateutil.relativedelta import relativedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Callable
@@ -329,6 +330,41 @@ def _parse_iso_datetime(value: object) -> datetime | None:
                 dt = dt.replace(tzinfo=timezone.utc)
             return dt.astimezone(timezone.utc)
     return None
+
+
+def _timestamp_epoch_seconds(value: object, *, cache: Optional[Dict[str, float]] = None) -> float:
+    if value in (None, ""):
+        return float("-inf")
+    key = None
+    if cache is not None:
+        key = f"{type(value).__name__}:{repr(value)}"
+        if key in cache:
+            return cache[key]
+    ts = float("-inf")
+    try:
+        if isinstance(value, datetime):
+            dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+            ts = float(dt.astimezone(timezone.utc).timestamp())
+        elif isinstance(value, _date):
+            dt = datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
+            ts = float(dt.timestamp())
+        elif isinstance(value, (int, float)) and math.isfinite(float(value)):
+            fv = float(value)
+            if fv > 10**11:
+                ts = fv / 1000.0
+            elif fv > 10**9:
+                ts = fv
+            else:
+                parsed = _parse_iso_datetime(value)
+                ts = float(parsed.timestamp()) if isinstance(parsed, datetime) else float("-inf")
+        else:
+            parsed = _parse_iso_datetime(value)
+            ts = float(parsed.timestamp()) if isinstance(parsed, datetime) else float("-inf")
+    except Exception:
+        ts = float("-inf")
+    if cache is not None and key is not None:
+        cache[key] = ts
+    return ts
 
 
 def _pid_is_alive(pid: object) -> bool:
@@ -5574,13 +5610,9 @@ def _build_journal_balance_timelines(
         return str(seed_source or "").strip().lower() in {
             "oanda_transaction_export_balance", "oanda_account_summary", "broker_account_summary", "account_summary"
         }
+    ts_cache: Dict[str, float] = {}
     def _to_ts(value: object) -> float:
-        if value in (None, ""):
-            return float("-inf")
-        try:
-            return float(pd.to_datetime(value, utc=True).timestamp())
-        except Exception:
-            return float("-inf")
+        return _timestamp_epoch_seconds(value, cache=ts_cache)
 
     out_rows = [dict(r) for r in rows]
     by_account: Dict[str, Dict[str, object]] = defaultdict(lambda: {"trade_indices": [], "labels": [], "currencies": []})
@@ -5628,6 +5660,7 @@ def _build_journal_balance_timelines(
             key=lambda i: _to_ts(out_rows[i].get("close_time") or out_rows[i].get("open_time")),
         )
         events = sorted((cashflow_ledger or {}).get(account_key) or [], key=lambda e: _to_ts(e.get("date")))
+        event_ts = [_to_ts(e.get("date")) for e in events]
         has_cashflow = len(events) > 0
         segment_running: Dict[int, float] = {}
         last_known_balance: Optional[float] = None
@@ -5641,8 +5674,8 @@ def _build_journal_balance_timelines(
 
             if has_cashflow:
                 anchor_idx = -1
-                for i, ev in enumerate(events):
-                    if _to_ts(ev.get("date")) <= trade_ts:
+                for i, _ev in enumerate(events):
+                    if event_ts[i] <= trade_ts:
                         anchor_idx = i
                     else:
                         break
@@ -6263,7 +6296,7 @@ def _infer_realized_net_profit_from_balance_continuity(
         return any(term in blob for term in block_terms)
 
     def _sort_key(row: Dict[str, object]) -> Tuple[float, int, str]:
-        ts = _parse_ts_utc(
+        ts = _parse_iso_datetime(
             row.get("close_time")
             or row.get("execution_time")
             or row.get("transaction_time")
@@ -20609,11 +20642,12 @@ def _trade_duration_seconds(row: Dict[str, object]) -> Optional[int]:
     if not open_time or not close_time:
         return None
     try:
-        open_ts = pd.to_datetime(open_time)
-        close_ts = pd.to_datetime(close_time)
-        if pd.isna(open_ts) or pd.isna(close_ts):
+        cache: Dict[str, float] = {}
+        open_ts = _timestamp_epoch_seconds(open_time, cache=cache)
+        close_ts = _timestamp_epoch_seconds(close_time, cache=cache)
+        if not math.isfinite(open_ts) or not math.isfinite(close_ts):
             return None
-        delta = (close_ts - open_ts).total_seconds()
+        delta = close_ts - open_ts
         if delta < 0:
             return None
         # Never show 0s durations for trades. Anything under 1s (including 0) rounds up to 1s.
@@ -21019,19 +21053,16 @@ def _calc_balance_after_trade(
         if account_key:
             by_account[account_key].append(idx)
 
+    ts_cache: Dict[str, float] = {}
     def _to_ts(value: object) -> float:
-        if value in (None, ""):
-            return float("-inf")
-        try:
-            return float(pd.to_datetime(value).timestamp())
-        except Exception:
-            return float("-inf")
+        return _timestamp_epoch_seconds(value, cache=ts_cache)
 
     for account_key, indices in by_account.items():
         events = cashflows.get(account_key) or []
         if not events:
             continue
         events_sorted = sorted(events, key=lambda e: _to_ts(e.get("date")))
+        event_ts = [_to_ts(e.get("date")) for e in events_sorted]
         trade_indices = sorted(
             indices,
             key=lambda i: _to_ts(
@@ -21044,8 +21075,8 @@ def _calc_balance_after_trade(
             row = out_rows[row_idx]
             trade_ts = _to_ts(row.get("close_time") or row.get("open_time"))
             anchor = -1
-            for i, event in enumerate(events_sorted):
-                if _to_ts(event.get("date")) <= trade_ts:
+            for i, _event in enumerate(events_sorted):
+                if event_ts[i] <= trade_ts:
                     anchor = i
                 else:
                     break
@@ -21641,13 +21672,9 @@ def _compute_journal_stats(
     denom_crypto = crypto_wins + crypto_losses
     crypto_win_rate_pct = (crypto_wins / denom_crypto * 100.0) if denom_crypto else None
 
+    ts_cache: Dict[str, float] = {}
     def _to_ts(value: object) -> float:
-        if value in (None, ""):
-            return float("-inf")
-        try:
-            return float(pd.to_datetime(value).timestamp())
-        except Exception:
-            return float("-inf")
+        return _timestamp_epoch_seconds(value, cache=ts_cache)
 
     # Drawdown stats (%), segmented by cashflow anchors so deposits/withdrawals
     # do not show up as drawdowns.
@@ -25976,6 +26003,7 @@ async def merged_trading_journal_workspace() -> HTMLResponse:
     return HTMLResponse(TRADING_JOURNAL_ACTIONS_TEMPLATE)
 
 def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, account_mode: Optional[str] = None) -> Dict[str, object]:
+    global _PENDING_MANUAL_SYNC_ROWS
     name = str(upload_name or "upload").strip() or "upload"
     suffix = Path(name).suffix.lower()
     allowed = {".xlsx", ".xlsm", ".xls", ".csv"}
@@ -25994,6 +26022,8 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tf:
         tf.write(payload)
         tmp_path = Path(tf.name)
+    timings: Dict[str, float] = {}
+    t0 = time.perf_counter()
     try:
         rows: List[Dict[str, object]] = []
         balance: Optional[Dict[str, object]] = None
@@ -26017,8 +26047,11 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 rows, balance = _parse_local_trading_journal_workbook(tmp_path, original_name=name, account_mode=mode or None)
             except Exception as exc:
                 return {"ok": False, "status_code": 422, "message": f"Failed to parse {name}: {exc}", "uploaded_name": name, "file_type": suffix, "errors": [str(exc)], "warnings": []}
+        timings["parse"] = round(time.perf_counter() - t0, 6)
+        t1 = time.perf_counter()
         existing_rows = _get_trading_journal_rows()
         rows, inference_warnings, inference_diag = _infer_realized_net_profit_from_balance_continuity(rows, existing_rows)
+        timings["pnl_inference"] = round(time.perf_counter() - t1, 6)
         rows = [r for r in (rows or []) if isinstance(r, dict)]
         missing_ids = [r for r in rows if str((r or {}).get("row_type") or "trade").strip().lower() == "trade" and not str((r or {}).get("id") or "").strip()]
         if missing_ids:
@@ -26040,18 +26073,40 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
         if workbook_had_original:
             workbook_backup_bytes = workbook_path.read_bytes()
         verify_result: Optional[Dict[str, object]] = None
+        previous_pending_rows = [dict(r) for r in (_PENDING_MANUAL_SYNC_ROWS or []) if isinstance(r, dict)]
+        pending_restored = False
         try:
+            t2 = time.perf_counter()
             rows_upserted = _upsert_trading_journal_rows(rows, allow_broker_rows_in_single_file=True)
-            snapshot = _build_trading_journal_view_snapshot(force=True)
-            _persist_trading_journal_sqlite(snapshot, import_meta={"source_mode": "manual_upload", "rows_imported": len(rows), "warnings": [], "errors": []})
+            timings["upsert"] = round(time.perf_counter() - t2, 6)
+
+            pending_map: Dict[str, Dict[str, object]] = {}
+            for r in [*rows, *previous_pending_rows]:
+                rid = str((r or {}).get("id") or "").strip()
+                if rid:
+                    pending_map[rid] = dict(r)
+            _PENDING_MANUAL_SYNC_ROWS = list(pending_map.values())
+
+            t3 = time.perf_counter()
             sync_result = _sync_master_journal_workbook()
+            timings["workbook_sync"] = round(time.perf_counter() - t3, 6)
             if not bool((sync_result or {}).get("ok")):
                 raise RuntimeError(f"Workbook sync failed: {(sync_result or {}).get('error') or 'unknown error'}")
+            _PENDING_MANUAL_SYNC_ROWS = previous_pending_rows
+            pending_restored = True
+
+            t4 = time.perf_counter()
+            snapshot = _build_trading_journal_view_snapshot(force=True)
+            _persist_trading_journal_sqlite(snapshot, import_meta={"source_mode": "manual_upload", "rows_imported": len(rows), "warnings": [], "errors": []})
             verify_result = _verify_trade_log_row_ids_in_workbook(_master_journal_path(), parsed_ids)
+            timings["verification"] = round(time.perf_counter() - t4, 6)
             if not bool((verify_result or {}).get("ok")):
                 raise RuntimeError(f"Workbook verification failed after import. missing_row_ids={(verify_result or {}).get('missing_row_ids') or []}")
         except Exception as exc:
+            if not pending_restored:
+                _PENDING_MANUAL_SYNC_ROWS = previous_pending_rows
             rollback_errors: List[str] = []
+            t_rb = time.perf_counter()
             try:
                 _set_trading_journal_rows(previous_rows)
             except Exception as row_restore_exc:
@@ -26069,13 +26124,16 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 _persist_trading_journal_sqlite(rollback_snapshot, import_meta={"source_mode": "manual_upload_rollback", "rows_imported": 0, "warnings": [], "errors": [str(exc), *rollback_errors]})
             except Exception as persist_rollback_exc:
                 rollback_errors.append(f"could not persist rollback snapshot: {persist_rollback_exc}")
+            timings["rollback"] = round(time.perf_counter() - t_rb, 6)
+            APP_LOGGER.warning("trading_journal_import_failed timings=%s upload=%s", timings, name)
             code = 500
             msg = str(exc)
             missing = (verify_result or {}).get("missing_row_ids") or []
             if rollback_errors:
                 msg = f"{msg} | rollback failed: {'; '.join(rollback_errors)}"
-            return {"ok": False, "status_code": code, "message": msg, "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": 0, "missing_row_ids": missing, "errors": [msg, *rollback_errors], "warnings": []}
-        return {"ok": True, "status_code": 200, "message": "Import complete.", "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": rows_upserted, "duplicate_rows_merged": duplicate_rows_merged, "balance_parsed": bool(balance), "master_journal_path": str(_master_journal_path()), "verified_row_ids_count": len(parsed_ids), "missing_row_ids": [], "warnings": inference_warnings, "errors": [], **inference_diag}
+            return {"ok": False, "status_code": code, "message": msg, "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": 0, "missing_row_ids": missing, "errors": [msg, *rollback_errors], "warnings": [], "import_timings": timings}
+        APP_LOGGER.info("trading_journal_import_success timings=%s upload=%s", timings, name)
+        return {"ok": True, "status_code": 200, "message": "Import complete.", "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": rows_upserted, "duplicate_rows_merged": duplicate_rows_merged, "balance_parsed": bool(balance), "master_journal_path": str(_master_journal_path()), "verified_row_ids_count": len(parsed_ids), "missing_row_ids": [], "warnings": inference_warnings, "errors": [], "import_timings": timings, **inference_diag}
     except Exception as exc:
         return {"ok": False, "status_code": 500, "message": f"Unexpected import error for {name}.", "uploaded_name": name, "file_type": suffix or "unknown", "rows_parsed": 0, "rows_upserted": 0, "duplicate_rows_merged": 0, "balance_parsed": False, "master_journal_path": str(_master_journal_path()), "verified_row_ids_count": 0, "missing_row_ids": [], "warnings": [], "errors": [str(exc)]}
     finally:

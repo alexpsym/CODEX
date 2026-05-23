@@ -6,6 +6,7 @@
   const accountModeSelect = document.getElementById('journal-account-mode');
   const status = document.getElementById('journal-actions-status');
   const BYBIT_AMBIGUITY_MSG = 'Select Demo or Live in Bybit CSV account, then import this file again.';
+  const IMPORT_WATCHDOG_MS = 15000;
 
   const setStatus = (msg, err = false) => {
     if (!status) return;
@@ -13,6 +14,18 @@
     status.style.color = err ? '#fca5a5' : '#94a3b8';
   };
   const isExplicitAccountMode = (value) => value === 'demo' || value === 'live';
+
+  const formatImportError = (payload, fallback) => {
+    const base = String(payload?.detail || payload?.message || fallback || 'Import failed.').trim();
+    const parts = [base];
+    if (Array.isArray(payload?.errors) && payload.errors.length) {
+      parts.push(`Errors: ${payload.errors.map((v) => String(v)).join(', ')}`);
+    }
+    if (Array.isArray(payload?.missing_row_ids) && payload.missing_row_ids.length) {
+      parts.push(`Missing Row IDs: ${payload.missing_row_ids.map((v) => String(v)).join(', ')}`);
+    }
+    return parts.join('\n');
+  };
   const isBybitCsvFileName = (name) => String(name || '').trim().toLowerCase().endsWith('.csv');
   const isLikelyBybitHistoryCsv = async (file) => {
     if (!file || !isBybitCsvFileName(file.name)) return false;
@@ -44,7 +57,11 @@
     if (!file) return;
     importBtn.disabled = true;
     setStatus('Importing...');
+    let watchdog = null;
     try {
+      watchdog = window.setTimeout(() => {
+        setStatus('Import is still running longer than expected. Waiting for backend result...', true);
+      }, IMPORT_WATCHDOG_MS);
       const explicitMode = String(accountModeSelect?.value || '').trim().toLowerCase();
       const bybitLikely = await isLikelyBybitHistoryCsv(file);
       if (bybitLikely && !isExplicitAccountMode(explicitMode)) {
@@ -62,13 +79,16 @@
         accountModeSelect?.focus?.();
         return;
       }
-      if (!res.ok || payload.ok !== true) throw new Error(payload.detail || payload.message || 'Import failed.');
+      if (!res.ok || payload.ok !== true) throw new Error(formatImportError(payload, 'Import failed.'));
       const warnings = payload.warnings || [];
       const inferred = payload.pnl_inferred_count ?? 0;
       const unresolved = payload.pnl_unresolved_count ?? 0;
       setStatus(`${payload.message || 'Import complete.'}\nRows parsed: ${payload.rows_parsed ?? 0}\nRows upserted: ${payload.rows_upserted ?? 0}\nP/L inferred: ${inferred}\nP/L unresolved: ${unresolved}\nWorkbook: ${payload.master_journal_path || ''}\nMissing Row IDs: ${(payload.missing_row_ids || []).join(', ') || 'none'}${warnings.length ? `\nWarnings:\n- ${warnings.join('\n- ')}` : ''}`);
     } catch (err) { setStatus(err?.message || String(err), true); }
-    finally { importBtn.disabled = false; fileInput.value = ''; }
+    finally {
+      if (watchdog) window.clearTimeout(watchdog);
+      importBtn.disabled = false; fileInput.value = '';
+    }
   });
   accountModeSelect?.addEventListener('change', () => {
     const explicitMode = String(accountModeSelect?.value || '').trim().toLowerCase();
