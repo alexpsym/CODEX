@@ -85,30 +85,13 @@
     "updated_at": "2026-05-23T14:12:21.391012+00:00"
   },
   "pending_webhooks": [],
-  "savedAt": "2026-05-23T14:21:56.829374+00:00",
+  "savedAt": "2026-05-23T14:22:04.948277+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [],
   "trading_journal": {
-    "items": [
-      {
-        "account": "Bybit Demo",
-        "account_label": "Bybit Demo",
-        "asset_class": "crypto",
-        "close_time": "2026-05-19T01:13:00+10:00",
-        "entry_price": 100001,
-        "exit_price": 100001,
-        "id": "bybit:demo:execution:BTCUSDT:E2",
-        "open_time": "2026-05-19T01:13:00+10:00",
-        "qty": 0.1,
-        "row_type": "trade",
-        "side": "Buy",
-        "source": "bybit_execution_history",
-        "symbol": "BTCUSDT",
-        "updated_at": "2026-05-23T14:21:54.803121+00:00"
-      }
-    ],
-    "updated_at": "2026-05-23T14:21:54.803171+00:00"
+    "items": [],
+    "updated_at": "2026-05-23T14:22:02.840326+00:00"
   },
   "trading_journal_import_cache": {},
   "trading_journal_state": {
@@ -162,7 +145,7 @@
       "warnings": []
     },
     "bybit_closed_pnl_last_seen": {
-      "demo": 1778940756426,
+      "demo": 1778941382536,
       "live": null
     },
     "bybit_demo_sync": {
@@ -170,13 +153,13 @@
       "bybit_demo_balance_backfill_error": null,
       "bybit_demo_balance_backfill_rows_backfilled": 0,
       "bybit_demo_balance_backfill_rows_seen": 2,
-      "bybit_demo_balance_backfill_snapshot_at": "2026-05-23T14:11:36.451502+00:00",
+      "bybit_demo_balance_backfill_snapshot_at": "2026-05-23T14:22:02.568177+00:00",
       "bybit_demo_execution_warning": null,
       "last_captured_row_ids": [
         "bybit:demo:execution:BTCUSDT:E1",
         "bybit:demo:execution:BTCUSDT:E2"
       ],
-      "last_checked_at": "2026-05-23T14:11:36.464607+00:00",
+      "last_checked_at": "2026-05-23T14:22:02.580727+00:00",
       "last_error": null,
       "last_invalid_time_row_details": [],
       "last_invalid_time_rows_dropped": 0,
@@ -186,10 +169,10 @@
       "last_rows_deduped": 0,
       "last_rows_seen": 2,
       "last_rows_upserted": 2,
-      "last_success_at": "2026-05-23T14:11:36.464639+00:00",
+      "last_success_at": "2026-05-23T14:22:02.580756+00:00",
       "last_workbook_rows_deduped": 0,
       "single_file_mode": true,
-      "updated_at": "2026-05-23T14:11:36.476551+00:00"
+      "updated_at": "2026-05-23T14:22:02.592386+00:00"
     },
     "daily_trade_sync": {
       "last_attempt_at": "2026-05-23T14:11:58.131766+00:00",
