@@ -85,13 +85,46 @@
     "updated_at": "2026-05-23T15:44:37.243167+00:00"
   },
   "pending_webhooks": [],
-  "savedAt": "2026-05-23T15:53:46.096154+00:00",
+  "savedAt": "2026-05-23T15:54:18.800659+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [],
   "trading_journal": {
-    "items": [],
-    "updated_at": "2026-05-23T15:53:44.079909+00:00"
+    "items": [
+      {
+        "account": "A",
+        "breakeven": "",
+        "close_time": "2026-01-01 11:00:00",
+        "id": "r1",
+        "is_test_trade": false,
+        "manual_override_fields": [
+          "breakeven",
+          "is_test_trade",
+          "notes",
+          "setup",
+          "timeframe"
+        ],
+        "manual_overrides": {
+          "breakeven": "",
+          "is_test_trade": false,
+          "notes": "",
+          "setup": "",
+          "timeframe": ""
+        },
+        "manual_updated_at": "2026-05-23T15:54:16.735527+00:00",
+        "net_profit": 10.0,
+        "notes": "",
+        "open_time": "2026-01-01 10:00:00",
+        "realized_pnl": 10.0,
+        "result_pct": 1.2,
+        "row_type": "trade",
+        "setup": "",
+        "side": "BUY",
+        "symbol": "EURUSD",
+        "timeframe": ""
+      }
+    ],
+    "updated_at": "2026-05-23T15:54:16.735584+00:00"
   },
   "trading_journal_import_cache": {},
   "trading_journal_state": {
@@ -175,18 +208,16 @@
       "updated_at": "2026-05-23T15:53:43.807453+00:00"
     },
     "daily_trade_sync": {
-      "last_attempt_at": "2026-05-23T15:43:52.531685+00:00",
-      "last_error": "boom",
+      "last_attempt_at": "2026-05-23T15:54:06.936962+00:00",
+      "last_error": null,
       "last_reason": "startup_recovery",
       "last_result": {
-        "master_journal_error": "boom",
-        "master_journal_ok": false,
+        "master_journal_ok": true,
         "oanda_recovery": {},
-        "ok": true,
-        "rows_imported": 1
+        "ok": true
       },
-      "last_success_at": null,
-      "updated_at": "2026-05-23T15:43:52.556643+00:00"
+      "last_success_at": "2026-05-23T15:54:06.936978+00:00",
+      "updated_at": "2026-05-23T15:54:06.938348+00:00"
     }
   },
   "version": 4,
