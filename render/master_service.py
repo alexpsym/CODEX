@@ -3907,10 +3907,13 @@ def _monthly_aud_revaluation_rows_for_journal_view() -> List[Dict[str, object]]:
             continue
         if result_currency != "AUD":
             continue
-        if "bybit" not in {
+        account_keys = {
             _norm_account_key(account),
             _norm_account_key(account_label),
-        }:
+            str(account or "").strip().upper(),
+            str(account_label or "").strip().upper(),
+        }
+        if not any(key in {"BYBIT", "BYBIT LIVE"} for key in account_keys):
             continue
         out = dict(row)
         out["row_type"] = "monthly_aud_reval"
@@ -6443,6 +6446,10 @@ def _infer_realized_net_profit_from_balance_continuity(
             side_text = str(row.get("side") or "").strip().lower()
             status_text = str(row.get("status") or "").strip().lower()
             has_close_marker = bool(row.get("close_time")) or status_text in {"closed", "close", "completed", "filled"}
+            is_bybit_execution_history = str(row.get("source") or "").strip().lower() == "bybit_execution_history"
+            has_explicit_realized = _to_float(row.get("realized_pnl")) is not None or _to_float(row.get("closed_pnl")) is not None
+            if is_bybit_execution_history and not has_explicit_realized and math.isclose(delta, -fee, abs_tol=1e-9):
+                has_close_marker = False
             likely_opening = (not has_close_marker) and side_text in {"buy", "sell"}
             if likely_opening and math.isclose(delta, -fee, abs_tol=1e-9):
                 unresolved.append(f"{rid}:pnl_inference_open_fill_fee_only_no_closing_proof")
@@ -25446,6 +25453,8 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
             enforce_pre = _enforce_single_master_journal_xlsx(TRADING_JOURNAL_LOCAL_DIR, cleanup_known_generated=True)
             if not enforce_pre.get("ok"):
                 raise RuntimeError("Unknown extra Excel files in journal directory: " + ", ".join(enforce_pre.get("unknown_extra_excel_files") or []) + ". Move legacy backups outside journal/. Keep only journal/Trading Journal.xlsx.")
+            if not path.exists():
+                raise FileNotFoundError("Trading Journal.xlsx is missing in master_journal single-file mode. Import history or create the workbook first.")
         snapshot = _build_trading_journal_view_snapshot(force=True) or {}
         source_items = [r for r in (snapshot.get("items") or []) if isinstance(r, dict)]
         source_trade_rows = [r for r in source_items if _row_type(r) == "trade"]
@@ -25841,6 +25850,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
             if not enforce_github.get("ok"):
                 raise RuntimeError("Unknown extra Excel files in journal directory before GitHub sync: " + ", ".join(enforce_github.get("unknown_extra_excel_files") or []) + ". Move legacy backups outside journal/. Keep only journal/Trading Journal.xlsx.")
         payload.update(_sync_journal_excel_files_to_github(path))
+        payload['ok'] = bool(payload.get('master_journal_ok')) and payload.get('github_sync_ok') is not False
         return payload
     except Exception as exc:
         try:
@@ -25849,6 +25859,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
         except Exception:
             pass
         return {
+            'ok': False,
             'master_journal_ok': False,
             'master_journal_path': str(path),
             'master_journal_exists': path.exists(),
@@ -25996,7 +26007,7 @@ def _master_journal_sync_ok(result: Dict[str, object] | None) -> bool:
         return False
     if "ok" in result:
         return bool(result.get("ok"))
-    return bool(result.get("master_journal_ok"))
+    return bool(result.get("master_journal_ok")) and result.get("github_sync_ok") is not False
 
 
 def _master_journal_sync_error(result: Dict[str, object] | None) -> str:
