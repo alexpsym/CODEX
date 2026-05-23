@@ -12967,6 +12967,7 @@ def _oanda_credentials(mode: str) -> Dict[str, str]:
         "account_id": account_id or "",
         "base_url": base_url,
     }
+APP_LOGGER = logging.getLogger("uvicorn.error")
 BALANCE_LOGGER = logging.getLogger("uvicorn.error")
 BYBIT_LOGGER = logging.getLogger("uvicorn.error")
 CALCULATOR_LOGGER = logging.getLogger("uvicorn.error")
@@ -26320,6 +26321,8 @@ async def local_exit(payload: Dict[str, object] = Body(default_factory=dict)) ->
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to schedule local shutdown: {exc}") from exc
-    _schedule_local_master_process_exit()
+    response_payload = {"ok": True, "target": close_info, "sentinel": str(sentinel_path)}
+    response = JSONResponse(response_payload)
     APP_LOGGER.info("LOCAL_EXIT_REQUESTED target=%s sentinel=%s", close_info.get("target_url"), sentinel_path)
-    return JSONResponse({"ok": True, "target": close_info, "sentinel": str(sentinel_path)})
+    _schedule_local_master_process_exit()
+    return response
