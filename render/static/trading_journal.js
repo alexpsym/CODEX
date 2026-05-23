@@ -144,6 +144,7 @@
   const diagnosticsErrorText = (value) => String(value?.message ?? value ?? '').trim();
   const isBalanceAnchorWarning = (value) => diagnosticsErrorText(value).toLowerCase().includes('missing balance anchor');
   const isParseSyncError = (value) => diagnosticsErrorText(value).length > 0 && !isBalanceAnchorWarning(value);
+  const BYBIT_DEMO_PURGE_NOTE = 'Bybit Demo workbook is blank; old Bybit Demo rows purged';
   const formatSyncFailureStatus = (err) => {
     const raw = String(err?.message || err || '');
     if (isMissingXlrdError(raw) || raw.toLowerCase().includes('local .xls journal workbooks require xlrd')) {
@@ -1395,6 +1396,7 @@
       const rowsTotal = Math.max(actualRowsTotal, diagnosticRowsTotal);
       const diagnosticsErrors = Array.isArray(diagnostics?.errors) ? diagnostics.errors : [];
       const hasParseSyncErrors = diagnosticsErrors.some((err) => isParseSyncError(err));
+      const hasBybitDemoPurgeNotice = diagnosticsErrors.some((err) => diagnosticsErrorText(err).toLowerCase().includes('bybit demo workbook is blank') || diagnosticsErrorText(err).toLowerCase().includes('old bybit demo rows purged'));
       const hasBalanceAnchorWarnings = diagnosticsErrors.some((err) => isBalanceAnchorWarning(err));
       const workbookSourcesSeen = Number(
         diagnostics?.workbook_sources_seen
@@ -1425,6 +1427,7 @@
           if (rowsTotal === 0) reasons.push('no journal rows loaded');
           if (lowRowCount) reasons.push('suspiciously low row count');
           if (shouldWarnZeroFx) reasons.push('zero FX rows');
+          if (hasBybitDemoPurgeNotice) reasons.push(BYBIT_DEMO_PURGE_NOTE);
           const dropped = Number(diagnostics?.duplicate_rows_dropped || 0);
           if (!preserveStatus) setStatus(`Warning: Trading Journal diagnostics require attention (${reasons.join(', ')}; rows=${rowsTotal}; duplicates dropped=${dropped}).`);
         } else if (actualRowsTotal > 0 && (quarantinedRows > 0 || Number(diagnostics?.repaired_time_order_rows || 0) > 0)) {
@@ -1622,8 +1625,16 @@
   filterInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') renderAll(); });
   syncActionButtons();
 
+  const handleSyncResultDiagnostics = (syncResult) => {
+    if (syncResult?.ok === false) {
+      const snapshotError = compactErrorMessage(syncResult?.error || 'Sync failed', 'Sync failed');
+      setStatus(`Load failed: ${snapshotError}`);
+      return;
+    }
+  };
+
   syncFlagButtons();
   applyView();
-  load();
+  load().then(handleSyncResultDiagnostics);
   scheduleAutoRefresh();
 })();
