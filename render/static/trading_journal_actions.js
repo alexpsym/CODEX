@@ -13,6 +13,18 @@
     status.style.color = err ? '#fca5a5' : '#94a3b8';
   };
   const isExplicitAccountMode = (value) => value === 'demo' || value === 'live';
+
+  const formatImportError = (payload, fallback) => {
+    const base = String(payload?.detail || payload?.message || fallback || 'Import failed.').trim();
+    const parts = [base];
+    if (Array.isArray(payload?.errors) && payload.errors.length) {
+      parts.push(`Errors: ${payload.errors.map((v) => String(v)).join(', ')}`);
+    }
+    if (Array.isArray(payload?.missing_row_ids) && payload.missing_row_ids.length) {
+      parts.push(`Missing Row IDs: ${payload.missing_row_ids.map((v) => String(v)).join(', ')}`);
+    }
+    return parts.join('\n');
+  };
   const isBybitCsvFileName = (name) => String(name || '').trim().toLowerCase().endsWith('.csv');
   const isLikelyBybitHistoryCsv = async (file) => {
     if (!file || !isBybitCsvFileName(file.name)) return false;
@@ -62,7 +74,7 @@
         accountModeSelect?.focus?.();
         return;
       }
-      if (!res.ok || payload.ok !== true) throw new Error(payload.detail || payload.message || 'Import failed.');
+      if (!res.ok || payload.ok !== true) throw new Error(formatImportError(payload, 'Import failed.'));
       const warnings = payload.warnings || [];
       const inferred = payload.pnl_inferred_count ?? 0;
       const unresolved = payload.pnl_unresolved_count ?? 0;

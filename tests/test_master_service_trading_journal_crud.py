@@ -1333,8 +1333,13 @@ def test_import_file_endpoint_not_stub_anymore(temp_state_paths, monkeypatch: py
     monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"ok": True})
     monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
     payload = master_service._import_uploaded_trading_journal_file("bybit_demo.csv", _bybit_csv_sample(1).encode("utf-8"), account_mode="demo")
+    assert int(payload.get("status_code") or 0) == 200
     assert int(payload.get("status_code") or 0) != 501
     assert payload["ok"] is True
+    assert payload.get("errors") == []
+    assert "_parse_ts_utc" not in str(payload)
+    assert int(payload.get("rows_parsed") or 0) >= 1
+    assert int(payload.get("verified_row_ids_count") or 0) >= 1
 
 
 def test_import_file_ambiguous_bybit_csv_is_blocked_without_account_mode(temp_state_paths):

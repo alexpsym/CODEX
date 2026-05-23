@@ -6263,7 +6263,7 @@ def _infer_realized_net_profit_from_balance_continuity(
         return any(term in blob for term in block_terms)
 
     def _sort_key(row: Dict[str, object]) -> Tuple[float, int, str]:
-        ts = _parse_ts_utc(
+        ts = _parse_iso_datetime(
             row.get("close_time")
             or row.get("execution_time")
             or row.get("transaction_time")
