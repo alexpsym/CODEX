@@ -1343,7 +1343,18 @@ def test_import_file_ambiguous_bybit_csv_is_blocked_without_account_mode(temp_st
     assert int(payload.get("status_code") or 0) == 422
     assert payload["ok"] is False
     assert "ambiguous" in payload["message"].lower()
+    assert "ambiguous_bybit_account" in (payload.get("errors") or [])
+    assert payload.get("requires_account_mode") is True
+    assert payload.get("detected_file_kind") == "bybit_history_csv"
+    assert set(payload.get("account_mode_options") or []) == {"demo", "live"}
     assert any(str(r.get("id")) == "existing:1" for r in master_service._get_trading_journal_rows())
+
+
+def test_parse_local_workbook_bybit_csv_requires_account_mode_or_filename_hint(tmp_path: Path):
+    p = tmp_path / "bybit_history.csv"
+    p.write_text(_bybit_csv_sample(1), encoding="utf-8")
+    with pytest.raises(ValueError, match="ambiguous"):
+        master_service._parse_local_trading_journal_workbook(p, original_name="bybit_history.csv")
 
 
 def test_import_file_uses_tempfile_without_nameerror(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
