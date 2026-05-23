@@ -57,13 +57,46 @@
   "monthly_aud_revaluation_state": {},
   "oanda_fill_state": {},
   "pending_webhooks": [],
-  "savedAt": "2026-05-23T13:50:40.125598+00:00",
+  "savedAt": "2026-05-23T13:51:08.687443+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [],
   "trading_journal": {
-    "items": [],
-    "updated_at": "2026-05-23T13:50:38.096455+00:00"
+    "items": [
+      {
+        "account": "A",
+        "breakeven": "",
+        "close_time": "2026-05-01",
+        "id": "t1",
+        "is_test_trade": false,
+        "manual_override_fields": [
+          "breakeven",
+          "is_test_trade",
+          "notes",
+          "setup",
+          "timeframe"
+        ],
+        "manual_overrides": {
+          "breakeven": "",
+          "is_test_trade": false,
+          "notes": "",
+          "setup": "",
+          "timeframe": ""
+        },
+        "manual_updated_at": "2026-05-23T13:51:06.621262+00:00",
+        "net_profit": 1.0,
+        "notes": "",
+        "open_time": "2026-05-01",
+        "realized_pnl": 1.0,
+        "result_pct": 1.0,
+        "row_type": "trade",
+        "setup": "",
+        "side": "BUY",
+        "symbol": "EURUSD",
+        "timeframe": ""
+      }
+    ],
+    "updated_at": "2026-05-23T13:51:06.621322+00:00"
   },
   "trading_journal_import_cache": {},
   "trading_journal_state": {
@@ -96,6 +129,18 @@
       "last_workbook_rows_deduped": 0,
       "single_file_mode": true,
       "updated_at": "2026-05-23T13:50:37.851342+00:00"
+    },
+    "daily_trade_sync": {
+      "last_attempt_at": "2026-05-23T13:50:54.382675+00:00",
+      "last_error": null,
+      "last_reason": "startup_recovery",
+      "last_result": {
+        "master_journal_ok": true,
+        "oanda_recovery": {},
+        "ok": true
+      },
+      "last_success_at": "2026-05-23T13:50:54.382687+00:00",
+      "updated_at": "2026-05-23T13:50:54.383501+00:00"
     }
   },
   "version": 4,
