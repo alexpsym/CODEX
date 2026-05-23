@@ -1,5 +1,6 @@
 import importlib.util
 import asyncio
+import json
 from pathlib import Path
 import sys
 import pytest
@@ -14,6 +15,11 @@ if HTTPX_AVAILABLE:
     master_service = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = master_service
     spec.loader.exec_module(master_service)
+
+
+def _legacy_sync_status_payload():
+    response = asyncio.run(master_service._legacy_trading_journal_sync_status())
+    return json.loads(response.body.decode("utf-8"))
 def _load_master_service_for_import_test():
     import types
     bm_pkg = types.ModuleType("bybit_monitor")
@@ -1146,7 +1152,7 @@ def test_sync_status_marks_abandoned_running_state_without_active_task(monkeypat
     state.update({"running": True, "started_at": "2020-01-01T00:00:00Z", "message": "old"})
     monkeypatch.setattr(master_service, "_sync_state_snapshot", lambda: state)
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_SYNC_TASK", None)
-    data = asyncio.run(master_service._legacy_trading_journal_sync_status())
+    data = _legacy_sync_status_payload()
     assert data["running"] is False
     assert data["ok"] is False
     assert data["abandoned_running_state"] is True
@@ -1162,7 +1168,7 @@ def test_sync_status_stale_warning_when_running_and_heartbeat_old(monkeypatch):
         sleeper.cancel()
         return payload
     _ = asyncio.run(_run())
-    data = asyncio.run(master_service._legacy_trading_journal_sync_status())
+    data = _legacy_sync_status_payload()
     assert data["running"] is True
     assert isinstance(data.get("elapsed_seconds"), (int, float))
     assert data.get("stale_warning")
@@ -1181,7 +1187,7 @@ def test_trading_journal_sync_status_rejects_stale_master_journal_success(tmp_pa
     })
     monkeypatch.setattr(master_service, '_sync_state_snapshot', lambda: state_payload)
     monkeypatch.setattr(master_service, '_load_trading_journal_state', lambda: {})
-    data = asyncio.run(master_service._legacy_trading_journal_sync_status())
+    data = _legacy_sync_status_payload()
     assert data['ok'] is False
     assert data['result']['master_journal_ok'] is False
     assert data['result']['master_journal_exists'] is False

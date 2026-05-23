@@ -23,7 +23,8 @@ SPEC.loader.exec_module(master_service)
 
 
 def _legacy_sync_status_payload():
-    return asyncio.run(master_service._legacy_trading_journal_sync_status())
+    response = asyncio.run(master_service._legacy_trading_journal_sync_status())
+    return json.loads(response.body.decode("utf-8"))
 
 
 @pytest.fixture

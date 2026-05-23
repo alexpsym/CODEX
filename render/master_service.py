@@ -5061,6 +5061,13 @@ def _parse_excel_account_workbook(
                 lower_name = str(file_name or "").strip().lower()
                 if "pepperstone" in lower_name or "mt5" in lower_name:
                     source_tag = "pepperstone_mt5_statement"
+                if source_tag == "pepperstone_mt5_statement":
+                    pnl_key = _norm_col(pnl_col) if pnl_col else ""
+                    has_trusted_explicit_net = pnl_key in {"net_profit", "realized_pnl", "net_pnl"}
+                    if not has_trusted_explicit_net:
+                        profit_v = _safe_float_from_row(row, _first_present(df, ["profit", "pnl", "pl"]))
+                        if profit_v is not None:
+                            net_profit = profit_v + (_safe_float_from_row(row, commission_col) or 0.0) + (_safe_float_from_row(row, swap_col) or 0.0)
                 all_rows.append(_normalize_journal_profit_fields({
                     "id": row_id,
                     "source": source_tag,
@@ -24848,7 +24855,12 @@ async def _legacy_trading_journal_sync_status() -> JSONResponse:
     if bool(snapshot.get("running")) and bool(task is not None and hasattr(task, "done") and bool(task.done())):
         err = None
         try:
-            err = task.exception()
+            if bool(hasattr(task, "cancelled") and task.cancelled()):
+                err = RuntimeError("Sync task was cancelled before completion.")
+            else:
+                err = task.exception()
+        except asyncio.CancelledError:
+            err = RuntimeError("Sync task was cancelled before completion.")
         except Exception as exc:
             err = exc
         msg = str(err or "Sync task ended without clearing running state.")
