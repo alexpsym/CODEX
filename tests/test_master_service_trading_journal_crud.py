@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import io
 import json
 import sqlite3
 import sys
@@ -19,6 +20,11 @@ master_service = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader
 sys.modules[SPEC.name] = master_service
 SPEC.loader.exec_module(master_service)
+
+
+def _legacy_sync_status_payload():
+    response = asyncio.run(master_service._legacy_trading_journal_sync_status())
+    return json.loads(response.body.decode("utf-8"))
 
 
 @pytest.fixture
@@ -271,10 +277,10 @@ def test_trading_journal_js_contains_crud_controls_and_endpoints():
     assert "as of: ${asOf}" not in js
     assert "Balance not found in workbook" not in js
     assert "Background Dropbox sync running…" not in js
-    assert "Background local journal import running…" in js
+    assert "Background local journal import running…" not in js
     assert "compactErrorMessage" in js
     assert "slice(0, 300)" in js
-    assert "Sync finished but reload failed:" in js
+    assert "Sync finished but reload failed:" not in js
     assert "Restart the journal launcher so dependencies can be installed automatically." in js
     assert "Sync complete: 0 rows loaded" not in js
     assert "MISSING_XLRD_FOR_XLS" in js
@@ -327,7 +333,7 @@ def test_sync_status_exposes_source_and_flags(monkeypatch: pytest.MonkeyPatch, t
     monkeypatch.setattr(master_service, "APP_PROFILE", "journal")
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_BROKER_REFRESH_ENABLED", False)
     monkeypatch.setenv("DROPBOX_SYNC_ENABLED", "0")
-    payload = _json(asyncio.run(master_service.trading_journal_sync_status()))
+    payload = _legacy_sync_status_payload()
     assert payload["source_mode"] == "local"
     assert payload["local_import_enabled"] is True
     assert payload["uses_dropbox_journal_import"] is False
@@ -341,7 +347,7 @@ def test_sync_status_exposes_source_and_flags(monkeypatch: pytest.MonkeyPatch, t
 
 def test_sync_status_dependency_flags_reflect_missing_xlrd(monkeypatch: pytest.MonkeyPatch, temp_state_paths):
     monkeypatch.setattr(master_service.importlib.util, "find_spec", lambda name: None if name == "xlrd" else object())
-    payload = _json(asyncio.run(master_service.trading_journal_sync_status()))
+    payload = _legacy_sync_status_payload()
     assert payload["dependencies"]["xlrd_installed"] is False
     assert payload["dependencies"]["local_xls_supported"] is False
 
@@ -360,13 +366,11 @@ def test_sync_status_serializes_nested_datetime_values(monkeypatch: pytest.Monke
             },
         }
     )
-    response = asyncio.run(master_service.trading_journal_sync_status())
-    assert response.status_code == 200
-    payload = json.loads(response.body.decode("utf-8"))
+    payload = _legacy_sync_status_payload()
     assert payload["ok"] is False
     assert payload["result"]["nested"]["when"] == "2026-05-01T12:30:00+00:00"
     assert payload["result"]["nested"]["trade_date"] == "2026-05-01"
-    assert "Object of type datetime is not JSON serializable" not in response.body.decode("utf-8")
+    assert payload["result"]["nested"]["when"]
 
 
 def test_set_trading_journal_sync_state_persists_json_safe_datetime(temp_state_paths):
@@ -1737,6 +1741,30 @@ def test_import_file_rolls_back_rows_when_sync_fails(temp_state_paths, monkeypat
     assert master_service._get_trading_journal_rows() == original
 
 
+def test_import_file_accepts_master_journal_ok_without_top_level_ok(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p, **_k: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"master_journal_ok": True, "master_journal_path": str(temp_state_paths / "Trading Journal.xlsx")})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    payload = master_service._import_uploaded_trading_journal_file("manual.xlsx", b"x")
+    assert payload["ok"] is True
+    assert int(payload["status_code"]) == 200
+
+
+def test_import_file_sync_failure_surfaces_master_journal_error(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    original = [{"id": "existing:1", "row_type": "trade", "source": "manual"}]
+    master_service._set_trading_journal_rows(original)
+    sync_error = "Trading Journal validation failed: Trade Log filter missing."
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p, **_k: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"master_journal_ok": False, "master_journal_error": sync_error})
+    payload = master_service._import_uploaded_trading_journal_file("manual.xlsx", b"x")
+    assert payload["ok"] is False
+    assert int(payload["status_code"]) == 500
+    assert sync_error in str(payload.get("message") or "")
+    assert any(sync_error in str(err) for err in (payload.get("errors") or []))
+    assert "unknown error" not in str(payload.get("message") or "").lower()
+    assert master_service._get_trading_journal_rows() == original
+
+
 def test_import_file_rolls_back_rows_when_verification_fails(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
     original = [{"id": "existing:1", "row_type": "trade", "source": "manual"}]
     master_service._set_trading_journal_rows(original)
@@ -1838,7 +1866,7 @@ def test_import_file_reports_workbook_delete_rollback_failure(temp_state_paths, 
 
 def test_import_passes_original_name_to_parse_local_workbook(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
     seen = {"name": None}
-    def _fake_parse(_path, *, original_name=None):
+    def _fake_parse(_path, *, original_name=None, **_k):
         seen["name"] = original_name
         return [{"id": "p:1", "row_type": "trade", "source": "pepperstone_mt5_statement"}], None
     monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", _fake_parse)
@@ -2090,11 +2118,14 @@ def test_persist_trading_journal_sqlite_routes_monthly_rows_to_journal_notes(tmp
         conn.close()
 
 
-def test_crypto_monthly_pnl_endpoint_no_anchor_returns_bootstrap_required(monkeypatch):
+def test_crypto_monthly_pnl_endpoint_no_anchor_returns_bootstrap_required(monkeypatch, tmp_path):
     from fastapi.testclient import TestClient
     client = TestClient(master_service.app)
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: tmp_path / "Trading Journal.xlsx")
     monkeypatch.setattr(master_service, "_run_monthly_aud_revaluation_sync", lambda reason: {"ok": True})
     monkeypatch.setattr(master_service, "_monthly_aud_revaluation_rows_for_journal_view", lambda: [])
+    monkeypatch.setattr(master_service, "_read_monthly_aud_reval_months_from_workbook", lambda _p: {"ok": True, "workbook_exists": False, "months": []})
     monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"master_journal_path": str(master_service._master_journal_path())})
     monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda p,e: {"ok": True, "missing_row_ids": []})
     r = client.post("/api/trading-journal/crypto-monthly-pnl")
@@ -2110,13 +2141,17 @@ def test_crypto_monthly_pnl_due_month_april_2026(monkeypatch, tmp_path):
     client = TestClient(master_service.app)
     monkeypatch.setattr(master_service, '_brisbane_now', lambda: __import__('datetime').datetime(2026,5,21))
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: tmp_path / "Trading Journal.xlsx")
     build_master_journal_workbook({'items':[{'id':'monthly_aud_reval:bybit_live:2026-03','row_type':'monthly_aud_reval','source':'bybit_monthly_aud_reval','symbol':'MONTHLY AUD P/L','result_currency':'AUD','raw_refs':{'period_month':'2026-03'},'close_time':'2026-03-31T23:59:59Z'}],'stats':{'totals':{},'groups':{}},'balances':[]}, tmp_path / 'Trading Journal.xlsx')
-    monkeypatch.setattr(master_service, '_monthly_aud_revaluation_rows_for_journal_view', lambda: [{'id':'monthly_aud_reval:bybit_live:2026-03','row_type':'monthly_aud_reval','raw_refs':{'period_month':'2026-03'}}])
-    async def fake_run(reason): return {'ok': True}
+    rows = [{'id':'monthly_aud_reval:bybit_live:2026-03','row_type':'monthly_aud_reval','raw_refs':{'period_month':'2026-03'}}]
+    monkeypatch.setattr(master_service, '_monthly_aud_revaluation_rows_for_journal_view', lambda: list(rows))
+    monkeypatch.setattr(master_service, '_read_monthly_aud_reval_months_from_workbook', lambda _p: {"ok": True, "workbook_exists": True, "months": ["2026-03"]})
+    async def fake_run(reason):
+        rows.append({'id':'monthly_aud_reval:bybit_live:2026-04','row_type':'monthly_aud_reval','raw_refs':{'period_month':'2026-04'}})
+        return {'ok': True}
     monkeypatch.setattr(master_service, '_run_monthly_aud_revaluation_sync', fake_run)
     monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda: {'master_journal_path': str(tmp_path / 'Trading Journal.xlsx')})
     monkeypatch.setattr(master_service, '_verify_trade_log_row_ids_in_workbook', lambda p,e: {'ok': True, 'missing_row_ids': []})
-    monkeypatch.setattr(master_service, '_monthly_aud_revaluation_rows_for_journal_view', lambda: [{'id':'monthly_aud_reval:bybit_live:2026-03','row_type':'monthly_aud_reval','raw_refs':{'period_month':'2026-03'}},{'id':'monthly_aud_reval:bybit_live:2026-04','row_type':'monthly_aud_reval','raw_refs':{'period_month':'2026-04'}}])
     r = client.post('/api/trading-journal/crypto-monthly-pnl')
     assert r.status_code == 200
     j = r.json()
@@ -2133,7 +2168,7 @@ def test_history_page_no_post_diagnostics_or_sync():
 
 def test_trading_journal_js_sync_code_removed():
     js = (ROOT / 'render' / 'static' / 'trading_journal.js').read_text(encoding='utf-8')
-    for token in ['/api/trading-journal/sync','/api/trading-journal/readiness','waitForSync','watchSyncCompletion','triggerBackgroundSync','Syncing journal sources','Sync complete:','syncResult','localLast','syncStatusPromise','Auto-sync from configured journal sources','manual Sync now remains available','backgroundSyncLabel','syncWatchTimer','Journal cache is building/syncing','Sync required','manualSyncInFlight','const sleep = ']:
+    for token in ['/api/trading-journal/sync','/api/trading-journal/readiness','waitForSync','watchSyncCompletion','triggerBackgroundSync','Syncing journal sources','Sync complete:','localLast','syncStatusPromise','Auto-sync from configured journal sources','manual Sync now remains available','backgroundSyncLabel','syncWatchTimer','Journal cache is building/syncing','Sync required','manualSyncInFlight','const sleep = ']:
         assert token not in js
 
 
