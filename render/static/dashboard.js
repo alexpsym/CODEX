@@ -164,6 +164,30 @@
     if (!scriptsGrid) return;
     scriptsGrid.innerHTML = '';
     scriptsState.forEach((item) => scriptsGrid.appendChild(makeScriptButton(item)));
+    scriptsGrid.appendChild(makeExitButton());
+  };
+
+  const makeExitButton = () => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'script-btn local-exit-btn';
+    btn.textContent = 'Exit';
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      setStatus('Exiting Local Trading Tools...');
+      try {
+        await fetchJson('/api/local-exit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: window.location.href }),
+        });
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err || 'Exit request failed.');
+        setStatus(detail, true);
+        btn.disabled = false;
+      }
+    });
+    return btn;
   };
 
   const activateWorkspaceScript = (script) => {

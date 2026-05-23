@@ -20,6 +20,7 @@ def test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls() -> No
     assert '/api/state-sync/status' in js
     assert '/api/state-sync/remote-backup-summary' in js
     assert '/api/oanda-inactivity-status' in js
+    assert '/api/local-exit' in js
     assert 'window.open(' not in js
     assert 'Loaded ${new Date().toLocaleTimeString()}' not in js
     assert "document.getElementById('dashboard-workspace-frame')" in js
@@ -49,6 +50,9 @@ def test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls() -> No
     assert "dotTitle = workspaceTitle ? `${workspaceTitle}; ${processTitle}` : processTitle;" in js
     assert "syncWorkspaceSelectionFromScripts();" in js
     assert "syncWorkspaceSelectionFromScripts();\n        renderScripts();" in js
+    assert "makeExitButton" in js
+    assert "local-exit-btn" in js
+    assert "scriptsState.forEach((item) => scriptsGrid.appendChild(makeScriptButton(item)));\n    scriptsGrid.appendChild(makeExitButton());" in js
     assert "if (isMonitor) {" in js
     assert "cache: 'no-store'" in js
     assert "Loading state…" in js
