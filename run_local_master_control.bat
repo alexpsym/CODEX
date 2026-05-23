@@ -102,7 +102,7 @@ if not defined LOCAL_MASTER_EDGE_DEBUG_PORT (
 set "LOCAL_MASTER_EDGE_PROFILE_DIR=%TEMP%\LocalTradingToolsEdge-%LOCAL_LAUNCH_TS%"
 set "LOCAL_MASTER_EXIT_REQUEST=%TEMP%\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.flag"
 if exist "%LOCAL_MASTER_EXIT_REQUEST%" del /q "%LOCAL_MASTER_EXIT_REQUEST%" >nul 2>nul
-start "Local Master Control" /D "%ROOT%" cmd /d /v:on /k ""%~f0" __worker"
+start "Local Master Control" /D "%ROOT%" cmd /d /v:on /c ""%~f0" __worker"
 set "MASTER_READY_TIMEOUT_SECONDS=60"
 set "SCANNER_READY_TIMEOUT_SECONDS=90"
 echo [local-master] waiting for %MASTER_HEALTH_URL% ...
@@ -192,7 +192,7 @@ if defined LOCAL_MASTER_EXIT_REQUEST if exist "!LOCAL_MASTER_EXIT_REQUEST!" (
   del /q "!LOCAL_MASTER_EXIT_REQUEST!" >nul 2>nul
   if defined LOCAL_MASTER_EDGE_PROFILE_DIR if exist "!LOCAL_MASTER_EDGE_PROFILE_DIR!\" rmdir /s /q "!LOCAL_MASTER_EDGE_PROFILE_DIR!" >nul 2>nul
   echo [local-master] closing Local Master Control command prompt.
-  exit
+  exit /b 0
 )
 echo [local-master] restarting in 3 seconds. Close this window to stop local master.
 timeout /t 3 /nobreak >nul

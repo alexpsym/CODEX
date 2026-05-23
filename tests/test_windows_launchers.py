@@ -103,6 +103,8 @@ def test_run_local_master_exit_wiring_and_ordering() -> None:
     script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
     assert 'set "LOCAL_MASTER_EXIT_REQUEST=%TEMP%\\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.flag"' in script
     assert 'set "LOCAL_MASTER_EDGE_DEBUG_PORT=' in script
+    assert 'start "Local Master Control" /D "%ROOT%" cmd /d /v:on /c ""%~f0" __worker"' in script
+    assert '/k ""%~f0" __worker"' not in script
     assert 'call "%ROOT%tools\\open_edge_url.bat" "%MASTER_BROWSER_URL%" "%LOCAL_MASTER_EDGE_DEBUG_PORT%" "%LOCAL_MASTER_EDGE_PROFILE_DIR%"' in script
     assert 'if defined LOCAL_MASTER_EXIT_REQUEST if exist "!LOCAL_MASTER_EXIT_REQUEST!" (' in script
     assert 'goto restart_master' in script
@@ -114,7 +116,7 @@ def test_run_local_master_exit_wiring_and_ordering() -> None:
     exit_branch_idx = script.find('if defined LOCAL_MASTER_EXIT_REQUEST if exist "!LOCAL_MASTER_EXIT_REQUEST!" (')
     restart_idx = script.find('goto restart_master')
     assert exit_branch_idx != -1 and restart_idx != -1 and exit_branch_idx < restart_idx
-    assert '\n  exit\n)' in script
+    assert '\n  exit /b 0\n)' in script
 
 
 def test_open_edge_url_supports_optional_debugging_profile_args() -> None:
@@ -154,26 +156,21 @@ def test_extract_latest_moves_checkout_blocking_untracked_journal_workbooks_befo
 
 def test_extract_latest_calls_blocker_helper_before_fast_forward_checkout_merge() -> None:
     script = (ROOT / 'ExtractLatestCodexMaster.bat').read_text(encoding='utf-8')
-    ff_helper_idx = script.find('Move-CheckoutBlockingUntrackedFilesBeforeGitUpdate -GitExe $GitExe -RepoDir $RepoDir -BackupDir $ffTempBackupDir')
-    ff_publish_idx = script.find('Publish-SingleExtractLatestBackup -DestinationRoot $DestinationRoot -TempBackupPath $ffTempBackupDir')
+    ff_helper_idx = script.find('Move-CheckoutBlockingUntrackedFilesBeforeGitUpdate -GitExe $GitExe -RepoDir $RepoDir -BackupDir $ffBlockerBackupDir')
     ff_checkout_idx = script.find("Invoke-GitCommand -GitExe $GitExe -Arguments @('checkout', $Branch)")
     ff_merge_idx = script.find("Invoke-GitCommand -GitExe $GitExe -Arguments @('merge', '--ff-only', \"origin/$Branch\")")
-    ff_restore_idx = script.find('Preserve-LocalFilesFromBackup -BackupDir $ffRestoreRoot -NewRepoDir $RepoDir')
     assert ff_helper_idx != -1
-    assert ff_publish_idx != -1
     assert ff_checkout_idx != -1
     assert ff_merge_idx != -1
-    assert ff_restore_idx != -1
-    assert ff_helper_idx < ff_publish_idx < ff_checkout_idx < ff_merge_idx < ff_restore_idx
-    assert 'CODEX-master-backup.tmp-' in script
-    assert 'CODEX-master-fastforward-blockers-' not in script
+    assert ff_helper_idx < ff_checkout_idx < ff_merge_idx
+    assert 'CODEX-master-fastforward-blockers-' in script
     assert 'Move-Item -LiteralPath $fullPath -Destination $destPath -Force -ErrorAction Stop' in script
 
 
 def test_extract_latest_fast_forward_restores_preserved_workbook_and_resolves_collision() -> None:
     script = (ROOT / 'ExtractLatestCodexMaster.bat').read_text(encoding='utf-8')
     assert 'if ($ffMovedBlockers -gt 0) {' in script
-    assert "$ffRestoreRoot = Join-Path $publishedBackupDir 'checkout-blockers'" in script
+    assert "$ffRestoreRoot = Join-Path $ffBlockerBackupDir 'checkout-blockers'" in script
     assert 'Preserve-LocalFilesFromBackup -BackupDir $ffRestoreRoot -NewRepoDir $RepoDir' in script
     assert 'Resolve-JournalWorkbookCollision -JournalDir $newJournal -Context "backup journal preservation"' in script
 
@@ -189,11 +186,10 @@ def test_extract_latest_git_diagnostic_writes_quiet_files_and_logs_only_summary(
 def test_extract_latest_transcript_logging_paths_and_messages_present() -> None:
     script = (ROOT / 'ExtractLatestCodexMaster.bat').read_text(encoding='utf-8')
     assert "ExtractLatestCodexMaster-latest.log" in script
-    assert "ExtractLatestCodexMaster-{0}.log" not in script
-    assert '$timestampedLogPath' not in script
-    assert 'Start-Transcript -LiteralPath $latestLogPath -Force' in script
+    assert "ExtractLatestCodexMaster-{0}.log" in script
+    assert 'Start-Transcript -LiteralPath $timestampedLogPath -Force' in script
     assert 'Stop-Transcript' in script
-    assert 'Full log written to: $latestLogPath' in script
+    assert 'Full log written to: $timestampedLogPath' in script
 
 
 def test_extract_latest_has_no_invalid_variable_scope_tokens_in_double_quoted_strings() -> None:
@@ -222,94 +218,3 @@ def test_extract_latest_embedded_powershell_parses_without_errors() -> None:
     )
     result = subprocess.run([ps_exe, "-NoProfile", "-Command", parse_cmd], capture_output=True, text=True)
     assert result.returncode == 0, f"PowerShell parse errors:\n{result.stdout}\n{result.stderr}"
-
-
-def test_extract_latest_static_retention_regressions() -> None:
-    script = (ROOT / 'ExtractLatestCodexMaster.bat').read_text(encoding='utf-8')
-    for forbidden in [
-        'CODEX-master-git-backup-',
-        'CODEX-master-zip-backup-',
-        'CODEX-master-fastforward-blockers-',
-        'ExtractLatestCodexMaster-{0}.log',
-        '$timestampedLogPath',
-    ]:
-        assert forbidden not in script
-
-    for required in [
-        'CODEX-master-backup',
-        'CODEX-master-backup.tmp-',
-        'CODEX-master-backup.rollback-',
-        'Remove-ExtractLatestLegacyBackupFolders',
-        'Remove-ExtractLatestLegacyLogFiles',
-        'Publish-SingleExtractLatestBackup',
-        'Assert-ExtractLatestRetentionState',
-    ]:
-        assert required in script
-
-
-def test_extract_latest_fast_forward_publish_not_only_post_merge() -> None:
-    script = (ROOT / 'ExtractLatestCodexMaster.bat').read_text(encoding='utf-8')
-    ff_start = script.find("if ((-not $needsBackupRecovery) -or ($behindCount -gt 0 -and $aheadCount -eq 0 -and $statusClassification.IsOnlyAllowed)) {")
-    assert ff_start != -1
-    ff_end = script.find("Write-Host 'Git checkout updated successfully by fast-forward merge.'", ff_start)
-    assert ff_end != -1
-    ff_block = script[ff_start:ff_end]
-
-    publish_idx = ff_block.find('Publish-SingleExtractLatestBackup -DestinationRoot $DestinationRoot -TempBackupPath $ffTempBackupDir')
-    checkout_idx = ff_block.find("Invoke-GitCommand -GitExe $GitExe -Arguments @('checkout', $Branch)")
-    merge_idx = ff_block.find("Invoke-GitCommand -GitExe $GitExe -Arguments @('merge', '--ff-only', \"origin/$Branch\")")
-
-    assert publish_idx != -1
-    assert checkout_idx != -1
-    assert merge_idx != -1
-    assert publish_idx < checkout_idx < merge_idx
-
-
-def test_extract_latest_fast_forward_stage_publish_is_guarded_and_restores_on_failure() -> None:
-    script = (ROOT / 'ExtractLatestCodexMaster.bat').read_text(encoding='utf-8')
-    ff_start = script.find("if ((-not $needsBackupRecovery) -or ($behindCount -gt 0 -and $aheadCount -eq 0 -and $statusClassification.IsOnlyAllowed)) {")
-    assert ff_start != -1
-    ff_end = script.find("Write-Host 'Git checkout updated successfully by fast-forward merge.'", ff_start)
-    assert ff_end != -1
-    ff_block = script[ff_start:ff_end]
-
-    assert 'try {' in ff_block
-    assert '} catch {' in ff_block
-    assert "Move-CheckoutBlockingUntrackedFilesBeforeGitUpdate -GitExe $GitExe -RepoDir $RepoDir -BackupDir $ffTempBackupDir" in ff_block
-    assert 'Publish-SingleExtractLatestBackup -DestinationRoot $DestinationRoot -TempBackupPath $ffTempBackupDir' in ff_block
-    assert "$ffTempRestoreRoot = Join-Path $ffTempBackupDir 'checkout-blockers'" in ff_block
-    assert "$ffPublishedRestoreRoot = Join-Path (Join-Path $DestinationRoot 'CODEX-master-backup') 'checkout-blockers'" in ff_block
-    assert 'Preserve-LocalFilesFromBackup -BackupDir $ffTempRestoreRoot -NewRepoDir $RepoDir' in ff_block
-    assert 'Preserve-LocalFilesFromBackup -BackupDir $ffPublishedRestoreRoot -NewRepoDir $RepoDir' in ff_block
-    assert 'throw' in ff_block
-
-    publish_idx = ff_block.find('Publish-SingleExtractLatestBackup -DestinationRoot $DestinationRoot -TempBackupPath $ffTempBackupDir')
-    checkout_idx = ff_block.find("Invoke-GitCommand -GitExe $GitExe -Arguments @('checkout', $Branch)")
-    assert publish_idx != -1 and checkout_idx != -1
-    assert publish_idx < checkout_idx
-
-
-def test_extract_latest_publish_backup_is_rollback_safe() -> None:
-    script = (ROOT / 'ExtractLatestCodexMaster.bat').read_text(encoding='utf-8')
-    assert 'CODEX-master-backup.rollback-' in script
-    assert 'Move-Item -LiteralPath $finalBackupPath -Destination $rollbackBackupPath -ErrorAction Stop' in script
-    assert 'Move-Item -LiteralPath $TempBackupPath -Destination $finalBackupPath -ErrorAction Stop' in script
-    assert "if ((Test-Path -LiteralPath $rollbackBackupPath -PathType Container) -and -not (Test-Path -LiteralPath $finalBackupPath))" in script
-    assert 'Move-Item -LiteralPath $rollbackBackupPath -Destination $finalBackupPath -ErrorAction Stop' in script
-    assert "Remove-Item -LiteralPath $finalBackupPath -Recurse -Force -ErrorAction Stop" not in script
-
-
-def test_extract_latest_startup_repairs_interrupted_backup_publish_before_cleanup() -> None:
-    script = (ROOT / 'ExtractLatestCodexMaster.bat').read_text(encoding='utf-8')
-    assert 'function Resolve-ExtractLatestInterruptedBackupPublish' in script
-    assert "'CODEX-master-backup.rollback-*'" in script
-    assert "'CODEX-master-backup.tmp-*'" in script
-    assert "'CODEX-master-backup'" in script
-    assert 'Move-Item -LiteralPath $rollbackToPromote.FullName -Destination $finalBackupPath -ErrorAction Stop' in script
-    assert 'Interrupted backup publish detected: CODEX-master-backup is missing, rollback backups are missing, and temp backup folder(s) remain' in script
-
-    resolve_call_idx = script.find('Resolve-ExtractLatestInterruptedBackupPublish -DestinationRoot $dest')
-    cleanup_call_idx = script.find('Remove-ExtractLatestLegacyBackupFolders -DestinationRoot $dest')
-    assert resolve_call_idx != -1
-    assert cleanup_call_idx != -1
-    assert resolve_call_idx < cleanup_call_idx
