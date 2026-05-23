@@ -4,44 +4,35 @@
       "alerts": [
         {
           "cooldown_seconds": 0,
-          "created_at": "2026-05-03T04:24:24.975767+00:00",
           "direction": "either",
           "enabled": true,
           "id": "d7f56968ece04ddbac72e8b6f8478a7d",
           "kind": "move",
-          "source": "dropbox",
           "symbol": "BRUSDT",
           "threshold": 10.0,
           "unit": "pct",
-          "updated_at": "2026-05-03T04:24:24.975767+00:00",
           "window_seconds": 60
         },
         {
           "cooldown_seconds": 0,
-          "created_at": "2026-05-03T04:46:04.185272+00:00",
           "direction": "either",
           "enabled": true,
           "id": "3e7bc55e3e994d9ebc4bc95ebff0e4a3",
           "kind": "move",
-          "source": "dropbox",
           "symbol": "AKTUSDT",
           "threshold": 6.0,
           "unit": "pct",
-          "updated_at": "2026-05-03T04:46:04.185272+00:00",
           "window_seconds": 60
         },
         {
           "cooldown_seconds": 0,
-          "created_at": "2026-05-04T02:26:40.799665+00:00",
           "direction": "either",
           "enabled": true,
           "id": "8b3273b6594b406c8f0aeb951d38a1a6",
           "kind": "move",
-          "source": "dropbox",
           "symbol": "DOGEUSDT",
           "threshold": 1.5,
           "unit": "pct",
-          "updated_at": "2026-05-04T02:26:40.799665+00:00",
           "window_seconds": 60
         }
       ]
@@ -60,18 +51,18 @@
       "demo": {
         "last_error": null,
         "last_seen_transaction_id": "624",
-        "last_success_at": "2026-05-23T15:44:35.897216+00:00",
+        "last_success_at": "2026-05-23T15:55:16.189819+00:00",
         "startup_recovered_rows": 0,
         "startup_skipped_duplicates": 0,
-        "updated_at": "2026-05-23T15:44:35.897227+00:00"
+        "updated_at": "2026-05-23T15:55:16.189838+00:00"
       },
       "live": {
         "last_error": null,
         "last_seen_transaction_id": "471",
-        "last_success_at": "2026-05-23T15:44:37.243139+00:00",
+        "last_success_at": "2026-05-23T15:55:17.297019+00:00",
         "startup_recovered_rows": 0,
         "startup_skipped_duplicates": 0,
-        "updated_at": "2026-05-23T15:44:37.243157+00:00"
+        "updated_at": "2026-05-23T15:55:17.297058+00:00"
       }
     },
     "last_seen_transaction_id": {
@@ -82,16 +73,16 @@
       "demo": {},
       "live": {}
     },
-    "updated_at": "2026-05-23T15:44:37.243167+00:00"
+    "updated_at": "2026-05-23T15:55:17.297071+00:00"
   },
   "pending_webhooks": [],
-  "savedAt": "2026-05-23T15:55:09.733267+00:00",
+  "savedAt": "2026-05-23T15:58:02.752164+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [],
   "trading_journal": {
     "items": [],
-    "updated_at": "2026-05-23T15:55:07.719944+00:00"
+    "updated_at": "2026-05-23T15:58:00.626841+00:00"
   },
   "trading_journal_import_cache": {},
   "trading_journal_state": {
@@ -99,7 +90,7 @@
       {
         "account": "Bybit Demo",
         "account_mode": "demo",
-        "as_of": "2026-05-23T15:44:27.449199+00:00",
+        "as_of": "2026-05-23T15:55:10.144837+00:00",
         "balance": 323.29989127,
         "balance_source": "bybit_wallet_balance",
         "currency": "USDT",
@@ -109,8 +100,8 @@
       {
         "account": "Bybit Live",
         "account_mode": "live",
-        "as_of": "2026-05-23T15:44:29.706552+00:00",
-        "balance": 224.64135231,
+        "as_of": "2026-05-23T15:55:12.037508+00:00",
+        "balance": 224.64360109,
         "balance_source": "bybit_wallet_balance",
         "currency": "USDT",
         "label": "Bybit Live",
@@ -119,7 +110,7 @@
       {
         "account": "OANDA DEMO",
         "account_mode": "demo",
-        "as_of": "2026-05-23T15:44:31.403660+00:00",
+        "as_of": "2026-05-23T15:55:13.037967+00:00",
         "balance": 1500.6539,
         "balance_source": "oanda_account_summary",
         "currency": "AUD",
@@ -130,7 +121,7 @@
       {
         "account": "OANDA LIVE",
         "account_mode": "live",
-        "as_of": "2026-05-23T15:44:32.519945+00:00",
+        "as_of": "2026-05-23T15:55:14.020150+00:00",
         "balance": 1479.3098,
         "balance_source": "oanda_account_summary",
         "currency": "AUD",
@@ -140,8 +131,8 @@
       }
     ],
     "broker_balance_diagnostics": {
-      "bybit_demo_anchor_fingerprint": "39c42b301d5ef7a24ad864a7525e144c1716e33e1f00bda4eabecf5a7a3b9dab",
-      "updated_at": "2026-05-23T15:44:32.536261+00:00",
+      "bybit_demo_anchor_fingerprint": "94611def51f47400cdfe708ae8e41e50af46270e4323832dc0a86571235642ca",
+      "updated_at": "2026-05-23T15:55:14.032332+00:00",
       "warnings": []
     },
     "bybit_closed_pnl_last_seen": {
@@ -193,5 +184,5 @@
   "watchlist": [
     "DASHUSDT"
   ],
-  "watchlist_updated_at": null
+  "watchlist_updated_at": "2026-05-23T15:57:50.866058+00:00"
 }
