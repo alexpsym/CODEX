@@ -1964,6 +1964,51 @@ def test_master_journal_authoritative_snapshot_preserves_monthly_aud_reval(monke
     assert "m1" in ids
 
 
+def test_master_journal_authoritative_snapshot_monthly_uses_json_fallback(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_load_trading_journal_view_snapshot", lambda: None)
+    monkeypatch.setattr(master_service, "_journal_source_fingerprint", lambda: {"source_mode": "master_journal", "files": []})
+    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_a, **_k: None)
+    monkeypatch.setattr(master_service, "_save_trading_journal_view_snapshot", lambda *_a, **_k: None)
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: True)
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: Path("/tmp/Trading Journal.xlsx"))
+    monkeypatch.setattr(master_service, "_get_excel_account_balances", lambda: [])
+    monkeypatch.setattr(master_service, "_load_json_file", lambda *_a, **_k: {})
+    monkeypatch.setattr(
+        master_service,
+        "_monthly_aud_revaluation_rows_for_journal_view",
+        lambda: [{
+            "id": "monthly_aud_reval:bybit_live:2026-03",
+            "row_type": "monthly_aud_reval",
+            "account": "Bybit Live",
+            "account_label": "Bybit Live",
+            "symbol": "MONTHLY AUD P/L",
+            "close_time": "2026-03-31T23:59:59Z",
+            "result_cash": 123.45,
+            "result_currency": "AUD",
+            "raw_refs": {"period_month": "2026-03"},
+        }],
+    )
+    monkeypatch.setattr(
+        master_service,
+        "read_master_journal_source",
+        lambda _p: {
+            "items": [
+                {"id": "t1", "row_type": "trade", "account": "OANDA DEMO", "symbol": "EURUSD", "side": "BUY", "open_time": "2026-04-30T09:45:41Z", "close_time": "2026-04-30T09:46:41Z", "net_profit": 10.0, "result_pct": 0.5},
+                {"id": "monthly_aud_reval:bybit_live:2026-03", "row_type": "monthly_aud_reval", "account": "Bybit Live", "symbol": "MONTHLY AUD P/L", "close_time": "2026-03-31T23:59:59Z", "result_cash": None},
+            ],
+            "cashflow_ledger": {},
+        },
+    )
+    snap = master_service._build_trading_journal_view_snapshot(force=True)
+    monthly = next(r for r in snap.get("items", []) if r.get("id") == "monthly_aud_reval:bybit_live:2026-03")
+    assert monthly["result_cash"] == pytest.approx(123.45)
+    assert monthly["result_currency"] == "AUD"
+    assert (monthly.get("raw_refs") or {}).get("period_month") == "2026-03"
+    assert "net_profit" not in monthly and "realized_pnl" not in monthly
+    assert snap["stats"]["totals"]["trades"] == 1
+    assert snap["stats"]["totals"]["net_profit_total"] == pytest.approx(10.0)
+
+
 def test_persist_trading_journal_sqlite_cashflow_no_name_error(tmp_path, monkeypatch: pytest.MonkeyPatch):
     sqlite_path = tmp_path / "trading_journal.sqlite"
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_SQLITE_PATH", sqlite_path)
