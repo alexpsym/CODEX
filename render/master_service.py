@@ -3907,15 +3907,22 @@ def _monthly_aud_revaluation_rows_for_journal_view() -> List[Dict[str, object]]:
             continue
         if result_currency != "AUD":
             continue
-        if "bybit" not in {
+        account_keys = {
             _norm_account_key(account),
             _norm_account_key(account_label),
-        }:
+            str(account or "").strip().upper(),
+            str(account_label or "").strip().upper(),
+        }
+        if not any(key in {"BYBIT", "BYBIT LIVE"} for key in account_keys):
             continue
         out = dict(row)
         out["row_type"] = "monthly_aud_reval"
         out["source"] = out.get("source") or "bybit_monthly_aud_reval"
         out["symbol"] = out.get("symbol") or "MONTHLY AUD P/L"
+        out["result_currency"] = str(out.get("result_currency") or "AUD").strip().upper()
+        out["result_cash"] = result_cash
+        out["raw_refs"] = out.get("raw_refs") if isinstance(out.get("raw_refs"), dict) else {}
+        out["close_time"] = out.get("close_time") or close_time
         out["account"] = "BYBIT"
         out["account_label"] = "BYBIT"
         out["setup"] = out.get("setup") or "Monthly BYBIT AUD P/L note - excluded from metrics"
@@ -5058,6 +5065,13 @@ def _parse_excel_account_workbook(
                 lower_name = str(file_name or "").strip().lower()
                 if "pepperstone" in lower_name or "mt5" in lower_name:
                     source_tag = "pepperstone_mt5_statement"
+                if source_tag == "pepperstone_mt5_statement":
+                    pnl_key = _norm_col(pnl_col) if pnl_col else ""
+                    has_trusted_explicit_net = pnl_key in {"net_profit", "realized_pnl", "net_pnl"}
+                    if not has_trusted_explicit_net:
+                        profit_v = _safe_float_from_row(row, _first_present(df, ["profit", "pnl", "pl"]))
+                        if profit_v is not None:
+                            net_profit = profit_v + (_safe_float_from_row(row, commission_col) or 0.0) + (_safe_float_from_row(row, swap_col) or 0.0)
                 all_rows.append(_normalize_journal_profit_fields({
                     "id": row_id,
                     "source": source_tag,
@@ -6443,6 +6457,10 @@ def _infer_realized_net_profit_from_balance_continuity(
             side_text = str(row.get("side") or "").strip().lower()
             status_text = str(row.get("status") or "").strip().lower()
             has_close_marker = bool(row.get("close_time")) or status_text in {"closed", "close", "completed", "filled"}
+            is_bybit_execution_history = str(row.get("source") or "").strip().lower() == "bybit_execution_history"
+            has_explicit_realized = _to_float(row.get("realized_pnl")) is not None or _to_float(row.get("closed_pnl")) is not None
+            if is_bybit_execution_history and not has_explicit_realized and math.isclose(delta, -fee, abs_tol=1e-9):
+                has_close_marker = False
             likely_opening = (not has_close_marker) and side_text in {"buy", "sell"}
             if likely_opening and math.isclose(delta, -fee, abs_tol=1e-9):
                 unresolved.append(f"{rid}:pnl_inference_open_fill_fee_only_no_closing_proof")
@@ -24839,9 +24857,17 @@ async def _legacy_trading_journal_sync_status() -> JSONResponse:
         snapshot["stale_warning"] = ""
 
     if bool(snapshot.get("running")) and bool(task is not None and hasattr(task, "done") and bool(task.done())):
+        task_cancelled = bool(hasattr(task, "cancelled") and task.cancelled())
+        if task_cancelled:
+            snapshot["stale_warning"] = snapshot.get("stale_warning") or "Sync task was cancelled; awaiting state reconciliation."
+            snapshot.update({"active_task_known": False})
+            snapshot.update(_manual_save_state_snapshot())
+            return JSONResponse(_json_safe(snapshot))
         err = None
         try:
             err = task.exception()
+        except asyncio.CancelledError:
+            err = RuntimeError("Sync task was cancelled before completion.")
         except Exception as exc:
             err = exc
         msg = str(err or "Sync task ended without clearing running state.")
@@ -25446,6 +25472,8 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
             enforce_pre = _enforce_single_master_journal_xlsx(TRADING_JOURNAL_LOCAL_DIR, cleanup_known_generated=True)
             if not enforce_pre.get("ok"):
                 raise RuntimeError("Unknown extra Excel files in journal directory: " + ", ".join(enforce_pre.get("unknown_extra_excel_files") or []) + ". Move legacy backups outside journal/. Keep only journal/Trading Journal.xlsx.")
+            if not path.exists():
+                raise FileNotFoundError("Trading Journal.xlsx is missing in master_journal single-file mode. Import history or create the workbook first.")
         snapshot = _build_trading_journal_view_snapshot(force=True) or {}
         source_items = [r for r in (snapshot.get("items") or []) if isinstance(r, dict)]
         source_trade_rows = [r for r in source_items if _row_type(r) == "trade"]
@@ -25841,6 +25869,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
             if not enforce_github.get("ok"):
                 raise RuntimeError("Unknown extra Excel files in journal directory before GitHub sync: " + ", ".join(enforce_github.get("unknown_extra_excel_files") or []) + ". Move legacy backups outside journal/. Keep only journal/Trading Journal.xlsx.")
         payload.update(_sync_journal_excel_files_to_github(path))
+        payload['ok'] = bool(payload.get('master_journal_ok')) and payload.get('github_sync_ok') is not False
         return payload
     except Exception as exc:
         try:
@@ -25849,6 +25878,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
         except Exception:
             pass
         return {
+            'ok': False,
             'master_journal_ok': False,
             'master_journal_path': str(path),
             'master_journal_exists': path.exists(),
@@ -25991,6 +26021,26 @@ def _open_path_with_os(path: Path) -> None:
         subprocess.Popen(["xdg-open", str(path)])
 
 
+def _master_journal_sync_ok(result: Dict[str, object] | None) -> bool:
+    if not isinstance(result, dict):
+        return False
+    if "ok" in result:
+        return bool(result.get("ok"))
+    return bool(result.get("master_journal_ok")) and result.get("github_sync_ok") is not False
+
+
+def _master_journal_sync_error(result: Dict[str, object] | None) -> str:
+    if not isinstance(result, dict):
+        return "no sync result returned"
+    return str(
+        result.get("error")
+        or result.get("master_journal_error")
+        or result.get("github_sync_error")
+        or result.get("message")
+        or "unknown error"
+    )
+
+
 
 TRADING_JOURNAL_ACTIONS_TEMPLATE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -26090,8 +26140,8 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             t3 = time.perf_counter()
             sync_result = _sync_master_journal_workbook()
             timings["workbook_sync"] = round(time.perf_counter() - t3, 6)
-            if not bool((sync_result or {}).get("ok")):
-                raise RuntimeError(f"Workbook sync failed: {(sync_result or {}).get('error') or 'unknown error'}")
+            if not _master_journal_sync_ok(sync_result):
+                raise RuntimeError(f"Workbook sync failed: {_master_journal_sync_error(sync_result)}")
             _PENDING_MANUAL_SYNC_ROWS = previous_pending_rows
             pending_restored = True
 

@@ -1,5 +1,6 @@
 import importlib.util
 import asyncio
+import json
 from pathlib import Path
 import sys
 import pytest
@@ -14,6 +15,11 @@ if HTTPX_AVAILABLE:
     master_service = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = master_service
     spec.loader.exec_module(master_service)
+
+
+def _legacy_sync_status_payload():
+    response = asyncio.run(master_service._legacy_trading_journal_sync_status())
+    return json.loads(response.body.decode("utf-8"))
 def _load_master_service_for_import_test():
     import types
     bm_pkg = types.ModuleType("bybit_monitor")
@@ -418,6 +424,7 @@ def test_manual_sync_skips_broker_refresh_in_master_journal_mode(tmp_path, monke
     monkeypatch.setattr(master_service, '_set_trading_journal_sync_state', _capture_sync_state)
     monkeypatch.setattr(master_service, '_run_bybit_closed_pnl_sync', lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not call")))
     monkeypatch.setattr(master_service, '_recover_oanda_recent_fills', lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not call")))
+    monkeypatch.setattr(master_service, 'describe_bybit_credentials_for', lambda _mode: {"credentials_available": False})
     monkeypatch.setattr(master_service, '_import_trading_journal_from_sources', lambda *a, **k: {"ok": True, "rows_imported": 0, "rows_by_asset_class": {}, "local_workbooks_seen": 1, "dropbox_workbooks_seen": 0})
     monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda: {"master_journal_ok": True})
     asyncio.run(master_service._run_trading_journal_sync_job())
@@ -1145,9 +1152,7 @@ def test_sync_status_marks_abandoned_running_state_without_active_task(monkeypat
     state.update({"running": True, "started_at": "2020-01-01T00:00:00Z", "message": "old"})
     monkeypatch.setattr(master_service, "_sync_state_snapshot", lambda: state)
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_SYNC_TASK", None)
-    payload = asyncio.run(master_service.trading_journal_sync_status()).body.decode("utf-8")
-    import json
-    data = json.loads(payload)
+    data = _legacy_sync_status_payload()
     assert data["running"] is False
     assert data["ok"] is False
     assert data["abandoned_running_state"] is True
@@ -1162,9 +1167,8 @@ def test_sync_status_stale_warning_when_running_and_heartbeat_old(monkeypatch):
         payload = (await master_service.trading_journal_sync_status()).body.decode("utf-8")
         sleeper.cancel()
         return payload
-    payload = asyncio.run(_run())
-    import json
-    data = json.loads(payload)
+    _ = asyncio.run(_run())
+    data = _legacy_sync_status_payload()
     assert data["running"] is True
     assert isinstance(data.get("elapsed_seconds"), (int, float))
     assert data.get("stale_warning")
@@ -1183,10 +1187,7 @@ def test_trading_journal_sync_status_rejects_stale_master_journal_success(tmp_pa
     })
     monkeypatch.setattr(master_service, '_sync_state_snapshot', lambda: state_payload)
     monkeypatch.setattr(master_service, '_load_trading_journal_state', lambda: {})
-    response = asyncio.run(master_service.trading_journal_sync_status())
-    payload = response.body.decode('utf-8')
-    import json
-    data = json.loads(payload)
+    data = _legacy_sync_status_payload()
     assert data['ok'] is False
     assert data['result']['master_journal_ok'] is False
     assert data['result']['master_journal_exists'] is False
@@ -1245,7 +1246,7 @@ def test_open_master_journal_missing_file_returns_404(tmp_path, monkeypatch):
     with pytest.raises(master_service.HTTPException) as exc:
         asyncio.run(master_service.open_master_journal_file())
     assert exc.value.status_code == 404
-    assert 'Click Sync Journal first' in str(exc.value.detail)
+    assert 'Trading Journal.xlsx does not exist' in str(exc.value.detail)
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_open_master_journal_existing_file_opens_exact_path(tmp_path, monkeypatch):
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
@@ -1467,6 +1468,7 @@ def test_existing_workbook_sync_does_not_rebuild_or_refresh_derived(tmp_path, mo
     assert called['build'] == 0
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_missing_master_journal_fails_loudly(tmp_path, monkeypatch):
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
     result = master_service._sync_master_journal_workbook()
     assert result['master_journal_ok'] is False
