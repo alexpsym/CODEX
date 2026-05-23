@@ -3,6 +3,7 @@
   const importBtn = document.getElementById('import-journal-btn');
   const fileInput = document.getElementById('journal-file-input');
   const cryptoMonthlyBtn = document.getElementById('crypto-monthly-pnl-btn');
+  const accountModeSelect = document.getElementById('journal-account-mode');
   const status = document.getElementById('journal-actions-status');
 
   const setStatus = (msg, err = false) => {
@@ -31,10 +32,12 @@
     setStatus('Importing...');
     try {
       const form = new FormData(); form.append('file', file);
+      const explicitMode = String(accountModeSelect?.value || '').trim().toLowerCase();
+      if (explicitMode === 'demo' || explicitMode === 'live') form.append('account_mode', explicitMode);
       const res = await fetch('/api/trading-journal/import-file', { method: 'POST', body: form });
       const payload = await res.json().catch(() => ({}));
       if (!res.ok || payload.ok !== true) throw new Error(payload.detail || payload.message || 'Import failed.');
-      setStatus(payload.message || 'Import complete.');
+      setStatus(`${payload.message || 'Import complete.'}\nRows parsed: ${payload.rows_parsed ?? 0}\nRows upserted: ${payload.rows_upserted ?? 0}\nWorkbook: ${payload.master_journal_path || ''}\nMissing Row IDs: ${(payload.missing_row_ids || []).join(', ') || 'none'}`);
     } catch (err) { setStatus(err?.message || String(err), true); }
     finally { importBtn.disabled = false; fileInput.value = ''; }
   });

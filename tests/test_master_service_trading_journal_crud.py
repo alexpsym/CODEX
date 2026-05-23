@@ -1321,6 +1321,194 @@ def test_oanda_export_filename_live_hint_maps_to_oanda_live_even_with_demo_prese
     assert relabeled[0]["label"] == "OANDA LIVE"
 
 
+def _bybit_csv_sample(row_count: int = 2) -> str:
+    header = "contracts,Order No.,Direction,Order Type,Filled Qty,Filled Price,Order Price,Filled Type,Trading Fee Rate,Fees Paid,Trasaction ID,Transaction Time(UTC+10),Final Balance (USDT)"
+    rows = []
+    for i in range(row_count):
+        rows.append(f"BTCUSDT,ord-{i},Buy,Market,0.001,65000,65000,Trade,0.0006,0.04,exec-{i},22:55 2026-05-17,1000.0")
+    return header + "\n" + "\n".join(rows) + "\n"
+
+
+def test_import_file_endpoint_not_stub_anymore(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"ok": True})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    payload = master_service._import_uploaded_trading_journal_file("bybit_demo.csv", _bybit_csv_sample(1).encode("utf-8"), account_mode="demo")
+    assert int(payload.get("status_code") or 0) != 501
+    assert payload["ok"] is True
+
+
+def test_import_file_ambiguous_bybit_csv_is_blocked_without_account_mode(temp_state_paths):
+    master_service._set_trading_journal_rows([{"id": "existing:1", "row_type": "trade", "source": "manual"}])
+    payload = master_service._import_uploaded_trading_journal_file("bybit_history.csv", _bybit_csv_sample(1).encode("utf-8"))
+    assert int(payload.get("status_code") or 0) == 422
+    assert payload["ok"] is False
+    assert "ambiguous" in payload["message"].lower()
+    assert any(str(r.get("id")) == "existing:1" for r in master_service._get_trading_journal_rows())
+
+
+def test_import_file_uses_tempfile_without_nameerror(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"ok": True})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    payload = master_service._import_uploaded_trading_journal_file("bybit_demo.csv", _bybit_csv_sample(1).encode("utf-8"), account_mode="demo")
+    assert payload["ok"] is True
+    assert "NameError" not in " ".join(payload.get("errors") or [])
+
+
+def test_import_file_bybit_csv_parses_once_with_explicit_account_mode(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    calls = {"bybit": 0, "local": 0}
+    monkeypatch.setattr(master_service, "_is_bybit_trade_history_csv", lambda _p: True)
+    def _fake_bybit(_path, account_mode="demo"):
+        calls["bybit"] += 1
+        assert account_mode == "live"
+        return [{"id": "bybit:live:execution:BTCUSDT:e1", "row_type": "trade", "source": "bybit_execution_history", "account": "Bybit Live"}]
+    def _fake_local(_path):
+        calls["local"] += 1
+        return [], None
+    monkeypatch.setattr(master_service, "_parse_bybit_trade_history_csv", _fake_bybit)
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", _fake_local)
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"ok": True})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    payload = master_service._import_uploaded_trading_journal_file("history.csv", _bybit_csv_sample(1).encode("utf-8"), account_mode="live")
+    assert payload["ok"] is True
+    assert calls["bybit"] == 1
+    assert calls["local"] == 0
+
+
+def test_import_file_balance_only_not_fake_success(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p: ([], {"account": "OANDA DEMO", "balance": 123.45}))
+    payload = master_service._import_uploaded_trading_journal_file("oanda_demo.xlsx", b"dummy")
+    assert payload["ok"] is False
+    assert int(payload["status_code"]) == 422
+    assert payload.get("balance_parsed") is True
+
+
+def test_import_file_unexpected_exception_returns_structured_json_failure(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
+    monkeypatch.setattr(master_service, "_upsert_trading_journal_rows", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")))
+    payload = master_service._import_uploaded_trading_journal_file("manual.xlsx", b"x")
+    assert payload["ok"] is False
+    assert int(payload["status_code"]) == 500
+    assert payload["uploaded_name"] == "manual.xlsx"
+    assert isinstance(payload.get("errors"), list) and payload["errors"]
+
+
+def test_import_file_rejects_rows_without_ids(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    master_service._set_trading_journal_rows([{"id": "existing:1", "row_type": "trade", "source": "manual"}])
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p: ([{"row_type": "trade", "source": "manual"}], None))
+    payload = master_service._import_uploaded_trading_journal_file("manual.xlsx", b"x")
+    assert payload["ok"] is False and int(payload["status_code"]) == 422
+    assert any(r.get("id") == "existing:1" for r in master_service._get_trading_journal_rows())
+
+
+def test_import_file_rolls_back_rows_when_sync_fails(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    original = [{"id": "existing:1", "row_type": "trade", "source": "manual"}]
+    master_service._set_trading_journal_rows(original)
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"ok": False, "error": "nope"})
+    payload = master_service._import_uploaded_trading_journal_file("manual.xlsx", b"x")
+    assert payload["ok"] is False
+    assert master_service._get_trading_journal_rows() == original
+
+
+def test_import_file_rolls_back_rows_when_verification_fails(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    original = [{"id": "existing:1", "row_type": "trade", "source": "manual"}]
+    master_service._set_trading_journal_rows(original)
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"ok": True})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": False, "missing_row_ids": ["new:1"], "error": "missing"})
+    payload = master_service._import_uploaded_trading_journal_file("manual.xlsx", b"x")
+    assert payload["ok"] is False
+    assert master_service._get_trading_journal_rows() == original
+
+
+def test_import_file_bybit_parse_error_is_422(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_is_bybit_trade_history_csv", lambda _p: True)
+    monkeypatch.setattr(master_service, "_parse_bybit_trade_history_csv", lambda *_a, **_k: (_ for _ in ()).throw(ValueError("bad bybit csv")))
+    payload = master_service._import_uploaded_trading_journal_file("bybit_demo.csv", _bybit_csv_sample(1).encode("utf-8"), account_mode="demo")
+    assert payload["ok"] is False
+    assert int(payload["status_code"]) == 422
+
+
+def test_import_file_read_failure_returns_json():
+    class BadUpload:
+        filename = "bad.csv"
+        async def read(self):
+            raise RuntimeError("read failed")
+    res = asyncio.run(master_service.trading_journal_import_file(file=BadUpload(), account_mode=None))
+    payload = _json(res)
+    assert res.status_code == 400
+    assert payload["ok"] is False
+
+
+def test_import_file_rollback_uses_deepcopy_for_nested_fields(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    original = [{"id": "existing:1", "row_type": "trade", "source": "manual", "raw_refs": {"nested": {"k": "v"}}, "manual_overrides": {"note": "keep"}}]
+    master_service._set_trading_journal_rows(original)
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p: ([{"id": "existing:1", "row_type": "trade", "source": "manual", "raw_refs": {"nested": {"k": "changed"}}}], None))
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"ok": False, "error": "sync failed"})
+    payload = master_service._import_uploaded_trading_journal_file("manual.xlsx", b"x")
+    assert payload["ok"] is False
+    restored = master_service._get_trading_journal_rows()
+    assert restored == original
+    assert restored[0]["raw_refs"]["nested"]["k"] == "v"
+
+
+def test_import_file_restores_workbook_bytes_on_verification_failure(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    workbook = temp_state_paths / "Trading Journal.xlsx"
+    workbook.write_bytes(b"ORIGINAL-WB")
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: workbook)
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
+    def _fake_sync():
+        workbook.write_bytes(b"MODIFIED-WB")
+        return {"ok": True}
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", _fake_sync)
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": False, "missing_row_ids": ["new:1"], "error": "missing"})
+    payload = master_service._import_uploaded_trading_journal_file("manual.xlsx", b"x")
+    assert payload["ok"] is False
+    assert workbook.read_bytes() == b"ORIGINAL-WB"
+
+
+def test_import_file_verification_missing_ids_comes_from_original_verify_result(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"ok": True})
+    calls = {"n": 0}
+    def _verify(*_a, **_k):
+        calls["n"] += 1
+        return {"ok": False, "missing_row_ids": ["new:1", "new:2"], "error": "missing"}
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", _verify)
+    payload = master_service._import_uploaded_trading_journal_file("manual.xlsx", b"x")
+    assert payload["ok"] is False
+    assert payload.get("missing_row_ids") == ["new:1", "new:2"]
+    assert calls["n"] == 1
+
+
+def test_import_file_deletes_new_workbook_created_before_verification_failure(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    workbook = temp_state_paths / "Trading Journal.xlsx"
+    assert workbook.exists() is False
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: workbook)
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
+    def _fake_sync():
+        workbook.write_bytes(b"NEWLY-CREATED")
+        return {"ok": True}
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", _fake_sync)
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": False, "missing_row_ids": ["new:1"], "error": "missing"})
+    payload = master_service._import_uploaded_trading_journal_file("manual.xlsx", b"x")
+    assert payload["ok"] is False
+    assert workbook.exists() is False
+
+
+def test_import_file_reports_workbook_delete_rollback_failure(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    workbook = temp_state_paths / "Trading Journal.xlsx"
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: workbook)
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: (workbook.write_bytes(b"NEW-WB"), {"ok": True})[1])
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": False, "missing_row_ids": ["new:1"], "error": "missing"})
+    monkeypatch.setattr(Path, "unlink", lambda _self: (_ for _ in ()).throw(PermissionError("cannot delete")))
+    payload = master_service._import_uploaded_trading_journal_file("manual.xlsx", b"x")
+    assert payload["ok"] is False
+    assert "rollback failed" in str(payload.get("message") or "").lower()
+    assert any("could not restore workbook" in str(err).lower() for err in (payload.get("errors") or []))
+
+
 def test_parse_excel_balance_uses_latest_trade_timestamp_not_bottom_row(monkeypatch: pytest.MonkeyPatch):
     df = master_service.pd.DataFrame(
         [

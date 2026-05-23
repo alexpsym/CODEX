@@ -183,6 +183,10 @@ def test_trading_journal_actions_js_wiring():
     assert "/api/trading-journal/open-master-journal" in js
     assert "/api/trading-journal/import-file" in js
     assert "/api/trading-journal/crypto-monthly-pnl" in js
+    assert "account_mode" in js
+    assert "Rows parsed:" in js
+    assert "includes('demo')" not in js
+    assert "includes('live')" not in js
 
 
 def test_trading_journal_actions_listener_inside_iife():
