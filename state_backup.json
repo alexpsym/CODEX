@@ -55,18 +55,112 @@
     "updated_at": null
   },
   "monthly_aud_revaluation_state": {},
-  "oanda_fill_state": {},
+  "oanda_fill_state": {
+    "diagnostics": {
+      "demo": {
+        "last_error": null,
+        "last_seen_transaction_id": "624",
+        "last_success_at": "2026-05-23T15:15:26.721992+00:00",
+        "startup_recovered_rows": 0,
+        "startup_skipped_duplicates": 0,
+        "updated_at": "2026-05-23T15:15:26.722012+00:00"
+      },
+      "live": {
+        "last_error": null,
+        "last_seen_transaction_id": "471",
+        "last_success_at": "2026-05-23T15:15:27.707820+00:00",
+        "startup_recovered_rows": 0,
+        "startup_skipped_duplicates": 0,
+        "updated_at": "2026-05-23T15:15:27.707839+00:00"
+      }
+    },
+    "last_seen_transaction_id": {
+      "demo": "624",
+      "live": "471"
+    },
+    "open_trade_legs": {
+      "demo": {},
+      "live": {}
+    },
+    "updated_at": "2026-05-23T15:15:27.707846+00:00"
+  },
   "pending_webhooks": [],
-  "savedAt": "2026-05-23T15:15:20.857236+00:00",
+  "savedAt": "2026-05-23T15:42:36.899371+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [],
   "trading_journal": {
-    "items": [],
-    "updated_at": "2026-05-23T15:15:18.835675+00:00"
+    "items": [
+      {
+        "account": "Bybit Demo",
+        "account_label": "Bybit Demo",
+        "asset_class": "crypto",
+        "close_time": "2026-05-19T01:13:00+10:00",
+        "entry_price": 100001,
+        "exit_price": 100001,
+        "id": "bybit:demo:execution:BTCUSDT:E2",
+        "open_time": "2026-05-19T01:13:00+10:00",
+        "qty": 0.1,
+        "row_type": "trade",
+        "side": "Buy",
+        "source": "bybit_execution_history",
+        "symbol": "BTCUSDT",
+        "updated_at": "2026-05-23T15:42:34.853082+00:00"
+      }
+    ],
+    "updated_at": "2026-05-23T15:42:34.853136+00:00"
   },
   "trading_journal_import_cache": {},
   "trading_journal_state": {
+    "broker_account_balances": [
+      {
+        "account": "Bybit Demo",
+        "account_mode": "demo",
+        "as_of": "2026-05-23T15:15:20.685775+00:00",
+        "balance": 323.29989127,
+        "balance_source": "bybit_wallet_balance",
+        "currency": "USDT",
+        "label": "Bybit Demo",
+        "source": "bybit_wallet_balance"
+      },
+      {
+        "account": "Bybit Live",
+        "account_mode": "live",
+        "as_of": "2026-05-23T15:15:22.225897+00:00",
+        "balance": 224.64584987,
+        "balance_source": "bybit_wallet_balance",
+        "currency": "USDT",
+        "label": "Bybit Live",
+        "source": "bybit_wallet_balance"
+      },
+      {
+        "account": "OANDA DEMO",
+        "account_mode": "demo",
+        "as_of": "2026-05-23T15:15:23.644942+00:00",
+        "balance": 1500.6539,
+        "balance_source": "oanda_account_summary",
+        "currency": "AUD",
+        "label": "OANDA DEMO",
+        "nav": 1500.6539,
+        "source": "oanda_account_summary"
+      },
+      {
+        "account": "OANDA LIVE",
+        "account_mode": "live",
+        "as_of": "2026-05-23T15:15:24.538050+00:00",
+        "balance": 1479.3098,
+        "balance_source": "oanda_account_summary",
+        "currency": "AUD",
+        "label": "OANDA LIVE",
+        "nav": 1479.3098,
+        "source": "oanda_account_summary"
+      }
+    ],
+    "broker_balance_diagnostics": {
+      "bybit_demo_anchor_fingerprint": "85b1d133211076bfbe20ee711b105b8d3abfd1bbcab5fa2d9ac967968efb9492",
+      "updated_at": "2026-05-23T15:15:24.545843+00:00",
+      "warnings": []
+    },
     "bybit_closed_pnl_last_seen": {
       "demo": 1778944521410,
       "live": null
