@@ -1146,7 +1146,7 @@ def test_sync_status_marks_abandoned_running_state_without_active_task(monkeypat
     state.update({"running": True, "started_at": "2020-01-01T00:00:00Z", "message": "old"})
     monkeypatch.setattr(master_service, "_sync_state_snapshot", lambda: state)
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_SYNC_TASK", None)
-    data = master_service._legacy_trading_journal_sync_status()
+    data = asyncio.run(master_service._legacy_trading_journal_sync_status())
     assert data["running"] is False
     assert data["ok"] is False
     assert data["abandoned_running_state"] is True
@@ -1162,7 +1162,7 @@ def test_sync_status_stale_warning_when_running_and_heartbeat_old(monkeypatch):
         sleeper.cancel()
         return payload
     _ = asyncio.run(_run())
-    data = master_service._legacy_trading_journal_sync_status()
+    data = asyncio.run(master_service._legacy_trading_journal_sync_status())
     assert data["running"] is True
     assert isinstance(data.get("elapsed_seconds"), (int, float))
     assert data.get("stale_warning")
@@ -1181,7 +1181,7 @@ def test_trading_journal_sync_status_rejects_stale_master_journal_success(tmp_pa
     })
     monkeypatch.setattr(master_service, '_sync_state_snapshot', lambda: state_payload)
     monkeypatch.setattr(master_service, '_load_trading_journal_state', lambda: {})
-    data = master_service._legacy_trading_journal_sync_status()
+    data = asyncio.run(master_service._legacy_trading_journal_sync_status())
     assert data['ok'] is False
     assert data['result']['master_journal_ok'] is False
     assert data['result']['master_journal_exists'] is False
@@ -1462,6 +1462,7 @@ def test_existing_workbook_sync_does_not_rebuild_or_refresh_derived(tmp_path, mo
     assert called['build'] == 0
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_missing_master_journal_fails_loudly(tmp_path, monkeypatch):
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
     result = master_service._sync_master_journal_workbook()
     assert result['master_journal_ok'] is False
