@@ -2039,6 +2039,8 @@ def test_append_generic_local_broker_rows_does_not_match_blank_ids(tmp_path, mon
 
 def test_snapshot_includes_monthly_aud_note_rows_excluded_from_stats(tmp_path, monkeypatch):
     monkeypatch.setattr(master_service, "_master_journal_authoritative_enabled", lambda: False)
+    monkeypatch.setattr(master_service, "_master_journal_single_file_mode", lambda: False)
+    monkeypatch.setenv("TRADING_JOURNAL_SOURCE", "both")
     monthly_path = tmp_path / "monthly_aud_revaluation.json"
     monthly_path.write_text(json.dumps({"items": [{
         "id": "monthly_aud_reval:bybit_live:2026-03",
@@ -2051,6 +2053,9 @@ def test_snapshot_includes_monthly_aud_note_rows_excluded_from_stats(tmp_path, m
         "raw_refs": {"period_month": "2026-03"},
     }]}), encoding="utf-8")
     monkeypatch.setattr(master_service, "MONTHLY_AUD_REVALUATION_PATH", monthly_path)
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: tmp_path / "Trading Journal.xlsx")
+    (tmp_path / "Trading Journal.xlsx").write_bytes(b"stub")
+    monkeypatch.setattr(master_service, "read_master_journal_source", lambda _p: (_ for _ in ()).throw(AssertionError("authoritative path should not be used when explicitly disabled")))
     monkeypatch.setattr(master_service, "_journal_source_fingerprint", lambda: {"source_mode": "local", "files": []})
     monkeypatch.setattr(master_service, "_get_trading_journal_rows", lambda: [{"id": "t1", "row_type": "trade", "close_time": "2026-03-01T00:00:00Z", "net_profit": 10.0, "account": "A"}])
     monkeypatch.setattr(master_service, "_get_excel_account_balances", lambda: [])

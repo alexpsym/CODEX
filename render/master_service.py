@@ -1500,9 +1500,11 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
     source_mode_runtime = str(os.getenv("TRADING_JOURNAL_SOURCE", TRADING_JOURNAL_SOURCE) or "").strip().lower()
     if source_mode_runtime not in {"dropbox", "local", "both", "auto", "master_journal"}:
         source_mode_runtime = _trading_journal_source_mode()
+    authoritative_enabled = _master_journal_authoritative_enabled()
     use_master_journal_snapshot = _master_journal_single_file_mode()
     if (
         not use_master_journal_snapshot
+        and authoritative_enabled
         and force
         and source_mode_runtime in {"both", "master_journal"}
         and _master_journal_path().exists()
