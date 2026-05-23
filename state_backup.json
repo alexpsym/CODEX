@@ -55,140 +55,35 @@
     "updated_at": null
   },
   "monthly_aud_revaluation_state": {},
-  "oanda_fill_state": {
-    "diagnostics": {
-      "demo": {
-        "last_error": null,
-        "last_seen_transaction_id": "624",
-        "last_success_at": "2026-05-23T14:54:38.821195+00:00",
-        "startup_recovered_rows": 0,
-        "startup_skipped_duplicates": 0,
-        "updated_at": "2026-05-23T14:54:38.821205+00:00"
-      },
-      "live": {
-        "last_error": null,
-        "last_seen_transaction_id": "471",
-        "last_success_at": "2026-05-23T14:54:39.601491+00:00",
-        "startup_recovered_rows": 0,
-        "startup_skipped_duplicates": 0,
-        "updated_at": "2026-05-23T14:54:39.601503+00:00"
-      }
-    },
-    "last_seen_transaction_id": {
-      "demo": "624",
-      "live": "471"
-    },
-    "open_trade_legs": {
-      "demo": {},
-      "live": {}
-    },
-    "updated_at": "2026-05-23T14:54:39.601508+00:00"
-  },
+  "oanda_fill_state": {},
   "pending_webhooks": [],
-  "savedAt": "2026-05-23T15:05:02.824195+00:00",
+  "savedAt": "2026-05-23T15:14:15.512237+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [],
   "trading_journal": {
-    "items": [],
-    "updated_at": "2026-05-23T15:05:00.810967+00:00"
-  },
-  "trading_journal_import_cache": {},
-  "trading_journal_state": {
-    "broker_account_balances": [
+    "items": [
       {
         "account": "Bybit Demo",
-        "account_mode": "demo",
-        "as_of": "2026-05-23T14:54:32.963316+00:00",
-        "balance": 323.30279685,
-        "balance_source": "bybit_wallet_balance",
-        "currency": "USDT",
-        "label": "Bybit Demo",
-        "source": "bybit_wallet_balance"
-      },
-      {
-        "account": "Bybit Live",
-        "account_mode": "live",
-        "as_of": "2026-05-23T14:54:34.240451+00:00",
-        "balance": 224.64764889,
-        "balance_source": "bybit_wallet_balance",
-        "currency": "USDT",
-        "label": "Bybit Live",
-        "source": "bybit_wallet_balance"
-      },
-      {
-        "account": "OANDA DEMO",
-        "account_mode": "demo",
-        "as_of": "2026-05-23T14:54:35.596186+00:00",
-        "balance": 1500.6539,
-        "balance_source": "oanda_account_summary",
-        "currency": "AUD",
-        "label": "OANDA DEMO",
-        "nav": 1500.6539,
-        "source": "oanda_account_summary"
-      },
-      {
-        "account": "OANDA LIVE",
-        "account_mode": "live",
-        "as_of": "2026-05-23T14:54:36.414866+00:00",
-        "balance": 1479.3098,
-        "balance_source": "oanda_account_summary",
-        "currency": "AUD",
-        "label": "OANDA LIVE",
-        "nav": 1479.3098,
-        "source": "oanda_account_summary"
+        "account_label": "Bybit Demo",
+        "asset_class": "crypto",
+        "close_time": "2026-05-19T01:13:00+10:00",
+        "entry_price": 100001,
+        "exit_price": 100001,
+        "id": "bybit:demo:execution:BTCUSDT:E2",
+        "open_time": "2026-05-19T01:13:00+10:00",
+        "qty": 0.1,
+        "row_type": "trade",
+        "side": "Buy",
+        "source": "bybit_execution_history",
+        "symbol": "BTCUSDT",
+        "updated_at": "2026-05-23T15:14:13.486687+00:00"
       }
     ],
-    "broker_balance_diagnostics": {
-      "bybit_demo_anchor_fingerprint": "53a1af880d85691d3f28bd44960b9947e8d2968d8de9c3702d4534a26438253b",
-      "updated_at": "2026-05-23T14:54:36.419852+00:00",
-      "warnings": []
-    },
-    "bybit_closed_pnl_last_seen": {
-      "demo": 1778943895842,
-      "live": null
-    },
-    "bybit_demo_sync": {
-      "bybit_demo_balance_backfill_changed": false,
-      "bybit_demo_balance_backfill_error": null,
-      "bybit_demo_balance_backfill_rows_backfilled": 0,
-      "bybit_demo_balance_backfill_rows_seen": 2,
-      "bybit_demo_balance_backfill_snapshot_at": "2026-05-23T15:03:55.875261+00:00",
-      "bybit_demo_execution_warning": null,
-      "last_captured_row_ids": [
-        "bybit:demo:execution:BTCUSDT:E1",
-        "bybit:demo:execution:BTCUSDT:E2"
-      ],
-      "last_checked_at": "2026-05-23T15:03:55.890349+00:00",
-      "last_error": null,
-      "last_invalid_time_row_details": [],
-      "last_invalid_time_rows_dropped": 0,
-      "last_local_workbook_path": null,
-      "last_local_workbook_rows_upserted": 2,
-      "last_local_workbook_sanitized": 0,
-      "last_rows_deduped": 0,
-      "last_rows_seen": 2,
-      "last_rows_upserted": 2,
-      "last_success_at": "2026-05-23T15:03:55.890363+00:00",
-      "last_workbook_rows_deduped": 0,
-      "single_file_mode": true,
-      "updated_at": "2026-05-23T15:03:55.903580+00:00"
-    },
-    "daily_trade_sync": {
-      "last_attempt_at": "2026-05-23T15:04:40.962480+00:00",
-      "last_error": "boom",
-      "last_reason": "startup_recovery",
-      "last_result": {
-        "master_journal_error": "boom",
-        "master_journal_ok": false,
-        "oanda_recovery": {},
-        "ok": true,
-        "rows_imported": 1
-      },
-      "last_success_at": null,
-      "updated_at": "2026-05-23T15:04:40.980796+00:00"
-    }
+    "updated_at": "2026-05-23T15:14:13.486718+00:00"
   },
+  "trading_journal_import_cache": {},
+  "trading_journal_state": {},
   "version": 4,
   "watchlist": [
     "DASHUSDT"
