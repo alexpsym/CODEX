@@ -5,11 +5,25 @@
   const cryptoMonthlyBtn = document.getElementById('crypto-monthly-pnl-btn');
   const accountModeSelect = document.getElementById('journal-account-mode');
   const status = document.getElementById('journal-actions-status');
+  const BYBIT_AMBIGUITY_MSG = 'Select Demo or Live in Bybit CSV account, then import this file again.';
 
   const setStatus = (msg, err = false) => {
     if (!status) return;
     status.textContent = msg || '';
     status.style.color = err ? '#fca5a5' : '#94a3b8';
+  };
+  const isExplicitAccountMode = (value) => value === 'demo' || value === 'live';
+  const isBybitCsvFileName = (name) => String(name || '').trim().toLowerCase().endsWith('.csv');
+  const isLikelyBybitHistoryCsv = async (file) => {
+    if (!file || !isBybitCsvFileName(file.name)) return false;
+    const head = await file.slice(0, 16384).text();
+    const normalized = String(head || '').toLowerCase();
+    const markers = [
+      'contracts', 'order no.', 'direction', 'order type', 'filled qty', 'filled price', 'order price',
+      'filled type', 'trading fee rate', 'fees paid', 'transaction time', 'final balance',
+    ];
+    const hasTxId = normalized.includes('trasaction id') || normalized.includes('transaction id');
+    return markers.every((m) => normalized.includes(m)) && hasTxId;
   };
 
   openBtn?.addEventListener('click', async () => {
@@ -31,11 +45,23 @@
     importBtn.disabled = true;
     setStatus('Importing...');
     try {
-      const form = new FormData(); form.append('file', file);
       const explicitMode = String(accountModeSelect?.value || '').trim().toLowerCase();
-      if (explicitMode === 'demo' || explicitMode === 'live') form.append('account_mode', explicitMode);
+      const bybitLikely = await isLikelyBybitHistoryCsv(file);
+      if (bybitLikely && !isExplicitAccountMode(explicitMode)) {
+        setStatus(BYBIT_AMBIGUITY_MSG, true);
+        accountModeSelect?.focus?.();
+        fileInput.value = '';
+        return;
+      }
+      const form = new FormData(); form.append('file', file);
+      if (isExplicitAccountMode(explicitMode)) form.append('account_mode', explicitMode);
       const res = await fetch('/api/trading-journal/import-file', { method: 'POST', body: form });
       const payload = await res.json().catch(() => ({}));
+      if (payload?.requires_account_mode || (Array.isArray(payload?.errors) && payload.errors.includes('ambiguous_bybit_account'))) {
+        setStatus(BYBIT_AMBIGUITY_MSG, true);
+        accountModeSelect?.focus?.();
+        return;
+      }
       if (!res.ok || payload.ok !== true) throw new Error(payload.detail || payload.message || 'Import failed.');
       const warnings = payload.warnings || [];
       const inferred = payload.pnl_inferred_count ?? 0;
@@ -43,6 +69,13 @@
       setStatus(`${payload.message || 'Import complete.'}\nRows parsed: ${payload.rows_parsed ?? 0}\nRows upserted: ${payload.rows_upserted ?? 0}\nP/L inferred: ${inferred}\nP/L unresolved: ${unresolved}\nWorkbook: ${payload.master_journal_path || ''}\nMissing Row IDs: ${(payload.missing_row_ids || []).join(', ') || 'none'}${warnings.length ? `\nWarnings:\n- ${warnings.join('\n- ')}` : ''}`);
     } catch (err) { setStatus(err?.message || String(err), true); }
     finally { importBtn.disabled = false; fileInput.value = ''; }
+  });
+  accountModeSelect?.addEventListener('change', () => {
+    const explicitMode = String(accountModeSelect?.value || '').trim().toLowerCase();
+    const text = String(status?.textContent || '');
+    if (text.includes('Select Demo or Live in Bybit CSV account')) {
+      setStatus(isExplicitAccountMode(explicitMode) ? 'Account mode selected. Re-import the file to continue.' : '');
+    }
   });
 
   cryptoMonthlyBtn?.addEventListener('click', async () => {
