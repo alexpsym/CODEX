@@ -37,7 +37,10 @@
       const res = await fetch('/api/trading-journal/import-file', { method: 'POST', body: form });
       const payload = await res.json().catch(() => ({}));
       if (!res.ok || payload.ok !== true) throw new Error(payload.detail || payload.message || 'Import failed.');
-      setStatus(`${payload.message || 'Import complete.'}\nRows parsed: ${payload.rows_parsed ?? 0}\nRows upserted: ${payload.rows_upserted ?? 0}\nWorkbook: ${payload.master_journal_path || ''}\nMissing Row IDs: ${(payload.missing_row_ids || []).join(', ') || 'none'}`);
+      const warnings = payload.warnings || [];
+      const inferred = payload.pnl_inferred_count ?? 0;
+      const unresolved = payload.pnl_unresolved_count ?? 0;
+      setStatus(`${payload.message || 'Import complete.'}\nRows parsed: ${payload.rows_parsed ?? 0}\nRows upserted: ${payload.rows_upserted ?? 0}\nP/L inferred: ${inferred}\nP/L unresolved: ${unresolved}\nWorkbook: ${payload.master_journal_path || ''}\nMissing Row IDs: ${(payload.missing_row_ids || []).join(', ') || 'none'}${warnings.length ? `\nWarnings:\n- ${warnings.join('\n- ')}` : ''}`);
     } catch (err) { setStatus(err?.message || String(err), true); }
     finally { importBtn.disabled = false; fileInput.value = ''; }
   });
