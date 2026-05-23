@@ -55,20 +55,97 @@
     "updated_at": null
   },
   "monthly_aud_revaluation_state": {},
-  "oanda_fill_state": {},
+  "oanda_fill_state": {
+    "diagnostics": {
+      "demo": {
+        "last_error": null,
+        "last_seen_transaction_id": "624",
+        "last_success_at": "2026-05-23T13:31:29.584116+00:00",
+        "startup_recovered_rows": 0,
+        "startup_skipped_duplicates": 0,
+        "updated_at": "2026-05-23T13:31:29.584136+00:00"
+      },
+      "live": {
+        "last_error": null,
+        "last_seen_transaction_id": "471",
+        "last_success_at": "2026-05-23T13:31:30.296693+00:00",
+        "startup_recovered_rows": 0,
+        "startup_skipped_duplicates": 0,
+        "updated_at": "2026-05-23T13:31:30.296703+00:00"
+      }
+    },
+    "last_seen_transaction_id": {
+      "demo": "624",
+      "live": "471"
+    },
+    "open_trade_legs": {
+      "demo": {},
+      "live": {}
+    },
+    "updated_at": "2026-05-23T13:31:30.296708+00:00"
+  },
   "pending_webhooks": [],
-  "savedAt": "2026-05-23T13:31:26.414836+00:00",
+  "savedAt": "2026-05-23T13:45:57.341999+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [],
   "trading_journal": {
     "items": [],
-    "updated_at": "2026-05-23T13:31:24.410415+00:00"
+    "updated_at": "2026-05-23T13:45:55.305259+00:00"
   },
   "trading_journal_import_cache": {},
   "trading_journal_state": {
+    "broker_account_balances": [
+      {
+        "account": "Bybit Demo",
+        "account_mode": "demo",
+        "as_of": "2026-05-23T13:31:25.652474+00:00",
+        "balance": 323.30279685,
+        "balance_source": "bybit_wallet_balance",
+        "currency": "USDT",
+        "label": "Bybit Demo",
+        "source": "bybit_wallet_balance"
+      },
+      {
+        "account": "Bybit Live",
+        "account_mode": "live",
+        "as_of": "2026-05-23T13:31:26.832585+00:00",
+        "balance": 224.65124693,
+        "balance_source": "bybit_wallet_balance",
+        "currency": "USDT",
+        "label": "Bybit Live",
+        "source": "bybit_wallet_balance"
+      },
+      {
+        "account": "OANDA DEMO",
+        "account_mode": "demo",
+        "as_of": "2026-05-23T13:31:27.519029+00:00",
+        "balance": 1500.6539,
+        "balance_source": "oanda_account_summary",
+        "currency": "AUD",
+        "label": "OANDA DEMO",
+        "nav": 1500.6539,
+        "source": "oanda_account_summary"
+      },
+      {
+        "account": "OANDA LIVE",
+        "account_mode": "live",
+        "as_of": "2026-05-23T13:31:28.240386+00:00",
+        "balance": 1479.3098,
+        "balance_source": "oanda_account_summary",
+        "currency": "AUD",
+        "label": "OANDA LIVE",
+        "nav": 1479.3098,
+        "source": "oanda_account_summary"
+      }
+    ],
+    "broker_balance_diagnostics": {
+      "bybit_demo_anchor_fingerprint": "fd430c4851a61d5a3023c25111df4e9a37239a7f27147b1c8f789f97ac0e8ece",
+      "updated_at": "2026-05-23T13:31:28.245899+00:00",
+      "warnings": []
+    },
     "bybit_closed_pnl_last_seen": {
-      "demo": 1778938307719,
+      "demo": 1778939214910,
       "live": null
     },
     "bybit_demo_sync": {
@@ -76,13 +153,13 @@
       "bybit_demo_balance_backfill_error": null,
       "bybit_demo_balance_backfill_rows_backfilled": 0,
       "bybit_demo_balance_backfill_rows_seen": 2,
-      "bybit_demo_balance_backfill_snapshot_at": "2026-05-23T13:30:47.743160+00:00",
+      "bybit_demo_balance_backfill_snapshot_at": "2026-05-23T13:45:54.942545+00:00",
       "bybit_demo_execution_warning": null,
       "last_captured_row_ids": [
         "bybit:demo:execution:BTCUSDT:E1",
         "bybit:demo:execution:BTCUSDT:E2"
       ],
-      "last_checked_at": "2026-05-23T13:30:47.757465+00:00",
+      "last_checked_at": "2026-05-23T13:45:54.958112+00:00",
       "last_error": null,
       "last_invalid_time_row_details": [],
       "last_invalid_time_rows_dropped": 0,
@@ -92,10 +169,10 @@
       "last_rows_deduped": 0,
       "last_rows_seen": 2,
       "last_rows_upserted": 2,
-      "last_success_at": "2026-05-23T13:30:47.757477+00:00",
+      "last_success_at": "2026-05-23T13:45:54.958130+00:00",
       "last_workbook_rows_deduped": 0,
       "single_file_mode": true,
-      "updated_at": "2026-05-23T13:30:47.766004+00:00"
+      "updated_at": "2026-05-23T13:45:54.971759+00:00"
     },
     "daily_trade_sync": {
       "last_attempt_at": "2026-05-23T13:31:12.941246+00:00",
