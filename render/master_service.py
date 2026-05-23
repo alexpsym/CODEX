@@ -4781,6 +4781,7 @@ def _journal_rows_from_oanda_transaction_history_frame(
     financing_alloc=defaultdict(float)
     latest_balance=None; latest_asof=None
     for _, r in frame.iterrows():
+        prev_balance_snapshot = latest_balance
         tx_type=str(r.get('TRANSACTION TYPE') or '').strip().upper()
         details=str(r.get('DETAILS') or '').strip().upper()
         symbol=str(r.get('INSTRUMENT') or '').strip().upper()
@@ -4819,6 +4820,8 @@ def _journal_rows_from_oanda_transaction_history_frame(
             o=bucket.pop(0)
             alloc=financing_alloc.pop(o['ticket'],0.0)
             net=(pl or 0.0)+alloc
+            if bal is not None and prev_balance_snapshot is not None:
+                net = bal - prev_balance_snapshot
             rows.append(_normalize_journal_profit_fields({'id':f"oanda_export:{account_mode}:{o['ticket']}:{ticket}",'source':'oanda_transaction_export','account':account_mode,'account_label':account_label,'asset_class':'forex','symbol':o['symbol'],'side':o['side'],'status':'closed','open_time':o['open_time'],'close_time':when,'qty':units/100000.0,'qty_raw':units,'qty_unit':'lots','entry_price':o['entry'],'exit_price':_to_float(r.get('PRICE')),'stop_loss':o['sl'],'take_profit':o['tp'],'swap':alloc or None,'commission':abs(o.get('spread') or 0.0)+abs(_to_float(r.get('SPREAD COST')) or 0.0)+abs(_to_float(r.get('COMMISSION')) or 0.0)+abs(_to_float(r.get('GSL FEE')) or 0.0),'net_profit':net,'realized_pnl':net,'balance_after_trade':bal,'balance_after_trade_currency':'AUD','metrics':{'oanda_export_pl':pl,'oanda_export_financing_allocated':alloc},'raw_refs':{'source_path':source_path,'open_ticket':o['ticket'],'close_ticket':ticket,'close_details':details,'transaction_date':when,'transactionId':ticket},'updated_at':_utc_now_iso()}))
     for legs in open_legs.values():
         unmatched_open.extend([str(l.get('ticket') or '') for l in legs if str(l.get('ticket') or '')])
@@ -5015,9 +5018,13 @@ def _parse_excel_account_workbook(
                     else None
                 )
 
+                source_tag = "excel"
+                lower_name = str(file_name or "").strip().lower()
+                if "pepperstone" in lower_name or "mt5" in lower_name:
+                    source_tag = "pepperstone_mt5_statement"
                 all_rows.append(_normalize_journal_profit_fields({
                     "id": row_id,
-                    "source": "excel",
+                    "source": source_tag,
                     "account": row_account_label,
                     "account_label": row_account_label,
                     "sheet": sheet,
@@ -6207,7 +6214,7 @@ def _normalize_bybit_execution_history_row(raw: Dict[str, object], account_mode:
     bal=_to_float(raw.get('Final Balance (USDT)')) if str(raw.get('Final Balance (USDT)') or '').strip() else None
     mode='demo' if str(account_mode).lower().strip()=='demo' else 'live'
     rid = f'bybit:{mode}:execution:{symbol}:{exec_id}' if exec_id else f"bybit:{mode}:execution:{symbol}:{order_id}:{open_time}:{side}:{qty}:{price}"
-    return {'id': rid,'row_type':'trade','asset_class':'crypto','account':_canonical_journal_account_label('Bybit Demo' if mode=='demo' else 'Bybit Live', source='bybit', account_mode=mode),'account_label':_canonical_journal_account_label('Bybit Demo' if mode=='demo' else 'Bybit Live', source='bybit', account_mode=mode),'symbol':symbol,'side':side,'qty':qty,'entry_price':price,'exit_price':price,'open_time':open_time,'close_time':open_time,'commission':fee,'fee_rate':fee_rate,'net_profit':None,'balance_after_trade':bal,'currency':'USDT' if symbol.endswith('USDT') else '', 'source':'bybit_execution_history','notes':'Bybit execution-history row; closed PnL unavailable unless matched to closed-PnL/transaction-log data.','raw_refs':{'orderId':order_id or None,'execId':exec_id or None,'source_file':source_path,'source_row':source_row}}
+    return {'id': rid,'row_type':'trade','asset_class':'crypto','account':_canonical_journal_account_label('Bybit Demo' if mode=='demo' else 'Bybit Live', source='bybit', account_mode=mode),'account_label':_canonical_journal_account_label('Bybit Demo' if mode=='demo' else 'Bybit Live', source='bybit', account_mode=mode),'symbol':symbol,'side':side,'qty':qty,'entry_price':price,'exit_price':price,'open_time':open_time,'close_time':open_time,'commission':fee,'fee_rate':fee_rate,'net_profit':None,'balance_after_trade':bal,'currency':'USDT' if symbol.endswith('USDT') else '', 'source':'bybit_execution_history','notes':'Bybit execution-history row; Net P/L may be inferred from explicit P/L fields or balance continuity when provable.','raw_refs':{'orderId':order_id or None,'execId':exec_id or None,'source_file':source_path,'source_row':source_row}}
 
 def _parse_bybit_trade_history_csv(path: Path, account_mode: str='demo') -> List[Dict[str, object]]:
     df = pd.read_csv(path, encoding='utf-8-sig')
@@ -6219,46 +6226,241 @@ def _parse_bybit_trade_history_csv(path: Path, account_mode: str='demo') -> List
     return rows
 
 
-def _parse_local_trading_journal_workbook(path: Path) -> Tuple[List[Dict[str, object]], Optional[Dict[str, object]]]:
+def _infer_realized_net_profit_from_balance_continuity(
+    imported_rows: List[Dict[str, object]],
+    existing_rows: List[Dict[str, object]],
+) -> Tuple[List[Dict[str, object]], List[str], Dict[str, object]]:
+    out = [dict(r) for r in (imported_rows or [])]
+    unresolved: List[str] = []
+    unresolved_reasons: Dict[str, str] = {}
+    warnings: List[str] = []
+    explicit_normalized = 0
+    inferred = 0
+    unresolved_ids: List[str] = []
+    cashflow_blocked = 0
+
+    def _is_non_trade_balance_event(row: Dict[str, object]) -> bool:
+        texts = [
+            str(row.get("row_type") or ""),
+            str(row.get("cashflow_type") or ""),
+            str(row.get("transaction_type") or ""),
+            str(row.get("type") or ""),
+            str(row.get("source") or ""),
+            str(row.get("symbol") or ""),
+            str(row.get("notes") or ""),
+        ]
+        raw_refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+        for k in ("event", "event_type", "transaction_type", "type", "details"):
+            texts.append(str(raw_refs.get(k) or ""))
+        blob = " ".join(texts).lower()
+        if "cashflow" in blob:
+            return True
+        block_terms = {
+            "deposit", "withdrawal", "transfer", "funding", "rebate", "bonus",
+            "interest", "dividend", "monthly revaluation", "monthly_aud_reval",
+            "balance adjustment", "manual adjustment",
+        }
+        return any(term in blob for term in block_terms)
+
+    def _sort_key(row: Dict[str, object]) -> Tuple[float, int, str]:
+        ts = _parse_ts_utc(
+            row.get("close_time")
+            or row.get("execution_time")
+            or row.get("transaction_time")
+            or row.get("open_time")
+        )
+        tsv = ts.timestamp() if isinstance(ts, datetime) else float("-inf")
+        refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+        src_row = refs.get("source_row")
+        try:
+            src_ord = int(src_row)
+        except Exception:
+            src_ord = 10**9
+        return (tsv, src_ord, str(row.get("id") or ""))
+
+    timeline = sorted([dict(r) for r in (existing_rows or [])] + out, key=_sort_key)
+    imported_ids = {str(r.get("id") or "") for r in out}
+    idx_by_id = {str(r.get("id") or ""): i for i, r in enumerate(out)}
+
+    by_account: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    for row in timeline:
+        acct_key = _norm_account_key(row.get("account_label") or row.get("account"))
+        by_account[acct_key].append(row)
+
+    chains: Dict[Tuple[str, str], List[Dict[str, object]]] = defaultdict(list)
+    for acct_key, rows in by_account.items():
+        known_ccy = sorted({str(r.get("currency") or r.get("balance_after_trade_currency") or "").strip().upper() for r in rows if str(r.get("currency") or r.get("balance_after_trade_currency") or "").strip()})
+        for r in rows:
+            ccy = str(r.get("currency") or r.get("balance_after_trade_currency") or "").strip().upper()
+            if not ccy:
+                if len(known_ccy) == 1:
+                    ccy = known_ccy[0]
+                else:
+                    ccy = "__AMBIG__"
+            chains[(acct_key, ccy)].append(r)
+
+    for (_acct_key, chain_ccy), chain_rows in chains.items():
+        for i, row in enumerate(chain_rows):
+            rid = str(row.get("id") or "")
+            if rid not in imported_ids:
+                continue
+            if str(row.get("row_type") or "trade").strip().lower() != "trade":
+                continue
+            if _to_float(row.get("net_profit")) is not None:
+                continue
+            explicit = _to_float(row.get("realized_pnl"))
+            if explicit is None:
+                for alias in ("closed_pnl", "net_pnl"):
+                    explicit = _to_float(row.get(alias))
+                    if explicit is not None:
+                        break
+            source_txt = str(row.get("source") or "").strip().lower()
+            refs_txt = str((row.get("raw_refs") or {}).get("source_file") or "").strip().lower() if isinstance(row.get("raw_refs"), dict) else ""
+            is_mt5_like = (
+                "mt5" in source_txt
+                or "pepperstone" in source_txt
+                or "mt5" in refs_txt
+                or "pepperstone" in refs_txt
+            )
+            if explicit is None and is_mt5_like and _to_float(row.get("profit")) is not None:
+                profit_v = _to_float(row.get("profit")) or 0.0
+                commission_v = _to_float(row.get("commission")) or 0.0
+                swap_v = _to_float(row.get("swap")) or 0.0
+                explicit = profit_v + commission_v + swap_v
+            if explicit is not None:
+                out_idx = idx_by_id.get(rid)
+                if out_idx is not None:
+                    out[out_idx]["net_profit"] = explicit
+                    if _to_float(out[out_idx].get("realized_pnl")) is None:
+                        out[out_idx]["realized_pnl"] = explicit
+                    explicit_normalized += 1
+                continue
+            if chain_ccy == "__AMBIG__":
+                unresolved.append(f"{rid}:pnl_inference_ambiguous_currency")
+                unresolved_reasons[rid] = "pnl_inference_ambiguous_currency"
+                unresolved_ids.append(rid)
+                continue
+            bal = _to_float(row.get("balance_after_trade"))
+            if bal is None:
+                # allow immediate post-trade anchor
+                nxt_bal = None
+                nxt_i = None
+                for j in range(i + 1, len(chain_rows)):
+                    if _is_non_trade_balance_event(chain_rows[j]):
+                        break
+                    b2 = _to_float(chain_rows[j].get("balance_after_trade"))
+                    if b2 is not None:
+                        nxt_bal = b2
+                        nxt_i = j
+                        break
+                if nxt_bal is None or nxt_i is None or nxt_i != i + 1:
+                    unresolved.append(f"{rid}:pnl_inference_missing_balance_after_trade")
+                    unresolved_reasons[rid] = "pnl_inference_missing_balance_after_trade"
+                    unresolved_ids.append(rid)
+                    continue
+                nxt = chain_rows[nxt_i]
+                nxt_is_trade = str(nxt.get("row_type") or "trade").strip().lower() == "trade"
+                same_order = False
+                refs_cur = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
+                refs_nxt = nxt.get("raw_refs") if isinstance(nxt.get("raw_refs"), dict) else {}
+                for key in ("orderId", "order_id", "execId", "tradeId"):
+                    if refs_cur.get(key) and refs_cur.get(key) == refs_nxt.get(key):
+                        same_order = True
+                        break
+                nxt_anchor_marked = str(nxt.get("row_type") or "").strip().lower() in {"balance", "account_balance"}
+                if nxt_is_trade and not same_order:
+                    unresolved.append(f"{rid}:pnl_inference_post_trade_anchor_ambiguous")
+                    unresolved_reasons[rid] = "pnl_inference_post_trade_anchor_ambiguous"
+                    unresolved_ids.append(rid)
+                    continue
+                if (not nxt_is_trade) and (not nxt_anchor_marked) and (not same_order):
+                    unresolved.append(f"{rid}:pnl_inference_post_trade_anchor_ambiguous")
+                    unresolved_reasons[rid] = "pnl_inference_post_trade_anchor_ambiguous"
+                    unresolved_ids.append(rid)
+                    continue
+                bal = nxt_bal
+            prev = None
+            prev_index = -1
+            for j in range(i - 1, -1, -1):
+                pb = _to_float(chain_rows[j].get("balance_after_trade"))
+                if pb is not None:
+                    prev = chain_rows[j]
+                    prev_index = j
+                    break
+            if not prev:
+                unresolved.append(f"{rid}:pnl_inference_missing_previous_balance_anchor")
+                unresolved_reasons[rid] = "pnl_inference_missing_previous_balance_anchor"
+                unresolved_ids.append(rid)
+                continue
+            intervening = chain_rows[prev_index + 1:i]
+            if any(_is_non_trade_balance_event(r) for r in intervening):
+                unresolved.append(f"{rid}:pnl_inference_blocked_by_non_trade_balance_event")
+                unresolved_reasons[rid] = "pnl_inference_blocked_by_non_trade_balance_event"
+                unresolved_ids.append(rid)
+                cashflow_blocked += 1
+                continue
+            prev_bal = _to_float(prev.get("balance_after_trade"))
+            if prev_bal is None:
+                unresolved.append(f"{rid}:pnl_inference_missing_previous_balance_anchor")
+                unresolved_reasons[rid] = "pnl_inference_missing_previous_balance_anchor"
+                unresolved_ids.append(rid)
+                continue
+            fee = abs(_to_float(row.get("commission")) or 0.0)
+            delta = bal - prev_bal
+            side_text = str(row.get("side") or "").strip().lower()
+            status_text = str(row.get("status") or "").strip().lower()
+            has_close_marker = bool(row.get("close_time")) or status_text in {"closed", "close", "completed", "filled"}
+            likely_opening = (not has_close_marker) and side_text in {"buy", "sell"}
+            if likely_opening and math.isclose(delta, -fee, abs_tol=1e-9):
+                unresolved.append(f"{rid}:pnl_inference_open_fill_fee_only_no_closing_proof")
+                unresolved_reasons[rid] = "pnl_inference_open_fill_fee_only_no_closing_proof"
+                unresolved_ids.append(rid)
+                continue
+            out_idx = idx_by_id.get(rid)
+            if out_idx is not None:
+                out[out_idx]["net_profit"] = delta
+            inferred += 1
+    if unresolved:
+        warnings.extend(unresolved)
+    diag = {
+        "pnl_explicit_normalized_count": explicit_normalized,
+        "pnl_inferred_count": inferred,
+        "pnl_unresolved_count": len(unresolved_ids),
+        "pnl_unresolved_row_ids": unresolved_ids,
+        "pnl_unresolved_reasons": unresolved_reasons,
+        "pnl_unresolved_cashflow_blocked_count": cashflow_blocked,
+    }
+    return out, warnings, diag
+
+
+def _parse_local_trading_journal_workbook(path: Path, *, original_name: Optional[str] = None) -> Tuple[List[Dict[str, object]], Optional[Dict[str, object]]]:
     if path.suffix.lower() == ".csv":
         df = pd.read_csv(path, encoding="utf-8-sig")
         if _is_bybit_trade_history_csv(list(df.columns)):
             return _parse_bybit_trade_history_csv(path, account_mode='demo'), None
         if _is_oanda_transaction_history_frame(df):
-            lower = path.name.lower()
-            hinted_mode = "demo" if "demo" in lower else ("live" if "live" in lower else "")
+            stem = Path(str(original_name or path.name)).stem.lower()
+            tokens = {t for t in re.split(r"[^a-z0-9]+", stem) if t}
+            hinted_mode = "demo" if "demo" in tokens else ("live" if "live" in tokens else "")
+            if not hinted_mode:
+                raise ValueError("OANDA CSV account is ambiguous; include demo/live in filename.")
             account_mode = hinted_mode or "demo"
             account_label = "OANDA DEMO" if account_mode == "demo" else "OANDA LIVE"
-            if not hinted_mode:
-                account_label = "__UNRESOLVED_OANDA_EXPORT__"
             parsed = _journal_rows_from_oanda_transaction_history_frame(
                 df,
                 account_mode=account_mode,
                 account_label=account_label,
                 source_path=str(path),
             )
-            if not hinted_mode:
-                for row in parsed.get("rows") or []:
-                    row["account"] = "__unresolved_oanda_export__"
-                    row["account_label"] = "__UNRESOLVED_OANDA_EXPORT__"
-                    refs = row.get("raw_refs") if isinstance(row.get("raw_refs"), dict) else {}
-                    refs["unresolved_account_mapping"] = True
-                    row["raw_refs"] = refs
-                if isinstance(parsed.get("account_balance"), dict):
-                    parsed["account_balance"]["account"] = "__UNRESOLVED_OANDA_EXPORT__"
-                    parsed["account_balance"]["label"] = "__UNRESOLVED_OANDA_EXPORT__"
-                    parsed["account_balance"]["raw_refs"] = {
-                        **(parsed["account_balance"].get("raw_refs") or {}),
-                        "unresolved_account_mapping": True,
-                        "workbook": path.name,
-                    }
             return parsed.get("rows") or [], parsed.get("account_balance")
         return [], None
     payload = path.read_bytes()
-    rows, balance = _parse_excel_account_workbook(path.name, str(path), payload)
+    rows, balance = _parse_excel_account_workbook(str(original_name or path.name), str(path), payload)
     for row in rows:
         if isinstance(row, dict):
-            row["source"] = "local_excel"
+            if not str(row.get("source") or "").strip():
+                row["source"] = "local_excel"
+            row["import_source"] = "local_excel"
     if isinstance(balance, dict):
         balance["import_source"] = "local_excel"
         if not str(balance.get("balance_source") or "").strip():
@@ -25791,6 +25993,12 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
         rows: List[Dict[str, object]] = []
         balance: Optional[Dict[str, object]] = None
         is_bybit_csv = bool(suffix == ".csv" and _is_bybit_trade_history_csv(tmp_path))
+        inference_warnings: List[str] = []
+        inference_diag: Dict[str, object] = {
+            "pnl_inferred_count": 0,
+            "pnl_unresolved_count": 0,
+            "pnl_unresolved_row_ids": [],
+        }
         if is_bybit_csv:
             if not mode:
                 return {"ok": False, "status_code": 422, "message": "Bybit history CSV account is ambiguous. Select Demo or Live before importing.", "uploaded_name": name, "file_type": suffix, "errors": ["ambiguous_bybit_account"], "warnings": []}
@@ -25801,9 +26009,11 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             balance = None
         else:
             try:
-                rows, balance = _parse_local_trading_journal_workbook(tmp_path)
+                rows, balance = _parse_local_trading_journal_workbook(tmp_path, original_name=name)
             except Exception as exc:
                 return {"ok": False, "status_code": 422, "message": f"Failed to parse {name}: {exc}", "uploaded_name": name, "file_type": suffix, "errors": [str(exc)], "warnings": []}
+        existing_rows = _get_trading_journal_rows()
+        rows, inference_warnings, inference_diag = _infer_realized_net_profit_from_balance_continuity(rows, existing_rows)
         rows = [r for r in (rows or []) if isinstance(r, dict)]
         missing_ids = [r for r in rows if str((r or {}).get("row_type") or "trade").strip().lower() == "trade" and not str((r or {}).get("id") or "").strip()]
         if missing_ids:
@@ -25860,7 +26070,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             if rollback_errors:
                 msg = f"{msg} | rollback failed: {'; '.join(rollback_errors)}"
             return {"ok": False, "status_code": code, "message": msg, "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": 0, "missing_row_ids": missing, "errors": [msg, *rollback_errors], "warnings": []}
-        return {"ok": True, "status_code": 200, "message": "Import complete.", "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": rows_upserted, "duplicate_rows_merged": duplicate_rows_merged, "balance_parsed": bool(balance), "master_journal_path": str(_master_journal_path()), "verified_row_ids_count": len(parsed_ids), "missing_row_ids": [], "warnings": [], "errors": []}
+        return {"ok": True, "status_code": 200, "message": "Import complete.", "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": rows_upserted, "duplicate_rows_merged": duplicate_rows_merged, "balance_parsed": bool(balance), "master_journal_path": str(_master_journal_path()), "verified_row_ids_count": len(parsed_ids), "missing_row_ids": [], "warnings": inference_warnings, "errors": [], **inference_diag}
     except Exception as exc:
         return {"ok": False, "status_code": 500, "message": f"Unexpected import error for {name}.", "uploaded_name": name, "file_type": suffix or "unknown", "rows_parsed": 0, "rows_upserted": 0, "duplicate_rows_merged": 0, "balance_parsed": False, "master_journal_path": str(_master_journal_path()), "verified_row_ids_count": 0, "missing_row_ids": [], "warnings": [], "errors": [str(exc)]}
     finally:

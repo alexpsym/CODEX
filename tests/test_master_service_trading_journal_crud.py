@@ -1361,7 +1361,7 @@ def test_import_file_bybit_csv_parses_once_with_explicit_account_mode(temp_state
         calls["bybit"] += 1
         assert account_mode == "live"
         return [{"id": "bybit:live:execution:BTCUSDT:e1", "row_type": "trade", "source": "bybit_execution_history", "account": "Bybit Live"}]
-    def _fake_local(_path):
+    def _fake_local(_path, **_k):
         calls["local"] += 1
         return [], None
     monkeypatch.setattr(master_service, "_parse_bybit_trade_history_csv", _fake_bybit)
@@ -1374,8 +1374,270 @@ def test_import_file_bybit_csv_parses_once_with_explicit_account_mode(temp_state
     assert calls["local"] == 0
 
 
+def test_global_pnl_inference_bybit_from_balance_continuity(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    existing = [{"id": "anchor:1", "row_type": "trade", "account": "Bybit Demo", "account_label": "Bybit Demo", "balance_after_trade": 1000.0, "open_time": "2026-05-17T12:00:00Z"}]
+    master_service._set_trading_journal_rows(existing)
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"ok": True})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    csv = _bybit_csv_sample(1).replace(",1000.0\n", ",1012.5\n").replace(",0.04,", ",0.50,")
+    payload = master_service._import_uploaded_trading_journal_file("bybit_demo.csv", csv.encode("utf-8"), account_mode="demo")
+    assert payload["ok"] is True
+    rows = master_service._get_trading_journal_rows()
+    imported = next(r for r in rows if str(r.get("id", "")).startswith("bybit:demo:execution:"))
+    assert imported["commission"] == 0.5
+    assert imported["net_profit"] == 12.5
+    assert payload.get("pnl_inferred_count") == 1
+
+
+def test_global_pnl_does_not_treat_fee_only_open_fill_as_realized_loss(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    existing = [{"id": "anchor:1", "row_type": "trade", "account": "Bybit Demo", "account_label": "Bybit Demo", "balance_after_trade": 1000.0, "open_time": "2026-05-17T12:00:00Z"}]
+    master_service._set_trading_journal_rows(existing)
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"ok": True})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    csv = _bybit_csv_sample(1).replace(",1000.0\n", ",999.5\n").replace(",0.04,", ",0.50,")
+    payload = master_service._import_uploaded_trading_journal_file("bybit_demo.csv", csv.encode("utf-8"), account_mode="demo")
+    assert payload["ok"] is True
+    imported = next(r for r in master_service._get_trading_journal_rows() if str(r.get("id", "")).startswith("bybit:demo:execution:"))
+    assert imported.get("net_profit") is None
+    assert any("open_fill_fee_only" in w for w in (payload.get("warnings") or []))
+
+
+def test_global_pnl_warns_when_previous_balance_anchor_missing(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    master_service._set_trading_journal_rows([])
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"ok": True})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    payload = master_service._import_uploaded_trading_journal_file("bybit_demo.csv", _bybit_csv_sample(1).encode("utf-8"), account_mode="demo")
+    assert payload["ok"] is True
+    assert payload.get("pnl_unresolved_count") == 1
+    assert payload.get("pnl_unresolved_row_ids")
+
+
+def test_global_pnl_does_not_double_count_commission():
+    imported = [{"id": "r2", "row_type": "trade", "account": "Bybit Demo", "account_label": "Bybit Demo", "currency": "USDT", "balance_after_trade": 1012.5, "commission": 0.5, "net_profit": None, "open_time": "2026-01-02T00:00:00Z"}]
+    existing = [{"id": "r1", "row_type": "trade", "account": "Bybit Demo", "account_label": "Bybit Demo", "currency": "USDT", "balance_after_trade": 1000.0, "open_time": "2026-01-01T00:00:00Z"}]
+    rows, _warnings, _diag = master_service._infer_realized_net_profit_from_balance_continuity(imported, existing)
+    assert rows[0]["net_profit"] == 12.5
+
+
+def test_import_response_uses_generic_pnl_diagnostics_not_bybit_only(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"ok": True})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    payload = master_service._import_uploaded_trading_journal_file("bybit_demo.csv", _bybit_csv_sample(1).encode("utf-8"), account_mode="demo")
+    assert "pnl_inferred_count" in payload
+    assert "pnl_unresolved_reasons" in payload
+
+
+def test_global_pnl_normalizes_explicit_realized_pnl_to_net_profit():
+    imported = [{"id": "o1", "row_type": "trade", "account": "OANDA DEMO", "account_label": "OANDA DEMO", "currency": "AUD", "realized_pnl": 8.25, "open_time": "2026-01-02T00:00:00Z"}]
+    rows, _warnings, _diag = master_service._infer_realized_net_profit_from_balance_continuity(imported, [])
+    assert rows[0]["net_profit"] == 8.25
+
+
+def test_global_pnl_preserves_pepperstone_explicit_profit_marked_source():
+    imported = [{"id": "p1", "row_type": "trade", "source": "pepperstone_mt5_statement", "account": "Pepperstone", "account_label": "Pepperstone", "currency": "USD", "profit": 5.5, "commission": 0.0, "swap": 0.0, "net_profit": None, "open_time": "2026-01-02T00:00:00Z"}]
+    rows, _warnings, _diag = master_service._infer_realized_net_profit_from_balance_continuity(imported, [])
+    assert rows[0]["net_profit"] == 5.5
+
+
+def test_global_pnl_non_trade_event_blocking_is_same_account_currency_only():
+    imported = [{"id": "t2", "row_type": "trade", "account": "Bybit Demo", "account_label": "Bybit Demo", "currency": "USDT", "balance_after_trade": 1010.0, "open_time": "2026-01-02T00:00:00Z"}]
+    existing = [
+        {"id": "t1", "row_type": "trade", "account": "Bybit Demo", "account_label": "Bybit Demo", "currency": "USDT", "balance_after_trade": 1000.0, "open_time": "2026-01-01T00:00:00Z"},
+        {"id": "cf1", "row_type": "cashflow", "account": "OANDA DEMO", "account_label": "OANDA DEMO", "currency": "AUD", "balance_after_trade": 9999.0, "open_time": "2026-01-01T12:00:00Z"},
+    ]
+    rows, warnings, _diag = master_service._infer_realized_net_profit_from_balance_continuity(imported, existing)
+    assert rows[0]["net_profit"] == 10.0
+    assert not any("blocked_by_non_trade" in w for w in warnings)
+
+
+def test_global_pnl_sort_prefers_close_time_over_open_time():
+    imported = [{"id": "t2", "row_type": "trade", "account": "OANDA DEMO", "account_label": "OANDA DEMO", "currency": "AUD", "open_time": "2026-01-01T00:00:00Z", "close_time": "2026-01-03T00:00:00Z", "balance_after_trade": 1010.0}]
+    existing = [{"id": "t1", "row_type": "trade", "account": "OANDA DEMO", "account_label": "OANDA DEMO", "currency": "AUD", "close_time": "2026-01-02T00:00:00Z", "balance_after_trade": 1000.0}]
+    rows, _w, _d = master_service._infer_realized_net_profit_from_balance_continuity(imported, existing)
+    assert rows[0]["net_profit"] == 10.0
+
+
+def test_global_pnl_post_trade_anchor_does_not_use_next_trade_as_anchor():
+    imported = [
+        {"id": "a", "row_type": "trade", "account": "Bybit Demo", "account_label": "Bybit Demo", "currency": "USDT", "open_time": "2026-01-02T00:00:00Z", "commission": 0.1},
+        {"id": "b", "row_type": "trade", "account": "Bybit Demo", "account_label": "Bybit Demo", "currency": "USDT", "open_time": "2026-01-02T00:01:00Z", "balance_after_trade": 1010.0},
+    ]
+    existing = [{"id": "prev", "row_type": "trade", "account": "Bybit Demo", "account_label": "Bybit Demo", "currency": "USDT", "open_time": "2026-01-01T00:00:00Z", "balance_after_trade": 1000.0}]
+    rows, _w, diag = master_service._infer_realized_net_profit_from_balance_continuity(imported, existing)
+    ra = next(r for r in rows if r["id"] == "a")
+    assert ra.get("net_profit") is None
+    assert diag["pnl_unresolved_reasons"]["a"] == "pnl_inference_post_trade_anchor_ambiguous"
+
+
+def test_global_pnl_blank_currency_blocks_when_account_currency_ambiguous():
+    imported = [{"id": "r1", "row_type": "trade", "account": "acct", "account_label": "acct", "currency": "", "balance_after_trade": 1010.0, "open_time": "2026-01-03T00:00:00Z"}]
+    existing = [
+        {"id": "e1", "row_type": "trade", "account": "acct", "account_label": "acct", "currency": "AUD", "balance_after_trade": 1000.0, "open_time": "2026-01-01T00:00:00Z"},
+        {"id": "e2", "row_type": "trade", "account": "acct", "account_label": "acct", "currency": "USD", "balance_after_trade": 1000.0, "open_time": "2026-01-02T00:00:00Z"},
+    ]
+    rows, _w, diag = master_service._infer_realized_net_profit_from_balance_continuity(imported, existing)
+    assert rows[0].get("net_profit") is None
+    assert diag["pnl_unresolved_reasons"]["r1"] == "pnl_inference_ambiguous_currency"
+
+
+def test_pepperstone_mt5_profit_commission_swap_normalizes_to_net_profit():
+    imported = [{"id": "mt5:1", "row_type": "trade", "source": "pepperstone_mt5_statement", "account": "Pepperstone", "account_label": "Pepperstone", "profit": 10.0, "commission": -1.0, "swap": -0.5, "open_time": "2026-01-01T00:00:00Z"}]
+    rows, _w, d = master_service._infer_realized_net_profit_from_balance_continuity(imported, [])
+    assert rows[0]["net_profit"] == 8.5
+    assert d.get("pnl_explicit_normalized_count") == 1
+
+
+def test_fee_only_closed_trade_is_not_suppressed_as_open_fill():
+    imported = [{"id": "c1", "row_type": "trade", "account": "Bybit Demo", "account_label": "Bybit Demo", "currency": "USDT", "commission": 0.5, "balance_after_trade": 999.5, "close_time": "2026-01-02T00:00:00Z", "status": "closed"}]
+    existing = [{"id": "p1", "row_type": "trade", "account": "Bybit Demo", "account_label": "Bybit Demo", "currency": "USDT", "balance_after_trade": 1000.0, "close_time": "2026-01-01T00:00:00Z"}]
+    rows, _w, _d = master_service._infer_realized_net_profit_from_balance_continuity(imported, existing)
+    assert rows[0]["net_profit"] == -0.5
+
+
+def test_prev_index_does_not_use_wrong_duplicate_row():
+    existing = [
+        {"id": "dup1", "row_type": "trade", "account": "A", "account_label": "A", "currency": "USD", "balance_after_trade": 100.0, "close_time": "2026-01-01T00:00:00Z"},
+        {"id": "dup2", "row_type": "trade", "account": "A", "account_label": "A", "currency": "USD", "balance_after_trade": 100.0, "close_time": "2026-01-01T00:00:00Z"},
+    ]
+    imported = [{"id": "t", "row_type": "trade", "account": "A", "account_label": "A", "currency": "USD", "balance_after_trade": 110.0, "close_time": "2026-01-02T00:00:00Z"}]
+    rows, _w, _d = master_service._infer_realized_net_profit_from_balance_continuity(imported, existing)
+    assert rows[0]["net_profit"] == 10.0
+
+
+def test_oanda_parser_explicit_realized_pl_reaches_net_profit_after_import(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"ok": True})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    csv = (
+        "TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,INSTRUMENT,DIRECTION,UNITS,PRICE,STOP LOSS,TAKE PROFIT,SPREAD COST,COMMISSION,GSL FEE,PL,BALANCE\n"
+        "1,2026-01-01 10:00:00 AEST,MARKET_ORDER,CLIENT_ORDER,EUR_USD,Buy,100000,1.1,,, -1,0,0,,1000\n"
+        "2,2026-01-01 10:00:01 AEST,ORDER_FILL,MARKET_ORDER,EUR_USD,Buy,100000,1.1,,, -1,0,0,,999\n"
+        "3,2026-01-01 11:00:00 AEST,ORDER_FILL,MARKET_ORDER_TRADE_CLOSE,EUR_USD,Buy,100000,1.2,,, -1,-1,0,10,1008\n"
+    )
+    payload = master_service._import_uploaded_trading_journal_file("oanda_demo.csv", csv.encode("utf-8"))
+    assert payload["ok"] is True
+    row = next(r for r in master_service._get_trading_journal_rows() if str(r.get("id", "")).startswith("oanda_export:"))
+    assert row["net_profit"] == 9.0
+
+
+def test_profit_alias_not_treated_as_gross_mt5_profit_for_unmarked_sources():
+    imported = [{"id": "x1", "row_type": "trade", "account": "Manual", "account_label": "Manual", "profit": 10.0, "commission": -1.0, "swap": -1.0, "open_time": "2026-01-01T00:00:00Z"}]
+    rows, _w, _d = master_service._infer_realized_net_profit_from_balance_continuity(imported, [])
+    assert rows[0].get("net_profit") is None
+
+
+def test_chain_currency_uses_current_chain_key_not_row_membership():
+    shared = {"row_type": "trade", "account": "A", "account_label": "A", "balance_after_trade": 1000.0, "close_time": "2026-01-01T00:00:00Z"}
+    existing = [dict(shared, id="aud", currency="AUD"), dict(shared, id="usd", currency="USD")]
+    imported = [dict(shared, id="new", currency="", balance_after_trade=1010.0, close_time="2026-01-02T00:00:00Z")]
+    rows, _w, d = master_service._infer_realized_net_profit_from_balance_continuity(imported, existing)
+    assert rows[0].get("net_profit") is None
+    assert d["pnl_unresolved_reasons"]["new"] == "pnl_inference_ambiguous_currency"
+
+
+def test_pepperstone_mt5_parser_profit_commission_swap_reaches_net_profit_after_import(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"ok": True})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    frame = master_service.pd.DataFrame([
+        {
+            "account": "Pepperstone MT5",
+            "symbol": "XAUUSD",
+            "side": "Buy",
+            "opening_time": "2026-01-01 10:00:00",
+            "closing_time": "2026-01-01 11:00:00",
+            "size_quantity": 1.0,
+            "entry_price": 2000.0,
+            "closing_price": 2005.0,
+            "profit": 10.0,
+            "commission": -1.0,
+            "swap": -0.5,
+            "balance_after_trade": 1008.5,
+            "currency": "USD",
+        }
+    ])
+    bio = io.BytesIO()
+    frame.to_excel(bio, index=False)
+    payload = master_service._import_uploaded_trading_journal_file("pepperstone_mt5.xlsx", bio.getvalue())
+    assert payload["ok"] is True
+    row = next(r for r in master_service._get_trading_journal_rows() if "pepperstone" in str(r.get("account_label", "")).lower())
+    assert row["net_profit"] == 8.5
+
+
+def test_workbook_net_pl_populates_for_oanda_pepperstone_bybit_after_sync(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    workbook = temp_state_paths / "Trading Journal.xlsx"
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: workbook)
+    rows = [
+        {"id": "oanda:1", "row_type": "trade", "account": "OANDA DEMO", "account_label": "OANDA DEMO", "symbol": "EURUSD", "side": "Buy", "open_time": "2026-01-01T00:00:00Z", "close_time": "2026-01-01T01:00:00Z", "qty": 1.0, "entry_price": 1.1, "exit_price": 1.2, "net_profit": 10.0, "commission": -1.0, "balance_after_trade": 1010.0, "currency": "AUD"},
+        {"id": "pep:1", "row_type": "trade", "account": "Pepperstone MT5", "account_label": "Pepperstone MT5", "symbol": "XAUUSD", "side": "Buy", "open_time": "2026-01-02T00:00:00Z", "close_time": "2026-01-02T01:00:00Z", "qty": 1.0, "entry_price": 2000.0, "exit_price": 2005.0, "net_profit": 8.5, "commission": -1.0, "swap": -0.5, "balance_after_trade": 1018.5, "currency": "USD"},
+        {"id": "bybit:1", "row_type": "trade", "account": "Bybit Demo", "account_label": "Bybit Demo", "symbol": "BTCUSDT", "side": "Buy", "open_time": "2026-01-03T00:00:00Z", "close_time": "2026-01-03T01:00:00Z", "qty": 0.1, "entry_price": 100000.0, "exit_price": 100100.0, "net_profit": 12.5, "commission": 0.5, "balance_after_trade": 1031.0, "currency": "USDT"},
+    ]
+    master_service._set_trading_journal_rows(rows)
+    out = master_service._sync_master_journal_workbook()
+    assert out.get("ok") is True
+    wb = master_service.load_workbook(master_service._master_journal_path(), data_only=True, read_only=True)
+    try:
+        ws = master_service._get_trade_log_sheet(wb, allow_legacy=False)
+        headers = [str(c.value or "").strip() for c in ws[1]]
+        pnl_idx = headers.index("Net P/L") + 1
+        vals = [ws.cell(r, pnl_idx).value for r in range(2, ws.max_row + 1)]
+        assert any(v == 10.0 for v in vals)
+        assert any(v == 8.5 for v in vals)
+        assert any(v == 12.5 for v in vals)
+    finally:
+        wb.close()
+
+
+def test_oanda_demo_upload_name_survives_tempfile_parse(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"ok": True})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    csv = "TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,BALANCE\n1,2026-01-01 10:00:00 AEST,ORDER_FILL,MARKET_ORDER,1000\n"
+    monkeypatch.setattr(master_service, "_journal_rows_from_oanda_transaction_history_frame", lambda *_a, **_k: {"rows":[{"id":"o:1","row_type":"trade","account":"OANDA DEMO","account_label":"OANDA DEMO","net_profit":1.0}],"account_balance":None})
+    payload = master_service._import_uploaded_trading_journal_file("oanda_demo.csv", csv.encode("utf-8"))
+    assert payload["ok"] is True
+    row = next(r for r in master_service._get_trading_journal_rows() if r.get("id") == "o:1")
+    assert row["account_label"] == "OANDA DEMO"
+
+
+def test_oanda_live_upload_name_survives_tempfile_parse(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"ok": True})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    csv = "TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,BALANCE\n1,2026-01-01 10:00:00 AEST,ORDER_FILL,MARKET_ORDER,1000\n"
+    monkeypatch.setattr(master_service, "_journal_rows_from_oanda_transaction_history_frame", lambda *_a, **_k: {"rows":[{"id":"o:2","row_type":"trade","account":"OANDA LIVE","account_label":"OANDA LIVE","net_profit":1.0}],"account_balance":None})
+    payload = master_service._import_uploaded_trading_journal_file("oanda_live.csv", csv.encode("utf-8"))
+    assert payload["ok"] is True
+    row = next(r for r in master_service._get_trading_journal_rows() if r.get("id") == "o:2")
+    assert row["account_label"] == "OANDA LIVE"
+
+
+def test_oanda_ambiguous_manual_upload_fails_or_warns_clearly(temp_state_paths):
+    csv = "TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,BALANCE\n1,2026-01-01 10:00:00 AEST,ORDER_FILL,MARKET_ORDER,1000\n"
+    payload = master_service._import_uploaded_trading_journal_file("oanda.csv", csv.encode("utf-8"))
+    assert payload["ok"] is False
+    assert int(payload["status_code"]) == 422
+
+
+def test_pepperstone_mt5_upload_name_survives_tempfile_parse(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"ok": True})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    frame = master_service.pd.DataFrame([{"account":"Pepperstone MT5","symbol":"XAUUSD","side":"Buy","opening_time":"2026-01-01","closing_time":"2026-01-02","size_quantity":1,"entry_price":1,"closing_price":2,"net_profit":1}])
+    bio = io.BytesIO(); frame.to_excel(bio, index=False)
+    payload = master_service._import_uploaded_trading_journal_file("pepperstone_mt5.xlsx", bio.getvalue())
+    assert payload["ok"] is True
+    row = next(r for r in master_service._get_trading_journal_rows() if "pepperstone" in str(r.get("account_label","")).lower())
+    assert row.get("source") == "pepperstone_mt5_statement"
+    assert row.get("import_source") == "local_excel"
+
+
+def test_local_excel_generic_rows_get_local_excel_source_when_blank(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_parse_excel_account_workbook", lambda *_a, **_k: ([{"id": "g:1", "row_type": "trade", "source": "", "account": "Generic"}], None))
+    p = temp_state_paths / "generic.xlsx"
+    p.write_bytes(b"x")
+    rows, _balance = master_service._parse_local_trading_journal_workbook(p, original_name="generic.xlsx")
+    assert rows[0]["source"] == "local_excel"
+    assert rows[0]["import_source"] == "local_excel"
+
+
 def test_import_file_balance_only_not_fake_success(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p: ([], {"account": "OANDA DEMO", "balance": 123.45}))
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p, **_k: ([], {"account": "OANDA DEMO", "balance": 123.45}))
     payload = master_service._import_uploaded_trading_journal_file("oanda_demo.xlsx", b"dummy")
     assert payload["ok"] is False
     assert int(payload["status_code"]) == 422
@@ -1383,7 +1645,7 @@ def test_import_file_balance_only_not_fake_success(temp_state_paths, monkeypatch
 
 
 def test_import_file_unexpected_exception_returns_structured_json_failure(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p, **_k: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
     monkeypatch.setattr(master_service, "_upsert_trading_journal_rows", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")))
     payload = master_service._import_uploaded_trading_journal_file("manual.xlsx", b"x")
     assert payload["ok"] is False
@@ -1394,7 +1656,7 @@ def test_import_file_unexpected_exception_returns_structured_json_failure(temp_s
 
 def test_import_file_rejects_rows_without_ids(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
     master_service._set_trading_journal_rows([{"id": "existing:1", "row_type": "trade", "source": "manual"}])
-    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p: ([{"row_type": "trade", "source": "manual"}], None))
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p, **_k: ([{"row_type": "trade", "source": "manual"}], None))
     payload = master_service._import_uploaded_trading_journal_file("manual.xlsx", b"x")
     assert payload["ok"] is False and int(payload["status_code"]) == 422
     assert any(r.get("id") == "existing:1" for r in master_service._get_trading_journal_rows())
@@ -1403,7 +1665,7 @@ def test_import_file_rejects_rows_without_ids(temp_state_paths, monkeypatch: pyt
 def test_import_file_rolls_back_rows_when_sync_fails(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
     original = [{"id": "existing:1", "row_type": "trade", "source": "manual"}]
     master_service._set_trading_journal_rows(original)
-    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p, **_k: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
     monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"ok": False, "error": "nope"})
     payload = master_service._import_uploaded_trading_journal_file("manual.xlsx", b"x")
     assert payload["ok"] is False
@@ -1413,7 +1675,7 @@ def test_import_file_rolls_back_rows_when_sync_fails(temp_state_paths, monkeypat
 def test_import_file_rolls_back_rows_when_verification_fails(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
     original = [{"id": "existing:1", "row_type": "trade", "source": "manual"}]
     master_service._set_trading_journal_rows(original)
-    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p, **_k: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
     monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"ok": True})
     monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": False, "missing_row_ids": ["new:1"], "error": "missing"})
     payload = master_service._import_uploaded_trading_journal_file("manual.xlsx", b"x")
@@ -1443,7 +1705,7 @@ def test_import_file_read_failure_returns_json():
 def test_import_file_rollback_uses_deepcopy_for_nested_fields(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
     original = [{"id": "existing:1", "row_type": "trade", "source": "manual", "raw_refs": {"nested": {"k": "v"}}, "manual_overrides": {"note": "keep"}}]
     master_service._set_trading_journal_rows(original)
-    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p: ([{"id": "existing:1", "row_type": "trade", "source": "manual", "raw_refs": {"nested": {"k": "changed"}}}], None))
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p, **_k: ([{"id": "existing:1", "row_type": "trade", "source": "manual", "raw_refs": {"nested": {"k": "changed"}}}], None))
     monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"ok": False, "error": "sync failed"})
     payload = master_service._import_uploaded_trading_journal_file("manual.xlsx", b"x")
     assert payload["ok"] is False
@@ -1456,7 +1718,7 @@ def test_import_file_restores_workbook_bytes_on_verification_failure(temp_state_
     workbook = temp_state_paths / "Trading Journal.xlsx"
     workbook.write_bytes(b"ORIGINAL-WB")
     monkeypatch.setattr(master_service, "_master_journal_path", lambda: workbook)
-    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p, **_k: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
     def _fake_sync():
         workbook.write_bytes(b"MODIFIED-WB")
         return {"ok": True}
@@ -1468,7 +1730,7 @@ def test_import_file_restores_workbook_bytes_on_verification_failure(temp_state_
 
 
 def test_import_file_verification_missing_ids_comes_from_original_verify_result(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p, **_k: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
     monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"ok": True})
     calls = {"n": 0}
     def _verify(*_a, **_k):
@@ -1485,7 +1747,7 @@ def test_import_file_deletes_new_workbook_created_before_verification_failure(te
     workbook = temp_state_paths / "Trading Journal.xlsx"
     assert workbook.exists() is False
     monkeypatch.setattr(master_service, "_master_journal_path", lambda: workbook)
-    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p, **_k: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
     def _fake_sync():
         workbook.write_bytes(b"NEWLY-CREATED")
         return {"ok": True}
@@ -1499,7 +1761,7 @@ def test_import_file_deletes_new_workbook_created_before_verification_failure(te
 def test_import_file_reports_workbook_delete_rollback_failure(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
     workbook = temp_state_paths / "Trading Journal.xlsx"
     monkeypatch.setattr(master_service, "_master_journal_path", lambda: workbook)
-    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p, **_k: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
     monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: (workbook.write_bytes(b"NEW-WB"), {"ok": True})[1])
     monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": False, "missing_row_ids": ["new:1"], "error": "missing"})
     monkeypatch.setattr(Path, "unlink", lambda _self: (_ for _ in ()).throw(PermissionError("cannot delete")))
@@ -1507,6 +1769,19 @@ def test_import_file_reports_workbook_delete_rollback_failure(temp_state_paths, 
     assert payload["ok"] is False
     assert "rollback failed" in str(payload.get("message") or "").lower()
     assert any("could not restore workbook" in str(err).lower() for err in (payload.get("errors") or []))
+
+
+def test_import_passes_original_name_to_parse_local_workbook(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    seen = {"name": None}
+    def _fake_parse(_path, *, original_name=None):
+        seen["name"] = original_name
+        return [{"id": "p:1", "row_type": "trade", "source": "pepperstone_mt5_statement"}], None
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", _fake_parse)
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"ok": True})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    payload = master_service._import_uploaded_trading_journal_file("pepperstone_mt5.xlsx", b"x")
+    assert payload["ok"] is True
+    assert seen["name"] == "pepperstone_mt5.xlsx"
 
 
 def test_parse_excel_balance_uses_latest_trade_timestamp_not_bottom_row(monkeypatch: pytest.MonkeyPatch):
