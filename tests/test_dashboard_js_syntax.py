@@ -74,10 +74,95 @@ def test_dashboard_js_prefers_post_verified_watchlist_before_remote_summary() ->
 
 def test_dashboard_js_removed_sync_journal_wiring():
     js = (ROOT / 'render' / 'static' / 'dashboard.js').read_text(encoding='utf-8')
-    assert '/api/trading-journal/sync' not in js
-    assert '/api/trading-journal/sync/status' not in js
-    assert 'sync-journal-btn' not in js
+    for token in [
+        'sync-journal-btn',
+        'syncJournalBtn',
+        'runSyncJournal',
+        'open-master-journal-btn',
+        'openMasterJournalBtn',
+        'openMasterJournal',
+        '/api/trading-journal/sync',
+        '/api/trading-journal/sync/status',
+    ]:
+        assert token not in js
 
+
+def test_dashboard_js_runtime_init_smoke() -> None:
+    node = shutil.which('node')
+    assert node, 'node is required for JS runtime smoke test'
+    harness = r"""
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+
+function element() {
+  return {
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    classList: { add: () => {}, remove: () => {}, toggle: () => {}, contains: () => false },
+    style: {},
+    dataset: {},
+    textContent: '',
+    innerHTML: '',
+    value: '',
+    disabled: false,
+    appendChild: () => {},
+    remove: () => {},
+    querySelector: () => element(),
+    querySelectorAll: () => [],
+    setAttribute: () => {},
+    getAttribute: () => null,
+  };
+}
+
+const document = {
+  visibilityState: 'visible',
+  body: element(),
+  getElementById: () => element(),
+  querySelector: () => element(),
+  querySelectorAll: () => [],
+  createElement: () => element(),
+  addEventListener: () => {},
+};
+
+const fetch = async (url) => ({
+  ok: true,
+  json: async () => {
+    if (String(url).includes('/scripts')) return [];
+    if (String(url).includes('/api/state-sync/status')) return {};
+    if (String(url).includes('/api/watchlist')) return { watchlist: [] };
+    if (String(url).includes('/api/oanda-inactivity-status')) return {};
+    return {};
+  },
+});
+
+const context = {
+  console,
+  document,
+  fetch,
+  setInterval: () => 1,
+  clearInterval: () => {},
+  setTimeout: (fn) => { if (typeof fn === 'function') fn(); return 1; },
+  clearTimeout: () => {},
+  URL: URL,
+  Date: Date,
+  Math: Math,
+  Promise: Promise,
+  AbortController: class { constructor() { this.signal = {}; } abort() {} },
+  navigator: { clipboard: { writeText: async () => {} } },
+  location: { href: 'http://127.0.0.1:8000/' },
+  sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+  localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+};
+context.window = context;
+context.window.addEventListener = () => {};
+context.window.removeEventListener = () => {};
+context.globalThis = context;
+
+vm.createContext(context);
+vm.runInContext(source, context, { filename: 'dashboard.js' });
+"""
+    subprocess.run([node, '-e', harness, str(JS_PATH)], check=True)
 
 
 def test_dashboard_js_user_facing_trading_journal_wording():

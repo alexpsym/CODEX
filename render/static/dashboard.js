@@ -746,15 +746,11 @@
     }
   });
   watchlistClearBtn?.addEventListener('click', () => clearWatchlist());
-  syncJournalBtn?.addEventListener('click', runSyncJournal);
-  openMasterJournalBtn?.addEventListener('click', openMasterJournal);
   oandaToggleBtn?.addEventListener('click', () => {
     oandaExpanded = !oandaExpanded;
     syncOandaDetailsVisibility();
   });
 
-  setOpenMasterJournalVisible(false);
-  refreshMasterJournalOpenState();
   restoreActiveWorkspace();
   refreshScripts();
   refreshStateSyncStatus().then(() => {
