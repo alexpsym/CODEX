@@ -25991,6 +25991,26 @@ def _open_path_with_os(path: Path) -> None:
         subprocess.Popen(["xdg-open", str(path)])
 
 
+def _master_journal_sync_ok(result: Dict[str, object] | None) -> bool:
+    if not isinstance(result, dict):
+        return False
+    if "ok" in result:
+        return bool(result.get("ok"))
+    return bool(result.get("master_journal_ok"))
+
+
+def _master_journal_sync_error(result: Dict[str, object] | None) -> str:
+    if not isinstance(result, dict):
+        return "no sync result returned"
+    return str(
+        result.get("error")
+        or result.get("master_journal_error")
+        or result.get("github_sync_error")
+        or result.get("message")
+        or "unknown error"
+    )
+
+
 
 TRADING_JOURNAL_ACTIONS_TEMPLATE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -26090,8 +26110,8 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             t3 = time.perf_counter()
             sync_result = _sync_master_journal_workbook()
             timings["workbook_sync"] = round(time.perf_counter() - t3, 6)
-            if not bool((sync_result or {}).get("ok")):
-                raise RuntimeError(f"Workbook sync failed: {(sync_result or {}).get('error') or 'unknown error'}")
+            if not _master_journal_sync_ok(sync_result):
+                raise RuntimeError(f"Workbook sync failed: {_master_journal_sync_error(sync_result)}")
             _PENDING_MANUAL_SYNC_ROWS = previous_pending_rows
             pending_restored = True
 

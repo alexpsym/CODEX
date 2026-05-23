@@ -1737,6 +1737,30 @@ def test_import_file_rolls_back_rows_when_sync_fails(temp_state_paths, monkeypat
     assert master_service._get_trading_journal_rows() == original
 
 
+def test_import_file_accepts_master_journal_ok_without_top_level_ok(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p, **_k: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"master_journal_ok": True, "master_journal_path": str(temp_state_paths / "Trading Journal.xlsx")})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    payload = master_service._import_uploaded_trading_journal_file("manual.xlsx", b"x")
+    assert payload["ok"] is True
+    assert int(payload["status_code"]) == 200
+
+
+def test_import_file_sync_failure_surfaces_master_journal_error(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    original = [{"id": "existing:1", "row_type": "trade", "source": "manual"}]
+    master_service._set_trading_journal_rows(original)
+    sync_error = "Trading Journal validation failed: Trade Log filter missing."
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda _p, **_k: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"master_journal_ok": False, "master_journal_error": sync_error})
+    payload = master_service._import_uploaded_trading_journal_file("manual.xlsx", b"x")
+    assert payload["ok"] is False
+    assert int(payload["status_code"]) == 500
+    assert sync_error in str(payload.get("message") or "")
+    assert any(sync_error in str(err) for err in (payload.get("errors") or []))
+    assert "unknown error" not in str(payload.get("message") or "").lower()
+    assert master_service._get_trading_journal_rows() == original
+
+
 def test_import_file_rolls_back_rows_when_verification_fails(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
     original = [{"id": "existing:1", "row_type": "trade", "source": "manual"}]
     master_service._set_trading_journal_rows(original)
