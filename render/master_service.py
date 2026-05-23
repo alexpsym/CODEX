@@ -1545,6 +1545,11 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
             "parsed_cashflow_rows": len([r for r in non_trade_items if _row_type(r) == "cashflow"]),
         })
         result = {"cache_version": TRADING_JOURNAL_VIEW_CACHE_VERSION, "generated_at": _utc_now_iso(), "items": items, "balances": balances, "stats": stats, "diagnostics": diagnostics, "source_fingerprints": fingerprint}
+        monthly_note_by_id = {
+            str(row.get("id") or ""): _normalize_monthly_aud_reval_snapshot_row(row)
+            for row in items
+            if _is_monthly_aud_reval_row(row)
+        }
         safe_result = _json_safe(result)
         if not isinstance(safe_result, dict):
             safe_result = {}
@@ -1557,21 +1562,12 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
                 if not _is_monthly_aud_reval_row(item):
                     normalized_items.append(item)
                     continue
-                normalized_note = dict(item)
-                normalized_note["id"] = str(normalized_note.get("id") or "")
-                normalized_note["row_type"] = "monthly_aud_reval"
-                normalized_note["source"] = normalized_note.get("source") or "bybit_monthly_aud_reval"
-                normalized_note["symbol"] = normalized_note.get("symbol") or "MONTHLY AUD P/L"
-                normalized_note["account"] = normalized_note.get("account") or "BYBIT"
-                normalized_note["account_label"] = normalized_note.get("account_label") or "BYBIT"
-                normalized_note["result_currency"] = str(normalized_note.get("result_currency") or "AUD").strip().upper()
-                normalized_note["result_cash"] = _to_float(normalized_note.get("result_cash"))
-                normalized_note["raw_refs"] = normalized_note.get("raw_refs") if isinstance(normalized_note.get("raw_refs"), dict) else {}
-                normalized_note["close_time"] = normalized_note.get("close_time") or ""
-                normalized_note["setup"] = normalized_note.get("setup") or "Monthly BYBIT AUD P/L note - excluded from metrics"
-                normalized_note["notes"] = normalized_note.get("notes") or "Monthly BYBIT AUD P/L note; excluded from trading metrics."
-                normalized_note["chart_available"] = bool(normalized_note.get("chart_available")) if "chart_available" in normalized_note else False
-                normalized_items.append(normalized_note)
+                row_id = str(item.get("id") or "")
+                fallback = monthly_note_by_id.get(row_id)
+                if fallback is not None:
+                    normalized_items.append(dict(fallback))
+                else:
+                    normalized_items.append(_normalize_monthly_aud_reval_snapshot_row(item))
             safe_result["items"] = normalized_items
         _save_trading_journal_view_snapshot(safe_result)
         _persist_trading_journal_sqlite(safe_result)
@@ -1712,6 +1708,11 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
         "warnings": diagnostics.get("errors") if isinstance(diagnostics.get("errors"), list) else [],
         "source_fingerprints": fingerprint,
     }
+    monthly_note_by_id = {
+        str(row.get("id") or ""): _normalize_monthly_aud_reval_snapshot_row(row)
+        for row in monthly_note_rows
+        if _is_monthly_aud_reval_row(row)
+    }
     safe_payload = _json_safe(payload)
     if not isinstance(safe_payload, dict):
         safe_payload = {}
@@ -1724,21 +1725,12 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
             if not _is_monthly_aud_reval_row(item):
                 normalized_items.append(item)
                 continue
-            normalized_note = dict(item)
-            normalized_note["id"] = str(normalized_note.get("id") or "")
-            normalized_note["row_type"] = "monthly_aud_reval"
-            normalized_note["source"] = normalized_note.get("source") or "bybit_monthly_aud_reval"
-            normalized_note["symbol"] = normalized_note.get("symbol") or "MONTHLY AUD P/L"
-            normalized_note["account"] = normalized_note.get("account") or "BYBIT"
-            normalized_note["account_label"] = normalized_note.get("account_label") or "BYBIT"
-            normalized_note["result_currency"] = str(normalized_note.get("result_currency") or "AUD").strip().upper()
-            normalized_note["result_cash"] = _to_float(normalized_note.get("result_cash"))
-            normalized_note["raw_refs"] = normalized_note.get("raw_refs") if isinstance(normalized_note.get("raw_refs"), dict) else {}
-            normalized_note["close_time"] = normalized_note.get("close_time") or ""
-            normalized_note["setup"] = normalized_note.get("setup") or "Monthly BYBIT AUD P/L note - excluded from metrics"
-            normalized_note["notes"] = normalized_note.get("notes") or "Monthly BYBIT AUD P/L note; excluded from trading metrics."
-            normalized_note["chart_available"] = bool(normalized_note.get("chart_available")) if "chart_available" in normalized_note else False
-            normalized_items.append(normalized_note)
+            row_id = str(item.get("id") or "")
+            fallback = monthly_note_by_id.get(row_id)
+            if fallback is not None:
+                normalized_items.append(dict(fallback))
+            else:
+                normalized_items.append(_normalize_monthly_aud_reval_snapshot_row(item))
         safe_payload["items"] = normalized_items
     _save_trading_journal_view_snapshot(safe_payload)
     _persist_trading_journal_sqlite(safe_payload)
@@ -20701,6 +20693,43 @@ def _row_type(row: Dict[str, object]) -> str:
 
 def _is_monthly_aud_reval_row(row: object) -> bool:
     return isinstance(row, dict) and str(row.get("row_type") or "").strip().lower() == "monthly_aud_reval"
+
+
+def _normalize_monthly_aud_reval_snapshot_row(
+    row: Dict[str, object],
+    *,
+    fallback: Optional[Dict[str, object]] = None,
+) -> Dict[str, object]:
+    current = row if isinstance(row, dict) else {}
+    backup = fallback if isinstance(fallback, dict) else {}
+    out = dict(current)
+    out["id"] = str(current.get("id") or backup.get("id") or "")
+    out["row_type"] = "monthly_aud_reval"
+    out["result_currency"] = str(
+        current.get("result_currency") or backup.get("result_currency") or "AUD"
+    ).strip().upper()
+    result_cash = _to_float(current.get("result_cash"))
+    if result_cash is None:
+        result_cash = _to_float(backup.get("result_cash"))
+    out["result_cash"] = result_cash
+    current_refs = current.get("raw_refs")
+    backup_refs = backup.get("raw_refs")
+    out["raw_refs"] = current_refs if isinstance(current_refs, dict) else backup_refs if isinstance(backup_refs, dict) else {}
+    out["close_time"] = current.get("close_time") or backup.get("close_time") or ""
+    out["source"] = current.get("source") or backup.get("source") or "bybit_monthly_aud_reval"
+    out["symbol"] = current.get("symbol") or backup.get("symbol") or "MONTHLY AUD P/L"
+    out["account"] = current.get("account") or backup.get("account") or "BYBIT"
+    out["account_label"] = current.get("account_label") or backup.get("account_label") or "BYBIT"
+    out["setup"] = current.get("setup") or backup.get("setup") or "Monthly BYBIT AUD P/L note - excluded from metrics"
+    out["notes"] = current.get("notes") or backup.get("notes") or "Monthly BYBIT AUD P/L note; excluded from trading metrics."
+    out["chart_available"] = bool(
+        current.get("chart_available")
+        if "chart_available" in current
+        else backup.get("chart_available")
+        if "chart_available" in backup
+        else False
+    )
+    return out
 
 
 def _is_trade_row(row: Dict[str, object]) -> bool:
