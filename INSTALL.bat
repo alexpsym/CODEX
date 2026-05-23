@@ -1002,8 +1002,20 @@ Set-Location -LiteralPath $dest
 
 $codexDir = Join-Path $dest $repoFolderName
 $gitExe = Get-GitExecutable
-$latestLogPath = Join-Path $dest 'ExtractLatestCodexMaster-latest.log'
-$timestampedLogPath = Join-Path $dest ("ExtractLatestCodexMaster-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+$scriptLogStem = 'INSTALL'
+if ($env:__BATFILE) {
+    $candidateStem = [IO.Path]::GetFileNameWithoutExtension($env:__BATFILE)
+    if (-not [string]::IsNullOrWhiteSpace($candidateStem)) {
+        $scriptLogStem = $candidateStem
+    }
+}
+$invalidFileNameChars = [string]::new([IO.Path]::GetInvalidFileNameChars())
+$scriptLogStem = [regex]::Replace($scriptLogStem, "[{0}]" -f [regex]::Escape($invalidFileNameChars), '_')
+if ([string]::IsNullOrWhiteSpace($scriptLogStem)) {
+    $scriptLogStem = 'INSTALL'
+}
+$latestLogPath = Join-Path $dest ("{0}-latest.log" -f $scriptLogStem)
+$timestampedLogPath = Join-Path $dest ("{0}-{1}.log" -f $scriptLogStem, (Get-Date -Format 'yyyyMMdd-HHmmss'))
 
 Write-Section 'Using Git instead of ZIP download/extraction.'
 Write-Host "Destination root: $dest"

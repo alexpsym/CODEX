@@ -1,6 +1,12 @@
 from pathlib import Path
 
 
+def _installer_script_path() -> Path:
+    modern = Path("INSTALL.bat")
+    legacy = Path("ExtractLatestCodexMaster.bat")
+    return modern if modern.exists() else legacy
+
+
 def classify_status(status_text: str, allowed_root_generated_files=None):
     allowed_root_generated_files = allowed_root_generated_files or []
     result = {"IsOnlyAllowed": True, "DisallowedLines": []}
@@ -61,7 +67,7 @@ def classify_status(status_text: str, allowed_root_generated_files=None):
 
 
 def test_classifier_source_preserves_leading_xy_columns():
-    text = Path("ExtractLatestCodexMaster.bat").read_text(encoding="utf-8")
+    text = _installer_script_path().read_text(encoding="utf-8")
     assert "$lineRaw.Substring(0,2)" in text
     assert "$line = $lineRaw.Trim()" not in text
 
@@ -116,14 +122,14 @@ def test_allows_relocated_state_root_files_only():
 
 
 def test_preserve_local_files_from_backup_includes_relocated_root_state_files():
-    text = Path("ExtractLatestCodexMaster.bat").read_text(encoding="utf-8")
+    text = _installer_script_path().read_text(encoding="utf-8")
     assert "function Preserve-LocalFilesFromBackup" in text
     for file_name in ("watchlist.json", "state_manifest.json", "stateManifest.json", "state_backup.json"):
         assert file_name in text
 
 
 def test_invoke_git_text_uses_process_start_info_and_separate_stderr():
-    text = Path("ExtractLatestCodexMaster.bat").read_text(encoding="utf-8")
+    text = _installer_script_path().read_text(encoding="utf-8")
     assert "function Invoke-GitText" in text
     assert "System.Diagnostics.ProcessStartInfo" in text
     assert "$psi.RedirectStandardError = $true" in text
@@ -131,7 +137,7 @@ def test_invoke_git_text_uses_process_start_info_and_separate_stderr():
 
 
 def test_backup_diagnostics_use_best_effort_helper():
-    text = Path("ExtractLatestCodexMaster.bat").read_text(encoding="utf-8")
+    text = _installer_script_path().read_text(encoding="utf-8")
     assert "function Write-GitDiagnosticFile" in text
     assert "WARNING: Could not write backup diagnostic" in text
     assert "git-status-before-reset.txt" in text
@@ -151,7 +157,7 @@ def test_classifier_rejects_modified_render_master_service():
 
 
 def test_invoke_git_text_does_not_trim_stdout_leading_columns():
-    text = Path("ExtractLatestCodexMaster.bat").read_text(encoding="utf-8")
+    text = _installer_script_path().read_text(encoding="utf-8")
     invoke_git_text_start = text.index("function Invoke-GitText")
     invoke_git_text_end = text.index("function Remove-TrailingLineTerminators")
     invoke_git_text_body = text[invoke_git_text_start:invoke_git_text_end]

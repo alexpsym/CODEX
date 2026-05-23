@@ -3,6 +3,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _installer_script_path() -> Path:
+    modern = ROOT / "INSTALL.bat"
+    legacy = ROOT / "ExtractLatestCodexMaster.bat"
+    return modern if modern.exists() else legacy
+
+
 def test_repo_tracks_trading_journal_not_legacy_master_journal() -> None:
     journal = ROOT / "journal"
     assert (journal / "Trading Journal.xlsx").exists()
@@ -10,7 +16,7 @@ def test_repo_tracks_trading_journal_not_legacy_master_journal() -> None:
 
 
 def test_extract_latest_preserve_normalizes_legacy_workbook_names() -> None:
-    script = (ROOT / "ExtractLatestCodexMaster.bat").read_text(encoding="utf-8")
+    script = _installer_script_path().read_text(encoding="utf-8")
     assert "function Resolve-JournalWorkbookCollision" in script
     assert "Master Journal.xlsx" in script
     assert "Trading Journal.xlsx" in script
@@ -20,7 +26,7 @@ def test_extract_latest_preserve_normalizes_legacy_workbook_names() -> None:
 
 
 def test_extract_latest_never_leaves_both_workbooks_active_after_preserve() -> None:
-    script = (ROOT / "ExtractLatestCodexMaster.bat").read_text(encoding="utf-8")
+    script = _installer_script_path().read_text(encoding="utf-8")
     assert "if (Test-Path -LiteralPath $canonical -PathType Leaf)" in script
     assert "Master Journal.legacy." in script
     assert "journal_legacy_backups" in script
