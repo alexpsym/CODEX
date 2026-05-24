@@ -194,12 +194,13 @@ def test_extract_latest_transcript_logging_paths_and_messages_present() -> None:
     assert "$scriptLogStem = 'INSTALL'" in script
     assert "[IO.Path]::GetFileNameWithoutExtension($env:__BATFILE)" in script
     assert '"{0}-latest.log" -f $scriptLogStem' in script
-    assert '"{0}-{1}.log" -f $scriptLogStem' in script
+    assert '"{0}-{1}.log" -f $scriptLogStem' not in script
     assert "ExtractLatestCodexMaster-latest.log" not in script
     assert "ExtractLatestCodexMaster-{0}.log" not in script
-    assert 'Start-Transcript -LiteralPath $timestampedLogPath -Force' in script
+    assert 'Start-Transcript -LiteralPath $latestLogPath -Force' in script
     assert 'Stop-Transcript' in script
-    assert 'Full log written to: $timestampedLogPath' in script
+    assert 'Copy-Item -LiteralPath $timestampedLogPath -Destination $latestLogPath' not in script
+    assert 'Full log written to: $latestLogPath' in script
 
 
 def test_extract_latest_has_no_invalid_variable_scope_tokens_in_double_quoted_strings() -> None:
@@ -228,3 +229,28 @@ def test_extract_latest_embedded_powershell_parses_without_errors() -> None:
     )
     result = subprocess.run([ps_exe, "-NoProfile", "-Command", parse_cmd], capture_output=True, text=True)
     assert result.returncode == 0, f"PowerShell parse errors:\n{result.stdout}\n{result.stderr}"
+
+
+def test_extract_latest_cleanup_helpers_and_calls_present() -> None:
+    script = _installer_script_path().read_text(encoding='utf-8')
+    assert 'function Remove-OldInstallLogs' in script
+    assert 'function Remove-OldVersionedDirectories' in script
+    assert 'function Remove-OldCodexBackupDirectories' in script
+    assert "CODEX-master-git-backup-" in script
+    assert "CODEX-master-zip-backup-" in script
+    assert "CODEX-master-fastforward-blockers-" in script
+    assert "Remove-OldInstallLogs -DestinationRoot $dest -ScriptLogStem $scriptLogStem -KeepPath $latestLogPath" in script
+    assert "Remove-OldVersionedDirectories -DestinationRoot $dest -Prefix 'CODEX-master-fastforward-blockers-'" in script
+    assert "Remove-OldVersionedDirectories -DestinationRoot $dest -Prefix 'CODEX-master-fastforward-blockers-' -KeepNewestWhenNoKeepPath" not in script
+    assert "Remove-OldCodexBackupDirectories -DestinationRoot $dest" in script
+    git_backup_idx = script.find("Write-GitDiagnosticFile -GitExe $GitExe -Arguments @('diff', '--cached', '--binary')")
+    git_cleanup_idx = script.find("Remove-OldCodexBackupDirectories -DestinationRoot $DestinationRoot -KeepPath $backupDir")
+    assert git_backup_idx != -1 and git_cleanup_idx != -1 and git_backup_idx < git_cleanup_idx
+    zip_preserve_idx = script.rfind('Preserve-LocalFilesFromBackup -BackupDir $backupDir -NewRepoDir $RepoDir')
+    zip_cleanup_idx = script.rfind("Remove-OldCodexBackupDirectories -DestinationRoot $DestinationRoot -KeepPath $backupDir")
+    assert zip_preserve_idx != -1 and zip_cleanup_idx != -1 and zip_preserve_idx < zip_cleanup_idx
+    ff_restore_idx = script.find("Preserve-LocalFilesFromBackup -BackupDir $ffRestoreRoot -NewRepoDir $RepoDir")
+    ff_delete_idx = script.find("Remove-Item -LiteralPath $ffBlockerBackupDir -Recurse -Force -ErrorAction Stop")
+    assert ff_restore_idx != -1 and ff_delete_idx != -1 and ff_restore_idx < ff_delete_idx
+    assert "if ($name -ieq 'CODEX-master') { return $false }" in script
+    assert 'CODEX-master*' not in script

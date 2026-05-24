@@ -803,6 +803,123 @@ function Preserve-LocalFilesFromBackup {
     }
 }
 
+function Remove-OldInstallLogs {
+    param(
+        [Parameter(Mandatory = $true)] [string] $DestinationRoot,
+        [Parameter(Mandatory = $true)] [string] $ScriptLogStem,
+        [Parameter(Mandatory = $true)] [string] $KeepPath
+    )
+
+    $keepResolved = [IO.Path]::GetFullPath($KeepPath)
+    $pattern = "{0}-*.log" -f $ScriptLogStem
+    $logCandidates = @(Get-ChildItem -LiteralPath $DestinationRoot -File -Filter $pattern -ErrorAction Stop)
+    foreach ($logFile in $logCandidates) {
+        $candidateResolved = [IO.Path]::GetFullPath($logFile.FullName)
+        if ($candidateResolved -ieq $keepResolved) {
+            continue
+        }
+
+        try {
+            Remove-Item -LiteralPath $logFile.FullName -Force -ErrorAction Stop
+            Write-Host "Removed old install log: $($logFile.FullName)"
+        } catch {
+            throw "Failed to remove old install log '$($logFile.FullName)': $($_.Exception.Message)"
+        }
+    }
+}
+
+function Remove-OldVersionedDirectories {
+    param(
+        [Parameter(Mandatory = $true)] [string] $DestinationRoot,
+        [Parameter(Mandatory = $true)] [string] $Prefix,
+        [string] $KeepPath,
+        [switch] $KeepNewestWhenNoKeepPath
+    )
+
+    $dirs = @(Get-ChildItem -LiteralPath $DestinationRoot -Directory -ErrorAction Stop | Where-Object {
+        $_.Name.StartsWith($Prefix, [System.StringComparison]::Ordinal)
+    })
+
+    if ($dirs.Count -eq 0) {
+        return
+    }
+
+    $keepResolved = $null
+    if ($KeepPath) {
+        $keepResolved = [IO.Path]::GetFullPath($KeepPath)
+    } elseif ($KeepNewestWhenNoKeepPath) {
+        $newest = $dirs | Sort-Object LastWriteTimeUtc, Name | Select-Object -Last 1
+        if ($newest) {
+            $keepResolved = [IO.Path]::GetFullPath($newest.FullName)
+        }
+    }
+
+    foreach ($dir in $dirs) {
+        if ($dir.Name -ieq 'CODEX-master') {
+            continue
+        }
+
+        $dirResolved = [IO.Path]::GetFullPath($dir.FullName)
+        if ($keepResolved -and $dirResolved -ieq $keepResolved) {
+            continue
+        }
+
+        try {
+            Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction Stop
+            Write-Host "Removed old backup folder: $($dir.FullName)"
+        } catch {
+            throw "Failed to remove old backup folder '$($dir.FullName)': $($_.Exception.Message)"
+        }
+    }
+}
+
+function Remove-OldCodexBackupDirectories {
+    param(
+        [Parameter(Mandatory = $true)] [string] $DestinationRoot,
+        [string] $KeepPath
+    )
+
+    $prefixes = @('CODEX-master-git-backup-', 'CODEX-master-zip-backup-')
+    $dirs = @(Get-ChildItem -LiteralPath $DestinationRoot -Directory -ErrorAction Stop | Where-Object {
+        $name = $_.Name
+        if ($name -ieq 'CODEX-master') { return $false }
+        foreach ($prefix in $prefixes) {
+            if ($name.StartsWith($prefix, [System.StringComparison]::Ordinal)) {
+                return $true
+            }
+        }
+        return $false
+    })
+
+    if ($dirs.Count -eq 0) {
+        return
+    }
+
+    $keepResolved = $null
+    if ($KeepPath) {
+        $keepResolved = [IO.Path]::GetFullPath($KeepPath)
+    } else {
+        $newest = $dirs | Sort-Object LastWriteTimeUtc, Name | Select-Object -Last 1
+        if ($newest) {
+            $keepResolved = [IO.Path]::GetFullPath($newest.FullName)
+        }
+    }
+
+    foreach ($dir in $dirs) {
+        $dirResolved = [IO.Path]::GetFullPath($dir.FullName)
+        if ($keepResolved -and $dirResolved -ieq $keepResolved) {
+            continue
+        }
+
+        try {
+            Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction Stop
+            Write-Host "Removed old real backup folder: $($dir.FullName)"
+        } catch {
+            throw "Failed to remove old real backup folder '$($dir.FullName)': $($_.Exception.Message)"
+        }
+    }
+}
+
 function Remove-OldCodexZipsFromDownloads {
     $downloadCandidates = @()
     if ($env:USERPROFILE) {
@@ -882,6 +999,8 @@ function Ensure-CodexGitRepo {
             if ($ffMovedBlockers -gt 0) {
                 $ffRestoreRoot = Join-Path $ffBlockerBackupDir 'checkout-blockers'
                 Preserve-LocalFilesFromBackup -BackupDir $ffRestoreRoot -NewRepoDir $RepoDir
+                Remove-Item -LiteralPath $ffBlockerBackupDir -Recurse -Force -ErrorAction Stop
+                Remove-OldVersionedDirectories -DestinationRoot $DestinationRoot -Prefix 'CODEX-master-fastforward-blockers-'
             }
             $headAfterFastForward = Invoke-GitText -GitExe $GitExe -Arguments @('rev-parse', 'HEAD') -WorkingDirectory $RepoDir
             $originAfterFastForward = Invoke-GitText -GitExe $GitExe -Arguments @('rev-parse', "origin/$Branch") -WorkingDirectory $RepoDir
@@ -901,6 +1020,7 @@ function Ensure-CodexGitRepo {
         Write-GitDiagnosticFile -GitExe $GitExe -Arguments @('log', '--oneline', "origin/$Branch..HEAD") -WorkingDirectory $RepoDir -DestinationPath (Join-Path $backupDir 'git-log-local-ahead.txt')
         Write-GitDiagnosticFile -GitExe $GitExe -Arguments @('diff', '--binary') -WorkingDirectory $RepoDir -DestinationPath (Join-Path $backupDir 'local-changes.patch')
         Write-GitDiagnosticFile -GitExe $GitExe -Arguments @('diff', '--cached', '--binary') -WorkingDirectory $RepoDir -DestinationPath (Join-Path $backupDir 'local-staged-changes.patch')
+        Remove-OldCodexBackupDirectories -DestinationRoot $DestinationRoot -KeepPath $backupDir
 
         Write-Host "Local Git state was not fast-forwardable. A full backup was created at: $backupDir"
         Stop-CodexRepoProcessMatches -RepoDir $RepoDir
@@ -975,6 +1095,7 @@ function Ensure-CodexGitRepo {
 
     if ($backupDir) {
         Preserve-LocalFilesFromBackup -BackupDir $backupDir -NewRepoDir $RepoDir
+        Remove-OldCodexBackupDirectories -DestinationRoot $DestinationRoot -KeepPath $backupDir
     }
 }
 
@@ -1015,18 +1136,20 @@ if ([string]::IsNullOrWhiteSpace($scriptLogStem)) {
     $scriptLogStem = 'INSTALL'
 }
 $latestLogPath = Join-Path $dest ("{0}-latest.log" -f $scriptLogStem)
-$timestampedLogPath = Join-Path $dest ("{0}-{1}.log" -f $scriptLogStem, (Get-Date -Format 'yyyyMMdd-HHmmss'))
+
+Remove-OldInstallLogs -DestinationRoot $dest -ScriptLogStem $scriptLogStem -KeepPath $latestLogPath
+Remove-OldVersionedDirectories -DestinationRoot $dest -Prefix 'CODEX-master-fastforward-blockers-'
+Remove-OldCodexBackupDirectories -DestinationRoot $dest
 
 Write-Section 'Using Git instead of ZIP download/extraction.'
 Write-Host "Destination root: $dest"
 Write-Host "CODEX folder:     $codexDir"
 Write-Host "Git executable:   $gitExe"
 Write-Host "Log file (latest): $latestLogPath"
-Write-Host "Log file (run):    $timestampedLogPath"
 
 $transcriptStarted = $false
 try {
-    Start-Transcript -LiteralPath $timestampedLogPath -Force | Out-Null
+    Start-Transcript -LiteralPath $latestLogPath -Force | Out-Null
     $transcriptStarted = $true
 } catch {
     Write-Host "WARNING: Unable to start transcript log: $($_.Exception.Message)"
@@ -1039,7 +1162,7 @@ try {
         Write-Host ''
         Write-Host 'ERROR: Git clone/update failed.'
         Write-Host $_.Exception.Message
-        Write-Host "Full log written to: $timestampedLogPath"
+        Write-Host "Full log written to: $latestLogPath"
         Write-Host ''
         Write-Host 'No fake success state was applied. Fix the Git error above and run this file again.'
         exit 1
@@ -1143,12 +1266,7 @@ $expectedLaunchers | ForEach-Object { Write-Host " - $_" }
 } finally {
     if ($transcriptStarted) {
         try { Stop-Transcript | Out-Null } catch {}
-        try {
-            Copy-Item -LiteralPath $timestampedLogPath -Destination $latestLogPath -Force -ErrorAction Stop
-        } catch {
-            Write-Host "WARNING: Unable to refresh latest log copy: $($_.Exception.Message)"
-        }
-        Write-Host "Full log written to: $timestampedLogPath"
+        Write-Host "Full log written to: $latestLogPath"
         Write-Host "Latest log path: $latestLogPath"
     }
 }
