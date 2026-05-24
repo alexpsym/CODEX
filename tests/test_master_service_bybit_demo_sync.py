@@ -1577,23 +1577,99 @@ def test_bybit_trade_history_csv_parser_full_fixture(tmp_path: Path) -> None:
         "Trading Fee Rate","Fees Paid","Trasaction ID","Transaction Time(UTC+10)","Final Balance (USDT)"
     ]
     lines = [",".join(headers)]
-    for i in range(23):
-        day = "17" if i < 11 else "19"
-        lines.append(
-            f"BTCUSDT,OID-1,Buy,Market,0.001,100000,100000,Trade,0.00055,0.01,EX{i:03d},2026-05-{day} 01:13:00+10:00,1000.{i}"
-        )
+    fills = [
+        ("OIDA","Buy",0.019,100000,"EX001","17/05/2026 22:55"),
+        ("OIDA","Sell",0.019,100100,"EX002","17/05/2026 22:56"),
+    ] + [(f"OIDB{i}","Buy",0.018,100200+i,f"EX{3+i:03d}","19/05/2026 00:52") for i in range(18)] + [
+        ("OIDBCLS","Sell",0.324,100260,"EX021","19/05/2026 00:54"),
+        ("OIDC","Buy",0.016,100300,"EX022","19/05/2026 01:12"),
+        ("OIDC","Sell",0.016,100330,"EX023","19/05/2026 01:13"),
+    ]
+    for oid, side, qty, px, exid, ts in fills:
+        lines.append(f"BTCUSDT,{oid},{side},Market,{qty},{px},{px},Trade,0.00055,0.01,{exid},{ts},1000.0")
     p = tmp_path / "bybit_history_fixture.csv"
     p.write_text("\n".join(lines), encoding="utf-8")
     assert master_service._is_bybit_trade_history_csv(headers) is True
-    rows = master_service._parse_bybit_trade_history_csv(p, account_mode="demo")
-    assert len(rows) == 23
-    assert rows[0]["id"] == "bybit:demo:execution:BTCUSDT:EX000"
-    assert rows[1]["raw_refs"]["orderId"] == rows[0]["raw_refs"]["orderId"]
-    assert rows[1]["raw_refs"]["execId"] != rows[0]["raw_refs"]["execId"]
-    assert rows[0]["open_time"] == rows[0]["close_time"]
-    assert str(rows[0]["open_time"]).startswith("2026-05-17")
-    assert str(rows[-1]["open_time"]).startswith("2026-05-19")
-    assert rows[0]["net_profit"] is None
+    rows, unmatched, diag = master_service._parse_bybit_trade_history_csv_with_diagnostics(p, account_mode="demo")
+    assert len(rows) == 3
+    assert unmatched == []
+    assert diag["bybit_execution_rows_seen"] == 23
+    assert diag["bybit_completed_trades_imported"] == 3
+    assert diag["bybit_unmatched_execution_rows"] == 0
+    assert [round(float(r["qty"]), 3) for r in rows] == [0.019, 0.324, 0.016]
+    assert all(str(r["id"]).startswith("bybit:demo:trade:") for r in rows)
+
+def test_rows_only_bybit_parser_raises_on_unmatched(tmp_path: Path) -> None:
+    p = tmp_path / "buy_only.csv"
+    p.write_text(
+        "contracts,Order No.,Direction,Order Type,Filled Qty,Filled Price,Order Price,Filled Type,Trading Fee Rate,Fees Paid,Trasaction ID,Transaction Time(UTC+10),Final Balance (USDT)\n"
+        "BTCUSDT,OID1,Buy,Market,0.01,100000,100000,Trade,0.00055,0.01,EX001,17/05/2026 22:55,1000\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Unmatched Bybit execution rows remain open"):
+        master_service._parse_bybit_trade_history_csv(p, account_mode="demo")
+
+def test_parse_iso_datetime_source_has_no_github_sync_terms() -> None:
+    import inspect
+    src = inspect.getsource(master_service._parse_iso_datetime)
+    lowered = src.lower()
+    assert "github_sync_result" not in lowered
+    assert "sync_journal_excel_files_to_github" not in lowered
+    assert "github_sync" not in lowered
+
+def test_bybit_reversal_rows_block_with_explicit_diagnostics(tmp_path: Path) -> None:
+    p = tmp_path / "reversal.csv"
+    p.write_text(
+        "contracts,Order No.,Direction,Order Type,Filled Qty,Filled Price,Order Price,Filled Type,Trading Fee Rate,Fees Paid,Trasaction ID,Transaction Time(UTC+10),Final Balance (USDT)\n"
+        "BTCUSDT,OID1,Buy,Market,0.01,100000,100000,Trade,0.00055,0.01,EX001,17/05/2026 22:55,1000\n"
+        "BTCUSDT,OID2,Sell,Market,0.02,100100,100100,Trade,0.00055,0.01,EX002,17/05/2026 22:56,1000\n",
+        encoding="utf-8",
+    )
+    rows, unmatched, diag = master_service._parse_bybit_trade_history_csv_with_diagnostics(p, account_mode="demo")
+    assert rows == []
+    assert len(unmatched) >= 1
+    assert diag.get("bybit_reversal_execution_rows_seen", 0) >= 1
+    assert diag.get("bybit_reversal_import_blocked") is True
+
+def test_manual_import_reversal_response_includes_reversal_diagnostics(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
+    payload = (
+        "contracts,Order No.,Direction,Order Type,Filled Qty,Filled Price,Order Price,Filled Type,Trading Fee Rate,Fees Paid,Trasaction ID,Transaction Time(UTC+10),Final Balance (USDT)\n"
+        "BTCUSDT,OID1,Buy,Market,0.01,100000,100000,Trade,0.00055,0.01,EX001,17/05/2026 22:55,1000\n"
+        "BTCUSDT,OID2,Sell,Market,0.02,100100,100100,Trade,0.00055,0.01,EX002,17/05/2026 22:56,1000\n"
+    ).encode("utf-8")
+    out = master_service._import_uploaded_trading_journal_file("bybit_history.csv", payload, account_mode="demo")
+    assert out["ok"] is False
+    assert "unmatched_bybit_executions" in out.get("errors", [])
+    assert "zero_rows" not in out.get("errors", [])
+    assert out.get("bybit_execution_rows_seen") == 2
+    assert out.get("bybit_completed_trades_imported") == 0
+    assert out.get("bybit_unmatched_execution_rows", 0) >= 1
+    assert out.get("bybit_reversal_import_blocked") is True
+    assert out.get("bybit_reversal_execution_rows_seen", 0) >= 1
+
+def test_manual_import_buy_only_response_includes_unmatched_diagnostics(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
+    payload = (
+        "contracts,Order No.,Direction,Order Type,Filled Qty,Filled Price,Order Price,Filled Type,Trading Fee Rate,Fees Paid,Trasaction ID,Transaction Time(UTC+10),Final Balance (USDT)\n"
+        "BTCUSDT,OID1,Buy,Market,0.01,100000,100000,Trade,0.00055,0.01,EX001,17/05/2026 22:55,1000\n"
+    ).encode("utf-8")
+    out = master_service._import_uploaded_trading_journal_file("bybit_history.csv", payload, account_mode="demo")
+    assert out["ok"] is False
+    assert "unmatched_bybit_executions" in out.get("errors", [])
+    assert "zero_rows" not in out.get("errors", [])
+    assert out.get("bybit_execution_rows_seen") == 1
+    assert out.get("bybit_completed_trades_imported") == 0
+    assert out.get("bybit_unmatched_execution_rows", 0) >= 1
+
+def test_epoch_or_iso_to_iso_dayfirst_au_date_no_warning():
+    import warnings
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        out = master_service._epoch_or_iso_to_iso("17/05/2026 22:55")
+    assert out is not None
+    assert str(out).startswith("2026-05-17")
+    assert not any("dayfirst=False" in str(w.message) for w in caught)
 
 
 def test_sync_bybit_closed_pnl_window_uses_execution_rows_when_closed_pnl_empty(monkeypatch) -> None:

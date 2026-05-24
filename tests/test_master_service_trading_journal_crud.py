@@ -1332,11 +1332,103 @@ def _bybit_csv_sample(row_count: int = 2) -> str:
         rows.append(f"BTCUSDT,ord-{i},Buy,Market,0.001,65000,65000,Trade,0.0006,0.04,exec-{i},22:55 2026-05-17,1000.0")
     return header + "\n" + "\n".join(rows) + "\n"
 
+def _bybit_csv_grouped_three_trades() -> str:
+    header = "contracts,Order No.,Direction,Order Type,Filled Qty,Filled Price,Order Price,Filled Type,Trading Fee Rate,Fees Paid,Trasaction ID,Transaction Time(UTC+10),Final Balance (USDT)"
+    fills = [
+        ("OIDA", "Buy", 0.019, 100000, "EX001", "17/05/2026 22:55"),
+        ("OIDA", "Sell", 0.019, 100100, "EX002", "17/05/2026 22:56"),
+    ] + [(f"OIDB{i}", "Buy", 0.018, 100200 + i, f"EX{3+i:03d}", "19/05/2026 00:52") for i in range(18)] + [
+        ("OIDBCLS", "Sell", 0.324, 100260, "EX021", "19/05/2026 00:54"),
+        ("OIDC", "Buy", 0.016, 100300, "EX022", "19/05/2026 01:12"),
+        ("OIDC", "Sell", 0.016, 100330, "EX023", "19/05/2026 01:13"),
+    ]
+    rows = [
+        f"BTCUSDT,{oid},{side},Market,{qty},{px},{px},Trade,0.00055,0.01,{exid},{ts},1000.0"
+        for oid, side, qty, px, exid, ts in fills
+    ]
+    return header + "\n" + "\n".join(rows) + "\n"
+
+
+def test_valid_bybit_import_preserves_existing_rows_and_reports_sync_fields(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    from tools.master_journal_workbook import build_master_journal_workbook
+    from openpyxl import load_workbook
+    old_rows = [
+        {"id": "old1", "row_type": "trade", "source": "manual", "account": "OANDA DEMO", "account_label": "OANDA DEMO", "symbol": "EURUSD", "side": "Buy", "qty": 1.0, "entry_price": 1.1, "exit_price": 1.2, "open_time": "2026-05-01T00:00:00Z", "close_time": "2026-05-01T01:00:00Z", "net_profit": 10.0},
+        {"id": "old2", "row_type": "trade", "source": "manual", "account": "OANDA DEMO", "account_label": "OANDA DEMO", "symbol": "GBPUSD", "side": "Buy", "qty": 1.0, "entry_price": 1.2, "exit_price": 1.3, "open_time": "2026-05-02T00:00:00Z", "close_time": "2026-05-02T01:00:00Z", "net_profit": 10.0},
+        {"id": "old3", "row_type": "trade", "source": "manual", "account": "OANDA DEMO", "account_label": "OANDA DEMO", "symbol": "USDJPY", "side": "Sell", "qty": 1.0, "entry_price": 150.0, "exit_price": 149.0, "open_time": "2026-05-03T00:00:00Z", "close_time": "2026-05-03T01:00:00Z", "net_profit": 10.0},
+        {"id": "monthly_aud_reval:bybit_live:2026-03", "row_type": "monthly_aud_reval", "source": "bybit_monthly_aud_reval", "account": "Bybit Live", "account_label": "Bybit Live", "symbol": "MONTHLY AUD P/L", "open_time": "2026-03-01T00:00:00Z", "close_time": "2026-03-31T23:59:59Z", "result_cash": 5.0, "result_currency": "AUD"},
+        {"id": "monthly_aud_reval:bybit_live:2026-04", "row_type": "monthly_aud_reval", "source": "bybit_monthly_aud_reval", "account": "Bybit Live", "account_label": "Bybit Live", "symbol": "MONTHLY AUD P/L", "open_time": "2026-04-01T00:00:00Z", "close_time": "2026-04-30T23:59:59Z", "result_cash": 7.0, "result_currency": "AUD"},
+    ]
+    master_service._set_trading_journal_rows(old_rows)
+    build_master_journal_workbook({"items": old_rows, "stats": {"totals": {}, "groups": {}}, "balances": []}, temp_state_paths / "Trading Journal.xlsx")
+
+    order = []
+    real_verify = master_service._verify_trade_log_row_ids_in_workbook
+    def _wrapped_verify(*a, **k):
+        order.append("verify")
+        return real_verify(*a, **k)
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", _wrapped_verify)
+    def _fake_sync(_path):
+        order.append("github")
+        return {"github_sync_enabled": True, "github_sync_ok": True, "github_sync_noop": False, "github_sync_error": "", "github_sync_commit": "abc123"}
+    monkeypatch.setattr(master_service, "_sync_journal_excel_files_to_github", _fake_sync)
+
+    payload = master_service._import_uploaded_trading_journal_file("bybit_demo.csv", _bybit_csv_grouped_three_trades().encode("utf-8"), account_mode="demo")
+    assert payload["ok"] is True
+    assert payload.get("github_sync_enabled") is True
+    assert payload.get("github_sync_ok") is True
+    assert payload.get("github_sync_deferred") is False
+    assert payload.get("github_sync_path")
+    assert payload.get("github_sync_message")
+    assert order.index("verify") < order.index("github")
+
+    ids = {str(r.get("id") or "") for r in master_service._get_trading_journal_rows()}
+    assert {"old1", "old2", "old3", "monthly_aud_reval:bybit_live:2026-03", "monthly_aud_reval:bybit_live:2026-04"}.issubset(ids)
+    bybit_ids = [x for x in ids if x.startswith("bybit:demo:trade:")]
+    assert len(bybit_ids) == 3
+
+    wb = load_workbook(temp_state_paths / "Trading Journal.xlsx", data_only=True)
+    ws = wb["Trade Log"]
+    headers = [str(c.value or "") for c in ws[1]]
+    ridx = headers.index("Row ID") + 1
+    trade_ids = {str(ws.cell(r, ridx).value or "").strip() for r in range(2, ws.max_row + 1)}
+    assert {"old1", "old2", "old3", "monthly_aud_reval:bybit_live:2026-03", "monthly_aud_reval:bybit_live:2026-04"}.issubset(trade_ids)
+    inst = wb["Instrument Averages"]
+    ih = [str(c.value or "").strip().lower() for c in inst[1]]
+    sym_col = ih.index("symbol") + 1
+    trades_col = ih.index("trades") + 1 if "trades" in ih else ih.index("total trades") + 1
+    btc_trades = None
+    for rr in range(2, inst.max_row + 1):
+        if str(inst.cell(rr, sym_col).value or "").strip().upper() == "BTCUSDT":
+            btc_trades = int(float(inst.cell(rr, trades_col).value or 0))
+            break
+    assert btc_trades == 3
+
+
+def test_sync_master_journal_duration_validation_still_fails_real_trade_blank_duration(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    from tools.master_journal_workbook import build_master_journal_workbook
+    mj = temp_state_paths / "Trading Journal.xlsx"
+    rows = [{"id": "t1", "row_type": "trade", "source": "manual", "account": "OANDA DEMO", "account_label": "OANDA DEMO", "symbol": "EURUSD", "side": "Buy", "qty": 1.0, "entry_price": 1.1, "exit_price": 1.2, "open_time": "2026-05-01T00:00:00Z", "close_time": "2026-05-01T01:00:00Z", "net_profit": 10.0}]
+    build_master_journal_workbook({"items": rows, "stats": {"totals": {}, "groups": {}}, "balances": []}, mj)
+    from openpyxl import load_workbook
+    wb = load_workbook(mj)
+    ws = wb["Trade Log"]
+    headers = [str(c.value or "") for c in ws[1]]
+    dur_col = headers.index("Trade Duration (DD:HH:MM:SS)") + 1
+    ws.cell(2, dur_col).value = ""
+    wb.save(mj)
+    wb.close()
+    monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", lambda force=True: {"items": rows, "stats": {"totals": {}, "groups": {}}, "balances": []})
+    monkeypatch.setattr(master_service, "update_master_journal_workbook_data_only", lambda *a, **k: {"ok": True, "candidate_path": str(mj)})
+    out = master_service._sync_master_journal_workbook(defer_github_sync=True)
+    assert out.get("ok") is False
+    assert "duration column blank/non-numeric" in str(out.get("master_journal_error") or "")
+
 
 def test_import_file_endpoint_not_stub_anymore(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"ok": True})
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda **_k: {"ok": True})
     monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
-    payload = master_service._import_uploaded_trading_journal_file("bybit_demo.csv", _bybit_csv_sample(1).encode("utf-8"), account_mode="demo")
+    payload = master_service._import_uploaded_trading_journal_file("bybit_demo.csv", _bybit_csv_grouped_three_trades().encode("utf-8"), account_mode="demo")
     assert int(payload.get("status_code") or 0) == 200
     assert int(payload.get("status_code") or 0) != 501
     assert payload["ok"] is True
