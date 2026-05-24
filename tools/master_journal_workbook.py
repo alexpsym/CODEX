@@ -1215,7 +1215,7 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
     finally:
         wb.close()
 
-def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any], expected_survivor_row_ids: Optional[List[str]] = None) -> Dict[str, Any]:
     wb = load_workbook(path)
     diagnostics: Dict[str, Any] = {"missing_accounts": [], "updated_cells": 0}
     try:
@@ -1509,6 +1509,21 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             gen_trade_log = _get_all_trades_sheet(gen, allow_legacy=False)
             live_trade_log = _get_all_trades_sheet(wb, allow_legacy=False)
             _copy_data_rows(gen_trade_log, live_trade_log, 2, force_all_columns=True)
+            if expected_survivor_row_ids:
+                headers = [str(c.value or "").strip() for c in live_trade_log[1]]
+                ridx = headers.index("Row ID") + 1 if "Row ID" in headers else None
+                if not ridx:
+                    return {
+                        "ok": False,
+                        "error": "workbook_row_survivor_verification_failed",
+                        "missing_row_ids": sorted([rid for rid in expected_survivor_row_ids if rid]),
+                        "reason": "missing_row_id_header",
+                        "diagnostics": diagnostics,
+                    }
+                present = {str(live_trade_log.cell(rr, ridx).value or "").strip() for rr in range(2, live_trade_log.max_row + 1)}
+                missing = sorted([rid for rid in expected_survivor_row_ids if rid and rid not in present])
+                if missing:
+                    return {"ok": False, "error": "workbook_row_survivor_verification_failed", "missing_row_ids": missing, "diagnostics": diagnostics}
             _repair_trade_log_unknown_currency_formats(live_trade_log, rows, diagnostics)
 
             def _copy_instrument_rows_header_aware(src_ws, dst_ws, start_row: int = 2):

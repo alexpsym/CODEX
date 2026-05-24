@@ -253,6 +253,23 @@ def test_update_data_only_repairs_legacy_instrument_averages_freeze_pane(tmp_pat
     assert "All Trades" not in repaired.sheetnames
     repaired.close()
 
+def test_update_data_only_survivor_guard_fails_when_row_id_header_missing(tmp_path: Path):
+    out = tmp_path / "Trading Journal.xlsx"
+    snap = sample_snapshot()
+    build_master_journal_workbook(snap, out)
+    wb = load_workbook(out)
+    ws = wb["Trade Log"]
+    headers = [str(ws.cell(1, c).value or "") for c in range(1, ws.max_column + 1)]
+    ridx = headers.index("Row ID") + 1
+    ws.cell(1, ridx).value = "Row ID Removed"
+    wb.save(out)
+    wb.close()
+    result = update_master_journal_workbook_data_only(out, snap, expected_survivor_row_ids=["old1", "old2"])
+    assert result["ok"] is False
+    assert result["error"] == "workbook_row_survivor_verification_failed"
+    assert result["reason"] == "missing_row_id_header"
+    assert result["missing_row_ids"] == ["old1", "old2"]
+
 def test_conditional_format_colors_and_dashboard_semantics(tmp_path: Path):
     out=tmp_path/'cf.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
     dash = wb["Dashboard"]

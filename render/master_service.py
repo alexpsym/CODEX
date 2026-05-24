@@ -6308,7 +6308,7 @@ def _normalize_bybit_execution_history_row(raw: Dict[str, object], account_mode:
         ts = str(t).strip()
         if ts:
             try:
-                parsed = pd.to_datetime(ts, errors="coerce")
+                parsed = pd.to_datetime(ts, errors="coerce", dayfirst=True)
                 if pd.notna(parsed):
                     brisbane = ZoneInfo("Australia/Brisbane")
                     if getattr(parsed, "tzinfo", None) is None:
@@ -6330,13 +6330,88 @@ def _normalize_bybit_execution_history_row(raw: Dict[str, object], account_mode:
     rid = f'bybit:{mode}:execution:{symbol}:{exec_id}' if exec_id else f"bybit:{mode}:execution:{symbol}:{order_id}:{open_time}:{side}:{qty}:{price}"
     return {'id': rid,'row_type':'trade','asset_class':'crypto','account':_canonical_journal_account_label('Bybit Demo' if mode=='demo' else 'Bybit Live', source='bybit', account_mode=mode),'account_label':_canonical_journal_account_label('Bybit Demo' if mode=='demo' else 'Bybit Live', source='bybit', account_mode=mode),'symbol':symbol,'side':side,'qty':qty,'entry_price':price,'exit_price':price,'open_time':open_time,'close_time':open_time,'commission':fee,'fee_rate':fee_rate,'net_profit':None,'balance_after_trade':bal,'currency':'USDT' if symbol.endswith('USDT') else '', 'source':'bybit_execution_history','notes':'Bybit execution-history row; Net P/L may be inferred from explicit P/L fields or balance continuity when provable.','raw_refs':{'orderId':order_id or None,'execId':exec_id or None,'source_file':source_path,'source_row':source_row}}
 
-def _parse_bybit_trade_history_csv(path: Path, account_mode: str='demo') -> List[Dict[str, object]]:
-    df = pd.read_csv(path, encoding='utf-8-sig')
-    rows=[]
-    for i, rec in enumerate(df.to_dict(orient='records'), start=2):
-        row=_normalize_bybit_execution_history_row(rec, account_mode, str(path), i)
+def _group_bybit_execution_history_rows_into_completed_trades(records: List[Dict[str, object]], account_mode: str, source_path: str) -> Tuple[List[Dict[str, object]], List[str], Dict[str, object]]:
+    mode = "demo" if str(account_mode).lower().strip() == "demo" else "live"
+    account_label = _canonical_journal_account_label("Bybit Demo" if mode == "demo" else "Bybit Live", source="bybit", account_mode=mode)
+    normalized: List[Dict[str, object]] = []
+    for rec in records or []:
+        if not isinstance(rec, dict):
+            continue
+        row = _normalize_bybit_execution_history_row(rec.get("raw") or rec, mode, source_path, rec.get("_source_row"))
         if row:
-            rows.append(row)
+            row["_source_row"] = rec.get("_source_row")
+            row["_ts"] = _parse_iso_datetime(row.get("open_time"))
+            normalized.append(row)
+    normalized.sort(key=lambda r: ((r.get("_ts").timestamp() if isinstance(r.get("_ts"), datetime) else float("inf")), int(r.get("_source_row") or 10**9)))
+    trades: List[Dict[str, object]] = []
+    unmatched: List[str] = []
+    reversal_rows: List[str] = []
+    by_symbol: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    for r in normalized:
+        by_symbol[str(r.get("symbol") or "").upper()].append(r)
+    for symbol, exec_rows in by_symbol.items():
+        seg: List[Dict[str, object]] = []
+        pos = 0.0
+        for ex in exec_rows:
+            qty = abs(_to_float(ex.get("qty")) or 0.0)
+            if qty <= 0:
+                continue
+            side = str(ex.get("side") or "").strip().lower()
+            signed = qty if side == "buy" else -qty
+            if not seg:
+                seg = [ex]; pos = signed
+            else:
+                if (pos > 0 and signed < 0 and abs(signed) > abs(pos)) or (pos < 0 and signed > 0 and abs(signed) > abs(pos)):
+                    reversal_rows.append(str((ex.get("raw_refs") or {}).get("execId") or ex.get("id") or ""))
+                    seg.append(ex)
+                    break
+                seg.append(ex); pos += signed
+            if abs(pos) < 1e-12:
+                open_side = str(seg[0].get("side") or "").strip().title()
+                open_qty = sum(abs(_to_float(s.get("qty")) or 0.0) for s in seg if str(s.get("side") or "").strip().lower() == open_side.lower())
+                close_qty = sum(abs(_to_float(s.get("qty")) or 0.0) for s in seg if str(s.get("side") or "").strip().lower() != open_side.lower())
+                closed = min(open_qty, close_qty)
+                entry_notional = sum((abs(_to_float(s.get("qty")) or 0.0) * (_to_float(s.get("entry_price")) or 0.0)) for s in seg if str(s.get("side") or "").strip().lower() == open_side.lower())
+                exit_notional = sum((abs(_to_float(s.get("qty")) or 0.0) * (_to_float(s.get("entry_price")) or 0.0)) for s in seg if str(s.get("side") or "").strip().lower() != open_side.lower())
+                fees = sum(_to_float(s.get("commission")) or 0.0 for s in seg)
+                exec_ids = [str(((s.get("raw_refs") or {}).get("execId") or "")).strip() for s in seg if str(((s.get("raw_refs") or {}).get("execId") or "")).strip()]
+                src_rows = [int(s.get("_source_row")) for s in seg if s.get("_source_row")]
+                digest = hashlib.sha256("|".join(exec_ids + [str(x) for x in src_rows]).encode("utf-8")).hexdigest()[:16]
+                gross = (exit_notional - entry_notional) if open_side.lower() == "buy" else (entry_notional - exit_notional)
+                open_ts = seg[0].get("open_time"); close_ts = seg[-1].get("close_time") or seg[-1].get("open_time")
+                dur = max(1, int(((_parse_iso_datetime(close_ts) - _parse_iso_datetime(open_ts)).total_seconds()) if _parse_iso_datetime(close_ts) and _parse_iso_datetime(open_ts) else 1))
+                trades.append({
+                    "id": f"bybit:{mode}:trade:{symbol}:{digest}", "row_type": "trade", "asset_class": "crypto", "account": account_label, "account_label": account_label,
+                    "symbol": symbol, "side": open_side, "qty": closed, "entry_price": (entry_notional / open_qty) if open_qty else None, "exit_price": (exit_notional / close_qty) if close_qty else None,
+                    "open_time": open_ts, "close_time": close_ts, "commission": fees, "net_profit": gross - fees, "currency": "USDT" if symbol.endswith("USDT") else "",
+                    "trade_duration_seconds": dur, "source": "bybit_execution_history_grouped",
+                    "raw_refs": {"source_file": source_path, "source_rows": src_rows, "order_ids": sorted({str(((s.get("raw_refs") or {}).get("orderId") or "")).strip() for s in seg if str(((s.get("raw_refs") or {}).get("orderId") or "")).strip()}), "exec_ids": exec_ids, "execution_count": len(seg), "parser": "bybit_execution_history_grouped"}
+                })
+                seg = []; pos = 0.0
+        if seg:
+            unmatched.extend([str((s.get("raw_refs") or {}).get("execId") or s.get("id") or "") for s in seg])
+    diag = {
+        "bybit_execution_rows_seen": len(normalized),
+        "bybit_completed_trades_imported": len(trades),
+        "bybit_unmatched_execution_rows": len(unmatched),
+        "bybit_reversal_execution_rows_seen": len(reversal_rows),
+        "bybit_reversal_import_blocked": bool(reversal_rows),
+        "bybit_reversal_row_ids": reversal_rows,
+    }
+    return trades, unmatched, diag
+
+def _parse_bybit_trade_history_csv_with_diagnostics(path: Path, account_mode: str='demo') -> Tuple[List[Dict[str, object]], List[str], Dict[str, object]]:
+    df = pd.read_csv(path, encoding='utf-8-sig')
+    records = []
+    for i, rec in enumerate(df.to_dict(orient='records'), start=2):
+        rec = dict(rec); rec["_source_row"] = i; rec["raw"] = dict(rec)
+        records.append(rec)
+    return _group_bybit_execution_history_rows_into_completed_trades(records, account_mode, str(path))
+
+def _parse_bybit_trade_history_csv(path: Path, account_mode: str='demo') -> List[Dict[str, object]]:
+    rows, unmatched, _diag = _parse_bybit_trade_history_csv_with_diagnostics(path, account_mode=account_mode)
+    if unmatched:
+        raise ValueError(f"Unmatched Bybit execution rows remain open; count={len(unmatched)}")
     return rows
 
 
@@ -25570,7 +25645,7 @@ async def _run_trading_journal_sync_job() -> None:
         hb_task.cancel()
 
 
-def _sync_master_journal_workbook() -> Dict[str, object]:
+def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_survivor_row_ids: Optional[List[str]] = None) -> Dict[str, object]:
     path = _master_journal_path()
     tmp = path.with_suffix('.tmp.xlsx')
     created_tmp = False
@@ -25616,7 +25691,7 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
                 source_trade_rows = [r for r in source_items if _row_type(r) == "trade"]
 
         if path.exists():
-            update_result = update_master_journal_workbook_data_only(path, snapshot)
+            update_result = update_master_journal_workbook_data_only(path, snapshot, expected_survivor_row_ids=expected_survivor_row_ids)
             if not bool((update_result or {}).get("ok")):
                 raise RuntimeError(str((update_result or {}).get("error") or "Trading Journal data-only update failed."))
             candidate_path = str((update_result or {}).get("candidate_path") or "").strip()
@@ -25976,7 +26051,10 @@ def _sync_master_journal_workbook() -> Dict[str, object]:
             enforce_github = _enforce_single_master_journal_xlsx(TRADING_JOURNAL_LOCAL_DIR, cleanup_known_generated=True)
             if not enforce_github.get("ok"):
                 raise RuntimeError("Unknown extra Excel files in journal directory before GitHub sync: " + ", ".join(enforce_github.get("unknown_extra_excel_files") or []) + ". Move legacy backups outside journal/. Keep only journal/Trading Journal.xlsx.")
-        payload.update(_sync_journal_excel_files_to_github(path))
+        if defer_github_sync:
+            payload.update({"github_sync_enabled": _trading_journal_github_sync_enabled(), "github_sync_ok": None, "github_sync_deferred": True})
+        else:
+            payload.update(_sync_journal_excel_files_to_github(path))
         payload["ok"] = bool(payload.get("master_journal_ok")) and payload.get("github_sync_ok") is not False
         return payload
     except Exception as exc:
@@ -26185,6 +26263,8 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
     try:
         rows: List[Dict[str, object]] = []
         balance: Optional[Dict[str, object]] = None
+        bybit_diag: Dict[str, object] = {"bybit_execution_rows_seen": 0, "bybit_completed_trades_imported": 0, "bybit_unmatched_execution_rows": 0}
+        unmatched_exec_ids: List[str] = []
         is_bybit_csv = bool(suffix == ".csv" and _is_bybit_trade_history_csv(tmp_path))
         inference_warnings: List[str] = []
         inference_diag: Dict[str, object] = {
@@ -26196,7 +26276,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             if not mode:
                 return {"ok": False, "status_code": 422, "message": "Bybit history CSV account is ambiguous. Select Demo or Live before importing.", "uploaded_name": name, "file_type": suffix, "errors": ["ambiguous_bybit_account"], "requires_account_mode": True, "detected_file_kind": "bybit_history_csv", "account_mode_options": ["demo", "live"], "warnings": []}
             try:
-                rows = _parse_bybit_trade_history_csv(tmp_path, account_mode=mode)
+                rows, unmatched_exec_ids, bybit_diag = _parse_bybit_trade_history_csv_with_diagnostics(tmp_path, account_mode=mode)
             except Exception as exc:
                 return {"ok": False, "status_code": 422, "message": f"Failed to parse {name}: {exc}", "uploaded_name": name, "file_type": suffix, "errors": [str(exc)], "warnings": []}
             balance = None
@@ -26205,6 +26285,18 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 rows, balance = _parse_local_trading_journal_workbook(tmp_path, original_name=name, account_mode=mode or None)
             except Exception as exc:
                 return {"ok": False, "status_code": 422, "message": f"Failed to parse {name}: {exc}", "uploaded_name": name, "file_type": suffix, "errors": [str(exc)], "warnings": []}
+        if is_bybit_csv and unmatched_exec_ids:
+            return {
+                "ok": False,
+                "status_code": 422,
+                "message": "Unmatched Bybit execution rows remain open; import blocked.",
+                "uploaded_name": name,
+                "file_type": suffix,
+                "rows_parsed": len(rows),
+                "errors": ["unmatched_bybit_executions"],
+                "warnings": [],
+                **bybit_diag,
+            }
         timings["parse"] = round(time.perf_counter() - t0, 6)
         t1 = time.perf_counter()
         existing_rows = _get_trading_journal_rows()
@@ -26230,6 +26322,10 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
         workbook_had_original = workbook_path.exists()
         if workbook_had_original:
             workbook_backup_bytes = workbook_path.read_bytes()
+        pre_import_workbook_row_ids: List[str] = []
+        if workbook_had_original:
+            src = read_master_journal_source(workbook_path) or {}
+            pre_import_workbook_row_ids = [str((r or {}).get("id") or "").strip() for r in (src.get("items") or []) if isinstance(r, dict) and str((r or {}).get("id") or "").strip()]
         verify_result: Optional[Dict[str, object]] = None
         previous_pending_rows = [dict(r) for r in (_PENDING_MANUAL_SYNC_ROWS or []) if isinstance(r, dict)]
         pending_restored = False
@@ -26246,7 +26342,8 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             _PENDING_MANUAL_SYNC_ROWS = list(pending_map.values())
 
             t3 = time.perf_counter()
-            sync_result = _sync_master_journal_workbook()
+            expected_survivors = sorted(set(pre_import_workbook_row_ids) | set(parsed_ids))
+            sync_result = _sync_master_journal_workbook(defer_github_sync=True, expected_survivor_row_ids=expected_survivors)
             timings["workbook_sync"] = round(time.perf_counter() - t3, 6)
             if not _master_journal_sync_ok(sync_result):
                 raise RuntimeError(f"Workbook sync failed: {_master_journal_sync_error(sync_result)}")
@@ -26254,12 +26351,15 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             pending_restored = True
 
             t4 = time.perf_counter()
-            snapshot = _build_trading_journal_view_snapshot(force=True)
-            _persist_trading_journal_sqlite(snapshot, import_meta={"source_mode": "manual_upload", "rows_imported": len(rows), "warnings": [], "errors": []})
-            verify_result = _verify_trade_log_row_ids_in_workbook(_master_journal_path(), parsed_ids)
+            verify_result = _verify_trade_log_row_ids_in_workbook(_master_journal_path(), expected_survivors)
             timings["verification"] = round(time.perf_counter() - t4, 6)
             if not bool((verify_result or {}).get("ok")):
                 raise RuntimeError(f"Workbook verification failed after import. missing_row_ids={(verify_result or {}).get('missing_row_ids') or []}")
+            snapshot = _build_trading_journal_view_snapshot(force=True)
+            _persist_trading_journal_sqlite(snapshot, import_meta={"source_mode": "manual_upload", "rows_imported": len(rows), "warnings": [], "errors": []})
+            github_sync_result = _sync_journal_excel_files_to_github(_master_journal_path())
+            if github_sync_result.get("github_sync_enabled") and github_sync_result.get("github_sync_ok") is False:
+                raise RuntimeError(f"GitHub sync failed after local verification: {github_sync_result.get('github_sync_error') or 'unknown error'}")
         except Exception as exc:
             if not pending_restored:
                 _PENDING_MANUAL_SYNC_ROWS = previous_pending_rows
@@ -26291,7 +26391,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 msg = f"{msg} | rollback failed: {'; '.join(rollback_errors)}"
             return {"ok": False, "status_code": code, "message": msg, "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": 0, "missing_row_ids": missing, "errors": [msg, *rollback_errors], "warnings": [], "import_timings": timings}
         APP_LOGGER.info("trading_journal_import_success timings=%s upload=%s", timings, name)
-        return {"ok": True, "status_code": 200, "message": "Import complete.", "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": rows_upserted, "duplicate_rows_merged": duplicate_rows_merged, "balance_parsed": bool(balance), "master_journal_path": str(_master_journal_path()), "verified_row_ids_count": len(parsed_ids), "missing_row_ids": [], "warnings": inference_warnings, "errors": [], "import_timings": timings, **inference_diag}
+        return {"ok": True, "status_code": 200, "message": "Import complete.", "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": rows_upserted, "duplicate_rows_merged": duplicate_rows_merged, "balance_parsed": bool(balance), "master_journal_path": str(_master_journal_path()), "verified_row_ids_count": len(parsed_ids), "missing_row_ids": [], "warnings": inference_warnings, "errors": [], "import_timings": timings, **inference_diag, **bybit_diag, **github_sync_result, "github_sync_deferred": False, "github_sync_commit_sha": github_sync_result.get("github_sync_commit"), "github_sync_path": str(_master_journal_path()), "github_sync_message": ("GitHub sync disabled" if not github_sync_result.get("github_sync_enabled") else ("GitHub sync complete" if github_sync_result.get("github_sync_ok") else str(github_sync_result.get("github_sync_error") or "")))}
     except Exception as exc:
         return {"ok": False, "status_code": 500, "message": f"Unexpected import error for {name}.", "uploaded_name": name, "file_type": suffix or "unknown", "rows_parsed": 0, "rows_upserted": 0, "duplicate_rows_merged": 0, "balance_parsed": False, "master_journal_path": str(_master_journal_path()), "verified_row_ids_count": 0, "missing_row_ids": [], "warnings": [], "errors": [str(exc)]}
     finally:
