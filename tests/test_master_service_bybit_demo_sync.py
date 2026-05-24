@@ -1662,6 +1662,15 @@ def test_manual_import_buy_only_response_includes_unmatched_diagnostics(tmp_path
     assert out.get("bybit_completed_trades_imported") == 0
     assert out.get("bybit_unmatched_execution_rows", 0) >= 1
 
+def test_epoch_or_iso_to_iso_dayfirst_au_date_no_warning():
+    import warnings
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        out = master_service._epoch_or_iso_to_iso("17/05/2026 22:55")
+    assert out is not None
+    assert str(out).startswith("2026-05-17")
+    assert not any("dayfirst=False" in str(w.message) for w in caught)
+
 
 def test_sync_bybit_closed_pnl_window_uses_execution_rows_when_closed_pnl_empty(monkeypatch) -> None:
     monkeypatch.setattr(master_service, "_trading_journal_local_excel_authoritative", lambda: False)

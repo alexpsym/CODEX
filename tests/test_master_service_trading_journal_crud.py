@@ -1356,6 +1356,8 @@ def test_valid_bybit_import_preserves_existing_rows_and_reports_sync_fields(temp
         {"id": "old1", "row_type": "trade", "source": "manual", "account": "OANDA DEMO", "account_label": "OANDA DEMO", "symbol": "EURUSD", "side": "Buy", "qty": 1.0, "entry_price": 1.1, "exit_price": 1.2, "open_time": "2026-05-01T00:00:00Z", "close_time": "2026-05-01T01:00:00Z", "net_profit": 10.0},
         {"id": "old2", "row_type": "trade", "source": "manual", "account": "OANDA DEMO", "account_label": "OANDA DEMO", "symbol": "GBPUSD", "side": "Buy", "qty": 1.0, "entry_price": 1.2, "exit_price": 1.3, "open_time": "2026-05-02T00:00:00Z", "close_time": "2026-05-02T01:00:00Z", "net_profit": 10.0},
         {"id": "old3", "row_type": "trade", "source": "manual", "account": "OANDA DEMO", "account_label": "OANDA DEMO", "symbol": "USDJPY", "side": "Sell", "qty": 1.0, "entry_price": 150.0, "exit_price": 149.0, "open_time": "2026-05-03T00:00:00Z", "close_time": "2026-05-03T01:00:00Z", "net_profit": 10.0},
+        {"id": "monthly_aud_reval:bybit_live:2026-03", "row_type": "monthly_aud_reval", "source": "bybit_monthly_aud_reval", "account": "Bybit Live", "account_label": "Bybit Live", "symbol": "MONTHLY AUD P/L", "open_time": "2026-03-01T00:00:00Z", "close_time": "2026-03-31T23:59:59Z", "result_cash": 5.0, "result_currency": "AUD"},
+        {"id": "monthly_aud_reval:bybit_live:2026-04", "row_type": "monthly_aud_reval", "source": "bybit_monthly_aud_reval", "account": "Bybit Live", "account_label": "Bybit Live", "symbol": "MONTHLY AUD P/L", "open_time": "2026-04-01T00:00:00Z", "close_time": "2026-04-30T23:59:59Z", "result_cash": 7.0, "result_currency": "AUD"},
     ]
     master_service._set_trading_journal_rows(old_rows)
     build_master_journal_workbook({"items": old_rows, "stats": {"totals": {}, "groups": {}}, "balances": []}, temp_state_paths / "Trading Journal.xlsx")
@@ -1381,7 +1383,7 @@ def test_valid_bybit_import_preserves_existing_rows_and_reports_sync_fields(temp
     assert order.index("verify") < order.index("github")
 
     ids = {str(r.get("id") or "") for r in master_service._get_trading_journal_rows()}
-    assert {"old1", "old2", "old3"}.issubset(ids)
+    assert {"old1", "old2", "old3", "monthly_aud_reval:bybit_live:2026-03", "monthly_aud_reval:bybit_live:2026-04"}.issubset(ids)
     bybit_ids = [x for x in ids if x.startswith("bybit:demo:trade:")]
     assert len(bybit_ids) == 3
 
@@ -1390,7 +1392,7 @@ def test_valid_bybit_import_preserves_existing_rows_and_reports_sync_fields(temp
     headers = [str(c.value or "") for c in ws[1]]
     ridx = headers.index("Row ID") + 1
     trade_ids = {str(ws.cell(r, ridx).value or "").strip() for r in range(2, ws.max_row + 1)}
-    assert {"old1", "old2", "old3"}.issubset(trade_ids)
+    assert {"old1", "old2", "old3", "monthly_aud_reval:bybit_live:2026-03", "monthly_aud_reval:bybit_live:2026-04"}.issubset(trade_ids)
     inst = wb["Instrument Averages"]
     ih = [str(c.value or "").strip().lower() for c in inst[1]]
     sym_col = ih.index("symbol") + 1
@@ -1401,6 +1403,26 @@ def test_valid_bybit_import_preserves_existing_rows_and_reports_sync_fields(temp
             btc_trades = int(float(inst.cell(rr, trades_col).value or 0))
             break
     assert btc_trades == 3
+
+
+def test_sync_master_journal_duration_validation_still_fails_real_trade_blank_duration(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    from tools.master_journal_workbook import build_master_journal_workbook
+    mj = temp_state_paths / "Trading Journal.xlsx"
+    rows = [{"id": "t1", "row_type": "trade", "source": "manual", "account": "OANDA DEMO", "account_label": "OANDA DEMO", "symbol": "EURUSD", "side": "Buy", "qty": 1.0, "entry_price": 1.1, "exit_price": 1.2, "open_time": "2026-05-01T00:00:00Z", "close_time": "2026-05-01T01:00:00Z", "net_profit": 10.0}]
+    build_master_journal_workbook({"items": rows, "stats": {"totals": {}, "groups": {}}, "balances": []}, mj)
+    from openpyxl import load_workbook
+    wb = load_workbook(mj)
+    ws = wb["Trade Log"]
+    headers = [str(c.value or "") for c in ws[1]]
+    dur_col = headers.index("Trade Duration (DD:HH:MM:SS)") + 1
+    ws.cell(2, dur_col).value = ""
+    wb.save(mj)
+    wb.close()
+    monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", lambda force=True: {"items": rows, "stats": {"totals": {}, "groups": {}}, "balances": []})
+    monkeypatch.setattr(master_service, "update_master_journal_workbook_data_only", lambda *a, **k: {"ok": True, "candidate_path": str(mj)})
+    out = master_service._sync_master_journal_workbook(defer_github_sync=True)
+    assert out.get("ok") is False
+    assert "duration column blank/non-numeric" in str(out.get("master_journal_error") or "")
 
 
 def test_import_file_endpoint_not_stub_anymore(temp_state_paths, monkeypatch: pytest.MonkeyPatch):

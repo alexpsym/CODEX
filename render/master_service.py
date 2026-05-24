@@ -7502,6 +7502,8 @@ def _epoch_or_iso_to_iso(value: object) -> Optional[str]:
     if numeric is not None:
         return _epoch_or_iso_to_iso(numeric)
     try:
+        if re.search(r"\b\d{1,2}/\d{1,2}/\d{4}\b", text):
+            return pd.to_datetime(text, utc=True, dayfirst=True).isoformat()
         return pd.to_datetime(text, utc=True).isoformat()
     except Exception:
         return None
@@ -20837,6 +20839,18 @@ def _is_trade_row(row: Dict[str, object]) -> bool:
     return _row_type(row) == "trade"
 
 
+def _is_duration_validated_trade_row(row: Dict[str, object]) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if _row_type(row) != "trade":
+        return False
+    rid = str(row.get("id") or "").strip().lower()
+    symbol = str(row.get("symbol") or "").strip().upper()
+    if rid.startswith("monthly_aud_reval:") or symbol == "MONTHLY AUD P/L":
+        return False
+    return True
+
+
 def _trade_duration_seconds(row: Dict[str, object]) -> Optional[int]:
     if not _is_trade_row(row):
         return None
@@ -25801,24 +25815,35 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
                 if open_col and close_col and dur_col:
                     expected_duration_ids: Set[str] = set()
                     for row in visible_trade_rows:
+                        if not _is_duration_validated_trade_row(row):
+                            continue
                         rid = str(row.get("id") or "").strip()
                         if not rid:
                             continue
                         if str(row.get("open_time") or "").strip() and str(row.get("close_time") or "").strip():
                             expected_duration_ids.add(rid)
                     if expected_duration_ids and row_id_col:
-                        missing_duration_ids: List[str] = []
+                        row_lookup = {str(r.get("id") or "").strip(): r for r in visible_trade_rows if isinstance(r, dict)}
+                        missing_duration_details: List[Dict[str, object]] = []
                         for rr in range(2, trade_log.max_row + 1):
                             rid = str(trade_log.cell(rr, row_id_col).value or "").strip()
                             if rid not in expected_duration_ids:
                                 continue
                             dv = trade_log.cell(rr, dur_col).value
                             if not isinstance(dv, (int, float)):
-                                missing_duration_ids.append(rid)
-                        if missing_duration_ids:
+                                src = row_lookup.get(rid) or {}
+                                missing_duration_details.append({
+                                    "row_id": rid,
+                                    "row_type": _row_type(src) if isinstance(src, dict) else "",
+                                    "open_time": src.get("open_time") if isinstance(src, dict) else "",
+                                    "close_time": src.get("close_time") if isinstance(src, dict) else "",
+                                    "duration_cell_value": dv,
+                                })
+                        if missing_duration_details:
                             raise RuntimeError(
                                 "Trading Journal validation failed: Trade Log duration column blank/non-numeric for trade rows with valid open/close timestamps "
-                                f"(sample row IDs: {', '.join(missing_duration_ids[:5])})."
+                                f"(sample row IDs: {', '.join(str(d.get('row_id') or '') for d in missing_duration_details[:5])}; "
+                                f"details={missing_duration_details[:3]})."
                             )
                 for cc in [c for c in currency_cols if c]:
                     for rr in range(2, trade_log.max_row + 1):
