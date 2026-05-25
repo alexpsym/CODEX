@@ -2348,3 +2348,81 @@ def test_crypto_monthly_endpoint_fails_when_workbook_anchor_read_fails(monkeypat
     r=client.post('/api/trading-journal/crypto-monthly-pnl')
     assert r.status_code==500
     assert r.json()['ok'] is False
+
+
+def test_verify_trade_log_row_ids_uses_streaming_iter_rows_only(monkeypatch, tmp_path):
+    class FakeSheet:
+        def __init__(self):
+            self._rows = [
+                ("Row ID", "Close Time"),
+                ("rid-1", "2026-01-01T00:00:00Z"),
+                ("rid-2", "2026-01-02T00:00:00Z"),
+            ]
+
+        def iter_rows(self, min_row=1, max_row=None, values_only=False):
+            assert values_only is True
+            rows = self._rows
+            start = max(min_row - 1, 0)
+            end = max_row if max_row is not None else len(rows)
+            for row in rows[start:end]:
+                yield row
+
+        def cell(self, *_a, **_k):
+            raise AssertionError("random cell access must not be used")
+
+    class FakeWorkbook:
+        def __init__(self):
+            self.sheet = FakeSheet()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(master_service, "load_workbook", lambda *_a, **_k: FakeWorkbook())
+    monkeypatch.setattr(master_service, "_get_trade_log_sheet", lambda wb, allow_legacy=False: wb.sheet)
+    path = tmp_path / "Trading Journal.xlsx"
+    path.write_bytes(b"ok")
+    out = master_service._verify_trade_log_row_ids_in_workbook(path, ["rid-1", "rid-2"])
+    assert out["ok"] is True
+    assert out["missing_row_ids"] == []
+    assert out["found_row_ids_count"] == 2
+
+
+def test_read_monthly_aud_reval_months_uses_streaming_iter_rows_only(monkeypatch, tmp_path):
+    class FakeSheet:
+        def __init__(self):
+            self._rows = [
+                ("Row ID",),
+                ("monthly_aud_reval:bybit_live:2026-03",),
+                ("ignore-me",),
+                ("monthly_aud_reval:bybit_live:2026-04",),
+            ]
+
+        def iter_rows(self, min_row=1, max_row=None, values_only=False):
+            assert values_only is True
+            rows = self._rows
+            start = max(min_row - 1, 0)
+            end = max_row if max_row is not None else len(rows)
+            for row in rows[start:end]:
+                yield row
+
+        def cell(self, *_a, **_k):
+            raise AssertionError("random cell access must not be used")
+
+    class FakeWorkbook:
+        def __init__(self):
+            self.sheet = FakeSheet()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(master_service, "load_workbook", lambda *_a, **_k: FakeWorkbook())
+    monkeypatch.setattr(master_service, "_get_trade_log_sheet", lambda wb, allow_legacy=False: wb.sheet)
+    path = tmp_path / "Trading Journal.xlsx"
+    path.write_bytes(b"ok")
+    out = master_service._read_monthly_aud_reval_months_from_workbook(path)
+    assert out["ok"] is True
+    assert out["months"] == ["2026-03", "2026-04"]
+    assert out["row_ids"] == [
+        "monthly_aud_reval:bybit_live:2026-03",
+        "monthly_aud_reval:bybit_live:2026-04",
+    ]
