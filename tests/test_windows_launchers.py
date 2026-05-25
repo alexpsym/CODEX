@@ -254,3 +254,42 @@ def test_extract_latest_cleanup_helpers_and_calls_present() -> None:
     assert ff_restore_idx != -1 and ff_delete_idx != -1 and ff_restore_idx < ff_delete_idx
     assert "if ($name -ieq 'CODEX-master') { return $false }" in script
     assert 'CODEX-master*' not in script
+
+
+def test_trading_tools_launcher_runs_hidden_and_shows_clear_errors() -> None:
+    launcher = (ROOT / 'tools' / 'windows_launchers' / 'TradingToolsLauncher.cs').read_text(encoding='utf-8')
+    assert 'using System.Windows.Forms;' in launcher
+    assert 'startInfo.CreateNoWindow = true;' in launcher
+    assert 'startInfo.WindowStyle = ProcessWindowStyle.Hidden;' in launcher
+    assert 'MessageBox.Show' in launcher
+    assert 'BuildForwardedArgString(args)' in launcher
+
+
+def test_windows_launcher_builder_uses_windows_subsystem_output() -> None:
+    ps1 = (ROOT / 'tools' / 'windows_launchers' / 'build_windows_launchers.ps1').read_text(encoding='utf-8')
+    assert '/target:winexe' in ps1
+    assert '/target:exe' not in ps1
+    assert '-OutputType WindowsApplication' in ps1
+    assert '-OutputType ConsoleApplication' not in ps1
+
+
+def test_windows_launcher_builder_references_windows_forms_for_message_box() -> None:
+    ps1 = (ROOT / 'tools' / 'windows_launchers' / 'build_windows_launchers.ps1').read_text(encoding='utf-8')
+    assert '/reference:System.Windows.Forms.dll' in ps1
+    assert "-ReferencedAssemblies @('System.Windows.Forms.dll', 'System.dll')" in ps1
+
+
+def test_run_local_master_parent_logs_are_condensed_and_worker_logs_are_detailed() -> None:
+    script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
+    assert 'echo [local-master] launcher starting.' in script
+    assert 'echo [local-master] waiting for %MASTER_HEALTH_URL% ...' in script
+    assert 'echo [local-master] worker started at !DATE! !TIME!' in script
+    parent_idx = script.find('echo [local-master] launcher starting.')
+    worker_idx = script.find(':worker')
+    assert parent_idx != -1 and worker_idx != -1 and parent_idx < worker_idx
+
+
+def test_iexpress_fallback_runs_single_launcher_cmd_invocation() -> None:
+    ps1 = (ROOT / 'tools' / 'windows_launchers' / 'build_windows_launchers.ps1').read_text(encoding='utf-8')
+    assert 'AppLaunched=cmd /d /c launcher.cmd' in ps1
+    assert 'ShowInstallProgramWindow=1' in ps1

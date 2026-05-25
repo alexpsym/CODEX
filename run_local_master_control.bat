@@ -67,28 +67,7 @@ call :load_master_env_vars
 
 if /I "%~1"=="__worker" goto worker
 
-echo [local-master] APP_PROFILE=%APP_PROFILE%
-echo [local-master] AUTOSTART_SCRIPTS=%AUTOSTART_SCRIPTS%
-echo [local-master] MASTER_ENV_DIR=%MASTER_ENV_DIR%
-echo [local-master] MASTER_ENV_FILE=%MASTER_ENV_FILE%
-echo [local-master] CWD=%CD%
-for %%I in ("%RENDER_CALCULATOR_BASE_URL%") do set "RCB_HOST=%%~nxI"
-if defined RENDER_CALCULATOR_BASE_URL (
-  echo [local-master] RENDER_CALCULATOR_BASE_URL=present host=!RCB_HOST!
-  echo [local-master] Calculator webhook local-to-Render mode: enabled
-) else (
-  echo [local-master] RENDER_CALCULATOR_BASE_URL=missing
-  echo [local-master] Calculator webhook local-to-Render mode: disabled
-)
-echo [local-master] DROPBOX_SYNC_ENABLED=%DROPBOX_SYNC_ENABLED%
-echo [local-master] DROPBOX_BACKUP_PATH=%DROPBOX_BACKUP_PATH%
-echo [local-master] DROPBOX_STATE_ROOT=%DROPBOX_STATE_ROOT%
-echo [local-master] LOCAL_STATE_ONLY=%LOCAL_STATE_ONLY%
-echo [local-master] STATE_BACKUP_LOCAL_PATH=%STATE_BACKUP_LOCAL_PATH%
-echo [local-master] BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH=%BYBIT_DEMO_CALC_CONTEXT_LOCAL_PATH%
-echo [local-master] User state source: Repo local files
-if /I "%LOCAL_STATE_ONLY%"=="1" echo [local-master] Repo-local state enabled. Ensure Git sync succeeds before replacing the repo clone.
-
+echo [local-master] launcher starting.
 set "MASTER_URL=http://127.0.0.1:8000"
 set "MASTER_HEALTH_URL=http://127.0.0.1:8000/health"
 set "MASTER_SCRIPTS_URL=http://127.0.0.1:8000/scripts"

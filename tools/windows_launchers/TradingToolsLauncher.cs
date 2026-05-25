@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Windows.Forms;
 
 internal static class Program
 {
@@ -15,12 +16,9 @@ internal static class Program
             string targetBatPath = ResolveTargetBatPath(TargetBat);
             if (targetBatPath == null)
             {
-                Console.Error.WriteLine("ERROR: Could not find required launcher target '" + TargetBat + "'.");
-                Console.Error.WriteLine("Looked relative to the launcher location and current working directory.");
+                ShowError("Could not find required launcher target '" + TargetBat + "'.\n\nLooked relative to the launcher location and current working directory.");
                 return 1;
             }
-
-            Console.WriteLine("Launching " + targetBatPath);
 
             string cmdArguments = "/d /s /c \"\"" + targetBatPath + "\"" + BuildForwardedArgString(args) + "\"";
             string workingDirectory = Path.GetDirectoryName(targetBatPath);
@@ -34,12 +32,14 @@ internal static class Program
             startInfo.Arguments = cmdArguments;
             startInfo.WorkingDirectory = workingDirectory;
             startInfo.UseShellExecute = false;
+            startInfo.CreateNoWindow = true;
+            startInfo.WindowStyle = ProcessWindowStyle.Hidden;
 
             using (Process process = Process.Start(startInfo))
             {
                 if (process == null)
                 {
-                    Console.Error.WriteLine("ERROR: Failed to launch cmd.exe for target batch file.");
+                    ShowError("Failed to launch cmd.exe for target batch file.");
                     return 1;
                 }
 
@@ -47,7 +47,7 @@ internal static class Program
                 int exitCode = process.ExitCode;
                 if (exitCode != 0)
                 {
-                    Console.Error.WriteLine("ERROR: Target exited with code " + exitCode + ".");
+                    ShowError("Launcher preflight failed with exit code " + exitCode + ".\n\nCheck the Local Master Control window for startup errors.");
                 }
 
                 return exitCode;
@@ -55,8 +55,21 @@ internal static class Program
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine("ERROR: Failed to launch target batch file: " + ex.Message);
+            ShowError("Failed to launch target batch file:\n" + ex.Message);
             return 1;
+        }
+    }
+
+    private static void ShowError(string message)
+    {
+        string fullMessage = "Local Trading Tools launcher error\n\n" + message;
+        try
+        {
+            MessageBox.Show(fullMessage, "Local Trading Tools", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        catch
+        {
+            Console.Error.WriteLine(fullMessage);
         }
     }
 

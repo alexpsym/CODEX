@@ -83,8 +83,9 @@ function Build-WithCsc {
     try {
         $compilerArgs = @(
             "/nologo",
-            "/target:exe",
+            "/target:winexe",
             "/optimize+",
+            "/reference:System.Windows.Forms.dll",
             ("/out:{0}" -f $tempOutputPath),
             $tempSourcePath
         )
@@ -151,7 +152,7 @@ function Build-WithAddType {
     Set-Content -LiteralPath $tempSourcePath -Value $generatedSource -Encoding UTF8
 
     try {
-        Add-Type -LiteralPath $tempSourcePath -OutputAssembly $tempOutputPath -OutputType ConsoleApplication -Language CSharp -ErrorAction Stop | Out-Null
+        Add-Type -LiteralPath $tempSourcePath -OutputAssembly $tempOutputPath -OutputType WindowsApplication -ReferencedAssemblies @('System.Windows.Forms.dll', 'System.dll') -Language CSharp -ErrorAction Stop | Out-Null
         if (-not (Test-Path -LiteralPath $tempOutputPath)) {
             Write-Warning "Add-Type reported success but output file is missing: $tempOutputPath"
             Write-Warning "Generated C# source preserved at: $tempSourcePath"
