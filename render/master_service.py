@@ -25124,46 +25124,44 @@ async def _legacy_trading_journal_sync_status() -> JSONResponse:
 
 
 async def _run_trading_journal_sync_job() -> None:
-    def _latest_bybit_demo_trade_log_close_iso() -> Optional[str]:
-        def _sec_to_iso(sec: Optional[int]) -> Optional[str]:
-            if sec is None:
-                return None
-            return datetime.fromtimestamp(int(sec), tz=timezone.utc).isoformat()
-        try:
-            wb = load_workbook(_master_journal_path(), data_only=True)
-            tl = _get_trade_log_sheet(wb, allow_legacy=False)
-            headers = [str(c.value or "").strip() for c in tl[1]]
-            aidx = headers.index("Account") + 1 if "Account" in headers else None
-            cidx = headers.index("Close Time") + 1 if "Close Time" in headers else None
-            latest_sec: Optional[int] = None
-            if not aidx or not cidx:
-                return None
-            for rr in range(2, tl.max_row + 1):
-                acct = str(tl.cell(rr, aidx).value or "").strip()
-                if not _is_bybit_demo_account_label(acct):
-                    continue
-                ts = _canonical_trade_epoch_second(_excel_datetime_to_iso(tl.cell(rr, cidx).value))
-                if ts is not None and (latest_sec is None or ts > latest_sec):
-                    latest_sec = ts
-            return _sec_to_iso(latest_sec)
-        except Exception:
-            return None
-    def _read_trade_log_row_ids(workbook_path: Path) -> Set[str]:
+    def _scan_trade_log_streaming(workbook_path: Path) -> Tuple[Set[str], Optional[int], Optional[str]]:
         wb = load_workbook(workbook_path, data_only=True, read_only=True)
         try:
             tl = _get_trade_log_sheet(wb, allow_legacy=False)
-            headers = [str(c.value or "").strip() for c in tl[1]]
+            header_rows = tl.iter_rows(min_row=1, max_row=1, values_only=True)
+            header_row = next(header_rows, tuple()) or tuple()
+            headers = [str(c or "").strip() for c in header_row]
             if "Row ID" not in headers:
                 raise RuntimeError(f"Trade Log Row ID header missing in workbook: {workbook_path}")
-            ridx = headers.index("Row ID") + 1
+            ridx = headers.index("Row ID")
+            cidx = headers.index("Close Time") if "Close Time" in headers else None
+            aidx = headers.index("Account") if "Account" in headers else None
             row_ids: Set[str] = set()
-            for rr in range(2, tl.max_row + 1):
-                v = str(tl.cell(rr, ridx).value or "").strip()
+            latest_trade_time: Optional[int] = None
+            latest_bybit_demo_close_time: Optional[int] = None
+            for row in tl.iter_rows(min_row=2, values_only=True):
+                v = str((row[ridx] if ridx < len(row) else "") or "").strip()
                 if v:
                     row_ids.add(v)
-            return row_ids
+                if cidx is None or cidx >= len(row):
+                    continue
+                tsec = _canonical_trade_epoch_second(_excel_datetime_to_iso(row[cidx]))
+                if tsec is not None and (latest_trade_time is None or tsec > latest_trade_time):
+                    latest_trade_time = tsec
+                if aidx is not None and aidx < len(row):
+                    acct = str((row[aidx] or "")).strip()
+                    if _is_bybit_demo_account_label(acct) and (latest_bybit_demo_close_time is None or tsec is not None and tsec > latest_bybit_demo_close_time):
+                        latest_bybit_demo_close_time = tsec
+            return row_ids, latest_trade_time, _ts_to_iso(latest_bybit_demo_close_time) if latest_bybit_demo_close_time is not None else None
         finally:
             wb.close()
+
+    def _latest_bybit_demo_trade_log_close_iso() -> Optional[str]:
+        try:
+            _, _, latest = _scan_trade_log_streaming(_master_journal_path())
+            return latest
+        except Exception:
+            return None
 
     def _verify_captured_rows_persisted_to_master_journal(
         captured_row_ids: List[str],
@@ -25185,28 +25183,11 @@ async def _run_trading_journal_sync_job() -> None:
                 "workbook_latest_trade_time": None,
             }
         workbook_ids: Set[str] = set()
-        latest_trade_time = None
+        latest_trade_time: Optional[int] = None
         verify_error: Optional[str] = None
         for _attempt in range(3):
             try:
-                workbook_ids = _read_trade_log_row_ids(verify_path)
-                latest_trade_time = None
-                wb = load_workbook(verify_path, data_only=True, read_only=True)
-                tl = _get_trade_log_sheet(wb, allow_legacy=False)
-                headers = [str(c.value or "").strip() for c in tl[1]]
-                cidx = headers.index("Close Time") + 1 if "Close Time" in headers else None
-                excel_to_iso = globals().get("_excel_datetime_to_iso")
-                for rr in range(2, tl.max_row + 1):
-                    if cidx:
-                        cell_value = tl.cell(rr, cidx).value
-                        if callable(excel_to_iso):
-                            tv = excel_to_iso(cell_value)
-                        else:
-                            tv = cell_value.isoformat() if hasattr(cell_value, "isoformat") else str(cell_value or "")
-                        tsec = _canonical_trade_epoch_second(tv)
-                        if tsec is not None and (latest_trade_time is None or tsec > latest_trade_time):
-                            latest_trade_time = tsec
-                wb.close()
+                workbook_ids, latest_trade_time, _ = _scan_trade_log_streaming(verify_path)
                 verify_error = None
                 break
             except Exception as exc:
@@ -26297,6 +26278,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             "pnl_unresolved_count": 0,
             "pnl_unresolved_row_ids": [],
         }
+        APP_LOGGER.info("trading_journal_import_stage_start stage=parse upload=%s", name)
         if is_bybit_csv:
             if not mode:
                 return {"ok": False, "status_code": 422, "message": "Bybit history CSV account is ambiguous. Select Demo or Live before importing.", "uploaded_name": name, "file_type": suffix, "errors": ["ambiguous_bybit_account"], "requires_account_mode": True, "detected_file_kind": "bybit_history_csv", "account_mode_options": ["demo", "live"], "warnings": []}
@@ -26323,10 +26305,13 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 **bybit_diag,
             }
         timings["parse"] = round(time.perf_counter() - t0, 6)
+        APP_LOGGER.info("trading_journal_import_stage_done stage=parse elapsed=%.6fs upload=%s", timings["parse"], name)
         t1 = time.perf_counter()
+        APP_LOGGER.info("trading_journal_import_stage_start stage=pnl_inference upload=%s", name)
         existing_rows = _get_trading_journal_rows()
         rows, inference_warnings, inference_diag = _infer_realized_net_profit_from_balance_continuity(rows, existing_rows)
         timings["pnl_inference"] = round(time.perf_counter() - t1, 6)
+        APP_LOGGER.info("trading_journal_import_stage_done stage=pnl_inference elapsed=%.6fs upload=%s", timings["pnl_inference"], name)
         rows = [r for r in (rows or []) if isinstance(r, dict)]
         missing_ids = [r for r in rows if str((r or {}).get("row_type") or "trade").strip().lower() == "trade" and not str((r or {}).get("id") or "").strip()]
         if missing_ids:
@@ -26356,8 +26341,10 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
         pending_restored = False
         try:
             t2 = time.perf_counter()
+            APP_LOGGER.info("trading_journal_import_stage_start stage=upsert upload=%s", name)
             rows_upserted = _upsert_trading_journal_rows(rows, allow_broker_rows_in_single_file=True)
             timings["upsert"] = round(time.perf_counter() - t2, 6)
+            APP_LOGGER.info("trading_journal_import_stage_done stage=upsert elapsed=%.6fs upload=%s", timings["upsert"], name)
 
             pending_map: Dict[str, Dict[str, object]] = {}
             for r in [*rows, *previous_pending_rows]:
@@ -26367,22 +26354,40 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             _PENDING_MANUAL_SYNC_ROWS = list(pending_map.values())
 
             t3 = time.perf_counter()
+            APP_LOGGER.info("trading_journal_import_stage_start stage=workbook_sync upload=%s", name)
             expected_survivors = sorted(set(pre_import_workbook_row_ids) | set(parsed_ids))
             sync_result = _sync_master_journal_workbook(defer_github_sync=True, expected_survivor_row_ids=expected_survivors)
             timings["workbook_sync"] = round(time.perf_counter() - t3, 6)
+            APP_LOGGER.info("trading_journal_import_stage_done stage=workbook_sync elapsed=%.6fs upload=%s", timings["workbook_sync"], name)
             if not _master_journal_sync_ok(sync_result):
                 raise RuntimeError(f"Workbook sync failed: {_master_journal_sync_error(sync_result)}")
             _PENDING_MANUAL_SYNC_ROWS = previous_pending_rows
             pending_restored = True
 
             t4 = time.perf_counter()
+            APP_LOGGER.info("trading_journal_import_stage_start stage=verification upload=%s expected_row_ids=%s", name, len(expected_survivors))
             verify_result = _verify_trade_log_row_ids_in_workbook(_master_journal_path(), expected_survivors)
             timings["verification"] = round(time.perf_counter() - t4, 6)
+            APP_LOGGER.info(
+                "trading_journal_import_stage_done stage=verification elapsed=%.6fs upload=%s found_row_ids_count=%s missing_row_ids_count=%s",
+                timings["verification"],
+                name,
+                (verify_result or {}).get("found_row_ids_count"),
+                len((verify_result or {}).get("missing_row_ids") or []),
+            )
             if not bool((verify_result or {}).get("ok")):
                 raise RuntimeError(f"Workbook verification failed after import. missing_row_ids={(verify_result or {}).get('missing_row_ids') or []}")
+            t5 = time.perf_counter()
+            APP_LOGGER.info("trading_journal_import_stage_start stage=snapshot_persist upload=%s", name)
             snapshot = _build_trading_journal_view_snapshot(force=True)
             _persist_trading_journal_sqlite(snapshot, import_meta={"source_mode": "manual_upload", "rows_imported": len(rows), "warnings": [], "errors": []})
+            timings["snapshot_persist"] = round(time.perf_counter() - t5, 6)
+            APP_LOGGER.info("trading_journal_import_stage_done stage=snapshot_persist elapsed=%.6fs upload=%s", timings["snapshot_persist"], name)
+            t6 = time.perf_counter()
+            APP_LOGGER.info("trading_journal_import_stage_start stage=github_sync upload=%s", name)
             github_sync_result = _sync_journal_excel_files_to_github(_master_journal_path())
+            timings["github_sync"] = round(time.perf_counter() - t6, 6)
+            APP_LOGGER.info("trading_journal_import_stage_done stage=github_sync elapsed=%.6fs upload=%s", timings["github_sync"], name)
             if github_sync_result.get("github_sync_enabled") and github_sync_result.get("github_sync_ok") is False:
                 raise RuntimeError(f"GitHub sync failed after local verification: {github_sync_result.get('github_sync_error') or 'unknown error'}")
         except Exception as exc:
@@ -26430,7 +26435,12 @@ async def trading_journal_import_file(file: UploadFile = File(...), account_mode
     except Exception as exc:
         result = {"ok": False, "status_code": 400, "message": "Failed to read uploaded file.", "uploaded_name": str(getattr(file, "filename", "") or "upload"), "file_type": Path(str(getattr(file, "filename", "") or "")).suffix.lower() or "unknown", "errors": [str(exc)], "warnings": []}
         return JSONResponse(result, status_code=400)
-    result = _import_uploaded_trading_journal_file(file.filename or "upload", payload, account_mode=account_mode)
+    result = await asyncio.to_thread(
+        _import_uploaded_trading_journal_file,
+        file.filename or "upload",
+        payload,
+        account_mode,
+    )
     status_code = int(result.get("status_code") or (200 if result.get("ok") else 422))
     return JSONResponse(result, status_code=status_code)
 
@@ -26450,17 +26460,20 @@ def _verify_trade_log_row_ids_in_workbook(workbook_path: Path, expected_row_ids:
             ws = _get_trade_log_sheet(wb, allow_legacy=False)
         except Exception as exc:
             return {"ok": False, "expected_row_ids": expected, "found_row_ids_count": 0, "missing_row_ids": expected, "error": f"Trade Log sheet missing: {exc}"}
-        headers = [str(c.value or "").strip() for c in ws[1]]
+        header_rows = ws.iter_rows(min_row=1, max_row=1, values_only=True)
+        header_row = next(header_rows, tuple()) or tuple()
+        headers = [str(c or "").strip() for c in header_row]
         if "Row ID" not in headers:
             return {"ok": False, "expected_row_ids": expected, "found_row_ids_count": 0, "missing_row_ids": expected, "error": "Trade Log Row ID column missing."}
-        ridx = headers.index("Row ID") + 1
-        for rr in range(2, ws.max_row + 1):
-            rid = str(ws.cell(rr, ridx).value or "").strip()
+        ridx = headers.index("Row ID")
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            rid = str((row[ridx] if ridx < len(row) else "") or "").strip()
             if rid:
                 found.append(rid)
     finally:
         wb.close()
-    missing = [rid for rid in expected if rid not in set(found)]
+    found_ids = set(found)
+    missing = [rid for rid in expected if rid not in found_ids]
     return {"ok": len(missing) == 0, "expected_row_ids": expected, "found_row_ids_count": len(found), "missing_row_ids": missing}
 
 
@@ -26478,14 +26491,16 @@ def _read_monthly_aud_reval_months_from_workbook(workbook_path: Path) -> Dict[st
             ws = _get_trade_log_sheet(wb, allow_legacy=False)
         except Exception as exc:
             return {"ok": False, "months": [], "row_ids": [], "error": f"Trade Log sheet missing: {exc}", "workbook_exists": True, "trade_log_exists": False, "row_id_column_exists": False}
-        headers = [str(c.value or "").strip() for c in ws[1]]
+        header_rows = ws.iter_rows(min_row=1, max_row=1, values_only=True)
+        header_row = next(header_rows, tuple()) or tuple()
+        headers = [str(c or "").strip() for c in header_row]
         if "Row ID" not in headers:
             return {"ok": False, "months": [], "row_ids": [], "error": "Trade Log Row ID column missing.", "workbook_exists": True, "trade_log_exists": True, "row_id_column_exists": False}
-        idx = headers.index("Row ID") + 1
+        idx = headers.index("Row ID")
         row_ids=[]
         months=[]
-        for rr in range(2, ws.max_row + 1):
-            rid = str(ws.cell(rr, idx).value or "").strip()
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            rid = str((row[idx] if idx < len(row) else "") or "").strip()
             if rid.startswith("monthly_aud_reval:bybit_live:"):
                 row_ids.append(rid)
                 months.append(rid.split(":")[-1])
