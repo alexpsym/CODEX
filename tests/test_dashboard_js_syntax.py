@@ -183,6 +183,7 @@ def test_trading_journal_actions_js_wiring():
     assert "/api/trading-journal/open-master-journal" in js
     assert "/api/trading-journal/import-file" in js
     assert "/api/trading-journal/crypto-monthly-pnl" in js
+    assert "/api/trading-journal/bybit-demo/balance-adjustment" in js
     assert "account_mode" in js
     assert "Rows parsed:" in js
     assert "includes('demo')" not in js
@@ -268,3 +269,44 @@ def test_trading_journal_js_removed_retired_auto_sync_block():
         "Sync required",
     ]:
         assert token not in js
+
+
+def test_trading_journal_actions_bybit_demo_balance_adjustment_flows():
+    node = shutil.which('node')
+    assert node
+    js_path = ROOT / 'render' / 'static' / 'trading_journal_actions.js'
+    harness = r"""
+const fs = require('fs'); const vm = require('vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const handlers = {};
+const status = { textContent: '', style: {} };
+const btn = { disabled: false, addEventListener: (ev, cb) => { if (ev==='click') handlers.click = cb; } };
+const els = { 'open-journal-btn': { addEventListener: () => {} }, 'import-journal-btn': { addEventListener: ()=>{} }, 'journal-file-input': { addEventListener: ()=>{}, files:[] }, 'crypto-monthly-pnl-btn': { addEventListener: ()=>{} }, 'journal-account-mode': { addEventListener: ()=>{} }, 'journal-actions-status': status, 'bybit-demo-balance-adjustment-btn': btn };
+let promptQueue = [null, 'abc', '0', '-40', 'note', '-40', 'note2'];
+const fetchCalls = [];
+let failNext = true;
+const context = { console, document: { getElementById: (id) => els[id] || null }, window: null, prompt: () => promptQueue.shift(), fetch: async (url, opts) => { fetchCalls.push([url, opts]); if (failNext) { failNext = false; return { ok:false, json: async()=>({ ok:false, message:'bad' }) }; } return { ok:true, json: async()=>({ ok:true, previous_balance:100, adjustment_amount:-40, new_balance:60, currency:'USDT', row_id:'rid', master_journal_path:'/tmp/x.xlsx' }) }; }, setTimeout:()=>1, clearTimeout:()=>{} };
+context.window = context; context.globalThis = context;
+vm.createContext(context); vm.runInContext(source, context);
+Promise.resolve(handlers.click()).then(()=>{
+  if (fetchCalls.length!==0) throw new Error('cancel should not fetch');
+  return handlers.click();
+}).then(()=>{
+  if (fetchCalls.length!==0 || !String(status.textContent).includes('finite non-zero')) throw new Error('invalid numeric should block');
+  return handlers.click();
+}).then(()=>{
+  if (fetchCalls.length!==0) throw new Error('zero should not fetch');
+  return handlers.click();
+}).then(()=>{
+  if (fetchCalls.length!==1) throw new Error('valid should fetch once');
+  const body = JSON.parse(fetchCalls[0][1].body);
+  if (body.amount !== -40) throw new Error('amount mismatch');
+  if (btn.disabled) throw new Error('button not re-enabled after failure');
+  return handlers.click();
+}).then(()=>{
+  if (fetchCalls.length!==2) throw new Error('second valid should fetch');
+  if (!String(status.textContent).includes('New balance: 60')) throw new Error('success status missing');
+  if (btn.disabled) throw new Error('button not re-enabled after success');
+});
+"""
+    subprocess.run([node, '-e', harness, str(js_path)], check=True)

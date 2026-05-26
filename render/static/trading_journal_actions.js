@@ -3,6 +3,7 @@
   const importBtn = document.getElementById('import-journal-btn');
   const fileInput = document.getElementById('journal-file-input');
   const cryptoMonthlyBtn = document.getElementById('crypto-monthly-pnl-btn');
+  const bybitDemoBalanceAdjustmentBtn = document.getElementById('bybit-demo-balance-adjustment-btn');
   const accountModeSelect = document.getElementById('journal-account-mode');
   const status = document.getElementById('journal-actions-status');
   const BYBIT_AMBIGUITY_MSG = 'Select Demo or Live in Bybit CSV account, then import this file again.';
@@ -108,5 +109,35 @@
       setStatus(`Target months: ${(payload.target_months || []).join(', ') || '—'}\nInserted months: ${(payload.inserted_months || []).join(', ') || '—'}\nSkipped existing months: ${(payload.skipped_existing_months || []).join(', ') || '—'}\nRows inserted: ${payload.rows_inserted || 0}\nWorkbook: ${payload.master_journal_path || ''}\n${payload.message || ''}`);
     } catch (err) { setStatus(err?.message || String(err), true); }
     finally { cryptoMonthlyBtn.disabled = false; }
+  });
+
+  bybitDemoBalanceAdjustmentBtn?.addEventListener('click', async () => {
+    const raw = window.prompt('Enter Bybit Demo journal balance adjustment in USDT. Use negative to reduce balance. This is journal-only and does not change Bybit.');
+    if (raw === null) return;
+    const text = String(raw || '').trim();
+    if (!text) { setStatus('Amount is required.', true); return; }
+    const amount = Number(text);
+    if (!Number.isFinite(amount) || amount === 0) { setStatus('Enter a finite non-zero number.', true); return; }
+    const reasonRaw = window.prompt('Optional reason/note for this journal-only adjustment:', '');
+    const reason = reasonRaw === null ? '' : String(reasonRaw || '').trim();
+    bybitDemoBalanceAdjustmentBtn.disabled = true;
+    setStatus('Applying Bybit Demo balance adjustment...');
+    try {
+      const res = await fetch('/api/trading-journal/bybit-demo/balance-adjustment', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ amount, reason }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || payload.ok !== true) {
+        const errors = Array.isArray(payload?.errors) && payload.errors.length ? `\nErrors: ${payload.errors.join(', ')}` : '';
+        throw new Error(String(payload?.detail || payload?.message || 'Bybit Demo balance adjustment failed.') + errors);
+      }
+      setStatus(`Success. Previous balance: ${payload.previous_balance} ${payload.currency || 'USDT'}\nAdjustment: ${payload.adjustment_amount} ${payload.currency || 'USDT'}\nNew balance: ${payload.new_balance} ${payload.currency || 'USDT'}\nRow ID: ${payload.row_id || ''}\nWorkbook: ${payload.master_journal_path || ''}`);
+    } catch (err) {
+      setStatus(err?.message || String(err), true);
+    } finally {
+      bybitDemoBalanceAdjustmentBtn.disabled = false;
+    }
   });
 })();
