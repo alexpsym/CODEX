@@ -1551,7 +1551,11 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
         trade_items = [_backfill_trade_row_context_fields(dict(r)) if isinstance(r, dict) else r for r in [r for r in items if _row_type(r) == "trade"]]
         trade_items = _enrich_trade_row_metrics(trade_items)
         non_trade_items = [r for r in items if _row_type(r) != "trade"]
-        timeline = _build_journal_balance_timelines(trade_items, source_payload.get("cashflow_ledger") or {}, _get_excel_account_balances())
+        timeline_ledger = _merge_pending_cashflow_rows_into_ledger(
+            source_payload.get("cashflow_ledger") or {},
+            list(_PENDING_MANUAL_SYNC_ROWS or []),
+        )
+        timeline = _build_journal_balance_timelines(trade_items, timeline_ledger, _get_excel_account_balances())
         trade_items = [_backfill_trade_row_context_fields(dict(r)) if isinstance(r, dict) else r for r in (timeline.get("rows") if isinstance(timeline.get("rows"), list) else trade_items)]
         trade_items = _enrich_trade_row_metrics(trade_items)
         items = sorted([*trade_items, *non_trade_items], key=_row_sort_dt, reverse=True)
@@ -26376,7 +26380,7 @@ TRADING_JOURNAL_ACTIONS_TEMPLATE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Trading Journal Workspace</title>
 <style>body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}.wrap{min-height:100vh;display:flex;align-items:center;justify-content:center}.stack{display:flex;flex-direction:column;gap:12px;min-width:280px}button{padding:12px 14px;border-radius:10px;border:1px solid #334155;background:#1f2937;color:#e2e8f0;font-weight:700;cursor:pointer}.status{margin-top:8px;white-space:pre-wrap;color:#94a3b8}</style></head>
-<body><div class="wrap"><div class="stack"><button id="open-journal-btn">Open Journal</button><button id="import-journal-btn">Import</button><label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode" style="margin-left:8px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"><option value="" selected disabled>Select Demo or Live</option><option value="demo">Demo</option><option value="live">Live</option></select></label><button id="crypto-monthly-pnl-btn">Crypto Monthly P&L</button><input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv" hidden/><div id="journal-actions-status" class="status"></div></div></div><script src="/static/trading_journal_actions.js"></script></body></html>"""
+<body><div class="wrap"><div class="stack"><button id="open-journal-btn">Open Journal</button><button id="import-journal-btn">Import</button><label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode" style="margin-left:8px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"><option value="" selected disabled>Select Demo or Live</option><option value="demo">Demo</option><option value="live">Live</option></select></label><button id="crypto-monthly-pnl-btn">Crypto Monthly P&L</button><button id="bybit-demo-balance-adjustment-btn">Bybit Demo Balance Adjustment</button><input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv" hidden/><div id="journal-actions-status" class="status"></div></div></div><script src="/static/trading_journal_actions.js"></script></body></html>"""
 
 @app.get("/merged/trading-journal")
 async def merged_trading_journal_workspace() -> HTMLResponse:
@@ -26651,6 +26655,94 @@ def _read_monthly_aud_reval_months_from_workbook(workbook_path: Path) -> Dict[st
     finally:
         wb.close()
 
+
+def _journal_local_now_naive_iso() -> str:
+    tz_name = str(APP_TIMEZONE or "").strip() or "Australia/Brisbane"
+    try:
+        now = datetime.now(ZoneInfo(tz_name))
+    except Exception:
+        now = datetime.now(ZoneInfo("Australia/Brisbane"))
+    return now.replace(tzinfo=None, microsecond=0).isoformat()
+
+
+def _master_journal_lock_status(path: Optional[Path] = None) -> Dict[str, object]:
+    path = path or _master_journal_path()
+    lockfile = path.parent / f"~${path.name}"
+    try:
+        if not path.exists():
+            return {"locked": False, "exists": False, "path": str(path), "lockfile": str(lockfile), "lockfile_exists": lockfile.exists()}
+        if lockfile.exists():
+            return {"locked": True, "exists": True, "path": str(path), "lockfile": str(lockfile), "lockfile_exists": True, "error": "excel_lockfile_present"}
+        with path.open("r+b"):
+            pass
+        return {"locked": False, "exists": True, "path": str(path), "lockfile": str(lockfile), "lockfile_exists": False}
+    except Exception as exc:
+        return {"locked": True, "exists": True, "path": str(path), "lockfile": str(lockfile), "lockfile_exists": lockfile.exists(), "error": str(exc)}
+
+
+def _cashflow_row_to_ledger_event(row: Dict[str, object]) -> Dict[str, object]:
+    amount = _to_float(row.get("cashflow_amount"))
+    if amount is None:
+        amount = _to_float(row.get("amount"))
+    new_balance = _to_float(row.get("cashflow_new_balance"))
+    if new_balance is None:
+        new_balance = _to_float(row.get("balance_after_trade"))
+    return {
+        "id": str(row.get("id") or "").strip(),
+        "account": row.get("account") or row.get("account_label") or "Bybit Demo",
+        "currency": row.get("currency") or "USDT",
+        "date": row.get("close_time") or row.get("open_time") or _journal_local_now_naive_iso(),
+        "amount": amount,
+        "new_balance": new_balance,
+        "notes": row.get("notes") or "",
+    }
+
+
+def _normalize_cashflow_ledger_keys(ledger: Dict[str, List[Dict[str, object]]]) -> Dict[str, List[Dict[str, object]]]:
+    out: Dict[str, List[Dict[str, object]]] = {}
+    for key, rows in (ledger or {}).items():
+        raw_key = str(key or "")
+        norm_key = _norm_account_key(raw_key)
+        if not norm_key:
+            continue
+        bucket = out.setdefault(norm_key, [])
+        for row in (rows or []):
+            if not isinstance(row, dict):
+                continue
+            event = dict(row)
+            evt_key = _norm_account_key(str(event.get("account") or ""))
+            bucket_key = evt_key or norm_key
+            out.setdefault(bucket_key, []).append(event)
+    return out
+
+
+def _merge_pending_cashflow_rows_into_ledger(
+    ledger: Dict[str, List[Dict[str, object]]],
+    pending_rows: List[Dict[str, object]],
+) -> Dict[str, List[Dict[str, object]]]:
+    merged = _normalize_cashflow_ledger_keys(ledger)
+    seen_ids: Set[str] = set()
+    for events in merged.values():
+        for event in events:
+            rid = str((event or {}).get("id") or "").strip()
+            if rid:
+                seen_ids.add(rid)
+    for row in pending_rows or []:
+        if not isinstance(row, dict) or _row_type(row) != "cashflow":
+            continue
+        rid = str(row.get("id") or "").strip()
+        if rid and rid in seen_ids:
+            continue
+        acct_key = _norm_account_key(str(row.get("account") or row.get("account_label") or ""))
+        if not acct_key:
+            continue
+        bucket = merged.setdefault(acct_key, [])
+        event = _cashflow_row_to_ledger_event(row)
+        bucket.append(event)
+        if rid:
+            seen_ids.add(rid)
+    return merged
+
 def _brisbane_now() -> datetime:
     return datetime.now(ZoneInfo("Australia/Brisbane"))
 
@@ -26718,6 +26810,104 @@ async def trading_journal_crypto_monthly_pnl() -> JSONResponse:
     if missing or not verification.get("ok"):
         return JSONResponse({"ok": False, "button": "crypto_monthly_pnl", "target_months": due, "processed_months": due, "inserted_months": inserted, "skipped_existing_months": [m for m in due if m in pre_months], "rows_inserted": len(inserted), "verified_row_ids": [f"monthly_aud_reval:bybit_live:{m}" for m in inserted], "missing_months": missing, "missing_row_ids": verification.get("missing_row_ids") or [], "master_journal_path": str(path), "message": "Crypto monthly AUD P&L update incomplete."}, status_code=500)
     return JSONResponse({"ok": True, "button": "crypto_monthly_pnl", "target_months": due, "processed_months": due, "inserted_months": inserted, "skipped_existing_months": [m for m in due if m in pre_months], "rows_inserted": len(inserted), "verified_row_ids": [f"monthly_aud_reval:bybit_live:{m}" for m in inserted], "master_journal_path": str(path), "message": f"Inserted crypto monthly AUD P&L for {', '.join(inserted)}."})
+
+
+@app.post("/api/trading-journal/bybit-demo/balance-adjustment")
+async def trading_journal_bybit_demo_balance_adjustment(payload: Dict[str, object] = Body(default_factory=dict)) -> JSONResponse:
+    global _PENDING_MANUAL_SYNC_ROWS
+    if not ENABLE_BYBIT_DEMO_JOURNAL:
+        return JSONResponse(
+            {"ok": False, "message": "Bybit Demo journal is disabled.", "errors": ["bybit_demo_journal_disabled"]},
+            status_code=409,
+        )
+    amount = _to_float((payload or {}).get("amount"))
+    reason = str((payload or {}).get("reason") or "").strip()
+    if not isinstance(amount, float) or not math.isfinite(amount) or amount == 0.0:
+        return JSONResponse({"ok": False, "message": "amount must be a finite non-zero number.", "errors": ["invalid_amount"]}, status_code=422)
+    workbook_path = _master_journal_path()
+    lock = _master_journal_lock_status(workbook_path)
+    if lock.get("locked"):
+        return JSONResponse({"ok": False, "code": "EXCEL_WORKBOOK_OPEN", "errors": ["workbook_locked"], "message": "Trading Journal.xlsx appears to be open in Excel. Close it, then press Resume."}, status_code=423)
+
+    rows_before = copy.deepcopy(_get_trading_journal_rows())
+    workbook_exists = workbook_path.exists()
+    workbook_backup = workbook_path.read_bytes() if workbook_exists else None
+    pending_before = [dict(r) for r in (_PENDING_MANUAL_SYNC_ROWS or []) if isinstance(r, dict)]
+    try:
+        snapshot = _build_trading_journal_view_snapshot(force=True)
+        balances = snapshot.get("balances") if isinstance(snapshot, dict) else []
+        demo_balance = next((b for b in (balances or []) if _is_bybit_demo_account_label(b.get("label") or b.get("account"))), {}) if isinstance(balances, list) else {}
+        prev_balance = _to_float(demo_balance.get("balance"))
+        if prev_balance is None or not math.isfinite(prev_balance):
+            return JSONResponse({"ok": False, "message": "Bybit Demo balance is missing or non-numeric in Dashboard Account Balances.", "errors": ["bybit_demo_balance_missing"]}, status_code=409)
+        as_of_raw = str(demo_balance.get("as_of") or "").strip()
+        local_now = datetime.fromisoformat(_journal_local_now_naive_iso())
+        as_of_dt = _parse_iso_datetime(as_of_raw) if as_of_raw else None
+        anchor = (as_of_dt + timedelta(seconds=1)).replace(tzinfo=None) if isinstance(as_of_dt, datetime) else local_now
+        ts = max(local_now, anchor)
+        new_balance = prev_balance + amount
+        row = {
+            "row_type": "cashflow",
+            "source": "manual_bybit_demo_balance_adjustment",
+            "account": "Bybit Demo",
+            "account_label": "Bybit Demo",
+            "currency": "USDT",
+            "account_currency": "USDT",
+            "balance_after_trade_currency": "USDT",
+            "symbol": "CASHFLOW",
+            "symbol_raw": "CASHFLOW",
+            "side": "ADJUSTMENT",
+            "cashflow_type": "balance_adjustment",
+            "cashflow_amount": amount,
+            "cashflow_new_balance": new_balance,
+            "amount": amount,
+            "open_time": ts.isoformat(),
+            "close_time": ts.isoformat(),
+            "balance_after_trade": new_balance,
+            "notes": f"Journal-only Bybit Demo balance adjustment. Does not modify Bybit broker balance. {reason}".strip(),
+            "is_manual": True,
+        }
+        row["id"] = stable_row_id(row)
+        _upsert_trading_journal_rows([row])
+        _PENDING_MANUAL_SYNC_ROWS = [*pending_before, dict(row)]
+        sync = _sync_master_journal_workbook(defer_github_sync=True)
+        if not _master_journal_sync_ok(sync):
+            raise RuntimeError(_master_journal_sync_error(sync))
+        _PENDING_MANUAL_SYNC_ROWS = pending_before
+        verify = _verify_trade_log_row_ids_in_workbook(_master_journal_path(), [str(row["id"])])
+        if not verify.get("ok"):
+            raise RuntimeError(f"Workbook verification failed after adjustment. missing_row_ids={verify.get('missing_row_ids') or []}")
+        post_snapshot = _build_trading_journal_view_snapshot(force=True)
+        post_balances = post_snapshot.get("balances") if isinstance(post_snapshot, dict) else []
+        post_demo = next((b for b in (post_balances or []) if _is_bybit_demo_account_label(b.get("label") or b.get("account"))), {}) if isinstance(post_balances, list) else {}
+        confirmed = _to_float(post_demo.get("balance"))
+        if confirmed is None or abs(confirmed - new_balance) > 1e-9:
+            raise RuntimeError(f"Bybit Demo balance confirmation failed after pending rows were restored. expected={new_balance} actual={confirmed}")
+        return JSONResponse({"ok": True, "row_id": row["id"], "previous_balance": prev_balance, "adjustment_amount": amount, "new_balance": new_balance, "currency": "USDT", "master_journal_path": str(_master_journal_path())})
+    except Exception as exc:
+        rollback_errors: List[str] = []
+        try:
+            _set_trading_journal_rows(rows_before)
+        except Exception as row_restore_exc:
+            rollback_errors.append(f"row restore failed: {row_restore_exc}")
+        _PENDING_MANUAL_SYNC_ROWS = pending_before
+        try:
+            if workbook_exists and workbook_backup is not None:
+                workbook_path.parent.mkdir(parents=True, exist_ok=True)
+                workbook_path.write_bytes(workbook_backup)
+            elif (not workbook_exists) and workbook_path.exists():
+                workbook_path.unlink()
+        except Exception as restore_exc:
+            rollback_errors.append(f"workbook restore failed: {restore_exc}")
+        try:
+            rollback_snapshot = _build_trading_journal_view_snapshot(force=True)
+            _persist_trading_journal_sqlite(rollback_snapshot, import_meta={"source_mode": "bybit_demo_balance_adjustment_rollback", "rows_imported": 0, "warnings": [], "errors": [str(exc), *rollback_errors]})
+        except Exception as snapshot_exc:
+            rollback_errors.append(f"snapshot rollback failed: {snapshot_exc}")
+        message = f"Bybit Demo balance adjustment failed: {exc}"
+        if rollback_errors:
+            message = f"{message} | rollback failed: {'; '.join(rollback_errors)}"
+        return JSONResponse({"ok": False, "message": message, "errors": ["balance_adjustment_failed"], "rollback_errors": rollback_errors}, status_code=500)
 
 @app.post("/api/trading-journal/open-master-journal")
 async def open_master_journal_file() -> JSONResponse:

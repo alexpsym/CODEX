@@ -186,6 +186,9 @@ def test_trading_journal_actions_js_wiring():
     assert "/api/trading-journal/bybit-demo/balance-adjustment" in js
     assert "account_mode" in js
     assert "Rows parsed:" in js
+    assert js.count("bybitDemoBalanceAdjustmentBtn?.addEventListener('click'") == 1
+    assert js.count("/api/trading-journal/open-master-journal") == 1
+    assert "/api/trading-journal/open-journal" not in js
     assert "includes('demo')" not in js
     assert "includes('live')" not in js
 

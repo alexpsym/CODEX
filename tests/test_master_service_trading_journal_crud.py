@@ -2493,6 +2493,23 @@ def test_bybit_demo_balance_adjustment_rejects_invalid_amounts(temp_state_paths)
         assert payload["ok"] is False
 
 
+def test_bybit_demo_balance_adjustment_respects_feature_gate_before_preflight(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "ENABLE_BYBIT_DEMO_JOURNAL", False)
+    before_rows = list(master_service._get_trading_journal_rows())
+    calls = {"sync": 0, "lock": 0}
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda **kwargs: calls.__setitem__("sync", calls["sync"] + 1))
+    monkeypatch.setattr(master_service, "_master_journal_lock_status", lambda *_a, **_k: calls.__setitem__("lock", calls["lock"] + 1) or {"locked": False})
+
+    res = asyncio.run(master_service.trading_journal_bybit_demo_balance_adjustment({"amount": 10}))
+    payload = _json(res)
+    assert res.status_code == 409
+    assert payload["ok"] is False
+    assert "bybit_demo_journal_disabled" in (payload.get("errors") or [])
+    assert master_service._get_trading_journal_rows() == before_rows
+    assert calls["sync"] == 0
+    assert calls["lock"] == 0
+
+
 def test_bybit_demo_balance_adjustment_rejects_missing_numeric_balance(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", lambda force=False: {"balances": [{"account": "Bybit Demo", "balance": "x"}]})
     res = asyncio.run(master_service.trading_journal_bybit_demo_balance_adjustment({"amount": 5}))

@@ -10,10 +10,13 @@
   const IMPORT_WATCHDOG_MS = 15000;
   const pendingRetry = { kind: '', run: null };
   let retryInFlight = false;
-  const resumeBtn = document.createElement('button');
-  const cancelBtn = document.createElement('button');
+  const makeFallbackButton = () => ({ id: '', textContent: '', style: { display: 'none' }, disabled: false, addEventListener: () => {} });
+  const resumeBtn = typeof document?.createElement === 'function' ? document.createElement('button') : makeFallbackButton();
+  const cancelBtn = typeof document?.createElement === 'function' ? document.createElement('button') : makeFallbackButton();
   resumeBtn.id = 'journal-retry-resume-btn'; resumeBtn.textContent = 'Resume after closing Excel'; resumeBtn.style.display = 'none';
   cancelBtn.id = 'journal-retry-cancel-btn'; cancelBtn.textContent = 'Cancel'; cancelBtn.style.display = 'none';
+  const hasRetryControls = Boolean(status && typeof status.after === 'function');
+  if (status && typeof status.after !== 'function') status.after = () => {};
   if (status) status.after(resumeBtn, cancelBtn);
 
   const setStatus = (msg, err = false) => {
@@ -22,7 +25,11 @@
     status.style.color = err ? '#fca5a5' : '#94a3b8';
   };
   const isExplicitAccountMode = (value) => value === 'demo' || value === 'live';
-  const isExcelLockPayload = (payload) => payload?.code === 'EXCEL_WORKBOOK_OPEN';
+  const isExcelLockPayload = (payload) => {
+    if (payload?.code === 'EXCEL_WORKBOOK_OPEN') return true;
+    const errs = Array.isArray(payload?.errors) ? payload.errors.map((e) => String(e)) : [];
+    return errs.includes('workbook_locked') || errs.includes('excel_open');
+  };
   const clearPendingRetry = () => { pendingRetry.kind = ''; pendingRetry.run = null; retryInFlight = false; resumeBtn.disabled = false; resumeBtn.style.display = 'none'; cancelBtn.style.display = 'none'; if (importBtn) importBtn.disabled = false; if (cryptoMonthlyBtn) cryptoMonthlyBtn.disabled = false; if (bybitDemoBalanceAdjustmentBtn) bybitDemoBalanceAdjustmentBtn.disabled = false; };
   const setPendingRetry = (kind, fn) => { pendingRetry.kind = kind; pendingRetry.run = fn; resumeBtn.style.display = ''; cancelBtn.style.display = ''; };
   resumeBtn.addEventListener('click', async () => {
@@ -156,6 +163,12 @@
       });
       const payload = await res.json().catch(() => ({}));
       if (isExcelLockPayload(payload)) {
+        if (!hasRetryControls) {
+          const retry = window.confirm('Trading Journal.xlsx appears to be open in Excel. Close it, then click OK to retry.');
+          if (retry) return await runBybitAdjust(amount, reason);
+          setStatus('Adjustment cancelled. Close Excel before trying again.', true);
+          return;
+        }
         setStatus(payload.message || 'Trading Journal.xlsx appears to be open in Excel. Close it, then press Resume.', true);
         setPendingRetry('bybit_demo_adjustment', () => runBybitAdjust(amount, reason));
         return;
@@ -184,52 +197,4 @@
     await runBybitAdjust(amount, reason);
   });
 
-  bybitDemoBalanceAdjustmentBtn?.addEventListener('click', async () => {
-    const raw = window.prompt('Enter Bybit Demo journal balance adjustment in USDT. Use negative to reduce balance. This is journal-only and does not change Bybit.');
-    if (raw === null) return;
-    const text = String(raw || '').trim();
-    if (!text) { setStatus('Amount is required.', true); return; }
-    const amount = Number(text);
-    if (!Number.isFinite(amount) || amount === 0) { setStatus('Enter a finite non-zero number.', true); return; }
-    const reasonRaw = window.prompt('Optional reason/note for this journal-only adjustment:', '');
-    const reason = reasonRaw === null ? '' : String(reasonRaw || '').trim();
-    bybitDemoBalanceAdjustmentBtn.disabled = true;
-    setStatus('Applying Bybit Demo balance adjustment...');
-    const postAdjustmentOnce = async () => {
-      const res = await fetch('/api/trading-journal/bybit-demo/balance-adjustment', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({ amount, reason }),
-      });
-      const payload = await res.json().catch(() => ({}));
-      return { res, payload };
-    };
-    try {
-      let { res, payload } = await postAdjustmentOnce();
-      const errCodes = Array.isArray(payload?.errors) ? payload.errors.map((e) => String(e)) : [];
-      const locked = res.status === 423 || errCodes.includes('workbook_locked') || errCodes.includes('excel_open');
-      if (locked) {
-        const retry = window.confirm('Trading Journal.xlsx appears to be open in Excel. Close it, save if needed, then click OK to retry. Cancel leaves the journal unchanged.');
-        if (!retry) {
-          setStatus('Adjustment cancelled. Close Excel before trying again.', true);
-          return;
-        }
-        ({ res, payload } = await postAdjustmentOnce());
-      }
-      if (!res.ok || payload.ok !== true) {
-        const errors = Array.isArray(payload?.errors) && payload.errors.length ? `
-Errors: ${payload.errors.join(', ')}` : '';
-        throw new Error(String(payload?.detail || payload?.message || 'Bybit Demo balance adjustment failed.') + errors);
-      }
-      setStatus(`Success. Previous balance: ${payload.previous_balance} ${payload.currency || 'USDT'}
-Adjustment: ${payload.adjustment_amount} ${payload.currency || 'USDT'}
-New balance: ${payload.new_balance} ${payload.currency || 'USDT'}
-Row ID: ${payload.row_id || ''}
-Workbook: ${payload.master_journal_path || ''}`);
-    } catch (err) {
-      setStatus(err?.message || String(err), true);
-    } finally {
-      bybitDemoBalanceAdjustmentBtn.disabled = false;
-    }
-  });
-})();
+})();;
