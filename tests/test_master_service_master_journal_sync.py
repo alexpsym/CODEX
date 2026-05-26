@@ -1,5 +1,6 @@
 import importlib.util
 import asyncio
+import ctypes
 import json
 from pathlib import Path
 import sys
@@ -1910,3 +1911,35 @@ def test_enforce_single_master_journal_rejects_legacy_backup_excel_name(tmp_path
 def test_single_file_enforcement_error_includes_backup_move_guidance():
     src = (ROOT / "render" / "master_service.py").read_text(encoding="utf-8")
     assert "Move legacy backups outside journal/. Keep only journal/Trading Journal.xlsx." in src
+
+
+@pytest.mark.skipif(master_service is None, reason="master_service import unavailable")
+def test_check_master_journal_write_lock_reports_locked_on_windows_probe_failure(monkeypatch, tmp_path):
+    p = tmp_path / "Trading Journal.xlsx"
+    p.write_bytes(b"x")
+    monkeypatch.setattr(master_service.os, "name", "nt")
+    class _K:
+        def __init__(self):
+            self.CreateFileW = lambda *_a: ctypes.c_void_p(-1).value
+            self.CloseHandle = lambda *_a: 1
+    monkeypatch.setattr(master_service.ctypes, "WinDLL", lambda *_a, **_k: _K(), raising=False)
+    monkeypatch.setattr(master_service.ctypes, "get_last_error", lambda: 5, raising=False)
+    out = master_service._check_master_journal_write_lock(p)
+    assert out["locked"] is True
+    assert out["code"] == "EXCEL_WORKBOOK_OPEN"
+
+
+@pytest.mark.skipif(master_service is None, reason="master_service import unavailable")
+def test_check_master_journal_write_lock_does_not_treat_stale_lock_file_as_locked(monkeypatch, tmp_path):
+    p = tmp_path / "Trading Journal.xlsx"
+    p.write_bytes(b"x")
+    (tmp_path / "~$Trading Journal.xlsx").write_bytes(b"stale")
+    monkeypatch.setattr(master_service.os, "name", "nt")
+    class _K:
+        def __init__(self):
+            self.CreateFileW = lambda *_a: ctypes.c_void_p(123).value
+            self.CloseHandle = lambda *_a: 1
+    monkeypatch.setattr(master_service.ctypes, "WinDLL", lambda *_a, **_k: _K(), raising=False)
+    out = master_service._check_master_journal_write_lock(p)
+    assert out["locked"] is False
+    assert "lockfile" in str(out.get("reason") or "")

@@ -7,6 +7,7 @@ import sys
 import threading
 from datetime import date, datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi import HTTPException
@@ -2354,6 +2355,25 @@ def test_crypto_monthly_endpoint_fails_when_workbook_anchor_read_fails(monkeypat
     assert r.json()['ok'] is False
 
 
+def test_crypto_monthly_failure_verified_row_ids_exclude_missing(monkeypatch, tmp_path):
+    from fastapi.testclient import TestClient
+    client = TestClient(master_service.app)
+    monkeypatch.setattr(master_service, "_brisbane_now", lambda: __import__('datetime').datetime(2026, 5, 21))
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: tmp_path / "Trading Journal.xlsx")
+    monkeypatch.setattr(master_service, "_monthly_aud_revaluation_rows_for_journal_view", lambda: [{"id":"monthly_aud_reval:bybit_live:2026-03","raw_refs":{"period_month":"2026-03"}}])
+    monkeypatch.setattr(master_service, "_read_monthly_aud_reval_months_from_workbook", lambda _p: {"ok": True, "workbook_exists": True, "months": ["2026-03"]})
+    async def _run(reason):
+        return {"ok": True}
+    monkeypatch.setattr(master_service, "_run_monthly_aud_revaluation_sync", _run)
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"ok": True, "master_journal_path": str(tmp_path / "Trading Journal.xlsx")})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda _p, _ids: {"ok": False, "missing_row_ids": ["monthly_aud_reval:bybit_live:2026-04"]})
+    r = client.post("/api/trading-journal/crypto-monthly-pnl")
+    payload = r.json()
+    assert r.status_code == 500
+    assert "monthly_aud_reval:bybit_live:2026-04" in (payload.get("missing_row_ids") or [])
+    assert "monthly_aud_reval:bybit_live:2026-04" not in (payload.get("verified_row_ids") or [])
+
+
 def test_verify_trade_log_row_ids_uses_streaming_iter_rows_only(monkeypatch, tmp_path):
     class FakeSheet:
         def __init__(self):
@@ -2461,6 +2481,51 @@ def test_bybit_demo_balance_adjustment_rejects_invalid_amounts(temp_state_paths)
         res = asyncio.run(master_service.trading_journal_bybit_demo_balance_adjustment({"amount": amt}))
         payload = _json(res)
         assert payload["ok"] is False
+
+
+def test_bybit_demo_balance_adjustment_returns_excel_lock_payload_before_mutation(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", lambda force=False: _demo_balance_snapshot(100.0))
+    monkeypatch.setattr(master_service, "_check_master_journal_write_lock", lambda _p: {"locked": True, "reason": "locked"})
+    before = list(master_service._get_trading_journal_rows())
+    res = asyncio.run(master_service.trading_journal_bybit_demo_balance_adjustment({"amount": 10, "reason": "r"}))
+    payload = _json(res)
+    assert res.status_code == 423
+    assert payload.get("code") == "EXCEL_WORKBOOK_OPEN"
+    assert master_service._get_trading_journal_rows() == before
+
+
+def test_import_file_returns_excel_lock_payload_before_upsert(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    data = b"contracts,order no.,direction,order type,filled qty,filled price,order price,filled type,trading fee rate,fees paid,transaction time,final balance,transaction id\n"
+    monkeypatch.setattr(master_service, "_is_bybit_trade_history_csv", lambda _p: False)
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda *_a, **_k: ([{"id": "r1", "row_type": "trade", "symbol": "BTCUSDT"}], None))
+    monkeypatch.setattr(master_service, "_infer_realized_net_profit_from_balance_continuity", lambda rows, existing: (rows, [], {"pnl_inferred_count": 0, "pnl_unresolved_count": 0, "pnl_unresolved_row_ids": []}))
+    monkeypatch.setattr(master_service, "_check_master_journal_write_lock", lambda _p: {"locked": True, "reason": "locked"})
+    monkeypatch.setattr(master_service, "_upsert_trading_journal_rows", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("upsert should not run")))
+    out = master_service._import_uploaded_trading_journal_file("x.xlsx", data)
+    assert out["status_code"] == 423
+    assert out["code"] == "EXCEL_WORKBOOK_OPEN"
+
+
+def test_crypto_monthly_pnl_resume_uses_workbook_anchor_when_state_ahead(monkeypatch, tmp_path):
+    client = TestClient(master_service.app)
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: tmp_path / "Trading Journal.xlsx")
+    class _Now(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 5, 15, tzinfo=tz)
+    monkeypatch.setattr(master_service, "_brisbane_now", lambda: _Now.now(ZoneInfo("Australia/Brisbane")))
+    monkeypatch.setattr(master_service, "_monthly_aud_revaluation_rows_for_journal_view", lambda: [{"id": "monthly_aud_reval:bybit_live:2026-04"}])
+    monkeypatch.setattr(master_service, "_read_monthly_aud_reval_months_from_workbook", lambda _p: {"ok": True, "workbook_exists": True, "months": ["2026-03"]})
+    monkeypatch.setattr(master_service, "_check_master_journal_write_lock", lambda _p: {"locked": False, "reason": ""})
+    monkeypatch.setattr(master_service, "_run_monthly_aud_revaluation_sync", lambda **_k: asyncio.sleep(0, result={"ok": True}))
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"ok": True, "master_journal_path": str(tmp_path / "Trading Journal.xlsx")})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda _p, ids: {"ok": True, "missing_row_ids": [], "expected_row_ids": ids})
+    r = client.post("/api/trading-journal/crypto-monthly-pnl")
+    payload = r.json()
+    assert r.status_code == 200
+    assert payload.get("target_months") == ["2026-04"]
+    assert payload.get("verified_row_ids") == ["monthly_aud_reval:bybit_live:2026-04"]
+    assert "Synced crypto monthly AUD P&L workbook rows for 2026-04." in str(payload.get("message") or "")
 
 
 def test_bybit_demo_balance_adjustment_rejects_missing_numeric_balance(temp_state_paths, monkeypatch: pytest.MonkeyPatch):

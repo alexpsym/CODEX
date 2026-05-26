@@ -139,3 +139,23 @@ def test_trading_journal_actions_import_error_shows_payload_errors_and_keeps_byb
     assert "Import is still running longer than expected. Waiting for backend result..." in js
     assert "IMPORT_WATCHDOG_MS" in js
     assert "if (!res.ok || payload.ok !== true)" in js
+
+
+def test_trading_journal_actions_excel_lock_retry_controls_and_guards_present() -> None:
+    js = ACTIONS_JS_PATH.read_text(encoding="utf-8")
+    assert "payload?.code === 'EXCEL_WORKBOOK_OPEN'" in js
+    assert "payload?.retryable === true" not in js
+    assert "Resume after closing Excel" in js
+    assert "Retry canceled." in js
+    assert "let retryInFlight = false;" in js
+    assert "if (!pendingRetry.run || retryInFlight) return;" in js
+    assert "resumeBtn.disabled = true;" in js
+    assert "setPendingRetry('import', () => runImport(file, explicitMode));" in js
+    assert "await runImport(file, capturedMode);" in js
+    assert "setPendingRetry('bybit_demo_adjustment', () => runBybitAdjust(amount, reason));" in js
+    assert "setPendingRetry('crypto', runCryptoMonthly);" in js
+    assert "if (importBtn) importBtn.disabled" in js
+    assert "if (cryptoMonthlyBtn) cryptoMonthlyBtn.disabled" in js
+    assert "if (bybitDemoBalanceAdjustmentBtn) bybitDemoBalanceAdjustmentBtn.disabled" in js
+    assert "if (status) status.after(resumeBtn, cancelBtn);" in js
+    assert "if (!pendingRetry.run && fileInput) fileInput.value = '';" in js

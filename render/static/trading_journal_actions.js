@@ -8,6 +8,13 @@
   const status = document.getElementById('journal-actions-status');
   const BYBIT_AMBIGUITY_MSG = 'Select Demo or Live in Bybit CSV account, then import this file again.';
   const IMPORT_WATCHDOG_MS = 15000;
+  const pendingRetry = { kind: '', run: null };
+  let retryInFlight = false;
+  const resumeBtn = document.createElement('button');
+  const cancelBtn = document.createElement('button');
+  resumeBtn.id = 'journal-retry-resume-btn'; resumeBtn.textContent = 'Resume after closing Excel'; resumeBtn.style.display = 'none';
+  cancelBtn.id = 'journal-retry-cancel-btn'; cancelBtn.textContent = 'Cancel'; cancelBtn.style.display = 'none';
+  if (status) status.after(resumeBtn, cancelBtn);
 
   const setStatus = (msg, err = false) => {
     if (!status) return;
@@ -15,6 +22,16 @@
     status.style.color = err ? '#fca5a5' : '#94a3b8';
   };
   const isExplicitAccountMode = (value) => value === 'demo' || value === 'live';
+  const isExcelLockPayload = (payload) => payload?.code === 'EXCEL_WORKBOOK_OPEN';
+  const clearPendingRetry = () => { pendingRetry.kind = ''; pendingRetry.run = null; retryInFlight = false; resumeBtn.disabled = false; resumeBtn.style.display = 'none'; cancelBtn.style.display = 'none'; if (importBtn) importBtn.disabled = false; if (cryptoMonthlyBtn) cryptoMonthlyBtn.disabled = false; if (bybitDemoBalanceAdjustmentBtn) bybitDemoBalanceAdjustmentBtn.disabled = false; };
+  const setPendingRetry = (kind, fn) => { pendingRetry.kind = kind; pendingRetry.run = fn; resumeBtn.style.display = ''; cancelBtn.style.display = ''; };
+  resumeBtn.addEventListener('click', async () => {
+    if (!pendingRetry.run || retryInFlight) return;
+    retryInFlight = true;
+    resumeBtn.disabled = true;
+    try { await pendingRetry.run(); } finally { retryInFlight = false; resumeBtn.disabled = false; }
+  });
+  cancelBtn.addEventListener('click', () => { clearPendingRetry(); setStatus('Retry canceled.'); });
 
   const formatImportError = (payload, fallback) => {
     const base = String(payload?.detail || payload?.message || fallback || 'Import failed.').trim();
@@ -53,17 +70,16 @@
   });
 
   importBtn?.addEventListener('click', () => fileInput?.click());
-  fileInput?.addEventListener('change', async () => {
-    const file = fileInput.files && fileInput.files[0];
+  const runImport = async (file, fixedAccountMode = null) => {
     if (!file) return;
-    importBtn.disabled = true;
+    if (importBtn) importBtn.disabled = true;
     setStatus('Importing...');
     let watchdog = null;
     try {
       watchdog = window.setTimeout(() => {
         setStatus('Import is still running longer than expected. Waiting for backend result...', true);
       }, IMPORT_WATCHDOG_MS);
-      const explicitMode = String(accountModeSelect?.value || '').trim().toLowerCase();
+      const explicitMode = String((fixedAccountMode ?? accountModeSelect?.value) || '').trim().toLowerCase();
       const bybitLikely = await isLikelyBybitHistoryCsv(file);
       if (bybitLikely && !isExplicitAccountMode(explicitMode)) {
         setStatus(BYBIT_AMBIGUITY_MSG, true);
@@ -80,16 +96,27 @@
         accountModeSelect?.focus?.();
         return;
       }
+      if (isExcelLockPayload(payload)) {
+        setStatus(payload.message || 'Trading Journal.xlsx appears to be open in Excel. Close it, then press Resume.', true);
+        setPendingRetry('import', () => runImport(file, explicitMode));
+        return;
+      }
       if (!res.ok || payload.ok !== true) throw new Error(formatImportError(payload, 'Import failed.'));
       const warnings = payload.warnings || [];
       const inferred = payload.pnl_inferred_count ?? 0;
       const unresolved = payload.pnl_unresolved_count ?? 0;
       setStatus(`${payload.message || 'Import complete.'}\nRows parsed: ${payload.rows_parsed ?? 0}\nRows upserted: ${payload.rows_upserted ?? 0}\nP/L inferred: ${inferred}\nP/L unresolved: ${unresolved}\nWorkbook: ${payload.master_journal_path || ''}\nMissing Row IDs: ${(payload.missing_row_ids || []).join(', ') || 'none'}${warnings.length ? `\nWarnings:\n- ${warnings.join('\n- ')}` : ''}`);
+      clearPendingRetry();
     } catch (err) { setStatus(err?.message || String(err), true); }
     finally {
       if (watchdog) window.clearTimeout(watchdog);
-      importBtn.disabled = false; fileInput.value = '';
+      if (importBtn) importBtn.disabled = Boolean(pendingRetry.run); if (!pendingRetry.run && fileInput) fileInput.value = '';
     }
+  };
+  fileInput?.addEventListener('change', async () => {
+    const file = fileInput.files && fileInput.files[0];
+    const capturedMode = String(accountModeSelect?.value || '').trim().toLowerCase();
+    await runImport(file, capturedMode);
   });
   accountModeSelect?.addEventListener('change', () => {
     const explicitMode = String(accountModeSelect?.value || '').trim().toLowerCase();
@@ -99,18 +126,52 @@
     }
   });
 
-  cryptoMonthlyBtn?.addEventListener('click', async () => {
-    cryptoMonthlyBtn.disabled = true;
+  const runCryptoMonthly = async () => {
+    if (cryptoMonthlyBtn) cryptoMonthlyBtn.disabled = true;
     setStatus('Checking crypto monthly P&L...');
     try {
       const res = await fetch('/api/trading-journal/crypto-monthly-pnl', { method: 'POST', headers: { Accept: 'application/json' } });
       const payload = await res.json().catch(() => ({}));
+      if (isExcelLockPayload(payload)) {
+        setStatus(payload.message || 'Trading Journal.xlsx appears to be open in Excel. Close it, then press Resume.', true);
+        setPendingRetry('crypto', runCryptoMonthly);
+        return;
+      }
       if (!res.ok || payload.ok !== true) throw new Error(payload.error || payload.detail || payload.message || 'Crypto monthly P&L failed.');
       setStatus(`Target months: ${(payload.target_months || []).join(', ') || '—'}\nInserted months: ${(payload.inserted_months || []).join(', ') || '—'}\nSkipped existing months: ${(payload.skipped_existing_months || []).join(', ') || '—'}\nRows inserted: ${payload.rows_inserted || 0}\nWorkbook: ${payload.master_journal_path || ''}\n${payload.message || ''}`);
+      clearPendingRetry();
     } catch (err) { setStatus(err?.message || String(err), true); }
-    finally { cryptoMonthlyBtn.disabled = false; }
-  });
+    finally { if (cryptoMonthlyBtn) cryptoMonthlyBtn.disabled = Boolean(pendingRetry.run); }
+  };
+  cryptoMonthlyBtn?.addEventListener('click', runCryptoMonthly);
 
+  const runBybitAdjust = async (amount, reason) => {
+    if (bybitDemoBalanceAdjustmentBtn) bybitDemoBalanceAdjustmentBtn.disabled = true;
+    setStatus('Applying Bybit Demo balance adjustment...');
+    try {
+      const res = await fetch('/api/trading-journal/bybit-demo/balance-adjustment', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ amount, reason }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (isExcelLockPayload(payload)) {
+        setStatus(payload.message || 'Trading Journal.xlsx appears to be open in Excel. Close it, then press Resume.', true);
+        setPendingRetry('bybit_demo_adjustment', () => runBybitAdjust(amount, reason));
+        return;
+      }
+      if (!res.ok || payload.ok !== true) {
+        const errors = Array.isArray(payload?.errors) && payload.errors.length ? `\nErrors: ${payload.errors.join(', ')}` : '';
+        throw new Error(String(payload?.detail || payload?.message || 'Bybit Demo balance adjustment failed.') + errors);
+      }
+      setStatus(`Success. Previous balance: ${payload.previous_balance} ${payload.currency || 'USDT'}\nAdjustment: ${payload.adjustment_amount} ${payload.currency || 'USDT'}\nNew balance: ${payload.new_balance} ${payload.currency || 'USDT'}\nRow ID: ${payload.row_id || ''}\nWorkbook: ${payload.master_journal_path || ''}`);
+      clearPendingRetry();
+    } catch (err) {
+      setStatus(err?.message || String(err), true);
+    } finally {
+      if (bybitDemoBalanceAdjustmentBtn) bybitDemoBalanceAdjustmentBtn.disabled = Boolean(pendingRetry.run);
+    }
+  };
   bybitDemoBalanceAdjustmentBtn?.addEventListener('click', async () => {
     const raw = window.prompt('Enter Bybit Demo journal balance adjustment in USDT. Use negative to reduce balance. This is journal-only and does not change Bybit.');
     if (raw === null) return;
@@ -120,24 +181,6 @@
     if (!Number.isFinite(amount) || amount === 0) { setStatus('Enter a finite non-zero number.', true); return; }
     const reasonRaw = window.prompt('Optional reason/note for this journal-only adjustment:', '');
     const reason = reasonRaw === null ? '' : String(reasonRaw || '').trim();
-    bybitDemoBalanceAdjustmentBtn.disabled = true;
-    setStatus('Applying Bybit Demo balance adjustment...');
-    try {
-      const res = await fetch('/api/trading-journal/bybit-demo/balance-adjustment', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify({ amount, reason }),
-      });
-      const payload = await res.json().catch(() => ({}));
-      if (!res.ok || payload.ok !== true) {
-        const errors = Array.isArray(payload?.errors) && payload.errors.length ? `\nErrors: ${payload.errors.join(', ')}` : '';
-        throw new Error(String(payload?.detail || payload?.message || 'Bybit Demo balance adjustment failed.') + errors);
-      }
-      setStatus(`Success. Previous balance: ${payload.previous_balance} ${payload.currency || 'USDT'}\nAdjustment: ${payload.adjustment_amount} ${payload.currency || 'USDT'}\nNew balance: ${payload.new_balance} ${payload.currency || 'USDT'}\nRow ID: ${payload.row_id || ''}\nWorkbook: ${payload.master_journal_path || ''}`);
-    } catch (err) {
-      setStatus(err?.message || String(err), true);
-    } finally {
-      bybitDemoBalanceAdjustmentBtn.disabled = false;
-    }
+    await runBybitAdjust(amount, reason);
   });
 })();
