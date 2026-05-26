@@ -148,7 +148,7 @@
   },
   "oanda_fill_state": {},
   "pending_webhooks": [],
-  "savedAt": "2026-05-26T04:00:37.482101+00:00",
+  "savedAt": "2026-05-26T04:02:28.049325+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [
@@ -74177,7 +74177,7 @@
         "trade_duration_seconds": null
       }
     ],
-    "updated_at": "2026-05-26T04:00:35.379651+00:00"
+    "updated_at": "2026-05-26T04:02:25.963611+00:00"
   },
   "trading_journal_import_cache": {},
   "trading_journal_state": {
@@ -74244,8 +74244,8 @@
       }
     },
     "daily_trade_sync": {
-      "last_attempt_at": "2026-05-26T03:48:40.787357+00:00",
-      "last_error": null,
+      "last_attempt_at": "2026-05-26T04:01:12.079776+00:00",
+      "last_error": "Trading Journal validation failed: Account Balances mismatch vs snapshot: Bybit Demo: expected_balance=319.8339282399999, actual_balance=366.4981079599999, expected_currency=USDT, actual_currency=USDT, balance_source=cashflow_anchor_plus_trades",
       "last_reason": "startup_recovery",
       "last_result": {
         "balances_found": 0,
@@ -74273,42 +74273,22 @@
           "visible_trade_rows_total": 0
         },
         "errors": [],
-        "finished_at": "2026-05-26T03:47:26.955057+00:00",
-        "github_sync_branch": "master",
-        "github_sync_commit": "1c910a4",
-        "github_sync_enabled": true,
-        "github_sync_error": "",
-        "github_sync_error_type": "",
-        "github_sync_files": [
-          "journal/Trading Journal.xlsx",
-          "journal/5-digit-demo-calculation-context.json",
-          "state_backup.json"
-        ],
-        "github_sync_noop": false,
-        "github_sync_ok": true,
-        "github_sync_remote": "origin",
-        "master_journal_diagnostics": {
-          "source_balances": 7,
-          "source_rows_total": 1512,
-          "source_trade_rows": 1413
-        },
+        "finished_at": "2026-05-26T04:00:23.796681+00:00",
+        "master_journal_error": "Trading Journal validation failed: Account Balances mismatch vs snapshot: Bybit Demo: expected_balance=319.8339282399999, actual_balance=366.4981079599999, expected_currency=USDT, actual_currency=USDT, balance_source=cashflow_anchor_plus_trades",
+        "master_journal_error_type": "RuntimeError",
         "master_journal_exists": true,
-        "master_journal_ok": true,
+        "master_journal_ok": false,
         "master_journal_path": "C:\\Users\\User\\Documents\\GPT\\CODEX-master\\journal\\Trading Journal.xlsx",
-        "master_journal_size_bytes": 296971,
-        "master_journal_updated_at": "2026-05-26T03:48:33.375594+00:00",
         "oanda_recovery": {},
-        "ok": true,
-        "rows_imported": 1512,
+        "ok": false,
+        "rows_imported": 1515,
         "source": "master_journal",
         "source_mode": "master_journal",
-        "source_rows_total": 1512,
-        "source_trade_rows": 1413,
-        "started_at": "2026-05-26T03:47:21.423722+00:00",
+        "started_at": "2026-05-26T04:00:18.338794+00:00",
         "warnings": []
       },
-      "last_success_at": "2026-05-26T03:48:40.787383+00:00",
-      "updated_at": "2026-05-26T03:48:40.913909+00:00"
+      "last_success_at": null,
+      "updated_at": "2026-05-26T04:01:12.080516+00:00"
     }
   },
   "version": 4,
