@@ -9847,6 +9847,38 @@ OANDA_PERIOD_DELTAS: Dict[str, relativedelta] = {
     "3y": relativedelta(years=3),
 }
 
+def _bybit_window_for_request(*, account_mode: str, period: Optional[str], complete: bool, days_value: object) -> tuple[int, int, int, dict[str, object]]:
+    now_utc = datetime.now(timezone.utc)
+    end_ms = int(now_utc.timestamp() * 1000)
+    max_days = 7 if account_mode == "demo" else 730
+
+    if complete:
+        requested_days = max_days
+    elif period:
+        delta = BYBIT_PERIOD_DELTAS.get(period)
+        if delta is None:
+            raise ValueError(f"Unknown period: {period}")
+        start_dt = now_utc - delta
+        requested_days = max(1, math.ceil((now_utc - start_dt).total_seconds() / 86400))
+    else:
+        if days_value is None:
+            raise ValueError("days is required unless complete is true.")
+        try:
+            requested_days = int(days_value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("days must be an integer.") from exc
+        if requested_days <= 0:
+            raise ValueError("days must be greater than zero.")
+
+    clamped_days = min(requested_days, max_days)
+    start_ms = end_ms - (clamped_days * 24 * 60 * 60 * 1000) + bybit_history_fetcher.LIMIT_CUSHION_MS
+    if start_ms > end_ms:
+        start_ms = end_ms
+
+    meta = {"requested_days": requested_days, "clamped_days": clamped_days, "max_days": max_days}
+    return start_ms, end_ms, max_days, meta
+
+
 BYBIT_PERIOD_DELTAS: Dict[str, relativedelta] = {
     "day": relativedelta(days=1),
     "week": relativedelta(days=7),
@@ -9908,30 +9940,12 @@ async def _run_bybit_history_export(job: BybitHistoryJob) -> None:
         period = _normalize_period(job.params.get("period"))
         complete = bool(job.params.get("complete")) or period == "complete"
 
-        # Bybit Demo Trading only retains ~7 days of orders/executions.
-        # Live/Testnet supports up to ~2 years.
-        max_days = 730
-        if account_mode == "demo":
-            max_days = 7
-
-        if complete:
-            start_date, end_date = _date_range_for_period("complete", max_days=max_days)
-        elif period:
-            start_date, end_date = _date_range_for_period(period, max_days=max_days)
-        else:
-            days_value = job.params.get("days")
-            if days_value is None:
-                raise ValueError("days is required unless complete is true.")
-            try:
-                days = int(days_value)
-            except (TypeError, ValueError) as exc:
-                raise ValueError("days must be an integer.") from exc
-            if days <= 0:
-                raise ValueError("days must be greater than zero.")
-            # Clamp to the Bybit API retention window.
-            if days > max_days:
-                days = max_days
-            start_date, end_date = _date_range_for_days(days)
+        start_ms, end_ms, _max_days, window_meta = _bybit_window_for_request(
+            account_mode=account_mode,
+            period=period,
+            complete=complete,
+            days_value=job.params.get("days"),
+        )
 
         def _export() -> Path:
             import shutil
@@ -9958,12 +9972,17 @@ async def _run_bybit_history_export(job: BybitHistoryJob) -> None:
                             "BYBIT_API_SECRET2 (testnet keypair). Live/legacy keys "
                             "cannot authenticate on testnet."
                         )
+                    diagnostics: Dict[str, Any] = {}
                     filename = bybit_history_fetcher.download_history(
                         "linear",
-                        start_date,
-                        end_date,
+                        None,
+                        None,
                         None,
                         True,
+                        mode_override=account_mode,
+                        start_ms_override=start_ms,
+                        end_ms_override=end_ms,
+                        diagnostics_out=diagnostics,
                     )
                 finally:
                     os.chdir(prev_cwd)
@@ -9972,7 +9991,18 @@ async def _run_bybit_history_export(job: BybitHistoryJob) -> None:
                     else:
                         os.environ["BYBIT_ENV"] = prev_env
                 if filename is None:
-                    raise RuntimeError("No transactions found for the selected timeframe.")
+                    start_iso = datetime.fromtimestamp((diagnostics.get("start_ms") or start_ms) / 1000, timezone.utc).isoformat()
+                    end_iso = datetime.fromtimestamp((diagnostics.get("end_ms") or end_ms) / 1000, timezone.utc).isoformat()
+                    base_host = urlparse(str(diagnostics.get("base_url") or "")).netloc
+                    row_count = int(diagnostics.get("row_count") or 0)
+                    detail = (
+                        f"No transactions found for the selected timeframe. "
+                        f"account_mode={account_mode} requested_period={period or ''} complete={complete} "
+                        f"days={job.params.get('days')} start_utc={start_iso} end_utc={end_iso} "
+                        f"base_host={base_host} row_count={row_count}"
+                    )
+                    BYBIT_LOGGER.info("Bybit export empty result id=%s %s", job.job_id, detail)
+                    raise RuntimeError(detail)
                 src = tmp_path / filename
                 if not src.exists():
                     raise RuntimeError("Export was generated but could not be found on disk.")

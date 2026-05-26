@@ -931,6 +931,9 @@ def download_history(
     symbol: str | None = None,
     template: bool | None = True,
     mode_override: str | None = None,
+    start_ms_override: int | None = None,
+    end_ms_override: int | None = None,
+    diagnostics_out: Dict[str, Any] | None = None,
 ) -> str | None:
     """Download execution history from Bybit and save as CSV.
 
@@ -959,10 +962,18 @@ def download_history(
     if symbol:
         params["symbol"] = symbol
 
-    start_ms = _parse_date_start(start_date) if start_date else None
-    end_ms = _parse_date_end(end_date) if end_date else None
+    start_ms = start_ms_override if start_ms_override is not None else (_parse_date_start(start_date) if start_date else None)
+    end_ms = end_ms_override if end_ms_override is not None else (_parse_date_end(end_date) if end_date else None)
     # Live/testnet: ~2 years. Demo: 7 days.
     start_ms, end_ms = _limit_time_window(mode, start_ms, end_ms)
+
+    if diagnostics_out is not None:
+        diagnostics_out.update({
+            "mode": mode,
+            "base_url": base_url,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+        })
 
     rows: List[Dict[str, Any]] = []
 
@@ -1015,6 +1026,8 @@ def download_history(
         )
 
     rows = _sort_execution_rows_oldest_first(rows)
+    if diagnostics_out is not None:
+        diagnostics_out["row_count"] = len(rows)
 
     for row in rows:
         _convert_exec_time(row, bool(template))

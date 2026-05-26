@@ -80,6 +80,24 @@ def test_download_history_mode_override(monkeypatch):
 
     assert captured.get("called") is True
 
+
+
+def test_download_history_uses_epoch_overrides_without_date_parsing(monkeypatch):
+    monkeypatch.setenv("BYBIT_API_KEY", "k")
+    monkeypatch.setenv("BYBIT_API_SECRET", "s")
+    monkeypatch.setattr(fetch_history, "HTTP", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(fetch_history, "_parse_date_start", lambda *_: (_ for _ in ()).throw(AssertionError("should not parse start")))
+    monkeypatch.setattr(fetch_history, "_parse_date_end", lambda *_: (_ for _ in ()).throw(AssertionError("should not parse end")))
+    monkeypatch.setattr(fetch_history, "_fetch_pages", lambda *args, **kwargs: [[]])
+
+    fetch_history.download_history(
+        "linear",
+        "2026-05-01",
+        "2026-05-02",
+        start_ms_override=1000,
+        end_ms_override=2000,
+    )
+
 def test_download_history_calls_api(monkeypatch):
     """Check API call parameters."""
     monkeypatch.setenv("BYBIT_API_KEY", "k")
