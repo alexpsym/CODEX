@@ -1548,11 +1548,12 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
                 continue
             merged_items.append(dict(fallback_row))
         items = merged_items
-        trade_items = _enrich_trade_row_metrics([r for r in items if _row_type(r) == "trade"])
+        trade_items = [_backfill_trade_row_context_fields(dict(r)) if isinstance(r, dict) else r for r in [r for r in items if _row_type(r) == "trade"]]
+        trade_items = _enrich_trade_row_metrics(trade_items)
         non_trade_items = [r for r in items if _row_type(r) != "trade"]
-        merged_ledger = _merge_pending_cashflow_rows_into_ledger(source_payload.get("cashflow_ledger") or {}, _PENDING_MANUAL_SYNC_ROWS or [])
-        timeline = _build_journal_balance_timelines(trade_items, merged_ledger, _get_excel_account_balances())
-        trade_items = _enrich_trade_row_metrics(timeline.get("rows") if isinstance(timeline.get("rows"), list) else trade_items)
+        timeline = _build_journal_balance_timelines(trade_items, source_payload.get("cashflow_ledger") or {}, _get_excel_account_balances())
+        trade_items = [_backfill_trade_row_context_fields(dict(r)) if isinstance(r, dict) else r for r in (timeline.get("rows") if isinstance(timeline.get("rows"), list) else trade_items)]
+        trade_items = _enrich_trade_row_metrics(trade_items)
         items = sorted([*trade_items, *non_trade_items], key=_row_sort_dt, reverse=True)
         balances = timeline.get("balances") or []
         state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
@@ -3853,30 +3854,6 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-
-
-def _journal_local_now_naive_iso() -> str:
-    try:
-        now_local = datetime.now(ZoneInfo(APP_TIMEZONE))
-    except Exception:
-        now_local = datetime.now(ZoneInfo("Australia/Brisbane"))
-    return now_local.replace(tzinfo=None).isoformat(timespec="seconds")
-
-
-def _master_journal_lock_status(path: Path) -> Dict[str, object]:
-    target = Path(path)
-    lock_file = target.with_name(f"~${target.name}")
-    if lock_file.exists():
-        return {"locked": True, "reason": "excel_lock_file_present", "path": str(target)}
-    if not target.exists():
-        return {"locked": False, "reason": "missing_workbook", "path": str(target)}
-    try:
-        with open(target, "r+b"):
-            pass
-    except (PermissionError, OSError) as exc:
-        return {"locked": True, "reason": f"open_failed:{exc.__class__.__name__}", "path": str(target)}
-    return {"locked": False, "reason": "ok", "path": str(target)}
-
 def _json_safe(value: object) -> object:
     if value is None or isinstance(value, (str, bool, int)):
         return value
@@ -4453,7 +4430,11 @@ def _repair_persisted_bybit_trade_context_fields() -> int:
     changed = 0
     repaired: List[Dict[str, object]] = []
     for row in rows:
-        if not isinstance(row, dict) or str(row.get("source") or "").strip().lower() != "bybit":
+        if not isinstance(row, dict):
+            repaired.append(row)
+            continue
+        source = str(row.get("source") or "").strip().lower()
+        if source not in {"bybit", "bybit_execution_history_grouped"}:
             repaired.append(row)
             continue
         if (
@@ -4546,10 +4527,14 @@ def _backfill_persisted_bybit_trade_fields(rows: List[Dict[str, object]]) -> tup
     repaired: List[Dict[str, object]] = []
     changed = 0
     for row in rows:
-        if not isinstance(row, dict) or str(row.get("source") or "").strip().lower() != "bybit":
+        if not isinstance(row, dict):
             repaired.append(row)
             continue
-        updated = dict(row)
+        source = str(row.get("source") or "").strip().lower()
+        if source not in {"bybit", "bybit_execution_history_grouped"}:
+            repaired.append(row)
+            continue
+        updated = _backfill_trade_row_context_fields(dict(row))
         ctx = _lookup_trade_context_for_journal_row(updated)
         timeframe = _normalize_timeframe(updated.get("timeframe"))
         if not timeframe and isinstance(ctx, dict):
@@ -5677,73 +5662,6 @@ def _load_cashflows_for_active_journal_source(state: dict) -> Dict[str, List[Dic
     return _load_cashflows_from_dropbox(active_folder) if active_folder else {}
 
 
-def _cashflow_row_to_ledger_event(row: Dict[str, object]) -> Optional[Tuple[str, Dict[str, object]]]:
-    if not isinstance(row, dict) or _row_type(row) != "cashflow":
-        return None
-    row_id = str(row.get("id") or "").strip()
-    account_label = str(row.get("account_label") or row.get("account") or "").strip()
-    account_key = _norm_account_key(account_label)
-    if not account_key:
-        return None
-    event_date = row.get("close_time") or row.get("open_time")
-    amount = _to_float(row.get("cashflow_amount"))
-    new_balance = _to_float(row.get("cashflow_new_balance"))
-    if new_balance is None:
-        new_balance = _to_float(row.get("balance_after_trade"))
-    currency = str(row.get("currency") or row.get("account_currency") or row.get("balance_after_trade_currency") or "").strip()
-    reason = str(row.get("notes") or row.get("cashflow_reason") or "").strip()
-    if event_date is None or amount is None or new_balance is None:
-        return None
-    event = {
-        "id": row_id,
-        "account": account_label,
-        "date": event_date,
-        "amount": amount,
-        "new_balance": new_balance,
-        "currency": currency,
-        "reason": reason,
-    }
-    return account_key, event
-
-
-def _normalize_cashflow_ledger_keys(cashflow_ledger: Dict[str, List[Dict[str, object]]]) -> Dict[str, List[Dict[str, object]]]:
-    normalized: Dict[str, List[Dict[str, object]]] = defaultdict(list)
-    for raw_key, events in (cashflow_ledger or {}).items():
-        fallback_key = _norm_account_key(raw_key)
-        for event in (events or []):
-            if not isinstance(event, dict):
-                continue
-            event_copy = dict(event)
-            event_account = event_copy.get("account")
-            account_key = _norm_account_key(event_account) or fallback_key
-            if not account_key:
-                continue
-            normalized[account_key].append(event_copy)
-    return {k: sorted(v, key=lambda e: _timestamp_epoch_seconds((e or {}).get("date"))) for k, v in normalized.items()}
-
-
-def _merge_pending_cashflow_rows_into_ledger(cashflow_ledger: Dict[str, List[Dict[str, object]]], pending_rows: List[Dict[str, object]]) -> Dict[str, List[Dict[str, object]]]:
-    merged: Dict[str, List[Dict[str, object]]] = _normalize_cashflow_ledger_keys(cashflow_ledger)
-    seen_ids: Set[str] = set()
-    for events in merged.values():
-        for ev in events:
-            rid = str(ev.get("id") or "").strip()
-            if rid:
-                seen_ids.add(rid)
-    for row in pending_rows or []:
-        converted = _cashflow_row_to_ledger_event(row)
-        if converted is None:
-            continue
-        account_key, event = converted
-        rid = str(event.get("id") or "").strip()
-        if rid and rid in seen_ids:
-            continue
-        merged.setdefault(account_key, []).append(event)
-        if rid:
-            seen_ids.add(rid)
-    return merged
-
-
 def _build_journal_balance_timelines(
     rows: List[Dict[str, object]],
     cashflow_ledger: Dict[str, List[Dict[str, object]]],
@@ -6471,7 +6389,9 @@ def _group_bybit_execution_history_rows_into_completed_trades(records: List[Dict
                 digest = hashlib.sha256("|".join(exec_ids + [str(x) for x in src_rows]).encode("utf-8")).hexdigest()[:16]
                 gross = (exit_notional - entry_notional) if open_side.lower() == "buy" else (entry_notional - exit_notional)
                 open_ts = seg[0].get("open_time"); close_ts = seg[-1].get("close_time") or seg[-1].get("open_time")
-                dur = max(1, int(((_parse_iso_datetime(close_ts) - _parse_iso_datetime(open_ts)).total_seconds()) if _parse_iso_datetime(close_ts) and _parse_iso_datetime(open_ts) else 1))
+                open_dt = _parse_iso_datetime(open_ts)
+                close_dt = _parse_iso_datetime(close_ts)
+                dur = _round_trade_duration_seconds((close_dt - open_dt).total_seconds()) if open_dt and close_dt else 1
                 trades.append({
                     "id": f"bybit:{mode}:trade:{symbol}:{digest}", "row_type": "trade", "asset_class": "crypto", "account": account_label, "account_label": account_label,
                     "symbol": symbol, "side": open_side, "qty": closed, "entry_price": (entry_notional / open_qty) if open_qty else None, "exit_price": (exit_notional / close_qty) if close_qty else None,
@@ -12649,9 +12569,30 @@ def _load_trade_contexts() -> List[Dict[str, object]]:
     payload = _load_json_file(TRADE_CONTEXTS_PATH, [])
     if isinstance(payload, dict):
         payload = payload.get("items", [])
-    if not isinstance(payload, list):
-        return []
-    return [dict(entry) for entry in payload if isinstance(entry, dict)]
+    items = [dict(entry) for entry in payload if isinstance(payload, list) and isinstance(entry, dict)]
+    if items:
+        return items
+
+    backup_payload = _load_json_file(STATE_BACKUP_LOCAL_PATH, {})
+    backup_items = []
+    if isinstance(backup_payload, dict):
+        raw_backup_items = backup_payload.get("trade_contexts")
+        if isinstance(raw_backup_items, list):
+            backup_items = [dict(entry) for entry in raw_backup_items if isinstance(entry, dict)]
+    if backup_items:
+        return backup_items
+
+    calc_items: List[Dict[str, object]] = []
+    calc_payload = _load_json_file(_bybit_demo_calc_context_path(), {})
+    if isinstance(calc_payload, dict):
+        raw_calc_items = calc_payload.get("items")
+        if isinstance(raw_calc_items, list):
+            calc_items = [dict(entry) for entry in raw_calc_items if isinstance(entry, dict)]
+    if not calc_items and isinstance(calc_payload, list):
+        calc_items = [dict(entry) for entry in calc_payload if isinstance(entry, dict)]
+    if calc_items:
+        return calc_items
+    return []
 
 
 def _save_trade_contexts(items: List[Dict[str, object]]) -> None:
@@ -13014,6 +12955,10 @@ def _lookup_trade_context_for_open_item(item: Dict[str, object]) -> Optional[Dic
         or ""
     ).strip()
     order_id = str(item.get("id") or item.get("order_id") or "").strip()
+    order_ids: List[str] = []
+    raw_order_ids = refs.get("order_ids")
+    if isinstance(raw_order_ids, list):
+        order_ids = [str(v or "").strip() for v in raw_order_ids if str(v or "").strip()]
     order_link_id = str(item.get("order_link_id") or item.get("orderLinkId") or "").strip()
     parent_order_link_id = str(
         item.get("parent_order_link_id") or item.get("parentOrderLinkId") or ""
@@ -13026,6 +12971,20 @@ def _lookup_trade_context_for_open_item(item: Dict[str, object]) -> Optional[Dic
     for ctx in contexts:
         if order_id and str(ctx.get("order_id") or "").strip() == order_id:
             return ctx
+    if order_ids:
+        order_id_matches: List[Dict[str, object]] = []
+        seen_match_ids: Set[str] = set()
+        for oid in order_ids:
+            for ctx in contexts:
+                if oid and str(ctx.get("order_id") or "").strip() == oid:
+                    key = str(ctx.get("order_id") or "").strip() or str(ctx.get("calculation_context_id") or "").strip() or str(id(ctx))
+                    if key not in seen_match_ids:
+                        seen_match_ids.add(key)
+                        order_id_matches.append(ctx)
+        if len(order_id_matches) == 1:
+            return order_id_matches[0]
+        if len(order_id_matches) > 1:
+            return None
     for ctx in contexts:
         if order_link_id and str(ctx.get("order_link_id") or "").strip() == order_link_id:
             return ctx
@@ -13081,6 +13040,10 @@ def _lookup_trade_context_for_journal_row(row: Dict[str, object]) -> Optional[Di
         or row.get("order_id")
         or ""
     ).strip()
+    order_ids: List[str] = []
+    raw_order_ids = refs.get("order_ids")
+    if isinstance(raw_order_ids, list):
+        order_ids = [str(v or "").strip() for v in raw_order_ids if str(v or "").strip()]
     trade_id = str(refs.get("tradeId") or refs.get("tradeID") or "").strip()
     transaction_id = str(refs.get("transactionId") or refs.get("transactionID") or "").strip()
     order_link_id = str(
@@ -13107,6 +13070,20 @@ def _lookup_trade_context_for_journal_row(row: Dict[str, object]) -> Optional[Di
     for ctx in contexts:
         if order_id and str(ctx.get("order_id") or "").strip() == order_id:
             return ctx
+    if order_ids:
+        order_id_matches: List[Dict[str, object]] = []
+        seen_match_ids: Set[str] = set()
+        for oid in order_ids:
+            for ctx in contexts:
+                if oid and str(ctx.get("order_id") or "").strip() == oid:
+                    key = str(ctx.get("order_id") or "").strip() or str(ctx.get("calculation_context_id") or "").strip() or str(id(ctx))
+                    if key not in seen_match_ids:
+                        seen_match_ids.add(key)
+                        order_id_matches.append(ctx)
+        if len(order_id_matches) == 1:
+            return order_id_matches[0]
+        if len(order_id_matches) > 1:
+            return None
     for ctx in contexts:
         if order_link_id and str(ctx.get("order_link_id") or "").strip() == order_link_id:
             return ctx
@@ -15979,11 +15956,13 @@ def _backfill_trade_row_context_fields(row: Dict[str, object]) -> Dict[str, obje
     if current_timeframe and not needs_tpsl and current_is_test_trade is not None:
         return row
 
+    source_text = str(row.get("source") or "").strip().lower()
+    broker_for_lookup = "bybit" if source_text.startswith("bybit_execution_history") else row.get("source")
     ctx = _lookup_trade_context_for_journal_row(row)
     if not isinstance(ctx, dict):
         ctx = _lookup_trade_context_by_market_window(
             {
-                "broker": row.get("source"),
+                "broker": broker_for_lookup,
                 "account": row.get("account"),
                 "instrument": row.get("symbol") or row.get("instrument"),
                 "side": row.get("side"),
@@ -16015,6 +15994,14 @@ def _backfill_trade_row_context_fields(row: Dict[str, object]) -> Dict[str, obje
             metrics = dict(patched.get("metrics") or {}) if isinstance(patched.get("metrics"), dict) else {}
             metrics["is_test_trade"] = ctx_test
             patched["metrics"] = metrics
+    if patched.get("r_multiple") in (None, ""):
+        entry = _to_float(patched.get("entry_price"))
+        stop = _to_float(patched.get("stop_loss"))
+        move = _signed_price_move(patched)
+        if move is not None and entry is not None and stop is not None:
+            risk_dist = abs(entry - stop)
+            if risk_dist > 0:
+                patched["r_multiple"] = move / risk_dist
     return patched
 
 
@@ -20943,6 +20930,15 @@ def _is_duration_validated_trade_row(row: Dict[str, object]) -> bool:
     return True
 
 
+def _round_trade_duration_seconds(delta_seconds: object) -> Optional[int]:
+    delta = _to_float(delta_seconds)
+    if delta is None or not math.isfinite(delta) or delta < 0:
+        return None
+    if delta < 1:
+        return 1
+    return max(1, int(delta + 0.5))
+
+
 def _trade_duration_seconds(row: Dict[str, object]) -> Optional[int]:
     if not _is_trade_row(row):
         return None
@@ -20960,7 +20956,7 @@ def _trade_duration_seconds(row: Dict[str, object]) -> Optional[int]:
         if delta < 0:
             return None
         # Never show 0s durations for trades. Anything under 1s (including 0) rounds up to 1s.
-        return max(1, int(math.ceil(delta)))
+        return _round_trade_duration_seconds(delta)
     except Exception:
         return None
 
@@ -25237,7 +25233,7 @@ async def _run_trading_journal_sync_job() -> None:
                     row_ids.add(v)
                 if cidx is None or cidx >= len(row):
                     continue
-                tsec = _canonical_trade_epoch_second(_excel_datetime_to_iso(row[cidx]))
+                tsec = _canonical_trade_epoch_second(_epoch_or_iso_to_iso(row[cidx]))
                 if tsec is not None and (latest_trade_time is None or tsec > latest_trade_time):
                     latest_trade_time = tsec
                 if aidx is not None and aidx < len(row):
@@ -26330,7 +26326,7 @@ TRADING_JOURNAL_ACTIONS_TEMPLATE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Trading Journal Workspace</title>
 <style>body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}.wrap{min-height:100vh;display:flex;align-items:center;justify-content:center}.stack{display:flex;flex-direction:column;gap:12px;min-width:280px}button{padding:12px 14px;border-radius:10px;border:1px solid #334155;background:#1f2937;color:#e2e8f0;font-weight:700;cursor:pointer}.status{margin-top:8px;white-space:pre-wrap;color:#94a3b8}</style></head>
-<body><div class="wrap"><div class="stack"><button id="open-journal-btn">Open Journal</button><button id="import-journal-btn">Import</button><label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode" style="margin-left:8px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"><option value="" selected disabled>Select Demo or Live</option><option value="demo">Demo</option><option value="live">Live</option></select></label><button id="crypto-monthly-pnl-btn">Crypto Monthly P&L</button><button id="bybit-demo-balance-adjustment-btn">Bybit Demo Balance Adjustment</button><input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv" hidden/><div id="journal-actions-status" class="status"></div></div></div><script src="/static/trading_journal_actions.js"></script></body></html>"""
+<body><div class="wrap"><div class="stack"><button id="open-journal-btn">Open Journal</button><button id="import-journal-btn">Import</button><label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode" style="margin-left:8px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"><option value="" selected disabled>Select Demo or Live</option><option value="demo">Demo</option><option value="live">Live</option></select></label><button id="crypto-monthly-pnl-btn">Crypto Monthly P&L</button><input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv" hidden/><div id="journal-actions-status" class="status"></div></div></div><script src="/static/trading_journal_actions.js"></script></body></html>"""
 
 @app.get("/merged/trading-journal")
 async def merged_trading_journal_workspace() -> HTMLResponse:
@@ -26432,11 +26428,16 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
         previous_pending_rows = [dict(r) for r in (_PENDING_MANUAL_SYNC_ROWS or []) if isinstance(r, dict)]
         pending_restored = False
         try:
+            rows = [_backfill_trade_row_context_fields(dict(r)) if isinstance(r, dict) else r for r in rows]
             t2 = time.perf_counter()
             APP_LOGGER.info("trading_journal_import_stage_start stage=upsert upload=%s", name)
             rows_upserted = _upsert_trading_journal_rows(rows, allow_broker_rows_in_single_file=True)
             timings["upsert"] = round(time.perf_counter() - t2, 6)
             APP_LOGGER.info("trading_journal_import_stage_done stage=upsert elapsed=%.6fs upload=%s", timings["upsert"], name)
+            repaired_rows, repaired_changed = _backfill_persisted_bybit_trade_fields(_get_trading_journal_rows())
+            if repaired_changed:
+                _set_trading_journal_rows(repaired_rows)
+                rows = [_backfill_trade_row_context_fields(dict(r)) if isinstance(r, dict) else r for r in rows]
 
             pending_map: Dict[str, Dict[str, object]] = {}
             for r in [*rows, *previous_pending_rows]:
@@ -26667,115 +26668,6 @@ async def trading_journal_crypto_monthly_pnl() -> JSONResponse:
     if missing or not verification.get("ok"):
         return JSONResponse({"ok": False, "button": "crypto_monthly_pnl", "target_months": due, "processed_months": due, "inserted_months": inserted, "skipped_existing_months": [m for m in due if m in pre_months], "rows_inserted": len(inserted), "verified_row_ids": [f"monthly_aud_reval:bybit_live:{m}" for m in inserted], "missing_months": missing, "missing_row_ids": verification.get("missing_row_ids") or [], "master_journal_path": str(path), "message": "Crypto monthly AUD P&L update incomplete."}, status_code=500)
     return JSONResponse({"ok": True, "button": "crypto_monthly_pnl", "target_months": due, "processed_months": due, "inserted_months": inserted, "skipped_existing_months": [m for m in due if m in pre_months], "rows_inserted": len(inserted), "verified_row_ids": [f"monthly_aud_reval:bybit_live:{m}" for m in inserted], "master_journal_path": str(path), "message": f"Inserted crypto monthly AUD P&L for {', '.join(inserted)}."})
-
-@app.post("/api/trading-journal/bybit-demo/balance-adjustment")
-async def trading_journal_bybit_demo_balance_adjustment(payload: Dict[str, object] = Body(default_factory=dict)) -> JSONResponse:
-    global _PENDING_MANUAL_SYNC_ROWS
-    if not ENABLE_BYBIT_DEMO_JOURNAL:
-        return JSONResponse({"ok": False, "message": "Bybit Demo journal is disabled.", "errors": ["bybit_demo_journal_disabled"]}, status_code=409)
-    raw_amount = payload.get("amount") if isinstance(payload, dict) else None
-    try:
-        amount = float(raw_amount)
-    except Exception:
-        amount = float('nan')
-    if not math.isfinite(amount) or amount == 0.0:
-        return JSONResponse({"ok": False, "message": "amount must be a finite non-zero number.", "errors": ["invalid_amount"]}, status_code=422)
-    reason = str((payload or {}).get("reason") or "").strip()
-    workbook_path = _master_journal_path()
-    lock_status = _master_journal_lock_status(workbook_path)
-    if bool(lock_status.get("locked")):
-        return JSONResponse({"ok": False, "message": "Trading Journal.xlsx appears to be open in Excel. Close it, then confirm and retry.", "errors": ["workbook_locked", "excel_open"], "master_journal_path": str(workbook_path), "lock_status": lock_status}, status_code=423)
-    snapshot = _build_trading_journal_view_snapshot(force=True)
-    balances = snapshot.get("balances") if isinstance(snapshot, dict) else []
-    current_balance = None
-    balance_as_of = None
-    for bal in balances or []:
-        if not isinstance(bal, dict):
-            continue
-        if _is_bybit_demo_account_label(bal.get("label") or bal.get("account")):
-            current_balance = _to_float(bal.get("balance"))
-            if current_balance is not None:
-                balance_as_of = bal.get("as_of")
-                break
-    if current_balance is None:
-        return JSONResponse({"ok": False, "message": "No numeric current Bybit Demo journal balance is available.", "errors": ["bybit_demo_balance_missing"]}, status_code=409)
-    local_now = _journal_local_now_naive_iso()
-    row_id = f"cashflow:bybit_demo_balance_adjustment:{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}:{uuid4().hex[:8]}"
-    new_balance = current_balance + amount
-    adjustment_dt = datetime.fromisoformat(str(local_now))
-    as_of_dt = None
-    try:
-        if balance_as_of:
-            parsed_as_of = pd.to_datetime(balance_as_of, errors="coerce")
-            if pd.notna(parsed_as_of):
-                as_of_dt = parsed_as_of.to_pydatetime()
-                if as_of_dt.tzinfo is not None:
-                    as_of_dt = as_of_dt.astimezone(ZoneInfo(APP_TIMEZONE)).replace(tzinfo=None)
-    except Exception:
-        as_of_dt = None
-    if as_of_dt is not None:
-        adjustment_dt = max(adjustment_dt, as_of_dt + timedelta(seconds=1))
-    adjustment_time = adjustment_dt.isoformat(timespec="seconds")
-    note = "Journal-only Bybit Demo balance adjustment; does not change Bybit."
-    if reason:
-        note = f"{note} Reason: {reason}"
-    row = {
-        "id": row_id, "row_type": "cashflow", "source": "manual_bybit_demo_balance_adjustment",
-        "account": "Bybit Demo", "account_label": "Bybit Demo", "asset_class": "crypto",
-        "currency": "USDT", "account_currency": "USDT", "balance_after_trade_currency": "USDT",
-        "symbol": "CASHFLOW", "symbol_raw": "CASHFLOW", "side": "ADJUSTMENT", "cashflow_type": "balance_adjustment",
-        "cashflow_amount": amount, "cashflow_new_balance": new_balance, "balance_after_trade": new_balance,
-        "open_time": adjustment_time, "close_time": adjustment_time, "status": "cashflow", "notes": note,
-        "raw_refs": {"adjustment_amount": amount, "previous_balance": current_balance, "new_balance": new_balance, "journal_only": True},
-    }
-    previous_pending_rows = [dict(r) for r in (_PENDING_MANUAL_SYNC_ROWS or []) if isinstance(r, dict)]
-    previous_rows = copy.deepcopy([r for r in _get_trading_journal_rows() if isinstance(r, dict)])
-    had_workbook = workbook_path.exists(); backup = workbook_path.read_bytes() if had_workbook else None
-    try:
-        pending_map = {str((r or {}).get("id") or "").strip(): dict(r) for r in previous_pending_rows if str((r or {}).get("id") or "").strip()}
-        pending_map[row_id] = dict(row)
-        _PENDING_MANUAL_SYNC_ROWS = list(pending_map.values())
-        _upsert_trading_journal_rows([row])
-        sync_result = _sync_master_journal_workbook(defer_github_sync=True)
-        if not _master_journal_sync_ok(sync_result):
-            raise RuntimeError(_master_journal_sync_error(sync_result))
-        verify = _verify_trade_log_row_ids_in_workbook(_master_journal_path(), [row_id])
-        if not bool(verify.get("ok")):
-            raise RuntimeError(f"Verification failed: missing_row_ids={verify.get('missing_row_ids') or []}")
-        _PENDING_MANUAL_SYNC_ROWS = previous_pending_rows
-        post = _build_trading_journal_view_snapshot(force=True)
-        post_bal = None
-        for bal in (post.get("balances") or []):
-            if isinstance(bal, dict) and _is_bybit_demo_account_label(bal.get("label") or bal.get("account")):
-                post_bal = _to_float(bal.get("balance"))
-                break
-        if post_bal is None or abs(post_bal - new_balance) > 1e-9:
-            raise RuntimeError("Dashboard Account Balances did not reflect the Bybit Demo adjustment after pending rows were restored.")
-    except Exception as exc:
-        _PENDING_MANUAL_SYNC_ROWS = previous_pending_rows
-        rollback_errors: List[str] = []
-        try:
-            _set_trading_journal_rows(previous_rows)
-        except Exception as row_restore_exc:
-            rollback_errors.append(f"could not restore journal rows: {row_restore_exc}")
-        try:
-            if had_workbook and backup is not None:
-                workbook_path.parent.mkdir(parents=True, exist_ok=True)
-                workbook_path.write_bytes(backup)
-            elif (not had_workbook) and workbook_path.exists():
-                workbook_path.unlink()
-        except Exception as workbook_restore_exc:
-            rollback_errors.append(f"could not restore workbook: {workbook_restore_exc}")
-        try:
-            _build_trading_journal_view_snapshot(force=True)
-        except Exception as refresh_exc:
-            rollback_errors.append(f"could not rebuild snapshot after rollback: {refresh_exc}")
-        message = f"Bybit Demo balance adjustment failed: {exc}"
-        if rollback_errors:
-            message = f"{message} | rollback failed: {'; '.join(rollback_errors)}"
-        return JSONResponse({"ok": False, "message": message, "row_id": row_id, "previous_balance": current_balance, "adjustment_amount": amount, "new_balance": new_balance, "currency": "USDT", "master_journal_path": str(_master_journal_path()), "errors": [str(exc), *rollback_errors]}, status_code=500)
-    return JSONResponse({"ok": True, "message": "Bybit Demo journal balance adjustment added.", "row_id": row_id, "previous_balance": current_balance, "adjustment_amount": amount, "new_balance": new_balance, "currency": "USDT", "master_journal_path": str(_master_journal_path())})
-
 
 @app.post("/api/trading-journal/open-master-journal")
 async def open_master_journal_file() -> JSONResponse:
