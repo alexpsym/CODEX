@@ -168,3 +168,9 @@ def test_import_upload_enriches_rows_before_upsert_and_pending(master_service, m
     assert captured["rows"][0].get("is_test_trade") is True
     assert observed["pending"][0].get("stop_loss") == 76491.2
     assert observed["pending"][0].get("take_profit") == 77067.3
+
+
+def test_load_trade_contexts_falls_back_to_state_backup(master_service, monkeypatch):
+    monkeypatch.setattr(master_service, "_load_json_file", lambda path, default=None: {"trade_contexts": [{"order_id": "oid-x", "stop_loss": 1.0}]} if str(path).endswith("state_backup.json") else {"items": []})
+    items = master_service._load_trade_contexts()
+    assert items and items[0].get("order_id") == "oid-x"
