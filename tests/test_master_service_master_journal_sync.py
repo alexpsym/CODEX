@@ -1599,6 +1599,21 @@ def test_build_journal_balance_timelines_rejects_non_authoritative_stale_excel_s
     bal = next(b for b in out['balances'] if str(b.get('label')) == 'BINANCE')
     assert bal['balance'] is None
     assert bal['balance_source'] == 'timeline_missing'
+
+
+def test_build_journal_balance_timelines_applies_pnl_for_bybit_test_rows():
+    ms = _load_master_service_for_import_test()
+    rows = [
+        {'id':'sig:cadd2b98cf847e7f4d2e2c54','row_type':'trade','source':'master_journal','account':'Bybit Demo','account_label':'Bybit Demo','symbol':'BTCUSDT','close_time':'2026-05-04T11:16:00+00:00','net_profit':0.0,'analysis_balance_after_trade':369.64962148,'balance_after_trade':369.64962148},
+        {'id':'bybit:demo:trade:BTCUSDT:049246f1ec6e4a68','row_type':'trade','source':'bybit_execution_history_grouped','account':'Bybit Demo','account_label':'Bybit Demo','symbol':'BTCUSDT','close_time':'2026-05-26T09:54:11+10:00','net_profit':-1.31721048,'is_test_trade':True},
+        {'id':'bybit:demo:trade:BTCUSDT:85c1adb0266f56a4','row_type':'trade','source':'bybit_execution_history_grouped','account':'Bybit Demo','account_label':'Bybit Demo','symbol':'BTCUSDT','close_time':'2026-05-26T12:43:30+10:00','net_profit':-1.83430304,'is_test_trade':True},
+        {'id':'cash:c1','row_type':'trade','source':'master_journal','account':'Bybit Demo','account_label':'Bybit Demo','symbol':'CASHFLOW','close_time':'2026-05-26T13:52:01+10:00','cashflow_new_balance':319.8339282399999,'balance_after_trade':319.8339282399999,'net_profit':0.0},
+    ]
+    out = ms._build_journal_balance_timelines(rows, {}, [])
+    by_id = {r.get("id"): r for r in out.get("rows", [])}
+    assert by_id['bybit:demo:trade:BTCUSDT:049246f1ec6e4a68']['analysis_balance_after_trade'] == pytest.approx(368.33241100)
+    assert by_id['bybit:demo:trade:BTCUSDT:85c1adb0266f56a4']['analysis_balance_after_trade'] == pytest.approx(366.49810796)
+    assert by_id['cash:c1']['analysis_balance_after_trade'] == pytest.approx(319.8339282399999)
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_balance_regression_stale_excel_binance_overridden_by_authoritative_zero_source():
     rows = []
