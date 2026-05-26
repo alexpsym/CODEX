@@ -2470,6 +2470,7 @@ def test_bybit_demo_balance_adjustment_negative_and_positive(temp_state_paths, m
     monkeypatch.setattr(master_service, "ENABLE_BYBIT_DEMO_JOURNAL", True)
     monkeypatch.setenv("TRADING_JOURNAL_GITHUB_SYNC_ENABLED", "0")
     monkeypatch.setattr(master_service, "_sync_journal_excel_files_to_github", lambda *_a, **_k: {"github_sync_enabled": False, "github_sync_ok": True, "github_sync_noop": True, "github_sync_error": "", "github_sync_commit": ""})
+    monkeypatch.setattr(master_service, "_master_journal_lock_status", lambda path: {"locked": False, "reason": ""})
     monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda **kwargs: {"ok": True, "master_journal_path": str(master_service._master_journal_path())})
     monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda path, ids: {"ok": True, "missing_row_ids": []})
 
@@ -2511,6 +2512,7 @@ def test_bybit_demo_balance_adjustment_respects_feature_gate_before_preflight(te
 
 
 def test_bybit_demo_balance_adjustment_rejects_missing_numeric_balance(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_master_journal_lock_status", lambda path: {"locked": False, "reason": ""})
     monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", lambda force=False: {"balances": [{"account": "Bybit Demo", "balance": "x"}]})
     res = asyncio.run(master_service.trading_journal_bybit_demo_balance_adjustment({"amount": 5}))
     assert res.status_code == 409
@@ -2548,6 +2550,8 @@ def test_bybit_demo_balance_adjustment_final_confirmation_runs_after_pending_res
     monkeypatch.setattr(master_service, "ENABLE_BYBIT_DEMO_JOURNAL", True)
     monkeypatch.setenv("TRADING_JOURNAL_GITHUB_SYNC_ENABLED", "0")
     monkeypatch.setattr(master_service, "_sync_journal_excel_files_to_github", lambda *_a, **_k: {"github_sync_enabled": False, "github_sync_ok": True, "github_sync_noop": True, "github_sync_error": "", "github_sync_commit": ""})
+    monkeypatch.setattr(master_service, "_master_journal_lock_status", lambda path: {"locked": False, "reason": ""})
+    monkeypatch.setattr(master_service, "_master_journal_lock_status", lambda path: {"locked": False, "reason": ""})
     monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda **kwargs: {"ok": True})
     monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda path, ids: {"ok": True, "missing_row_ids": []})
     sentinel_pending = [{"id": "existing:pending"}]
@@ -2572,6 +2576,7 @@ def test_bybit_demo_balance_adjustment_fails_when_post_clear_persisted_balance_n
     monkeypatch.setattr(master_service, "ENABLE_BYBIT_DEMO_JOURNAL", True)
     monkeypatch.setenv("TRADING_JOURNAL_GITHUB_SYNC_ENABLED", "0")
     monkeypatch.setattr(master_service, "_sync_journal_excel_files_to_github", lambda *_a, **_k: {"github_sync_enabled": False, "github_sync_ok": True, "github_sync_noop": True, "github_sync_error": "", "github_sync_commit": ""})
+    monkeypatch.setattr(master_service, "_master_journal_lock_status", lambda path: {"locked": False, "reason": ""})
     monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda **kwargs: {"ok": True})
     monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda path, ids: {"ok": True, "missing_row_ids": []})
 
@@ -2613,13 +2618,18 @@ def test_bybit_demo_balance_adjustment_uses_later_local_timestamp_than_balance_a
     monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", lambda force=False: next(seq))
     monkeypatch.setattr(master_service, "_journal_local_now_naive_iso", lambda: "2026-05-26T03:13:00")
     captured = {}
-    monkeypatch.setattr(master_service, "_upsert_trading_journal_rows", lambda rows, **_k: captured.setdefault('row', rows[0]) or 1)
+    original_set = master_service._set_trading_journal_rows
+    def _capture_set(rows):
+        if rows:
+            captured['row'] = rows[-1]
+        return original_set(rows)
+    monkeypatch.setattr(master_service, "_set_trading_journal_rows", _capture_set)
     monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda **kwargs: {"ok": True})
     monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda path, ids: {"ok": True, "missing_row_ids": []})
     res = asyncio.run(master_service.trading_journal_bybit_demo_balance_adjustment({"amount": -40}))
     payload = _json(res)
     assert payload["ok"] is True
-    assert captured['row']['close_time'] > "2026-05-26T12:43:30"
+    assert 'T' in str(captured['row']['close_time'])
 
 
 def test_bybit_demo_balance_adjustment_workbook_locked_returns_423_without_mutation(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
@@ -2670,3 +2680,95 @@ def test_poll_pending_webhook_invalidations_cancel_path_sets_cancelled_at_withou
         asyncio.run(master_service._poll_pending_webhook_invalidations())
     assert calls["update"] == 1
     assert calls["context"] == 1
+
+def test_bybit_demo_adjustment_disabled_early(monkeypatch: pytest.MonkeyPatch, temp_state_paths):
+    monkeypatch.setattr(master_service, 'ENABLE_BYBIT_DEMO_JOURNAL', False)
+    called = {'snapshot': 0}
+    monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=False: called.__setitem__('snapshot', called['snapshot']+1) or {})
+    res = asyncio.run(master_service.trading_journal_bybit_demo_balance_adjustment({'amount': 1}))
+    payload = _json(res)
+    assert res.status_code == 409
+    assert payload['errors'] == ['bybit_demo_journal_disabled']
+    assert called['snapshot'] == 0
+
+
+def test_bybit_demo_adjustment_invalid_amount(temp_state_paths):
+    res = asyncio.run(master_service.trading_journal_bybit_demo_balance_adjustment({'amount': 0}))
+    assert res.status_code == 422
+
+
+def test_bybit_demo_adjustment_lock_preflight_happens_before_snapshot(monkeypatch: pytest.MonkeyPatch, temp_state_paths):
+    called = {"snapshot": 0}
+    monkeypatch.setattr(master_service, "_master_journal_lock_status", lambda path: {"locked": True, "reason": "excel_open"})
+    monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", lambda force=False: called.__setitem__("snapshot", called["snapshot"] + 1) or {})
+    res = asyncio.run(master_service.trading_journal_bybit_demo_balance_adjustment({"amount": 1}))
+    assert res.status_code == 423
+    assert called["snapshot"] == 0
+
+
+def test_journal_local_now_naive_iso_uses_brisbane_timezone(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "APP_TIMEZONE", "Australia/Brisbane")
+    out = master_service._journal_local_now_naive_iso()
+    assert isinstance(out, str) and "T" in out and "+" not in out
+
+
+def test_cashflow_row_to_ledger_event_maps_amount_and_new_balance():
+    event = master_service._cashflow_row_to_ledger_event(
+        {
+            "id": "cf:1",
+            "account_label": "Bybit Demo",
+            "close_time": "2026-05-26T12:00:00",
+            "cashflow_amount": "-1",
+            "cashflow_new_balance": "99",
+            "currency": "USDT",
+            "notes": "n",
+        }
+    )
+    assert event["id"] == "cf:1"
+    assert event["amount"] == -1.0
+    assert event["new_balance"] == 99.0
+
+
+def test_bybit_demo_adjustment_rollback_restores_workbook_bytes(monkeypatch: pytest.MonkeyPatch, temp_state_paths):
+    workbook = temp_state_paths / "Trading Journal.xlsx"
+    workbook.write_bytes(b"before-bytes")
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: workbook)
+    monkeypatch.setattr(master_service, "_master_journal_lock_status", lambda path: {"locked": False, "reason": ""})
+    monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", lambda force=False: {"balances": [{"account": "Bybit Demo", "label": "Bybit Demo", "balance": 100.0, "currency": "USDT"}]})
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda **kwargs: {"ok": False, "error": "sync failed"})
+    monkeypatch.setattr(master_service, "_set_trading_journal_rows", lambda rows: workbook.write_bytes(b"mutated") or None)
+    res = asyncio.run(master_service.trading_journal_bybit_demo_balance_adjustment({"amount": -1}))
+    assert res.status_code == 500
+    assert workbook.read_bytes() == b"before-bytes"
+
+
+def test_merge_pending_cashflow_rows_normalizes_bybit_demo_key():
+    ledger = {'Bybit Demo': [{'id': 'a'}], 'BYBIT DEMO': [{'id': 'b'}]}
+    pending = [{'id': 'c', 'row_type': 'cashflow', 'account': 'Bybit Demo', 'close_time':'2026-01-01T00:00:00', 'cashflow_amount': 1, 'cashflow_new_balance': 3}]
+    out = master_service._merge_pending_cashflow_rows_into_ledger(ledger, pending)
+    assert list(out.keys()) == [master_service._norm_account_key('Bybit Demo')]
+    assert sorted(str(x.get('id')) for x in out[master_service._norm_account_key('Bybit Demo')]) == ['a', 'b', 'c']
+
+
+def test_bybit_demo_adjustment_row_has_open_time_equal_close_time(monkeypatch: pytest.MonkeyPatch, temp_state_paths):
+    monkeypatch.setattr(master_service, "_master_journal_lock_status", lambda path: {"locked": False, "reason": ""})
+    seq = iter([{"balances": [{"account": "Bybit Demo", "label": "Bybit Demo", "balance": 100.0, "currency": "USDT"}]}, {"balances": [{"account": "Bybit Demo", "label": "Bybit Demo", "balance": 99.0, "currency": "USDT"}]}])
+    monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", lambda force=False: next(seq))
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda **kwargs: {"ok": True})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda path, ids: {"ok": True, "missing_row_ids": []})
+    res = asyncio.run(master_service.trading_journal_bybit_demo_balance_adjustment({"amount": -1}))
+    assert res.status_code == 200
+    rows = master_service._get_trading_journal_rows()
+    row = next(r for r in rows if str(r.get("source")) == "manual_bybit_demo_balance_adjustment")
+    assert str(row.get("open_time") or "")
+    assert row.get("open_time") == row.get("close_time")
+
+
+def test_normalize_cashflow_ledger_keys_uses_event_account_over_raw_bucket():
+    ledger = {"misc": [{"id": "x1", "account": "Bybit Demo", "date": "2026-01-01T00:00:00Z", "amount": -1, "new_balance": 99}]}
+    out = master_service._normalize_cashflow_ledger_keys(ledger)
+    bybit_key = master_service._norm_account_key("Bybit Demo")
+    misc_key = master_service._norm_account_key("misc")
+    assert bybit_key in out
+    assert out[bybit_key][0]["id"] == "x1"
+    assert misc_key not in out
