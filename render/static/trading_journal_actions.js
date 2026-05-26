@@ -62,7 +62,7 @@
     setStatus('Opening Trading Journal...');
     try {
       const res = await fetch('/api/trading-journal/open-master-journal', { method: 'POST', headers: { Accept: 'application/json' } });
-      const payload = await res.json();
+      const payload = await res.json().catch(() => ({}));
       if (!res.ok || payload.ok !== true) throw new Error(payload.detail || payload.message || 'Failed to open workbook.');
       setStatus(`Opened: ${payload.master_journal_path || 'Trading Journal.xlsx'}`);
     } catch (err) { setStatus(err?.message || String(err), true); }
@@ -182,5 +182,54 @@
     const reasonRaw = window.prompt('Optional reason/note for this journal-only adjustment:', '');
     const reason = reasonRaw === null ? '' : String(reasonRaw || '').trim();
     await runBybitAdjust(amount, reason);
+  });
+
+  bybitDemoBalanceAdjustmentBtn?.addEventListener('click', async () => {
+    const raw = window.prompt('Enter Bybit Demo journal balance adjustment in USDT. Use negative to reduce balance. This is journal-only and does not change Bybit.');
+    if (raw === null) return;
+    const text = String(raw || '').trim();
+    if (!text) { setStatus('Amount is required.', true); return; }
+    const amount = Number(text);
+    if (!Number.isFinite(amount) || amount === 0) { setStatus('Enter a finite non-zero number.', true); return; }
+    const reasonRaw = window.prompt('Optional reason/note for this journal-only adjustment:', '');
+    const reason = reasonRaw === null ? '' : String(reasonRaw || '').trim();
+    bybitDemoBalanceAdjustmentBtn.disabled = true;
+    setStatus('Applying Bybit Demo balance adjustment...');
+    const postAdjustmentOnce = async () => {
+      const res = await fetch('/api/trading-journal/bybit-demo/balance-adjustment', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ amount, reason }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      return { res, payload };
+    };
+    try {
+      let { res, payload } = await postAdjustmentOnce();
+      const errCodes = Array.isArray(payload?.errors) ? payload.errors.map((e) => String(e)) : [];
+      const locked = res.status === 423 || errCodes.includes('workbook_locked') || errCodes.includes('excel_open');
+      if (locked) {
+        const retry = window.confirm('Trading Journal.xlsx appears to be open in Excel. Close it, save if needed, then click OK to retry. Cancel leaves the journal unchanged.');
+        if (!retry) {
+          setStatus('Adjustment cancelled. Close Excel before trying again.', true);
+          return;
+        }
+        ({ res, payload } = await postAdjustmentOnce());
+      }
+      if (!res.ok || payload.ok !== true) {
+        const errors = Array.isArray(payload?.errors) && payload.errors.length ? `
+Errors: ${payload.errors.join(', ')}` : '';
+        throw new Error(String(payload?.detail || payload?.message || 'Bybit Demo balance adjustment failed.') + errors);
+      }
+      setStatus(`Success. Previous balance: ${payload.previous_balance} ${payload.currency || 'USDT'}
+Adjustment: ${payload.adjustment_amount} ${payload.currency || 'USDT'}
+New balance: ${payload.new_balance} ${payload.currency || 'USDT'}
+Row ID: ${payload.row_id || ''}
+Workbook: ${payload.master_journal_path || ''}`);
+    } catch (err) {
+      setStatus(err?.message || String(err), true);
+    } finally {
+      bybitDemoBalanceAdjustmentBtn.disabled = false;
+    }
   });
 })();

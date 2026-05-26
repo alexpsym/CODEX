@@ -310,3 +310,31 @@ Promise.resolve(handlers.click()).then(()=>{
 });
 """
     subprocess.run([node, '-e', harness, str(js_path)], check=True)
+
+
+def test_trading_journal_actions_bybit_demo_lock_retry_flow():
+    node = shutil.which('node')
+    assert node
+    js_path = ROOT / 'render' / 'static' / 'trading_journal_actions.js'
+    harness = r"""
+const fs = require('fs'); const vm = require('vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const handlers = {};
+const status = { textContent: '', style: {} };
+const btn = { disabled:false, addEventListener:(ev,cb)=>{ if(ev==='click') handlers.click=cb; } };
+const els = { 'open-journal-btn':{addEventListener:()=>{}}, 'import-journal-btn':{addEventListener:()=>{}}, 'journal-file-input':{addEventListener:()=>{}, files:[]}, 'crypto-monthly-pnl-btn':{addEventListener:()=>{}}, 'journal-account-mode':{addEventListener:()=>{}}, 'journal-actions-status':status, 'bybit-demo-balance-adjustment-btn':btn };
+let prompts = ['-40','note','-40','note'];
+let confirms = [false, true];
+let fetchN = 0;
+const context = { console, document:{getElementById:(id)=>els[id]||null}, window:null, prompt:()=>prompts.shift(), confirm:()=>confirms.shift(), fetch:async ()=>{ fetchN++; if (fetchN===1) return { status:423, ok:false, json:async()=>({ok:false, errors:['workbook_locked']})}; if (fetchN===2) return { status:423, ok:false, json:async()=>({ok:false, errors:['excel_open']})}; return { status:200, ok:true, json:async()=>({ok:true, previous_balance:100, adjustment_amount:-40, new_balance:60, currency:'USDT'})}; }, setTimeout:()=>1, clearTimeout:()=>{} };
+context.window=context; context.globalThis=context; vm.createContext(context); vm.runInContext(source, context);
+Promise.resolve(handlers.click()).then(()=>{
+  if (fetchN!==1) throw new Error('cancel path should not retry');
+  if (btn.disabled) throw new Error('button stuck disabled cancel');
+  return handlers.click();
+}).then(()=>{
+  if (fetchN!==3) throw new Error('confirm path should retry once');
+  if (btn.disabled) throw new Error('button stuck disabled success');
+});
+"""
+    subprocess.run([node, '-e', harness, str(js_path)], check=True)
