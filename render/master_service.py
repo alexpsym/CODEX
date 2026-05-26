@@ -17730,6 +17730,10 @@ CALCULATOR_TEMPLATE = """<!doctype html>
     .compact-risk{max-width:110px}
     button{cursor:pointer;font-weight:700}
     button:disabled{opacity:.55;cursor:not-allowed}
+    #calc-submit{transition:background-color .18s ease,border-color .18s ease,box-shadow .18s ease,transform .1s ease,color .18s ease}
+    #calc-submit[data-submit-visual-state="submitting"]{background:#1d4ed8;border-color:#60a5fa;box-shadow:0 0 0 3px rgba(59,130,246,.35);color:#eff6ff;transform:translateY(-1px)}
+    #calc-submit[data-submit-visual-state="success"]{background:#166534;border-color:#4ade80;box-shadow:0 0 0 3px rgba(74,222,128,.28);color:#ecfdf5}
+    #calc-submit:disabled[data-submit-visual-state="submitting"]{opacity:.85}
     .toggle button.active{background:#2563eb;border-color:#3b82f6}
     .error{color:#fca5a5;min-height:1.2em}
     .ok{color:#86efac}

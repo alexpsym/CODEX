@@ -42,6 +42,10 @@
   const submitBtn = $('calc-submit');
   const quoteStatusEl = $('calc-quote-status');
   const webhookStatusEl = $('calc-webhook-status');
+  const SUBMIT_LABEL = 'Submit Order';
+  const SUBMITTING_LABEL = 'Submitting…';
+  let submitInFlight = false;
+  let submitStateResetTimer = null;
 
   let symbolTimer = null;
   let walletPrewarmInterval = null;
@@ -174,7 +178,26 @@
     if (stateName) submitBtn.dataset.state = stateName;
   }
 
+  function clearSubmitStateResetTimer() {
+    if (!submitStateResetTimer) return;
+    clearTimeout(submitStateResetTimer);
+    submitStateResetTimer = null;
+  }
+
+  function markSubmitClicked() {
+    clearSubmitStateResetTimer();
+    submitBtn.dataset.submitVisualState = 'submitting';
+    submitBtn.textContent = SUBMITTING_LABEL;
+  }
+
+  function clearSubmitClicked() {
+    clearSubmitStateResetTimer();
+    delete submitBtn.dataset.submitVisualState;
+    submitBtn.textContent = SUBMIT_LABEL;
+  }
+
   function invalidateQuote({ clearResults = true, status = 'stale', reason = '' } = {}) {
+    clearSubmitClicked();
     state.quote = null;
     state.quoteStatus = status;
     const visible = status === 'idle' ? false : state.hasCalculatedOnce;
@@ -877,12 +900,18 @@
   });
 
   $('calc-submit').addEventListener('click', async () => {
+    if (submitInFlight) return;
     clearMessages();
+    let startedSubmit = false;
     try {
       if (submitBtn.disabled) throw new Error('Calculate a fresh quote before submitting.');
       if (state.webhook_mode === 'yes') throw new Error('Webhook mode is enabled. Use the generated TradingView JSON instead of Submit Order.');
       if (state.quoteStatus !== 'ready' || !state.quote) throw new Error('Calculate first.');
       if (!state.timeframe) throw new Error('Timeframe is required.');
+      submitInFlight = true;
+      startedSubmit = true;
+      markSubmitClicked();
+      submitBtn.disabled = true;
       if (!state.resolvedSymbol && resolveInFlight) {
         try { await Promise.race([resolveInFlight, new Promise((r) => setTimeout(r, 800))]); } catch (_e) {}
       }
@@ -928,10 +957,25 @@
         okEl.textContent = 'Order submitted, but journal context warning requires attention.';
         errorEl.textContent = submitWarnings.join(' ');
       }
+      submitBtn.dataset.submitVisualState = 'success';
+      submitBtn.textContent = SUBMIT_LABEL;
+      clearSubmitStateResetTimer();
+      submitStateResetTimer = setTimeout(() => {
+        if (state.quoteStatus === 'ready' && state.quote && !submitInFlight) {
+          clearSubmitClicked();
+          setSubmitState({ visible: true, enabled: true, reason: '', stateName: 'ready' });
+        }
+      }, 1200);
     } catch (e) {
       okEl.textContent = '';
       errorEl.textContent = String(e.message || e);
       renderErrorDebug(e.detail || (e.debug ? { debug: e.debug } : null));
+      clearSubmitClicked();
+      if (state.quoteStatus === 'ready' && state.quote && state.webhook_mode !== 'yes' && state.quote.quote_valid_for_submit !== false) {
+        setSubmitState({ visible: true, enabled: true, reason: '', stateName: 'ready' });
+      }
+    } finally {
+      if (startedSubmit) submitInFlight = false;
     }
   });
 

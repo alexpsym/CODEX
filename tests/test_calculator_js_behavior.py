@@ -561,3 +561,71 @@ global.document={getElementById:(id)=>el[id]};global.navigator={clipboard:{write
     assert "Quote data ready" not in data["status"]
     assert "save failed" in data["error"] or "BYBIT_DEMO_CALC_CONTEXT_SAVE_FAILED" in data["error"]
     assert "disk locked" in data["debug"] or "nested" in data["debug"]
+
+def test_submit_button_visual_states_and_duplicate_blocking() -> None:
+    node = shutil.which("node")
+    assert node, "node is required for JS behavior test"
+    harness = r'''
+const fs = require('fs');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+class E { constructor(id){ this.id=id; this.value=''; this.textContent=''; this.innerHTML=''; this.dataset={}; this.style={}; this.listeners={}; this.buttons=[]; this.classList={toggle:()=>{},add:()=>{},remove:()=>{}}; this.disabled=false; this.title=''; } addEventListener(e,cb){this.listeners[e]=cb;} querySelectorAll(s){return s==='button'?this.buttons:[];} }
+class B { constructor(v){ this.dataset={v}; this.listeners={}; this.classList={toggle:()=>{},add:()=>{},remove:()=>{}}; this.disabled=false; this._attrs={}; this.title=''; } addEventListener(e,cb){this.listeners[e]=cb;} click(){ if(this.listeners.click) this.listeners.click(); } setAttribute(k,v){this._attrs[k]=String(v); this[k]=v;} getAttribute(k){return this._attrs[k];} removeAttribute(k){delete this._attrs[k];} }
+const ids=['calc-error','calc-error-debug','calc-success','calc-results','calc-request-summary','calc-canonical-symbol','calc-journal-summary','calc-instrument-specs','risk-toggle-wrap','calc-webhook-panel','calc-webhook-url','calc-webhook-json','calc-webhook-copy','calc-webhook-copy-url','risk-toggle','calc-risk-label','limit-wrap','account-toggle','asset-toggle','side-toggle','order-toggle','webhook-toggle','test-toggle','timeframe-toggle','calc-symbol','calc-limit','calc-sl-ticks','calc-rr','calc-risk','calc-quote','calc-submit','calc-quote-status','calc-webhook-status'];
+const el=Object.fromEntries(ids.map(i=>[i,new E(i)]));
+const mk=(v)=>v.map(x=>new B(x));
+el['risk-toggle'].buttons=mk(['fixed_aud','percent']); el['asset-toggle'].buttons=mk(['crypto','fx']); el['account-toggle'].buttons=mk(['live','demo']); el['side-toggle'].buttons=mk(['buy','sell']); el['order-toggle'].buttons=mk(['market','limit']); el['webhook-toggle'].buttons=mk(['no','yes']); el['test-toggle'].buttons=mk(['no','yes']); el['timeframe-toggle'].buttons=[];
+el['calc-symbol'].value='BTCUSDT'; el['calc-sl-ticks'].value='10'; el['calc-rr'].value='2'; el['calc-risk'].value='1';
+let mode='success'; let submitCalls=0; let resolveSubmit;
+const submitPromise = () => new Promise((r)=>{ resolveSubmit = r; });
+let gate = null;
+let quoteSeq = 0;
+global.fetch=async (url,opts={})=>{ if(url.includes('/quote')) { quoteSeq += 1; return {ok:true,status:200,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({broker:'bybit',symbol:'BTCUSDT',entry_price:String(79300 + quoteSeq),stop_price:String(78784.5 + quoteSeq),target_price:String(79669 + quoteSeq),quantity:'0.012',calculation_context_id:'ctx'+String(quoteSeq),quote_created_at_ms:123 + quoteSeq})}; } if(url.includes('/submit')){ submitCalls += 1; if(mode==='success'){ gate = submitPromise(); await gate; return {ok:true,status:200,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({ok:true})}; } return {ok:false,status:400,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({detail:'fail'})}; } return {ok:true,status:200,headers:{get:()=> 'application/json'},text:async()=>JSON.stringify({status:'no_data'})}; };
+global.document={getElementById:(id)=>el[id]}; global.navigator={clipboard:{writeText:async()=>{}}}; global.setTimeout=(f)=>{f();return 1;}; global.clearTimeout=()=>{};
+eval(source);
+(async()=>{
+  await el['calc-quote'].listeners.click();
+  const p1 = el['calc-submit'].listeners.click();
+  const submittingState = el['calc-submit'].dataset.submitVisualState;
+  const submittingText = el['calc-submit'].textContent;
+  const p2 = el['calc-submit'].listeners.click();
+  const p3 = el['calc-submit'].listeners.click();
+  const submitCallsWhilePending = submitCalls;
+  const pendingStateAfterDuplicates = el['calc-submit'].dataset.submitVisualState || '';
+  const pendingTextAfterDuplicates = el['calc-submit'].textContent;
+  const pendingErrorAfterDuplicates = el['calc-error'].textContent;
+  el['calc-risk'].value = '2';
+  el['calc-risk'].listeners.input();
+  const staleClearsVisualState = !el['calc-submit'].dataset.submitVisualState && el['calc-submit'].textContent === 'Submit Order';
+  await el['calc-quote'].listeners.click();
+  await el['calc-submit'].listeners.click();
+  const submitCallsAfterInvalidateRecalc = submitCalls;
+  resolveSubmit();
+  await p1; await p2; await p3;
+  const successState = el['calc-submit'].dataset.submitVisualState || '';
+  el['calc-risk'].listeners.input();
+  const clearedAfterInvalidate = !el['calc-submit'].dataset.submitVisualState && el['calc-submit'].textContent === 'Submit Order';
+  await el['calc-quote'].listeners.click();
+  mode='fail';
+  await el['calc-submit'].listeners.click();
+  const failCleared = !el['calc-submit'].dataset.submitVisualState && el['calc-submit'].textContent === 'Submit Order' && !!el['calc-error'].textContent;
+  el['calc-submit'].disabled = true;
+  await el['calc-submit'].listeners.click();
+  const disabledNoHighlight = !el['calc-submit'].dataset.submitVisualState;
+  console.log(JSON.stringify({submittingState,submittingText,submitCallsWhilePending,pendingStateAfterDuplicates,pendingTextAfterDuplicates,pendingErrorAfterDuplicates,staleClearsVisualState,submitCallsAfterInvalidateRecalc,successState,submitCalls,clearedAfterInvalidate,failCleared,disabledNoHighlight}));
+})();
+'''
+    result = subprocess.run([node, "-e", harness, str(JS_PATH)], check=True, capture_output=True, text=True)
+    data = json.loads(result.stdout.strip().splitlines()[-1])
+    assert data["submittingState"] == "submitting"
+    assert data["submittingText"] == "Submitting…"
+    assert data["submitCallsWhilePending"] == 1
+    assert data["pendingStateAfterDuplicates"] == "submitting"
+    assert data["pendingTextAfterDuplicates"] == "Submitting…"
+    assert data["pendingErrorAfterDuplicates"] == ""
+    assert data["staleClearsVisualState"] is True
+    assert data["submitCallsAfterInvalidateRecalc"] == 1
+    assert data["submitCalls"] == 2
+    assert data["successState"] == "success"
+    assert data["clearedAfterInvalidate"] is True
+    assert data["failCleared"] is True
+    assert data["disabledNoHighlight"] is True
