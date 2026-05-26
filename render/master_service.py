@@ -3685,8 +3685,17 @@ def _merge_trading_journal_row(
         "balance_after_trade",
         "timeframe",
         "is_test_trade",
+        "r_multiple",
+        "raw_refs",
     }
     for key, value in incoming.items():
+        if key == "raw_refs":
+            existing_refs = merged.get("raw_refs") if isinstance(merged.get("raw_refs"), dict) else {}
+            incoming_refs = value if isinstance(value, dict) else {}
+            if existing_refs and not incoming_refs:
+                continue
+            merged[key] = {**existing_refs, **incoming_refs}
+            continue
         if key == "metrics" and isinstance(value, dict):
             existing_metrics = merged.get("metrics") if isinstance(merged.get("metrics"), dict) else {}
             incoming_metrics = dict(value)
@@ -25841,6 +25850,7 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
                     "Trading Journal validation failed: unrepaired crypto Qty=0 rows detected "
                     f"(sample row IDs: {', '.join(crypto_zero_qty_ids[:5])})."
                 )
+            workbook_row_ids: Set[str] = set()
             if visible_trade_rows:
                 headers = [str(c.value or "").strip() for c in trade_log[1]]
                 symbol_col = headers.index("Symbol") + 1 if "Symbol" in headers else None
@@ -25848,7 +25858,6 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
                 if not symbol_col:
                     raise RuntimeError("Trading Journal validation failed: Trade Log Symbol column missing.")
                 populated_symbol_rows = 0
-                workbook_row_ids: Set[str] = set()
                 for rr in range(2, trade_log.max_row + 1):
                     symbol = str(trade_log.cell(rr, symbol_col).value or "").strip()
                     if symbol:
@@ -26094,7 +26103,47 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
                         + " | ".join(nonnumeric_skipped[:20])
                     )
                 if mismatches:
-                    raise RuntimeError("Trading Journal validation failed: Account Balances mismatch vs snapshot: " + " | ".join(mismatches[:20]))
+                    missing_expected_ids: List[str] = []
+                    if expected_survivor_row_ids:
+                        expected_set = {str(rid or "").strip() for rid in expected_survivor_row_ids if str(rid or "").strip()}
+                        if expected_set:
+                            missing_expected_ids = sorted([rid for rid in expected_set if rid not in workbook_row_ids])
+                    if missing_expected_ids:
+                        raise RuntimeError(
+                            "Trading Journal validation failed: expected imported row IDs missing from Trade Log before balance validation. "
+                            f"missing_row_ids={missing_expected_ids[:20]}"
+                        )
+                    bybit_demo_trade_rows: List[Dict[str, object]] = []
+                    headers = [str(c.value or "").strip() for c in trade_log[1]]
+                    acct_col = headers.index("Account") + 1 if "Account" in headers else None
+                    sym_col = headers.index("Symbol") + 1 if "Symbol" in headers else None
+                    rid_col = headers.index("Row ID") + 1 if "Row ID" in headers else None
+                    close_col = headers.index("Close Time") + 1 if "Close Time" in headers else None
+                    if acct_col and rid_col:
+                        for rr in range(2, trade_log.max_row + 1):
+                            acct_val = str(trade_log.cell(rr, acct_col).value or "").strip()
+                            if acct_val.lower() != "bybit demo":
+                                continue
+                            bybit_demo_trade_rows.append({
+                                "row_id": str(trade_log.cell(rr, rid_col).value or "").strip(),
+                                "symbol": str(trade_log.cell(rr, sym_col).value or "").strip() if sym_col else "",
+                                "close_time": str(trade_log.cell(rr, close_col).value or "").strip() if close_col else "",
+                            })
+                    snapshot_bybit_demo_rows = [
+                        {
+                            "row_id": str(r.get("id") or "").strip(),
+                            "symbol": str(r.get("symbol") or "").strip(),
+                            "close_time": str(r.get("close_time") or "").strip(),
+                        }
+                        for r in visible_trade_rows
+                        if str(r.get("account") or r.get("account_label") or "").strip().lower() == "bybit demo"
+                    ]
+                    raise RuntimeError(
+                        "Trading Journal validation failed: Account Balances mismatch vs snapshot: "
+                        + " | ".join(mismatches[:20])
+                        + f" | candidate_bybit_demo_rows={bybit_demo_trade_rows[-5:]}"
+                        + f" | snapshot_bybit_demo_rows={snapshot_bybit_demo_rows[-5:]}"
+                    )
             leaders = ((stats.get("groups") or {}).get("leaders") or {})
             expected_payloads = {
                 label: (leaders.get(key) or {}) for label, key in LEADER_LABEL_TO_KEY.items()

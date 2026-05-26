@@ -1009,6 +1009,36 @@ def test_upsert_trading_journal_rows_rejects_broker_rows_in_local_mode(monkeypat
     master_service._set_trading_journal_rows([])
     changed = master_service._upsert_trading_journal_rows([{"id": "oanda:demo:test", "source": "oanda"}])
     assert changed == 0
+
+
+def test_merge_trading_journal_row_preserves_rich_raw_refs_and_context_fields():
+    existing = {
+        "id": "bybit:demo:trade:BTCUSDT:85c1adb0266f56a4",
+        "source": "bybit_execution_history_grouped",
+        "raw_refs": {"order_ids": ["a", "b"]},
+        "stop_loss": 76491.2,
+        "take_profit": 77067.3,
+        "timeframe": "1m",
+        "is_test_trade": True,
+        "r_multiple": -0.27,
+    }
+    incoming = {
+        "id": "bybit:demo:trade:BTCUSDT:85c1adb0266f56a4",
+        "source": "master_journal",
+        "raw_refs": None,
+        "stop_loss": "",
+        "take_profit": "",
+        "timeframe": "",
+        "is_test_trade": None,
+        "r_multiple": "",
+    }
+    merged = master_service._merge_trading_journal_row(existing, incoming)
+    assert merged.get("raw_refs", {}).get("order_ids") == ["a", "b"]
+    assert merged.get("stop_loss") == 76491.2
+    assert merged.get("take_profit") == 77067.3
+    assert merged.get("timeframe") == "1m"
+    assert merged.get("is_test_trade") is True
+    assert merged.get("r_multiple") == -0.27
     assert master_service._get_trading_journal_rows() == []
 
 
