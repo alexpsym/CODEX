@@ -672,7 +672,7 @@ def _convert_exec_time(row: Dict[str, Any], template: bool = False) -> None:
     if "execTime" in row:
         try:
             ms = int(row["execTime"])
-            fmt = "%H:%M %Y-%m-%d" if template else "%Y-%m-%dT%H:%M:%S"
+            fmt = "%H:%M:%S %Y-%m-%d" if template else "%Y-%m-%dT%H:%M:%S"
             row["execTime"] = datetime.fromtimestamp(ms / 1000, tz=BRISBANE_TZ).strftime(
                 fmt
             )

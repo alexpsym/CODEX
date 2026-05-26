@@ -958,3 +958,11 @@ def test_update_data_only_overwrites_stale_dashboard_account_balances_with_zero(
     assert vals.get("PEPPERSTONE DEMO") == 0
     assert vals.get("BINANCE") == 0
     wb.close()
+
+
+def test_infer_trade_duration_rounds_to_nearest_second():
+    from tools.master_journal_workbook import _infer_trade_duration_seconds
+    assert _infer_trade_duration_seconds({"row_type":"trade","trade_duration_seconds":60.1}) == 60
+    assert _infer_trade_duration_seconds({"row_type":"trade","trade_duration_seconds":60.5}) == 61
+    assert _infer_trade_duration_seconds({"row_type":"trade","trade_duration_seconds":0.2}) == 1
+    assert _infer_trade_duration_seconds({"row_type":"trade","trade_duration_seconds":60}) == 60

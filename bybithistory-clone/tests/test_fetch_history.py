@@ -1023,3 +1023,15 @@ def test_export_balance_csv_uses_cashflow(monkeypatch):
     with open(fname, newline="", encoding="utf-8") as f:
         rows = list(csv.reader(f))
     assert rows[1][1] == "15.0"
+
+
+def test_convert_exec_time_template_preserves_seconds():
+    row = {"execTime": "1000"}
+    fetch_history._convert_exec_time(row, template=True)
+    assert row["execTime"] == "10:00:01 1970-01-01"
+
+
+def test_convert_exec_time_non_template_preserves_seconds():
+    row = {"execTime": "1000"}
+    fetch_history._convert_exec_time(row, template=False)
+    assert row["execTime"].endswith("10:00:01")

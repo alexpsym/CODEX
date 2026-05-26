@@ -204,21 +204,27 @@ def _as_datetime(value: Any) -> datetime | None:
         dt = dt.astimezone().replace(tzinfo=None)
     return dt
 
+def _round_trade_duration_seconds(delta_seconds: Any) -> int | None:
+    val = _as_float(delta_seconds)
+    if val is None or not math.isfinite(val) or val < 0:
+        return None
+    if val < 1:
+        return 1
+    return max(1, int(val + 0.5))
+
 def _infer_trade_duration_seconds(row: Dict[str, Any]) -> int | None:
     if str(row.get("row_type") or "trade").strip().lower() != "trade":
         return None
     for key in ("trade_duration_seconds", "duration_seconds"):
         val = _as_float(row.get(key))
         if val is not None and val >= 0:
-            return max(1, int(math.ceil(val)))
+            return _round_trade_duration_seconds(val)
     ot = _as_datetime(row.get("open_time"))
     ct = _as_datetime(row.get("close_time"))
     if not ot or not ct:
         return None
     delta = (ct - ot).total_seconds()
-    if delta < 0:
-        return None
-    return max(1, int(math.ceil(delta)))
+    return _round_trade_duration_seconds(delta)
 
 def _resolve_balance_after(row: Dict[str, Any]) -> float | None:
     for key in ("analysis_balance_after_trade", "balance_after_trade", "cashflow_new_balance"):

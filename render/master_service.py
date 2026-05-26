@@ -4428,7 +4428,11 @@ def _repair_persisted_bybit_trade_context_fields() -> int:
     changed = 0
     repaired: List[Dict[str, object]] = []
     for row in rows:
-        if not isinstance(row, dict) or str(row.get("source") or "").strip().lower() != "bybit":
+        if not isinstance(row, dict):
+            repaired.append(row)
+            continue
+        source = str(row.get("source") or "").strip().lower()
+        if source not in {"bybit", "bybit_execution_history_grouped"}:
             repaired.append(row)
             continue
         if (
@@ -4521,10 +4525,14 @@ def _backfill_persisted_bybit_trade_fields(rows: List[Dict[str, object]]) -> tup
     repaired: List[Dict[str, object]] = []
     changed = 0
     for row in rows:
-        if not isinstance(row, dict) or str(row.get("source") or "").strip().lower() != "bybit":
+        if not isinstance(row, dict):
             repaired.append(row)
             continue
-        updated = dict(row)
+        source = str(row.get("source") or "").strip().lower()
+        if source not in {"bybit", "bybit_execution_history_grouped"}:
+            repaired.append(row)
+            continue
+        updated = _backfill_trade_row_context_fields(dict(row))
         ctx = _lookup_trade_context_for_journal_row(updated)
         timeframe = _normalize_timeframe(updated.get("timeframe"))
         if not timeframe and isinstance(ctx, dict):
@@ -6379,7 +6387,9 @@ def _group_bybit_execution_history_rows_into_completed_trades(records: List[Dict
                 digest = hashlib.sha256("|".join(exec_ids + [str(x) for x in src_rows]).encode("utf-8")).hexdigest()[:16]
                 gross = (exit_notional - entry_notional) if open_side.lower() == "buy" else (entry_notional - exit_notional)
                 open_ts = seg[0].get("open_time"); close_ts = seg[-1].get("close_time") or seg[-1].get("open_time")
-                dur = max(1, int(((_parse_iso_datetime(close_ts) - _parse_iso_datetime(open_ts)).total_seconds()) if _parse_iso_datetime(close_ts) and _parse_iso_datetime(open_ts) else 1))
+                open_dt = _parse_iso_datetime(open_ts)
+                close_dt = _parse_iso_datetime(close_ts)
+                dur = _round_trade_duration_seconds((close_dt - open_dt).total_seconds()) if open_dt and close_dt else 1
                 trades.append({
                     "id": f"bybit:{mode}:trade:{symbol}:{digest}", "row_type": "trade", "asset_class": "crypto", "account": account_label, "account_label": account_label,
                     "symbol": symbol, "side": open_side, "qty": closed, "entry_price": (entry_notional / open_qty) if open_qty else None, "exit_price": (exit_notional / close_qty) if close_qty else None,
@@ -12922,6 +12932,10 @@ def _lookup_trade_context_for_open_item(item: Dict[str, object]) -> Optional[Dic
         or ""
     ).strip()
     order_id = str(item.get("id") or item.get("order_id") or "").strip()
+    order_ids: List[str] = []
+    raw_order_ids = refs.get("order_ids")
+    if isinstance(raw_order_ids, list):
+        order_ids = [str(v or "").strip() for v in raw_order_ids if str(v or "").strip()]
     order_link_id = str(item.get("order_link_id") or item.get("orderLinkId") or "").strip()
     parent_order_link_id = str(
         item.get("parent_order_link_id") or item.get("parentOrderLinkId") or ""
@@ -12934,6 +12948,20 @@ def _lookup_trade_context_for_open_item(item: Dict[str, object]) -> Optional[Dic
     for ctx in contexts:
         if order_id and str(ctx.get("order_id") or "").strip() == order_id:
             return ctx
+    if order_ids:
+        order_id_matches: List[Dict[str, object]] = []
+        seen_match_ids: Set[str] = set()
+        for oid in order_ids:
+            for ctx in contexts:
+                if oid and str(ctx.get("order_id") or "").strip() == oid:
+                    key = str(ctx.get("order_id") or "").strip() or str(ctx.get("calculation_context_id") or "").strip() or str(id(ctx))
+                    if key not in seen_match_ids:
+                        seen_match_ids.add(key)
+                        order_id_matches.append(ctx)
+        if len(order_id_matches) == 1:
+            return order_id_matches[0]
+        if len(order_id_matches) > 1:
+            return None
     for ctx in contexts:
         if order_link_id and str(ctx.get("order_link_id") or "").strip() == order_link_id:
             return ctx
@@ -12989,6 +13017,10 @@ def _lookup_trade_context_for_journal_row(row: Dict[str, object]) -> Optional[Di
         or row.get("order_id")
         or ""
     ).strip()
+    order_ids: List[str] = []
+    raw_order_ids = refs.get("order_ids")
+    if isinstance(raw_order_ids, list):
+        order_ids = [str(v or "").strip() for v in raw_order_ids if str(v or "").strip()]
     trade_id = str(refs.get("tradeId") or refs.get("tradeID") or "").strip()
     transaction_id = str(refs.get("transactionId") or refs.get("transactionID") or "").strip()
     order_link_id = str(
@@ -13015,6 +13047,20 @@ def _lookup_trade_context_for_journal_row(row: Dict[str, object]) -> Optional[Di
     for ctx in contexts:
         if order_id and str(ctx.get("order_id") or "").strip() == order_id:
             return ctx
+    if order_ids:
+        order_id_matches: List[Dict[str, object]] = []
+        seen_match_ids: Set[str] = set()
+        for oid in order_ids:
+            for ctx in contexts:
+                if oid and str(ctx.get("order_id") or "").strip() == oid:
+                    key = str(ctx.get("order_id") or "").strip() or str(ctx.get("calculation_context_id") or "").strip() or str(id(ctx))
+                    if key not in seen_match_ids:
+                        seen_match_ids.add(key)
+                        order_id_matches.append(ctx)
+        if len(order_id_matches) == 1:
+            return order_id_matches[0]
+        if len(order_id_matches) > 1:
+            return None
     for ctx in contexts:
         if order_link_id and str(ctx.get("order_link_id") or "").strip() == order_link_id:
             return ctx
@@ -15923,6 +15969,14 @@ def _backfill_trade_row_context_fields(row: Dict[str, object]) -> Dict[str, obje
             metrics = dict(patched.get("metrics") or {}) if isinstance(patched.get("metrics"), dict) else {}
             metrics["is_test_trade"] = ctx_test
             patched["metrics"] = metrics
+    if patched.get("r_multiple") in (None, ""):
+        entry = _to_float(patched.get("entry_price"))
+        stop = _to_float(patched.get("stop_loss"))
+        move = _signed_price_move(patched)
+        if move is not None and entry is not None and stop is not None:
+            risk_dist = abs(entry - stop)
+            if risk_dist > 0:
+                patched["r_multiple"] = move / risk_dist
     return patched
 
 
@@ -20855,6 +20909,15 @@ def _is_duration_validated_trade_row(row: Dict[str, object]) -> bool:
     return True
 
 
+def _round_trade_duration_seconds(delta_seconds: object) -> Optional[int]:
+    delta = _to_float(delta_seconds)
+    if delta is None or not math.isfinite(delta) or delta < 0:
+        return None
+    if delta < 1:
+        return 1
+    return max(1, int(delta + 0.5))
+
+
 def _trade_duration_seconds(row: Dict[str, object]) -> Optional[int]:
     if not _is_trade_row(row):
         return None
@@ -20872,7 +20935,7 @@ def _trade_duration_seconds(row: Dict[str, object]) -> Optional[int]:
         if delta < 0:
             return None
         # Never show 0s durations for trades. Anything under 1s (including 0) rounds up to 1s.
-        return max(1, int(math.ceil(delta)))
+        return _round_trade_duration_seconds(delta)
     except Exception:
         return None
 
@@ -25149,7 +25212,7 @@ async def _run_trading_journal_sync_job() -> None:
                     row_ids.add(v)
                 if cidx is None or cidx >= len(row):
                     continue
-                tsec = _canonical_trade_epoch_second(_excel_datetime_to_iso(row[cidx]))
+                tsec = _canonical_trade_epoch_second(_epoch_or_iso_to_iso(row[cidx]))
                 if tsec is not None and (latest_trade_time is None or tsec > latest_trade_time):
                     latest_trade_time = tsec
                 if aidx is not None and aidx < len(row):
