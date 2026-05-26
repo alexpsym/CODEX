@@ -72,7 +72,7 @@ from shared.symbol_resolution import (
 from shared.atomic_json import write_json_file
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, stable_row_id, SHEET_ORDER, _get_all_trades_sheet, _get_trade_log_sheet, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, stable_row_id, SHEET_ORDER, _get_all_trades_sheet, _get_trade_log_sheet, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -26048,8 +26048,9 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
                         break
                 if not header_row:
                     raise RuntimeError("Trading Journal validation failed: Account Balances headers missing.")
+                canonical_balances = _canonicalize_and_dedupe_balances([b for b in balances if isinstance(b, dict)])
                 expected_balances: Dict[str, Dict[str, object]] = {}
-                for b in balances:
+                for b in canonical_balances:
                     if not isinstance(b, dict):
                         continue
                     account_label = str(b.get("account_label") or b.get("account") or "").strip()

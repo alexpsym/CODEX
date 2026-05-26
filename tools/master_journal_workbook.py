@@ -331,6 +331,29 @@ def _collect_zero_qty_validation(rows: List[Dict[str, Any]]) -> Dict[str, List[D
 
 
 def _canonicalize_and_dedupe_balances(balances: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _source_rank(value: Any) -> int:
+        src = str(value or "").strip().lower()
+        if src == "cashflow_anchor_plus_trades":
+            return 300
+        if "broker" in src or "account_summary" in src or "wallet_balance_anchor" in src:
+            return 200
+        if src in {"trade_timeline", "master_journal", "timeline_missing"}:
+            return 100
+        return 50
+    def _asof_rank(value: Any) -> float:
+        dt = _as_datetime(value)
+        return dt.timestamp() if dt else float("-inf")
+    def _pick(prev: Dict[str, Any], now: Dict[str, Any]) -> Dict[str, Any]:
+        prev_bal = _as_float(prev.get("balance"))
+        now_bal = _as_float(now.get("balance"))
+        if prev_bal is None and now_bal is not None:
+            return now
+        if now_bal is None and prev_bal is not None:
+            return prev
+        prev_score = (_source_rank(prev.get("balance_source") or prev.get("source")), _asof_rank(prev.get("as_of") or prev.get("updated_at")))
+        now_score = (_source_rank(now.get("balance_source") or now.get("source")), _asof_rank(now.get("as_of") or now.get("updated_at")))
+        return now if now_score >= prev_score else prev
+
     merged: Dict[str, Dict[str, Any]] = {}
     order: List[str] = []
     for rec in balances or []:
@@ -347,11 +370,7 @@ def _canonicalize_and_dedupe_balances(balances: List[Dict[str, Any]]) -> List[Di
             order.append(key)
             merged[key] = payload
             continue
-        prev = merged[key]
-        prev_bal = _as_float(prev.get("balance"))
-        now_bal = _as_float(payload.get("balance"))
-        if prev_bal is None and now_bal is not None:
-            merged[key] = payload
+        merged[key] = _pick(merged[key], payload)
     return [merged[k] for k in order]
 
 def _currency_code(*values: Any) -> str:

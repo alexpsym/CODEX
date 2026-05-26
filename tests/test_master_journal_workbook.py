@@ -966,3 +966,14 @@ def test_infer_trade_duration_rounds_to_nearest_second():
     assert _infer_trade_duration_seconds({"row_type":"trade","trade_duration_seconds":60.5}) == 61
     assert _infer_trade_duration_seconds({"row_type":"trade","trade_duration_seconds":0.2}) == 1
     assert _infer_trade_duration_seconds({"row_type":"trade","trade_duration_seconds":60}) == 60
+
+
+def test_canonicalize_and_dedupe_balances_prefers_cashflow_anchor():
+    from tools.master_journal_workbook import _canonicalize_and_dedupe_balances
+    balances = [
+        {"account_label": "Bybit Demo", "balance": 369.64962148, "currency": "USDT", "balance_source": "trade_timeline", "as_of": "2026-05-26T01:00:00Z"},
+        {"account_label": "Bybit Demo", "balance": 319.8339282399999, "currency": "USDT", "balance_source": "cashflow_anchor_plus_trades", "as_of": "2026-05-26T02:00:00Z"},
+    ]
+    deduped = _canonicalize_and_dedupe_balances(balances)
+    assert len(deduped) == 1
+    assert deduped[0]["balance"] == 319.8339282399999
