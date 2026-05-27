@@ -22,6 +22,13 @@ ALL_TRADES_SHEET = LEGACY_ALL_TRADES_SHEET
 LEGACY_TRADE_LOG_SHEET = LEGACY_ALL_TRADES_SHEET
 SHEET_ORDER=["Dashboard","Trade Log","Instrument Averages","P&L Calendar"]
 EDITABLE_COLS=["Test","Setup","Timeframe","Breakeven","Notes"]
+
+def _canonical_journal_timeframe(value: Any) -> str:
+    text = " ".join(str(value or "").strip().split())
+    key = text.lower().replace("-", " ")
+    key = " ".join(key.split())
+    aliases = {"1m":"1MIN","1 min":"1MIN","1 minute":"1MIN","5m":"5MIN","15m":"15MIN","30m":"30MIN","1h":"1H","4h":"4H","1d":"1D","1w":"1W","1mo":"1MO","1 month":"1MO"}
+    return aliases.get(key, text)
 PROFIT_FILL = "C6EFCE"
 PROFIT_FONT = "006100"
 LOSS_FILL = "FFC7CE"
@@ -534,7 +541,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     def core_rows(mkt: Dict[str, Any], money_map: Dict[str, Any]):
         msrc=(mkt.get('metric_sources') or {}) if isinstance(mkt,dict) else {}
         return [
-            ('Trades', mkt.get('trades'),'neutral','count',None,None,money_map),('Wins', mkt.get('wins'),'profit','count',None,None,money_map),('Losses', mkt.get('losses'),'loss','count',None,None,money_map),('Break-even', mkt.get('break_even'),'neutral','count',None,None,money_map),('Win rate', mkt.get('win_rate_pct'),'neutral','pct',None,None,money_map),
+            ('Trades', mkt.get('trades'),'neutral','count',None,None,money_map),('Wins', mkt.get('wins'),'profit','count',None,None,money_map),('Losses', mkt.get('losses'),'loss','count',None,None,money_map),('Break-even', mkt.get('break_even'),'neutral','count',None,None,money_map),('Test', mkt.get('test_trades'),'neutral','count',None,None,money_map),('Win rate', mkt.get('win_rate_pct'),'neutral','pct',None,None,money_map),
             ('Net P/L', mkt.get('net_profit_total'),'auto','money','net_profit_total',None,money_map),('Gross gain', mkt.get('gross_gain'),'profit','money','gross_gain',None,money_map),('Gross loss', mkt.get('gross_loss'),'loss','money','gross_loss',None,money_map),
             ('Avg result %', mkt.get('avg_result_pct'),'auto','pct',None,None,money_map),('Max loss %', mkt.get('min_result_pct'),'loss','pct',None,_fmt_detail_src(msrc.get('min_result_pct')),money_map),('Max win %', mkt.get('max_result_pct'),'profit','pct',None,_fmt_detail_src(msrc.get('max_result_pct')),money_map),
             ('Avg R', mkt.get('avg_r_multiple'),'auto','r',None,None,money_map),('Max R loss', mkt.get('min_r_multiple'),'loss','r',None,_fmt_detail_src(msrc.get('min_r_multiple')),money_map),('Max R win', mkt.get('max_r_multiple'),'profit','r',None,_fmt_detail_src(msrc.get('max_r_multiple')),money_map),
@@ -603,7 +610,12 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         row_type = str(row.get('row_type') or 'trade').strip().lower()
         if row_type == 'cashflow' and cashflow_new_balance in (None, ''):
             cashflow_new_balance = resolved_balance
-        ws.append([otv,ctv,acct,symbol,row.get('side'),row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('stop_loss'),row.get('take_profit'),comm_val,net_pnl,(pct/100.0 if pct is not None else ''),row.get('r_multiple'),resolved_balance,_fmt_duration_full(_infer_trade_duration_seconds(row)),'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',row.get('setup') or '',row.get('timeframe') or '',row.get('breakeven') or '',notes,row.get('cashflow_amount'),cashflow_new_balance,row.get('currency') or row.get('account_currency') or row.get('result_currency') or '',row.get('row_type') or 'trade', stable_row_id(row)])
+        side = str(row.get('side') or '').upper()
+        if row_type in {'monthly_aud_reval','cashflow'}:
+            setup_val = ''
+        else:
+            setup_val = row.get('setup') or ''
+        ws.append([otv,ctv,acct,symbol,side,row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('stop_loss'),row.get('take_profit'),comm_val,net_pnl,(pct/100.0 if pct is not None else ''),row.get('r_multiple'),resolved_balance,_fmt_duration_full(_infer_trade_duration_seconds(row)),'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',setup_val,_canonical_journal_timeframe(row.get('timeframe') or ''),row.get('breakeven') or '',notes,row.get('cashflow_amount'),cashflow_new_balance,row.get('currency') or row.get('account_currency') or row.get('result_currency') or '',row.get('row_type') or 'trade', stable_row_id(row)])
     _style_table_sheet(ws,1,'A2',True)
     for rr in range(2, ws.max_row + 1):
         row_ctx = rows[rr - 2] if rr - 2 < len(rows) else {}
@@ -1330,6 +1342,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             write_metric(section, "Wins", bucket.get("wins"), "count")
             write_metric(section, "Losses", bucket.get("losses"), "count")
             write_metric(section, "Break-even", bucket.get("break_even"), "count")
+            write_metric(section, "Test", bucket.get("test_trades"), "count")
             write_metric(section, "Win rate", bucket.get("win_rate_pct"), "pct")
             write_metric(section, "Net P/L", bucket.get("net_profit_total"))
             write_metric(section, "Avg result %", bucket.get("avg_result_pct"), "pct")

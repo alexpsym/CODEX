@@ -334,6 +334,23 @@ def test_read_source_cashflow_new_balance_falls_back_to_balance_after_zero(tmp_p
     assert cashflow_row["cashflow_new_balance"] is not None
     assert parsed["cashflow_ledger"]["BINANCE"][-1]["new_balance"] == 0
 
+
+def test_build_workbook_forces_blank_setup_for_semantic_rows(tmp_path: Path):
+    snap = {
+        "items": [
+            {"id":"m1","row_type":"monthly_aud_reval","account":"BYBIT","symbol":"MONTHLY AUD P/L","side":"","open_time":"2026-01-31","close_time":"2026-01-31","result_cash":1.0,"notes":"monthly","setup":"STALE"},
+            {"id":"c1","row_type":"cashflow","account":"BYBIT","symbol":"CASHFLOW","side":"DEPOSIT","open_time":"2026-01-20","close_time":"2026-01-20","cashflow_amount":10.0,"cashflow_new_balance":100.0,"notes":"cash detail","setup":"STALE"},
+        ],
+        "stats":{"totals":{},"groups":{"by_market":{"overall":{},"fx":{},"crypto":{}},"risk_expectancy":{},"leaders":{},"duration":{}}},
+        "balances":[],
+    }
+    out = tmp_path / "semantic_blank_setup.xlsx"
+    build_master_journal_workbook(snap, out)
+    ws = load_workbook(out)["Trade Log"]
+    # col R = Setup, col U = Notes
+    assert ws["R2"].value in ("", None) and ws["U2"].value == "monthly"
+    assert ws["R3"].value in ("", None) and ws["U3"].value == "cash detail"
+
 def test_instrument_currency_and_percent_formats(tmp_path: Path):
     out=tmp_path/'fmt.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
     inst = wb["Instrument Averages"]
