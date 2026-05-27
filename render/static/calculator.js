@@ -1,5 +1,5 @@
 (function () {
-  const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w', '1mo'];
+  const TIMEFRAMES = [['1m','1MIN'], ['5m','5MIN'], ['15m','15MIN'], ['30m','30MIN'], ['1h','1H'], ['4h','4H'], ['1d','1D'], ['1w','1W'], ['1mo','1MO']];
   const state = {
     account: 'live',
     asset: 'crypto',
@@ -10,6 +10,7 @@
     timeframe: '15m',
     webhook_mode: 'no',
     test_mode: 'no',
+    setup: '',
     quote: null,
     resolvedSymbol: '',
     pendingWebhookId: '',
@@ -470,6 +471,7 @@
       `webhook=${payload.webhook}`,
       `test=${payload.test}`,
       `timeframe=${state.timeframe || payload.timeframe || ''}`,
+      `setup=${state.setup || payload.setup || ''}`,
       `risk_mode=${payload.risk_mode}`,
       `risk_value=${payload.risk_value}`,
       `stop_loss_ticks=${payload.stop_loss_ticks}`,
@@ -637,7 +639,7 @@
 
   function setTimeframeButtons() {
     const root = $('timeframe-toggle');
-    root.innerHTML = TIMEFRAMES.map((tf) => `<button type="button" data-v="${tf}" class="${tf === state.timeframe ? 'active' : ''}">${tf}</button>`).join('');
+    root.innerHTML = TIMEFRAMES.map(([tf,label]) => `<button type="button" data-v="${tf}" class="${tf === state.timeframe ? 'active' : ''}">${label}</button>`).join('');
     root.querySelectorAll('button').forEach((btn) => {
       btn.addEventListener('click', () => {
         root.querySelectorAll('button').forEach((b) => b.classList.remove('active'));
@@ -645,6 +647,12 @@
         state.timeframe = btn.dataset.v;
       });
     });
+  }
+  function setSetupButtons() {
+    const root = $('setup-toggle'); if (!root) return;
+    const opts = [['','None'],['Pullback','pullback'],['Breakout','breakout'],['News Scalp','news scalp']];
+    root.innerHTML = opts.map(([v,l])=>`<button type="button" data-v="${v}" class="${v===state.setup?'active':''}">${l}</button>`).join('');
+    root.querySelectorAll('button').forEach((btn)=>btn.addEventListener('click',()=>{state.setup=btn.dataset.v||''; setSetupButtons(); invalidateQuote();}));
   }
 
   async function resolveSymbolAndLoad() {
@@ -841,6 +849,7 @@
         risk_value: $('calc-risk').value,
         webhook: state.webhook_mode,
         test: state.test_mode,
+        setup: state.setup,
         pending_webhook_id: state.webhook_mode === 'yes' ? (state.pendingWebhookId || undefined) : undefined,
         previous_pending_webhook_id: state.webhook_mode === 'yes' ? undefined : (state.pendingWebhookId || undefined),
       };
@@ -927,6 +936,7 @@
         quantity: state.quote.quantity,
         timeframe: state.timeframe,
         test: state.test_mode,
+        setup: state.setup,
         planned_entry_price: state.quote.entry_price,
         planned_stop_price: state.quote.stop_price,
         planned_target_price: state.quote.target_price,
@@ -987,6 +997,7 @@
   setToggle('webhook-toggle', 'webhook_mode');
   setToggle('test-toggle', 'test_mode');
   setTimeframeButtons();
+  setSetupButtons();
   updateRiskUiForAsset();
   syncAllToggleStates();
   const webhookYesBtn = $('webhook-toggle').querySelectorAll('button')[1];

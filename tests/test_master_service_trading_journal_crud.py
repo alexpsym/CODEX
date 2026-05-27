@@ -5,25 +5,70 @@ import json
 import sqlite3
 import sys
 import threading
+import types
+import importlib.machinery
 from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
+if "multipart" not in sys.modules:
+    multipart_mod = types.ModuleType("multipart")
+    multipart_mod.__spec__ = importlib.machinery.ModuleSpec("multipart", loader=None)
+    multipart_mod.__version__ = "0.0-test"
+    multipart_sub = types.ModuleType("multipart.multipart")
+    multipart_sub.__spec__ = importlib.machinery.ModuleSpec("multipart.multipart", loader=None)
+    multipart_sub.parse_options_header = lambda value: (value, {})
+    sys.modules["multipart"] = multipart_mod
+    sys.modules["multipart.multipart"] = multipart_sub
+
+try:
+    import requests as _rq  # noqa: F401
+    if not hasattr(_rq, "adapters"):
+        raise ImportError
+except Exception:
+    import importlib.machinery
+    req = types.ModuleType("requests")
+    req.__spec__ = importlib.machinery.ModuleSpec("requests", loader=None)
+    adapters = types.ModuleType("requests.adapters")
+    adapters.__spec__ = importlib.machinery.ModuleSpec("requests.adapters", loader=None)
+    adapters.HTTPAdapter = object
+    req.adapters = adapters
+    sys.modules["requests"] = req
+    sys.modules["requests.adapters"] = adapters
+try:
+    from urllib3.util.retry import Retry  # noqa: F401
+except Exception:
+    import importlib.machinery
+    urllib3 = types.ModuleType("urllib3")
+    urllib3.__spec__ = importlib.machinery.ModuleSpec("urllib3", loader=None)
+    util = types.ModuleType("urllib3.util")
+    util.__spec__ = importlib.machinery.ModuleSpec("urllib3.util", loader=None)
+    retry = types.ModuleType("urllib3.util.retry")
+    retry.__spec__ = importlib.machinery.ModuleSpec("urllib3.util.retry", loader=None)
+    retry.Retry = object
+    sys.modules["urllib3"] = urllib3
+    sys.modules["urllib3.util"] = util
+    sys.modules["urllib3.util.retry"] = retry
 
 try:
     import httpx  # noqa: F401
 except Exception:
-    import types
+    import importlib.machinery
+    class _HttpxResponse:  # minimal class for starlette.testclient MRO
+        pass
+    class _HttpxAsyncClient:
+        pass
     httpx_stub = types.SimpleNamespace(
         Timeout=lambda *args, **kwargs: None,
-        AsyncClient=object,
-        Response=object,
+        AsyncClient=_HttpxAsyncClient,
+        Response=_HttpxResponse,
         TimeoutException=Exception,
         RequestError=Exception,
         HTTPStatusError=Exception,
         ConnectError=Exception,
     )
+    httpx_stub.__spec__ = importlib.machinery.ModuleSpec("httpx", loader=None)
     sys.modules["httpx"] = httpx_stub
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1092,6 +1137,30 @@ def test_normalize_bybit_closed_pnl_row_sets_net_profit():
     assert row is not None
     assert row["realized_pnl"] == 9.5
     assert row["net_profit"] == 9.5
+
+
+def test_normalize_bybit_closed_pnl_row_does_not_repersist_invalid_ctx_setup(monkeypatch: pytest.MonkeyPatch):
+    captured = {}
+    monkeypatch.setattr(master_service, "_lookup_trade_context_for_journal_row", lambda *_a, **_k: {"timeframe": "15m", "setup": "invalid-setup", "is_test_trade": False, "open_time": "2026-01-01T00:00:00Z"})
+    monkeypatch.setattr(master_service, "_upsert_trade_context", lambda payload: captured.update(payload) or payload)
+    row = master_service._normalize_bybit_closed_pnl_row(
+        {"symbol": "BTCUSDT", "orderId": "order-2", "updatedTime": 1710000001000, "createdTime": 1710000000000, "closedPnl": "1", "avgEntryPrice": "100", "avgExitPrice": "101", "closedSize": "1", "side": "Buy"},
+        account_mode="demo",
+        balance_after_trade=None,
+    )
+    assert row is not None
+    assert row.get("setup") in ("", None)
+    assert captured.get("setup") in ("", None)
+
+
+def test_journal_rows_from_bybit_execution_replays_valid_setup_and_ignores_invalid(monkeypatch: pytest.MonkeyPatch):
+    base = {"account": "demo", "category": "linear", "symbol": "BTCUSDT", "orderId": "oid", "execId": "eid", "execQty": "1", "execPrice": "100", "execFee": "0.1", "execPnl": "2", "execTime": 1710000001000, "side": "Buy"}
+    monkeypatch.setattr(master_service, "_lookup_trade_context_for_journal_row", lambda *_a, **_k: {"timeframe": "15m", "setup": "Pullback", "is_test_trade": True})
+    rows = master_service._journal_rows_from_bybit_execution(dict(base))
+    assert rows and rows[0]["setup"] == "Pullback"
+    monkeypatch.setattr(master_service, "_lookup_trade_context_for_journal_row", lambda *_a, **_k: {"timeframe": "15m", "setup": "bad-setup", "is_test_trade": True})
+    rows2 = master_service._journal_rows_from_bybit_execution(dict(base))
+    assert rows2 and rows2[0].get("setup") in ("", None)
 
 
 def test_oanda_rows_set_net_profit_from_realized_pnl(monkeypatch: pytest.MonkeyPatch):
@@ -2295,8 +2364,6 @@ def test_persist_trading_journal_sqlite_routes_monthly_rows_to_journal_notes(tmp
 
 
 def test_crypto_monthly_pnl_endpoint_no_anchor_returns_bootstrap_required(monkeypatch, tmp_path):
-    from fastapi.testclient import TestClient
-    client = TestClient(master_service.app)
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
     monkeypatch.setattr(master_service, "_master_journal_path", lambda: tmp_path / "Trading Journal.xlsx")
     monkeypatch.setattr(master_service, "_run_monthly_aud_revaluation_sync", lambda reason: {"ok": True})
@@ -2304,17 +2371,15 @@ def test_crypto_monthly_pnl_endpoint_no_anchor_returns_bootstrap_required(monkey
     monkeypatch.setattr(master_service, "_read_monthly_aud_reval_months_from_workbook", lambda _p: {"ok": True, "workbook_exists": False, "months": []})
     monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"master_journal_path": str(master_service._master_journal_path())})
     monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda p,e: {"ok": True, "missing_row_ids": []})
-    r = client.post("/api/trading-journal/crypto-monthly-pnl")
+    r = asyncio.run(master_service.trading_journal_crypto_monthly_pnl())
     assert r.status_code == 422
-    payload = r.json()
+    payload = json.loads(r.body.decode("utf-8"))
     assert payload["ok"] is False
     assert 'Bootstrap required' in payload["message"]
 
 
 def test_crypto_monthly_pnl_due_month_april_2026(monkeypatch, tmp_path):
-    from fastapi.testclient import TestClient
     from tools.master_journal_workbook import build_master_journal_workbook
-    client = TestClient(master_service.app)
     monkeypatch.setattr(master_service, '_brisbane_now', lambda: __import__('datetime').datetime(2026,5,21))
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
     monkeypatch.setattr(master_service, "_master_journal_path", lambda: tmp_path / "Trading Journal.xlsx")
@@ -2328,9 +2393,9 @@ def test_crypto_monthly_pnl_due_month_april_2026(monkeypatch, tmp_path):
     monkeypatch.setattr(master_service, '_run_monthly_aud_revaluation_sync', fake_run)
     monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda: {'master_journal_path': str(tmp_path / 'Trading Journal.xlsx')})
     monkeypatch.setattr(master_service, '_verify_trade_log_row_ids_in_workbook', lambda p,e: {'ok': True, 'missing_row_ids': []})
-    r = client.post('/api/trading-journal/crypto-monthly-pnl')
+    r = asyncio.run(master_service.trading_journal_crypto_monthly_pnl())
     assert r.status_code == 200
-    j = r.json()
+    j = json.loads(r.body.decode("utf-8"))
     assert j['target_months'] == ['2026-04']
 
 
@@ -2373,15 +2438,13 @@ def test_read_monthly_anchor_helper_missing_row_id(tmp_path):
 
 
 def test_crypto_monthly_endpoint_fails_when_workbook_anchor_read_fails(monkeypatch, tmp_path):
-    from fastapi.testclient import TestClient
-    client=TestClient(master_service.app)
     monkeypatch.setattr(master_service, '_brisbane_now', lambda: __import__('datetime').datetime(2026,5,21))
     monkeypatch.setattr(master_service, '_master_journal_path', lambda: tmp_path/'Trading Journal.xlsx')
     monkeypatch.setattr(master_service, '_monthly_aud_revaluation_rows_for_journal_view', lambda: [{'id':'monthly_aud_reval:bybit_live:2026-03','raw_refs':{'period_month':'2026-03'}}])
     monkeypatch.setattr(master_service, '_read_monthly_aud_reval_months_from_workbook', lambda _p: {'ok':False,'workbook_exists':True,'error':'boom','months':[],'row_ids':[],'trade_log_exists':False,'row_id_column_exists':False})
-    r=client.post('/api/trading-journal/crypto-monthly-pnl')
+    r=asyncio.run(master_service.trading_journal_crypto_monthly_pnl())
     assert r.status_code==500
-    assert r.json()['ok'] is False
+    assert json.loads(r.body.decode("utf-8"))['ok'] is False
 
 
 def test_verify_trade_log_row_ids_uses_streaming_iter_rows_only(monkeypatch, tmp_path):

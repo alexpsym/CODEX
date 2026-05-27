@@ -1,15 +1,68 @@
 import importlib.util
+import importlib.machinery
+import sys
+import types
 import pytest
+if "multipart" not in sys.modules:
+    multipart_mod = types.ModuleType("multipart")
+    multipart_mod.__spec__ = importlib.machinery.ModuleSpec("multipart", loader=None)
+    multipart_mod.__version__ = "0.0-test"
+    multipart_sub = types.ModuleType("multipart.multipart")
+    multipart_sub.__spec__ = importlib.machinery.ModuleSpec("multipart.multipart", loader=None)
+    multipart_sub.parse_options_header = lambda value: (value, {})
+    sys.modules["multipart"] = multipart_mod
+    sys.modules["multipart.multipart"] = multipart_sub
 
-_httpx_spec = importlib.util.find_spec("httpx")
-AVAILABLE = _httpx_spec is not None
-if AVAILABLE:
-    from render.master_service import _compute_journal_stats, _build_journal_balance_timelines
-else:
-    _compute_journal_stats = None  # type: ignore[assignment]
-    _build_journal_balance_timelines = None  # type: ignore[assignment]
+try:
+    import requests as _rq  # noqa: F401
+    if not hasattr(_rq, "adapters"):
+        raise ImportError
+except Exception:
+    req = types.ModuleType("requests")
+    req.__spec__ = importlib.machinery.ModuleSpec("requests", loader=None)
+    adapters = types.ModuleType("requests.adapters")
+    adapters.__spec__ = importlib.machinery.ModuleSpec("requests.adapters", loader=None)
+    adapters.HTTPAdapter = object
+    req.adapters = adapters
+    sys.modules["requests"] = req
+    sys.modules["requests.adapters"] = adapters
+try:
+    from urllib3.util.retry import Retry  # noqa: F401
+except Exception:
+    urllib3 = types.ModuleType("urllib3")
+    urllib3.__spec__ = importlib.machinery.ModuleSpec("urllib3", loader=None)
+    util = types.ModuleType("urllib3.util")
+    util.__spec__ = importlib.machinery.ModuleSpec("urllib3.util", loader=None)
+    retry = types.ModuleType("urllib3.util.retry")
+    retry.__spec__ = importlib.machinery.ModuleSpec("urllib3.util.retry", loader=None)
+    retry.Retry = object
+    sys.modules["urllib3"] = urllib3
+    sys.modules["urllib3.util"] = util
+    sys.modules["urllib3.util.retry"] = retry
 
-pytestmark = pytest.mark.skipif(not AVAILABLE, reason="master_service optional deps unavailable")
+try:
+    _httpx_spec = importlib.util.find_spec("httpx")
+except ValueError:
+    _httpx_spec = None
+if _httpx_spec is None:
+    class _HttpxResponse:
+        pass
+    class _HttpxAsyncClient:
+        pass
+    httpx_stub = types.SimpleNamespace(
+        Timeout=lambda *args, **kwargs: None,
+        AsyncClient=_HttpxAsyncClient,
+        Response=_HttpxResponse,
+        BaseTransport=object,
+        TimeoutException=Exception,
+        RequestError=Exception,
+        HTTPStatusError=Exception,
+        ConnectError=Exception,
+    )
+    httpx_stub.__spec__ = importlib.machinery.ModuleSpec("httpx", loader=None)
+    sys.modules["httpx"] = httpx_stub
+
+from render.master_service import _compute_journal_stats, _build_journal_balance_timelines
 
 
 def test_compute_journal_stats_winner_loser_splits_and_durations() -> None:
@@ -145,6 +198,22 @@ def test_compute_journal_stats_no_zero_count_leaders() -> None:
     leaders = stats["groups"]["leaders"]
     assert leaders["most_wins_instrument"] is None
     assert leaders["most_losses_instrument"] is None
+
+
+def test_compute_journal_stats_tracks_test_trades_but_excludes_from_core_metrics() -> None:
+    rows = [
+        {"row_type": "trade", "asset_class": "fx", "symbol": "EURUSD", "result_pct": 1.0, "r_multiple": 1.0, "net_profit": 10},
+        {"row_type": "trade", "asset_class": "fx", "symbol": "GBPUSD", "result_pct": 2.0, "r_multiple": 1.5, "net_profit": 20, "is_test_trade": True},
+        {"row_type": "trade", "asset_class": "crypto", "symbol": "BTCUSDT", "result_pct": -1.0, "r_multiple": -1.0, "net_profit": -5, "is_test_trade": "yes"},
+    ]
+    stats = _compute_journal_stats(rows, balances=[])
+    assert stats["totals"]["trades"] == 1
+    assert stats["totals"]["test_trades"] == 2
+    assert stats["totals"]["net_profit_total"] == 10
+    by_market = stats["groups"]["by_market"]
+    assert by_market["overall"]["test_trades"] == 2
+    assert by_market["fx"]["test_trades"] == 1
+    assert by_market["crypto"]["test_trades"] == 1
 
 
 def test_compute_journal_stats_drawdown_behaviour() -> None:
