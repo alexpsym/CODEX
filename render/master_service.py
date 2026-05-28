@@ -9,6 +9,7 @@ import copy
 import importlib.util
 import threading
 import base64
+import ctypes
 import hashlib
 import hmac
 import html
@@ -72,7 +73,7 @@ from shared.symbol_resolution import (
 from shared.atomic_json import write_json_file
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, stable_row_id, SHEET_ORDER, _get_all_trades_sheet, _get_trade_log_sheet, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, _get_all_trades_sheet, _get_trade_log_sheet, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -26694,18 +26695,31 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
         sync_result: Optional[Dict[str, object]] = None
         previous_pending_rows = [dict(r) for r in (_PENDING_MANUAL_SYNC_ROWS or []) if isinstance(r, dict)]
         pending_restored = False
+        duplicate_noop_fast_path_used = False
         try:
+            def _stable_trade_log_projection(row: Dict[str, object]) -> Dict[str, object]:
+                return {
+                    "id": str(row.get("id") or "").strip(),
+                    "row_type": str(row.get("row_type") or "").strip().lower(),
+                    "account": str(row.get("account") or row.get("account_label") or "").strip(),
+                    "symbol": str(row.get("symbol") or "").strip(),
+                    "side": str(row.get("side") or "").strip(),
+                    "open_time": str(row.get("open_time") or "").strip(),
+                    "close_time": str(row.get("close_time") or "").strip(),
+                    "qty": _to_float(row.get("qty")),
+                    "entry_price": _to_float(row.get("entry_price")),
+                    "exit_price": _to_float(row.get("exit_price")),
+                    "net_profit": _to_float(row.get("net_profit")),
+                }
             if workbook_existing_rows:
-                def _row_sig(row: Dict[str, object]) -> str:
-                    try:
-                        return json.dumps(_json_safe(row), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-                    except Exception:
-                        return str(row)
                 current_ids = {str((r or {}).get("id") or "").strip() for r in previous_rows if str((r or {}).get("id") or "").strip()}
                 workbook_ids = {str((r or {}).get("id") or "").strip() for r in workbook_existing_rows if str((r or {}).get("id") or "").strip()}
                 current_map = {str((r or {}).get("id") or "").strip(): dict(r) for r in previous_rows if str((r or {}).get("id") or "").strip()}
                 workbook_map = {str((r or {}).get("id") or "").strip(): dict(r) for r in workbook_existing_rows if str((r or {}).get("id") or "").strip()}
-                stale_ids = [rid for rid in workbook_ids.intersection(current_ids) if _row_sig(current_map.get(rid, {})) != _row_sig(workbook_map.get(rid, {}))]
+                stale_ids = [
+                    rid for rid in workbook_ids.intersection(current_ids)
+                    if _stable_trade_log_projection(current_map.get(rid, {})) != _stable_trade_log_projection(workbook_map.get(rid, {}))
+                ]
                 should_hydrate = (not previous_rows) or (not workbook_ids.issubset(current_ids)) or bool(stale_ids)
                 hydrated_rows_added = 0
                 hydrated_rows_replaced = 0
@@ -26742,42 +26756,59 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 duplicate_rows_merged,
             )
             rows = [_backfill_trade_row_context_fields(dict(r)) if isinstance(r, dict) else r for r in rows]
-            t2 = time.perf_counter()
-            APP_LOGGER.info("trading_journal_import_stage_start stage=upsert upload=%s", name)
-            rows_upserted = _upsert_trading_journal_rows(rows, allow_broker_rows_in_single_file=True)
-            timings["upsert"] = round(time.perf_counter() - t2, 6)
-            APP_LOGGER.info("trading_journal_import_stage_done stage=upsert elapsed=%.6fs upload=%s", timings["upsert"], name)
-            repaired_rows, repaired_changed = _backfill_persisted_bybit_trade_fields(_get_trading_journal_rows())
-            if repaired_changed:
-                _set_trading_journal_rows(repaired_rows)
-                rows = [_backfill_trade_row_context_fields(dict(r)) if isinstance(r, dict) else r for r in rows]
-
-            pending_map: Dict[str, Dict[str, object]] = {}
-            for r in [*rows, *previous_pending_rows]:
-                rid = str((r or {}).get("id") or "").strip()
-                if rid:
-                    pending_map[rid] = dict(r)
-            _PENDING_MANUAL_SYNC_ROWS = list(pending_map.values())
-
-            t3 = time.perf_counter()
-            APP_LOGGER.info("trading_journal_import_stage_start stage=workbook_sync upload=%s", name)
             expected_survivors = sorted(set(pre_import_workbook_row_ids) | set(parsed_ids))
-            sync_result = _sync_master_journal_workbook(defer_github_sync=True, expected_survivor_row_ids=expected_survivors)
-            timings["workbook_sync"] = round(time.perf_counter() - t3, 6)
-            APP_LOGGER.info("trading_journal_import_stage_done stage=workbook_sync elapsed=%.6fs upload=%s", timings["workbook_sync"], name)
-            if not _master_journal_sync_ok(sync_result):
-                sync_missing = list((sync_result or {}).get("missing_row_ids") or [])
-                APP_LOGGER.error(
-                    "trading_journal_import workbook_sync failed upload=%s elapsed=%.6fs missing_row_ids_count=%s missing_row_ids_sample=%s error=%s",
-                    name,
-                    timings["workbook_sync"],
-                    len(sync_missing),
-                    sync_missing[:5],
-                    _master_journal_sync_error(sync_result),
-                )
-                raise RuntimeError(f"Workbook sync failed: {_master_journal_sync_error(sync_result)}")
-            _PENDING_MANUAL_SYNC_ROWS = previous_pending_rows
-            pending_restored = True
+            workbook_map = {str((r or {}).get("id") or "").strip(): dict(r) for r in workbook_existing_rows if str((r or {}).get("id") or "").strip()}
+            parsed_map = {str((r or {}).get("id") or "").strip(): dict(r) for r in rows if str((r or {}).get("id") or "").strip()}
+            fast_path_noop = bool(parsed_map) and all(
+                (rid in workbook_map) and (_stable_trade_log_projection(parsed_map[rid]) == _stable_trade_log_projection(workbook_map[rid]))
+                for rid in parsed_map.keys()
+            ) and set(expected_survivors).issubset(set(pre_import_workbook_row_ids))
+            if fast_path_noop:
+                timings["upsert"] = 0.0
+                timings["workbook_sync"] = 0.0
+                t_stats = time.perf_counter()
+                APP_LOGGER.info("trading_journal_import_stage_start stage=stats_refresh_duplicate_noop upload=%s", name)
+                refreshed = refresh_master_journal_derived_sheets(_master_journal_path(), _build_trading_journal_view_snapshot(force=True) or {})
+                if not bool((refreshed or {}).get("ok")):
+                    raise RuntimeError(f"Duplicate import stats refresh failed: {(refreshed or {}).get('error') or 'unknown error'}")
+                duplicate_noop_fast_path_used = True
+                timings["stats_refresh_duplicate_noop"] = round(time.perf_counter() - t_stats, 6)
+                APP_LOGGER.info("trading_journal_import_stage_done stage=stats_refresh_duplicate_noop elapsed=%.6fs upload=%s", timings["stats_refresh_duplicate_noop"], name)
+                APP_LOGGER.info("trading_journal_import_stage_skip stage=workbook_sync upload=%s reason=duplicate_noop", name)
+                _PENDING_MANUAL_SYNC_ROWS = previous_pending_rows
+                pending_restored = True
+            else:
+                t2 = time.perf_counter()
+                APP_LOGGER.info("trading_journal_import_stage_start stage=upsert upload=%s", name)
+                rows_upserted = _upsert_trading_journal_rows(rows, allow_broker_rows_in_single_file=True)
+                timings["upsert"] = round(time.perf_counter() - t2, 6)
+                APP_LOGGER.info("trading_journal_import_stage_done stage=upsert elapsed=%.6fs upload=%s", timings["upsert"], name)
+                repaired_rows, repaired_changed = _backfill_persisted_bybit_trade_fields(_get_trading_journal_rows())
+                if repaired_changed:
+                    _set_trading_journal_rows(repaired_rows)
+                    rows = [_backfill_trade_row_context_fields(dict(r)) if isinstance(r, dict) else r for r in rows]
+
+                pending_map: Dict[str, Dict[str, object]] = {}
+                for r in [*rows, *previous_pending_rows]:
+                    rid = str((r or {}).get("id") or "").strip()
+                    if rid:
+                        pending_map[rid] = dict(r)
+                _PENDING_MANUAL_SYNC_ROWS = list(pending_map.values())
+
+                t3 = time.perf_counter()
+                APP_LOGGER.info("trading_journal_import_stage_start stage=workbook_sync upload=%s", name)
+                sync_result = _sync_master_journal_workbook(defer_github_sync=True, expected_survivor_row_ids=expected_survivors)
+                timings["workbook_sync"] = round(time.perf_counter() - t3, 6)
+                APP_LOGGER.info("trading_journal_import_stage_done stage=workbook_sync elapsed=%.6fs upload=%s", timings["workbook_sync"], name)
+                if not _master_journal_sync_ok(sync_result):
+                    sync_missing = list((sync_result or {}).get("missing_row_ids") or [])
+                    APP_LOGGER.error(
+                        "trading_journal_import workbook_sync failed upload=%s elapsed=%.6fs missing_row_ids_count=%s missing_row_ids_sample=%s error=%s",
+                        name, timings["workbook_sync"], len(sync_missing), sync_missing[:5], _master_journal_sync_error(sync_result),
+                    )
+                    raise RuntimeError(f"Workbook sync failed: {_master_journal_sync_error(sync_result)}")
+                _PENDING_MANUAL_SYNC_ROWS = previous_pending_rows
+                pending_restored = True
 
             t4 = time.perf_counter()
             APP_LOGGER.info("trading_journal_import_stage_start stage=verification upload=%s expected_row_ids=%s", name, len(expected_survivors))
@@ -26836,7 +26867,8 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 msg = f"{msg} | rollback failed: {'; '.join(rollback_errors)}"
             return {"ok": False, "status_code": code, "message": msg, "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": 0, "missing_row_ids": missing, "errors": [msg, *rollback_errors], "warnings": [], "import_timings": timings, "master_journal_error": _master_journal_sync_error(sync_result), "diagnostics": (sync_result or {}).get("diagnostics")}
         APP_LOGGER.info("trading_journal_import_success timings=%s upload=%s", timings, name)
-        return {"ok": True, "status_code": 200, "message": "Import complete.", "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": rows_upserted, "duplicate_rows_merged": duplicate_rows_merged, "balance_parsed": bool(balance), "master_journal_path": str(_master_journal_path()), "verified_row_ids_count": len(parsed_ids), "missing_row_ids": [], "warnings": inference_warnings, "errors": [], "import_timings": timings, **inference_diag, **bybit_diag, **github_sync_result, "github_sync_deferred": False, "github_sync_commit_sha": github_sync_result.get("github_sync_commit"), "github_sync_path": str(_master_journal_path()), "github_sync_message": ("GitHub sync disabled" if not github_sync_result.get("github_sync_enabled") else ("GitHub sync complete" if github_sync_result.get("github_sync_ok") else str(github_sync_result.get("github_sync_error") or "")))}
+        message = "Import complete. Duplicate rows already present; stats refreshed; workbook trade rows unchanged." if duplicate_noop_fast_path_used else "Import complete."
+        return {"ok": True, "status_code": 200, "message": message, "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": rows_upserted, "duplicate_rows_merged": duplicate_rows_merged, "balance_parsed": bool(balance), "master_journal_path": str(_master_journal_path()), "verified_row_ids_count": len(parsed_ids), "missing_row_ids": [], "warnings": inference_warnings, "errors": [], "import_timings": timings, **inference_diag, **bybit_diag, **github_sync_result, "github_sync_deferred": False, "github_sync_commit_sha": github_sync_result.get("github_sync_commit"), "github_sync_path": str(_master_journal_path()), "github_sync_message": ("GitHub sync disabled" if not github_sync_result.get("github_sync_enabled") else ("GitHub sync complete" if github_sync_result.get("github_sync_ok") else str(github_sync_result.get("github_sync_error") or "")))}
     except Exception as exc:
         return {"ok": False, "status_code": 500, "message": f"Unexpected import error for {name}.", "uploaded_name": name, "file_type": suffix or "unknown", "rows_parsed": 0, "rows_upserted": 0, "duplicate_rows_merged": 0, "balance_parsed": False, "master_journal_path": str(_master_journal_path()), "verified_row_ids_count": 0, "missing_row_ids": [], "warnings": [], "errors": [str(exc)]}
     finally:
