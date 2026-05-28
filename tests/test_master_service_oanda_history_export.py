@@ -9,6 +9,51 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+
+# dependency-tolerant import shims
+bm_pkg = types.ModuleType("bybit_monitor")
+bm_mod = types.ModuleType("bybit_monitor.bybit_altcoin_monitor")
+bm_mod.__getattr__ = lambda _name: (lambda *a, **k: None)
+bm_pkg.bybit_altcoin_monitor = bm_mod
+sys.modules.setdefault("bybit_monitor", bm_pkg)
+sys.modules.setdefault("bybit_monitor.bybit_altcoin_monitor", bm_mod)
+om_pkg = types.ModuleType("oanda_monitor")
+om_mod = types.ModuleType("oanda_monitor.oanda_forex_monitor")
+om_mod.__getattr__ = lambda _name: (lambda *a, **k: None)
+om_pkg.oanda_forex_monitor = om_mod
+sys.modules.setdefault("oanda_monitor", om_pkg)
+sys.modules.setdefault("oanda_monitor.oanda_forex_monitor", om_mod)
+try:
+    _httpx_spec = importlib.util.find_spec("httpx")
+except ValueError:
+    _httpx_spec = None
+if _httpx_spec is None:
+    httpx_stub = types.ModuleType("httpx")
+    httpx_stub.AsyncClient = object
+    httpx_stub.Timeout = lambda *a, **k: None
+    httpx_stub.TimeoutException = Exception
+    httpx_stub.RequestError = Exception
+    httpx_stub.HTTPStatusError = Exception
+    httpx_stub.Response = object
+    httpx_stub.ConnectError = Exception
+    sys.modules.setdefault("httpx", httpx_stub)
+mp_pkg = types.ModuleType("multipart")
+mp_pkg.__version__ = "0.0-test"
+mp_sub = types.ModuleType("multipart.multipart")
+mp_sub.parse_options_header = lambda *args, **kwargs: ("", {})
+sys.modules.setdefault("multipart", mp_pkg)
+sys.modules.setdefault("multipart.multipart", mp_sub)
+try:
+    _requests_spec = importlib.util.find_spec("requests")
+except ValueError:
+    _requests_spec = None
+if _requests_spec is None:
+    requests_stub = types.ModuleType("requests")
+    requests_adapters = types.ModuleType("requests.adapters")
+    requests_adapters.HTTPAdapter = object
+    requests_stub.adapters = requests_adapters
+    sys.modules.setdefault("requests", requests_stub)
+    sys.modules.setdefault("requests.adapters", requests_adapters)
 sys.modules.setdefault("dotenv", types.SimpleNamespace(load_dotenv=lambda *args, **kwargs: None))
 SPEC = importlib.util.spec_from_file_location(
     "render_master_service_oanda_history_export", ROOT / "render" / "master_service.py"
@@ -441,6 +486,29 @@ def test_oanda_transaction_history_real_csv_blanks_do_not_crash(tmp_path: Path):
     final = parsed['rows'][-1]
     assert final['raw_refs']['close_ticket'] == '622'
     assert final['balance_after_trade'] == pytest.approx(1500.65)
+
+
+def test_oanda_transaction_history_converts_to_brisbane_local_time():
+    parsed = master_service._journal_rows_from_oanda_transaction_history_frame(
+        pd.DataFrame(_sample_oanda_history_rows()),
+        account_mode='demo',
+        account_label='OANDA DEMO',
+        source_path='/tmp/oanda_history_demo.csv',
+    )
+    row = parsed['rows'][0]
+    assert row['open_time'] == '2026-04-08T19:50:46+10:00'
+    assert row['close_time'] == '2026-04-09T19:35:17+10:00'
+
+
+def test_oanda_transaction_history_aedt_converts_to_brisbane_wall_clock():
+    rows = [
+        {"TICKET":1,"TRANSACTION DATE":"2024-10-28 22:59:57 AEDT","TRANSACTION TYPE":"ORDER_FILL","DETAILS":"MARKET_ORDER","INSTRUMENT":"EUR_USD","PRICE":1.1,"UNITS":1000,"DIRECTION":"Buy","SPREAD COST":0,"STOP LOSS":"","TAKE PROFIT":"","FINANCING":"","COMMISSION":"","PL":"","BALANCE":1000},
+        {"TICKET":2,"TRANSACTION DATE":"2024-10-28 22:59:58 AEDT","TRANSACTION TYPE":"ORDER_FILL","DETAILS":"MARKET_ORDER_TRADE_CLOSE","INSTRUMENT":"EUR_USD","PRICE":1.2,"UNITS":-1000,"DIRECTION":"Sell","SPREAD COST":0,"STOP LOSS":"","TAKE PROFIT":"","FINANCING":"","COMMISSION":0,"PL":1.0,"BALANCE":1001},
+    ]
+    parsed = master_service._journal_rows_from_oanda_transaction_history_frame(pd.DataFrame(rows), account_mode='demo', account_label='OANDA DEMO', source_path='/tmp/oanda_history_demo.csv')
+    row = parsed['rows'][0]
+    assert row['open_time'] == '2024-10-28T21:59:57+10:00'
+    assert row['close_time'] == '2024-10-28T21:59:58+10:00'
 
 
 def test_oanda_transaction_history_uses_client_order_stop_target():

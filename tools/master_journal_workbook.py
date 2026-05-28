@@ -14,6 +14,7 @@ from openpyxl.utils.cell import range_boundaries
 import calendar
 from copy import copy
 import math
+from zoneinfo import ZoneInfo
 
 TRADE_LOG_SHEET = "Trade Log"
 LEGACY_ALL_TRADES_SHEET = "All Trades"
@@ -22,6 +23,7 @@ ALL_TRADES_SHEET = LEGACY_ALL_TRADES_SHEET
 LEGACY_TRADE_LOG_SHEET = LEGACY_ALL_TRADES_SHEET
 SHEET_ORDER=["Dashboard","Trade Log","Instrument Averages","P&L Calendar"]
 EDITABLE_COLS=["Test","Setup","Timeframe","Breakeven","Notes"]
+JOURNAL_DISPLAY_TZ = ZoneInfo("Australia/Brisbane")
 
 def _canonical_journal_timeframe(value: Any) -> str:
     text = " ".join(str(value or "").strip().split())
@@ -208,7 +210,7 @@ def _as_datetime(value: Any) -> datetime | None:
     else:
         return None
     if dt.tzinfo is not None:
-        dt = dt.astimezone().replace(tzinfo=None)
+        dt = dt.astimezone(JOURNAL_DISPLAY_TZ).replace(tzinfo=None)
     return dt
 
 def _round_trade_duration_seconds(delta_seconds: Any) -> int | None:

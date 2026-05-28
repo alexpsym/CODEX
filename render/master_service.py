@@ -5,6 +5,7 @@ import math
 import atexit
 import calendar
 import asyncio
+import ctypes
 import copy
 import importlib.util
 import threading
@@ -196,6 +197,7 @@ def _resolve_app_profile() -> str:
 
 
 APP_PROFILE = _resolve_app_profile()
+JOURNAL_DISPLAY_TZ = ZoneInfo("Australia/Brisbane")
 RENDER_ALLOWED_APPS = _parse_allowed_apps(os.getenv("RENDER_ALLOWED_APPS", DEFAULT_RENDER_ALLOWED_APPS))
 LOCAL_ALLOWED_APPS = _parse_allowed_apps(os.getenv("LOCAL_ALLOWED_APPS", DEFAULT_LOCAL_ALLOWED_APPS))
 LOCAL_ONLY_DISABLED_MESSAGE = "This app is local-only to reduce Render bandwidth. Run run_local_master_control.bat."
@@ -4981,23 +4983,45 @@ def _is_oanda_transaction_history_frame(df: pd.DataFrame) -> bool:
     return required.issubset(cols)
 
 
+def _to_journal_display_iso(value: object) -> Optional[str]:
+    iso = _epoch_or_iso_to_iso(value)
+    if not iso:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(JOURNAL_DISPLAY_TZ).isoformat()
+
+
+def _parse_oanda_datetime_to_epoch_and_journal_iso(value: object) -> Tuple[float, Optional[str]]:
+    raw = str(value or "").strip()
+    if not raw:
+        return float("-inf"), None
+    normalized = raw.replace(" AEST", " +10:00").replace(" AEDT", " +11:00")
+    try:
+        parsed_utc = pd.to_datetime(normalized, utc=True)
+    except Exception:
+        return float("-inf"), None
+    epoch = float(parsed_utc.timestamp())
+    local_iso = parsed_utc.to_pydatetime().astimezone(JOURNAL_DISPLAY_TZ).isoformat()
+    return epoch, local_iso
+
+
 def _journal_rows_from_oanda_transaction_history_frame(
     df: pd.DataFrame, *, account_mode: str, account_label: str, source_path: str
 ) -> Dict[str, object]:
-    def _parse_dt(value: object) -> Optional[str]:
-        raw = str(value or "").strip()
-        if not raw:
-            return None
-        normalized = raw.replace(" AEST", " +10:00").replace(" AEDT", " +11:00")
-        try:
-            return pd.to_datetime(normalized, utc=True).isoformat()
-        except Exception:
-            return None
+    def _parse_dt(value: object) -> Tuple[float, Optional[str]]:
+        return _parse_oanda_datetime_to_epoch_and_journal_iso(value)
     rows=[]; warnings=[]; unmatched_open=[]; unmatched_close=[]
     frame=df.copy()
     frame['_ticket_num']=pd.to_numeric(frame.get('TICKET'), errors='coerce')
-    frame['_dt']=frame.get('TRANSACTION DATE').map(_parse_dt)
-    frame=frame.sort_values(by=['_dt','_ticket_num'], kind='stable')
+    frame['_dt_parsed']=frame.get('TRANSACTION DATE').map(_parse_dt)
+    frame['_dt_epoch']=frame['_dt_parsed'].map(lambda v: v[0] if isinstance(v, tuple) else float('-inf'))
+    frame['_dt']=frame['_dt_parsed'].map(lambda v: v[1] if isinstance(v, tuple) else None)
+    frame=frame.sort_values(by=['_dt_epoch','_ticket_num'], kind='stable')
     open_legs=defaultdict(list)
     pending_client=defaultdict(list)
     financing_alloc=defaultdict(float)
@@ -5041,9 +5065,7 @@ def _journal_rows_from_oanda_transaction_history_frame(
                 unmatched_close.append(ticket); continue
             o=bucket.pop(0)
             alloc=financing_alloc.pop(o['ticket'],0.0)
-            net=(pl or 0.0)+alloc
-            if bal is not None and prev_balance_snapshot is not None:
-                net = bal - prev_balance_snapshot
+            net=(pl or 0.0)+alloc+(_to_float(r.get('COMMISSION')) or 0.0)+(_to_float(r.get('GSL FEE')) or 0.0)+(_to_float(r.get('GSL PREMIUM')) or 0.0)
             rows.append(_normalize_journal_profit_fields({'id':f"oanda_export:{account_mode}:{o['ticket']}:{ticket}",'source':'oanda_transaction_export','account':account_mode,'account_label':account_label,'asset_class':'forex','symbol':o['symbol'],'side':o['side'],'status':'closed','open_time':o['open_time'],'close_time':when,'qty':units/100000.0,'qty_raw':units,'qty_unit':'lots','entry_price':o['entry'],'exit_price':_to_float(r.get('PRICE')),'stop_loss':o['sl'],'take_profit':o['tp'],'swap':alloc or None,'commission':abs(o.get('spread') or 0.0)+abs(_to_float(r.get('SPREAD COST')) or 0.0)+abs(_to_float(r.get('COMMISSION')) or 0.0)+abs(_to_float(r.get('GSL FEE')) or 0.0),'net_profit':net,'realized_pnl':net,'balance_after_trade':bal,'balance_after_trade_currency':'AUD','metrics':{'oanda_export_pl':pl,'oanda_export_financing_allocated':alloc},'raw_refs':{'source_path':source_path,'open_ticket':o['ticket'],'close_ticket':ticket,'close_details':details,'transaction_date':when,'transactionId':ticket},'updated_at':_utc_now_iso()}))
     for legs in open_legs.values():
         unmatched_open.extend([str(l.get('ticket') or '') for l in legs if str(l.get('ticket') or '')])
@@ -5054,15 +5076,7 @@ def _parse_excel_account_workbook(
     file_name: str, dbx_path: str, payload: bytes
 ) -> Tuple[List[Dict[str, object]], Optional[Dict[str, object]]]:
     def _parse_oanda_export_datetime(value: object) -> Tuple[float, Optional[str]]:
-        raw = str(value or "").strip()
-        if not raw:
-            return float("-inf"), None
-        normalized = raw.replace(" AEST", " +10:00").replace(" AEDT", " +11:00")
-        try:
-            parsed = pd.to_datetime(normalized, utc=True)
-            return float(parsed.timestamp()), parsed.isoformat()
-        except Exception:
-            return float("-inf"), raw
+        return _parse_oanda_datetime_to_epoch_and_journal_iso(value)
     bio = io.BytesIO(payload)
     try:
         xls = pd.ExcelFile(bio, engine="openpyxl")
@@ -7732,7 +7746,7 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
     if not tx_id or not symbol:
         return []
     legs = _OANDA_OPEN_TRADE_LEGS.setdefault(account, {})
-    close_time = str(entry.get("time") or "")
+    close_time = _to_journal_display_iso(entry.get("time")) or str(entry.get("time") or "")
     tx_order_id = str(entry.get("orderID") or "").strip()
     tx_id = str(entry.get("id") or "").strip()
 

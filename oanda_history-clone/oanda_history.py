@@ -81,7 +81,7 @@ CSV_FIELDNAMES = [
     "BALANCE",
 ]
 
-DEFAULT_TIMEZONE = "Australia/Sydney"
+DEFAULT_TIMEZONE = "Australia/Brisbane"
 
 
 class OandaAPIError(Exception):

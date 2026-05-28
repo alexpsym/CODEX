@@ -8,8 +8,51 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-if importlib.util.find_spec("httpx") is None:
-    pytest.skip("httpx is not installed in this environment", allow_module_level=True)
+
+# dependency-tolerant import shims
+bm_pkg = types.ModuleType("bybit_monitor")
+bm_mod = types.ModuleType("bybit_monitor.bybit_altcoin_monitor")
+bm_mod.__getattr__ = lambda _name: (lambda *a, **k: None)
+bm_pkg.bybit_altcoin_monitor = bm_mod
+sys.modules.setdefault("bybit_monitor", bm_pkg)
+sys.modules.setdefault("bybit_monitor.bybit_altcoin_monitor", bm_mod)
+om_pkg = types.ModuleType("oanda_monitor")
+om_mod = types.ModuleType("oanda_monitor.oanda_forex_monitor")
+om_mod.__getattr__ = lambda _name: (lambda *a, **k: None)
+om_pkg.oanda_forex_monitor = om_mod
+sys.modules.setdefault("oanda_monitor", om_pkg)
+sys.modules.setdefault("oanda_monitor.oanda_forex_monitor", om_mod)
+try:
+    _httpx_spec = importlib.util.find_spec("httpx")
+except ValueError:
+    _httpx_spec = None
+if _httpx_spec is None:
+    httpx_stub = types.ModuleType("httpx")
+    httpx_stub.AsyncClient = object
+    httpx_stub.Timeout = lambda *a, **k: None
+    httpx_stub.TimeoutException = Exception
+    httpx_stub.RequestError = Exception
+    httpx_stub.HTTPStatusError = Exception
+    httpx_stub.Response = object
+    httpx_stub.ConnectError = Exception
+    sys.modules.setdefault("httpx", httpx_stub)
+mp_pkg = types.ModuleType("multipart")
+mp_pkg.__version__ = "0.0-test"
+mp_sub = types.ModuleType("multipart.multipart")
+mp_sub.parse_options_header = lambda *args, **kwargs: ("", {})
+sys.modules.setdefault("multipart", mp_pkg)
+sys.modules.setdefault("multipart.multipart", mp_sub)
+try:
+    _requests_spec = importlib.util.find_spec("requests")
+except ValueError:
+    _requests_spec = None
+if _requests_spec is None:
+    requests_stub = types.ModuleType("requests")
+    requests_adapters = types.ModuleType("requests.adapters")
+    requests_adapters.HTTPAdapter = object
+    requests_stub.adapters = requests_adapters
+    sys.modules.setdefault("requests", requests_stub)
+    sys.modules.setdefault("requests.adapters", requests_adapters)
 sys.modules.setdefault("dotenv", types.SimpleNamespace(load_dotenv=lambda *args, **kwargs: None))
 SPEC = importlib.util.spec_from_file_location(
     "render_master_service_oanda_fill_recovery", ROOT / "render" / "master_service.py"
@@ -42,6 +85,7 @@ def test_journal_rows_from_oanda_open_fill_only_returns_empty():
 
     assert rows == []
     assert master_service._OANDA_OPEN_TRADE_LEGS["demo"]["t1"]["entry_price"] == 1.2
+    assert master_service._OANDA_OPEN_TRADE_LEGS["demo"]["t1"]["open_time"] == "2026-04-10T10:00:00+10:00"
 
 
 def test_journal_rows_from_oanda_close_fill_uses_cached_open_leg():
@@ -95,8 +139,8 @@ def test_journal_rows_from_oanda_close_fill_uses_cached_open_leg():
 
     assert len(rows) == 1
     row = rows[0]
-    assert row["open_time"] == "2026-04-10T00:00:00Z"
-    assert row["close_time"] == "2026-04-10T01:00:00Z"
+    assert row["open_time"] == "2026-04-10T10:00:00+10:00"
+    assert row["close_time"] == "2026-04-10T11:00:00+10:00"
     assert row["entry_price"] == 1.2
     assert row["exit_price"] == 1.21
     assert row["notes"] == ""
