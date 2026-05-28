@@ -2835,3 +2835,103 @@ def test_normalize_cashflow_ledger_keys_uses_event_account_over_raw_bucket():
     assert bybit_key in out
     assert out[bybit_key][0]["id"] == "x1"
     assert misc_key not in out
+
+
+def test_import_hydrates_from_workbook_when_json_state_missing_rows(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: temp_state_paths / "Trading Journal.xlsx")
+    (temp_state_paths / "Trading Journal.xlsx").write_bytes(b"x")
+    master_service._set_trading_journal_rows([])
+    parsed = {"id": "oanda_export:demo:626:630", "row_type": "trade", "source": "oanda", "symbol": "EURUSD"}
+    wb_existing = {"id": "manual:existing:1", "row_type": "trade", "source": "manual", "symbol": "BTCUSDT"}
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda *_a, **_k: ([parsed], None))
+    monkeypatch.setattr(master_service, "_infer_realized_net_profit_from_balance_continuity", lambda rows, _existing: (rows, [], {"pnl_inferred_count": 0, "pnl_unresolved_count": 0, "pnl_unresolved_row_ids": []}))
+    monkeypatch.setattr(master_service, "read_master_journal_source", lambda _p: {"items": [wb_existing]})
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda **_k: {"ok": True})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_a, **_k: None)
+    monkeypatch.setattr(master_service, "_sync_journal_excel_files_to_github", lambda *_a, **_k: {"github_sync_enabled": False, "github_sync_ok": True, "github_sync_error": "", "github_sync_commit": ""})
+    out = master_service._import_uploaded_trading_journal_file("oanda_demo.csv", b"x")
+    assert out["ok"] is True
+    ids = {str(r.get("id")) for r in master_service._get_trading_journal_rows()}
+    assert "manual:existing:1" in ids
+    assert "oanda_export:demo:626:630" in ids
+
+
+def test_import_sync_missing_row_ids_propagated(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: temp_state_paths / "Trading Journal.xlsx")
+    (temp_state_paths / "Trading Journal.xlsx").write_bytes(b"x")
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda *_a, **_k: ([{"id": "new:1", "row_type": "trade", "source": "manual"}], None))
+    monkeypatch.setattr(master_service, "_infer_realized_net_profit_from_balance_continuity", lambda rows, _existing: (rows, [], {"pnl_inferred_count": 0, "pnl_unresolved_count": 0, "pnl_unresolved_row_ids": []}))
+    monkeypatch.setattr(master_service, "read_master_journal_source", lambda _p: {"items": []})
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda **_k: {"ok": False, "error": "workbook_row_survivor_verification_failed", "missing_row_ids": ["new:1"], "diagnostics": {"x": 1}})
+    out = master_service._import_uploaded_trading_journal_file("manual.xlsx", b"x")
+    assert out["ok"] is False
+    assert out["missing_row_ids"] == ["new:1"]
+    assert out["master_journal_error"] == "workbook_row_survivor_verification_failed"
+    assert out["diagnostics"] == {"x": 1}
+
+
+def test_import_hydration_replaces_stale_same_id_rows_from_workbook(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: temp_state_paths / "Trading Journal.xlsx")
+    (temp_state_paths / "Trading Journal.xlsx").write_bytes(b"x")
+    master_service._set_trading_journal_rows([{"id": "manual:existing:1", "row_type": "trade", "source": "manual", "notes": "stale-json"}])
+    parsed = {"id": "oanda_export:demo:626:630", "row_type": "trade", "source": "oanda", "symbol": "EURUSD"}
+    wb_existing = {"id": "manual:existing:1", "row_type": "trade", "source": "manual", "notes": "workbook-newer"}
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda *_a, **_k: ([parsed], None))
+    monkeypatch.setattr(master_service, "_infer_realized_net_profit_from_balance_continuity", lambda rows, _existing: (rows, [], {"pnl_inferred_count": 0, "pnl_unresolved_count": 0, "pnl_unresolved_row_ids": []}))
+    monkeypatch.setattr(master_service, "read_master_journal_source", lambda _p: {"items": [wb_existing]})
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda **_k: {"ok": True})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_a, **_k: None)
+    monkeypatch.setattr(master_service, "_sync_journal_excel_files_to_github", lambda *_a, **_k: {"github_sync_enabled": False, "github_sync_ok": True, "github_sync_error": "", "github_sync_commit": ""})
+    out = master_service._import_uploaded_trading_journal_file("oanda_demo.csv", b"x")
+    assert out["ok"] is True
+    row = next(r for r in master_service._get_trading_journal_rows() if str(r.get("id")) == "manual:existing:1")
+    assert row["notes"] == "workbook-newer"
+
+
+def test_import_duplicate_rows_merged_recomputed_after_workbook_hydration(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: temp_state_paths / "Trading Journal.xlsx")
+    (temp_state_paths / "Trading Journal.xlsx").write_bytes(b"x")
+    master_service._set_trading_journal_rows([])
+    parsed = {"id": "oanda_export:demo:626:630", "row_type": "trade", "source": "oanda", "symbol": "EURUSD"}
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda *_a, **_k: ([parsed], None))
+    monkeypatch.setattr(master_service, "_infer_realized_net_profit_from_balance_continuity", lambda rows, _existing: (rows, [], {"pnl_inferred_count": 0, "pnl_unresolved_count": 0, "pnl_unresolved_row_ids": []}))
+    monkeypatch.setattr(master_service, "read_master_journal_source", lambda _p: {"items": [dict(parsed)]})
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda **_k: {"ok": True})
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_a, **_k: None)
+    monkeypatch.setattr(master_service, "_sync_journal_excel_files_to_github", lambda *_a, **_k: {"github_sync_enabled": False, "github_sync_ok": True, "github_sync_error": "", "github_sync_commit": ""})
+    out = master_service._import_uploaded_trading_journal_file("oanda_demo.csv", b"x")
+    assert out["ok"] is True
+    assert out["duplicate_rows_merged"] == 1
+    rows = [r for r in master_service._get_trading_journal_rows() if str(r.get("id")) == "oanda_export:demo:626:630"]
+    assert len(rows) == 1
+
+
+def test_atomic_write_bytes_retries_replace_then_succeeds(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    target = tmp_path / "state_backup.json"
+    real_replace = master_service.os.replace
+    calls = {"n": 0}
+    def _replace(src, dst):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            err = PermissionError("busy")
+            err.winerror = 32
+            raise err
+        return real_replace(src, dst)
+    monkeypatch.setattr(master_service.os, "replace", _replace)
+    master_service._atomic_write_bytes(target, b'{"ok":1}')
+    assert target.read_bytes() == b'{"ok":1}'
+    assert calls["n"] == 3
+
+
+def test_atomic_write_bytes_fallback_after_retry_exhaustion(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    target = tmp_path / "state_backup.json"
+    def _replace(_src, _dst):
+        err = PermissionError("denied")
+        err.winerror = 5
+        raise err
+    monkeypatch.setattr(master_service.os, "replace", _replace)
+    master_service._atomic_write_bytes(target, b'{"ok":2}')
+    assert target.read_bytes() == b'{"ok":2}'

@@ -114,10 +114,16 @@
       const unresolved = payload.pnl_unresolved_count ?? 0;
       setStatus(`${payload.message || 'Import complete.'}\nRows parsed: ${payload.rows_parsed ?? 0}\nRows upserted: ${payload.rows_upserted ?? 0}\nP/L inferred: ${inferred}\nP/L unresolved: ${unresolved}\nWorkbook: ${payload.master_journal_path || ''}\nMissing Row IDs: ${(payload.missing_row_ids || []).join(', ') || 'none'}${warnings.length ? `\nWarnings:\n- ${warnings.join('\n- ')}` : ''}`);
       clearPendingRetry();
-    } catch (err) { setStatus(err?.message || String(err), true); }
+    } catch (err) {
+      setStatus(err?.message || String(err), true);
+      clearPendingRetry();
+    }
     finally {
       if (watchdog) window.clearTimeout(watchdog);
-      if (importBtn) importBtn.disabled = Boolean(pendingRetry.run); if (!pendingRetry.run && fileInput) fileInput.value = '';
+      if (importBtn) importBtn.disabled = Boolean(pendingRetry.run);
+      if (cryptoMonthlyBtn) cryptoMonthlyBtn.disabled = Boolean(pendingRetry.run);
+      if (bybitDemoBalanceAdjustmentBtn) bybitDemoBalanceAdjustmentBtn.disabled = Boolean(pendingRetry.run);
+      if (!pendingRetry.run && fileInput) fileInput.value = '';
     }
   };
   fileInput?.addEventListener('change', async () => {

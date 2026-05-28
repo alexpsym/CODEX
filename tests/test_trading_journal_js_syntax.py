@@ -139,6 +139,8 @@ def test_trading_journal_actions_import_error_shows_payload_errors_and_keeps_byb
     assert "Import is still running longer than expected. Waiting for backend result..." in js
     assert "IMPORT_WATCHDOG_MS" in js
     assert "if (!res.ok || payload.ok !== true)" in js
+    assert "} catch (err) {" in js
+    assert "clearPendingRetry();" in js
 
 
 def test_trading_journal_actions_excel_lock_retry_controls_and_guards_present() -> None:

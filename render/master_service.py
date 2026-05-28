@@ -5483,7 +5483,32 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
         fh.write(data)
         fh.flush()
         os.fsync(fh.fileno())
-    os.replace(tmp, path)
+    replace_error: Optional[BaseException] = None
+    for attempt in range(5):
+        try:
+            os.replace(tmp, path)
+            return
+        except Exception as exc:
+            winerror = int(getattr(exc, "winerror", 0) or 0)
+            if not isinstance(exc, (PermissionError, OSError)) or winerror not in (5, 32):
+                raise
+            replace_error = exc
+            if attempt >= 4:
+                break
+            time.sleep(0.05 * (attempt + 1))
+    try:
+        with open(path, "wb") as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
+    if replace_error is not None:
+        APP_LOGGER.warning("Atomic replace failed for %s; direct write fallback used: %s", path, replace_error)
 
 
 def _read_excel_sheet_or_empty(path: Path, sheet_name: str, columns: List[str]) -> pd.DataFrame:
@@ -25970,7 +25995,10 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
                 source_trade_rows = [r for r in source_items if _row_type(r) == "trade"]
 
         if path.exists():
-            update_result = update_master_journal_workbook_data_only(path, snapshot, expected_survivor_row_ids=expected_survivor_row_ids)
+            if expected_survivor_row_ids is None:
+                update_result = update_master_journal_workbook_data_only(path, snapshot)
+            else:
+                update_result = update_master_journal_workbook_data_only(path, snapshot, expected_survivor_row_ids=expected_survivor_row_ids)
             if not bool((update_result or {}).get("ok")):
                 raise RuntimeError(str((update_result or {}).get("error") or "Trading Journal data-only update failed."))
             candidate_path = str((update_result or {}).get("candidate_path") or "").strip()
@@ -26646,11 +26674,10 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
         if not rows:
             return {"ok": False, "status_code": 422, "message": "No trade rows or account balance found in uploaded file.", "uploaded_name": name, "file_type": suffix, "rows_parsed": 0, "errors": ["zero_rows"], "warnings": []}
         previous_rows = copy.deepcopy([r for r in _get_trading_journal_rows() if isinstance(r, dict)])
-        existing_ids = {str((r or {}).get("id") or "").strip() for r in previous_rows}
         parsed_ids = [str(r.get("id") or "").strip() for r in rows if str(r.get("id") or "").strip()]
         if rows and not parsed_ids:
             return {"ok": False, "status_code": 422, "message": "No verifiable row IDs were parsed from trade rows.", "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "errors": ["no_verifiable_row_ids"], "warnings": []}
-        duplicate_rows_merged = sum(1 for rid in parsed_ids if rid in existing_ids)
+        duplicate_rows_merged = 0
         rows_upserted = 0
         workbook_path = _master_journal_path()
         workbook_backup_bytes: Optional[bytes] = None
@@ -26658,13 +26685,62 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
         if workbook_had_original:
             workbook_backup_bytes = workbook_path.read_bytes()
         pre_import_workbook_row_ids: List[str] = []
+        workbook_existing_rows: List[Dict[str, object]] = []
         if workbook_had_original:
             src = read_master_journal_source(workbook_path) or {}
-            pre_import_workbook_row_ids = [str((r or {}).get("id") or "").strip() for r in (src.get("items") or []) if isinstance(r, dict) and str((r or {}).get("id") or "").strip()]
+            workbook_existing_rows = [dict(r) for r in (src.get("items") or []) if isinstance(r, dict) and str((r or {}).get("id") or "").strip()]
+            pre_import_workbook_row_ids = [str((r or {}).get("id") or "").strip() for r in workbook_existing_rows]
         verify_result: Optional[Dict[str, object]] = None
+        sync_result: Optional[Dict[str, object]] = None
         previous_pending_rows = [dict(r) for r in (_PENDING_MANUAL_SYNC_ROWS or []) if isinstance(r, dict)]
         pending_restored = False
         try:
+            if workbook_existing_rows:
+                def _row_sig(row: Dict[str, object]) -> str:
+                    try:
+                        return json.dumps(_json_safe(row), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+                    except Exception:
+                        return str(row)
+                current_ids = {str((r or {}).get("id") or "").strip() for r in previous_rows if str((r or {}).get("id") or "").strip()}
+                workbook_ids = {str((r or {}).get("id") or "").strip() for r in workbook_existing_rows if str((r or {}).get("id") or "").strip()}
+                current_map = {str((r or {}).get("id") or "").strip(): dict(r) for r in previous_rows if str((r or {}).get("id") or "").strip()}
+                workbook_map = {str((r or {}).get("id") or "").strip(): dict(r) for r in workbook_existing_rows if str((r or {}).get("id") or "").strip()}
+                stale_ids = [rid for rid in workbook_ids.intersection(current_ids) if _row_sig(current_map.get(rid, {})) != _row_sig(workbook_map.get(rid, {}))]
+                should_hydrate = (not previous_rows) or (not workbook_ids.issubset(current_ids)) or bool(stale_ids)
+                hydrated_rows_added = 0
+                hydrated_rows_replaced = 0
+                if should_hydrate:
+                    merged = dict(current_map)
+                    for row in workbook_existing_rows:
+                        rid = str((row or {}).get("id") or "").strip()
+                        if not rid:
+                            continue
+                        if rid not in merged:
+                            merged[rid] = dict(row)
+                            hydrated_rows_added += 1
+                        elif rid in stale_ids:
+                            merged[rid] = dict(row)
+                            hydrated_rows_replaced += 1
+                    hydrated_rows = list(merged.values())
+                    _set_trading_journal_rows(hydrated_rows)
+                    previous_rows = copy.deepcopy([r for r in _get_trading_journal_rows() if isinstance(r, dict)])
+                APP_LOGGER.info(
+                    "trading_journal_import_hydration upload=%s workbook_rows_loaded=%s state_rows_before_hydration=%s hydrated_rows_added=%s hydrated_rows_replaced_due_to_stale_state=%s stale_same_id_count=%s",
+                    name,
+                    len(workbook_existing_rows),
+                    len(current_map),
+                    hydrated_rows_added,
+                    hydrated_rows_replaced,
+                    len(stale_ids),
+                )
+            existing_ids = {str((r or {}).get("id") or "").strip() for r in previous_rows if str((r or {}).get("id") or "").strip()}
+            duplicate_rows_merged = sum(1 for rid in parsed_ids if rid in existing_ids)
+            APP_LOGGER.info(
+                "trading_journal_import_duplicate_check upload=%s parsed_duplicate_ids_after_hydration=%s duplicate_rows_merged=%s",
+                name,
+                [rid for rid in parsed_ids if rid in existing_ids][:10],
+                duplicate_rows_merged,
+            )
             rows = [_backfill_trade_row_context_fields(dict(r)) if isinstance(r, dict) else r for r in rows]
             t2 = time.perf_counter()
             APP_LOGGER.info("trading_journal_import_stage_start stage=upsert upload=%s", name)
@@ -26690,6 +26766,15 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             timings["workbook_sync"] = round(time.perf_counter() - t3, 6)
             APP_LOGGER.info("trading_journal_import_stage_done stage=workbook_sync elapsed=%.6fs upload=%s", timings["workbook_sync"], name)
             if not _master_journal_sync_ok(sync_result):
+                sync_missing = list((sync_result or {}).get("missing_row_ids") or [])
+                APP_LOGGER.error(
+                    "trading_journal_import workbook_sync failed upload=%s elapsed=%.6fs missing_row_ids_count=%s missing_row_ids_sample=%s error=%s",
+                    name,
+                    timings["workbook_sync"],
+                    len(sync_missing),
+                    sync_missing[:5],
+                    _master_journal_sync_error(sync_result),
+                )
                 raise RuntimeError(f"Workbook sync failed: {_master_journal_sync_error(sync_result)}")
             _PENDING_MANUAL_SYNC_ROWS = previous_pending_rows
             pending_restored = True
@@ -26746,10 +26831,10 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             APP_LOGGER.warning("trading_journal_import_failed timings=%s upload=%s", timings, name)
             code = 500
             msg = str(exc)
-            missing = (verify_result or {}).get("missing_row_ids") or []
+            missing = (verify_result or {}).get("missing_row_ids") or list((sync_result or {}).get("missing_row_ids") or [])
             if rollback_errors:
                 msg = f"{msg} | rollback failed: {'; '.join(rollback_errors)}"
-            return {"ok": False, "status_code": code, "message": msg, "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": 0, "missing_row_ids": missing, "errors": [msg, *rollback_errors], "warnings": [], "import_timings": timings}
+            return {"ok": False, "status_code": code, "message": msg, "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": 0, "missing_row_ids": missing, "errors": [msg, *rollback_errors], "warnings": [], "import_timings": timings, "master_journal_error": _master_journal_sync_error(sync_result), "diagnostics": (sync_result or {}).get("diagnostics")}
         APP_LOGGER.info("trading_journal_import_success timings=%s upload=%s", timings, name)
         return {"ok": True, "status_code": 200, "message": "Import complete.", "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": rows_upserted, "duplicate_rows_merged": duplicate_rows_merged, "balance_parsed": bool(balance), "master_journal_path": str(_master_journal_path()), "verified_row_ids_count": len(parsed_ids), "missing_row_ids": [], "warnings": inference_warnings, "errors": [], "import_timings": timings, **inference_diag, **bybit_diag, **github_sync_result, "github_sync_deferred": False, "github_sync_commit_sha": github_sync_result.get("github_sync_commit"), "github_sync_path": str(_master_journal_path()), "github_sync_message": ("GitHub sync disabled" if not github_sync_result.get("github_sync_enabled") else ("GitHub sync complete" if github_sync_result.get("github_sync_ok") else str(github_sync_result.get("github_sync_error") or "")))}
     except Exception as exc:
