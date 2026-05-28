@@ -108,13 +108,15 @@ def test_run_local_master_uses_uvicorn_log_config_and_access_log_enabled() -> No
 def test_run_local_master_exit_wiring_and_ordering() -> None:
     script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
     assert 'set "LOCAL_MASTER_EXIT_REQUEST=%TEMP%\\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.flag"' in script
+    assert 'set "LOCAL_MASTER_WINDOW_TITLE=Local Master Control - %LOCAL_LAUNCH_TS%"' in script
     assert 'set "LOCAL_MASTER_EDGE_DEBUG_PORT=' in script
-    assert 'start "Local Master Control" /D "%ROOT%" cmd /d /v:on /c ""%~f0" __worker"' in script
+    assert 'start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" cmd /d /v:on /c ""%~f0" __worker"' in script
+    assert 'if defined LOCAL_MASTER_WINDOW_TITLE title !LOCAL_MASTER_WINDOW_TITLE!' in script
     assert '/k ""%~f0" __worker"' not in script
     assert 'call "%ROOT%tools\\open_edge_url.bat" "%MASTER_BROWSER_URL%" "%LOCAL_MASTER_EDGE_DEBUG_PORT%" "%LOCAL_MASTER_EDGE_PROFILE_DIR%"' in script
     assert 'if defined LOCAL_MASTER_EXIT_REQUEST if exist "!LOCAL_MASTER_EXIT_REQUEST!" (' in script
     assert 'goto restart_master' in script
-    worker_idx = script.find('start "Local Master Control"')
+    worker_idx = script.find('start "%LOCAL_MASTER_WINDOW_TITLE%"')
     health_idx = script.find(':wait_for_master_ready')
     open_idx = script.find('call "%ROOT%tools\\open_edge_url.bat"')
     assert worker_idx != -1 and health_idx != -1 and open_idx != -1
@@ -123,7 +125,15 @@ def test_run_local_master_exit_wiring_and_ordering() -> None:
     restart_idx = script.find('goto restart_master')
     assert exit_branch_idx != -1 and restart_idx != -1 and exit_branch_idx < restart_idx
     assert '\n  exit /b 0\n)' not in script
-    assert '\n  echo [local-master] closing Local Master Control command prompt.\n  exit 0\n)' in script
+    assert 'LOCAL_MASTER_SHUTDOWN_PS1=%TEMP%\\local_master_shutdown_!RANDOM!_!RANDOM!.ps1' in script
+    assert 'start "" powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "!LOCAL_MASTER_SHUTDOWN_PS1!"' in script
+    assert 'powershell -NoProfile -WindowStyle Hidden -Command' not in script
+    assert "$_.MainWindowTitle -eq $title" in script
+    assert "Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue" in script
+    assert "$allow = @^('WindowsTerminal','wt','OpenConsole','conhost','cmd'^)" in script
+    assert "Stop-Process -Id $_.Id -Force -ErrorAction Stop" in script
+    assert "Stop-Process -Name WindowsTerminal" not in script
+    assert '\n  exit 0\n)' in script
 
 
 def test_open_edge_url_supports_optional_debugging_profile_args() -> None:

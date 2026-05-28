@@ -80,8 +80,9 @@ if not defined LOCAL_MASTER_EDGE_DEBUG_PORT (
 )
 set "LOCAL_MASTER_EDGE_PROFILE_DIR=%TEMP%\LocalTradingToolsEdge-%LOCAL_LAUNCH_TS%"
 set "LOCAL_MASTER_EXIT_REQUEST=%TEMP%\LocalTradingToolsExit-%LOCAL_LAUNCH_TS%.flag"
+set "LOCAL_MASTER_WINDOW_TITLE=Local Master Control - %LOCAL_LAUNCH_TS%"
 if exist "%LOCAL_MASTER_EXIT_REQUEST%" del /q "%LOCAL_MASTER_EXIT_REQUEST%" >nul 2>nul
-start "Local Master Control" /D "%ROOT%" cmd /d /v:on /c ""%~f0" __worker"
+start "%LOCAL_MASTER_WINDOW_TITLE%" /D "%ROOT%" cmd /d /v:on /c ""%~f0" __worker"
 set "MASTER_READY_TIMEOUT_SECONDS=60"
 set "SCANNER_READY_TIMEOUT_SECONDS=90"
 echo [local-master] waiting for %MASTER_HEALTH_URL% ...
@@ -133,6 +134,7 @@ echo [local-master] Browser was not opened to avoid showing a misleading dashboa
 exit /b 1
 
 :worker
+if defined LOCAL_MASTER_WINDOW_TITLE title !LOCAL_MASTER_WINDOW_TITLE!
 cd /d "%ROOT%" || (
   echo [local-master] ERROR: failed to cd to %ROOT%
   exit /b 1
@@ -171,6 +173,16 @@ if defined LOCAL_MASTER_EXIT_REQUEST if exist "!LOCAL_MASTER_EXIT_REQUEST!" (
   del /q "!LOCAL_MASTER_EXIT_REQUEST!" >nul 2>nul
   if defined LOCAL_MASTER_EDGE_PROFILE_DIR if exist "!LOCAL_MASTER_EDGE_PROFILE_DIR!\" rmdir /s /q "!LOCAL_MASTER_EDGE_PROFILE_DIR!" >nul 2>nul
   echo [local-master] closing Local Master Control command prompt.
+  set "LOCAL_MASTER_SHUTDOWN_PS1=%TEMP%\local_master_shutdown_!RANDOM!_!RANDOM!.ps1"
+  > "!LOCAL_MASTER_SHUTDOWN_PS1!" (
+    echo $title = $env:LOCAL_MASTER_WINDOW_TITLE
+    echo Start-Sleep -Milliseconds 750
+    echo if ^([string]::IsNullOrWhiteSpace^($title^)^) { exit 0 }
+    echo $allow = @^('WindowsTerminal','wt','OpenConsole','conhost','cmd'^)
+    echo Get-Process ^| Where-Object { $_.MainWindowTitle -eq $title -and $allow -contains $_.ProcessName } ^| ForEach-Object { try { Stop-Process -Id $_.Id -Force -ErrorAction Stop } catch {} }
+    echo Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+  )
+  start "" powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "!LOCAL_MASTER_SHUTDOWN_PS1!"
   exit 0
 )
 echo [local-master] restarting in 3 seconds. Close this window to stop local master.
