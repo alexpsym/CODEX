@@ -67,3 +67,16 @@ def test_specs_labels_and_ranges_present() -> None:
     assert "range 1m (%)" in js
     assert "range monthly (%)" in js
     assert "btc-reference-row" in js
+
+
+def test_calculator_timeframe_display_labels() -> None:
+    js = JS_PATH.read_text(encoding="utf-8")
+    assert "DAILY" in js
+    assert "WEEKLY" in js
+    assert "MONTHLY" in js
+    assert "['1d','1D']" not in js
+    assert "['1w','1W']" not in js
+    assert "['1mo','1MO']" not in js
+    assert "['1d','DAILY']" in js
+    assert "['1w','WEEKLY']" in js
+    assert "['1mo','MONTHLY']" in js

@@ -1,5 +1,5 @@
 (function () {
-  const TIMEFRAMES = [['1m','1MIN'], ['5m','5MIN'], ['15m','15MIN'], ['30m','30MIN'], ['1h','1H'], ['4h','4H'], ['1d','1D'], ['1w','1W'], ['1mo','1MO']];
+  const TIMEFRAMES = [['1m','1MIN'], ['5m','5MIN'], ['15m','15MIN'], ['30m','30MIN'], ['1h','1H'], ['4h','4H'], ['1d','DAILY'], ['1w','WEEKLY'], ['1mo','MONTHLY']];
   const state = {
     account: 'live',
     asset: 'crypto',
