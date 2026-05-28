@@ -122,7 +122,8 @@ def test_run_local_master_exit_wiring_and_ordering() -> None:
     exit_branch_idx = script.find('if defined LOCAL_MASTER_EXIT_REQUEST if exist "!LOCAL_MASTER_EXIT_REQUEST!" (')
     restart_idx = script.find('goto restart_master')
     assert exit_branch_idx != -1 and restart_idx != -1 and exit_branch_idx < restart_idx
-    assert '\n  exit /b 0\n)' in script
+    assert '\n  exit /b 0\n)' not in script
+    assert '\n  echo [local-master] closing Local Master Control command prompt.\n  exit 0\n)' in script
 
 
 def test_open_edge_url_supports_optional_debugging_profile_args() -> None:

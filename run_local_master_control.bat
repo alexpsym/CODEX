@@ -171,7 +171,7 @@ if defined LOCAL_MASTER_EXIT_REQUEST if exist "!LOCAL_MASTER_EXIT_REQUEST!" (
   del /q "!LOCAL_MASTER_EXIT_REQUEST!" >nul 2>nul
   if defined LOCAL_MASTER_EDGE_PROFILE_DIR if exist "!LOCAL_MASTER_EDGE_PROFILE_DIR!\" rmdir /s /q "!LOCAL_MASTER_EDGE_PROFILE_DIR!" >nul 2>nul
   echo [local-master] closing Local Master Control command prompt.
-  exit /b 0
+  exit 0
 )
 echo [local-master] restarting in 3 seconds. Close this window to stop local master.
 timeout /t 3 /nobreak >nul
