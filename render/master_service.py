@@ -1637,10 +1637,16 @@ def _merge_pending_cashflow_rows_into_ledger(ledger: Dict[str, object], pending_
     return merged
 
 
-def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, object]:
+def _build_trading_journal_view_snapshot(
+    force: bool = False,
+    *,
+    local_only: bool = False,
+    skip_external_balances: bool = False,
+    skip_live_account_refresh: bool = False,
+) -> Dict[str, object]:
     existing = _load_trading_journal_view_snapshot()
     fingerprint = _journal_source_fingerprint()
-    if not force and isinstance(existing, dict) and existing.get("source_fingerprints") == fingerprint:
+    if not local_only and not force and isinstance(existing, dict) and existing.get("source_fingerprints") == fingerprint:
         return existing
     source_mode_runtime = str(os.getenv("TRADING_JOURNAL_SOURCE", TRADING_JOURNAL_SOURCE) or "").strip().lower()
     if source_mode_runtime not in {"dropbox", "local", "both", "auto", "master_journal"}:
@@ -1655,6 +1661,8 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
         and _master_journal_path().exists()
     ):
         use_master_journal_snapshot = True
+    if local_only:
+        use_master_journal_snapshot = False
     if use_master_journal_snapshot:
         source_payload = read_master_journal_source(_master_journal_path())
         items = [dict(r) for r in (source_payload.get("items") or []) if isinstance(r, dict)]
@@ -1759,10 +1767,14 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
             r for r in rows
             if (_row_type(r) != "trade") or str(r.get("source") or "").strip().lower() == "local_excel"
         ]
-    excel_balances = _get_excel_account_balances()
+    excel_balances = [] if skip_external_balances else _get_excel_account_balances()
     balances_seed = [b for b in excel_balances if not _is_bybit_demo_account_label(b.get("label") or b.get("account"))]
     state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
-    ledger = _load_cashflows_for_active_journal_source(state if isinstance(state, dict) else {})
+    if local_only:
+        local_cashflow_dir = TRADING_JOURNAL_LOCAL_DIR
+        ledger = _load_cashflows_from_local(local_cashflow_dir) if (local_cashflow_dir / "account_cashflows.xlsx").exists() else {}
+    else:
+        ledger = _load_cashflows_for_active_journal_source(state if isinstance(state, dict) else {})
     excel_balances, oanda_balance_warnings = _reconcile_oanda_export_balance_labels(
         excel_balances,
         ledger,
@@ -1783,7 +1795,7 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
         if not isinstance(bal, dict):
             continue
         label = str(bal.get("label") or bal.get("account") or "").strip().upper()
-        if label == "OANDA DEMO" and str(bal.get("balance_source") or "") == "cashflow_anchor_plus_trades":
+        if (not local_only) and label == "OANDA DEMO" and str(bal.get("balance_source") or "") == "cashflow_anchor_plus_trades":
             demo_exports = [p for p in _list_local_oanda_history_exports() if "demo" in p.name.lower()]
             latest_export = sorted(demo_exports, key=lambda p: p.stat().st_mtime, reverse=True)[0] if demo_exports else None
             blocked_reason = None
@@ -1851,11 +1863,13 @@ def _build_trading_journal_view_snapshot(force: bool = False) -> Dict[str, objec
             existing_errors = diagnostics.get("errors") if isinstance(diagnostics.get("errors"), list) else []
             diagnostics["errors"] = [*existing_errors, *[str(w) for w in warnings if str(w).strip()]]
     try:
+        if local_only or skip_live_account_refresh:
+            export_files = []
         demo_balance = next(
             (b for b in balances if isinstance(b, dict) and str(b.get("label") or b.get("account") or "").strip().upper() == "OANDA DEMO"),
             None,
         )
-        export_files = [p for p in _list_local_oanda_history_exports() if "demo" in p.name.lower()]
+        export_files = export_files if (local_only or skip_live_account_refresh) else [p for p in _list_local_oanda_history_exports() if "demo" in p.name.lower()]
         latest_export_balance = None
         latest_export_as_of = None
         for p in export_files:
@@ -26018,7 +26032,7 @@ async def _run_trading_journal_sync_job() -> None:
         hb_task.cancel()
 
 
-def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_survivor_row_ids: Optional[List[str]] = None) -> Dict[str, object]:
+def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_survivor_row_ids: Optional[List[str]] = None, prebuilt_snapshot: Optional[Dict[str, object]] = None) -> Dict[str, object]:
     path = _master_journal_path()
     tmp = path.with_suffix('.tmp.xlsx')
     created_tmp = False
@@ -26040,12 +26054,16 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
                 raise RuntimeError("Unknown extra Excel files in journal directory: " + ", ".join(enforce_pre.get("unknown_extra_excel_files") or []) + ". Move legacy backups outside journal/. Keep only journal/Trading Journal.xlsx.")
             if not path.exists():
                 raise FileNotFoundError("Trading Journal.xlsx is missing in master_journal single-file mode. Import history or create the workbook first.")
-        snapshot = _build_trading_journal_view_snapshot(force=True) or {}
+        if isinstance(prebuilt_snapshot, dict):
+            snapshot = copy.deepcopy(prebuilt_snapshot)
+        else:
+            _update_trading_journal_import_status(stage="workbook_sync:snapshot_build", message="Building workbook snapshot")
+            snapshot = _build_trading_journal_view_snapshot(force=True) or {}
         source_items = [r for r in (snapshot.get("items") or []) if isinstance(r, dict)]
         source_trade_rows = [r for r in source_items if _row_type(r) == "trade"]
         _finish_substage("snapshot_build")
 
-        manual_overrides = read_master_journal_manual_overrides(path) if path.exists() else {}
+        manual_overrides = {} if isinstance(prebuilt_snapshot, dict) else (read_master_journal_manual_overrides(path) if path.exists() else {})
         _finish_substage("manual_override_read")
         if isinstance(manual_overrides, dict) and manual_overrides:
             from tools.master_journal_workbook import _all_trades_row_fingerprint_from_map
@@ -26071,7 +26089,7 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
                 merged_rows.append(_apply_trading_journal_manual_overrides(dict(row), ov) if ov else dict(row))
             if overrides_applied > 0:
                 _set_trading_journal_rows(merged_rows)
-                snapshot = _build_trading_journal_view_snapshot(force=True) or {}
+                snapshot = _build_trading_journal_view_snapshot(force=True, local_only=True, skip_external_balances=True, skip_live_account_refresh=True) or {}
                 source_items = [r for r in (snapshot.get("items") or []) if isinstance(r, dict)]
                 source_trade_rows = [r for r in source_items if _row_type(r) == "trade"]
 
@@ -26819,6 +26837,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             pre_import_workbook_row_ids = [str((r or {}).get("id") or "").strip() for r in workbook_existing_rows]
         verify_result: Optional[Dict[str, object]] = None
         sync_result: Optional[Dict[str, object]] = None
+        manual_import_snapshot: Optional[Dict[str, object]] = None
         previous_pending_rows = [dict(r) for r in (_PENDING_MANUAL_SYNC_ROWS or []) if isinstance(r, dict)]
         pending_restored = False
         duplicate_noop_fast_path_used = False
@@ -26902,7 +26921,8 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 timings["workbook_sync"] = 0.0
                 t_stats = time.perf_counter()
                 APP_LOGGER.info("trading_journal_import_stage_start stage=stats_refresh_duplicate_noop upload=%s", name)
-                refreshed = refresh_master_journal_derived_sheets(_master_journal_path(), _build_trading_journal_view_snapshot(force=True) or {})
+                manual_import_snapshot = _build_trading_journal_view_snapshot(force=True, local_only=True, skip_external_balances=True, skip_live_account_refresh=True) or {}
+                refreshed = refresh_master_journal_derived_sheets(_master_journal_path(), manual_import_snapshot)
                 if not bool((refreshed or {}).get("ok")):
                     raise RuntimeError(f"Duplicate import stats refresh failed: {(refreshed or {}).get('error') or 'unknown error'}")
                 duplicate_noop_fast_path_used = True
@@ -26930,10 +26950,16 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                         pending_map[rid] = dict(r)
                 _PENDING_MANUAL_SYNC_ROWS = list(pending_map.values())
 
+                t_snap = time.perf_counter()
+                _update_trading_journal_import_status(stage="snapshot_build", message="Building local import snapshot")
+                APP_LOGGER.info("trading_journal_import_stage_start stage=snapshot_build upload=%s mode=local_only", name)
+                manual_import_snapshot = _build_trading_journal_view_snapshot(force=True, local_only=True, skip_external_balances=True, skip_live_account_refresh=True) or {}
+                timings["snapshot_build"] = round(time.perf_counter() - t_snap, 6)
+                APP_LOGGER.info("trading_journal_import_stage_done stage=snapshot_build elapsed=%.6fs upload=%s mode=local_only", timings["snapshot_build"], name)
                 t3 = time.perf_counter()
                 _update_trading_journal_import_status(stage="workbook_sync", message="Updating Trading Journal.xlsx")
                 APP_LOGGER.info("trading_journal_import_stage_start stage=workbook_sync upload=%s", name)
-                sync_result = _sync_master_journal_workbook(defer_github_sync=True, expected_survivor_row_ids=expected_survivors)
+                sync_result = _sync_master_journal_workbook(defer_github_sync=True, expected_survivor_row_ids=expected_survivors, prebuilt_snapshot=manual_import_snapshot)
                 timings["workbook_sync"] = round(time.perf_counter() - t3, 6)
                 APP_LOGGER.info("trading_journal_import_stage_done stage=workbook_sync elapsed=%.6fs upload=%s", timings["workbook_sync"], name)
                 if not _master_journal_sync_ok(sync_result):
@@ -26964,7 +26990,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 raise RuntimeError(f"Workbook verification failed after import. missing_row_ids={(verify_result or {}).get('missing_row_ids') or []}")
             t5 = time.perf_counter()
             APP_LOGGER.info("trading_journal_import_stage_start stage=snapshot_persist upload=%s", name)
-            snapshot = _build_trading_journal_view_snapshot(force=True)
+            snapshot = manual_import_snapshot or _build_trading_journal_view_snapshot(force=True, local_only=True, skip_external_balances=True, skip_live_account_refresh=True)
             _persist_trading_journal_sqlite(snapshot, import_meta={"source_mode": "manual_upload", "rows_imported": len(rows), "warnings": [], "errors": []})
             timings["snapshot_persist"] = round(time.perf_counter() - t5, 6)
             APP_LOGGER.info("trading_journal_import_stage_done stage=snapshot_persist elapsed=%.6fs upload=%s", timings["snapshot_persist"], name)
@@ -26993,7 +27019,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             except Exception as restore_exc:
                 rollback_errors.append(f"could not restore workbook: {restore_exc}")
             try:
-                rollback_snapshot = _build_trading_journal_view_snapshot(force=True)
+                rollback_snapshot = _build_trading_journal_view_snapshot(force=True, local_only=True, skip_external_balances=True, skip_live_account_refresh=True)
                 _persist_trading_journal_sqlite(rollback_snapshot, import_meta={"source_mode": "manual_upload_rollback", "rows_imported": 0, "warnings": [], "errors": [str(exc), *rollback_errors]})
             except Exception as persist_rollback_exc:
                 rollback_errors.append(f"could not persist rollback snapshot: {persist_rollback_exc}")

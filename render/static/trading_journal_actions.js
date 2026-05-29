@@ -98,7 +98,18 @@
     updateImportTimer();
     let watchdog = null;
     let elapsedTimer = null;
+    let statusPoll = null;
+    const pollImportStatus = async () => {
+      try {
+        const res = await fetch('/api/trading-journal/import/status', { headers: { Accept: 'application/json' }, cache: 'no-store' });
+        const payload = await res.json().catch(() => ({}));
+        if (payload?.running && payload?.stage) {
+          setStatus(`Importing... ${payload.stage} elapsed ${formatElapsed((payload.elapsed_seconds || 0) * 1000)}`);
+        }
+      } catch (_err) {}
+    };
     try {
+      statusPoll = typeof window.setInterval === 'function' ? window.setInterval(pollImportStatus, 2000) : null;
       elapsedTimer = typeof window.setInterval === 'function' ? window.setInterval(updateImportTimer, 1000) : null;
       watchdog = window.setTimeout(() => {
         setStatus(`Import is still running longer than expected. Waiting for backend result... elapsed ${formatElapsed(Date.now() - importStartedAt)}`, true);
@@ -107,6 +118,7 @@
       const bybitLikely = await isLikelyBybitHistoryCsv(file);
       if (bybitLikely && !isExplicitAccountMode(explicitMode)) {
         if (elapsedTimer && typeof window.clearInterval === 'function') { window.clearInterval(elapsedTimer); elapsedTimer = null; }
+        if (statusPoll && typeof window.clearInterval === 'function') { window.clearInterval(statusPoll); statusPoll = null; }
         if (watchdog) { window.clearTimeout(watchdog); watchdog = null; }
         setStatus(BYBIT_AMBIGUITY_MSG, true);
         accountModeSelect?.focus?.();
@@ -119,6 +131,7 @@
       const payload = await res.json().catch(() => ({}));
       if (payload?.requires_account_mode || (Array.isArray(payload?.errors) && payload.errors.includes('ambiguous_bybit_account'))) {
         if (elapsedTimer && typeof window.clearInterval === 'function') { window.clearInterval(elapsedTimer); elapsedTimer = null; }
+        if (statusPoll && typeof window.clearInterval === 'function') { window.clearInterval(statusPoll); statusPoll = null; }
         if (watchdog) { window.clearTimeout(watchdog); watchdog = null; }
         setStatus(BYBIT_AMBIGUITY_MSG, true);
         accountModeSelect?.focus?.();
@@ -126,6 +139,7 @@
       }
       if (isExcelLockPayload(payload)) {
         if (elapsedTimer && typeof window.clearInterval === 'function') { window.clearInterval(elapsedTimer); elapsedTimer = null; }
+        if (statusPoll && typeof window.clearInterval === 'function') { window.clearInterval(statusPoll); statusPoll = null; }
         if (watchdog) { window.clearTimeout(watchdog); watchdog = null; }
         setStatus(`Import failed: ${formatImportError(payload, 'Trading Journal.xlsx appears to be open/locked. Close Excel, then press Resume.')}`, true);
         setPendingRetry('import', () => runImport(file, explicitMode));
@@ -133,10 +147,12 @@
       }
       if (!res.ok || payload.ok !== true) {
         if (elapsedTimer && typeof window.clearInterval === 'function') { window.clearInterval(elapsedTimer); elapsedTimer = null; }
+        if (statusPoll && typeof window.clearInterval === 'function') { window.clearInterval(statusPoll); statusPoll = null; }
         if (watchdog) { window.clearTimeout(watchdog); watchdog = null; }
         throw new Error(formatImportError(payload, 'Import failed.'));
       }
       if (elapsedTimer && typeof window.clearInterval === 'function') { window.clearInterval(elapsedTimer); elapsedTimer = null; }
+        if (statusPoll && typeof window.clearInterval === 'function') { window.clearInterval(statusPoll); statusPoll = null; }
       if (watchdog) { window.clearTimeout(watchdog); watchdog = null; }
       const warnings = payload.warnings || [];
       const inferred = payload.pnl_inferred_count ?? 0;
@@ -149,6 +165,7 @@
     }
     finally {
       if (elapsedTimer && typeof window.clearInterval === 'function') window.clearInterval(elapsedTimer);
+      if (statusPoll && typeof window.clearInterval === 'function') window.clearInterval(statusPoll);
       if (watchdog) window.clearTimeout(watchdog);
       if (openBtn) openBtn.disabled = Boolean(pendingRetry.run);
       if (importBtn) importBtn.disabled = Boolean(pendingRetry.run);

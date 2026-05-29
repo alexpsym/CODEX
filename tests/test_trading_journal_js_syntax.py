@@ -201,6 +201,7 @@ let intervalStarted = 0;
 let intervalCleared = 0;
 let timeoutCleared = 0;
 let fetchCalls = 0;
+let importFetchCalls = 0;
 const file = {
   name: 'oanda_demo.csv',
   slice: () => ({ text: async () => 'TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,BALANCE\n' }),
@@ -218,8 +219,10 @@ const context = {
   clearInterval: () => { intervalCleared += 1; },
   setTimeout: (fn) => { fn(); return 24; },
   clearTimeout: () => { timeoutCleared += 1; },
-  fetch: async () => {
+  fetch: async (url) => {
     fetchCalls += 1;
+    if (String(url).includes('/api/trading-journal/import-file')) importFetchCalls += 1;
+    if (String(url).includes('/api/trading-journal/import/status')) return { ok: true, json: async () => ({ ok: true, running: true, stage: 'workbook_sync', elapsed_seconds: 2 }) };
     return { ok: true, json: async () => ({ ok: true, message: 'Import complete.', rows_parsed: 1, rows_upserted: 1, warnings: [], missing_row_ids: [], master_journal_path: 'Trading Journal.xlsx' }) };
   },
 };
@@ -233,7 +236,7 @@ vm.runInContext(source, context, { filename: 'trading_journal_actions.js' });
   await drop({ preventDefault: () => { listeners.prevented = true; }, dataTransfer: { files: [file] } });
   const status = elements['journal-actions-status'].textContent;
   if (!listeners.prevented) throw new Error('drop default not prevented');
-  if (fetchCalls !== 1) throw new Error('drop did not import exactly once');
+  if (importFetchCalls !== 1) throw new Error('drop did not import exactly once');
   if (intervalStarted < 1) throw new Error('elapsed timer did not start');
   if (intervalCleared < 1 || timeoutCleared < 1) throw new Error('timer/watchdog were not cleared');
   if (!status.includes('Import complete.')) throw new Error('final success not shown: ' + status);

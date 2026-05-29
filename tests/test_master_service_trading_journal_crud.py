@@ -3138,3 +3138,80 @@ def test_import_final_replace_permission_error_returns_excel_lock_payload(temp_s
     assert out["rows_parsed"] == 1
     assert "workbook_sync" in out["import_timings"]
     assert out["diagnostics"]["workbook_sync_substage_timings"]["final_replace"] == pytest.approx(0.01)
+
+
+def test_manual_import_uses_single_local_only_prebuilt_snapshot(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: temp_state_paths / "Trading Journal.xlsx")
+    (temp_state_paths / "Trading Journal.xlsx").write_bytes(b"x")
+    parsed = {
+        "id": "oanda_export:demo:626:630",
+        "row_type": "trade",
+        "source": "oanda_transaction_export",
+        "account": "OANDA DEMO",
+        "account_label": "OANDA DEMO",
+        "symbol": "EURUSD",
+        "net_profit": -0.4505,
+        "commission": 0.0,
+        "balance_after_trade": 1500.20,
+        "balance_after_trade_currency": "AUD",
+    }
+    snapshot = {"items": [dict(parsed)], "balances": [{"account": "OANDA DEMO", "label": "OANDA DEMO", "balance": 1500.20, "currency": "AUD"}], "stats": {}, "diagnostics": {}}
+    calls = {"snapshot": 0, "sync": 0}
+
+    def fake_snapshot(*, force=False, local_only=False, skip_external_balances=False, skip_live_account_refresh=False):
+        calls["snapshot"] += 1
+        assert force is True
+        assert local_only is True
+        assert skip_external_balances is True
+        assert skip_live_account_refresh is True
+        return dict(snapshot)
+
+    def fake_sync(**kwargs):
+        calls["sync"] += 1
+        assert kwargs.get("defer_github_sync") is True
+        assert kwargs.get("prebuilt_snapshot") == snapshot
+        return {"ok": True, "master_journal_ok": True, "github_sync_ok": None, "github_sync_deferred": True, "master_journal_path": str(temp_state_paths / "Trading Journal.xlsx")}
+
+    master_service._set_trading_journal_rows([])
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda *_a, **_k: ([dict(parsed)], None))
+    monkeypatch.setattr(master_service, "_infer_realized_net_profit_from_balance_continuity", lambda rows, _existing: (rows, [], {"pnl_inferred_count": 0, "pnl_unresolved_count": 0, "pnl_unresolved_row_ids": []}))
+    monkeypatch.setattr(master_service, "read_master_journal_source", lambda _p: {"items": []})
+    monkeypatch.setattr(master_service, "_upsert_trading_journal_rows", lambda *_a, **_k: 1)
+    monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", fake_snapshot)
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", fake_sync)
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_a, **_k: None)
+    monkeypatch.setattr(master_service, "_sync_journal_excel_files_to_github", lambda *_a, **_k: {"github_sync_enabled": False, "github_sync_ok": True, "github_sync_error": "", "github_sync_commit": ""})
+
+    out = master_service._import_uploaded_trading_journal_file("oanda_demo.csv", b"x")
+
+    assert out["ok"] is True
+    assert calls == {"snapshot": 1, "sync": 1}
+    assert out["import_timings"]["snapshot_build"] >= 0
+
+
+def test_manual_import_local_snapshot_does_not_call_external_refresh_helpers(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    master_service._set_trading_journal_rows([
+        {
+            "id": "oanda_export:demo:626:630",
+            "row_type": "trade",
+            "source": "oanda_transaction_export",
+            "account": "OANDA DEMO",
+            "account_label": "OANDA DEMO",
+            "symbol": "EURUSD",
+            "close_time": "2026-05-26T16:55:31+10:00",
+            "net_profit": -0.4505,
+            "commission": 0.0,
+            "balance_after_trade": 1500.20,
+            "balance_after_trade_currency": "AUD",
+        }
+    ])
+    monkeypatch.setattr(master_service, "_load_cashflows_for_active_journal_source", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("dropbox/active cashflow loader should not run")))
+    monkeypatch.setattr(master_service, "_get_excel_account_balances", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("external balance seeds should be skipped")))
+    monkeypatch.setattr(master_service, "_list_local_oanda_history_exports", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("OANDA export scan should not run")))
+
+    snapshot = master_service._build_trading_journal_view_snapshot(force=True, local_only=True, skip_external_balances=True, skip_live_account_refresh=True)
+
+    assert snapshot["items"]
+    bal = next(b for b in snapshot["balances"] if str(b.get("account") or b.get("label")).upper() == "OANDA DEMO")
+    assert bal["balance"] == pytest.approx(1500.20)
