@@ -5047,7 +5047,7 @@ def _journal_rows_from_oanda_transaction_history_frame(
             if units<=0: continue
             pend=pending_client.get((symbol,units,direction.lower())) or []
             pctx=pend.pop(0) if pend else {}
-            open_legs[(symbol,units)].append({'ticket':ticket,'open_time':when,'symbol':_canonical_symbol(symbol),'side':direction,'units':units,'entry':_to_float(r.get('PRICE')),'sl':_to_float(r.get('STOP LOSS')) or pctx.get('sl'),'tp':_to_float(r.get('TAKE PROFIT')) or pctx.get('tp'),'spread':abs(_to_float(r.get('SPREAD COST')) or 0.0)})
+            open_legs[(symbol,units)].append({'ticket':ticket,'open_time':when,'symbol':_canonical_symbol(symbol),'side':direction,'units':units,'entry':_to_float(r.get('PRICE')),'sl':_to_float(r.get('STOP LOSS')) or pctx.get('sl'),'tp':_to_float(r.get('TAKE PROFIT')) or pctx.get('tp'),'spread_cost':_to_float(r.get('SPREAD COST'))})
             continue
         if tx_type=='DAILY_FINANCING':
             fin=_to_float(r.get('FINANCING'))
@@ -5066,7 +5066,7 @@ def _journal_rows_from_oanda_transaction_history_frame(
             o=bucket.pop(0)
             alloc=financing_alloc.pop(o['ticket'],0.0)
             net=(pl or 0.0)+alloc+(_to_float(r.get('COMMISSION')) or 0.0)+(_to_float(r.get('GSL FEE')) or 0.0)+(_to_float(r.get('GSL PREMIUM')) or 0.0)
-            rows.append(_normalize_journal_profit_fields({'id':f"oanda_export:{account_mode}:{o['ticket']}:{ticket}",'source':'oanda_transaction_export','account':account_mode,'account_label':account_label,'asset_class':'forex','symbol':o['symbol'],'side':o['side'],'status':'closed','open_time':o['open_time'],'close_time':when,'qty':units/100000.0,'qty_raw':units,'qty_unit':'lots','entry_price':o['entry'],'exit_price':_to_float(r.get('PRICE')),'stop_loss':o['sl'],'take_profit':o['tp'],'swap':alloc or None,'commission':abs(o.get('spread') or 0.0)+abs(_to_float(r.get('SPREAD COST')) or 0.0)+abs(_to_float(r.get('COMMISSION')) or 0.0)+abs(_to_float(r.get('GSL FEE')) or 0.0),'net_profit':net,'realized_pnl':net,'balance_after_trade':bal,'balance_after_trade_currency':'AUD','metrics':{'oanda_export_pl':pl,'oanda_export_financing_allocated':alloc},'raw_refs':{'source_path':source_path,'open_ticket':o['ticket'],'close_ticket':ticket,'close_details':details,'transaction_date':when,'transactionId':ticket},'updated_at':_utc_now_iso()}))
+            rows.append(_normalize_journal_profit_fields({'id':f"oanda_export:{account_mode}:{o['ticket']}:{ticket}",'source':'oanda_transaction_export','account':account_mode,'account_label':account_label,'asset_class':'forex','symbol':o['symbol'],'side':o['side'],'status':'closed','open_time':o['open_time'],'close_time':when,'qty':units/100000.0,'qty_raw':units,'qty_unit':'lots','entry_price':o['entry'],'exit_price':_to_float(r.get('PRICE')),'stop_loss':o['sl'],'take_profit':o['tp'],'swap':alloc or None,'commission':abs(_to_float(r.get('COMMISSION')) or 0.0)+abs(_to_float(r.get('GSL FEE')) or 0.0),'net_profit':net,'realized_pnl':net,'balance_after_trade':bal,'balance_after_trade_currency':'AUD','metrics':{'oanda_export_pl':pl,'oanda_export_financing_allocated':alloc,'oanda_open_spread_cost':o.get('spread_cost'),'oanda_close_spread_cost':_to_float(r.get('SPREAD COST'))},'raw_refs':{'source_path':source_path,'open_ticket':o['ticket'],'close_ticket':ticket,'close_details':details,'transaction_date':when,'transactionId':ticket},'updated_at':_utc_now_iso()}))
     for legs in open_legs.values():
         unmatched_open.extend([str(l.get('ticket') or '') for l in legs if str(l.get('ticket') or '')])
     return {'rows':rows,'account_balance':{'source':'oanda_transaction_export_balance','balance_source':'oanda_transaction_export_balance','account':account_label,'label':account_label,'balance':latest_balance,'currency':'AUD','as_of':latest_asof,'dropbox_path':source_path},'warnings':warnings,'unmatched_open_fills':unmatched_open,'unmatched_close_fills':unmatched_close}
@@ -5813,7 +5813,7 @@ def _build_journal_balance_timelines(
         if bal is None:
             return None
         source = str(row.get("source") or "").strip().lower()
-        if source in {"oanda", "excel", "local_excel", "master_journal"}:
+        if source in {"oanda", "oanda_transaction_export", "excel", "local_excel", "master_journal"}:
             return bal
         bal_source = str(row.get("balance_after_trade_source") or "").strip().lower()
         if bal_source == "master_journal":
@@ -26605,8 +26605,8 @@ def _master_journal_sync_error(result: Dict[str, object] | None) -> str:
 TRADING_JOURNAL_ACTIONS_TEMPLATE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Trading Journal Workspace</title>
-<style>body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}.wrap{min-height:100vh;display:flex;align-items:center;justify-content:center}.stack{display:flex;flex-direction:column;gap:12px;min-width:280px}button{padding:12px 14px;border-radius:10px;border:1px solid #334155;background:#1f2937;color:#e2e8f0;font-weight:700;cursor:pointer}.status{margin-top:8px;white-space:pre-wrap;color:#94a3b8}</style></head>
-<body><div class="wrap"><div class="stack"><button id="open-journal-btn">Open Journal</button><button id="import-journal-btn">Import</button><label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode" style="margin-left:8px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"><option value="" selected disabled>Select Demo or Live</option><option value="demo">Demo</option><option value="live">Live</option></select></label><button id="crypto-monthly-pnl-btn">Crypto Monthly P&L</button><button id="bybit-demo-balance-adjustment-btn">Bybit Demo Balance Adjustment</button><input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv" hidden/><div id="journal-actions-status" class="status"></div></div></div><script src="/static/trading_journal_actions.js"></script></body></html>"""
+<style>body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}.wrap{min-height:100vh;display:flex;align-items:center;justify-content:center}.stack{display:flex;flex-direction:column;gap:12px;min-width:280px}button{padding:12px 14px;border-radius:10px;border:1px solid #334155;background:#1f2937;color:#e2e8f0;font-weight:700;cursor:pointer}.drop-zone{border:1px dashed #475569;border-radius:12px;padding:16px;text-align:center;color:#94a3b8;background:#0f172a;cursor:pointer}.drop-zone.drag-over{border-color:#38bdf8;background:#082f49;color:#e0f2fe}.status{margin-top:8px;white-space:pre-wrap;color:#94a3b8}</style></head>
+<body><div class="wrap"><div class="stack"><button id="open-journal-btn">Open Journal</button><button id="import-journal-btn">Import</button><div id="journal-import-drop-zone" class="drop-zone">Drop .xlsx/.xlsm/.xls/.csv import files here<br/><span style="font-size:12px">or click Import to choose a file</span></div><label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode" style="margin-left:8px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"><option value="" selected disabled>Select Demo or Live</option><option value="demo">Demo</option><option value="live">Live</option></select></label><button id="crypto-monthly-pnl-btn">Crypto Monthly P&L</button><button id="bybit-demo-balance-adjustment-btn">Bybit Demo Balance Adjustment</button><input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv" hidden/><div id="journal-actions-status" class="status"></div></div></div><script src="/static/trading_journal_actions.js"></script></body></html>"""
 
 @app.get("/merged/trading-journal")
 async def merged_trading_journal_workspace() -> HTMLResponse:
@@ -26724,6 +26724,14 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                     "entry_price": _to_float(row.get("entry_price")),
                     "exit_price": _to_float(row.get("exit_price")),
                     "net_profit": _to_float(row.get("net_profit")),
+                    "realized_pnl": _to_float(row.get("realized_pnl")),
+                    "commission": _to_float(row.get("commission")),
+                    "balance_after_trade": _to_float(row.get("balance_after_trade")),
+                    "balance_after_trade_currency": str(row.get("balance_after_trade_currency") or "").strip(),
+                    "stop_loss": _to_float(row.get("stop_loss")),
+                    "take_profit": _to_float(row.get("take_profit")),
+                    "result_pct": _to_float(row.get("result_pct")),
+                    "r_multiple": _to_float(row.get("r_multiple")),
                 }
             if workbook_existing_rows:
                 current_ids = {str((r or {}).get("id") or "").strip() for r in previous_rows if str((r or {}).get("id") or "").strip()}

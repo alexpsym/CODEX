@@ -161,3 +161,96 @@ def test_trading_journal_actions_excel_lock_retry_controls_and_guards_present() 
     assert "if (bybitDemoBalanceAdjustmentBtn) bybitDemoBalanceAdjustmentBtn.disabled" in js
     assert "if (status) status.after(resumeBtn, cancelBtn);" in js
     assert "if (!pendingRetry.run && fileInput) fileInput.value = '';" in js
+
+
+def test_trading_journal_actions_drag_drop_import_timer_and_final_status() -> None:
+    node = shutil.which("node")
+    assert node, "node is required for JS runtime smoke test"
+    harness = r"""
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const listeners = {};
+function element(id) {
+  return {
+    id,
+    style: {},
+    classList: { add: (c) => { listeners[id + ':class'] = c; }, remove: () => {} },
+    textContent: '',
+    value: '',
+    disabled: false,
+    files: [],
+    focus: () => { listeners.focused = id; },
+    click: () => { listeners.clicked = id; },
+    after: () => {},
+    addEventListener: (type, fn) => { listeners[id + ':' + type] = fn; },
+  };
+}
+const elements = {
+  'open-journal-btn': element('open-journal-btn'),
+  'import-journal-btn': element('import-journal-btn'),
+  'journal-file-input': element('journal-file-input'),
+  'journal-import-drop-zone': element('journal-import-drop-zone'),
+  'crypto-monthly-pnl-btn': element('crypto-monthly-pnl-btn'),
+  'bybit-demo-balance-adjustment-btn': element('bybit-demo-balance-adjustment-btn'),
+  'journal-account-mode': element('journal-account-mode'),
+  'journal-actions-status': element('journal-actions-status'),
+};
+elements['journal-account-mode'].value = 'demo';
+let intervalStarted = 0;
+let intervalCleared = 0;
+let timeoutCleared = 0;
+let fetchCalls = 0;
+const file = {
+  name: 'oanda_demo.csv',
+  slice: () => ({ text: async () => 'TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,BALANCE\n' }),
+};
+class FormData { append(k, v) { this[k] = v; } }
+const context = {
+  console,
+  document: {
+    getElementById: (id) => elements[id] || element(id),
+    createElement: (tag) => element(tag),
+  },
+  FormData,
+  Date: { now: (() => { let n = 0; return () => { n += 1000; return n; }; })() },
+  setInterval: (fn) => { intervalStarted += 1; fn(); return 42; },
+  clearInterval: () => { intervalCleared += 1; },
+  setTimeout: (fn) => { fn(); return 24; },
+  clearTimeout: () => { timeoutCleared += 1; },
+  fetch: async () => {
+    fetchCalls += 1;
+    return { ok: true, json: async () => ({ ok: true, message: 'Import complete.', rows_parsed: 1, rows_upserted: 1, warnings: [], missing_row_ids: [], master_journal_path: 'Trading Journal.xlsx' }) };
+  },
+};
+context.window = context;
+context.globalThis = context;
+vm.createContext(context);
+vm.runInContext(source, context, { filename: 'trading_journal_actions.js' });
+(async () => {
+  const drop = listeners['journal-import-drop-zone:drop'];
+  if (typeof drop !== 'function') throw new Error('drop handler missing');
+  await drop({ preventDefault: () => { listeners.prevented = true; }, dataTransfer: { files: [file] } });
+  const status = elements['journal-actions-status'].textContent;
+  if (!listeners.prevented) throw new Error('drop default not prevented');
+  if (fetchCalls !== 1) throw new Error('drop did not import exactly once');
+  if (intervalStarted < 1) throw new Error('elapsed timer did not start');
+  if (intervalCleared < 1 || timeoutCleared < 1) throw new Error('timer/watchdog were not cleared');
+  if (!status.includes('Import complete.')) throw new Error('final success not shown: ' + status);
+  if (status.includes('longer than expected')) throw new Error('watchdog message was not replaced: ' + status);
+  if (!status.includes('Rows parsed: 1')) throw new Error('summary missing: ' + status);
+})().catch((err) => { console.error(err); process.exit(1); });
+"""
+    subprocess.run([node, "-e", harness, str(ACTIONS_JS_PATH)], check=True)
+
+
+def test_trading_journal_actions_drag_drop_and_elapsed_timer_hooks_present() -> None:
+    js = ACTIONS_JS_PATH.read_text(encoding="utf-8")
+    assert "journal-import-drop-zone" in js
+    assert "dragover" in js
+    assert "dragleave" in js
+    assert "drop" in js
+    assert "await runImport(file, capturedMode);" in js
+    assert "Importing... elapsed" in js
+    assert "formatElapsed" in js
+    assert "window.clearInterval(elapsedTimer)" in js

@@ -2,12 +2,19 @@
   const openBtn = document.getElementById('open-journal-btn');
   const importBtn = document.getElementById('import-journal-btn');
   const fileInput = document.getElementById('journal-file-input');
+  const dropZone = document.getElementById('journal-import-drop-zone');
   const cryptoMonthlyBtn = document.getElementById('crypto-monthly-pnl-btn');
   const bybitDemoBalanceAdjustmentBtn = document.getElementById('bybit-demo-balance-adjustment-btn');
   const accountModeSelect = document.getElementById('journal-account-mode');
   const status = document.getElementById('journal-actions-status');
   const BYBIT_AMBIGUITY_MSG = 'Select Demo or Live in Bybit CSV account, then import this file again.';
   const IMPORT_WATCHDOG_MS = 15000;
+  const formatElapsed = (ms) => {
+    const total = Math.max(0, Math.floor(ms / 1000));
+    const minutes = String(Math.floor(total / 60)).padStart(2, '0');
+    const seconds = String(total % 60).padStart(2, '0');
+    return `${minutes}:${seconds}`;
+  };
   const pendingRetry = { kind: '', run: null };
   let retryInFlight = false;
   const makeFallbackButton = () => ({ id: '', textContent: '', style: { display: 'none' }, disabled: false, addEventListener: () => {} });
@@ -80,15 +87,22 @@
   const runImport = async (file, fixedAccountMode = null) => {
     if (!file) return;
     if (importBtn) importBtn.disabled = true;
-    setStatus('Importing...');
+    if (dropZone) dropZone.classList.remove('drag-over');
+    const importStartedAt = Date.now();
+    const updateImportTimer = () => setStatus(`Importing... elapsed ${formatElapsed(Date.now() - importStartedAt)}`);
+    updateImportTimer();
     let watchdog = null;
+    let elapsedTimer = null;
     try {
+      elapsedTimer = typeof window.setInterval === 'function' ? window.setInterval(updateImportTimer, 1000) : null;
       watchdog = window.setTimeout(() => {
-        setStatus('Import is still running longer than expected. Waiting for backend result...', true);
+        setStatus(`Import is still running longer than expected. Waiting for backend result... elapsed ${formatElapsed(Date.now() - importStartedAt)}`, true);
       }, IMPORT_WATCHDOG_MS);
       const explicitMode = String((fixedAccountMode ?? accountModeSelect?.value) || '').trim().toLowerCase();
       const bybitLikely = await isLikelyBybitHistoryCsv(file);
       if (bybitLikely && !isExplicitAccountMode(explicitMode)) {
+        if (elapsedTimer && typeof window.clearInterval === 'function') { window.clearInterval(elapsedTimer); elapsedTimer = null; }
+        if (watchdog) { window.clearTimeout(watchdog); watchdog = null; }
         setStatus(BYBIT_AMBIGUITY_MSG, true);
         accountModeSelect?.focus?.();
         fileInput.value = '';
@@ -99,16 +113,26 @@
       const res = await fetch('/api/trading-journal/import-file', { method: 'POST', body: form });
       const payload = await res.json().catch(() => ({}));
       if (payload?.requires_account_mode || (Array.isArray(payload?.errors) && payload.errors.includes('ambiguous_bybit_account'))) {
+        if (elapsedTimer && typeof window.clearInterval === 'function') { window.clearInterval(elapsedTimer); elapsedTimer = null; }
+        if (watchdog) { window.clearTimeout(watchdog); watchdog = null; }
         setStatus(BYBIT_AMBIGUITY_MSG, true);
         accountModeSelect?.focus?.();
         return;
       }
       if (isExcelLockPayload(payload)) {
+        if (elapsedTimer && typeof window.clearInterval === 'function') { window.clearInterval(elapsedTimer); elapsedTimer = null; }
+        if (watchdog) { window.clearTimeout(watchdog); watchdog = null; }
         setStatus(payload.message || 'Trading Journal.xlsx appears to be open in Excel. Close it, then press Resume.', true);
         setPendingRetry('import', () => runImport(file, explicitMode));
         return;
       }
-      if (!res.ok || payload.ok !== true) throw new Error(formatImportError(payload, 'Import failed.'));
+      if (!res.ok || payload.ok !== true) {
+        if (elapsedTimer && typeof window.clearInterval === 'function') { window.clearInterval(elapsedTimer); elapsedTimer = null; }
+        if (watchdog) { window.clearTimeout(watchdog); watchdog = null; }
+        throw new Error(formatImportError(payload, 'Import failed.'));
+      }
+      if (elapsedTimer && typeof window.clearInterval === 'function') { window.clearInterval(elapsedTimer); elapsedTimer = null; }
+      if (watchdog) { window.clearTimeout(watchdog); watchdog = null; }
       const warnings = payload.warnings || [];
       const inferred = payload.pnl_inferred_count ?? 0;
       const unresolved = payload.pnl_unresolved_count ?? 0;
@@ -119,6 +143,7 @@
       clearPendingRetry();
     }
     finally {
+      if (elapsedTimer && typeof window.clearInterval === 'function') window.clearInterval(elapsedTimer);
       if (watchdog) window.clearTimeout(watchdog);
       if (importBtn) importBtn.disabled = Boolean(pendingRetry.run);
       if (cryptoMonthlyBtn) cryptoMonthlyBtn.disabled = Boolean(pendingRetry.run);
@@ -126,6 +151,22 @@
       if (!pendingRetry.run && fileInput) fileInput.value = '';
     }
   };
+  const isAcceptedImportFile = (file) => /\.(xlsx|xlsm|xls|csv)$/i.test(String(file?.name || ''));
+  dropZone?.addEventListener('click', () => fileInput?.click());
+  dropZone?.addEventListener('dragover', (event) => {
+    event.preventDefault();
+    dropZone.classList.add('drag-over');
+  });
+  dropZone?.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+  dropZone?.addEventListener('drop', async (event) => {
+    event.preventDefault();
+    dropZone.classList.remove('drag-over');
+    const file = event.dataTransfer?.files && event.dataTransfer.files[0];
+    if (!file) return;
+    if (!isAcceptedImportFile(file)) { setStatus('Unsupported file type. Drop .xlsx, .xlsm, .xls, or .csv.', true); return; }
+    const capturedMode = String(accountModeSelect?.value || '').trim().toLowerCase();
+    await runImport(file, capturedMode);
+  });
   fileInput?.addEventListener('change', async () => {
     const file = fileInput.files && fileInput.files[0];
     const capturedMode = String(accountModeSelect?.value || '').trim().toLowerCase();

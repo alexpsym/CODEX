@@ -580,3 +580,35 @@ def test_coinspot_history_export_status_download_url_requires_existing_file(tmp_
     finally:
         master_service.COINSPOT_HISTORY_JOBS.pop(missing_job.job_id, None)
         master_service.COINSPOT_HISTORY_JOBS.pop(present_job.job_id, None)
+
+
+def test_oanda_demo_raw_history_spread_cost_not_commission_and_balance_authoritative():
+    csv = """TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,INSTRUMENT,PRICE,UNITS,DIRECTION,SPREAD COST,STOP LOSS,TAKE PROFIT,FINANCING,COMMISSION,GSL FEE,GSL PREMIUM,PL,BALANCE
+625,2026-05-26 16:54:33 AEST,MARKET_ORDER,CLIENT_ORDER,EUR_USD,1.16372,6393.00,Buy,0.0000,,,,0.0000,0.0000,0.0000,0.00000,1500.65
+626,2026-05-26 16:54:34 AEST,ORDER_FILL,MARKET_ORDER,EUR_USD,1.16372,6393.00,Buy,0.4460,,,,0.0000,0.0000,0.0000,0.00000,1500.65
+627,2026-05-26 16:54:35 AEST,STOP_LOSS_ORDER,CLIENT_ORDER,EUR_USD,1.16272,-6393.00,Sell,0.0000,,,,0.0000,0.0000,0.0000,0.00000,1500.65
+628,2026-05-26 16:54:35 AEST,TAKE_PROFIT_ORDER,CLIENT_ORDER,EUR_USD,1.16472,-6393.00,Sell,0.0000,,,,0.0000,0.0000,0.0000,0.00000,1500.65
+629,2026-05-26 16:55:30 AEST,MARKET_ORDER,CLIENT_ORDER,EUR_USD,1.16365,-6393.00,Sell,0.0000,,,,0.0000,0.0000,0.0000,0.00000,1500.65
+630,2026-05-26 16:55:31 AEST,ORDER_FILL,MARKET_ORDER_TRADE_CLOSE,EUR_USD,1.16365,6393.00,Sell,0.4906,,,,0.0000,0.0000,0.0000,-0.45050,1500.20
+631,2026-05-26 16:55:32 AEST,ORDER_CANCEL,LINKED_TRADE_CLOSED,EUR_USD,,,,0.0000,,,,0.0000,0.0000,0.0000,0.00000,1500.20
+632,2026-05-26 16:55:33 AEST,ORDER_CANCEL,LINKED_TRADE_CLOSED,EUR_USD,,,,0.0000,,,,0.0000,0.0000,0.0000,0.00000,1500.20
+"""
+    df = master_service.pd.read_csv(master_service.io.StringIO(csv))
+    parsed = master_service._journal_rows_from_oanda_transaction_history_frame(
+        df,
+        account_mode="demo",
+        account_label="OANDA DEMO",
+        source_path="oanda_demo.csv",
+    )
+
+    rows = parsed["rows"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["id"] == "oanda_export:demo:626:630"
+    assert row["commission"] in (None, 0, 0.0)
+    assert row["net_profit"] == pytest.approx(-0.4505)
+    assert row["balance_after_trade"] == pytest.approx(1500.20)
+    assert parsed["account_balance"]["balance"] == pytest.approx(1500.20)
+    assert (row.get("metrics") or {}).get("oanda_open_spread_cost") == pytest.approx(0.4460)
+    assert (row.get("metrics") or {}).get("oanda_close_spread_cost") == pytest.approx(0.4906)
+    assert row["commission"] != pytest.approx(0.9366)
