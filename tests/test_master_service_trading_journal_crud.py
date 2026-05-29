@@ -3081,3 +3081,60 @@ def test_import_changed_oanda_financial_fields_do_not_use_duplicate_fast_path(te
     assert called["sync"] == 1
     assert called["stats_refresh"] == 0
     assert "stats refreshed" not in str(out["message"]).lower()
+
+
+def test_import_preflight_rejects_when_trading_journal_xlsx_locked(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    workbook = temp_state_paths / "Trading Journal.xlsx"
+    workbook.write_bytes(b"locked")
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: workbook)
+    monkeypatch.setattr(master_service, "_master_journal_lock_status", lambda _p: {"locked": True, "reason": "excel_open"})
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("parse should not run")))
+
+    out = master_service._import_uploaded_trading_journal_file("oanda_demo.csv", b"x")
+
+    assert out["ok"] is False
+    assert out["status_code"] == 423
+    assert out["code"] == "EXCEL_WORKBOOK_OPEN"
+    assert "workbook_locked" in out["errors"]
+    assert out["rows_parsed"] == 0
+
+
+def test_open_master_journal_rejects_while_import_in_progress(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    workbook = temp_state_paths / "Trading Journal.xlsx"
+    workbook.write_bytes(b"x")
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: workbook)
+    monkeypatch.setattr(master_service, "_open_path_with_os", lambda _p: (_ for _ in ()).throw(AssertionError("should not open")))
+    master_service._update_trading_journal_import_status(running=True, stage="workbook_sync", message="Updating", started_at=master_service._utc_now_iso(), started_epoch=master_service.time.time(), upload_name="demo.csv")
+    try:
+        res = asyncio.run(master_service.open_master_journal_file())
+        payload = master_service.json.loads(res.body.decode("utf-8"))
+        assert res.status_code == 409
+        assert payload["ok"] is False
+        assert payload["code"] == "TRADING_JOURNAL_IMPORT_IN_PROGRESS"
+    finally:
+        master_service._update_trading_journal_import_status(running=False, stage="idle", message="", finished_at=master_service._utc_now_iso(), upload_name="")
+
+
+def test_import_final_replace_permission_error_returns_excel_lock_payload(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: temp_state_paths / "Trading Journal.xlsx")
+    (temp_state_paths / "Trading Journal.xlsx").write_bytes(b"x")
+    parsed = {"id": "oanda_export:demo:626:630", "row_type": "trade", "source": "oanda_transaction_export", "account": "OANDA DEMO", "symbol": "EURUSD", "net_profit": -0.4505, "commission": 0.0, "balance_after_trade": 1500.20}
+    master_service._set_trading_journal_rows([])
+    monkeypatch.setattr(master_service, "_master_journal_lock_status", lambda _p: {"locked": False, "reason": ""})
+    monkeypatch.setattr(master_service, "_parse_local_trading_journal_workbook", lambda *_a, **_k: ([dict(parsed)], None))
+    monkeypatch.setattr(master_service, "_infer_realized_net_profit_from_balance_continuity", lambda rows, _existing: (rows, [], {"pnl_inferred_count": 0, "pnl_unresolved_count": 0, "pnl_unresolved_row_ids": []}))
+    monkeypatch.setattr(master_service, "read_master_journal_source", lambda _p: {"items": []})
+    monkeypatch.setattr(master_service, "_upsert_trading_journal_rows", lambda *_a, **_k: 1)
+    monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda *_a, **_k: {"ok": True, "missing_row_ids": []})
+    monkeypatch.setattr(master_service, "_persist_trading_journal_sqlite", lambda *_a, **_k: None)
+    monkeypatch.setattr(master_service, "_sync_journal_excel_files_to_github", lambda *_a, **_k: {"github_sync_enabled": False, "github_sync_ok": True, "github_sync_error": "", "github_sync_commit": ""})
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda **_k: {"ok": False, "code": "EXCEL_WORKBOOK_OPEN", "status_code": 423, "message": "Trading Journal.xlsx appears to be open in Excel. Close Excel, then press Resume.", "master_journal_error": "locked", "diagnostics": {"workbook_sync_substage_timings": {"final_replace": 0.01}}})
+
+    out = master_service._import_uploaded_trading_journal_file("oanda_demo.csv", b"x")
+
+    assert out["ok"] is False
+    assert out["status_code"] == 423
+    assert out["code"] == "EXCEL_WORKBOOK_OPEN"
+    assert out["rows_parsed"] == 1
+    assert "workbook_sync" in out["import_timings"]
+    assert out["diagnostics"]["workbook_sync_substage_timings"]["final_replace"] == pytest.approx(0.01)

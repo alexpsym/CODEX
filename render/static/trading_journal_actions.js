@@ -37,8 +37,8 @@
     const errs = Array.isArray(payload?.errors) ? payload.errors.map((e) => String(e)) : [];
     return errs.includes('workbook_locked') || errs.includes('excel_open');
   };
-  const clearPendingRetry = () => { pendingRetry.kind = ''; pendingRetry.run = null; retryInFlight = false; resumeBtn.disabled = false; resumeBtn.style.display = 'none'; cancelBtn.style.display = 'none'; if (importBtn) importBtn.disabled = false; if (cryptoMonthlyBtn) cryptoMonthlyBtn.disabled = false; if (bybitDemoBalanceAdjustmentBtn) bybitDemoBalanceAdjustmentBtn.disabled = false; };
-  const setPendingRetry = (kind, fn) => { pendingRetry.kind = kind; pendingRetry.run = fn; resumeBtn.style.display = ''; cancelBtn.style.display = ''; };
+  const clearPendingRetry = () => { pendingRetry.kind = ''; pendingRetry.run = null; retryInFlight = false; resumeBtn.disabled = false; resumeBtn.style.display = 'none'; cancelBtn.style.display = 'none'; if (openBtn) openBtn.disabled = false; if (importBtn) importBtn.disabled = false; if (cryptoMonthlyBtn) cryptoMonthlyBtn.disabled = false; if (bybitDemoBalanceAdjustmentBtn) bybitDemoBalanceAdjustmentBtn.disabled = false; };
+  const setPendingRetry = (kind, fn) => { pendingRetry.kind = kind; pendingRetry.run = fn; resumeBtn.style.display = ''; cancelBtn.style.display = ''; if (openBtn) openBtn.disabled = true; };
   resumeBtn.addEventListener('click', async () => {
     if (!pendingRetry.run || retryInFlight) return;
     retryInFlight = true;
@@ -55,6 +55,10 @@
     }
     if (Array.isArray(payload?.missing_row_ids) && payload.missing_row_ids.length) {
       parts.push(`Missing Row IDs: ${payload.missing_row_ids.map((v) => String(v)).join(', ')}`);
+    }
+    if (payload?.import_timings && typeof payload.import_timings === 'object') {
+      const timingText = Object.entries(payload.import_timings).map(([k, v]) => `${k}=${v}s`).join(', ');
+      if (timingText) parts.push(`Timings: ${timingText}`);
     }
     return parts.join('\n');
   };
@@ -86,6 +90,7 @@
   importBtn?.addEventListener('click', () => fileInput?.click());
   const runImport = async (file, fixedAccountMode = null) => {
     if (!file) return;
+    if (openBtn) openBtn.disabled = true;
     if (importBtn) importBtn.disabled = true;
     if (dropZone) dropZone.classList.remove('drag-over');
     const importStartedAt = Date.now();
@@ -122,7 +127,7 @@
       if (isExcelLockPayload(payload)) {
         if (elapsedTimer && typeof window.clearInterval === 'function') { window.clearInterval(elapsedTimer); elapsedTimer = null; }
         if (watchdog) { window.clearTimeout(watchdog); watchdog = null; }
-        setStatus(payload.message || 'Trading Journal.xlsx appears to be open in Excel. Close it, then press Resume.', true);
+        setStatus(`Import failed: ${formatImportError(payload, 'Trading Journal.xlsx appears to be open/locked. Close Excel, then press Resume.')}`, true);
         setPendingRetry('import', () => runImport(file, explicitMode));
         return;
       }
@@ -145,6 +150,7 @@
     finally {
       if (elapsedTimer && typeof window.clearInterval === 'function') window.clearInterval(elapsedTimer);
       if (watchdog) window.clearTimeout(watchdog);
+      if (openBtn) openBtn.disabled = Boolean(pendingRetry.run);
       if (importBtn) importBtn.disabled = Boolean(pendingRetry.run);
       if (cryptoMonthlyBtn) cryptoMonthlyBtn.disabled = Boolean(pendingRetry.run);
       if (bybitDemoBalanceAdjustmentBtn) bybitDemoBalanceAdjustmentBtn.disabled = Boolean(pendingRetry.run);

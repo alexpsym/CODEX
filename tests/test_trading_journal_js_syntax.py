@@ -254,3 +254,111 @@ def test_trading_journal_actions_drag_drop_and_elapsed_timer_hooks_present() -> 
     assert "Importing... elapsed" in js
     assert "formatElapsed" in js
     assert "window.clearInterval(elapsedTimer)" in js
+
+
+def test_trading_journal_actions_lock_failure_keeps_retry_and_clears_import_state() -> None:
+    node = shutil.which("node")
+    assert node, "node is required for JS runtime smoke test"
+    harness = r"""
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const listeners = {};
+function element(id) {
+  return { id, style: {}, classList: { add: () => {}, remove: () => {} }, textContent: '', value: '', disabled: false, files: [], focus: () => {}, click: () => {}, after: () => {}, addEventListener: (type, fn) => { listeners[id + ':' + type] = fn; } };
+}
+const elements = {
+  'open-journal-btn': element('open-journal-btn'),
+  'import-journal-btn': element('import-journal-btn'),
+  'journal-file-input': element('journal-file-input'),
+  'journal-import-drop-zone': element('journal-import-drop-zone'),
+  'crypto-monthly-pnl-btn': element('crypto-monthly-pnl-btn'),
+  'bybit-demo-balance-adjustment-btn': element('bybit-demo-balance-adjustment-btn'),
+  'journal-account-mode': element('journal-account-mode'),
+  'journal-actions-status': element('journal-actions-status'),
+};
+elements['journal-account-mode'].value = 'demo';
+const file = { name: 'oanda_demo.csv', slice: () => ({ text: async () => 'TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,BALANCE\n' }) };
+class FormData { append(k, v) { this[k] = v; } }
+let intervalCleared = 0;
+let timeoutCleared = 0;
+const context = {
+  console,
+  document: { getElementById: (id) => elements[id] || element(id), createElement: (tag) => element(tag) },
+  FormData,
+  Date: { now: (() => { let n = 0; return () => { n += 1000; return n; }; })() },
+  setInterval: () => 11,
+  clearInterval: () => { intervalCleared += 1; },
+  setTimeout: () => 22,
+  clearTimeout: () => { timeoutCleared += 1; },
+  fetch: async () => ({ ok: false, json: async () => ({ ok: false, code: 'EXCEL_WORKBOOK_OPEN', message: 'Trading Journal.xlsx appears to be open in Excel. Close it, then press Resume.', errors: ['workbook_locked'], import_timings: { parse: 1, workbook_sync: 2 } }) }),
+};
+context.window = context;
+context.globalThis = context;
+vm.createContext(context);
+vm.runInContext(source, context, { filename: 'trading_journal_actions.js' });
+elements['journal-file-input'].files = [file];
+(async () => {
+  await listeners['journal-file-input:change']();
+  const status = elements['journal-actions-status'].textContent;
+  if (!status.includes('Import failed: Trading Journal.xlsx appears')) throw new Error('lock message missing: ' + status);
+  if (status.includes('Importing...') || status.includes('longer than expected')) throw new Error('stale import status remains: ' + status);
+  if (elements['open-journal-btn'].disabled !== true) throw new Error('open journal should remain disabled while retry is pending');
+  if (elements['import-journal-btn'].disabled !== true) throw new Error('import button should remain disabled while retry is pending');
+  if (intervalCleared < 1 || timeoutCleared < 1) throw new Error('timers not cleared');
+})();
+"""
+    subprocess.run([node, "-e", harness, str(ACTIONS_JS_PATH)], check=True)
+
+
+def test_trading_journal_actions_500_json_replaces_watchdog_and_reenables_open() -> None:
+    node = shutil.which("node")
+    assert node, "node is required for JS runtime smoke test"
+    harness = r"""
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const listeners = {};
+function element(id) {
+  return { id, style: {}, classList: { add: () => {}, remove: () => {} }, textContent: '', value: '', disabled: false, files: [], focus: () => {}, click: () => {}, after: () => {}, addEventListener: (type, fn) => { listeners[id + ':' + type] = fn; } };
+}
+const elements = {
+  'open-journal-btn': element('open-journal-btn'),
+  'import-journal-btn': element('import-journal-btn'),
+  'journal-file-input': element('journal-file-input'),
+  'journal-import-drop-zone': element('journal-import-drop-zone'),
+  'crypto-monthly-pnl-btn': element('crypto-monthly-pnl-btn'),
+  'bybit-demo-balance-adjustment-btn': element('bybit-demo-balance-adjustment-btn'),
+  'journal-account-mode': element('journal-account-mode'),
+  'journal-actions-status': element('journal-actions-status'),
+};
+elements['journal-account-mode'].value = 'demo';
+const file = { name: 'oanda_demo.csv', slice: () => ({ text: async () => 'TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,BALANCE\n' }) };
+class FormData { append(k, v) { this[k] = v; } }
+const context = {
+  console,
+  document: { getElementById: (id) => elements[id] || element(id), createElement: (tag) => element(tag) },
+  FormData,
+  Date: { now: (() => { let n = 0; return () => { n += 1000; return n; }; })() },
+  setInterval: () => 11,
+  clearInterval: () => {},
+  setTimeout: (fn) => { fn(); return 22; },
+  clearTimeout: () => {},
+  fetch: async () => ({ ok: false, json: async () => ({ ok: false, message: 'Backend exploded.', errors: ['boom'], import_timings: { parse: 1.2, workbook_sync: 15.5 } }) }),
+};
+context.window = context;
+context.globalThis = context;
+vm.createContext(context);
+vm.runInContext(source, context, { filename: 'trading_journal_actions.js' });
+elements['journal-file-input'].files = [file];
+(async () => {
+  await listeners['journal-file-input:change']();
+  const status = elements['journal-actions-status'].textContent;
+  if (!status.includes('Backend exploded.')) throw new Error('final error missing: ' + status);
+  if (!status.includes('Errors: boom')) throw new Error('payload errors missing: ' + status);
+  if (!status.includes('Timings: parse=1.2s, workbook_sync=15.5s')) throw new Error('timings missing: ' + status);
+  if (status.includes('longer than expected')) throw new Error('watchdog text not replaced: ' + status);
+  if (elements['open-journal-btn'].disabled !== false) throw new Error('open journal should be re-enabled after non-retry failure');
+})();
+"""
+    subprocess.run([node, "-e", harness, str(ACTIONS_JS_PATH)], check=True)

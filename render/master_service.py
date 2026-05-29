@@ -591,6 +591,18 @@ TRADING_JOURNAL_SYNC_STATE: Dict[str, object] = {
     "abandoned_running_state": False,
 }
 TRADING_JOURNAL_SYNC_LOCK = threading.Lock()
+
+TRADING_JOURNAL_IMPORT_LOCK = threading.Lock()
+TRADING_JOURNAL_IMPORT_STATUS_LOCK = threading.Lock()
+TRADING_JOURNAL_IMPORT_STATUS: Dict[str, object] = {
+    "running": False,
+    "stage": "idle",
+    "message": "",
+    "started_at": None,
+    "updated_at": None,
+    "finished_at": None,
+    "upload_name": "",
+}
 TRADING_JOURNAL_SYNC_TASK: Optional[asyncio.Task] = None
 TRADING_JOURNAL_SYNC_THREAD: Optional[threading.Thread] = None
 TRADING_JOURNAL_SYNC_LOGGER = logging.getLogger("uvicorn.error")
@@ -1505,15 +1517,57 @@ def _journal_local_now_naive_iso() -> str:
 
 
 def _master_journal_lock_status(path: Path) -> Dict[str, object]:
+    if not path.exists():
+        return {"locked": False, "reason": "", "path": str(path)}
     lock_file = path.with_name(f"~${path.name}")
     if lock_file.exists():
-        return {"locked": True, "reason": "excel_open"}
+        return {"locked": True, "reason": "excel_open", "path": str(path), "lock_file": str(lock_file)}
     try:
         with path.open("r+b"):
             pass
-    except Exception:
-        return {"locked": True, "reason": "workbook_locked"}
-    return {"locked": False, "reason": ""}
+    except Exception as exc:
+        return {"locked": True, "reason": "workbook_locked", "path": str(path), "error": str(exc), "error_type": type(exc).__name__}
+    return {"locked": False, "reason": "", "path": str(path)}
+
+
+def _is_workbook_lock_exception(exc: BaseException) -> bool:
+    if isinstance(exc, PermissionError):
+        return True
+    winerror = getattr(exc, "winerror", None)
+    if winerror in {5, 32, 33}:
+        return True
+    text = str(exc).lower()
+    return "access is denied" in text or "permission denied" in text or "being used by another process" in text
+
+
+def _excel_workbook_open_payload(*, message_prefix: str = "Trading Journal.xlsx appears to be open in Excel", status_code: int = 423, extra: Optional[Dict[str, object]] = None) -> Dict[str, object]:
+    payload: Dict[str, object] = {
+        "ok": False,
+        "status_code": status_code,
+        "code": "EXCEL_WORKBOOK_OPEN",
+        "retryable": True,
+        "errors": ["workbook_locked"],
+        "message": f"{message_prefix}. Close Excel, then press Resume.",
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def _update_trading_journal_import_status(**updates: object) -> None:
+    with TRADING_JOURNAL_IMPORT_STATUS_LOCK:
+        TRADING_JOURNAL_IMPORT_STATUS.update(updates)
+        TRADING_JOURNAL_IMPORT_STATUS["updated_at"] = _utc_now_iso()
+
+
+def _trading_journal_import_status_snapshot() -> Dict[str, object]:
+    with TRADING_JOURNAL_IMPORT_STATUS_LOCK:
+        status = dict(TRADING_JOURNAL_IMPORT_STATUS)
+    started = status.get("started_at")
+    status["elapsed_seconds"] = round(max(0.0, time.time() - float(status.get("started_epoch") or time.time())), 3) if status.get("running") else 0.0
+    if started and not status.get("running"):
+        status.pop("started_epoch", None)
+    return status
 
 
 def _cashflow_row_to_ledger_event(row: Dict[str, object]) -> Dict[str, object]:
@@ -25969,6 +26023,16 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
     tmp = path.with_suffix('.tmp.xlsx')
     created_tmp = False
     validation_warnings: List[str] = []
+    substage_timings: Dict[str, float] = {}
+    _substage_t0 = time.perf_counter()
+    def _finish_substage(stage: str) -> None:
+        nonlocal _substage_t0
+        elapsed = round(time.perf_counter() - _substage_t0, 6)
+        substage_timings[stage] = elapsed
+        APP_LOGGER.info("master_journal_workbook_sync_substage_done stage=%s elapsed=%.6fs", stage, elapsed)
+        _substage_t0 = time.perf_counter()
+    for _stage in ("snapshot_build", "manual_override_read", "update_master_journal_workbook_data_only", "workbook_validation_load", "validation_trade_log", "validation_instrument_averages", "validation_calendar", "validation_dashboard_balances", "validation_leaders", "final_replace", "enforce_single_file", "github_sync"):
+        substage_timings.setdefault(_stage, 0.0)
     try:
         if _master_journal_single_file_mode():
             enforce_pre = _enforce_single_master_journal_xlsx(TRADING_JOURNAL_LOCAL_DIR, cleanup_known_generated=True)
@@ -25979,8 +26043,10 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
         snapshot = _build_trading_journal_view_snapshot(force=True) or {}
         source_items = [r for r in (snapshot.get("items") or []) if isinstance(r, dict)]
         source_trade_rows = [r for r in source_items if _row_type(r) == "trade"]
+        _finish_substage("snapshot_build")
 
         manual_overrides = read_master_journal_manual_overrides(path) if path.exists() else {}
+        _finish_substage("manual_override_read")
         if isinstance(manual_overrides, dict) and manual_overrides:
             from tools.master_journal_workbook import _all_trades_row_fingerprint_from_map
             current_rows = [r for r in _get_trading_journal_rows() if isinstance(r, dict)]
@@ -26022,15 +26088,18 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
             tmp = Path(candidate_path)
             created_tmp = True
             validate_path = tmp
+            _finish_substage("update_master_journal_workbook_data_only")
         else:
             build_master_journal_workbook(snapshot, tmp)
             created_tmp = True
             if not tmp.exists() or tmp.stat().st_size <= 0:
                 raise RuntimeError("Trading Journal temporary workbook was not created.")
             validate_path = tmp
+            _finish_substage("update_master_journal_workbook_data_only")
 
         from openpyxl import load_workbook as _load_wb
         wb = _load_wb(validate_path, data_only=True)
+        _finish_substage("workbook_validation_load")
         try:
             for sheet in SHEET_ORDER:
                 if sheet not in wb.sheetnames:
@@ -26241,6 +26310,7 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
                 if _safe_float(r.get("result_pct")) is None:
                     continue
                 non_test_with_results.append(r)
+            _finish_substage("validation_instrument_averages")
             if non_test_with_results:
                 expected_year_months: Set[Tuple[int, int]] = set()
                 for row in non_test_with_results:
@@ -26250,6 +26320,7 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
                         expected_year_months.add((int(dt.year), int(dt.month)))
                 if expected_year_months and not _calendar_has_expected_pl_cells(cal, expected_year_months):
                     raise RuntimeError("Trading Journal validation failed: P&L Calendar missing expected dated P/L cells.")
+            _finish_substage("validation_calendar")
             balances = snapshot.get("balances") or []
             if balances:
                 anchor = None
@@ -26375,6 +26446,7 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
                         + f" | candidate_bybit_demo_rows={bybit_demo_trade_rows[-5:]}"
                         + f" | snapshot_bybit_demo_rows={snapshot_bybit_demo_rows[-5:]}"
                     )
+            _finish_substage("validation_dashboard_balances")
             leaders = ((stats.get("groups") or {}).get("leaders") or {})
             expected_payloads = {
                 label: (leaders.get(key) or {}) for label, key in LEADER_LABEL_TO_KEY.items()
@@ -26393,17 +26465,32 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
                     trades_num = _safe_float(dash.cell(row_idx, header_map["trades"]).value)
                     if not symbol or symbol == "—" or trades_num is None:
                         raise RuntimeError(f"Trading Journal validation failed: Instrument leaders row '{metric_label}' is present but blank/invalid; user-deleted rows are skipped.")
+            _finish_substage("validation_leaders")
         finally:
             wb.close()
 
         if created_tmp:
-            os.replace(tmp, path)
+            lock_status = _master_journal_lock_status(path)
+            if lock_status.get("locked"):
+                payload = _excel_workbook_open_payload(extra={"master_journal_path": str(path), "master_journal_ok": False, "master_journal_exists": path.exists(), "lock_status": lock_status, "diagnostics": {"workbook_sync_substage_timings": dict(substage_timings)}})
+                payload["master_journal_error"] = payload["message"]
+                return payload
+            try:
+                os.replace(tmp, path)
+            except Exception as replace_exc:
+                if _is_workbook_lock_exception(replace_exc):
+                    payload = _excel_workbook_open_payload(extra={"master_journal_path": str(path), "master_journal_ok": False, "master_journal_exists": path.exists(), "replace_error": str(replace_exc), "diagnostics": {"workbook_sync_substage_timings": dict(substage_timings)}})
+                    payload["master_journal_error"] = payload["message"]
+                    return payload
+                raise
+        _finish_substage("final_replace")
         if not path.exists() or path.stat().st_size <= 0:
             raise RuntimeError("Trading Journal.xlsx was not created.")
         if _master_journal_single_file_mode():
             enforce_post = _enforce_single_master_journal_xlsx(TRADING_JOURNAL_LOCAL_DIR, cleanup_known_generated=True)
             if not enforce_post.get("ok"):
                 raise RuntimeError("Unknown extra Excel files in journal directory after workbook sync: " + ", ".join(enforce_post.get("unknown_extra_excel_files") or []) + ". Move legacy backups outside journal/. Keep only journal/Trading Journal.xlsx.")
+        _finish_substage("enforce_single_file")
         size = path.stat().st_size
         payload = {
             'master_journal_ok': True,
@@ -26417,6 +26504,7 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
                 'source_rows_total': len(source_items),
                 'source_trade_rows': len(source_trade_rows),
                 'source_balances': len(snapshot.get('balances') or []),
+                'workbook_sync_substage_timings': dict(substage_timings),
             },
         }
         if validation_warnings:
@@ -26429,6 +26517,7 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
             payload.update({"github_sync_enabled": _trading_journal_github_sync_enabled(), "github_sync_ok": None, "github_sync_deferred": True})
         else:
             payload.update(_sync_journal_excel_files_to_github(path))
+        _finish_substage("github_sync")
         payload["ok"] = bool(payload.get("master_journal_ok")) and payload.get("github_sync_ok") is not False
         return payload
     except Exception as exc:
@@ -26437,6 +26526,16 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
                 tmp.unlink()
         except Exception:
             pass
+        if _is_workbook_lock_exception(exc):
+            payload = _excel_workbook_open_payload(extra={
+                'master_journal_path': str(path),
+                'master_journal_ok': False,
+                'master_journal_exists': path.exists(),
+                'master_journal_error': str(exc),
+                'master_journal_error_type': type(exc).__name__,
+                'diagnostics': {'workbook_sync_substage_timings': dict(substage_timings)},
+            })
+            return payload
         return {
             'ok': False,
             'master_journal_ok': False,
@@ -26444,6 +26543,7 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
             'master_journal_exists': path.exists(),
             'master_journal_error': str(exc),
             'master_journal_error_type': type(exc).__name__,
+            'diagnostics': {'workbook_sync_substage_timings': dict(substage_timings)},
         }
 
 def _trading_journal_github_sync_enabled() -> bool:
@@ -26629,12 +26729,22 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
     inferred_mode = "demo" if "demo" in tokens else ("live" if "live" in tokens else "")
     if not mode:
         mode = inferred_mode
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tf:
-        tf.write(payload)
-        tmp_path = Path(tf.name)
+    if not TRADING_JOURNAL_IMPORT_LOCK.acquire(blocking=False):
+        return {"ok": False, "status_code": 409, "code": "TRADING_JOURNAL_IMPORT_IN_PROGRESS", "message": "Trading Journal import is still running. Wait for it to complete before opening the workbook.", "uploaded_name": name, "file_type": suffix, "errors": ["import_in_progress"], "warnings": []}
+    acquired_import_lock = True
+    _update_trading_journal_import_status(running=True, stage="preflight", message="Checking workbook lock", started_at=_utc_now_iso(), started_epoch=time.time(), finished_at=None, upload_name=name)
+    tmp_path: Optional[Path] = None
     timings: Dict[str, float] = {}
-    t0 = time.perf_counter()
     try:
+        workbook_path_for_preflight = _master_journal_path()
+        if workbook_path_for_preflight.exists():
+            lock_status = _master_journal_lock_status(workbook_path_for_preflight)
+            if lock_status.get("locked"):
+                return _excel_workbook_open_payload(extra={"uploaded_name": name, "file_type": suffix, "rows_parsed": 0, "rows_upserted": 0, "warnings": [], "lock_status": lock_status, "import_timings": timings})
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tf:
+            tf.write(payload)
+            tmp_path = Path(tf.name)
+        t0 = time.perf_counter()
         rows: List[Dict[str, object]] = []
         balance: Optional[Dict[str, object]] = None
         bybit_diag: Dict[str, object] = {"bybit_execution_rows_seen": 0, "bybit_completed_trades_imported": 0, "bybit_unmatched_execution_rows": 0}
@@ -26646,6 +26756,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             "pnl_unresolved_count": 0,
             "pnl_unresolved_row_ids": [],
         }
+        _update_trading_journal_import_status(stage="parse", message="Parsing uploaded file")
         APP_LOGGER.info("trading_journal_import_stage_start stage=parse upload=%s", name)
         if is_bybit_csv:
             if not mode:
@@ -26675,6 +26786,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
         timings["parse"] = round(time.perf_counter() - t0, 6)
         APP_LOGGER.info("trading_journal_import_stage_done stage=parse elapsed=%.6fs upload=%s", timings["parse"], name)
         t1 = time.perf_counter()
+        _update_trading_journal_import_status(stage="pnl_inference", message="Inferring P/L")
         APP_LOGGER.info("trading_journal_import_stage_start stage=pnl_inference upload=%s", name)
         existing_rows = _get_trading_journal_rows()
         rows, inference_warnings, inference_diag = _infer_realized_net_profit_from_balance_continuity(rows, existing_rows)
@@ -26801,6 +26913,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 pending_restored = True
             else:
                 t2 = time.perf_counter()
+                _update_trading_journal_import_status(stage="upsert", message="Saving imported rows")
                 APP_LOGGER.info("trading_journal_import_stage_start stage=upsert upload=%s", name)
                 rows_upserted = _upsert_trading_journal_rows(rows, allow_broker_rows_in_single_file=True)
                 timings["upsert"] = round(time.perf_counter() - t2, 6)
@@ -26818,6 +26931,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 _PENDING_MANUAL_SYNC_ROWS = list(pending_map.values())
 
                 t3 = time.perf_counter()
+                _update_trading_journal_import_status(stage="workbook_sync", message="Updating Trading Journal.xlsx")
                 APP_LOGGER.info("trading_journal_import_stage_start stage=workbook_sync upload=%s", name)
                 sync_result = _sync_master_journal_workbook(defer_github_sync=True, expected_survivor_row_ids=expected_survivors)
                 timings["workbook_sync"] = round(time.perf_counter() - t3, 6)
@@ -26828,11 +26942,14 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                         "trading_journal_import workbook_sync failed upload=%s elapsed=%.6fs missing_row_ids_count=%s missing_row_ids_sample=%s error=%s",
                         name, timings["workbook_sync"], len(sync_missing), sync_missing[:5], _master_journal_sync_error(sync_result),
                     )
+                    if isinstance(sync_result, dict) and sync_result.get("code") == "EXCEL_WORKBOOK_OPEN":
+                        raise PermissionError(_master_journal_sync_error(sync_result))
                     raise RuntimeError(f"Workbook sync failed: {_master_journal_sync_error(sync_result)}")
                 _PENDING_MANUAL_SYNC_ROWS = previous_pending_rows
                 pending_restored = True
 
             t4 = time.perf_counter()
+            _update_trading_journal_import_status(stage="verification", message="Verifying workbook rows")
             APP_LOGGER.info("trading_journal_import_stage_start stage=verification upload=%s expected_row_ids=%s", name, len(expected_survivors))
             verify_result = _verify_trade_log_row_ids_in_workbook(_master_journal_path(), expected_survivors)
             timings["verification"] = round(time.perf_counter() - t4, 6)
@@ -26887,6 +27004,20 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             missing = (verify_result or {}).get("missing_row_ids") or list((sync_result or {}).get("missing_row_ids") or [])
             if rollback_errors:
                 msg = f"{msg} | rollback failed: {'; '.join(rollback_errors)}"
+            if _is_workbook_lock_exception(exc) or (isinstance(sync_result, dict) and sync_result.get("code") == "EXCEL_WORKBOOK_OPEN"):
+                payload = _excel_workbook_open_payload(extra={
+                    "uploaded_name": name,
+                    "file_type": suffix,
+                    "rows_parsed": len(rows),
+                    "rows_upserted": 0,
+                    "missing_row_ids": missing,
+                    "warnings": [],
+                    "import_timings": timings,
+                    "master_journal_error": _master_journal_sync_error(sync_result) or msg,
+                    "diagnostics": (sync_result or {}).get("diagnostics") if isinstance(sync_result, dict) else None,
+                })
+                payload["errors"] = ["workbook_locked", *rollback_errors]
+                return payload
             return {"ok": False, "status_code": code, "message": msg, "uploaded_name": name, "file_type": suffix, "rows_parsed": len(rows), "rows_upserted": 0, "missing_row_ids": missing, "errors": [msg, *rollback_errors], "warnings": [], "import_timings": timings, "master_journal_error": _master_journal_sync_error(sync_result), "diagnostics": (sync_result or {}).get("diagnostics")}
         APP_LOGGER.info("trading_journal_import_success timings=%s upload=%s", timings, name)
         message = "Import complete. Duplicate rows already present; stats refreshed; workbook trade rows unchanged." if duplicate_noop_fast_path_used else "Import complete."
@@ -26894,8 +27025,14 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
     except Exception as exc:
         return {"ok": False, "status_code": 500, "message": f"Unexpected import error for {name}.", "uploaded_name": name, "file_type": suffix or "unknown", "rows_parsed": 0, "rows_upserted": 0, "duplicate_rows_merged": 0, "balance_parsed": False, "master_journal_path": str(_master_journal_path()), "verified_row_ids_count": 0, "missing_row_ids": [], "warnings": [], "errors": [str(exc)]}
     finally:
-        try: tmp_path.unlink(missing_ok=True)
-        except Exception: pass
+        try:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        _update_trading_journal_import_status(running=False, stage="idle", message="", finished_at=_utc_now_iso(), upload_name="")
+        if acquired_import_lock:
+            TRADING_JOURNAL_IMPORT_LOCK.release()
 
 @app.post("/api/trading-journal/import-file")
 async def trading_journal_import_file(file: UploadFile = File(...), account_mode: Optional[str] = Form(None)) -> JSONResponse:
@@ -27137,8 +27274,20 @@ async def trading_journal_crypto_monthly_pnl() -> JSONResponse:
         return JSONResponse({"ok": False, "button": "crypto_monthly_pnl", "target_months": due, "processed_months": due, "inserted_months": inserted, "skipped_existing_months": [m for m in due if m in pre_months], "rows_inserted": len(inserted), "verified_row_ids": [f"monthly_aud_reval:bybit_live:{m}" for m in inserted], "missing_months": missing, "missing_row_ids": verification.get("missing_row_ids") or [], "master_journal_path": str(path), "message": "Crypto monthly AUD P&L update incomplete."}, status_code=500)
     return JSONResponse({"ok": True, "button": "crypto_monthly_pnl", "target_months": due, "processed_months": due, "inserted_months": inserted, "skipped_existing_months": [m for m in due if m in pre_months], "rows_inserted": len(inserted), "verified_row_ids": [f"monthly_aud_reval:bybit_live:{m}" for m in inserted], "master_journal_path": str(path), "message": f"Inserted crypto monthly AUD P&L for {', '.join(inserted)}."})
 
+@app.get("/api/trading-journal/import/status")
+async def trading_journal_import_status() -> JSONResponse:
+    return JSONResponse({"ok": True, **_trading_journal_import_status_snapshot()})
+
 @app.post("/api/trading-journal/open-master-journal")
 async def open_master_journal_file() -> JSONResponse:
+    status = _trading_journal_import_status_snapshot()
+    if status.get("running"):
+        return JSONResponse({
+            "ok": False,
+            "code": "TRADING_JOURNAL_IMPORT_IN_PROGRESS",
+            "message": "Trading Journal import is still running. Wait for it to complete before opening the workbook.",
+            "import_status": status,
+        }, status_code=409)
     path = _master_journal_path()
     if not path.exists():
         raise HTTPException(status_code=404, detail="Trading Journal.xlsx does not exist. Import history or create the journal workbook first.")
