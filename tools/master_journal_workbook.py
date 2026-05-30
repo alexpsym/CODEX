@@ -275,6 +275,10 @@ def _canonical_account_label(label: Any) -> str:
         return "Bybit Demo"
     if "bybit" in parts and ("live" in parts or len(parts) == 1):
         return "BYBIT"
+    if "pepperstone" in parts and "demo" in parts:
+        return "PEPPERSTONE DEMO"
+    if "pepperstone" in parts and "live" in parts:
+        return "PEPPERSTONE LIVE"
     return raw
 
 def _repair_or_flag_zero_trade_qty(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -1345,6 +1349,8 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             write_metric(section, "Trades", bucket.get("trades"), "count")
             write_metric(section, "Wins", bucket.get("wins"), "count")
             write_metric(section, "Losses", bucket.get("losses"), "count")
+            write_metric(section, "Winning Streak", bucket.get("winning_streak"), "count")
+            write_metric(section, "Losing Streak", bucket.get("losing_streak"), "count")
             write_metric(section, "Break-even", bucket.get("break_even"), "count")
             write_metric(section, "Test", bucket.get("test_trades"), "count")
             write_metric(section, "Win rate", bucket.get("win_rate_pct"), "pct")

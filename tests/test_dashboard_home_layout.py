@@ -99,14 +99,16 @@ def test_local_profile_buttons_include_trading_journal_source() -> None:
     assert '"open_url": "/merged/trading-journal"' in source
 
 
-def test_trading_journal_workspace_contains_four_buttons_in_order():
+def test_trading_journal_workspace_contains_action_buttons_in_order():
     source = MASTER_SERVICE_PATH.read_text(encoding='utf-8')
     assert "open-journal-btn" in source
     assert "import-journal-btn" in source
+    assert "journal-resync-btn" in source
+    assert ">Resync<" in source
     assert "crypto-monthly-pnl-btn" in source
     assert "bybit-demo-balance-adjustment-btn" in source
     assert "Bybit Demo Balance Adjustment" in source
-    assert source.index("open-journal-btn") < source.index("import-journal-btn") < source.index("crypto-monthly-pnl-btn") < source.index("bybit-demo-balance-adjustment-btn")
+    assert source.index("open-journal-btn") < source.index("import-journal-btn") < source.index("journal-resync-btn") < source.index("crypto-monthly-pnl-btn") < source.index("bybit-demo-balance-adjustment-btn")
 
 
 def test_trading_journal_workspace_bybit_account_dropdown_has_no_auto_option():

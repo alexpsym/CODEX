@@ -365,3 +365,84 @@ elements['journal-file-input'].files = [file];
 })();
 """
     subprocess.run([node, "-e", harness, str(ACTIONS_JS_PATH)], check=True)
+def test_trading_journal_actions_resync_calls_endpoint_and_disables_buttons() -> None:
+    node = shutil.which("node")
+    assert node, "node is required for JS runtime smoke test"
+    harness = r"""
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const listeners = {};
+function element(id) { return { id, style: {}, classList: { add: () => {}, remove: () => {} }, textContent: '', value: '', disabled: false, files: [], focus: () => {}, click: () => {}, after: () => {}, addEventListener: (type, fn) => { listeners[id + ':' + type] = fn; } }; }
+const elements = {
+  'open-journal-btn': element('open-journal-btn'),
+  'import-journal-btn': element('import-journal-btn'),
+  'journal-resync-btn': element('journal-resync-btn'),
+  'journal-file-input': element('journal-file-input'),
+  'journal-import-drop-zone': element('journal-import-drop-zone'),
+  'crypto-monthly-pnl-btn': element('crypto-monthly-pnl-btn'),
+  'bybit-demo-balance-adjustment-btn': element('bybit-demo-balance-adjustment-btn'),
+  'journal-account-mode': element('journal-account-mode'),
+  'journal-actions-status': element('journal-actions-status'),
+};
+let urls = [];
+const context = {
+  console,
+  document: { getElementById: (id) => elements[id] || element(id), createElement: (tag) => element(tag) },
+  Date: { now: (() => { let n = 0; return () => { n += 1000; return n; }; })() },
+  setInterval: () => 11,
+  clearInterval: () => {},
+  setTimeout: () => 22,
+  clearTimeout: () => {},
+  fetch: async (url) => { urls.push(url); if (elements['journal-resync-btn'].disabled !== true) throw new Error('resync not disabled during fetch'); if (elements['import-journal-btn'].disabled !== true) throw new Error('import not disabled during resync'); return { ok: true, json: async () => ({ ok: true, master_journal_path: '/tmp/Trading Journal.xlsx', master_journal_diagnostics: { workbook_sync_substage_timings: { snapshot_build: 0.1, workbook_sync: 0.2 } } }) }; },
+};
+context.window = context; context.globalThis = context;
+vm.createContext(context);
+vm.runInContext(source, context, { filename: 'trading_journal_actions.js' });
+(async () => {
+  await listeners['journal-resync-btn:click']();
+  if (urls[0] !== '/api/trading-journal/resync') throw new Error('wrong endpoint ' + urls[0]);
+  const status = elements['journal-actions-status'].textContent;
+  if (!status.includes('Resync complete.')) throw new Error('success missing: ' + status);
+  if (!status.includes('snapshot_build=0.1s')) throw new Error('timings missing: ' + status);
+  if (elements['journal-resync-btn'].disabled !== false) throw new Error('resync should re-enable after success');
+})();
+"""
+    subprocess.run([node, "-e", harness, str(ACTIONS_JS_PATH)], check=True)
+
+
+def test_trading_journal_actions_resync_excel_lock_sets_retry() -> None:
+    node = shutil.which("node")
+    assert node, "node is required for JS runtime smoke test"
+    harness = r"""
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const listeners = {};
+function element(id) { return { id, style: {}, classList: { add: () => {}, remove: () => {} }, textContent: '', value: '', disabled: false, files: [], focus: () => {}, click: () => {}, after: () => {}, addEventListener: (type, fn) => { listeners[id + ':' + type] = fn; } }; }
+const elements = {
+  'open-journal-btn': element('open-journal-btn'),
+  'import-journal-btn': element('import-journal-btn'),
+  'journal-resync-btn': element('journal-resync-btn'),
+  'journal-file-input': element('journal-file-input'),
+  'journal-import-drop-zone': element('journal-import-drop-zone'),
+  'crypto-monthly-pnl-btn': element('crypto-monthly-pnl-btn'),
+  'bybit-demo-balance-adjustment-btn': element('bybit-demo-balance-adjustment-btn'),
+  'journal-account-mode': element('journal-account-mode'),
+  'journal-actions-status': element('journal-actions-status'),
+};
+const context = { console, document: { getElementById: (id) => elements[id] || element(id), createElement: (tag) => element(tag) }, Date: { now: () => 1000 }, setInterval: () => 11, clearInterval: () => {}, setTimeout: () => 22, clearTimeout: () => {}, fetch: async () => ({ ok: false, json: async () => ({ ok: false, code: 'EXCEL_WORKBOOK_OPEN', message: 'Close Excel then retry', errors: ['workbook_locked'] }) }) };
+context.window = context; context.globalThis = context;
+vm.createContext(context);
+vm.runInContext(source, context, { filename: 'trading_journal_actions.js' });
+(async () => {
+  await listeners['journal-resync-btn:click']();
+  const status = elements['journal-actions-status'].textContent;
+  if (!status.includes('Close Excel then retry')) throw new Error('lock message missing: ' + status);
+  if (elements['open-journal-btn'].disabled !== true) throw new Error('open should be disabled for retry');
+  if (elements['import-journal-btn'].disabled !== true) throw new Error('import should be disabled for retry');
+  if (elements['journal-resync-btn'].disabled !== true) throw new Error('resync should be disabled for retry');
+})();
+"""
+    subprocess.run([node, "-e", harness, str(ACTIONS_JS_PATH)], check=True)
+

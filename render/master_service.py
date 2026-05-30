@@ -1516,10 +1516,27 @@ def _journal_local_now_naive_iso() -> str:
     return now.replace(tzinfo=None, microsecond=0).isoformat()
 
 
-def _master_journal_lock_status(path: Path) -> Dict[str, object]:
+def _check_master_journal_write_lock(path: Path) -> Dict[str, object]:
     if not path.exists():
         return {"locked": False, "reason": "", "path": str(path)}
     lock_file = path.with_name(f"~${path.name}")
+    if os.name == "nt":
+        try:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            handle = kernel32.CreateFileW(str(path), 0x40000000, 0, None, 3, 0x80, None)
+            invalid = ctypes.c_void_p(-1).value
+            if handle == invalid or handle == -1:
+                err = ctypes.get_last_error() if hasattr(ctypes, "get_last_error") else None
+                return {"locked": True, "code": "EXCEL_WORKBOOK_OPEN", "reason": "workbook_locked", "path": str(path), "lock_file": str(lock_file) if lock_file.exists() else "", "winerror": err}
+            try:
+                kernel32.CloseHandle(handle)
+            except Exception:
+                pass
+            if lock_file.exists():
+                return {"locked": False, "reason": "lockfile_stale", "path": str(path), "lock_file": str(lock_file)}
+            return {"locked": False, "reason": "", "path": str(path)}
+        except Exception as exc:
+            return {"locked": True, "reason": "workbook_locked", "path": str(path), "error": str(exc), "error_type": type(exc).__name__}
     if lock_file.exists():
         return {"locked": True, "reason": "excel_open", "path": str(path), "lock_file": str(lock_file)}
     try:
@@ -1528,6 +1545,10 @@ def _master_journal_lock_status(path: Path) -> Dict[str, object]:
     except Exception as exc:
         return {"locked": True, "reason": "workbook_locked", "path": str(path), "error": str(exc), "error_type": type(exc).__name__}
     return {"locked": False, "reason": "", "path": str(path)}
+
+
+def _master_journal_lock_status(path: Path) -> Dict[str, object]:
+    return _check_master_journal_write_lock(path)
 
 
 def _is_workbook_lock_exception(exc: BaseException) -> bool:
@@ -1708,13 +1729,14 @@ def _build_trading_journal_view_snapshot(
             source_payload.get("cashflow_ledger") or {},
             _PENDING_MANUAL_SYNC_ROWS or [],
         )
-        timeline = _build_journal_balance_timelines(trade_items, merged_ledger, _get_excel_account_balances())
+        excel_balance_seeds = [] if skip_external_balances else _get_excel_account_balances()
+        timeline = _build_journal_balance_timelines(trade_items, merged_ledger, excel_balance_seeds)
         trade_items = [_backfill_trade_row_context_fields(dict(r)) if isinstance(r, dict) else r for r in (timeline.get("rows") if isinstance(timeline.get("rows"), list) else trade_items)]
         trade_items = _enrich_trade_row_metrics(trade_items)
         items = sorted([*trade_items, *non_trade_items], key=_row_sort_dt, reverse=True)
         balances = timeline.get("balances") or []
         state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
-        broker_balances = (state or {}).get("broker_account_balances") if isinstance(state, dict) else []
+        broker_balances = [] if (skip_external_balances or skip_live_account_refresh) else ((state or {}).get("broker_account_balances") if isinstance(state, dict) else [])
         if not isinstance(broker_balances, list):
             broker_balances = []
         balances = _merge_missing_timeline_balances_with_broker(balances, broker_balances)
@@ -4918,6 +4940,7 @@ def _norm_account_key(name: object) -> str:
     text = str(name or "").upper().strip()
     if not text:
         return ""
+    text = re.sub(r"[_\-/]+", " ", text)
     text = re.sub(r"\s+", " ", text)
     text = re.sub(r"[^A-Z0-9 ]", "", text)
     text = re.sub(r"\s+", " ", text).strip()
@@ -22489,6 +22512,9 @@ def _compute_journal_stats(
         stop_vals = _stop_pct_values(rows_subset)
         target_vals = _target_pct_values(rows_subset)
         money = _money_stats_by_currency(rows_subset)
+        streaks_local = _compute_longest_streaks(rows_subset)
+        winning_streak_detail = streaks_local.get("longest_winning")
+        losing_streak_detail = streaks_local.get("longest_losing")
         return {
             "label": label,
             "trades": len(rows_subset),
@@ -22516,6 +22542,10 @@ def _compute_journal_stats(
             "min_target_pct": _safe_min(target_vals),
             "max_target_pct": _safe_max(target_vals),
             "avg_duration_seconds": _avg(durations),
+            "winning_streak": (winning_streak_detail or {}).get("trade_count"),
+            "losing_streak": (losing_streak_detail or {}).get("trade_count"),
+            "longest_winning_streak": winning_streak_detail,
+            "longest_losing_streak": losing_streak_detail,
             "longest_duration_seconds": max(durations) if durations else None,
             "shortest_duration_seconds": min(durations) if durations else None,
             "metric_sources": {
@@ -25972,7 +26002,14 @@ async def _run_trading_journal_sync_job() -> None:
                     "missing env vars",
                 ]
             )
-        broker_failed = any((p.get("ok") is False) and (not _is_optional_config_warning(p)) for p in broker_payloads)
+        broker_failed = any(
+            (p.get("ok") is False)
+            and (
+                (not _is_optional_config_warning(p))
+                or (p.get("final_trade_log_row_ids_verified") is False and bool(p.get("missing_execution_row_ids") or p.get("missing_row_ids")))
+            )
+            for p in broker_payloads
+        )
         local_workbook_failed = any(
             any(tok in str(p.get("error") or p.get("message") or "").lower() for tok in ["permission", "openpyxl", "os.replace", "workbook", "excel", "failed to read workbook", "failed to write"])
             for p in broker_payloads
@@ -26102,7 +26139,7 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
                     snapshot["items"] = merged_rows
                 else:
                     _set_trading_journal_rows(merged_rows)
-                    snapshot = _build_trading_journal_view_snapshot(force=True, local_only=True, skip_external_balances=True, skip_live_account_refresh=True) or {}
+                    snapshot = _build_manual_import_authoritative_snapshot()
                 source_items = [r for r in (snapshot.get("items") or []) if isinstance(r, dict)]
                 source_trade_rows = [r for r in source_items if _row_type(r) == "trade"]
 
@@ -26512,6 +26549,7 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
                 if _is_workbook_lock_exception(replace_exc):
                     payload = _excel_workbook_open_payload(extra={"master_journal_path": str(path), "master_journal_ok": False, "master_journal_exists": path.exists(), "replace_error": str(replace_exc), "diagnostics": {"workbook_sync_substage_timings": dict(substage_timings)}})
                     payload["master_journal_error"] = payload["message"]
+                    payload["master_journal_error_type"] = type(replace_exc).__name__
                     return payload
                 raise
         _finish_substage("final_replace")
@@ -26732,12 +26770,20 @@ def _master_journal_sync_error(result: Dict[str, object] | None) -> str:
     )
 
 
+def _build_manual_import_authoritative_snapshot() -> Dict[str, object]:
+    try:
+        return _build_trading_journal_view_snapshot(force=True, skip_external_balances=True, skip_live_account_refresh=True) or {}
+    except TypeError as exc:
+        if "skip_external_balances" not in str(exc) and "skip_live_account_refresh" not in str(exc):
+            raise
+        return _build_trading_journal_view_snapshot(force=True) or {}
+
 
 TRADING_JOURNAL_ACTIONS_TEMPLATE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Trading Journal Workspace</title>
 <style>body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}.wrap{min-height:100vh;display:flex;align-items:center;justify-content:center}.stack{display:flex;flex-direction:column;gap:12px;min-width:280px}button{padding:12px 14px;border-radius:10px;border:1px solid #334155;background:#1f2937;color:#e2e8f0;font-weight:700;cursor:pointer}.drop-zone{border:1px dashed #475569;border-radius:12px;padding:16px;text-align:center;color:#94a3b8;background:#0f172a;cursor:pointer}.drop-zone.drag-over{border-color:#38bdf8;background:#082f49;color:#e0f2fe}.status{margin-top:8px;white-space:pre-wrap;color:#94a3b8}</style></head>
-<body><div class="wrap"><div class="stack"><button id="open-journal-btn">Open Journal</button><button id="import-journal-btn">Import</button><div id="journal-import-drop-zone" class="drop-zone">Drop .xlsx/.xlsm/.xls/.csv import files here<br/><span style="font-size:12px">or click Import to choose a file</span></div><label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode" style="margin-left:8px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"><option value="" selected disabled>Select Demo or Live</option><option value="demo">Demo</option><option value="live">Live</option></select></label><button id="crypto-monthly-pnl-btn">Crypto Monthly P&L</button><button id="bybit-demo-balance-adjustment-btn">Bybit Demo Balance Adjustment</button><input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv" hidden/><div id="journal-actions-status" class="status"></div></div></div><script src="/static/trading_journal_actions.js"></script></body></html>"""
+<body><div class="wrap"><div class="stack"><button id="open-journal-btn">Open Journal</button><button id="import-journal-btn">Import</button><button id="journal-resync-btn">Resync</button><div id="journal-import-drop-zone" class="drop-zone">Drop .xlsx/.xlsm/.xls/.csv import files here<br/><span style="font-size:12px">or click Import to choose a file</span></div><label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode" style="margin-left:8px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"><option value="" selected disabled>Select Demo or Live</option><option value="demo">Demo</option><option value="live">Live</option></select></label><button id="crypto-monthly-pnl-btn">Crypto Monthly P&L</button><button id="bybit-demo-balance-adjustment-btn">Bybit Demo Balance Adjustment</button><input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv" hidden/><div id="journal-actions-status" class="status"></div></div></div><script src="/static/trading_journal_actions.js"></script></body></html>"""
 
 @app.get("/merged/trading-journal")
 async def merged_trading_journal_workspace() -> HTMLResponse:
@@ -26934,7 +26980,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 timings["workbook_sync"] = 0.0
                 t_stats = time.perf_counter()
                 APP_LOGGER.info("trading_journal_import_stage_start stage=stats_refresh_duplicate_noop upload=%s", name)
-                manual_import_snapshot = _build_trading_journal_view_snapshot(force=True, local_only=True, skip_external_balances=True, skip_live_account_refresh=True) or {}
+                manual_import_snapshot = _build_manual_import_authoritative_snapshot()
                 refreshed = refresh_master_journal_derived_sheets(_master_journal_path(), manual_import_snapshot)
                 if not bool((refreshed or {}).get("ok")):
                     raise RuntimeError(f"Duplicate import stats refresh failed: {(refreshed or {}).get('error') or 'unknown error'}")
@@ -26964,11 +27010,11 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 _PENDING_MANUAL_SYNC_ROWS = list(pending_map.values())
 
                 t_snap = time.perf_counter()
-                _update_trading_journal_import_status(stage="snapshot_build", message="Building local import snapshot")
-                APP_LOGGER.info("trading_journal_import_stage_start stage=snapshot_build upload=%s mode=local_only", name)
-                manual_import_snapshot = _build_trading_journal_view_snapshot(force=True, local_only=True, skip_external_balances=True, skip_live_account_refresh=True) or {}
+                _update_trading_journal_import_status(stage="snapshot_build", message="Building authoritative import snapshot")
+                APP_LOGGER.info("trading_journal_import_stage_start stage=snapshot_build upload=%s mode=authoritative_workbook", name)
+                manual_import_snapshot = _build_manual_import_authoritative_snapshot()
                 timings["snapshot_build"] = round(time.perf_counter() - t_snap, 6)
-                APP_LOGGER.info("trading_journal_import_stage_done stage=snapshot_build elapsed=%.6fs upload=%s mode=local_only", timings["snapshot_build"], name)
+                APP_LOGGER.info("trading_journal_import_stage_done stage=snapshot_build elapsed=%.6fs upload=%s mode=authoritative_workbook", timings["snapshot_build"], name)
                 t3 = time.perf_counter()
                 _update_trading_journal_import_status(stage="workbook_sync", message="Updating Trading Journal.xlsx")
                 APP_LOGGER.info("trading_journal_import_stage_start stage=workbook_sync upload=%s", name)
@@ -27003,7 +27049,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 raise RuntimeError(f"Workbook verification failed after import. missing_row_ids={(verify_result or {}).get('missing_row_ids') or []}")
             t5 = time.perf_counter()
             APP_LOGGER.info("trading_journal_import_stage_start stage=snapshot_persist upload=%s", name)
-            snapshot = manual_import_snapshot or _build_trading_journal_view_snapshot(force=True, local_only=True, skip_external_balances=True, skip_live_account_refresh=True)
+            snapshot = manual_import_snapshot or _build_manual_import_authoritative_snapshot()
             _persist_trading_journal_sqlite(snapshot, import_meta={"source_mode": "manual_upload", "rows_imported": len(rows), "warnings": [], "errors": []})
             timings["snapshot_persist"] = round(time.perf_counter() - t5, 6)
             APP_LOGGER.info("trading_journal_import_stage_done stage=snapshot_persist elapsed=%.6fs upload=%s", timings["snapshot_persist"], name)
@@ -27032,7 +27078,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
             except Exception as restore_exc:
                 rollback_errors.append(f"could not restore workbook: {restore_exc}")
             try:
-                rollback_snapshot = _build_trading_journal_view_snapshot(force=True, local_only=True, skip_external_balances=True, skip_live_account_refresh=True)
+                rollback_snapshot = _build_manual_import_authoritative_snapshot()
                 _persist_trading_journal_sqlite(rollback_snapshot, import_meta={"source_mode": "manual_upload_rollback", "rows_imported": 0, "warnings": [], "errors": [str(exc), *rollback_errors]})
             except Exception as persist_rollback_exc:
                 rollback_errors.append(f"could not persist rollback snapshot: {persist_rollback_exc}")
@@ -27339,9 +27385,35 @@ async def open_master_journal_file() -> JSONResponse:
 
 
 
+def _run_trading_journal_resync() -> Dict[str, object]:
+    timings: Dict[str, float] = {}
+    started = time.perf_counter()
+    path = _master_journal_path()
+    lock_status = _master_journal_lock_status(path) if path.exists() else {"locked": False}
+    if lock_status.get("locked"):
+        payload = _excel_workbook_open_payload(extra={"button": "resync", "master_journal_path": str(path), "lock_status": lock_status, "resync_timings": timings})
+        payload["status_code"] = 409
+        return payload
+    t0 = time.perf_counter()
+    sync = _sync_master_journal_workbook(defer_github_sync=True)
+    timings["workbook_sync"] = round(time.perf_counter() - t0, 6)
+    timings["total"] = round(time.perf_counter() - started, 6)
+    ok = _master_journal_sync_ok(sync)
+    payload = {"ok": ok, "button": "resync", "message": "Trading Journal resync complete." if ok else _master_journal_sync_error(sync), "resync_timings": timings, **(sync if isinstance(sync, dict) else {})}
+    payload.setdefault("status_code", 200 if ok else 500)
+    return payload
+
+
+@app.post("/api/trading-journal/resync")
+async def trading_journal_resync() -> JSONResponse:
+    result = await asyncio.to_thread(_run_trading_journal_resync)
+    status_code = int(result.pop("status_code", 200 if result.get("ok") else 500))
+    return JSONResponse(_json_safe(result), status_code=status_code)
+
+
 @app.post("/api/trading-journal/sync")
 async def trading_journal_sync() -> JSONResponse:
-    return JSONResponse({"ok": False, "message": "Trading Journal sync has been retired. Use Import on the Trading Journal workspace."}, status_code=410)
+    return await trading_journal_resync()
 def _runtime_is_render() -> bool:
     return _resolve_app_profile() == "render"
 

@@ -1,6 +1,7 @@
 (() => {
   const openBtn = document.getElementById('open-journal-btn');
   const importBtn = document.getElementById('import-journal-btn');
+  const resyncBtn = document.getElementById('journal-resync-btn');
   const fileInput = document.getElementById('journal-file-input');
   const dropZone = document.getElementById('journal-import-drop-zone');
   const cryptoMonthlyBtn = document.getElementById('crypto-monthly-pnl-btn');
@@ -37,8 +38,8 @@
     const errs = Array.isArray(payload?.errors) ? payload.errors.map((e) => String(e)) : [];
     return errs.includes('workbook_locked') || errs.includes('excel_open');
   };
-  const clearPendingRetry = () => { pendingRetry.kind = ''; pendingRetry.run = null; retryInFlight = false; resumeBtn.disabled = false; resumeBtn.style.display = 'none'; cancelBtn.style.display = 'none'; if (openBtn) openBtn.disabled = false; if (importBtn) importBtn.disabled = false; if (cryptoMonthlyBtn) cryptoMonthlyBtn.disabled = false; if (bybitDemoBalanceAdjustmentBtn) bybitDemoBalanceAdjustmentBtn.disabled = false; };
-  const setPendingRetry = (kind, fn) => { pendingRetry.kind = kind; pendingRetry.run = fn; resumeBtn.style.display = ''; cancelBtn.style.display = ''; if (openBtn) openBtn.disabled = true; };
+  const clearPendingRetry = () => { pendingRetry.kind = ''; pendingRetry.run = null; retryInFlight = false; resumeBtn.disabled = false; resumeBtn.style.display = 'none'; cancelBtn.style.display = 'none'; if (openBtn) openBtn.disabled = false; if (importBtn) importBtn.disabled = false; if (resyncBtn) resyncBtn.disabled = false; if (cryptoMonthlyBtn) cryptoMonthlyBtn.disabled = false; if (bybitDemoBalanceAdjustmentBtn) bybitDemoBalanceAdjustmentBtn.disabled = false; };
+  const setPendingRetry = (kind, fn) => { pendingRetry.kind = kind; pendingRetry.run = fn; resumeBtn.style.display = ''; cancelBtn.style.display = ''; if (openBtn) openBtn.disabled = true; if (importBtn) importBtn.disabled = true; if (resyncBtn) resyncBtn.disabled = true; };
   resumeBtn.addEventListener('click', async () => {
     if (!pendingRetry.run || retryInFlight) return;
     retryInFlight = true;
@@ -90,7 +91,7 @@
   importBtn?.addEventListener('click', () => fileInput?.click());
   const runImport = async (file, fixedAccountMode = null) => {
     if (!file) return;
-    if (openBtn) openBtn.disabled = true;
+    if (openBtn) openBtn.disabled = true; if (importBtn) importBtn.disabled = true; if (resyncBtn) resyncBtn.disabled = true;
     if (importBtn) importBtn.disabled = true;
     if (dropZone) dropZone.classList.remove('drag-over');
     const importStartedAt = Date.now();
@@ -169,11 +170,50 @@
       if (watchdog) window.clearTimeout(watchdog);
       if (openBtn) openBtn.disabled = Boolean(pendingRetry.run);
       if (importBtn) importBtn.disabled = Boolean(pendingRetry.run);
+      if (resyncBtn) resyncBtn.disabled = Boolean(pendingRetry.run);
       if (cryptoMonthlyBtn) cryptoMonthlyBtn.disabled = Boolean(pendingRetry.run);
       if (bybitDemoBalanceAdjustmentBtn) bybitDemoBalanceAdjustmentBtn.disabled = Boolean(pendingRetry.run);
       if (!pendingRetry.run && fileInput) fileInput.value = '';
     }
   };
+  const formatTimings = (value) => {
+    if (!value || typeof value !== 'object') return '';
+    const text = Object.entries(value).map(([k, v]) => `${k}=${v}s`).join(', ');
+    return text ? `\nTimings: ${text}` : '';
+  };
+
+  const runResync = async () => {
+    if (resyncBtn) resyncBtn.disabled = true;
+    if (importBtn) importBtn.disabled = true;
+    setStatus('Resyncing Trading Journal... elapsed 00:00');
+    const started = Date.now();
+    const elapsedTimer = typeof window.setInterval === 'function' ? window.setInterval(() => {
+      setStatus(`Resyncing Trading Journal... elapsed ${formatElapsed(Date.now() - started)}`);
+    }, 1000) : null;
+    try {
+      const res = await fetch('/api/trading-journal/resync', { method: 'POST', headers: { Accept: 'application/json' } });
+      const payload = await res.json().catch(() => ({}));
+      if (isExcelLockPayload(payload)) {
+        setStatus(payload.message || 'Trading Journal.xlsx appears to be open in Excel. Close it, then press Resume.', true);
+        setPendingRetry('resync', runResync);
+        return;
+      }
+      if (!res.ok || payload.ok !== true) throw new Error(payload.message || payload.error || payload.detail || 'Trading Journal resync failed.');
+      const diagnostics = payload.master_journal_diagnostics || payload.diagnostics || {};
+      const stageTimings = diagnostics.workbook_sync_substage_timings || payload.resync_timings || {};
+      setStatus(`Resync complete.\nWorkbook: ${payload.master_journal_path || ''}${formatTimings(stageTimings)}`);
+      clearPendingRetry();
+    } catch (err) {
+      setStatus(err?.message || String(err), true);
+      clearPendingRetry();
+    } finally {
+      if (elapsedTimer && typeof window.clearInterval === 'function') window.clearInterval(elapsedTimer);
+      if (resyncBtn) resyncBtn.disabled = Boolean(pendingRetry.run);
+      if (importBtn) importBtn.disabled = Boolean(pendingRetry.run);
+    }
+  };
+  resyncBtn?.addEventListener('click', runResync);
+
   const isAcceptedImportFile = (file) => /\.(xlsx|xlsm|xls|csv)$/i.test(String(file?.name || ''));
   dropZone?.addEventListener('click', () => fileInput?.click());
   dropZone?.addEventListener('dragover', (event) => {

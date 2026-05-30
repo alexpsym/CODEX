@@ -1484,6 +1484,28 @@ def test_canonical_market_precedence_cases():
     assert cm({'account':'BINANCE','symbol':'ETHUSD','asset_class':'fx'}) == 'crypto'
     assert cm({'account':'BYBIT','symbol':'BTCUSDT','asset_class':''}) == 'crypto'
     assert cm({'account':'UNKNOWN','symbol':'ABCDEF','asset_class':''}) == ''
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
+def test_build_journal_balance_timelines_pepperstone_demo_zero_anchor_beats_stale_trade_variants():
+    rows = [
+        {'id':'pepperstone-demo-stale-trade','row_type':'trade','source':'master_journal','account':'Pepperstone Demo','symbol':'EURUSD','side':'BUY','open_time':'2018-07-25T22:55:00','close_time':'2018-07-25T23:00:00','net_profit':4.78,'balance_after_trade':4.78,'currency':'AUD'},
+    ]
+    cashflows = {
+        master_service._norm_account_key('pepperstone_demo'): [
+            {'account':'PEPPERSTONE DEMO','date':'2018-07-26T00:00:00','amount':None,'new_balance':0,'currency':'AUD'},
+        ]
+    }
+    timelines = master_service._build_journal_balance_timelines(rows, cashflows, [])
+    balances = {str(b.get('label') or b.get('account')).upper(): b for b in timelines['balances']}
+    assert master_service._norm_account_key('PEPPERSTONE DEMO') == master_service._norm_account_key('pepperstone_demo')
+    assert master_service._norm_account_key('Pepperstone-Demo') == 'PEPPERSTONE DEMO'
+    assert balances['PEPPERSTONE DEMO']['balance'] == 0
+    assert balances['PEPPERSTONE DEMO']['currency'] == 'AUD'
+    assert balances['PEPPERSTONE DEMO']['balance_source'] == 'cashflow_anchor_plus_trades'
+    assert timelines['diagnostics']['PEPPERSTONE DEMO']['ignored_cashflow_anchors_without_new_balance'] == 0
+
+
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_sync_master_journal_writes_zero_balances_and_validation_detects_mismatch(tmp_path, monkeypatch):
     from tools.master_journal_workbook import build_master_journal_workbook
@@ -1999,3 +2021,120 @@ def test_check_master_journal_write_lock_does_not_treat_stale_lock_file_as_locke
     out = master_service._check_master_journal_write_lock(p)
     assert out["locked"] is False
     assert "lockfile" in str(out.get("reason") or "")
+def test_manual_import_prebuilt_snapshot_preserves_workbook_zero_cashflow_anchors(tmp_path, monkeypatch):
+    ms = _load_master_service_for_import_test()
+    from tools.master_journal_workbook import build_master_journal_workbook
+    monkeypatch.setattr(ms, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    mj = tmp_path / 'Trading Journal.xlsx'
+    monkeypatch.setattr(ms, '_master_journal_path', lambda: mj)
+    monkeypatch.setattr(ms, '_master_journal_single_file_mode', lambda: True)
+    monkeypatch.setattr(ms, '_master_journal_authoritative_enabled', lambda: True)
+    monkeypatch.setattr(ms, '_trading_journal_github_sync_enabled', lambda: False)
+    monkeypatch.setenv('TRADING_JOURNAL_SOURCE', 'master_journal')
+    monkeypatch.setattr(ms, '_load_trading_journal_view_snapshot', lambda: None)
+    monkeypatch.setattr(ms, '_save_trading_journal_view_snapshot', lambda *_a, **_k: None)
+    monkeypatch.setattr(ms, '_persist_trading_journal_sqlite', lambda *_a, **_k: None)
+    rows = [
+        {'id':'binance-trade','row_type':'trade','source':'master_journal','account':'BINANCE','symbol':'BTCUSDT','side':'BUY','open_time':'2020-10-24T02:14:00','close_time':'2020-10-24T02:18:00','net_profit':-3.79,'balance_after_trade':396.65720524,'currency':'USDT'},
+        {'id':'cashflow:BINANCE:2020-10-26T00:00:00:4','row_type':'cashflow','source':'master_journal','account':'BINANCE','symbol':'CASHFLOW','side':'WITHDRAWAL','open_time':'2020-10-26T00:00:00','close_time':'2020-10-26T00:00:00','cashflow_amount':None,'cashflow_new_balance':0,'balance_after_trade':0,'currency':'USDT'},
+        {'id':'pepperstone-demo-stale-trade','row_type':'trade','source':'master_journal','account':'Pepperstone Demo','symbol':'EURUSD','side':'BUY','open_time':'2018-07-25T22:55:00','close_time':'2018-07-25T23:00:00','net_profit':4.78,'balance_after_trade':4.78,'currency':'AUD'},
+        {'id':'cashflow:PEPPERSTONE DEMO:2018-07-26T00:00:00:5','row_type':'cashflow','source':'master_journal','account':'PEPPERSTONE DEMO','symbol':'CASHFLOW','side':'WITHDRAWAL','open_time':'2018-07-26T00:00:00','close_time':'2018-07-26T00:00:00','cashflow_amount':None,'cashflow_new_balance':0,'balance_after_trade':0,'currency':'AUD'},
+    ]
+    stale = {'items': rows, 'stats': {'totals': {}, 'by_instrument': [], 'groups': {'leaders': {}}}, 'balances': [
+        {'account_label':'BINANCE','balance':396.65720524,'currency':'USDT'},
+        {'account_label':'Pepperstone Demo','balance':4.78,'currency':'AUD'},
+    ], 'diagnostics': {}}
+    build_master_journal_workbook(stale, mj)
+    pending = {'id':'oanda-demo-import','row_type':'trade','source':'oanda','account':'OANDA DEMO','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01T00:00:00','close_time':'2026-01-01T00:05:00','net_profit':1.25,'balance_after_trade':1001.25,'currency':'AUD'}
+    previous_pending = list(ms._PENDING_MANUAL_SYNC_ROWS)
+    try:
+        ms._PENDING_MANUAL_SYNC_ROWS = [pending]
+        snapshot = ms._build_trading_journal_view_snapshot(force=True, skip_external_balances=True, skip_live_account_refresh=True)
+        balances = {str(b.get('label') or b.get('account')): b for b in snapshot.get('balances') or []}
+        assert balances['BINANCE']['balance'] == 0
+        assert balances['PEPPERSTONE DEMO']['balance'] == 0
+        assert balances['PEPPERSTONE DEMO']['currency'] == 'AUD'
+        assert any(str(r.get('id')) == 'oanda-demo-import' for r in snapshot.get('items') or [])
+        result = ms._sync_master_journal_workbook(defer_github_sync=True, expected_survivor_row_ids=['oanda-demo-import'], prebuilt_snapshot=snapshot)
+        assert result['master_journal_ok'] is True
+        synced = load_workbook(mj, data_only=True)
+        try:
+            dash = synced['Dashboard']
+            values = {str(dash.cell(r, 1).value or '').strip(): dash.cell(r, 2).value for r in range(1, dash.max_row + 1)}
+            assert values['BINANCE'] == 0
+            assert values['PEPPERSTONE DEMO'] == 0
+            trade_log = synced['Trade Log']
+            headers = [str(c.value or '').strip() for c in trade_log[1]]
+            ridx = headers.index('Row ID') + 1
+            row_ids = {str(trade_log.cell(r, ridx).value or '').strip() for r in range(2, trade_log.max_row + 1)}
+            assert 'oanda-demo-import' in row_ids
+        finally:
+            synced.close()
+    finally:
+        ms._PENDING_MANUAL_SYNC_ROWS = previous_pending
+
+
+def test_resync_endpoint_runs_workbook_sync_without_import_parser(monkeypatch, tmp_path):
+    ms = _load_master_service_for_import_test()
+    monkeypatch.setattr(ms, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    monkeypatch.setattr(ms, '_master_journal_path', lambda: tmp_path / 'Trading Journal.xlsx')
+    monkeypatch.setattr(ms, '_master_journal_lock_status', lambda _path: {'locked': False})
+    called = {'sync': 0, 'import': 0}
+    monkeypatch.setattr(ms, '_sync_master_journal_workbook', lambda **_kwargs: called.update(sync=called['sync'] + 1) or {'master_journal_ok': True, 'master_journal_path': str(tmp_path / 'Trading Journal.xlsx'), 'master_journal_diagnostics': {'workbook_sync_substage_timings': {'snapshot_build': 0.1}}})
+    monkeypatch.setattr(ms, '_import_uploaded_trading_journal_file', lambda *_a, **_k: called.update({'import': called['import'] + 1}) or {'ok': False})
+    result = ms._run_trading_journal_resync()
+    assert result['ok'] is True
+    assert called == {'sync': 1, 'import': 0}
+    assert result['resync_timings']['workbook_sync'] >= 0
+
+
+def test_resync_preserves_pepperstone_demo_zero_anchor_without_import_parser(monkeypatch, tmp_path):
+    ms = _load_master_service_for_import_test()
+    from tools.master_journal_workbook import build_master_journal_workbook
+    monkeypatch.setattr(ms, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    mj = tmp_path / 'Trading Journal.xlsx'
+    monkeypatch.setattr(ms, '_master_journal_path', lambda: mj)
+    monkeypatch.setattr(ms, '_master_journal_lock_status', lambda _path: {'locked': False})
+    monkeypatch.setattr(ms, '_master_journal_single_file_mode', lambda: True)
+    monkeypatch.setattr(ms, '_master_journal_authoritative_enabled', lambda: True)
+    monkeypatch.setattr(ms, '_trading_journal_github_sync_enabled', lambda: False)
+    monkeypatch.setenv('TRADING_JOURNAL_SOURCE', 'master_journal')
+    monkeypatch.setattr(ms, '_load_trading_journal_view_snapshot', lambda: None)
+    monkeypatch.setattr(ms, '_save_trading_journal_view_snapshot', lambda *_a, **_k: None)
+    monkeypatch.setattr(ms, '_persist_trading_journal_sqlite', lambda *_a, **_k: None)
+    monkeypatch.setattr(ms, '_import_uploaded_trading_journal_file', lambda *_a, **_k: (_ for _ in ()).throw(AssertionError('resync must not parse/import a file')))
+    rows = [
+        {'id':'pepperstone-demo-stale-trade','row_type':'trade','source':'master_journal','account':'Pepperstone Demo','symbol':'EURUSD','side':'BUY','open_time':'2018-07-25T22:55:00','close_time':'2018-07-25T23:00:00','net_profit':4.78,'balance_after_trade':4.78,'currency':'AUD'},
+        {'id':'cashflow:PEPPERSTONE DEMO:2018-07-26T00:00:00:5','row_type':'cashflow','source':'master_journal','account':'PEPPERSTONE DEMO','symbol':'CASHFLOW','side':'WITHDRAWAL','open_time':'2018-07-26T00:00:00','close_time':'2018-07-26T00:00:00','cashflow_amount':None,'cashflow_new_balance':0,'balance_after_trade':0,'currency':'AUD'},
+        {'id':'binance-trade','row_type':'trade','source':'master_journal','account':'BINANCE','symbol':'BTCUSDT','side':'BUY','open_time':'2020-10-24T02:14:00','close_time':'2020-10-24T02:18:00','net_profit':-3.79,'balance_after_trade':396.65720524,'currency':'USDT'},
+        {'id':'cashflow:BINANCE:2020-10-26T00:00:00:4','row_type':'cashflow','source':'master_journal','account':'BINANCE','symbol':'CASHFLOW','side':'WITHDRAWAL','open_time':'2020-10-26T00:00:00','close_time':'2020-10-26T00:00:00','cashflow_amount':None,'cashflow_new_balance':0,'balance_after_trade':0,'currency':'USDT'},
+    ]
+    stale = {'items': rows, 'stats': {'totals': {}, 'by_instrument': [], 'groups': {'leaders': {}}}, 'balances': [
+        {'account_label':'Pepperstone Demo','balance':4.78,'currency':'AUD'},
+        {'account_label':'BINANCE','balance':396.65720524,'currency':'USDT'},
+    ], 'diagnostics': {}}
+    build_master_journal_workbook(stale, mj)
+    result = ms._run_trading_journal_resync()
+    assert result['ok'] is True
+    assert result['master_journal_ok'] is True
+    synced = load_workbook(mj, data_only=True)
+    try:
+        dash = synced['Dashboard']
+        rows_by_account = {str(dash.cell(r, 1).value or '').strip(): (dash.cell(r, 2).value, dash.cell(r, 3).value) for r in range(1, dash.max_row + 1)}
+        assert rows_by_account['PEPPERSTONE DEMO'] == (0, 'AUD')
+        assert rows_by_account['BINANCE'] == (0, 'USDT')
+    finally:
+        synced.close()
+
+
+def test_resync_returns_excel_lock_payload(monkeypatch, tmp_path):
+    ms = _load_master_service_for_import_test()
+    path = tmp_path / 'Trading Journal.xlsx'
+    path.write_bytes(b'placeholder')
+    monkeypatch.setattr(ms, '_master_journal_path', lambda: path)
+    monkeypatch.setattr(ms, '_master_journal_lock_status', lambda _path: {'locked': True, 'lock_file': '~$Trading Journal.xlsx'})
+    result = ms._run_trading_journal_resync()
+    assert result['ok'] is False
+    assert result['code'] == 'EXCEL_WORKBOOK_OPEN'
+    assert result['status_code'] == 409
+

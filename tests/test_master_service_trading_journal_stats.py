@@ -284,3 +284,23 @@ def test_oanda_demo_newer_authoritative_balance_overrides_stale_cashflow() -> No
     diag = out["diagnostics"]["OANDA DEMO"]
     assert diag["stale_cashflow_overridden"] is True
     assert diag["previous_cashflow_balance"] == 200.589
+
+def test_compute_journal_stats_by_market_streaks_reset_on_break_even() -> None:
+    rows = [
+        {"row_type":"trade","id":"fx-w1","asset_class":"fx","symbol":"EURUSD","net_profit":10,"close_time":"2026-01-01T00:00:00Z"},
+        {"row_type":"trade","id":"fx-w2","asset_class":"fx","symbol":"GBPUSD","net_profit":11,"close_time":"2026-01-02T00:00:00Z"},
+        {"row_type":"trade","id":"fx-be","asset_class":"fx","symbol":"AUDUSD","net_profit":0,"result_pct":0,"breakeven":"yes","close_time":"2026-01-03T00:00:00Z"},
+        {"row_type":"trade","id":"fx-l1","asset_class":"fx","symbol":"USDJPY","net_profit":-5,"close_time":"2026-01-04T00:00:00Z"},
+        {"row_type":"trade","id":"crypto-l1","asset_class":"crypto","symbol":"BTCUSDT","net_profit":-1,"close_time":"2026-01-05T00:00:00Z"},
+        {"row_type":"trade","id":"crypto-l2","asset_class":"crypto","symbol":"ETHUSDT","net_profit":-2,"close_time":"2026-01-06T00:00:00Z"},
+        {"row_type":"trade","id":"crypto-w1","asset_class":"crypto","symbol":"BTCUSDT","net_profit":3,"close_time":"2026-01-07T00:00:00Z"},
+    ]
+    by_market = _compute_journal_stats(rows, balances=[])["groups"]["by_market"]
+    assert by_market["overall"]["winning_streak"] == 2
+    assert by_market["overall"]["losing_streak"] == 3
+    assert by_market["fx"]["winning_streak"] == 2
+    assert by_market["fx"]["losing_streak"] == 1
+    assert by_market["crypto"]["winning_streak"] == 1
+    assert by_market["crypto"]["losing_streak"] == 2
+    assert by_market["overall"]["longest_losing_streak"]["trade_ids"] == ["fx-l1", "crypto-l1", "crypto-l2"]
+

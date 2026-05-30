@@ -1007,6 +1007,21 @@ def test_canonicalize_balances_prefers_cashflow_zero_over_stale_authoritative_tr
     assert balances[0]['balance_source'] == 'cashflow_anchor_plus_trades'
 
 
+def test_canonicalize_balances_prefers_pepperstone_demo_cashflow_zero_over_stale_trade_variants():
+    from tools.master_journal_workbook import _canonicalize_and_dedupe_balances
+    balances = _canonicalize_and_dedupe_balances([
+        {'account_label':'Pepperstone Demo','balance':4.78,'currency':'AUD','balance_source':'authoritative_trade_balance','as_of':'2018-07-25T23:00:00'},
+        {'account_label':'pepperstone_demo','balance':0,'currency':'AUD','balance_source':'cashflow_anchor_plus_trades','as_of':'2018-07-26T00:00:00'},
+        {'account_label':'PEPPERSTONE-DEMO','balance':None,'currency':'AUD','balance_source':'timeline_missing','as_of':'2018-07-27T00:00:00'},
+    ])
+    assert len(balances) == 1
+    assert balances[0]['account_label'] == 'PEPPERSTONE DEMO'
+    assert balances[0]['account'] == 'PEPPERSTONE DEMO'
+    assert balances[0]['balance'] == 0
+    assert balances[0]['currency'] == 'AUD'
+    assert balances[0]['balance_source'] == 'cashflow_anchor_plus_trades'
+
+
 def test_update_data_only_verifies_dashboard_binance_zero_balance(tmp_path: Path):
     from tools.master_journal_workbook import build_master_journal_workbook, update_master_journal_workbook_data_only
     p = tmp_path / 'Trading Journal.xlsx'
@@ -1024,3 +1039,69 @@ def test_update_data_only_verifies_dashboard_binance_zero_balance(tmp_path: Path
         assert values['BINANCE'] == 0
     finally:
         wb.close()
+
+
+def test_update_data_only_overwrites_stale_pepperstone_demo_balance_with_zero(tmp_path: Path):
+    from tools.master_journal_workbook import build_master_journal_workbook, update_master_journal_workbook_data_only
+    p = tmp_path / 'Trading Journal.xlsx'
+    stale = {'items': [], 'stats': {'totals': {}, 'groups': {}}, 'balances': [{'account_label':'Pepperstone Demo','balance':4.78,'currency':'AUD','balance_source':'authoritative_trade_balance'}]}
+    build_master_journal_workbook(stale, p)
+    fresh = {'items': [], 'stats': {'totals': {}, 'groups': {}}, 'balances': [{'account_label':'pepperstone_demo','balance':0,'currency':'AUD','balance_source':'cashflow_anchor_plus_trades','as_of':'2018-07-26T00:00:00'}]}
+    result = update_master_journal_workbook_data_only(p, fresh)
+    assert result['ok'] is True
+    assert 'PEPPERSTONE DEMO' in result['diagnostics']['account_balance_verified']
+    candidate = Path(result['candidate_path'])
+    wb = load_workbook(candidate, data_only=True)
+    try:
+        dash = wb['Dashboard']
+        values = {str(dash.cell(r, 1).value or '').strip(): (dash.cell(r, 2).value, dash.cell(r, 3).value) for r in range(1, dash.max_row + 1)}
+        assert values['PEPPERSTONE DEMO'] == (0, 'AUD')
+    finally:
+        wb.close()
+
+
+def test_update_data_only_fails_if_pepperstone_demo_balance_remains_stale(tmp_path: Path, monkeypatch):
+    import tools.master_journal_workbook as mjw
+    from tools.master_journal_workbook import build_master_journal_workbook, update_master_journal_workbook_data_only
+    p = tmp_path / 'Trading Journal.xlsx'
+    stale = {'items': [], 'stats': {'totals': {}, 'groups': {}}, 'balances': [{'account_label':'Pepperstone Demo','balance':4.78,'currency':'AUD','balance_source':'authoritative_trade_balance'}]}
+    build_master_journal_workbook(stale, p)
+    real_write = mjw._write_value_preserving_cell
+
+    def _block_pepperstone_demo_balance_write(ws, row, col, value):
+        if col == 2 and str(ws.cell(row, 1).value or '').strip().upper() == 'PEPPERSTONE DEMO' and value == 0:
+            return False
+        return real_write(ws, row, col, value)
+
+    monkeypatch.setattr(mjw, '_write_value_preserving_cell', _block_pepperstone_demo_balance_write)
+    fresh = {'items': [], 'stats': {'totals': {}, 'groups': {}}, 'balances': [{'account_label':'PEPPERSTONE DEMO','balance':0,'currency':'AUD','balance_source':'cashflow_anchor_plus_trades','as_of':'2018-07-26T00:00:00'}]}
+    result = update_master_journal_workbook_data_only(p, fresh)
+    assert result['ok'] is False
+    assert result['error'] == 'dashboard_account_balance_verification_failed'
+    mismatches = result['diagnostics']['account_balance_mismatches']
+    assert len(mismatches) == 1
+    assert mismatches[0]['account'] == 'PEPPERSTONE DEMO'
+    assert mismatches[0]['expected'] == 0.0
+    assert mismatches[0]['actual'] == 4.78
+    assert isinstance(mismatches[0]['row'], int)
+
+def test_update_data_only_writes_overall_fx_crypto_streak_metrics(tmp_path: Path):
+    from openpyxl import Workbook
+    from tools.master_journal_workbook import update_master_journal_workbook_data_only
+    p = tmp_path / "streaks.xlsx"
+    wb = Workbook(); ws = wb.active; ws.title = "Dashboard"; wb.create_sheet("Trade Log"); wb.create_sheet("Instrument Averages"); wb.create_sheet("P&L Calendar")
+    ws["A1"] = "Overall"; ws["D1"] = "FX"; ws["G1"] = "Crypto"; ws["J1"] = "Winners"; ws["J8"] = "Losers"; ws["J14"] = "Drawdown"; ws["M1"] = "Instrument leaders"; ws["T1"] = "Account Balances"
+    for col in ("A", "D", "G"):
+        ws[f"{col}2"] = "Winning Streak"
+        ws[f"{col}3"] = "Losing Streak"
+    ws["T2"] = "Account"; ws["U2"] = "Balance"; ws["V2"] = "Currency"; ws["T3"] = "BINANCE"
+    wb.save(p); wb.close()
+    snap = {"stats":{"totals":{},"groups":{"by_market":{"overall":{"winning_streak":4,"losing_streak":3},"fx":{"winning_streak":2,"losing_streak":1},"crypto":{"winning_streak":5,"losing_streak":6}},"risk_expectancy":{},"leaders":{},"duration":{}}},"balances":[{"account_label":"BINANCE","balance":0,"currency":"USDT"}]}
+    res = update_master_journal_workbook_data_only(p, snap)
+    assert res["ok"] is True
+    Path(res["candidate_path"]).replace(p)
+    out = load_workbook(p)["Dashboard"]
+    assert out["B2"].value == 4 and out["B3"].value == 3
+    assert out["E2"].value == 2 and out["E3"].value == 1
+    assert out["H2"].value == 5 and out["H3"].value == 6
+
