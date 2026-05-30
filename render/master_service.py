@@ -1706,9 +1706,24 @@ def _build_trading_journal_view_snapshot(
     if local_only:
         use_master_journal_snapshot = False
     if use_master_journal_snapshot:
+        snapshot_substage_timings: Dict[str, float] = {}
+        _snapshot_substage_started = time.perf_counter()
+
+        def _finish_snapshot_substage(stage: str) -> None:
+            nonlocal _snapshot_substage_started
+            elapsed = round(time.perf_counter() - _snapshot_substage_started, 6)
+            snapshot_substage_timings[stage] = elapsed
+            APP_LOGGER.info(
+                "trading_journal_snapshot_substage_done sync_id=%s caller=%s stage=%s elapsed=%.6fs",
+                snapshot_sync_id, snapshot_caller, stage, elapsed,
+            )
+            _snapshot_substage_started = time.perf_counter()
+
         source_payload = read_master_journal_source(_master_journal_path())
+        _finish_snapshot_substage("workbook_source_read")
         items = [dict(r) for r in (source_payload.get("items") or []) if isinstance(r, dict)]
         monthly_note_rows = _monthly_aud_revaluation_rows_for_journal_view()
+        _finish_snapshot_substage("monthly_aud_revaluation_rows")
         monthly_fallback_by_id = {
             str(row.get("id") or "").strip(): _normalize_monthly_aud_reval_snapshot_row(row)
             for row in monthly_note_rows
@@ -1743,32 +1758,46 @@ def _build_trading_journal_view_snapshot(
                 continue
             merged_items.append(dict(fallback_row))
         items = merged_items
-        trade_items = [_backfill_trade_row_context_fields(dict(r)) if isinstance(r, dict) else r for r in [r for r in items if _row_type(r) == "trade"]]
-        trade_items = _enrich_trade_row_metrics(trade_items)
+        _finish_snapshot_substage("pending_and_monthly_merge")
+        raw_trade_items = [r for r in items if _row_type(r) == "trade"]
         non_trade_items = [r for r in items if _row_type(r) != "trade"]
+        _finish_snapshot_substage("trade_cashflow_split")
+        trade_items = [_backfill_trade_row_context_fields(dict(r)) if isinstance(r, dict) else r for r in raw_trade_items]
+        _finish_snapshot_substage("trade_context_backfill_initial")
+        trade_items = _enrich_trade_row_metrics(trade_items)
+        _finish_snapshot_substage("trade_metric_enrichment_initial")
         merged_ledger = _merge_pending_cashflow_rows_into_ledger(
             source_payload.get("cashflow_ledger") or {},
             _PENDING_MANUAL_SYNC_ROWS or [],
         )
         excel_balance_seeds = [] if skip_external_balances else _get_excel_account_balances()
         timeline = _build_journal_balance_timelines(trade_items, merged_ledger, excel_balance_seeds)
+        _finish_snapshot_substage("balance_timeline_build")
         trade_items = [_backfill_trade_row_context_fields(dict(r)) if isinstance(r, dict) else r for r in (timeline.get("rows") if isinstance(timeline.get("rows"), list) else trade_items)]
+        _finish_snapshot_substage("trade_context_backfill_post_timeline")
         trade_items = _enrich_trade_row_metrics(trade_items)
+        _finish_snapshot_substage("trade_metric_enrichment_post_timeline")
         items = sorted([*trade_items, *non_trade_items], key=_row_sort_dt, reverse=True)
+        _finish_snapshot_substage("journal_item_sort")
         balances = timeline.get("balances") or []
         state = _load_json_file(TRADING_JOURNAL_STATE_PATH, {})
+        _finish_snapshot_substage("local_state_read")
         broker_balances = [] if (skip_external_balances or skip_live_account_refresh) else ((state or {}).get("broker_account_balances") if isinstance(state, dict) else [])
         if not isinstance(broker_balances, list):
             broker_balances = []
         balances = _merge_missing_timeline_balances_with_broker(balances, broker_balances)
+        _finish_snapshot_substage("broker_balance_merge")
         stats = _compute_journal_stats(items, balances)
+        _finish_snapshot_substage("stats_dashboard_instrument_calendar_build")
         diagnostics = _build_authoritative_trading_journal_diagnostics_snapshot(items)
+        _finish_snapshot_substage("diagnostics_build")
         diagnostics.update({
             "source": "master_journal_authoritative",
             "authoritative_mode": True,
             "source_workbooks_scanned": 0,
             "parsed_trade_rows": len(trade_items),
             "parsed_cashflow_rows": len([r for r in non_trade_items if _row_type(r) == "cashflow"]),
+            "snapshot_substage_timings": dict(snapshot_substage_timings),
         })
         result = {"cache_version": TRADING_JOURNAL_VIEW_CACHE_VERSION, "generated_at": _utc_now_iso(), "items": items, "balances": balances, "stats": stats, "diagnostics": diagnostics, "source_fingerprints": fingerprint}
         monthly_note_by_id = {
@@ -1796,7 +1825,12 @@ def _build_trading_journal_view_snapshot(
                     normalized_items.append(_normalize_monthly_aud_reval_snapshot_row(item))
             safe_result["items"] = normalized_items
         _save_trading_journal_view_snapshot(safe_result)
+        _finish_snapshot_substage("view_cache_write")
         _persist_trading_journal_sqlite(safe_result)
+        _finish_snapshot_substage("sqlite_snapshot_persist")
+        safe_diag = safe_result.get("diagnostics") if isinstance(safe_result.get("diagnostics"), dict) else {}
+        if isinstance(safe_diag, dict):
+            safe_diag["snapshot_substage_timings"] = dict(snapshot_substage_timings)
         _TRADING_JOURNAL_VIEW_CACHE["key"] = "snapshot"
         _TRADING_JOURNAL_VIEW_CACHE["payload"] = safe_result
         APP_LOGGER.info("trading_journal_snapshot_build_done sync_id=%s caller=%s elapsed=%.6fs cached=False mode=master_journal", snapshot_sync_id, snapshot_caller, time.perf_counter() - snapshot_started)
@@ -12885,38 +12919,52 @@ def _normalize_optional_price(value: object) -> Optional[str]:
     return str(value).strip() or f"{parsed}"
 
 
+
+_TRADE_CONTEXTS_CACHE: Dict[str, object] = {"fingerprint": None, "items": None}
+
+def _trade_context_source_fingerprint() -> List[Dict[str, object]]:
+    return [
+        _source_file_fingerprint(TRADE_CONTEXTS_PATH),
+        _source_file_fingerprint(STATE_BACKUP_LOCAL_PATH),
+        _source_file_fingerprint(Path(_bybit_demo_calc_context_path())),
+    ]
+
 def _load_trade_contexts() -> List[Dict[str, object]]:
+    fingerprint = _trade_context_source_fingerprint()
+    cached_fp = _TRADE_CONTEXTS_CACHE.get("fingerprint")
+    cached_items = _TRADE_CONTEXTS_CACHE.get("items")
+    if cached_fp == fingerprint and isinstance(cached_items, list):
+        return [dict(entry) for entry in cached_items if isinstance(entry, dict)]
+
     payload = _load_json_file(TRADE_CONTEXTS_PATH, [])
     if isinstance(payload, dict):
         payload = payload.get("items", [])
     items = [dict(entry) for entry in payload if isinstance(payload, list) and isinstance(entry, dict)]
-    if items:
-        return items
+    if not items:
+        backup_payload = _load_json_file(STATE_BACKUP_LOCAL_PATH, {})
+        if isinstance(backup_payload, dict):
+            raw_backup_items = backup_payload.get("trade_contexts")
+            if isinstance(raw_backup_items, list):
+                items = [dict(entry) for entry in raw_backup_items if isinstance(entry, dict)]
 
-    backup_payload = _load_json_file(STATE_BACKUP_LOCAL_PATH, {})
-    backup_items = []
-    if isinstance(backup_payload, dict):
-        raw_backup_items = backup_payload.get("trade_contexts")
-        if isinstance(raw_backup_items, list):
-            backup_items = [dict(entry) for entry in raw_backup_items if isinstance(entry, dict)]
-    if backup_items:
-        return backup_items
+    if not items:
+        calc_payload = _load_json_file(_bybit_demo_calc_context_path(), {})
+        if isinstance(calc_payload, dict):
+            raw_calc_items = calc_payload.get("items")
+            if isinstance(raw_calc_items, list):
+                items = [dict(entry) for entry in raw_calc_items if isinstance(entry, dict)]
+        if not items and isinstance(calc_payload, list):
+            items = [dict(entry) for entry in calc_payload if isinstance(entry, dict)]
 
-    calc_items: List[Dict[str, object]] = []
-    calc_payload = _load_json_file(_bybit_demo_calc_context_path(), {})
-    if isinstance(calc_payload, dict):
-        raw_calc_items = calc_payload.get("items")
-        if isinstance(raw_calc_items, list):
-            calc_items = [dict(entry) for entry in raw_calc_items if isinstance(entry, dict)]
-    if not calc_items and isinstance(calc_payload, list):
-        calc_items = [dict(entry) for entry in calc_payload if isinstance(entry, dict)]
-    if calc_items:
-        return calc_items
-    return []
+    _TRADE_CONTEXTS_CACHE["fingerprint"] = fingerprint
+    _TRADE_CONTEXTS_CACHE["items"] = [dict(entry) for entry in items]
+    return [dict(entry) for entry in items]
 
 
 def _save_trade_contexts(items: List[Dict[str, object]]) -> None:
     _save_json_file(TRADE_CONTEXTS_PATH, {"items": items, "updated_at": _utc_now_iso()})
+    _TRADE_CONTEXTS_CACHE.clear()
+    _TRADE_CONTEXTS_CACHE.update({"fingerprint": None, "items": None})
     _schedule_dropbox_upload_state_backup()
 
 def _calculator_context_path() -> Path:
@@ -16287,6 +16335,8 @@ def _backfill_trade_row_context_fields(row: Dict[str, object]) -> Dict[str, obje
         return row
 
     source_text = str(row.get("source") or "").strip().lower()
+    if source_text == "master_journal":
+        return row
     broker_for_lookup = "bybit" if source_text.startswith("bybit_execution_history") else row.get("source")
     ctx = _lookup_trade_context_for_journal_row(row)
     if not isinstance(ctx, dict):
@@ -27539,6 +27589,41 @@ def _trading_journal_code_version() -> str:
         return "unknown"
 
 
+def _resync_source_fingerprint(path: Path) -> Dict[str, object]:
+    if not _master_journal_single_file_mode():
+        return _journal_source_fingerprint()
+    files = [
+        _source_file_fingerprint(path),
+        _source_file_fingerprint(MONTHLY_AUD_REVALUATION_PATH),
+        _source_file_fingerprint(MONTHLY_AUD_REVALUATION_STATE_PATH),
+        *_trade_context_source_fingerprint(),
+    ]
+    return {
+        "source_mode": "master_journal",
+        "local_dir": str(TRADING_JOURNAL_LOCAL_DIR),
+        "schema_version": TRADING_JOURNAL_VIEW_CACHE_VERSION,
+        "code_version": _trading_journal_code_version(),
+        "files": sorted(files, key=lambda item: str(item.get("path") or "")),
+    }
+
+
+def _fingerprint_changed_components(previous: object, current: object) -> List[Dict[str, object]]:
+    if previous == current:
+        return []
+    if not isinstance(previous, dict) or not isinstance(current, dict):
+        return [{"component": "fingerprint", "previous": previous, "current": current}]
+    changes: List[Dict[str, object]] = []
+    for key in sorted((set(previous.keys()) | set(current.keys())) - {"files"}):
+        if previous.get(key) != current.get(key):
+            changes.append({"component": key, "previous": previous.get(key), "current": current.get(key)})
+    prev_files = {str(item.get("path") or ""): item for item in (previous.get("files") or []) if isinstance(item, dict)}
+    cur_files = {str(item.get("path") or ""): item for item in (current.get("files") or []) if isinstance(item, dict)}
+    for path_key in sorted(set(prev_files) | set(cur_files)):
+        if prev_files.get(path_key) != cur_files.get(path_key):
+            changes.append({"component": "file", "path": path_key, "previous": prev_files.get(path_key), "current": cur_files.get(path_key)})
+    return changes
+
+
 def _resync_expected_snapshot_from_metadata(meta: Dict[str, object]) -> Optional[Dict[str, object]]:
     balances = meta.get("expected_balances") if isinstance(meta, dict) else None
     if not isinstance(balances, list):
@@ -27680,28 +27765,46 @@ def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Opti
         wb.close()
 
 
-def _resync_fast_path_snapshot(path: Path, fingerprint: Dict[str, object]) -> Tuple[Optional[Dict[str, object]], str]:
+def _resync_fast_path_snapshot(path: Path, fingerprint: Dict[str, object]) -> Tuple[Optional[Dict[str, object]], str, Dict[str, object]]:
+    diagnostics: Dict[str, object] = {"changed_components": []}
     if _PENDING_MANUAL_SYNC_ROWS:
-        return None, "pending_manual_rows"
+        return None, "pending_manual_rows", diagnostics
     if not path.exists():
-        return None, "workbook_missing"
+        return None, "workbook_missing", diagnostics
     last = TRADING_JOURNAL_RESYNC_LAST_SUCCESS
     if (
         str(last.get("workbook_path") or "") == str(path)
         and isinstance(last.get("snapshot"), dict)
         and last.get("fingerprint") == fingerprint
     ):
-        return last.get("snapshot"), "memory_fingerprint_match"  # type: ignore[return-value]
-    persisted = _load_resync_success_metadata(path, fingerprint)
-    if isinstance(persisted, dict) and isinstance(persisted.get("snapshot"), dict):
-        TRADING_JOURNAL_RESYNC_LAST_SUCCESS.update({
-            "fingerprint": fingerprint,
-            "snapshot": persisted["snapshot"],
-            "verified_at": persisted.get("verified_at"),
-            "workbook_path": str(path),
-        })
-        return persisted["snapshot"], "persisted_fingerprint_match"  # type: ignore[return-value]
-    return None, "fingerprint_changed_or_no_verified_cache"
+        return last.get("snapshot"), "memory_fingerprint_match", diagnostics  # type: ignore[return-value]
+    if isinstance(last.get("fingerprint"), dict) and str(last.get("workbook_path") or "") == str(path):
+        diagnostics["memory_changed_components"] = _fingerprint_changed_components(last.get("fingerprint"), fingerprint)
+
+    meta = _load_json_file(TRADING_JOURNAL_RESYNC_CACHE_PATH, {})
+    if isinstance(meta, dict) and meta:
+        if int(meta.get("schema_version") or 0) != TRADING_JOURNAL_RESYNC_CACHE_SCHEMA_VERSION:
+            diagnostics["metadata_schema_changed"] = {"previous": meta.get("schema_version"), "current": TRADING_JOURNAL_RESYNC_CACHE_SCHEMA_VERSION}
+        elif str(meta.get("workbook_path") or "") != str(path):
+            diagnostics["metadata_workbook_path_changed"] = {"previous": meta.get("workbook_path"), "current": str(path)}
+        elif str(meta.get("code_version") or "") != _trading_journal_code_version():
+            diagnostics["metadata_code_version_changed"] = {"previous": meta.get("code_version"), "current": _trading_journal_code_version()}
+        elif meta.get("source_fingerprint") != fingerprint:
+            diagnostics["changed_components"] = _fingerprint_changed_components(meta.get("source_fingerprint"), fingerprint)
+        else:
+            snapshot = _resync_expected_snapshot_from_metadata(meta)
+            if isinstance(snapshot, dict):
+                TRADING_JOURNAL_RESYNC_LAST_SUCCESS.update({
+                    "fingerprint": fingerprint,
+                    "snapshot": snapshot,
+                    "verified_at": meta.get("verified_at"),
+                    "workbook_path": str(path),
+                })
+                return snapshot, "persisted_fingerprint_match", diagnostics
+            diagnostics["metadata_snapshot_missing"] = True
+    else:
+        diagnostics["metadata_missing"] = True
+    return None, "fingerprint_changed_or_no_verified_cache", diagnostics
 
 
 def _run_trading_journal_resync() -> Dict[str, object]:
@@ -27746,8 +27849,8 @@ def _run_trading_journal_resync() -> Dict[str, object]:
         master_reserved = True
         APP_LOGGER.info("master_journal_workbook_sync_start sync_id=%s caller=resync path=%s prebuilt_snapshot=True reserved_before_snapshot=True", request_id, path)
 
-        fingerprint = _journal_source_fingerprint()
-        fast_snapshot, fast_path_reason = _resync_fast_path_snapshot(path, fingerprint)
+        fingerprint = _resync_source_fingerprint(path)
+        fast_snapshot, fast_path_reason, fast_path_diagnostics = _resync_fast_path_snapshot(path, fingerprint)
         if isinstance(fast_snapshot, dict):
             t0 = time.perf_counter()
             verification = _fast_verify_trading_journal_workbook(path, expected_snapshot=fast_snapshot)
@@ -27767,6 +27870,7 @@ def _run_trading_journal_resync() -> Dict[str, object]:
                     "skipped_snapshot_build": True,
                     "snapshot_build_ran": False,
                     "fast_path_reason": fast_path_reason,
+                    "fast_path_diagnostics": fast_path_diagnostics,
                     "app_version": _trading_journal_code_version(),
                     "fast_verification": verification,
                     "status_code": 200,
@@ -27774,7 +27878,7 @@ def _run_trading_journal_resync() -> Dict[str, object]:
                 return payload
             APP_LOGGER.warning("trading_journal_resync_fast_verify_failed request_id=%s reason=%s error=%s", request_id, fast_path_reason, verification.get("error"))
         else:
-            APP_LOGGER.info("trading_journal_resync_fast_path_not_used request_id=%s reason=%s", request_id, fast_path_reason)
+            APP_LOGGER.info("trading_journal_resync_fast_path_not_used request_id=%s reason=%s diagnostics=%s", request_id, fast_path_reason, fast_path_diagnostics)
 
         t0 = time.perf_counter()
         snapshot = _build_trading_journal_view_snapshot(force=True, skip_external_balances=True, skip_live_account_refresh=True, sync_id=request_id, sync_caller="resync") or {}
@@ -27795,7 +27899,7 @@ def _run_trading_journal_resync() -> Dict[str, object]:
                 ok = False
                 sync = {**(sync if isinstance(sync, dict) else {}), "master_journal_ok": False, "master_journal_error": verification.get("error"), "master_journal_diagnostics": {"fast_verification": verification}}
         if ok and isinstance(snapshot, dict):
-            verified_fingerprint = _journal_source_fingerprint()
+            verified_fingerprint = _resync_source_fingerprint(path)
             TRADING_JOURNAL_RESYNC_LAST_SUCCESS.update({
                 "fingerprint": verified_fingerprint,
                 "snapshot": copy.deepcopy(snapshot),
@@ -27805,7 +27909,7 @@ def _run_trading_journal_resync() -> Dict[str, object]:
             _save_resync_success_metadata(path, verified_fingerprint, snapshot)
         timings["total"] = round(time.perf_counter() - started, 6)
         APP_LOGGER.info("master_journal_workbook_sync_done sync_id=%s caller=resync ok=%s snapshot_build_ran=True", request_id, ok)
-        payload = {"ok": ok, "button": "resync", "message": "Trading Journal resync complete." if ok else _master_journal_sync_error(sync), "request_id": request_id, "app_version": _trading_journal_code_version(), "resync_timings": timings, "skipped_snapshot_build": False, "snapshot_build_ran": True, "fast_path_reason": fast_path_reason, **(sync if isinstance(sync, dict) else {})}
+        payload = {"ok": ok, "button": "resync", "message": "Trading Journal resync complete." if ok else _master_journal_sync_error(sync), "request_id": request_id, "app_version": _trading_journal_code_version(), "resync_timings": timings, "skipped_snapshot_build": False, "snapshot_build_ran": True, "fast_path_reason": fast_path_reason, "fast_path_diagnostics": fast_path_diagnostics, **(sync if isinstance(sync, dict) else {})}
         if verification is not None:
             payload["fast_verification"] = verification
         payload.setdefault("status_code", 200 if ok else 500)

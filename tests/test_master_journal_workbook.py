@@ -1105,3 +1105,20 @@ def test_update_data_only_writes_overall_fx_crypto_streak_metrics(tmp_path: Path
     assert out["E2"].value == 2 and out["E3"].value == 1
     assert out["H2"].value == 5 and out["H3"].value == 6
 
+
+
+def test_read_master_journal_source_uses_read_only_workbook(monkeypatch, tmp_path):
+    from tools import master_journal_workbook as mjw
+    from tools.master_journal_workbook import build_master_journal_workbook
+    path = tmp_path / 'Trading Journal.xlsx'
+    build_master_journal_workbook({'items': [{'id': 't1', 'row_type': 'trade', 'account': 'BINANCE', 'symbol': 'BTCUSDT', 'side': 'BUY', 'open_time': '2026-01-01', 'close_time': '2026-01-01'}], 'stats': {'totals': {}, 'groups': {}}, 'balances': []}, path)
+    real_load = mjw.load_workbook
+    calls = []
+    def wrapped_load_workbook(*args, **kwargs):
+        calls.append(kwargs)
+        return real_load(*args, **kwargs)
+    monkeypatch.setattr(mjw, 'load_workbook', wrapped_load_workbook)
+    payload = mjw.read_master_journal_source(path)
+    assert payload['items']
+    assert calls and calls[0].get('read_only') is True
+    assert calls[0].get('data_only') is True

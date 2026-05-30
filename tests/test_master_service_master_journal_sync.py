@@ -2415,3 +2415,67 @@ def test_resync_returns_excel_lock_payload(monkeypatch, tmp_path):
     assert result['code'] == 'EXCEL_WORKBOOK_OPEN'
     assert result['status_code'] == 409
 
+
+
+def test_master_journal_snapshot_records_substage_timings_and_skips_context_lookup(monkeypatch, tmp_path):
+    ms = _load_master_service_for_import_test()
+    monkeypatch.setattr(ms, 'TRADING_JOURNAL_SOURCE', 'master_journal')
+    monkeypatch.setattr(ms, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    monkeypatch.setattr(ms, '_master_journal_single_file_mode', lambda: True)
+    monkeypatch.setattr(ms, '_master_journal_authoritative_enabled', lambda: True)
+    monkeypatch.setattr(ms, '_master_journal_path', lambda: tmp_path / 'Trading Journal.xlsx')
+    monkeypatch.setattr(ms, 'read_master_journal_source', lambda _path: {
+        'items': [
+            {'id': 't1', 'row_type': 'trade', 'source': 'master_journal', 'account': 'BINANCE', 'account_label': 'BINANCE', 'symbol': 'BTCUSDT', 'side': 'BUY', 'open_time': '2026-01-01', 'close_time': '2026-01-01', 'net_profit': 1.0, 'result_pct': 1.0, 'balance_after_trade': 1.0, 'currency': 'USDT'},
+            {'id': 'c1', 'row_type': 'cashflow', 'source': 'master_journal', 'account': 'BINANCE', 'account_label': 'BINANCE', 'symbol': 'CASHFLOW', 'side': 'WITHDRAWAL', 'open_time': '2026-01-02', 'close_time': '2026-01-02', 'cashflow_new_balance': 0.0, 'balance_after_trade': 0.0, 'currency': 'USDT'},
+        ],
+        'cashflow_ledger': {'BINANCE': [{'account': 'BINANCE', 'date': '2026-01-02', 'new_balance': 0.0, 'currency': 'USDT'}]},
+    })
+    monkeypatch.setattr(ms, '_monthly_aud_revaluation_rows_for_journal_view', lambda: [])
+    monkeypatch.setattr(ms, '_load_trade_contexts', lambda: (_ for _ in ()).throw(AssertionError('master_journal snapshot must not load local trade contexts')))
+    monkeypatch.setattr(ms, '_save_trading_journal_view_snapshot', lambda _payload: None)
+    monkeypatch.setattr(ms, '_persist_trading_journal_sqlite', lambda *_args, **_kwargs: None)
+    snapshot = ms._build_trading_journal_view_snapshot(force=True, skip_external_balances=True, skip_live_account_refresh=True, sync_id='timing-test', sync_caller='unit-test')
+    timings = ((snapshot.get('diagnostics') or {}).get('snapshot_substage_timings') or {})
+    assert 'workbook_source_read' in timings
+    assert 'trade_context_backfill_initial' in timings
+    assert 'balance_timeline_build' in timings
+    assert 'stats_dashboard_instrument_calendar_build' in timings
+
+
+def test_resync_fast_path_miss_reports_changed_fingerprint_components(tmp_path):
+    ms = _load_master_service_for_import_test()
+    path = tmp_path / 'Trading Journal.xlsx'
+    path.write_bytes(b'placeholder')
+    old_fp = {'source_mode': 'master_journal', 'files': [{'path': str(path), 'sha256': 'old', 'size': 1}]}
+    new_fp = {'source_mode': 'master_journal', 'files': [{'path': str(path), 'sha256': 'new', 'size': 2}]}
+    ms.TRADING_JOURNAL_RESYNC_LAST_SUCCESS.update({'fingerprint': old_fp, 'snapshot': {'items': [], 'stats': {}, 'balances': []}, 'workbook_path': str(path), 'verified_at': 'then'})
+    snapshot, reason, diagnostics = ms._resync_fast_path_snapshot(path, new_fp)
+    assert snapshot is None
+    assert reason == 'fingerprint_changed_or_no_verified_cache'
+    changed = diagnostics.get('memory_changed_components') or diagnostics.get('changed_components') or []
+    assert any(item.get('component') == 'file' and item.get('path') == str(path) for item in changed)
+
+
+def test_resync_persists_post_replace_fingerprint_for_next_fast_path(monkeypatch, tmp_path):
+    ms = _load_master_service_for_import_test()
+    mj = tmp_path / 'Trading Journal.xlsx'
+    snapshot = {'items': [], 'stats': {'totals': {}, 'groups': {}}, 'balances': [
+        {'account_label': 'BINANCE', 'balance': 0, 'currency': 'USDT'},
+        {'account_label': 'PEPPERSTONE DEMO', 'balance': 0, 'currency': 'AUD'},
+    ]}
+    from tools.master_journal_workbook import build_master_journal_workbook
+    build_master_journal_workbook(snapshot, mj)
+    fingerprints = iter([{'stage': 'pre'}, {'stage': 'post'}, {'stage': 'post'}])
+    monkeypatch.setattr(ms, '_master_journal_path', lambda: mj)
+    monkeypatch.setattr(ms, '_master_journal_lock_status', lambda _path: {'locked': False})
+    monkeypatch.setattr(ms, '_resync_source_fingerprint', lambda _path: next(fingerprints))
+    monkeypatch.setattr(ms, '_build_trading_journal_view_snapshot', lambda **_kwargs: snapshot)
+    monkeypatch.setattr(ms, '_sync_master_journal_workbook_unlocked', lambda **_kwargs: {'master_journal_ok': True, 'master_journal_path': str(mj)})
+    result = ms._run_trading_journal_resync()
+    assert result['ok'] is True
+    assert result['snapshot_build_ran'] is True
+    assert ms.TRADING_JOURNAL_RESYNC_LAST_SUCCESS['fingerprint'] == {'stage': 'post'}
+    cached, reason, _diagnostics = ms._resync_fast_path_snapshot(mj, {'stage': 'post'})
+    assert cached == snapshot
+    assert reason == 'memory_fingerprint_match'

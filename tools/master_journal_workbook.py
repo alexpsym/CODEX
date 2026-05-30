@@ -1178,10 +1178,11 @@ def _repair_trade_log_row_ids_from_rows(ws, rows, diagnostics):
 def read_master_journal_source(path: Path) -> Dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"Master Journal workbook not found: {path}")
-    wb = load_workbook(path, data_only=True)
+    wb = load_workbook(path, data_only=True, read_only=True)
     try:
         ws = _get_all_trades_sheet(wb)
-        headers = [str(c.value or '').strip() for c in ws[1]]
+        header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), tuple()) or tuple()
+        headers = [str(c or '').strip() for c in header_row]
         idx = {h:i for i,h in enumerate(headers)}
         required = {'Open Time','Close Time','Account','Symbol','Side'}
         if not required.issubset(set(idx.keys())):
@@ -1197,7 +1198,15 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
         i_pnl = _alias_index(idx, 'Net P/L', 'Net Profit', 'Realized PnL')
         i_result_pct = _alias_index(idx, 'Result %', 'Profit %', 'P/L %', 'Result Percent')
         i_dur = _alias_index(idx, 'Trade Duration (DD:HH:MM:SS)', 'Trade Duration', 'Trade Duration Seconds', 'Duration')
-        for r in ws.iter_rows(min_row=2, values_only=True):
+        max_col = max(1, len(headers))
+        max_row = ws.max_row or 1
+        try:
+            _min_col, _min_row, dim_max_col, dim_max_row = range_boundaries(ws.calculate_dimension())
+            max_col = min(max_col, max(1, dim_max_col))
+            max_row = max(1, dim_max_row)
+        except Exception:
+            pass
+        for r in ws.iter_rows(min_row=2, max_row=max_row, max_col=max_col, values_only=True):
             if not any(v not in (None,'') for v in r):
                 continue
             symbol = str(r[idx.get('Symbol',3)] or '').strip()
