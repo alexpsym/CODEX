@@ -1614,6 +1614,47 @@ def test_build_journal_balance_timelines_applies_pnl_for_bybit_test_rows():
     assert by_id['bybit:demo:trade:BTCUSDT:049246f1ec6e4a68']['analysis_balance_after_trade'] == pytest.approx(368.33241100)
     assert by_id['bybit:demo:trade:BTCUSDT:85c1adb0266f56a4']['analysis_balance_after_trade'] == pytest.approx(366.49810796)
     assert by_id['cash:c1']['analysis_balance_after_trade'] == pytest.approx(319.8339282399999)
+
+def test_build_journal_balance_timelines_zero_cashflow_anchor_beats_older_trade_balance():
+    ms = _load_master_service_for_import_test()
+    rows = [
+        {'id':'t1','row_type':'trade','source':'master_journal','account':'BINANCE','symbol':'BTCUSDT','close_time':'2020-10-24T02:18:00','net_profit':-3.7985222,'balance_after_trade':396.65720524},
+    ]
+    cashflows = {'BINANCE': [{'account':'BINANCE','date':'2020-10-26T00:00:00','amount':None,'new_balance':0,'currency':'USDT','side':'WITHDRAWAL'}]}
+    out = ms._build_journal_balance_timelines(rows, cashflows, [])
+    bal = next(b for b in out['balances'] if b.get('label') == 'BINANCE')
+    assert bal['balance'] == 0
+    assert bal['balance_source'] == 'cashflow_anchor_plus_trades'
+    assert out['diagnostics']['BINANCE']['previous_cashflow_balance'] == 0
+
+
+def test_build_journal_balance_timelines_ignores_blank_cashflow_anchor_without_erasing_valid_trade_balance():
+    ms = _load_master_service_for_import_test()
+    rows = [
+        {'id':'t1','row_type':'trade','source':'master_journal','account':'BINANCE','symbol':'BTCUSDT','close_time':'2020-10-24T02:18:00','net_profit':-3.7985222,'balance_after_trade':396.65720524},
+    ]
+    cashflows = {'BINANCE': [{'account':'BINANCE','date':'2020-10-26T00:00:00','amount':None,'new_balance':None,'currency':'USDT','side':'WITHDRAWAL'}]}
+    out = ms._build_journal_balance_timelines(rows, cashflows, [])
+    bal = next(b for b in out['balances'] if b.get('label') == 'BINANCE')
+    assert bal['balance'] == 396.65720524
+    assert bal['balance_source'] in {'authoritative_trade_balance', 'trade_timeline'}
+    assert out['diagnostics']['BINANCE']['ignored_cashflow_anchors_without_new_balance'] == 1
+
+
+def test_cashflow_row_to_ledger_event_keeps_zero_anchor_without_amount():
+    ms = _load_master_service_for_import_test()
+    event = ms._cashflow_row_to_ledger_event({
+        'id':'c1',
+        'row_type':'cashflow',
+        'account':'BINANCE',
+        'close_time':'2020-10-26T00:00:00',
+        'cashflow_amount':'',
+        'cashflow_new_balance':0,
+        'currency':'USDT',
+    })
+    assert event['new_balance'] == 0
+    assert event['amount'] is None
+
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_balance_regression_stale_excel_binance_overridden_by_authoritative_zero_source():
     rows = []

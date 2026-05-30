@@ -994,3 +994,33 @@ def test_canonicalize_and_dedupe_balances_prefers_cashflow_anchor():
     deduped = _canonicalize_and_dedupe_balances(balances)
     assert len(deduped) == 1
     assert deduped[0]["balance"] == 319.8339282399999
+
+
+def test_canonicalize_balances_prefers_cashflow_zero_over_stale_authoritative_trade():
+    from tools.master_journal_workbook import _canonicalize_and_dedupe_balances
+    balances = _canonicalize_and_dedupe_balances([
+        {'account_label':'BINANCE','balance':396.65720524,'currency':'USDT','balance_source':'authoritative_trade_balance','as_of':'2020-10-24T02:18:00'},
+        {'account_label':'BINANCE','balance':0,'currency':'USDT','balance_source':'cashflow_anchor_plus_trades','as_of':'2020-10-26T00:00:00'},
+    ])
+    assert len(balances) == 1
+    assert balances[0]['balance'] == 0
+    assert balances[0]['balance_source'] == 'cashflow_anchor_plus_trades'
+
+
+def test_update_data_only_verifies_dashboard_binance_zero_balance(tmp_path: Path):
+    from tools.master_journal_workbook import build_master_journal_workbook, update_master_journal_workbook_data_only
+    p = tmp_path / 'Trading Journal.xlsx'
+    stale = {'items': [], 'stats': {'totals': {}, 'groups': {}}, 'balances': [{'account_label':'BINANCE','balance':396.65720524,'currency':'USDT','balance_source':'authoritative_trade_balance'}]}
+    build_master_journal_workbook(stale, p)
+    fresh = {'items': [], 'stats': {'totals': {}, 'groups': {}}, 'balances': [{'account_label':'BINANCE','balance':0,'currency':'USDT','balance_source':'cashflow_anchor_plus_trades','as_of':'2020-10-26T00:00:00'}]}
+    result = update_master_journal_workbook_data_only(p, fresh)
+    assert result['ok'] is True
+    assert 'BINANCE' in result['diagnostics']['account_balance_verified']
+    candidate = Path(result['candidate_path'])
+    wb = load_workbook(candidate, data_only=True)
+    try:
+        dash = wb['Dashboard']
+        values = {str(dash.cell(r, 1).value or '').strip(): dash.cell(r, 2).value for r in range(1, dash.max_row + 1)}
+        assert values['BINANCE'] == 0
+    finally:
+        wb.close()

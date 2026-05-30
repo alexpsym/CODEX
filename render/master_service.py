@@ -1588,7 +1588,7 @@ def _cashflow_row_to_ledger_event(row: Dict[str, object]) -> Dict[str, object]:
         or ""
     ).strip()
     reason = str(row_data.get("notes") or row_data.get("cashflow_reason") or "").strip()
-    if not account or not date or amount is None or new_balance is None:
+    if not account or not date or new_balance is None:
         return {}
     return {
         "id": row_id,
@@ -5966,7 +5966,9 @@ def _build_journal_balance_timelines(
             bucket.get("trade_indices") or [],
             key=lambda i: _to_ts(out_rows[i].get("close_time") or out_rows[i].get("open_time")),
         )
-        events = sorted((cashflow_ledger or {}).get(account_key) or [], key=lambda e: _to_ts(e.get("date")))
+        raw_events = sorted((cashflow_ledger or {}).get(account_key) or [], key=lambda e: _to_ts(e.get("date")))
+        events = [e for e in raw_events if _to_float(e.get("new_balance")) is not None]
+        ignored_cashflow_anchor_count = len(raw_events) - len(events)
         event_ts = [_to_ts(e.get("date")) for e in events]
         has_cashflow = len(events) > 0
         segment_running: Dict[int, float] = {}
@@ -5995,7 +5997,10 @@ def _build_journal_balance_timelines(
                     continue
                 if anchor_idx >= 0:
                     if anchor_idx not in segment_running:
-                        segment_running[anchor_idx] = _to_float(events[anchor_idx].get("new_balance")) or 0.0
+                        anchor_balance = _to_float(events[anchor_idx].get("new_balance"))
+                        if anchor_balance is None:
+                            continue
+                        segment_running[anchor_idx] = anchor_balance
                     before = segment_running[anchor_idx]
                     after = before
                     if _apply_pnl_to_balance(row, pnl):
@@ -6124,6 +6129,7 @@ def _build_journal_balance_timelines(
         diagnostics[account_key] = {
             "account_key": account_key,
             "cashflow_events": len(events),
+            "ignored_cashflow_anchors_without_new_balance": ignored_cashflow_anchor_count,
             "trade_rows": len(trade_indices),
             "missing_balance": missing_balance,
             "latest_cashflow_at": events[-1].get("date") if events else None,
@@ -26067,7 +26073,10 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
         _finish_substage("manual_override_read")
         if isinstance(manual_overrides, dict) and manual_overrides:
             from tools.master_journal_workbook import _all_trades_row_fingerprint_from_map
-            current_rows = [r for r in _get_trading_journal_rows() if isinstance(r, dict)]
+            if _master_journal_single_file_mode():
+                current_rows = [r for r in source_items if isinstance(r, dict)]
+            else:
+                current_rows = [r for r in _get_trading_journal_rows() if isinstance(r, dict)]
             merged_rows: List[Dict[str, object]] = []
             overrides_applied = 0
             for row in current_rows:
@@ -26088,8 +26097,12 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
                     overrides_applied += 1
                 merged_rows.append(_apply_trading_journal_manual_overrides(dict(row), ov) if ov else dict(row))
             if overrides_applied > 0:
-                _set_trading_journal_rows(merged_rows)
-                snapshot = _build_trading_journal_view_snapshot(force=True, local_only=True, skip_external_balances=True, skip_live_account_refresh=True) or {}
+                if _master_journal_single_file_mode():
+                    snapshot = dict(snapshot)
+                    snapshot["items"] = merged_rows
+                else:
+                    _set_trading_journal_rows(merged_rows)
+                    snapshot = _build_trading_journal_view_snapshot(force=True, local_only=True, skip_external_balances=True, skip_live_account_refresh=True) or {}
                 source_items = [r for r in (snapshot.get("items") or []) if isinstance(r, dict)]
                 source_trade_rows = [r for r in source_items if _row_type(r) == "trade"]
 

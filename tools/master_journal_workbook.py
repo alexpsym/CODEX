@@ -346,8 +346,10 @@ def _canonicalize_and_dedupe_balances(balances: List[Dict[str, Any]]) -> List[Di
             return 300
         if "broker" in src or "account_summary" in src or "wallet_balance_anchor" in src:
             return 200
-        if src in {"trade_timeline", "master_journal", "timeline_missing"}:
+        if src in {"authoritative_trade_balance", "trade_timeline", "master_journal"}:
             return 100
+        if src == "timeline_missing":
+            return 0
         return 50
     def _asof_rank(value: Any) -> float:
         dt = _as_datetime(value)
@@ -1450,6 +1452,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             canonical_label = _canonical_account_label(raw_label)
             existing_rows_by_raw.setdefault(raw_label, []).append(rr)
             existing_rows_by_canonical.setdefault(canonical_label, []).append(rr)
+        account_balance_targets: Dict[str, Dict[str, Any]] = {}
         for b in balances:
             label = _canonical_account_label(b.get("account_label") or b.get("account"))
             if not label:
@@ -1489,6 +1492,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             if curr:
                 if _write_value_preserving_cell(dash, row, col_map["currency"], curr):
                     diagnostics["updated_cells"] += 1
+            account_balance_targets[label] = {"row": row, "balance": bal_num, "currency": curr}
             if "as_of" in col_map:
                 as_of = str(b.get("as_of") or "").strip()
                 if as_of:
@@ -1503,6 +1507,19 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 for stale_row in stale_rows:
                     _clear_account_balance_row(dash, stale_row, col_map)
                     diagnostics["stale_account_balance_rows_cleared"] += 1
+
+        diagnostics.setdefault("account_balance_verified", [])
+        diagnostics.setdefault("account_balance_mismatches", [])
+        for label, target in account_balance_targets.items():
+            row = int(target["row"])
+            expected = _as_float(target.get("balance"))
+            actual = _as_float(dash.cell(row, col_map["balance"]).value)
+            if expected is not None and actual is not None and abs(actual - expected) <= max(1e-9, abs(expected) * 1e-12):
+                diagnostics["account_balance_verified"].append(label)
+            else:
+                diagnostics["account_balance_mismatches"].append({"account": label, "expected": expected, "actual": actual, "row": row})
+        if diagnostics["account_balance_mismatches"]:
+            return {"ok": False, "error": "dashboard_account_balance_verification_failed", "diagnostics": diagnostics}
 
         zero_qty = _collect_zero_qty_validation(rows)
         diagnostics.update(zero_qty)
