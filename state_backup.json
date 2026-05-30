@@ -130,25 +130,25 @@
       "changed": 0,
       "failed_months": [],
       "failures": [],
-      "finished_at": "2026-05-30T13:11:16.869385+00:00",
+      "finished_at": "2026-05-30T13:33:45.791238+00:00",
       "mandatory_row_id": "monthly_aud_reval:bybit_live:2026-03",
       "partial": false,
       "processed_months": [],
       "rows": 2,
-      "started_at": "2026-05-30T13:11:16.831907+00:00",
+      "started_at": "2026-05-30T13:33:45.788915+00:00",
       "succeeded_months": [],
       "target_months": []
     },
-    "last_synced_at": "2026-05-30T13:11:16.869359+00:00",
+    "last_synced_at": "2026-05-30T13:33:45.791215+00:00",
     "month_key": null,
     "ok": true,
     "stage": "complete",
     "traceback": null,
-    "updated_at": "2026-05-30T13:11:16.869376+00:00"
+    "updated_at": "2026-05-30T13:33:45.791231+00:00"
   },
   "oanda_fill_state": {},
   "pending_webhooks": [],
-  "savedAt": "2026-05-30T13:11:18.785517+00:00",
+  "savedAt": "2026-05-30T13:33:48.009252+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [
@@ -51537,5 +51537,5 @@
   "watchlist": [
     "DASHUSDT"
   ],
-  "watchlist_updated_at": "2026-05-30T13:11:10.778006+00:00"
+  "watchlist_updated_at": "2026-05-30T13:33:39.025604+00:00"
 }
