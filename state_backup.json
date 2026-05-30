@@ -130,25 +130,25 @@
       "changed": 0,
       "failed_months": [],
       "failures": [],
-      "finished_at": "2026-05-30T12:39:17.148197+00:00",
+      "finished_at": "2026-05-30T13:11:16.869385+00:00",
       "mandatory_row_id": "monthly_aud_reval:bybit_live:2026-03",
       "partial": false,
       "processed_months": [],
       "rows": 2,
-      "started_at": "2026-05-30T12:39:16.859082+00:00",
+      "started_at": "2026-05-30T13:11:16.831907+00:00",
       "succeeded_months": [],
       "target_months": []
     },
-    "last_synced_at": "2026-05-30T12:39:17.148171+00:00",
+    "last_synced_at": "2026-05-30T13:11:16.869359+00:00",
     "month_key": null,
     "ok": true,
     "stage": "complete",
     "traceback": null,
-    "updated_at": "2026-05-30T12:39:17.148191+00:00"
+    "updated_at": "2026-05-30T13:11:16.869376+00:00"
   },
   "oanda_fill_state": {},
   "pending_webhooks": [],
-  "savedAt": "2026-05-30T12:39:24.780380+00:00",
+  "savedAt": "2026-05-30T13:11:18.785517+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [
@@ -51445,67 +51445,97 @@
         "trade_duration_seconds": null
       }
     ],
-    "updated_at": "2026-05-30T12:39:22.427173+00:00"
+    "updated_at": "2026-05-30T12:57:50.232665+00:00"
   },
   "trading_journal_import_cache": {},
   "trading_journal_state": {
     "daily_trade_sync": {
-      "last_attempt_at": "2026-05-30T12:26:05.880049+00:00",
-      "last_error": "Trading Journal.xlsx appears to be open in Excel. Close Excel, then press Resume.",
+      "last_attempt_at": "2026-05-30T12:46:30.836590+00:00",
+      "last_error": null,
       "last_reason": "startup_recovery",
       "last_result": {
         "balances_found": 0,
-        "code": "EXCEL_WORKBOOK_OPEN",
         "diagnostics": {
+          "blank_pnl_trade_rows": 0,
+          "cashflow_rows_total": 0,
+          "dedupe_groups": 0,
+          "dropbox_workbooks_seen": 0,
+          "duplicate_rows_dropped": 0,
+          "errors": [],
+          "excluded_test_trade_rows": 0,
+          "ignored_local_workbooks": [],
+          "last_sync": {},
+          "local_dir": "C:\\Users\\User\\Documents\\GPT\\CODEX-master\\journal",
+          "local_workbooks_seen": 1,
+          "quarantined_invalid_time_rows": 0,
+          "quarantined_rows": 0,
+          "raw_workbook_rows_total": 0,
+          "rows_by_account": {},
+          "rows_by_asset_class": {},
+          "rows_by_source": {},
+          "rows_total": 0,
+          "source_duplicate_rows_dropped": 0,
+          "source_mode": "master_journal",
+          "visible_trade_rows_total": 0
+        },
+        "errors": [],
+        "finished_at": "2026-05-30T12:39:22.576623+00:00",
+        "github_sync_branch": "master",
+        "github_sync_commit": "610787b",
+        "github_sync_enabled": true,
+        "github_sync_error": "",
+        "github_sync_error_type": "",
+        "github_sync_files": [
+          "journal/Trading Journal.xlsx",
+          "journal/5-digit-demo-calculation-context.json",
+          "state_backup.json"
+        ],
+        "github_sync_noop": false,
+        "github_sync_ok": true,
+        "github_sync_remote": "origin",
+        "master_journal_diagnostics": {
+          "source_balances": 7,
+          "source_rows_total": 1514,
+          "source_trade_rows": 1416,
           "workbook_sync_substage_timings": {
-            "enforce_single_file": 0.0,
-            "final_replace": 0.0,
+            "enforce_single_file": 0.001517,
+            "final_replace": 0.002633,
             "github_sync": 0.0,
-            "manual_override_read": 2.171769,
-            "snapshot_build": 366.919378,
-            "update_master_journal_workbook_data_only": 31.855007,
-            "validation_calendar": 0.028634,
-            "validation_dashboard_balances": 0.000668,
-            "validation_instrument_averages": 0.101409,
-            "validation_leaders": 0.005698,
+            "manual_override_read": 2.049036,
+            "snapshot_build": 388.485891,
+            "update_master_journal_workbook_data_only": 29.835301,
+            "validation_calendar": 0.044459,
+            "validation_dashboard_balances": 0.000911,
+            "validation_instrument_averages": 0.1219,
+            "validation_leaders": 0.013529,
             "validation_trade_log": 0.0,
-            "workbook_validation_load": 2.332275
+            "workbook_validation_load": 1.39641
           }
         },
-        "errors": [
-          "workbook_locked"
-        ],
-        "finished_at": "2026-05-30T12:19:22.366337+00:00",
-        "lock_status": {
-          "code": "EXCEL_WORKBOOK_OPEN",
-          "lock_file": "",
-          "locked": true,
-          "path": "C:\\Users\\User\\Documents\\GPT\\CODEX-master\\journal\\Trading Journal.xlsx",
-          "reason": "workbook_locked",
-          "winerror": 32
-        },
-        "master_journal_error": "Trading Journal.xlsx appears to be open in Excel. Close Excel, then press Resume.",
         "master_journal_exists": true,
-        "master_journal_ok": false,
+        "master_journal_ok": true,
         "master_journal_path": "C:\\Users\\User\\Documents\\GPT\\CODEX-master\\journal\\Trading Journal.xlsx",
-        "message": "Trading Journal.xlsx appears to be open in Excel. Close Excel, then press Resume.",
+        "master_journal_size_bytes": 297229,
+        "master_journal_updated_at": "2026-05-30T12:46:24.779003+00:00",
         "oanda_recovery": {},
-        "ok": false,
-        "retryable": true,
+        "ok": true,
         "rows_imported": 1514,
         "source": "master_journal",
         "source_mode": "master_journal",
-        "started_at": "2026-05-30T12:19:15.434935+00:00",
-        "status_code": 423,
+        "source_rows_total": 1514,
+        "source_trade_rows": 1416,
+        "started_at": "2026-05-30T12:39:16.859168+00:00",
+        "sync_caller": "unspecified",
+        "sync_id": "mjsync-74912f704214",
         "warnings": []
       },
-      "last_success_at": null,
-      "updated_at": "2026-05-30T12:26:05.905616+00:00"
+      "last_success_at": "2026-05-30T12:46:30.836617+00:00",
+      "updated_at": "2026-05-30T12:46:30.837725+00:00"
     }
   },
   "version": 4,
   "watchlist": [
     "DASHUSDT"
   ],
-  "watchlist_updated_at": "2026-05-30T12:39:10.671432+00:00"
+  "watchlist_updated_at": "2026-05-30T13:11:10.778006+00:00"
 }
