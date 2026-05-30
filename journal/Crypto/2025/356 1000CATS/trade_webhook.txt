@@ -1,0 +1,10 @@
+{
+  "symbol": "1000CATSUSDT",
+  "action": "sell",
+  "quantity": 10110.0,
+  "take_profit_price": "{{close}} - 0.000467",
+  "stop_loss_price": "{{close}} + 0.000232"
+}
+
+WEBHOOK FUTURES:
+https://app.signalstack.com/hook/bBXsexppDWXFDMxUhr7Soq

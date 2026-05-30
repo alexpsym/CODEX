@@ -1,0 +1,10 @@
+{
+  "symbol": "GPSUSDT",
+  "action": "buy",
+  "quantity": 2491.0,
+  "take_profit_price": "{{close}} + 0.001920",
+  "stop_loss_price": "{{close}} - 0.000940"
+}
+
+WEBHOOK FUTURES:
+https://app.signalstack.com/hook/6vSSkN1tYQLj3C1H3YQqpz

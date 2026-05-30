@@ -1,0 +1,10 @@
+{
+  "symbol": "HOOKUSDT",
+  "action": "sell",
+  "quantity": 2323.0,
+  "take_profit_price": "{{close}} - 0.002100",
+  "stop_loss_price": "{{close}} + 0.001000"
+}
+
+WEBHOOK FUTURES:
+https://app.signalstack.com/hook/bBXsexppDWXFDMxUhr7Soq

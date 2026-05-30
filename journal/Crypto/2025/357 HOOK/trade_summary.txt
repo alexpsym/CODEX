@@ -1,0 +1,35 @@
+==================================================
+              CRYPTO TRADE CALCULATOR
+==================================================
+
+                 TRADE PARAMETERS
+--------------------------------------------------
+Symbol:           HOOKUSDT
+Direction:        Short
+Order Type:       Market
+Account Balance:  232.31 USDT
+Risk Percent:     1%
+Risk Amount:      2.323057 USDT
+Entry Price:      0.084300 USDT
+
+                 POSITION DETAILS
+--------------------------------------------------
+Position Size:     195.83 USDT
+Quantity:          2323.000 HOOK
+Stop Loss Ticks:   10
+Stop Distance:     0.001000 USDT
+Target Distance:   -0.002100 USDT
+Stop Price:        0.085300 USDT
+Target Price:      0.082200 USDT
+
+                 RISK/REWARD
+--------------------------------------------------
+Gross Reward:     4.878300 USDT
+Net Profit:       4.757876 USDT
+Actual Risk:      2.323000 USDT
+Achieved RR:     2.05x
+
+                 COST BREAKDOWN
+--------------------------------------------------
+Fees:            0.120424 USDT
+Interest Cost:   0.000000 USDT

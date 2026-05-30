@@ -1,0 +1,66 @@
+{
+  "symbol": "PENGUUSDT",
+  "action": "buy",
+  "quantity": 7080.0,
+  "take_profit_price": "{{close}} + 0.000699",
+  "stop_loss_price": "{{close}} - 0.000337"
+}
+
+Summary
+==================================================
+              CRYPTO TRADE CALCULATOR
+==================================================
+
+                 TRADE PARAMETERS
+--------------------------------------------------
+Symbol:           PENGUUSDT
+Direction:        Long
+Order Type:       Market
+Account Balance:  238.82 USDT
+Risk Percent:     1.0%
+Risk Amount:      2.388214 USDT
+Entry Price:      0.019655 USDT
+
+                 POSITION DETAILS
+--------------------------------------------------
+Position Size:     139.16 USDT
+Quantity:          7080.000 PENGU
+Stop Loss Ticks:   337.0
+Stop Distance:     0.000337 USDT
+Target Distance:   0.000699 USDT
+Stop Price:        0.019318 USDT
+Target Price:      0.020354 USDT
+
+                 RISK/REWARD
+--------------------------------------------------
+Gross Reward:     4.948920 USDT
+Net Profit:       4.778962 USDT
+Actual Risk:      2.385960 USDT
+Achieved RR:     2.00x
+
+                 COST BREAKDOWN
+--------------------------------------------------
+Fees:            0.169958 USDT
+Interest Cost:   0.000000 USDT
+Position Details
+Item	Value
+Symbol	PENGUUSDT
+Direction	long
+Order Type	market
+Account Balance	238.8214147
+Risk Percent	1.0
+Risk Amount	2.388214147
+Entry Price	0.019655
+Position Usdt	139.1574
+Quantity	7080.0
+Stop Loss Ticks	337.0
+Stop Distance	0.000337
+Stop Price	0.019318
+Target Price	0.020353999999999997
+Gross Reward	4.948919999999988
+Net Profit	4.778961767999988
+Fees	0.169958232
+Interest Cost	0.0
+Actual Risk	2.3859600000000003
+Rr Ratio	2.0
+Achieved Rr	2.0029513353115673

@@ -1,0 +1,38 @@
+Timestamp: 2025-06-29 10:50:49
+Balance: 285.7104 USDT
+Placing Buy 0.01 BTC-30JUN25-107500-P-USDT @ 220
+Trade log: C:\Users\User\OneDrive\Documents\CRYPTO\PYTHON-C\optionstrader\optionstrader-clone\option_trade_log_20250629_105201.log
+
+Ticker Data:
+  ask1Iv: 0.2871
+  ask1Price: 345
+  ask1Size: 14.23
+  bid1Iv: 0.2819
+  bid1Price: 335
+  bid1Size: 1.53
+  change24h: -0.48251749
+  delta: -0.33550041
+  gamma: 0.00021438
+  highPrice24h: 735
+  indexPrice: 108112.60761339
+  lastPrice: 370
+  lowPrice24h: 285
+  markIv: 0.282
+  markPrice: 334.93331228
+  openInterest: 12.85
+  predictedDeliveryPrice: 0
+  symbol: BTC-30JUN25-107500-P-USDT
+  theta: -272.89798248
+  totalTurnover: 1597926
+  totalVolume: 15
+  turnover24h: 1375887.89630024
+  underlyingPrice: 108123.83030356
+  vega: 19.35886578
+  volume24h: 12.78
+
+Greek Exposures:
+Greek      Per-Contract    Qty    Exposure
+Delta       -0.3355       0.01   -0.003355
+Gamma        0.00021438   0.01    2.14e-06
+Vega        19.3589       0.01    0.193589
+Theta     -272.898        0.01   -2.72898

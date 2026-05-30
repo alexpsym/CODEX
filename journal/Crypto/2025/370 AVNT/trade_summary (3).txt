@@ -1,0 +1,36 @@
+==================================================
+              CRYPTO TRADE CALCULATOR
+==================================================
+
+                 TRADE PARAMETERS
+--------------------------------------------------
+Symbol:           AVNTUSDT
+Direction:        Long
+Order Type:       Market
+Account Balance:  225.48 USDT
+Risk Percent:     1.0%
+Risk Amount:      2.254785 USDT
+Entry Price:      1.931600 USDT
+
+                 POSITION DETAILS
+--------------------------------------------------
+Position Size:     30.91 USDT
+Quantity:          16.000 AVNT
+Stop Loss Ticks:   1404.0
+Stop Distance:     0.140400 USDT
+Target Distance:   0.287800 USDT
+Stop Price:        1.791200 USDT
+Target Price:      2.219400 USDT
+
+                 RISK/REWARD
+--------------------------------------------------
+Gross Reward:     4.604800 USDT
+Net Profit:       4.564950 USDT
+Actual Risk:      2.282139 USDT
+Achieved RR:     2.00x
+
+                 COST BREAKDOWN
+--------------------------------------------------
+Fees:            0.039850 USDT
+Interest Cost:   0.000000 USDT
+Funding Rate:    0.0718%

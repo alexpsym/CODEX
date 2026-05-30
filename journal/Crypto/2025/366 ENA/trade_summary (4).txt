@@ -1,0 +1,35 @@
+==================================================
+              CRYPTO TRADE CALCULATOR
+==================================================
+
+                 TRADE PARAMETERS
+--------------------------------------------------
+Symbol:           ENAUSDT
+Direction:        Long
+Order Type:       Market
+Account Balance:  224.50 USDT
+Risk Percent:     1.0%
+Risk Amount:      2.244975 USDT
+Entry Price:      0.731700 USDT
+
+                 POSITION DETAILS
+--------------------------------------------------
+Position Size:     53.41 USDT
+Quantity:          73.000 ENA
+Stop Loss Ticks:   300.0
+Stop Distance:     0.030000 USDT
+Target Distance:   0.062700 USDT
+Stop Price:        0.701700 USDT
+Target Price:      0.794400 USDT
+
+                 RISK/REWARD
+--------------------------------------------------
+Gross Reward:     4.577100 USDT
+Net Profit:       4.510257 USDT
+Actual Risk:      2.252783 USDT
+Achieved RR:     2.00x
+
+                 COST BREAKDOWN
+--------------------------------------------------
+Fees:            0.066843 USDT
+Interest Cost:   0.000000 USDT

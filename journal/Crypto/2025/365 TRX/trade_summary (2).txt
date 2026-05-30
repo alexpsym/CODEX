@@ -1,0 +1,35 @@
+==================================================
+              CRYPTO TRADE CALCULATOR
+==================================================
+
+                 TRADE PARAMETERS
+--------------------------------------------------
+Symbol:           TRXUSDT
+Direction:        Long
+Order Type:       Market
+Account Balance:  226.86 USDT
+Risk Percent:     1.0%
+Risk Amount:      2.268642 USDT
+Entry Price:      0.368040 USDT
+
+                 POSITION DETAILS
+--------------------------------------------------
+Position Size:     430.24 USDT
+Quantity:          1169.000 TRX
+Stop Loss Ticks:   150.0
+Stop Distance:     0.001500 USDT
+Target Distance:   0.004330 USDT
+Stop Price:        0.366540 USDT
+Target Price:      0.372370 USDT
+
+                 RISK/REWARD
+--------------------------------------------------
+Gross Reward:     5.061770 USDT
+Net Profit:       4.542446 USDT
+Actual Risk:      2.268734 USDT
+Achieved RR:     2.00x
+
+                 COST BREAKDOWN
+--------------------------------------------------
+Fees:            0.519324 USDT
+Interest Cost:   0.000000 USDT

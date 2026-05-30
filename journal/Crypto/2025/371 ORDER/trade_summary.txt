@@ -1,0 +1,36 @@
+==================================================
+              CRYPTO TRADE CALCULATOR
+==================================================
+
+                 TRADE PARAMETERS
+--------------------------------------------------
+Symbol:           ORDERUSDT
+Direction:        Long
+Order Type:       Market
+Account Balance:  231.96 USDT
+Risk Percent:     1.0%
+Risk Amount:      2.319639 USDT
+Entry Price:      0.439900 USDT
+
+                 POSITION DETAILS
+--------------------------------------------------
+Position Size:     43.55 USDT
+Quantity:          99.000 ORDER
+Stop Loss Ticks:   230.0
+Stop Distance:     0.023000 USDT
+Target Distance:   0.047600 USDT
+Stop Price:        0.416900 USDT
+Target Price:      0.487500 USDT
+
+                 RISK/REWARD
+--------------------------------------------------
+Gross Reward:     4.712400 USDT
+Net Profit:       4.657312 USDT
+Actual Risk:      2.327894 USDT
+Achieved RR:     2.00x
+
+                 COST BREAKDOWN
+--------------------------------------------------
+Fees:            0.055088 USDT
+Interest Cost:   0.000000 USDT
+Funding Rate:    0.0088%

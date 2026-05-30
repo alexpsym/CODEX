@@ -1,0 +1,10 @@
+{
+  "symbol": "TLMUSDT",
+  "action": "sell",
+  "quantity": 17406.0,
+  "take_profit_price": "{{close}} - 0.000277",
+  "stop_loss_price": "{{close}} + 0.000136"
+}
+
+WEBHOOK FUTURES:
+https://app.signalstack.com/hook/bBXsexppDWXFDMxUhr7Soq
