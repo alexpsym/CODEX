@@ -2080,7 +2080,8 @@ def test_resync_endpoint_runs_workbook_sync_without_import_parser(monkeypatch, t
     monkeypatch.setattr(ms, '_master_journal_path', lambda: tmp_path / 'Trading Journal.xlsx')
     monkeypatch.setattr(ms, '_master_journal_lock_status', lambda _path: {'locked': False})
     called = {'sync': 0, 'import': 0}
-    monkeypatch.setattr(ms, '_sync_master_journal_workbook', lambda **_kwargs: called.update(sync=called['sync'] + 1) or {'master_journal_ok': True, 'master_journal_path': str(tmp_path / 'Trading Journal.xlsx'), 'master_journal_diagnostics': {'workbook_sync_substage_timings': {'snapshot_build': 0.1}}})
+    monkeypatch.setattr(ms, '_sync_master_journal_workbook_unlocked', lambda **_kwargs: called.update(sync=called['sync'] + 1) or {'master_journal_ok': True, 'master_journal_path': str(tmp_path / 'Trading Journal.xlsx'), 'master_journal_diagnostics': {'workbook_sync_substage_timings': {'snapshot_build': 0.1}}})
+    monkeypatch.setattr(ms, '_build_trading_journal_view_snapshot', lambda **_kwargs: {'items': [], 'stats': {'totals': {}, 'groups': {}}, 'balances': []})
     monkeypatch.setattr(ms, '_import_uploaded_trading_journal_file', lambda *_a, **_k: called.update({'import': called['import'] + 1}) or {'ok': False})
     result = ms._run_trading_journal_resync()
     assert result['ok'] is True
@@ -2108,12 +2109,36 @@ def test_workspace_and_status_routes_do_not_start_workbook_sync(monkeypatch):
     assert client.get('/api/oanda-inactivity-status').status_code == 200
 
 
+def test_resync_rejects_active_workbook_sync_before_snapshot_build(monkeypatch, tmp_path):
+    ms = _load_master_service_for_import_test()
+    path = tmp_path / 'Trading Journal.xlsx'
+    monkeypatch.setattr(ms, '_master_journal_path', lambda: path)
+    monkeypatch.setattr(ms, '_master_journal_lock_status', lambda _path: {'locked': False})
+    assert ms.MASTER_JOURNAL_WORKBOOK_SYNC_LOCK.acquire(blocking=False) is True
+    try:
+        ms.MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.update({'sync_id': 'active-sync', 'caller': 'manual_import', 'path': str(path), 'started_epoch': ms.time.time() - 3.25})
+        monkeypatch.setattr(ms, '_build_trading_journal_view_snapshot', lambda **_kwargs: (_ for _ in ()).throw(AssertionError('resync must reject before snapshot build')))
+        result = ms._run_trading_journal_resync()
+    finally:
+        ms.MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.clear()
+        ms.MASTER_JOURNAL_WORKBOOK_SYNC_LOCK.release()
+    assert result['ok'] is False
+    assert result['status_code'] == 409
+    assert result['code'] == 'MASTER_JOURNAL_SYNC_IN_PROGRESS'
+    assert result['snapshot_build_ran'] is False
+    assert result['skipped_snapshot_build'] is True
+    assert result['active_sync_id'] == 'active-sync'
+    assert result['active_caller'] == 'manual_import'
+    assert result['active_path'] == str(path)
+    assert result['active_elapsed_seconds'] >= 3
+
+
 def test_core_workbook_sync_singleflight_rejects_duplicate_before_snapshot_build(monkeypatch, tmp_path):
     ms = _load_master_service_for_import_test()
     monkeypatch.setattr(ms, '_master_journal_path', lambda: tmp_path / 'Trading Journal.xlsx')
     assert ms.MASTER_JOURNAL_WORKBOOK_SYNC_LOCK.acquire(blocking=False) is True
     try:
-        ms.MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.update({'sync_id': 'active-sync', 'caller': 'resync', 'path': str(tmp_path / 'Trading Journal.xlsx')})
+        ms.MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.update({'sync_id': 'active-sync', 'caller': 'resync', 'path': str(tmp_path / 'Trading Journal.xlsx'), 'started_epoch': ms.time.time() - 2.0})
         monkeypatch.setattr(ms, '_build_trading_journal_view_snapshot', lambda **_kwargs: (_ for _ in ()).throw(AssertionError('duplicate core sync must not build snapshot')))
         result = ms._sync_master_journal_workbook(sync_caller='test-duplicate')
     finally:
@@ -2123,6 +2148,9 @@ def test_core_workbook_sync_singleflight_rejects_duplicate_before_snapshot_build
     assert result['status_code'] == 409
     assert result['code'] == 'MASTER_JOURNAL_SYNC_IN_PROGRESS'
     assert result['active_sync']['sync_id'] == 'active-sync'
+    assert result['active_sync_id'] == 'active-sync'
+    assert result['active_caller'] == 'resync'
+    assert result['active_elapsed_seconds'] >= 1
 
 
 def test_resync_fast_path_survives_memory_clear_via_persisted_metadata(monkeypatch, tmp_path):
@@ -2153,7 +2181,10 @@ def test_resync_fast_path_survives_memory_clear_via_persisted_metadata(monkeypat
 
 def test_sync_and_snapshot_logs_include_sync_id_and_caller(monkeypatch, caplog):
     ms = _load_master_service_for_import_test()
-    monkeypatch.setattr(ms, '_sync_master_journal_workbook_unlocked', lambda **_kwargs: {'master_journal_ok': True, 'ok': True})
+    def _logged_unlocked(**kwargs):
+        assert kwargs['sync_caller'] != 'unspecified'
+        return {'master_journal_ok': True, 'ok': True}
+    monkeypatch.setattr(ms, '_sync_master_journal_workbook_unlocked', _logged_unlocked)
     with caplog.at_level('INFO'):
         result = ms._sync_master_journal_workbook(sync_id='sync-log-test', sync_caller='unit-test')
     assert result['sync_id'] == 'sync-log-test'
@@ -2192,10 +2223,12 @@ def test_resync_builds_authoritative_snapshot_once_and_reuses_it(monkeypatch, tm
     def _sync_once(**kwargs):
         called['sync'] += 1
         assert kwargs['prebuilt_snapshot'] is snapshot
+        assert kwargs['sync_id'].startswith('resync-')
+        assert kwargs['sync_caller'] == 'resync'
         return {'master_journal_ok': True, 'master_journal_path': str(tmp_path / 'Trading Journal.xlsx')}
 
     monkeypatch.setattr(ms, '_build_trading_journal_view_snapshot', _build_once)
-    monkeypatch.setattr(ms, '_sync_master_journal_workbook', _sync_once)
+    monkeypatch.setattr(ms, '_sync_master_journal_workbook_unlocked', _sync_once)
     result = ms._run_trading_journal_resync()
     assert result['ok'] is True
     assert result['snapshot_build_ran'] is True
@@ -2258,7 +2291,7 @@ def test_resync_changed_fingerprint_forces_full_snapshot_build(monkeypatch, tmp_
     monkeypatch.setattr(ms, '_journal_source_fingerprint', lambda: {'new': 2})
     called = {'build': 0, 'sync': 0}
     monkeypatch.setattr(ms, '_build_trading_journal_view_snapshot', lambda **_kwargs: called.update(build=called['build'] + 1) or snapshot)
-    monkeypatch.setattr(ms, '_sync_master_journal_workbook', lambda **_kwargs: called.update(sync=called['sync'] + 1) or {'master_journal_ok': True, 'master_journal_path': str(mj)})
+    monkeypatch.setattr(ms, '_sync_master_journal_workbook_unlocked', lambda **_kwargs: called.update(sync=called['sync'] + 1) or {'master_journal_ok': True, 'master_journal_path': str(mj)})
     result = ms._run_trading_journal_resync()
     assert result['ok'] is True
     assert result['snapshot_build_ran'] is True
@@ -2277,6 +2310,14 @@ def test_resync_concurrent_duplicate_is_rejected_before_snapshot_build(monkeypat
     assert result['ok'] is False
     assert result['status_code'] == 409
     assert result['code'] == 'TRADING_JOURNAL_RESYNC_IN_PROGRESS'
+
+
+def test_workbook_sync_call_sites_use_explicit_callers():
+    source = (ROOT / 'render' / 'master_service.py').read_text(encoding='utf-8')
+    call_lines = [line.strip() for line in source.splitlines() if '_sync_master_journal_workbook(' in line and not line.lstrip().startswith('def ')]
+    assert call_lines
+    assert all('sync_caller=' in line for line in call_lines), call_lines
+    assert 'caller=unspecified' not in source
 
 
 def test_sync_compatibility_route_invokes_one_resync(monkeypatch):

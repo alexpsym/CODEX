@@ -1676,10 +1676,10 @@ def _build_trading_journal_view_snapshot(
     skip_external_balances: bool = False,
     skip_live_account_refresh: bool = False,
     sync_id: Optional[str] = None,
-    sync_caller: str = "unspecified",
+    sync_caller: str = "direct",
 ) -> Dict[str, object]:
     snapshot_sync_id = str(sync_id or f"snapshot-{uuid4().hex[:12]}")
-    snapshot_caller = str(sync_caller or "unspecified")
+    snapshot_caller = str(sync_caller or "direct").strip() or "direct"
     snapshot_started = time.perf_counter()
     APP_LOGGER.info(
         "trading_journal_snapshot_build_start sync_id=%s caller=%s force=%s local_only=%s skip_external_balances=%s skip_live_account_refresh=%s",
@@ -26098,29 +26098,63 @@ async def _run_trading_journal_sync_job() -> None:
         hb_task.cancel()
 
 
-def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_survivor_row_ids: Optional[List[str]] = None, prebuilt_snapshot: Optional[Dict[str, object]] = None, sync_caller: str = "unspecified", sync_id: Optional[str] = None) -> Dict[str, object]:
-    sync_id = str(sync_id or f"mjsync-{uuid4().hex[:12]}")
-    caller = str(sync_caller or "unspecified")
-    path = _master_journal_path()
+def _master_journal_active_sync_payload(path: Path, sync_id: str, caller: str) -> Dict[str, object]:
+    active = dict(MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE)
+    started_epoch = _to_float(active.get("started_epoch"))
+    elapsed = max(0.0, time.time() - started_epoch) if started_epoch is not None else 0.0
+    active_sync_id = str(active.get("sync_id") or "")
+    active_caller = str(active.get("caller") or "")
+    active_path = str(active.get("path") or "")
+    return {
+        "ok": False,
+        "master_journal_ok": False,
+        "master_journal_path": str(path),
+        "master_journal_exists": path.exists(),
+        "master_journal_error": "Trading Journal workbook sync is already running.",
+        "master_journal_error_type": "MASTER_JOURNAL_SYNC_IN_PROGRESS",
+        "code": "MASTER_JOURNAL_SYNC_IN_PROGRESS",
+        "status_code": 409,
+        "sync_id": sync_id,
+        "sync_caller": caller,
+        "active_sync": active,
+        "active_sync_id": active_sync_id,
+        "active_caller": active_caller,
+        "active_path": active_path,
+        "active_elapsed_seconds": round(elapsed, 3),
+        "diagnostics": {"workbook_sync_substage_timings": {}},
+    }
+
+
+def _reserve_master_journal_workbook_sync(path: Path, sync_id: str, caller: str) -> Optional[Dict[str, object]]:
     if not MASTER_JOURNAL_WORKBOOK_SYNC_LOCK.acquire(blocking=False):
-        active = dict(MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE)
-        APP_LOGGER.warning("master_journal_workbook_sync_rejected sync_id=%s caller=%s active_sync_id=%s active_caller=%s", sync_id, caller, active.get("sync_id"), active.get("caller"))
-        return {
-            "ok": False,
-            "master_journal_ok": False,
-            "master_journal_path": str(path),
-            "master_journal_exists": path.exists(),
-            "master_journal_error": "Trading Journal workbook sync is already running.",
-            "master_journal_error_type": "MASTER_JOURNAL_SYNC_IN_PROGRESS",
-            "code": "MASTER_JOURNAL_SYNC_IN_PROGRESS",
-            "status_code": 409,
-            "sync_id": sync_id,
-            "sync_caller": caller,
-            "active_sync": active,
-            "diagnostics": {"workbook_sync_substage_timings": {}},
-        }
+        APP_LOGGER.warning(
+            "master_journal_workbook_sync_rejected sync_id=%s caller=%s active_sync_id=%s active_caller=%s",
+            sync_id, caller, MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.get("sync_id"), MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.get("caller"),
+        )
+        return _master_journal_active_sync_payload(path, sync_id, caller)
     MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.clear()
-    MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.update({"sync_id": sync_id, "caller": caller, "path": str(path), "started_at": _utc_now_iso()})
+    MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.update({
+        "sync_id": sync_id,
+        "caller": caller,
+        "path": str(path),
+        "started_at": _utc_now_iso(),
+        "started_epoch": time.time(),
+    })
+    return None
+
+
+def _release_master_journal_workbook_sync() -> None:
+    MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.clear()
+    MASTER_JOURNAL_WORKBOOK_SYNC_LOCK.release()
+
+
+def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_survivor_row_ids: Optional[List[str]] = None, prebuilt_snapshot: Optional[Dict[str, object]] = None, sync_caller: str = "direct", sync_id: Optional[str] = None) -> Dict[str, object]:
+    sync_id = str(sync_id or f"mjsync-{uuid4().hex[:12]}")
+    caller = str(sync_caller or "direct").strip() or "direct"
+    path = _master_journal_path()
+    rejected = _reserve_master_journal_workbook_sync(path, sync_id, caller)
+    if rejected is not None:
+        return rejected
     APP_LOGGER.info("master_journal_workbook_sync_start sync_id=%s caller=%s path=%s prebuilt_snapshot=%s", sync_id, caller, path, isinstance(prebuilt_snapshot, dict))
     try:
         result = _sync_master_journal_workbook_unlocked(
@@ -26136,11 +26170,10 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
         APP_LOGGER.info("master_journal_workbook_sync_done sync_id=%s caller=%s ok=%s snapshot_build_ran=%s", sync_id, caller, bool((result or {}).get("master_journal_ok") if isinstance(result, dict) else False), not isinstance(prebuilt_snapshot, dict))
         return result
     finally:
-        MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.clear()
-        MASTER_JOURNAL_WORKBOOK_SYNC_LOCK.release()
+        _release_master_journal_workbook_sync()
 
 
-def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, expected_survivor_row_ids: Optional[List[str]] = None, prebuilt_snapshot: Optional[Dict[str, object]] = None, sync_caller: str = "unspecified", sync_id: Optional[str] = None) -> Dict[str, object]:
+def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, expected_survivor_row_ids: Optional[List[str]] = None, prebuilt_snapshot: Optional[Dict[str, object]] = None, sync_caller: str = "direct", sync_id: Optional[str] = None) -> Dict[str, object]:
     path = _master_journal_path()
     tmp = path.with_suffix('.tmp.xlsx')
     created_tmp = False
@@ -27084,7 +27117,7 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 t3 = time.perf_counter()
                 _update_trading_journal_import_status(stage="workbook_sync", message="Updating Trading Journal.xlsx")
                 APP_LOGGER.info("trading_journal_import_stage_start stage=workbook_sync upload=%s", name)
-                sync_result = _sync_master_journal_workbook(defer_github_sync=True, expected_survivor_row_ids=expected_survivors, prebuilt_snapshot=manual_import_snapshot)
+                sync_result = _sync_master_journal_workbook(defer_github_sync=True, expected_survivor_row_ids=expected_survivors, prebuilt_snapshot=manual_import_snapshot, sync_caller="manual_import")
                 timings["workbook_sync"] = round(time.perf_counter() - t3, 6)
                 APP_LOGGER.info("trading_journal_import_stage_done stage=workbook_sync elapsed=%.6fs upload=%s", timings["workbook_sync"], name)
                 if not _master_journal_sync_ok(sync_result):
@@ -27320,7 +27353,7 @@ async def trading_journal_bybit_demo_balance_adjustment(payload: Dict[str, objec
     try:
         _PENDING_MANUAL_SYNC_ROWS = [*prev_pending, dict(row)]
         _set_trading_journal_rows([*prev_rows, dict(row)])
-        sync = _sync_master_journal_workbook(defer_github_sync=True)
+        sync = _sync_master_journal_workbook(defer_github_sync=True, sync_caller="bybit_demo_balance_adjustment")
         if not _master_journal_sync_ok(sync):
             raise RuntimeError(_master_journal_sync_error(sync))
         verify = _verify_trade_log_row_ids_in_workbook(_master_journal_path(), [row["id"]])
@@ -27414,7 +27447,7 @@ async def trading_journal_crypto_monthly_pnl() -> JSONResponse:
     run = await _run_monthly_aud_revaluation_sync(reason="manual_crypto_monthly_pnl")
     if not run.get("ok"):
         return JSONResponse({"ok": False, "button": "crypto_monthly_pnl", **run}, status_code=500)
-    workbook_sync = _sync_master_journal_workbook()
+    workbook_sync = _sync_master_journal_workbook(sync_caller="crypto_monthly_pnl")
     path = Path(str(workbook_sync.get("master_journal_path") or wb_path))
     expected_ids = [f"monthly_aud_reval:bybit_live:{m}" for m in due]
     verification = _verify_trade_log_row_ids_in_workbook(path, expected_ids)
@@ -27649,6 +27682,7 @@ def _run_trading_journal_resync() -> Dict[str, object]:
     timings: Dict[str, float] = {}
     started = time.perf_counter()
     path = _master_journal_path()
+    master_reserved = False
     if not TRADING_JOURNAL_RESYNC_LOCK.acquire(blocking=False):
         return {
             "ok": False,
@@ -27657,7 +27691,7 @@ def _run_trading_journal_resync() -> Dict[str, object]:
             "message": "Trading Journal Resync is already running.",
             "request_id": request_id,
             "app_version": _trading_journal_code_version(),
-            "fast_path_reason": "sync_already_running",
+            "fast_path_reason": "resync_already_running",
             "master_journal_path": str(path),
             "resync_timings": timings,
             "status_code": 409,
@@ -27670,6 +27704,21 @@ def _run_trading_journal_resync() -> Dict[str, object]:
             payload["status_code"] = 409
             return payload
 
+        rejected = _reserve_master_journal_workbook_sync(path, request_id, "resync")
+        if rejected is not None:
+            rejected.update({
+                "button": "resync",
+                "request_id": request_id,
+                "app_version": _trading_journal_code_version(),
+                "fast_path_reason": "workbook_sync_already_running",
+                "resync_timings": timings,
+                "skipped_snapshot_build": True,
+                "snapshot_build_ran": False,
+            })
+            return rejected
+        master_reserved = True
+        APP_LOGGER.info("master_journal_workbook_sync_start sync_id=%s caller=resync path=%s prebuilt_snapshot=True reserved_before_snapshot=True", request_id, path)
+
         fingerprint = _journal_source_fingerprint()
         fast_snapshot, fast_path_reason = _resync_fast_path_snapshot(path, fingerprint)
         if isinstance(fast_snapshot, dict):
@@ -27678,11 +27727,14 @@ def _run_trading_journal_resync() -> Dict[str, object]:
             timings["fast_verification"] = round(time.perf_counter() - t0, 6)
             timings["total"] = round(time.perf_counter() - started, 6)
             if verification.get("ok"):
+                APP_LOGGER.info("master_journal_workbook_sync_done sync_id=%s caller=resync ok=True snapshot_build_ran=False", request_id)
                 payload = {
                     "ok": True,
                     "button": "resync",
                     "message": "Trading Journal resync verified; no source changes detected.",
                     "request_id": request_id,
+                    "sync_id": request_id,
+                    "sync_caller": "resync",
                     "master_journal_path": str(path),
                     "resync_timings": timings,
                     "skipped_snapshot_build": True,
@@ -27701,8 +27753,11 @@ def _run_trading_journal_resync() -> Dict[str, object]:
         snapshot = _build_trading_journal_view_snapshot(force=True, skip_external_balances=True, skip_live_account_refresh=True, sync_id=request_id, sync_caller="resync") or {}
         timings["snapshot_build"] = round(time.perf_counter() - t0, 6)
         t0 = time.perf_counter()
-        sync = _sync_master_journal_workbook(defer_github_sync=True, prebuilt_snapshot=snapshot if isinstance(snapshot, dict) else {}, sync_caller="resync", sync_id=request_id)
+        sync = _sync_master_journal_workbook_unlocked(defer_github_sync=True, prebuilt_snapshot=snapshot if isinstance(snapshot, dict) else {}, sync_caller="resync", sync_id=request_id)
         timings["workbook_sync"] = round(time.perf_counter() - t0, 6)
+        if isinstance(sync, dict):
+            sync.setdefault("sync_id", request_id)
+            sync.setdefault("sync_caller", "resync")
         ok = _master_journal_sync_ok(sync)
         verification = None
         if ok and path.exists():
@@ -27713,14 +27768,16 @@ def _run_trading_journal_resync() -> Dict[str, object]:
                 ok = False
                 sync = {**(sync if isinstance(sync, dict) else {}), "master_journal_ok": False, "master_journal_error": verification.get("error"), "master_journal_diagnostics": {"fast_verification": verification}}
         if ok and isinstance(snapshot, dict):
+            verified_fingerprint = _journal_source_fingerprint()
             TRADING_JOURNAL_RESYNC_LAST_SUCCESS.update({
-                "fingerprint": _journal_source_fingerprint(),
+                "fingerprint": verified_fingerprint,
                 "snapshot": copy.deepcopy(snapshot),
                 "verified_at": _utc_now_iso(),
                 "workbook_path": str(path),
             })
-            _save_resync_success_metadata(path, _journal_source_fingerprint(), snapshot)
+            _save_resync_success_metadata(path, verified_fingerprint, snapshot)
         timings["total"] = round(time.perf_counter() - started, 6)
+        APP_LOGGER.info("master_journal_workbook_sync_done sync_id=%s caller=resync ok=%s snapshot_build_ran=True", request_id, ok)
         payload = {"ok": ok, "button": "resync", "message": "Trading Journal resync complete." if ok else _master_journal_sync_error(sync), "request_id": request_id, "app_version": _trading_journal_code_version(), "resync_timings": timings, "skipped_snapshot_build": False, "snapshot_build_ran": True, "fast_path_reason": fast_path_reason, **(sync if isinstance(sync, dict) else {})}
         if verification is not None:
             payload["fast_verification"] = verification
@@ -27729,6 +27786,8 @@ def _run_trading_journal_resync() -> Dict[str, object]:
     finally:
         timings.setdefault("total", round(time.perf_counter() - started, 6))
         APP_LOGGER.info("trading_journal_resync_done request_id=%s elapsed=%.6fs", request_id, timings.get("total") or 0.0)
+        if master_reserved:
+            _release_master_journal_workbook_sync()
         TRADING_JOURNAL_RESYNC_LOCK.release()
 
 
