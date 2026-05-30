@@ -1676,10 +1676,10 @@ def _build_trading_journal_view_snapshot(
     skip_external_balances: bool = False,
     skip_live_account_refresh: bool = False,
     sync_id: Optional[str] = None,
-    sync_caller: str = "direct",
+    sync_caller: Optional[str] = None,
 ) -> Dict[str, object]:
     snapshot_sync_id = str(sync_id or f"snapshot-{uuid4().hex[:12]}")
-    snapshot_caller = str(sync_caller or "direct").strip() or "direct"
+    snapshot_caller = str(sync_caller or "snapshot").strip() or "snapshot"
     snapshot_started = time.perf_counter()
     APP_LOGGER.info(
         "trading_journal_snapshot_build_start sync_id=%s caller=%s force=%s local_only=%s skip_external_balances=%s skip_live_account_refresh=%s",
@@ -9447,7 +9447,7 @@ def _compute_autostart_scripts() -> List[str]:
 
 
 async def _run_startup_recovery_import_if_needed() -> None:
-    if _is_scanner_local_ui_mode():
+    if _is_scanner_local_ui_mode() or _master_journal_single_file_mode():
         return
     _set_trading_journal_sync_state(
         running=True,
@@ -9475,7 +9475,7 @@ async def _run_startup_recovery_import_if_needed() -> None:
                 pass
     try:
         result = await asyncio.to_thread(_import_trading_journal_from_sources)
-        workbook_sync = await asyncio.to_thread(_sync_master_journal_workbook)
+        workbook_sync = await asyncio.to_thread(_sync_master_journal_workbook, sync_caller="startup_recovery")
         if isinstance(result, dict):
             result.update(workbook_sync)
         else:
@@ -9876,7 +9876,19 @@ async def _autostart_scripts() -> None:
         asyncio.create_task(_ensure_trading_journal_dropbox_templates())
     asyncio.create_task(_log_outbound_traffic_summary())
     global TRADING_JOURNAL_SYNC_TASK
-    TRADING_JOURNAL_SYNC_TASK = asyncio.create_task(_start_startup_recovery_import_after_restore())
+    if _master_journal_single_file_mode():
+        _set_trading_journal_sync_state(
+            running=False,
+            progress=100,
+            message="Startup journal sync skipped; use Resync to update Trading Journal.xlsx.",
+            ok=True,
+            error=None,
+            result={"startup_sync_skipped": True, "reason": "master_journal_single_file_mode"},
+            finished_at=_utc_now_iso(),
+        )
+        TRADING_JOURNAL_SYNC_TASK = None
+    else:
+        TRADING_JOURNAL_SYNC_TASK = asyncio.create_task(_start_startup_recovery_import_after_restore())
     if (not _trading_journal_excel_only_mode()) and (not _master_journal_single_file_mode()):
         asyncio.create_task(_schedule_daily_trade_history_sync())
     asyncio.create_task(_schedule_monthly_aud_revaluation_sync())
@@ -25880,7 +25892,7 @@ async def _run_trading_journal_sync_job() -> None:
         if _trading_journal_local_excel_authoritative() and run_closed_trade_capture and not _master_journal_single_file_mode():
             result = await asyncio.to_thread(_import_trading_journal_from_sources, progress_cb=_cb)
         _set_trading_journal_sync_state(stage="updating_master_journal", message="Updating Trading Journal.xlsx…")
-        workbook_sync = await asyncio.to_thread(_sync_master_journal_workbook)
+        workbook_sync = await asyncio.to_thread(_sync_master_journal_workbook, sync_caller="manual_sync")
         _PENDING_MANUAL_SYNC_ROWS = []
         if isinstance(result, dict):
             result.update(workbook_sync)
@@ -26148,10 +26160,25 @@ def _release_master_journal_workbook_sync() -> None:
     MASTER_JOURNAL_WORKBOOK_SYNC_LOCK.release()
 
 
-def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_survivor_row_ids: Optional[List[str]] = None, prebuilt_snapshot: Optional[Dict[str, object]] = None, sync_caller: str = "direct", sync_id: Optional[str] = None) -> Dict[str, object]:
+def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_survivor_row_ids: Optional[List[str]] = None, prebuilt_snapshot: Optional[Dict[str, object]] = None, sync_caller: Optional[str] = None, sync_id: Optional[str] = None) -> Dict[str, object]:
     sync_id = str(sync_id or f"mjsync-{uuid4().hex[:12]}")
-    caller = str(sync_caller or "direct").strip() or "direct"
+    caller = str(sync_caller or "").strip()
     path = _master_journal_path()
+    if not caller or caller.lower() == "direct":
+        APP_LOGGER.error("master_journal_workbook_sync_missing_caller sync_id=%s caller=%s path=%s", sync_id, caller or "<missing>", path)
+        return {
+            "ok": False,
+            "master_journal_ok": False,
+            "master_journal_path": str(path),
+            "master_journal_exists": path.exists(),
+            "master_journal_error": "Trading Journal workbook sync requires an explicit user/action caller.",
+            "master_journal_error_type": "MASTER_JOURNAL_SYNC_CALLER_REQUIRED",
+            "code": "MASTER_JOURNAL_SYNC_CALLER_REQUIRED",
+            "status_code": 500,
+            "sync_id": sync_id,
+            "sync_caller": caller,
+            "diagnostics": {"workbook_sync_substage_timings": {}},
+        }
     rejected = _reserve_master_journal_workbook_sync(path, sync_id, caller)
     if rejected is not None:
         return rejected
@@ -26173,7 +26200,7 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
         _release_master_journal_workbook_sync()
 
 
-def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, expected_survivor_row_ids: Optional[List[str]] = None, prebuilt_snapshot: Optional[Dict[str, object]] = None, sync_caller: str = "direct", sync_id: Optional[str] = None) -> Dict[str, object]:
+def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, expected_survivor_row_ids: Optional[List[str]] = None, prebuilt_snapshot: Optional[Dict[str, object]] = None, sync_caller: str = "internal", sync_id: Optional[str] = None) -> Dict[str, object]:
     path = _master_journal_path()
     tmp = path.with_suffix('.tmp.xlsx')
     created_tmp = False

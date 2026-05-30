@@ -183,6 +183,15 @@
     return text ? `\nTimings: ${text}` : '';
   };
 
+  const isActiveSyncPayload = (payload) => payload && (payload.code === 'MASTER_JOURNAL_SYNC_IN_PROGRESS' || payload.code === 'TRADING_JOURNAL_RESYNC_IN_PROGRESS');
+
+  const formatActiveSyncMessage = (payload) => {
+    const caller = String(payload?.active_caller || payload?.sync_caller || 'unknown');
+    const elapsedRaw = Number(payload?.active_elapsed_seconds);
+    const elapsed = Number.isFinite(elapsedRaw) ? elapsedRaw.toFixed(elapsedRaw >= 10 ? 0 : 1) : '0';
+    return `Trading Journal sync already running: caller=${caller}, elapsed=${elapsed}s`;
+  };
+
   const runResync = async () => {
     if (resyncInFlight) return;
     resyncInFlight = true;
@@ -201,6 +210,7 @@
         setPendingRetry('resync', runResync);
         return;
       }
+      if (isActiveSyncPayload(payload)) throw new Error(formatActiveSyncMessage(payload));
       if (!res.ok || payload.ok !== true) throw new Error(payload.message || payload.error || payload.detail || 'Trading Journal resync failed.');
       const diagnostics = payload.master_journal_diagnostics || payload.diagnostics || {};
       const stageTimings = diagnostics.workbook_sync_substage_timings || payload.resync_timings || {};

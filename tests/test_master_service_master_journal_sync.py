@@ -186,7 +186,7 @@ def test_manual_sync_endpoint_path_writes_rows_and_is_idempotent(tmp_path) -> No
     ms._trading_journal_github_sync_enabled = lambda: False
     debug_seen = {"pending_ids": [], "snapshot_ids": []}
     _real_sync_master = ms._sync_master_journal_workbook
-    def _sync_master_with_debug():
+    def _sync_master_with_debug(**kwargs):
         debug_seen["pending_ids"] = [
             str(r.get("id") or "").strip()
             for r in (ms._PENDING_MANUAL_SYNC_ROWS or [])
@@ -198,7 +198,7 @@ def test_manual_sync_endpoint_path_writes_rows_and_is_idempotent(tmp_path) -> No
             for r in (snap.get("items") or [])
             if isinstance(r, dict)
         ]
-        return _real_sync_master()
+        return _real_sync_master(**kwargs)
     ms._sync_master_journal_workbook = _sync_master_with_debug
     calls = {"exec": 0}
     async def _fake_exec_chunked(**_kwargs):
@@ -329,7 +329,7 @@ def test_manual_sync_captured_rows_dropped_fails_with_counts(tmp_path) -> None:
             return {"ok": True, "rows_seen": 1, "captured_rows": [row], "captured_row_ids": [row["id"]]}
         return {"ok": True, "rows_seen": 0, "captured_rows": [], "captured_row_ids": []}
     ms._run_bybit_closed_pnl_sync = _fake_bybit
-    ms._sync_master_journal_workbook = lambda: {"master_journal_ok": True}
+    ms._sync_master_journal_workbook = lambda **_kwargs: {"master_journal_ok": True}
     async def _fake_oanda(*_a, **_k):
         return {"ok": True, "rows_seen": 0, "captured_row_ids": []}
     ms._recover_oanda_recent_fills = _fake_oanda
@@ -402,7 +402,7 @@ def test_master_journal_sync_does_not_delete_existing_workbook_on_validation_fai
     build_master_journal_workbook({'items': [], 'stats': {'totals': {}, 'groups': {}}, 'balances': []}, mj)
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: {'items': [{'id': 'r1', 'row_type': 'trade'}], 'stats': {'by_instrument': [{'symbol': 'EURUSD'}]}, 'balances': [], 'diagnostics': {}})
     monkeypatch.setattr(master_service, 'update_master_journal_workbook_data_only', lambda *_: {"ok": False, "error": "forced"})
-    r = master_service._sync_master_journal_workbook()
+    r = master_service._sync_master_journal_workbook(sync_caller="test")
     assert r["master_journal_ok"] is False
     assert mj.exists()
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
@@ -511,7 +511,7 @@ def test_existing_master_journal_not_modified_on_validation_failure(tmp_path, mo
     before = mj.read_bytes()
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
     monkeypatch.setattr(master_service, 'update_master_journal_workbook_data_only', lambda *_: {"ok": False, "error": "forced"})
-    out = master_service._sync_master_journal_workbook()
+    out = master_service._sync_master_journal_workbook(sync_caller="test")
     assert out["master_journal_ok"] is False
     assert mj.read_bytes() == before
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
@@ -529,7 +529,7 @@ def test_existing_master_journal_update_is_atomic_on_post_update_validation_fail
     snap2["items"] = snap["items"] + [{'id':'new-row-should-not-survive','row_type':'trade','symbol':'BTCUSDT','side':'SELL','open_time':'2026-01-02','close_time':'2026-01-02','net_profit':2.0,'result_pct':2.0}]
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap2)
     monkeypatch.setattr(master_service.os, "replace", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("forced replace fail")))
-    out = master_service._sync_master_journal_workbook()
+    out = master_service._sync_master_journal_workbook(sync_caller="test")
     assert out["master_journal_ok"] is False
     assert mj.read_bytes() == before
     live = load_workbook(mj, data_only=True)
@@ -548,7 +548,7 @@ def test_master_journal_requires_row_id_validation(tmp_path, monkeypatch):
     build_master_journal_workbook(snap, mj)
     wb = load_workbook(mj); ws = wb["Trade Log"]; headers=[c.value for c in ws[1]]; ws.cell(2, headers.index("Row ID")+1).value=None; wb.save(mj); wb.close()
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
-    out = master_service._sync_master_journal_workbook()
+    out = master_service._sync_master_journal_workbook(sync_caller="test")
     # Data-only updater may self-heal missing Row ID by restoring generated metadata columns.
     assert out["master_journal_ok"] in {True, False}
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
@@ -567,7 +567,7 @@ def test_sync_master_journal_migrates_legacy_all_trades_and_removes_trade_meta(t
     wb.save(mj)
     wb.close()
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
-    out = master_service._sync_master_journal_workbook()
+    out = master_service._sync_master_journal_workbook(sync_caller="test")
     assert out["master_journal_ok"] is True
     migrated = load_workbook(mj)
     assert "_Trade Meta" not in migrated.sheetnames
@@ -588,7 +588,7 @@ def test_sync_master_journal_repairs_legacy_instrument_averages_freeze_pane(tmp_
     wb.save(mj)
     wb.close()
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
-    out = master_service._sync_master_journal_workbook()
+    out = master_service._sync_master_journal_workbook(sync_caller="test")
     assert out["master_journal_ok"] is True
     repaired = load_workbook(mj)
     assert repaired["Instrument Averages"].freeze_panes == "A2"
@@ -614,7 +614,7 @@ def test_sync_master_journal_repairs_unknown_trade_log_currency_formats(tmp_path
     ws["L3"].number_format = '#,##0.00 "UNKNOWN"'
     wb.save(mj); wb.close()
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
-    out = master_service._sync_master_journal_workbook()
+    out = master_service._sync_master_journal_workbook(sync_caller="test")
     assert out["master_journal_ok"] is True
     repaired = load_workbook(mj)
     ws2 = repaired["Trade Log"]
@@ -648,7 +648,7 @@ def test_sync_validation_detects_instrument_duration_alias_columns_blank(tmp_pat
         return out
     monkeypatch.setattr(master_service, "update_master_journal_workbook_data_only", fake_update)
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
-    out = master_service._sync_master_journal_workbook()
+    out = master_service._sync_master_journal_workbook(sync_caller="test")
     assert out["master_journal_ok"] is False
     assert "duration columns are blank despite duration stats" in str(out.get("master_journal_error") or "").lower()
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
@@ -678,7 +678,7 @@ def test_existing_master_journal_preserves_restored_layout_and_populates_stats(t
     wb.save(mj); wb.close()
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
     monkeypatch.setattr(master_service, '_get_excel_account_balances', lambda: [])
-    out = master_service._sync_master_journal_workbook()
+    out = master_service._sync_master_journal_workbook(sync_caller="test")
     assert out["master_journal_ok"] in {True, False}
     if not out["master_journal_ok"]:
         return
@@ -723,7 +723,7 @@ def test_existing_master_journal_trade_log_filter_range_can_update_without_invar
     wb = load_workbook(mj); wb["Trade Log"].auto_filter.ref = "A1:Z1511"; wb.save(mj); wb.close()
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
     monkeypatch.setattr(master_service, '_get_excel_account_balances', lambda: [])
-    result = master_service._sync_master_journal_workbook()
+    result = master_service._sync_master_journal_workbook(sync_caller="test")
     assert result["master_journal_ok"] is True
     out = load_workbook(mj, data_only=True)
     at = out["Trade Log"]; ref = at.auto_filter.ref
@@ -738,8 +738,8 @@ def test_existing_master_journal_trade_log_filter_range_can_update_without_invar
 def test_startup_recovery_skips_broker_refresh_in_master_journal_mode(monkeypatch):
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
     monkeypatch.setattr(master_service, '_is_scanner_local_ui_mode', lambda: False)
-    monkeypatch.setattr(master_service, '_import_trading_journal_from_sources', lambda: {"ok": True})
-    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda: {"master_journal_ok": True})
+    monkeypatch.setattr(master_service, '_import_trading_journal_from_sources', lambda: (_ for _ in ()).throw(AssertionError("startup must not import journal sources in master_journal mode")))
+    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda **_kwargs: (_ for _ in ()).throw(AssertionError("startup must not sync workbook in master_journal mode")))
     monkeypatch.setattr(master_service, '_recover_oanda_recent_fills', lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("should not call")))
     monkeypatch.setattr(master_service, '_run_bybit_closed_pnl_sync', lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("should not call")))
     asyncio.run(master_service._run_startup_recovery_import_if_needed())
@@ -764,6 +764,7 @@ def test_autostart_skips_fill_polls_in_master_journal_mode(monkeypatch):
         return _Dummy()
     monkeypatch.setattr(master_service.asyncio, 'create_task', _fake_create_task)
     asyncio.run(master_service._autostart_scripts())
+    assert '_start_startup_recovery_import_after_restore' not in scheduled
     assert '_poll_bybit_fills' not in scheduled
     assert '_start_oanda_fill_poll_after_delay' not in scheduled
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
@@ -772,14 +773,14 @@ def test_sync_master_journal_permission_error(tmp_path, monkeypatch):
     monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: [])
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: {'items':[], 'stats':{'totals':{}}, 'balances':[], 'diagnostics':{}})
     monkeypatch.setattr(master_service.os, 'replace', lambda *_: (_ for _ in ()).throw(PermissionError('locked')))
-    r=master_service._sync_master_journal_workbook()
+    r=master_service._sync_master_journal_workbook(sync_caller="test")
     assert r['master_journal_ok'] is False
     assert r['master_journal_error_type'] == 'PermissionError'
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_sync_master_journal_builder_runtime_error(tmp_path, monkeypatch):
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
     monkeypatch.setattr(master_service, 'build_master_journal_workbook', lambda *_: (_ for _ in ()).throw(RuntimeError('boom')))
-    r=master_service._sync_master_journal_workbook()
+    r=master_service._sync_master_journal_workbook(sync_caller="test")
     assert r['master_journal_ok'] is False
     assert r['master_journal_error_type'] == 'RuntimeError'
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
@@ -788,7 +789,7 @@ def test_sync_master_journal_validation_failure(tmp_path, monkeypatch):
     def bad_builder(_snap, out):
         wb=Workbook(); ws=wb.active; ws.title='Wrong'; wb.save(out)
     monkeypatch.setattr(master_service, 'build_master_journal_workbook', bad_builder)
-    r=master_service._sync_master_journal_workbook()
+    r=master_service._sync_master_journal_workbook(sync_caller="test")
     assert r['master_journal_ok'] is False
     assert r['master_journal_error_type'] == 'RuntimeError'
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
@@ -798,7 +799,7 @@ def test_sync_master_journal_temp_cleanup_on_failure(tmp_path, monkeypatch):
         wb=Workbook(); wb.save(out)
     monkeypatch.setattr(master_service, 'build_master_journal_workbook', bad_builder)
     monkeypatch.setattr(master_service, 'SHEET_ORDER', ['Dashboard'])
-    r=master_service._sync_master_journal_workbook()
+    r=master_service._sync_master_journal_workbook(sync_caller="test")
     assert r['master_journal_ok'] is False
     assert not (tmp_path/'Master Journal.tmp.xlsx').exists()
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
@@ -816,7 +817,7 @@ def test_sync_master_journal_applies_manual_overrides(tmp_path, monkeypatch):
     captured={}
     monkeypatch.setattr(master_service, '_set_trading_journal_rows', lambda r: captured.setdefault('rows', r))
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: {'items': captured.get('rows',rows), 'stats':{'totals':{}}, 'balances':[], 'diagnostics':{}})
-    r=master_service._sync_master_journal_workbook()
+    r=master_service._sync_master_journal_workbook(sync_caller="test")
     assert r['master_journal_ok'] is True
     patched=captured['rows'][0]
     assert patched['is_test_trade'] is True and patched['setup']=='S' and patched['timeframe']=='M5' and patched['notes']=='note'
@@ -830,7 +831,7 @@ def test_sync_master_journal_test_yes_excluded_from_aggregates(tmp_path, monkeyp
     wb=load_workbook(mj); ws=wb['Trade Log']; ws['Q2']='Yes'; before=[c.value for c in ws[2]]; wb.save(mj)
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: {'items': seed['items'], 'stats': {'totals': {}, 'groups': {}}, 'balances': [], 'diagnostics': {}})
-    r=master_service._sync_master_journal_workbook()
+    r=master_service._sync_master_journal_workbook(sync_caller="test")
     assert r['master_journal_ok'] is True
     out=load_workbook(mj)
     after = [c.value for c in out['Trade Log'][2]]
@@ -843,7 +844,7 @@ def test_sync_master_journal_success_reports_existing_file_and_size(tmp_path, mo
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: {'items': [], 'stats': {'totals': {}}, 'balances': [], 'diagnostics': {}})
     from tools.master_journal_workbook import build_master_journal_workbook
     build_master_journal_workbook({'items': [], 'stats': {'totals': {}, 'groups': {}}, 'balances': []}, tmp_path/'Trading Journal.xlsx')
-    result = master_service._sync_master_journal_workbook()
+    result = master_service._sync_master_journal_workbook(sync_caller="test")
     assert result['master_journal_ok'] in {True, False}
     assert result['master_journal_exists'] is True
     assert str(result['master_journal_path']).endswith('Trading Journal.xlsx')
@@ -856,7 +857,7 @@ def test_sync_master_journal_rebuilds_when_master_missing(tmp_path, monkeypatch)
     snap = {'items':[{'id':'r1','row_type':'trade','account':'A','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01 10:00:00','close_time':'2026-01-01 11:00:00','net_profit':10.0,'result_pct':1.2}], 'stats': {'totals': {}, 'groups': {'leaders': {}}, 'by_instrument':[{'symbol':'EURUSD','total_trades':1,'wins':1,'losses':0,'break_even':0,'long_trades':1,'short_trades':0}]}, 'balances': [{'account':'A','balance':1000.0,'currency':'USD'}], 'diagnostics': {}}
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
     monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: snap['items'])
-    result = master_service._sync_master_journal_workbook()
+    result = master_service._sync_master_journal_workbook(sync_caller="test")
     assert result['master_journal_ok'] in {True, False}
     assert (tmp_path/'Trading Journal.xlsx').exists()
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
@@ -912,7 +913,7 @@ def test_sync_master_journal_rebuilds_blanked_workbook_sections(tmp_path, monkey
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
     monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: source_rows)
     monkeypatch.setattr(master_service, '_get_excel_account_balances', lambda: [])
-    result = master_service._sync_master_journal_workbook()
+    result = master_service._sync_master_journal_workbook(sync_caller="test")
     assert result['master_journal_ok'] in {True, False}
     if not result['master_journal_ok']:
         return
@@ -1053,7 +1054,7 @@ def test_sync_master_journal_repairs_missing_expected_balance_account_row(tmp_pa
     wb.close()
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
     monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: source_rows)
-    result = master_service._sync_master_journal_workbook()
+    result = master_service._sync_master_journal_workbook(sync_caller="test")
     assert result['master_journal_ok'] is True
     repaired = load_workbook(mj, data_only=True)["Dashboard"]
     anchor = None
@@ -1101,7 +1102,7 @@ def test_sync_master_journal_fails_when_expected_balance_non_numeric(tmp_path, m
     build_master_journal_workbook(snap, mj)
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
     monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: source_rows)
-    result = master_service._sync_master_journal_workbook()
+    result = master_service._sync_master_journal_workbook(sync_caller="test")
     assert result['master_journal_ok'] is False
     assert 'Account Balances missing numeric values' in str(result.get('master_journal_error') or '')
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
@@ -1127,7 +1128,7 @@ def test_sync_master_journal_succeeds_with_merged_calendar_cells(tmp_path, monke
     wb.save(mj); wb.close()
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
     monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: snap["items"])
-    result = master_service._sync_master_journal_workbook()
+    result = master_service._sync_master_journal_workbook(sync_caller="test")
     assert result["master_journal_ok"] is True
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_sync_master_journal_populates_instrument_leaders_custom_layout(tmp_path, monkeypatch):
@@ -1142,7 +1143,7 @@ def test_sync_master_journal_populates_instrument_leaders_custom_layout(tmp_path
     wb=load_workbook(mj); d=wb["Dashboard"]; d["A11"]="Instrument leaders"; d["A12"]="Metric"; d["B12"]="Symbol"; d["C12"]="Wins"; d["D12"]="Losses"; d["E12"]="Trades"; d["A13"]="Overall most wins"; wb.save(mj); wb.close()
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
     monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: snap["items"])
-    result = master_service._sync_master_journal_workbook()
+    result = master_service._sync_master_journal_workbook(sync_caller="test")
     assert result["master_journal_ok"] is True
     out=load_workbook(mj, data_only=True)["Dashboard"]
     assert out["B13"].value == "EURUSD"
@@ -1203,7 +1204,7 @@ def test_sync_master_journal_uses_configured_local_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: {'items': [], 'stats': {'totals': {}}, 'balances': [], 'diagnostics': {}})
     from tools.master_journal_workbook import build_master_journal_workbook
     build_master_journal_workbook({'items': [], 'stats': {'totals': {}, 'groups': {}}, 'balances': []}, tmp_path/'Trading Journal.xlsx')
-    result = master_service._sync_master_journal_workbook()
+    result = master_service._sync_master_journal_workbook(sync_caller="test")
     expected = custom_journal_dir.resolve() / 'Trading Journal.xlsx'
     assert Path(result['master_journal_path']) == expected
     assert expected.exists()
@@ -1464,14 +1465,14 @@ def test_existing_workbook_sync_does_not_rebuild_or_refresh_derived(tmp_path, mo
     called = {'build': 0, 'refresh': 0}
     monkeypatch.setattr(master_service, 'build_master_journal_workbook', lambda *_: called.__setitem__('build', called['build']+1))
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: {'items': [], 'balances': [], 'stats': {'totals': {}, 'groups': {}}})
-    result = master_service._sync_master_journal_workbook()
+    result = master_service._sync_master_journal_workbook(sync_caller="test")
     assert result['master_journal_ok'] is True
     assert called['build'] == 0
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_missing_master_journal_fails_loudly(tmp_path, monkeypatch):
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
-    result = master_service._sync_master_journal_workbook()
+    result = master_service._sync_master_journal_workbook(sync_caller="test")
     assert result['master_journal_ok'] is False
     assert result['master_journal_error_type'] in {'FileNotFoundError', 'RuntimeError'}
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
@@ -1523,7 +1524,7 @@ def test_sync_master_journal_writes_zero_balances_and_validation_detects_mismatc
     ], 'diagnostics': {}}
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: zero_snap)
     monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: source_rows)
-    result = master_service._sync_master_journal_workbook()
+    result = master_service._sync_master_journal_workbook(sync_caller="test")
     assert result['master_journal_ok'] is True
     from openpyxl import load_workbook
     wb = load_workbook(mj, data_only=True)
@@ -1551,7 +1552,7 @@ def test_sync_master_journal_writes_zero_balances_and_validation_detects_mismatc
         return payload
     monkeypatch.setattr(master_service, 'update_master_journal_workbook_data_only', _corrupting_update)
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: zero_snap)
-    bad = master_service._sync_master_journal_workbook()
+    bad = master_service._sync_master_journal_workbook(sync_caller="test")
     assert bad['master_journal_ok'] is False
     assert 'Account Balances mismatch vs snapshot' in str(bad.get('master_journal_error') or '')
     assert 'PEPPERSTONE DEMO' in str(bad.get('master_journal_error') or '')
@@ -1580,7 +1581,7 @@ def test_sync_master_journal_zero_qty_repairable_crypto_passes(tmp_path, monkeyp
     snap = {'items': rows, 'stats': {'totals': {}, 'by_instrument': [{'symbol': 'BTCUSDT', 'total_trades': 1}], 'groups': {'leaders': {}}}, 'balances': [{'account_label': 'BYBIT', 'balance': 1.0, 'currency': 'USDT'}], 'diagnostics': {}}
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
     monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: rows)
-    result = master_service._sync_master_journal_workbook()
+    result = master_service._sync_master_journal_workbook(sync_caller="test")
     assert result['master_journal_ok'] is True
     wb = load_workbook(tmp_path / 'Trading Journal.xlsx', data_only=True)
     tl = master_service._get_trade_log_sheet(wb, allow_legacy=False)
@@ -1609,7 +1610,7 @@ def test_sync_master_journal_zero_qty_unrepairable_crypto_fails(tmp_path, monkey
     snap = {'items': rows, 'stats': {'totals': {}, 'by_instrument': [{'symbol': 'BTCUSDT', 'total_trades': 1}], 'groups': {'leaders': {}}}, 'balances': [{'account_label': 'BYBIT', 'balance': 1.0, 'currency': 'USDT'}], 'diagnostics': {}}
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
     monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: rows)
-    result = master_service._sync_master_journal_workbook()
+    result = master_service._sync_master_journal_workbook(sync_caller="test")
     assert result['master_journal_ok'] is False
     assert 'unrepaired crypto Qty=0' in str(result.get('master_journal_error') or '')
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
@@ -1747,7 +1748,7 @@ def test_sync_master_journal_uses_zero_cashflow_anchor_when_cashflow_new_balance
     assert balances['PEPPERSTONE DEMO']['balance'] == 0
     assert balances['BINANCE'].get('balance_source') != 'authoritative_trade_balance'
     assert balances['PEPPERSTONE DEMO'].get('balance_source') != 'authoritative_trade_balance'
-    result = master_service._sync_master_journal_workbook()
+    result = master_service._sync_master_journal_workbook(sync_caller="test")
     assert result['master_journal_ok'] is True
     synced = load_workbook(mj, data_only=True)
     dash = synced['Dashboard']
@@ -2055,7 +2056,7 @@ def test_manual_import_prebuilt_snapshot_preserves_workbook_zero_cashflow_anchor
         assert balances['PEPPERSTONE DEMO']['balance'] == 0
         assert balances['PEPPERSTONE DEMO']['currency'] == 'AUD'
         assert any(str(r.get('id')) == 'oanda-demo-import' for r in snapshot.get('items') or [])
-        result = ms._sync_master_journal_workbook(defer_github_sync=True, expected_survivor_row_ids=['oanda-demo-import'], prebuilt_snapshot=snapshot)
+        result = ms._sync_master_journal_workbook(defer_github_sync=True, expected_survivor_row_ids=['oanda-demo-import'], prebuilt_snapshot=snapshot, sync_caller='test')
         assert result['master_journal_ok'] is True
         synced = load_workbook(mj, data_only=True)
         try:
@@ -2101,12 +2102,32 @@ def test_workspace_and_status_routes_do_not_start_workbook_sync(monkeypatch):
     async def _fake_oanda_status():
         return {'ok': True, 'status': 'cached-test'}
 
+    async def _fake_state_restore():
+        return {'ok': True, 'restored': True}
+
     monkeypatch.setattr(ms, '_build_oanda_inactivity_status', _fake_oanda_status)
+    monkeypatch.setattr(ms, '_wait_for_state_restore_or_error', _fake_state_restore)
+    monkeypatch.setattr(ms, '_get_watchlist', lambda: ['EURUSD'])
     ms._OANDA_INACTIVITY_CACHE.clear()
     client = TestClient(ms.app)
+    assert client.get('/').status_code in {200, 307}
     assert client.get('/merged/trading-journal').status_code == 200
     assert client.get('/scripts').status_code == 200
+    assert client.get('/api/state-sync/status').status_code == 200
+    assert client.get('/api/watchlist').status_code == 200
     assert client.get('/api/oanda-inactivity-status').status_code == 200
+
+
+def test_workbook_sync_rejects_missing_or_direct_caller(monkeypatch, tmp_path):
+    ms = _load_master_service_for_import_test()
+    path = tmp_path / 'Trading Journal.xlsx'
+    monkeypatch.setattr(ms, '_master_journal_path', lambda: path)
+    monkeypatch.setattr(ms, '_sync_master_journal_workbook_unlocked', lambda **_kwargs: (_ for _ in ()).throw(AssertionError('missing/direct caller must not run sync')))
+    for caller in (None, '', '   ', 'direct', 'DIRECT'):
+        result = ms._sync_master_journal_workbook(sync_caller=caller)
+        assert result['ok'] is False
+        assert result['status_code'] == 500
+        assert result['code'] == 'MASTER_JOURNAL_SYNC_CALLER_REQUIRED'
 
 
 def test_resync_rejects_active_workbook_sync_before_snapshot_build(monkeypatch, tmp_path):
