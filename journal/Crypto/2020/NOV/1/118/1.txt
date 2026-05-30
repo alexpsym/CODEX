@@ -1,1 +1,0 @@
-10c difference between set stop price and actual stopped out price. 
