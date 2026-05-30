@@ -592,6 +592,10 @@ TRADING_JOURNAL_SYNC_STATE: Dict[str, object] = {
 }
 TRADING_JOURNAL_SYNC_LOCK = threading.Lock()
 TRADING_JOURNAL_RESYNC_LOCK = threading.Lock()
+MASTER_JOURNAL_WORKBOOK_SYNC_LOCK = threading.Lock()
+MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE: Dict[str, object] = {}
+TRADING_JOURNAL_RESYNC_CACHE_SCHEMA_VERSION = 1
+TRADING_JOURNAL_RESYNC_CACHE_PATH = BASE_DIR / "render" / "data" / "trading_journal_resync_cache.json"
 TRADING_JOURNAL_RESYNC_LAST_SUCCESS: Dict[str, object] = {
     "fingerprint": None,
     "snapshot": None,
@@ -1671,10 +1675,20 @@ def _build_trading_journal_view_snapshot(
     local_only: bool = False,
     skip_external_balances: bool = False,
     skip_live_account_refresh: bool = False,
+    sync_id: Optional[str] = None,
+    sync_caller: str = "unspecified",
 ) -> Dict[str, object]:
+    snapshot_sync_id = str(sync_id or f"snapshot-{uuid4().hex[:12]}")
+    snapshot_caller = str(sync_caller or "unspecified")
+    snapshot_started = time.perf_counter()
+    APP_LOGGER.info(
+        "trading_journal_snapshot_build_start sync_id=%s caller=%s force=%s local_only=%s skip_external_balances=%s skip_live_account_refresh=%s",
+        snapshot_sync_id, snapshot_caller, force, local_only, skip_external_balances, skip_live_account_refresh,
+    )
     existing = _load_trading_journal_view_snapshot()
     fingerprint = _journal_source_fingerprint()
     if not local_only and not force and isinstance(existing, dict) and existing.get("source_fingerprints") == fingerprint:
+        APP_LOGGER.info("trading_journal_snapshot_build_done sync_id=%s caller=%s elapsed=%.6fs cached=True", snapshot_sync_id, snapshot_caller, time.perf_counter() - snapshot_started)
         return existing
     source_mode_runtime = str(os.getenv("TRADING_JOURNAL_SOURCE", TRADING_JOURNAL_SOURCE) or "").strip().lower()
     if source_mode_runtime not in {"dropbox", "local", "both", "auto", "master_journal"}:
@@ -1785,6 +1799,7 @@ def _build_trading_journal_view_snapshot(
         _persist_trading_journal_sqlite(safe_result)
         _TRADING_JOURNAL_VIEW_CACHE["key"] = "snapshot"
         _TRADING_JOURNAL_VIEW_CACHE["payload"] = safe_result
+        APP_LOGGER.info("trading_journal_snapshot_build_done sync_id=%s caller=%s elapsed=%.6fs cached=False mode=master_journal", snapshot_sync_id, snapshot_caller, time.perf_counter() - snapshot_started)
         return safe_result
     rows = [
         _backfill_trade_row_context_fields(r)
@@ -1954,6 +1969,7 @@ def _build_trading_journal_view_snapshot(
     _persist_trading_journal_sqlite(safe_payload)
     _TRADING_JOURNAL_VIEW_CACHE["key"] = "snapshot"
     _TRADING_JOURNAL_VIEW_CACHE["payload"] = safe_payload
+    APP_LOGGER.info("trading_journal_snapshot_build_done sync_id=%s caller=%s elapsed=%.6fs cached=False mode=sources", snapshot_sync_id, snapshot_caller, time.perf_counter() - snapshot_started)
     return safe_payload
 
 
@@ -26082,7 +26098,49 @@ async def _run_trading_journal_sync_job() -> None:
         hb_task.cancel()
 
 
-def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_survivor_row_ids: Optional[List[str]] = None, prebuilt_snapshot: Optional[Dict[str, object]] = None) -> Dict[str, object]:
+def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_survivor_row_ids: Optional[List[str]] = None, prebuilt_snapshot: Optional[Dict[str, object]] = None, sync_caller: str = "unspecified", sync_id: Optional[str] = None) -> Dict[str, object]:
+    sync_id = str(sync_id or f"mjsync-{uuid4().hex[:12]}")
+    caller = str(sync_caller or "unspecified")
+    path = _master_journal_path()
+    if not MASTER_JOURNAL_WORKBOOK_SYNC_LOCK.acquire(blocking=False):
+        active = dict(MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE)
+        APP_LOGGER.warning("master_journal_workbook_sync_rejected sync_id=%s caller=%s active_sync_id=%s active_caller=%s", sync_id, caller, active.get("sync_id"), active.get("caller"))
+        return {
+            "ok": False,
+            "master_journal_ok": False,
+            "master_journal_path": str(path),
+            "master_journal_exists": path.exists(),
+            "master_journal_error": "Trading Journal workbook sync is already running.",
+            "master_journal_error_type": "MASTER_JOURNAL_SYNC_IN_PROGRESS",
+            "code": "MASTER_JOURNAL_SYNC_IN_PROGRESS",
+            "status_code": 409,
+            "sync_id": sync_id,
+            "sync_caller": caller,
+            "active_sync": active,
+            "diagnostics": {"workbook_sync_substage_timings": {}},
+        }
+    MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.clear()
+    MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.update({"sync_id": sync_id, "caller": caller, "path": str(path), "started_at": _utc_now_iso()})
+    APP_LOGGER.info("master_journal_workbook_sync_start sync_id=%s caller=%s path=%s prebuilt_snapshot=%s", sync_id, caller, path, isinstance(prebuilt_snapshot, dict))
+    try:
+        result = _sync_master_journal_workbook_unlocked(
+            defer_github_sync=defer_github_sync,
+            expected_survivor_row_ids=expected_survivor_row_ids,
+            prebuilt_snapshot=prebuilt_snapshot,
+            sync_caller=caller,
+            sync_id=sync_id,
+        )
+        if isinstance(result, dict):
+            result.setdefault("sync_id", sync_id)
+            result.setdefault("sync_caller", caller)
+        APP_LOGGER.info("master_journal_workbook_sync_done sync_id=%s caller=%s ok=%s snapshot_build_ran=%s", sync_id, caller, bool((result or {}).get("master_journal_ok") if isinstance(result, dict) else False), not isinstance(prebuilt_snapshot, dict))
+        return result
+    finally:
+        MASTER_JOURNAL_WORKBOOK_SYNC_ACTIVE.clear()
+        MASTER_JOURNAL_WORKBOOK_SYNC_LOCK.release()
+
+
+def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, expected_survivor_row_ids: Optional[List[str]] = None, prebuilt_snapshot: Optional[Dict[str, object]] = None, sync_caller: str = "unspecified", sync_id: Optional[str] = None) -> Dict[str, object]:
     path = _master_journal_path()
     tmp = path.with_suffix('.tmp.xlsx')
     created_tmp = False
@@ -26093,7 +26151,7 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
         nonlocal _substage_t0
         elapsed = round(time.perf_counter() - _substage_t0, 6)
         substage_timings[stage] = elapsed
-        APP_LOGGER.info("master_journal_workbook_sync_substage_done stage=%s elapsed=%.6fs", stage, elapsed)
+        APP_LOGGER.info("master_journal_workbook_sync_substage_done sync_id=%s caller=%s stage=%s elapsed=%.6fs", sync_id, sync_caller, stage, elapsed)
         _substage_t0 = time.perf_counter()
     for _stage in ("snapshot_build", "manual_override_read", "update_master_journal_workbook_data_only", "workbook_validation_load", "validation_trade_log", "validation_instrument_averages", "validation_calendar", "validation_dashboard_balances", "validation_leaders", "final_replace", "enforce_single_file", "github_sync"):
         substage_timings.setdefault(_stage, 0.0)
@@ -26108,7 +26166,7 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
             snapshot = copy.deepcopy(prebuilt_snapshot)
         else:
             _update_trading_journal_import_status(stage="workbook_sync:snapshot_build", message="Building workbook snapshot")
-            snapshot = _build_trading_journal_view_snapshot(force=True) or {}
+            snapshot = _build_trading_journal_view_snapshot(force=True, sync_id=sync_id, sync_caller=sync_caller) or {}
         source_items = [r for r in (snapshot.get("items") or []) if isinstance(r, dict)]
         source_trade_rows = [r for r in source_items if _row_type(r) == "trade"]
         _finish_substage("snapshot_build")
@@ -26790,11 +26848,12 @@ TRADING_JOURNAL_ACTIONS_TEMPLATE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Trading Journal Workspace</title>
 <style>body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}.wrap{min-height:100vh;display:flex;align-items:center;justify-content:center}.stack{display:flex;flex-direction:column;gap:12px;min-width:280px}button{padding:12px 14px;border-radius:10px;border:1px solid #334155;background:#1f2937;color:#e2e8f0;font-weight:700;cursor:pointer}.drop-zone{border:1px dashed #475569;border-radius:12px;padding:16px;text-align:center;color:#94a3b8;background:#0f172a;cursor:pointer}.drop-zone.drag-over{border-color:#38bdf8;background:#082f49;color:#e0f2fe}.status{margin-top:8px;white-space:pre-wrap;color:#94a3b8}</style></head>
-<body><div class="wrap"><div class="stack"><button id="open-journal-btn">Open Journal</button><button id="import-journal-btn">Import</button><button id="journal-resync-btn">Resync</button><div id="journal-import-drop-zone" class="drop-zone">Drop .xlsx/.xlsm/.xls/.csv import files here<br/><span style="font-size:12px">or click Import to choose a file</span></div><label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode" style="margin-left:8px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"><option value="" selected disabled>Select Demo or Live</option><option value="demo">Demo</option><option value="live">Live</option></select></label><button id="crypto-monthly-pnl-btn">Crypto Monthly P&L</button><button id="bybit-demo-balance-adjustment-btn">Bybit Demo Balance Adjustment</button><input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv" hidden/><div id="journal-actions-status" class="status"></div></div></div><script src="/static/trading_journal_actions.js"></script></body></html>"""
+<body><div class="wrap"><div class="stack"><button id="open-journal-btn">Open Journal</button><button id="import-journal-btn">Import</button><button id="journal-resync-btn">Resync</button><div id="journal-import-drop-zone" class="drop-zone">Drop .xlsx/.xlsm/.xls/.csv import files here<br/><span style="font-size:12px">or click Import to choose a file</span></div><label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode" style="margin-left:8px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"><option value="" selected disabled>Select Demo or Live</option><option value="demo">Demo</option><option value="live">Live</option></select></label><button id="crypto-monthly-pnl-btn">Crypto Monthly P&L</button><button id="bybit-demo-balance-adjustment-btn">Bybit Demo Balance Adjustment</button><input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv" hidden/><div id="journal-actions-status" class="status"></div></div></div><script src="/static/trading_journal_actions.js?v={{TRADING_JOURNAL_ACTIONS_JS_VERSION}}"></script></body></html>"""
 
 @app.get("/merged/trading-journal")
 async def merged_trading_journal_workspace() -> HTMLResponse:
-    return HTMLResponse(TRADING_JOURNAL_ACTIONS_TEMPLATE)
+    actions_js_version = _static_asset_version("render/static/trading_journal_actions.js")
+    return HTMLResponse(TRADING_JOURNAL_ACTIONS_TEMPLATE.replace("{{TRADING_JOURNAL_ACTIONS_JS_VERSION}}", actions_js_version))
 
 def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, account_mode: Optional[str] = None) -> Dict[str, object]:
     global _PENDING_MANUAL_SYNC_ROWS
@@ -27405,6 +27464,59 @@ def _expected_dashboard_balance_map(snapshot: Optional[Dict[str, object]]) -> Di
     return expected
 
 
+def _trading_journal_code_version() -> str:
+    env_version = str(os.getenv("RENDER_GIT_COMMIT") or os.getenv("GIT_COMMIT") or "").strip()
+    if env_version:
+        return env_version[:12]
+    try:
+        head = (BASE_DIR / ".git" / "HEAD").read_text(encoding="utf-8").strip()
+        if head.startswith("ref:"):
+            ref = head.split(":", 1)[1].strip()
+            value = (BASE_DIR / ".git" / ref).read_text(encoding="utf-8").strip()
+            return value[:12] if value else "unknown"
+        return head[:12] if head else "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _resync_expected_snapshot_from_metadata(meta: Dict[str, object]) -> Optional[Dict[str, object]]:
+    balances = meta.get("expected_balances") if isinstance(meta, dict) else None
+    if not isinstance(balances, list):
+        return None
+    return {"items": [], "stats": {"totals": {}, "groups": {}}, "balances": [b for b in balances if isinstance(b, dict)]}
+
+
+def _load_resync_success_metadata(path: Path, fingerprint: Dict[str, object]) -> Optional[Dict[str, object]]:
+    meta = _load_json_file(TRADING_JOURNAL_RESYNC_CACHE_PATH, {})
+    if not isinstance(meta, dict):
+        return None
+    if int(meta.get("schema_version") or 0) != TRADING_JOURNAL_RESYNC_CACHE_SCHEMA_VERSION:
+        return None
+    if str(meta.get("workbook_path") or "") != str(path):
+        return None
+    if meta.get("source_fingerprint") != fingerprint:
+        return None
+    if str(meta.get("code_version") or "") != _trading_journal_code_version():
+        return None
+    snapshot = _resync_expected_snapshot_from_metadata(meta)
+    if not isinstance(snapshot, dict):
+        return None
+    return {**meta, "snapshot": snapshot}
+
+
+def _save_resync_success_metadata(path: Path, fingerprint: Dict[str, object], snapshot: Dict[str, object]) -> None:
+    balances = list(_expected_dashboard_balance_map(snapshot).values())
+    meta = {
+        "schema_version": TRADING_JOURNAL_RESYNC_CACHE_SCHEMA_VERSION,
+        "verified_at": _utc_now_iso(),
+        "workbook_path": str(path),
+        "source_fingerprint": fingerprint,
+        "expected_balances": _json_safe(balances),
+        "code_version": _trading_journal_code_version(),
+    }
+    _save_json_file(TRADING_JOURNAL_RESYNC_CACHE_PATH, meta)
+
+
 def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Optional[Dict[str, object]] = None) -> Dict[str, object]:
     diagnostics: Dict[str, object] = {"checked_accounts": [], "formula_error_cells": []}
     if not path.exists():
@@ -27508,16 +27620,28 @@ def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Opti
         wb.close()
 
 
-def _resync_can_use_fast_path(path: Path, fingerprint: Dict[str, object]) -> bool:
+def _resync_fast_path_snapshot(path: Path, fingerprint: Dict[str, object]) -> Tuple[Optional[Dict[str, object]], str]:
     if _PENDING_MANUAL_SYNC_ROWS:
-        return False
+        return None, "pending_manual_rows"
+    if not path.exists():
+        return None, "workbook_missing"
     last = TRADING_JOURNAL_RESYNC_LAST_SUCCESS
-    return (
-        path.exists()
-        and str(last.get("workbook_path") or "") == str(path)
+    if (
+        str(last.get("workbook_path") or "") == str(path)
         and isinstance(last.get("snapshot"), dict)
         and last.get("fingerprint") == fingerprint
-    )
+    ):
+        return last.get("snapshot"), "memory_fingerprint_match"  # type: ignore[return-value]
+    persisted = _load_resync_success_metadata(path, fingerprint)
+    if isinstance(persisted, dict) and isinstance(persisted.get("snapshot"), dict):
+        TRADING_JOURNAL_RESYNC_LAST_SUCCESS.update({
+            "fingerprint": fingerprint,
+            "snapshot": persisted["snapshot"],
+            "verified_at": persisted.get("verified_at"),
+            "workbook_path": str(path),
+        })
+        return persisted["snapshot"], "persisted_fingerprint_match"  # type: ignore[return-value]
+    return None, "fingerprint_changed_or_no_verified_cache"
 
 
 def _run_trading_journal_resync() -> Dict[str, object]:
@@ -27532,6 +27656,8 @@ def _run_trading_journal_resync() -> Dict[str, object]:
             "code": "TRADING_JOURNAL_RESYNC_IN_PROGRESS",
             "message": "Trading Journal Resync is already running.",
             "request_id": request_id,
+            "app_version": _trading_journal_code_version(),
+            "fast_path_reason": "sync_already_running",
             "master_journal_path": str(path),
             "resync_timings": timings,
             "status_code": 409,
@@ -27540,14 +27666,15 @@ def _run_trading_journal_resync() -> Dict[str, object]:
     try:
         lock_status = _master_journal_lock_status(path) if path.exists() else {"locked": False}
         if lock_status.get("locked"):
-            payload = _excel_workbook_open_payload(extra={"button": "resync", "request_id": request_id, "master_journal_path": str(path), "lock_status": lock_status, "resync_timings": timings})
+            payload = _excel_workbook_open_payload(extra={"button": "resync", "request_id": request_id, "app_version": _trading_journal_code_version(), "fast_path_reason": "workbook_locked", "master_journal_path": str(path), "lock_status": lock_status, "resync_timings": timings})
             payload["status_code"] = 409
             return payload
 
         fingerprint = _journal_source_fingerprint()
-        if _resync_can_use_fast_path(path, fingerprint):
+        fast_snapshot, fast_path_reason = _resync_fast_path_snapshot(path, fingerprint)
+        if isinstance(fast_snapshot, dict):
             t0 = time.perf_counter()
-            verification = _fast_verify_trading_journal_workbook(path, expected_snapshot=TRADING_JOURNAL_RESYNC_LAST_SUCCESS.get("snapshot") if isinstance(TRADING_JOURNAL_RESYNC_LAST_SUCCESS.get("snapshot"), dict) else None)
+            verification = _fast_verify_trading_journal_workbook(path, expected_snapshot=fast_snapshot)
             timings["fast_verification"] = round(time.perf_counter() - t0, 6)
             timings["total"] = round(time.perf_counter() - started, 6)
             if verification.get("ok"):
@@ -27560,17 +27687,21 @@ def _run_trading_journal_resync() -> Dict[str, object]:
                     "resync_timings": timings,
                     "skipped_snapshot_build": True,
                     "snapshot_build_ran": False,
+                    "fast_path_reason": fast_path_reason,
+                    "app_version": _trading_journal_code_version(),
                     "fast_verification": verification,
                     "status_code": 200,
                 }
                 return payload
-            APP_LOGGER.warning("trading_journal_resync_fast_verify_failed request_id=%s error=%s", request_id, verification.get("error"))
+            APP_LOGGER.warning("trading_journal_resync_fast_verify_failed request_id=%s reason=%s error=%s", request_id, fast_path_reason, verification.get("error"))
+        else:
+            APP_LOGGER.info("trading_journal_resync_fast_path_not_used request_id=%s reason=%s", request_id, fast_path_reason)
 
         t0 = time.perf_counter()
-        snapshot = _build_trading_journal_view_snapshot(force=True, skip_external_balances=True, skip_live_account_refresh=True) or {}
+        snapshot = _build_trading_journal_view_snapshot(force=True, skip_external_balances=True, skip_live_account_refresh=True, sync_id=request_id, sync_caller="resync") or {}
         timings["snapshot_build"] = round(time.perf_counter() - t0, 6)
         t0 = time.perf_counter()
-        sync = _sync_master_journal_workbook(defer_github_sync=True, prebuilt_snapshot=snapshot if isinstance(snapshot, dict) else {})
+        sync = _sync_master_journal_workbook(defer_github_sync=True, prebuilt_snapshot=snapshot if isinstance(snapshot, dict) else {}, sync_caller="resync", sync_id=request_id)
         timings["workbook_sync"] = round(time.perf_counter() - t0, 6)
         ok = _master_journal_sync_ok(sync)
         verification = None
@@ -27588,8 +27719,9 @@ def _run_trading_journal_resync() -> Dict[str, object]:
                 "verified_at": _utc_now_iso(),
                 "workbook_path": str(path),
             })
+            _save_resync_success_metadata(path, _journal_source_fingerprint(), snapshot)
         timings["total"] = round(time.perf_counter() - started, 6)
-        payload = {"ok": ok, "button": "resync", "message": "Trading Journal resync complete." if ok else _master_journal_sync_error(sync), "request_id": request_id, "resync_timings": timings, "skipped_snapshot_build": False, "snapshot_build_ran": True, **(sync if isinstance(sync, dict) else {})}
+        payload = {"ok": ok, "button": "resync", "message": "Trading Journal resync complete." if ok else _master_journal_sync_error(sync), "request_id": request_id, "app_version": _trading_journal_code_version(), "resync_timings": timings, "skipped_snapshot_build": False, "snapshot_build_ran": True, "fast_path_reason": fast_path_reason, **(sync if isinstance(sync, dict) else {})}
         if verification is not None:
             payload["fast_verification"] = verification
         payload.setdefault("status_code", 200 if ok else 500)
@@ -27598,32 +27730,6 @@ def _run_trading_journal_resync() -> Dict[str, object]:
         timings.setdefault("total", round(time.perf_counter() - started, 6))
         APP_LOGGER.info("trading_journal_resync_done request_id=%s elapsed=%.6fs", request_id, timings.get("total") or 0.0)
         TRADING_JOURNAL_RESYNC_LOCK.release()
-
-
-@app.post("/api/trading-journal/resync")
-async def trading_journal_resync() -> JSONResponse:
-    result = await asyncio.to_thread(_run_trading_journal_resync)
-    status_code = int(result.pop("status_code", 200 if result.get("ok") else 500))
-    return JSONResponse(_json_safe(result), status_code=status_code)
-
-
-def _run_trading_journal_resync() -> Dict[str, object]:
-    timings: Dict[str, float] = {}
-    started = time.perf_counter()
-    path = _master_journal_path()
-    lock_status = _master_journal_lock_status(path) if path.exists() else {"locked": False}
-    if lock_status.get("locked"):
-        payload = _excel_workbook_open_payload(extra={"button": "resync", "master_journal_path": str(path), "lock_status": lock_status, "resync_timings": timings})
-        payload["status_code"] = 409
-        return payload
-    t0 = time.perf_counter()
-    sync = _sync_master_journal_workbook(defer_github_sync=True)
-    timings["workbook_sync"] = round(time.perf_counter() - t0, 6)
-    timings["total"] = round(time.perf_counter() - started, 6)
-    ok = _master_journal_sync_ok(sync)
-    payload = {"ok": ok, "button": "resync", "message": "Trading Journal resync complete." if ok else _master_journal_sync_error(sync), "resync_timings": timings, **(sync if isinstance(sync, dict) else {})}
-    payload.setdefault("status_code", 200 if ok else 500)
-    return payload
 
 
 @app.post("/api/trading-journal/resync")
