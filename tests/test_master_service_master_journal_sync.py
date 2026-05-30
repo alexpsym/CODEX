@@ -2088,6 +2088,120 @@ def test_resync_endpoint_runs_workbook_sync_without_import_parser(monkeypatch, t
     assert result['resync_timings']['workbook_sync'] >= 0
 
 
+def test_resync_builds_authoritative_snapshot_once_and_reuses_it(monkeypatch, tmp_path):
+    ms = _load_master_service_for_import_test()
+    monkeypatch.setattr(ms, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    monkeypatch.setattr(ms, '_master_journal_path', lambda: tmp_path / 'Trading Journal.xlsx')
+    monkeypatch.setattr(ms, '_master_journal_lock_status', lambda _path: {'locked': False})
+    snapshot = {'items': [], 'stats': {'totals': {}, 'groups': {}}, 'balances': []}
+    called = {'build': 0, 'sync': 0}
+
+    def _build_once(**kwargs):
+        called['build'] += 1
+        assert kwargs['force'] is True
+        assert kwargs['skip_external_balances'] is True
+        assert kwargs['skip_live_account_refresh'] is True
+        return snapshot
+
+    def _sync_once(**kwargs):
+        called['sync'] += 1
+        assert kwargs['prebuilt_snapshot'] is snapshot
+        return {'master_journal_ok': True, 'master_journal_path': str(tmp_path / 'Trading Journal.xlsx')}
+
+    monkeypatch.setattr(ms, '_build_trading_journal_view_snapshot', _build_once)
+    monkeypatch.setattr(ms, '_sync_master_journal_workbook', _sync_once)
+    result = ms._run_trading_journal_resync()
+    assert result['ok'] is True
+    assert result['snapshot_build_ran'] is True
+    assert result['skipped_snapshot_build'] is False
+    assert called == {'build': 1, 'sync': 1}
+    assert result['request_id'].startswith('resync-')
+
+
+def test_resync_fast_verification_catches_stale_binance_or_pepperstone(tmp_path):
+    ms = _load_master_service_for_import_test()
+    from tools.master_journal_workbook import build_master_journal_workbook
+    mj = tmp_path / 'Trading Journal.xlsx'
+    stale_snapshot = {'items': [], 'stats': {'totals': {}, 'groups': {}}, 'balances': [
+        {'account_label':'BINANCE','balance':396.65720524,'currency':'USDT','balance_source':'authoritative_trade_balance'},
+        {'account_label':'PEPPERSTONE DEMO','balance':4.78,'currency':'AUD','balance_source':'authoritative_trade_balance'},
+    ]}
+    expected_snapshot = {'items': [], 'stats': {'totals': {}, 'groups': {}}, 'balances': [
+        {'account_label':'BINANCE','balance':0,'currency':'USDT','balance_source':'cashflow_anchor_plus_trades'},
+        {'account_label':'PEPPERSTONE DEMO','balance':0,'currency':'AUD','balance_source':'cashflow_anchor_plus_trades'},
+    ]}
+    build_master_journal_workbook(stale_snapshot, mj)
+    verification = ms._fast_verify_trading_journal_workbook(mj, expected_snapshot=expected_snapshot)
+    assert verification['ok'] is False
+    assert verification['error'] == 'dashboard_account_balance_verification_failed'
+    mismatches = ' | '.join(verification['diagnostics']['account_balance_mismatches'])
+    assert 'BINANCE' in mismatches
+    assert 'PEPPERSTONE DEMO' in mismatches
+
+
+def test_resync_no_change_fast_path_skips_snapshot_build_but_verifies_workbook(monkeypatch, tmp_path):
+    ms = _load_master_service_for_import_test()
+    from tools.master_journal_workbook import build_master_journal_workbook
+    mj = tmp_path / 'Trading Journal.xlsx'
+    snapshot = {'items': [], 'stats': {'totals': {}, 'groups': {}}, 'balances': [
+        {'account_label':'BINANCE','balance':0,'currency':'USDT','balance_source':'cashflow_anchor_plus_trades'},
+        {'account_label':'PEPPERSTONE DEMO','balance':0,'currency':'AUD','balance_source':'cashflow_anchor_plus_trades'},
+    ]}
+    build_master_journal_workbook(snapshot, mj)
+    fingerprint = {'fingerprint': 'unchanged'}
+    monkeypatch.setattr(ms, '_master_journal_path', lambda: mj)
+    monkeypatch.setattr(ms, '_master_journal_lock_status', lambda _path: {'locked': False})
+    monkeypatch.setattr(ms, '_journal_source_fingerprint', lambda: fingerprint)
+    ms.TRADING_JOURNAL_RESYNC_LAST_SUCCESS.update({'fingerprint': fingerprint, 'snapshot': snapshot, 'workbook_path': str(mj), 'verified_at': 'now'})
+    monkeypatch.setattr(ms, '_build_trading_journal_view_snapshot', lambda **_kwargs: (_ for _ in ()).throw(AssertionError('snapshot_build should be skipped')))
+    monkeypatch.setattr(ms, '_sync_master_journal_workbook', lambda **_kwargs: (_ for _ in ()).throw(AssertionError('workbook sync should be skipped')))
+    result = ms._run_trading_journal_resync()
+    assert result['ok'] is True
+    assert result['skipped_snapshot_build'] is True
+    assert result['snapshot_build_ran'] is False
+    assert result['fast_verification']['ok'] is True
+
+
+def test_resync_changed_fingerprint_forces_full_snapshot_build(monkeypatch, tmp_path):
+    ms = _load_master_service_for_import_test()
+    mj = tmp_path / 'Trading Journal.xlsx'
+    snapshot = {'items': [], 'stats': {'totals': {}, 'groups': {}}, 'balances': []}
+    ms.TRADING_JOURNAL_RESYNC_LAST_SUCCESS.update({'fingerprint': {'old': 1}, 'snapshot': snapshot, 'workbook_path': str(mj), 'verified_at': 'now'})
+    monkeypatch.setattr(ms, '_master_journal_path', lambda: mj)
+    monkeypatch.setattr(ms, '_master_journal_lock_status', lambda _path: {'locked': False})
+    monkeypatch.setattr(ms, '_journal_source_fingerprint', lambda: {'new': 2})
+    called = {'build': 0, 'sync': 0}
+    monkeypatch.setattr(ms, '_build_trading_journal_view_snapshot', lambda **_kwargs: called.update(build=called['build'] + 1) or snapshot)
+    monkeypatch.setattr(ms, '_sync_master_journal_workbook', lambda **_kwargs: called.update(sync=called['sync'] + 1) or {'master_journal_ok': True, 'master_journal_path': str(mj)})
+    result = ms._run_trading_journal_resync()
+    assert result['ok'] is True
+    assert result['snapshot_build_ran'] is True
+    assert called == {'build': 1, 'sync': 1}
+
+
+def test_resync_concurrent_duplicate_is_rejected_before_snapshot_build(monkeypatch, tmp_path):
+    ms = _load_master_service_for_import_test()
+    monkeypatch.setattr(ms, '_master_journal_path', lambda: tmp_path / 'Trading Journal.xlsx')
+    assert ms.TRADING_JOURNAL_RESYNC_LOCK.acquire(blocking=False) is True
+    try:
+        monkeypatch.setattr(ms, '_build_trading_journal_view_snapshot', lambda **_kwargs: (_ for _ in ()).throw(AssertionError('duplicate resync should not build')))
+        result = ms._run_trading_journal_resync()
+    finally:
+        ms.TRADING_JOURNAL_RESYNC_LOCK.release()
+    assert result['ok'] is False
+    assert result['status_code'] == 409
+    assert result['code'] == 'TRADING_JOURNAL_RESYNC_IN_PROGRESS'
+
+
+def test_sync_compatibility_route_invokes_one_resync(monkeypatch):
+    ms = _load_master_service_for_import_test()
+    calls = {'run': 0}
+    monkeypatch.setattr(ms, '_run_trading_journal_resync', lambda: calls.update(run=calls['run'] + 1) or {'ok': True, 'status_code': 200, 'request_id': 'resync-test'})
+    response = asyncio.run(ms.trading_journal_sync())
+    assert response.status_code == 200
+    assert calls == {'run': 1}
+
+
 def test_resync_preserves_pepperstone_demo_zero_anchor_without_import_parser(monkeypatch, tmp_path):
     ms = _load_master_service_for_import_test()
     from tools.master_journal_workbook import build_master_journal_workbook
@@ -2133,6 +2247,7 @@ def test_resync_returns_excel_lock_payload(monkeypatch, tmp_path):
     path.write_bytes(b'placeholder')
     monkeypatch.setattr(ms, '_master_journal_path', lambda: path)
     monkeypatch.setattr(ms, '_master_journal_lock_status', lambda _path: {'locked': True, 'lock_file': '~$Trading Journal.xlsx'})
+    monkeypatch.setattr(ms, '_build_trading_journal_view_snapshot', lambda **_kwargs: (_ for _ in ()).throw(AssertionError('lock preflight must happen before snapshot build')))
     result = ms._run_trading_journal_resync()
     assert result['ok'] is False
     assert result['code'] == 'EXCEL_WORKBOOK_OPEN'

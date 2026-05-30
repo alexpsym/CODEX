@@ -18,6 +18,7 @@
   };
   const pendingRetry = { kind: '', run: null };
   let retryInFlight = false;
+  let resyncInFlight = false;
   const makeFallbackButton = () => ({ id: '', textContent: '', style: { display: 'none' }, disabled: false, addEventListener: () => {} });
   const resumeBtn = typeof document?.createElement === 'function' ? document.createElement('button') : makeFallbackButton();
   const cancelBtn = typeof document?.createElement === 'function' ? document.createElement('button') : makeFallbackButton();
@@ -183,6 +184,8 @@
   };
 
   const runResync = async () => {
+    if (resyncInFlight) return;
+    resyncInFlight = true;
     if (resyncBtn) resyncBtn.disabled = true;
     if (importBtn) importBtn.disabled = true;
     setStatus('Resyncing Trading Journal... elapsed 00:00');
@@ -208,6 +211,7 @@
       clearPendingRetry();
     } finally {
       if (elapsedTimer && typeof window.clearInterval === 'function') window.clearInterval(elapsedTimer);
+      resyncInFlight = false;
       if (resyncBtn) resyncBtn.disabled = Boolean(pendingRetry.run);
       if (importBtn) importBtn.disabled = Boolean(pendingRetry.run);
     }

@@ -411,6 +411,56 @@ vm.runInContext(source, context, { filename: 'trading_journal_actions.js' });
     subprocess.run([node, "-e", harness, str(ACTIONS_JS_PATH)], check=True)
 
 
+def test_trading_journal_actions_resync_ignores_duplicate_click_while_running() -> None:
+    node = shutil.which("node")
+    assert node, "node is required for JS runtime smoke test"
+    harness = r"""
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const listeners = {};
+function element(id) { return { id, style: {}, classList: { add: () => {}, remove: () => {} }, textContent: '', value: '', disabled: false, files: [], focus: () => {}, click: () => {}, after: () => {}, addEventListener: (type, fn) => { listeners[id + ':' + type] = fn; } }; }
+const elements = {
+  'open-journal-btn': element('open-journal-btn'),
+  'import-journal-btn': element('import-journal-btn'),
+  'journal-resync-btn': element('journal-resync-btn'),
+  'journal-file-input': element('journal-file-input'),
+  'journal-import-drop-zone': element('journal-import-drop-zone'),
+  'crypto-monthly-pnl-btn': element('crypto-monthly-pnl-btn'),
+  'bybit-demo-balance-adjustment-btn': element('bybit-demo-balance-adjustment-btn'),
+  'journal-account-mode': element('journal-account-mode'),
+  'journal-actions-status': element('journal-actions-status'),
+};
+let fetchCount = 0;
+let releaseFetch;
+const context = {
+  console,
+  document: { getElementById: (id) => elements[id] || element(id), createElement: (tag) => element(tag) },
+  Date: { now: (() => { let n = 0; return () => { n += 1000; return n; }; })() },
+  setInterval: () => 11,
+  clearInterval: () => {},
+  setTimeout: () => 22,
+  clearTimeout: () => {},
+  fetch: async () => { fetchCount += 1; await new Promise((resolve) => { releaseFetch = resolve; }); return { ok: true, json: async () => ({ ok: true, master_journal_path: '/tmp/Trading Journal.xlsx', resync_timings: { snapshot_build: 1 } }) }; },
+};
+context.window = context; context.globalThis = context;
+vm.createContext(context);
+vm.runInContext(source, context, { filename: 'trading_journal_actions.js' });
+(async () => {
+  const first = listeners['journal-resync-btn:click']();
+  const second = listeners['journal-resync-btn:click']();
+  await Promise.resolve();
+  if (fetchCount !== 1) throw new Error('duplicate click sent ' + fetchCount + ' requests');
+  releaseFetch();
+  await first;
+  await second;
+  if (fetchCount !== 1) throw new Error('duplicate click completed with ' + fetchCount + ' requests');
+  if (elements['journal-resync-btn'].disabled !== false) throw new Error('resync should re-enable after duplicate-click run');
+})();
+"""
+    subprocess.run([node, "-e", harness, str(ACTIONS_JS_PATH)], check=True)
+
+
 def test_trading_journal_actions_resync_excel_lock_sets_retry() -> None:
     node = shutil.which("node")
     assert node, "node is required for JS runtime smoke test"

@@ -591,6 +591,13 @@ TRADING_JOURNAL_SYNC_STATE: Dict[str, object] = {
     "abandoned_running_state": False,
 }
 TRADING_JOURNAL_SYNC_LOCK = threading.Lock()
+TRADING_JOURNAL_RESYNC_LOCK = threading.Lock()
+TRADING_JOURNAL_RESYNC_LAST_SUCCESS: Dict[str, object] = {
+    "fingerprint": None,
+    "snapshot": None,
+    "verified_at": None,
+    "workbook_path": "",
+}
 
 TRADING_JOURNAL_IMPORT_LOCK = threading.Lock()
 TRADING_JOURNAL_IMPORT_STATUS_LOCK = threading.Lock()
@@ -27383,6 +27390,221 @@ async def open_master_journal_file() -> JSONResponse:
     return JSONResponse({"ok": True, "master_journal_path": str(path.resolve())})
 
 
+
+def _expected_dashboard_balance_map(snapshot: Optional[Dict[str, object]]) -> Dict[str, Dict[str, object]]:
+    if not isinstance(snapshot, dict):
+        return {}
+    expected: Dict[str, Dict[str, object]] = {}
+    for rec in _canonicalize_and_dedupe_balances([b for b in (snapshot.get("balances") or []) if isinstance(b, dict)]):
+        if not isinstance(rec, dict):
+            continue
+        label = str(rec.get("account_label") or rec.get("account") or rec.get("label") or "").strip()
+        if not label:
+            continue
+        expected[label.upper()] = rec
+    return expected
+
+
+def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Optional[Dict[str, object]] = None) -> Dict[str, object]:
+    diagnostics: Dict[str, object] = {"checked_accounts": [], "formula_error_cells": []}
+    if not path.exists():
+        return {"ok": False, "error": "Trading Journal.xlsx is missing.", "diagnostics": diagnostics}
+    wb = load_workbook(path, data_only=False)
+    try:
+        expected_order = ["Dashboard", "Trade Log", "Instrument Averages", "P&L Calendar"]
+        diagnostics["sheet_order"] = list(wb.sheetnames)
+        if list(wb.sheetnames) != expected_order:
+            return {"ok": False, "error": f"sheet_order_mismatch: expected {expected_order}, got {wb.sheetnames}", "diagnostics": diagnostics}
+        dash = wb["Dashboard"]
+        trade_log = wb["Trade Log"]
+        inst = wb["Instrument Averages"]
+        diagnostics["trade_log_filter"] = trade_log.auto_filter.ref
+        diagnostics["instrument_averages_filter"] = inst.auto_filter.ref
+        if not trade_log.auto_filter.ref:
+            return {"ok": False, "error": "Trade Log filter is missing.", "diagnostics": diagnostics}
+        if not inst.auto_filter.ref:
+            return {"ok": False, "error": "Instrument Averages filter is missing.", "diagnostics": diagnostics}
+        error_tokens = ("#REF!", "#DIV/0!", "#VALUE!", "#NAME?", "#N/A")
+        for ws in wb.worksheets:
+            for row in ws.iter_rows():
+                for cell in row:
+                    value = cell.value
+                    if isinstance(value, str) and any(token in value for token in error_tokens):
+                        diagnostics["formula_error_cells"].append({"sheet": ws.title, "cell": cell.coordinate, "value": value})
+                        if len(diagnostics["formula_error_cells"]) >= 20:
+                            break
+                if len(diagnostics["formula_error_cells"]) >= 20:
+                    break
+            if len(diagnostics["formula_error_cells"]) >= 20:
+                break
+        if diagnostics["formula_error_cells"]:
+            return {"ok": False, "error": "formula_error_strings_found", "diagnostics": diagnostics}
+
+        anchor = None
+        for rr in range(1, dash.max_row + 1):
+            for cc in range(1, dash.max_column + 1):
+                if str(dash.cell(rr, cc).value or "").strip().lower() == "account balances":
+                    anchor = (rr, cc)
+                    break
+            if anchor:
+                break
+        if not anchor:
+            return {"ok": False, "error": "Account Balances section anchor missing.", "diagnostics": diagnostics}
+        header_row = None
+        header_map: Dict[str, int] = {}
+        for rr in range(anchor[0] + 1, min(dash.max_row + 1, anchor[0] + 12)):
+            row_map: Dict[str, int] = {}
+            for cc in range(anchor[1], min(dash.max_column + 1, anchor[1] + 8)):
+                token = str(dash.cell(rr, cc).value or "").strip().lower().replace("_", " ")
+                if token in {"account", "balance", "currency", "as of"}:
+                    row_map[token] = cc
+            if {"account", "balance", "currency"}.issubset(set(row_map.keys())):
+                header_row = rr
+                header_map = row_map
+                break
+        if not header_row:
+            return {"ok": False, "error": "Account Balances headers missing.", "diagnostics": diagnostics}
+        actual: Dict[str, Dict[str, object]] = {}
+        for rr in range(header_row + 1, min(dash.max_row + 1, header_row + 100)):
+            account = str(dash.cell(rr, header_map["account"]).value or "").strip()
+            if not account:
+                continue
+            actual[account.upper()] = {
+                "account": account,
+                "row": rr,
+                "balance": _to_float(dash.cell(rr, header_map["balance"]).value),
+                "currency": str(dash.cell(rr, header_map["currency"]).value or "").strip().upper(),
+            }
+        diagnostics["checked_accounts"] = sorted(actual.keys())
+        required = {"BINANCE": (0.0, "USDT"), "PEPPERSTONE DEMO": (0.0, "AUD")}
+        mismatches: List[str] = []
+        for account_key, (expected_balance, expected_currency) in required.items():
+            row = actual.get(account_key)
+            if row is None:
+                mismatches.append(f"{account_key}: missing")
+                continue
+            bal = _to_float(row.get("balance"))
+            currency = str(row.get("currency") or "").upper()
+            if bal is None or abs(bal - expected_balance) > 1e-9 or currency != expected_currency:
+                mismatches.append(f"{account_key}: expected={expected_balance} {expected_currency}, actual={row.get('balance')} {currency}")
+        for account_key, expected in _expected_dashboard_balance_map(expected_snapshot).items():
+            row = actual.get(account_key)
+            expected_balance = _to_float(expected.get("balance"))
+            expected_currency = str(expected.get("currency") or "").strip().upper()
+            if expected_balance is None:
+                continue
+            if row is None:
+                mismatches.append(f"{account_key}: missing expected snapshot account")
+                continue
+            bal = _to_float(row.get("balance"))
+            currency = str(row.get("currency") or "").upper()
+            if bal is None or abs(bal - expected_balance) > max(1e-9, abs(expected_balance) * 1e-12) or currency != expected_currency:
+                mismatches.append(f"{account_key}: expected={expected_balance} {expected_currency}, actual={row.get('balance')} {currency}")
+        if mismatches:
+            diagnostics["account_balance_mismatches"] = mismatches
+            return {"ok": False, "error": "dashboard_account_balance_verification_failed", "diagnostics": diagnostics}
+        return {"ok": True, "diagnostics": diagnostics}
+    finally:
+        wb.close()
+
+
+def _resync_can_use_fast_path(path: Path, fingerprint: Dict[str, object]) -> bool:
+    if _PENDING_MANUAL_SYNC_ROWS:
+        return False
+    last = TRADING_JOURNAL_RESYNC_LAST_SUCCESS
+    return (
+        path.exists()
+        and str(last.get("workbook_path") or "") == str(path)
+        and isinstance(last.get("snapshot"), dict)
+        and last.get("fingerprint") == fingerprint
+    )
+
+
+def _run_trading_journal_resync() -> Dict[str, object]:
+    request_id = f"resync-{uuid4().hex[:12]}"
+    timings: Dict[str, float] = {}
+    started = time.perf_counter()
+    path = _master_journal_path()
+    if not TRADING_JOURNAL_RESYNC_LOCK.acquire(blocking=False):
+        return {
+            "ok": False,
+            "button": "resync",
+            "code": "TRADING_JOURNAL_RESYNC_IN_PROGRESS",
+            "message": "Trading Journal Resync is already running.",
+            "request_id": request_id,
+            "master_journal_path": str(path),
+            "resync_timings": timings,
+            "status_code": 409,
+        }
+    APP_LOGGER.info("trading_journal_resync_start request_id=%s path=%s", request_id, path)
+    try:
+        lock_status = _master_journal_lock_status(path) if path.exists() else {"locked": False}
+        if lock_status.get("locked"):
+            payload = _excel_workbook_open_payload(extra={"button": "resync", "request_id": request_id, "master_journal_path": str(path), "lock_status": lock_status, "resync_timings": timings})
+            payload["status_code"] = 409
+            return payload
+
+        fingerprint = _journal_source_fingerprint()
+        if _resync_can_use_fast_path(path, fingerprint):
+            t0 = time.perf_counter()
+            verification = _fast_verify_trading_journal_workbook(path, expected_snapshot=TRADING_JOURNAL_RESYNC_LAST_SUCCESS.get("snapshot") if isinstance(TRADING_JOURNAL_RESYNC_LAST_SUCCESS.get("snapshot"), dict) else None)
+            timings["fast_verification"] = round(time.perf_counter() - t0, 6)
+            timings["total"] = round(time.perf_counter() - started, 6)
+            if verification.get("ok"):
+                payload = {
+                    "ok": True,
+                    "button": "resync",
+                    "message": "Trading Journal resync verified; no source changes detected.",
+                    "request_id": request_id,
+                    "master_journal_path": str(path),
+                    "resync_timings": timings,
+                    "skipped_snapshot_build": True,
+                    "snapshot_build_ran": False,
+                    "fast_verification": verification,
+                    "status_code": 200,
+                }
+                return payload
+            APP_LOGGER.warning("trading_journal_resync_fast_verify_failed request_id=%s error=%s", request_id, verification.get("error"))
+
+        t0 = time.perf_counter()
+        snapshot = _build_trading_journal_view_snapshot(force=True, skip_external_balances=True, skip_live_account_refresh=True) or {}
+        timings["snapshot_build"] = round(time.perf_counter() - t0, 6)
+        t0 = time.perf_counter()
+        sync = _sync_master_journal_workbook(defer_github_sync=True, prebuilt_snapshot=snapshot if isinstance(snapshot, dict) else {})
+        timings["workbook_sync"] = round(time.perf_counter() - t0, 6)
+        ok = _master_journal_sync_ok(sync)
+        verification = None
+        if ok and path.exists():
+            t0 = time.perf_counter()
+            verification = _fast_verify_trading_journal_workbook(path, expected_snapshot=snapshot if isinstance(snapshot, dict) else None)
+            timings["final_fast_verification"] = round(time.perf_counter() - t0, 6)
+            if not verification.get("ok"):
+                ok = False
+                sync = {**(sync if isinstance(sync, dict) else {}), "master_journal_ok": False, "master_journal_error": verification.get("error"), "master_journal_diagnostics": {"fast_verification": verification}}
+        if ok and isinstance(snapshot, dict):
+            TRADING_JOURNAL_RESYNC_LAST_SUCCESS.update({
+                "fingerprint": _journal_source_fingerprint(),
+                "snapshot": copy.deepcopy(snapshot),
+                "verified_at": _utc_now_iso(),
+                "workbook_path": str(path),
+            })
+        timings["total"] = round(time.perf_counter() - started, 6)
+        payload = {"ok": ok, "button": "resync", "message": "Trading Journal resync complete." if ok else _master_journal_sync_error(sync), "request_id": request_id, "resync_timings": timings, "skipped_snapshot_build": False, "snapshot_build_ran": True, **(sync if isinstance(sync, dict) else {})}
+        if verification is not None:
+            payload["fast_verification"] = verification
+        payload.setdefault("status_code", 200 if ok else 500)
+        return payload
+    finally:
+        timings.setdefault("total", round(time.perf_counter() - started, 6))
+        APP_LOGGER.info("trading_journal_resync_done request_id=%s elapsed=%.6fs", request_id, timings.get("total") or 0.0)
+        TRADING_JOURNAL_RESYNC_LOCK.release()
+
+
+@app.post("/api/trading-journal/resync")
+async def trading_journal_resync() -> JSONResponse:
+    result = await asyncio.to_thread(_run_trading_journal_resync)
+    status_code = int(result.pop("status_code", 200 if result.get("ok") else 500))
+    return JSONResponse(_json_safe(result), status_code=status_code)
 
 
 def _run_trading_journal_resync() -> Dict[str, object]:
