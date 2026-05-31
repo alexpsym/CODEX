@@ -1003,7 +1003,7 @@ def _snapshot_invariants(wb) -> Dict[str, Any]:
 
 
 def _assert_invariants_unchanged(before: Dict[str, Any], after: Dict[str, Any]) -> None:
-    skipped = {"pnl_calendar_layout", "pnl_calendar_dimensions", "P&L Calendar_layout"}
+    skipped = {"pnl_calendar_layout", "pnl_calendar_dimensions", "P&L Calendar_layout", "dash_styles"}
     for key in before.keys() | after.keys():
         if key in skipped:
             continue
@@ -1115,6 +1115,52 @@ def _find_instrument_leaders_table(ws) -> tuple[int | None, Dict[str, int], Dict
     first_anchor = sorted(anchors, key=lambda t: (t[1], t[0]))[0]
     return None, {}, {}, first_anchor[1]
 
+
+
+def _copy_leader_row_cell_style(ws, source_row: int, target_row: int, header_map: Dict[str, int]) -> None:
+    for col in header_map.values():
+        src = ws.cell(source_row, col)
+        dst = ws.cell(target_row, col)
+        if src.has_style:
+            dst._style = copy(src._style)
+        if src.number_format:
+            dst.number_format = src.number_format
+        if src.alignment:
+            dst.alignment = copy(src.alignment)
+        if src.protection:
+            dst.protection = copy(src.protection)
+
+
+def _repair_missing_market_leader_counterpart_row(ws, metric_rows: Dict[str, int], header_map: Dict[str, int], label: str) -> int | None:
+    wanted = str(label or "").strip().lower()
+    if not wanted or wanted in metric_rows or not header_map:
+        return metric_rows.get(wanted)
+    parts = wanted.split()
+    if len(parts) < 3 or parts[-2:] not in (["most", "wins"], ["most", "losses"]):
+        return None
+    market = " ".join(parts[:-2])
+    counterpart_suffix = "losses" if parts[-1] == "wins" else "wins"
+    counterpart = f"{market} most {counterpart_suffix}"
+    counterpart_row = metric_rows.get(counterpart)
+    if not counterpart_row:
+        return None
+
+    metric_col = header_map["metric"]
+    table_cols = sorted(header_map.values())
+    first_data_row = min(metric_rows.values()) if metric_rows else counterpart_row
+    last_scan_row = max(max(metric_rows.values(), default=counterpart_row) + 8, counterpart_row + 1)
+    for row in range(counterpart_row + 1, min(ws.max_row + 24, last_scan_row) + 1):
+        if any(ws.cell(row, col).value not in (None, "") for col in table_cols):
+            continue
+        source_row = counterpart_row
+        existing = [r for r in metric_rows.values() if first_data_row <= r < row]
+        if existing:
+            source_row = max(existing)
+        _copy_leader_row_cell_style(ws, source_row, row, header_map)
+        ws.cell(row, metric_col).value = label
+        metric_rows[wanted] = row
+        return row
+    raise RuntimeError(f"Instrument leaders is missing required row '{label}' and no safe blank row is available to restore it.")
 
 def _write_value_preserving_cell(ws, row: int, col: int, value: Any) -> bool:
     if _is_merged_non_anchor(ws, row, col):
@@ -1435,6 +1481,9 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 if pct is None:
                     return None
                 return _pct_points_to_excel_fraction(pct)
+            if metric_type == "r":
+                r_value = _as_float(value)
+                return r_value if r_value is not None else value
             if metric_type == "duration":
                 return _fmt_duration_full(value)
             if metric_type == "count":
@@ -1444,13 +1493,45 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 return _fmt_detail_src(value)
             return value
 
-        def _write_dashboard_metric_cell(row: int, col: int, value: Any, metric_type: str = "raw") -> bool:
+        def _set_dashboard_metric_number_format(cell, metric_type: str) -> None:
+            if metric_type == "pct":
+                cell.number_format = "0.00%"
+            elif metric_type == "r":
+                cell.number_format = '0.000"R"'
+            elif metric_type == "count":
+                cell.number_format = "0"
+            elif metric_type == "duration":
+                cell.number_format = r'00\:00\:00\:00'
+
+        def _apply_dashboard_metric_semantic_style(cell, semantic: str | None) -> None:
+            value = _as_float(cell.value)
+            if value is None or value == 0 or not semantic:
+                return
+            if semantic == "profit_loss":
+                if value > 0:
+                    cell.fill = PatternFill("solid", fgColor=PROFIT_FILL)
+                    cell.font = copy(cell.font)
+                    cell.font = Font(name=cell.font.name, sz=cell.font.sz, b=cell.font.b, i=cell.font.i,
+                                     color=PROFIT_FONT, underline=cell.font.underline, strike=cell.font.strike)
+                elif value < 0:
+                    cell.fill = PatternFill("solid", fgColor=LOSS_FILL)
+                    cell.font = copy(cell.font)
+                    cell.font = Font(name=cell.font.name, sz=cell.font.sz, b=cell.font.b, i=cell.font.i,
+                                     color=LOSS_FONT, underline=cell.font.underline, strike=cell.font.strike)
+            elif semantic in {"loss", "drawdown"}:
+                cell.fill = PatternFill("solid", fgColor=LOSS_FILL)
+                cell.font = copy(cell.font)
+                cell.font = Font(name=cell.font.name, sz=cell.font.sz, b=cell.font.b, i=cell.font.i,
+                                 color=LOSS_FONT, underline=cell.font.underline, strike=cell.font.strike)
+
+        def _write_dashboard_metric_cell(row: int, col: int, value: Any, metric_type: str = "raw", semantic: str | None = None) -> bool:
             if value is None or _is_light_grey_no_metric_cell(dash.cell(row, col)):
                 return False
             if _write_value_preserving_cell(dash, row, col, value):
                 diagnostics["updated_cells"] += 1
-                if metric_type == "duration":
-                    dash.cell(row, col).number_format = r'00\:00\:00\:00'
+                cell = dash.cell(row, col)
+                _set_dashboard_metric_number_format(cell, metric_type)
+                _apply_dashboard_metric_semantic_style(cell, semantic)
                 return True
             return False
 
@@ -1478,16 +1559,23 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                     break
             return cols
 
-        def write_market_metric(section: str, label: str, values_by_market: Dict[str, Any], metric_type: str = "raw"):
+        def write_market_metric(section: str, label: str, values_by_market: Dict[str, Any], metric_type: str = "raw", semantic: str | None = None):
             pos = _find_label_in_section(dash, label, anchors[section])
             if not pos:
                 return
             market_cols = _main_dashboard_market_columns()
+            missing_markets = []
             for market, col in market_cols.items():
                 out = _format_metric_value(values_by_market.get(market), metric_type)
                 if out is None:
+                    if section == "Drawdown" and market in {"fx", "crypto"}:
+                        missing_markets.append(market)
                     continue
-                _write_dashboard_metric_cell(pos[0], col, out, metric_type)
+                _write_dashboard_metric_cell(pos[0], col, out, metric_type, semantic)
+            if missing_markets:
+                diagnostics.setdefault("missing_market_drawdown_values", []).extend(
+                    f"{market} {label}" for market in missing_markets
+                )
 
         def write_source_below(section: str, metric_label: str, source_val: Any):
             if source_val is None:
@@ -1518,7 +1606,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             write_metric(section, "Win rate", bucket.get("win_rate_pct"), "pct")
             write_metric(section, "Net P/L", bucket.get("net_profit_total"))
             write_metric(section, "Avg result %", bucket.get("avg_result_pct"), "pct")
-            write_metric(section, "Avg R", bucket.get("avg_r_multiple"), "raw")
+            write_metric(section, "Avg R", bucket.get("avg_r_multiple"), "r")
             write_metric(section, "Gross gain", bucket.get("gross_gain"))
             write_metric(section, "Gross loss", bucket.get("gross_loss"))
             write_metric(section, "Max loss %", bucket.get("min_result_pct"), "pct")
@@ -1548,16 +1636,16 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 "crypto": (risk_by_market.get("crypto") or {}).get(key),
             }
 
-        write_market_metric("Winners", "Avg result %", _risk_market_values("avg_result_pct_winners"), "pct")
-        write_market_metric("Winners", "Avg R", _risk_market_values("avg_r_multiple_winners"))
+        write_market_metric("Winners", "Avg result %", _risk_market_values("avg_result_pct_winners"), "pct", "profit_loss")
+        write_market_metric("Winners", "Avg R", _risk_market_values("avg_r_multiple_winners"), "r", "profit_loss")
         write_market_metric("Winners", "Avg stop %", _risk_market_values("avg_stop_pct_winners"), "pct")
         write_market_metric("Winners", "Avg target %", _risk_market_values("avg_target_pct_winners"), "pct")
-        write_market_metric("Losers", "Avg result %", _risk_market_values("avg_result_pct_losers"), "pct")
-        write_market_metric("Losers", "Avg R", _risk_market_values("avg_r_multiple_losers"))
+        write_market_metric("Losers", "Avg result %", _risk_market_values("avg_result_pct_losers"), "pct", "loss")
+        write_market_metric("Losers", "Avg R", _risk_market_values("avg_r_multiple_losers"), "r", "loss")
         write_market_metric("Losers", "Avg stop %", _risk_market_values("avg_stop_pct_losers"), "pct")
         write_market_metric("Losers", "Avg target %", _risk_market_values("avg_target_pct_losers"), "pct")
-        write_market_metric("Drawdown", "Max drawdown", {"overall": risk.get("max_drawdown_pct"), "fx": (by_market.get("fx") or {}).get("max_drawdown_pct"), "crypto": (by_market.get("crypto") or {}).get("max_drawdown_pct")}, "pct")
-        write_market_metric("Drawdown", "Avg drawdown", {"overall": risk.get("avg_drawdown_pct")}, "pct")
+        write_market_metric("Drawdown", "Max drawdown", {"overall": risk.get("max_drawdown_pct"), "fx": (by_market.get("fx") or {}).get("max_drawdown_pct"), "crypto": (by_market.get("crypto") or {}).get("max_drawdown_pct")}, "pct", "drawdown")
+        write_market_metric("Drawdown", "Avg drawdown", {"overall": risk.get("avg_drawdown_pct"), "fx": (by_market.get("fx") or {}).get("avg_drawdown_pct"), "crypto": (by_market.get("crypto") or {}).get("avg_drawdown_pct")}, "pct", "drawdown")
         duration = groups.get("duration") or {}
         write_metric("FX", "FX shortest", duration.get("fx_shortest_seconds"), "duration")
         write_metric("FX", "FX longest", duration.get("fx_longest_seconds"), "duration")
@@ -1598,6 +1686,11 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                     continue
                 diagnostics["leader_payload_keys"].append(key)
                 row_idx = metric_rows.get(metric_label)
+                if not row_idx and metric_label.startswith(("fx ", "crypto ")):
+                    row_idx = _repair_missing_market_leader_counterpart_row(dash, metric_rows, leader_headers, metric_label)
+                    if row_idx:
+                        diagnostics.setdefault("restored_leader_rows", []).append(metric_label)
+                        diagnostics["updated_cells"] += 1
                 if not row_idx:
                     diagnostics["skipped_optional_leader_rows"].append(metric_label)
                     continue

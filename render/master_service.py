@@ -22500,7 +22500,9 @@ def _compute_journal_stats(
         return _timestamp_epoch_seconds(value, cache=ts_cache)
 
     # Drawdown stats (%), segmented by cashflow anchors so deposits/withdrawals
-    # do not show up as drawdowns.
+    # do not show up as drawdowns.  The helper is reused for market-specific
+    # subsets so FX/Crypto dashboard drawdown cells are based on the same
+    # cashflow-anchor logic as the overall journal calculation.
     cashflow_rows = [r for r in rows if _row_type(r) == "cashflow"]
     events_by_account: Dict[str, List[Tuple[float, str]]] = defaultdict(list)
     for r in cashflow_rows:
@@ -22515,52 +22517,52 @@ def _compute_journal_stats(
     for account_key in list(events_by_account.keys()):
         events_by_account[account_key] = sorted(events_by_account[account_key], key=lambda x: x[0])
 
-    segments: Dict[Tuple[str, str], List[Tuple[float, float]]] = defaultdict(list)
-    for row in trade_rows:
-        account = str(row.get("account_label") or row.get("account") or "").strip()
-        account_key = _norm_account_key(account)
-        if not account_key:
-            continue
-        dt = row.get("close_time") or row.get("open_time")
-        ts = _to_ts(dt)
-        bal = _to_float(row.get("analysis_balance_after_trade"))
-        if bal is None:
-            bal = _to_float(row.get("balance_after_trade"))
-        if bal is None or not math.isfinite(bal) or bal <= 0 or not math.isfinite(ts):
-            continue
+    def _drawdown_stats_for_rows(rows_subset: List[Dict[str, object]]) -> Dict[str, object]:
+        segments: Dict[Tuple[str, str], List[Tuple[float, float]]] = defaultdict(list)
+        for row in rows_subset:
+            account = str(row.get("account_label") or row.get("account") or "").strip()
+            account_key = _norm_account_key(account)
+            if not account_key:
+                continue
+            dt = row.get("close_time") or row.get("open_time")
+            ts = _to_ts(dt)
+            bal = _to_float(row.get("analysis_balance_after_trade"))
+            if bal is None:
+                bal = _to_float(row.get("balance_after_trade"))
+            if bal is None or not math.isfinite(bal) or bal <= 0 or not math.isfinite(ts):
+                continue
 
-        anchor_id = "__no_anchor__"
-        for ev_ts, ev_id in events_by_account.get(account_key, []):
-            if ev_ts <= ts:
-                anchor_id = ev_id
-            else:
-                break
-        segments[(account_key, anchor_id)].append((ts, bal))
+            anchor_id = "__no_anchor__"
+            for ev_ts, ev_id in events_by_account.get(account_key, []):
+                if ev_ts <= ts:
+                    anchor_id = ev_id
+                else:
+                    break
+            segments[(account_key, anchor_id)].append((ts, bal))
 
-    dd_vals: List[float] = []
-    dd_segment_count = 0
-    dd_balance_points = 0
-    for pts in segments.values():
-        pts_sorted = sorted(pts, key=lambda x: x[0])
-        if len(pts_sorted) < 2:
-            continue
-        dd_segment_count += 1
-        dd_balance_points += len(pts_sorted)
-        peak: Optional[float] = None
-        for _, bal in pts_sorted:
-            if peak is None or bal > peak:
-                peak = bal
-            if peak and peak > 0:
-                dd = (peak - bal) / peak * 100.0
-                if dd > 0 and math.isfinite(dd):
-                    dd_vals.append(dd)
+        dd_vals: List[float] = []
+        dd_segment_count = 0
+        dd_balance_points = 0
+        for pts in segments.values():
+            pts_sorted = sorted(pts, key=lambda x: x[0])
+            if len(pts_sorted) < 2:
+                continue
+            dd_segment_count += 1
+            dd_balance_points += len(pts_sorted)
+            peak: Optional[float] = None
+            for _, bal in pts_sorted:
+                if peak is None or bal > peak:
+                    peak = bal
+                if peak and peak > 0:
+                    dd = (peak - bal) / peak * 100.0
+                    if dd > 0 and math.isfinite(dd):
+                        dd_vals.append(dd)
 
-    if dd_vals:
-        max_drawdown_pct = max(dd_vals)
-        min_drawdown_pct = min(dd_vals)
-        avg_drawdown_pct = sum(dd_vals) / len(dd_vals)
-    else:
-        if dd_segment_count > 0:
+        if dd_vals:
+            max_drawdown_pct = max(dd_vals)
+            min_drawdown_pct = min(dd_vals)
+            avg_drawdown_pct = sum(dd_vals) / len(dd_vals)
+        elif dd_segment_count > 0:
             max_drawdown_pct = 0.0
             min_drawdown_pct = 0.0
             avg_drawdown_pct = 0.0
@@ -22568,6 +22570,22 @@ def _compute_journal_stats(
             max_drawdown_pct = None
             min_drawdown_pct = None
             avg_drawdown_pct = None
+        return {
+            "max_drawdown_pct": max_drawdown_pct,
+            "min_drawdown_pct": min_drawdown_pct,
+            "avg_drawdown_pct": avg_drawdown_pct,
+            "drawdown_balance_points": dd_balance_points,
+            "drawdown_segments_count": dd_segment_count,
+        }
+
+    overall_drawdown = _drawdown_stats_for_rows(trade_rows)
+    fx_drawdown = _drawdown_stats_for_rows(fx_rows)
+    crypto_drawdown = _drawdown_stats_for_rows(crypto_rows)
+    max_drawdown_pct = overall_drawdown.get("max_drawdown_pct")
+    min_drawdown_pct = overall_drawdown.get("min_drawdown_pct")
+    avg_drawdown_pct = overall_drawdown.get("avg_drawdown_pct")
+    dd_balance_points = overall_drawdown.get("drawdown_balance_points")
+    dd_segment_count = overall_drawdown.get("drawdown_segments_count")
 
     pnl_vals = [_row_pnl(r) for r in trade_rows]
     pnl_vals = [v for v in pnl_vals if v is not None]
@@ -22681,9 +22699,9 @@ def _compute_journal_stats(
         }
 
     risk_by_market = {
-        "overall": _risk_bucket(trade_rows),
-        "fx": _risk_bucket(fx_rows),
-        "crypto": _risk_bucket(crypto_rows),
+        "overall": {**_risk_bucket(trade_rows), **overall_drawdown},
+        "fx": {**_risk_bucket(fx_rows), **fx_drawdown},
+        "crypto": {**_risk_bucket(crypto_rows), **crypto_drawdown},
     }
 
     def _market_bucket(rows_subset: List[Dict[str, object]], label: str) -> Dict[str, object]:
@@ -22705,6 +22723,7 @@ def _compute_journal_stats(
         stop_vals = _stop_pct_values(rows_subset)
         target_vals = _target_pct_values(rows_subset)
         money = _money_stats_by_currency(rows_subset)
+        drawdown = _drawdown_stats_for_rows(rows_subset)
         streaks_local = _compute_longest_streaks(rows_subset)
         winning_streak_detail = streaks_local.get("longest_winning")
         losing_streak_detail = streaks_local.get("longest_losing")
@@ -22752,7 +22771,11 @@ def _compute_journal_stats(
                 "max_loss": _pnl_extreme_ref(rows_subset, "max_loss"),
             },
             "instruments": len({str(r.get("symbol") or "").strip() for r in rows_subset if str(r.get("symbol") or "").strip()}),
-            "max_drawdown_pct": totals.get("max_drawdown_pct") if label == "Overall" else None,
+            "max_drawdown_pct": drawdown.get("max_drawdown_pct"),
+            "min_drawdown_pct": drawdown.get("min_drawdown_pct"),
+            "avg_drawdown_pct": drawdown.get("avg_drawdown_pct"),
+            "drawdown_balance_points": drawdown.get("drawdown_balance_points"),
+            "drawdown_segments_count": drawdown.get("drawdown_segments_count"),
             "money_by_currency": money,
             "test_trades": 0,
         }
@@ -26321,10 +26344,10 @@ def _release_master_journal_workbook_sync() -> None:
 
 def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_survivor_row_ids: Optional[List[str]] = None, prebuilt_snapshot: Optional[Dict[str, object]] = None, sync_caller: Optional[str] = None, sync_id: Optional[str] = None) -> Dict[str, object]:
     sync_id = str(sync_id or f"mjsync-{uuid4().hex[:12]}")
-    caller = str(sync_caller or "internal").strip() or "internal"
+    raw_caller = "" if sync_caller is None else str(sync_caller).strip()
     path = _master_journal_path()
-    if caller.lower() == "direct":
-        APP_LOGGER.error("master_journal_workbook_sync_missing_caller sync_id=%s caller=%s path=%s", sync_id, caller or "<missing>", path)
+    if not raw_caller or raw_caller.lower() == "direct":
+        APP_LOGGER.error("master_journal_workbook_sync_missing_caller sync_id=%s caller=%s path=%s", sync_id, raw_caller or "<missing>", path)
         return {
             "ok": False,
             "master_journal_ok": False,
@@ -26335,9 +26358,10 @@ def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_s
             "code": "MASTER_JOURNAL_SYNC_CALLER_REQUIRED",
             "status_code": 500,
             "sync_id": sync_id,
-            "sync_caller": caller,
+            "sync_caller": raw_caller,
             "diagnostics": {"workbook_sync_substage_timings": {}},
         }
+    caller = raw_caller
     rejected = _reserve_master_journal_workbook_sync(path, sync_id, caller)
     if rejected is not None:
         return rejected
@@ -27641,13 +27665,7 @@ async def trading_journal_crypto_monthly_pnl() -> JSONResponse:
     run = await _run_monthly_aud_revaluation_sync(reason="manual_crypto_monthly_pnl")
     if not run.get("ok"):
         return JSONResponse({"ok": False, "button": "crypto_monthly_pnl", **run}, status_code=500)
-    try:
-        workbook_sync = _sync_master_journal_workbook(sync_caller="crypto_monthly_pnl")
-    except TypeError as exc:
-        msg = str(exc)
-        if "unexpected keyword argument" not in msg or "sync_caller" not in msg:
-            raise
-        workbook_sync = _sync_master_journal_workbook()
+    workbook_sync = _sync_master_journal_workbook(sync_caller="crypto_monthly_pnl")
     path = Path(str(workbook_sync.get("master_journal_path") or wb_path))
     expected_ids = [f"monthly_aud_reval:bybit_live:{m}" for m in due]
     verification = _verify_trade_log_row_ids_in_workbook(path, expected_ids)

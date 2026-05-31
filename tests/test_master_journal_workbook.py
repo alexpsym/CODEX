@@ -703,7 +703,7 @@ def test_instrument_leaders_skips_missing_optional_rows(tmp_path: Path):
     wb=Workbook(); ws=wb.active; ws.title='Dashboard'; wb.create_sheet('Trade Log'); wb.create_sheet('Instrument Averages')
     ws['A1']='Overall'; ws['D1']='FX'; ws['G1']='Crypto'; ws['J1']='Winners'; ws['J8']='Losers'; ws['J14']='Drawdown'; ws['M1']='Instrument leaders'; ws['T1']='Account Balances'
     ws['M2']='Metric'; ws['N2']='Symbol'; ws['O2']='Wins'; ws['P2']='Losses'; ws['Q2']='Trades'
-    ws['M3']='Overall most wins'; ws['M4']='Overall most losses'; ws['M5']='FX most wins'; ws['M6']='FX most losses'; ws['M7']='Crypto most wins'  # missing crypto most losses row intentionally
+    ws['M3']='FX most wins'; ws['M4']='FX most losses'; ws['M5']='Crypto most wins'  # missing crypto most losses row intentionally
     ws['T2']='Account'; ws['U2']='Balance'; ws['V2']='Currency'
     ws['T3']='Bybit Live'; ws['U3']='1'; ws['V3']='USDT'
     _ensure_trade_log_headers(wb); wb.save(p)
@@ -717,12 +717,20 @@ def test_instrument_leaders_skips_missing_optional_rows(tmp_path: Path):
     }}},'balances':[{'account_label':'BYBIT','balance':2,'currency':'USDT'}]}
     result=update_master_journal_workbook_data_only(p,snap); Path(result["candidate_path"]).replace(p)
     out=load_workbook(p)['Dashboard']
-    assert out['N3'].value=='EURUSD' and out['O3'].value==4 and out['P3'].value==1 and out['Q3'].value==5
-    assert out['N4'].value=='GBPUSD' and out['O4'].value==1 and out['P4'].value==4 and out['Q4'].value==5
-    assert out['N8'].value is None and out['O8'].value is None and out['P8'].value is None and out['Q8'].value is None
-    assert 'crypto most losses' in result['diagnostics'].get('skipped_optional_leader_rows', [])
-    assert 'crypto most losses' not in result['diagnostics'].get('missing_leader_rows', [])
-    assert result['diagnostics']['updated_cells'] > 0
+    assert out['M3'].value == 'FX most wins' and out['N3'].value=='EURUSD' and out['O3'].value==3 and out['P3'].value==1 and out['Q3'].value==4
+    assert out['M4'].value == 'FX most losses' and out['N4'].value=='XAUUSD' and out['O4'].value==1 and out['P4'].value==3 and out['Q4'].value==4
+    assert out['M5'].value == 'Crypto most wins' and out['N5'].value=='BTCUSDT' and out['O5'].value==6 and out['P5'].value==2 and out['Q5'].value==8
+    assert out['M6'].value == 'crypto most losses' or out['M6'].value == 'Crypto most losses'
+    assert out['N6'].value=='ETHUSDT' and out['O6'].value==2 and out['P6'].value==6 and out['Q6'].value==8
+    assert 'overall most wins' in result['diagnostics'].get('skipped_optional_leader_rows', [])
+    assert 'overall most losses' in result['diagnostics'].get('skipped_optional_leader_rows', [])
+    assert 'crypto most losses' in result['diagnostics'].get('restored_leader_rows', [])
+
+    result2=update_master_journal_workbook_data_only(p,snap); Path(result2["candidate_path"]).replace(p)
+    out2=load_workbook(p)['Dashboard']
+    labels = [str(out2.cell(r, 13).value or '').strip().lower() for r in range(1, out2.max_row + 1)]
+    assert labels.count('crypto most losses') == 1
+    assert 'crypto most losses' not in result2['diagnostics'].get('restored_leader_rows', [])
 
 def test_account_balances_restores_missing_rows_without_layout_mutation(tmp_path: Path):
     from tools.master_journal_workbook import update_master_journal_workbook_data_only
@@ -1229,9 +1237,9 @@ def test_dashboard_market_risk_cells_and_grey_no_metric_cells(tmp_path: Path):
     wb.create_sheet("Instrument Averages")
     wb.create_sheet("P&L Calendar")
     dash["B1"] = "Overall"; dash["C1"] = "FX"; dash["D1"] = "Crypto"
-    dash["A33"] = "Winners"; dash["A34"] = "Avg stop %"; dash["A35"] = "Avg target %"
-    dash["A38"] = "Losers"; dash["A39"] = "Avg stop %"; dash["A40"] = "Avg target %"
-    dash["A43"] = "Drawdown"
+    dash["A33"] = "Winners"; dash["A34"] = "Avg result %"; dash["A35"] = "Avg stop %"; dash["A36"] = "Avg target %"; dash["A37"] = "Avg R"
+    dash["A38"] = "Losers"; dash["A39"] = "Avg result %"; dash["A40"] = "Avg stop %"; dash["A41"] = "Avg target %"; dash["A42"] = "Avg R"
+    dash["A43"] = "Drawdown"; dash["A44"] = "Max drawdown"; dash["A45"] = "Avg drawdown"
     dash["F1"] = "Instrument leaders"; dash["J1"] = "Account Balances"
     dash["J2"] = "Account"; dash["K2"] = "Balance"; dash["L2"] = "Currency"
     dash["D35"].fill = PatternFill("solid", fgColor="EAF2F8")
@@ -1241,17 +1249,27 @@ def test_dashboard_market_risk_cells_and_grey_no_metric_cells(tmp_path: Path):
     snap = {
         "items": [],
         "stats": {"totals": {}, "groups": {
-            "by_market": {"overall": {}, "fx": {}, "crypto": {}},
+            "by_market": {
+                "overall": {"max_drawdown_pct": 9.0, "avg_drawdown_pct": 4.5},
+                "fx": {"max_drawdown_pct": 10.0, "avg_drawdown_pct": 5.0},
+                "crypto": {"max_drawdown_pct": 12.0, "avg_drawdown_pct": 6.0},
+            },
             "leaders": {}, "duration": {},
             "risk_expectancy": {
-                "avg_stop_pct_winners": 1.0,
+                "avg_result_pct_winners": 1.0,
+                "avg_stop_pct_winners": 1.1,
                 "avg_target_pct_winners": 2.0,
+                "avg_r_multiple_winners": 1.25,
+                "avg_result_pct_losers": -3.0,
                 "avg_stop_pct_losers": 3.0,
                 "avg_target_pct_losers": 4.0,
+                "avg_r_multiple_losers": -0.75,
+                "max_drawdown_pct": 9.0,
+                "avg_drawdown_pct": 4.5,
                 "by_market": {
-                    "overall": {"avg_stop_pct_winners": 1.0, "avg_target_pct_winners": 2.0, "avg_stop_pct_losers": 3.0, "avg_target_pct_losers": 4.0},
-                    "fx": {"avg_stop_pct_winners": 1.5, "avg_target_pct_winners": 2.5, "avg_stop_pct_losers": 3.5, "avg_target_pct_losers": 4.5},
-                    "crypto": {"avg_stop_pct_winners": 5.5, "avg_target_pct_winners": 6.5, "avg_stop_pct_losers": 7.5, "avg_target_pct_losers": 8.5},
+                    "overall": {"avg_result_pct_winners": 1.0, "avg_stop_pct_winners": 1.1, "avg_target_pct_winners": 2.0, "avg_r_multiple_winners": 1.25, "avg_result_pct_losers": -3.0, "avg_stop_pct_losers": 3.0, "avg_target_pct_losers": 4.0, "avg_r_multiple_losers": -0.75, "max_drawdown_pct": 9.0, "avg_drawdown_pct": 4.5},
+                    "fx": {"avg_result_pct_winners": 1.5, "avg_stop_pct_winners": 1.5, "avg_target_pct_winners": 2.5, "avg_r_multiple_winners": 1.5, "avg_result_pct_losers": -3.5, "avg_stop_pct_losers": 3.5, "avg_target_pct_losers": 4.5, "avg_r_multiple_losers": -0.5, "max_drawdown_pct": 10.0, "avg_drawdown_pct": 5.0},
+                    "crypto": {"avg_result_pct_winners": 5.5, "avg_stop_pct_winners": 5.5, "avg_target_pct_winners": 6.5, "avg_r_multiple_winners": 2.5, "avg_result_pct_losers": -7.5, "avg_stop_pct_losers": 7.5, "avg_target_pct_losers": 8.5, "avg_r_multiple_losers": -1.5, "max_drawdown_pct": 12.0, "avg_drawdown_pct": 6.0},
                 },
             },
         }},
@@ -1264,8 +1282,22 @@ def test_dashboard_market_risk_cells_and_grey_no_metric_cells(tmp_path: Path):
     d = updated["Dashboard"]
     assert d["C34"].value == pytest.approx(0.015)
     assert d["D34"].value == pytest.approx(0.055)
-    assert d["C35"].value == pytest.approx(0.025)
+    assert d["C34"].number_format == "0.00%"
+    assert d["D34"].number_format == "0.00%"
+    assert d["C35"].value == pytest.approx(0.015)
     assert d["D35"].value in (None, "")
-    assert d["C39"].value == pytest.approx(0.035)
-    assert d["D40"].value == pytest.approx(0.085)
+    assert d["C35"].number_format == "0.00%"
+    assert d["D35"].number_format != "0.00%"
+    assert d["C37"].value == pytest.approx(1.5)
+    assert d["D37"].value == pytest.approx(2.5)
+    assert d["C37"].number_format == '0.000"R"'
+    assert d["D37"].number_format == '0.000"R"'
+    assert d["C39"].value == pytest.approx(-0.035)
+    assert d["D42"].number_format == '0.000"R"'
+    assert d["C44"].value == pytest.approx(0.10)
+    assert d["D44"].value == pytest.approx(0.12)
+    assert d["C45"].value == pytest.approx(0.05)
+    assert d["D45"].value == pytest.approx(0.06)
+    assert d["C44"].number_format == "0.00%"
+    assert d["D45"].number_format == "0.00%"
     updated.close()

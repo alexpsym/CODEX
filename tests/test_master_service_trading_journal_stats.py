@@ -202,6 +202,35 @@ def test_compute_journal_stats_winner_loser_splits_and_durations() -> None:
     assert leaders["crypto_most_losses_instrument"]["symbol"] == "ETHUSDT"
 
 
+def test_compute_journal_stats_market_drawdown_uses_cashflow_segments() -> None:
+    rows = [
+        {"row_type": "trade", "asset_class": "fx", "symbol": "EURUSD", "account": "FX", "result_pct": 1.0, "r_multiple": 1.0, "net_profit": 10, "analysis_balance_after_trade": 1000, "close_time": "2026-01-01T00:00:00Z"},
+        {"row_type": "trade", "asset_class": "fx", "symbol": "GBPUSD", "account": "FX", "result_pct": -1.0, "r_multiple": -1.0, "net_profit": -10, "analysis_balance_after_trade": 900, "close_time": "2026-01-02T00:00:00Z"},
+        {"row_type": "cashflow", "account": "FX", "cashflow_amount": 600, "close_time": "2026-01-03T00:00:00Z"},
+        {"row_type": "trade", "asset_class": "fx", "symbol": "AUDUSD", "account": "FX", "result_pct": 1.0, "r_multiple": 1.0, "net_profit": 10, "analysis_balance_after_trade": 1500, "close_time": "2026-01-04T00:00:00Z"},
+        {"row_type": "trade", "asset_class": "fx", "symbol": "USDJPY", "account": "FX", "result_pct": -1.0, "r_multiple": -1.0, "net_profit": -10, "analysis_balance_after_trade": 1450, "close_time": "2026-01-05T00:00:00Z"},
+        {"row_type": "trade", "asset_class": "crypto", "symbol": "BTCUSDT", "account": "CRYPTO", "result_pct": 1.0, "r_multiple": 1.0, "net_profit": 10, "analysis_balance_after_trade": 2000, "close_time": "2026-01-01T00:00:00Z"},
+        {"row_type": "trade", "asset_class": "crypto", "symbol": "ETHUSDT", "account": "CRYPTO", "result_pct": -1.0, "r_multiple": -1.0, "net_profit": -10, "analysis_balance_after_trade": 1800, "close_time": "2026-01-02T00:00:00Z"},
+        {"row_type": "cashflow", "account": "CRYPTO", "cashflow_amount": -100, "close_time": "2026-01-03T00:00:00Z"},
+        {"row_type": "trade", "asset_class": "crypto", "symbol": "SOLUSDT", "account": "CRYPTO", "result_pct": 1.0, "r_multiple": 1.0, "net_profit": 10, "analysis_balance_after_trade": 1700, "close_time": "2026-01-04T00:00:00Z"},
+        {"row_type": "trade", "asset_class": "crypto", "symbol": "XRPUSDT", "account": "CRYPTO", "result_pct": -1.0, "r_multiple": -1.0, "net_profit": -10, "analysis_balance_after_trade": 1600, "close_time": "2026-01-05T00:00:00Z"},
+    ]
+
+    stats = _compute_journal_stats(rows, balances=[])
+    by_market = stats["groups"]["by_market"]
+    risk_by_market = stats["groups"]["risk_expectancy"]["by_market"]
+
+    assert by_market["fx"]["max_drawdown_pct"] == pytest.approx(10.0)
+    assert by_market["fx"]["avg_drawdown_pct"] == pytest.approx((10.0 + (50 / 1500 * 100)) / 2)
+    assert by_market["crypto"]["max_drawdown_pct"] == pytest.approx(10.0)
+    assert by_market["crypto"]["avg_drawdown_pct"] == pytest.approx((10.0 + (100 / 1700 * 100)) / 2)
+    assert risk_by_market["fx"]["max_drawdown_pct"] == by_market["fx"]["max_drawdown_pct"]
+    assert risk_by_market["fx"]["avg_drawdown_pct"] == by_market["fx"]["avg_drawdown_pct"]
+    assert risk_by_market["crypto"]["max_drawdown_pct"] == by_market["crypto"]["max_drawdown_pct"]
+    assert risk_by_market["crypto"]["avg_drawdown_pct"] == by_market["crypto"]["avg_drawdown_pct"]
+    assert by_market["fx"]["drawdown_segments_count"] == 2
+    assert by_market["crypto"]["drawdown_segments_count"] == 2
+
 
 def test_compute_journal_stats_distance_fallback_percent_points_are_not_fraction_scaled() -> None:
     rows = [

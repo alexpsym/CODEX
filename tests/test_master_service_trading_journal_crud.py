@@ -1523,7 +1523,7 @@ def test_sync_master_journal_duration_validation_still_fails_real_trade_blank_du
     wb.close()
     monkeypatch.setattr(master_service, "_build_trading_journal_view_snapshot", lambda force=True: {"items": rows, "stats": {"totals": {}, "groups": {}}, "balances": []})
     monkeypatch.setattr(master_service, "update_master_journal_workbook_data_only", lambda *a, **k: {"ok": True, "candidate_path": str(mj)})
-    out = master_service._sync_master_journal_workbook(defer_github_sync=True)
+    out = master_service._sync_master_journal_workbook(defer_github_sync=True, sync_caller="test")
     assert out.get("ok") is False
     assert "duration column blank/non-numeric" in str(out.get("master_journal_error") or "")
 
@@ -1835,7 +1835,7 @@ def test_workbook_net_pl_populates_for_oanda_pepperstone_bybit_after_sync(temp_s
         {"id": "bybit:1", "row_type": "trade", "account": "Bybit Demo", "account_label": "Bybit Demo", "symbol": "BTCUSDT", "side": "Buy", "open_time": "2026-01-03T00:00:00Z", "close_time": "2026-01-03T01:00:00Z", "qty": 0.1, "entry_price": 100000.0, "exit_price": 100100.0, "net_profit": 12.5, "commission": 0.5, "balance_after_trade": 1031.0, "currency": "USDT"},
     ]
     master_service._set_trading_journal_rows(rows)
-    out = master_service._sync_master_journal_workbook()
+    out = master_service._sync_master_journal_workbook(sync_caller="test")
     assert out.get("ok") is True
     wb = master_service.load_workbook(master_service._master_journal_path(), data_only=True, read_only=True)
     try:
@@ -2369,7 +2369,7 @@ def test_crypto_monthly_pnl_endpoint_no_anchor_returns_bootstrap_required(monkey
     monkeypatch.setattr(master_service, "_run_monthly_aud_revaluation_sync", lambda reason: {"ok": True})
     monkeypatch.setattr(master_service, "_monthly_aud_revaluation_rows_for_journal_view", lambda: [])
     monkeypatch.setattr(master_service, "_read_monthly_aud_reval_months_from_workbook", lambda _p: {"ok": True, "workbook_exists": False, "months": []})
-    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda: {"master_journal_path": str(master_service._master_journal_path())})
+    monkeypatch.setattr(master_service, "_sync_master_journal_workbook", lambda **_kwargs: {"master_journal_path": str(master_service._master_journal_path())})
     monkeypatch.setattr(master_service, "_verify_trade_log_row_ids_in_workbook", lambda p,e: {"ok": True, "missing_row_ids": []})
     r = asyncio.run(master_service.trading_journal_crypto_monthly_pnl())
     assert r.status_code == 422
@@ -2391,7 +2391,7 @@ def test_crypto_monthly_pnl_due_month_april_2026(monkeypatch, tmp_path):
         rows.append({'id':'monthly_aud_reval:bybit_live:2026-04','row_type':'monthly_aud_reval','raw_refs':{'period_month':'2026-04'}})
         return {'ok': True}
     monkeypatch.setattr(master_service, '_run_monthly_aud_revaluation_sync', fake_run)
-    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda: {'master_journal_path': str(tmp_path / 'Trading Journal.xlsx')})
+    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda **_kwargs: {'master_journal_path': str(tmp_path / 'Trading Journal.xlsx')})
     monkeypatch.setattr(master_service, '_verify_trade_log_row_ids_in_workbook', lambda p,e: {'ok': True, 'missing_row_ids': []})
     r = asyncio.run(master_service.trading_journal_crypto_monthly_pnl())
     assert r.status_code == 200
