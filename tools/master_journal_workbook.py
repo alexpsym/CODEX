@@ -22,9 +22,33 @@ LEGACY_ALL_TRADES_SHEET = "All Trades"
 ALL_TRADES_SHEET = LEGACY_ALL_TRADES_SHEET
 LEGACY_TRADE_LOG_SHEET = LEGACY_ALL_TRADES_SHEET
 SHEET_ORDER=["Dashboard","Trade Log","Instrument Averages","P&L Calendar"]
-EDITABLE_COLS=["Test","Setup","Timeframe","Breakeven","Notes"]
+QUALITY_ANALYSIS_FIELD_MAP = {
+    "Pattern": "pattern",
+    "EMA": "ema",
+    "ATHS/ATLS": "aths_atls",
+    "Order": "order_type",
+    "Round Number": "round_number",
+    "Spiked Out": "spiked_out",
+    "Close": "close_flag",
+    "Stop Out": "stop_out",
+    "Near Perfect Entry": "near_perfect_entry",
+    "Near Win": "near_win",
+    "Early Close": "early_close",
+}
+EDITABLE_COLS=["Test",*QUALITY_ANALYSIS_FIELD_MAP.keys(),"Setup","Timeframe","Breakeven","Notes"]
 
 TRADE_LOG_HEADERS = [
+    "Open Time", "Close Time", "Account", "Symbol", "Side", "Qty",
+    "Entry Price", "Exit Price", "Stop Loss Price", "Stop Loss Distance",
+    "Target Price", "Target Distance", "Commission", "Net P/L",
+    "Profit %", "R-Multiple", "Balance After",
+    "Trade Duration (DD:HH:MM:SS)", "Test", "Pattern", "EMA",
+    "ATHS/ATLS", "Order", "Round Number", "Spiked Out", "Close",
+    "Stop Out", "Near Perfect Entry", "Near Win", "Early Close",
+    "Setup", "Timeframe", "Breakeven", "Notes", "Cashflow Amount",
+    "Cashflow New Balance", "Currency", "Row Type", "Row ID",
+]
+OLD_TRADE_LOG_HEADERS = [
     "Open Time", "Close Time", "Account", "Symbol", "Side", "Qty",
     "Entry Price", "Exit Price", "Stop Loss Price", "Stop Loss Distance",
     "Target Price", "Target Distance", "Commission", "Net P/L",
@@ -529,6 +553,120 @@ def stable_row_id(row: Dict[str, Any]) -> str:
 def _all_trades_row_fingerprint_from_map(values: Dict[str, Any]) -> str:
     parts = [str(values.get(k) or '') for k in ['Account','Symbol','Side','Open Time','Close Time','Qty','Entry Price','Exit Price','Net P/L']]
     return 'sig:' + hashlib.sha1('|'.join(parts).encode('utf-8')).hexdigest()[:24]
+
+
+
+def _trade_log_header_map(ws) -> Dict[str, int]:
+    return {str(ws.cell(1, c).value or "").strip(): c for c in range(1, ws.max_column + 1) if str(ws.cell(1, c).value or "").strip()}
+
+
+def _set_trade_log_auto_filter(ws) -> None:
+    last_col = len(TRADE_LOG_HEADERS)
+    last_row = 1
+    for r in range(2, ws.max_row + 1):
+        if any(ws.cell(r, c).value not in (None, "") for c in range(1, last_col + 1)):
+            last_row = r
+    ws.auto_filter.ref = f"A1:{get_column_letter(last_col)}{max(1, last_row)}"
+
+
+def _hide_trade_log_row_id(ws) -> None:
+    headers = _trade_log_header_map(ws)
+    row_id_col = headers.get("Row ID")
+    if not row_id_col:
+        raise RuntimeError("Trade Log schema repair failed: missing Row ID header.")
+    for c in range(1, ws.max_column + 1):
+        if str(ws.cell(1, c).value or "").strip() == "Row ID":
+            ws.column_dimensions[get_column_letter(c)].hidden = (c == row_id_col)
+    ws.column_dimensions[get_column_letter(row_id_col)].hidden = True
+
+
+def _clear_trade_log_dropdown_validations(ws) -> None:
+    keep = []
+    editable_cols = {_trade_log_header_map(ws).get(h) for h in ["Test", "ATHS/ATLS", "Order", "Round Number", "Spiked Out", "Close", "Stop Out", "Near Perfect Entry", "Near Win", "Early Close"]}
+    editable_cols.discard(None)
+    for dv in list(ws.data_validations.dataValidation):
+        touches_editable = False
+        for sq in dv.cells.ranges:
+            if any(sq.min_col <= c <= sq.max_col for c in editable_cols):
+                touches_editable = True
+                break
+        if not touches_editable:
+            keep.append(dv)
+    ws.data_validations.dataValidation = keep
+
+
+def _apply_trade_log_dropdown_validations(ws) -> None:
+    headers = _trade_log_header_map(ws)
+    _clear_trade_log_dropdown_validations(ws)
+    max_row = max(2, ws.max_row)
+    specs = {
+        "Test": '"Yes,No"',
+        "ATHS/ATLS": '"All-Time High,All-Time Low"',
+        "Order": '"Market,Limit"',
+        "Round Number": '"Yes,No"',
+        "Spiked Out": '"Yes,No"',
+        "Close": '"Yes,No"',
+        "Stop Out": '"Yes,No"',
+        "Near Perfect Entry": '"Yes,No"',
+        "Near Win": '"Yes,No"',
+        "Early Close": '"Yes,No"',
+    }
+    for header, formula in specs.items():
+        col = headers.get(header)
+        if not col:
+            continue
+        dv = DataValidation(type="list", formula1=formula, allow_blank=True)
+        ws.add_data_validation(dv)
+        letter = get_column_letter(col)
+        dv.add(f"{letter}2:{letter}{max_row}")
+
+
+def _copy_cell_style(src, dst) -> None:
+    dst.font = copy(src.font)
+    dst.fill = copy(src.fill)
+    dst.border = copy(src.border)
+    dst.alignment = copy(src.alignment)
+    dst.number_format = src.number_format
+    dst.protection = copy(src.protection)
+
+
+def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> None:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    current = [str(ws.cell(1, c).value or "").strip() for c in range(1, max(ws.max_column, len(TRADE_LOG_HEADERS)) + 1)]
+    trimmed = current[:]
+    while trimmed and trimmed[-1] == "":
+        trimmed.pop()
+    if trimmed[:len(TRADE_LOG_HEADERS)] == TRADE_LOG_HEADERS:
+        pass
+    elif trimmed[:len(OLD_TRADE_LOG_HEADERS)] == OLD_TRADE_LOG_HEADERS:
+        test_col = OLD_TRADE_LOG_HEADERS.index("Test") + 1
+        insert_at = test_col + 1
+        new_headers = list(QUALITY_ANALYSIS_FIELD_MAP.keys())
+        ws.insert_cols(insert_at, amount=len(new_headers))
+        for offset, header in enumerate(new_headers):
+            col = insert_at + offset
+            ws.cell(1, col).value = header
+            template_col = test_col if header in {"Pattern", "EMA"} else insert_at + len(new_headers)
+            _copy_cell_style(ws.cell(1, template_col), ws.cell(1, col))
+            for rr in range(2, ws.max_row + 1):
+                _copy_cell_style(ws.cell(rr, template_col), ws.cell(rr, col))
+            src_letter = get_column_letter(template_col)
+            dst_letter = get_column_letter(col)
+            src_width = ws.column_dimensions[src_letter].width
+            ws.column_dimensions[dst_letter].width = src_width if src_width else 14
+        diagnostics["migrated_trade_log_quality_columns"] = True
+    else:
+        expected = TRADE_LOG_HEADERS
+        raise RuntimeError(
+            "Trade Log headers cannot be migrated safely: "
+            f"expected current or legacy schema, found {trimmed!r}; expected {expected!r}."
+        )
+    for idx, header in enumerate(TRADE_LOG_HEADERS, start=1):
+        ws.cell(1, idx).value = header
+    ws.freeze_panes = "A2"
+    _hide_trade_log_row_id(ws)
+    _set_trade_log_auto_filter(ws)
+    _apply_trade_log_dropdown_validations(ws)
 def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
     if not path.exists():
@@ -562,7 +700,7 @@ def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]
             if test_i is not None:
                 t=str(r[test_i] or '').strip().lower()
                 edits['is_test_trade']=t in {'yes','true','1'}
-            for col,field in [('Setup','setup'),('Timeframe','timeframe'),('Breakeven','breakeven'),('Notes','notes')]:
+            for col,field in [('Setup','setup'),('Timeframe','timeframe'),('Breakeven','breakeven'),('Notes','notes'), *QUALITY_ANALYSIS_FIELD_MAP.items()]:
                 i=idx.get(col)
                 if i is None:
                     continue
@@ -596,9 +734,10 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         return [
             ('Trades', mkt.get('trades'),'neutral','count',None,None,money_map),('Wins', mkt.get('wins'),'profit','count',None,None,money_map),('Losses', mkt.get('losses'),'loss','count',None,None,money_map),('Break-even', mkt.get('break_even'),'neutral','count',None,None,money_map),('Test', mkt.get('test_trades'),'neutral','count',None,None,money_map),('Win rate', mkt.get('win_rate_pct'),'neutral','pct',None,None,money_map),
             ('Net P/L', mkt.get('net_profit_total'),'auto','money','net_profit_total',None,money_map),('Gross gain', mkt.get('gross_gain'),'profit','money','gross_gain',None,money_map),('Gross loss', mkt.get('gross_loss'),'loss','money','gross_loss',None,money_map),
+            ('Best Win Streak', mkt.get('winning_streak'),'neutral','count',None,None,money_map),('Worst Losing Streak', mkt.get('losing_streak'),'neutral','count',None,None,money_map),
             ('Avg result %', mkt.get('avg_result_pct'),'auto','pct',None,None,money_map),('Max loss %', mkt.get('min_result_pct'),'loss','pct',None,_fmt_detail_src(msrc.get('min_result_pct')),money_map),('Max win %', mkt.get('max_result_pct'),'profit','pct',None,_fmt_detail_src(msrc.get('max_result_pct')),money_map),
             ('Avg R', mkt.get('avg_r_multiple'),'auto','r',None,None,money_map),('Max R loss', mkt.get('min_r_multiple'),'loss','r',None,_fmt_detail_src(msrc.get('min_r_multiple')),money_map),('Max R win', mkt.get('max_r_multiple'),'profit','r',None,_fmt_detail_src(msrc.get('max_r_multiple')),money_map),
-            ('Max gain', mkt.get('max_gain'),'profit','money','max_gain',_fmt_detail_src(msrc.get('max_gain')),money_map),('Max loss', mkt.get('max_loss'),'loss','money','max_loss',_fmt_detail_src(msrc.get('max_loss')),money_map),('Avg stop %', mkt.get('avg_stop_pct'),'neutral','pct',None,None,money_map),('Avg target %', mkt.get('avg_target_pct'),'neutral','pct',None,None,money_map),('Avg duration', mkt.get('avg_duration_seconds'),'neutral','duration',None,None,money_map),
+            ('Max gain', mkt.get('max_gain'),'profit','money','max_gain',_fmt_detail_src(msrc.get('max_gain')),money_map),('Max loss', mkt.get('max_loss'),'loss','money','max_loss',_fmt_detail_src(msrc.get('max_loss')),money_map),('Avg stop %', mkt.get('avg_stop_pct'),'neutral','pct',None,None,money_map),('Avg target %', mkt.get('avg_target_pct'),'neutral','pct',None,None,money_map),('Max target %', mkt.get('max_target_pct'),'neutral','pct',None,None,money_map),('Avg duration', mkt.get('avg_duration_seconds'),'neutral','duration',None,None,money_map),
         ]
 
     overall_bucket=by_market.get('overall') or totals
@@ -675,7 +814,20 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             target_distance = _distance_fraction_from_prices(row.get('entry_price'), row.get('take_profit'))
             stop_loss_distance = '' if stop_loss_distance is None else stop_loss_distance
             target_distance = '' if target_distance is None else target_distance
-        ws.append([otv,ctv,acct,symbol,side,row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('stop_loss'),stop_loss_distance,row.get('take_profit'),target_distance,comm_val,net_pnl,(pct/100.0 if pct is not None else ''),row.get('r_multiple'),resolved_balance,_fmt_duration_full(_infer_trade_duration_seconds(row)),'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',setup_val,_canonical_journal_timeframe(row.get('timeframe') or ''),row.get('breakeven') or '',notes,row.get('cashflow_amount'),cashflow_new_balance,row.get('currency') or row.get('account_currency') or row.get('result_currency') or '',row.get('row_type') or 'trade', stable_row_id(row)])
+        ws.append([
+            otv, ctv, acct, symbol, side, row.get('qty'), row.get('entry_price'), row.get('exit_price'),
+            row.get('stop_loss'), stop_loss_distance, row.get('take_profit'), target_distance, comm_val,
+            net_pnl, (pct/100.0 if pct is not None else ''), row.get('r_multiple'), resolved_balance,
+            _fmt_duration_full(_infer_trade_duration_seconds(row)),
+            'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',
+            row.get('pattern') or '', row.get('ema') or '', row.get('aths_atls') or '', row.get('order_type') or '',
+            row.get('round_number') or '', row.get('spiked_out') or '', row.get('close_flag') or '', row.get('stop_out') or '',
+            row.get('near_perfect_entry') or '', row.get('near_win') or '', row.get('early_close') or '',
+            setup_val, _canonical_journal_timeframe(row.get('timeframe') or ''), row.get('breakeven') or '', notes,
+            row.get('cashflow_amount'), cashflow_new_balance,
+            row.get('currency') or row.get('account_currency') or row.get('result_currency') or '',
+            row.get('row_type') or 'trade', stable_row_id(row),
+        ])
     _style_table_sheet(ws,1,'A2',True)
     for rr in range(2, ws.max_row + 1):
         row_ctx = rows[rr - 2] if rr - 2 < len(rows) else {}
@@ -696,8 +848,9 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         if ccy_bal:
             ws.cell(rr, 17).number_format = '#,##0.0000000000' if _is_crypto_currency(ccy_bal) else '#,##0.00'
         ws.cell(rr, 18).number_format = r'00\:00\:00\:00'
-    ws.column_dimensions['AB'].hidden = True
-    dv=DataValidation(type='list',formula1='"Yes,No"',allow_blank=True); ws.add_data_validation(dv); dv.add(f"S2:S{max(2,ws.max_row)}")
+    _hide_trade_log_row_id(ws)
+    _set_trade_log_auto_filter(ws)
+    _apply_trade_log_dropdown_validations(ws)
     _negative_impact_rule(ws, f"M2:M{max(2, ws.max_row)}")
     _profit_loss_rules(ws, f"N2:P{max(2, ws.max_row)}")
 
@@ -1409,6 +1562,9 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
                 row_id = computed_id
             currency = str(r[idx.get('Currency')] or '').strip() if 'Currency' in idx else ''
             item={'id': row_id or computed_id, 'row_type':row_type,'account':account,'symbol':symbol,'side':side,'open_time':open_time,'close_time':close_time,'qty':_num(r[idx.get('Qty')]) if 'Qty' in idx else None,'entry_price':_num(r[idx.get('Entry Price')]) if 'Entry Price' in idx else None,'exit_price':_num(r[idx.get('Exit Price')]) if 'Exit Price' in idx else None,'stop_loss':_num(r[i_stop]) if i_stop is not None else None,'take_profit':_num(r[i_tp]) if i_tp is not None else None,'stop_loss_distance_pct':_normalize_pct_distance_cell(r[i_stop_dist], row_cells[i_stop_dist].number_format) if i_stop_dist is not None and i_stop_dist < len(row_cells) else None,'target_distance_pct':_normalize_pct_distance_cell(r[i_target_dist], row_cells[i_target_dist].number_format) if i_target_dist is not None and i_target_dist < len(row_cells) else None,'commission':_num(r[idx.get('Commission')]) if 'Commission' in idx else None,'net_profit':_num(r[i_pnl]) if i_pnl is not None else None,'result_pct':_excel_fraction_to_pct_points(r[i_result_pct]) if i_result_pct is not None else None,'r_multiple':_num(r[idx.get('R-Multiple')]) if 'R-Multiple' in idx else None,'balance_after_trade':balance_after,'balance_after_trade_source':'master_journal','trade_duration_seconds':duration,'is_test_trade':str(r[idx.get('Test')]).strip().lower() in {'yes','y','true','1'} if 'Test' in idx else False,'setup':r[idx.get('Setup',17)] if 'Setup' in idx else '','timeframe':r[idx.get('Timeframe',18)] if 'Timeframe' in idx else '','breakeven':r[idx.get('Breakeven',19)] if 'Breakeven' in idx else '','notes':r[idx.get('Notes',20)] if 'Notes' in idx else '','cashflow_amount':cashflow_amount,'cashflow_new_balance':cashflow_new_balance,'currency':currency, 'asset_class': asset_class, 'source':'master_journal'}
+            for header, field in QUALITY_ANALYSIS_FIELD_MAP.items():
+                if header in idx:
+                    item[field] = r[idx[header]] if idx[header] < len(r) else ''
             if row_type == "monthly_aud_reval":
                 monthly_currency = (currency or str(item.get("result_currency") or "").strip() or "AUD").upper()
                 item["result_cash"] = _num(r[i_pnl]) if i_pnl is not None else None
@@ -1440,9 +1596,16 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
         def _repair_trade_log_unknown_currency_formats(ws, rows: List[Dict[str, Any]], diagnostics: Dict[str, Any] | None = None) -> None:
             diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
             repaired = 0
+            headers = _trade_log_header_map(ws)
+            repair_cols = (
+                (headers.get("Commission"), "commission"),
+                (headers.get("Net P/L"), "net_pnl"),
+            )
             for rr in range(2, ws.max_row + 1):
                 row_ctx = rows[rr - 2] if rr - 2 < len(rows) else {}
-                for col, field in ((11, "commission"), (12, "net_pnl")):
+                for col, field in repair_cols:
+                    if not col:
+                        continue
                     cell = ws.cell(rr, col)
                     fmt = str(cell.number_format or "")
                     if "UNKNOWN" not in fmt:
@@ -1455,6 +1618,8 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             if repaired:
                 diagnostics["repaired_trade_log_unknown_currency_formats"] = True
                 diagnostics["repaired_trade_log_unknown_currency_format_cells"] = repaired
+        trade_log_ws = _get_trade_log_sheet(wb, allow_legacy=False)
+        _ensure_trade_log_schema(trade_log_ws, diagnostics)
         if "Dashboard" not in wb.sheetnames:
             raise RuntimeError("Master Journal missing Dashboard sheet.")
         dash = wb["Dashboard"]
@@ -1465,6 +1630,15 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             _repair_or_flag_zero_trade_qty(dict(r)) for r in (snapshot.get("items") or [])
             if isinstance(r, dict) and str(r.get("row_type") or "trade") in {"trade", "monthly_aud_reval", "cashflow"}
         ]
+        existing_manual_overrides = read_master_journal_manual_overrides(path) if path.exists() else {}
+        if existing_manual_overrides:
+            for row in rows:
+                rid = stable_row_id(row)
+                overrides = existing_manual_overrides.get(rid) or existing_manual_overrides.get(str(row.get("id") or "").strip())
+                if overrides:
+                    row.update(overrides)
+            snapshot = dict(snapshot)
+            snapshot["items"] = rows
         groups = stats.get("groups") or {}
         by_market = groups.get("by_market") or {}
         risk = groups.get("risk_expectancy") or {}
@@ -1577,6 +1751,70 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                     f"{market} {label}" for market in missing_markets
                 )
 
+        def _dashboard_label_rows_by_col(label_col: int = 1) -> Dict[str, List[int]]:
+            rows_by_label: Dict[str, List[int]] = defaultdict(list)
+            for r in range(1, dash.max_row + 1):
+                label = str(dash.cell(r, label_col).value or "").strip().lower()
+                if label:
+                    rows_by_label[label].append(r)
+            return rows_by_label
+
+        def write_horizontal_core_market_metrics() -> None:
+            market_cols: Dict[str, int] = {}
+            for r in range(1, min(5, dash.max_row) + 1):
+                row_tokens = {str(dash.cell(r, c).value or "").strip().lower(): c for c in range(1, min(8, dash.max_column) + 1)}
+                candidate = {
+                    "overall": row_tokens.get("overall"),
+                    "fx": row_tokens.get("fx") or row_tokens.get("forex"),
+                    "crypto": row_tokens.get("crypto"),
+                }
+                if all(candidate.values()) and candidate["overall"] + 1 == candidate["fx"] and candidate["fx"] + 1 == candidate["crypto"] and candidate["overall"] > 1:
+                    market_cols = {k: int(v) for k, v in candidate.items() if v}
+                    break
+            if not {"overall", "fx", "crypto"}.issubset(market_cols):
+                return
+            label_rows = _dashboard_label_rows_by_col(1)
+            metric_specs = [
+                (["Trades"], "trades", "count", None),
+                (["Wins"], "wins", "count", None),
+                (["Losses"], "losses", "count", None),
+                (["Break-even"], "break_even", "count", None),
+                (["Test"], "test_trades", "count", None),
+                (["Win rate"], "win_rate_pct", "pct", None),
+                (["Net P/L"], "net_profit_total", "raw", "profit_loss"),
+                (["Gross gain"], "gross_gain", "raw", "profit_loss"),
+                (["Gross loss"], "gross_loss", "raw", "loss"),
+                (["Best Win Streak", "Winning Streak"], "winning_streak", "count", None),
+                (["Worst Losing Streak", "Losing Streak"], "losing_streak", "count", None),
+                (["Avg result %"], "avg_result_pct", "pct", "profit_loss"),
+                (["Avg R"], "avg_r_multiple", "r", "profit_loss"),
+                (["Avg stop %"], "avg_stop_pct", "pct", None),
+                (["Avg target %"], "avg_target_pct", "pct", None),
+                (["Max target %"], "max_target_pct", "pct", None),
+                (["Avg duration", "Avg duration (DD:HH:MM:SS)"], "avg_duration_seconds", "duration", None),
+                (["Max loss %"], "min_result_pct", "pct", "loss"),
+                (["Max win %"], "max_result_pct", "pct", None),
+                (["Max R loss"], "min_r_multiple", "r", "loss"),
+                (["Max R win"], "max_r_multiple", "r", None),
+                (["Max gain"], "max_gain", "raw", None),
+                (["Max loss"], "max_loss", "raw", "loss"),
+            ]
+            buckets = {"overall": by_market.get("overall") or totals, "fx": by_market.get("fx") or {}, "crypto": by_market.get("crypto") or {}}
+            for labels, key, metric_type, semantic in metric_specs:
+                rows_for_metric: List[int] = []
+                for label in labels:
+                    rows_for_metric.extend(label_rows.get(label.lower(), []))
+                if not rows_for_metric:
+                    diagnostics.setdefault("missing_dashboard_metric_labels", []).append(" / ".join(labels))
+                    continue
+                for row_num in sorted(set(rows_for_metric)):
+                    for market, col in market_cols.items():
+                        value = _format_metric_value((buckets.get(market) or {}).get(key), metric_type)
+                        if value is None:
+                            diagnostics.setdefault("missing_dashboard_metric_values", []).append(f"{market} {labels[0]}")
+                            continue
+                        _write_dashboard_metric_cell(row_num, col, value, metric_type, semantic)
+
         def write_source_below(section: str, metric_label: str, source_val: Any):
             if source_val is None:
                 return
@@ -1590,6 +1828,8 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 _write_value_preserving_cell(dash, sr, pos[1] + 1, _fmt_detail_src(source_val))
                 diagnostics["updated_cells"] += 1
 
+        write_horizontal_core_market_metrics()
+
         section_maps = {
             "Overall": by_market.get("overall") or totals,
             "FX": by_market.get("fx") or {},
@@ -1599,7 +1839,9 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             write_metric(section, "Trades", bucket.get("trades"), "count")
             write_metric(section, "Wins", bucket.get("wins"), "count")
             write_metric(section, "Losses", bucket.get("losses"), "count")
+            write_metric(section, "Best Win Streak", bucket.get("winning_streak"), "count")
             write_metric(section, "Winning Streak", bucket.get("winning_streak"), "count")
+            write_metric(section, "Worst Losing Streak", bucket.get("losing_streak"), "count")
             write_metric(section, "Losing Streak", bucket.get("losing_streak"), "count")
             write_metric(section, "Break-even", bucket.get("break_even"), "count")
             write_metric(section, "Test", bucket.get("test_trades"), "count")
@@ -1848,7 +2090,9 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                         dc.hyperlink = copy(sc.hyperlink) if sc.hyperlink else None
                 last_row = max(start_row - 1, src_ws.max_row)
                 if force_all_columns:
-                    dst_ws.auto_filter.ref = f"A1:AB{max(1,last_row)}"
+                    dst_ws.auto_filter.ref = f"A1:{get_column_letter(len(TRADE_LOG_HEADERS))}{max(1,last_row)}"
+                    _hide_trade_log_row_id(dst_ws)
+                    _apply_trade_log_dropdown_validations(dst_ws)
                 else:
                     if dst_ws.auto_filter and dst_ws.auto_filter.ref:
                         last_col_letter = get_column_letter(max_col)
