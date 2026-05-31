@@ -94,7 +94,7 @@ def test_local_profile_includes_open_orders_but_not_trading_journal() -> None:
     assert "trading-journal" not in names
 
 
-def test_journal_profile_redirects_root_and_allows_trading_journal_api() -> None:
+def test_journal_profile_redirects_root_and_reports_retired_sync_status() -> None:
     master_service = _load_master_service("render_master_service_profile_journal", "journal")
     root_response = asyncio.run(master_service.home_page())
     assert root_response.status_code == 307
@@ -104,7 +104,10 @@ def test_journal_profile_redirects_root_and_allows_trading_journal_api() -> None
     body = page_response.body.decode("utf-8")
     assert "Trading Journal" in body
     api_response = asyncio.run(master_service.trading_journal_sync_status())
-    assert api_response.status_code == 200
+    assert api_response.status_code == 410
+    api_body = api_response.body.decode("utf-8")
+    assert "Trading Journal sync has been retired" in api_body
+    assert "Use Import on the Trading Journal workspace" in api_body
 
 
 def test_trading_journal_page_includes_stats_columns_and_wider_wrap() -> None:

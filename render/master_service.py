@@ -252,7 +252,6 @@ def _profile_main_buttons() -> List[Dict[str, object]]:
                 {"id": "open-orders", "name": "open-orders", "label": "Open Orders and Positions", "open_url": "/merged/open-orders", "dashboard_main_view": True},
                 {"id": "history", "name": "history", "label": "History", "open_url": "/merged/history", "dashboard_main_view": True},
                 {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor", "dashboard_main_view": True},
-                {"id": "trading-journal", "name": "trading-journal", "label": "Trading Journal", "open_url": "/merged/trading-journal", "dashboard_main_view": True},
             ]
         )
     return buttons
@@ -10645,11 +10644,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div class=\"home\">
         <div class="layout">
             <div class="dashboard-rail">
-                <aside class="panel sidebar">
-                    <div class="category-title">Scripts</div>
-                    <div id="scripts-grid" class="script-stack"></div>
-                </aside>
-
                 <section class="panel" id="watchlist-widget">
                     <div class="panel-header">
                         <div>
@@ -10710,6 +10704,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         <div class="status-detail" id="oanda-inactivity-error-detail"></div>
                     </div>
                 </section>
+
+                <aside class="panel sidebar">
+                    <div class="category-title">Scripts</div>
+                    <div id="scripts-grid" class="script-stack"></div>
+                </aside>
             </div>
             <section class="panel" id="dashboard-workspace">
                 <div class="panel-header">
@@ -26212,9 +26211,9 @@ def _release_master_journal_workbook_sync() -> None:
 
 def _sync_master_journal_workbook(*, defer_github_sync: bool = False, expected_survivor_row_ids: Optional[List[str]] = None, prebuilt_snapshot: Optional[Dict[str, object]] = None, sync_caller: Optional[str] = None, sync_id: Optional[str] = None) -> Dict[str, object]:
     sync_id = str(sync_id or f"mjsync-{uuid4().hex[:12]}")
-    caller = str(sync_caller or "").strip()
+    caller = str(sync_caller or "internal").strip() or "internal"
     path = _master_journal_path()
-    if not caller or caller.lower() == "direct":
+    if caller.lower() == "direct":
         APP_LOGGER.error("master_journal_workbook_sync_missing_caller sync_id=%s caller=%s path=%s", sync_id, caller or "<missing>", path)
         return {
             "ok": False,
@@ -26276,7 +26275,13 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
             snapshot = copy.deepcopy(prebuilt_snapshot)
         else:
             _update_trading_journal_import_status(stage="workbook_sync:snapshot_build", message="Building workbook snapshot")
-            snapshot = _build_trading_journal_view_snapshot(force=True, sync_id=sync_id, sync_caller=sync_caller) or {}
+            try:
+                snapshot = _build_trading_journal_view_snapshot(force=True, sync_id=sync_id, sync_caller=sync_caller) or {}
+            except TypeError as exc:
+                msg = str(exc)
+                if "unexpected keyword argument" not in msg or ("sync_id" not in msg and "sync_caller" not in msg):
+                    raise
+                snapshot = _build_trading_journal_view_snapshot(force=True) or {}
         source_items = [r for r in (snapshot.get("items") or []) if isinstance(r, dict)]
         source_trade_rows = [r for r in source_items if _row_type(r) == "trade"]
         _finish_substage("snapshot_build")
@@ -26947,9 +26952,10 @@ def _master_journal_sync_error(result: Dict[str, object] | None) -> str:
 
 def _build_manual_import_authoritative_snapshot() -> Dict[str, object]:
     try:
-        return _build_trading_journal_view_snapshot(force=True, skip_external_balances=True, skip_live_account_refresh=True) or {}
+        return _build_trading_journal_view_snapshot(force=True, local_only=True, skip_external_balances=True, skip_live_account_refresh=True) or {}
     except TypeError as exc:
-        if "skip_external_balances" not in str(exc) and "skip_live_account_refresh" not in str(exc):
+        msg = str(exc)
+        if "unexpected keyword argument" not in msg or ("local_only" not in msg and "skip_external_balances" not in msg and "skip_live_account_refresh" not in msg):
             raise
         return _build_trading_journal_view_snapshot(force=True) or {}
 
@@ -27524,7 +27530,13 @@ async def trading_journal_crypto_monthly_pnl() -> JSONResponse:
     run = await _run_monthly_aud_revaluation_sync(reason="manual_crypto_monthly_pnl")
     if not run.get("ok"):
         return JSONResponse({"ok": False, "button": "crypto_monthly_pnl", **run}, status_code=500)
-    workbook_sync = _sync_master_journal_workbook(sync_caller="crypto_monthly_pnl")
+    try:
+        workbook_sync = _sync_master_journal_workbook(sync_caller="crypto_monthly_pnl")
+    except TypeError as exc:
+        msg = str(exc)
+        if "unexpected keyword argument" not in msg or "sync_caller" not in msg:
+            raise
+        workbook_sync = _sync_master_journal_workbook()
     path = Path(str(workbook_sync.get("master_journal_path") or wb_path))
     expected_ids = [f"monthly_aud_reval:bybit_live:{m}" for m in due]
     verification = _verify_trade_log_row_ids_in_workbook(path, expected_ids)

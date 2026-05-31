@@ -42,7 +42,13 @@ def test_dashboard_home_removes_instrument_specs_recent_trades_open_orders() -> 
     watchlist_idx = html.find('Watchlist')
     oanda_idx = html.find('OANDA Inactivity')
     assert scripts_idx != -1 and watchlist_idx != -1 and oanda_idx != -1
-    assert scripts_idx < watchlist_idx < oanda_idx
+    assert watchlist_idx < oanda_idx < scripts_idx
+
+    scripts_grid_idx = html.find('id="scripts-grid"')
+    watchlist_widget_idx = html.find('id="watchlist-widget"')
+    oanda_widget_idx = html.find('id="oanda-inactivity-widget"')
+    assert scripts_grid_idx != -1 and watchlist_widget_idx != -1 and oanda_widget_idx != -1
+    assert watchlist_widget_idx < oanda_widget_idx < scripts_grid_idx
 
 
 def test_calculator_specs_markup_and_endpoint_are_preserved() -> None:
@@ -93,10 +99,11 @@ def test_local_profile_sets_no_cache_for_home_and_static_assets(monkeypatch) -> 
     assert 'no-store' in static_cache or 'no-cache' in static_cache
 
 
-def test_local_profile_buttons_include_trading_journal_source() -> None:
+def test_local_profile_buttons_exclude_trading_journal_source() -> None:
     source = MASTER_SERVICE_PATH.read_text(encoding='utf-8')
-    assert '"id": "trading-journal"' in source
-    assert '"open_url": "/merged/trading-journal"' in source
+    assert '"id": "trading-journal"' not in source
+    assert '"open_url": "/merged/trading-journal"' not in source
+    assert '@app.get("/trading-journal", response_class=HTMLResponse)' in source
 
 
 def test_trading_journal_workspace_contains_action_buttons_in_order():
