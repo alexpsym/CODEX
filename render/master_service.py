@@ -249,6 +249,7 @@ def _profile_main_buttons() -> List[Dict[str, object]]:
     elif APP_PROFILE == "local":
         buttons.extend(
             [
+                {"id": "trading-journal", "name": "trading-journal", "label": "Trading Journal", "open_url": "/trading-journal", "dashboard_main_view": True},
                 {"id": "open-orders", "name": "open-orders", "label": "Open Orders and Positions", "open_url": "/merged/open-orders", "dashboard_main_view": True},
                 {"id": "history", "name": "history", "label": "History", "open_url": "/merged/history", "dashboard_main_view": True},
                 {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor", "dashboard_main_view": True},
@@ -10413,14 +10414,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             flex-wrap: nowrap;
             min-width: 0;
         }
-        .script-toolbar-title{
-            flex: 0 0 auto;
-            margin: 0;
-            font-size: 0.86rem;
-            letter-spacing: 0.08em;
-            text-transform: uppercase;
-            color: #94a3b8;
-        }
         .script-toolbar-grid{
             flex: 1 1 auto;
             min-width: 0;
@@ -10533,16 +10526,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .exit-button-slot .local-exit-btn{
             width: auto;
             min-width: 0;
-            max-width: 160px;
+            max-width: 170px;
             height: 34px;
             padding: 0.38rem 0.55rem;
             border-radius: 10px;
             gap: 0.35rem;
             font-size: 0.78rem;
-            flex: 1 1 0;
+            flex: 0 1 auto;
             white-space: nowrap;
             overflow: hidden;
         }
+        .script-toolbar-grid .script-btn[data-script-name="history"] { max-width: 96px; }
+        .script-toolbar-grid .script-btn[data-script-name="monitor"] { max-width: 108px; }
+        .script-toolbar-grid .script-btn[data-script-name="calculator"] { max-width: 126px; }
+        .script-toolbar-grid .script-btn[data-script-name="ivindicator-clone"] { max-width: 132px; }
+        .script-toolbar-grid .script-btn[data-script-name="trading-journal"] { max-width: 150px; }
+        .script-toolbar-grid .script-btn[data-script-name="open-orders"] { max-width: 190px; }
         .exit-button-slot .local-exit-btn{
             flex: 0 0 auto;
             min-width: 64px;
@@ -10719,7 +10718,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <div class=\"home\">
         <section class="panel dashboard-script-toolbar">
             <div class="script-toolbar-row">
-                <div class="category-title script-toolbar-title">Scripts</div>
                 <div id="scripts-grid" class="script-stack script-toolbar-grid"></div>
                 <div id="exit-button-slot" class="exit-button-slot"></div>
             </div>

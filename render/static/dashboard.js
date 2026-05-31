@@ -292,6 +292,7 @@
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'script-btn';
+    btn.dataset.scriptName = String(script.name || '');
 
     const name = document.createElement('div');
     name.className = 'script-name';

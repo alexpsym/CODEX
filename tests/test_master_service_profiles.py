@@ -86,12 +86,19 @@ def test_render_profile_scripts_hide_local_only_main_views() -> None:
     assert "calculator" in names
 
 
-def test_local_profile_includes_open_orders_but_not_trading_journal() -> None:
+def test_local_profile_includes_open_orders_and_trading_journal() -> None:
     master_service = _load_master_service("render_master_service_profile_local_scripts", "local")
     payload = json.loads(asyncio.run(master_service.list_scripts()).body.decode("utf-8"))
     names = {str(item.get("name")) for item in payload}
+    by_name = {str(item.get("name")): item for item in payload}
+
     assert "open-orders" in names
-    assert "trading-journal" not in names
+    assert "trading-journal" in names
+
+    trading_journal = by_name["trading-journal"]
+    assert trading_journal["label"] == "Trading Journal"
+    assert trading_journal["open_url"] == "/trading-journal"
+    assert trading_journal["dashboard_main_view"] is True
 
 
 def test_journal_profile_redirects_root_and_reports_retired_sync_status() -> None:

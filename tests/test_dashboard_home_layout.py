@@ -22,7 +22,8 @@ def test_dashboard_home_removes_instrument_specs_recent_trades_open_orders() -> 
     assert 'id="recent-trades-panel"' not in html
     assert 'id="open-orders-panel"' not in html
 
-    assert 'Scripts' in html
+    assert 'script-toolbar-title' not in html
+    assert '>Scripts<' not in html
     assert 'Watchlist' in html
     assert 'OANDA Inactivity' in html
     assert 'id="dashboard-workspace"' in html
@@ -43,11 +44,10 @@ def test_dashboard_home_removes_instrument_specs_recent_trades_open_orders() -> 
     assert 'id="sync-journal-btn"' not in html
     assert 'id="sync-journal-status"' not in html
 
-    scripts_idx = html.find('Scripts')
     watchlist_idx = html.find('Watchlist')
     oanda_idx = html.find('OANDA Inactivity')
-    assert scripts_idx != -1 and watchlist_idx != -1 and oanda_idx != -1
-    assert scripts_idx < watchlist_idx < oanda_idx
+    assert watchlist_idx != -1 and oanda_idx != -1
+    assert watchlist_idx < oanda_idx
 
     scripts_grid_idx = html.find('id="scripts-grid"')
     exit_slot_idx = html.find('id="exit-button-slot"')
@@ -74,9 +74,15 @@ def test_dashboard_toolbar_css_keeps_scripts_single_row() -> None:
     assert '.dashboard-script-toolbar' in html
     assert '.script-toolbar-row' in html
     assert '.script-toolbar-grid' in html
+    assert 'script-toolbar-title' not in html
+    assert '>Scripts<' not in html
     assert 'flex-wrap: nowrap;' in html
+    assert 'flex: 0 1 auto;' in html
+    assert 'flex: 1 1 0;' not in html
     assert 'text-overflow: ellipsis;' in html
     assert 'white-space: nowrap;' in html
+    assert '.script-toolbar-grid .script-btn[data-script-name="history"] { max-width: 96px; }' in html
+    assert '.script-toolbar-grid .script-btn[data-script-name="trading-journal"] { max-width: 150px; }' in html
     assert '.local-exit-btn{\n            margin-top: 0;' in html
 
 
@@ -128,9 +134,10 @@ def test_local_profile_sets_no_cache_for_home_and_static_assets(monkeypatch) -> 
     assert 'no-store' in static_cache or 'no-cache' in static_cache
 
 
-def test_local_profile_buttons_exclude_trading_journal_source() -> None:
+def test_local_profile_buttons_use_trading_journal_page_not_merged_route() -> None:
     source = MASTER_SERVICE_PATH.read_text(encoding='utf-8')
-    assert '"id": "trading-journal"' not in source
+    assert '"id": "trading-journal"' in source
+    assert '"open_url": "/trading-journal"' in source
     assert '"open_url": "/merged/trading-journal"' not in source
     assert '@app.get("/trading-journal", response_class=HTMLResponse)' in source
 

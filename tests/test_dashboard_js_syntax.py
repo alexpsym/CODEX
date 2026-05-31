@@ -55,6 +55,7 @@ def test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls() -> No
     assert "makeExitButton" in js
     assert "local-exit-btn" in js
     assert "const exitButtonSlot = document.getElementById('exit-button-slot');" in js
+    assert "btn.dataset.scriptName = String(script.name || '');" in js
     assert "scriptsState.forEach((item) => scriptsGrid.appendChild(makeScriptButton(item)));" in js
     assert "exitButtonSlot.appendChild(makeExitButton());" in js
     assert "scriptsGrid.appendChild(makeExitButton());" in js
