@@ -113,6 +113,8 @@
     return text;
   };
 
+  // Browser trade columns are intentionally grouped for editing/readability;
+  // workbook export/sync order is defined separately by TRADE_LOG_HEADERS in Python.
   const TRADE_COLUMNS = [
     { key: 'open_time', header: 'Open Time', value: (r) => fmtTime(r.open_time) },
     { key: 'close_time', header: 'Close Time', value: (r) => fmtTime(r.close_time || r.open_time) },
@@ -126,7 +128,9 @@
     { key: 'entry_price', header: 'Entry', value: (r) => fmtNum(r.entry_price, 6) },
     { key: 'exit_price', header: 'Exit', value: (r) => fmtNum(r.exit_price, 6) },
     { key: 'stop_loss', header: 'Stop Loss', value: (r) => fmtNum(r.stop_loss, 6) },
+    { key: 'stop_loss_distance_pct', header: 'Stop Loss Distance', value: (r) => fmtPctSmall(priceDistancePct(r.entry_price, r.stop_loss, r.stop_loss_distance_pct), 2) },
     { key: 'take_profit', header: 'Target', value: (r) => fmtNum(r.take_profit, 6) },
+    { key: 'target_distance_pct', header: 'Target Distance', value: (r) => fmtPctSmall(priceDistancePct(r.entry_price, r.take_profit, r.target_distance_pct), 2) },
     { key: 'commission', header: 'Commission', value: (r) => `${fmtNum(r.commission ?? r.fees, 4)} ${r.commission_currency || r.fee_currency || ''}`.trim() || '—' },
     { key: 'net_profit', header: 'Net Profit', value: (r) => `${fmtNum(rowPnlValue(r), 4)} ${rowPnlCurrency(r)}`.trim() || '—' },
     { key: 'profit_pct', header: 'Profit %', value: (r) => fmtProfitPct(r.result_pct ?? r.profit_pct) },
@@ -474,6 +478,17 @@
     const n = asNum(v);
     if (!Number.isFinite(n)) return '—';
     return `${fmtNum(n, 4)}%`;
+  }
+
+  function priceDistancePct(entry, level, fallbackPct) {
+    const e = asNum(entry);
+    const l = asNum(level);
+    if (Number.isFinite(e) && Number.isFinite(l) && e > 0 && l > 0) return Math.abs(l - e) / e * 100;
+    const fb = asNum(fallbackPct);
+    if (!Number.isFinite(fb)) return NaN;
+    // API rows use percent points here; Excel percentage fractions are
+    // normalized server-side while reading workbook cells.
+    return fb;
   }
 
   function fmtPctSmall(v, d = 2) {

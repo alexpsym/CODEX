@@ -152,6 +152,16 @@ def test_compute_journal_stats_winner_loser_splits_and_durations() -> None:
     assert risk["avg_result_pct_losers"] == -1.5
     assert risk["avg_r_multiple_winners"] == 1.6
     assert risk["avg_r_multiple_losers"] == -0.75
+    by_risk = risk["by_market"]
+    assert by_risk["overall"]["avg_stop_pct_winners"] == 7.5
+    assert by_risk["fx"]["avg_stop_pct_winners"] == 5.0
+    assert by_risk["fx"]["avg_stop_pct_losers"] == 2.0
+    assert by_risk["crypto"]["avg_stop_pct_winners"] == 10.0
+    assert by_risk["crypto"]["avg_stop_pct_losers"] == 10.0
+    assert by_risk["fx"]["avg_target_pct_winners"] == 10.0
+    assert by_risk["crypto"]["avg_target_pct_losers"] == 20.0
+    assert by_risk["fx"]["avg_result_pct_losers"] == -1.0
+    assert by_risk["crypto"]["avg_r_multiple_winners"] == 2.0
 
     assert duration["overall_avg_winner_seconds"] == 2700
     assert duration["overall_avg_loser_seconds"] == 9000
@@ -190,6 +200,27 @@ def test_compute_journal_stats_winner_loser_splits_and_durations() -> None:
     assert leaders["fx_most_losses_instrument"]["losses"] == 1
     assert leaders["crypto_most_wins_instrument"]["symbol"] == "BTCUSDT"
     assert leaders["crypto_most_losses_instrument"]["symbol"] == "ETHUSDT"
+
+
+
+def test_compute_journal_stats_distance_fallback_percent_points_are_not_fraction_scaled() -> None:
+    rows = [
+        {
+            "row_type": "trade",
+            "asset_class": "fx",
+            "symbol": "EURUSD",
+            "result_pct": 1.0,
+            "r_multiple": 1.0,
+            "net_profit": 10.0,
+            "stop_loss_distance_pct": 1.0,
+            "target_distance_pct": 2.0,
+        }
+    ]
+    stats = _compute_journal_stats(rows, balances=[])
+    risk = stats["groups"]["risk_expectancy"]
+    assert risk["avg_stop_pct_winners"] == pytest.approx(1.0)
+    assert risk["avg_target_pct_winners"] == pytest.approx(2.0)
+    assert risk["by_market"]["fx"]["avg_stop_pct_winners"] == pytest.approx(1.0)
 
 
 def test_compute_journal_stats_no_zero_count_leaders() -> None:

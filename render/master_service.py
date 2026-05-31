@@ -22074,10 +22074,20 @@ def _compute_journal_stats(
     def _safe_max(vals: List[float]) -> Optional[float]:
         return max(vals) if vals else None
 
+    def _distance_cell_pct_points(value: object) -> Optional[float]:
+        val = _to_float(value)
+        if val is None or not math.isfinite(val):
+            return None
+        # API/stat rows carry percent points. Workbook fractions are normalized
+        # at read_master_journal_source() using cell number formats.
+        return val
+
     def _stop_pct_values(rows_subset: List[Dict[str, object]]) -> List[float]:
         out: List[float] = []
         for r in rows_subset:
             pct = _pct_distance(_to_float(r.get("entry_price")), _to_float(r.get("stop_loss")))
+            if pct is None:
+                pct = _distance_cell_pct_points(r.get("stop_loss_distance_pct"))
             if pct is not None:
                 out.append(pct)
         return out
@@ -22086,9 +22096,25 @@ def _compute_journal_stats(
         out: List[float] = []
         for r in rows_subset:
             pct = _pct_distance(_to_float(r.get("entry_price")), _to_float(r.get("take_profit")))
+            if pct is None:
+                pct = _distance_cell_pct_points(r.get("target_distance_pct"))
             if pct is not None:
                 out.append(pct)
         return out
+
+    def _risk_bucket(rows_subset: List[Dict[str, object]]) -> Dict[str, object]:
+        winners = _winner_rows(rows_subset)
+        losers = _loser_rows(rows_subset)
+        return {
+            "avg_stop_pct_winners": _avg(_stop_pct_values(winners)),
+            "avg_stop_pct_losers": _avg(_stop_pct_values(losers)),
+            "avg_target_pct_winners": _avg(_target_pct_values(winners)),
+            "avg_target_pct_losers": _avg(_target_pct_values(losers)),
+            "avg_result_pct_winners": _avg(_metric_values(winners, "result_pct")),
+            "avg_result_pct_losers": _avg(_metric_values(losers, "result_pct")),
+            "avg_r_multiple_winners": _avg(_metric_values(winners, "r_multiple")),
+            "avg_r_multiple_losers": _avg(_metric_values(losers, "r_multiple")),
+        }
     def _compute_longest_streaks(rows_subset: List[Dict[str, object]]) -> Dict[str, Optional[Dict[str, object]]]:
         enriched = []
         for i, r in enumerate(rows_subset):
@@ -22577,6 +22603,12 @@ def _compute_journal_stats(
             "longest_losing_streak": streaks.get("longest_losing"),
         }
 
+    risk_by_market = {
+        "overall": _risk_bucket(trade_rows),
+        "fx": _risk_bucket(fx_rows),
+        "crypto": _risk_bucket(crypto_rows),
+    }
+
     def _market_bucket(rows_subset: List[Dict[str, object]], label: str) -> Dict[str, object]:
         durations = [
             _to_float(r.get("trade_duration_seconds"))
@@ -22705,6 +22737,7 @@ def _compute_journal_stats(
                 "max_drawdown_pct": totals.get("max_drawdown_pct"),
                 "avg_drawdown_pct": totals.get("avg_drawdown_pct"),
                 "min_drawdown_pct": totals.get("min_drawdown_pct"),
+                "by_market": risk_by_market,
             },
             "duration": {
                 "overall_avg_seconds": totals.get("avg_duration_seconds"),

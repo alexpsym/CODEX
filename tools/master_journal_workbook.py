@@ -23,6 +23,17 @@ ALL_TRADES_SHEET = LEGACY_ALL_TRADES_SHEET
 LEGACY_TRADE_LOG_SHEET = LEGACY_ALL_TRADES_SHEET
 SHEET_ORDER=["Dashboard","Trade Log","Instrument Averages","P&L Calendar"]
 EDITABLE_COLS=["Test","Setup","Timeframe","Breakeven","Notes"]
+
+TRADE_LOG_HEADERS = [
+    "Open Time", "Close Time", "Account", "Symbol", "Side", "Qty",
+    "Entry Price", "Exit Price", "Stop Loss Price", "Stop Loss Distance",
+    "Target Price", "Target Distance", "Commission", "Net P/L",
+    "Profit %", "R-Multiple", "Balance After",
+    "Trade Duration (DD:HH:MM:SS)", "Test", "Setup", "Timeframe",
+    "Breakeven", "Notes", "Cashflow Amount", "Cashflow New Balance",
+    "Currency", "Row Type", "Row ID",
+]
+LIGHT_GREY_FILL_RGB = "FFEAF2F8"
 JOURNAL_DISPLAY_TZ = ZoneInfo("Australia/Brisbane")
 
 def _canonical_journal_timeframe(value: Any) -> str:
@@ -97,6 +108,40 @@ def _pct_points_to_excel_fraction(value: Any) -> float | None:
 def _excel_fraction_to_pct_points(value: Any) -> float | None:
     num = _as_float(value)
     return None if num is None else num * 100.0
+
+
+def _distance_fraction_from_prices(entry: Any, level: Any) -> float | None:
+    entry_num = _as_float(entry)
+    level_num = _as_float(level)
+    if entry_num is None or level_num is None:
+        return None
+    if not (math.isfinite(entry_num) and math.isfinite(level_num)) or entry_num <= 0 or level_num <= 0:
+        return None
+    return abs(level_num - entry_num) / entry_num
+
+
+def _normalize_pct_distance_cell(value: Any, number_format: Any = None) -> float | None:
+    """Return internal percentage points from a workbook distance cell.
+
+    Excel percentage-formatted cells store fractions (0.01 displays as 1%).
+    Plain numeric values are already treated as internal percent points.
+    """
+    num = _as_float(value)
+    if num is None:
+        return None
+    fmt = str(number_format or "")
+    return num * 100.0 if "%" in fmt else num
+
+
+def _cell_fill_rgb(cell) -> str:
+    fg = getattr(getattr(cell, "fill", None), "fgColor", None)
+    rgb = str(getattr(fg, "rgb", "") or "").upper()
+    return rgb
+
+
+def _is_light_grey_no_metric_cell(cell) -> bool:
+    rgb = _cell_fill_rgb(cell)
+    return rgb == LIGHT_GREY_FILL_RGB or rgb.endswith(LIGHT_GREY_FILL_RGB[-6:])
 
 
 def _is_likely_fx_pair(value: str) -> bool:
@@ -508,7 +553,7 @@ def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]
             meta_rid = rid_by_row.get(row_num,'')
             rowid_i = idx.get('Row ID')
             inline_rid = str(r[rowid_i] or '').strip() if rowid_i is not None and rowid_i < len(r) else ''
-            rid = inline_rid or comment_rid or meta_rid
+            rid = comment_rid or inline_rid or meta_rid
             if not rid:
                 row_map = {h: (r[i] if i < len(r) else None) for h, i in idx.items()}
                 rid = _all_trades_row_fingerprint_from_map(row_map)
@@ -595,7 +640,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         cur += 1
 
     resolved_balances = _resolved_all_trade_balances(rows)
-    ws=_get_all_trades_sheet(wb); headers=['Open Time','Close Time','Account','Symbol','Side','Qty','Entry Price','Exit Price','Stop Loss Price','Target Price','Commission','Net P/L','Profit %','R-Multiple','Balance After','Trade Duration (DD:HH:MM:SS)']+EDITABLE_COLS+['Cashflow Amount','Cashflow New Balance','Currency','Row Type','Row ID']; ws.append(headers)
+    ws=_get_all_trades_sheet(wb); headers=TRADE_LOG_HEADERS; ws.append(headers)
     for i, row in enumerate(rows):
         pct = _as_float(row.get('result_pct'))
         is_monthly = str(row.get("row_type") or "") == "monthly_aud_reval"
@@ -623,7 +668,14 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             setup_val = ''
         else:
             setup_val = row.get('setup') or ''
-        ws.append([otv,ctv,acct,symbol,side,row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('stop_loss'),row.get('take_profit'),comm_val,net_pnl,(pct/100.0 if pct is not None else ''),row.get('r_multiple'),resolved_balance,_fmt_duration_full(_infer_trade_duration_seconds(row)),'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',setup_val,_canonical_journal_timeframe(row.get('timeframe') or ''),row.get('breakeven') or '',notes,row.get('cashflow_amount'),cashflow_new_balance,row.get('currency') or row.get('account_currency') or row.get('result_currency') or '',row.get('row_type') or 'trade', stable_row_id(row)])
+        stop_loss_distance = ''
+        target_distance = ''
+        if row_type == 'trade':
+            stop_loss_distance = _distance_fraction_from_prices(row.get('entry_price'), row.get('stop_loss'))
+            target_distance = _distance_fraction_from_prices(row.get('entry_price'), row.get('take_profit'))
+            stop_loss_distance = '' if stop_loss_distance is None else stop_loss_distance
+            target_distance = '' if target_distance is None else target_distance
+        ws.append([otv,ctv,acct,symbol,side,row.get('qty'),row.get('entry_price'),row.get('exit_price'),row.get('stop_loss'),stop_loss_distance,row.get('take_profit'),target_distance,comm_val,net_pnl,(pct/100.0 if pct is not None else ''),row.get('r_multiple'),resolved_balance,_fmt_duration_full(_infer_trade_duration_seconds(row)),'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',setup_val,_canonical_journal_timeframe(row.get('timeframe') or ''),row.get('breakeven') or '',notes,row.get('cashflow_amount'),cashflow_new_balance,row.get('currency') or row.get('account_currency') or row.get('result_currency') or '',row.get('row_type') or 'trade', stable_row_id(row)])
     _style_table_sheet(ws,1,'A2',True)
     for rr in range(2, ws.max_row + 1):
         row_ctx = rows[rr - 2] if rr - 2 < len(rows) else {}
@@ -633,19 +685,21 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         ws.cell(rr, 6).number_format = '#,##0.##########'
         ws.cell(rr, 1).number_format = 'yyyy-mm-dd hh:mm:ss'
         ws.cell(rr, 2).number_format = 'yyyy-mm-dd hh:mm:ss'
+        ws.cell(rr, 10).number_format = "0.00%"
+        ws.cell(rr, 12).number_format = "0.00%"
         if ccy_comm:
-            ws.cell(rr, 11).number_format = _currency_number_format(ccy_comm)
+            ws.cell(rr, 13).number_format = _currency_number_format(ccy_comm)
         if ccy_pnl:
-            ws.cell(rr, 12).number_format = _currency_number_format(ccy_pnl)
-        ws.cell(rr, 14).number_format = '0.00'
+            ws.cell(rr, 14).number_format = _currency_number_format(ccy_pnl)
+        ws.cell(rr, 15).number_format = "0.00%"
+        ws.cell(rr, 16).number_format = '0.00'
         if ccy_bal:
-            ws.cell(rr, 15).number_format = '#,##0.0000000000' if _is_crypto_currency(ccy_bal) else '#,##0.00'
-        ws.cell(rr, 13).number_format = "0.00%"
-        ws.cell(rr, 16).number_format = r'00\:00\:00\:00'
-    ws.column_dimensions['Z'].hidden = True
-    dv=DataValidation(type='list',formula1='"Yes,No"',allow_blank=True); ws.add_data_validation(dv); dv.add(f"Q2:Q{max(2,ws.max_row)}")
-    _negative_impact_rule(ws, f"K2:K{max(2, ws.max_row)}")
-    _profit_loss_rules(ws, f"L2:N{max(2, ws.max_row)}")
+            ws.cell(rr, 17).number_format = '#,##0.0000000000' if _is_crypto_currency(ccy_bal) else '#,##0.00'
+        ws.cell(rr, 18).number_format = r'00\:00\:00\:00'
+    ws.column_dimensions['AB'].hidden = True
+    dv=DataValidation(type='list',formula1='"Yes,No"',allow_blank=True); ws.add_data_validation(dv); dv.add(f"S2:S{max(2,ws.max_row)}")
+    _negative_impact_rule(ws, f"M2:M{max(2, ws.max_row)}")
+    _profit_loss_rules(ws, f"N2:P{max(2, ws.max_row)}")
 
     inst=wb['Instrument Averages']; headers=["Symbol","Class","Trades","Longs","Shorts","Wins","Losses","Break-even","Long wins","Long losses","Short wins","Short losses","Long break-even","Short break-even","Net P/L %","Avg P/L %","Win Rate %","Avg stop % (W)","Avg stop % (L)","Avg target % (W)","Avg target % (L)","Shortest duration (DD:HH:MM:SS)","Avg duration (DD:HH:MM:SS)","Longest duration (DD:HH:MM:SS)"]; inst.append(headers)
     for rec in (stats.get('by_instrument') or []):
@@ -870,17 +924,68 @@ def _header_map(ws, header_row: int = 1) -> Dict[str, int]:
 
 
 
+def _style_signature(cell) -> Dict[str, Any]:
+    return {
+        "fill": copy(cell.fill),
+        "font": copy(cell.font),
+        "border": copy(cell.border),
+        "alignment": copy(cell.alignment),
+    }
+
+
+def _header_style_snapshot(ws) -> List[Dict[str, Any]]:
+    return [
+        {
+            "value": ws.cell(1, c).value,
+            "style": _style_signature(ws.cell(1, c)),
+        }
+        for c in range(1, ws.max_column + 1)
+    ]
+
+
+def _auto_filter_layout_signature(ws) -> Any:
+    ref = ws.auto_filter.ref if ws.auto_filter else None
+    if not ref:
+        return None
+    try:
+        min_col, min_row, max_col, _max_row = range_boundaries(ref)
+        return (min_col, min_row, max_col)
+    except Exception:
+        return ref
+
+
+def _worksheet_layout_snapshot(ws) -> Dict[str, Any]:
+    return {
+        "merged": [str(r) for r in ws.merged_cells.ranges],
+        "row_heights": {k: v.height for k, v in ws.row_dimensions.items()},
+        "col_widths": {k: v.width for k, v in ws.column_dimensions.items()},
+        "hidden_cols": {k: bool(v.hidden) for k, v in ws.column_dimensions.items() if v.hidden},
+        "freeze": ws.freeze_panes,
+        "auto_filter": _auto_filter_layout_signature(ws),
+    }
+
+
 def _snapshot_invariants(wb) -> Dict[str, Any]:
     out: Dict[str, Any] = {"sheetnames": list(wb.sheetnames)}
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        out[f"{sheet_name}_layout"] = _worksheet_layout_snapshot(ws)
     dash = wb["Dashboard"] if "Dashboard" in wb.sheetnames else None
     if dash is not None:
-        out["dash_merged"] = [str(r) for r in dash.merged_cells.ranges]
-        out["dash_row_heights"] = {k: v.height for k, v in dash.row_dimensions.items()}
-        out["dash_col_widths"] = {k: v.width for k, v in dash.column_dimensions.items()}
         out["dash_cf"] = [str(k.sqref) for k in dash.conditional_formatting._cf_rules.keys()]
-        out["dash_freeze"] = dash.freeze_panes
-    for name, prefix in ((ALL_TRADES_SHEET, "all_trades"), ("Instrument Averages", "instrument")):
-        ws = _get_all_trades_sheet(wb) if prefix == "all_trades" else (wb[name] if name in wb.sheetnames else None)
+        out["dash_styles"] = {
+            (r, c): _style_signature(dash.cell(r, c))
+            for r in range(1, dash.max_row + 1)
+            for c in range(1, dash.max_column + 1)
+        }
+    for name, prefix in ((ALL_TRADES_SHEET, "all_trades"), (TRADE_LOG_SHEET, "trade_log"), ("Instrument Averages", "instrument")):
+        try:
+            ws = _get_all_trades_sheet(wb) if name in {ALL_TRADES_SHEET, TRADE_LOG_SHEET} and prefix in {"all_trades", "trade_log"} else (wb[name] if name in wb.sheetnames else None)
+        except Exception:
+            ws = None
+        if ws is not None:
+            out[f"{prefix}_headers"] = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+            out[f"{prefix}_header_styles"] = _header_style_snapshot(ws)
         ref = ws.auto_filter.ref if ws and ws.auto_filter else None
         out[f"{prefix}_filter_present"] = bool(ref)
         if ref:
@@ -890,11 +995,18 @@ def _snapshot_invariants(wb) -> Dict[str, Any]:
         else:
             out[f"{prefix}_filter_min_col"] = None
             out[f"{prefix}_filter_min_row"] = None
+    if "P&L Calendar" in wb.sheetnames:
+        ws = wb["P&L Calendar"]
+        out["pnl_calendar_layout"] = _worksheet_layout_snapshot(ws)
+        out["pnl_calendar_dimensions"] = (ws.max_row, ws.max_column)
     return out
 
 
 def _assert_invariants_unchanged(before: Dict[str, Any], after: Dict[str, Any]) -> None:
-    for key in ("sheetnames","dash_merged","dash_row_heights","dash_col_widths","dash_cf","dash_freeze"):
+    skipped = {"pnl_calendar_layout", "pnl_calendar_dimensions", "P&L Calendar_layout"}
+    for key in before.keys() | after.keys():
+        if key in skipped:
+            continue
         if before.get(key) != after.get(key):
             raise RuntimeError(f"Workbook structural invariant changed: {key}")
 
@@ -1181,8 +1293,8 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
     wb = load_workbook(path, data_only=True, read_only=True)
     try:
         ws = _get_all_trades_sheet(wb)
-        header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), tuple()) or tuple()
-        headers = [str(c or '').strip() for c in header_row]
+        header_cells = next(ws.iter_rows(min_row=1, max_row=1), tuple()) or tuple()
+        headers = [str(c.value or '').strip() for c in header_cells]
         idx = {h:i for i,h in enumerate(headers)}
         required = {'Open Time','Close Time','Account','Symbol','Side'}
         if not required.issubset(set(idx.keys())):
@@ -1195,6 +1307,8 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
             except Exception: return None
         i_stop = _alias_index(idx, 'Stop Loss', 'Stop Loss Price')
         i_tp = _alias_index(idx, 'Take Profit', 'Target Price', 'Target')
+        i_stop_dist = _alias_index(idx, 'Stop Loss Distance', 'Stop Loss Distance %')
+        i_target_dist = _alias_index(idx, 'Target Distance', 'Target Distance %')
         i_pnl = _alias_index(idx, 'Net P/L', 'Net Profit', 'Realized PnL')
         i_result_pct = _alias_index(idx, 'Result %', 'Profit %', 'P/L %', 'Result Percent')
         i_dur = _alias_index(idx, 'Trade Duration (DD:HH:MM:SS)', 'Trade Duration', 'Trade Duration Seconds', 'Duration')
@@ -1206,7 +1320,8 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
             max_row = max(1, dim_max_row)
         except Exception:
             pass
-        for r in ws.iter_rows(min_row=2, max_row=max_row, max_col=max_col, values_only=True):
+        for row_cells in ws.iter_rows(min_row=2, max_row=max_row, max_col=max_col):
+            r = [cell.value for cell in row_cells]
             if not any(v not in (None,'') for v in r):
                 continue
             symbol = str(r[idx.get('Symbol',3)] or '').strip()
@@ -1247,7 +1362,7 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
             if row_id and (('PEPPERSTONE' in row_id.upper() or 'OANDA' in row_id.upper()) and ('BYBIT' in account_u or ('USDT' in symbol_u))):
                 row_id = computed_id
             currency = str(r[idx.get('Currency')] or '').strip() if 'Currency' in idx else ''
-            item={'id': row_id or computed_id, 'row_type':row_type,'account':account,'symbol':symbol,'side':side,'open_time':open_time,'close_time':close_time,'qty':_num(r[idx.get('Qty')]) if 'Qty' in idx else None,'entry_price':_num(r[idx.get('Entry Price')]) if 'Entry Price' in idx else None,'exit_price':_num(r[idx.get('Exit Price')]) if 'Exit Price' in idx else None,'stop_loss':_num(r[i_stop]) if i_stop is not None else None,'take_profit':_num(r[i_tp]) if i_tp is not None else None,'commission':_num(r[idx.get('Commission')]) if 'Commission' in idx else None,'net_profit':_num(r[i_pnl]) if i_pnl is not None else None,'result_pct':_excel_fraction_to_pct_points(r[i_result_pct]) if i_result_pct is not None else None,'r_multiple':_num(r[idx.get('R-Multiple')]) if 'R-Multiple' in idx else None,'balance_after_trade':balance_after,'balance_after_trade_source':'master_journal','trade_duration_seconds':duration,'is_test_trade':str(r[idx.get('Test')]).strip().lower() in {'yes','y','true','1'} if 'Test' in idx else False,'setup':r[idx.get('Setup',17)] if 'Setup' in idx else '','timeframe':r[idx.get('Timeframe',18)] if 'Timeframe' in idx else '','breakeven':r[idx.get('Breakeven',19)] if 'Breakeven' in idx else '','notes':r[idx.get('Notes',20)] if 'Notes' in idx else '','cashflow_amount':cashflow_amount,'cashflow_new_balance':cashflow_new_balance,'currency':currency, 'asset_class': asset_class, 'source':'master_journal'}
+            item={'id': row_id or computed_id, 'row_type':row_type,'account':account,'symbol':symbol,'side':side,'open_time':open_time,'close_time':close_time,'qty':_num(r[idx.get('Qty')]) if 'Qty' in idx else None,'entry_price':_num(r[idx.get('Entry Price')]) if 'Entry Price' in idx else None,'exit_price':_num(r[idx.get('Exit Price')]) if 'Exit Price' in idx else None,'stop_loss':_num(r[i_stop]) if i_stop is not None else None,'take_profit':_num(r[i_tp]) if i_tp is not None else None,'stop_loss_distance_pct':_normalize_pct_distance_cell(r[i_stop_dist], row_cells[i_stop_dist].number_format) if i_stop_dist is not None and i_stop_dist < len(row_cells) else None,'target_distance_pct':_normalize_pct_distance_cell(r[i_target_dist], row_cells[i_target_dist].number_format) if i_target_dist is not None and i_target_dist < len(row_cells) else None,'commission':_num(r[idx.get('Commission')]) if 'Commission' in idx else None,'net_profit':_num(r[i_pnl]) if i_pnl is not None else None,'result_pct':_excel_fraction_to_pct_points(r[i_result_pct]) if i_result_pct is not None else None,'r_multiple':_num(r[idx.get('R-Multiple')]) if 'R-Multiple' in idx else None,'balance_after_trade':balance_after,'balance_after_trade_source':'master_journal','trade_duration_seconds':duration,'is_test_trade':str(r[idx.get('Test')]).strip().lower() in {'yes','y','true','1'} if 'Test' in idx else False,'setup':r[idx.get('Setup',17)] if 'Setup' in idx else '','timeframe':r[idx.get('Timeframe',18)] if 'Timeframe' in idx else '','breakeven':r[idx.get('Breakeven',19)] if 'Breakeven' in idx else '','notes':r[idx.get('Notes',20)] if 'Notes' in idx else '','cashflow_amount':cashflow_amount,'cashflow_new_balance':cashflow_new_balance,'currency':currency, 'asset_class': asset_class, 'source':'master_journal'}
             if row_type == "monthly_aud_reval":
                 monthly_currency = (currency or str(item.get("result_currency") or "").strip() or "AUD").upper()
                 item["result_cash"] = _num(r[i_pnl]) if i_pnl is not None else None
@@ -1312,29 +1427,67 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
 
         anchors = _find_anchor_sections(dash, ["Account Balances", "Instrument leaders", "Overall", "Winners", "Losers", "Drawdown", "FX", "Crypto"], optional=["Duration"])
 
-        def write_metric(section: str, label: str, value: Any, metric_type: str = "raw"):
+        def _format_metric_value(value: Any, metric_type: str = "raw"):
             if value is None:
+                return None
+            if metric_type == "pct":
+                pct = _as_float(value)
+                if pct is None:
+                    return None
+                return _pct_points_to_excel_fraction(pct)
+            if metric_type == "duration":
+                return _fmt_duration_full(value)
+            if metric_type == "count":
+                f = _as_float(value)
+                return int(f) if f is not None else value
+            if metric_type == "source":
+                return _fmt_detail_src(value)
+            return value
+
+        def _write_dashboard_metric_cell(row: int, col: int, value: Any, metric_type: str = "raw") -> bool:
+            if value is None or _is_light_grey_no_metric_cell(dash.cell(row, col)):
+                return False
+            if _write_value_preserving_cell(dash, row, col, value):
+                diagnostics["updated_cells"] += 1
+                if metric_type == "duration":
+                    dash.cell(row, col).number_format = r'00\:00\:00\:00'
+                return True
+            return False
+
+        def write_metric(section: str, label: str, value: Any, metric_type: str = "raw"):
+            out = _format_metric_value(value, metric_type)
+            if out is None:
                 return
             pos = _find_label_in_section(dash, label, anchors[section])
             if not pos:
                 return
-            out = value
-            if metric_type == "pct":
-                pct = _as_float(value)
-                if pct is None:
-                    return
-                out = _pct_points_to_excel_fraction(pct)
-            elif metric_type == "duration":
-                out = _fmt_duration_full(value)
-            elif metric_type == "count":
-                f = _as_float(value)
-                out = int(f) if f is not None else value
-            elif metric_type == "source":
-                out = _fmt_detail_src(value)
-            if _write_value_preserving_cell(dash, pos[0], pos[1]+1, out):
-                diagnostics["updated_cells"] += 1
-            if metric_type == "duration":
-                dash.cell(pos[0], pos[1]+1).number_format = r'00\:00\:00\:00'
+            _write_dashboard_metric_cell(pos[0], pos[1]+1, out, metric_type)
+
+        def _main_dashboard_market_columns() -> Dict[str, int]:
+            cols: Dict[str, int] = {}
+            for r in range(1, min(5, dash.max_row) + 1):
+                for c in range(1, min(8, dash.max_column) + 1):
+                    token = str(dash.cell(r, c).value or "").strip().lower()
+                    if token == "overall":
+                        cols["overall"] = c
+                    elif token in {"fx", "forex"}:
+                        cols["fx"] = c
+                    elif token == "crypto":
+                        cols["crypto"] = c
+                if {"overall", "fx", "crypto"}.issubset(cols):
+                    break
+            return cols
+
+        def write_market_metric(section: str, label: str, values_by_market: Dict[str, Any], metric_type: str = "raw"):
+            pos = _find_label_in_section(dash, label, anchors[section])
+            if not pos:
+                return
+            market_cols = _main_dashboard_market_columns()
+            for market, col in market_cols.items():
+                out = _format_metric_value(values_by_market.get(market), metric_type)
+                if out is None:
+                    continue
+                _write_dashboard_metric_cell(pos[0], col, out, metric_type)
 
         def write_source_below(section: str, metric_label: str, source_val: Any):
             if source_val is None:
@@ -1376,6 +1529,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             write_metric(section, "Max loss", bucket.get("max_loss"))
             write_metric(section, "Avg stop %", bucket.get("avg_stop_pct"), "pct")
             write_metric(section, "Avg target %", bucket.get("avg_target_pct"), "pct")
+            write_metric(section, "Max target %", bucket.get("max_target_pct"), "pct")
             write_metric(section, "Avg duration", bucket.get("avg_duration_seconds"), "duration")
             msrc = bucket.get("metric_sources") or {}
             write_source_below(section, "Max loss %", msrc.get("min_result_pct"))
@@ -1386,16 +1540,24 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             write_source_below(section, "Max loss", msrc.get("max_loss"))
 
 
-        write_metric("Winners", "Avg result %", risk.get("avg_result_pct_winners"), "pct")
-        write_metric("Winners", "Avg R", risk.get("avg_r_multiple_winners"))
-        write_metric("Winners", "Avg stop %", risk.get("avg_stop_pct_winners"), "pct")
-        write_metric("Winners", "Avg target %", risk.get("avg_target_pct_winners"), "pct")
-        write_metric("Losers", "Avg result %", risk.get("avg_result_pct_losers"), "pct")
-        write_metric("Losers", "Avg R", risk.get("avg_r_multiple_losers"))
-        write_metric("Losers", "Avg stop %", risk.get("avg_stop_pct_losers"), "pct")
-        write_metric("Losers", "Avg target %", risk.get("avg_target_pct_losers"), "pct")
-        write_metric("Drawdown", "Max drawdown", risk.get("max_drawdown_pct"), "pct")
-        write_metric("Drawdown", "Avg drawdown", risk.get("avg_drawdown_pct"), "pct")
+        risk_by_market = risk.get("by_market") if isinstance(risk.get("by_market"), dict) else {}
+        def _risk_market_values(key: str) -> Dict[str, Any]:
+            return {
+                "overall": risk.get(key),
+                "fx": (risk_by_market.get("fx") or {}).get(key),
+                "crypto": (risk_by_market.get("crypto") or {}).get(key),
+            }
+
+        write_market_metric("Winners", "Avg result %", _risk_market_values("avg_result_pct_winners"), "pct")
+        write_market_metric("Winners", "Avg R", _risk_market_values("avg_r_multiple_winners"))
+        write_market_metric("Winners", "Avg stop %", _risk_market_values("avg_stop_pct_winners"), "pct")
+        write_market_metric("Winners", "Avg target %", _risk_market_values("avg_target_pct_winners"), "pct")
+        write_market_metric("Losers", "Avg result %", _risk_market_values("avg_result_pct_losers"), "pct")
+        write_market_metric("Losers", "Avg R", _risk_market_values("avg_r_multiple_losers"))
+        write_market_metric("Losers", "Avg stop %", _risk_market_values("avg_stop_pct_losers"), "pct")
+        write_market_metric("Losers", "Avg target %", _risk_market_values("avg_target_pct_losers"), "pct")
+        write_market_metric("Drawdown", "Max drawdown", {"overall": risk.get("max_drawdown_pct"), "fx": (by_market.get("fx") or {}).get("max_drawdown_pct"), "crypto": (by_market.get("crypto") or {}).get("max_drawdown_pct")}, "pct")
+        write_market_metric("Drawdown", "Avg drawdown", {"overall": risk.get("avg_drawdown_pct")}, "pct")
         duration = groups.get("duration") or {}
         write_metric("FX", "FX shortest", duration.get("fx_shortest_seconds"), "duration")
         write_metric("FX", "FX longest", duration.get("fx_longest_seconds"), "duration")
@@ -1547,15 +1709,32 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
         gen = load_workbook(tmp, data_only=False)
         try:
             def _copy_data_rows(src_ws, dst_ws, start_row: int, *, force_all_columns: bool = False):
-                max_col = src_ws.max_column if force_all_columns else min(src_ws.max_column, dst_ws.max_column)
-                if force_all_columns and dst_ws.max_column < src_ws.max_column:
-                    for c in range(dst_ws.max_column + 1, src_ws.max_column + 1):
-                        src_letter = get_column_letter(c)
-                        dst_letter = get_column_letter(c)
-                        dst_ws.cell(1, c).value = src_ws.cell(1, c).value
-                        if dst_ws.column_dimensions[dst_letter].width in (None, 0):
-                            dst_ws.column_dimensions[dst_letter].width = src_ws.column_dimensions[src_letter].width
-                        dst_ws.column_dimensions[dst_letter].hidden = bool(src_ws.column_dimensions[src_letter].hidden)
+                src_headers = [str(src_ws.cell(1, c).value or "").strip() for c in range(1, src_ws.max_column + 1)]
+                dst_headers = [str(dst_ws.cell(1, c).value or "").strip() for c in range(1, dst_ws.max_column + 1)]
+                if force_all_columns:
+                    expected = TRADE_LOG_HEADERS
+                    if dst_headers[:len(expected)] != expected:
+                        raise RuntimeError(
+                            "Trade Log headers do not match expected template: "
+                            f"expected {expected!r}, found {dst_headers[:len(expected)]!r}"
+                        )
+                    missing_src = [h for h in expected if h not in src_headers]
+                    if missing_src:
+                        raise RuntimeError(f"Generated Trade Log missing headers: {missing_src!r}")
+                    max_col = len(expected)
+                else:
+                    max_col = min(src_ws.max_column, dst_ws.max_column)
+                src_map = {h: i + 1 for i, h in enumerate(src_headers) if h}
+                dst_map = {h: i + 1 for i, h in enumerate(dst_headers) if h}
+                header_pairs = []
+                if force_all_columns:
+                    for h in TRADE_LOG_HEADERS:
+                        header_pairs.append((src_map[h], dst_map[h], h))
+                else:
+                    for h, dc in dst_map.items():
+                        sc = src_map.get(h)
+                        if sc and dc <= max_col:
+                            header_pairs.append((sc, dc, h))
                 for r in range(start_row, dst_ws.max_row + 1):
                     for c in range(1, max_col + 1):
                         if _is_merged_non_anchor(dst_ws, r, c):
@@ -1565,18 +1744,23 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                         dc.comment = None
                         dc.hyperlink = None
                 for r in range(start_row, src_ws.max_row + 1):
-                    for c in range(1, max_col + 1):
-                        if _is_merged_non_anchor(dst_ws, r, c):
+                    for sc_idx, dc_idx, header in header_pairs:
+                        if _is_merged_non_anchor(dst_ws, r, dc_idx):
                             continue
-                        sc = src_ws.cell(r, c)
-                        dc = dst_ws.cell(r, c)
+                        sc = src_ws.cell(r, sc_idx)
+                        dc = dst_ws.cell(r, dc_idx)
                         dc.value = sc.value
                         dc.number_format = sc.number_format
                         dc.comment = copy(sc.comment) if sc.comment else None
                         dc.hyperlink = copy(sc.hyperlink) if sc.hyperlink else None
                 last_row = max(start_row - 1, src_ws.max_row)
-                last_col_letter = get_column_letter(max_col)
-                dst_ws.auto_filter.ref = f"A1:{last_col_letter}{max(1,last_row)}"
+                if force_all_columns:
+                    dst_ws.auto_filter.ref = f"A1:AB{max(1,last_row)}"
+                else:
+                    if dst_ws.auto_filter and dst_ws.auto_filter.ref:
+                        last_col_letter = get_column_letter(max_col)
+                        dst_ws.auto_filter.ref = f"A1:{last_col_letter}{max(1,last_row)}"
+
 
             gen_trade_log = _get_all_trades_sheet(gen, allow_legacy=False)
             live_trade_log = _get_all_trades_sheet(wb, allow_legacy=False)
@@ -1624,6 +1808,8 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                     sc=find_col(src_headers, keys); dc=find_col(dst_headers, keys)
                     if sc and dc:
                         pairs.append((sc,dc))
+                if not pairs:
+                    return
                 max_dst_row = max(dst_ws.max_row, src_ws.max_row)
                 for r in range(start_row, max_dst_row + 1):
                     for _,dc in pairs:

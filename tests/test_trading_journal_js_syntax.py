@@ -26,6 +26,14 @@ def test_trading_journal_diagnostics_split_balance_anchor_from_parse_sync() -> N
     assert "avg_r_multiple" in js
     assert "avg_stop_pct_winners" in js
     assert "avg_stop_pct_losers" in js
+    assert "stop_loss_distance_pct" in js
+    assert "target_distance_pct" in js
+    assert "Stop Loss Distance" in js
+    assert "Target Distance" in js
+    assert "priceDistancePct" in js
+    assert "Browser trade columns are intentionally grouped" in js
+    assert "return fb;" in js
+    assert "fb * 100" not in js
     assert "max_drawdown_pct" in js
     assert "overall_avg_seconds" in js
     assert "tj-stats-table" in js
