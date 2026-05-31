@@ -217,6 +217,7 @@ LOCAL_ONLY_PATH_PREFIXES = (
     "/oanda-history",
     "/coinspot-history",
     "/trading-journal",
+    "/dashboard/trading-journal",
     "/merged/open-orders",
     "/api/bybit-history",
     "/api/oanda-history",
@@ -249,7 +250,7 @@ def _profile_main_buttons() -> List[Dict[str, object]]:
     elif APP_PROFILE == "local":
         buttons.extend(
             [
-                {"id": "trading-journal", "name": "trading-journal", "label": "Trading Journal", "open_url": "/trading-journal", "dashboard_main_view": True},
+                {"id": "trading-journal", "name": "trading-journal", "label": "Trading Journal", "open_url": "/dashboard/trading-journal", "dashboard_main_view": True},
                 {"id": "open-orders", "name": "open-orders", "label": "Open Orders and Positions", "open_url": "/merged/open-orders", "dashboard_main_view": True},
                 {"id": "history", "name": "history", "label": "History", "open_url": "/merged/history", "dashboard_main_view": True},
                 {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor", "dashboard_main_view": True},
@@ -27073,10 +27074,11 @@ TRADING_JOURNAL_ACTIONS_TEMPLATE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Trading Journal Workspace</title>
 <style>body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}.wrap{min-height:100vh;display:flex;align-items:center;justify-content:center}.stack{display:flex;flex-direction:column;gap:12px;min-width:280px}button{padding:12px 14px;border-radius:10px;border:1px solid #334155;background:#1f2937;color:#e2e8f0;font-weight:700;cursor:pointer}.drop-zone{border:1px dashed #475569;border-radius:12px;padding:16px;text-align:center;color:#94a3b8;background:#0f172a;cursor:pointer}.drop-zone.drag-over{border-color:#38bdf8;background:#082f49;color:#e0f2fe}.status{margin-top:8px;white-space:pre-wrap;color:#94a3b8}</style></head>
-<body><div class="wrap"><div class="stack"><button id="open-journal-btn">Open Journal</button><button id="import-journal-btn">Import</button><button id="journal-resync-btn">Resync</button><div id="journal-import-drop-zone" class="drop-zone">Drop .xlsx/.xlsm/.xls/.csv import files here<br/><span style="font-size:12px">or click Import to choose a file</span></div><label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode" style="margin-left:8px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"><option value="" selected disabled>Select Demo or Live</option><option value="demo">Demo</option><option value="live">Live</option></select></label><button id="crypto-monthly-pnl-btn">Crypto Monthly P&L</button><button id="bybit-demo-balance-adjustment-btn">Bybit Demo Balance Adjustment</button><input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv" hidden/><div id="journal-actions-status" class="status"></div></div></div><script src="/static/trading_journal_actions.js?v={{TRADING_JOURNAL_ACTIONS_JS_VERSION}}"></script></body></html>"""
+<body><div class="wrap"><div class="stack"><button id="open-journal-btn">Open workbook</button><button id="import-journal-btn">Import</button><button id="journal-resync-btn">Resync</button><div id="journal-import-drop-zone" class="drop-zone">Drop .xlsx/.xlsm/.xls/.csv import files here<br/><span style="font-size:12px">or click Import to choose a file</span></div><label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode" style="margin-left:8px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"><option value="" selected disabled>Select Demo or Live</option><option value="demo">Demo</option><option value="live">Live</option></select></label><button id="crypto-monthly-pnl-btn">Crypto Monthly P&L</button><button id="bybit-demo-balance-adjustment-btn">Bybit Demo Balance Adjustment</button><input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv" hidden/><div id="journal-actions-status" class="status"></div></div></div><script src="/static/trading_journal_actions.js?v={{TRADING_JOURNAL_ACTIONS_JS_VERSION}}"></script></body></html>"""
 
+@app.get("/dashboard/trading-journal")
 @app.get("/merged/trading-journal")
-async def merged_trading_journal_workspace() -> HTMLResponse:
+async def trading_journal_actions_workspace() -> HTMLResponse:
     actions_js_version = _static_asset_version("render/static/trading_journal_actions.js")
     return HTMLResponse(TRADING_JOURNAL_ACTIONS_TEMPLATE.replace("{{TRADING_JOURNAL_ACTIONS_JS_VERSION}}", actions_js_version))
 

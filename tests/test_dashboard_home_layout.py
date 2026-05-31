@@ -137,8 +137,10 @@ def test_local_profile_sets_no_cache_for_home_and_static_assets(monkeypatch) -> 
 def test_local_profile_buttons_use_trading_journal_page_not_merged_route() -> None:
     source = MASTER_SERVICE_PATH.read_text(encoding='utf-8')
     assert '"id": "trading-journal"' in source
-    assert '"open_url": "/trading-journal"' in source
+    assert '"open_url": "/dashboard/trading-journal"' in source
+    assert '"open_url": "/trading-journal"' not in source
     assert '"open_url": "/merged/trading-journal"' not in source
+    assert '@app.get("/dashboard/trading-journal")' in source
     assert '@app.get("/trading-journal", response_class=HTMLResponse)' in source
 
 

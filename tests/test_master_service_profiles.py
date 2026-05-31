@@ -65,6 +65,7 @@ def test_render_profile_blocks_local_only_routes() -> None:
     master_service = _load_master_service("render_master_service_profile_render", "render")
     assert master_service._render_blocks_path("/merged/history") is True
     assert master_service._render_blocks_path("/trading-journal") is True
+    assert master_service._render_blocks_path("/dashboard/trading-journal") is True
     assert master_service._render_blocks_path("/health") is False
     disabled = master_service._local_only_disabled_response("/trading-journal")
     assert disabled.status_code == 410
@@ -97,8 +98,36 @@ def test_local_profile_includes_open_orders_and_trading_journal() -> None:
 
     trading_journal = by_name["trading-journal"]
     assert trading_journal["label"] == "Trading Journal"
-    assert trading_journal["open_url"] == "/trading-journal"
+    assert trading_journal["open_url"] == "/dashboard/trading-journal"
+    assert trading_journal["open_url"] != "/trading-journal"
     assert trading_journal["dashboard_main_view"] is True
+
+
+def test_local_trading_journal_dashboard_workspace_is_actions_only() -> None:
+    master_service = _load_master_service("render_master_service_profile_local_tj_actions", "local")
+    response = asyncio.run(master_service.trading_journal_actions_workspace())
+    assert response.status_code == 200
+    body = response.body.decode("utf-8")
+
+    for token in [
+        "open-journal-btn",
+        "Open workbook",
+        "import-journal-btn",
+        "journal-resync-btn",
+        "crypto-monthly-pnl-btn",
+        "bybit-demo-balance-adjustment-btn",
+    ]:
+        assert token in body
+
+    for token in [
+        "All trades",
+        "Instrument averages",
+        "P/L calendar",
+        "Equity curve",
+        "Filter symbol / account / source",
+        "Cached journal shown",
+    ]:
+        assert token not in body
 
 
 def test_journal_profile_redirects_root_and_reports_retired_sync_status() -> None:
