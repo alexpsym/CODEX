@@ -30,8 +30,13 @@ def test_dashboard_home_removes_instrument_specs_recent_trades_open_orders() -> 
     assert 'id="dashboard-workspace-status"' in html
     assert 'id="dashboard-workspace-empty"' in html
     assert 'id="dashboard-workspace-frame"' in html
+    assert 'Select a script from the toolbar above to load it here.' in html
+    assert 'Select a script from the left to load it here.' not in html
     assert '.local-exit-btn' in html
-    assert 'id="scripts-grid" class="script-stack"' in html
+    assert 'class="panel dashboard-script-toolbar"' in html
+    assert 'class="script-toolbar-row"' in html
+    assert 'id="scripts-grid" class="script-stack script-toolbar-grid"' in html
+    assert 'id="exit-button-slot" class="exit-button-slot"' in html
     assert 'id="exit-panel"' not in html
 
     assert 'id="journal-sync-widget"' not in html
@@ -42,13 +47,37 @@ def test_dashboard_home_removes_instrument_specs_recent_trades_open_orders() -> 
     watchlist_idx = html.find('Watchlist')
     oanda_idx = html.find('OANDA Inactivity')
     assert scripts_idx != -1 and watchlist_idx != -1 and oanda_idx != -1
-    assert watchlist_idx < oanda_idx < scripts_idx
+    assert scripts_idx < watchlist_idx < oanda_idx
 
     scripts_grid_idx = html.find('id="scripts-grid"')
+    exit_slot_idx = html.find('id="exit-button-slot"')
     watchlist_widget_idx = html.find('id="watchlist-widget"')
     oanda_widget_idx = html.find('id="oanda-inactivity-widget"')
-    assert scripts_grid_idx != -1 and watchlist_widget_idx != -1 and oanda_widget_idx != -1
-    assert watchlist_widget_idx < oanda_widget_idx < scripts_grid_idx
+    workspace_idx = html.find('id="dashboard-workspace"')
+    assert scripts_grid_idx != -1 and exit_slot_idx != -1
+    assert watchlist_widget_idx != -1 and oanda_widget_idx != -1 and workspace_idx != -1
+    assert scripts_grid_idx < watchlist_widget_idx
+    assert scripts_grid_idx < workspace_idx
+    assert watchlist_widget_idx < oanda_widget_idx
+
+    rail_start = html.find('<div class="dashboard-rail">')
+    workspace_start = html.find('<section class="panel" id="dashboard-workspace">')
+    rail_html = html[rail_start:workspace_start]
+    assert '<aside class="panel sidebar">' not in rail_html
+    assert 'id="scripts-grid"' not in rail_html
+
+
+def test_dashboard_toolbar_css_keeps_scripts_single_row() -> None:
+    source = MASTER_SERVICE_PATH.read_text(encoding='utf-8')
+    html = _extract_html_template(source)
+
+    assert '.dashboard-script-toolbar' in html
+    assert '.script-toolbar-row' in html
+    assert '.script-toolbar-grid' in html
+    assert 'flex-wrap: nowrap;' in html
+    assert 'text-overflow: ellipsis;' in html
+    assert 'white-space: nowrap;' in html
+    assert '.local-exit-btn{\n            margin-top: 0;' in html
 
 
 def test_calculator_specs_markup_and_endpoint_are_preserved() -> None:

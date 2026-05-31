@@ -2,6 +2,7 @@
   const refreshBtn = document.getElementById('refresh-btn');
   const status = document.getElementById('status');
   const scriptsGrid = document.getElementById('scripts-grid');
+  const exitButtonSlot = document.getElementById('exit-button-slot');
 
   const workspaceTitle = document.getElementById('dashboard-workspace-title');
   const workspaceStatus = document.getElementById('dashboard-workspace-status');
@@ -163,8 +164,15 @@
   const renderScripts = () => {
     if (!scriptsGrid) return;
     scriptsGrid.innerHTML = '';
+    if (exitButtonSlot) {
+      exitButtonSlot.innerHTML = '';
+    }
     scriptsState.forEach((item) => scriptsGrid.appendChild(makeScriptButton(item)));
-    scriptsGrid.appendChild(makeExitButton());
+    if (exitButtonSlot) {
+      exitButtonSlot.appendChild(makeExitButton());
+    } else {
+      scriptsGrid.appendChild(makeExitButton());
+    }
   };
 
   const makeExitButton = () => {
@@ -250,7 +258,7 @@
       activeMainScriptName = '';
       activeMainScriptUrl = '';
       activeMainLoadState = 'idle';
-      showWorkspaceEmpty('Select a script from the left to load it here.');
+      showWorkspaceEmpty('Select a script from the toolbar above to load it here.');
       setWorkspaceMeta('Workspace', 'Ready to load a script.', false);
       persistActiveWorkspace();
       return;

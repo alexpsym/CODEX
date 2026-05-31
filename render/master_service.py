@@ -10397,11 +10397,45 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .oo-toolbar { display:flex; gap:0.6rem; align-items:center; }
 
         .layout{
-            margin-top: 1.25rem;
+            margin-top: 1rem;
             display: grid;
             grid-template-columns: 260px minmax(0, 1fr);
             gap: 1rem;
             align-items: start;
+        }
+        .dashboard-script-toolbar{
+            padding: 0.65rem 0.75rem;
+        }
+        .script-toolbar-row{
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            flex-wrap: nowrap;
+            min-width: 0;
+        }
+        .script-toolbar-title{
+            flex: 0 0 auto;
+            margin: 0;
+            font-size: 0.86rem;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: #94a3b8;
+        }
+        .script-toolbar-grid{
+            flex: 1 1 auto;
+            min-width: 0;
+            display: flex;
+            flex-direction: row;
+            flex-wrap: nowrap;
+            gap: 0.45rem;
+            overflow: hidden;
+        }
+        .exit-button-slot{
+            margin-left: auto;
+            flex: 0 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
         }
         .dashboard-rail{
             display: flex;
@@ -10467,8 +10501,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             flex-direction:column;
             gap:0.65rem;
         }
+        .script-stack.script-toolbar-grid{
+            flex: 1 1 auto;
+            min-width: 0;
+            flex-direction: row;
+            flex-wrap: nowrap;
+            gap: 0.45rem;
+            overflow: hidden;
+        }
         .local-exit-btn{
-            margin-top:2.25rem;
+            margin-top: 0;
         }
         
         .script-btn {
@@ -10487,7 +10529,40 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .script-btn:hover { background: #0f172a; }
         .script-btn.active-script { outline: 1px solid rgba(96, 165, 250, 0.8); }
         .script-btn.compact { width: auto; min-width: 190px; padding: 0.75rem 0.9rem; }
-        .script-name { font-weight: 900; }
+        .script-toolbar-grid .script-btn,
+        .exit-button-slot .local-exit-btn{
+            width: auto;
+            min-width: 0;
+            max-width: 160px;
+            height: 34px;
+            padding: 0.38rem 0.55rem;
+            border-radius: 10px;
+            gap: 0.35rem;
+            font-size: 0.78rem;
+            flex: 1 1 0;
+            white-space: nowrap;
+            overflow: hidden;
+        }
+        .exit-button-slot .local-exit-btn{
+            flex: 0 0 auto;
+            min-width: 64px;
+            max-width: none;
+            justify-content: center;
+        }
+        .script-toolbar-grid .status-dot{
+            width: 8px;
+            height: 8px;
+            min-width: 8px;
+            margin-left: 4px;
+            flex: 0 0 auto;
+        }
+        .script-name {
+            font-weight: 900;
+            min-width: 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
         .status-pill {
             display: inline-flex;
             align-items: center;
@@ -10642,6 +10717,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
     <div class=\"home\">
+        <section class="panel dashboard-script-toolbar">
+            <div class="script-toolbar-row">
+                <div class="category-title script-toolbar-title">Scripts</div>
+                <div id="scripts-grid" class="script-stack script-toolbar-grid"></div>
+                <div id="exit-button-slot" class="exit-button-slot"></div>
+            </div>
+        </section>
         <div class="layout">
             <div class="dashboard-rail">
                 <section class="panel" id="watchlist-widget">
@@ -10705,10 +10787,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     </div>
                 </section>
 
-                <aside class="panel sidebar">
-                    <div class="category-title">Scripts</div>
-                    <div id="scripts-grid" class="script-stack"></div>
-                </aside>
             </div>
             <section class="panel" id="dashboard-workspace">
                 <div class="panel-header">
@@ -10717,7 +10795,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         <p id="dashboard-workspace-status">Ready to load a script.</p>
                     </div>
                 </div>
-                <p id="dashboard-workspace-empty">Select a script from the left to load it here.</p>
+                <p id="dashboard-workspace-empty">Select a script from the toolbar above to load it here.</p>
                 <iframe
                     id="dashboard-workspace-frame"
                     title="Dashboard script workspace"

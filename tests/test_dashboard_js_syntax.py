@@ -47,12 +47,17 @@ def test_dashboard_js_no_removed_widget_endpoints_and_keeps_needed_calls() -> No
     assert "'Open in workspace: loading'" in js
     assert "'Open in workspace: load failed'" in js
     assert "'Open in workspace'" in js
+    assert "Select a script from the toolbar above to load it here." in js
+    assert "Select a script from the left to load it here." not in js
     assert "dotTitle = workspaceTitle ? `${workspaceTitle}; ${processTitle}` : processTitle;" in js
     assert "syncWorkspaceSelectionFromScripts();" in js
     assert "syncWorkspaceSelectionFromScripts();\n        renderScripts();" in js
     assert "makeExitButton" in js
     assert "local-exit-btn" in js
-    assert "scriptsState.forEach((item) => scriptsGrid.appendChild(makeScriptButton(item)));\n    scriptsGrid.appendChild(makeExitButton());" in js
+    assert "const exitButtonSlot = document.getElementById('exit-button-slot');" in js
+    assert "scriptsState.forEach((item) => scriptsGrid.appendChild(makeScriptButton(item)));" in js
+    assert "exitButtonSlot.appendChild(makeExitButton());" in js
+    assert "scriptsGrid.appendChild(makeExitButton());" in js
     assert "if (isMonitor) {" in js
     assert "cache: 'no-store'" in js
     assert "Loading state…" in js
