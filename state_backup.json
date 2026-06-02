@@ -46,6 +46,43 @@
       {
         "account": "live",
         "account_label": "Bybit Live",
+        "close_time": "2026-05-31T23:59:59+10:00",
+        "duration_seconds": "",
+        "entry_price": 0.716215,
+        "exit_price": 0.717765,
+        "fees": "",
+        "id": "monthly_aud_reval:bybit_live:2026-05",
+        "open_time": "2026-05-01T00:00:00+10:00",
+        "outcome": "",
+        "raw_refs": {
+          "computed_result_pct": -0.21684748214216387,
+          "end_balance_source": "current_balance_no_activity_after_boundary",
+          "end_balance_usdt": 224.54735344,
+          "end_fx_close": 0.71842,
+          "end_fx_next_open": 0.71711,
+          "end_rate": 0.717765,
+          "fx_close": 0.71623,
+          "fx_next_open": 0.7162,
+          "period_month": "2026-05",
+          "start_balance_source": "current_balance_no_activity_after_boundary",
+          "start_balance_usdt": 224.54937733,
+          "start_rate": 0.716215
+        },
+        "result_cash": -0.68,
+        "result_currency": "AUD",
+        "result_pct": "",
+        "row_type": "monthly_aud_reval",
+        "side": "",
+        "source": "bybit_monthly_aud_reval",
+        "status": "closed",
+        "stop_loss": "",
+        "symbol": "MONTHLY AUD P/L",
+        "take_profit": "",
+        "updated_at": "2026-06-02T10:21:29.149136+00:00"
+      },
+      {
+        "account": "live",
+        "account_label": "Bybit Live",
         "close_time": "2026-04-30T23:59:59+10:00",
         "duration_seconds": "",
         "entry_price": 0.68842,
@@ -118,7 +155,7 @@
         "updated_at": "2026-05-27T11:02:20.792012+00:00"
       }
     ],
-    "updated_at": "2026-05-27T11:02:38.453443+00:00"
+    "updated_at": "2026-06-02T10:21:29.149744+00:00"
   },
   "monthly_aud_revaluation_state": {
     "error_detail": null,
@@ -130,25 +167,25 @@
       "changed": 0,
       "failed_months": [],
       "failures": [],
-      "finished_at": "2026-05-31T11:40:41.615876+00:00",
+      "finished_at": "2026-06-02T11:17:40.087411+00:00",
       "mandatory_row_id": "monthly_aud_reval:bybit_live:2026-03",
       "partial": false,
       "processed_months": [],
-      "rows": 2,
-      "started_at": "2026-05-31T11:40:41.610144+00:00",
+      "rows": 3,
+      "started_at": "2026-06-02T11:17:40.083425+00:00",
       "succeeded_months": [],
       "target_months": []
     },
-    "last_synced_at": "2026-05-31T11:40:41.615832+00:00",
+    "last_synced_at": "2026-06-02T11:17:40.087376+00:00",
     "month_key": null,
     "ok": true,
     "stage": "complete",
     "traceback": null,
-    "updated_at": "2026-05-31T11:40:41.615864+00:00"
+    "updated_at": "2026-06-02T11:17:40.087403+00:00"
   },
   "oanda_fill_state": {},
   "pending_webhooks": [],
-  "savedAt": "2026-05-31T11:40:44.646713+00:00",
+  "savedAt": "2026-06-02T11:17:42.288776+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [
@@ -51537,5 +51574,5 @@
   "watchlist": [
     "DASHUSDT"
   ],
-  "watchlist_updated_at": "2026-05-31T11:40:34.864195+00:00"
+  "watchlist_updated_at": "2026-06-02T11:17:32.428642+00:00"
 }
