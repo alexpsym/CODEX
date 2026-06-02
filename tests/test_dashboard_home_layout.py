@@ -156,6 +156,16 @@ def test_trading_journal_workspace_contains_action_buttons_in_order():
     assert source.index("open-journal-btn") < source.index("import-journal-btn") < source.index("journal-resync-btn") < source.index("crypto-monthly-pnl-btn") < source.index("bybit-demo-balance-adjustment-btn")
 
 
+
+def test_trading_journal_actions_crypto_monthly_diagnostics_are_rendered() -> None:
+    js = (ROOT / 'render' / 'static' / 'trading_journal_actions.js').read_text(encoding='utf-8')
+    assert 'renderCryptoMonthlyDiagnostics' in js
+    assert 'crypto-monthly-pnl-diagnostics' in js
+    assert 'Crypto Monthly P&amp;L diagnostics / raw JSON' in js
+    for token in ['now_brisbane', 'current_month', 'last_completed_month', 'state_months', 'workbook_months', 'ignored_invalid_workbook_anchors', 'missing_workbook_months', 'verified_row_ids', 'code_version', 'app_commit']:
+        assert token in js
+    assert 'payload.rows_inserted || 0' not in js
+
 def test_trading_journal_workspace_bybit_account_dropdown_has_no_auto_option():
     source = MASTER_SERVICE_PATH.read_text(encoding='utf-8')
     assert '>Auto<' not in source

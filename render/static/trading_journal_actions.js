@@ -28,9 +28,15 @@
   if (status && typeof status.after !== 'function') status.after = () => {};
   if (status) status.after(resumeBtn, cancelBtn);
 
+  const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
   const setStatus = (msg, err = false) => {
     if (!status) return;
     status.textContent = msg || '';
+    status.style.color = err ? '#fca5a5' : '#94a3b8';
+  };
+  const setStatusHtml = (html, err = false) => {
+    if (!status) return;
+    status.innerHTML = html || '';
     status.style.color = err ? '#fca5a5' : '#94a3b8';
   };
   const isExplicitAccountMode = (value) => value === 'demo' || value === 'live';
@@ -257,6 +263,30 @@
     }
   });
 
+  const formatList = (value) => Array.isArray(value) && value.length ? value.map((v) => String(v)).join(', ') : '—';
+  const renderCryptoMonthlyDiagnostics = (payload, err = false) => {
+    const rawJson = JSON.stringify(payload || {}, null, 2);
+    const rows = [
+      ['Message', payload?.message || ''],
+      ['Target months', formatList(payload?.target_months)],
+      ['Inserted months', formatList(payload?.inserted_months)],
+      ['Synced existing months', formatList(payload?.synced_existing_months)],
+      ['Skipped existing months', formatList(payload?.skipped_existing_months)],
+      ['Rows inserted', payload?.rows_inserted ?? 0],
+      ['Verified Row IDs', formatList(payload?.verified_row_ids)],
+      ['Missing workbook months', formatList(payload?.missing_workbook_months)],
+      ['State months', formatList(payload?.state_months)],
+      ['Workbook months', formatList(payload?.workbook_months)],
+      ['Current month', payload?.current_month || ''],
+      ['Last completed month', payload?.last_completed_month || ''],
+      ['Now Brisbane', payload?.now_brisbane || ''],
+      ['Code version', payload?.code_version || payload?.app_commit || ''],
+      ['Workbook', payload?.master_journal_path || ''],
+      ['Ignored invalid workbook anchors', Array.isArray(payload?.ignored_invalid_workbook_anchors) ? String(payload.ignored_invalid_workbook_anchors.length) : '0'],
+    ];
+    const body = rows.map(([label, value]) => `<div><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</div>`).join('');
+    setStatusHtml(`${body}<details class="crypto-monthly-pnl-diagnostics" open><summary>Crypto Monthly P&amp;L diagnostics / raw JSON</summary><pre>${escapeHtml(rawJson)}</pre></details>`, err);
+  };
   const runCryptoMonthly = async () => {
     if (cryptoMonthlyBtn) cryptoMonthlyBtn.disabled = true;
     setStatus('Checking crypto monthly P&L...');
@@ -264,12 +294,12 @@
       const res = await fetch('/api/trading-journal/crypto-monthly-pnl', { method: 'POST', headers: { Accept: 'application/json' } });
       const payload = await res.json().catch(() => ({}));
       if (isExcelLockPayload(payload)) {
-        setStatus(payload.message || 'Trading Journal.xlsx appears to be open in Excel. Close it, then press Resume.', true);
+        renderCryptoMonthlyDiagnostics(payload, true);
         setPendingRetry('crypto', runCryptoMonthly);
         return;
       }
-      if (!res.ok || payload.ok !== true) throw new Error(payload.error || payload.detail || payload.message || 'Crypto monthly P&L failed.');
-      setStatus(`Target months: ${(payload.target_months || []).join(', ') || '—'}\nInserted months: ${(payload.inserted_months || []).join(', ') || '—'}\nSkipped existing months: ${(payload.skipped_existing_months || []).join(', ') || '—'}\nRows inserted: ${payload.rows_inserted || 0}\nWorkbook: ${payload.master_journal_path || ''}\n${payload.message || ''}`);
+      renderCryptoMonthlyDiagnostics(payload, !res.ok || payload.ok !== true);
+      if (!res.ok || payload.ok !== true) return;
       clearPendingRetry();
     } catch (err) { setStatus(err?.message || String(err), true); }
     finally { if (cryptoMonthlyBtn) cryptoMonthlyBtn.disabled = Boolean(pendingRetry.run); }

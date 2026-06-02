@@ -2242,6 +2242,7 @@ def test_snapshot_includes_monthly_aud_note_rows_excluded_from_stats(tmp_path, m
         "row_type": "monthly_aud_reval",
         "account": "Bybit Live",
         "account_label": "Bybit Live",
+        "symbol": "MONTHLY AUD P/L",
         "close_time": "2026-03-31T23:59:59Z",
         "result_cash": 123.45,
         "result_currency": "AUD",
@@ -2305,6 +2306,7 @@ def test_monthly_aud_revaluation_rows_for_journal_view_keeps_zero_result(tmp_pat
         "row_type": "monthly_aud_reval",
         "account": "live",
         "account_label": "Bybit Live",
+        "symbol": "MONTHLY AUD P/L",
         "close_time": "2026-04-30T23:59:59Z",
         "result_cash": 0.0,
         "result_currency": "AUD",
@@ -2326,6 +2328,7 @@ def test_monthly_aud_revaluation_rows_for_journal_view_accepts_canonical_bybit(t
         "row_type": "monthly_aud_reval",
         "account": "BYBIT",
         "account_label": "BYBIT",
+        "symbol": "MONTHLY AUD P/L",
         "close_time": "2026-05-31T23:59:59Z",
         "result_cash": 1.0,
         "result_currency": "AUD",
@@ -2363,6 +2366,20 @@ def test_persist_trading_journal_sqlite_routes_monthly_rows_to_journal_notes(tmp
         conn.close()
 
 
+
+def _monthly_row(month: str) -> dict:
+    return {
+        "id": f"monthly_aud_reval:bybit_live:{month}",
+        "row_type": "monthly_aud_reval",
+        "account": "BYBIT",
+        "account_label": "BYBIT",
+        "symbol": "MONTHLY AUD P/L",
+        "result_currency": "AUD",
+        "result_cash": 1.0,
+        "close_time": f"{month}-28T23:59:59Z",
+        "raw_refs": {"period_month": month},
+    }
+
 def test_crypto_monthly_pnl_endpoint_no_anchor_returns_bootstrap_required(monkeypatch, tmp_path):
     monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
     monkeypatch.setattr(master_service, "_master_journal_path", lambda: tmp_path / "Trading Journal.xlsx")
@@ -2384,14 +2401,14 @@ def test_crypto_monthly_pnl_due_month_april_2026(monkeypatch, tmp_path):
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
     monkeypatch.setattr(master_service, "_master_journal_path", lambda: tmp_path / "Trading Journal.xlsx")
     build_master_journal_workbook({'items':[{'id':'monthly_aud_reval:bybit_live:2026-03','row_type':'monthly_aud_reval','source':'bybit_monthly_aud_reval','account':'BYBIT','account_label':'BYBIT','symbol':'MONTHLY AUD P/L','result_currency':'AUD','raw_refs':{'period_month':'2026-03'},'close_time':'2026-03-31T23:59:59Z'}],'stats':{'totals':{},'groups':{}},'balances':[]}, tmp_path / 'Trading Journal.xlsx')
-    rows = [{'id':'monthly_aud_reval:bybit_live:2026-03','row_type':'monthly_aud_reval','raw_refs':{'period_month':'2026-03'}}]
+    rows = [_monthly_row('2026-03')]
     monkeypatch.setattr(master_service, '_monthly_aud_revaluation_rows_for_journal_view', lambda: list(rows))
     monkeypatch.setattr(master_service, '_read_monthly_aud_reval_months_from_workbook', lambda _p: {"ok": True, "workbook_exists": True, "months": ["2026-03"]})
     async def fake_run(reason):
-        rows.append({'id':'monthly_aud_reval:bybit_live:2026-04','row_type':'monthly_aud_reval','raw_refs':{'period_month':'2026-04'}})
+        rows.append(_monthly_row('2026-04'))
         return {'ok': True}
     monkeypatch.setattr(master_service, '_run_monthly_aud_revaluation_sync', fake_run)
-    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda **_kwargs: {'master_journal_path': str(tmp_path / 'Trading Journal.xlsx')})
+    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda **_kwargs: {'ok': True, 'master_journal_path': str(tmp_path / 'Trading Journal.xlsx')})
     monkeypatch.setattr(master_service, '_verify_trade_log_row_ids_in_workbook', lambda p,e: {'ok': True, 'missing_row_ids': []})
     r = asyncio.run(master_service.trading_journal_crypto_monthly_pnl())
     assert r.status_code == 200
@@ -2437,19 +2454,29 @@ def test_read_monthly_anchor_helper_ignores_corrupted_trade_row(tmp_path):
 def test_monthly_months_from_rows_ignores_corrupted_trade_row_id():
     rows = [
         {"id": "monthly_aud_reval:bybit_live:2026-05", "row_type": "trade", "raw_refs": {"period_month": "2026-05"}},
-        {"id": "monthly_aud_reval:bybit_live:2026-04", "row_type": "monthly_aud_reval", "raw_refs": {"period_month": "2026-04"}},
-        {"id": "monthly_aud_reval:bybit_live:2026-03", "row_type": "monthly_aud_reval", "raw_refs": {"period_month": "2026-04"}},
+        _monthly_row("2026-04"),
+        {**_monthly_row("2026-03"), "raw_refs": {"period_month": "2026-04"}},
     ]
     assert master_service._monthly_months_from_rows(rows) == {"2026-04"}
 
+
+
+def test_monthly_months_from_rows_requires_symbol_and_account_semantics():
+    missing_symbol = dict(_monthly_row('2026-05'))
+    missing_symbol.pop('symbol')
+    missing_account = dict(_monthly_row('2026-06'))
+    missing_account.pop('account')
+    missing_account.pop('account_label')
+    valid = _monthly_row('2026-04')
+    assert master_service._monthly_months_from_rows([missing_symbol, missing_account, valid]) == {'2026-04'}
 
 def test_crypto_monthly_pnl_due_month_may_june_2_ignores_invalid_workbook_anchor(monkeypatch, tmp_path):
     monkeypatch.setattr(master_service, '_brisbane_now', lambda: __import__('datetime').datetime(2026, 6, 2, 9, 0, 0))
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
     monkeypatch.setattr(master_service, "_master_journal_path", lambda: tmp_path / "Trading Journal.xlsx")
     rows = [
-        {"id": "monthly_aud_reval:bybit_live:2026-03", "row_type": "monthly_aud_reval", "raw_refs": {"period_month": "2026-03"}},
-        {"id": "monthly_aud_reval:bybit_live:2026-04", "row_type": "monthly_aud_reval", "raw_refs": {"period_month": "2026-04"}},
+        _monthly_row("2026-03"),
+        _monthly_row("2026-04"),
     ]
     monkeypatch.setattr(master_service, '_monthly_aud_revaluation_rows_for_journal_view', lambda: list(rows))
     monkeypatch.setattr(master_service, '_read_monthly_aud_reval_months_from_workbook', lambda _p: {
@@ -2459,18 +2486,73 @@ def test_crypto_monthly_pnl_due_month_may_june_2_ignores_invalid_workbook_anchor
         "ignored_invalid_workbook_anchors": [{"row_id": "monthly_aud_reval:bybit_live:2026-05", "row_id_month": "2026-05", "row_type": "trade"}],
     })
     async def fake_run(reason):
-        rows.append({"id": "monthly_aud_reval:bybit_live:2026-05", "row_type": "monthly_aud_reval", "raw_refs": {"period_month": "2026-05"}})
+        rows.append(_monthly_row("2026-05"))
         return {"ok": True}
     monkeypatch.setattr(master_service, '_run_monthly_aud_revaluation_sync', fake_run)
-    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda **_kwargs: {'master_journal_path': str(tmp_path / 'Trading Journal.xlsx')})
+    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda **_kwargs: {'ok': True, 'master_journal_path': str(tmp_path / 'Trading Journal.xlsx')})
     monkeypatch.setattr(master_service, '_verify_trade_log_row_ids_in_workbook', lambda p,e: {'ok': True, 'missing_row_ids': []})
 
     r = asyncio.run(master_service.trading_journal_crypto_monthly_pnl())
     assert r.status_code == 200
     body = json.loads(r.body.decode("utf-8"))
     assert body["target_months"] == ["2026-05"]
+    assert "2026-06" not in body["target_months"]
     assert body["inserted_months"] == ["2026-05"]
     assert body["ignored_invalid_workbook_anchors"][0]["row_id_month"] == "2026-05"
+
+
+def test_crypto_monthly_pnl_syncs_state_month_missing_from_workbook(monkeypatch, tmp_path):
+    monkeypatch.setattr(master_service, '_brisbane_now', lambda: __import__('datetime').datetime(2026, 6, 2, 9, 0, 0))
+    monkeypatch.setattr(master_service, '_master_journal_path', lambda: tmp_path / 'Trading Journal.xlsx')
+    rows = [_monthly_row('2026-03'), _monthly_row('2026-04'), _monthly_row('2026-05')]
+    monkeypatch.setattr(master_service, '_monthly_aud_revaluation_rows_for_journal_view', lambda: list(rows))
+    monkeypatch.setattr(master_service, '_read_monthly_aud_reval_months_from_workbook', lambda _p: {
+        'ok': True, 'workbook_exists': True, 'months': ['2026-03', '2026-04'], 'ignored_invalid_workbook_anchors': []
+    })
+    run_calls = []
+    async def fake_run(reason):
+        run_calls.append(reason)
+        return {'ok': True}
+    sync_calls = []
+    def fake_sync(**kwargs):
+        sync_calls.append(kwargs)
+        return {'ok': True, 'master_journal_path': str(tmp_path / 'Trading Journal.xlsx')}
+    monkeypatch.setattr(master_service, '_run_monthly_aud_revaluation_sync', fake_run)
+    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', fake_sync)
+    monkeypatch.setattr(master_service, '_verify_trade_log_row_ids_in_workbook', lambda p,e: {'ok': True, 'missing_row_ids': []})
+
+    r = asyncio.run(master_service.trading_journal_crypto_monthly_pnl())
+    body = json.loads(r.body.decode('utf-8'))
+    assert r.status_code == 200
+    assert body['target_months'] == ['2026-05']
+    assert body['inserted_months'] == []
+    assert body['synced_existing_months'] == ['2026-05']
+    assert body['missing_workbook_months'] == ['2026-05']
+    assert body['verified_row_ids'] == ['monthly_aud_reval:bybit_live:2026-05']
+    assert run_calls == []
+    assert sync_calls and sync_calls[0]['expected_survivor_row_ids'] == ['monthly_aud_reval:bybit_live:2026-05']
+
+
+def test_crypto_monthly_pnl_noops_when_workbook_has_valid_may(monkeypatch, tmp_path):
+    monkeypatch.setattr(master_service, '_brisbane_now', lambda: __import__('datetime').datetime(2026, 6, 2, 9, 0, 0))
+    monkeypatch.setattr(master_service, '_master_journal_path', lambda: tmp_path / 'Trading Journal.xlsx')
+    rows = [_monthly_row('2026-03'), _monthly_row('2026-04'), _monthly_row('2026-05')]
+    monkeypatch.setattr(master_service, '_monthly_aud_revaluation_rows_for_journal_view', lambda: list(rows))
+    monkeypatch.setattr(master_service, '_read_monthly_aud_reval_months_from_workbook', lambda _p: {
+        'ok': True, 'workbook_exists': True, 'months': ['2026-03', '2026-04', '2026-05'], 'ignored_invalid_workbook_anchors': []
+    })
+    monkeypatch.setattr(master_service, '_run_monthly_aud_revaluation_sync', lambda reason: (_ for _ in ()).throw(AssertionError('monthly sync should not run')))
+    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda **kwargs: (_ for _ in ()).throw(AssertionError('workbook sync should not run')))
+
+    r = asyncio.run(master_service.trading_journal_crypto_monthly_pnl())
+    body = json.loads(r.body.decode('utf-8'))
+    assert r.status_code == 200
+    assert body['target_months'] == []
+    assert body['rows_inserted'] == 0
+    assert body['state_months'] == ['2026-03', '2026-04', '2026-05']
+    assert body['workbook_months'] == ['2026-03', '2026-04', '2026-05']
+    assert body['last_completed_month'] == '2026-05'
+    assert body.get('code_version')
 
 def test_history_page_no_post_diagnostics_or_sync():
     js = (ROOT / 'render' / 'static' / 'history_page.js').read_text(encoding='utf-8')
@@ -2513,7 +2595,7 @@ def test_read_monthly_anchor_helper_missing_row_id(tmp_path):
 def test_crypto_monthly_endpoint_fails_when_workbook_anchor_read_fails(monkeypatch, tmp_path):
     monkeypatch.setattr(master_service, '_brisbane_now', lambda: __import__('datetime').datetime(2026,5,21))
     monkeypatch.setattr(master_service, '_master_journal_path', lambda: tmp_path/'Trading Journal.xlsx')
-    monkeypatch.setattr(master_service, '_monthly_aud_revaluation_rows_for_journal_view', lambda: [{'id':'monthly_aud_reval:bybit_live:2026-03','row_type':'monthly_aud_reval','raw_refs':{'period_month':'2026-03'}}])
+    monkeypatch.setattr(master_service, '_monthly_aud_revaluation_rows_for_journal_view', lambda: [_monthly_row('2026-03')])
     monkeypatch.setattr(master_service, '_read_monthly_aud_reval_months_from_workbook', lambda _p: {'ok':False,'workbook_exists':True,'error':'boom','months':[],'row_ids':[],'trade_log_exists':False,'row_id_column_exists':False})
     r=asyncio.run(master_service.trading_journal_crypto_monthly_pnl())
     assert r.status_code==500
