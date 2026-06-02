@@ -2383,7 +2383,7 @@ def test_crypto_monthly_pnl_due_month_april_2026(monkeypatch, tmp_path):
     monkeypatch.setattr(master_service, '_brisbane_now', lambda: __import__('datetime').datetime(2026,5,21))
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
     monkeypatch.setattr(master_service, "_master_journal_path", lambda: tmp_path / "Trading Journal.xlsx")
-    build_master_journal_workbook({'items':[{'id':'monthly_aud_reval:bybit_live:2026-03','row_type':'monthly_aud_reval','source':'bybit_monthly_aud_reval','symbol':'MONTHLY AUD P/L','result_currency':'AUD','raw_refs':{'period_month':'2026-03'},'close_time':'2026-03-31T23:59:59Z'}],'stats':{'totals':{},'groups':{}},'balances':[]}, tmp_path / 'Trading Journal.xlsx')
+    build_master_journal_workbook({'items':[{'id':'monthly_aud_reval:bybit_live:2026-03','row_type':'monthly_aud_reval','source':'bybit_monthly_aud_reval','account':'BYBIT','account_label':'BYBIT','symbol':'MONTHLY AUD P/L','result_currency':'AUD','raw_refs':{'period_month':'2026-03'},'close_time':'2026-03-31T23:59:59Z'}],'stats':{'totals':{},'groups':{}},'balances':[]}, tmp_path / 'Trading Journal.xlsx')
     rows = [{'id':'monthly_aud_reval:bybit_live:2026-03','row_type':'monthly_aud_reval','raw_refs':{'period_month':'2026-03'}}]
     monkeypatch.setattr(master_service, '_monthly_aud_revaluation_rows_for_journal_view', lambda: list(rows))
     monkeypatch.setattr(master_service, '_read_monthly_aud_reval_months_from_workbook', lambda _p: {"ok": True, "workbook_exists": True, "months": ["2026-03"]})
@@ -2398,6 +2398,79 @@ def test_crypto_monthly_pnl_due_month_april_2026(monkeypatch, tmp_path):
     j = json.loads(r.body.decode("utf-8"))
     assert j['target_months'] == ['2026-04']
 
+
+
+def test_read_monthly_anchor_helper_ignores_corrupted_trade_row(tmp_path):
+    from openpyxl import Workbook
+    from tools.master_journal_workbook import TRADE_LOG_HEADERS
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Trade Log"
+    ws.append(TRADE_LOG_HEADERS)
+    row = [None] * len(TRADE_LOG_HEADERS)
+    values = {
+        "Open Time": "2026-05-01",
+        "Close Time": "2026-05-01",
+        "Account": "PEPPERSTONE DEMO",
+        "Symbol": "EURUSD",
+        "Side": "BUY",
+        "Row Type": "trade",
+        "Row ID": "monthly_aud_reval:bybit_live:2026-05",
+    }
+    for key, value in values.items():
+        row[TRADE_LOG_HEADERS.index(key)] = value
+    ws.append(row)
+    values.update({"Account": "BYBIT", "Symbol": "MONTHLY AUD P/L", "Row Type": "monthly_aud_reval", "Row ID": "monthly_aud_reval:bybit_live:2026-04"})
+    row = [None] * len(TRADE_LOG_HEADERS)
+    for key, value in values.items():
+        row[TRADE_LOG_HEADERS.index(key)] = value
+    ws.append(row)
+    path = tmp_path / "Trading Journal.xlsx"
+    wb.save(path)
+
+    out = master_service._read_monthly_aud_reval_months_from_workbook(path)
+    assert out["months"] == ["2026-04"]
+    assert [x["row_id_month"] for x in out["ignored_invalid_workbook_anchors"]] == ["2026-05"]
+
+
+def test_monthly_months_from_rows_ignores_corrupted_trade_row_id():
+    rows = [
+        {"id": "monthly_aud_reval:bybit_live:2026-05", "row_type": "trade", "raw_refs": {"period_month": "2026-05"}},
+        {"id": "monthly_aud_reval:bybit_live:2026-04", "row_type": "monthly_aud_reval", "raw_refs": {"period_month": "2026-04"}},
+        {"id": "monthly_aud_reval:bybit_live:2026-03", "row_type": "monthly_aud_reval", "raw_refs": {"period_month": "2026-04"}},
+    ]
+    assert master_service._monthly_months_from_rows(rows) == {"2026-04"}
+
+
+def test_crypto_monthly_pnl_due_month_may_june_2_ignores_invalid_workbook_anchor(monkeypatch, tmp_path):
+    monkeypatch.setattr(master_service, '_brisbane_now', lambda: __import__('datetime').datetime(2026, 6, 2, 9, 0, 0))
+    monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
+    monkeypatch.setattr(master_service, "_master_journal_path", lambda: tmp_path / "Trading Journal.xlsx")
+    rows = [
+        {"id": "monthly_aud_reval:bybit_live:2026-03", "row_type": "monthly_aud_reval", "raw_refs": {"period_month": "2026-03"}},
+        {"id": "monthly_aud_reval:bybit_live:2026-04", "row_type": "monthly_aud_reval", "raw_refs": {"period_month": "2026-04"}},
+    ]
+    monkeypatch.setattr(master_service, '_monthly_aud_revaluation_rows_for_journal_view', lambda: list(rows))
+    monkeypatch.setattr(master_service, '_read_monthly_aud_reval_months_from_workbook', lambda _p: {
+        "ok": True,
+        "workbook_exists": True,
+        "months": ["2026-03", "2026-04"],
+        "ignored_invalid_workbook_anchors": [{"row_id": "monthly_aud_reval:bybit_live:2026-05", "row_id_month": "2026-05", "row_type": "trade"}],
+    })
+    async def fake_run(reason):
+        rows.append({"id": "monthly_aud_reval:bybit_live:2026-05", "row_type": "monthly_aud_reval", "raw_refs": {"period_month": "2026-05"}})
+        return {"ok": True}
+    monkeypatch.setattr(master_service, '_run_monthly_aud_revaluation_sync', fake_run)
+    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda **_kwargs: {'master_journal_path': str(tmp_path / 'Trading Journal.xlsx')})
+    monkeypatch.setattr(master_service, '_verify_trade_log_row_ids_in_workbook', lambda p,e: {'ok': True, 'missing_row_ids': []})
+
+    r = asyncio.run(master_service.trading_journal_crypto_monthly_pnl())
+    assert r.status_code == 200
+    body = json.loads(r.body.decode("utf-8"))
+    assert body["target_months"] == ["2026-05"]
+    assert body["inserted_months"] == ["2026-05"]
+    assert body["ignored_invalid_workbook_anchors"][0]["row_id_month"] == "2026-05"
 
 def test_history_page_no_post_diagnostics_or_sync():
     js = (ROOT / 'render' / 'static' / 'history_page.js').read_text(encoding='utf-8')
@@ -2440,7 +2513,7 @@ def test_read_monthly_anchor_helper_missing_row_id(tmp_path):
 def test_crypto_monthly_endpoint_fails_when_workbook_anchor_read_fails(monkeypatch, tmp_path):
     monkeypatch.setattr(master_service, '_brisbane_now', lambda: __import__('datetime').datetime(2026,5,21))
     monkeypatch.setattr(master_service, '_master_journal_path', lambda: tmp_path/'Trading Journal.xlsx')
-    monkeypatch.setattr(master_service, '_monthly_aud_revaluation_rows_for_journal_view', lambda: [{'id':'monthly_aud_reval:bybit_live:2026-03','raw_refs':{'period_month':'2026-03'}}])
+    monkeypatch.setattr(master_service, '_monthly_aud_revaluation_rows_for_journal_view', lambda: [{'id':'monthly_aud_reval:bybit_live:2026-03','row_type':'monthly_aud_reval','raw_refs':{'period_month':'2026-03'}}])
     monkeypatch.setattr(master_service, '_read_monthly_aud_reval_months_from_workbook', lambda _p: {'ok':False,'workbook_exists':True,'error':'boom','months':[],'row_ids':[],'trade_log_exists':False,'row_id_column_exists':False})
     r=asyncio.run(master_service.trading_journal_crypto_monthly_pnl())
     assert r.status_code==500
@@ -2488,10 +2561,10 @@ def test_read_monthly_aud_reval_months_uses_streaming_iter_rows_only(monkeypatch
     class FakeSheet:
         def __init__(self):
             self._rows = [
-                ("Row ID",),
-                ("monthly_aud_reval:bybit_live:2026-03",),
-                ("ignore-me",),
-                ("monthly_aud_reval:bybit_live:2026-04",),
+                ("Row ID", "Row Type", "Symbol", "Account"),
+                ("monthly_aud_reval:bybit_live:2026-03", "monthly_aud_reval", "MONTHLY AUD P/L", "BYBIT"),
+                ("ignore-me", "trade", "BTCUSDT", "BYBIT"),
+                ("monthly_aud_reval:bybit_live:2026-04", "monthly_aud_reval", "MONTHLY AUD P/L", "Bybit Live"),
             ]
 
         def iter_rows(self, min_row=1, max_row=None, values_only=False):

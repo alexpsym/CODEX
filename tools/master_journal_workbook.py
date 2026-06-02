@@ -14,6 +14,7 @@ from openpyxl.utils.cell import range_boundaries
 import calendar
 from copy import copy
 import math
+import re
 from zoneinfo import ZoneInfo
 
 TRADE_LOG_SHEET = "Trade Log"
@@ -336,6 +337,18 @@ def _resolved_all_trade_balances(rows: List[Dict[str, Any]]) -> Dict[str, float]
 
 ZERO_HIDE_FORMAT = "0;-0;;@"
 
+_MONTHLY_AUD_REVAL_ROW_ID_RE = re.compile(r"^monthly_aud_reval:bybit_live:(\d{4}-\d{2})$")
+
+def _monthly_aud_reval_row_id_month(row_id: Any) -> str:
+    m = _MONTHLY_AUD_REVAL_ROW_ID_RE.match(str(row_id or "").strip())
+    return m.group(1) if m else ""
+
+def _is_monthly_aud_reval_semantic_row(row: Dict[str, Any]) -> bool:
+    row_type = str(row.get("row_type") or "").strip().lower()
+    symbol = str(row.get("symbol") or "").strip().upper()
+    account = _canonical_account_label(row.get("account_label") or row.get("account"))
+    return row_type == "monthly_aud_reval" and symbol == "MONTHLY AUD P/L" and account == "BYBIT"
+
 def _canonical_account_label(label: Any) -> str:
     raw = str(label or "").strip()
     low = raw.lower().replace("_", " ").replace("-", " ")
@@ -541,10 +554,12 @@ def _excel_scalar(value: Any) -> Any:
 
 def stable_row_id(row: Dict[str, Any]) -> str:
     rid=str(row.get('id') or row.get('__row_id') or '').strip()
-    if rid:
+    if rid and not rid.startswith('monthly_aud_reval:'):
+        return rid
+    if rid and _monthly_aud_reval_row_id_month(rid) and _is_monthly_aud_reval_semantic_row(row):
         return rid
     refs=row.get('raw_refs') if isinstance(row.get('raw_refs'),dict) else {}
-    parts=[str(row.get('account_label') or row.get('account') or ''),str(row.get('symbol') or ''),str(row.get('side') or ''),str(row.get('open_time') or ''),str(row.get('close_time') or ''),str(row.get('qty') or row.get('qty_raw') or ''),str(row.get('entry_price') or ''),str(row.get('exit_price') or ''),str(row.get('net_profit') or ''),str(row.get('source') or ''),str(row.get('source_file') or ''),str(row.get('workbook_name') or ''),str(refs.get('source_file') or ''),str(refs.get('workbook') or ''),str(refs.get('sheet') or ''),str(refs.get('source_row') or '')]
+    parts=[str(row.get('account_label') or row.get('account') or ''),str(row.get('symbol') or ''),str(row.get('side') or ''),str(row.get('open_time') or ''),str(row.get('close_time') or ''),str(row.get('qty') or row.get('qty_raw') or ''),str(row.get('entry_price') or ''),str(row.get('exit_price') or ''),str(row.get('net_profit') or row.get('result_cash') or ''),str(row.get('source') or ''),str(row.get('source_file') or ''),str(row.get('workbook_name') or ''),str(refs.get('source_file') or ''),str(refs.get('workbook') or ''),str(refs.get('sheet') or ''),str(refs.get('source_row') or ''),str(refs.get('period_month') or '')]
     return 'sig:'+hashlib.sha1('|'.join(parts).encode('utf-8')).hexdigest()[:24]
 
 
@@ -1498,7 +1513,7 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
         required = {'Open Time','Close Time','Account','Symbol','Side'}
         if not required.issubset(set(idx.keys())):
             raise RuntimeError('Master Journal Trade Log headers are invalid.')
-        items=[]; cashflow_ledger=defaultdict(list)
+        items=[]; cashflow_ledger=defaultdict(list); diagnostics={'repaired_corrupted_row_ids': []}
         def _num(v):
             try:
                 if v in (None, ""): return None
@@ -1558,7 +1573,13 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
             if row_type == 'cashflow' and cashflow_new_balance is None:
                 cashflow_new_balance = balance_after
             computed_id = stable_row_id({'account':account,'symbol':symbol,'side':side,'open_time':open_time,'close_time':close_time,'qty':_num(r[idx.get('Qty')]) if 'Qty' in idx else None,'entry_price':_num(r[idx.get('Entry Price')]) if 'Entry Price' in idx else None,'exit_price':_num(r[idx.get('Exit Price')]) if 'Exit Price' in idx else None})
+            monthly_like_id = row_id.startswith('monthly_aud_reval:')
+            monthly_semantic = _is_monthly_aud_reval_semantic_row({'row_type': row_type, 'symbol': symbol, 'account': account})
             if row_id and (('PEPPERSTONE' in row_id.upper() or 'OANDA' in row_id.upper()) and ('BYBIT' in account_u or ('USDT' in symbol_u))):
+                diagnostics['repaired_corrupted_row_ids'].append({'old_row_id': row_id, 'new_row_id': computed_id, 'reason': 'broker_account_mismatch'})
+                row_id = computed_id
+            elif row_id and monthly_like_id and (row_type != 'monthly_aud_reval' or not monthly_semantic or not _monthly_aud_reval_row_id_month(row_id)):
+                diagnostics['repaired_corrupted_row_ids'].append({'old_row_id': row_id, 'new_row_id': computed_id, 'reason': 'invalid_monthly_aud_reval_row_id', 'row_type': row_type, 'symbol': symbol, 'account': account})
                 row_id = computed_id
             currency = str(r[idx.get('Currency')] or '').strip() if 'Currency' in idx else ''
             item={'id': row_id or computed_id, 'row_type':row_type,'account':account,'symbol':symbol,'side':side,'open_time':open_time,'close_time':close_time,'qty':_num(r[idx.get('Qty')]) if 'Qty' in idx else None,'entry_price':_num(r[idx.get('Entry Price')]) if 'Entry Price' in idx else None,'exit_price':_num(r[idx.get('Exit Price')]) if 'Exit Price' in idx else None,'stop_loss':_num(r[i_stop]) if i_stop is not None else None,'take_profit':_num(r[i_tp]) if i_tp is not None else None,'stop_loss_distance_pct':_normalize_pct_distance_cell(r[i_stop_dist], row_cells[i_stop_dist].number_format) if i_stop_dist is not None and i_stop_dist < len(row_cells) else None,'target_distance_pct':_normalize_pct_distance_cell(r[i_target_dist], row_cells[i_target_dist].number_format) if i_target_dist is not None and i_target_dist < len(row_cells) else None,'commission':_num(r[idx.get('Commission')]) if 'Commission' in idx else None,'net_profit':_num(r[i_pnl]) if i_pnl is not None else None,'result_pct':_excel_fraction_to_pct_points(r[i_result_pct]) if i_result_pct is not None else None,'r_multiple':_num(r[idx.get('R-Multiple')]) if 'R-Multiple' in idx else None,'balance_after_trade':balance_after,'balance_after_trade_source':'master_journal','trade_duration_seconds':duration,'is_test_trade':str(r[idx.get('Test')]).strip().lower() in {'yes','y','true','1'} if 'Test' in idx else False,'setup':r[idx.get('Setup',17)] if 'Setup' in idx else '','timeframe':r[idx.get('Timeframe',18)] if 'Timeframe' in idx else '','breakeven':r[idx.get('Breakeven',19)] if 'Breakeven' in idx else '','notes':r[idx.get('Notes',20)] if 'Notes' in idx else '','cashflow_amount':cashflow_amount,'cashflow_new_balance':cashflow_new_balance,'currency':currency, 'asset_class': asset_class, 'source':'master_journal'}
@@ -1582,7 +1603,7 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
             items.append(item)
             if row_type=='cashflow':
                 cashflow_ledger[account].append({'account':account,'date':item['close_time'] or item['open_time'],'amount':cashflow_amount,'new_balance':cashflow_new_balance,'currency':str(r[idx.get('Currency')] or '').strip() if 'Currency' in idx else '','reason':item.get('notes') or '', 'side':side})
-        return {'items':items,'cashflow_ledger':dict(cashflow_ledger)}
+        return {'items':items,'cashflow_ledger':dict(cashflow_ledger),'diagnostics':diagnostics}
     finally:
         wb.close()
 
@@ -2070,8 +2091,9 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                         sc = src_map.get(h)
                         if sc and dc <= max_col:
                             header_pairs.append((sc, dc, h))
+                clear_max_col = max(dst_ws.max_column, max_col) if force_all_columns else max_col
                 for r in range(start_row, dst_ws.max_row + 1):
-                    for c in range(1, max_col + 1):
+                    for c in range(1, clear_max_col + 1):
                         if _is_merged_non_anchor(dst_ws, r, c):
                             continue
                         dc = dst_ws.cell(r, c)
@@ -2090,7 +2112,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                         dc.hyperlink = copy(sc.hyperlink) if sc.hyperlink else None
                 last_row = max(start_row - 1, src_ws.max_row)
                 if force_all_columns:
-                    dst_ws.auto_filter.ref = f"A1:{get_column_letter(len(TRADE_LOG_HEADERS))}{max(1,last_row)}"
+                    dst_ws.auto_filter.ref = f"A1:{get_column_letter(len(TRADE_LOG_HEADERS))}{max(1, max(last_row, dst_ws.max_row))}"
                     _hide_trade_log_row_id(dst_ws)
                     _apply_trade_log_dropdown_validations(dst_ws)
                 else:
@@ -2102,6 +2124,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             gen_trade_log = _get_all_trades_sheet(gen, allow_legacy=False)
             live_trade_log = _get_all_trades_sheet(wb, allow_legacy=False)
             _copy_data_rows(gen_trade_log, live_trade_log, 2, force_all_columns=True)
+            _repair_trade_log_row_ids_from_rows(live_trade_log, rows, diagnostics)
             if expected_survivor_row_ids:
                 headers = [str(c.value or "").strip() for c in live_trade_log[1]]
                 ridx = headers.index("Row ID") + 1 if "Row ID" in headers else None

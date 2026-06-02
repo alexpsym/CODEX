@@ -696,6 +696,58 @@ def test_read_master_journal_source_asset_class_regressions(tmp_path: Path):
     assert rows[4]['asset_class'] == 'crypto'
     assert rows[5]['asset_class'] == 'crypto'
 
+
+def test_read_master_journal_source_recomputes_corrupted_monthly_trade_row_id(tmp_path: Path):
+    from openpyxl import Workbook
+
+    p = tmp_path / "corrupt_read.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Trade Log"
+    for idx, header in enumerate(TRADE_LOG_HEADERS, start=1):
+        ws.cell(1, idx).value = header
+    row = {
+        "Open Time": "2026-05-02",
+        "Close Time": "2026-05-02",
+        "Account": "PEPPERSTONE DEMO",
+        "Symbol": "EURUSD",
+        "Side": "BUY",
+        "Qty": 1,
+        "Entry Price": 1.1,
+        "Exit Price": 1.2,
+        "Net P/L": 10,
+        "Row Type": "trade",
+        "Row ID": "monthly_aud_reval:bybit_live:2026-05",
+    }
+    for header, value in row.items():
+        ws.cell(2, TRADE_LOG_HEADERS.index(header) + 1).value = value
+    wb.save(p)
+
+    parsed = read_master_journal_source(p)
+    item = parsed["items"][0]
+    assert item["row_type"] == "trade"
+    assert item["id"].startswith("sig:")
+    assert item["id"] != "monthly_aud_reval:bybit_live:2026-05"
+    assert parsed["diagnostics"]["repaired_corrupted_row_ids"][0]["reason"] == "invalid_monthly_aud_reval_row_id"
+
+
+def test_update_master_journal_workbook_data_only_repairs_corrupted_row_id_cells(tmp_path: Path):
+    snapshot = sample_snapshot()
+    path = tmp_path / "sync_repair.xlsx"
+    build_master_journal_workbook(snapshot, path)
+    wb = load_workbook(path)
+    ws = wb["Trade Log"]
+    row_id_col = _header_col(ws, "Row ID")
+    ws.cell(2, row_id_col).value = "monthly_aud_reval:bybit_live:2026-05"
+    wb.save(path)
+
+    result = update_master_journal_workbook_data_only(path, snapshot)
+    Path(result["candidate_path"]).replace(path)
+    repaired = load_workbook(path)["Trade Log"]
+    assert repaired.cell(2, row_id_col).value == snapshot["items"][0]["id"]
+    assert repaired.cell(2, row_id_col).value != "monthly_aud_reval:bybit_live:2026-05"
+    assert result["diagnostics"].get("repaired_trade_log_row_ids", 0) >= 0
+
 def test_instrument_leaders_skips_missing_optional_rows(tmp_path: Path):
     from openpyxl import Workbook
     from tools.master_journal_workbook import update_master_journal_workbook_data_only

@@ -27498,34 +27498,79 @@ def _verify_trade_log_row_ids_in_workbook(workbook_path: Path, expected_row_ids:
 
 
 
+
+_MONTHLY_AUD_REVAL_ROW_ID_RE = re.compile(r"^monthly_aud_reval:bybit_live:(\d{4}-\d{2})$")
+
+def _monthly_aud_reval_row_id_month(row_id: object) -> str:
+    m = _MONTHLY_AUD_REVAL_ROW_ID_RE.match(str(row_id or "").strip())
+    return m.group(1) if m else ""
+
+def _is_monthly_aud_reval_anchor_semantics(*, row_type: object, symbol: object, account: object) -> bool:
+    return (
+        str(row_type or "").strip().lower() == "monthly_aud_reval"
+        and str(symbol or "").strip().upper() == "MONTHLY AUD P/L"
+        and _canonical_journal_account_label(account).upper() == "BYBIT"
+    )
+
 def _read_monthly_aud_reval_months_from_workbook(workbook_path: Path) -> Dict[str, object]:
+    base = {
+        "ok": True,
+        "months": [],
+        "row_ids": [],
+        "ignored_invalid_workbook_anchors": [],
+        "error": "",
+        "workbook_exists": workbook_path.exists(),
+        "trade_log_exists": False,
+        "row_id_column_exists": False,
+    }
     if not workbook_path.exists():
-        return {"ok": True, "months": [], "row_ids": [], "error": "", "workbook_exists": False, "trade_log_exists": False, "row_id_column_exists": False}
+        return base
     try:
         wb = load_workbook(workbook_path, data_only=True, read_only=True)
     except Exception as exc:
-        return {"ok": False, "months": [], "row_ids": [], "error": f"Failed to open workbook: {exc}", "workbook_exists": True, "trade_log_exists": False, "row_id_column_exists": False}
+        return {**base, "ok": False, "error": f"Failed to open workbook: {exc}", "workbook_exists": True}
     try:
         try:
             ws = _get_trade_log_sheet(wb, allow_legacy=False)
         except Exception as exc:
-            return {"ok": False, "months": [], "row_ids": [], "error": f"Trade Log sheet missing: {exc}", "workbook_exists": True, "trade_log_exists": False, "row_id_column_exists": False}
+            return {**base, "ok": False, "error": f"Trade Log sheet missing: {exc}", "workbook_exists": True, "trade_log_exists": False}
         header_rows = ws.iter_rows(min_row=1, max_row=1, values_only=True)
         header_row = next(header_rows, tuple()) or tuple()
         headers = [str(c or "").strip() for c in header_row]
         if "Row ID" not in headers:
-            return {"ok": False, "months": [], "row_ids": [], "error": "Trade Log Row ID column missing.", "workbook_exists": True, "trade_log_exists": True, "row_id_column_exists": False}
-        idx = headers.index("Row ID")
-        row_ids=[]
-        months=[]
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            rid = str((row[idx] if idx < len(row) else "") or "").strip()
-            if rid.startswith("monthly_aud_reval:bybit_live:"):
+            return {**base, "ok": False, "error": "Trade Log Row ID column missing.", "workbook_exists": True, "trade_log_exists": True, "row_id_column_exists": False}
+        idx = {h: i for i, h in enumerate(headers) if h}
+        rid_idx = idx["Row ID"]
+        row_ids: List[str] = []
+        months: List[str] = []
+        ignored: List[Dict[str, object]] = []
+        for row_num, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+            rid = str((row[rid_idx] if rid_idx < len(row) else "") or "").strip()
+            if not rid.startswith("monthly_aud_reval:"):
+                continue
+            month = _monthly_aud_reval_row_id_month(rid)
+            row_type = str((row[idx["Row Type"]] if "Row Type" in idx and idx["Row Type"] < len(row) else "") or "").strip()
+            symbol = str((row[idx["Symbol"]] if "Symbol" in idx and idx["Symbol"] < len(row) else "") or "").strip()
+            account_col = idx.get("Account Label", idx.get("Account"))
+            account = str((row[account_col] if account_col is not None and account_col < len(row) else "") or "").strip()
+            valid = bool(month) and _is_monthly_aud_reval_anchor_semantics(row_type=row_type, symbol=symbol, account=account)
+            if valid:
                 row_ids.append(rid)
-                months.append(rid.split(":")[-1])
-        return {"ok": True, "months": sorted(set(months)), "row_ids": row_ids, "error": "", "workbook_exists": True, "trade_log_exists": True, "row_id_column_exists": True}
+                months.append(month)
+            else:
+                ignored.append({
+                    "row_number": row_num,
+                    "row_id": rid,
+                    "row_id_month": month,
+                    "row_type": row_type,
+                    "symbol": symbol,
+                    "account": account,
+                    "reason": "invalid_monthly_aud_reval_anchor_semantics",
+                })
+        return {**base, "months": sorted(set(months)), "row_ids": row_ids, "ignored_invalid_workbook_anchors": ignored, "workbook_exists": True, "trade_log_exists": True, "row_id_column_exists": True}
     finally:
         wb.close()
+
 
 
 @app.post("/api/trading-journal/bybit-demo/balance-adjustment")
@@ -27638,18 +27683,26 @@ def _ym_iter(start_ym: str, end_ym: str) -> List[str]:
 def _monthly_months_from_rows(rows: List[Dict[str, object]]) -> Set[str]:
     months: Set[str] = set()
     for r in rows or []:
-        rid = str(r.get("id") or "")
-        if rid.startswith("monthly_aud_reval:bybit_live:"):
-            months.add(rid.split(":")[-1])
-        pm = str((r.get("raw_refs") or {}).get("period_month") or "")
-        if pm:
+        if not isinstance(r, dict) or str(r.get("row_type") or "").strip().lower() != "monthly_aud_reval":
+            continue
+        rid = str(r.get("id") or "").strip()
+        id_month = _monthly_aud_reval_row_id_month(rid)
+        refs = r.get("raw_refs") if isinstance(r.get("raw_refs"), dict) else {}
+        pm = str(refs.get("period_month") or "").strip()
+        if id_month and pm and pm != id_month:
+            continue
+        if id_month:
+            months.add(id_month)
+        elif _MONTHLY_AUD_REVAL_ROW_ID_RE.match(f"monthly_aud_reval:bybit_live:{pm}"):
             months.add(pm)
     return months
+
 
 
 @app.post("/api/trading-journal/crypto-monthly-pnl")
 async def trading_journal_crypto_monthly_pnl() -> JSONResponse:
     now_bne = _brisbane_now()
+    now_brisbane = now_bne.isoformat()
     current_month = now_bne.strftime("%Y-%m")
     dt = datetime.strptime(current_month + "-01", "%Y-%m-%d")
     prev = dt.replace(year=dt.year-1, month=12) if dt.month == 1 else dt.replace(month=dt.month-1)
@@ -27659,23 +27712,38 @@ async def trading_journal_crypto_monthly_pnl() -> JSONResponse:
     pre_months = set(_monthly_months_from_rows(pre_state_rows))
     wb_path = _master_journal_path()
     workbook_anchor = _read_monthly_aud_reval_months_from_workbook(wb_path)
+    ignored_invalid = list(workbook_anchor.get("ignored_invalid_workbook_anchors") or [])
+    response_diag = {
+        "now_brisbane": now_brisbane,
+        "current_month": current_month,
+        "last_completed_month": last_completed,
+        "state_months": sorted(pre_months),
+        "workbook_months": [],
+        "ignored_invalid_workbook_anchors": ignored_invalid,
+    }
     if workbook_anchor.get("workbook_exists") and not workbook_anchor.get("ok"):
-        return JSONResponse({"ok": False, "button": "crypto_monthly_pnl", "message": "Failed to inspect workbook monthly anchors.", "workbook_anchor": workbook_anchor, "master_journal_path": str(wb_path)}, status_code=500)
+        return JSONResponse({"ok": False, "button": "crypto_monthly_pnl", **response_diag, "message": "Failed to inspect workbook monthly anchors.", "workbook_anchor": workbook_anchor, "master_journal_path": str(wb_path)}, status_code=500)
     pre_wb_months: Set[str] = set(str(m) for m in (workbook_anchor.get("months") or []) if str(m))
+    response_diag["workbook_months"] = sorted(pre_wb_months)
     existing = sorted(pre_months | pre_wb_months)
     if not existing:
-        return JSONResponse({"ok": False, "button": "crypto_monthly_pnl", "target_months": [], "processed_months": [], "inserted_months": [], "skipped_existing_months": [], "rows_inserted": 0, "verified_row_ids": [], "master_journal_path": str(wb_path), "message": "Bootstrap required: no existing crypto monthly AUD P&L anchor row found."}, status_code=422)
+        return JSONResponse({"ok": False, "button": "crypto_monthly_pnl", **response_diag, "target_months": [], "processed_months": [], "inserted_months": [], "skipped_existing_months": [], "rows_inserted": 0, "verified_row_ids": [], "master_journal_path": str(wb_path), "message": "Bootstrap required: no existing valid crypto monthly AUD P&L anchor row found."}, status_code=422)
     latest = existing[-1]
     due = [] if latest > last_completed else _ym_iter(latest, last_completed)
     if due and due[0] == latest:
         due = due[1:]
     due = [m for m in due if m < current_month]
     if not due:
-        return JSONResponse({"ok": True, "button": "crypto_monthly_pnl", "target_months": [], "processed_months": [], "inserted_months": [], "skipped_existing_months": [], "rows_inserted": 0, "verified_row_ids": [], "master_journal_path": str(wb_path), "message": "No completed crypto monthly AUD P&L month is due."})
+        invalid_months = sorted({str(x.get("row_id_month") or "") for x in ignored_invalid if isinstance(x, dict) and str(x.get("row_id_month") or "")})
+        warning = last_completed in invalid_months
+        message = "No completed crypto monthly AUD P&L month is due."
+        if warning:
+            message += " Ignored invalid workbook monthly-looking anchor(s) include the last completed month; they were not counted as valid anchors."
+        return JSONResponse({"ok": True, "button": "crypto_monthly_pnl", **response_diag, "target_months": [], "processed_months": [], "inserted_months": [], "skipped_existing_months": [], "rows_inserted": 0, "verified_row_ids": [], "master_journal_path": str(wb_path), "message": message})
 
     run = await _run_monthly_aud_revaluation_sync(reason="manual_crypto_monthly_pnl")
     if not run.get("ok"):
-        return JSONResponse({"ok": False, "button": "crypto_monthly_pnl", **run}, status_code=500)
+        return JSONResponse({"ok": False, "button": "crypto_monthly_pnl", **response_diag, **run}, status_code=500)
     workbook_sync = _sync_master_journal_workbook(sync_caller="crypto_monthly_pnl")
     path = Path(str(workbook_sync.get("master_journal_path") or wb_path))
     expected_ids = [f"monthly_aud_reval:bybit_live:{m}" for m in due]
@@ -27684,8 +27752,8 @@ async def trading_journal_crypto_monthly_pnl() -> JSONResponse:
     inserted = [m for m in due if m in post_months and m not in pre_months]
     missing = [m for m in due if m not in post_months]
     if missing or not verification.get("ok"):
-        return JSONResponse({"ok": False, "button": "crypto_monthly_pnl", "target_months": due, "processed_months": due, "inserted_months": inserted, "skipped_existing_months": [m for m in due if m in pre_months], "rows_inserted": len(inserted), "verified_row_ids": [f"monthly_aud_reval:bybit_live:{m}" for m in inserted], "missing_months": missing, "missing_row_ids": verification.get("missing_row_ids") or [], "master_journal_path": str(path), "message": "Crypto monthly AUD P&L update incomplete."}, status_code=500)
-    return JSONResponse({"ok": True, "button": "crypto_monthly_pnl", "target_months": due, "processed_months": due, "inserted_months": inserted, "skipped_existing_months": [m for m in due if m in pre_months], "rows_inserted": len(inserted), "verified_row_ids": [f"monthly_aud_reval:bybit_live:{m}" for m in inserted], "master_journal_path": str(path), "message": f"Inserted crypto monthly AUD P&L for {', '.join(inserted)}."})
+        return JSONResponse({"ok": False, "button": "crypto_monthly_pnl", **response_diag, "target_months": due, "processed_months": due, "inserted_months": inserted, "skipped_existing_months": [m for m in due if m in pre_months], "rows_inserted": len(inserted), "verified_row_ids": [f"monthly_aud_reval:bybit_live:{m}" for m in inserted], "missing_months": missing, "missing_row_ids": verification.get("missing_row_ids") or [], "master_journal_path": str(path), "message": "Crypto monthly AUD P&L update incomplete."}, status_code=500)
+    return JSONResponse({"ok": True, "button": "crypto_monthly_pnl", **response_diag, "target_months": due, "processed_months": due, "inserted_months": inserted, "skipped_existing_months": [m for m in due if m in pre_months], "rows_inserted": len(inserted), "verified_row_ids": [f"monthly_aud_reval:bybit_live:{m}" for m in inserted], "master_journal_path": str(path), "message": f"Inserted crypto monthly AUD P&L for {', '.join(inserted)}."})
 
 @app.get("/api/trading-journal/import/status")
 async def trading_journal_import_status() -> JSONResponse:
