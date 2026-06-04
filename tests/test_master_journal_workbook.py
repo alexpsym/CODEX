@@ -325,10 +325,11 @@ def test_conditional_format_colors_and_dashboard_semantics(tmp_path: Path):
             for lc, vc in ((1, 2), (5, 6), (9, 10)):
                 if str(dash.cell(r, lc).value or "").strip().lower() == wanted:
                     assert not _cell_covered(_cf_ranges(dash), f"{chr(64+vc)}{r}")
-    # all trades configured ranges exist
+    # Trade Log row-level rules cover the full visible row without overlapping value-cell fill rules.
     tr = _cf_ranges(trade_log)
-    assert any("M2:M" in r for r in tr)
-    assert any("N2:P" in r for r in tr)
+    assert any(r.startswith("A2:AM") for r in tr)
+    assert not any("M2:M" in r for r in tr)
+    assert not any("N2:P" in r for r in tr)
     colors = _all_rule_colors(trade_log) + _all_rule_colors(dash) + _all_rule_colors(wb["P&L Calendar"]) + _all_rule_colors(wb["Instrument Averages"])
     assert any("C6EFCE" in f and "006100" in c for f, c in colors)
     assert any("FFC7CE" in f and "9C0006" in c for f, c in colors)
@@ -1544,3 +1545,271 @@ def test_update_data_only_repairs_unknown_currency_formats_after_schema_migratio
     assert "UNKNOWN" not in net_pl_format
     assert "AUD" in commission_format
     assert "AUD" in net_pl_format
+
+
+def _cf_rule_details(ws):
+    details = []
+    for key, rules in ws.conditional_formatting._cf_rules.items():
+        sqref = str(key.sqref)
+        for rule in rules:
+            formula = getattr(rule, "formula", None) or []
+            dxf = getattr(rule, "dxf", None)
+            fill = getattr(getattr(dxf, "fill", None), "fgColor", None)
+            details.append((sqref, [str(f) for f in formula], (str(getattr(fill, "rgb", "") or "")[-6:].upper() if fill else "")))
+    return details
+
+
+def test_trade_log_win_loss_row_conditional_formatting_uses_current_schema(tmp_path: Path):
+    out = tmp_path / "Trading Journal.xlsx"
+    build_master_journal_workbook(sample_snapshot(), out)
+    ws = load_workbook(out)["Trade Log"]
+    row_type_letter = get_column_letter(_header_col(ws, "Row Type"))
+    net_pl_letter = get_column_letter(_header_col(ws, "Net P/L"))
+    expected_range = f"A2:{get_column_letter(len(TRADE_LOG_HEADERS))}{ws.max_row}"
+    row_rules = [d for d in _cf_rule_details(ws) if d[0] == expected_range]
+    formulas = {tuple(d[1]) for d in row_rules}
+    assert (f'AND(${row_type_letter}2="trade",${net_pl_letter}2>0)',) in formulas
+    assert (f'AND(${row_type_letter}2="trade",${net_pl_letter}2<0)',) in formulas
+    assert expected_range == "A2:AM3"
+    all_rule_text = " ".join(" ".join(formulas) for _range, formulas, _fill in _cf_rule_details(ws))
+    assert "$AA" not in all_rule_text
+    assert "A2:AB" not in " ".join(_cf_ranges(ws))
+
+
+def test_trade_log_stale_conditional_formatting_removed_on_update(tmp_path: Path):
+    from openpyxl.formatting.rule import FormulaRule
+
+    out = tmp_path / "Trading Journal.xlsx"
+    build_master_journal_workbook(sample_snapshot(), out)
+    wb = load_workbook(out)
+    ws = wb["Trade Log"]
+    ws.conditional_formatting.add(
+        "A2:AB99",
+        FormulaRule(formula=['AND($AA2="trade",$N2<0)'], fill=PatternFill("solid", fgColor="FFC7CE")),
+    )
+    wb.save(out)
+    wb.close()
+
+    result = update_master_journal_workbook_data_only(out, sample_snapshot())
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(out)
+    ws = load_workbook(out)["Trade Log"]
+    all_ranges = " ".join(_cf_ranges(ws))
+    all_formulas = " ".join(" ".join(formula) for _range, formula, _fill in _cf_rule_details(ws))
+    assert "A2:AB" not in all_ranges
+    assert "$AA" not in all_formulas
+    assert "A2:AM3" in all_ranges
+
+
+def test_conditional_formatting_uses_worksheet_api_not_unbound_class_method():
+    src = Path("tools/master_journal_workbook.py").read_text(encoding="utf-8")
+    test_src = Path("tests/test_master_journal_workbook.py").read_text(encoding="utf-8")
+    forbidden = "ConditionalFormattingList" + ".add"
+    assert forbidden not in src
+    assert forbidden not in test_src
+    assert "max_priority" not in src
+
+
+def test_dashboard_trade_log_and_pnl_calendar_loss_profit_fills_match(tmp_path: Path):
+    out = tmp_path / "Trading Journal.xlsx"
+    build_master_journal_workbook(sample_snapshot(), out)
+    wb = load_workbook(out)
+    dash = wb["Dashboard"]
+    trade = wb["Trade Log"]
+    cal = wb["P&L Calendar"]
+
+    dashboard_fills = {fill for _range, _formula, fill in _cf_rule_details(dash) if fill}
+    assert "FFC7CE" in dashboard_fills
+    assert "C6EFCE" in dashboard_fills
+
+    trade_row_rules = [d for d in _cf_rule_details(trade) if d[0] == "A2:AM3"]
+    trade_fills = {fill for _range, _formula, fill in trade_row_rules}
+    assert trade_fills == {"FFC7CE", "C6EFCE"}
+
+    pnl_fills = {fill for cf_range, _formula, fill in _cf_rule_details(cal) if cf_range.startswith("B")}
+    assert pnl_fills == {"FFC7CE", "C6EFCE"}
+
+
+def test_pnl_calendar_update_removes_duplicate_generated_profit_loss_rules(tmp_path: Path):
+    from openpyxl import Workbook
+    from openpyxl.formatting.rule import CellIsRule
+
+    p = tmp_path / "calendar_stale_cf.xlsx"
+    wb = Workbook()
+    dash = wb.active
+    dash.title = "Dashboard"
+    wb.create_sheet("Trade Log")
+    wb.create_sheet("Instrument Averages")
+    cal = wb.create_sheet("P&L Calendar")
+    dash["A1"] = "Overall"
+    dash["D1"] = "FX"
+    dash["G1"] = "Crypto"
+    dash["J1"] = "Winners"
+    dash["J8"] = "Losers"
+    dash["J14"] = "Drawdown"
+    dash["M1"] = "Instrument leaders"
+    dash["T1"] = "Account Balances"
+    dash["T2"] = "Account"
+    dash["U2"] = "Balance"
+    dash["V2"] = "Currency"
+    dash["W2"] = "As Of"
+    months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+    for col, month in enumerate(months, start=3):
+        cal.cell(1, col).value = month
+    cal.merge_cells("A2:A3")
+    cal["A2"] = 2026
+    cal["B2"] = "P/L %"
+    cal["B3"] = "Total Trades"
+    cal.conditional_formatting.add(
+        "C2:N2",
+        CellIsRule(operator="greaterThan", formula=["0"], fill=PatternFill("solid", fgColor="FFFF00")),
+    )
+    cal.conditional_formatting.add(
+        "C2:N2",
+        CellIsRule(operator="lessThan", formula=["0"], fill=PatternFill("solid", fgColor="0000FF")),
+    )
+    _ensure_trade_log_headers(wb)
+    wb.save(p)
+    wb.close()
+
+    snap = {
+        "items": [{"id": "t1", "row_type": "trade", "account": "BYBIT", "symbol": "BTCUSDT", "open_time": "2026-05-01", "close_time": "2026-05-01", "net_profit": 10.0, "result_pct": 1.0}],
+        "stats": {"totals": {}, "groups": {"by_market": {"overall": {}, "fx": {}, "crypto": {}}, "risk_expectancy": {}, "leaders": {}, "duration": {}}},
+        "balances": [],
+    }
+    result = update_master_journal_workbook_data_only(p, snap)
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(p)
+    wb = load_workbook(p)
+    cal = wb["P&L Calendar"]
+    details = [d for d in _cf_rule_details(cal) if d[0] == "C2:N2"]
+    assert [fill for _range, _formula, fill in details] == ["C6EFCE", "FFC7CE"]
+    assert "FFFF00" not in {fill for _range, _formula, fill in _cf_rule_details(cal)}
+    assert "0000FF" not in {fill for _range, _formula, fill in _cf_rule_details(cal)}
+    assert "A2:AM2" in " ".join(_cf_ranges(wb["Trade Log"]))
+
+
+def test_generated_pnl_calendar_update_removes_stale_profit_loss_rules(tmp_path: Path):
+    from openpyxl.formatting.rule import CellIsRule
+
+    p = tmp_path / "generated_calendar_stale_cf.xlsx"
+    build_master_journal_workbook(sample_snapshot(), p)
+    wb = load_workbook(p)
+    cal = wb["P&L Calendar"]
+    cal.conditional_formatting.add(
+        "B3:M3",
+        CellIsRule(operator="greaterThan", formula=["0"], fill=PatternFill("solid", fgColor="FFFF00")),
+    )
+    cal.conditional_formatting.add(
+        "B3:M3",
+        CellIsRule(operator="lessThan", formula=["0"], fill=PatternFill("solid", fgColor="0000FF")),
+    )
+    wb.save(p)
+    wb.close()
+
+    result = update_master_journal_workbook_data_only(p, sample_snapshot())
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(p)
+    wb = load_workbook(p)
+    cal = wb["P&L Calendar"]
+    details = [d for d in _cf_rule_details(cal) if d[0] == "B3:M3"]
+    assert [fill for _range, _formula, fill in details] == ["C6EFCE", "FFC7CE"]
+    assert "A2:AM3" in " ".join(_cf_ranges(wb["Trade Log"]))
+
+
+def _trade_log_row_rule_details(ws):
+    row_rules = []
+    for cf_range, formulas, fill in _cf_rule_details(ws):
+        if cf_range.startswith("A2:AM") and formulas and formulas[0].startswith('AND($'):
+            for rules in ws.conditional_formatting._cf_rules.values():
+                for rule in rules:
+                    rule_formulas = [str(f) for f in (getattr(rule, "formula", None) or [])]
+                    if rule_formulas == formulas:
+                        row_rules.append((cf_range, formulas, fill, rule))
+    return row_rules
+
+def _trade_log_generated_value_fill_ranges(ws):
+    out = []
+    for key, rules in ws.conditional_formatting._cf_rules.items():
+        sqref = str(key.sqref)
+        for part in sqref.split():
+            try:
+                from openpyxl.utils.cell import range_boundaries
+                min_col, min_row, max_col, _max_row = range_boundaries(part)
+            except ValueError:
+                continue
+            if min_row >= 2 and 13 <= min_col <= max_col <= 16:
+                for rule in rules:
+                    formula = " ".join(str(f) for f in (getattr(rule, "formula", None) or []))
+                    if getattr(rule, "type", None) == "cellIs" and formula.strip() == "0":
+                        out.append((part, getattr(rule, "operator", None)))
+    return out
+
+def test_trade_log_row_rules_stop_if_true_and_no_generated_value_fill_overlap(tmp_path: Path):
+    out = tmp_path / "Trading Journal.xlsx"
+    build_master_journal_workbook(sample_snapshot(), out)
+    wb = load_workbook(out)
+    ws = wb["Trade Log"]
+    row_rules = _trade_log_row_rule_details(ws)
+    assert len(row_rules) == 2
+    assert {fill for _range, _formulas, fill, _rule in row_rules} == {"C6EFCE", "FFC7CE"}
+    assert all(getattr(rule, "stopIfTrue", None) is True for _range, _formulas, _fill, rule in row_rules)
+    assert _trade_log_generated_value_fill_ranges(ws) == []
+
+def test_trade_log_update_removes_stale_generated_value_fill_overlap(tmp_path: Path):
+    from openpyxl.formatting.rule import CellIsRule
+
+    out = tmp_path / "Trading Journal.xlsx"
+    build_master_journal_workbook(sample_snapshot(), out)
+    wb = load_workbook(out)
+    ws = wb["Trade Log"]
+    ws.conditional_formatting.add(
+        "M2:M99",
+        CellIsRule(operator="notEqual", formula=["0"], fill=PatternFill("solid", fgColor="FFFF00")),
+    )
+    ws.conditional_formatting.add(
+        "N2:P99",
+        CellIsRule(operator="greaterThan", formula=["0"], fill=PatternFill("solid", fgColor="FFFF00")),
+    )
+    ws.conditional_formatting.add(
+        "N2:P99",
+        CellIsRule(operator="lessThan", formula=["0"], fill=PatternFill("solid", fgColor="0000FF")),
+    )
+    wb.save(out)
+    wb.close()
+
+    result = update_master_journal_workbook_data_only(out, sample_snapshot())
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(out)
+    ws = load_workbook(out)["Trade Log"]
+    assert _trade_log_generated_value_fill_ranges(ws) == []
+    row_rules = _trade_log_row_rule_details(ws)
+    assert len(row_rules) == 2
+    assert all(getattr(rule, "stopIfTrue", None) is True for _range, _formulas, _fill, rule in row_rules)
+
+def test_trade_log_saved_xml_row_rules_stop_if_true_without_overlap(tmp_path: Path):
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    out = tmp_path / "Trading Journal.xlsx"
+    build_master_journal_workbook(sample_snapshot(), out)
+    wb = load_workbook(out)
+    trade_sheet_index = wb.sheetnames.index("Trade Log") + 1
+    wb.close()
+    with zipfile.ZipFile(out) as zf:
+        xml = zf.read(f"xl/worksheets/sheet{trade_sheet_index}.xml")
+    root = ET.fromstring(xml)
+    ns = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    overlapping_value_refs = []
+    row_rules = []
+    for cf in root.findall("x:conditionalFormatting", ns):
+        sqref = cf.attrib.get("sqref", "")
+        rules = cf.findall("x:cfRule", ns)
+        formulas = [rule.findtext("x:formula", default="", namespaces=ns) for rule in rules]
+        if sqref.startswith("A2:AM") and any('="trade"' in formula for formula in formulas):
+            row_rules.extend(rules)
+        if sqref in {"M2:M3", "N2:P3"}:
+            overlapping_value_refs.append(sqref)
+    assert len(row_rules) == 2
+    assert all(rule.attrib.get("stopIfTrue") == "1" for rule in row_rules)
+    assert overlapping_value_refs == []

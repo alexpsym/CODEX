@@ -8,7 +8,7 @@ from openpyxl.styles import Font
 from openpyxl.worksheet.datavalidation import DataValidation
 import hashlib
 from openpyxl.styles import PatternFill, Border, Side, Alignment
-from openpyxl.formatting.rule import CellIsRule
+from openpyxl.formatting.rule import CellIsRule, FormulaRule
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries
 import calendar
@@ -682,6 +682,144 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
     _hide_trade_log_row_id(ws)
     _set_trade_log_auto_filter(ws)
     _apply_trade_log_dropdown_validations(ws)
+    _apply_trade_log_win_loss_row_formatting(ws)
+
+def _conditional_formatting_formula_text(rule) -> str:
+    formula = getattr(rule, "formula", None) or []
+    if isinstance(formula, (list, tuple)):
+        return " ".join(str(part or "") for part in formula)
+    return str(formula or "")
+
+def _remove_trade_log_win_loss_row_formatting(ws) -> None:
+    """Remove generated Trade Log row-level win/loss CF, including stale schemas."""
+    cf = ws.conditional_formatting
+    stale_refs = []
+    for key, rules in list(getattr(cf, "_cf_rules", {}).items()):
+        sqref = str(getattr(key, "sqref", key))
+        rule_text = " ".join(_conditional_formatting_formula_text(rule) for rule in rules)
+        is_generated_row_rule = (
+            sqref.startswith("A2:")
+            and '"trade"' in rule_text
+            and ("AND(" in rule_text.upper())
+            and (">0" in rule_text or "<0" in rule_text)
+        )
+        is_stale_old_schema = sqref.startswith("A2:AB") or "$AA" in rule_text
+        if is_generated_row_rule or is_stale_old_schema:
+            stale_refs.append(sqref)
+    for sqref in stale_refs:
+        del cf[sqref]
+
+def _is_generated_trade_log_value_fill_rule(rule) -> bool:
+    formula_text = _conditional_formatting_formula_text(rule).strip()
+    return (
+        getattr(rule, "type", None) == "cellIs"
+        and getattr(rule, "operator", None) in {"greaterThan", "lessThan", "notEqual"}
+        and formula_text == "0"
+    )
+
+def _range_is_trade_log_generated_value_fill_range(range_ref: str) -> bool:
+    try:
+        min_col, min_row, max_col, _max_row = range_boundaries(range_ref)
+    except ValueError:
+        return False
+    return min_row >= 2 and 13 <= min_col <= max_col <= 16
+
+def _remove_trade_log_generated_value_fill_formatting(ws) -> None:
+    cf = ws.conditional_formatting
+    refs_to_remove = []
+    for key, rules in list(getattr(cf, "_cf_rules", {}).items()):
+        sqref = str(getattr(key, "sqref", key))
+        sqref_parts = sqref.split()
+        if (
+            sqref_parts
+            and all(_range_is_trade_log_generated_value_fill_range(part) for part in sqref_parts)
+            and all(_is_generated_trade_log_value_fill_rule(rule) for rule in rules)
+        ):
+            refs_to_remove.append(sqref)
+    for sqref in refs_to_remove:
+        del cf[sqref]
+
+def _apply_trade_log_win_loss_row_formatting(ws) -> None:
+    headers = _trade_log_header_map(ws)
+    row_type_col = headers.get("Row Type")
+    net_pl_col = headers.get("Net P/L")
+    if not row_type_col or not net_pl_col:
+        return
+    _remove_trade_log_win_loss_row_formatting(ws)
+    _remove_trade_log_generated_value_fill_formatting(ws)
+    last_col = max((col for header, col in headers.items() if header), default=ws.max_column)
+    last_row = max(2, ws.max_row)
+    row_type_letter = get_column_letter(row_type_col)
+    net_pl_letter = get_column_letter(net_pl_col)
+    cell_range = f"A2:{get_column_letter(last_col)}{last_row}"
+    profit_fill = PatternFill("solid", fgColor=PROFIT_FILL)
+    loss_fill = PatternFill("solid", fgColor=LOSS_FILL)
+    ws.conditional_formatting.add(
+        cell_range,
+        FormulaRule(formula=[f'AND(${row_type_letter}2="trade",${net_pl_letter}2>0)'], fill=profit_fill, stopIfTrue=True),
+    )
+    ws.conditional_formatting.add(
+        cell_range,
+        FormulaRule(formula=[f'AND(${row_type_letter}2="trade",${net_pl_letter}2<0)'], fill=loss_fill, stopIfTrue=True),
+    )
+
+def _is_generated_profit_loss_rule(rule) -> bool:
+    formula = getattr(rule, "formula", None) or []
+    formula_text = " ".join(str(part or "") for part in formula)
+    return (
+        getattr(rule, "type", None) == "cellIs"
+        and getattr(rule, "operator", None) in {"greaterThan", "lessThan"}
+        and formula_text.strip() == "0"
+    )
+
+def _pnl_calendar_profit_loss_ranges(ws) -> List[str]:
+    month_cols = _detect_calendar_month_columns(ws)
+    if month_cols:
+        first_col = min(month_cols.values())
+        last_col = max(month_cols.values())
+        ranges = []
+        for row in range(2, ws.max_row + 1):
+            label = str(ws.cell(row, 2).value or "").strip().lower()
+            if label == "p/l %":
+                ranges.append(f"{get_column_letter(first_col)}{row}:{get_column_letter(last_col)}{row}")
+        return ranges
+
+    month_names = {calendar.month_name[i].lower() for i in range(1, 13)}
+    pnl_cols = []
+    for col in range(2, ws.max_column + 1):
+        header = str(ws.cell(1, col).value or "").strip().lower()
+        subheader = str(ws.cell(2, col).value or "").strip().lower()
+        if header.endswith(" p/l %") or subheader in month_names:
+            pnl_cols.append(col)
+    if not pnl_cols:
+        return []
+    first_col = min(pnl_cols)
+    last_col = max(pnl_cols)
+    ranges = []
+    for row in range(3, ws.max_row + 1, 2):
+        year_value = _as_float(ws.cell(row, 1).value)
+        if year_value is not None:
+            ranges.append(f"{get_column_letter(first_col)}{row}:{get_column_letter(last_col)}{row}")
+    return ranges
+
+def _remove_pnl_calendar_generated_profit_loss_formatting(ws) -> None:
+    ranges = set(_pnl_calendar_profit_loss_ranges(ws))
+    if not ranges:
+        return
+    refs_to_remove = []
+    for key, rules in list(getattr(ws.conditional_formatting, "_cf_rules", {}).items()):
+        sqref = str(getattr(key, "sqref", key))
+        sqref_parts = sqref.split()
+        if sqref_parts and all(part in ranges for part in sqref_parts) and all(_is_generated_profit_loss_rule(rule) for rule in rules):
+            refs_to_remove.append(sqref)
+    for sqref in refs_to_remove:
+        del ws.conditional_formatting[sqref]
+
+def _apply_pnl_calendar_profit_loss_formatting(ws) -> None:
+    _remove_pnl_calendar_generated_profit_loss_formatting(ws)
+    for cell_range in _pnl_calendar_profit_loss_ranges(ws):
+        _profit_loss_rules(ws, cell_range)
+
 def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
     if not path.exists():
@@ -868,6 +1006,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     _apply_trade_log_dropdown_validations(ws)
     _negative_impact_rule(ws, f"M2:M{max(2, ws.max_row)}")
     _profit_loss_rules(ws, f"N2:P{max(2, ws.max_row)}")
+    _apply_trade_log_win_loss_row_formatting(ws)
 
     inst=wb['Instrument Averages']; headers=["Symbol","Class","Trades","Longs","Shorts","Wins","Losses","Break-even","Long wins","Long losses","Short wins","Short losses","Long break-even","Short break-even","Net P/L %","Avg P/L %","Win Rate %","Avg stop % (W)","Avg stop % (L)","Avg target % (W)","Avg target % (L)","Shortest duration (DD:HH:MM:SS)","Avg duration (DD:HH:MM:SS)","Longest duration (DD:HH:MM:SS)"]; inst.append(headers)
     for rec in (stats.get('by_instrument') or []):
@@ -911,8 +1050,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     for rr in range(4, cal.max_row + 1, 2):
         for cc in range(2, 14):
             cal.cell(rr, cc).number_format = "0"
-    for rr in range(3, cal.max_row + 1, 2):
-        _profit_loss_rules(cal, f"B{rr}:M{rr}")
+    _apply_pnl_calendar_profit_loss_formatting(cal)
 
     output_path.parent.mkdir(parents=True, exist_ok=True); wb.save(output_path)
     return {'ok':True,'path':str(output_path)}
@@ -2141,6 +2279,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 if missing:
                     return {"ok": False, "error": "workbook_row_survivor_verification_failed", "missing_row_ids": missing, "diagnostics": diagnostics}
             _repair_trade_log_unknown_currency_formats(live_trade_log, rows, diagnostics)
+            _apply_trade_log_win_loss_row_formatting(live_trade_log)
 
             def _copy_instrument_rows_header_aware(src_ws, dst_ws, start_row: int = 2):
                 aliases = {
@@ -2188,6 +2327,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                     _update_pnl_calendar_preserving_layout(cal_ws, snapshot, diagnostics)
                 else:
                     _copy_data_rows(gen["P&L Calendar"], cal_ws, 3)
+                _apply_pnl_calendar_profit_loss_formatting(cal_ws)
         finally:
             gen.close()
             tmp.unlink(missing_ok=True)
