@@ -1813,3 +1813,65 @@ def test_trade_log_saved_xml_row_rules_stop_if_true_without_overlap(tmp_path: Pa
     assert len(row_rules) == 2
     assert all(rule.attrib.get("stopIfTrue") == "1" for rule in row_rules)
     assert overlapping_value_refs == []
+
+
+def _cell_fill_rgb(cell) -> str:
+    rgb = str(getattr(cell.fill.fgColor, "rgb", "") or "")
+    return rgb[-6:].upper() if getattr(cell.fill, "fill_type", None) == "solid" and rgb else ""
+
+
+def _trade_log_row_by_id(ws, row_id: str) -> int:
+    rid_col = _header_col(ws, "Row ID")
+    for row in range(2, ws.max_row + 1):
+        if str(ws.cell(row, rid_col).value or "") == row_id:
+            return row
+    raise AssertionError(f"missing row id {row_id!r}")
+
+
+def test_trade_log_direct_row_fills_cover_winning_and_losing_rows(tmp_path: Path):
+    out = tmp_path / "Trading Journal.xlsx"
+    build_master_journal_workbook(sample_snapshot(), out)
+    ws = load_workbook(out)["Trade Log"]
+    winning_row = _trade_log_row_by_id(ws, "t1")
+    losing_row = _trade_log_row_by_id(ws, "t2")
+    checked_cols = [1, 3, _header_col(ws, "Net P/L"), len(TRADE_LOG_HEADERS)]
+    assert [get_column_letter(col) for col in checked_cols] == ["A", "C", "N", "AM"]
+    assert all(_cell_fill_rgb(ws.cell(winning_row, col)) == "C6EFCE" for col in checked_cols)
+    assert all(_cell_fill_rgb(ws.cell(losing_row, col)) == "FFC7CE" for col in checked_cols)
+
+
+def test_trade_log_direct_row_fills_skip_non_trade_and_zero_rows(tmp_path: Path):
+    snap = sample_snapshot()
+    snap["items"] = [
+        {"id": "win", "row_type": "trade", "account": "A", "symbol": "EURUSD", "open_time": "2026-01-01", "close_time": "2026-01-01", "net_profit": 1.0},
+        {"id": "zero", "row_type": "trade", "account": "A", "symbol": "EURUSD", "open_time": "2026-01-02", "close_time": "2026-01-02", "net_profit": 0.0},
+        {"id": "cash", "row_type": "cashflow", "account": "A", "symbol": "CASH", "open_time": "2026-01-03", "close_time": "2026-01-03", "net_profit": -50.0, "cashflow_amount": -50.0},
+        {"id": "reval", "row_type": "monthly_aud_reval", "account": "A", "period_month": "2026-01-31", "net_profit": 25.0, "result_cash": 25.0},
+    ]
+    out = tmp_path / "Trading Journal.xlsx"
+    build_master_journal_workbook(snap, out)
+    ws = load_workbook(out)["Trade Log"]
+    assert _cell_fill_rgb(ws.cell(_trade_log_row_by_id(ws, "win"), 1)) == "C6EFCE"
+    for row_id in ["zero", "cash", "reval"]:
+        row = _trade_log_row_by_id(ws, row_id)
+        assert all(_cell_fill_rgb(ws.cell(row, col)) == "" for col in [1, 3, _header_col(ws, "Net P/L"), len(TRADE_LOG_HEADERS)])
+
+
+def test_update_data_only_restores_trade_log_direct_row_fills(tmp_path: Path):
+    out = tmp_path / "Trading Journal.xlsx"
+    snap = sample_snapshot()
+    build_master_journal_workbook(snap, out)
+    wb = load_workbook(out)
+    ws = wb["Trade Log"]
+    winning_row = _trade_log_row_by_id(ws, "t1")
+    for col in range(1, len(TRADE_LOG_HEADERS) + 1):
+        ws.cell(winning_row, col).fill = PatternFill()
+    wb.save(out)
+    wb.close()
+
+    result = update_master_journal_workbook_data_only(out, snap)
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(out)
+    ws = load_workbook(out)["Trade Log"]
+    winning_row = _trade_log_row_by_id(ws, "t1")
+    assert all(_cell_fill_rgb(ws.cell(winning_row, col)) == "C6EFCE" for col in [1, 3, _header_col(ws, "Net P/L"), len(TRADE_LOG_HEADERS)])

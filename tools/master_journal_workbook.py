@@ -683,6 +683,7 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
     _set_trade_log_auto_filter(ws)
     _apply_trade_log_dropdown_validations(ws)
     _apply_trade_log_win_loss_row_formatting(ws)
+    _apply_trade_log_win_loss_direct_row_fills(ws)
 
 def _conditional_formatting_formula_text(rule) -> str:
     formula = getattr(rule, "formula", None) or []
@@ -738,6 +739,39 @@ def _remove_trade_log_generated_value_fill_formatting(ws) -> None:
             refs_to_remove.append(sqref)
     for sqref in refs_to_remove:
         del cf[sqref]
+
+def _cell_fill_rgb(cell) -> str:
+    color = getattr(getattr(cell, "fill", None), "fgColor", None)
+    rgb = str(getattr(color, "rgb", "") or "")
+    return rgb[-6:].upper() if rgb else ""
+
+def _cell_has_generated_trade_log_win_loss_fill(cell) -> bool:
+    return getattr(cell.fill, "fill_type", None) == "solid" and _cell_fill_rgb(cell) in {PROFIT_FILL, LOSS_FILL}
+
+def _apply_trade_log_win_loss_direct_row_fills(ws) -> None:
+    headers = _trade_log_header_map(ws)
+    row_type_col = headers.get("Row Type")
+    net_pl_col = headers.get("Net P/L")
+    if not row_type_col or not net_pl_col:
+        return
+    last_col = max((col for header, col in headers.items() if header), default=ws.max_column)
+    profit_fill = PatternFill("solid", fgColor=PROFIT_FILL)
+    loss_fill = PatternFill("solid", fgColor=LOSS_FILL)
+    for row in range(2, ws.max_row + 1):
+        row_type = str(ws.cell(row, row_type_col).value or "").strip().lower()
+        net_pl = _as_float(ws.cell(row, net_pl_col).value)
+        fill = None
+        if row_type == "trade" and net_pl is not None:
+            if net_pl > 0:
+                fill = profit_fill
+            elif net_pl < 0:
+                fill = loss_fill
+        for col in range(1, last_col + 1):
+            cell = ws.cell(row, col)
+            if fill is not None:
+                cell.fill = copy(fill)
+            elif _cell_has_generated_trade_log_win_loss_fill(cell):
+                cell.fill = PatternFill()
 
 def _apply_trade_log_win_loss_row_formatting(ws) -> None:
     headers = _trade_log_header_map(ws)
@@ -1007,6 +1041,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     _negative_impact_rule(ws, f"M2:M{max(2, ws.max_row)}")
     _profit_loss_rules(ws, f"N2:P{max(2, ws.max_row)}")
     _apply_trade_log_win_loss_row_formatting(ws)
+    _apply_trade_log_win_loss_direct_row_fills(ws)
 
     inst=wb['Instrument Averages']; headers=["Symbol","Class","Trades","Longs","Shorts","Wins","Losses","Break-even","Long wins","Long losses","Short wins","Short losses","Long break-even","Short break-even","Net P/L %","Avg P/L %","Win Rate %","Avg stop % (W)","Avg stop % (L)","Avg target % (W)","Avg target % (L)","Shortest duration (DD:HH:MM:SS)","Avg duration (DD:HH:MM:SS)","Longest duration (DD:HH:MM:SS)"]; inst.append(headers)
     for rec in (stats.get('by_instrument') or []):
@@ -2280,6 +2315,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                     return {"ok": False, "error": "workbook_row_survivor_verification_failed", "missing_row_ids": missing, "diagnostics": diagnostics}
             _repair_trade_log_unknown_currency_formats(live_trade_log, rows, diagnostics)
             _apply_trade_log_win_loss_row_formatting(live_trade_log)
+            _apply_trade_log_win_loss_direct_row_fills(live_trade_log)
 
             def _copy_instrument_rows_header_aware(src_ws, dst_ws, start_row: int = 2):
                 aliases = {
