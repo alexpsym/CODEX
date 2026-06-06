@@ -192,6 +192,114 @@ def test_duplicate_two_row_headers_migrate_to_vertical_merges_without_losing_row
     wb.close()
 
 
+def test_dashboard_build_includes_canonical_move_duration_rows(tmp_path: Path):
+    snapshot = sample_snapshot()
+    snapshot["items"][0].update({
+        "move_to_break_even_duration": 3600,
+        "move_to_profit_time": "2026-01-01 02:00:00",
+        "open_time": "2026-01-01 00:00:00",
+    })
+    out = tmp_path / "canonical_dashboard_rows.xlsx"
+    build_master_journal_workbook(snapshot, out)
+    wb = load_workbook(out)
+    dash = wb["Dashboard"]
+    for label_col, value_col in ((1, 2), (3, 4), (5, 6)):
+        labels = {str(dash.cell(row, label_col).value or ""): row for row in range(1, dash.max_row + 1)}
+        assert "Move to Break Even (DD:HH:MM:SS)" in labels
+        assert "Move to Profit (DD:HH:MM:SS)" in labels
+        break_even_row = labels["Move to Break Even (DD:HH:MM:SS)"]
+        profit_row = labels["Move to Profit (DD:HH:MM:SS)"]
+        assert profit_row == break_even_row + 1
+        assert dash.cell(break_even_row, value_col).number_format == r'00\:00\:00\:00'
+        assert dash.cell(profit_row, value_col).number_format == r'00\:00\:00\:00'
+    wb.close()
+
+
+def test_data_only_update_inserts_missing_dashboard_move_rows_and_preserves_metrics(tmp_path: Path):
+    from openpyxl import Workbook
+
+    path = tmp_path / "missing_move_rows.xlsx"
+    wb = Workbook()
+    dash = wb.active
+    dash.title = "Dashboard"
+    wb.create_sheet("Trade Log")
+    wb.create_sheet("Instrument Averages")
+    wb.create_sheet("P&L Calendar")
+    dash["B1"] = "Overall"
+    dash["C1"] = "FX"
+    dash["D1"] = "Crypto"
+    dash["F1"] = "Account Balances"
+    dash["F2"] = "Account"
+    dash["G2"] = "Balance"
+    dash["H2"] = "Currency"
+    dash["F11"] = "Instrument leaders"
+    dash["F12"] = "Metric"
+    dash["G12"] = "Symbol"
+    dash["H12"] = "Wins"
+    dash["I12"] = "Losses"
+    dash["J12"] = "Trades"
+    dash["A2"] = "Trades"
+    dash["A18"] = "Avg duration (DD:HH:MM:SS)"
+    dash["A19"] = "Max loss %"
+    dash["A35"] = "Winners"
+    dash["A40"] = "Losers"
+    dash["A45"] = "Drawdown"
+    for cell in (dash["B18"], dash["C18"], dash["D18"]):
+        cell.number_format = r'00\:00\:00\:00'
+    dash.row_dimensions[18].height = 27
+    _ensure_trade_log_headers(wb)
+    trade = wb["Trade Log"]
+    trade.cell(3, _header_col(trade, "Row ID")).value = "move-1"
+    trade.cell(3, _header_col(trade, "Move to Break Even Duration")).value = 10000
+    trade.cell(3, _header_col(trade, "Move to Break Even Duration")).number_format = r'00\:00\:00\:00'
+    trade.cell(3, _header_col(trade, "Move to Profit Time")).value = "2026-05-01 11:00:00"
+    wb.save(path)
+    wb.close()
+
+    snapshot = {
+        "items": [{
+            "id": "move-1", "row_type": "trade", "account": "BYBIT", "asset_class": "crypto",
+            "symbol": "BTCUSDT", "open_time": "2026-05-01 09:00:00", "close_time": "2026-05-01 12:00:00",
+        }],
+        "stats": {
+            "totals": {"trades": 1},
+            "groups": {
+                "by_market": {"overall": {"trades": 1}, "fx": {"trades": 0}, "crypto": {"trades": 1}},
+                "risk_expectancy": {}, "leaders": {}, "duration": {},
+            },
+        },
+        "balances": [],
+    }
+    result = update_master_journal_workbook_data_only(path, snapshot)
+    assert result["ok"] is True
+    assert result["diagnostics"]["inserted_dashboard_metric_rows"] == [
+        "Move to Break Even (DD:HH:MM:SS)",
+        "Move to Profit (DD:HH:MM:SS)",
+    ]
+    Path(result["candidate_path"]).replace(path)
+    wb = load_workbook(path)
+    dash = wb["Dashboard"]
+    labels = {str(dash.cell(row, 1).value or ""): row for row in range(1, dash.max_row + 1)}
+    break_even_row = labels["Move to Break Even (DD:HH:MM:SS)"]
+    profit_row = labels["Move to Profit (DD:HH:MM:SS)"]
+    assert break_even_row == 19
+    assert profit_row == 20
+    assert labels["Max loss %"] == 21
+    assert labels["Winners"] == 37
+    assert dash.cell(break_even_row, 2).value == 10000
+    assert dash.cell(break_even_row, 4).value == 10000
+    assert dash.cell(profit_row, 2).value == 20000
+    assert dash.cell(profit_row, 4).value == 20000
+    assert dash.cell(2, 2).value == 1
+    assert dash.row_dimensions[break_even_row].height == 27
+    assert dash.cell(break_even_row, 2).number_format == r'00\:00\:00\:00'
+    trade = wb["Trade Log"]
+    merged = {str(rng) for rng in trade.merged_cells.ranges}
+    assert "A1:A2" in merged and "S1:W1" in merged and "X1:AB1" in merged
+    assert trade.freeze_panes == "A3"
+    wb.close()
+
+
 def test_dashboard_manual_move_rows_survive_and_populate_by_label(tmp_path: Path):
     from openpyxl import Workbook
     from openpyxl.styles import Border, Side

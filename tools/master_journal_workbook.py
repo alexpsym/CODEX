@@ -1,5 +1,5 @@
 from __future__ import annotations
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -87,6 +87,8 @@ TRADE_LOG_DATA_START_ROW = 3
 MOVE_TO_BREAK_EVEN_HEADERS = list(MOVE_TO_FIELD_MAP.keys())[:5]
 MOVE_TO_PROFIT_HEADERS = list(MOVE_TO_FIELD_MAP.keys())[5:]
 MOVE_TO_SUBHEADERS = ["Time", "Duration", "Trigger Price", "Distance From Entry %", "Distance From Exit %"]
+DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL = "Move to Break Even (DD:HH:MM:SS)"
+DASHBOARD_MOVE_TO_PROFIT_LABEL = "Move to Profit (DD:HH:MM:SS)"
 LIGHT_GREY_FILL_RGB = "FFEAF2F8"
 JOURNAL_DISPLAY_TZ = ZoneInfo("Australia/Brisbane")
 
@@ -1226,8 +1228,9 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     risk=(groups.get('risk_expectancy') or {})
     duration=(groups.get('duration') or {})
     leaders=(groups.get('leaders') or {})
+    move_duration_metrics = _trade_move_duration_metrics(metric_rows)
 
-    def core_rows(mkt: Dict[str, Any], money_map: Dict[str, Any]):
+    def core_rows(mkt: Dict[str, Any], money_map: Dict[str, Any], market: str):
         msrc=(mkt.get('metric_sources') or {}) if isinstance(mkt,dict) else {}
         return [
             ('Trades', mkt.get('trades'),'neutral','count',None,None,money_map),('Wins', mkt.get('wins'),'profit','count',None,None,money_map),('Losses', mkt.get('losses'),'loss','count',None,None,money_map),('Break-even', mkt.get('break_even'),'neutral','count',None,None,money_map),('Test', mkt.get('test_trades'),'neutral','count',None,None,money_map),('Win rate', mkt.get('win_rate_pct'),'neutral','pct',None,None,money_map),
@@ -1236,17 +1239,19 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             ('Avg result %', mkt.get('avg_result_pct'),'auto','pct',None,None,money_map),('Max loss %', mkt.get('min_result_pct'),'loss','pct',None,_fmt_detail_src(msrc.get('min_result_pct')),money_map),('Max win %', mkt.get('max_result_pct'),'profit','pct',None,_fmt_detail_src(msrc.get('max_result_pct')),money_map),
             ('Avg R', mkt.get('avg_r_multiple'),'auto','r',None,None,money_map),('Max R loss', mkt.get('min_r_multiple'),'loss','r',None,_fmt_detail_src(msrc.get('min_r_multiple')),money_map),('Max R win', mkt.get('max_r_multiple'),'profit','r',None,_fmt_detail_src(msrc.get('max_r_multiple')),money_map),
             ('Max gain', mkt.get('max_gain'),'profit','money','max_gain',_fmt_detail_src(msrc.get('max_gain')),money_map),('Max loss', mkt.get('max_loss'),'loss','money','max_loss',_fmt_detail_src(msrc.get('max_loss')),money_map),('Avg stop %', mkt.get('avg_stop_pct'),'neutral','pct',None,None,money_map),('Avg target %', mkt.get('avg_target_pct'),'neutral','pct',None,None,money_map),('Max target %', mkt.get('max_target_pct'),'neutral','pct',None,None,money_map),('Avg duration', mkt.get('avg_duration_seconds'),'neutral','duration',None,None,money_map),
+            (DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL, move_duration_metrics[market]['move_to_break_even_duration_seconds'],'neutral','duration',None,None,money_map),
+            (DASHBOARD_MOVE_TO_PROFIT_LABEL, move_duration_metrics[market]['move_to_profit_duration_seconds'],'neutral','duration',None,None,money_map),
         ]
 
     overall_bucket=by_market.get('overall') or totals
     section_rows=[
-      ('Overall', core_rows(overall_bucket, overall_bucket.get('money_by_currency') or totals.get('money_by_currency') or {})),
+      ('Overall', core_rows(overall_bucket, overall_bucket.get('money_by_currency') or totals.get('money_by_currency') or {}, 'overall')),
       ('Winners', [('Avg stop %',risk.get('avg_stop_pct_winners'),'neutral','pct',None,None,{}),('Avg target %',risk.get('avg_target_pct_winners'),'neutral','pct',None,None,{}),('Avg result %',risk.get('avg_result_pct_winners'),'profit','pct',None,None,{}),('Avg R',risk.get('avg_r_multiple_winners'),'profit','r',None,None,{})]),
       ('Losers', [('Avg stop %',risk.get('avg_stop_pct_losers'),'neutral','pct',None,None,{}),('Avg target %',risk.get('avg_target_pct_losers'),'neutral','pct',None,None,{}),('Avg result %',risk.get('avg_result_pct_losers'),'loss','pct',None,None,{}),('Avg R',risk.get('avg_r_multiple_losers'),'loss','r',None,None,{})]),
       ('Drawdown', [('Max drawdown',risk.get('max_drawdown_pct'),'drawdown','pct',None,None,{}),('Avg drawdown',risk.get('avg_drawdown_pct'),'drawdown','pct',None,None,{})]),
       ('Duration', [('Overall avg',duration.get('overall_avg_seconds'),'neutral','duration',None,None,{}),('Overall shortest',duration.get('overall_shortest_seconds'),'neutral','duration',None,_fmt_detail_src((duration.get('metric_sources') or {}).get('overall_shortest_seconds')),{}),('Overall longest',duration.get('overall_longest_seconds'),'neutral','duration',None,_fmt_detail_src((duration.get('metric_sources') or {}).get('overall_longest_seconds')),{}),('FX shortest',duration.get('fx_shortest_seconds'),'neutral','duration',None,_fmt_detail_src((duration.get('metric_sources') or {}).get('fx_shortest_seconds')),{}),('FX longest',duration.get('fx_longest_seconds'),'neutral','duration',None,_fmt_detail_src((duration.get('metric_sources') or {}).get('fx_longest_seconds')),{}),('Crypto shortest',duration.get('crypto_shortest_seconds'),'neutral','duration',None,_fmt_detail_src((duration.get('metric_sources') or {}).get('crypto_shortest_seconds')),{}),('Crypto longest',duration.get('crypto_longest_seconds'),'neutral','duration',None,_fmt_detail_src((duration.get('metric_sources') or {}).get('crypto_longest_seconds')),{})]),
-      ('FX', core_rows(by_market.get('fx') or {}, ((by_market.get('fx') or {}).get('money_by_currency') or {}))),
-      ('Crypto', core_rows(by_market.get('crypto') or {}, ((by_market.get('crypto') or {}).get('money_by_currency') or {}))),
+      ('FX', core_rows(by_market.get('fx') or {}, ((by_market.get('fx') or {}).get('money_by_currency') or {}), 'fx')),
+      ('Crypto', core_rows(by_market.get('crypto') or {}, ((by_market.get('crypto') or {}).get('money_by_currency') or {}), 'crypto')),
     ]
     fixed_layout = {'Overall': (1,1), 'FX': (1,3), 'Crypto': (1,5), 'Winners': (1,7), 'Losers': (6,7), 'Drawdown': (11,7), 'Duration': (1,9)}
     end_rows = {}
@@ -1743,6 +1748,108 @@ def _assert_filter_covers_data(ws, *, sheet_name: str, header_row: int = 1, requ
         raise RuntimeError(f"{sheet_name} filter excludes populated rows.")
 
 
+def _shift_dashboard_range_rows(cell_range: str, start_row: int, amount: int) -> str:
+    min_col, min_row, max_col, max_row = range_boundaries(cell_range)
+    if max_row < start_row:
+        return cell_range
+    if min_row >= start_row:
+        min_row += amount
+    max_row += amount
+    return f"{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}"
+
+
+def _insert_dashboard_rows_preserving_layout(ws, row_idx: int, amount: int, style_row: int) -> None:
+    merged_ranges = [str(merged) for merged in ws.merged_cells.ranges]
+    for merged in list(ws.merged_cells.ranges):
+        ws.unmerge_cells(str(merged))
+    shifted_merges = [_shift_dashboard_range_rows(cell_range, row_idx, amount) for cell_range in merged_ranges]
+
+    shifted_cf = OrderedDict()
+    for key, rules in list(getattr(ws.conditional_formatting, "_cf_rules", {}).items()):
+        shifted_key = copy(key)
+        shifted_key.sqref = " ".join(
+            _shift_dashboard_range_rows(part, row_idx, amount) for part in str(key.sqref).split()
+        )
+        shifted_cf[shifted_key] = rules
+
+    ws.insert_rows(row_idx, amount)
+    for cell_range in shifted_merges:
+        ws.merge_cells(cell_range)
+    ws.conditional_formatting._cf_rules = shifted_cf
+
+    source_height = ws.row_dimensions[style_row].height
+    for target_row in range(row_idx, row_idx + amount):
+        ws.row_dimensions[target_row].height = source_height
+        for col in range(1, ws.max_column + 1):
+            source = ws.cell(style_row, col)
+            target = ws.cell(target_row, col)
+            _copy_cell_style(source, target)
+            target.value = None
+            target.comment = None
+            target.hyperlink = None
+
+
+def _ensure_dashboard_move_duration_rows(ws, diagnostics: Dict[str, Any] | None = None) -> bool:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    market_cols: Dict[str, int] = {}
+    for row in range(1, min(5, ws.max_row) + 1):
+        tokens = {str(ws.cell(row, col).value or "").strip().lower(): col for col in range(1, min(8, ws.max_column) + 1)}
+        candidate = {
+            "overall": tokens.get("overall"),
+            "fx": tokens.get("fx") or tokens.get("forex"),
+            "crypto": tokens.get("crypto"),
+        }
+        if all(candidate.values()) and candidate["overall"] + 1 == candidate["fx"] and candidate["fx"] + 1 == candidate["crypto"]:
+            market_cols = {key: int(value) for key, value in candidate.items() if value}
+            break
+    if not market_cols or market_cols["overall"] <= 1:
+        return False
+
+    label_col = market_cols["overall"] - 1
+    aliases = {
+        DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL.lower(): DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL,
+        "move to break-even (dd:hh:mm:ss)": DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL,
+        DASHBOARD_MOVE_TO_PROFIT_LABEL.lower(): DASHBOARD_MOVE_TO_PROFIT_LABEL,
+    }
+
+    def label_rows() -> Dict[str, int]:
+        found: Dict[str, int] = {}
+        for row in range(1, ws.max_row + 1):
+            raw = str(ws.cell(row, label_col).value or "").strip().lower()
+            canonical = aliases.get(raw)
+            if canonical and canonical not in found:
+                found[canonical] = row
+        return found
+
+    duration_row = next((
+        row for row in range(1, ws.max_row + 1)
+        if str(ws.cell(row, label_col).value or "").strip().lower() in {"avg duration", "avg duration (dd:hh:mm:ss)"}
+    ), None)
+    if duration_row is None:
+        diagnostics.setdefault("missing_dashboard_metric_labels", []).append("Avg duration (DD:HH:MM:SS)")
+        return False
+
+    changed = False
+    rows = label_rows()
+    if DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL not in rows:
+        insert_at = rows.get(DASHBOARD_MOVE_TO_PROFIT_LABEL, duration_row + 1)
+        _insert_dashboard_rows_preserving_layout(ws, insert_at, 1, duration_row)
+        ws.cell(insert_at, label_col).value = DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL
+        diagnostics.setdefault("inserted_dashboard_metric_rows", []).append(DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL)
+        changed = True
+
+    rows = label_rows()
+    if DASHBOARD_MOVE_TO_PROFIT_LABEL not in rows:
+        break_even_row = rows[DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL]
+        insert_at = break_even_row + 1
+        _insert_dashboard_rows_preserving_layout(ws, insert_at, 1, duration_row)
+        ws.cell(insert_at, label_col).value = DASHBOARD_MOVE_TO_PROFIT_LABEL
+        diagnostics.setdefault("inserted_dashboard_metric_rows", []).append(DASHBOARD_MOVE_TO_PROFIT_LABEL)
+        changed = True
+
+    return changed
+
+
 def _find_anchor_sections(ws, anchors: List[str], optional: List[str] | None = None) -> Dict[str, Dict[str, int]]:
     optional = optional or []
     all_anchors = list(dict.fromkeys([*anchors, *optional]))
@@ -2219,6 +2326,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
         if "Dashboard" not in wb.sheetnames:
             raise RuntimeError("Master Journal missing Dashboard sheet.")
         dash = wb["Dashboard"]
+        _ensure_dashboard_move_duration_rows(dash, diagnostics)
         before = _snapshot_invariants(wb)
 
         stats = snapshot.get("stats") or {}
