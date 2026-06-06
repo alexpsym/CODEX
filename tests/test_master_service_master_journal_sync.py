@@ -591,7 +591,7 @@ def test_sync_master_journal_repairs_legacy_instrument_averages_freeze_pane(tmp_
     out = master_service._sync_master_journal_workbook(sync_caller="test")
     assert out["master_journal_ok"] is True
     repaired = load_workbook(mj)
-    assert repaired["Instrument Averages"].freeze_panes == "A2"
+    assert repaired["Instrument Averages"].freeze_panes == "B2"
     assert repaired.sheetnames == ["Dashboard", "Trade Log", "Instrument Averages", "P&L Calendar"]
     assert "_Trade Meta" not in repaired.sheetnames
     assert "All Trades" not in repaired.sheetnames
@@ -2061,7 +2061,7 @@ def test_manual_import_prebuilt_snapshot_preserves_workbook_zero_cashflow_anchor
         synced = load_workbook(mj, data_only=True)
         try:
             dash = synced['Dashboard']
-            values = {str(dash.cell(r, 1).value or '').strip(): dash.cell(r, 2).value for r in range(1, dash.max_row + 1)}
+            values = {str(dash.cell(r, 6).value or '').strip(): dash.cell(r, 7).value for r in range(1, dash.max_row + 1)}
             assert values['BINANCE'] == 0
             assert values['PEPPERSTONE DEMO'] == 0
             trade_log = synced['Trade Log']
@@ -2396,7 +2396,7 @@ def test_resync_preserves_pepperstone_demo_zero_anchor_without_import_parser(mon
     synced = load_workbook(mj, data_only=True)
     try:
         dash = synced['Dashboard']
-        rows_by_account = {str(dash.cell(r, 1).value or '').strip(): (dash.cell(r, 2).value, dash.cell(r, 3).value) for r in range(1, dash.max_row + 1)}
+        rows_by_account = {str(dash.cell(r, 6).value or '').strip(): (dash.cell(r, 7).value, dash.cell(r, 8).value) for r in range(1, dash.max_row + 1)}
         assert rows_by_account['PEPPERSTONE DEMO'] == (0, 'AUD')
         assert rows_by_account['BINANCE'] == (0, 'USDT')
     finally:

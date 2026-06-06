@@ -103,6 +103,38 @@ PROFIT_FONT = "006100"
 LOSS_FILL = "FFC7CE"
 LOSS_FONT = "9C0006"
 
+def _semantic_fill_rgb(cell) -> str:
+    fill = getattr(cell, "fill", None)
+    color = getattr(fill, "fgColor", None)
+    rgb = str(getattr(color, "rgb", "") or "")
+    return rgb[-6:].upper() if getattr(fill, "fill_type", None) == "solid" and rgb else ""
+
+def _apply_full_cell_semantic_fill(cell, semantic: str | None) -> None:
+    """Apply a direct profit/loss fill while preserving all unrelated cell styling."""
+    if semantic not in {"profit", "loss"}:
+        return
+    fill_rgb, font_rgb = (PROFIT_FILL, PROFIT_FONT) if semantic == "profit" else (LOSS_FILL, LOSS_FONT)
+    font = copy(cell.font)
+    font.color = font_rgb
+    cell.font = font
+    cell.fill = PatternFill(fill_type="solid", fgColor=fill_rgb)
+
+def _clear_generated_semantic_fill(cell) -> None:
+    if _semantic_fill_rgb(cell) not in {PROFIT_FILL, LOSS_FILL}:
+        return
+    font = copy(cell.font)
+    if getattr(font.color, "type", None) == "rgb" and str(font.color.rgb or "")[-6:].upper() in {PROFIT_FONT, LOSS_FONT}:
+        font.color = "000000"
+    cell.font = font
+    cell.fill = PatternFill()
+
+def _apply_sign_based_full_cell_fill(cell) -> None:
+    value = _as_float(cell.value)
+    if value is None or value == 0:
+        _clear_generated_semantic_fill(cell)
+    else:
+        _apply_full_cell_semantic_fill(cell, "profit" if value > 0 else "loss")
+
 LEADER_LABEL_TO_KEY = {
     "overall most wins": "most_wins_instrument",
     "overall most losses": "most_losses_instrument",
@@ -152,8 +184,8 @@ def _repair_legacy_instrument_averages_freeze_pane(wb: Workbook, diagnostics: Di
         return
     ws = wb["Instrument Averages"]
     previous = str(ws.freeze_panes or "")
-    if previous != "A2":
-        ws.freeze_panes = "A2"
+    if previous != "B2":
+        ws.freeze_panes = "B2"
         diagnostics["repaired_instrument_averages_freeze_pane"] = True
         diagnostics["previous_instrument_averages_freeze_pane"] = previous
 
@@ -385,7 +417,7 @@ def _canonical_account_label(label: Any) -> str:
     low = raw.lower().replace("_", " ").replace("-", " ")
     parts = {p for p in low.split() if p}
     if "bybit" in parts and "demo" in parts:
-        return "Bybit Demo"
+        return "BYBIT DEMO"
     if "bybit" in parts and ("live" in parts or len(parts) == 1):
         return "BYBIT"
     if "pepperstone" in parts and "demo" in parts:
@@ -1101,6 +1133,47 @@ def _apply_pnl_calendar_profit_loss_formatting(ws) -> None:
     _remove_pnl_calendar_generated_profit_loss_formatting(ws)
     for cell_range in _pnl_calendar_profit_loss_ranges(ws):
         _profit_loss_rules(ws, cell_range)
+        min_col, min_row, max_col, max_row = range_boundaries(cell_range)
+        for row in range(min_row, max_row + 1):
+            for col in range(min_col, max_col + 1):
+                _apply_sign_based_full_cell_fill(ws.cell(row, col))
+
+    # Total Trades rows are deliberately neutral, including when repairing stale direct fills.
+    for row in range(1, ws.max_row + 1):
+        if str(ws.cell(row, 2).value or "").strip().lower() == "total trades":
+            for col in range(3, ws.max_column + 1):
+                _clear_generated_semantic_fill(ws.cell(row, col))
+
+def _apply_instrument_averages_semantic_fills(ws) -> None:
+    headers = {str(ws.cell(1, col).value or "").strip().lower(): col for col in range(1, ws.max_column + 1)}
+    profit_headers = {"wins", "long wins", "short wins"}
+    loss_headers = {"losses", "long losses", "short losses"}
+    signed_headers = {"net p/l %", "avg p/l %"}
+    symbol_col = headers.get("symbol", 1)
+    for row in range(2, ws.max_row + 1):
+        if ws.cell(row, symbol_col).value in (None, ""):
+            continue
+        for header in profit_headers:
+            col = headers.get(header)
+            if col:
+                _apply_full_cell_semantic_fill(ws.cell(row, col), "profit")
+        for header in loss_headers:
+            col = headers.get(header)
+            if col:
+                _apply_full_cell_semantic_fill(ws.cell(row, col), "loss")
+        for header in signed_headers:
+            col = headers.get(header)
+            if col:
+                _apply_sign_based_full_cell_fill(ws.cell(row, col))
+
+def _apply_dashboard_requested_semantic_fills(ws) -> None:
+    for coordinate in ("B3", "C3", "D3", "B11", "C11", "D11", "C23", "D23", "C27", "D27", "C29", "D29"):
+        _apply_full_cell_semantic_fill(ws[coordinate], "profit")
+    for coordinate in ("B4", "C4", "D4", "B12", "C12", "D12"):
+        _apply_full_cell_semantic_fill(ws[coordinate], "loss")
+    for row in range(13, 17):
+        _apply_full_cell_semantic_fill(ws.cell(row, 8), "profit")
+        _apply_full_cell_semantic_fill(ws.cell(row, 9), "loss")
 
 def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]]:
     out: Dict[str, Dict[str, Any]] = {}
@@ -1211,6 +1284,29 @@ def _trade_move_duration_metrics(rows: List[Dict[str, Any]]) -> Dict[str, Dict[s
     }
 
 
+def _result_percentage_totals_by_market(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, float | None]]:
+    grouped: Dict[str, List[float]] = {"overall": [], "fx": [], "crypto": []}
+    for row in rows:
+        if str(row.get("row_type") or "trade") != "trade" or _is_test_trade_value(row.get("is_test_trade")):
+            continue
+        value = _as_float(row.get("result_pct"))
+        if value is None:
+            continue
+        grouped["overall"].append(value)
+        market = _trade_row_market(row)
+        if market in {"fx", "crypto"}:
+            grouped[market].append(value)
+    result: Dict[str, Dict[str, float | None]] = {}
+    for market, values in grouped.items():
+        gains = [value for value in values if value > 0]
+        losses = [value for value in values if value < 0]
+        result[market] = {
+            "net_result_pct": sum(values) if values else None,
+            "gross_gain_pct": sum(gains) if values else None,
+            "gross_loss_pct": abs(sum(losses)) if values else None,
+        }
+    return result
+
 def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -> Dict[str, Any]:
     wb=Workbook(); wb.remove(wb.active)
     for s in SHEET_ORDER: wb.create_sheet(s)
@@ -1221,65 +1317,166 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     totals = stats.get('totals') or {}
     groups = stats.get('groups') or {}
 
-    dash=wb['Dashboard']
-    for c,w in [('A',30),('B',22),('C',30),('E',30),('F',22),('G',30),('I',30),('J',22),('K',30)]: dash.column_dimensions[c].width=w
+    dash = wb["Dashboard"]
+    for col, width in (("A", 32), ("B", 18), ("C", 18), ("D", 18), ("E", 3), ("F", 24), ("G", 20), ("H", 12), ("I", 12), ("J", 12)):
+        dash.column_dimensions[col].width = width
 
-    by_market=(groups.get('by_market') or {})
-    risk=(groups.get('risk_expectancy') or {})
-    duration=(groups.get('duration') or {})
-    leaders=(groups.get('leaders') or {})
+    by_market = groups.get("by_market") or {}
+    risk = groups.get("risk_expectancy") or {}
+    duration = groups.get("duration") or {}
+    leaders = groups.get("leaders") or {}
     move_duration_metrics = _trade_move_duration_metrics(metric_rows)
+    percentage_totals = _result_percentage_totals_by_market(metric_rows)
+    buckets = {
+        market: {**percentage_totals[market], **dict(bucket or {})}
+        for market, bucket in {
+            "overall": by_market.get("overall") or totals,
+            "fx": by_market.get("fx") or {},
+            "crypto": by_market.get("crypto") or {},
+        }.items()
+    }
+    market_cols = {"overall": 2, "fx": 3, "crypto": 4}
+    for market, col in market_cols.items():
+        dash.cell(1, col, {"overall": "Overall", "fx": "FX", "crypto": "Crypto"}[market])
 
-    def core_rows(mkt: Dict[str, Any], money_map: Dict[str, Any], market: str):
-        msrc=(mkt.get('metric_sources') or {}) if isinstance(mkt,dict) else {}
-        return [
-            ('Trades', mkt.get('trades'),'neutral','count',None,None,money_map),('Wins', mkt.get('wins'),'profit','count',None,None,money_map),('Losses', mkt.get('losses'),'loss','count',None,None,money_map),('Break-even', mkt.get('break_even'),'neutral','count',None,None,money_map),('Test', mkt.get('test_trades'),'neutral','count',None,None,money_map),('Win rate', mkt.get('win_rate_pct'),'neutral','pct',None,None,money_map),
-            ('Net P/L', mkt.get('net_profit_total'),'auto','money','net_profit_total',None,money_map),('Gross gain', mkt.get('gross_gain'),'profit','money','gross_gain',None,money_map),('Gross loss', mkt.get('gross_loss'),'loss','money','gross_loss',None,money_map),
-            ('Best Win Streak', mkt.get('winning_streak'),'neutral','count',None,None,money_map),('Worst Losing Streak', mkt.get('losing_streak'),'neutral','count',None,None,money_map),
-            ('Avg result %', mkt.get('avg_result_pct'),'auto','pct',None,None,money_map),('Max loss %', mkt.get('min_result_pct'),'loss','pct',None,_fmt_detail_src(msrc.get('min_result_pct')),money_map),('Max win %', mkt.get('max_result_pct'),'profit','pct',None,_fmt_detail_src(msrc.get('max_result_pct')),money_map),
-            ('Avg R', mkt.get('avg_r_multiple'),'auto','r',None,None,money_map),('Max R loss', mkt.get('min_r_multiple'),'loss','r',None,_fmt_detail_src(msrc.get('min_r_multiple')),money_map),('Max R win', mkt.get('max_r_multiple'),'profit','r',None,_fmt_detail_src(msrc.get('max_r_multiple')),money_map),
-            ('Max gain', mkt.get('max_gain'),'profit','money','max_gain',_fmt_detail_src(msrc.get('max_gain')),money_map),('Max loss', mkt.get('max_loss'),'loss','money','max_loss',_fmt_detail_src(msrc.get('max_loss')),money_map),('Avg stop %', mkt.get('avg_stop_pct'),'neutral','pct',None,None,money_map),('Avg target %', mkt.get('avg_target_pct'),'neutral','pct',None,None,money_map),('Max target %', mkt.get('max_target_pct'),'neutral','pct',None,None,money_map),('Avg duration', mkt.get('avg_duration_seconds'),'neutral','duration',None,None,money_map),
-            (DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL, move_duration_metrics[market]['move_to_break_even_duration_seconds'],'neutral','duration',None,None,money_map),
-            (DASHBOARD_MOVE_TO_PROFIT_LABEL, move_duration_metrics[market]['move_to_profit_duration_seconds'],'neutral','duration',None,None,money_map),
-        ]
-
-    overall_bucket=by_market.get('overall') or totals
-    section_rows=[
-      ('Overall', core_rows(overall_bucket, overall_bucket.get('money_by_currency') or totals.get('money_by_currency') or {}, 'overall')),
-      ('Winners', [('Avg stop %',risk.get('avg_stop_pct_winners'),'neutral','pct',None,None,{}),('Avg target %',risk.get('avg_target_pct_winners'),'neutral','pct',None,None,{}),('Avg result %',risk.get('avg_result_pct_winners'),'profit','pct',None,None,{}),('Avg R',risk.get('avg_r_multiple_winners'),'profit','r',None,None,{})]),
-      ('Losers', [('Avg stop %',risk.get('avg_stop_pct_losers'),'neutral','pct',None,None,{}),('Avg target %',risk.get('avg_target_pct_losers'),'neutral','pct',None,None,{}),('Avg result %',risk.get('avg_result_pct_losers'),'loss','pct',None,None,{}),('Avg R',risk.get('avg_r_multiple_losers'),'loss','r',None,None,{})]),
-      ('Drawdown', [('Max drawdown',risk.get('max_drawdown_pct'),'drawdown','pct',None,None,{}),('Avg drawdown',risk.get('avg_drawdown_pct'),'drawdown','pct',None,None,{})]),
-      ('Duration', [('Overall avg',duration.get('overall_avg_seconds'),'neutral','duration',None,None,{}),('Overall shortest',duration.get('overall_shortest_seconds'),'neutral','duration',None,_fmt_detail_src((duration.get('metric_sources') or {}).get('overall_shortest_seconds')),{}),('Overall longest',duration.get('overall_longest_seconds'),'neutral','duration',None,_fmt_detail_src((duration.get('metric_sources') or {}).get('overall_longest_seconds')),{}),('FX shortest',duration.get('fx_shortest_seconds'),'neutral','duration',None,_fmt_detail_src((duration.get('metric_sources') or {}).get('fx_shortest_seconds')),{}),('FX longest',duration.get('fx_longest_seconds'),'neutral','duration',None,_fmt_detail_src((duration.get('metric_sources') or {}).get('fx_longest_seconds')),{}),('Crypto shortest',duration.get('crypto_shortest_seconds'),'neutral','duration',None,_fmt_detail_src((duration.get('metric_sources') or {}).get('crypto_shortest_seconds')),{}),('Crypto longest',duration.get('crypto_longest_seconds'),'neutral','duration',None,_fmt_detail_src((duration.get('metric_sources') or {}).get('crypto_longest_seconds')),{})]),
-      ('FX', core_rows(by_market.get('fx') or {}, ((by_market.get('fx') or {}).get('money_by_currency') or {}), 'fx')),
-      ('Crypto', core_rows(by_market.get('crypto') or {}, ((by_market.get('crypto') or {}).get('money_by_currency') or {}), 'crypto')),
+    core_rows = [
+        ("Trades", "trades", "count", None),
+        ("Wins", "wins", "count", "profit"),
+        ("Losses", "losses", "count", "loss"),
+        ("Break-even", "break_even", "count", None),
+        ("Test", "test_trades", "count", None),
+        ("Win rate", "win_rate_pct", "pct", None),
+        ("Net P/L", "net_result_pct", "pct", "auto"),
+        ("Gross gain", "gross_gain_pct", "pct", "profit"),
+        ("Gross loss", "gross_loss_pct", "pct", "loss"),
+        ("Best Win Streak", "winning_streak", "count", "profit"),
+        ("Worst Losing Streak", "losing_streak", "count", "loss"),
+        ("Avg result %", "avg_result_pct", "pct", "auto"),
+        ("Avg R", "avg_r_multiple", "r", "auto"),
+        ("Avg stop %", "avg_stop_pct", "pct", None),
+        ("Avg target %", "avg_target_pct", "pct", None),
+        ("Max target %", "max_target_pct", "pct", None),
+        ("Avg duration (DD:HH:MM:SS)", "avg_duration_seconds", "duration", None),
+        (DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL, "move_to_break_even_duration_seconds", "duration", None),
+        (DASHBOARD_MOVE_TO_PROFIT_LABEL, "move_to_profit_duration_seconds", "duration", None),
+        ("Max loss %", "min_result_pct", "pct", "loss"),
+        ("Max win %", "max_result_pct", "pct", "profit"),
+        ("Max R loss", "min_r_multiple", "r", "loss"),
+        ("Max R win", "max_r_multiple", "r", "profit"),
+        ("Max gain", "max_gain", "money", "profit"),
+        ("Shortest (DD:HH:MM:SS)", "shortest_duration_seconds", "duration", None),
+        ("Longest (DD:HH:MM:SS)", "longest_duration_seconds", "duration", None),
     ]
-    fixed_layout = {'Overall': (1,1), 'FX': (1,3), 'Crypto': (1,5), 'Winners': (1,7), 'Losers': (6,7), 'Drawdown': (11,7), 'Duration': (1,9)}
-    end_rows = {}
-    for title, srows in section_rows:
-        sr, sc = fixed_layout[title]
-        uses_detail = title == "Duration" or any(((list(r)+[None]*7)[:7][5] not in (None, "", "—")) for r in srows)
-        end_rows[title] = sr + _write_stat_section(dash, sr, sc, title, srows, use_detail_col=uses_detail, apply_semantic_cf=True)
-    leaders_start = 1
-    leaders_end = _write_instrument_leaders_section(dash, leaders_start, 11, leaders)
-    balances = _canonicalize_and_dedupe_balances(snapshot.get('balances') or stats.get('balances') or [])
-    br = max([leaders_end] + list(end_rows.values()) or [1]) + 2
-    dash.cell(br, 1, "Account Balances").font = Font(bold=True)
-    dash.merge_cells(start_row=br, start_column=1, end_row=br, end_column=4)
-    dash.cell(br+1,1,"Account").font=Font(bold=True)
-    dash.cell(br+1,2,"Balance").font=Font(bold=True)
-    dash.cell(br+1,3,"Currency").font=Font(bold=True)
-    dash.cell(br+1,4,"As Of").font=Font(bold=True)
-    cur = br + 2
-    for rec in balances:
+
+    row = 2
+    for label, key, kind, semantic in core_rows:
+        dash.cell(row, 1, label).font = Font(bold=True)
+        for market, col in market_cols.items():
+            bucket = {**dict(buckets[market] or {}), **move_duration_metrics[market]}
+            value = bucket.get(key)
+            cell = dash.cell(row, col)
+            # Overall money totals can mix currencies; retain the existing neutral blank cells.
+            if market == "overall" and key in {"net_result_pct", "gross_gain_pct", "gross_loss_pct", "max_gain"}:
+                cell.fill = PatternFill("solid", fgColor=LIGHT_GREY_FILL_RGB)
+                continue
+            if kind == "pct":
+                number = _as_float(value)
+                cell.value = "" if number is None else number / 100.0
+                cell.number_format = "0.00%"
+            elif kind == "r":
+                cell.value = "" if value is None else value
+                cell.number_format = '0.000"R"'
+            elif kind == "count":
+                cell.value = "" if value is None else value
+                cell.number_format = "0"
+            elif kind == "duration":
+                cell.value = _fmt_duration_full(value) if value is not None else ""
+                cell.number_format = r'00\:00\:00\:00'
+            elif kind == "money":
+                money_map = (bucket.get("money_by_currency") or {}).get(key) or {}
+                if isinstance(money_map, dict) and len(money_map) == 1:
+                    currency, amount = next(iter(money_map.items()))
+                    cell.value = amount
+                    cell.number_format = _currency_number_format(currency)
+                else:
+                    cell.value = "" if value is None else value
+            if semantic == "profit":
+                _apply_full_cell_semantic_fill(cell, "profit")
+            elif semantic == "loss":
+                _apply_full_cell_semantic_fill(cell, "loss")
+            elif semantic == "auto":
+                _apply_sign_based_full_cell_fill(cell)
+        if key in {"min_result_pct", "max_result_pct", "min_r_multiple", "max_r_multiple", "max_gain", "shortest_duration_seconds", "longest_duration_seconds"}:
+            row += 1
+            dash.cell(row, 1, "Source").font = Font(bold=True)
+            for market, col in market_cols.items():
+                source = ((buckets[market] or {}).get("metric_sources") or {}).get(key)
+                dash.cell(row, col, _fmt_detail_src(source) if source else "")
+        row += 1
+
+    section_start = row
+    section_specs = [
+        ("Winners", [("Avg stop %", "avg_stop_pct_winners", None), ("Avg target %", "avg_target_pct_winners", None), ("Avg result %", "avg_result_pct_winners", "profit"), ("Avg R", "avg_r_multiple_winners", "profit")]),
+        ("Losers", [("Avg stop %", "avg_stop_pct_losers", None), ("Avg target %", "avg_target_pct_losers", None), ("Avg result %", "avg_result_pct_losers", "loss"), ("Avg R", "avg_r_multiple_losers", "loss")]),
+        ("Drawdown", [("Max drawdown", "max_drawdown_pct", "loss"), ("Avg drawdown", "avg_drawdown_pct", "loss")]),
+    ]
+    risk_by_market = risk.get("by_market") or {}
+    for title, metrics in section_specs:
+        dash.cell(row, 1, title).font = Font(bold=True)
+        for col in market_cols.values():
+            dash.cell(row, col).fill = PatternFill("solid", fgColor="EAF2F8")
+        row += 1
+        for label, key, semantic in metrics:
+            dash.cell(row, 1, label).font = Font(bold=True)
+            for market, col in market_cols.items():
+                source = risk_by_market.get(market) or risk
+                value = _as_float(source.get(key))
+                cell = dash.cell(row, col, "" if value is None else (value / 100.0 if "%" in label.lower() or "drawdown" in label.lower() else value))
+                cell.number_format = "0.00%" if "%" in label.lower() or "drawdown" in label.lower() else '0.000"R"'
+                if semantic:
+                    _apply_full_cell_semantic_fill(cell, semantic)
+            row += 1
+
+    dash.cell(row, 1, "Duration").font = Font(bold=True)
+    dash.merge_cells(start_row=row, start_column=1, end_row=row, end_column=2)
+    row += 1
+    for label, key in (("Overall avg", "overall_avg_seconds"), ("Overall shortest", "overall_shortest_seconds"), ("Overall longest", "overall_longest_seconds")):
+        dash.cell(row, 1, label).font = Font(bold=True)
+        dash.cell(row, 2, _fmt_duration_full(duration.get(key)))
+        dash.cell(row, 2).number_format = r'00\:00\:00\:00'
+        row += 1
+
+    _style_header_row(dash, 1)
+    _table_border(dash, 1, 1, row - 1, 4)
+    _profit_loss_rules(dash, f"B13:D14")
+    _negative_impact_rule(dash, f"C21:D21")
+
+    balances = _canonicalize_and_dedupe_balances(snapshot.get("balances") or stats.get("balances") or [])
+    dash.cell(1, 6, "Account Balances").font = Font(bold=True)
+    for col, header in enumerate(("Account", "Balance", "Currency", "As Of"), start=6):
+        dash.cell(2, col, header).font = Font(bold=True)
+    for target_row, rec in enumerate(balances, start=3):
         if not isinstance(rec, dict):
             continue
-        ccy = _currency_code(rec.get("currency"), rec.get("account_currency"))
-        dash.cell(cur,1,_canonical_account_label(rec.get("account_label") or rec.get("account") or rec.get("source") or "—"))
-        bcell = dash.cell(cur,2,_as_float(rec.get("balance")))
-        bcell.number_format = '#,##0.0000000000' if _is_crypto_currency(ccy) else '#,##0.00'
-        dash.cell(cur,3,ccy)
-        dash.cell(cur,4,rec.get("as_of") or "")
-        cur += 1
+        currency = _currency_code(rec.get("currency"), rec.get("account_currency"))
+        dash.cell(target_row, 6, _canonical_account_label(rec.get("account_label") or rec.get("account") or rec.get("source") or "—"))
+        dash.cell(target_row, 7, _as_float(rec.get("balance")))
+        dash.cell(target_row, 7).number_format = "#,##0.0000000000" if _is_crypto_currency(currency) else "#,##0.00"
+        dash.cell(target_row, 8, currency)
+        dash.cell(target_row, 9, rec.get("as_of") or "")
+
+    dash.cell(11, 6, "Instrument leaders").font = Font(bold=True)
+    for col, header in enumerate(("Metric", "Symbol", "Wins", "Losses", "Trades"), start=6):
+        dash.cell(12, col, header).font = Font(bold=True)
+    leader_rows = (("FX most wins", "fx_most_wins_instrument"), ("FX most losses", "fx_most_losses_instrument"), ("Crypto most wins", "crypto_most_wins_instrument"), ("Crypto most losses", "crypto_most_losses_instrument"))
+    for target_row, (label, key) in enumerate(leader_rows, start=13):
+        payload = leaders.get(key) or {}
+        dash.cell(target_row, 6, label)
+        dash.cell(target_row, 7, payload.get("symbol") or "—")
+        dash.cell(target_row, 8, payload.get("wins"))
+        dash.cell(target_row, 9, payload.get("losses"))
+        dash.cell(target_row, 10, payload.get("trades", payload.get("total_trades")))
+    _apply_dashboard_requested_semantic_fills(dash)
 
     resolved_balances = _resolved_all_trade_balances(rows)
     ws=_get_all_trades_sheet(wb); headers=TRADE_LOG_HEADERS; ws.append(headers)
@@ -1393,8 +1590,9 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         inst.cell(row_idx, 16).number_format = "0.00%"
         for col in (22,23,24):
             inst.cell(row_idx, col).number_format = r'00\:00\:00\:00'
-    _style_table_sheet(inst,1,'A2',True)
+    _style_table_sheet(inst,1,'B2',True)
     _profit_loss_rules(inst, f"O2:P{max(2, inst.max_row)}")
+    _apply_instrument_averages_semantic_fills(inst)
 
     cal=wb['P&L Calendar']; cal.append(['Year'] + [f"{calendar.month_name[m]} P/L %" for m in range(1,13)]); cal.append(['Trades'] + [calendar.month_name[m] for m in range(1,13)])
     monthly=defaultdict(lambda:{'pct':0.0,'trades':0})
@@ -1757,6 +1955,70 @@ def _shift_dashboard_range_rows(cell_range: str, start_row: int, amount: int) ->
     max_row += amount
     return f"{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}"
 
+
+def _delete_dashboard_rows_preserving_layout(ws, row_idx: int, amount: int) -> None:
+    delete_end = row_idx + amount - 1
+
+    def shifted_range(cell_range: str) -> str | None:
+        min_col, min_row, max_col, max_row = range_boundaries(cell_range)
+        if max_row < row_idx:
+            return cell_range
+        if min_row > delete_end:
+            min_row -= amount
+            max_row -= amount
+        elif min_row >= row_idx and max_row <= delete_end:
+            return None
+        else:
+            removed = max(0, min(max_row, delete_end) - max(min_row, row_idx) + 1)
+            if min_row >= row_idx:
+                min_row = row_idx
+            max_row -= removed
+            if max_row < min_row:
+                return None
+        return f"{get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}"
+
+    merged_ranges = [str(merged) for merged in ws.merged_cells.ranges]
+    for merged in list(ws.merged_cells.ranges):
+        ws.unmerge_cells(str(merged))
+
+    shifted_cf = OrderedDict()
+    for key, rules in list(getattr(ws.conditional_formatting, "_cf_rules", {}).items()):
+        parts = [shifted_range(part) for part in str(key.sqref).split()]
+        parts = [part for part in parts if part]
+        if not parts:
+            continue
+        shifted_key = copy(key)
+        shifted_key.sqref = " ".join(parts)
+        shifted_cf[shifted_key] = rules
+
+    row_heights = {idx: dim.height for idx, dim in ws.row_dimensions.items()}
+    ws.delete_rows(row_idx, amount)
+    for idx in list(ws.row_dimensions.keys()):
+        del ws.row_dimensions[idx]
+    for idx, height in row_heights.items():
+        if row_idx <= idx <= delete_end:
+            continue
+        target = idx - amount if idx > delete_end else idx
+        ws.row_dimensions[target].height = height
+
+    for cell_range in merged_ranges:
+        shifted = shifted_range(cell_range)
+        if shifted:
+            ws.merge_cells(shifted)
+    ws.conditional_formatting._cf_rules = shifted_cf
+
+def _remove_dashboard_max_loss_rows(ws, diagnostics: Dict[str, Any] | None = None) -> bool:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    for row in range(1, ws.max_row + 1):
+        if str(ws.cell(row, 1).value or "").strip().lower() != "max loss":
+            continue
+        amount = 1
+        if row + 1 <= ws.max_row and str(ws.cell(row + 1, 1).value or "").strip().lower() == "source":
+            amount = 2
+        _delete_dashboard_rows_preserving_layout(ws, row, amount)
+        diagnostics["removed_dashboard_max_loss_rows"] = amount
+        return True
+    return False
 
 def _insert_dashboard_rows_preserving_layout(ws, row_idx: int, amount: int, style_row: int) -> None:
     merged_ranges = [str(merged) for merged in ws.merged_cells.ranges]
@@ -2326,6 +2588,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
         if "Dashboard" not in wb.sheetnames:
             raise RuntimeError("Master Journal missing Dashboard sheet.")
         dash = wb["Dashboard"]
+        _remove_dashboard_max_loss_rows(dash, diagnostics)
         _ensure_dashboard_move_duration_rows(dash, diagnostics)
         before = _snapshot_invariants(wb)
 
@@ -2387,21 +2650,11 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             if value is None or value == 0 or not semantic:
                 return
             if semantic == "profit_loss":
-                if value > 0:
-                    cell.fill = PatternFill("solid", fgColor=PROFIT_FILL)
-                    cell.font = copy(cell.font)
-                    cell.font = Font(name=cell.font.name, sz=cell.font.sz, b=cell.font.b, i=cell.font.i,
-                                     color=PROFIT_FONT, underline=cell.font.underline, strike=cell.font.strike)
-                elif value < 0:
-                    cell.fill = PatternFill("solid", fgColor=LOSS_FILL)
-                    cell.font = copy(cell.font)
-                    cell.font = Font(name=cell.font.name, sz=cell.font.sz, b=cell.font.b, i=cell.font.i,
-                                     color=LOSS_FONT, underline=cell.font.underline, strike=cell.font.strike)
+                _apply_full_cell_semantic_fill(cell, "profit" if value > 0 else "loss")
             elif semantic in {"loss", "drawdown"}:
-                cell.fill = PatternFill("solid", fgColor=LOSS_FILL)
-                cell.font = copy(cell.font)
-                cell.font = Font(name=cell.font.name, sz=cell.font.sz, b=cell.font.b, i=cell.font.i,
-                                 color=LOSS_FONT, underline=cell.font.underline, strike=cell.font.strike)
+                _apply_full_cell_semantic_fill(cell, "loss")
+            elif semantic == "profit":
+                _apply_full_cell_semantic_fill(cell, "profit")
 
         def _write_dashboard_metric_cell(row: int, col: int, value: Any, metric_type: str = "raw", semantic: str | None = None) -> bool:
             if value is None or _is_light_grey_no_metric_cell(dash.cell(row, col)):
@@ -2486,9 +2739,9 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 (["Break-even"], "break_even", "count", None),
                 (["Test"], "test_trades", "count", None),
                 (["Win rate"], "win_rate_pct", "pct", None),
-                (["Net P/L"], "net_profit_total", "raw", "profit_loss"),
-                (["Gross gain"], "gross_gain", "raw", "profit_loss"),
-                (["Gross loss"], "gross_loss", "raw", "loss"),
+                (["Net P/L"], "net_result_pct", "pct", "profit_loss"),
+                (["Gross gain"], "gross_gain_pct", "pct", "profit_loss"),
+                (["Gross loss"], "gross_loss_pct", "pct", "loss"),
                 (["Best Win Streak", "Winning Streak"], "winning_streak", "count", None),
                 (["Worst Losing Streak", "Losing Streak"], "losing_streak", "count", None),
                 (["Avg result %"], "avg_result_pct", "pct", "profit_loss"),
@@ -2504,10 +2757,10 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 (["Max R loss"], "min_r_multiple", "r", "loss"),
                 (["Max R win"], "max_r_multiple", "r", None),
                 (["Max gain"], "max_gain", "raw", None),
-                (["Max loss"], "max_loss", "raw", "loss"),
             ]
+            percentage_totals = _result_percentage_totals_by_market(rows)
             buckets = {
-                market: {**dict(bucket or {}), **move_duration_metrics[market]}
+                market: {**percentage_totals[market], **dict(bucket or {}), **move_duration_metrics[market]}
                 for market, bucket in {
                     "overall": by_market.get("overall") or totals,
                     "fx": by_market.get("fx") or {},
@@ -2570,7 +2823,6 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             write_metric(section, "Max R loss", bucket.get("min_r_multiple"))
             write_metric(section, "Max R win", bucket.get("max_r_multiple"))
             write_metric(section, "Max gain", bucket.get("max_gain"))
-            write_metric(section, "Max loss", bucket.get("max_loss"))
             write_metric(section, "Avg stop %", bucket.get("avg_stop_pct"), "pct")
             write_metric(section, "Avg target %", bucket.get("avg_target_pct"), "pct")
             write_metric(section, "Max target %", bucket.get("max_target_pct"), "pct")
@@ -2581,7 +2833,6 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             write_source_below(section, "Max R loss", msrc.get("min_r_multiple"))
             write_source_below(section, "Max R win", msrc.get("max_r_multiple"))
             write_source_below(section, "Max gain", msrc.get("max_gain"))
-            write_source_below(section, "Max loss", msrc.get("max_loss"))
 
 
         risk_by_market = risk.get("by_market") if isinstance(risk.get("by_market"), dict) else {}
@@ -2753,6 +3004,8 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             sample = ", ".join(str(x.get("id") or x.get("symbol") or "?") for x in zero_qty["crypto_zero_qty_unrepaired"][:5])
             return {"ok": False, "error": f"Unrepaired crypto zero-quantity trade rows detected: {sample}", "diagnostics": diagnostics}
 
+        _apply_dashboard_requested_semantic_fills(dash)
+
         tmp = path.with_suffix(".update.tmp.xlsx")
         build_master_journal_workbook(snapshot, tmp)
         gen = load_workbook(tmp, data_only=False)
@@ -2877,7 +3130,10 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 last_col=dst_ws.max_column
                 dst_ws.auto_filter.ref=f"A1:{get_column_letter(last_col)}{max(1,max_dst_row)}"
             if "Instrument Averages" in wb.sheetnames and "Instrument Averages" in gen.sheetnames:
-                _copy_instrument_rows_header_aware(gen["Instrument Averages"], wb["Instrument Averages"], 2)
+                instrument_ws = wb["Instrument Averages"]
+                _copy_instrument_rows_header_aware(gen["Instrument Averages"], instrument_ws, 2)
+                instrument_ws.freeze_panes = "B2"
+                _apply_instrument_averages_semantic_fills(instrument_ws)
             if "P&L Calendar" in wb.sheetnames and "P&L Calendar" in gen.sheetnames:
                 cal_ws = wb["P&L Calendar"]
                 if _detect_calendar_month_columns(cal_ws):

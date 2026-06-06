@@ -22803,6 +22803,9 @@ def _compute_journal_stats(
             "net_profit_total": sum(pnl) if pnl else None,
             "gross_gain": sum(gains_local) if gains_local else None,
             "gross_loss": sum(losses_local) if losses_local else None,
+            "net_result_pct": sum(result_vals) if result_vals else None,
+            "gross_gain_pct": sum(v for v in result_vals if v > 0) if result_vals else None,
+            "gross_loss_pct": abs(sum(v for v in result_vals if v < 0)) if result_vals else None,
             "avg_gain": _avg(gains_local),
             "avg_loss": _avg(losses_local),
             "max_gain": _safe_max(gains_local),
@@ -26564,8 +26567,8 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                 raise RuntimeError("Trading Journal validation failed: Trade Log filter missing.")
             if not inst.auto_filter or not inst.auto_filter.ref:
                 raise RuntimeError("Trading Journal validation failed: Instrument Averages filter missing.")
-            if str(inst.freeze_panes or "") != "A2":
-                raise RuntimeError("Trading Journal validation failed: Instrument Averages freeze pane must be A2.")
+            if str(inst.freeze_panes or "") != "B2":
+                raise RuntimeError("Trading Journal validation failed: Instrument Averages freeze pane must be B2.")
             def _is_hidden_trade_row(row: Dict[str, object]) -> bool:
                 metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
                 for key in ("is_hidden", "hidden", "_hidden"):
