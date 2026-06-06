@@ -81,6 +81,12 @@ OLD_TRADE_LOG_HEADERS = [
     "Breakeven", "Notes", "Cashflow Amount", "Cashflow New Balance",
     "Currency", "Row Type", "Row ID",
 ]
+TRADE_LOG_HEADER_ROWS = 2
+TRADE_LOG_FILTER_HEADER_ROW = 2
+TRADE_LOG_DATA_START_ROW = 3
+MOVE_TO_BREAK_EVEN_HEADERS = list(MOVE_TO_FIELD_MAP.keys())[:5]
+MOVE_TO_PROFIT_HEADERS = list(MOVE_TO_FIELD_MAP.keys())[5:]
+MOVE_TO_SUBHEADERS = ["Time", "Duration", "Trigger Price", "Distance From Entry %", "Distance From Exit %"]
 LIGHT_GREY_FILL_RGB = "FFEAF2F8"
 JOURNAL_DISPLAY_TZ = ZoneInfo("Australia/Brisbane")
 
@@ -594,17 +600,63 @@ def _all_trades_row_fingerprint_from_map(values: Dict[str, Any]) -> str:
 
 
 
+def _trade_log_two_row_header_values() -> Tuple[List[str], List[str]]:
+    row1: List[str] = []
+    row2: List[str] = []
+    for header in TRADE_LOG_HEADERS:
+        if header in MOVE_TO_BREAK_EVEN_HEADERS:
+            row1.append("Move to Break-Even" if header == MOVE_TO_BREAK_EVEN_HEADERS[0] else "")
+            row2.append(MOVE_TO_SUBHEADERS[MOVE_TO_BREAK_EVEN_HEADERS.index(header)])
+        elif header in MOVE_TO_PROFIT_HEADERS:
+            row1.append("Move to Profit" if header == MOVE_TO_PROFIT_HEADERS[0] else "")
+            row2.append(MOVE_TO_SUBHEADERS[MOVE_TO_PROFIT_HEADERS.index(header)])
+        else:
+            row1.append(header)
+            row2.append(header)
+    return row1, row2
+
+
+def _trade_log_has_two_row_headers(ws) -> bool:
+    row1, row2 = _trade_log_two_row_header_values()
+    found1 = [str(ws.cell(1, c).value or "").strip() for c in range(1, len(TRADE_LOG_HEADERS) + 1)]
+    found2 = [str(ws.cell(2, c).value or "").strip() for c in range(1, len(TRADE_LOG_HEADERS) + 1)]
+    return found1 == row1 and found2 == row2
+
+
 def _trade_log_header_map(ws) -> Dict[str, int]:
-    return {str(ws.cell(1, c).value or "").strip(): c for c in range(1, ws.max_column + 1) if str(ws.cell(1, c).value or "").strip()}
+    if _trade_log_has_two_row_headers(ws):
+        return {header: col for col, header in enumerate(TRADE_LOG_HEADERS, start=1)}
+    return {
+        str(ws.cell(1, c).value or "").strip(): c
+        for c in range(1, ws.max_column + 1)
+        if str(ws.cell(1, c).value or "").strip()
+    }
+
+
+def _trade_log_data_start_row(ws) -> int:
+    return TRADE_LOG_DATA_START_ROW if _trade_log_has_two_row_headers(ws) else 2
+
+
+def _trade_log_data_row_count(ws) -> int:
+    headers = _trade_log_header_map(ws)
+    row_id_col = headers.get("Row ID")
+    start_row = _trade_log_data_start_row(ws)
+    count = 0
+    for row in range(start_row, ws.max_row + 1):
+        if row_id_col and ws.cell(row, row_id_col).value not in (None, ""):
+            count += 1
+        elif any(ws.cell(row, col).value not in (None, "") for col in range(1, min(ws.max_column, len(TRADE_LOG_HEADERS)) + 1)):
+            count += 1
+    return count
 
 
 def _set_trade_log_auto_filter(ws) -> None:
     last_col = len(TRADE_LOG_HEADERS)
-    last_row = 1
-    for r in range(2, ws.max_row + 1):
-        if any(ws.cell(r, c).value not in (None, "") for c in range(1, last_col + 1)):
-            last_row = r
-    ws.auto_filter.ref = f"A1:{get_column_letter(last_col)}{max(1, last_row)}"
+    last_row = TRADE_LOG_FILTER_HEADER_ROW
+    for row in range(TRADE_LOG_DATA_START_ROW, ws.max_row + 1):
+        if any(ws.cell(row, col).value not in (None, "") for col in range(1, last_col + 1)):
+            last_row = row
+    ws.auto_filter.ref = f"A{TRADE_LOG_FILTER_HEADER_ROW}:{get_column_letter(last_col)}{last_row}"
 
 
 def _hide_trade_log_row_id(ws) -> None:
@@ -612,9 +664,6 @@ def _hide_trade_log_row_id(ws) -> None:
     row_id_col = headers.get("Row ID")
     if not row_id_col:
         raise RuntimeError("Trade Log schema repair failed: missing Row ID header.")
-    for c in range(1, ws.max_column + 1):
-        if str(ws.cell(1, c).value or "").strip() == "Row ID":
-            ws.column_dimensions[get_column_letter(c)].hidden = (c == row_id_col)
     ws.column_dimensions[get_column_letter(row_id_col)].hidden = True
 
 
@@ -636,7 +685,7 @@ def _clear_trade_log_dropdown_validations(ws) -> None:
 def _apply_trade_log_dropdown_validations(ws) -> None:
     headers = _trade_log_header_map(ws)
     _clear_trade_log_dropdown_validations(ws)
-    max_row = max(2, ws.max_row)
+    max_row = max(TRADE_LOG_DATA_START_ROW, ws.max_row)
     specs = {
         "Test": '"Yes,No"',
         "ATHS/ATLS": '"All-Time High,All-Time Low"',
@@ -656,7 +705,7 @@ def _apply_trade_log_dropdown_validations(ws) -> None:
         dv = DataValidation(type="list", formula1=formula, allow_blank=True)
         ws.add_data_validation(dv)
         letter = get_column_letter(col)
-        dv.add(f"{letter}2:{letter}{max_row}")
+        dv.add(f"{letter}{TRADE_LOG_DATA_START_ROW}:{letter}{max_row}")
 
 
 def _copy_cell_style(src, dst) -> None:
@@ -668,88 +717,178 @@ def _copy_cell_style(src, dst) -> None:
     dst.protection = copy(src.protection)
 
 
-def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> None:
-    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
-    found_headers = [str(ws.cell(1, c).value or "").strip() for c in range(1, ws.max_column + 1)]
-    while found_headers and not found_headers[-1]:
-        found_headers.pop()
-    accepted_schemas = (TRADE_LOG_HEADERS, PRE_MOVE_TRADE_LOG_HEADERS, OLD_TRADE_LOG_HEADERS)
-    if found_headers not in accepted_schemas:
-        raise RuntimeError(
-            "Trade Log headers cannot be migrated safely: "
-            f"found {found_headers!r}; expected one of {[list(schema) for schema in accepted_schemas]!r}."
+def _snapshot_cell(cell) -> Dict[str, Any]:
+    return {
+        "value": cell.value,
+        "style": copy(cell._style),
+        "comment": copy(cell.comment),
+        "hyperlink": copy(cell.hyperlink),
+    }
+
+
+def _restore_cell_snapshot(cell, snapshot: Dict[str, Any], *, value: Any = None, use_snapshot_value: bool = True) -> None:
+    cell.value = snapshot["value"] if use_snapshot_value else value
+    cell._style = copy(snapshot["style"])
+    cell.comment = copy(snapshot["comment"])
+    cell.hyperlink = copy(snapshot["hyperlink"])
+
+
+def _write_trade_log_two_row_headers(ws, header_templates: Dict[str, Dict[str, Any]]) -> None:
+    for merged in list(ws.merged_cells.ranges):
+        if merged.min_row <= 2 and merged.max_row >= 1:
+            ws.unmerge_cells(str(merged))
+    row1, row2 = _trade_log_two_row_header_values()
+    for col, logical_header in enumerate(TRADE_LOG_HEADERS, start=1):
+        template = header_templates.get(logical_header) or next(iter(header_templates.values()))
+        _restore_cell_snapshot(ws.cell(1, col), template, value=row1[col - 1], use_snapshot_value=False)
+        _restore_cell_snapshot(ws.cell(2, col), template, value=row2[col - 1], use_snapshot_value=False)
+    ws.merge_cells(start_row=1, start_column=19, end_row=1, end_column=23)
+    ws.merge_cells(start_row=1, start_column=24, end_row=1, end_column=28)
+    ws["S1"] = "Move to Break-Even"
+    ws["X1"] = "Move to Profit"
+    for col in range(19, 29):
+        ws.cell(1, col).alignment = copy(ws.cell(2, col).alignment)
+        ws.cell(1, col).alignment = Alignment(
+            horizontal="center", vertical="center", wrap_text=True,
+            text_rotation=ws.cell(1, col).alignment.text_rotation,
+            shrink_to_fit=ws.cell(1, col).alignment.shrink_to_fit,
+            indent=ws.cell(1, col).alignment.indent,
         )
 
-    if found_headers != TRADE_LOG_HEADERS:
-        source_by_header = {header: idx for idx, header in enumerate(found_headers, start=1)}
-        if len(source_by_header) != len(found_headers):
-            raise RuntimeError(f"Trade Log headers cannot be migrated safely because duplicates were found: {found_headers!r}.")
-        source_cells = {
-            header: [copy(ws.cell(row, col)) for row in range(1, ws.max_row + 1)]
-            for header, col in source_by_header.items()
-        }
-        source_dimensions = {
-            header: copy(ws.column_dimensions[get_column_letter(col)])
-            for header, col in source_by_header.items()
-        }
-        max_source_col = ws.max_column
-        duration_header = "Trade Duration (DD:HH:MM:SS)"
-        price_template = "Entry Price"
-        pct_template = "Stop Loss Distance"
-        default_template = "Test" if "Test" in source_by_header else duration_header
 
-        for target_col, header in enumerate(TRADE_LOG_HEADERS, start=1):
-            source_header = header
-            if header == "Close Stopout" and source_header not in source_by_header:
-                source_header = "Stop Out"
-            template_header = source_header if source_header in source_by_header else default_template
-            if "Trigger Price" in header:
-                template_header = price_template
-            elif "Distance From" in header:
-                template_header = pct_template
-            elif header.endswith("Duration"):
-                template_header = duration_header
-            template_cells = source_cells[template_header]
-            source_values = source_cells.get(source_header)
-            for row in range(1, ws.max_row + 1):
-                src = source_values[row - 1] if source_values else template_cells[row - 1]
-                dst = ws.cell(row, target_col)
-                dst.value = src.value if source_values else (header if row == 1 else None)
-                _copy_cell_style(src, dst)
-                dst.comment = copy(src.comment)
-                dst.hyperlink = copy(src.hyperlink)
-            dim = source_dimensions.get(source_header) or source_dimensions.get(template_header)
-            letter = get_column_letter(target_col)
-            ws.column_dimensions[letter].width = dim.width if dim and dim.width else 14
-            ws.column_dimensions[letter].hidden = False
+def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> None:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    before_data_rows = _trade_log_data_row_count(ws)
+    already_current = _trade_log_has_two_row_headers(ws)
+    if already_current:
+        headers = _trade_log_header_map(ws)
+        for header in ("Move to Break Even Duration", "Move to Profit Duration"):
+            for row in range(TRADE_LOG_DATA_START_ROW, ws.max_row + 1):
+                ws.cell(row, headers[header]).number_format = r'00\:00\:00\:00'
+        for header in (
+            "Move to Break Even Distance From Entry %", "Move to Break Even Distance From Exit %",
+            "Move to Profit Distance From Entry %", "Move to Profit Distance From Exit %",
+        ):
+            for row in range(TRADE_LOG_DATA_START_ROW, ws.max_row + 1):
+                ws.cell(row, headers[header]).number_format = "0.00%"
+        ws.freeze_panes = "A3"
+        _hide_trade_log_row_id(ws)
+        _set_trade_log_auto_filter(ws)
+        _apply_trade_log_dropdown_validations(ws)
+        _apply_trade_log_win_loss_row_formatting(ws)
+        _apply_trade_log_win_loss_direct_row_fills(ws)
+        if _trade_log_data_row_count(ws) != before_data_rows:
+            raise RuntimeError("Trade Log schema validation changed the data row count unexpectedly.")
+        return
+    else:
+        source_headers = [str(ws.cell(1, col).value or "").strip() for col in range(1, ws.max_column + 1)]
+        while source_headers and not source_headers[-1]:
+            source_headers.pop()
+        if source_headers not in (PRE_MOVE_TRADE_LOG_HEADERS, OLD_TRADE_LOG_HEADERS, TRADE_LOG_HEADERS):
+            raise RuntimeError(
+                "Trade Log headers cannot be migrated safely: "
+                f"found {source_headers!r}; expected current two-row headers or one of "
+                f"{[PRE_MOVE_TRADE_LOG_HEADERS, OLD_TRADE_LOG_HEADERS, TRADE_LOG_HEADERS]!r}."
+            )
+        source_start_row = 2
 
-        for col in range(len(TRADE_LOG_HEADERS) + 1, max_source_col + 1):
-            for row in range(1, ws.max_row + 1):
-                ws.cell(row, col).value = None
-            ws.column_dimensions[get_column_letter(col)].hidden = False
-        diagnostics["migrated_trade_log_schema"] = True
-        diagnostics["migrated_trade_log_from_headers"] = found_headers
+    source_by_header = {header: idx for idx, header in enumerate(source_headers, start=1)}
+    if len(source_by_header) != len(source_headers):
+        raise RuntimeError(f"Trade Log headers cannot be migrated safely because duplicate logical headers were found: {source_headers!r}.")
 
-    for idx, header in enumerate(TRADE_LOG_HEADERS, start=1):
-        ws.cell(1, idx).value = header
-    headers = _trade_log_header_map(ws)
-    for header in ("Move to Break Even Duration", "Move to Profit Duration"):
-        col = headers[header]
-        for row in range(2, ws.max_row + 1):
-            ws.cell(row, col).number_format = r'00\:00\:00\:00'
-    for header in (
-        "Move to Break Even Distance From Entry %", "Move to Break Even Distance From Exit %",
-        "Move to Profit Distance From Entry %", "Move to Profit Distance From Exit %",
-    ):
-        col = headers[header]
-        for row in range(2, ws.max_row + 1):
-            ws.cell(row, col).number_format = "0.00%"
-    ws.freeze_panes = "A2"
+    source_data_rows: List[Dict[str, Dict[str, Any]]] = []
+    source_row_heights: List[float | None] = []
+    for row in range(source_start_row, ws.max_row + 1):
+        if not any(ws.cell(row, col).value not in (None, "") for col in range(1, len(source_headers) + 1)):
+            continue
+        row_snapshot: Dict[str, Dict[str, Any]] = {}
+        for header, col in source_by_header.items():
+            row_snapshot[header] = _snapshot_cell(ws.cell(row, col))
+        source_data_rows.append(row_snapshot)
+        source_row_heights.append(ws.row_dimensions[row].height)
+
+    header_templates: Dict[str, Dict[str, Any]] = {}
+    source_header_row = 2 if already_current else 1
+    for header in TRADE_LOG_HEADERS:
+        source_header = header
+        if header == "Close Stopout" and source_header not in source_by_header:
+            source_header = "Stop Out"
+        template_header = source_header if source_header in source_by_header else "Test"
+        if "Trigger Price" in header:
+            template_header = "Entry Price"
+        elif "Distance From" in header:
+            template_header = "Stop Loss Distance"
+        elif header.endswith("Duration"):
+            template_header = "Trade Duration (DD:HH:MM:SS)"
+        header_templates[header] = _snapshot_cell(ws.cell(source_header_row, source_by_header[template_header]))
+
+    source_dimensions = {
+        header: copy(ws.column_dimensions[get_column_letter(col)])
+        for header, col in source_by_header.items()
+    }
+    max_old_row = ws.max_row
+    max_old_col = ws.max_column
+    for row in range(1, max(max_old_row, TRADE_LOG_DATA_START_ROW + len(source_data_rows) - 1) + 1):
+        for col in range(1, max(max_old_col, len(TRADE_LOG_HEADERS)) + 1):
+            if _is_merged_non_anchor(ws, row, col):
+                continue
+            cell = ws.cell(row, col)
+            cell.value = None
+            cell.comment = None
+            cell.hyperlink = None
+
+    _write_trade_log_two_row_headers(ws, header_templates)
+    for target_col, header in enumerate(TRADE_LOG_HEADERS, start=1):
+        source_header = header if header in source_by_header else ("Stop Out" if header == "Close Stopout" and "Stop Out" in source_by_header else None)
+        template_header = source_header or "Test"
+        if "Trigger Price" in header:
+            template_header = "Entry Price"
+        elif "Distance From" in header:
+            template_header = "Stop Loss Distance"
+        elif header.endswith("Duration"):
+            template_header = "Trade Duration (DD:HH:MM:SS)"
+        dimension = source_dimensions.get(source_header or "") or source_dimensions.get(template_header)
+        letter = get_column_letter(target_col)
+        ws.column_dimensions[letter].width = dimension.width if dimension and dimension.width else 14
+        ws.column_dimensions[letter].hidden = bool(dimension.hidden) if dimension else False
+        for offset, row_snapshot in enumerate(source_data_rows):
+            target_row = TRADE_LOG_DATA_START_ROW + offset
+            snapshot = row_snapshot.get(source_header) if source_header else None
+            if snapshot:
+                _restore_cell_snapshot(ws.cell(target_row, target_col), snapshot)
+            else:
+                template_snapshot = row_snapshot.get(template_header)
+                if template_snapshot:
+                    _restore_cell_snapshot(ws.cell(target_row, target_col), template_snapshot, value=None, use_snapshot_value=False)
+        if header in ("Move to Break Even Duration", "Move to Profit Duration"):
+            for row in range(TRADE_LOG_DATA_START_ROW, TRADE_LOG_DATA_START_ROW + len(source_data_rows)):
+                ws.cell(row, target_col).number_format = r'00\:00\:00\:00'
+        elif "Distance From" in header:
+            for row in range(TRADE_LOG_DATA_START_ROW, TRADE_LOG_DATA_START_ROW + len(source_data_rows)):
+                ws.cell(row, target_col).number_format = "0.00%"
+
+    for offset, height in enumerate(source_row_heights):
+        ws.row_dimensions[TRADE_LOG_DATA_START_ROW + offset].height = height
+    ws.row_dimensions[1].height = ws.row_dimensions[1].height or 24
+    ws.row_dimensions[2].height = ws.row_dimensions[2].height or 24
+    ws.freeze_panes = "A3"
     _hide_trade_log_row_id(ws)
     _set_trade_log_auto_filter(ws)
     _apply_trade_log_dropdown_validations(ws)
     _apply_trade_log_win_loss_row_formatting(ws)
     _apply_trade_log_win_loss_direct_row_fills(ws)
+
+    after_data_rows = _trade_log_data_row_count(ws)
+    if after_data_rows != before_data_rows:
+        raise RuntimeError(
+            "Trade Log schema migration aborted because data row count changed: "
+            f"before={before_data_rows}, after={after_data_rows}."
+        )
+    if before_data_rows and not after_data_rows:
+        raise RuntimeError("Trade Log schema migration aborted because it would blank the Trade Log.")
+    if not already_current:
+        diagnostics["migrated_trade_log_schema"] = True
+        diagnostics["migrated_trade_log_from_headers"] = source_headers
 
 def _conditional_formatting_formula_text(rule) -> str:
     formula = getattr(rule, "formula", None) or []
@@ -765,12 +904,12 @@ def _remove_trade_log_win_loss_row_formatting(ws) -> None:
         sqref = str(getattr(key, "sqref", key))
         rule_text = " ".join(_conditional_formatting_formula_text(rule) for rule in rules)
         is_generated_row_rule = (
-            sqref.startswith("A2:")
+            sqref.startswith(("A2:", "A3:"))
             and '"trade"' in rule_text
             and ("AND(" in rule_text.upper())
             and (">0" in rule_text or "<0" in rule_text)
         )
-        is_stale_old_schema = sqref.startswith("A2:AB") or "$AA" in rule_text
+        is_stale_old_schema = sqref.startswith(("A2:AB", "A3:AB")) or "$AA" in rule_text
         if is_generated_row_rule or is_stale_old_schema:
             stale_refs.append(sqref)
     for sqref in stale_refs:
@@ -823,7 +962,7 @@ def _apply_trade_log_win_loss_direct_row_fills(ws) -> None:
     last_col = max((col for header, col in headers.items() if header), default=ws.max_column)
     profit_fill = PatternFill("solid", fgColor=PROFIT_FILL)
     loss_fill = PatternFill("solid", fgColor=LOSS_FILL)
-    for row in range(2, ws.max_row + 1):
+    for row in range(_trade_log_data_start_row(ws), ws.max_row + 1):
         row_type = str(ws.cell(row, row_type_col).value or "").strip().lower()
         net_pl = _as_float(ws.cell(row, net_pl_col).value)
         fill = None
@@ -848,19 +987,20 @@ def _apply_trade_log_win_loss_row_formatting(ws) -> None:
     _remove_trade_log_win_loss_row_formatting(ws)
     _remove_trade_log_generated_value_fill_formatting(ws)
     last_col = max((col for header, col in headers.items() if header), default=ws.max_column)
-    last_row = max(2, ws.max_row)
+    start_row = _trade_log_data_start_row(ws)
+    last_row = max(start_row, ws.max_row)
     row_type_letter = get_column_letter(row_type_col)
     net_pl_letter = get_column_letter(net_pl_col)
-    cell_range = f"A2:{get_column_letter(last_col)}{last_row}"
+    cell_range = f"A{start_row}:{get_column_letter(last_col)}{last_row}"
     profit_fill = PatternFill("solid", fgColor=PROFIT_FILL)
     loss_fill = PatternFill("solid", fgColor=LOSS_FILL)
     ws.conditional_formatting.add(
         cell_range,
-        FormulaRule(formula=[f'AND(${row_type_letter}2="trade",${net_pl_letter}2>0)'], fill=profit_fill, stopIfTrue=True),
+        FormulaRule(formula=[f'AND(${row_type_letter}{start_row}="trade",${net_pl_letter}{start_row}>0)'], fill=profit_fill, stopIfTrue=True),
     )
     ws.conditional_formatting.add(
         cell_range,
-        FormulaRule(formula=[f'AND(${row_type_letter}2="trade",${net_pl_letter}2<0)'], fill=loss_fill, stopIfTrue=True),
+        FormulaRule(formula=[f'AND(${row_type_letter}{start_row}="trade",${net_pl_letter}{start_row}<0)'], fill=loss_fill, stopIfTrue=True),
     )
 
 def _is_generated_profit_loss_rule(rule) -> bool:
@@ -930,13 +1070,14 @@ def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]
             ws=_get_all_trades_sheet(wb)
         except RuntimeError:
             return out
-        headers=[str(c.value or '').strip() for c in ws[1]]
-        idx={h:i for i,h in enumerate(headers)}
+        header_map = _trade_log_header_map(ws)
+        idx = {header: col - 1 for header, col in header_map.items()}
+        data_start_row = _trade_log_data_start_row(ws)
         rid_by_row={}
         if '_Trade Meta' in wb.sheetnames:
             meta=wb['_Trade Meta']
             rid_by_row={int(r[0]):str(r[1] or '').strip() for r in meta.iter_rows(min_row=2,values_only=True) if r and r[0] and r[1]}
-        for row_num,r in enumerate(ws.iter_rows(min_row=2, values_only=True),start=2):
+        for row_num,r in enumerate(ws.iter_rows(min_row=data_start_row, values_only=True), start=data_start_row):
             comment_rid = ""
             cmt = ws.cell(row_num, 1).comment
             if cmt and isinstance(cmt.text, str) and cmt.text.startswith("row_id:"):
@@ -1119,8 +1260,8 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             ws.cell(rr, 17).number_format = '#,##0.0000000000' if _is_crypto_currency(ccy_bal) else '#,##0.00'
         ws.cell(rr, 18).number_format = r'00\:00\:00\:00'
     _ensure_trade_log_schema(ws)
-    _negative_impact_rule(ws, f"M2:M{max(2, ws.max_row)}")
-    _profit_loss_rules(ws, f"N2:P{max(2, ws.max_row)}")
+    _negative_impact_rule(ws, f"M3:M{max(3, ws.max_row)}")
+    _profit_loss_rules(ws, f"N3:P{max(3, ws.max_row)}")
     _apply_trade_log_win_loss_row_formatting(ws)
     _apply_trade_log_win_loss_direct_row_fills(ws)
 
@@ -1425,6 +1566,47 @@ def _snapshot_invariants(wb) -> Dict[str, Any]:
     return out
 
 
+def _workbook_content_snapshot(wb) -> Dict[str, int]:
+    trade_log = _get_trade_log_sheet(wb)
+    instrument = wb["Instrument Averages"] if "Instrument Averages" in wb.sheetnames else None
+    calendar_ws = wb["P&L Calendar"] if "P&L Calendar" in wb.sheetnames else None
+    instrument_rows = 0
+    if instrument is not None:
+        instrument_rows = sum(
+            1 for row in range(2, instrument.max_row + 1)
+            if any(instrument.cell(row, col).value not in (None, "") for col in range(1, instrument.max_column + 1))
+        )
+    calendar_cells = 0
+    if calendar_ws is not None:
+        calendar_cells = sum(
+            1 for row in calendar_ws.iter_rows()
+            for cell in row if cell.value not in (None, "")
+        )
+    return {
+        "trade_log_data_rows": _trade_log_data_row_count(trade_log),
+        "instrument_average_data_rows": instrument_rows,
+        "pnl_calendar_populated_cells": calendar_cells,
+    }
+
+
+def _assert_workbook_content_not_wiped(before: Dict[str, int], after: Dict[str, int], *, migration_performed: bool) -> None:
+    labels = {
+        "trade_log_data_rows": "Trade Log data rows",
+        "instrument_average_data_rows": "Instrument Averages data rows",
+        "pnl_calendar_populated_cells": "P&L Calendar populated cells",
+    }
+    for key, label in labels.items():
+        before_value = int(before.get(key) or 0)
+        after_value = int(after.get(key) or 0)
+        if before_value > 0 and after_value == 0:
+            raise RuntimeError(f"Workbook update aborted because {label} would be wiped (before={before_value}, after=0).")
+        if migration_performed and after_value < before_value:
+            raise RuntimeError(
+                f"Workbook schema migration aborted because {label} dropped: "
+                f"before={before_value}, after={after_value}."
+            )
+
+
 def _assert_invariants_unchanged(before: Dict[str, Any], after: Dict[str, Any]) -> None:
     skipped = {"pnl_calendar_layout", "pnl_calendar_dimensions", "P&L Calendar_layout", "dash_styles"}
     for key in before.keys() | after.keys():
@@ -1434,14 +1616,14 @@ def _assert_invariants_unchanged(before: Dict[str, Any], after: Dict[str, Any]) 
             raise RuntimeError(f"Workbook structural invariant changed: {key}")
 
 
-def _assert_filter_covers_data(ws, *, sheet_name: str, header_row: int = 1, required_headers: List[str] | None = None) -> None:
+def _assert_filter_covers_data(ws, *, sheet_name: str, header_row: int = 1, required_headers: List[str] | None = None, header_map: Dict[str, int] | None = None) -> None:
     ref = ws.auto_filter.ref if ws.auto_filter else None
     if not ref:
         raise RuntimeError(f"{sheet_name} filter missing.")
     min_col, min_row, max_col, max_row = range_boundaries(ref)
     if min_row != header_row or min_col != 1:
         raise RuntimeError(f"{sheet_name} filter starts at invalid range {ref}.")
-    headers = _header_map(ws, header_row=header_row)
+    headers = header_map or _header_map(ws, header_row=header_row)
     required_headers = required_headers or []
     for h in required_headers:
         col = headers.get(h)
@@ -1758,13 +1940,14 @@ def _clear_account_balance_row(ws, row: int, col_map: Dict[str, int]) -> None:
 
 def _repair_trade_log_row_ids_from_rows(ws, rows, diagnostics):
     diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
-    headers=[str(c.value or '').strip() for c in ws[1]]
-    if 'Row ID' not in headers:
+    headers = _trade_log_header_map(ws)
+    rid_col = headers.get('Row ID')
+    if not rid_col:
         return
-    rid_col=headers.index('Row ID')+1
+    start_row = _trade_log_data_start_row(ws)
     repaired=0
-    for rr in range(2, ws.max_row+1):
-        row_ctx = rows[rr-2] if rr-2 < len(rows) else {}
+    for rr in range(start_row, ws.max_row+1):
+        row_ctx = rows[rr-start_row] if rr-start_row < len(rows) else {}
         expected = str(row_ctx.get('id') or stable_row_id(row_ctx)).strip() if isinstance(row_ctx, dict) else ''
         if not expected:
             continue
@@ -1781,9 +1964,10 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
     wb = load_workbook(path, data_only=True, read_only=True)
     try:
         ws = _get_all_trades_sheet(wb)
-        header_cells = next(ws.iter_rows(min_row=1, max_row=1), tuple()) or tuple()
-        headers = [str(c.value or '').strip() for c in header_cells]
-        idx = {h:i for i,h in enumerate(headers)}
+        header_map = _trade_log_header_map(ws)
+        headers = list(header_map.keys())
+        idx = {header: col - 1 for header, col in header_map.items()}
+        data_start_row = _trade_log_data_start_row(ws)
         required = {'Open Time','Close Time','Account','Symbol','Side'}
         if not required.issubset(set(idx.keys())):
             raise RuntimeError('Master Journal Trade Log headers are invalid.')
@@ -1808,7 +1992,7 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
             max_row = max(1, dim_max_row)
         except Exception:
             pass
-        for row_cells in ws.iter_rows(min_row=2, max_row=max_row, max_col=max_col):
+        for row_cells in ws.iter_rows(min_row=data_start_row, max_row=max_row, max_col=max_col):
             r = [cell.value for cell in row_cells]
             if not any(v not in (None,'') for v in r):
                 continue
@@ -1887,6 +2071,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
     wb = load_workbook(path)
     diagnostics: Dict[str, Any] = {"missing_accounts": [], "updated_cells": 0}
     try:
+        content_before = _workbook_content_snapshot(wb)
         _migrate_legacy_trade_log_sheet_name(wb, diagnostics)
         _remove_legacy_trade_meta_sheet(wb, diagnostics)
         _repair_legacy_instrument_averages_freeze_pane(wb, diagnostics)
@@ -1898,8 +2083,9 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 (headers.get("Commission"), "commission"),
                 (headers.get("Net P/L"), "net_pnl"),
             )
-            for rr in range(2, ws.max_row + 1):
-                row_ctx = rows[rr - 2] if rr - 2 < len(rows) else {}
+            start_row = _trade_log_data_start_row(ws)
+            for rr in range(start_row, ws.max_row + 1):
+                row_ctx = rows[rr - start_row] if rr - start_row < len(rows) else {}
                 for col, field in repair_cols:
                     if not col:
                         continue
@@ -2341,69 +2527,70 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
         gen = load_workbook(tmp, data_only=False)
         try:
             def _copy_data_rows(src_ws, dst_ws, start_row: int, *, force_all_columns: bool = False):
-                src_headers = [str(src_ws.cell(1, c).value or "").strip() for c in range(1, src_ws.max_column + 1)]
-                dst_headers = [str(dst_ws.cell(1, c).value or "").strip() for c in range(1, dst_ws.max_column + 1)]
                 if force_all_columns:
-                    expected = TRADE_LOG_HEADERS
-                    if dst_headers[:len(expected)] != expected:
+                    src_map = _trade_log_header_map(src_ws)
+                    dst_map = _trade_log_header_map(dst_ws)
+                    missing_src = [header for header in TRADE_LOG_HEADERS if header not in src_map]
+                    missing_dst = [header for header in TRADE_LOG_HEADERS if header not in dst_map]
+                    if missing_src or missing_dst:
                         raise RuntimeError(
-                            "Trade Log headers do not match expected template: "
-                            f"expected {expected!r}, found {dst_headers[:len(expected)]!r}"
+                            "Trade Log logical headers do not match expected template: "
+                            f"missing_source={missing_src!r}, missing_destination={missing_dst!r}."
                         )
-                    missing_src = [h for h in expected if h not in src_headers]
-                    if missing_src:
-                        raise RuntimeError(f"Generated Trade Log missing headers: {missing_src!r}")
-                    max_col = len(expected)
+                    header_pairs = [(src_map[header], dst_map[header], header) for header in TRADE_LOG_HEADERS]
+                    max_col = len(TRADE_LOG_HEADERS)
                 else:
+                    src_headers = [str(src_ws.cell(1, c).value or "").strip() for c in range(1, src_ws.max_column + 1)]
+                    dst_headers = [str(dst_ws.cell(1, c).value or "").strip() for c in range(1, dst_ws.max_column + 1)]
+                    src_map = {header: idx + 1 for idx, header in enumerate(src_headers) if header}
+                    dst_map = {header: idx + 1 for idx, header in enumerate(dst_headers) if header}
                     max_col = min(src_ws.max_column, dst_ws.max_column)
-                src_map = {h: i + 1 for i, h in enumerate(src_headers) if h}
-                dst_map = {h: i + 1 for i, h in enumerate(dst_headers) if h}
-                header_pairs = []
-                if force_all_columns:
-                    for h in TRADE_LOG_HEADERS:
-                        header_pairs.append((src_map[h], dst_map[h], h))
-                else:
-                    for h, dc in dst_map.items():
-                        sc = src_map.get(h)
-                        if sc and dc <= max_col:
-                            header_pairs.append((sc, dc, h))
+                    header_pairs = [
+                        (src_map[header], dst_col, header)
+                        for header, dst_col in dst_map.items()
+                        if header in src_map and dst_col <= max_col
+                    ]
                 clear_max_col = max(dst_ws.max_column, max_col) if force_all_columns else max_col
-                for r in range(start_row, dst_ws.max_row + 1):
-                    for c in range(1, clear_max_col + 1):
-                        if _is_merged_non_anchor(dst_ws, r, c):
+                for row in range(start_row, dst_ws.max_row + 1):
+                    for col in range(1, clear_max_col + 1):
+                        if _is_merged_non_anchor(dst_ws, row, col):
                             continue
-                        dc = dst_ws.cell(r, c)
-                        dc.value = None
-                        dc.comment = None
-                        dc.hyperlink = None
-                for r in range(start_row, src_ws.max_row + 1):
-                    for sc_idx, dc_idx, header in header_pairs:
-                        if _is_merged_non_anchor(dst_ws, r, dc_idx):
+                        cell = dst_ws.cell(row, col)
+                        cell.value = None
+                        cell.comment = None
+                        cell.hyperlink = None
+                src_start_row = _trade_log_data_start_row(src_ws) if force_all_columns else start_row
+                dst_row = start_row
+                for src_row in range(src_start_row, src_ws.max_row + 1):
+                    if force_all_columns and not any(src_ws.cell(src_row, col).value not in (None, "") for col in range(1, max_col + 1)):
+                        continue
+                    for src_col, dst_col, _header in header_pairs:
+                        if _is_merged_non_anchor(dst_ws, dst_row, dst_col):
                             continue
-                        sc = src_ws.cell(r, sc_idx)
-                        dc = dst_ws.cell(r, dc_idx)
-                        dc.value = sc.value
-                        dc.number_format = sc.number_format
-                        dc.comment = copy(sc.comment) if sc.comment else None
-                        dc.hyperlink = copy(sc.hyperlink) if sc.hyperlink else None
-                last_row = max(start_row - 1, src_ws.max_row)
+                        src_cell = src_ws.cell(src_row, src_col)
+                        dst_cell = dst_ws.cell(dst_row, dst_col)
+                        dst_cell.value = src_cell.value
+                        dst_cell.number_format = src_cell.number_format
+                        dst_cell.comment = copy(src_cell.comment) if src_cell.comment else None
+                        dst_cell.hyperlink = copy(src_cell.hyperlink) if src_cell.hyperlink else None
+                    dst_row += 1
+                last_row = max(start_row - 1, dst_row - 1)
                 if force_all_columns:
-                    dst_ws.auto_filter.ref = f"A1:{get_column_letter(len(TRADE_LOG_HEADERS))}{max(1, max(last_row, dst_ws.max_row))}"
+                    _set_trade_log_auto_filter(dst_ws)
                     _hide_trade_log_row_id(dst_ws)
                     _apply_trade_log_dropdown_validations(dst_ws)
-                else:
-                    if dst_ws.auto_filter and dst_ws.auto_filter.ref:
-                        last_col_letter = get_column_letter(max_col)
-                        dst_ws.auto_filter.ref = f"A1:{last_col_letter}{max(1,last_row)}"
+                elif dst_ws.auto_filter and dst_ws.auto_filter.ref:
+                    last_col_letter = get_column_letter(max_col)
+                    dst_ws.auto_filter.ref = f"A1:{last_col_letter}{max(1,last_row)}"
 
 
             gen_trade_log = _get_all_trades_sheet(gen, allow_legacy=False)
             live_trade_log = _get_all_trades_sheet(wb, allow_legacy=False)
-            _copy_data_rows(gen_trade_log, live_trade_log, 2, force_all_columns=True)
+            _copy_data_rows(gen_trade_log, live_trade_log, TRADE_LOG_DATA_START_ROW, force_all_columns=True)
             _repair_trade_log_row_ids_from_rows(live_trade_log, rows, diagnostics)
             if expected_survivor_row_ids:
-                headers = [str(c.value or "").strip() for c in live_trade_log[1]]
-                ridx = headers.index("Row ID") + 1 if "Row ID" in headers else None
+                header_map = _trade_log_header_map(live_trade_log)
+                ridx = header_map.get("Row ID")
                 if not ridx:
                     return {
                         "ok": False,
@@ -2412,7 +2599,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                         "reason": "missing_row_id_header",
                         "diagnostics": diagnostics,
                     }
-                present = {str(live_trade_log.cell(rr, ridx).value or "").strip() for rr in range(2, live_trade_log.max_row + 1)}
+                present = {str(live_trade_log.cell(rr, ridx).value or "").strip() for rr in range(_trade_log_data_start_row(live_trade_log), live_trade_log.max_row + 1)}
                 missing = sorted([rid for rid in expected_survivor_row_ids if rid and rid not in present])
                 if missing:
                     return {"ok": False, "error": "workbook_row_survivor_verification_failed", "missing_row_ids": missing, "diagnostics": diagnostics}
@@ -2473,7 +2660,13 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             tmp.unlink(missing_ok=True)
 
         trade_log = _get_all_trades_sheet(wb, allow_legacy=False)
-        _assert_filter_covers_data(trade_log, sheet_name="Trade Log", header_row=1, required_headers=["Open Time", "Close Time", "Row ID"])
+        content_after = _workbook_content_snapshot(wb)
+        _assert_workbook_content_not_wiped(
+            content_before,
+            content_after,
+            migration_performed=bool(diagnostics.get("migrated_trade_log_schema")),
+        )
+        _assert_filter_covers_data(trade_log, sheet_name="Trade Log", header_row=TRADE_LOG_FILTER_HEADER_ROW, required_headers=["Open Time", "Close Time", "Row ID"], header_map=_trade_log_header_map(trade_log))
         _assert_filter_covers_data(wb["Instrument Averages"], sheet_name="Instrument Averages", header_row=1, required_headers=["Symbol", "Trades"])
 
         after = _snapshot_invariants(wb)

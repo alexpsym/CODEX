@@ -2,7 +2,7 @@ from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 import pytest
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, SHEET_ORDER, TRADE_LOG_HEADERS, OLD_TRADE_LOG_HEADERS, PRE_MOVE_TRADE_LOG_HEADERS, MOVE_TO_FIELD_MAP, _ensure_trade_log_schema, _ensure_pnl_calendar_freeze_panes
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, SHEET_ORDER, TRADE_LOG_HEADERS, OLD_TRADE_LOG_HEADERS, PRE_MOVE_TRADE_LOG_HEADERS, MOVE_TO_FIELD_MAP, TRADE_LOG_DATA_START_ROW, _ensure_trade_log_schema, _ensure_pnl_calendar_freeze_panes, _trade_log_header_map
 from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter
 
 def _cf_ranges(ws):
@@ -21,16 +21,25 @@ def _cell_covered(ranges, cell):
 
 
 def _header_col(ws, name: str) -> int:
+    if ws.title in {"Trade Log", "All Trades"}:
+        return _trade_log_header_map(ws)[name]
     headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
     return headers.index(name) + 1
 
 
+def _trade_data_row(index: int = 0) -> int:
+    return TRADE_LOG_DATA_START_ROW + index
+
+
 def _ensure_trade_log_headers(wb) -> None:
     ws = wb["Trade Log"] if "Trade Log" in wb.sheetnames else wb.create_sheet("Trade Log")
-    for idx, header in enumerate(TRADE_LOG_HEADERS, start=1):
-        ws.cell(1, idx).value = header
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = f"A1:{get_column_letter(len(TRADE_LOG_HEADERS))}1"
+    existing = [str(ws.cell(1, col).value or "").strip() for col in range(1, ws.max_column + 1)]
+    while existing and not existing[-1]:
+        existing.pop()
+    if not existing or existing == TRADE_LOG_HEADERS[:len(existing)]:
+        for col, header in enumerate(TRADE_LOG_HEADERS, start=1):
+            ws.cell(1, col, header)
+    _ensure_trade_log_schema(ws)
     if "Instrument Averages" in wb.sheetnames:
         inst = wb["Instrument Averages"]
         inst_headers = ["Symbol","Class","Trades","Longs","Shorts","Wins","Losses","Break-even","Long wins","Long losses","Short wins","Short losses","Long break-even","Short break-even","Net P/L %","Avg P/L %","Win Rate %","Avg stop % (W)","Avg stop % (L)","Avg target % (W)","Avg target % (L)","Shortest duration (DD:HH:MM:SS)","Avg duration (DD:HH:MM:SS)","Longest duration (DD:HH:MM:SS)"]
@@ -91,7 +100,7 @@ def test_dashboard_parity_and_equity(tmp_path: Path):
 
 def test_manual_override_roundtrip(tmp_path: Path):
     out=tmp_path/'Trading Journal.xlsx'; build_master_journal_workbook(sample_snapshot(), out)
-    wb=load_workbook(out); ws=wb['Trade Log']; ws.cell(2, _header_col(ws, 'Test')).value='Yes'; ws.cell(2, _header_col(ws, 'Setup')).value='AAA'; wb.save(out)
+    wb=load_workbook(out); ws=wb['Trade Log']; ws.cell(_trade_data_row(), _header_col(ws, 'Test')).value='Yes'; ws.cell(_trade_data_row(), _header_col(ws, 'Setup')).value='AAA'; wb.save(out)
     ov=read_master_journal_manual_overrides(out)
     assert ov['t1']['is_test_trade'] is True and ov['t1']['setup']=='AAA'
 
@@ -121,11 +130,82 @@ def test_pre_move_schema_migrates_stop_out_value_and_hides_row_id():
     ws.cell(2, PRE_MOVE_TRADE_LOG_HEADERS.index("Stop Out") + 1, "Yes")
     ws.cell(2, PRE_MOVE_TRADE_LOG_HEADERS.index("Row ID") + 1, "row-1")
     _ensure_trade_log_schema(ws)
-    assert ws.cell(2, _header_col(ws, "Close Stopout")).value == "Yes"
-    assert ws.cell(2, _header_col(ws, "Row ID")).value == "row-1"
+    assert ws.cell(_trade_data_row(), _header_col(ws, "Close Stopout")).value == "Yes"
+    assert ws.cell(_trade_data_row(), _header_col(ws, "Row ID")).value == "row-1"
     assert get_column_letter(_header_col(ws, "Row ID")) == "AV"
     assert ws.column_dimensions["AV"].hidden is True
-    assert ws.auto_filter.ref == "A1:AV2"
+    assert ws.auto_filter.ref == "A2:AV3"
+
+
+def test_trade_log_two_row_umbrella_headers_and_filter(tmp_path: Path):
+    out = tmp_path / "two_row_headers.xlsx"
+    build_master_journal_workbook(sample_snapshot(), out)
+    wb = load_workbook(out)
+    ws = wb["Trade Log"]
+    assert "S1:W1" in {str(rng) for rng in ws.merged_cells.ranges}
+    assert "X1:AB1" in {str(rng) for rng in ws.merged_cells.ranges}
+    assert ws["S1"].value == "Move to Break-Even"
+    assert ws["X1"].value == "Move to Profit"
+    expected = ["Time", "Duration", "Trigger Price", "Distance From Entry %", "Distance From Exit %"]
+    assert [ws.cell(2, col).value for col in range(19, 24)] == expected
+    assert [ws.cell(2, col).value for col in range(24, 29)] == expected
+    assert ws.freeze_panes == "A3"
+    assert ws.auto_filter.ref == f"A2:AV{ws.max_row}"
+    assert ws.cell(3, _header_col(ws, "Row ID")).value == "t1"
+    assert ws.column_dimensions["AV"].hidden is True
+    pattern_validations = _validation_for_col(ws, get_column_letter(_header_col(ws, "Pattern")))
+    assert any(dv.formula1 == '"range,channel"' and dv.allow_blank for dv in pattern_validations)
+    wb.close()
+
+
+def test_schema_migration_preserves_trade_and_derived_sheet_content(tmp_path: Path):
+    out = tmp_path / "preserve_content.xlsx"
+    build_master_journal_workbook(sample_snapshot(), out)
+    wb = load_workbook(out)
+    ws = wb["Trade Log"]
+    # Convert the generated sheet back to the pre-move flat schema to exercise migration.
+    data = [[ws.cell(row, _header_col(ws, header)).value for header in PRE_MOVE_TRADE_LOG_HEADERS if header != "Close" and header != "Stop Out"] for row in range(3, ws.max_row + 1)]
+    wb.close()
+
+    from openpyxl import Workbook
+    legacy = Workbook()
+    legacy.remove(legacy.active)
+    for name in ["Dashboard", "Trade Log", "Instrument Averages", "P&L Calendar"]:
+        legacy.create_sheet(name)
+    trade = legacy["Trade Log"]
+    for col, header in enumerate(PRE_MOVE_TRADE_LOG_HEADERS, start=1):
+        trade.cell(1, col, header)
+    for row_idx, source in enumerate(data, start=2):
+        source_map = {header: value for header, value in zip([h for h in PRE_MOVE_TRADE_LOG_HEADERS if h not in {"Close", "Stop Out"}], source)}
+        for col, header in enumerate(PRE_MOVE_TRADE_LOG_HEADERS, start=1):
+            trade.cell(row_idx, col, source_map.get(header, "Yes" if header == "Stop Out" else None))
+    legacy["Instrument Averages"].append(["Symbol", "Trades"])
+    legacy["Instrument Averages"].append(["EURUSD", 2])
+    legacy["P&L Calendar"]["C1"] = "January"
+    legacy["P&L Calendar"]["A2"] = 2026
+    legacy["P&L Calendar"]["B2"] = "P/L %"
+    legacy["P&L Calendar"]["C2"] = 0.01
+    before_trade_rows = trade.max_row - 1
+    before_instrument = legacy["Instrument Averages"]["A2"].value
+    before_calendar = legacy["P&L Calendar"]["C2"].value
+    _ensure_trade_log_schema(trade)
+    assert trade.max_row - 2 == before_trade_rows
+    assert legacy["Instrument Averages"]["A2"].value == before_instrument
+    assert legacy["P&L Calendar"]["C2"].value == before_calendar
+    assert all(trade.cell(row, _header_col(trade, "Row ID")).value for row in range(3, trade.max_row + 1))
+    legacy.close()
+
+
+def test_data_only_update_aborts_before_wiping_populated_sheets(tmp_path: Path):
+    path = tmp_path / "no_wipe.xlsx"
+    build_master_journal_workbook(sample_snapshot(), path)
+    empty_snapshot = {
+        "items": [],
+        "stats": {"totals": {}, "groups": {"by_market": {"overall": {}, "fx": {}, "crypto": {}}, "risk_expectancy": {}, "leaders": {}, "duration": {}}},
+        "balances": [],
+    }
+    with pytest.raises(RuntimeError, match="would be wiped"):
+        update_master_journal_workbook_data_only(path, empty_snapshot)
 
 def test_calendar_month_conditional_formatting_rows(tmp_path: Path):
     snap=sample_snapshot()
@@ -166,8 +246,8 @@ def test_unanchored_account_does_not_fabricate_equity(tmp_path: Path):
     ]
     out=tmp_path/'u.xlsx'; build_master_journal_workbook(s,out); wb=load_workbook(out)
     ws=wb['Trade Log']
-    assert ws.cell(2, _header_col(ws, 'Balance After')).value in ('', None)
-    assert ws.cell(3, _header_col(ws, 'Balance After')).value in ('', None)
+    assert ws.cell(_trade_data_row(), _header_col(ws, 'Balance After')).value in ('', None)
+    assert ws.cell(4, _header_col(ws, 'Balance After')).value in ('', None)
 
 
 def test_trade_log_hidden_row_id_and_unsorted_override(tmp_path: Path):
@@ -176,27 +256,27 @@ def test_trade_log_hidden_row_id_and_unsorted_override(tmp_path: Path):
     headers=[ws.cell(1,c).value for c in range(1,ws.max_column+1)]
     assert '__row_id' not in headers
     assert ws.max_column == len(TRADE_LOG_HEADERS)
-    assert ws["A2"].comment is None
-    ws.cell(2, _header_col(ws, 'Test')).value='Yes'; ws.cell(2, _header_col(ws, 'Setup')).value='setup-x'; wb.save(out)
+    assert ws["A3"].comment is None
+    ws.cell(_trade_data_row(), _header_col(ws, 'Test')).value='Yes'; ws.cell(_trade_data_row(), _header_col(ws, 'Setup')).value='setup-x'; wb.save(out)
     ov=read_master_journal_manual_overrides(out)
     assert ov["t1"]["is_test_trade"] is True
     assert ov["t1"]["setup"] == "setup-x"
     assert len(ws.conditional_formatting) > 0
-    assert ws.cell(2, _header_col(ws, "Profit %")).number_format == "0.00%"
-    assert ws["A2"].comment is None
-    assert ws.cell(2, _header_col(ws, "Profit %")).value in (0.023, -0.011)
+    assert ws.cell(_trade_data_row(), _header_col(ws, "Profit %")).number_format == "0.00%"
+    assert ws["A3"].comment is None
+    assert ws.cell(_trade_data_row(), _header_col(ws, "Profit %")).value in (0.023, -0.011)
 
 
 def test_legacy_comment_row_id_preferred_over_trade_meta_after_row_move(tmp_path: Path):
     out=tmp_path/'legacy.xlsx'; build_master_journal_workbook(sample_snapshot(), out)
     wb=load_workbook(out); ws=wb['Trade Log']
     from openpyxl.comments import Comment
-    ws["A2"].comment = Comment("row_id:t1", "legacy")
-    ws["A3"].comment = Comment("row_id:t2", "legacy")
+    ws["A3"].comment = Comment("row_id:t1", "legacy")
+    ws["A4"].comment = Comment("row_id:t2", "legacy")
     for c in range(1, ws.max_column+1):
-        ws.cell(2,c).value, ws.cell(3,c).value = ws.cell(3,c).value, ws.cell(2,c).value
+        ws.cell(3,c).value, ws.cell(4,c).value = ws.cell(4,c).value, ws.cell(3,c).value
     # stale _Trade Meta row mapping now conflicts with moved comments
-    ws.cell(2, _header_col(ws, "Setup")).value = "moved-comment-target"
+    ws.cell(_trade_data_row(), _header_col(ws, "Setup")).value = "moved-comment-target"
     wb.save(out)
     ov=read_master_journal_manual_overrides(out)
     assert ov["t1"]["setup"] == "moved-comment-target"
@@ -210,13 +290,13 @@ def test_balance_after_resolution_and_duration_display(tmp_path: Path):
     ]
     out=tmp_path/'m3.xlsx'; build_master_journal_workbook(s,out); wb=load_workbook(out)
     ws=wb['Trade Log']
-    assert ws.cell(2, _header_col(ws, 'Balance After')).value == 100
-    assert ws.cell(3, _header_col(ws, 'Balance After')).value == 105
-    assert ws.cell(4, _header_col(ws, 'Balance After')).value in ("", None)
+    assert ws.cell(_trade_data_row(), _header_col(ws, 'Balance After')).value == 100
+    assert ws.cell(4, _header_col(ws, 'Balance After')).value == 105
+    assert ws.cell(5, _header_col(ws, 'Balance After')).value in ("", None)
     assert ws.cell(1, _header_col(ws, 'Trade Duration (DD:HH:MM:SS)')).value == 'Trade Duration (DD:HH:MM:SS)'
-    assert ws.cell(2, _header_col(ws, 'Trade Duration (DD:HH:MM:SS)')).value == 41
-    assert ws.cell(3, _header_col(ws, 'Trade Duration (DD:HH:MM:SS)')).value == 503
-    assert ws.cell(2, _header_col(ws, 'Trade Duration (DD:HH:MM:SS)')).number_format == r'00\:00\:00\:00'
+    assert ws.cell(_trade_data_row(), _header_col(ws, 'Trade Duration (DD:HH:MM:SS)')).value == 41
+    assert ws.cell(4, _header_col(ws, 'Trade Duration (DD:HH:MM:SS)')).value == 503
+    assert ws.cell(_trade_data_row(), _header_col(ws, 'Trade Duration (DD:HH:MM:SS)')).number_format == r'00\:00\:00\:00'
     inst=wb['Instrument Averages']
     assert isinstance(inst['V2'].value, (int, float))
     assert isinstance(inst['W2'].value, (int, float))
@@ -260,7 +340,7 @@ def test_trade_log_preserves_explicit_bybit_execution_row_id(tmp_path: Path):
     ws = load_workbook(out)["Trade Log"]
     headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
     rid_col = headers.index("Row ID") + 1
-    assert ws.cell(2, rid_col).value == "bybit:demo:execution:BTCUSDT:E1"
+    assert ws.cell(3, rid_col).value == "bybit:demo:execution:BTCUSDT:E1"
 
 def test_update_data_only_migrates_legacy_all_trades_and_removes_trade_meta(tmp_path: Path):
     out = tmp_path / "Trading Journal.xlsx"
@@ -359,7 +439,7 @@ def test_conditional_format_colors_and_dashboard_semantics(tmp_path: Path):
                     assert not _cell_covered(_cf_ranges(dash), f"{chr(64+vc)}{r}")
     # Trade Log row-level rules cover the full visible row without overlapping value-cell fill rules.
     tr = _cf_ranges(trade_log)
-    assert any(r.startswith("A2:AV") for r in tr)
+    assert any(r.startswith("A3:AV") for r in tr)
     assert not any("M2:M" in r for r in tr)
     assert not any("N2:P" in r for r in tr)
     colors = _all_rule_colors(trade_log) + _all_rule_colors(dash) + _all_rule_colors(wb["P&L Calendar"]) + _all_rule_colors(wb["Instrument Averages"])
@@ -402,8 +482,8 @@ def test_build_workbook_forces_blank_setup_for_semantic_rows(tmp_path: Path):
     ws = load_workbook(out)["Trade Log"]
     setup_col = _header_col(ws, 'Setup')
     notes_col = _header_col(ws, 'Notes')
-    assert ws.cell(2, setup_col).value in ("", None) and ws.cell(2, notes_col).value == "monthly"
-    assert ws.cell(3, setup_col).value in ("", None) and ws.cell(3, notes_col).value == "cash detail"
+    assert ws.cell(3, setup_col).value in ("", None) and ws.cell(3, notes_col).value == "monthly"
+    assert ws.cell(4, setup_col).value in ("", None) and ws.cell(4, notes_col).value == "cash detail"
 
 def test_instrument_currency_and_percent_formats(tmp_path: Path):
     out=tmp_path/'fmt.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
@@ -598,11 +678,11 @@ def test_trade_log_commission_zero_none_blank_and_nonzero(tmp_path: Path):
     build_master_journal_workbook(s, out)
     ws = load_workbook(out)["Trade Log"]
     comm_col = _header_col(ws, 'Commission')
-    assert ws.cell(2, comm_col).value in ("", None)
     assert ws.cell(3, comm_col).value in ("", None)
     assert ws.cell(4, comm_col).value in ("", None)
-    assert ws.cell(5, comm_col).value == 1.25
-    assert "AUD" in str(ws.cell(5, comm_col).number_format or "")
+    assert ws.cell(5, comm_col).value in ("", None)
+    assert ws.cell(6, comm_col).value == 1.25
+    assert "AUD" in str(ws.cell(6, comm_col).number_format or "")
 
 def test_trade_log_currency_inference_avoids_unknown_and_respects_fx_vs_crypto(tmp_path: Path):
     s = sample_snapshot()
@@ -642,9 +722,9 @@ def test_update_data_only_repairs_unknown_trade_log_currency_formats(tmp_path: P
     out = tmp_path / "repair_unknown.xlsx"
     build_master_journal_workbook(s, out)
     wb = load_workbook(out); ws = wb["Trade Log"]
-    ws.cell(2, _header_col(ws, "Commission")).number_format = '#,##0.00 "UNKNOWN"'
-    ws.cell(2, _header_col(ws, "Net P/L")).number_format = '#,##0.00 "UNKNOWN"'
-    ws.cell(3, _header_col(ws, "Net P/L")).number_format = '#,##0.00 "UNKNOWN"'
+    ws.cell(_trade_data_row(), _header_col(ws, "Commission")).number_format = '#,##0.00 "UNKNOWN"'
+    ws.cell(_trade_data_row(), _header_col(ws, "Net P/L")).number_format = '#,##0.00 "UNKNOWN"'
+    ws.cell(5, _header_col(ws, "Net P/L")).number_format = '#,##0.00 "UNKNOWN"'
     ws.cell(4, _header_col(ws, "Net P/L")).number_format = '#,##0.00 "UNKNOWN"'
     wb.save(out); wb.close()
     res = update_master_journal_workbook_data_only(out, s)
@@ -771,14 +851,14 @@ def test_update_master_journal_workbook_data_only_repairs_corrupted_row_id_cells
     wb = load_workbook(path)
     ws = wb["Trade Log"]
     row_id_col = _header_col(ws, "Row ID")
-    ws.cell(2, row_id_col).value = "monthly_aud_reval:bybit_live:2026-05"
+    ws.cell(3, row_id_col).value = "monthly_aud_reval:bybit_live:2026-05"
     wb.save(path)
 
     result = update_master_journal_workbook_data_only(path, snapshot)
     Path(result["candidate_path"]).replace(path)
     repaired = load_workbook(path)["Trade Log"]
-    assert repaired.cell(2, row_id_col).value == snapshot["items"][0]["id"]
-    assert repaired.cell(2, row_id_col).value != "monthly_aud_reval:bybit_live:2026-05"
+    assert repaired.cell(3, row_id_col).value == snapshot["items"][0]["id"]
+    assert repaired.cell(3, row_id_col).value != "monthly_aud_reval:bybit_live:2026-05"
     assert result["diagnostics"].get("repaired_trade_log_row_ids", 0) >= 0
 
 def test_instrument_leaders_skips_missing_optional_rows(tmp_path: Path):
@@ -1055,7 +1135,7 @@ def test_legacy_all_trades_migrates_to_trade_log(tmp_path: Path):
     wb = load_workbook(p)
     wb["Trade Log"].title = "All Trades"
     wb.save(p)
-    snap={"items":[],"stats":{"totals":{},"groups":{"by_market":{"overall":{},"fx":{},"crypto":{}},"risk_expectancy":{},"leaders":{},"duration":{}}},"balances":[]}
+    snap = sample_snapshot()
     res=update_master_journal_workbook_data_only(p,snap)
     assert res["ok"] is True
     assert res["diagnostics"].get("migrated_trade_log_sheet") is True
@@ -1275,10 +1355,10 @@ def test_generated_trade_log_distance_fraction_displays_one_percent(tmp_path: Pa
     }]
     build_master_journal_workbook(snap, out)
     ws = load_workbook(out)["Trade Log"]
-    assert ws["J2"].value == pytest.approx(0.01)
-    assert ws["J2"].number_format == "0.00%"
-    assert ws["L2"].value == pytest.approx(0.01)
-    assert ws["L2"].number_format == "0.00%"
+    assert ws["J3"].value == pytest.approx(0.01)
+    assert ws["J3"].number_format == "0.00%"
+    assert ws["L3"].value == pytest.approx(0.01)
+    assert ws["L3"].number_format == "0.00%"
 
 def test_trade_log_new_schema_distances_and_header_aware_update(tmp_path: Path):
     out = tmp_path / "new_schema.xlsx"
@@ -1286,11 +1366,11 @@ def test_trade_log_new_schema_distances_and_header_aware_update(tmp_path: Path):
     build_master_journal_workbook(snap, out)
     wb = load_workbook(out)
     ws = wb["Trade Log"]
-    assert [ws.cell(1, c).value for c in range(1, len(TRADE_LOG_HEADERS) + 1)] == TRADE_LOG_HEADERS
-    assert ws["J2"].number_format == "0.00%"
-    assert ws["L2"].number_format == "0.00%"
-    assert ws["J2"].value == pytest.approx(abs(1.09 - 1.1) / 1.1)
-    assert ws["L2"].value == pytest.approx(abs(1.12 - 1.1) / 1.1)
+    assert _trade_log_header_map(ws) == {header: col for col, header in enumerate(TRADE_LOG_HEADERS, start=1)}
+    assert ws["J3"].number_format == "0.00%"
+    assert ws["L3"].number_format == "0.00%"
+    assert ws["J3"].value == pytest.approx(abs(1.09 - 1.1) / 1.1)
+    assert ws["L3"].value == pytest.approx(abs(1.12 - 1.1) / 1.1)
     assert ws["K1"].value == "Target Price"
     assert ws["M1"].value == "Commission"
     assert ws["N1"].value == "Net P/L"
@@ -1303,12 +1383,12 @@ def test_trade_log_new_schema_distances_and_header_aware_update(tmp_path: Path):
     Path(result["candidate_path"]).replace(out)
     updated = load_workbook(out)
     ws2 = updated["Trade Log"]
-    assert [ws2.cell(1, c).value for c in range(1, len(TRADE_LOG_HEADERS) + 1)] == TRADE_LOG_HEADERS
-    assert ws2["M2"].value in (None, "")
-    assert ws2["N2"].value == 120.5
-    assert ws2["O2"].value == pytest.approx(0.023)
-    assert ws2["P2"].value == 1.2
-    assert ws2["Q2"].value == 1000
+    assert _trade_log_header_map(ws2) == {header: col for col, header in enumerate(TRADE_LOG_HEADERS, start=1)}
+    assert ws2["M3"].value in (None, "")
+    assert ws2["N3"].value == 120.5
+    assert ws2["O3"].value == pytest.approx(0.023)
+    assert ws2["P3"].value == 1.2
+    assert ws2["Q3"].value == 1000
     updated.close()
 
 
@@ -1431,7 +1511,7 @@ def test_trade_log_quality_columns_insert_after_test(tmp_path: Path):
     assert res["ok"] is True
     Path(res["candidate_path"]).replace(p)
     ws = load_workbook(p)["Trade Log"]
-    headers = [ws.cell(1, c).value for c in range(1, len(TRADE_LOG_HEADERS) + 1)]
+    headers = list(_trade_log_header_map(ws))
     assert headers == TRADE_LOG_HEADERS
     duration_col = _header_col(ws, "Trade Duration (DD:HH:MM:SS)")
     assert headers[duration_col:duration_col + 10] == list(MOVE_TO_FIELD_MAP)
@@ -1439,7 +1519,7 @@ def test_trade_log_quality_columns_insert_after_test(tmp_path: Path):
     assert _header_col(ws, "Close Stopout") > _header_col(ws, "Pattern")
     assert ws["AV1"].value == "Row ID"
     assert ws.column_dimensions["AV"].hidden is True
-    assert ws.auto_filter.ref == f"A1:{get_column_letter(len(TRADE_LOG_HEADERS))}{ws.max_row}"
+    assert ws.auto_filter.ref == f"A2:{get_column_letter(len(TRADE_LOG_HEADERS))}{ws.max_row}"
 
 def test_trade_log_quality_dropdowns(tmp_path: Path):
     p = tmp_path / "quality_dropdowns.xlsx"
@@ -1463,8 +1543,8 @@ def test_trade_log_quality_manual_values_survive_resync(tmp_path: Path):
     ws = wb["Trade Log"]
     vals = {"Pattern": "legacy-manual", "EMA": "20/50", "ATHS/ATLS": "All-Time High", "Order": "Limit", "Round Number": "Yes", "Spiked Out": "No", "Close Stopout": "No", "Near Perfect Entry": "Yes", "Near Win": "No", "Early Close": "Yes", "Move to Break Even Time": "2026-01-01 10:00", "Move to Profit Trigger Price": "123.45"}
     for header, value in vals.items():
-        ws.cell(2, _header_col(ws, header), value)
-    row_id = ws.cell(2, _header_col(ws, "Row ID")).value
+        ws.cell(_trade_data_row(), _header_col(ws, header), value)
+    row_id = ws.cell(_trade_data_row(), _header_col(ws, "Row ID")).value
     wb.save(p); wb.close()
     res = update_master_journal_workbook_data_only(p, snap)
     assert res["ok"] is True
@@ -1481,10 +1561,10 @@ def test_read_master_journal_manual_overrides_reads_quality_columns(tmp_path: Pa
     build_master_journal_workbook(sample_snapshot(), p)
     wb = load_workbook(p)
     ws = wb["Trade Log"]
-    ws.cell(2, _header_col(ws, "Pattern"), "Pullback")
-    ws.cell(2, _header_col(ws, "EMA"), "9")
-    ws.cell(2, _header_col(ws, "ATHS/ATLS"), "All-Time Low")
-    rid = ws.cell(2, _header_col(ws, "Row ID")).value
+    ws.cell(_trade_data_row(), _header_col(ws, "Pattern"), "Pullback")
+    ws.cell(_trade_data_row(), _header_col(ws, "EMA"), "9")
+    ws.cell(_trade_data_row(), _header_col(ws, "ATHS/ATLS"), "All-Time Low")
+    rid = ws.cell(_trade_data_row(), _header_col(ws, "Row ID")).value
     wb.save(p); wb.close()
     ov = read_master_journal_manual_overrides(p)
     assert ov[rid]["pattern"] == "Pullback"
@@ -1497,10 +1577,10 @@ def test_read_master_journal_source_reads_quality_columns(tmp_path: Path):
     build_master_journal_workbook(sample_snapshot(), p)
     wb = load_workbook(p)
     ws = wb["Trade Log"]
-    ws.cell(2, _header_col(ws, "Pattern"), "Range")
-    ws.cell(2, _header_col(ws, "Order"), "Market")
-    ws.cell(2, _header_col(ws, "Near Win"), "Yes")
-    rid = ws.cell(2, _header_col(ws, "Row ID")).value
+    ws.cell(_trade_data_row(), _header_col(ws, "Pattern"), "Range")
+    ws.cell(_trade_data_row(), _header_col(ws, "Order"), "Market")
+    ws.cell(_trade_data_row(), _header_col(ws, "Near Win"), "Yes")
+    rid = ws.cell(_trade_data_row(), _header_col(ws, "Row ID")).value
     wb.save(p); wb.close()
     item = next(r for r in read_master_journal_source(p)["items"] if r["id"] == rid)
     assert item["pattern"] == "Range"
@@ -1555,8 +1635,8 @@ def test_update_data_only_repairs_unknown_currency_formats_after_schema_migratio
         result = real_build(snapshot, output_path)
         wb = load_workbook(output_path)
         ws = wb["Trade Log"]
-        ws.cell(2, _header_col(ws, "Commission")).number_format = '#,##0.00 "UNKNOWN"'
-        ws.cell(2, _header_col(ws, "Net P/L")).number_format = '#,##0.00 "UNKNOWN"'
+        ws.cell(_trade_data_row(), _header_col(ws, "Commission")).number_format = '#,##0.00 "UNKNOWN"'
+        ws.cell(_trade_data_row(), _header_col(ws, "Net P/L")).number_format = '#,##0.00 "UNKNOWN"'
         wb.save(output_path)
         wb.close()
         return result
@@ -1568,8 +1648,8 @@ def test_update_data_only_repairs_unknown_currency_formats_after_schema_migratio
     ws = load_workbook(p)["Trade Log"]
     assert ws.cell(1, 13).value == "Commission"
     assert ws.cell(1, 14).value == "Net P/L"
-    commission_format = str(ws.cell(2, _header_col(ws, "Commission")).number_format or "")
-    net_pl_format = str(ws.cell(2, _header_col(ws, "Net P/L")).number_format or "")
+    commission_format = str(ws.cell(_trade_data_row(), _header_col(ws, "Commission")).number_format or "")
+    net_pl_format = str(ws.cell(_trade_data_row(), _header_col(ws, "Net P/L")).number_format or "")
     assert "UNKNOWN" not in commission_format
     assert "UNKNOWN" not in net_pl_format
     assert "AUD" in commission_format
@@ -1594,12 +1674,12 @@ def test_trade_log_win_loss_row_conditional_formatting_uses_current_schema(tmp_p
     ws = load_workbook(out)["Trade Log"]
     row_type_letter = get_column_letter(_header_col(ws, "Row Type"))
     net_pl_letter = get_column_letter(_header_col(ws, "Net P/L"))
-    expected_range = f"A2:{get_column_letter(len(TRADE_LOG_HEADERS))}{ws.max_row}"
+    expected_range = f"A3:{get_column_letter(len(TRADE_LOG_HEADERS))}{ws.max_row}"
     row_rules = [d for d in _cf_rule_details(ws) if d[0] == expected_range]
     formulas = {tuple(d[1]) for d in row_rules}
-    assert (f'AND(${row_type_letter}2="trade",${net_pl_letter}2>0)',) in formulas
-    assert (f'AND(${row_type_letter}2="trade",${net_pl_letter}2<0)',) in formulas
-    assert expected_range == "A2:AV3"
+    assert (f'AND(${row_type_letter}3="trade",${net_pl_letter}3>0)',) in formulas
+    assert (f'AND(${row_type_letter}3="trade",${net_pl_letter}3<0)',) in formulas
+    assert expected_range == "A3:AV4"
     all_rule_text = " ".join(" ".join(formulas) for _range, formulas, _fill in _cf_rule_details(ws))
     assert "$AA" not in all_rule_text
     assert "A2:AB" not in " ".join(_cf_ranges(ws))
@@ -1627,7 +1707,7 @@ def test_trade_log_stale_conditional_formatting_removed_on_update(tmp_path: Path
     all_formulas = " ".join(" ".join(formula) for _range, formula, _fill in _cf_rule_details(ws))
     assert "A2:AB" not in all_ranges
     assert "$AA" not in all_formulas
-    assert "A2:AV3" in all_ranges
+    assert "A3:AV4" in all_ranges
 
 
 def test_conditional_formatting_uses_worksheet_api_not_unbound_class_method():
@@ -1651,7 +1731,7 @@ def test_dashboard_trade_log_and_pnl_calendar_loss_profit_fills_match(tmp_path: 
     assert "FFC7CE" in dashboard_fills
     assert "C6EFCE" in dashboard_fills
 
-    trade_row_rules = [d for d in _cf_rule_details(trade) if d[0] == "A2:AV3"]
+    trade_row_rules = [d for d in _cf_rule_details(trade) if d[0] == "A3:AV4"]
     trade_fills = {fill for _range, _formula, fill in trade_row_rules}
     assert trade_fills == {"FFC7CE", "C6EFCE"}
 
@@ -1715,7 +1795,7 @@ def test_pnl_calendar_update_removes_duplicate_generated_profit_loss_rules(tmp_p
     assert [fill for _range, _formula, fill in details] == ["C6EFCE", "FFC7CE"]
     assert "FFFF00" not in {fill for _range, _formula, fill in _cf_rule_details(cal)}
     assert "0000FF" not in {fill for _range, _formula, fill in _cf_rule_details(cal)}
-    assert "A2:AV2" in " ".join(_cf_ranges(wb["Trade Log"]))
+    assert "A3:AV3" in " ".join(_cf_ranges(wb["Trade Log"]))
 
 
 def test_generated_pnl_calendar_update_removes_stale_profit_loss_rules(tmp_path: Path):
@@ -1743,13 +1823,13 @@ def test_generated_pnl_calendar_update_removes_stale_profit_loss_rules(tmp_path:
     cal = wb["P&L Calendar"]
     details = [d for d in _cf_rule_details(cal) if d[0] == "B3:M3"]
     assert [fill for _range, _formula, fill in details] == ["C6EFCE", "FFC7CE"]
-    assert "A2:AV3" in " ".join(_cf_ranges(wb["Trade Log"]))
+    assert "A3:AV4" in " ".join(_cf_ranges(wb["Trade Log"]))
 
 
 def _trade_log_row_rule_details(ws):
     row_rules = []
     for cf_range, formulas, fill in _cf_rule_details(ws):
-        if cf_range.startswith("A2:AV") and formulas and formulas[0].startswith('AND($'):
+        if cf_range.startswith("A3:AV") and formulas and formulas[0].startswith('AND($'):
             for rules in ws.conditional_formatting._cf_rules.values():
                 for rule in rules:
                     rule_formulas = [str(f) for f in (getattr(rule, "formula", None) or [])]
@@ -1835,9 +1915,9 @@ def test_trade_log_saved_xml_row_rules_stop_if_true_without_overlap(tmp_path: Pa
         sqref = cf.attrib.get("sqref", "")
         rules = cf.findall("x:cfRule", ns)
         formulas = [rule.findtext("x:formula", default="", namespaces=ns) for rule in rules]
-        if sqref.startswith("A2:AV") and any('="trade"' in formula for formula in formulas):
+        if sqref.startswith("A3:AV") and any('="trade"' in formula for formula in formulas):
             row_rules.extend(rules)
-        if sqref in {"M2:M3", "N2:P3"}:
+        if sqref in {"M3:M4", "N3:P4"}:
             overlapping_value_refs.append(sqref)
     assert len(row_rules) == 2
     assert all(rule.attrib.get("stopIfTrue") == "1" for rule in row_rules)
