@@ -1,4 +1,5 @@
 from pathlib import Path
+from copy import copy
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 import pytest
@@ -146,6 +147,15 @@ def test_trade_log_two_row_umbrella_headers_and_filter(tmp_path: Path):
     assert "X1:AB1" in {str(rng) for rng in ws.merged_cells.ranges}
     assert ws["S1"].value == "Move to Break-Even"
     assert ws["X1"].value == "Move to Profit"
+    merged = {str(rng) for rng in ws.merged_cells.ranges}
+    for col, header in enumerate(TRADE_LOG_HEADERS, start=1):
+        if header not in MOVE_TO_FIELD_MAP:
+            letter = get_column_letter(col)
+            assert f"{letter}1:{letter}2" in merged
+            assert ws.cell(1, col).value == header
+            assert ws.cell(2, col).value is None
+            assert ws.cell(1, col).alignment.horizontal == "center"
+            assert ws.cell(1, col).alignment.vertical == "center"
     expected = ["Time", "Duration", "Trigger Price", "Distance From Entry %", "Distance From Exit %"]
     assert [ws.cell(2, col).value for col in range(19, 24)] == expected
     assert [ws.cell(2, col).value for col in range(24, 29)] == expected
@@ -157,6 +167,101 @@ def test_trade_log_two_row_umbrella_headers_and_filter(tmp_path: Path):
     assert any(dv.formula1 == '"range,channel"' and dv.allow_blank for dv in pattern_validations)
     wb.close()
 
+
+
+def test_duplicate_two_row_headers_migrate_to_vertical_merges_without_losing_rows(tmp_path: Path):
+    out = tmp_path / "duplicate_headers.xlsx"
+    build_master_journal_workbook(sample_snapshot(), out)
+    wb = load_workbook(out)
+    ws = wb["Trade Log"]
+    before_ids = [ws.cell(row, _header_col(ws, "Row ID")).value for row in range(3, ws.max_row + 1)]
+    for merged in list(ws.merged_cells.ranges):
+        if merged.min_row == 1 and merged.max_row == 2:
+            ws.unmerge_cells(str(merged))
+    for col, header in enumerate(TRADE_LOG_HEADERS, start=1):
+        if header not in MOVE_TO_FIELD_MAP:
+            ws.cell(2, col).value = header
+    _ensure_trade_log_schema(ws)
+    after_ids = [ws.cell(row, _header_col(ws, "Row ID")).value for row in range(3, ws.max_row + 1)]
+    assert after_ids == before_ids
+    assert _trade_log_header_map(ws) == {header: col for col, header in enumerate(TRADE_LOG_HEADERS, start=1)}
+    assert all(ws.cell(2, col).value is None for col, header in enumerate(TRADE_LOG_HEADERS, start=1) if header not in MOVE_TO_FIELD_MAP)
+    assert ws.freeze_panes == "A3"
+    assert ws.auto_filter.ref == f"A2:AV{ws.max_row}"
+    assert ws.column_dimensions["AV"].hidden is True
+    wb.close()
+
+
+def test_dashboard_manual_move_rows_survive_and_populate_by_label(tmp_path: Path):
+    from openpyxl import Workbook
+    from openpyxl.styles import Border, Side
+
+    path = tmp_path / "manual_move_metrics.xlsx"
+    wb = Workbook()
+    dash = wb.active
+    dash.title = "Dashboard"
+    wb.create_sheet("Trade Log")
+    wb.create_sheet("Instrument Averages")
+    wb.create_sheet("P&L Calendar")
+    dash["A1"] = "Metric"
+    dash["B1"] = "Overall"
+    dash["C1"] = "FX"
+    dash["D1"] = "Crypto"
+    dash["G1"] = "Winners"
+    dash["G8"] = "Losers"
+    dash["G14"] = "Drawdown"
+    dash["M1"] = "Instrument leaders"
+    dash["T1"] = "Account Balances"
+    dash["T2"] = "Account"
+    dash["U2"] = "Balance"
+    dash["V2"] = "Currency"
+    dash["W2"] = "As Of"
+    dash["A2"] = "Move to Break Even (DD:HH:MM:SS)"
+    dash["A3"] = "Move to Profit (DD:HH:MM:SS)"
+    dash["A4"] = "Trades"
+    dash["A2"].fill = PatternFill("solid", fgColor="ABCDEF")
+    label_font = copy(dash["A2"].font)
+    label_font.bold = True
+    dash["A2"].font = label_font
+    dash["A2"].border = Border(bottom=Side(style="thick", color="123456"))
+    dash.row_dimensions[2].height = 31
+    style_id = dash["A2"].style_id
+    _ensure_trade_log_headers(wb)
+    trade = wb["Trade Log"]
+    trade.cell(3, _header_col(trade, "Row ID")).value = "move-1"
+    trade.cell(3, _header_col(trade, "Move to Break Even Duration")).value = 10000
+    trade.cell(3, _header_col(trade, "Move to Break Even Duration")).number_format = r'00\:00\:00\:00'
+    trade.cell(3, _header_col(trade, "Move to Profit Time")).value = "2026-05-01 11:00:00"
+    wb.save(path)
+    wb.close()
+
+    snapshot = {
+        "items": [{
+            "id": "move-1", "row_type": "trade", "account": "BYBIT", "asset_class": "crypto",
+            "symbol": "BTCUSDT", "open_time": "2026-05-01 09:00:00", "close_time": "2026-05-01 12:00:00",
+        }],
+        "stats": {
+            "totals": {"trades": 1},
+            "groups": {
+                "by_market": {"overall": {"trades": 1}, "fx": {"trades": 0}, "crypto": {"trades": 1}},
+                "risk_expectancy": {}, "leaders": {}, "duration": {},
+            },
+        },
+        "balances": [],
+    }
+    result = update_master_journal_workbook_data_only(path, snapshot)
+    assert result["ok"] is True
+    Path(result["candidate_path"]).replace(path)
+    wb = load_workbook(path)
+    dash = wb["Dashboard"]
+    assert dash["A2"].value == "Move to Break Even (DD:HH:MM:SS)"
+    assert dash["A3"].value == "Move to Profit (DD:HH:MM:SS)"
+    assert dash["B2"].value == 10000 and dash["D2"].value == 10000
+    assert dash["B3"].value == 20000 and dash["D3"].value == 20000
+    assert dash["B4"].value == 1 and dash["D4"].value == 1
+    assert dash["A2"].style_id == style_id
+    assert dash.row_dimensions[2].height == 31
+    wb.close()
 
 def test_schema_migration_preserves_trade_and_derived_sheet_content(tmp_path: Path):
     out = tmp_path / "preserve_content.xlsx"
