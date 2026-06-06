@@ -41,7 +41,7 @@ def test_backfill_grouped_row_populates_context_and_r_multiple(master_service, m
         "exit_price": 101.0,
         "raw_refs": {"order_ids": ["oid-2"]},
     }
-    ctx = {"order_id": "oid-2", "stop_loss": 99.0, "take_profit": 103.0, "timeframe": "1m", "is_test_trade": True}
+    ctx = {"order_id": "oid-2", "stop_loss": 99.0, "take_profit": 103.0, "timeframe": "1m", "is_test_trade": True, "pattern": "channel"}
     monkeypatch.setattr(master_service, "_lookup_trade_context_for_journal_row", lambda _r: ctx)
     monkeypatch.setattr(master_service, "_lookup_trade_context_by_market_window", lambda *_a, **_k: None)
     patched = master_service._backfill_trade_row_context_fields(row)
@@ -49,6 +49,7 @@ def test_backfill_grouped_row_populates_context_and_r_multiple(master_service, m
     assert patched["take_profit"] == 103.0
     assert patched["timeframe"] == "1m"
     assert patched["is_test_trade"] is True
+    assert patched["pattern"] == "channel"
     assert patched.get("r_multiple") not in (None, "")
 
 

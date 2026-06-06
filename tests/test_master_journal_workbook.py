@@ -2,7 +2,7 @@ from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 import pytest
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, SHEET_ORDER, TRADE_LOG_HEADERS
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, SHEET_ORDER, TRADE_LOG_HEADERS, OLD_TRADE_LOG_HEADERS, PRE_MOVE_TRADE_LOG_HEADERS, MOVE_TO_FIELD_MAP, _ensure_trade_log_schema, _ensure_pnl_calendar_freeze_panes
 from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter
 
 def _cf_ranges(ws):
@@ -95,6 +95,38 @@ def test_manual_override_roundtrip(tmp_path: Path):
     ov=read_master_journal_manual_overrides(out)
     assert ov['t1']['is_test_trade'] is True and ov['t1']['setup']=='AAA'
 
+
+def test_current_pnl_calendar_layout_freezes_months_and_left_axis():
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "P&L Calendar"
+    for col, month in enumerate(["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"], start=3):
+        ws.cell(1, col, month)
+    ws.merge_cells("A2:A3")
+    ws["A2"] = 2026
+    ws["B2"] = "P/L %"
+    ws["B3"] = "Total Trades"
+    _ensure_pnl_calendar_freeze_panes(ws)
+    assert ws.freeze_panes == "C2"
+
+
+def test_pre_move_schema_migrates_stop_out_value_and_hides_row_id():
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Trade Log"
+    for col, header in enumerate(PRE_MOVE_TRADE_LOG_HEADERS, start=1):
+        ws.cell(1, col, header)
+    ws.cell(2, PRE_MOVE_TRADE_LOG_HEADERS.index("Stop Out") + 1, "Yes")
+    ws.cell(2, PRE_MOVE_TRADE_LOG_HEADERS.index("Row ID") + 1, "row-1")
+    _ensure_trade_log_schema(ws)
+    assert ws.cell(2, _header_col(ws, "Close Stopout")).value == "Yes"
+    assert ws.cell(2, _header_col(ws, "Row ID")).value == "row-1"
+    assert get_column_letter(_header_col(ws, "Row ID")) == "AV"
+    assert ws.column_dimensions["AV"].hidden is True
+    assert ws.auto_filter.ref == "A1:AV2"
+
 def test_calendar_month_conditional_formatting_rows(tmp_path: Path):
     snap=sample_snapshot()
     snap['items']=[
@@ -112,7 +144,7 @@ def test_calendar_month_conditional_formatting_rows(tmp_path: Path):
     assert _cell_covered(ranges, "G3")
     assert not _cell_covered(ranges, "F4")
     assert not _cell_covered(ranges, "G4")
-    assert cal.freeze_panes == "A3"
+    assert cal.freeze_panes == "B3"
     for c in range(1, 14):
         assert cal.cell(1, c).font.bold is True
         assert cal.cell(2, c).font.bold is True
@@ -327,7 +359,7 @@ def test_conditional_format_colors_and_dashboard_semantics(tmp_path: Path):
                     assert not _cell_covered(_cf_ranges(dash), f"{chr(64+vc)}{r}")
     # Trade Log row-level rules cover the full visible row without overlapping value-cell fill rules.
     tr = _cf_ranges(trade_log)
-    assert any(r.startswith("A2:AM") for r in tr)
+    assert any(r.startswith("A2:AV") for r in tr)
     assert not any("M2:M" in r for r in tr)
     assert not any("N2:P" in r for r in tr)
     colors = _all_rule_colors(trade_log) + _all_rule_colors(dash) + _all_rule_colors(wb["P&L Calendar"]) + _all_rule_colors(wb["Instrument Averages"])
@@ -1357,7 +1389,7 @@ def test_dashboard_market_risk_cells_and_grey_no_metric_cells(tmp_path: Path):
 
 
 def _old_trade_log_headers():
-    return [h for h in TRADE_LOG_HEADERS if h not in {"Pattern", "EMA", "ATHS/ATLS", "Order", "Round Number", "Spiked Out", "Close", "Stop Out", "Near Perfect Entry", "Near Win", "Early Close"}]
+    return list(OLD_TRADE_LOG_HEADERS)
 
 
 def _minimal_old_schema_workbook(path: Path):
@@ -1401,30 +1433,27 @@ def test_trade_log_quality_columns_insert_after_test(tmp_path: Path):
     ws = load_workbook(p)["Trade Log"]
     headers = [ws.cell(1, c).value for c in range(1, len(TRADE_LOG_HEADERS) + 1)]
     assert headers == TRADE_LOG_HEADERS
-    assert ws["S1"].value == "Test"
-    assert ws["T1"].value == "Pattern"
-    assert ws["U1"].value == "EMA"
-    assert ws["V1"].value == "ATHS/ATLS"
-    assert ws["W1"].value == "Order"
-    assert [ws.cell(1, c).value for c in range(24, 31)] == ["Round Number", "Spiked Out", "Close", "Stop Out", "Near Perfect Entry", "Near Win", "Early Close"]
-    assert ws["AE1"].value == "Setup"
-    assert ws["AM1"].value == "Row ID"
-    assert ws.column_dimensions["AM"].hidden is True
+    duration_col = _header_col(ws, "Trade Duration (DD:HH:MM:SS)")
+    assert headers[duration_col:duration_col + 10] == list(MOVE_TO_FIELD_MAP)
+    assert "Close" not in headers
+    assert _header_col(ws, "Close Stopout") > _header_col(ws, "Pattern")
+    assert ws["AV1"].value == "Row ID"
+    assert ws.column_dimensions["AV"].hidden is True
     assert ws.auto_filter.ref == f"A1:{get_column_letter(len(TRADE_LOG_HEADERS))}{ws.max_row}"
-
 
 def test_trade_log_quality_dropdowns(tmp_path: Path):
     p = tmp_path / "quality_dropdowns.xlsx"
     build_master_journal_workbook(sample_snapshot(), p)
     ws = load_workbook(p)["Trade Log"]
-    assert any(dv.formula1 == '"Yes,No"' and dv.allow_blank for dv in _validation_for_col(ws, "S"))
-    assert any(dv.formula1 == '"All-Time High,All-Time Low"' and dv.allow_blank for dv in _validation_for_col(ws, "V"))
-    assert any(dv.formula1 == '"Market,Limit"' and dv.allow_blank for dv in _validation_for_col(ws, "W"))
-    for col in ["X", "Y", "Z", "AA", "AB", "AC", "AD"]:
-        assert any(dv.formula1 == '"Yes,No"' and dv.allow_blank for dv in _validation_for_col(ws, col))
-    assert _validation_for_col(ws, "T") == []
-    assert _validation_for_col(ws, "U") == []
-
+    def validations(header):
+        return _validation_for_col(ws, get_column_letter(_header_col(ws, header)))
+    assert any(dv.formula1 == '"Yes,No"' and dv.allow_blank for dv in validations("Test"))
+    assert any(dv.formula1 == '"range,channel"' and dv.allow_blank for dv in validations("Pattern"))
+    assert any(dv.formula1 == '"All-Time High,All-Time Low"' and dv.allow_blank for dv in validations("ATHS/ATLS"))
+    assert any(dv.formula1 == '"Market,Limit"' and dv.allow_blank for dv in validations("Order"))
+    for header in ["Round Number", "Spiked Out", "Close Stopout", "Near Perfect Entry", "Near Win", "Early Close"]:
+        assert any(dv.formula1 == '"Yes,No"' and dv.allow_blank for dv in validations(header))
+    assert validations("EMA") == []
 
 def test_trade_log_quality_manual_values_survive_resync(tmp_path: Path):
     p = tmp_path / "quality_resync.xlsx"
@@ -1432,7 +1461,7 @@ def test_trade_log_quality_manual_values_survive_resync(tmp_path: Path):
     build_master_journal_workbook(snap, p)
     wb = load_workbook(p)
     ws = wb["Trade Log"]
-    vals = {"Pattern": "Breakout", "EMA": "20/50", "ATHS/ATLS": "All-Time High", "Order": "Limit", "Round Number": "Yes", "Spiked Out": "No", "Close": "Yes", "Stop Out": "No", "Near Perfect Entry": "Yes", "Near Win": "No", "Early Close": "Yes"}
+    vals = {"Pattern": "legacy-manual", "EMA": "20/50", "ATHS/ATLS": "All-Time High", "Order": "Limit", "Round Number": "Yes", "Spiked Out": "No", "Close Stopout": "No", "Near Perfect Entry": "Yes", "Near Win": "No", "Early Close": "Yes", "Move to Break Even Time": "2026-01-01 10:00", "Move to Profit Trigger Price": "123.45"}
     for header, value in vals.items():
         ws.cell(2, _header_col(ws, header), value)
     row_id = ws.cell(2, _header_col(ws, "Row ID")).value
@@ -1570,7 +1599,7 @@ def test_trade_log_win_loss_row_conditional_formatting_uses_current_schema(tmp_p
     formulas = {tuple(d[1]) for d in row_rules}
     assert (f'AND(${row_type_letter}2="trade",${net_pl_letter}2>0)',) in formulas
     assert (f'AND(${row_type_letter}2="trade",${net_pl_letter}2<0)',) in formulas
-    assert expected_range == "A2:AM3"
+    assert expected_range == "A2:AV3"
     all_rule_text = " ".join(" ".join(formulas) for _range, formulas, _fill in _cf_rule_details(ws))
     assert "$AA" not in all_rule_text
     assert "A2:AB" not in " ".join(_cf_ranges(ws))
@@ -1598,7 +1627,7 @@ def test_trade_log_stale_conditional_formatting_removed_on_update(tmp_path: Path
     all_formulas = " ".join(" ".join(formula) for _range, formula, _fill in _cf_rule_details(ws))
     assert "A2:AB" not in all_ranges
     assert "$AA" not in all_formulas
-    assert "A2:AM3" in all_ranges
+    assert "A2:AV3" in all_ranges
 
 
 def test_conditional_formatting_uses_worksheet_api_not_unbound_class_method():
@@ -1622,7 +1651,7 @@ def test_dashboard_trade_log_and_pnl_calendar_loss_profit_fills_match(tmp_path: 
     assert "FFC7CE" in dashboard_fills
     assert "C6EFCE" in dashboard_fills
 
-    trade_row_rules = [d for d in _cf_rule_details(trade) if d[0] == "A2:AM3"]
+    trade_row_rules = [d for d in _cf_rule_details(trade) if d[0] == "A2:AV3"]
     trade_fills = {fill for _range, _formula, fill in trade_row_rules}
     assert trade_fills == {"FFC7CE", "C6EFCE"}
 
@@ -1686,7 +1715,7 @@ def test_pnl_calendar_update_removes_duplicate_generated_profit_loss_rules(tmp_p
     assert [fill for _range, _formula, fill in details] == ["C6EFCE", "FFC7CE"]
     assert "FFFF00" not in {fill for _range, _formula, fill in _cf_rule_details(cal)}
     assert "0000FF" not in {fill for _range, _formula, fill in _cf_rule_details(cal)}
-    assert "A2:AM2" in " ".join(_cf_ranges(wb["Trade Log"]))
+    assert "A2:AV2" in " ".join(_cf_ranges(wb["Trade Log"]))
 
 
 def test_generated_pnl_calendar_update_removes_stale_profit_loss_rules(tmp_path: Path):
@@ -1714,13 +1743,13 @@ def test_generated_pnl_calendar_update_removes_stale_profit_loss_rules(tmp_path:
     cal = wb["P&L Calendar"]
     details = [d for d in _cf_rule_details(cal) if d[0] == "B3:M3"]
     assert [fill for _range, _formula, fill in details] == ["C6EFCE", "FFC7CE"]
-    assert "A2:AM3" in " ".join(_cf_ranges(wb["Trade Log"]))
+    assert "A2:AV3" in " ".join(_cf_ranges(wb["Trade Log"]))
 
 
 def _trade_log_row_rule_details(ws):
     row_rules = []
     for cf_range, formulas, fill in _cf_rule_details(ws):
-        if cf_range.startswith("A2:AM") and formulas and formulas[0].startswith('AND($'):
+        if cf_range.startswith("A2:AV") and formulas and formulas[0].startswith('AND($'):
             for rules in ws.conditional_formatting._cf_rules.values():
                 for rule in rules:
                     rule_formulas = [str(f) for f in (getattr(rule, "formula", None) or [])]
@@ -1806,7 +1835,7 @@ def test_trade_log_saved_xml_row_rules_stop_if_true_without_overlap(tmp_path: Pa
         sqref = cf.attrib.get("sqref", "")
         rules = cf.findall("x:cfRule", ns)
         formulas = [rule.findtext("x:formula", default="", namespaces=ns) for rule in rules]
-        if sqref.startswith("A2:AM") and any('="trade"' in formula for formula in formulas):
+        if sqref.startswith("A2:AV") and any('="trade"' in formula for formula in formulas):
             row_rules.extend(rules)
         if sqref in {"M2:M3", "N2:P3"}:
             overlapping_value_refs.append(sqref)
@@ -1835,7 +1864,7 @@ def test_trade_log_direct_row_fills_cover_winning_and_losing_rows(tmp_path: Path
     winning_row = _trade_log_row_by_id(ws, "t1")
     losing_row = _trade_log_row_by_id(ws, "t2")
     checked_cols = [1, 3, _header_col(ws, "Net P/L"), len(TRADE_LOG_HEADERS)]
-    assert [get_column_letter(col) for col in checked_cols] == ["A", "C", "N", "AM"]
+    assert [get_column_letter(col) for col in checked_cols] == ["A", "C", "N", "AV"]
     assert all(_cell_fill_rgb(ws.cell(winning_row, col)) == "C6EFCE" for col in checked_cols)
     assert all(_cell_fill_rgb(ws.cell(losing_row, col)) == "FFC7CE" for col in checked_cols)
 

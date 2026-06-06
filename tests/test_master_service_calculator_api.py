@@ -501,12 +501,13 @@ def test_bybit_quote_webhook_payload_uses_snapped_prices(monkeypatch: pytest.Mon
     monkeypatch.setattr(master_service, "_bybit_signed_get", fake_signed_get)
     body = json.loads(asyncio.run(master_service.calculator_quote({
         "asset": "crypto", "account": "live", "symbol": "BTC", "side": "buy", "order_type": "market",
-        "risk_mode": "percent", "risk_value": 0.001, "stop_loss_ticks": 1, "take_profit_ticks": 1, "webhook": "yes",
+        "risk_mode": "percent", "risk_value": 0.001, "stop_loss_ticks": 1, "take_profit_ticks": 1, "webhook": "yes", "pattern": "range",
     })).body.decode("utf-8"))
     payload = json.loads(body["webhook_payload_json"])
     assert payload["entry_price"] == "78032.9"
     assert payload["stop_loss_price"] == "78032.8"
     assert payload["take_profit_price"] == "78033"
+    assert payload["pattern"] == "range"
 
 
 def test_bybit_market_uses_side_specific_bid_ask(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1478,7 +1479,8 @@ def test_oanda_nzdusd_35_ticks_fixed_aud_10_demo_flat_account_quotes_successfull
     assert float(body["estimated_initial_margin_home"]) < 1513.09
 
 def test_calculator_quote_bybit_success_has_no_logger_nameerror(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(master_service, "_upsert_bybit_demo_calc_context", lambda *_args, **_kwargs: None)
+    saved_context = {}
+    monkeypatch.setattr(master_service, "_upsert_bybit_demo_calc_context", lambda payload, **_kwargs: saved_context.update(payload))
     monkeypatch.setattr(master_service, "resolve_bybit_credentials_for", lambda _a: ("demo", "k", "s", "https://bybit.test", "KEY1"))
     monkeypatch.setattr(master_service, "_bybit_get_symbols_by_category_cached", lambda *_args, **_kwargs: asyncio.sleep(0, result=["LABUSDT"]))
     monkeypatch.setattr(master_service, "_fetch_oanda_mid_prices_batch", lambda **_kwargs: asyncio.sleep(0, result={"AUD_USD": 1}))
@@ -1492,10 +1494,11 @@ def test_calculator_quote_bybit_success_has_no_logger_nameerror(monkeypatch: pyt
     monkeypatch.setattr(master_service, "_bybit_signed_get", lambda **_kwargs: asyncio.sleep(0, result={"result": {"list": [{"makerFeeRate": "0", "takerFeeRate": "0"}]}}))
     monkeypatch.setattr(master_service, "_fetch_bybit_balance_usdt", lambda *_args, **_kwargs: asyncio.sleep(0, result={"available_usdt": "1000", "total_equity": "1000"}))
 
-    response = asyncio.run(master_service.calculator_quote({"asset": "crypto", "account": "demo", "symbol": "LAB", "side": "sell", "order_type": "market", "risk_mode": "percent", "risk_value": 1, "stop_loss_ticks": 10, "take_profit_ticks": 20}))
+    response = asyncio.run(master_service.calculator_quote({"asset": "crypto", "account": "demo", "symbol": "LAB", "side": "sell", "order_type": "market", "risk_mode": "percent", "risk_value": 1, "stop_loss_ticks": 10, "take_profit_ticks": 20, "pattern": "channel"}))
     assert isinstance(response, master_service.JSONResponse)
     body = json.loads(response.body.decode("utf-8"))
     assert body["broker"] == "bybit"
+    assert saved_context["pattern"] == "channel"
     for k in ("quantity", "entry_price", "stop_price", "target_price"):
         assert k in body
 
@@ -1855,9 +1858,11 @@ def test_calculator_submit_passes_normalized_setup_to_broker(monkeypatch: pytest
     seen = {}
     async def fake_place(payload, request_id):
         seen["setup"] = payload.get("setup")
+        seen["pattern"] = payload.get("pattern")
         return {"journal_context_saved": True}
     monkeypatch.setattr(master_service, "_place_bybit_order", fake_place)
-    resp = asyncio.run(master_service.calculator_submit({"asset":"crypto","account":"demo","symbol":"BTCUSDT","side":"buy","order_type":"market","setup":"news scalp"}))
+    resp = asyncio.run(master_service.calculator_submit({"asset":"crypto","account":"demo","symbol":"BTCUSDT","side":"buy","order_type":"market","setup":"news scalp","pattern":"channel"}))
     body = json.loads(resp.body.decode("utf-8"))
     assert body["ok"] is True
     assert seen["setup"] == "News Scalp"
+    assert seen["pattern"] == "channel"

@@ -23,6 +23,18 @@ LEGACY_ALL_TRADES_SHEET = "All Trades"
 ALL_TRADES_SHEET = LEGACY_ALL_TRADES_SHEET
 LEGACY_TRADE_LOG_SHEET = LEGACY_ALL_TRADES_SHEET
 SHEET_ORDER=["Dashboard","Trade Log","Instrument Averages","P&L Calendar"]
+MOVE_TO_FIELD_MAP = {
+    "Move to Break Even Time": "move_to_break_even_time",
+    "Move to Break Even Duration": "move_to_break_even_duration",
+    "Move to Break Even Trigger Price": "move_to_break_even_trigger_price",
+    "Move to Break Even Distance From Entry %": "move_to_break_even_distance_from_entry_pct",
+    "Move to Break Even Distance From Exit %": "move_to_break_even_distance_from_exit_pct",
+    "Move to Profit Time": "move_to_profit_time",
+    "Move to Profit Duration": "move_to_profit_duration",
+    "Move to Profit Trigger Price": "move_to_profit_trigger_price",
+    "Move to Profit Distance From Entry %": "move_to_profit_distance_from_entry_pct",
+    "Move to Profit Distance From Exit %": "move_to_profit_distance_from_exit_pct",
+}
 QUALITY_ANALYSIS_FIELD_MAP = {
     "Pattern": "pattern",
     "EMA": "ema",
@@ -30,15 +42,26 @@ QUALITY_ANALYSIS_FIELD_MAP = {
     "Order": "order_type",
     "Round Number": "round_number",
     "Spiked Out": "spiked_out",
-    "Close": "close_flag",
-    "Stop Out": "stop_out",
+    "Close Stopout": "close_stopout",
     "Near Perfect Entry": "near_perfect_entry",
     "Near Win": "near_win",
     "Early Close": "early_close",
 }
-EDITABLE_COLS=["Test",*QUALITY_ANALYSIS_FIELD_MAP.keys(),"Setup","Timeframe","Breakeven","Notes"]
+TRADE_LOG_MANUAL_FIELD_MAP = {**MOVE_TO_FIELD_MAP, **QUALITY_ANALYSIS_FIELD_MAP}
+EDITABLE_COLS=["Test",*TRADE_LOG_MANUAL_FIELD_MAP.keys(),"Setup","Timeframe","Breakeven","Notes"]
 
 TRADE_LOG_HEADERS = [
+    "Open Time", "Close Time", "Account", "Symbol", "Side", "Qty",
+    "Entry Price", "Exit Price", "Stop Loss Price", "Stop Loss Distance",
+    "Target Price", "Target Distance", "Commission", "Net P/L",
+    "Profit %", "R-Multiple", "Balance After",
+    "Trade Duration (DD:HH:MM:SS)", *MOVE_TO_FIELD_MAP.keys(),
+    "Test", "Pattern", "EMA", "ATHS/ATLS", "Order", "Round Number",
+    "Spiked Out", "Close Stopout", "Near Perfect Entry", "Near Win", "Early Close",
+    "Setup", "Timeframe", "Breakeven", "Notes", "Cashflow Amount",
+    "Cashflow New Balance", "Currency", "Row Type", "Row ID",
+]
+PRE_MOVE_TRADE_LOG_HEADERS = [
     "Open Time", "Close Time", "Account", "Symbol", "Side", "Qty",
     "Entry Price", "Exit Price", "Stop Loss Price", "Stop Loss Distance",
     "Target Price", "Target Distance", "Commission", "Net P/L",
@@ -597,7 +620,7 @@ def _hide_trade_log_row_id(ws) -> None:
 
 def _clear_trade_log_dropdown_validations(ws) -> None:
     keep = []
-    editable_cols = {_trade_log_header_map(ws).get(h) for h in ["Test", "ATHS/ATLS", "Order", "Round Number", "Spiked Out", "Close", "Stop Out", "Near Perfect Entry", "Near Win", "Early Close"]}
+    editable_cols = {_trade_log_header_map(ws).get(h) for h in ["Test", "Pattern", "ATHS/ATLS", "Order", "Round Number", "Spiked Out", "Close Stopout", "Near Perfect Entry", "Near Win", "Early Close"]}
     editable_cols.discard(None)
     for dv in list(ws.data_validations.dataValidation):
         touches_editable = False
@@ -620,8 +643,8 @@ def _apply_trade_log_dropdown_validations(ws) -> None:
         "Order": '"Market,Limit"',
         "Round Number": '"Yes,No"',
         "Spiked Out": '"Yes,No"',
-        "Close": '"Yes,No"',
-        "Stop Out": '"Yes,No"',
+        "Pattern": '"range,channel"',
+        "Close Stopout": '"Yes,No"',
         "Near Perfect Entry": '"Yes,No"',
         "Near Win": '"Yes,No"',
         "Early Close": '"Yes,No"',
@@ -647,37 +670,80 @@ def _copy_cell_style(src, dst) -> None:
 
 def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> None:
     diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
-    current = [str(ws.cell(1, c).value or "").strip() for c in range(1, max(ws.max_column, len(TRADE_LOG_HEADERS)) + 1)]
-    trimmed = current[:]
-    while trimmed and trimmed[-1] == "":
-        trimmed.pop()
-    if trimmed[:len(TRADE_LOG_HEADERS)] == TRADE_LOG_HEADERS:
-        pass
-    elif trimmed[:len(OLD_TRADE_LOG_HEADERS)] == OLD_TRADE_LOG_HEADERS:
-        test_col = OLD_TRADE_LOG_HEADERS.index("Test") + 1
-        insert_at = test_col + 1
-        new_headers = list(QUALITY_ANALYSIS_FIELD_MAP.keys())
-        ws.insert_cols(insert_at, amount=len(new_headers))
-        for offset, header in enumerate(new_headers):
-            col = insert_at + offset
-            ws.cell(1, col).value = header
-            template_col = test_col if header in {"Pattern", "EMA"} else insert_at + len(new_headers)
-            _copy_cell_style(ws.cell(1, template_col), ws.cell(1, col))
-            for rr in range(2, ws.max_row + 1):
-                _copy_cell_style(ws.cell(rr, template_col), ws.cell(rr, col))
-            src_letter = get_column_letter(template_col)
-            dst_letter = get_column_letter(col)
-            src_width = ws.column_dimensions[src_letter].width
-            ws.column_dimensions[dst_letter].width = src_width if src_width else 14
-        diagnostics["migrated_trade_log_quality_columns"] = True
-    else:
-        expected = TRADE_LOG_HEADERS
+    found_headers = [str(ws.cell(1, c).value or "").strip() for c in range(1, ws.max_column + 1)]
+    while found_headers and not found_headers[-1]:
+        found_headers.pop()
+    accepted_schemas = (TRADE_LOG_HEADERS, PRE_MOVE_TRADE_LOG_HEADERS, OLD_TRADE_LOG_HEADERS)
+    if found_headers not in accepted_schemas:
         raise RuntimeError(
             "Trade Log headers cannot be migrated safely: "
-            f"expected current or legacy schema, found {trimmed!r}; expected {expected!r}."
+            f"found {found_headers!r}; expected one of {[list(schema) for schema in accepted_schemas]!r}."
         )
+
+    if found_headers != TRADE_LOG_HEADERS:
+        source_by_header = {header: idx for idx, header in enumerate(found_headers, start=1)}
+        if len(source_by_header) != len(found_headers):
+            raise RuntimeError(f"Trade Log headers cannot be migrated safely because duplicates were found: {found_headers!r}.")
+        source_cells = {
+            header: [copy(ws.cell(row, col)) for row in range(1, ws.max_row + 1)]
+            for header, col in source_by_header.items()
+        }
+        source_dimensions = {
+            header: copy(ws.column_dimensions[get_column_letter(col)])
+            for header, col in source_by_header.items()
+        }
+        max_source_col = ws.max_column
+        duration_header = "Trade Duration (DD:HH:MM:SS)"
+        price_template = "Entry Price"
+        pct_template = "Stop Loss Distance"
+        default_template = "Test" if "Test" in source_by_header else duration_header
+
+        for target_col, header in enumerate(TRADE_LOG_HEADERS, start=1):
+            source_header = header
+            if header == "Close Stopout" and source_header not in source_by_header:
+                source_header = "Stop Out"
+            template_header = source_header if source_header in source_by_header else default_template
+            if "Trigger Price" in header:
+                template_header = price_template
+            elif "Distance From" in header:
+                template_header = pct_template
+            elif header.endswith("Duration"):
+                template_header = duration_header
+            template_cells = source_cells[template_header]
+            source_values = source_cells.get(source_header)
+            for row in range(1, ws.max_row + 1):
+                src = source_values[row - 1] if source_values else template_cells[row - 1]
+                dst = ws.cell(row, target_col)
+                dst.value = src.value if source_values else (header if row == 1 else None)
+                _copy_cell_style(src, dst)
+                dst.comment = copy(src.comment)
+                dst.hyperlink = copy(src.hyperlink)
+            dim = source_dimensions.get(source_header) or source_dimensions.get(template_header)
+            letter = get_column_letter(target_col)
+            ws.column_dimensions[letter].width = dim.width if dim and dim.width else 14
+            ws.column_dimensions[letter].hidden = False
+
+        for col in range(len(TRADE_LOG_HEADERS) + 1, max_source_col + 1):
+            for row in range(1, ws.max_row + 1):
+                ws.cell(row, col).value = None
+            ws.column_dimensions[get_column_letter(col)].hidden = False
+        diagnostics["migrated_trade_log_schema"] = True
+        diagnostics["migrated_trade_log_from_headers"] = found_headers
+
     for idx, header in enumerate(TRADE_LOG_HEADERS, start=1):
         ws.cell(1, idx).value = header
+    headers = _trade_log_header_map(ws)
+    for header in ("Move to Break Even Duration", "Move to Profit Duration"):
+        col = headers[header]
+        for row in range(2, ws.max_row + 1):
+            ws.cell(row, col).number_format = r'00\:00\:00\:00'
+    for header in (
+        "Move to Break Even Distance From Entry %", "Move to Break Even Distance From Exit %",
+        "Move to Profit Distance From Entry %", "Move to Profit Distance From Exit %",
+    ):
+        col = headers[header]
+        for row in range(2, ws.max_row + 1):
+            ws.cell(row, col).number_format = "0.00%"
     ws.freeze_panes = "A2"
     _hide_trade_log_row_id(ws)
     _set_trade_log_auto_filter(ws)
@@ -887,11 +953,14 @@ def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]
             if test_i is not None:
                 t=str(r[test_i] or '').strip().lower()
                 edits['is_test_trade']=t in {'yes','true','1'}
-            for col,field in [('Setup','setup'),('Timeframe','timeframe'),('Breakeven','breakeven'),('Notes','notes'), *QUALITY_ANALYSIS_FIELD_MAP.items()]:
+            for col,field in [('Setup','setup'),('Timeframe','timeframe'),('Breakeven','breakeven'),('Notes','notes'), *TRADE_LOG_MANUAL_FIELD_MAP.items()]:
                 i=idx.get(col)
                 if i is None:
                     continue
                 edits[field] = '' if r[i] is None else str(r[i])
+            if 'close_stopout' not in edits and 'Stop Out' in idx:
+                i = idx['Stop Out']
+                edits['close_stopout'] = '' if r[i] is None else str(r[i])
             out[rid]=edits
     finally:
         wb.close()
@@ -1001,20 +1070,34 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             target_distance = _distance_fraction_from_prices(row.get('entry_price'), row.get('take_profit'))
             stop_loss_distance = '' if stop_loss_distance is None else stop_loss_distance
             target_distance = '' if target_distance is None else target_distance
-        ws.append([
-            otv, ctv, acct, symbol, side, row.get('qty'), row.get('entry_price'), row.get('exit_price'),
-            row.get('stop_loss'), stop_loss_distance, row.get('take_profit'), target_distance, comm_val,
-            net_pnl, (pct/100.0 if pct is not None else ''), row.get('r_multiple'), resolved_balance,
-            _fmt_duration_full(_infer_trade_duration_seconds(row)),
-            'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',
-            row.get('pattern') or '', row.get('ema') or '', row.get('aths_atls') or '', row.get('order_type') or '',
-            row.get('round_number') or '', row.get('spiked_out') or '', row.get('close_flag') or '', row.get('stop_out') or '',
-            row.get('near_perfect_entry') or '', row.get('near_win') or '', row.get('early_close') or '',
-            setup_val, _canonical_journal_timeframe(row.get('timeframe') or ''), row.get('breakeven') or '', notes,
-            row.get('cashflow_amount'), cashflow_new_balance,
-            row.get('currency') or row.get('account_currency') or row.get('result_currency') or '',
-            row.get('row_type') or 'trade', stable_row_id(row),
-        ])
+        close_stopout = row.get('close_stopout')
+        if close_stopout in (None, ''):
+            close_stopout = row.get('close_stop_out')
+        if close_stopout in (None, ''):
+            close_stopout = row.get('stop_out')
+        values = {
+            "Open Time": otv, "Close Time": ctv, "Account": acct, "Symbol": symbol, "Side": side,
+            "Qty": row.get('qty'), "Entry Price": row.get('entry_price'), "Exit Price": row.get('exit_price'),
+            "Stop Loss Price": row.get('stop_loss'), "Stop Loss Distance": stop_loss_distance,
+            "Target Price": row.get('take_profit'), "Target Distance": target_distance, "Commission": comm_val,
+            "Net P/L": net_pnl, "Profit %": (pct / 100.0 if pct is not None else ''),
+            "R-Multiple": row.get('r_multiple'), "Balance After": resolved_balance,
+            "Trade Duration (DD:HH:MM:SS)": _fmt_duration_full(_infer_trade_duration_seconds(row)),
+            "Test": 'Yes' if _is_test_trade_value(row.get('is_test_trade')) else 'No',
+            "Pattern": row.get('pattern') or '', "EMA": row.get('ema') or '', "ATHS/ATLS": row.get('aths_atls') or '',
+            "Order": row.get('order_type') or '', "Round Number": row.get('round_number') or '',
+            "Spiked Out": row.get('spiked_out') or '', "Close Stopout": close_stopout or '',
+            "Near Perfect Entry": row.get('near_perfect_entry') or '', "Near Win": row.get('near_win') or '',
+            "Early Close": row.get('early_close') or '', "Setup": setup_val,
+            "Timeframe": _canonical_journal_timeframe(row.get('timeframe') or ''),
+            "Breakeven": row.get('breakeven') or '', "Notes": notes,
+            "Cashflow Amount": row.get('cashflow_amount'), "Cashflow New Balance": cashflow_new_balance,
+            "Currency": row.get('currency') or row.get('account_currency') or row.get('result_currency') or '',
+            "Row Type": row.get('row_type') or 'trade', "Row ID": stable_row_id(row),
+        }
+        for header, field in MOVE_TO_FIELD_MAP.items():
+            values[header] = row.get(field) or ''
+        ws.append([values.get(header, '') for header in TRADE_LOG_HEADERS])
     _style_table_sheet(ws,1,'A2',True)
     for rr in range(2, ws.max_row + 1):
         row_ctx = rows[rr - 2] if rr - 2 < len(rows) else {}
@@ -1035,9 +1118,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         if ccy_bal:
             ws.cell(rr, 17).number_format = '#,##0.0000000000' if _is_crypto_currency(ccy_bal) else '#,##0.00'
         ws.cell(rr, 18).number_format = r'00\:00\:00\:00'
-    _hide_trade_log_row_id(ws)
-    _set_trade_log_auto_filter(ws)
-    _apply_trade_log_dropdown_validations(ws)
+    _ensure_trade_log_schema(ws)
     _negative_impact_rule(ws, f"M2:M{max(2, ws.max_row)}")
     _profit_loss_rules(ws, f"N2:P{max(2, ws.max_row)}")
     _apply_trade_log_win_loss_row_formatting(ws)
@@ -1086,6 +1167,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         for cc in range(2, 14):
             cal.cell(rr, cc).number_format = "0"
     _apply_pnl_calendar_profit_loss_formatting(cal)
+    _ensure_pnl_calendar_freeze_panes(cal)
 
     output_path.parent.mkdir(parents=True, exist_ok=True); wb.save(output_path)
     return {'ok':True,'path':str(output_path)}
@@ -1518,8 +1600,27 @@ def _detect_calendar_month_columns(ws) -> Dict[int, int]:
             month_cols[names[token]] = c
     return month_cols
 
+
+def _ensure_pnl_calendar_freeze_panes(ws) -> None:
+    month_cols = _detect_calendar_month_columns(ws)
+    if month_cols and min(month_cols.values()) == 3:
+        ws.freeze_panes = "C2"
+        return
+    names = {calendar.month_name[i].lower() for i in range(1, 13)}
+    row_two_months = {
+        c for c in range(1, ws.max_column + 1)
+        if str(ws.cell(2, c).value or "").strip().lower() in names
+    }
+    row_one_has_month_headers = any(
+        str(ws.cell(1, c).value or "").strip().lower().endswith(" p/l %")
+        for c in range(1, ws.max_column + 1)
+    )
+    if row_one_has_month_headers and row_two_months and min(row_two_months) == 2:
+        ws.freeze_panes = "B3"
+
 def _update_pnl_calendar_preserving_layout(dst_ws, snapshot: Dict[str, Any], diagnostics: Dict[str, Any] | None = None) -> None:
     diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    _ensure_pnl_calendar_freeze_panes(dst_ws)
     month_cols = _detect_calendar_month_columns(dst_ws)
     if not month_cols:
         return
@@ -1756,9 +1857,11 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
                 row_id = computed_id
             currency = str(r[idx.get('Currency')] or '').strip() if 'Currency' in idx else ''
             item={'id': row_id or computed_id, 'row_type':row_type,'account':account,'symbol':symbol,'side':side,'open_time':open_time,'close_time':close_time,'qty':_num(r[idx.get('Qty')]) if 'Qty' in idx else None,'entry_price':_num(r[idx.get('Entry Price')]) if 'Entry Price' in idx else None,'exit_price':_num(r[idx.get('Exit Price')]) if 'Exit Price' in idx else None,'stop_loss':_num(r[i_stop]) if i_stop is not None else None,'take_profit':_num(r[i_tp]) if i_tp is not None else None,'stop_loss_distance_pct':_normalize_pct_distance_cell(r[i_stop_dist], row_cells[i_stop_dist].number_format) if i_stop_dist is not None and i_stop_dist < len(row_cells) else None,'target_distance_pct':_normalize_pct_distance_cell(r[i_target_dist], row_cells[i_target_dist].number_format) if i_target_dist is not None and i_target_dist < len(row_cells) else None,'commission':_num(r[idx.get('Commission')]) if 'Commission' in idx else None,'net_profit':_num(r[i_pnl]) if i_pnl is not None else None,'result_pct':_excel_fraction_to_pct_points(r[i_result_pct]) if i_result_pct is not None else None,'r_multiple':_num(r[idx.get('R-Multiple')]) if 'R-Multiple' in idx else None,'balance_after_trade':balance_after,'balance_after_trade_source':'master_journal','trade_duration_seconds':duration,'is_test_trade':str(r[idx.get('Test')]).strip().lower() in {'yes','y','true','1'} if 'Test' in idx else False,'setup':r[idx.get('Setup',17)] if 'Setup' in idx else '','timeframe':r[idx.get('Timeframe',18)] if 'Timeframe' in idx else '','breakeven':r[idx.get('Breakeven',19)] if 'Breakeven' in idx else '','notes':r[idx.get('Notes',20)] if 'Notes' in idx else '','cashflow_amount':cashflow_amount,'cashflow_new_balance':cashflow_new_balance,'currency':currency, 'asset_class': asset_class, 'source':'master_journal'}
-            for header, field in QUALITY_ANALYSIS_FIELD_MAP.items():
+            for header, field in TRADE_LOG_MANUAL_FIELD_MAP.items():
                 if header in idx:
                     item[field] = r[idx[header]] if idx[header] < len(r) else ''
+            if "close_stopout" not in item and "Stop Out" in idx:
+                item["close_stopout"] = r[idx["Stop Out"]] if idx["Stop Out"] < len(r) else ''
             if row_type == "monthly_aud_reval":
                 monthly_currency = (currency or str(item.get("result_currency") or "").strip() or "AUD").upper()
                 item["result_cash"] = _num(r[i_pnl]) if i_pnl is not None else None
@@ -2364,6 +2467,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 else:
                     _copy_data_rows(gen["P&L Calendar"], cal_ws, 3)
                 _apply_pnl_calendar_profit_loss_formatting(cal_ws)
+                _ensure_pnl_calendar_freeze_panes(cal_ws)
         finally:
             gen.close()
             tmp.unlink(missing_ok=True)

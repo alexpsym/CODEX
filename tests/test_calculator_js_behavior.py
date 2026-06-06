@@ -629,3 +629,16 @@ eval(source);
     assert data["clearedAfterInvalidate"] is True
     assert data["failCleared"] is True
     assert data["disabledNoHighlight"] is True
+
+
+def test_pattern_selector_buttons_invalidate_quote_and_payloads_include_pattern() -> None:
+    source = JS_PATH.read_text(encoding="utf-8")
+    assert "id=\"pattern-toggle\"" not in source  # UI container is server-rendered.
+    assert "function setPatternButtons()" in source
+    pattern_block = source.split("function setPatternButtons()", 1)[1].split("async function resolveSymbolAndLoad", 1)[0]
+    assert "['','None']" in pattern_block
+    assert "['range','range']" in pattern_block
+    assert "['channel','channel']" in pattern_block
+    assert "invalidateQuote()" in pattern_block
+    assert source.count("pattern: state.pattern") >= 2
+    assert "`pattern=${state.pattern || payload.pattern || ''}`" in source

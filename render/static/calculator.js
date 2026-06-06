@@ -11,6 +11,7 @@
     webhook_mode: 'no',
     test_mode: 'no',
     setup: '',
+    pattern: '',
     quote: null,
     resolvedSymbol: '',
     pendingWebhookId: '',
@@ -472,6 +473,7 @@
       `test=${payload.test}`,
       `timeframe=${state.timeframe || payload.timeframe || ''}`,
       `setup=${state.setup || payload.setup || ''}`,
+      `pattern=${state.pattern || payload.pattern || ''}`,
       `risk_mode=${payload.risk_mode}`,
       `risk_value=${payload.risk_value}`,
       `stop_loss_ticks=${payload.stop_loss_ticks}`,
@@ -653,6 +655,12 @@
     const opts = [['','None'],['Pullback','pullback'],['Breakout','breakout'],['News Scalp','news scalp']];
     root.innerHTML = opts.map(([v,l])=>`<button type="button" data-v="${v}" class="${v===state.setup?'active':''}">${l}</button>`).join('');
     root.querySelectorAll('button').forEach((btn)=>btn.addEventListener('click',()=>{state.setup=btn.dataset.v||''; setSetupButtons(); invalidateQuote();}));
+  }
+  function setPatternButtons() {
+    const root = $('pattern-toggle'); if (!root) return;
+    const opts = [['','None'],['range','range'],['channel','channel']];
+    root.innerHTML = opts.map(([v,l])=>`<button type="button" data-v="${v}" class="${v===state.pattern?'active':''}">${l}</button>`).join('');
+    root.querySelectorAll('button').forEach((btn)=>btn.addEventListener('click',()=>{state.pattern=btn.dataset.v||''; setPatternButtons(); invalidateQuote();}));
   }
 
   async function resolveSymbolAndLoad() {
@@ -850,6 +858,7 @@
         webhook: state.webhook_mode,
         test: state.test_mode,
         setup: state.setup,
+        pattern: state.pattern,
         pending_webhook_id: state.webhook_mode === 'yes' ? (state.pendingWebhookId || undefined) : undefined,
         previous_pending_webhook_id: state.webhook_mode === 'yes' ? undefined : (state.pendingWebhookId || undefined),
       };
@@ -937,6 +946,7 @@
         timeframe: state.timeframe,
         test: state.test_mode,
         setup: state.setup,
+        pattern: state.pattern,
         planned_entry_price: state.quote.entry_price,
         planned_stop_price: state.quote.stop_price,
         planned_target_price: state.quote.target_price,
@@ -998,6 +1008,7 @@
   setToggle('test-toggle', 'test_mode');
   setTimeframeButtons();
   setSetupButtons();
+  setPatternButtons();
   updateRiskUiForAsset();
   syncAllToggleStates();
   const webhookYesBtn = $('webhook-toggle').querySelectorAll('button')[1];
