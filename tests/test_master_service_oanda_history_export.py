@@ -441,6 +441,23 @@ def test_oanda_transaction_history_allocates_daily_financing_to_single_open_trad
     assert row['net_profit'] == pytest.approx(3.1518)
     assert row['balance_after_trade'] == pytest.approx(1496.92)
 
+
+def test_oanda_transaction_history_allocates_financing_by_closed_interval_despite_unmatched_noise():
+    rows = [
+        {"TICKET": 100, "TRANSACTION DATE": "2024-01-01 00:00:00 AEST", "TRANSACTION TYPE": "ORDER_FILL", "DETAILS": "MARKET_ORDER", "INSTRUMENT": "EUR_USD", "PRICE": 1.1, "UNITS": 999, "DIRECTION": "Buy", "SPREAD COST": 0.1, "BALANCE": 1000},
+        *_sample_oanda_history_rows(),
+    ]
+    parsed = master_service._journal_rows_from_oanda_transaction_history_frame(
+        pd.DataFrame(rows),
+        account_mode="demo",
+        account_label="OANDA DEMO",
+        source_path="/tmp/oanda_history_demo.csv",
+    )
+    row = next(item for item in parsed["rows"] if item["id"] == "oanda_export:demo:589:594")
+    assert row["swap"] == pytest.approx(-0.1329)
+    assert row["net_profit"] == pytest.approx(3.1518)
+    assert "ambiguous_oanda_financing_allocation:592" not in parsed["warnings"]
+
 def test_oanda_transaction_history_csv_parses_closed_trades():
     rows = _sample_oanda_history_rows() + [
         {"TICKET":598,"TRANSACTION DATE":"2026-04-09 19:37:46 AEST","TRANSACTION TYPE":"ORDER_FILL","DETAILS":"MARKET_ORDER","INSTRUMENT":"NZD_USD","PRICE":0.58323,"UNITS":2916,"DIRECTION":"Buy","SPREAD COST":0,"STOP LOSS":0.58117,"TAKE PROFIT":0.58717,"FINANCING":"","COMMISSION":"","PL":"","BALANCE":1496.92},
@@ -611,4 +628,37 @@ def test_oanda_demo_raw_history_spread_cost_not_commission_and_balance_authorita
     assert parsed["account_balance"]["balance"] == pytest.approx(1500.20)
     assert (row.get("metrics") or {}).get("oanda_open_spread_cost") == pytest.approx(0.4460)
     assert (row.get("metrics") or {}).get("oanda_close_spread_cost") == pytest.approx(0.4906)
+    assert (row.get("metrics") or {}).get("oanda_total_spread_cost") == pytest.approx(0.9366)
     assert row["commission"] != pytest.approx(0.9366)
+
+
+def test_oanda_demo_attached_style_spread_costs_never_become_commission():
+    csv = """TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,INSTRUMENT,PRICE,UNITS,DIRECTION,SPREAD COST,STOP LOSS,TAKE PROFIT,FINANCING,COMMISSION,GSL FEE,GSL PREMIUM,PL,BALANCE
+604,2026-04-22 20:51:56 AEST,ORDER_FILL,MARKET_ORDER,NZD_USD,0.59116,30821,Buy,3.0127,0.59097,0.59166,0,0,0,0,0,1513.09
+608,2026-04-22 20:52:36 AEST,ORDER_FILL,MARKET_ORDER_TRADE_CLOSE,NZD_USD,0.59112,30821,Sell,2.7972,,,0,0,0,0,-1.7385,1511.35
+618,2026-04-30 19:45:59 AEST,ORDER_FILL,MARKET_ORDER,EUR_USD,1.16929,6546,Buy,0.3667,1.16824,1.17148,0,0,0,0,0,1502.41
+622,2026-04-30 19:46:41 AEST,ORDER_FILL,MARKET_ORDER_TRADE_CLOSE,EUR_USD,1.16910,6546,Sell,0.4125,,,0,0,0,0,-1.7591,1500.65
+626,2026-05-26 16:54:34 AEST,ORDER_FILL,MARKET_ORDER,EUR_USD,1.16370,6393,Buy,0.4460,1.16260,1.16593,0,0,0,0,0,1500.65
+630,2026-05-26 16:55:31 AEST,ORDER_FILL,MARKET_ORDER_TRADE_CLOSE,EUR_USD,1.16365,6393,Sell,0.4906,,,0,0,0,0,-0.4505,1500.20
+"""
+    parsed = master_service._journal_rows_from_oanda_transaction_history_frame(
+        pd.read_csv(master_service.io.StringIO(csv)),
+        account_mode="demo",
+        account_label="OANDA DEMO",
+        source_path="oanda_history_demo.csv",
+    )
+    by_id = {row["id"]: row for row in parsed["rows"]}
+
+    row_618 = by_id["oanda_export:demo:618:622"]
+    assert row_618["commission"] in (None, 0, 0.0)
+    assert row_618["metrics"]["oanda_total_spread_cost"] == pytest.approx(0.7792)
+    assert row_618["net_profit"] == pytest.approx(-1.7591)
+    assert row_618["balance_after_trade"] == pytest.approx(1500.65)
+
+    row_604 = by_id["oanda_export:demo:604:608"]
+    assert row_604["commission"] in (None, 0, 0.0)
+    assert row_604["metrics"]["oanda_total_spread_cost"] == pytest.approx(5.8099)
+
+    row_626 = by_id["oanda_export:demo:626:630"]
+    assert row_626["commission"] in (None, 0, 0.0)
+    assert row_626["metrics"]["oanda_total_spread_cost"] == pytest.approx(0.9366)

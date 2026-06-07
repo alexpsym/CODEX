@@ -1,44 +1,35 @@
 [
   {
     "cooldown_seconds": 0,
-    "created_at": "2026-05-03T04:24:24.975767+00:00",
     "direction": "either",
     "enabled": true,
     "id": "d7f56968ece04ddbac72e8b6f8478a7d",
     "kind": "move",
-    "source": "dropbox",
     "symbol": "BRUSDT",
     "threshold": 10.0,
     "unit": "pct",
-    "updated_at": "2026-05-03T04:24:24.975767+00:00",
     "window_seconds": 60
   },
   {
     "cooldown_seconds": 0,
-    "created_at": "2026-05-03T04:46:04.185272+00:00",
     "direction": "either",
     "enabled": true,
     "id": "3e7bc55e3e994d9ebc4bc95ebff0e4a3",
     "kind": "move",
-    "source": "dropbox",
     "symbol": "AKTUSDT",
     "threshold": 6.0,
     "unit": "pct",
-    "updated_at": "2026-05-03T04:46:04.185272+00:00",
     "window_seconds": 60
   },
   {
     "cooldown_seconds": 0,
-    "created_at": "2026-05-04T02:26:40.799665+00:00",
     "direction": "either",
     "enabled": true,
     "id": "8b3273b6594b406c8f0aeb951d38a1a6",
     "kind": "move",
-    "source": "dropbox",
     "symbol": "DOGEUSDT",
     "threshold": 1.5,
     "unit": "pct",
-    "updated_at": "2026-05-04T02:26:40.799665+00:00",
     "window_seconds": 60
   }
 ]

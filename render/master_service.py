@@ -1758,7 +1758,7 @@ def _build_trading_journal_view_snapshot(
             if row_id in seen_monthly_ids:
                 continue
             merged_items.append(dict(fallback_row))
-        items = merged_items
+        items = _sanitize_oanda_demo_commission_fields(merged_items)
         _finish_snapshot_substage("pending_and_monthly_merge")
         raw_trade_items = [r for r in items if _row_type(r) == "trade"]
         non_trade_items = [r for r in items if _row_type(r) != "trade"]
@@ -1836,11 +1836,11 @@ def _build_trading_journal_view_snapshot(
         _TRADING_JOURNAL_VIEW_CACHE["payload"] = safe_result
         APP_LOGGER.info("trading_journal_snapshot_build_done sync_id=%s caller=%s elapsed=%.6fs cached=False mode=master_journal", snapshot_sync_id, snapshot_caller, time.perf_counter() - snapshot_started)
         return safe_result
-    rows = [
+    rows = _sanitize_oanda_demo_commission_fields([
         _backfill_trade_row_context_fields(r)
         for r in _get_trading_journal_rows()
         if _is_visible_trading_journal_row(r)
-    ]
+    ])
     if _trading_journal_local_excel_authoritative():
         rows = [
             r for r in rows
@@ -3878,12 +3878,11 @@ def _find_journal_row_index(row_id: str) -> int:
 
 
 def _upsert_trading_journal_rows(rows: Iterable[Dict[str, object]], *, allow_broker_rows_in_single_file: bool = False) -> int:
+    incoming_rows = [dict(row) for row in rows if isinstance(row, dict)]
     if _trading_journal_local_excel_authoritative():
         blocked = 0
         allow_broker = bool(allow_broker_rows_in_single_file and _master_journal_single_file_mode())
-        for raw in rows:
-            if not isinstance(raw, dict):
-                continue
+        for raw in incoming_rows:
             src = str(raw.get("source") or "").strip().lower()
             acct = str(raw.get("account") or raw.get("account_label") or "").strip().lower()
             if src == "local_excel":
@@ -3898,15 +3897,15 @@ def _upsert_trading_journal_rows(rows: Iterable[Dict[str, object]], *, allow_bro
             return 0
     with _TRADING_JOURNAL_ROWS_LOCK:
         existing = _get_trading_journal_rows()
+        incoming_rows, stale_oanda_ids = _prepare_oanda_canonical_replacements(existing, incoming_rows)
+        existing = _sanitize_oanda_demo_commission_fields(existing, raw_export_rows=incoming_rows)
         by_id: Dict[str, Dict[str, object]] = {}
         for row in existing:
             row_id = str(row.get("id") or "").strip()
-            if row_id:
+            if row_id and row_id not in stale_oanda_ids:
                 by_id[row_id] = row
         changed = 0
-        for raw in rows:
-            if not isinstance(raw, dict):
-                continue
+        for raw in incoming_rows:
             row = _normalize_journal_profit_fields(dict(raw))
             row_id = str(row.get("id") or "").strip()
             if not row_id:
@@ -4297,6 +4296,210 @@ def _canonical_trade_epoch_second(value: object) -> Optional[int]:
         return None
 
 
+def _canonical_oanda_account_label(row: Dict[str, object]) -> str:
+    account = str(row.get("account_label") or row.get("account") or "").strip().upper()
+    source = str(row.get("source") or "").strip().lower()
+    if "OANDA" in account:
+        if "DEMO" in account or "PRACTICE" in account:
+            return "OANDA DEMO"
+        if "LIVE" in account:
+            return "OANDA LIVE"
+    if source.startswith("oanda"):
+        if account in {"DEMO", "PRACTICE"}:
+            return "OANDA DEMO"
+        if account == "LIVE":
+            return "OANDA LIVE"
+    return ""
+
+
+def _canonical_oanda_trade_fingerprint(row: Dict[str, object]) -> Optional[str]:
+    if not isinstance(row, dict) or _row_type(row) != "trade":
+        return None
+    account = _canonical_oanda_account_label(row)
+    if not account:
+        return None
+    symbol = _canonical_symbol(row.get("symbol") or row.get("instrument") or row.get("symbol_raw"))
+    open_second = _canonical_trade_epoch_second(row.get("open_time") or row.get("opened_at") or row.get("entry_time"))
+    close_second = _canonical_trade_epoch_second(row.get("close_time") or row.get("closed_at") or row.get("exit_time"))
+    if not symbol or open_second is None or close_second is None:
+        return None
+
+    qty_raw = _to_float(row.get("qty_raw"))
+    if qty_raw is None:
+        qty_raw = _to_float(row.get("qty"))
+        if qty_raw is not None and (
+            str(row.get("qty_unit") or "").strip().lower() == "lots"
+            or abs(qty_raw) < 1000
+        ):
+            qty_raw *= 100000.0
+
+    def _rounded(value: object, dp: int = 8) -> str:
+        number = _to_float(value)
+        return "" if number is None else f"{number:.{dp}f}"
+
+    return "|".join(
+        [
+            account,
+            symbol,
+            str(open_second),
+            str(close_second),
+            _rounded(abs(qty_raw) if qty_raw is not None else None, 4),
+            _rounded(row.get("entry_price")),
+            _rounded(row.get("exit_price")),
+            _rounded(row.get("net_profit") if row.get("net_profit") is not None else row.get("realized_pnl")),
+            _rounded(row.get("balance_after_trade")),
+        ]
+    )
+
+
+_OANDA_MANUAL_PRESERVE_FIELDS = {
+    "is_test_trade",
+    "setup",
+    "timeframe",
+    "pattern",
+    "ema",
+    "aths_atls",
+    "order_type",
+    "round_number",
+    "spiked_out",
+    "close_stopout",
+    "close_stop_out",
+    "stop_out",
+    "near_perfect_entry",
+    "near_win",
+    "early_close",
+    "breakeven",
+    "notes",
+    "result_pct",
+    "r_multiple",
+    "move_to_break_even_time",
+    "move_to_break_even_duration",
+    "move_to_break_even_trigger_price",
+    "move_to_break_even_distance_from_entry_pct",
+    "move_to_break_even_distance_from_exit_pct",
+    "move_to_profit_time",
+    "move_to_profit_duration",
+    "move_to_profit_trigger_price",
+    "move_to_profit_distance_from_entry_pct",
+    "move_to_profit_distance_from_exit_pct",
+    "manual_overrides",
+    "manual_override_fields",
+    "manual_updated_at",
+}
+
+
+def _preserve_oanda_manual_fields(
+    canonical: Dict[str, object], legacy: Dict[str, object]
+) -> Dict[str, object]:
+    merged = dict(canonical)
+    for field in _OANDA_MANUAL_PRESERVE_FIELDS:
+        if field not in legacy:
+            continue
+        value = legacy.get(field)
+        if field == "notes" and value in (None, ""):
+            continue
+        merged[field] = copy.deepcopy(value)
+    return merged
+
+
+def _prepare_oanda_canonical_replacements(
+    existing_rows: Iterable[Dict[str, object]],
+    incoming_rows: Iterable[Dict[str, object]],
+) -> Tuple[List[Dict[str, object]], Set[str]]:
+    existing_by_fingerprint: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    for row in existing_rows:
+        if not isinstance(row, dict):
+            continue
+        fingerprint = _canonical_oanda_trade_fingerprint(row)
+        if fingerprint:
+            existing_by_fingerprint[fingerprint].append(row)
+
+    prepared: List[Dict[str, object]] = []
+    stale_ids: Set[str] = set()
+    for raw in incoming_rows:
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        row_id = str(row.get("id") or "").strip()
+        source = str(row.get("source") or "").strip().lower()
+        is_canonical_export = row_id.startswith("oanda_export:") or source == "oanda_transaction_export"
+        if is_canonical_export:
+            fingerprint = _canonical_oanda_trade_fingerprint(row)
+            matches = [
+                candidate
+                for candidate in existing_by_fingerprint.get(fingerprint or "", [])
+                if str(candidate.get("id") or "").strip() != row_id
+            ]
+            if len(matches) == 1:
+                legacy = matches[0]
+                legacy_id = str(legacy.get("id") or "").strip()
+                if legacy_id:
+                    stale_ids.add(legacy_id)
+                row = _preserve_oanda_manual_fields(row, legacy)
+            elif len(matches) > 1:
+                APP_LOGGER.warning(
+                    "oanda_canonical_replacement_ambiguous row_id=%s candidates=%s",
+                    row_id,
+                    [str(candidate.get("id") or "") for candidate in matches[:5]],
+                )
+        prepared.append(row)
+    return _sanitize_oanda_demo_commission_fields(prepared), stale_ids
+
+
+def _sanitize_oanda_demo_commission_fields(
+    rows: Iterable[Dict[str, object]],
+    *,
+    raw_export_rows: Optional[Iterable[Dict[str, object]]] = None,
+) -> List[Dict[str, object]]:
+    authoritative_by_fingerprint: Dict[str, Dict[str, object]] = {}
+    for raw in raw_export_rows or []:
+        if not isinstance(raw, dict) or _canonical_oanda_account_label(raw) != "OANDA DEMO":
+            continue
+        fingerprint = _canonical_oanda_trade_fingerprint(raw)
+        if fingerprint:
+            authoritative_by_fingerprint[fingerprint] = raw
+
+    allowed_sources = {"", "oanda_transaction_export", "oanda", "master_journal", "excel", "local_excel"}
+    sanitized: List[Dict[str, object]] = []
+    for raw in rows:
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        if _canonical_oanda_account_label(row) != "OANDA DEMO":
+            sanitized.append(row)
+            continue
+        source = str(row.get("source") or "").strip().lower()
+        if source not in allowed_sources:
+            sanitized.append(row)
+            continue
+
+        metrics = dict(row.get("metrics") or {}) if isinstance(row.get("metrics"), dict) else {}
+        open_spread = _to_float(metrics.get("oanda_open_spread_cost"))
+        close_spread = _to_float(metrics.get("oanda_close_spread_cost"))
+        if open_spread is not None or close_spread is not None:
+            metrics["oanda_total_spread_cost"] = (open_spread or 0.0) + (close_spread or 0.0)
+            row["metrics"] = metrics
+
+        authoritative = authoritative_by_fingerprint.get(_canonical_oanda_trade_fingerprint(row) or "")
+        if authoritative is not None:
+            commission = _to_float(authoritative.get("commission"))
+            fees = _to_float(authoritative.get("fees"))
+        elif source == "oanda_transaction_export":
+            commission = _to_float(row.get("commission"))
+            fees = _to_float(row.get("fees"))
+        elif source == "oanda" and _to_float(metrics.get("oanda_actual_commission_total")) is not None:
+            commission = _to_float(metrics.get("oanda_actual_commission_total"))
+            fees = commission
+        else:
+            commission = None
+            fees = None
+
+        row["commission"] = None if commission is None or math.isclose(commission, 0.0, abs_tol=1e-12) else abs(commission)
+        row["fees"] = None if fees is None or math.isclose(fees, 0.0, abs_tol=1e-12) else abs(fees)
+        sanitized.append(row)
+    return sanitized
+
+
 def _canonical_bybit_demo_trade_signature(row: Dict[str, object]) -> Optional[str]:
     if not isinstance(row, dict):
         return None
@@ -4637,8 +4840,10 @@ def _repair_persisted_oanda_trade_rows() -> int:
     rows = _get_trading_journal_rows()
     if not rows:
         return 0
+    sanitized_rows = _sanitize_oanda_demo_commission_fields(rows)
+    changed = sum(1 for before, after in zip(rows, sanitized_rows) if before != after)
+    rows = sanitized_rows
     contexts = _load_trade_contexts()
-    changed = 0
     inserted = 0
     updated = 0
     repaired: List[Dict[str, object]] = []
@@ -5187,61 +5392,220 @@ def _journal_rows_from_oanda_transaction_history_frame(
 ) -> Dict[str, object]:
     def _parse_dt(value: object) -> Tuple[float, Optional[str]]:
         return _parse_oanda_datetime_to_epoch_and_journal_iso(value)
-    rows=[]; warnings=[]; unmatched_open=[]; unmatched_close=[]
-    frame=df.copy()
-    frame['_ticket_num']=pd.to_numeric(frame.get('TICKET'), errors='coerce')
-    frame['_dt_parsed']=frame.get('TRANSACTION DATE').map(_parse_dt)
-    frame['_dt_epoch']=frame['_dt_parsed'].map(lambda v: v[0] if isinstance(v, tuple) else float('-inf'))
-    frame['_dt']=frame['_dt_parsed'].map(lambda v: v[1] if isinstance(v, tuple) else None)
-    frame=frame.sort_values(by=['_dt_epoch','_ticket_num'], kind='stable')
-    open_legs=defaultdict(list)
-    pending_client=defaultdict(list)
-    financing_alloc=defaultdict(float)
-    latest_balance=None; latest_asof=None
+
+    rows: List[Dict[str, object]] = []
+    warnings: List[str] = []
+    unmatched_open: List[str] = []
+    unmatched_close: List[str] = []
+    frame = df.copy()
+    frame["_ticket_num"] = pd.to_numeric(frame.get("TICKET"), errors="coerce")
+    frame["_dt_parsed"] = frame.get("TRANSACTION DATE").map(_parse_dt)
+    frame["_dt_epoch"] = frame["_dt_parsed"].map(
+        lambda value: value[0] if isinstance(value, tuple) else float("-inf")
+    )
+    frame["_dt"] = frame["_dt_parsed"].map(
+        lambda value: value[1] if isinstance(value, tuple) else None
+    )
+    frame = frame.sort_values(by=["_dt_epoch", "_ticket_num"], kind="stable")
+    open_legs: Dict[Tuple[str, int], List[Dict[str, object]]] = defaultdict(list)
+    pending_client: Dict[Tuple[str, int, str], List[Dict[str, object]]] = defaultdict(list)
+    financing_events: List[Dict[str, object]] = []
+    closed_trades: List[Dict[str, object]] = []
+    latest_balance = None
+    latest_asof = None
     for _, r in frame.iterrows():
-        prev_balance_snapshot = latest_balance
-        tx_type=str(r.get('TRANSACTION TYPE') or '').strip().upper()
-        details=str(r.get('DETAILS') or '').strip().upper()
-        symbol=str(r.get('INSTRUMENT') or '').strip().upper()
-        direction=str(r.get('DIRECTION') or '').strip().title()
-        ticket=str(r.get('TICKET') or '').strip()
-        when=r.get('_dt')
-        pl=_to_float(r.get('PL')); bal=_to_float(r.get('BALANCE'))
+        tx_type = str(r.get("TRANSACTION TYPE") or "").strip().upper()
+        details = str(r.get("DETAILS") or "").strip().upper()
+        symbol = str(r.get("INSTRUMENT") or "").strip().upper()
+        direction = str(r.get("DIRECTION") or "").strip().title()
+        ticket = str(r.get("TICKET") or "").strip()
+        when = r.get("_dt")
+        when_epoch = _to_float(r.get("_dt_epoch"))
+        pl = _to_float(r.get("PL"))
+        bal = _to_float(r.get("BALANCE"))
         if bal is not None and when:
-            latest_balance=bal; latest_asof=when
-        if tx_type=='MARKET_ORDER' and details=='CLIENT_ORDER' and symbol:
-            u=_to_float(r.get('UNITS')); units=int(abs(u)) if u is not None else 0
-            if units>0:
-                pending_client[(symbol,units,direction.lower())].append({'sl':_to_float(r.get('STOP LOSS')),'tp':_to_float(r.get('TAKE PROFIT')),'ticket':ticket})
+            latest_balance = bal
+            latest_asof = when
+        if tx_type == "MARKET_ORDER" and details == "CLIENT_ORDER" and symbol:
+            units_value = _to_float(r.get("UNITS"))
+            units = int(abs(units_value)) if units_value is not None else 0
+            if units > 0:
+                pending_client[(symbol, units, direction.lower())].append(
+                    {
+                        "sl": _to_float(r.get("STOP LOSS")),
+                        "tp": _to_float(r.get("TAKE PROFIT")),
+                        "ticket": ticket,
+                    }
+                )
             continue
-        if tx_type=='ORDER_FILL' and details=='MARKET_ORDER' and symbol:
-            u=_to_float(r.get('UNITS')); units=int(abs(u)) if u is not None else 0
-            if units<=0: continue
-            pend=pending_client.get((symbol,units,direction.lower())) or []
-            pctx=pend.pop(0) if pend else {}
-            open_legs[(symbol,units)].append({'ticket':ticket,'open_time':when,'symbol':_canonical_symbol(symbol),'side':direction,'units':units,'entry':_to_float(r.get('PRICE')),'sl':_to_float(r.get('STOP LOSS')) or pctx.get('sl'),'tp':_to_float(r.get('TAKE PROFIT')) or pctx.get('tp'),'spread_cost':_to_float(r.get('SPREAD COST'))})
+        if tx_type == "ORDER_FILL" and details == "MARKET_ORDER" and symbol:
+            units_value = _to_float(r.get("UNITS"))
+            units = int(abs(units_value)) if units_value is not None else 0
+            if units <= 0:
+                continue
+            pending = pending_client.get((symbol, units, direction.lower())) or []
+            pending_context = pending.pop(0) if pending else {}
+            open_legs[(symbol, units)].append(
+                {
+                    "ticket": ticket,
+                    "open_time": when,
+                    "open_epoch": when_epoch,
+                    "symbol": _canonical_symbol(symbol),
+                    "side": direction,
+                    "units": units,
+                    "entry": _to_float(r.get("PRICE")),
+                    "sl": _to_float(r.get("STOP LOSS")) or pending_context.get("sl"),
+                    "tp": _to_float(r.get("TAKE PROFIT")) or pending_context.get("tp"),
+                    "spread_cost": _to_float(r.get("SPREAD COST")),
+                }
+            )
             continue
-        if tx_type=='DAILY_FINANCING':
-            fin=_to_float(r.get('FINANCING'))
-            if fin is None: continue
-            live=[v[-1] for v in open_legs.values() if v]
-            if len(live)==1: financing_alloc[live[0]['ticket']]+=fin
-            elif len(live)==0: warnings.append(f'unallocated_oanda_financing:{ticket}')
-            else: warnings.append(f'ambiguous_oanda_financing_allocation:{ticket}')
+        if tx_type == "DAILY_FINANCING":
+            financing = _to_float(r.get("FINANCING"))
+            if financing is not None and when_epoch is not None:
+                financing_events.append(
+                    {"ticket": ticket, "epoch": when_epoch, "amount": financing}
+                )
             continue
-        if tx_type=='ORDER_FILL' and details in {'MARKET_ORDER_TRADE_CLOSE','TAKE_PROFIT_ORDER','STOP_LOSS_ORDER'} and symbol:
-            u=_to_float(r.get('UNITS')); units=int(abs(u)) if u is not None else 0
-            if units<=0: continue
-            bucket=open_legs.get((symbol,units)) or []
+        if (
+            tx_type == "ORDER_FILL"
+            and details in {"MARKET_ORDER_TRADE_CLOSE", "TAKE_PROFIT_ORDER", "STOP_LOSS_ORDER"}
+            and symbol
+        ):
+            units_value = _to_float(r.get("UNITS"))
+            units = int(abs(units_value)) if units_value is not None else 0
+            if units <= 0:
+                continue
+            bucket = open_legs.get((symbol, units)) or []
             if not bucket:
-                unmatched_close.append(ticket); continue
-            o=bucket.pop(0)
-            alloc=financing_alloc.pop(o['ticket'],0.0)
-            net=(pl or 0.0)+alloc+(_to_float(r.get('COMMISSION')) or 0.0)+(_to_float(r.get('GSL FEE')) or 0.0)+(_to_float(r.get('GSL PREMIUM')) or 0.0)
-            rows.append(_normalize_journal_profit_fields({'id':f"oanda_export:{account_mode}:{o['ticket']}:{ticket}",'source':'oanda_transaction_export','account':account_mode,'account_label':account_label,'asset_class':'forex','symbol':o['symbol'],'side':o['side'],'status':'closed','open_time':o['open_time'],'close_time':when,'qty':units/100000.0,'qty_raw':units,'qty_unit':'lots','entry_price':o['entry'],'exit_price':_to_float(r.get('PRICE')),'stop_loss':o['sl'],'take_profit':o['tp'],'swap':alloc or None,'commission':abs(_to_float(r.get('COMMISSION')) or 0.0)+abs(_to_float(r.get('GSL FEE')) or 0.0),'net_profit':net,'realized_pnl':net,'balance_after_trade':bal,'balance_after_trade_currency':'AUD','metrics':{'oanda_export_pl':pl,'oanda_export_financing_allocated':alloc,'oanda_open_spread_cost':o.get('spread_cost'),'oanda_close_spread_cost':_to_float(r.get('SPREAD COST'))},'raw_refs':{'source_path':source_path,'open_ticket':o['ticket'],'close_ticket':ticket,'close_details':details,'transaction_date':when,'transactionId':ticket},'updated_at':_utc_now_iso()}))
+                unmatched_close.append(ticket)
+                continue
+            opened = bucket.pop(0)
+            closed_trades.append(
+                {
+                    "opened": opened,
+                    "close_ticket": ticket,
+                    "close_time": when,
+                    "close_epoch": when_epoch,
+                    "close_details": details,
+                    "exit_price": _to_float(r.get("PRICE")),
+                    "close_spread_cost": _to_float(r.get("SPREAD COST")),
+                    "pl": pl,
+                    "balance": bal,
+                    "commission_raw": _to_float(r.get("COMMISSION")) or 0.0,
+                    "gsl_fee_raw": _to_float(r.get("GSL FEE")) or 0.0,
+                    "gsl_premium_raw": _to_float(r.get("GSL PREMIUM")) or 0.0,
+                    "financing": 0.0,
+                }
+            )
+
+    for event in financing_events:
+        event_epoch = _to_float(event.get("epoch"))
+        candidates = [
+            trade
+            for trade in closed_trades
+            if event_epoch is not None
+            and _to_float((trade.get("opened") or {}).get("open_epoch")) is not None
+            and _to_float(trade.get("close_epoch")) is not None
+            and _to_float((trade.get("opened") or {}).get("open_epoch")) <= event_epoch <= _to_float(trade.get("close_epoch"))
+        ]
+        if len(candidates) == 1:
+            candidates[0]["financing"] = (_to_float(candidates[0].get("financing")) or 0.0) + (
+                _to_float(event.get("amount")) or 0.0
+            )
+        elif not candidates:
+            warnings.append(f"unallocated_oanda_financing:{event.get('ticket')}")
+        else:
+            warnings.append(f"ambiguous_oanda_financing_allocation:{event.get('ticket')}")
+
+    for trade in closed_trades:
+        opened = trade.get("opened") if isinstance(trade.get("opened"), dict) else {}
+        allocated_financing = _to_float(trade.get("financing")) or 0.0
+        commission_raw = _to_float(trade.get("commission_raw")) or 0.0
+        gsl_fee_raw = _to_float(trade.get("gsl_fee_raw")) or 0.0
+        gsl_premium_raw = _to_float(trade.get("gsl_premium_raw")) or 0.0
+        actual_commission = abs(commission_raw) + abs(gsl_fee_raw) + abs(gsl_premium_raw)
+        commission = None if math.isclose(actual_commission, 0.0, abs_tol=1e-12) else actual_commission
+        open_spread = _to_float(opened.get("spread_cost"))
+        close_spread = _to_float(trade.get("close_spread_cost"))
+        total_spread = (open_spread or 0.0) + (close_spread or 0.0)
+        net = (
+            (_to_float(trade.get("pl")) or 0.0)
+            + allocated_financing
+            + commission_raw
+            + gsl_fee_raw
+            + gsl_premium_raw
+        )
+        rows.append(
+            _normalize_journal_profit_fields(
+                {
+                    "id": f"oanda_export:{account_mode}:{opened.get('ticket')}:{trade.get('close_ticket')}",
+                    "source": "oanda_transaction_export",
+                    "account": account_mode,
+                    "account_label": account_label,
+                    "asset_class": "forex",
+                    "symbol": opened.get("symbol"),
+                    "side": opened.get("side"),
+                    "status": "closed",
+                    "open_time": opened.get("open_time"),
+                    "close_time": trade.get("close_time"),
+                    "qty": (_to_float(opened.get("units")) or 0.0) / 100000.0,
+                    "qty_raw": opened.get("units"),
+                    "qty_unit": "lots",
+                    "entry_price": opened.get("entry"),
+                    "exit_price": trade.get("exit_price"),
+                    "stop_loss": opened.get("sl"),
+                    "take_profit": opened.get("tp"),
+                    "swap": allocated_financing or None,
+                    "commission": commission,
+                    "fees": commission,
+                    "net_profit": net,
+                    "realized_pnl": net,
+                    "balance_after_trade": trade.get("balance"),
+                    "balance_after_trade_currency": "AUD",
+                    "metrics": {
+                        "oanda_export_pl": trade.get("pl"),
+                        "oanda_export_financing_allocated": allocated_financing,
+                        "oanda_open_spread_cost": open_spread,
+                        "oanda_close_spread_cost": close_spread,
+                        "oanda_total_spread_cost": total_spread,
+                        "oanda_raw_commission": commission_raw,
+                        "oanda_raw_gsl_fee": gsl_fee_raw,
+                        "oanda_raw_gsl_premium": gsl_premium_raw,
+                        "oanda_actual_commission_total": actual_commission,
+                    },
+                    "raw_refs": {
+                        "source_path": source_path,
+                        "open_ticket": opened.get("ticket"),
+                        "close_ticket": trade.get("close_ticket"),
+                        "close_details": trade.get("close_details"),
+                        "transaction_date": trade.get("close_time"),
+                        "transactionId": trade.get("close_ticket"),
+                    },
+                    "updated_at": _utc_now_iso(),
+                }
+            )
+        )
     for legs in open_legs.values():
-        unmatched_open.extend([str(l.get('ticket') or '') for l in legs if str(l.get('ticket') or '')])
-    return {'rows':rows,'account_balance':{'source':'oanda_transaction_export_balance','balance_source':'oanda_transaction_export_balance','account':account_label,'label':account_label,'balance':latest_balance,'currency':'AUD','as_of':latest_asof,'dropbox_path':source_path},'warnings':warnings,'unmatched_open_fills':unmatched_open,'unmatched_close_fills':unmatched_close}
+        unmatched_open.extend(
+            [str(leg.get("ticket") or "") for leg in legs if str(leg.get("ticket") or "")]
+        )
+    return {
+        "rows": _sanitize_oanda_demo_commission_fields(rows),
+        "account_balance": {
+            "source": "oanda_transaction_export_balance",
+            "balance_source": "oanda_transaction_export_balance",
+            "account": account_label,
+            "label": account_label,
+            "balance": latest_balance,
+            "currency": "AUD",
+            "as_of": latest_asof,
+            "dropbox_path": source_path,
+        },
+        "warnings": warnings,
+        "unmatched_open_fills": unmatched_open,
+        "unmatched_close_fills": unmatched_close,
+    }
 
 
 def _parse_excel_account_workbook(
@@ -5559,7 +5923,7 @@ def _parse_excel_account_workbook(
                     "dropbox_path": dbx_path,
                 }
 
-    return all_rows, account_balance
+    return _sanitize_oanda_demo_commission_fields(all_rows), account_balance
 def _resolve_trading_journal_dropbox_folder() -> Tuple[str, List[Dict[str, Any]]]:
     if not TRADING_JOURNAL_DROPBOX_FOLDER:
         raise HTTPException(status_code=500, detail="TRADING_JOURNAL_DROPBOX_FOLDER is not set.")
@@ -6523,7 +6887,14 @@ def _list_local_oanda_history_exports() -> List[Path]:
         if "oanda" in name and "history" in name:
             hits.append(candidate)
     export_root = OANDA_HISTORY_EXPORT_ROOT
-    if export_root.exists() and export_root.is_dir():
+    try:
+        include_global_export_root = root.resolve() in {
+            (BASE_DIR / "journal").resolve(),
+            export_root.resolve(),
+        }
+    except Exception:
+        include_global_export_root = False
+    if include_global_export_root and export_root.exists() and export_root.is_dir():
         for candidate in export_root.iterdir():
             if not candidate.is_file() or candidate.suffix.lower() != ".csv":
                 continue
@@ -7000,7 +7371,7 @@ def _parse_local_trading_journal_workbook(path: Path, *, original_name: Optional
         balance["import_source"] = "local_excel"
         if not str(balance.get("balance_source") or "").strip():
             balance["source"] = "local_excel"
-    return rows, balance
+    return _sanitize_oanda_demo_commission_fields(rows), balance
 
 
 def _import_trading_journal_from_dropbox_excel(
@@ -8186,9 +8557,9 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             row_is_test_trade = base_is_test_trade
         exit_price = _to_float(close_leg.get("price")) or _to_float(entry.get("price"))
         realized_pnl = (_to_float(close_leg.get("realizedPL")) or 0.0) + (_to_float(close_leg.get("financing")) or 0.0)
+        spread_cost = abs(_to_float(entry.get("halfSpreadCost")) or 0.0)
         fees = (
-            abs(_to_float(entry.get("halfSpreadCost")) or 0.0)
-            + abs(_to_float(entry.get("commission")) or 0.0)
+            abs(_to_float(entry.get("commission")) or 0.0)
             + abs(_to_float(entry.get("guaranteedExecutionFee")) or 0.0)
         )
         row_id_suffix = trade_id or f"{tx_id}:{idx}"
@@ -8209,9 +8580,9 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             "qty_raw": leg_units,
             "qty_unit": "lots",
             "notional_usd": None,
-            "commission": fees,
+            "commission": fees or None,
             "commission_currency": "AUD",
-            "fees": fees,
+            "fees": fees or None,
             "fee_currency": "AUD",
             "realized_pnl": realized_pnl,
             "net_profit": realized_pnl,
@@ -8223,7 +8594,16 @@ def _journal_rows_from_oanda_order_fill(entry: Dict[str, object]) -> List[Dict[s
             "stop_loss": row_stop_loss,
             "take_profit": row_take_profit,
             "is_test_trade": row_is_test_trade,
-            "metrics": {k: v for k, v in {"timeframe": row_timeframe, "is_test_trade": row_is_test_trade}.items() if v not in ("", None)},
+            "metrics": {
+                k: v
+                for k, v in {
+                    "timeframe": row_timeframe,
+                    "is_test_trade": row_is_test_trade,
+                    "oanda_half_spread_cost": spread_cost or None,
+                    "oanda_actual_commission_total": fees,
+                }.items()
+                if v not in ("", None)
+            },
             "raw_refs": {"transactionId": tx_id, "orderId": entry.get("orderID"), "tradeId": trade_id},
         }
         rows.append(_normalize_journal_profit_fields(row))
@@ -27411,7 +27791,10 @@ def _import_uploaded_trading_journal_file(upload_name: str, payload: bytes, acco
                 duplicate_rows_merged,
             )
             rows = [_backfill_trade_row_context_fields(dict(r)) if isinstance(r, dict) else r for r in rows]
-            expected_survivors = sorted(set(pre_import_workbook_row_ids) | set(parsed_ids))
+            rows, replaced_oanda_legacy_ids = _prepare_oanda_canonical_replacements(previous_rows, rows)
+            expected_survivors = sorted(
+                (set(pre_import_workbook_row_ids) - replaced_oanda_legacy_ids) | set(parsed_ids)
+            )
             workbook_map = {str((r or {}).get("id") or "").strip(): dict(r) for r in workbook_existing_rows if str((r or {}).get("id") or "").strip()}
             parsed_map = {str((r or {}).get("id") or "").strip(): dict(r) for r in rows if str((r or {}).get("id") or "").strip()}
             fast_path_noop = bool(parsed_map) and all(
