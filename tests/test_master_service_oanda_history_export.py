@@ -662,3 +662,81 @@ def test_oanda_demo_attached_style_spread_costs_never_become_commission():
     row_626 = by_id["oanda_export:demo:626:630"]
     assert row_626["commission"] in (None, 0, 0.0)
     assert row_626["metrics"]["oanda_total_spread_cost"] == pytest.approx(0.9366)
+
+
+def test_oanda_live_market_if_touched_open_and_order_closes_parse_canonical_rows():
+    csv = """TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,INSTRUMENT,PRICE,UNITS,DIRECTION,SPREAD COST,STOP LOSS,TAKE PROFIT,FINANCING,COMMISSION,GSL FEE,GSL PREMIUM,PL,BALANCE
+100,2025-01-01 09:59:58 AEST,MARKET_IF_TOUCHED_ORDER,CLIENT_ORDER,EUR_USD,,1200,Sell,,1.1060,1.0980,,0,0,0,,1000
+101,2025-01-01 10:00:00 AEST,ORDER_FILL,MARKET_IF_TOUCHED_ORDER,EUR_USD,1.1020,1200,Sell,0.31,,,,0,0,0,0,1000
+102,2025-01-01 17:00:00 AEST,DAILY_FINANCING,DAILY_FINANCING,,,,,,,,-0.12,0,0,0,,999.88
+103,2025-01-01 18:00:00 AEST,ORDER_FILL,TAKE_PROFIT_ORDER,EUR_USD,1.0980,1200,Buy,0.28,,,,0,0,0,7.25,1007.13
+201,2025-01-02 10:00:00 AEST,MARKET_IF_TOUCHED_ORDER,CLIENT_ORDER,USD_CHF,,900,Buy,,0.8950,0.9020,,0,0,0,,1007.13
+202,2025-01-02 10:01:00 AEST,ORDER_FILL,MARKET_IF_TOUCHED_ORDER,USD_CHF,0.8990,900,Buy,0.11,,,,0,0,0,0,1007.13
+203,2025-01-02 11:00:00 AEST,ORDER_FILL,STOP_LOSS_ORDER,USD_CHF,0.8950,900,Sell,0.12,,,,0,0,0,-5.50,1001.63
+"""
+    parsed = master_service._journal_rows_from_oanda_transaction_history_frame(
+        pd.read_csv(master_service.io.StringIO(csv)),
+        account_mode="live",
+        account_label="OANDA LIVE",
+        source_path="oanda_history_live.csv",
+    )
+    by_id = {row["id"]: row for row in parsed["rows"]}
+
+    take_profit = by_id["oanda_export:live:101:103"]
+    assert take_profit["commission"] in (None, 0, 0.0)
+    assert take_profit["fees"] in (None, 0, 0.0)
+    assert take_profit["swap"] == pytest.approx(-0.12)
+    assert take_profit["net_profit"] == pytest.approx(7.13)
+    assert take_profit["metrics"]["oanda_total_spread_cost"] == pytest.approx(0.59)
+    assert take_profit["stop_loss"] == pytest.approx(1.1060)
+    assert take_profit["take_profit"] == pytest.approx(1.0980)
+
+    stop_loss = by_id["oanda_export:live:202:203"]
+    assert stop_loss["commission"] in (None, 0, 0.0)
+    assert stop_loss["net_profit"] == pytest.approx(-5.50)
+    assert stop_loss["metrics"]["oanda_total_spread_cost"] == pytest.approx(0.23)
+
+
+def test_oanda_live_market_order_position_closeout_parses_as_close():
+    csv = """TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,INSTRUMENT,PRICE,UNITS,DIRECTION,SPREAD COST,STOP LOSS,TAKE PROFIT,FINANCING,COMMISSION,GSL FEE,GSL PREMIUM,PL,BALANCE
+420,2025-09-05 03:05:05 AEST,ORDER_FILL,MARKET_ORDER,USD_CHF,0.80699,4130,Sell,0.4999,0.80899,0.80299,0,0,0,0,0,1460.29
+423,2025-09-05 07:00:00 AEST,DAILY_FINANCING,DAILY_FINANCING,,,,,,,,-0.9771,0,0,0,,1459.31
+425,2025-09-05 18:05:54 AEST,ORDER_FILL,MARKET_ORDER_POSITION_CLOSEOUT,USD_CHF,0.80372,4130,Buy,0.5214,,,,0,0,0,25.5489,1484.86
+"""
+    parsed = master_service._journal_rows_from_oanda_transaction_history_frame(
+        pd.read_csv(master_service.io.StringIO(csv)),
+        account_mode="live",
+        account_label="OANDA LIVE",
+        source_path="oanda_history_live.csv",
+    )
+
+    assert len(parsed["rows"]) == 1
+    row = parsed["rows"][0]
+    assert row["id"] == "oanda_export:live:420:425"
+    assert row["raw_refs"]["close_details"] == "MARKET_ORDER_POSITION_CLOSEOUT"
+    assert row["commission"] in (None, 0, 0.0)
+    assert row["swap"] == pytest.approx(-0.9771)
+    assert row["net_profit"] == pytest.approx(24.5718)
+    assert row["metrics"]["oanda_total_spread_cost"] == pytest.approx(1.0213)
+    assert row["commission"] != pytest.approx(1.0213)
+
+
+def test_oanda_live_ambiguous_daily_financing_is_not_allocated():
+    csv = """TICKET,TRANSACTION DATE,TRANSACTION TYPE,DETAILS,INSTRUMENT,PRICE,UNITS,DIRECTION,SPREAD COST,STOP LOSS,TAKE PROFIT,FINANCING,COMMISSION,GSL FEE,GSL PREMIUM,PL,BALANCE
+1,2025-01-01 10:00:00 AEST,ORDER_FILL,MARKET_ORDER,EUR_USD,1.1000,1000,Buy,0.10,,,,0,0,0,0,1000
+2,2025-01-01 10:05:00 AEST,ORDER_FILL,MARKET_ORDER,USD_CHF,0.9000,2000,Buy,0.20,,,,0,0,0,0,1000
+3,2025-01-01 12:00:00 AEST,DAILY_FINANCING,DAILY_FINANCING,,,,,,,,-0.33,0,0,0,,999.67
+4,2025-01-01 13:00:00 AEST,ORDER_FILL,TAKE_PROFIT_ORDER,EUR_USD,1.1010,1000,Sell,0.11,,,,0,0,0,1.50,1001.17
+5,2025-01-01 13:05:00 AEST,ORDER_FILL,STOP_LOSS_ORDER,USD_CHF,0.8990,2000,Sell,0.21,,,,0,0,0,-2.00,999.17
+"""
+    parsed = master_service._journal_rows_from_oanda_transaction_history_frame(
+        pd.read_csv(master_service.io.StringIO(csv)),
+        account_mode="live",
+        account_label="OANDA LIVE",
+        source_path="oanda_history_live.csv",
+    )
+
+    assert "ambiguous_oanda_financing_allocation:3" in parsed["warnings"]
+    assert len(parsed["rows"]) == 2
+    assert all(row.get("swap") in (None, "", 0, 0.0) for row in parsed["rows"])
+    assert [row["commission"] for row in parsed["rows"]] == [None, None]

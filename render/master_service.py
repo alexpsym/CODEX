@@ -1758,7 +1758,7 @@ def _build_trading_journal_view_snapshot(
             if row_id in seen_monthly_ids:
                 continue
             merged_items.append(dict(fallback_row))
-        items = _sanitize_oanda_demo_commission_fields(merged_items)
+        items = _sanitize_oanda_commission_fields(merged_items)
         _finish_snapshot_substage("pending_and_monthly_merge")
         raw_trade_items = [r for r in items if _row_type(r) == "trade"]
         non_trade_items = [r for r in items if _row_type(r) != "trade"]
@@ -1836,7 +1836,7 @@ def _build_trading_journal_view_snapshot(
         _TRADING_JOURNAL_VIEW_CACHE["payload"] = safe_result
         APP_LOGGER.info("trading_journal_snapshot_build_done sync_id=%s caller=%s elapsed=%.6fs cached=False mode=master_journal", snapshot_sync_id, snapshot_caller, time.perf_counter() - snapshot_started)
         return safe_result
-    rows = _sanitize_oanda_demo_commission_fields([
+    rows = _sanitize_oanda_commission_fields([
         _backfill_trade_row_context_fields(r)
         for r in _get_trading_journal_rows()
         if _is_visible_trading_journal_row(r)
@@ -3898,7 +3898,7 @@ def _upsert_trading_journal_rows(rows: Iterable[Dict[str, object]], *, allow_bro
     with _TRADING_JOURNAL_ROWS_LOCK:
         existing = _get_trading_journal_rows()
         incoming_rows, stale_oanda_ids = _prepare_oanda_canonical_replacements(existing, incoming_rows)
-        existing = _sanitize_oanda_demo_commission_fields(existing, raw_export_rows=incoming_rows)
+        existing = _sanitize_oanda_commission_fields(existing, raw_export_rows=incoming_rows)
         by_id: Dict[str, Dict[str, object]] = {}
         for row in existing:
             row_id = str(row.get("id") or "").strip()
@@ -4312,6 +4312,17 @@ def _canonical_oanda_account_label(row: Dict[str, object]) -> str:
     return ""
 
 
+_OANDA_CANONICAL_ACCOUNT_LABELS = {"OANDA DEMO", "OANDA LIVE"}
+_OANDA_COMMISSION_SANITIZER_SOURCES = {
+    "",
+    "oanda_transaction_export",
+    "oanda",
+    "master_journal",
+    "excel",
+    "local_excel",
+}
+
+
 def _canonical_oanda_trade_fingerprint(row: Dict[str, object]) -> Optional[str]:
     if not isinstance(row, dict) or _row_type(row) != "trade":
         return None
@@ -4402,14 +4413,171 @@ def _preserve_oanda_manual_fields(
     return merged
 
 
+def _oanda_qty_raw_for_match(row: Dict[str, object]) -> Optional[float]:
+    qty_raw = _to_float(row.get("qty_raw"))
+    if qty_raw is not None:
+        return abs(qty_raw)
+    qty = _to_float(row.get("qty"))
+    if qty is None:
+        return None
+    if (
+        str(row.get("qty_unit") or "").strip().lower() == "lots"
+        or abs(qty) < 1000
+    ):
+        qty *= 100000.0
+    return abs(qty)
+
+
+def _numbers_close_for_oanda_match(
+    left: object,
+    right: object,
+    *,
+    abs_tol: float,
+    rel_tol: float = 0.0,
+) -> bool:
+    left_num = _to_float(left)
+    right_num = _to_float(right)
+    if left_num is None or right_num is None:
+        return False
+    return math.isclose(left_num, right_num, abs_tol=abs_tol, rel_tol=rel_tol)
+
+
+def _oanda_match_epoch_candidates(value: object) -> List[int]:
+    candidates: List[int] = []
+    canonical = _canonical_trade_epoch_second(value)
+    if canonical is not None:
+        candidates.append(canonical)
+    if value in (None, ""):
+        return candidates
+    try:
+        parsed = pd.to_datetime(value)
+    except Exception:
+        return candidates
+    try:
+        if pd.isna(parsed):
+            return candidates
+    except Exception:
+        pass
+    try:
+        dt = parsed.to_pydatetime()
+    except Exception:
+        return candidates
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=JOURNAL_DISPLAY_TZ)
+    else:
+        dt = dt.astimezone(JOURNAL_DISPLAY_TZ)
+    local_epoch = int(round(dt.timestamp()))
+    if local_epoch not in candidates:
+        candidates.append(local_epoch)
+    return candidates
+
+
+def _oanda_epoch_candidates_close(
+    left_values: List[int],
+    right_values: List[int],
+    *,
+    tolerance_seconds: int,
+) -> bool:
+    if not left_values or not right_values:
+        return False
+    return any(abs(left - right) <= tolerance_seconds for left in left_values for right in right_values)
+
+
+def _oanda_rows_match_for_canonical_replacement(
+    candidate: Dict[str, object],
+    canonical: Dict[str, object],
+) -> bool:
+    if not isinstance(candidate, dict) or not isinstance(canonical, dict):
+        return False
+    if _row_type(candidate) != "trade" or _row_type(canonical) != "trade":
+        return False
+    account = _canonical_oanda_account_label(candidate)
+    if account not in _OANDA_CANONICAL_ACCOUNT_LABELS:
+        return False
+    if account != _canonical_oanda_account_label(canonical):
+        return False
+    candidate_id = str(candidate.get("id") or "").strip()
+    canonical_id = str(canonical.get("id") or "").strip()
+    if candidate_id and candidate_id == canonical_id:
+        return False
+
+    exact_candidate = _canonical_oanda_trade_fingerprint(candidate)
+    exact_canonical = _canonical_oanda_trade_fingerprint(canonical)
+    if exact_candidate and exact_canonical and exact_candidate == exact_canonical:
+        return True
+
+    candidate_symbol = _canonical_symbol(
+        candidate.get("symbol") or candidate.get("instrument") or candidate.get("symbol_raw")
+    )
+    canonical_symbol = _canonical_symbol(
+        canonical.get("symbol") or canonical.get("instrument") or canonical.get("symbol_raw")
+    )
+    if not candidate_symbol or candidate_symbol != canonical_symbol:
+        return False
+
+    candidate_open = _oanda_match_epoch_candidates(
+        candidate.get("open_time") or candidate.get("opened_at") or candidate.get("entry_time")
+    )
+    canonical_open = _oanda_match_epoch_candidates(
+        canonical.get("open_time") or canonical.get("opened_at") or canonical.get("entry_time")
+    )
+    candidate_close = _oanda_match_epoch_candidates(
+        candidate.get("close_time") or candidate.get("closed_at") or candidate.get("exit_time")
+    )
+    canonical_close = _oanda_match_epoch_candidates(
+        canonical.get("close_time") or canonical.get("closed_at") or canonical.get("exit_time")
+    )
+    if not _oanda_epoch_candidates_close(candidate_open, canonical_open, tolerance_seconds=90):
+        return False
+    if not _oanda_epoch_candidates_close(candidate_close, canonical_close, tolerance_seconds=90):
+        return False
+
+    candidate_qty = _oanda_qty_raw_for_match(candidate)
+    canonical_qty = _oanda_qty_raw_for_match(canonical)
+    if candidate_qty is None or canonical_qty is None:
+        return False
+    if not math.isclose(candidate_qty, canonical_qty, abs_tol=1.0, rel_tol=0.00005):
+        return False
+
+    price_checks = (
+        ("entry_price", 0.0001),
+        ("exit_price", 0.0001),
+    )
+    for field, tolerance in price_checks:
+        if not _numbers_close_for_oanda_match(
+            candidate.get(field),
+            canonical.get(field),
+            abs_tol=tolerance,
+            rel_tol=0.00001,
+        ):
+            return False
+
+    if not _numbers_close_for_oanda_match(
+        candidate.get("net_profit") if candidate.get("net_profit") is not None else candidate.get("realized_pnl"),
+        canonical.get("net_profit") if canonical.get("net_profit") is not None else canonical.get("realized_pnl"),
+        abs_tol=0.05,
+    ):
+        return False
+    if not _numbers_close_for_oanda_match(
+        candidate.get("balance_after_trade"),
+        canonical.get("balance_after_trade"),
+        abs_tol=0.05,
+    ):
+        return False
+    return True
+
+
 def _prepare_oanda_canonical_replacements(
     existing_rows: Iterable[Dict[str, object]],
     incoming_rows: Iterable[Dict[str, object]],
 ) -> Tuple[List[Dict[str, object]], Set[str]]:
     existing_by_fingerprint: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    existing_candidates: List[Dict[str, object]] = []
     for row in existing_rows:
         if not isinstance(row, dict):
             continue
+        if _canonical_oanda_account_label(row) in _OANDA_CANONICAL_ACCOUNT_LABELS:
+            existing_candidates.append(row)
         fingerprint = _canonical_oanda_trade_fingerprint(row)
         if fingerprint:
             existing_by_fingerprint[fingerprint].append(row)
@@ -4430,6 +4598,12 @@ def _prepare_oanda_canonical_replacements(
                 for candidate in existing_by_fingerprint.get(fingerprint or "", [])
                 if str(candidate.get("id") or "").strip() != row_id
             ]
+            if not matches:
+                matches = [
+                    candidate
+                    for candidate in existing_candidates
+                    if _oanda_rows_match_for_canonical_replacement(candidate, row)
+                ]
             if len(matches) == 1:
                 legacy = matches[0]
                 legacy_id = str(legacy.get("id") or "").strip()
@@ -4443,33 +4617,34 @@ def _prepare_oanda_canonical_replacements(
                     [str(candidate.get("id") or "") for candidate in matches[:5]],
                 )
         prepared.append(row)
-    return _sanitize_oanda_demo_commission_fields(prepared), stale_ids
+    return _sanitize_oanda_commission_fields(prepared), stale_ids
 
 
-def _sanitize_oanda_demo_commission_fields(
+def _sanitize_oanda_commission_fields(
     rows: Iterable[Dict[str, object]],
     *,
     raw_export_rows: Optional[Iterable[Dict[str, object]]] = None,
 ) -> List[Dict[str, object]]:
     authoritative_by_fingerprint: Dict[str, Dict[str, object]] = {}
+    authoritative_rows: List[Dict[str, object]] = []
     for raw in raw_export_rows or []:
-        if not isinstance(raw, dict) or _canonical_oanda_account_label(raw) != "OANDA DEMO":
+        if not isinstance(raw, dict) or _canonical_oanda_account_label(raw) not in _OANDA_CANONICAL_ACCOUNT_LABELS:
             continue
+        authoritative_rows.append(raw)
         fingerprint = _canonical_oanda_trade_fingerprint(raw)
         if fingerprint:
             authoritative_by_fingerprint[fingerprint] = raw
 
-    allowed_sources = {"", "oanda_transaction_export", "oanda", "master_journal", "excel", "local_excel"}
     sanitized: List[Dict[str, object]] = []
     for raw in rows:
         if not isinstance(raw, dict):
             continue
         row = dict(raw)
-        if _canonical_oanda_account_label(row) != "OANDA DEMO":
+        if _canonical_oanda_account_label(row) not in _OANDA_CANONICAL_ACCOUNT_LABELS:
             sanitized.append(row)
             continue
         source = str(row.get("source") or "").strip().lower()
-        if source not in allowed_sources:
+        if source not in _OANDA_COMMISSION_SANITIZER_SOURCES:
             sanitized.append(row)
             continue
 
@@ -4481,6 +4656,14 @@ def _sanitize_oanda_demo_commission_fields(
             row["metrics"] = metrics
 
         authoritative = authoritative_by_fingerprint.get(_canonical_oanda_trade_fingerprint(row) or "")
+        if authoritative is None and authoritative_rows:
+            fuzzy = [
+                candidate
+                for candidate in authoritative_rows
+                if _oanda_rows_match_for_canonical_replacement(row, candidate)
+            ]
+            if len(fuzzy) == 1:
+                authoritative = fuzzy[0]
         if authoritative is not None:
             commission = _to_float(authoritative.get("commission"))
             fees = _to_float(authoritative.get("fees"))
@@ -4498,6 +4681,14 @@ def _sanitize_oanda_demo_commission_fields(
         row["fees"] = None if fees is None or math.isclose(fees, 0.0, abs_tol=1e-12) else abs(fees)
         sanitized.append(row)
     return sanitized
+
+
+def _sanitize_oanda_demo_commission_fields(
+    rows: Iterable[Dict[str, object]],
+    *,
+    raw_export_rows: Optional[Iterable[Dict[str, object]]] = None,
+) -> List[Dict[str, object]]:
+    return _sanitize_oanda_commission_fields(rows, raw_export_rows=raw_export_rows)
 
 
 def _canonical_bybit_demo_trade_signature(row: Dict[str, object]) -> Optional[str]:
@@ -4840,7 +5031,7 @@ def _repair_persisted_oanda_trade_rows() -> int:
     rows = _get_trading_journal_rows()
     if not rows:
         return 0
-    sanitized_rows = _sanitize_oanda_demo_commission_fields(rows)
+    sanitized_rows = _sanitize_oanda_commission_fields(rows)
     changed = sum(1 for before, after in zip(rows, sanitized_rows) if before != after)
     rows = sanitized_rows
     contexts = _load_trade_contexts()
@@ -5393,6 +5584,15 @@ def _journal_rows_from_oanda_transaction_history_frame(
     def _parse_dt(value: object) -> Tuple[float, Optional[str]]:
         return _parse_oanda_datetime_to_epoch_and_journal_iso(value)
 
+    opening_order_types = {"MARKET_ORDER", "MARKET_IF_TOUCHED_ORDER"}
+    opening_fill_details = {"MARKET_ORDER", "MARKET_IF_TOUCHED_ORDER"}
+    closing_fill_details = {
+        "MARKET_ORDER_TRADE_CLOSE",
+        "MARKET_ORDER_POSITION_CLOSEOUT",
+        "TAKE_PROFIT_ORDER",
+        "STOP_LOSS_ORDER",
+    }
+
     rows: List[Dict[str, object]] = []
     warnings: List[str] = []
     unmatched_open: List[str] = []
@@ -5426,7 +5626,7 @@ def _journal_rows_from_oanda_transaction_history_frame(
         if bal is not None and when:
             latest_balance = bal
             latest_asof = when
-        if tx_type == "MARKET_ORDER" and details == "CLIENT_ORDER" and symbol:
+        if tx_type in opening_order_types and details == "CLIENT_ORDER" and symbol:
             units_value = _to_float(r.get("UNITS"))
             units = int(abs(units_value)) if units_value is not None else 0
             if units > 0:
@@ -5438,7 +5638,7 @@ def _journal_rows_from_oanda_transaction_history_frame(
                     }
                 )
             continue
-        if tx_type == "ORDER_FILL" and details == "MARKET_ORDER" and symbol:
+        if tx_type == "ORDER_FILL" and details in opening_fill_details and symbol:
             units_value = _to_float(r.get("UNITS"))
             units = int(abs(units_value)) if units_value is not None else 0
             if units <= 0:
@@ -5469,7 +5669,7 @@ def _journal_rows_from_oanda_transaction_history_frame(
             continue
         if (
             tx_type == "ORDER_FILL"
-            and details in {"MARKET_ORDER_TRADE_CLOSE", "TAKE_PROFIT_ORDER", "STOP_LOSS_ORDER"}
+            and details in closing_fill_details
             and symbol
         ):
             units_value = _to_float(r.get("UNITS"))
@@ -5591,7 +5791,7 @@ def _journal_rows_from_oanda_transaction_history_frame(
             [str(leg.get("ticket") or "") for leg in legs if str(leg.get("ticket") or "")]
         )
     return {
-        "rows": _sanitize_oanda_demo_commission_fields(rows),
+        "rows": _sanitize_oanda_commission_fields(rows),
         "account_balance": {
             "source": "oanda_transaction_export_balance",
             "balance_source": "oanda_transaction_export_balance",
@@ -5923,7 +6123,7 @@ def _parse_excel_account_workbook(
                     "dropbox_path": dbx_path,
                 }
 
-    return _sanitize_oanda_demo_commission_fields(all_rows), account_balance
+    return _sanitize_oanda_commission_fields(all_rows), account_balance
 def _resolve_trading_journal_dropbox_folder() -> Tuple[str, List[Dict[str, Any]]]:
     if not TRADING_JOURNAL_DROPBOX_FOLDER:
         raise HTTPException(status_code=500, detail="TRADING_JOURNAL_DROPBOX_FOLDER is not set.")
@@ -7371,7 +7571,7 @@ def _parse_local_trading_journal_workbook(path: Path, *, original_name: Optional
         balance["import_source"] = "local_excel"
         if not str(balance.get("balance_source") or "").strip():
             balance["source"] = "local_excel"
-    return _sanitize_oanda_demo_commission_fields(rows), balance
+    return _sanitize_oanda_commission_fields(rows), balance
 
 
 def _import_trading_journal_from_dropbox_excel(

@@ -927,6 +927,43 @@ def test_trade_log_never_uses_oanda_spread_metrics_as_commission(tmp_path: Path)
     )
     assert ws.cell(row_number, _header_col(ws, "Commission")).value in ("", None)
 
+
+def test_trade_log_oanda_live_zero_commission_blank_and_spread_metrics_ignored(tmp_path: Path):
+    snapshot = sample_snapshot()
+    snapshot["items"] = [{
+        "id": "oanda_export:live:460:464",
+        "row_type": "trade",
+        "source": "oanda_transaction_export",
+        "account": "OANDA LIVE",
+        "symbol": "EURUSD",
+        "side": "BUY",
+        "open_time": "2025-11-06T07:16:35+10:00",
+        "close_time": "2025-11-06T11:28:13+10:00",
+        "qty": 0.06801,
+        "entry_price": 1.14910,
+        "exit_price": 1.15084,
+        "commission": 0.0,
+        "swap": 0.9922,
+        "net_profit": -17.3026,
+        "balance_after_trade": 1479.31,
+        "metrics": {
+            "oanda_open_spread_cost": 0.5407,
+            "oanda_close_spread_cost": 0.5574,
+            "oanda_total_spread_cost": 1.0981,
+        },
+    }]
+    out = tmp_path / "oanda_live_repaired.xlsx"
+    build_master_journal_workbook(snapshot, out)
+    ws = load_workbook(out)["Trade Log"]
+    row_id_col = _header_col(ws, "Row ID")
+    row_number = next(
+        row
+        for row in range(2, ws.max_row + 1)
+        if ws.cell(row, row_id_col).value == "oanda_export:live:460:464"
+    )
+    assert ws.cell(row_number, _header_col(ws, "Commission")).value in ("", None)
+
+
 def test_trade_log_currency_inference_avoids_unknown_and_respects_fx_vs_crypto(tmp_path: Path):
     s = sample_snapshot()
     s["items"] = [

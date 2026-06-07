@@ -3313,7 +3313,85 @@ def test_oanda_canonical_upsert_replaces_legacy_id_and_preserves_manual_fields(
     assert all(row["id"] != stale_id for row in rows)
 
 
-def test_oanda_demo_sanitizer_clears_unsupported_legacy_commission_only():
+def test_oanda_live_canonical_upsert_replaces_legacy_id_and_preserves_manual_fields(
+    temp_state_paths, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setattr(master_service, "_trading_journal_local_excel_authoritative", lambda: False)
+    stale_id = "excel:PEPPERSTONE DEMO:Sheet0:593:GBPAUD:2018-06-07T20:10:00"
+    stale = {
+        "id": stale_id,
+        "row_type": "trade",
+        "source": "master_journal",
+        "account": "OANDA LIVE",
+        "symbol": "EURUSD",
+        "side": "Buy",
+        "open_time": "2025-11-06T07:16:00",
+        "close_time": "2025-11-06T11:28:00",
+        "qty": 0.06801,
+        "entry_price": 1.14910,
+        "exit_price": 1.15084,
+        "commission": -0.99,
+        "fees": -0.99,
+        "net_profit": -17.30,
+        "balance_after_trade": 1479.31,
+        "is_test_trade": True,
+        "setup": "Pullback",
+        "timeframe": "15MIN",
+        "pattern": "manual-pattern",
+        "ema": "20/50",
+        "notes": "keep live note",
+    }
+    canonical = {
+        "id": "oanda_export:live:460:464",
+        "row_type": "trade",
+        "source": "oanda_transaction_export",
+        "account": "live",
+        "account_label": "OANDA LIVE",
+        "asset_class": "forex",
+        "symbol": "EURUSD",
+        "side": "Buy",
+        "status": "closed",
+        "open_time": "2025-11-06T07:16:35+10:00",
+        "close_time": "2025-11-06T11:28:13+10:00",
+        "qty": 0.06801,
+        "qty_raw": 6801,
+        "qty_unit": "lots",
+        "entry_price": 1.14910,
+        "exit_price": 1.15084,
+        "swap": 0.9922,
+        "commission": None,
+        "fees": None,
+        "net_profit": -17.3026,
+        "realized_pnl": -17.3026,
+        "balance_after_trade": 1479.31,
+        "metrics": {
+            "oanda_open_spread_cost": 0.5407,
+            "oanda_close_spread_cost": 0.5574,
+        },
+        "raw_refs": {"open_ticket": "460", "close_ticket": "464"},
+    }
+    master_service._set_trading_journal_rows([stale])
+
+    assert master_service._upsert_trading_journal_rows([canonical]) == 1
+
+    rows = master_service._get_trading_journal_rows()
+    assert len(rows) == 1
+    repaired = rows[0]
+    assert repaired["id"] == "oanda_export:live:460:464"
+    assert repaired["commission"] is None
+    assert repaired["fees"] is None
+    assert repaired["swap"] == pytest.approx(0.9922)
+    assert repaired["setup"] == "Pullback"
+    assert repaired["timeframe"] == "15MIN"
+    assert repaired["pattern"] == "manual-pattern"
+    assert repaired["ema"] == "20/50"
+    assert repaired["notes"] == "keep live note"
+    assert repaired["is_test_trade"] is True
+    assert repaired["metrics"]["oanda_total_spread_cost"] == pytest.approx(1.0981)
+    assert all(row["id"] != stale_id for row in rows)
+
+
+def test_oanda_commission_sanitizer_clears_unsupported_legacy_commission_only():
     stale = {
         "id": "legacy:oanda",
         "row_type": "trade",
@@ -3330,8 +3408,9 @@ def test_oanda_demo_sanitizer_clears_unsupported_legacy_commission_only():
         "notes": "manual",
     }
     pepperstone = dict(stale, id="pepperstone", account="PEPPERSTONE DEMO", commission=2.5, fees=2.5)
+    live = dict(stale, id="legacy:live", account="OANDA LIVE", commission=-0.99, fees=-0.99)
 
-    sanitized = master_service._sanitize_oanda_demo_commission_fields([stale, pepperstone])
+    sanitized = master_service._sanitize_oanda_commission_fields([stale, pepperstone, live])
 
     assert sanitized[0]["commission"] is None
     assert sanitized[0]["fees"] is None
@@ -3343,6 +3422,8 @@ def test_oanda_demo_sanitizer_clears_unsupported_legacy_commission_only():
     assert sanitized[0]["notes"] == "manual"
     assert sanitized[1]["commission"] == pytest.approx(2.5)
     assert sanitized[1]["fees"] == pytest.approx(2.5)
+    assert sanitized[2]["commission"] is None
+    assert sanitized[2]["fees"] is None
 
 
 def test_import_preflight_rejects_when_trading_journal_xlsx_locked(temp_state_paths, monkeypatch: pytest.MonkeyPatch):
