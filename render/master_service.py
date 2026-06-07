@@ -22770,6 +22770,57 @@ def _compute_journal_stats(
         "crypto": {**_risk_bucket(crypto_rows), **crypto_drawdown},
     }
 
+    def _market_return_stats(rows_subset: List[Dict[str, object]], market: str) -> Dict[str, object]:
+        pnl_by_currency: Dict[str, List[float]] = defaultdict(list)
+        for row in rows_subset:
+            pnl = _row_pnl(row)
+            if pnl is None:
+                continue
+            currency = _row_pnl_currency(row) or "UNKNOWN"
+            pnl_by_currency[currency].append(pnl)
+
+        balances_by_currency: Dict[str, float] = defaultdict(float)
+        for balance in balances or []:
+            label = str(balance.get("account_label") or balance.get("account") or balance.get("label") or "").strip()
+            if _canonical_market_for_row({"account": label}) != market:
+                continue
+            current = _to_float(balance.get("balance"))
+            if current is None:
+                continue
+            currency = str(balance.get("currency") or balance.get("account_currency") or _infer_account_currency(label) or "UNKNOWN").strip().upper()
+            balances_by_currency[currency] += current
+
+        currencies = sorted(set(pnl_by_currency) | set(balances_by_currency))
+        result: Dict[str, object] = {
+            "market_return_pct": None,
+            "gross_gain_return_pct": None,
+            "gross_loss_return_pct": None,
+            "return_currency": currencies[0] if len(currencies) == 1 else None,
+            "return_unavailable_reason": None,
+        }
+        if len(currencies) != 1:
+            result["return_unavailable_reason"] = "mixed_currency" if len(currencies) > 1 else "missing_currency"
+            return result
+        currency = currencies[0]
+        if currency not in balances_by_currency:
+            result["return_unavailable_reason"] = "missing_current_balance"
+            return result
+        pnl_values = pnl_by_currency.get(currency, [])
+        net_pnl = sum(pnl_values)
+        funded_capital = balances_by_currency[currency] - net_pnl
+        if not math.isfinite(funded_capital) or funded_capital <= 0:
+            result["return_unavailable_reason"] = "invalid_funded_capital"
+            return result
+        gross_gain = sum(value for value in pnl_values if value > 0)
+        gross_loss = abs(sum(value for value in pnl_values if value < 0))
+        result.update({
+            "market_return_pct": net_pnl / funded_capital * 100.0,
+            "gross_gain_return_pct": gross_gain / funded_capital * 100.0,
+            "gross_loss_return_pct": gross_loss / funded_capital * 100.0,
+            "starting_or_funded_capital": funded_capital,
+        })
+        return result
+
     def _market_bucket(rows_subset: List[Dict[str, object]], label: str) -> Dict[str, object]:
         durations = [
             _to_float(r.get("trade_duration_seconds"))
@@ -22789,6 +22840,14 @@ def _compute_journal_stats(
         stop_vals = _stop_pct_values(rows_subset)
         target_vals = _target_pct_values(rows_subset)
         money = _money_stats_by_currency(rows_subset)
+        market_key = "fx" if label.lower() in {"forex", "fx"} else "crypto" if label.lower() == "crypto" else ""
+        market_returns = _market_return_stats(rows_subset, market_key) if market_key else {
+            "market_return_pct": None,
+            "gross_gain_return_pct": None,
+            "gross_loss_return_pct": None,
+            "return_currency": None,
+            "return_unavailable_reason": "mixed_market",
+        }
         drawdown = _drawdown_stats_for_rows(rows_subset)
         streaks_local = _compute_longest_streaks(rows_subset)
         winning_streak_detail = streaks_local.get("longest_winning")
@@ -22803,9 +22862,7 @@ def _compute_journal_stats(
             "net_profit_total": sum(pnl) if pnl else None,
             "gross_gain": sum(gains_local) if gains_local else None,
             "gross_loss": sum(losses_local) if losses_local else None,
-            "net_result_pct": sum(result_vals) if result_vals else None,
-            "gross_gain_pct": sum(v for v in result_vals if v > 0) if result_vals else None,
-            "gross_loss_pct": abs(sum(v for v in result_vals if v < 0)) if result_vals else None,
+            **market_returns,
             "avg_gain": _avg(gains_local),
             "avg_loss": _avg(losses_local),
             "max_gain": _safe_max(gains_local),

@@ -364,3 +364,67 @@ def test_compute_journal_stats_by_market_streaks_reset_on_break_even() -> None:
     assert by_market["crypto"]["losing_streak"] == 2
     assert by_market["overall"]["longest_losing_streak"]["trade_ids"] == ["fx-l1", "crypto-l1", "crypto-l2"]
 
+
+
+def test_market_return_percentage_uses_current_balance_and_funded_capital() -> None:
+    rows = [
+        {
+            "row_type": "trade",
+            "asset_class": "fx",
+            "account": "OANDA DEMO",
+            "symbol": "EURUSD",
+            "net_profit": -100.0,
+            "result_pct": -80.0,
+            "currency": "AUD",
+        }
+    ]
+    stats = _compute_journal_stats(
+        rows,
+        balances=[{"account": "OANDA DEMO", "balance": 900.0, "currency": "AUD"}],
+    )
+    fx = stats["groups"]["by_market"]["fx"]
+    assert fx["starting_or_funded_capital"] == 1000.0
+    assert fx["market_return_pct"] == pytest.approx(-10.0)
+    assert fx["gross_gain_return_pct"] == pytest.approx(0.0)
+    assert fx["gross_loss_return_pct"] == pytest.approx(10.0)
+
+
+def test_market_return_percentage_can_represent_total_capital_loss() -> None:
+    rows = [
+        {
+            "row_type": "trade",
+            "asset_class": "crypto",
+            "account": "BYBIT",
+            "symbol": "BTCUSDT",
+            "net_profit": -100.0,
+            "result_pct": -250.0,
+            "currency": "USDT",
+        }
+    ]
+    stats = _compute_journal_stats(
+        rows,
+        balances=[{"account": "BYBIT", "balance": 0.0, "currency": "USDT"}],
+    )
+    crypto = stats["groups"]["by_market"]["crypto"]
+    assert crypto["starting_or_funded_capital"] == 100.0
+    assert crypto["market_return_pct"] == pytest.approx(-100.0)
+    assert crypto["gross_loss_return_pct"] == pytest.approx(100.0)
+
+
+def test_market_return_percentage_is_blank_for_mixed_currencies() -> None:
+    rows = [
+        {"row_type": "trade", "asset_class": "fx", "account": "OANDA DEMO", "symbol": "EURUSD", "net_profit": -100.0, "currency": "AUD"},
+        {"row_type": "trade", "asset_class": "fx", "account": "FOREX USD", "symbol": "USDJPY", "net_profit": 20.0, "currency": "USD"},
+    ]
+    stats = _compute_journal_stats(
+        rows,
+        balances=[
+            {"account": "OANDA DEMO", "balance": 900.0, "currency": "AUD"},
+            {"account": "FOREX USD", "balance": 520.0, "currency": "USD"},
+        ],
+    )
+    fx = stats["groups"]["by_market"]["fx"]
+    assert fx["market_return_pct"] is None
+    assert fx["gross_gain_return_pct"] is None
+    assert fx["gross_loss_return_pct"] is None
+    assert fx["return_unavailable_reason"] == "mixed_currency"

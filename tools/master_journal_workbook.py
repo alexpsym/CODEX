@@ -1166,11 +1166,105 @@ def _apply_instrument_averages_semantic_fills(ws) -> None:
             if col:
                 _apply_sign_based_full_cell_fill(ws.cell(row, col))
 
+def _apply_dashboard_source_label_style(cell) -> None:
+    font = copy(cell.font)
+    font.bold = False
+    font.italic = True
+    cell.font = font
+    alignment = copy(cell.alignment)
+    alignment.horizontal = "right"
+    cell.alignment = alignment
+
+def _is_generated_dashboard_semantic_rule(rule) -> bool:
+    if getattr(rule, "type", None) != "cellIs":
+        return False
+    if getattr(rule, "operator", None) not in {"greaterThan", "lessThan", "notEqual"}:
+        return False
+    if [str(value) for value in (getattr(rule, "formula", None) or [])] != ["0"]:
+        return False
+    dxf = getattr(rule, "dxf", None)
+    fill = getattr(getattr(dxf, "fill", None), "fgColor", None)
+    font = getattr(getattr(dxf, "font", None), "color", None)
+    fill_rgb = str(getattr(fill, "rgb", "") or "")[-6:].upper()
+    font_rgb = str(getattr(font, "rgb", "") or "")[-6:].upper()
+    return (fill_rgb, font_rgb) in {(PROFIT_FILL, PROFIT_FONT), (LOSS_FILL, LOSS_FONT)}
+
+def _subtract_range_rectangle(cell_range: str, cut_range: str) -> List[str]:
+    min_col, min_row, max_col, max_row = range_boundaries(cell_range)
+    cut_min_col, cut_min_row, cut_max_col, cut_max_row = range_boundaries(cut_range)
+    inter_min_col = max(min_col, cut_min_col)
+    inter_min_row = max(min_row, cut_min_row)
+    inter_max_col = min(max_col, cut_max_col)
+    inter_max_row = min(max_row, cut_max_row)
+    if inter_min_col > inter_max_col or inter_min_row > inter_max_row:
+        return [cell_range]
+    rectangles = []
+    if min_row < inter_min_row:
+        rectangles.append((min_col, min_row, max_col, inter_min_row - 1))
+    if inter_max_row < max_row:
+        rectangles.append((min_col, inter_max_row + 1, max_col, max_row))
+    if min_col < inter_min_col:
+        rectangles.append((min_col, inter_min_row, inter_min_col - 1, inter_max_row))
+    if inter_max_col < max_col:
+        rectangles.append((inter_max_col + 1, inter_min_row, max_col, inter_max_row))
+    return [
+        f"{get_column_letter(left)}{top}:{get_column_letter(right)}{bottom}"
+        for left, top, right, bottom in rectangles
+    ]
+
+def _sanitize_dashboard_semantic_conditional_formatting(ws) -> None:
+    protected_ranges = ("B3:D4", "B11:D12", "C10:D12", "C21:D28")
+    sanitized = OrderedDict()
+
+    def add_rules(key, rules) -> None:
+        if not rules:
+            return
+        if key in sanitized:
+            sanitized[key].extend(rules)
+        else:
+            sanitized[key] = list(rules)
+
+    for key, rules in list(getattr(ws.conditional_formatting, "_cf_rules", {}).items()):
+        generated = [rule for rule in rules if _is_generated_dashboard_semantic_rule(rule)]
+        manual = [rule for rule in rules if not _is_generated_dashboard_semantic_rule(rule)]
+        if manual:
+            add_rules(copy(key), manual)
+        if not generated:
+            continue
+        remaining_parts: List[str] = []
+        for part in str(key.sqref).split():
+            pieces = [part]
+            for protected in protected_ranges:
+                pieces = [piece for current in pieces for piece in _subtract_range_rectangle(current, protected)]
+            remaining_parts.extend(pieces)
+        if remaining_parts:
+            generated_key = copy(key)
+            generated_key.sqref = " ".join(remaining_parts)
+            add_rules(generated_key, generated)
+    ws.conditional_formatting._cf_rules = sanitized
+
 def _apply_dashboard_requested_semantic_fills(ws) -> None:
-    for coordinate in ("B3", "C3", "D3", "B11", "C11", "D11", "C23", "D23", "C27", "D27", "C29", "D29"):
+    _sanitize_dashboard_semantic_conditional_formatting(ws)
+    for coordinate in ("B3", "C3", "D3", "B11", "C11", "D11"):
         _apply_full_cell_semantic_fill(ws[coordinate], "profit")
     for coordinate in ("B4", "C4", "D4", "B12", "C12", "D12"):
         _apply_full_cell_semantic_fill(ws[coordinate], "loss")
+
+    semantic_by_label = {
+        "max win %": "profit",
+        "max loss %": "loss",
+        "max r loss": "loss",
+        "max r win": "profit",
+    }
+    for row in range(1, ws.max_row + 1):
+        label = str(ws.cell(row, 1).value or "").strip().lower()
+        if label == "source":
+            _apply_dashboard_source_label_style(ws.cell(row, 1))
+        semantic = semantic_by_label.get(label)
+        if semantic:
+            for col in (3, 4):
+                _apply_full_cell_semantic_fill(ws.cell(row, col), semantic)
+
     for row in range(13, 17):
         _apply_full_cell_semantic_fill(ws.cell(row, 8), "profit")
         _apply_full_cell_semantic_fill(ws.cell(row, 9), "loss")
@@ -1236,9 +1330,9 @@ def _trade_row_market(row: Dict[str, Any]) -> str | None:
     if asset_class == "crypto":
         return "crypto"
     account = str(row.get("account_label") or row.get("account") or "").strip().lower()
-    if any(token in account for token in ("bybit", "crypto")):
+    if any(token in account for token in ("bybit", "binance", "coinspot", "crypto")):
         return "crypto"
-    if any(token in account for token in ("oanda", "forex", "fx")):
+    if any(token in account for token in ("oanda", "pepperstone", "forex", "fx")):
         return "fx"
     if _is_likely_fx_pair(str(row.get("symbol") or "")):
         return "fx"
@@ -1284,27 +1378,79 @@ def _trade_move_duration_metrics(rows: List[Dict[str, Any]]) -> Dict[str, Dict[s
     }
 
 
-def _result_percentage_totals_by_market(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, float | None]]:
-    grouped: Dict[str, List[float]] = {"overall": [], "fx": [], "crypto": []}
+def _result_percentage_totals_by_market(
+    rows: List[Dict[str, Any]], balances: List[Dict[str, Any]]
+) -> Dict[str, Dict[str, Any]]:
+    """Calculate currency-safe market returns from current capital and money P/L."""
+    trade_money: Dict[str, Dict[str, List[float]]] = {
+        market: defaultdict(list) for market in ("overall", "fx", "crypto")
+    }
     for row in rows:
         if str(row.get("row_type") or "trade") != "trade" or _is_test_trade_value(row.get("is_test_trade")):
             continue
-        value = _as_float(row.get("result_pct"))
-        if value is None:
+        pnl = _as_float(row.get("net_profit") if row.get("net_profit") is not None else row.get("result_cash"))
+        if pnl is None:
             continue
-        grouped["overall"].append(value)
+        currency = _infer_trade_log_currency(row, field="net_pnl") or _currency_code(
+            row.get("realized_pnl_currency"), row.get("currency"), row.get("account_currency")
+        )
+        markets = ["overall"]
         market = _trade_row_market(row)
         if market in {"fx", "crypto"}:
-            grouped[market].append(value)
-    result: Dict[str, Dict[str, float | None]] = {}
-    for market, values in grouped.items():
-        gains = [value for value in values if value > 0]
-        losses = [value for value in values if value < 0]
-        result[market] = {
-            "net_result_pct": sum(values) if values else None,
-            "gross_gain_pct": sum(gains) if values else None,
-            "gross_loss_pct": abs(sum(losses)) if values else None,
+            markets.append(market)
+        for market_name in markets:
+            trade_money[market_name][currency].append(pnl)
+
+    balance_money: Dict[str, Dict[str, float]] = {
+        market: defaultdict(float) for market in ("overall", "fx", "crypto")
+    }
+    for balance in _canonicalize_and_dedupe_balances(balances or []):
+        current = _as_float(balance.get("balance"))
+        if current is None:
+            continue
+        label = balance.get("account_label") or balance.get("account") or balance.get("label")
+        currency = _currency_code(balance.get("currency"), balance.get("account_currency"))
+        balance_money["overall"][currency] += current
+        market = _trade_row_market({"account": label})
+        if market in {"fx", "crypto"}:
+            balance_money[market][currency] += current
+
+    result: Dict[str, Dict[str, Any]] = {}
+    for market in ("overall", "fx", "crypto"):
+        currencies = sorted(set(trade_money[market]) | set(balance_money[market]))
+        payload: Dict[str, Any] = {
+            "market_return_pct": None,
+            "gross_gain_return_pct": None,
+            "gross_loss_return_pct": None,
+            "return_currency": currencies[0] if len(currencies) == 1 else None,
+            "return_unavailable_reason": None,
         }
+        if len(currencies) != 1:
+            payload["return_unavailable_reason"] = "mixed_currency" if len(currencies) > 1 else "missing_currency"
+            result[market] = payload
+            continue
+        currency = currencies[0]
+        if currency not in balance_money[market]:
+            payload["return_unavailable_reason"] = "missing_current_balance"
+            result[market] = payload
+            continue
+        pnl_values = trade_money[market].get(currency, [])
+        net_pnl = sum(pnl_values)
+        current_balance = balance_money[market][currency]
+        funded_capital = current_balance - net_pnl
+        if not math.isfinite(funded_capital) or funded_capital <= 0:
+            payload["return_unavailable_reason"] = "invalid_funded_capital"
+            result[market] = payload
+            continue
+        gross_gain = sum(value for value in pnl_values if value > 0)
+        gross_loss = abs(sum(value for value in pnl_values if value < 0))
+        payload.update({
+            "market_return_pct": net_pnl / funded_capital * 100.0,
+            "gross_gain_return_pct": gross_gain / funded_capital * 100.0,
+            "gross_loss_return_pct": gross_loss / funded_capital * 100.0,
+            "starting_or_funded_capital": funded_capital,
+        })
+        result[market] = payload
     return result
 
 def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -> Dict[str, Any]:
@@ -1326,7 +1472,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     duration = groups.get("duration") or {}
     leaders = groups.get("leaders") or {}
     move_duration_metrics = _trade_move_duration_metrics(metric_rows)
-    percentage_totals = _result_percentage_totals_by_market(metric_rows)
+    percentage_totals = _result_percentage_totals_by_market(metric_rows, snapshot.get("balances") or stats.get("balances") or [])
     buckets = {
         market: {**percentage_totals[market], **dict(bucket or {})}
         for market, bucket in {
@@ -1346,9 +1492,9 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         ("Break-even", "break_even", "count", None),
         ("Test", "test_trades", "count", None),
         ("Win rate", "win_rate_pct", "pct", None),
-        ("Net P/L", "net_result_pct", "pct", "auto"),
-        ("Gross gain", "gross_gain_pct", "pct", "profit"),
-        ("Gross loss", "gross_loss_pct", "pct", "loss"),
+        ("Net P/L", "market_return_pct", "pct", "auto"),
+        ("Gross gain", "gross_gain_return_pct", "pct", "profit"),
+        ("Gross loss", "gross_loss_return_pct", "pct", "loss"),
         ("Best Win Streak", "winning_streak", "count", "profit"),
         ("Worst Losing Streak", "losing_streak", "count", "loss"),
         ("Avg result %", "avg_result_pct", "pct", "auto"),
@@ -1359,11 +1505,10 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         ("Avg duration (DD:HH:MM:SS)", "avg_duration_seconds", "duration", None),
         (DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL, "move_to_break_even_duration_seconds", "duration", None),
         (DASHBOARD_MOVE_TO_PROFIT_LABEL, "move_to_profit_duration_seconds", "duration", None),
-        ("Max loss %", "min_result_pct", "pct", "loss"),
         ("Max win %", "max_result_pct", "pct", "profit"),
+        ("Max loss %", "min_result_pct", "pct", "loss"),
         ("Max R loss", "min_r_multiple", "r", "loss"),
         ("Max R win", "max_r_multiple", "r", "profit"),
-        ("Max gain", "max_gain", "money", "profit"),
         ("Shortest (DD:HH:MM:SS)", "shortest_duration_seconds", "duration", None),
         ("Longest (DD:HH:MM:SS)", "longest_duration_seconds", "duration", None),
     ]
@@ -1376,7 +1521,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             value = bucket.get(key)
             cell = dash.cell(row, col)
             # Overall money totals can mix currencies; retain the existing neutral blank cells.
-            if market == "overall" and key in {"net_result_pct", "gross_gain_pct", "gross_loss_pct", "max_gain"}:
+            if market == "overall" and key in {"market_return_pct", "gross_gain_return_pct", "gross_loss_return_pct"}:
                 cell.fill = PatternFill("solid", fgColor=LIGHT_GREY_FILL_RGB)
                 continue
             if kind == "pct":
@@ -1406,9 +1551,10 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
                 _apply_full_cell_semantic_fill(cell, "loss")
             elif semantic == "auto":
                 _apply_sign_based_full_cell_fill(cell)
-        if key in {"min_result_pct", "max_result_pct", "min_r_multiple", "max_r_multiple", "max_gain", "shortest_duration_seconds", "longest_duration_seconds"}:
+        if key in {"min_result_pct", "max_result_pct", "min_r_multiple", "max_r_multiple", "shortest_duration_seconds", "longest_duration_seconds"}:
             row += 1
-            dash.cell(row, 1, "Source").font = Font(bold=True)
+            dash.cell(row, 1, "Source")
+            _apply_dashboard_source_label_style(dash.cell(row, 1))
             for market, col in market_cols.items():
                 source = ((buckets[market] or {}).get("metric_sources") or {}).get(key)
                 dash.cell(row, col, _fmt_detail_src(source) if source else "")
@@ -1449,7 +1595,6 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     _style_header_row(dash, 1)
     _table_border(dash, 1, 1, row - 1, 4)
     _profit_loss_rules(dash, f"B13:D14")
-    _negative_impact_rule(dash, f"C21:D21")
 
     balances = _canonicalize_and_dedupe_balances(snapshot.get("balances") or stats.get("balances") or [])
     dash.cell(1, 6, "Account Balances").font = Font(bold=True)
@@ -2007,18 +2152,79 @@ def _delete_dashboard_rows_preserving_layout(ws, row_idx: int, amount: int) -> N
             ws.merge_cells(shifted)
     ws.conditional_formatting._cf_rules = shifted_cf
 
-def _remove_dashboard_max_loss_rows(ws, diagnostics: Dict[str, Any] | None = None) -> bool:
+def _remove_dashboard_metric_pair(
+    ws, label: str, diagnostics: Dict[str, Any] | None = None
+) -> bool:
     diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    wanted = str(label or "").strip().lower()
     for row in range(1, ws.max_row + 1):
-        if str(ws.cell(row, 1).value or "").strip().lower() != "max loss":
+        if str(ws.cell(row, 1).value or "").strip().lower() != wanted:
             continue
         amount = 1
         if row + 1 <= ws.max_row and str(ws.cell(row + 1, 1).value or "").strip().lower() == "source":
             amount = 2
         _delete_dashboard_rows_preserving_layout(ws, row, amount)
-        diagnostics["removed_dashboard_max_loss_rows"] = amount
+        diagnostics.setdefault("removed_dashboard_metric_rows", {})[label] = amount
         return True
     return False
+
+def _dashboard_row_snapshot(ws, row: int) -> Dict[str, Any]:
+    cells = []
+    for col in range(1, ws.max_column + 1):
+        cell = ws.cell(row, col)
+        cells.append({
+            "value": cell.value,
+            "font": copy(cell.font),
+            "fill": copy(cell.fill),
+            "border": copy(cell.border),
+            "alignment": copy(cell.alignment),
+            "number_format": cell.number_format,
+            "protection": copy(cell.protection),
+            "comment": copy(cell.comment),
+            "hyperlink": copy(cell.hyperlink),
+        })
+    return {"cells": cells, "height": ws.row_dimensions[row].height}
+
+def _restore_dashboard_row_snapshot(ws, row: int, snapshot: Dict[str, Any]) -> None:
+    ws.row_dimensions[row].height = snapshot.get("height")
+    for col, state in enumerate(snapshot["cells"], start=1):
+        cell = ws.cell(row, col)
+        cell.value = state["value"]
+        cell.font = copy(state["font"])
+        cell.fill = copy(state["fill"])
+        cell.border = copy(state["border"])
+        cell.alignment = copy(state["alignment"])
+        cell.number_format = state["number_format"]
+        cell.protection = copy(state["protection"])
+        cell.comment = copy(state["comment"])
+        cell.hyperlink = copy(state["hyperlink"])
+
+def _repair_dashboard_extreme_metric_order(ws, diagnostics: Dict[str, Any] | None = None) -> bool:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    positions = {}
+    for row in range(1, ws.max_row + 1):
+        label = str(ws.cell(row, 1).value or "").strip().lower()
+        if label in {"max win %", "max loss %"}:
+            positions[label] = row
+    win_row = positions.get("max win %")
+    loss_row = positions.get("max loss %")
+    if not win_row or not loss_row or win_row < loss_row:
+        return False
+    if win_row != loss_row + 2:
+        raise RuntimeError("Dashboard Max win % / Max loss % rows are not a movable adjacent pair.")
+    if any(str(ws.cell(row + 1, 1).value or "").strip().lower() != "source" for row in (loss_row, win_row)):
+        raise RuntimeError("Dashboard Max win % / Max loss % source rows are missing.")
+    loss_pair = [_dashboard_row_snapshot(ws, loss_row), _dashboard_row_snapshot(ws, loss_row + 1)]
+    win_pair = [_dashboard_row_snapshot(ws, win_row), _dashboard_row_snapshot(ws, win_row + 1)]
+    for offset, snapshot in enumerate(win_pair + loss_pair):
+        _restore_dashboard_row_snapshot(ws, loss_row + offset, snapshot)
+    diagnostics["reordered_dashboard_extreme_metric_rows"] = True
+    return True
+
+def _repair_dashboard_core_layout(ws, diagnostics: Dict[str, Any] | None = None) -> None:
+    _remove_dashboard_metric_pair(ws, "Max gain", diagnostics)
+    _repair_dashboard_extreme_metric_order(ws, diagnostics)
+    _apply_dashboard_requested_semantic_fills(ws)
 
 def _insert_dashboard_rows_preserving_layout(ws, row_idx: int, amount: int, style_row: int) -> None:
     merged_ranges = [str(merged) for merged in ws.merged_cells.ranges]
@@ -2588,7 +2794,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
         if "Dashboard" not in wb.sheetnames:
             raise RuntimeError("Master Journal missing Dashboard sheet.")
         dash = wb["Dashboard"]
-        _remove_dashboard_max_loss_rows(dash, diagnostics)
+        _repair_dashboard_core_layout(dash, diagnostics)
         _ensure_dashboard_move_duration_rows(dash, diagnostics)
         before = _snapshot_invariants(wb)
 
@@ -2739,9 +2945,9 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 (["Break-even"], "break_even", "count", None),
                 (["Test"], "test_trades", "count", None),
                 (["Win rate"], "win_rate_pct", "pct", None),
-                (["Net P/L"], "net_result_pct", "pct", "profit_loss"),
-                (["Gross gain"], "gross_gain_pct", "pct", "profit_loss"),
-                (["Gross loss"], "gross_loss_pct", "pct", "loss"),
+                (["Net P/L"], "market_return_pct", "pct", "profit_loss"),
+                (["Gross gain"], "gross_gain_return_pct", "pct", "profit_loss"),
+                (["Gross loss"], "gross_loss_return_pct", "pct", "loss"),
                 (["Best Win Streak", "Winning Streak"], "winning_streak", "count", None),
                 (["Worst Losing Streak", "Losing Streak"], "losing_streak", "count", None),
                 (["Avg result %"], "avg_result_pct", "pct", "profit_loss"),
@@ -2756,9 +2962,8 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 (["Max win %"], "max_result_pct", "pct", None),
                 (["Max R loss"], "min_r_multiple", "r", "loss"),
                 (["Max R win"], "max_r_multiple", "r", None),
-                (["Max gain"], "max_gain", "raw", None),
             ]
-            percentage_totals = _result_percentage_totals_by_market(rows)
+            percentage_totals = _result_percentage_totals_by_market(rows, snapshot.get("balances") or stats.get("balances") or [])
             buckets = {
                 market: {**percentage_totals[market], **dict(bucket or {}), **move_duration_metrics[market]}
                 for market, bucket in {
@@ -2822,7 +3027,6 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             write_metric(section, "Max win %", bucket.get("max_result_pct"), "pct")
             write_metric(section, "Max R loss", bucket.get("min_r_multiple"))
             write_metric(section, "Max R win", bucket.get("max_r_multiple"))
-            write_metric(section, "Max gain", bucket.get("max_gain"))
             write_metric(section, "Avg stop %", bucket.get("avg_stop_pct"), "pct")
             write_metric(section, "Avg target %", bucket.get("avg_target_pct"), "pct")
             write_metric(section, "Max target %", bucket.get("max_target_pct"), "pct")
@@ -2832,7 +3036,6 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             write_source_below(section, "Max win %", msrc.get("max_result_pct"))
             write_source_below(section, "Max R loss", msrc.get("min_r_multiple"))
             write_source_below(section, "Max R win", msrc.get("max_r_multiple"))
-            write_source_below(section, "Max gain", msrc.get("max_gain"))
 
 
         risk_by_market = risk.get("by_market") if isinstance(risk.get("by_market"), dict) else {}

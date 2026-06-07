@@ -1,10 +1,10 @@
 from pathlib import Path
 from copy import copy
 from openpyxl import load_workbook
-from openpyxl.styles import PatternFill
+from openpyxl.styles import Alignment, Font, PatternFill
 import pytest
 from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, SHEET_ORDER, TRADE_LOG_HEADERS, OLD_TRADE_LOG_HEADERS, PRE_MOVE_TRADE_LOG_HEADERS, MOVE_TO_FIELD_MAP, TRADE_LOG_DATA_START_ROW, _ensure_trade_log_schema, _ensure_pnl_calendar_freeze_panes, _trade_log_header_map
-from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter
+from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter, range_boundaries
 
 def _cf_ranges(ws):
     return [str(k.sqref) for k in ws.conditional_formatting._cf_rules.keys()]
@@ -639,8 +639,8 @@ def test_conditional_format_colors_and_dashboard_semantics(tmp_path: Path):
     # Dashboard semantic metrics use direct full-cell fills rather than text-only formatting.
     assert _cell_fill_rgb(dash["B3"]) == "C6EFCE"
     assert _cell_fill_rgb(dash["B4"]) == "FFC7CE"
-    assert _cell_fill_rgb(dash["C23"]) == "C6EFCE"
-    assert _cell_fill_rgb(dash["C21"]) == "FFC7CE"
+    assert _cell_fill_rgb(dash["C21"]) == "C6EFCE"
+    assert _cell_fill_rgb(dash["C23"]) == "FFC7CE"
     assert _cell_fill_rgb(dash["H13"]) == "C6EFCE"
     assert _cell_fill_rgb(dash["I13"]) == "FFC7CE"
     assert _cell_fill_rgb(dash["B15"]) == ""
@@ -2136,6 +2136,25 @@ def _cell_fill_rgb(cell) -> str:
     rgb = str(getattr(cell.fill.fgColor, "rgb", "") or "")
     return rgb[-6:].upper() if getattr(cell.fill, "fill_type", None) == "solid" and rgb else ""
 
+def _cell_font_rgb(cell) -> str:
+    color = getattr(cell.font, "color", None)
+    rgb = str(getattr(color, "rgb", "") or "")
+    return rgb[-6:].upper() if rgb else ""
+
+def _cf_fill_intersects(ws, target_range: str, fill_rgb: str) -> bool:
+    target_min_col, target_min_row, target_max_col, target_max_row = range_boundaries(target_range)
+    for key, rules in ws.conditional_formatting._cf_rules.items():
+        for part in str(key.sqref).split():
+            min_col, min_row, max_col, max_row = range_boundaries(part)
+            if max_col < target_min_col or target_max_col < min_col or max_row < target_min_row or target_max_row < min_row:
+                continue
+            for rule in rules:
+                color = getattr(getattr(getattr(rule, "dxf", None), "fill", None), "fgColor", None)
+                rgb = str(getattr(color, "rgb", "") or "")[-6:].upper()
+                if rgb == fill_rgb:
+                    return True
+    return False
+
 
 def _trade_log_row_by_id(ws, row_id: str) -> int:
     rid_col = _header_col(ws, "Row ID")
@@ -2194,40 +2213,100 @@ def test_update_data_only_restores_trade_log_direct_row_fills(tmp_path: Path):
     assert all(_cell_fill_rgb(ws.cell(winning_row, col)) == "C6EFCE" for col in [1, 3, _header_col(ws, "Net P/L"), len(TRADE_LOG_HEADERS)])
 
 
+def _dashboard_core_labels(ws):
+    winners_row = next(row for row in range(1, ws.max_row + 1) if ws.cell(row, 1).value == "Winners")
+    return [str(ws.cell(row, 1).value or "").strip() for row in range(1, winners_row)]
+
+def _swap_dashboard_test_rows(ws, first: int, second: int) -> None:
+    for col in range(1, ws.max_column + 1):
+        a = ws.cell(first, col)
+        b = ws.cell(second, col)
+        a_value, b_value = a.value, b.value
+        a_style, b_style = copy(a._style), copy(b._style)
+        a_alignment, b_alignment = copy(a.alignment), copy(b.alignment)
+        a.value, b.value = b_value, a_value
+        a._style, b._style = b_style, a_style
+        a.alignment, b.alignment = b_alignment, a_alignment
+
 def test_generated_dashboard_layout_percentages_semantic_fills_and_labels(tmp_path: Path):
     snapshot = sample_snapshot()
-    snapshot["balances"].append({"account_label": "Bybit Demo", "balance": 25.0, "currency": "USDT"})
+    snapshot["balances"].extend([
+        {"account_label": "Bybit Demo", "balance": 25.0, "currency": "USDT"},
+        {"account_label": "OANDA DEMO", "balance": 900.0, "currency": "AUD"},
+    ])
     out = tmp_path / "generated-dashboard-formatting.xlsx"
     build_master_journal_workbook(snapshot, out)
     wb = load_workbook(out)
     dash = wb["Dashboard"]
 
-    assert "Max loss" not in {str(dash.cell(row, 1).value or "").strip() for row in range(1, dash.max_row + 1)}
+    labels = _dashboard_core_labels(dash)
+    assert "Max gain" not in labels
+    expected_order = ["Max win %", "Source", "Max loss %", "Source", "Max R loss", "Source", "Max R win", "Source"]
+    start = labels.index("Max win %")
+    assert labels[start:start + len(expected_order)] == expected_order
     assert "BYBIT DEMO" in _dashboard_account_balances(dash)
+
+    assert dash["C8"].value == pytest.approx(120.5 / (900.0 - 120.5))
+    crypto_current = 10.123456789 + 25.0
+    assert dash["D8"].value == pytest.approx(-50.0 / (crypto_current - (-50.0)))
+    assert dash["C9"].value == pytest.approx(120.5 / (900.0 - 120.5))
+    assert dash["C10"].value == pytest.approx(0.0)
+    assert dash["D9"].value == pytest.approx(0.0)
+    assert dash["D10"].value == pytest.approx(50.0 / (crypto_current + 50.0))
     for coordinate in ("C8", "D8", "C9", "D9", "C10", "D10"):
-        assert isinstance(dash[coordinate].value, (int, float))
         assert dash[coordinate].number_format == "0.00%"
         assert not any(token in dash[coordinate].number_format.upper() for token in ("AUD", "USDT", "$"))
 
-    green = ("B3", "C3", "D3", "B11", "C11", "D11", "C23", "D23", "C27", "D27", "C29", "D29", "H13", "H14", "H15", "H16")
-    red = ("B4", "C4", "D4", "B12", "C12", "D12", "I13", "I14", "I15", "I16")
+    green = ("B3", "C3", "D3", "B11", "C11", "D11", "C21", "D21", "C27", "D27", "H13", "H14", "H15", "H16")
+    red = ("B4", "C4", "D4", "B12", "C12", "D12", "C23", "D23", "C25", "D25", "I13", "I14", "I15", "I16")
     assert all(_cell_fill_rgb(dash[coordinate]) == "C6EFCE" for coordinate in green)
+    assert all(_cell_font_rgb(dash[coordinate]) == "006100" for coordinate in green)
     assert all(_cell_fill_rgb(dash[coordinate]) == "FFC7CE" for coordinate in red)
+    assert all(_cell_font_rgb(dash[coordinate]) == "9C0006" for coordinate in red)
+    assert not _cf_fill_intersects(dash, "B11:D11", "FFC7CE")
+
+    source_rows = [row for row in range(1, dash.max_row + 1) if dash.cell(row, 1).value == "Source"]
+    assert source_rows
+    assert all(dash.cell(row, 1).font.italic is True for row in source_rows)
+    assert all(dash.cell(row, 1).font.bold is False for row in source_rows)
+    assert all(dash.cell(row, 1).alignment.horizontal == "right" for row in source_rows)
     wb.close()
 
+def test_update_repairs_dashboard_order_source_style_max_gain_and_stale_cf(tmp_path: Path):
+    from openpyxl.formatting.rule import CellIsRule
 
-def test_update_repairs_dashboard_rows_labels_percentages_and_direct_fills(tmp_path: Path):
     snapshot = sample_snapshot()
-    snapshot["balances"].append({"account_label": "Bybit Demo", "balance": 25.0, "currency": "USDT"})
+    snapshot["balances"].extend([
+        {"account_label": "Bybit Demo", "balance": 25.0, "currency": "USDT"},
+        {"account_label": "OANDA DEMO", "balance": 900.0, "currency": "AUD"},
+    ])
     path = tmp_path / "dashboard-repair.xlsx"
     build_master_journal_workbook(snapshot, path)
     wb = load_workbook(path)
     dash = wb["Dashboard"]
-    dash.insert_rows(31, 2)
-    dash["A31"] = "Max loss"
-    dash["A32"] = "Source"
-    for coordinate in ("B3", "C3", "D3", "B4", "C4", "D4", "H13", "I13"):
-        dash[coordinate].fill = PatternFill()
+
+    # Recreate the stale loss-before-win order and obsolete Max gain pair.
+    for offset in (0, 1):
+        _swap_dashboard_test_rows(dash, 21 + offset, 23 + offset)
+    dash.insert_rows(29, 2)
+    dash["A29"] = "Max gain"
+    dash["C29"] = 316.5
+    dash["D29"] = 9.75
+    dash["C29"].number_format = '#,##0.00 "AUD"'
+    dash["D29"].number_format = '#,##0.00 "USDT"'
+    dash["A30"] = "Source"
+    dash["C30"] = "USDCAD · 2018-08-17"
+    dash["D30"] = "BTCUSDT · 2020-01-01"
+    dash["A22"].font = copy(dash["A22"].font)
+    dash["A22"].font = Font(name=dash["A22"].font.name, size=dash["A22"].font.size, bold=True, italic=False)
+    dash["A22"].alignment = Alignment(horizontal="left")
+    stale_red = CellIsRule(operator="notEqual", formula=["0"], fill=PatternFill("solid", fgColor="FFC7CE"), font=Font(color="9C0006"))
+    dash.conditional_formatting.add("B11:B12", stale_red)
+    dash.conditional_formatting.add("C10:D12", copy(stale_red))
+    dash.conditional_formatting.add(
+        "E20",
+        CellIsRule(operator="equal", formula=["5"], fill=PatternFill("solid", fgColor="FFF2CC")),
+    )
     for row in range(3, dash.max_row + 1):
         if dash.cell(row, 6).value == "BYBIT DEMO":
             dash.cell(row, 6).value = "Bybit Demo"
@@ -2236,16 +2315,25 @@ def test_update_repairs_dashboard_rows_labels_percentages_and_direct_fills(tmp_p
 
     result = update_master_journal_workbook_data_only(path, snapshot)
     assert result["ok"] is True
-    assert result["diagnostics"]["removed_dashboard_max_loss_rows"] == 2
+    assert result["diagnostics"]["removed_dashboard_metric_rows"]["Max gain"] == 2
+    assert result["diagnostics"]["reordered_dashboard_extreme_metric_rows"] is True
     Path(result["candidate_path"]).replace(path)
     wb = load_workbook(path)
     dash = wb["Dashboard"]
-    labels = [str(dash.cell(row, 1).value or "").strip() for row in range(1, dash.max_row + 1)]
-    assert "Max loss" not in labels
+    labels = _dashboard_core_labels(dash)
+    assert "Max gain" not in labels
+    expected_order = ["Max win %", "Source", "Max loss %", "Source", "Max R loss", "Source", "Max R win", "Source"]
+    start = labels.index("Max win %")
+    assert labels[start:start + len(expected_order)] == expected_order
     assert "BYBIT DEMO" in _dashboard_account_balances(dash)
     assert all(dash[coordinate].number_format == "0.00%" for coordinate in ("C8", "D8", "C9", "D9", "C10", "D10"))
-    assert all(_cell_fill_rgb(dash[coordinate]) == "C6EFCE" for coordinate in ("B3", "C3", "D3", "H13"))
-    assert all(_cell_fill_rgb(dash[coordinate]) == "FFC7CE" for coordinate in ("B4", "C4", "D4", "I13"))
+    assert all(_cell_fill_rgb(dash[coordinate]) == "C6EFCE" for coordinate in ("B11", "C11", "D11"))
+    assert all(_cell_font_rgb(dash[coordinate]) == "006100" for coordinate in ("B11", "C11", "D11"))
+    assert not _cf_fill_intersects(dash, "B11:D11", "FFC7CE")
+    assert _cf_fill_intersects(dash, "E20", "FFF2CC")
+    source_rows = [row for row in range(1, dash.max_row + 1) if dash.cell(row, 1).value == "Source"]
+    assert all(dash.cell(row, 1).font.italic and not dash.cell(row, 1).font.bold for row in source_rows)
+    assert all(dash.cell(row, 1).alignment.horizontal == "right" for row in source_rows)
     wb.close()
 
 

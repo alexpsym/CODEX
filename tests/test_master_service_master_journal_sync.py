@@ -9,7 +9,8 @@ from openpyxl import Workbook
 from openpyxl import load_workbook
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = ROOT / 'render' / 'master_service.py'
-HTTPX_AVAILABLE = importlib.util.find_spec("httpx") is not None
+_HTTPX_SPEC = importlib.util.find_spec("httpx")
+HTTPX_AVAILABLE = _HTTPX_SPEC is not None and _HTTPX_SPEC.loader is not None
 master_service = None
 if HTTPX_AVAILABLE:
     spec = importlib.util.spec_from_file_location('ms_sync_test', MODULE_PATH)
@@ -2479,3 +2480,73 @@ def test_resync_persists_post_replace_fingerprint_for_next_fast_path(monkeypatch
     cached, reason, _diagnostics = ms._resync_fast_path_snapshot(mj, {'stage': 'post'})
     assert cached == snapshot
     assert reason == 'memory_fingerprint_match'
+
+
+@pytest.mark.skipif(not HTTPX_AVAILABLE, reason="httpx is not installed")
+def test_sync_repairs_dashboard_stale_semantic_cf_order_source_and_max_gain(tmp_path, monkeypatch):
+    from copy import copy
+    from openpyxl.formatting.rule import CellIsRule
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils.cell import range_boundaries
+    from tools.master_journal_workbook import build_master_journal_workbook
+
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_SOURCE", "master_journal")
+    monkeypatch.setattr(master_service, "TRADING_JOURNAL_LOCAL_DIR", tmp_path)
+    path = tmp_path / "Trading Journal.xlsx"
+    rows = [
+        {"id": "fx", "row_type": "trade", "asset_class": "fx", "account": "OANDA DEMO", "symbol": "EURUSD", "side": "BUY", "open_time": "2026-01-01", "close_time": "2026-01-01", "net_profit": -100.0, "result_pct": -80.0, "currency": "AUD"},
+        {"id": "crypto", "row_type": "trade", "asset_class": "crypto", "account": "BYBIT", "symbol": "BTCUSDT", "side": "BUY", "open_time": "2026-01-02", "close_time": "2026-01-02", "net_profit": -10.0, "result_pct": -20.0, "currency": "USDT"},
+    ]
+    balances = [
+        {"account": "OANDA DEMO", "label": "OANDA DEMO", "balance": 900.0, "currency": "AUD"},
+        {"account": "BYBIT", "label": "BYBIT", "balance": 90.0, "currency": "USDT"},
+    ]
+    stats = master_service._compute_journal_stats(rows, balances)
+    snapshot = {"items": rows, "balances": balances, "stats": stats}
+    build_master_journal_workbook(snapshot, path)
+
+    wb = load_workbook(path)
+    dash = wb["Dashboard"]
+    for offset in (0, 1):
+        for col in range(1, dash.max_column + 1):
+            a = dash.cell(21 + offset, col)
+            b = dash.cell(23 + offset, col)
+            a_value, b_value = a.value, b.value
+            a_style, b_style = copy(a._style), copy(b._style)
+            a.value, b.value = b_value, a_value
+            a._style, b._style = b_style, a_style
+    dash.insert_rows(29, 2)
+    dash["A29"] = "Max gain"
+    dash["C29"] = 100.0
+    dash["C29"].number_format = '#,##0.00 "AUD"'
+    dash["A30"] = "Source"
+    dash["A22"].font = Font(bold=True, italic=False)
+    dash["A22"].alignment = Alignment(horizontal="left")
+    stale_rule = CellIsRule(operator="notEqual", formula=["0"], fill=PatternFill("solid", fgColor="FFC7CE"), font=Font(color="9C0006"))
+    dash.conditional_formatting.add("B11:B12", stale_rule)
+    dash.conditional_formatting.add("C10:D12", copy(stale_rule))
+    wb.save(path)
+    wb.close()
+
+    result = master_service._sync_master_journal_workbook(prebuilt_snapshot=snapshot, sync_caller="test")
+    assert result["master_journal_ok"] is True
+    wb = load_workbook(path)
+    dash = wb["Dashboard"]
+    labels = [str(dash.cell(row, 1).value or "").strip() for row in range(1, dash.max_row + 1)]
+    assert "Max gain" not in labels
+    start = labels.index("Max win %")
+    assert labels[start:start + 8] == ["Max win %", "Source", "Max loss %", "Source", "Max R loss", "Source", "Max R win", "Source"]
+    assert all(dash.cell(row, 1).font.italic and not dash.cell(row, 1).font.bold for row in range(1, dash.max_row + 1) if dash.cell(row, 1).value == "Source")
+    assert all(dash.cell(row, 1).alignment.horizontal == "right" for row in range(1, dash.max_row + 1) if dash.cell(row, 1).value == "Source")
+    for coordinate in ("B11", "C11", "D11"):
+        assert str(dash[coordinate].fill.fgColor.rgb)[-6:].upper() == "C6EFCE"
+        assert str(dash[coordinate].font.color.rgb)[-6:].upper() == "006100"
+    for key, rules in dash.conditional_formatting._cf_rules.items():
+        for part in str(key.sqref).split():
+            min_col, min_row, max_col, max_row = range_boundaries(part)
+            if max_col < 2 or min_col > 4 or max_row < 11 or min_row > 11:
+                continue
+            for rule in rules:
+                color = getattr(getattr(getattr(rule, "dxf", None), "fill", None), "fgColor", None)
+                assert str(getattr(color, "rgb", "") or "")[-6:].upper() != "FFC7CE"
+    wb.close()
