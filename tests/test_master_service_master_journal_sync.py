@@ -428,7 +428,7 @@ def test_manual_sync_skips_broker_refresh_in_master_journal_mode(tmp_path, monke
     monkeypatch.setattr(master_service, '_recover_oanda_recent_fills', lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not call")))
     monkeypatch.setattr(master_service, 'describe_bybit_credentials_for', lambda _mode: {"credentials_available": False})
     monkeypatch.setattr(master_service, '_import_trading_journal_from_sources', lambda *a, **k: {"ok": True, "rows_imported": 0, "rows_by_asset_class": {}, "local_workbooks_seen": 1, "dropbox_workbooks_seen": 0})
-    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda: {"master_journal_ok": True})
+    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda **_kwargs: {"master_journal_ok": True})
     asyncio.run(master_service._run_trading_journal_sync_job())
     assert state_calls
     final_state = state_calls[-1]
@@ -459,7 +459,7 @@ def test_manual_sync_calculator_trades_flag_runs_closed_capture_when_broker_refr
     monkeypatch.setattr(master_service, '_run_bybit_closed_pnl_sync', _fake_bybit)
     monkeypatch.setattr(master_service, '_recover_oanda_recent_fills', _fake_oanda)
     monkeypatch.setattr(master_service, '_import_trading_journal_from_sources', lambda *a, **k: {"ok": True, "rows_imported": 0, "rows_by_asset_class": {}, "local_workbooks_seen": 1, "dropbox_workbooks_seen": 0})
-    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda: {"master_journal_ok": True})
+    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda **_kwargs: {"master_journal_ok": True})
     asyncio.run(master_service._run_trading_journal_sync_job())
     assert bybit_calls == ["demo", "live"]
     assert oanda_calls == ["demo", "live"]
@@ -490,7 +490,7 @@ def test_manual_sync_calculator_trades_flag_broker_failure_not_fake_green(tmp_pa
     monkeypatch.setattr(master_service, '_run_bybit_closed_pnl_sync', _fake_bybit)
     monkeypatch.setattr(master_service, '_recover_oanda_recent_fills', _fake_oanda)
     monkeypatch.setattr(master_service, '_import_trading_journal_from_sources', lambda *a, **k: {"ok": True, "rows_imported": 0, "rows_by_asset_class": {}, "local_workbooks_seen": 1, "dropbox_workbooks_seen": 0})
-    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda: {"master_journal_ok": True})
+    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda **_kwargs: {"master_journal_ok": True})
     asyncio.run(master_service._run_trading_journal_sync_job())
     assert state_calls
     final_state = state_calls[-1]
@@ -541,13 +541,14 @@ def test_existing_master_journal_update_is_atomic_on_post_update_validation_fail
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_master_journal_requires_row_id_validation(tmp_path, monkeypatch):
     from tools.master_journal_workbook import build_master_journal_workbook
+    from tools.master_journal_workbook import _trade_log_header_map
     from openpyxl import load_workbook
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
     mj = tmp_path / "Trading Journal.xlsx"
     snap = {'items':[{'id':'r1','row_type':'trade','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0,'result_pct':1.0}], 'stats':{'totals':{}, 'groups':{}, 'by_instrument':[{'symbol':'EURUSD','trades':1}]}, 'balances':[]}
     build_master_journal_workbook(snap, mj)
-    wb = load_workbook(mj); ws = wb["Trade Log"]; headers=[c.value for c in ws[1]]; ws.cell(2, headers.index("Row ID")+1).value=None; wb.save(mj); wb.close()
+    wb = load_workbook(mj); ws = wb["Trade Log"]; headers=_trade_log_header_map(ws); ws.cell(3, headers["Row ID"]).value=None; wb.save(mj); wb.close()
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
     out = master_service._sync_master_journal_workbook(sync_caller="test")
     # Data-only updater may self-heal missing Row ID by restoring generated metadata columns.
@@ -578,6 +579,7 @@ def test_sync_master_journal_migrates_legacy_all_trades_and_removes_trade_meta(t
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_sync_master_journal_repairs_legacy_instrument_averages_freeze_pane(tmp_path, monkeypatch):
     from tools.master_journal_workbook import build_master_journal_workbook
+    from tools.master_journal_workbook import SHEET_ORDER, expected_report_sheet_names
     from openpyxl import load_workbook
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
@@ -593,7 +595,8 @@ def test_sync_master_journal_repairs_legacy_instrument_averages_freeze_pane(tmp_
     assert out["master_journal_ok"] is True
     repaired = load_workbook(mj)
     assert repaired["Instrument Averages"].freeze_panes == "B2"
-    assert repaired.sheetnames == ["Dashboard", "Trade Log", "Instrument Averages", "P&L Calendar"]
+    assert repaired.sheetnames[:4] == SHEET_ORDER
+    assert repaired.sheetnames[4:] == expected_report_sheet_names(snap)
     assert "_Trade Meta" not in repaired.sheetnames
     assert "All Trades" not in repaired.sheetnames
     repaired.close()
@@ -728,7 +731,7 @@ def test_existing_master_journal_trade_log_filter_range_can_update_without_invar
     assert result["master_journal_ok"] is True
     out = load_workbook(mj, data_only=True)
     at = out["Trade Log"]; ref = at.auto_filter.ref
-    assert ref and ref.startswith("A1:")
+    assert ref and ref.startswith("A2:")
     headers=[str(c.value or "") for c in at[1]]
     rid_col = headers.index("Row ID")+1
     from openpyxl.utils import get_column_letter
@@ -808,10 +811,16 @@ def test_sync_master_journal_applies_manual_overrides(tmp_path, monkeypatch):
     mj=tmp_path/'Trading Journal.xlsx'
     # seed manual workbook via canonical builder
     snap={'items':[{'id':'r1','row_type':'trade','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0,'is_test_trade':False}], 'stats':{'totals':{}}, 'balances':[], 'diagnostics':{}}
-    from tools.master_journal_workbook import build_master_journal_workbook
+    from tools.master_journal_workbook import build_master_journal_workbook, _trade_log_header_map
     build_master_journal_workbook(snap,mj)
     from openpyxl import load_workbook
-    wb=load_workbook(mj); ws=wb['Trade Log']; ws['Q2']='Yes'; ws['R2']='S'; ws['S2']='M5'; ws['T2']='No'; ws['U2']='note'; wb.save(mj)
+    wb=load_workbook(mj); ws=wb['Trade Log']; headers=_trade_log_header_map(ws); data_row=3
+    ws.cell(data_row, headers["Test"]).value='Yes'
+    ws.cell(data_row, headers["Setup"]).value='S'
+    ws.cell(data_row, headers["Timeframe"]).value='M5'
+    ws.cell(data_row, headers["Breakeven"]).value='No'
+    ws.cell(data_row, headers["Notes"]).value='note'
+    wb.save(mj)
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
     rows=[{'id':'r1','row_type':'trade','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0}]
     monkeypatch.setattr(master_service, '_get_trading_journal_rows', lambda: rows)
@@ -825,19 +834,20 @@ def test_sync_master_journal_applies_manual_overrides(tmp_path, monkeypatch):
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_sync_master_journal_test_yes_excluded_from_aggregates(tmp_path, monkeypatch):
     mj=tmp_path/'Trading Journal.xlsx'
-    from tools.master_journal_workbook import build_master_journal_workbook
+    from tools.master_journal_workbook import build_master_journal_workbook, _trade_log_header_map
     seed={'items':[{'id':'r1','row_type':'trade','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':10.0,'is_test_trade':False}], 'stats':{'totals':{}, 'groups':{}}, 'balances':[], 'diagnostics':{}}
     build_master_journal_workbook(seed,mj)
     from openpyxl import load_workbook
-    wb=load_workbook(mj); ws=wb['Trade Log']; ws['Q2']='Yes'; before=[c.value for c in ws[2]]; wb.save(mj)
+    wb=load_workbook(mj); ws=wb['Trade Log']; headers=_trade_log_header_map(ws); data_row=3; ws.cell(data_row, headers["Test"]).value='Yes'; before=[ws.cell(data_row, c).value for c in range(1, len(headers) + 1)]; wb.save(mj)
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: {'items': seed['items'], 'stats': {'totals': {}, 'groups': {}}, 'balances': [], 'diagnostics': {}})
     r=master_service._sync_master_journal_workbook(sync_caller="test")
     assert r['master_journal_ok'] is True
     out=load_workbook(mj)
-    after = [c.value for c in out['Trade Log'][2]]
+    out_headers = _trade_log_header_map(out['Trade Log'])
+    after = [out['Trade Log'].cell(data_row, c).value for c in range(1, len(out_headers) + 1)]
     assert after[:16] == before[:16]
-    assert str(after[16] or "").strip().lower() in {"yes", "no"}
+    assert str(after[out_headers["Test"] - 1] or "").strip().lower() in {"yes", "no"}
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_sync_master_journal_success_reports_existing_file_and_size(tmp_path, monkeypatch):
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
@@ -896,7 +906,10 @@ def test_sync_master_journal_rebuilds_blanked_workbook_sections(tmp_path, monkey
         ws = wb[ws_name]
         for r in range(2, ws.max_row + 1):
             for c in range(1, ws.max_column + 1):
-                ws.cell(r, c).value = None
+                cell = ws.cell(r, c)
+                if type(cell).__name__ == "MergedCell":
+                    continue
+                cell.value = None
     dash = wb['Dashboard']
     for r in range(1, dash.max_row + 1):
         for c in range(1, dash.max_column + 1):
@@ -1217,7 +1230,7 @@ def test_startup_recovery_import_includes_master_journal_sync_success(monkeypatc
     monkeypatch.setattr(
         master_service,
         '_sync_master_journal_workbook',
-        lambda: {
+        lambda **_kwargs: {
             'master_journal_ok': True,
             'master_journal_path': str(tmp_path / 'journal' / 'Trading Journal.xlsx'),
             'master_journal_exists': True,
@@ -1237,7 +1250,7 @@ def test_startup_recovery_import_master_journal_failure_is_not_success(monkeypat
     monkeypatch.setattr(
         master_service,
         '_sync_master_journal_workbook',
-        lambda: {'master_journal_ok': False, 'master_journal_error': 'boom'},
+        lambda **_kwargs: {'master_journal_ok': False, 'master_journal_error': 'boom'},
     )
     asyncio.run(master_service._run_startup_recovery_import_if_needed())
     assert master_service.TRADING_JOURNAL_SYNC_STATE['ok'] is False
@@ -1530,7 +1543,12 @@ def test_sync_master_journal_writes_zero_balances_and_validation_detects_mismatc
     from openpyxl import load_workbook
     wb = load_workbook(mj, data_only=True)
     dash = wb['Dashboard']
-    pairs = {str(dash.cell(r,1).value or '').strip(): dash.cell(r,2).value for r in range(1,dash.max_row+1)}
+    pairs = {}
+    for r in range(1, dash.max_row + 1):
+        for c in range(1, dash.max_column):
+            label = str(dash.cell(r, c).value or '').strip()
+            if label:
+                pairs[label] = dash.cell(r, c + 1).value
     assert pairs['PEPPERSTONE DEMO'] == 0
     assert pairs['BINANCE'] == 0
     wb.close()
@@ -1544,9 +1562,13 @@ def test_sync_master_journal_writes_zero_balances_and_validation_detects_mismatc
         try:
             bad_dash = bad_wb['Dashboard']
             for r in range(1, bad_dash.max_row + 1):
-                if str(bad_dash.cell(r, 1).value or '').strip() == 'PEPPERSTONE DEMO':
-                    bad_dash.cell(r, 2).value = 4.78
-                    break
+                for c in range(1, bad_dash.max_column):
+                    if str(bad_dash.cell(r, c).value or '').strip() == 'PEPPERSTONE DEMO':
+                        bad_dash.cell(r, c + 1).value = 4.78
+                        break
+                else:
+                    continue
+                break
             bad_wb.save(candidate_path)
         finally:
             bad_wb.close()
@@ -1586,9 +1608,10 @@ def test_sync_master_journal_zero_qty_repairable_crypto_passes(tmp_path, monkeyp
     assert result['master_journal_ok'] is True
     wb = load_workbook(tmp_path / 'Trading Journal.xlsx', data_only=True)
     tl = master_service._get_trade_log_sheet(wb, allow_legacy=False)
-    headers = [str(c.value or '').strip() for c in tl[1]]
-    qty_col = headers.index('Qty') + 1
-    assert float(tl.cell(2, qty_col).value) == pytest.approx(0.015)
+    headers = master_service._trade_log_header_map(tl)
+    qty_col = headers['Qty']
+    data_start = master_service._trade_log_data_start_row(tl)
+    assert float(tl.cell(data_start, qty_col).value) == pytest.approx(0.015)
     wb.close()
 
 
@@ -1753,7 +1776,12 @@ def test_sync_master_journal_uses_zero_cashflow_anchor_when_cashflow_new_balance
     assert result['master_journal_ok'] is True
     synced = load_workbook(mj, data_only=True)
     dash = synced['Dashboard']
-    dash_map = {str(dash.cell(r,1).value or '').strip(): dash.cell(r,2).value for r in range(1, dash.max_row+1)}
+    dash_map = {}
+    for r in range(1, dash.max_row + 1):
+        for c in range(1, dash.max_column):
+            label = str(dash.cell(r, c).value or '').strip()
+            if label:
+                dash_map[label] = dash.cell(r, c + 1).value
     assert dash_map['BINANCE'] == 0
     assert dash_map['PEPPERSTONE DEMO'] == 0
     synced.close()
@@ -1824,7 +1852,7 @@ def test_manual_sync_demo_capture_not_masked_by_live_empty(tmp_path, monkeypatch
     from tools.master_journal_workbook import build_master_journal_workbook
     build_master_journal_workbook({'items': [], 'stats': {'totals': {}, 'groups': {}}, 'balances': []}, tmp_path / 'Trading Journal.xlsx')
     monkeypatch.setattr(master_service, '_import_trading_journal_from_sources', lambda *a, **k: {'ok': True, 'rows_imported': 0, 'diagnostics': {}})
-    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda: {'master_journal_ok': True, 'master_journal_path': str(tmp_path/'Trading Journal.xlsx'), 'master_journal_exists': True})
+    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda **_kwargs: {'master_journal_ok': True, 'master_journal_path': str(tmp_path/'Trading Journal.xlsx'), 'master_journal_exists': True})
     async def _bybit(account_mode: str, **_k):
         if account_mode == 'demo':
             return {'ok': True, 'rows_seen': 1, 'captured_row_ids': ['demo-row-1']}
@@ -1848,7 +1876,7 @@ def test_manual_sync_live_capture_verified_independently(tmp_path, monkeypatch):
     from tools.master_journal_workbook import build_master_journal_workbook
     build_master_journal_workbook({'items': [], 'stats': {'totals': {}, 'groups': {}}, 'balances': []}, tmp_path / 'Trading Journal.xlsx')
     monkeypatch.setattr(master_service, '_import_trading_journal_from_sources', lambda *a, **k: {'ok': True, 'rows_imported': 0, 'diagnostics': {}})
-    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda: {'master_journal_ok': True, 'master_journal_path': str(tmp_path/'Trading Journal.xlsx'), 'master_journal_exists': True})
+    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda **_kwargs: {'master_journal_ok': True, 'master_journal_path': str(tmp_path/'Trading Journal.xlsx'), 'master_journal_exists': True})
     async def _bybit(account_mode: str, **_k):
         if account_mode == 'live':
             return {'ok': True, 'rows_seen': 1, 'captured_row_ids': ['live-row-1']}
@@ -1873,7 +1901,7 @@ def test_manual_sync_demo_live_successful_row_id_verification(tmp_path, monkeypa
     snap={'items':[{'id':'demo-row-1','row_type':'trade','symbol':'BTCUSDT','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0},{'id':'live-row-1','row_type':'trade','symbol':'ETHUSDT','side':'SELL','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0}], 'stats': {'totals': {}, 'groups': {}}, 'balances': []}
     build_master_journal_workbook(snap, tmp_path / 'Trading Journal.xlsx')
     monkeypatch.setattr(master_service, '_import_trading_journal_from_sources', lambda *a, **k: {'ok': True, 'rows_imported': 2, 'diagnostics': {}})
-    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda: {'master_journal_ok': True, 'master_journal_path': str(tmp_path/'Trading Journal.xlsx'), 'master_journal_exists': True})
+    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda **_kwargs: {'master_journal_ok': True, 'master_journal_path': str(tmp_path/'Trading Journal.xlsx'), 'master_journal_exists': True})
     async def _bybit(account_mode: str, **_k):
         return {'ok': True, 'rows_seen': 1, 'captured_row_ids': ['demo-row-1' if account_mode=='demo' else 'live-row-1']}
     monkeypatch.setattr(master_service, '_run_bybit_closed_pnl_sync', _bybit)
@@ -1895,7 +1923,7 @@ def test_manual_sync_oanda_missing_row_ids_hard_fail(tmp_path, monkeypatch):
     from tools.master_journal_workbook import build_master_journal_workbook
     build_master_journal_workbook({'items': [], 'stats': {'totals': {}, 'groups': {}}, 'balances': []}, tmp_path / 'Trading Journal.xlsx')
     monkeypatch.setattr(master_service, '_import_trading_journal_from_sources', lambda *a, **k: {'ok': True, 'rows_imported': 0, 'diagnostics': {}})
-    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda: {'master_journal_ok': True, 'master_journal_path': str(tmp_path/'Trading Journal.xlsx'), 'master_journal_exists': True})
+    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda **_kwargs: {'master_journal_ok': True, 'master_journal_path': str(tmp_path/'Trading Journal.xlsx'), 'master_journal_exists': True})
     monkeypatch.setattr(master_service, '_run_bybit_closed_pnl_sync', lambda **_k: asyncio.sleep(0, result={'ok': True, 'rows_seen':0, 'captured_row_ids': []}))
     async def _oanda(acct): return {'ok': True, 'rows_seen':1, 'captured_row_ids':[f'o-{acct}-1']}
     monkeypatch.setattr(master_service, '_recover_oanda_recent_fills', _oanda)
@@ -1915,7 +1943,7 @@ def test_manual_sync_oanda_row_ids_present_pass(tmp_path, monkeypatch):
     snap={'items':[{'id':'o-demo-1','row_type':'trade','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0},{'id':'o-live-1','row_type':'trade','symbol':'GBPUSD','side':'SELL','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0}], 'stats': {'totals': {}, 'groups': {}}, 'balances': []}
     build_master_journal_workbook(snap, tmp_path / 'Trading Journal.xlsx')
     monkeypatch.setattr(master_service, '_import_trading_journal_from_sources', lambda *a, **k: {'ok': True, 'rows_imported': 2, 'diagnostics': {}})
-    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda: {'master_journal_ok': True, 'master_journal_path': str(tmp_path/'Trading Journal.xlsx'), 'master_journal_exists': True})
+    monkeypatch.setattr(master_service, '_sync_master_journal_workbook', lambda **_kwargs: {'master_journal_ok': True, 'master_journal_path': str(tmp_path/'Trading Journal.xlsx'), 'master_journal_exists': True})
     monkeypatch.setattr(master_service, '_run_bybit_closed_pnl_sync', lambda **_k: asyncio.sleep(0, result={'ok': True, 'rows_seen':0, 'captured_row_ids': []}))
     async def _oanda(acct): return {'ok': True, 'rows_seen':1, 'captured_row_ids':[f'o-{acct}-1']}
     monkeypatch.setattr(master_service, '_recover_oanda_recent_fills', _oanda)
@@ -2066,9 +2094,10 @@ def test_manual_import_prebuilt_snapshot_preserves_workbook_zero_cashflow_anchor
             assert values['BINANCE'] == 0
             assert values['PEPPERSTONE DEMO'] == 0
             trade_log = synced['Trade Log']
-            headers = [str(c.value or '').strip() for c in trade_log[1]]
-            ridx = headers.index('Row ID') + 1
-            row_ids = {str(trade_log.cell(r, ridx).value or '').strip() for r in range(2, trade_log.max_row + 1)}
+            headers = ms._trade_log_header_map(trade_log)
+            ridx = headers['Row ID']
+            data_start = ms._trade_log_data_start_row(trade_log)
+            row_ids = {str(trade_log.cell(r, ridx).value or '').strip() for r in range(data_start, trade_log.max_row + 1)}
             assert 'oanda-demo-import' in row_ids
         finally:
             synced.close()

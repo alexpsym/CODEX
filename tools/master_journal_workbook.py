@@ -23,6 +23,10 @@ LEGACY_ALL_TRADES_SHEET = "All Trades"
 ALL_TRADES_SHEET = LEGACY_ALL_TRADES_SHEET
 LEGACY_TRADE_LOG_SHEET = LEGACY_ALL_TRADES_SHEET
 SHEET_ORDER=["Dashboard","Trade Log","Instrument Averages","P&L Calendar"]
+REPORT_YEARLY_SHEET = "YEARLY REPORT"
+REPORT_START_YEAR = 2018
+REPORT_MIN_END_YEAR = 2026
+TRADE_NUMBER_HEADER = "Trade Number"
 MOVE_TO_FIELD_MAP = {
     "Move to Break Even Time": "move_to_break_even_time",
     "Move to Break Even Duration": "move_to_break_even_duration",
@@ -47,10 +51,11 @@ QUALITY_ANALYSIS_FIELD_MAP = {
     "Near Win": "near_win",
     "Early Close": "early_close",
 }
-TRADE_LOG_MANUAL_FIELD_MAP = {**MOVE_TO_FIELD_MAP, **QUALITY_ANALYSIS_FIELD_MAP}
+TRADE_NUMBER_FIELD_MAP = {TRADE_NUMBER_HEADER: "trade_number"}
+TRADE_LOG_MANUAL_FIELD_MAP = {**TRADE_NUMBER_FIELD_MAP, **MOVE_TO_FIELD_MAP, **QUALITY_ANALYSIS_FIELD_MAP}
 EDITABLE_COLS=["Test",*TRADE_LOG_MANUAL_FIELD_MAP.keys(),"Setup","Timeframe","Breakeven","Notes"]
 
-TRADE_LOG_HEADERS = [
+TRADE_LOG_HEADERS_V1 = [
     "Open Time", "Close Time", "Account", "Symbol", "Side", "Qty",
     "Entry Price", "Exit Price", "Stop Loss Price", "Stop Loss Distance",
     "Target Price", "Target Distance", "Commission", "Net P/L",
@@ -61,6 +66,7 @@ TRADE_LOG_HEADERS = [
     "Setup", "Timeframe", "Breakeven", "Notes", "Cashflow Amount",
     "Cashflow New Balance", "Currency", "Row Type", "Row ID",
 ]
+TRADE_LOG_HEADERS = [TRADE_NUMBER_HEADER, *TRADE_LOG_HEADERS_V1]
 PRE_MOVE_TRADE_LOG_HEADERS = [
     "Open Time", "Close Time", "Account", "Symbol", "Side", "Qty",
     "Entry Price", "Exit Price", "Stop Loss Price", "Stop Loss Distance",
@@ -89,6 +95,60 @@ MOVE_TO_PROFIT_HEADERS = list(MOVE_TO_FIELD_MAP.keys())[5:]
 MOVE_TO_SUBHEADERS = ["Time", "Duration", "Trigger Price", "Distance From Entry %", "Distance From Exit %"]
 DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL = "Move to Break Even (DD:HH:MM:SS)"
 DASHBOARD_MOVE_TO_PROFIT_LABEL = "Move to Profit (DD:HH:MM:SS)"
+REPORT_METRIC_LABELS = [
+    "Trades",
+    "Wins",
+    "Losses",
+    "Break-even",
+    "Test",
+    "Win rate",
+    "Net P/L",
+    "Gross gain",
+    "Gross loss",
+    "Best Win Streak",
+    "Worst Losing Streak",
+    "Avg result %",
+    "Avg R",
+    "Avg stop %",
+    "Avg target %",
+    "Max target %",
+    "Avg duration (DD:HH:MM:SS)",
+    "Move to Break Even (DD:HH:MM:SS)",
+    "Move to Profit (DD:HH:MM:SS)",
+    "Max win %",
+    "Source",
+    "Max loss %",
+    "Source",
+    "Max R loss",
+    "Source",
+    "Max R win",
+    "Source",
+    "Shortest (DD:HH:MM:SS)",
+    "Source",
+    "Longest (DD:HH:MM:SS)",
+    "Source",
+    "Winners",
+    "Avg stop %",
+    "Avg target %",
+    "Avg result %",
+    "Avg R",
+    "Losers",
+    "Avg stop %",
+    "Avg target %",
+    "Avg result %",
+    "Avg R",
+    "Drawdown",
+    "Max drawdown",
+    "Avg drawdown",
+    "Longs",
+    "Long wins",
+    "Long losses",
+    "Long break-even",
+    "Shorts",
+    "Short wins",
+    "Short losses",
+    "Short break-even",
+]
 LIGHT_GREY_FILL_RGB = "FFEAF2F8"
 JOURNAL_DISPLAY_TZ = ZoneInfo("Australia/Brisbane")
 
@@ -634,10 +694,10 @@ def _all_trades_row_fingerprint_from_map(values: Dict[str, Any]) -> str:
 
 
 
-def _trade_log_two_row_header_values() -> Tuple[List[str], List[str]]:
+def _trade_log_two_row_header_values_for(headers: List[str]) -> Tuple[List[str], List[str]]:
     row1: List[str] = []
     row2: List[str] = []
-    for header in TRADE_LOG_HEADERS:
+    for header in headers:
         if header in MOVE_TO_BREAK_EVEN_HEADERS:
             row1.append("Move to Break-Even" if header == MOVE_TO_BREAK_EVEN_HEADERS[0] else "")
             row2.append(MOVE_TO_SUBHEADERS[MOVE_TO_BREAK_EVEN_HEADERS.index(header)])
@@ -650,13 +710,17 @@ def _trade_log_two_row_header_values() -> Tuple[List[str], List[str]]:
     return row1, row2
 
 
-def _trade_log_has_two_row_headers(ws) -> bool:
-    row1, row2 = _trade_log_two_row_header_values()
-    found1 = [str(ws.cell(1, c).value or "").strip() for c in range(1, len(TRADE_LOG_HEADERS) + 1)]
-    found2 = [str(ws.cell(2, c).value or "").strip() for c in range(1, len(TRADE_LOG_HEADERS) + 1)]
+def _trade_log_two_row_header_values() -> Tuple[List[str], List[str]]:
+    return _trade_log_two_row_header_values_for(TRADE_LOG_HEADERS)
+
+
+def _trade_log_has_two_row_headers_for(ws, headers: List[str]) -> bool:
+    row1, row2 = _trade_log_two_row_header_values_for(headers)
+    found1 = [str(ws.cell(1, c).value or "").strip() for c in range(1, len(headers) + 1)]
+    found2 = [str(ws.cell(2, c).value or "").strip() for c in range(1, len(headers) + 1)]
     expected_vertical_merges = {
         f"{get_column_letter(col)}1:{get_column_letter(col)}2"
-        for col, header in enumerate(TRADE_LOG_HEADERS, start=1)
+        for col, header in enumerate(headers, start=1)
         if header not in MOVE_TO_FIELD_MAP
     }
     merged_cells = getattr(ws, "merged_cells", None)
@@ -666,24 +730,38 @@ def _trade_log_has_two_row_headers(ws) -> bool:
     return found1 == row1 and found2 == row2 and expected_vertical_merges.issubset(found_merges)
 
 
-def _trade_log_has_legacy_duplicate_two_row_headers(ws) -> bool:
-    row1, row2 = _trade_log_two_row_header_values()
+def _trade_log_has_two_row_headers(ws) -> bool:
+    return _trade_log_has_two_row_headers_for(ws, TRADE_LOG_HEADERS)
+
+
+def _trade_log_has_legacy_duplicate_two_row_headers_for(ws, headers: List[str]) -> bool:
+    row1, row2 = _trade_log_two_row_header_values_for(headers)
     duplicate_row2 = [
         header if header not in MOVE_TO_FIELD_MAP else row2[col - 1]
-        for col, header in enumerate(TRADE_LOG_HEADERS, start=1)
+        for col, header in enumerate(headers, start=1)
     ]
-    found1 = [str(ws.cell(1, c).value or "").strip() for c in range(1, len(TRADE_LOG_HEADERS) + 1)]
-    found2 = [str(ws.cell(2, c).value or "").strip() for c in range(1, len(TRADE_LOG_HEADERS) + 1)]
+    found1 = [str(ws.cell(1, c).value or "").strip() for c in range(1, len(headers) + 1)]
+    found2 = [str(ws.cell(2, c).value or "").strip() for c in range(1, len(headers) + 1)]
     return found1 == row1 and found2 == duplicate_row2
 
 
+def _trade_log_has_legacy_duplicate_two_row_headers(ws) -> bool:
+    return _trade_log_has_legacy_duplicate_two_row_headers_for(ws, TRADE_LOG_HEADERS)
+
+
+def _trade_log_has_v1_grouped_two_row_headers(ws) -> bool:
+    return _trade_log_has_two_row_headers_for(ws, TRADE_LOG_HEADERS_V1) or _trade_log_has_legacy_duplicate_two_row_headers_for(ws, TRADE_LOG_HEADERS_V1)
+
+
 def _trade_log_uses_grouped_two_row_headers(ws) -> bool:
-    return _trade_log_has_two_row_headers(ws) or _trade_log_has_legacy_duplicate_two_row_headers(ws)
+    return _trade_log_has_two_row_headers(ws) or _trade_log_has_legacy_duplicate_two_row_headers(ws) or _trade_log_has_v1_grouped_two_row_headers(ws)
 
 
 def _trade_log_header_map(ws) -> Dict[str, int]:
-    if _trade_log_uses_grouped_two_row_headers(ws):
+    if _trade_log_has_two_row_headers(ws) or _trade_log_has_legacy_duplicate_two_row_headers(ws):
         return {header: col for col, header in enumerate(TRADE_LOG_HEADERS, start=1)}
+    if _trade_log_has_v1_grouped_two_row_headers(ws):
+        return {header: col for col, header in enumerate(TRADE_LOG_HEADERS_V1, start=1)}
     return {
         str(ws.cell(1, c).value or "").strip(): c
         for c in range(1, ws.max_column + 1)
@@ -810,18 +888,27 @@ def _write_trade_log_two_row_headers(ws, header_templates: Dict[str, Dict[str, A
                 shrink_to_fit=anchor.alignment.shrink_to_fit,
                 indent=anchor.alignment.indent,
             )
-    ws.merge_cells(start_row=1, start_column=19, end_row=1, end_column=23)
-    ws.merge_cells(start_row=1, start_column=24, end_row=1, end_column=28)
-    ws["S1"] = "Move to Break-Even"
-    ws["X1"] = "Move to Profit"
-    for col in range(19, 29):
-        ws.cell(1, col).alignment = copy(ws.cell(2, col).alignment)
-        ws.cell(1, col).alignment = Alignment(
-            horizontal="center", vertical="center", wrap_text=True,
-            text_rotation=ws.cell(1, col).alignment.text_rotation,
-            shrink_to_fit=ws.cell(1, col).alignment.shrink_to_fit,
-            indent=ws.cell(1, col).alignment.indent,
-        )
+    for label, group_headers in (
+        ("Move to Break-Even", MOVE_TO_BREAK_EVEN_HEADERS),
+        ("Move to Profit", MOVE_TO_PROFIT_HEADERS),
+    ):
+        group_cols = [
+            col for col, logical_header in enumerate(TRADE_LOG_HEADERS, start=1)
+            if logical_header in group_headers
+        ]
+        if not group_cols:
+            continue
+        first_col, last_col = min(group_cols), max(group_cols)
+        ws.merge_cells(start_row=1, start_column=first_col, end_row=1, end_column=last_col)
+        ws.cell(1, first_col).value = label
+        for col in group_cols:
+            ws.cell(1, col).alignment = copy(ws.cell(2, col).alignment)
+            ws.cell(1, col).alignment = Alignment(
+                horizontal="center", vertical="center", wrap_text=True,
+                text_rotation=ws.cell(1, col).alignment.text_rotation,
+                shrink_to_fit=ws.cell(1, col).alignment.shrink_to_fit,
+                indent=ws.cell(1, col).alignment.indent,
+            )
 
 
 def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> None:
@@ -829,8 +916,14 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
     before_data_rows = _trade_log_data_row_count(ws)
     already_current = _trade_log_has_two_row_headers(ws)
     legacy_duplicate_headers = _trade_log_has_legacy_duplicate_two_row_headers(ws)
+    legacy_v1_grouped_headers = _trade_log_has_two_row_headers_for(ws, TRADE_LOG_HEADERS_V1)
+    legacy_v1_duplicate_headers = _trade_log_has_legacy_duplicate_two_row_headers_for(ws, TRADE_LOG_HEADERS_V1)
     if already_current:
         headers = _trade_log_header_map(ws)
+        trade_number_col = headers.get(TRADE_NUMBER_HEADER)
+        if trade_number_col:
+            for row in range(TRADE_LOG_DATA_START_ROW, ws.max_row + 1):
+                ws.cell(row, trade_number_col).number_format = "@"
         for header in ("Move to Break Even Duration", "Move to Profit Duration"):
             for row in range(TRADE_LOG_DATA_START_ROW, ws.max_row + 1):
                 ws.cell(row, headers[header]).number_format = r'00\:00\:00\:00'
@@ -853,17 +946,20 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
         if legacy_duplicate_headers:
             source_headers = list(TRADE_LOG_HEADERS)
             source_start_row = TRADE_LOG_DATA_START_ROW
+        elif legacy_v1_grouped_headers or legacy_v1_duplicate_headers:
+            source_headers = list(TRADE_LOG_HEADERS_V1)
+            source_start_row = TRADE_LOG_DATA_START_ROW
         else:
             source_headers = [str(ws.cell(1, col).value or "").strip() for col in range(1, ws.max_column + 1)]
             while source_headers and not source_headers[-1]:
                 source_headers.pop()
-        if source_headers not in (PRE_MOVE_TRADE_LOG_HEADERS, OLD_TRADE_LOG_HEADERS, TRADE_LOG_HEADERS):
+        if source_headers not in (PRE_MOVE_TRADE_LOG_HEADERS, OLD_TRADE_LOG_HEADERS, TRADE_LOG_HEADERS_V1, TRADE_LOG_HEADERS):
             raise RuntimeError(
                 "Trade Log headers cannot be migrated safely: "
                 f"found {source_headers!r}; expected current two-row headers or one of "
-                f"{[PRE_MOVE_TRADE_LOG_HEADERS, OLD_TRADE_LOG_HEADERS, TRADE_LOG_HEADERS]!r}."
+                f"{[PRE_MOVE_TRADE_LOG_HEADERS, OLD_TRADE_LOG_HEADERS, TRADE_LOG_HEADERS_V1, TRADE_LOG_HEADERS]!r}."
             )
-        if not legacy_duplicate_headers:
+        if not (legacy_duplicate_headers or legacy_v1_grouped_headers or legacy_v1_duplicate_headers):
             source_start_row = 2
 
     source_by_header = {header: idx for idx, header in enumerate(source_headers, start=1)}
@@ -887,7 +983,7 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
         source_header = header
         if header == "Close Stopout" and source_header not in source_by_header:
             source_header = "Stop Out"
-        template_header = source_header if source_header in source_by_header else "Test"
+        template_header = source_header if source_header in source_by_header else ("Open Time" if TRADE_NUMBER_HEADER not in source_by_header else "Test")
         if "Trigger Price" in header:
             template_header = "Entry Price"
         elif "Distance From" in header:
@@ -914,7 +1010,7 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
     _write_trade_log_two_row_headers(ws, header_templates)
     for target_col, header in enumerate(TRADE_LOG_HEADERS, start=1):
         source_header = header if header in source_by_header else ("Stop Out" if header == "Close Stopout" and "Stop Out" in source_by_header else None)
-        template_header = source_header or "Test"
+        template_header = source_header or ("Open Time" if TRADE_NUMBER_HEADER not in source_by_header else "Test")
         if "Trigger Price" in header:
             template_header = "Entry Price"
         elif "Distance From" in header:
@@ -937,6 +1033,9 @@ def _ensure_trade_log_schema(ws, diagnostics: Dict[str, Any] | None = None) -> N
         if header in ("Move to Break Even Duration", "Move to Profit Duration"):
             for row in range(TRADE_LOG_DATA_START_ROW, TRADE_LOG_DATA_START_ROW + len(source_data_rows)):
                 ws.cell(row, target_col).number_format = r'00\:00\:00\:00'
+        elif header == TRADE_NUMBER_HEADER:
+            for row in range(TRADE_LOG_DATA_START_ROW, TRADE_LOG_DATA_START_ROW + len(source_data_rows)):
+                ws.cell(row, target_col).number_format = "@"
         elif "Distance From" in header:
             for row in range(TRADE_LOG_DATA_START_ROW, TRADE_LOG_DATA_START_ROW + len(source_data_rows)):
                 ws.cell(row, target_col).number_format = "0.00%"
@@ -1002,7 +1101,7 @@ def _range_is_trade_log_generated_value_fill_range(range_ref: str) -> bool:
         min_col, min_row, max_col, _max_row = range_boundaries(range_ref)
     except ValueError:
         return False
-    return min_row >= 2 and 13 <= min_col <= max_col <= 16
+    return min_row >= 2 and 13 <= min_col <= max_col <= 17
 
 def _remove_trade_log_generated_value_fill_formatting(ws) -> None:
     cf = ws.conditional_formatting
@@ -1312,6 +1411,8 @@ def read_master_journal_manual_overrides(path: Path) -> Dict[str, Dict[str, Any]
                     number_format = str(ws.cell(row_num, i + 1).number_format or "")
                     parsed_duration = _duration_ddhhmmss_cell_to_seconds(raw_value) if r"\:" in number_format else _parse_duration_text(raw_value)
                     edits[field] = parsed_duration if parsed_duration is not None else raw_value
+                elif field in MOVE_TO_FIELD_MAP.values():
+                    edits[field] = raw_value
                 else:
                     edits[field] = '' if raw_value is None else str(raw_value)
             if 'close_stopout' not in edits and 'Stop Out' in idx:
@@ -1665,6 +1766,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         if close_stopout in (None, ''):
             close_stopout = row.get('stop_out')
         values = {
+            TRADE_NUMBER_HEADER: str(row.get("trade_number") or ""),
             "Open Time": otv, "Close Time": ctv, "Account": acct, "Symbol": symbol, "Side": side,
             "Qty": row.get('qty'), "Entry Price": row.get('entry_price'), "Exit Price": row.get('exit_price'),
             "Stop Loss Price": row.get('stop_loss'), "Stop Loss Distance": stop_loss_distance,
@@ -1685,31 +1787,60 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             "Row Type": row.get('row_type') or 'trade', "Row ID": stable_row_id(row),
         }
         for header, field in MOVE_TO_FIELD_MAP.items():
-            values[header] = row.get(field) or ''
+            raw_move_value = row.get(field)
+            if field in {"move_to_break_even_duration", "move_to_profit_duration"} and raw_move_value not in (None, ""):
+                values[header] = _fmt_duration_full(raw_move_value)
+            else:
+                values[header] = raw_move_value or ''
         ws.append([values.get(header, '') for header in TRADE_LOG_HEADERS])
     _style_table_sheet(ws,1,'A2',True)
+    trade_cols = _trade_log_header_map(ws)
+    def _fmt_col(row_idx: int, header: str, number_format: str) -> None:
+        col = trade_cols.get(header)
+        if col:
+            ws.cell(row_idx, col).number_format = number_format
     for rr in range(2, ws.max_row + 1):
         row_ctx = rows[rr - 2] if rr - 2 < len(rows) else {}
         ccy_comm = _infer_trade_log_currency(row_ctx, field="commission")
         ccy_pnl = _infer_trade_log_currency(row_ctx, field="net_pnl")
         ccy_bal = _infer_trade_log_currency(row_ctx, field="balance_after")
-        ws.cell(rr, 6).number_format = '#,##0.##########'
-        ws.cell(rr, 1).number_format = 'yyyy-mm-dd hh:mm:ss'
-        ws.cell(rr, 2).number_format = 'yyyy-mm-dd hh:mm:ss'
-        ws.cell(rr, 10).number_format = "0.00%"
-        ws.cell(rr, 12).number_format = "0.00%"
+        _fmt_col(rr, TRADE_NUMBER_HEADER, "@")
+        _fmt_col(rr, "Qty", '#,##0.##########')
+        _fmt_col(rr, "Open Time", 'yyyy-mm-dd hh:mm:ss')
+        _fmt_col(rr, "Close Time", 'yyyy-mm-dd hh:mm:ss')
+        _fmt_col(rr, "Stop Loss Distance", "0.00%")
+        _fmt_col(rr, "Target Distance", "0.00%")
         if ccy_comm:
-            ws.cell(rr, 13).number_format = _currency_number_format(ccy_comm)
+            _fmt_col(rr, "Commission", _currency_number_format(ccy_comm))
         if ccy_pnl:
-            ws.cell(rr, 14).number_format = _currency_number_format(ccy_pnl)
-        ws.cell(rr, 15).number_format = "0.00%"
-        ws.cell(rr, 16).number_format = '0.00'
+            _fmt_col(rr, "Net P/L", _currency_number_format(ccy_pnl))
+        _fmt_col(rr, "Profit %", "0.00%")
+        _fmt_col(rr, "R-Multiple", '0.00')
         if ccy_bal:
-            ws.cell(rr, 17).number_format = '#,##0.0000000000' if _is_crypto_currency(ccy_bal) else '#,##0.00'
-        ws.cell(rr, 18).number_format = r'00\:00\:00\:00'
+            _fmt_col(rr, "Balance After", '#,##0.0000000000' if _is_crypto_currency(ccy_bal) else '#,##0.00')
+        _fmt_col(rr, "Trade Duration (DD:HH:MM:SS)", r'00\:00\:00\:00')
+        _fmt_col(rr, "Move to Break Even Time", 'yyyy-mm-dd hh:mm:ss')
+        _fmt_col(rr, "Move to Break Even Duration", r'00\:00\:00\:00')
+        _fmt_col(rr, "Move to Profit Time", 'yyyy-mm-dd hh:mm:ss')
+        _fmt_col(rr, "Move to Profit Duration", r'00\:00\:00\:00')
+        for pct_header in (
+            "Move to Break Even Distance From Entry %",
+            "Move to Break Even Distance From Exit %",
+            "Move to Profit Distance From Entry %",
+            "Move to Profit Distance From Exit %",
+        ):
+            _fmt_col(rr, pct_header, "0.00%")
     _ensure_trade_log_schema(ws)
-    _negative_impact_rule(ws, f"M3:M{max(3, ws.max_row)}")
-    _profit_loss_rules(ws, f"N3:P{max(3, ws.max_row)}")
+    trade_cols = _trade_log_header_map(ws)
+    last_trade_row = max(TRADE_LOG_DATA_START_ROW, ws.max_row)
+    commission_col = trade_cols.get("Commission")
+    net_col = trade_cols.get("Net P/L")
+    r_col = trade_cols.get("R-Multiple")
+    if commission_col:
+        letter = get_column_letter(commission_col)
+        _negative_impact_rule(ws, f"{letter}{TRADE_LOG_DATA_START_ROW}:{letter}{last_trade_row}")
+    if net_col and r_col:
+        _profit_loss_rules(ws, f"{get_column_letter(net_col)}{TRADE_LOG_DATA_START_ROW}:{get_column_letter(r_col)}{last_trade_row}")
     _apply_trade_log_win_loss_row_formatting(ws)
     _apply_trade_log_win_loss_direct_row_fills(ws)
 
@@ -1758,6 +1889,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             cal.cell(rr, cc).number_format = "0"
     _apply_pnl_calendar_profit_loss_formatting(cal)
     _ensure_pnl_calendar_freeze_panes(cal)
+    _ensure_report_sheets(wb, snapshot)
 
     output_path.parent.mkdir(parents=True, exist_ok=True); wb.save(output_path)
     return {'ok':True,'path':str(output_path)}
@@ -1848,6 +1980,237 @@ def _style_table_sheet(ws, header_row=1, freeze='A2', autofilter=True):
         cell.font = Font(name='Calibri', size=11, bold=True, color='00000000')
     for r in range(header_row + 1, ws.max_row + 1):
         ws.row_dimensions[r].height = 15
+
+
+_REPORT_SECTION_ROWS = {"Winners", "Losers", "Drawdown", "Longs", "Shorts"}
+_REPORT_SPECS = [
+    ("Trades", "trades", "count", None),
+    ("Wins", "wins", "count", "profit"),
+    ("Losses", "losses", "count", "loss"),
+    ("Break-even", "break_even", "count", None),
+    ("Test", "test_trades", "count", None),
+    ("Win rate", "win_rate_pct", "pct", None),
+    ("Net P/L", "net_profit_total", "number", "auto"),
+    ("Gross gain", "gross_gain", "number", "profit"),
+    ("Gross loss", "gross_loss", "number", "loss"),
+    ("Best Win Streak", "winning_streak", "count", "profit"),
+    ("Worst Losing Streak", "losing_streak", "count", "loss"),
+    ("Avg result %", "avg_result_pct", "pct", "auto"),
+    ("Avg R", "avg_r_multiple", "r", "auto"),
+    ("Avg stop %", "avg_stop_pct", "pct", None),
+    ("Avg target %", "avg_target_pct", "pct", None),
+    ("Max target %", "max_target_pct", "pct", None),
+    ("Avg duration (DD:HH:MM:SS)", "avg_duration_seconds", "duration", None),
+    ("Move to Break Even (DD:HH:MM:SS)", "move_to_break_even_duration_seconds", "duration", None),
+    ("Move to Profit (DD:HH:MM:SS)", "move_to_profit_duration_seconds", "duration", None),
+    ("Max win %", "max_result_pct", "pct", "profit"),
+    ("Source", "source:max_result_pct", "source", None),
+    ("Max loss %", "min_result_pct", "pct", "loss"),
+    ("Source", "source:min_result_pct", "source", None),
+    ("Max R loss", "min_r_multiple", "r", "loss"),
+    ("Source", "source:min_r_multiple", "source", None),
+    ("Max R win", "max_r_multiple", "r", "profit"),
+    ("Source", "source:max_r_multiple", "source", None),
+    ("Shortest (DD:HH:MM:SS)", "shortest_duration_seconds", "duration", None),
+    ("Source", "source:shortest_duration_seconds", "source", None),
+    ("Longest (DD:HH:MM:SS)", "longest_duration_seconds", "duration", None),
+    ("Source", "source:longest_duration_seconds", "source", None),
+    ("Winners", None, "section", None),
+    ("Avg stop %", "avg_stop_pct_winners", "pct", None),
+    ("Avg target %", "avg_target_pct_winners", "pct", None),
+    ("Avg result %", "avg_result_pct_winners", "pct", "profit"),
+    ("Avg R", "avg_r_multiple_winners", "r", "profit"),
+    ("Losers", None, "section", None),
+    ("Avg stop %", "avg_stop_pct_losers", "pct", None),
+    ("Avg target %", "avg_target_pct_losers", "pct", None),
+    ("Avg result %", "avg_result_pct_losers", "pct", "loss"),
+    ("Avg R", "avg_r_multiple_losers", "r", "loss"),
+    ("Drawdown", None, "section", None),
+    ("Max drawdown", "max_drawdown_pct", "pct", "loss"),
+    ("Avg drawdown", "avg_drawdown_pct", "pct", "loss"),
+    ("Longs", "long_trades", "count", None),
+    ("Long wins", "long_wins", "count", "profit"),
+    ("Long losses", "long_losses", "count", "loss"),
+    ("Long break-even", "long_break_even", "count", None),
+    ("Shorts", "short_trades", "count", None),
+    ("Short wins", "short_wins", "count", "profit"),
+    ("Short losses", "short_losses", "count", "loss"),
+    ("Short break-even", "short_break_even", "count", None),
+]
+
+
+def _report_trade_years_from_snapshot(snapshot: Dict[str, Any]) -> List[int]:
+    years = {REPORT_START_YEAR, REPORT_MIN_END_YEAR, datetime.now(JOURNAL_DISPLAY_TZ).year}
+    for row in snapshot.get("items") or []:
+        if not isinstance(row, dict) or str(row.get("row_type") or "trade") != "trade":
+            continue
+        dt = _as_date(row.get("close_time") or row.get("open_time"))
+        if dt:
+            years.add(int(dt.year))
+    reports = ((snapshot.get("stats") or {}).get("period_reports") or {})
+    for key in (reports.get("years") or {}).keys():
+        try:
+            years.add(int(key))
+        except Exception:
+            pass
+    end_year = max(max(years), REPORT_MIN_END_YEAR)
+    return list(range(REPORT_START_YEAR, end_year + 1))
+
+
+def expected_report_sheet_names(snapshot: Dict[str, Any] | None = None) -> List[str]:
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    return [REPORT_YEARLY_SHEET, *[str(year) for year in _report_trade_years_from_snapshot(snapshot)]]
+
+
+def _period_report_lookup(snapshot: Dict[str, Any], *, year: int, month: int | None = None) -> Dict[str, Any]:
+    reports = ((snapshot.get("stats") or {}).get("period_reports") or {})
+    if month is None:
+        years = reports.get("years") if isinstance(reports.get("years"), dict) else {}
+        return years.get(year) or years.get(str(year)) or {}
+    months = reports.get("months") if isinstance(reports.get("months"), dict) else {}
+    year_months = months.get(year) or months.get(str(year)) or {}
+    if not isinstance(year_months, dict):
+        return {}
+    return year_months.get(month) or year_months.get(str(month)) or {}
+
+
+def _report_bucket_from_stats(stats: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(stats, dict):
+        return {}
+    groups = stats.get("groups") if isinstance(stats.get("groups"), dict) else {}
+    totals = stats.get("totals") if isinstance(stats.get("totals"), dict) else {}
+    by_market = groups.get("by_market") if isinstance(groups.get("by_market"), dict) else {}
+    overall = by_market.get("overall") if isinstance(by_market.get("overall"), dict) else {}
+    risk = groups.get("risk_expectancy") if isinstance(groups.get("risk_expectancy"), dict) else {}
+    risk_by_market = risk.get("by_market") if isinstance(risk.get("by_market"), dict) else {}
+    duration = groups.get("duration") if isinstance(groups.get("duration"), dict) else {}
+    bucket: Dict[str, Any] = {}
+    bucket.update(totals)
+    bucket.update(overall)
+    bucket.update(risk)
+    if isinstance(risk_by_market.get("overall"), dict):
+        bucket.update(risk_by_market["overall"])
+    bucket.setdefault("shortest_duration_seconds", duration.get("overall_shortest_seconds"))
+    bucket.setdefault("longest_duration_seconds", duration.get("overall_longest_seconds"))
+    bucket.setdefault("avg_duration_seconds", duration.get("overall_avg_seconds"))
+    metric_sources: Dict[str, Any] = {}
+    for source_map in (
+        overall.get("metric_sources") if isinstance(overall, dict) else None,
+        duration.get("metric_sources") if isinstance(duration, dict) else None,
+    ):
+        if isinstance(source_map, dict):
+            metric_sources.update(source_map)
+    if metric_sources:
+        bucket["metric_sources"] = metric_sources
+    return bucket
+
+
+def _report_cell_value(bucket: Dict[str, Any], key: str | None, kind: str) -> Any:
+    if kind == "section" or key is None:
+        return ""
+    if kind == "source":
+        source_key = key.split(":", 1)[1] if ":" in key else key
+        source = (bucket.get("metric_sources") or {}).get(source_key)
+        return _fmt_detail_src(source) if source else ""
+    value = bucket.get(key)
+    if kind == "pct":
+        number = _as_float(value)
+        return "" if number is None else number / 100.0
+    if kind == "r":
+        number = _as_float(value)
+        return "" if number is None else number
+    if kind == "count":
+        number = _as_float(value)
+        return "" if number is None else int(number)
+    if kind == "duration":
+        return _fmt_duration_full(value) if value not in (None, "") else ""
+    if kind == "number":
+        number = _as_float(value)
+        return "" if number is None else number
+    return "" if value is None else value
+
+
+def _format_report_sheet(ws, last_col: int) -> None:
+    ws.freeze_panes = "B2"
+    ws.sheet_view.showGridLines = False
+    ws.column_dimensions["A"].width = 32
+    for col in range(2, last_col + 1):
+        ws.column_dimensions[get_column_letter(col)].width = 14
+    _style_header_row(ws, 1)
+    _table_border(ws, 1, 1, len(REPORT_METRIC_LABELS) + 1, last_col)
+    for row in range(2, len(REPORT_METRIC_LABELS) + 2):
+        label = str(ws.cell(row, 1).value or "")
+        ws.cell(row, 1).font = Font(name="Calibri", size=11, bold=True)
+        if label in _REPORT_SECTION_ROWS:
+            for col in range(1, last_col + 1):
+                ws.cell(row, col).font = Font(name="Calibri", size=11, bold=True)
+                ws.cell(row, col).fill = PatternFill("solid", fgColor="EAF2F8")
+        if label == "Source":
+            _apply_dashboard_source_label_style(ws.cell(row, 1))
+    for idx, (_label, _key, kind, semantic) in enumerate(_REPORT_SPECS, start=2):
+        for col in range(2, last_col + 1):
+            cell = ws.cell(idx, col)
+            if kind == "pct":
+                cell.number_format = "0.00%"
+            elif kind == "r":
+                cell.number_format = '0.000"R"'
+            elif kind == "count":
+                cell.number_format = "0"
+            elif kind == "duration":
+                cell.number_format = r'00\:00\:00\:00'
+            elif kind == "number":
+                cell.number_format = '#,##0.00'
+            if semantic == "profit":
+                _apply_full_cell_semantic_fill(cell, "profit")
+            elif semantic == "loss":
+                _apply_full_cell_semantic_fill(cell, "loss")
+            elif semantic == "auto":
+                _apply_sign_based_full_cell_fill(cell)
+
+
+def _clear_report_sheet(ws) -> None:
+    for merged in list(ws.merged_cells.ranges):
+        ws.unmerge_cells(str(merged))
+    if ws.max_row:
+        ws.delete_rows(1, ws.max_row)
+    if ws.max_column:
+        ws.delete_cols(1, ws.max_column)
+    ws.conditional_formatting._cf_rules.clear()
+
+
+def _write_report_sheet(ws, headers: List[Any], buckets: List[Dict[str, Any]]) -> None:
+    _clear_report_sheet(ws)
+    ws.cell(1, 1, "")
+    for col, header in enumerate(headers, start=2):
+        ws.cell(1, col, header)
+    for row_idx, (label, key, kind, _semantic) in enumerate(_REPORT_SPECS, start=2):
+        ws.cell(row_idx, 1, label)
+        for col, bucket in enumerate(buckets, start=2):
+            ws.cell(row_idx, col, _report_cell_value(bucket, key, kind))
+    _format_report_sheet(ws, max(1, len(headers) + 1))
+
+
+def _ensure_report_sheets(wb, snapshot: Dict[str, Any], diagnostics: Dict[str, Any] | None = None) -> None:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    years = _report_trade_years_from_snapshot(snapshot if isinstance(snapshot, dict) else {})
+    expected_names = [REPORT_YEARLY_SHEET, *[str(year) for year in years]]
+    for name in expected_names:
+        if name not in wb.sheetnames:
+            wb.create_sheet(name)
+            diagnostics.setdefault("created_report_sheets", []).append(name)
+    yearly_buckets = [_report_bucket_from_stats(_period_report_lookup(snapshot, year=year)) for year in years]
+    _write_report_sheet(wb[REPORT_YEARLY_SHEET], years, yearly_buckets)
+    for year in years:
+        month_headers = [calendar.month_name[month] for month in range(1, 13)]
+        month_buckets = [
+            _report_bucket_from_stats(_period_report_lookup(snapshot, year=year, month=month))
+            for month in range(1, 13)
+        ]
+        _write_report_sheet(wb[str(year)], month_headers, month_buckets)
+    ordered = [name for name in SHEET_ORDER if name in wb.sheetnames] + expected_names
+    seen = set(ordered)
+    remaining = [sheet.title for sheet in wb._sheets if sheet.title not in seen]
+    wb._sheets = [wb[name] for name in ordered if name in wb.sheetnames] + [wb[name] for name in remaining]
 
 def _write_instrument_leaders_section(ws, start_row, start_col, leaders):
     ws.merge_cells(start_row=start_row,start_column=start_col,end_row=start_row,end_column=start_col+4)
@@ -2378,14 +2741,15 @@ def _find_instrument_leaders_table(ws) -> tuple[int | None, Dict[str, int], Dict
         header_row = None
         header_map: Dict[str, int] = {}
         for r in range(ar + 1, min(ws.max_row, ar + 12) + 1):
-            row_map: Dict[str, int] = {}
-            for c in range(ac, min(ws.max_column, ac + 8) + 1):
-                token = str(ws.cell(r, c).value or "").strip().lower()
-                if token in {"metric", "symbol", "wins", "losses", "trades"}:
-                    row_map[token] = c
-            if {"metric", "symbol", "wins", "losses", "trades"}.issubset(row_map.keys()):
+            wanted = ["metric", "symbol", "wins", "losses", "trades"]
+            for c in range(ac, min(ws.max_column, ac + 8) - len(wanted) + 3):
+                tokens = [str(ws.cell(r, c + offset).value or "").strip().lower() for offset in range(len(wanted))]
+                if tokens != wanted:
+                    continue
                 header_row = r
-                header_map = row_map
+                header_map = {token: c + offset for offset, token in enumerate(wanted)}
+                break
+            if header_row:
                 break
         if not header_row:
             continue
@@ -2722,6 +3086,9 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
                 row_id = computed_id
             currency = str(r[idx.get('Currency')] or '').strip() if 'Currency' in idx else ''
             item={'id': row_id or computed_id, 'row_type':row_type,'account':account,'symbol':symbol,'side':side,'open_time':open_time,'close_time':close_time,'qty':_num(r[idx.get('Qty')]) if 'Qty' in idx else None,'entry_price':_num(r[idx.get('Entry Price')]) if 'Entry Price' in idx else None,'exit_price':_num(r[idx.get('Exit Price')]) if 'Exit Price' in idx else None,'stop_loss':_num(r[i_stop]) if i_stop is not None else None,'take_profit':_num(r[i_tp]) if i_tp is not None else None,'stop_loss_distance_pct':_normalize_pct_distance_cell(r[i_stop_dist], row_cells[i_stop_dist].number_format) if i_stop_dist is not None and i_stop_dist < len(row_cells) else None,'target_distance_pct':_normalize_pct_distance_cell(r[i_target_dist], row_cells[i_target_dist].number_format) if i_target_dist is not None and i_target_dist < len(row_cells) else None,'commission':_num(r[idx.get('Commission')]) if 'Commission' in idx else None,'net_profit':_num(r[i_pnl]) if i_pnl is not None else None,'result_pct':_excel_fraction_to_pct_points(r[i_result_pct]) if i_result_pct is not None else None,'r_multiple':_num(r[idx.get('R-Multiple')]) if 'R-Multiple' in idx else None,'balance_after_trade':balance_after,'balance_after_trade_source':'master_journal','trade_duration_seconds':duration,'is_test_trade':str(r[idx.get('Test')]).strip().lower() in {'yes','y','true','1'} if 'Test' in idx else False,'setup':r[idx.get('Setup',17)] if 'Setup' in idx else '','timeframe':r[idx.get('Timeframe',18)] if 'Timeframe' in idx else '','breakeven':r[idx.get('Breakeven',19)] if 'Breakeven' in idx else '','notes':r[idx.get('Notes',20)] if 'Notes' in idx else '','cashflow_amount':cashflow_amount,'cashflow_new_balance':cashflow_new_balance,'currency':currency, 'asset_class': asset_class, 'source':'master_journal'}
+            if TRADE_NUMBER_HEADER in idx:
+                trade_number_value = r[idx[TRADE_NUMBER_HEADER]] if idx[TRADE_NUMBER_HEADER] < len(r) else ""
+                item["trade_number"] = "" if trade_number_value is None else str(trade_number_value).strip()
             for header, field in TRADE_LOG_MANUAL_FIELD_MAP.items():
                 if header in idx:
                     field_index = idx[header]
@@ -2796,7 +3163,6 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
         dash = wb["Dashboard"]
         _repair_dashboard_core_layout(dash, diagnostics)
         _ensure_dashboard_move_duration_rows(dash, diagnostics)
-        before = _snapshot_invariants(wb)
 
         stats = snapshot.get("stats") or {}
         rows = [
@@ -2812,6 +3178,8 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                     row.update(overrides)
             snapshot = dict(snapshot)
             snapshot["items"] = rows
+        _ensure_report_sheets(wb, snapshot, diagnostics)
+        before = _snapshot_invariants(wb)
         groups = stats.get("groups") or {}
         by_market = groups.get("by_market") or {}
         risk = groups.get("risk_expectancy") or {}
@@ -3394,6 +3762,7 @@ def refresh_master_journal_derived_sheets(path: Path, snapshot: Dict[str, Any]) 
                 dst.freeze_panes = src.freeze_panes
                 dst.auto_filter.ref = src.auto_filter.ref
                 for k,v in src.column_dimensions.items(): dst.column_dimensions[k].width=v.width
+            _ensure_report_sheets(wb, snapshot)
         finally:
             gen.close()
             tmp.unlink(missing_ok=True)

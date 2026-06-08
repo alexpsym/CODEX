@@ -74,7 +74,7 @@ from shared.symbol_resolution import (
 from shared.atomic_json import write_json_file
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, _get_all_trades_sheet, _get_trade_log_sheet, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -1789,6 +1789,7 @@ def _build_trading_journal_view_snapshot(
         balances = _merge_missing_timeline_balances_with_broker(balances, broker_balances)
         _finish_snapshot_substage("broker_balance_merge")
         stats = _compute_journal_stats(items, balances)
+        stats["period_reports"] = _compute_journal_period_stats(items, balances)
         _finish_snapshot_substage("stats_dashboard_instrument_calendar_build")
         diagnostics = _build_authoritative_trading_journal_diagnostics_snapshot(items)
         _finish_snapshot_substage("diagnostics_build")
@@ -1866,6 +1867,7 @@ def _build_trading_journal_view_snapshot(
     combined_items = sorted([*trade_items, *cashflow_rows, *monthly_note_rows], key=_row_sort_dt, reverse=True)
     balances = timeline.get("balances") if isinstance(timeline.get("balances"), list) else []
     stats = _compute_journal_stats(stats_items, balances)
+    stats["period_reports"] = _compute_journal_period_stats(stats_items, balances)
     broker_balances = (state or {}).get("broker_account_balances") if isinstance(state, dict) else []
     if not isinstance(broker_balances, list):
         broker_balances = []
@@ -3691,6 +3693,7 @@ def _editable_trading_journal_fields() -> Set[str]:
     return {
         "open_time",
         "close_time",
+        "trade_number",
         "symbol",
         "side",
         "timeframe",
@@ -19781,6 +19784,7 @@ async def calculator_journal_summary(asset: str, symbol: str) -> JSONResponse:
     if not filtered_sorted:
         return JSONResponse({"status": "no_data", "canonical_symbol": canonical, "stats": None, "trades": []})
     stats = _compute_journal_stats(filtered_sorted, balances)
+    stats["period_reports"] = _compute_journal_period_stats(filtered_sorted, balances)
     totals = stats.get("totals") if isinstance(stats, dict) else {}
     last_trade_ts = None
     try:
@@ -23603,6 +23607,66 @@ def _compute_journal_stats(
         "balance_after_trade_note": "Approximate unless cashflow ledger fully captures deposits/withdrawals/transfers.",
     }
 
+
+def _compute_journal_period_stats(
+    rows: List[Dict[str, object]], balances: List[Dict[str, object]]
+) -> Dict[str, object]:
+    trade_rows = [dict(r) for r in rows or [] if isinstance(r, dict) and _is_trade_row(r)]
+
+    def _period_datetime(row: Dict[str, object]) -> Optional[datetime]:
+        value = row.get("close_time") or row.get("open_time")
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, _date):
+            return datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
+        parsed = _parse_iso_datetime(value)
+        return parsed if isinstance(parsed, datetime) else None
+
+    def _move_duration_avg(rows_subset: List[Dict[str, object]], prefix: str) -> Optional[float]:
+        values: List[float] = []
+        for row in rows_subset:
+            if _is_test_trade_row(row):
+                continue
+            duration = _to_float(row.get(f"{prefix}_duration"))
+            if duration is None:
+                move_time = _parse_iso_datetime(row.get(f"{prefix}_time"))
+                open_time = _parse_iso_datetime(row.get("open_time"))
+                if move_time is not None and open_time is not None:
+                    duration = (move_time - open_time).total_seconds()
+            if duration is not None and duration >= 0:
+                values.append(float(duration))
+        return sum(values) / len(values) if values else None
+
+    def _stats_for(rows_subset: List[Dict[str, object]]) -> Dict[str, object]:
+        stats = _compute_journal_stats(rows_subset, balances or [])
+        move_break_even = _move_duration_avg(rows_subset, "move_to_break_even")
+        move_profit = _move_duration_avg(rows_subset, "move_to_profit")
+        totals = stats.get("totals") if isinstance(stats.get("totals"), dict) else {}
+        groups = stats.get("groups") if isinstance(stats.get("groups"), dict) else {}
+        by_market = groups.get("by_market") if isinstance(groups.get("by_market"), dict) else {}
+        overall = by_market.get("overall") if isinstance(by_market.get("overall"), dict) else {}
+        for target in (totals, overall):
+            target["move_to_break_even_duration_seconds"] = move_break_even
+            target["move_to_profit_duration_seconds"] = move_profit
+        return stats
+
+    years: Dict[int, List[Dict[str, object]]] = defaultdict(list)
+    months: Dict[int, Dict[int, List[Dict[str, object]]]] = defaultdict(lambda: defaultdict(list))
+    for row in trade_rows:
+        dt = _period_datetime(row)
+        if not dt:
+            continue
+        years[int(dt.year)].append(row)
+        months[int(dt.year)][int(dt.month)].append(row)
+
+    return {
+        "years": {year: _stats_for(bucket) for year, bucket in sorted(years.items())},
+        "months": {
+            year: {month: _stats_for(bucket) for month, bucket in sorted(month_map.items())}
+            for year, month_map in sorted(months.items())
+        },
+    }
+
 def _read_bybit_settings() -> Dict[str, float]:
     try:
         settings = bybit_monitor.get_runtime_settings(force=True)
@@ -26162,7 +26226,9 @@ async def trading_journal_items(filter: str = "") -> JSONResponse:
         ]
         if len(filtered) != len(items):
             items = filtered
-            stats = _compute_journal_stats(items, snapshot.get("balances") if isinstance(snapshot.get("balances"), list) else [])
+            balances_for_stats = snapshot.get("balances") if isinstance(snapshot.get("balances"), list) else []
+            stats = _compute_journal_stats(items, balances_for_stats)
+            stats["period_reports"] = _compute_journal_period_stats(items, balances_for_stats)
 
     def _norm_search_text(value: object) -> str:
         text = str(value or "").lower()
@@ -27102,7 +27168,7 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
         substage_timings[stage] = elapsed
         APP_LOGGER.info("master_journal_workbook_sync_substage_done sync_id=%s caller=%s stage=%s elapsed=%.6fs", sync_id, sync_caller, stage, elapsed)
         _substage_t0 = time.perf_counter()
-    for _stage in ("snapshot_build", "manual_override_read", "update_master_journal_workbook_data_only", "workbook_validation_load", "validation_trade_log", "validation_instrument_averages", "validation_calendar", "validation_dashboard_balances", "validation_leaders", "final_replace", "enforce_single_file", "github_sync"):
+    for _stage in ("snapshot_build", "manual_override_read", "update_master_journal_workbook_data_only", "workbook_validation_load", "validation_trade_log", "validation_instrument_averages", "validation_calendar", "validation_reports", "validation_dashboard_balances", "validation_leaders", "final_replace", "enforce_single_file", "github_sync"):
         substage_timings.setdefault(_stage, 0.0)
     try:
         if _master_journal_single_file_mode():
@@ -27239,13 +27305,14 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                 )
             workbook_row_ids: Set[str] = set()
             if visible_trade_rows:
-                headers = [str(c.value or "").strip() for c in trade_log[1]]
-                symbol_col = headers.index("Symbol") + 1 if "Symbol" in headers else None
-                row_id_col = headers.index("Row ID") + 1 if "Row ID" in headers else None
+                trade_headers = _trade_log_header_map(trade_log)
+                trade_data_start = _trade_log_data_start_row(trade_log)
+                symbol_col = trade_headers.get("Symbol")
+                row_id_col = trade_headers.get("Row ID")
                 if not symbol_col:
                     raise RuntimeError("Trading Journal validation failed: Trade Log Symbol column missing.")
                 populated_symbol_rows = 0
-                for rr in range(2, trade_log.max_row + 1):
+                for rr in range(trade_data_start, trade_log.max_row + 1):
                     symbol = str(trade_log.cell(rr, symbol_col).value or "").strip()
                     if symbol:
                         populated_symbol_rows += 1
@@ -27260,11 +27327,11 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                     raise RuntimeError("Trading Journal validation failed: Row ID metadata is required in master_journal mode.")
                 if expected_ids and not expected_ids.issubset(workbook_row_ids):
                     raise RuntimeError("Trading Journal validation failed: Trade Log row IDs do not match source snapshot.")
-                open_col = headers.index("Open Time") + 1 if "Open Time" in headers else None
-                close_col = headers.index("Close Time") + 1 if "Close Time" in headers else None
-                dur_col = headers.index("Trade Duration (DD:HH:MM:SS)") + 1 if "Trade Duration (DD:HH:MM:SS)" in headers else None
-                currency_cols = [headers.index("Commission") + 1 if "Commission" in headers else None, headers.index("Net P/L") + 1 if "Net P/L" in headers else None]
-                for rr in range(2, trade_log.max_row + 1):
+                open_col = trade_headers.get("Open Time")
+                close_col = trade_headers.get("Close Time")
+                dur_col = trade_headers.get("Trade Duration (DD:HH:MM:SS)")
+                currency_cols = [trade_headers.get("Commission"), trade_headers.get("Net P/L")]
+                for rr in range(trade_data_start, trade_log.max_row + 1):
                     if open_col:
                         ov = trade_log.cell(rr, open_col).value
                         if isinstance(ov, str) and "T" in ov:
@@ -27290,7 +27357,7 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                     if expected_duration_ids and row_id_col:
                         row_lookup = {str(r.get("id") or "").strip(): r for r in visible_trade_rows if isinstance(r, dict)}
                         missing_duration_details: List[Dict[str, object]] = []
-                        for rr in range(2, trade_log.max_row + 1):
+                        for rr in range(trade_data_start, trade_log.max_row + 1):
                             rid = str(trade_log.cell(rr, row_id_col).value or "").strip()
                             if rid not in expected_duration_ids:
                                 continue
@@ -27311,13 +27378,13 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                                 f"details={missing_duration_details[:3]})."
                             )
                 for cc in [c for c in currency_cols if c]:
-                    for rr in range(2, trade_log.max_row + 1):
+                    for rr in range(trade_data_start, trade_log.max_row + 1):
                         fmt = str(trade_log.cell(rr, cc).number_format or "")
                         if "UNKNOWN" in fmt:
-                            col_name = headers[cc - 1] if cc - 1 < len(headers) else f"col_{cc}"
-                            sym = str(trade_log.cell(rr, headers.index("Symbol") + 1).value or "").strip() if "Symbol" in headers else ""
-                            acct = str(trade_log.cell(rr, headers.index("Account") + 1).value or "").strip() if "Account" in headers else ""
-                            row_type = str(trade_log.cell(rr, headers.index("Row Type") + 1).value or "").strip() if "Row Type" in headers else ""
+                            col_name = next((name for name, col in trade_headers.items() if col == cc), f"col_{cc}")
+                            sym = str(trade_log.cell(rr, trade_headers.get("Symbol")).value or "").strip() if trade_headers.get("Symbol") else ""
+                            acct = str(trade_log.cell(rr, trade_headers.get("Account")).value or "").strip() if trade_headers.get("Account") else ""
+                            row_type = str(trade_log.cell(rr, trade_headers.get("Row Type")).value or "").strip() if trade_headers.get("Row Type") else ""
                             raise RuntimeError(
                                 "Trading Journal validation failed: Trade Log currency format contains UNKNOWN "
                                 f"(row={rr}, column={col_name}, account={acct or '—'}, symbol={sym or '—'}, row_type={row_type or '—'})."
@@ -27409,6 +27476,22 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                 if expected_year_months and not _calendar_has_expected_pl_cells(cal, expected_year_months):
                     raise RuntimeError("Trading Journal validation failed: P&L Calendar missing expected dated P/L cells.")
             _finish_substage("validation_calendar")
+            expected_reports = expected_report_sheet_names(snapshot)
+            for sheet_name in expected_reports:
+                if sheet_name not in wb.sheetnames:
+                    raise RuntimeError(f"Trading Journal validation failed: missing required report sheet '{sheet_name}'.")
+                report_ws = wb[sheet_name]
+                if report_ws.max_column < 2 or report_ws.max_row < 53:
+                    raise RuntimeError(f"Trading Journal validation failed: report sheet '{sheet_name}' is missing its metric layout.")
+                if not str(report_ws.cell(1, 2).value or "").strip():
+                    raise RuntimeError(f"Trading Journal validation failed: report sheet '{sheet_name}' has blank report headers.")
+                metric_labels = [
+                    str(report_ws.cell(rr, 1).value or "").strip()
+                    for rr in range(2, min(report_ws.max_row, 53) + 1)
+                ]
+                if "Trades" not in metric_labels or "Short break-even" not in metric_labels:
+                    raise RuntimeError(f"Trading Journal validation failed: report sheet '{sheet_name}' metric labels are incomplete.")
+            _finish_substage("validation_reports")
             balances = snapshot.get("balances") or []
             if balances:
                 anchor = None
@@ -27504,13 +27587,14 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                             f"missing_row_ids={missing_expected_ids[:20]}"
                         )
                     bybit_demo_trade_rows: List[Dict[str, object]] = []
-                    headers = [str(c.value or "").strip() for c in trade_log[1]]
-                    acct_col = headers.index("Account") + 1 if "Account" in headers else None
-                    sym_col = headers.index("Symbol") + 1 if "Symbol" in headers else None
-                    rid_col = headers.index("Row ID") + 1 if "Row ID" in headers else None
-                    close_col = headers.index("Close Time") + 1 if "Close Time" in headers else None
+                    debug_headers = _trade_log_header_map(trade_log)
+                    debug_data_start = _trade_log_data_start_row(trade_log)
+                    acct_col = debug_headers.get("Account")
+                    sym_col = debug_headers.get("Symbol")
+                    rid_col = debug_headers.get("Row ID")
+                    close_col = debug_headers.get("Close Time")
                     if acct_col and rid_col:
-                        for rr in range(2, trade_log.max_row + 1):
+                        for rr in range(debug_data_start, trade_log.max_row + 1):
                             acct_val = str(trade_log.cell(rr, acct_col).value or "").strip()
                             if acct_val.lower() != "bybit demo":
                                 continue
@@ -27542,13 +27626,14 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
             }
             if expected_payloads:
                 _, header_map, metric_rows, _ = _find_instrument_leaders_table(dash)
+                metric_rows_normalized = {str(label or "").strip().lower(): row_idx for label, row_idx in (metric_rows or {}).items()}
                 if not header_map:
                     raise RuntimeError("Trading Journal validation failed: Instrument leaders headers missing.")
-                present_expected_payloads = {label: payload for label, payload in expected_payloads.items() if metric_rows.get(label)}
+                present_expected_payloads = {label: payload for label, payload in expected_payloads.items() if metric_rows.get(label) or metric_rows_normalized.get(label)}
                 if not present_expected_payloads:
                     raise RuntimeError("Trading Journal validation failed: Instrument leaders section has no recognized metric rows despite leader stats.")
                 for metric_label in present_expected_payloads:
-                    row_idx = metric_rows.get(metric_label)
+                    row_idx = metric_rows.get(metric_label) or metric_rows_normalized.get(metric_label)
                     symbol = str(dash.cell(row_idx, header_map["symbol"]).value or "").strip()
                     trades_num = _safe_float(dash.cell(row_idx, header_map["trades"]).value)
                     if not symbol or symbol == "—" or trades_num is None:
@@ -28620,7 +28705,7 @@ def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Opti
         return {"ok": False, "error": "Trading Journal.xlsx is missing.", "diagnostics": diagnostics}
     wb = load_workbook(path, data_only=False)
     try:
-        expected_order = ["Dashboard", "Trade Log", "Instrument Averages", "P&L Calendar"]
+        expected_order = [*SHEET_ORDER, *expected_report_sheet_names(expected_snapshot)]
         diagnostics["sheet_order"] = list(wb.sheetnames)
         if list(wb.sheetnames) != expected_order:
             return {"ok": False, "error": f"sheet_order_mismatch: expected {expected_order}, got {wb.sheetnames}", "diagnostics": diagnostics}

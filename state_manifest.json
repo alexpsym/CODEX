@@ -23,9 +23,9 @@
   "oanda_settings": {
     "app_profile": "local",
     "key": "oanda_settings",
-    "sha256": "24056e34fdbd71558251cde0ce7a46bb9509ceff62adb17f41a601fb8c073d82",
+    "sha256": "dc2a334749044449c09d68b5ff54ca943349f7e5c2ff58fd822b55ca29c75e46",
     "source_host": "DESKTOP-1B14EQ6",
-    "updated_at": "2026-04-29T10:45:59.927676+00:00"
+    "updated_at": "2026-06-08T07:09:53.247744+00:00"
   },
   "watchlist": {
     "app_profile": "local",

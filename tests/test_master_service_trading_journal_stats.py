@@ -62,7 +62,7 @@ if _httpx_spec is None:
     httpx_stub.__spec__ = importlib.machinery.ModuleSpec("httpx", loader=None)
     sys.modules["httpx"] = httpx_stub
 
-from render.master_service import _compute_journal_stats, _build_journal_balance_timelines
+from render.master_service import _compute_journal_stats, _compute_journal_period_stats, _build_journal_balance_timelines
 
 
 def test_compute_journal_stats_winner_loser_splits_and_durations() -> None:
@@ -274,6 +274,54 @@ def test_compute_journal_stats_tracks_test_trades_but_excludes_from_core_metrics
     assert by_market["overall"]["test_trades"] == 2
     assert by_market["fx"]["test_trades"] == 1
     assert by_market["crypto"]["test_trades"] == 1
+
+
+def test_compute_journal_period_stats_year_month_buckets_and_test_counts() -> None:
+    rows = [
+        {
+            "row_type": "trade",
+            "asset_class": "crypto",
+            "symbol": "BTCUSDT",
+            "side": "BUY",
+            "open_time": "2025-12-31T23:00:00Z",
+            "close_time": "2026-01-01T00:05:00Z",
+            "net_profit": 10,
+            "result_pct": 1.0,
+            "r_multiple": 1.0,
+            "move_to_break_even_duration": 300,
+        },
+        {
+            "row_type": "trade",
+            "asset_class": "crypto",
+            "symbol": "ETHUSDT",
+            "side": "SELL",
+            "open_time": "2026-01-05T00:00:00Z",
+            "close_time": "2026-01-05T00:10:00Z",
+            "net_profit": -5,
+            "result_pct": -0.5,
+            "r_multiple": -0.5,
+        },
+        {
+            "row_type": "trade",
+            "asset_class": "fx",
+            "symbol": "EURUSD",
+            "open_time": "2026-02-01T00:00:00Z",
+            "close_time": "2026-02-01T00:05:00Z",
+            "net_profit": 99,
+            "result_pct": 9,
+            "is_test_trade": True,
+        },
+    ]
+    reports = _compute_journal_period_stats(rows, balances=[])
+    jan = reports["months"][2026][1]
+    feb = reports["months"][2026][2]
+    assert jan["totals"]["trades"] == 2
+    assert jan["totals"]["test_trades"] == 0
+    assert jan["totals"]["net_profit_total"] == 5
+    assert jan["groups"]["by_market"]["overall"]["move_to_break_even_duration_seconds"] == 300
+    assert feb["totals"]["trades"] == 0
+    assert feb["totals"]["test_trades"] == 1
+    assert reports["years"][2026]["totals"]["trades"] == 2
 
 
 def test_compute_journal_stats_drawdown_behaviour() -> None:
