@@ -185,7 +185,7 @@
   },
   "oanda_fill_state": {},
   "pending_webhooks": [],
-  "savedAt": "2026-06-09T05:23:04.262270+00:00",
+  "savedAt": "2026-06-09T07:44:15.102421+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [
@@ -355,7 +355,7 @@
           "timeframe": "",
           "trade_number": ""
         },
-        "manual_updated_at": "2026-06-08T07:10:28.640544+00:00",
+        "manual_updated_at": "2026-06-09T07:44:12.925344+00:00",
         "move_to_break_even_distance_from_entry_pct": null,
         "move_to_break_even_distance_from_exit_pct": null,
         "move_to_break_even_duration": null,
@@ -385,7 +385,7 @@
         "trade_number": ""
       }
     ],
-    "updated_at": "2026-06-08T07:10:28.640636+00:00"
+    "updated_at": "2026-06-09T07:44:12.925644+00:00"
   },
   "trading_journal_import_cache": {},
   "trading_journal_state": {
@@ -401,7 +401,7 @@
       ]
     },
     "bybit_closed_pnl_last_seen": {
-      "demo": 1780297526518,
+      "demo": 1780385738090,
       "live": null
     },
     "bybit_demo_sync": {
@@ -409,13 +409,13 @@
       "bybit_demo_balance_backfill_error": null,
       "bybit_demo_balance_backfill_rows_backfilled": 0,
       "bybit_demo_balance_backfill_rows_seen": 2,
-      "bybit_demo_balance_backfill_snapshot_at": "2026-06-08T07:04:26.568476+00:00",
+      "bybit_demo_balance_backfill_snapshot_at": "2026-06-09T07:34:38.190958+00:00",
       "bybit_demo_execution_warning": null,
       "last_captured_row_ids": [
         "bybit:demo:execution:BTCUSDT:E1",
         "bybit:demo:execution:BTCUSDT:E2"
       ],
-      "last_checked_at": "2026-06-08T07:04:26.589051+00:00",
+      "last_checked_at": "2026-06-09T07:34:38.233104+00:00",
       "last_error": null,
       "last_invalid_time_row_details": [],
       "last_invalid_time_rows_dropped": 0,
@@ -425,13 +425,13 @@
       "last_rows_deduped": 0,
       "last_rows_seen": 2,
       "last_rows_upserted": 2,
-      "last_success_at": "2026-06-08T07:04:26.589077+00:00",
+      "last_success_at": "2026-06-09T07:34:38.233129+00:00",
       "last_workbook_rows_deduped": 0,
       "single_file_mode": true,
-      "updated_at": "2026-06-08T07:04:26.603238+00:00"
+      "updated_at": "2026-06-09T07:34:38.271640+00:00"
     },
     "daily_trade_sync": {
-      "last_attempt_at": "2026-06-08T07:09:44.355419+00:00",
+      "last_attempt_at": "2026-06-09T07:43:10.521396+00:00",
       "last_error": "boom",
       "last_reason": "startup_recovery",
       "last_result": {
@@ -442,12 +442,12 @@
         "rows_imported": 1
       },
       "last_success_at": null,
-      "updated_at": "2026-06-08T07:09:44.368752+00:00"
+      "updated_at": "2026-06-09T07:43:10.535127+00:00"
     }
   },
   "version": 4,
   "watchlist": [
     "DASHUSDT"
   ],
-  "watchlist_updated_at": "2026-06-09T05:22:56.895619+00:00"
+  "watchlist_updated_at": null
 }

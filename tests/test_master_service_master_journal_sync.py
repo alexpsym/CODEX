@@ -541,14 +541,14 @@ def test_existing_master_journal_update_is_atomic_on_post_update_validation_fail
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_master_journal_requires_row_id_validation(tmp_path, monkeypatch):
     from tools.master_journal_workbook import build_master_journal_workbook
-    from tools.master_journal_workbook import _trade_log_header_map
+    from tools.master_journal_workbook import _trade_log_data_start_row, _trade_log_header_map
     from openpyxl import load_workbook
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_SOURCE', 'master_journal')
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
     mj = tmp_path / "Trading Journal.xlsx"
     snap = {'items':[{'id':'r1','row_type':'trade','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0,'result_pct':1.0}], 'stats':{'totals':{}, 'groups':{}, 'by_instrument':[{'symbol':'EURUSD','trades':1}]}, 'balances':[]}
     build_master_journal_workbook(snap, mj)
-    wb = load_workbook(mj); ws = wb["Trade Log"]; headers=_trade_log_header_map(ws); ws.cell(3, headers["Row ID"]).value=None; wb.save(mj); wb.close()
+    wb = load_workbook(mj); ws = wb["Trade Log"]; headers=_trade_log_header_map(ws); ws.cell(_trade_log_data_start_row(ws), headers["Row ID"]).value=None; wb.save(mj); wb.close()
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: snap)
     out = master_service._sync_master_journal_workbook(sync_caller="test")
     # Data-only updater may self-heal missing Row ID by restoring generated metadata columns.
@@ -731,7 +731,7 @@ def test_existing_master_journal_trade_log_filter_range_can_update_without_invar
     assert result["master_journal_ok"] is True
     out = load_workbook(mj, data_only=True)
     at = out["Trade Log"]; ref = at.auto_filter.ref
-    assert ref and ref.startswith("A2:")
+    assert ref and ref.startswith("A3:")
     headers=[str(c.value or "") for c in at[1]]
     rid_col = headers.index("Row ID")+1
     from openpyxl.utils import get_column_letter
@@ -811,10 +811,10 @@ def test_sync_master_journal_applies_manual_overrides(tmp_path, monkeypatch):
     mj=tmp_path/'Trading Journal.xlsx'
     # seed manual workbook via canonical builder
     snap={'items':[{'id':'r1','row_type':'trade','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':1.0,'is_test_trade':False}], 'stats':{'totals':{}}, 'balances':[], 'diagnostics':{}}
-    from tools.master_journal_workbook import build_master_journal_workbook, _trade_log_header_map
+    from tools.master_journal_workbook import build_master_journal_workbook, _trade_log_data_start_row, _trade_log_header_map
     build_master_journal_workbook(snap,mj)
     from openpyxl import load_workbook
-    wb=load_workbook(mj); ws=wb['Trade Log']; headers=_trade_log_header_map(ws); data_row=3
+    wb=load_workbook(mj); ws=wb['Trade Log']; headers=_trade_log_header_map(ws); data_row=_trade_log_data_start_row(ws)
     ws.cell(data_row, headers["Test"]).value='Yes'
     ws.cell(data_row, headers["Setup"]).value='S'
     ws.cell(data_row, headers["Timeframe"]).value='M5'
@@ -834,11 +834,11 @@ def test_sync_master_journal_applies_manual_overrides(tmp_path, monkeypatch):
 @pytest.mark.skipif(not HTTPX_AVAILABLE, reason='httpx is not installed')
 def test_sync_master_journal_test_yes_excluded_from_aggregates(tmp_path, monkeypatch):
     mj=tmp_path/'Trading Journal.xlsx'
-    from tools.master_journal_workbook import build_master_journal_workbook, _trade_log_header_map
+    from tools.master_journal_workbook import build_master_journal_workbook, _trade_log_data_start_row, _trade_log_header_map
     seed={'items':[{'id':'r1','row_type':'trade','symbol':'EURUSD','side':'BUY','open_time':'2026-01-01','close_time':'2026-01-01','net_profit':10.0,'is_test_trade':False}], 'stats':{'totals':{}, 'groups':{}}, 'balances':[], 'diagnostics':{}}
     build_master_journal_workbook(seed,mj)
     from openpyxl import load_workbook
-    wb=load_workbook(mj); ws=wb['Trade Log']; headers=_trade_log_header_map(ws); data_row=3; ws.cell(data_row, headers["Test"]).value='Yes'; before=[ws.cell(data_row, c).value for c in range(1, len(headers) + 1)]; wb.save(mj)
+    wb=load_workbook(mj); ws=wb['Trade Log']; headers=_trade_log_header_map(ws); data_row=_trade_log_data_start_row(ws); ws.cell(data_row, headers["Test"]).value='Yes'; before=[ws.cell(data_row, c).value for c in range(1, len(headers) + 1)]; wb.save(mj)
     monkeypatch.setattr(master_service, 'TRADING_JOURNAL_LOCAL_DIR', tmp_path)
     monkeypatch.setattr(master_service, '_build_trading_journal_view_snapshot', lambda force=True: {'items': seed['items'], 'stats': {'totals': {}, 'groups': {}}, 'balances': [], 'diagnostics': {}})
     r=master_service._sync_master_journal_workbook(sync_caller="test")

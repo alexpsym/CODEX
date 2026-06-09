@@ -6,6 +6,7 @@ import pytest
 
 from tools.backfill_legacy_crypto_trade_metadata import run_backfill
 from tools.master_journal_workbook import (
+    TRADE_LOG_DATA_START_ROW,
     TRADE_NUMBER_HEADER,
     build_master_journal_workbook,
     _trade_log_header_map,
@@ -103,7 +104,7 @@ def test_backfill_exact_match_dry_run_and_apply(tmp_path: Path):
     wb = load_workbook(journal)
     ws = wb["Trade Log"]
     headers = _trade_log_header_map(ws)
-    row = 3
+    row = TRADE_LOG_DATA_START_ROW
     assert ws.cell(row, headers[TRADE_NUMBER_HEADER]).value == "C1"
     assert ws.cell(row, headers["Move to Break Even Duration"]).value == 300
     assert ws.cell(row, headers["Move to Break Even Duration"]).number_format == r"00\:00\:00\:00"

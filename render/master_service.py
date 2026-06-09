@@ -26545,18 +26545,18 @@ async def _run_trading_journal_sync_job() -> None:
         wb = load_workbook(workbook_path, data_only=True, read_only=True)
         try:
             tl = _get_trade_log_sheet(wb, allow_legacy=False)
-            header_rows = tl.iter_rows(min_row=1, max_row=1, values_only=True)
-            header_row = next(header_rows, tuple()) or tuple()
-            headers = [str(c or "").strip() for c in header_row]
-            if "Row ID" not in headers:
+            header_map = _trade_log_header_map(tl)
+            if "Row ID" not in header_map:
                 raise RuntimeError(f"Trade Log Row ID header missing in workbook: {workbook_path}")
-            ridx = headers.index("Row ID")
-            cidx = headers.index("Close Time") if "Close Time" in headers else None
-            aidx = headers.index("Account") if "Account" in headers else None
+            ridx = header_map["Row ID"] - 1
+            cidx = header_map.get("Close Time")
+            cidx = cidx - 1 if cidx else None
+            aidx = header_map.get("Account")
+            aidx = aidx - 1 if aidx else None
             row_ids: Set[str] = set()
             latest_trade_time: Optional[int] = None
             latest_bybit_demo_close_time: Optional[int] = None
-            for row in tl.iter_rows(min_row=2, values_only=True):
+            for row in tl.iter_rows(min_row=_trade_log_data_start_row(tl), values_only=True):
                 v = str((row[ridx] if ridx < len(row) else "") or "").strip()
                 if v:
                     row_ids.add(v)
@@ -26953,11 +26953,11 @@ async def _run_trading_journal_sync_job() -> None:
             try:
                 wb = load_workbook(_master_journal_path(), data_only=True)
                 tl = _get_trade_log_sheet(wb, allow_legacy=False)
-                headers = [str(c.value or "").strip() for c in tl[1]]
-                ridx = headers.index("Row ID") + 1 if "Row ID" in headers else None
+                trade_headers = _trade_log_header_map(tl)
+                ridx = trade_headers.get("Row ID")
                 workbook_ids = set()
                 if ridx:
-                    for rr in range(2, tl.max_row + 1):
+                    for rr in range(_trade_log_data_start_row(tl), tl.max_row + 1):
                         v = str(tl.cell(rr, ridx).value or "").strip()
                         if v:
                             workbook_ids.add(v)
@@ -28262,13 +28262,11 @@ def _verify_trade_log_row_ids_in_workbook(workbook_path: Path, expected_row_ids:
             ws = _get_trade_log_sheet(wb, allow_legacy=False)
         except Exception as exc:
             return {"ok": False, "expected_row_ids": expected, "found_row_ids_count": 0, "missing_row_ids": expected, "error": f"Trade Log sheet missing: {exc}"}
-        header_rows = ws.iter_rows(min_row=1, max_row=1, values_only=True)
-        header_row = next(header_rows, tuple()) or tuple()
-        headers = [str(c or "").strip() for c in header_row]
-        if "Row ID" not in headers:
+        header_map = _trade_log_header_map(ws)
+        if "Row ID" not in header_map:
             return {"ok": False, "expected_row_ids": expected, "found_row_ids_count": 0, "missing_row_ids": expected, "error": "Trade Log Row ID column missing."}
-        ridx = headers.index("Row ID")
-        for row in ws.iter_rows(min_row=2, values_only=True):
+        ridx = header_map["Row ID"] - 1
+        for row in ws.iter_rows(min_row=_trade_log_data_start_row(ws), values_only=True):
             rid = str((row[ridx] if ridx < len(row) else "") or "").strip()
             if rid:
                 found.append(rid)
@@ -28330,17 +28328,16 @@ def _read_monthly_aud_reval_months_from_workbook(workbook_path: Path) -> Dict[st
             ws = _get_trade_log_sheet(wb, allow_legacy=False)
         except Exception as exc:
             return {**base, "ok": False, "error": f"Trade Log sheet missing: {exc}", "workbook_exists": True, "trade_log_exists": False}
-        header_rows = ws.iter_rows(min_row=1, max_row=1, values_only=True)
-        header_row = next(header_rows, tuple()) or tuple()
-        headers = [str(c or "").strip() for c in header_row]
-        if "Row ID" not in headers:
+        header_map = _trade_log_header_map(ws)
+        if "Row ID" not in header_map:
             return {**base, "ok": False, "error": "Trade Log Row ID column missing.", "workbook_exists": True, "trade_log_exists": True, "row_id_column_exists": False}
-        idx = {h: i for i, h in enumerate(headers) if h}
+        idx = {header: col - 1 for header, col in header_map.items()}
         rid_idx = idx["Row ID"]
         row_ids: List[str] = []
         months: List[str] = []
         ignored: List[Dict[str, object]] = []
-        for row_num, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+        start_row = _trade_log_data_start_row(ws)
+        for row_num, row in enumerate(ws.iter_rows(min_row=start_row, values_only=True), start=start_row):
             rid = str((row[rid_idx] if rid_idx < len(row) else "") or "").strip()
             if not rid.startswith("monthly_aud_reval:"):
                 continue

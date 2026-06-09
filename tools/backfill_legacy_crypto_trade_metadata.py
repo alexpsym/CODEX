@@ -24,10 +24,12 @@ from tools.master_journal_workbook import (
     TRADE_NUMBER_HEADER,
     _as_datetime,
     _as_float,
+    _canonical_journal_timeframe,
     _duration_ddhhmmss_cell_to_seconds,
     _ensure_trade_log_schema,
     _fmt_duration_full,
     _parse_duration_text,
+    _repair_trade_log_move_to_durations,
     _trade_log_data_start_row,
     _trade_log_header_map,
 )
@@ -56,6 +58,8 @@ class LegacyTrade:
     result_pct: Optional[float]
     move_be: Dict[str, Any]
     move_profit: Dict[str, Any]
+    manual: Dict[str, Any]
+    uncertain_breakeven: Dict[str, Any]
 
 
 @dataclass
@@ -195,6 +199,33 @@ def _canon_side(value: Any) -> str:
     return text
 
 
+def _yes_no(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"yes", "y", "true", "1", "x"}:
+        return "Yes"
+    if text in {"no", "n", "false", "0"}:
+        return "No"
+    return ""
+
+
+def _order(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if "market" in text:
+        return "Market"
+    if "limit" in text:
+        return "Limit"
+    return ""
+
+
+def _aths_atls(value: Any) -> str:
+    text = str(value or "").strip().lower().replace("-", " ").replace("_", " ")
+    if text in {"aths", "ath", "all time high", "all time highs"}:
+        return "All-Time High"
+    if text in {"atls", "atl", "all time low", "all time lows"}:
+        return "All-Time Low"
+    return ""
+
+
 def _is_crypto_repo_row(account: str, symbol: str) -> bool:
     account_u = str(account or "").upper()
     symbol_u = str(symbol or "").upper()
@@ -297,6 +328,25 @@ def parse_legacy_trades(path: Path) -> Tuple[List[LegacyTrade], List[Dict[str, A
                 "move_to_profit_duration": _parse_duration_seconds(_cell_value(ws, row, "BR", ignored)),
                 **(profit_fallback if use_fallback else {k: profit_primary.get(k) if profit_primary.get(k) is not None else profit_fallback.get(k) for k in profit_primary}),
             }
+            channel_value = _cell_value(ws, row, "AP", ignored)
+            channel = "channel" if _yes_no(channel_value) == "Yes" or "channel" in str(channel_value or "").lower() else ""
+            manual = {
+                "Pattern": channel,
+                "ATHS/ATLS": _aths_atls(_cell_value(ws, row, "BF", ignored)),
+                "Order": _order(_cell_value(ws, row, "BH", ignored)),
+                "Round Number": _yes_no(_cell_value(ws, row, "BB", ignored)),
+                "Spiked Out": _yes_no(_cell_value(ws, row, "BD", ignored)),
+                "Close Stopout": _yes_no(_cell_value(ws, row, "BC", ignored)),
+                "Near Perfect Entry": _yes_no(_cell_value(ws, row, "AQ", ignored)),
+                "Near Win": _yes_no(_cell_value(ws, row, "AR", ignored)),
+                "Early Close": _yes_no(_cell_value(ws, row, "AF", ignored)),
+                "Timeframe": _canonical_journal_timeframe(_cell_value(ws, row, "AI", ignored)),
+            }
+            uncertain_breakeven = {
+                col: _cell_value(ws, row, col, ignored)
+                for col in ("AN", "AO")
+                if _cell_value(ws, row, col, ignored) not in (None, "")
+            }
             trades.append(
                 LegacyTrade(
                     row=row,
@@ -315,6 +365,8 @@ def parse_legacy_trades(path: Path) -> Tuple[List[LegacyTrade], List[Dict[str, A
                     result_pct=_safe_float(_cell_value(ws, row, "M", ignored)),
                     move_be={k: v for k, v in move_be.items() if v not in (None, "")},
                     move_profit={k: v for k, v in move_profit.items() if v not in (None, "")},
+                    manual={k: v for k, v in manual.items() if v not in (None, "")},
+                    uncertain_breakeven=uncertain_breakeven,
                 )
             )
         return trades, ignored, fallback_used
@@ -389,7 +441,7 @@ def _has_any_move_data(values: Dict[str, Any]) -> bool:
     return any(value not in (None, "") for value in values.values())
 
 
-def _write_move_fields(ws, headers: Dict[str, int], row: int, values: Dict[str, Any]) -> int:
+def _write_move_fields(ws, headers: Dict[str, int], row: int, values: Dict[str, Any], *, overwrite: bool = False) -> int:
     field_to_header = {field: header for header, field in MOVE_TO_FIELD_MAP.items()}
     written = 0
     for field, value in values.items():
@@ -398,6 +450,8 @@ def _write_move_fields(ws, headers: Dict[str, int], row: int, values: Dict[str, 
         if not col or value in (None, ""):
             continue
         cell = ws.cell(row, col)
+        if cell.value not in (None, "") and not overwrite:
+            continue
         if field.endswith("_duration"):
             cell.value = _fmt_duration_full(value)
             cell.number_format = r'00\:00\:00\:00'
@@ -412,7 +466,7 @@ def _write_move_fields(ws, headers: Dict[str, int], row: int, values: Dict[str, 
     return written
 
 
-def run_backfill(journal_path: Path, legacy_path: Path, *, apply_changes: bool = False) -> Dict[str, Any]:
+def run_backfill(journal_path: Path, legacy_path: Path, *, apply_changes: bool = False, overwrite: bool = False) -> Dict[str, Any]:
     legacy_trades, ignored, fallback_used = parse_legacy_trades(legacy_path)
     wb = load_workbook(journal_path)
     try:
@@ -436,6 +490,7 @@ def run_backfill(journal_path: Path, legacy_path: Path, *, apply_changes: bool =
             "move_profit_rows_to_write": move_profit_rows,
             "ignored_invalid_cells": len(ignored),
             "fallback_used": fallback_used,
+            "uncertain_breakeven_candidates": sum(bool(trade.uncertain_breakeven) for trade in legacy_trades),
             "applied": False,
             "unmatched_legacy_rows": [trade.row for trade in unmatched[:20]],
             "ambiguous_matches": ambiguous[:20],
@@ -450,10 +505,20 @@ def run_backfill(journal_path: Path, legacy_path: Path, *, apply_changes: bool =
                 raise RuntimeError("Journal Trade Log missing Trade Number column after schema migration.")
             for legacy, repo in matches.values():
                 cell = ws.cell(repo.row, trade_col)
-                cell.value = legacy.trade_number
-                cell.number_format = "@"
-                _write_move_fields(ws, headers, repo.row, legacy.move_be)
-                _write_move_fields(ws, headers, repo.row, legacy.move_profit)
+                if cell.value in (None, "") or overwrite:
+                    cell.value = legacy.trade_number
+                    cell.number_format = "@"
+                _write_move_fields(ws, headers, repo.row, legacy.move_be, overwrite=overwrite)
+                _write_move_fields(ws, headers, repo.row, legacy.move_profit, overwrite=overwrite)
+                for header, value in legacy.manual.items():
+                    col = headers.get(header)
+                    if not col or value in (None, ""):
+                        continue
+                    target = ws.cell(repo.row, col)
+                    if target.value not in (None, "") and not overwrite:
+                        continue
+                    target.value = value
+            _repair_trade_log_move_to_durations(ws, summary)
             wb.save(journal_path)
             summary["applied"] = True
         return summary
@@ -466,8 +531,9 @@ def main() -> int:
     parser.add_argument("--journal", required=True, type=Path)
     parser.add_argument("--legacy", required=True, type=Path)
     parser.add_argument("--apply", action="store_true", help="Write changes. Omit for dry-run.")
+    parser.add_argument("--overwrite", action="store_true", help="Replace existing manual values.")
     args = parser.parse_args()
-    summary = run_backfill(args.journal, args.legacy, apply_changes=bool(args.apply))
+    summary = run_backfill(args.journal, args.legacy, apply_changes=bool(args.apply), overwrite=bool(args.overwrite))
     print(json.dumps(summary, indent=2, sort_keys=True, default=str))
     return 2 if summary.get("error") else 0
 
