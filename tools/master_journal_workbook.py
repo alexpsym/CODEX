@@ -2,7 +2,7 @@ from __future__ import annotations
 from collections import defaultdict, OrderedDict
 from datetime import datetime, date, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font
 from openpyxl.worksheet.datavalidation import DataValidation
@@ -95,7 +95,7 @@ MOVE_TO_PROFIT_HEADERS = list(MOVE_TO_FIELD_MAP.keys())[5:]
 MOVE_TO_SUBHEADERS = ["Time", "Duration", "Trigger Price", "Distance From Entry %", "Distance From Exit %"]
 DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL = "Average Move to Break Even (DD:HH:MM:SS)"
 DASHBOARD_MOVE_TO_PROFIT_LABEL = "Average Move to Profit (DD:HH:MM:SS)"
-INSTRUMENT_AVERAGES_HEADERS = [
+LEGACY_INSTRUMENT_AVERAGES_HEADERS = [
     "Symbol", "Class", "Trades", "Wins", "Losses", "Break-even", "Longs", "Long wins",
     "Long losses", "Long break-even", "Shorts", "Short wins", "Short losses", "Short break-even",
     "Move to break even", "Move to profit", "Pattern", "EMA", "All-time highs", "All-time lows",
@@ -103,6 +103,16 @@ INSTRUMENT_AVERAGES_HEADERS = [
     "Early close", "Most traded timeframe", "R Multiple", "Net P/L %", "Avg P/L %", "Win Rate %",
     "Avg stop % (W)", "Avg stop % (L)", "Avg target % (W)", "Avg target % (L)",
     "Shortest duration (DD:HH:MM:SS)", "Avg duration (DD:HH:MM:SS)", "Longest duration (DD:HH:MM:SS)",
+]
+INSTRUMENT_AVERAGES_GROUP_HEADER_ROW = 1
+INSTRUMENT_AVERAGES_FILTER_HEADER_ROW = 2
+INSTRUMENT_AVERAGES_DATA_START_ROW = 3
+INSTRUMENT_AVERAGES_HEADERS = [
+    *LEGACY_INSTRUMENT_AVERAGES_HEADERS[:20],
+    "Market", "Limit",
+    *LEGACY_INSTRUMENT_AVERAGES_HEADERS[21:28],
+    "Net R Multiple",
+    *LEGACY_INSTRUMENT_AVERAGES_HEADERS[29:],
 ]
 REPORT_METRIC_LABELS = [
     "Trades",
@@ -253,14 +263,68 @@ def _repair_legacy_instrument_averages_freeze_pane(wb: Workbook, diagnostics: Di
         return
     ws = wb["Instrument Averages"]
     previous = str(ws.freeze_panes or "")
-    if previous != "B2":
-        ws.freeze_panes = "B2"
+    if previous != "B3":
+        ws.freeze_panes = "B3"
         diagnostics["repaired_instrument_averages_freeze_pane"] = True
         diagnostics["previous_instrument_averages_freeze_pane"] = previous
 
 
+def _instrument_averages_header_row(ws) -> int:
+    row_two = [str(ws.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, col).value or "").strip() for col in range(1, len(INSTRUMENT_AVERAGES_HEADERS) + 1)]
+    return INSTRUMENT_AVERAGES_FILTER_HEADER_ROW if row_two == INSTRUMENT_AVERAGES_HEADERS else 1
+
+
+def _instrument_averages_data_start_row(ws) -> int:
+    return INSTRUMENT_AVERAGES_DATA_START_ROW if _instrument_averages_header_row(ws) == INSTRUMENT_AVERAGES_FILTER_HEADER_ROW else 2
+
+
+def _instrument_averages_header_map(ws) -> Dict[str, int]:
+    header_row = _instrument_averages_header_row(ws)
+    return {
+        str(ws.cell(header_row, col).value or "").strip(): col
+        for col in range(1, ws.max_column + 1)
+        if str(ws.cell(header_row, col).value or "").strip()
+    }
+
+
+def _write_instrument_averages_headers(ws) -> None:
+    order_start = INSTRUMENT_AVERAGES_HEADERS.index("Market") + 1
+    order_end = INSTRUMENT_AVERAGES_HEADERS.index("Limit") + 1
+    for merged in list(ws.merged_cells.ranges):
+        if merged.min_row <= INSTRUMENT_AVERAGES_FILTER_HEADER_ROW:
+            ws.unmerge_cells(str(merged))
+    for col in range(1, len(INSTRUMENT_AVERAGES_HEADERS) + 1):
+        ws.cell(INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, col).value = None
+        ws.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, col).value = INSTRUMENT_AVERAGES_HEADERS[col - 1]
+    ws.merge_cells(
+        start_row=INSTRUMENT_AVERAGES_GROUP_HEADER_ROW,
+        start_column=order_start,
+        end_row=INSTRUMENT_AVERAGES_GROUP_HEADER_ROW,
+        end_column=order_end,
+    )
+    ws.cell(INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, order_start).value = "Order"
+    _style_header_row(ws, INSTRUMENT_AVERAGES_GROUP_HEADER_ROW)
+    _style_header_row(ws, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW)
+    ws.cell(INSTRUMENT_AVERAGES_GROUP_HEADER_ROW, order_start).alignment = Alignment(horizontal="center")
+    ws.freeze_panes = "B3"
+    ws.auto_filter.ref = (
+        f"A{INSTRUMENT_AVERAGES_FILTER_HEADER_ROW}:"
+        f"{get_column_letter(len(INSTRUMENT_AVERAGES_HEADERS))}{max(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, ws.max_row)}"
+    )
+
+
 def _ensure_instrument_averages_schema(ws, diagnostics: Dict[str, Any] | None = None) -> bool:
     diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    existing_row_two = [
+        str(ws.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, col).value or "").strip()
+        for col in range(1, ws.max_column + 1)
+    ]
+    while existing_row_two and not existing_row_two[-1]:
+        existing_row_two.pop()
+    if existing_row_two == INSTRUMENT_AVERAGES_HEADERS:
+        _write_instrument_averages_headers(ws)
+        return False
+
     existing = [str(ws.cell(1, col).value or "").strip() for col in range(1, ws.max_column + 1)]
     while existing and not existing[-1]:
         existing.pop()
@@ -269,26 +333,52 @@ def _ensure_instrument_averages_schema(ws, diagnostics: Dict[str, Any] | None = 
         "Longest (DD:HH:MM:SS)": "Longest duration (DD:HH:MM:SS)",
     }
     canonical_existing = [aliases.get(header, header) for header in existing]
-    legacy_headers = INSTRUMENT_AVERAGES_HEADERS[:14] + INSTRUMENT_AVERAGES_HEADERS[29:]
-    if existing == INSTRUMENT_AVERAGES_HEADERS:
-        ws.freeze_panes = "B2"
-        ws.auto_filter.ref = f"A1:{get_column_letter(len(INSTRUMENT_AVERAGES_HEADERS))}{max(1, ws.max_row)}"
-        return False
-    if canonical_existing != legacy_headers:
+    if not canonical_existing:
+        _write_instrument_averages_headers(ws)
+        diagnostics["migrated_instrument_averages_schema"] = True
+        return True
+    legacy_order_col = LEGACY_INSTRUMENT_AVERAGES_HEADERS.index("Order") + 1
+    if (
+        len(canonical_existing) < legacy_order_col
+        and canonical_existing == LEGACY_INSTRUMENT_AVERAGES_HEADERS[:len(canonical_existing)]
+    ):
+        ws.insert_rows(1)
+        _write_instrument_averages_headers(ws)
+        diagnostics["migrated_instrument_averages_schema"] = True
+        return True
+    old_compact_headers = LEGACY_INSTRUMENT_AVERAGES_HEADERS[:14] + LEGACY_INSTRUMENT_AVERAGES_HEADERS[29:]
+    if canonical_existing == old_compact_headers:
+        inserted_headers = LEGACY_INSTRUMENT_AVERAGES_HEADERS[14:29]
+        ws.insert_cols(15, len(inserted_headers))
+        template = ws.cell(1, 14)
+        for offset, header in enumerate(inserted_headers, start=15):
+            cell = ws.cell(1, offset)
+            _copy_cell_style(template, cell)
+            cell.value = header
+            ws.column_dimensions[get_column_letter(offset)].width = 18
+        for col, header in enumerate(LEGACY_INSTRUMENT_AVERAGES_HEADERS, start=1):
+            ws.cell(1, col).value = header
+        canonical_existing = list(LEGACY_INSTRUMENT_AVERAGES_HEADERS)
+    if canonical_existing != LEGACY_INSTRUMENT_AVERAGES_HEADERS:
         return False
 
-    inserted_headers = INSTRUMENT_AVERAGES_HEADERS[14:29]
-    ws.insert_cols(15, len(inserted_headers))
-    template = ws.cell(1, 14)
-    for offset, header in enumerate(inserted_headers, start=15):
-        cell = ws.cell(1, offset)
-        _copy_cell_style(template, cell)
-        cell.value = header
-        ws.column_dimensions[get_column_letter(offset)].width = 18
-    for col, header in enumerate(INSTRUMENT_AVERAGES_HEADERS, start=1):
-        ws.cell(1, col).value = header
-    ws.freeze_panes = "B2"
-    ws.auto_filter.ref = f"A1:{get_column_letter(len(INSTRUMENT_AVERAGES_HEADERS))}{max(1, ws.max_row)}"
+    old_order_col = LEGACY_INSTRUMENT_AVERAGES_HEADERS.index("Order") + 1
+    old_widths = {
+        col: ws.column_dimensions[get_column_letter(col)].width
+        for col in range(old_order_col + 1, ws.max_column + 1)
+    }
+    ws.insert_rows(1)
+    ws.insert_cols(old_order_col + 1)
+    for row in range(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, ws.max_row + 1):
+        _copy_cell_style(ws.cell(row, old_order_col), ws.cell(row, old_order_col + 1))
+    for col in range(ws.max_column, old_order_col + 1, -1):
+        previous_width = old_widths.get(col - 1)
+        if previous_width is not None:
+            ws.column_dimensions[get_column_letter(col)].width = previous_width
+    order_width = ws.column_dimensions[get_column_letter(old_order_col)].width
+    if order_width is not None:
+        ws.column_dimensions[get_column_letter(old_order_col + 1)].width = order_width
+    _write_instrument_averages_headers(ws)
     diagnostics["migrated_instrument_averages_schema"] = True
     return True
 
@@ -727,6 +817,231 @@ def stable_row_id(row: Dict[str, Any]) -> str:
     refs=row.get('raw_refs') if isinstance(row.get('raw_refs'),dict) else {}
     parts=[str(row.get('account_label') or row.get('account') or ''),str(row.get('symbol') or ''),str(row.get('side') or ''),str(row.get('open_time') or ''),str(row.get('close_time') or ''),str(row.get('qty') or row.get('qty_raw') or ''),str(row.get('entry_price') or ''),str(row.get('exit_price') or ''),str(row.get('net_profit') or row.get('result_cash') or ''),str(row.get('source') or ''),str(row.get('source_file') or ''),str(row.get('workbook_name') or ''),str(refs.get('source_file') or ''),str(refs.get('workbook') or ''),str(refs.get('sheet') or ''),str(refs.get('source_row') or ''),str(refs.get('period_month') or '')]
     return 'sig:'+hashlib.sha1('|'.join(parts).encode('utf-8')).hexdigest()[:24]
+
+
+def _execution_datetime_token(value: Any) -> str:
+    parsed = _as_datetime(value)
+    if parsed is None:
+        return ""
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=JOURNAL_DISPLAY_TZ)
+    return str(int(parsed.timestamp()))
+
+
+def _execution_number_token(value: Any, digits: int = 8) -> str:
+    number = _as_float(value)
+    if number is None or not math.isfinite(number):
+        return ""
+    return f"{number:.{digits}f}"
+
+
+def _trade_execution_fingerprint(row: Dict[str, Any]) -> Optional[str]:
+    if not isinstance(row, dict) or str(row.get("row_type") or "trade").strip().lower() != "trade":
+        return None
+    account = _canonical_account_label(row.get("account_label") or row.get("account")).upper()
+    asset_class = str(row.get("asset_class") or _trade_row_market(row) or "").strip().lower()
+    symbol = "".join(ch for ch in str(row.get("symbol") or row.get("symbol_raw") or "").upper() if ch.isalnum())
+    side_raw = str(row.get("side") or "").strip().upper()
+    side = "BUY" if side_raw in {"BUY", "LONG"} or side_raw.startswith("BUY") else (
+        "SELL" if side_raw in {"SELL", "SHORT"} or side_raw.startswith("SELL") else side_raw
+    )
+    open_time = _execution_datetime_token(row.get("open_time"))
+    close_time = _execution_datetime_token(row.get("close_time"))
+    qty = _execution_number_token(row.get("qty") if row.get("qty") is not None else row.get("qty_raw"))
+    entry = _execution_number_token(row.get("entry_price"))
+    exit_price = _execution_number_token(row.get("exit_price"))
+    if not all((account, asset_class, symbol, side, open_time, close_time, qty, entry, exit_price)):
+        return None
+    return "|".join([
+        account,
+        asset_class,
+        symbol,
+        side,
+        open_time,
+        close_time,
+        qty,
+        entry,
+        exit_price,
+        _execution_number_token(row.get("stop_loss")),
+        _execution_number_token(row.get("take_profit")),
+    ])
+
+
+def _trade_execution_row_id(row: Dict[str, Any]) -> str:
+    fingerprint = _trade_execution_fingerprint(row)
+    if fingerprint:
+        return "sig:" + hashlib.sha1(fingerprint.encode("utf-8")).hexdigest()[:24]
+    row_without_id = dict(row)
+    row_without_id.pop("id", None)
+    row_without_id.pop("__row_id", None)
+    return stable_row_id(row_without_id)
+
+
+def _trade_source_execution_fingerprint(row: Dict[str, Any]) -> Optional[str]:
+    execution = _trade_execution_fingerprint(row)
+    if not execution:
+        return None
+    parts = execution.split("|")
+    return "|".join([*parts[:7], *parts[9:11]])
+
+
+def _trade_row_source_rank(row: Dict[str, Any]) -> int:
+    row_id = str(row.get("id") or row.get("__row_id") or "").strip().lower()
+    source = str(row.get("source") or "").strip().lower()
+    import_source = str(row.get("import_source") or "").strip().lower()
+    combined = " ".join((row_id, source, import_source))
+    if row_id.startswith(("oanda_export:", "bybit:", "bybit_")):
+        return 500
+    if source in {"oanda_transaction_export", "oanda_export", "bybit"} or import_source in {
+        "oanda_transaction_export", "oanda_export", "bybit"
+    }:
+        return 500
+    if row_id.startswith("sig:"):
+        return 300
+    if row_id.startswith("excel:") or source in {"excel", "local_excel", "master_journal"}:
+        return 100
+    if "oanda_export" in combined or "bybit" in combined:
+        return 500
+    return 200
+
+
+def _merge_duplicate_execution_rows(primary: Dict[str, Any], duplicate: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(primary)
+    preserve_fields = {
+        "trade_number", "manual_overrides", "manual_override_fields", "notes", "pre_trade_comments",
+        "entry_comments", "trade_management", "exit_comments", "flags", "setup", "timeframe",
+        "breakeven", *TRADE_LOG_MANUAL_FIELD_MAP.values(),
+    }
+    for field in preserve_fields:
+        if merged.get(field) in (None, "", [], {}) and duplicate.get(field) not in (None, "", [], {}):
+            merged[field] = duplicate.get(field)
+    return merged
+
+
+def _dedupe_trade_rows_by_execution(
+    rows: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    groups: Dict[str, List[Tuple[int, Dict[str, Any]]]] = defaultdict(list)
+    passthrough: Dict[int, Dict[str, Any]] = {}
+    for index, row in enumerate(rows):
+        fingerprint = _trade_execution_fingerprint(row)
+        if fingerprint:
+            groups[fingerprint].append((index, row))
+        else:
+            passthrough[index] = row
+
+    replacements: Dict[int, Dict[str, Any]] = {}
+    removed_indexes: set[int] = set()
+    duplicate_groups = 0
+    rows_removed = 0
+    ambiguous: List[Dict[str, Any]] = []
+    for fingerprint, entries in groups.items():
+        if len(entries) == 1:
+            replacements[entries[0][0]] = entries[0][1]
+            continue
+        ranked = sorted(
+            entries,
+            key=lambda item: (-_trade_row_source_rank(item[1]), item[0]),
+        )
+        best_rank = _trade_row_source_rank(ranked[0][1])
+        best = [entry for entry in ranked if _trade_row_source_rank(entry[1]) == best_rank]
+        best_ids = {str(entry[1].get("id") or "").strip() for entry in best}
+        if len(best) > 1 and len(best_ids) > 1:
+            ambiguous.append({
+                "fingerprint": fingerprint,
+                "row_ids": [str(entry[1].get("id") or "") for entry in entries],
+            })
+            for index, row in entries:
+                replacements[index] = row
+            continue
+        canonical_index, canonical = ranked[0]
+        for index, duplicate in ranked[1:]:
+            canonical = _merge_duplicate_execution_rows(canonical, duplicate)
+            removed_indexes.add(index)
+            rows_removed += 1
+        replacements[canonical_index] = canonical
+        duplicate_groups += 1
+
+    result: List[Dict[str, Any]] = []
+    for index in range(len(rows)):
+        if index in removed_indexes:
+            continue
+        if index in passthrough:
+            result.append(passthrough[index])
+        elif index in replacements:
+            result.append(replacements[index])
+
+    source_execution_groups: Dict[str, List[Tuple[int, Dict[str, Any]]]] = defaultdict(list)
+    source_execution_passthrough: Dict[int, Dict[str, Any]] = {}
+    for index, row in enumerate(result):
+        fingerprint = _trade_source_execution_fingerprint(row)
+        if fingerprint:
+            source_execution_groups[fingerprint].append((index, row))
+        else:
+            source_execution_passthrough[index] = row
+    source_execution_replacements: Dict[int, Dict[str, Any]] = {}
+    source_execution_removed: set[int] = set()
+    for fingerprint, entries in source_execution_groups.items():
+        if len(entries) == 1:
+            source_execution_replacements[entries[0][0]] = entries[0][1]
+            continue
+        ranked = sorted(entries, key=lambda item: (-_trade_row_source_rank(item[1]), item[0]))
+        best_rank = _trade_row_source_rank(ranked[0][1])
+        best = [entry for entry in ranked if _trade_row_source_rank(entry[1]) == best_rank]
+        best_ids = {str(entry[1].get("id") or "").strip() for entry in best}
+        if len(best) > 1 and len(best_ids) > 1:
+            ambiguous.append({
+                "fingerprint": fingerprint,
+                "row_ids": [str(entry[1].get("id") or "") for entry in entries],
+                "reason": "duplicate_source_execution",
+            })
+            for index, row in entries:
+                source_execution_replacements[index] = row
+            continue
+        canonical_index, canonical = ranked[0]
+        for index, duplicate in ranked[1:]:
+            canonical = _merge_duplicate_execution_rows(canonical, duplicate)
+            source_execution_removed.add(index)
+            rows_removed += 1
+        source_execution_replacements[canonical_index] = canonical
+        duplicate_groups += 1
+    if source_execution_removed:
+        result = [
+            source_execution_passthrough.get(index, source_execution_replacements.get(index))
+            for index in range(len(result))
+            if index not in source_execution_removed
+        ]
+    return result, {
+        "duplicate_execution_groups_removed": duplicate_groups,
+        "duplicate_execution_rows_removed": rows_removed,
+        "ambiguous_duplicate_execution_groups": ambiguous,
+    }
+
+
+_EXCEL_ROW_ID_RE = re.compile(
+    r"^excel:(?P<account>[^:]+):(?P<sheet>[^:]+):(?P<row>\d+):(?P<symbol>[^:]+):(?P<opened>.+)$",
+    re.IGNORECASE,
+)
+
+
+def _stale_excel_row_id_reasons(row_id: str, row: Dict[str, Any]) -> List[str]:
+    match = _EXCEL_ROW_ID_RE.match(str(row_id or "").strip())
+    if not match:
+        return []
+    reasons: List[str] = []
+    encoded_account = _canonical_account_label(match.group("account")).upper()
+    visible_account = _canonical_account_label(row.get("account_label") or row.get("account")).upper()
+    if encoded_account and visible_account and encoded_account != visible_account:
+        reasons.append("account")
+    encoded_symbol = "".join(ch for ch in match.group("symbol").upper() if ch.isalnum())
+    visible_symbol = "".join(ch for ch in str(row.get("symbol") or "").upper() if ch.isalnum())
+    if encoded_symbol and visible_symbol and encoded_symbol != visible_symbol:
+        reasons.append("symbol")
+    encoded_date = _as_date(match.group("opened"))
+    visible_date = _as_date(row.get("open_time") or row.get("close_time"))
+    if encoded_date and visible_date and encoded_date != visible_date:
+        reasons.append("date")
+    return reasons
 
 
 
@@ -1387,12 +1702,12 @@ def _apply_pnl_calendar_profit_loss_formatting(ws) -> None:
                 _clear_generated_semantic_fill(ws.cell(row, col))
 
 def _apply_instrument_averages_semantic_fills(ws) -> None:
-    headers = {str(ws.cell(1, col).value or "").strip().lower(): col for col in range(1, ws.max_column + 1)}
+    headers = {header.lower(): col for header, col in _instrument_averages_header_map(ws).items()}
     profit_headers = {"wins", "long wins", "short wins"}
     loss_headers = {"losses", "long losses", "short losses"}
     signed_headers = {"net p/l %", "avg p/l %"}
     symbol_col = headers.get("symbol", 1)
-    for row in range(2, ws.max_row + 1):
+    for row in range(_instrument_averages_data_start_row(ws), ws.max_row + 1):
         if ws.cell(row, symbol_col).value in (None, ""):
             continue
         for header in profit_headers:
@@ -1410,7 +1725,9 @@ def _apply_instrument_averages_semantic_fills(ws) -> None:
 
 
 def _apply_instrument_averages_requested_style(ws) -> None:
-    headers = {str(ws.cell(1, col).value or "").strip(): col for col in range(1, ws.max_column + 1)}
+    headers = _instrument_averages_header_map(ws)
+    header_row = _instrument_averages_header_row(ws)
+    data_start_row = _instrument_averages_data_start_row(ws)
     symbol_col = headers.get("Symbol", 1)
     duration_headers = {
         "Move to break even", "Move to profit",
@@ -1420,13 +1737,14 @@ def _apply_instrument_averages_requested_style(ws) -> None:
     count_headers = {
         "Trades", "Wins", "Losses", "Break-even", "Longs", "Long wins", "Long losses",
         "Long break-even", "Shorts", "Short wins", "Short losses", "Short break-even",
-        "All-time highs", "All-time lows",
+        "All-time highs", "All-time lows", "Market", "Limit", "Round number", "Spiked out",
+        "Close stop out", "Near perfect entry", "Near win", "Early close",
     }
-    for row in range(2, ws.max_row + 1):
+    for row in range(data_start_row, ws.max_row + 1):
         if ws.cell(row, symbol_col).value in (None, ""):
             continue
         symbol_value = ws.cell(row, symbol_col).value
-        _copy_cell_style(ws.cell(1, symbol_col), ws.cell(row, symbol_col))
+        _copy_cell_style(ws.cell(header_row, symbol_col), ws.cell(row, symbol_col))
         ws.cell(row, symbol_col).value = symbol_value
         for col in range(2, ws.max_column + 1):
             alignment = copy(ws.cell(row, col).alignment)
@@ -1438,10 +1756,15 @@ def _apply_instrument_averages_requested_style(ws) -> None:
         for header in count_headers:
             if headers.get(header):
                 ws.cell(row, headers[header]).number_format = ZERO_HIDE_FORMAT
-        if headers.get("R Multiple"):
-            ws.cell(row, headers["R Multiple"]).number_format = '0.000"R"'
-    ws.freeze_panes = "B2"
-    ws.auto_filter.ref = f"A1:{get_column_letter(ws.max_column)}{max(1, ws.max_row)}"
+        if headers.get("Net R Multiple"):
+            ws.cell(row, headers["Net R Multiple"]).number_format = '0.000"R"'
+        for header in ("Move to break even", "Move to profit"):
+            col = headers.get(header)
+            if col:
+                font = copy(ws.cell(row, col).font)
+                font.color = "FF000000"
+                ws.cell(row, col).font = font
+    _write_instrument_averages_headers(ws)
 
 
 def _apply_dashboard_source_label_style(cell) -> None:
@@ -1674,6 +1997,12 @@ def _mode_nonblank(values: List[Any]) -> Any:
     return display[winner]
 
 
+def _is_positive_manual_value(value: Any) -> bool:
+    if value is True or value == 1:
+        return True
+    return str(value or "").strip().lower() in {"yes", "y", "true", "1"}
+
+
 def _instrument_analysis_by_symbol(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -1689,14 +2018,15 @@ def _instrument_analysis_by_symbol(rows: List[Dict[str, Any]]) -> Dict[str, Dict
     mode_fields = {
         "pattern": "pattern",
         "ema": "ema",
-        "order": "order_type",
+        "most_traded_timeframe": "timeframe",
+    }
+    count_fields = {
         "round_number": "round_number",
         "spiked_out": "spiked_out",
         "close_stop_out": "close_stopout",
         "near_perfect_entry": "near_perfect_entry",
         "near_win": "near_win",
         "early_close": "early_close",
-        "most_traded_timeframe": "timeframe",
     }
     for symbol, symbol_rows in grouped.items():
         payload: Dict[str, Any] = {}
@@ -1719,13 +2049,18 @@ def _instrument_analysis_by_symbol(rows: List[Dict[str, Any]]) -> Dict[str, Dict
             if value is not None and math.isfinite(value)
         ]
         aths_values = [str(row.get("aths_atls") or "").strip().lower() for row in symbol_rows]
+        order_values = [str(row.get("order_type") or "").strip().lower() for row in symbol_rows]
         payload.update({
             "move_to_break_even": sum(be_values) / len(be_values) if be_values else None,
             "move_to_profit": sum(profit_values) / len(profit_values) if profit_values else None,
             "all_time_highs": sum(value in {"all-time high", "all time high", "aths", "ath"} for value in aths_values),
             "all_time_lows": sum(value in {"all-time low", "all time low", "atls", "atl"} for value in aths_values),
-            "r_multiple": sum(r_values) / len(r_values) if r_values else None,
+            "market_orders": sum("market" in value for value in order_values),
+            "limit_orders": sum("limit" in value for value in order_values),
+            "net_r_multiple": sum(r_values) if r_values else None,
         })
+        for output_key, field in count_fields.items():
+            payload[output_key] = sum(_is_positive_manual_value(row.get(field)) for row in symbol_rows)
         result[symbol] = payload
     return result
 
@@ -1823,12 +2158,24 @@ def _result_percentage_totals_by_market(
             "return_method": "funded_capital",
         })
         result[market] = payload
+    overall = result["overall"]
+    if overall.get("return_method") == "sum_trade_result_pct":
+        fx = result["fx"]
+        crypto = result["crypto"]
+        if _as_float(fx.get("market_return_pct")) is not None and _as_float(crypto.get("market_return_pct")) is not None:
+            overall["market_return_pct"] = float(fx["market_return_pct"]) + float(crypto["market_return_pct"])
+            for key in ("gross_gain_return_pct", "gross_loss_return_pct"):
+                if _as_float(fx.get(key)) is not None and _as_float(crypto.get(key)) is not None:
+                    overall[key] = float(fx[key]) + float(crypto[key])
+            overall["return_method"] = "sum_market_returns"
+            overall["return_unavailable_reason"] = None
     return result
 
 def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -> Dict[str, Any]:
     wb=Workbook(); wb.remove(wb.active)
     for s in SHEET_ORDER: wb.create_sheet(s)
     rows=[_repair_or_flag_zero_trade_qty(dict(r)) for r in (snapshot.get('items') or []) if isinstance(r,dict) and str(r.get('row_type') or 'trade') in {'trade','monthly_aud_reval','cashflow'}]
+    rows, _dedupe_diagnostics = _dedupe_trade_rows_by_execution(rows)
     metric_rows=[r for r in rows if str(r.get('row_type') or 'trade')=='trade']
     non_test=[r for r in metric_rows if not _is_test_trade_value(r.get('is_test_trade'))]
     stats = snapshot.get('stats') or {}
@@ -2116,7 +2463,10 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
     _apply_trade_log_win_loss_row_formatting(ws)
     _apply_trade_log_win_loss_direct_row_fills(ws)
 
-    inst=wb['Instrument Averages']; inst.append(INSTRUMENT_AVERAGES_HEADERS)
+    inst=wb['Instrument Averages']
+    inst.append([""] * len(INSTRUMENT_AVERAGES_HEADERS))
+    inst.append(INSTRUMENT_AVERAGES_HEADERS)
+    _write_instrument_averages_headers(inst)
     instrument_analysis = _instrument_analysis_by_symbol(rows)
     for rec in (stats.get('by_instrument') or []):
         cls=str(rec.get("asset_class") or rec.get("class") or "").lower()
@@ -2132,9 +2482,10 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             _fmt_duration_full(analysis.get("move_to_break_even")),
             _fmt_duration_full(analysis.get("move_to_profit")),
             analysis.get("pattern"), analysis.get("ema"), analysis.get("all_time_highs"), analysis.get("all_time_lows"),
-            analysis.get("order"), analysis.get("round_number"), analysis.get("spiked_out"), analysis.get("close_stop_out"),
+            analysis.get("market_orders"), analysis.get("limit_orders"),
+            analysis.get("round_number"), analysis.get("spiked_out"), analysis.get("close_stop_out"),
             analysis.get("near_perfect_entry"), analysis.get("near_win"), analysis.get("early_close"),
-            analysis.get("most_traded_timeframe"), analysis.get("r_multiple"),
+            analysis.get("most_traded_timeframe"), analysis.get("net_r_multiple"),
             (netp/100.0 if netp is not None else ''), (avgp/100.0 if avgp is not None else ''),
             rec.get("win_rate_pct"), rec.get('avg_sl_pct_wins'), rec.get('avg_sl_pct_losses'),
             rec.get('avg_tp_pct_wins'), rec.get('avg_tp_pct_losses'),
@@ -2150,9 +2501,15 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             if val is not None:
                 cell.value = val / 100.0
                 cell.number_format = "0.00%"
-        for zc in [4,5,6,7,8,9,10,11,12,13,14,header_cols["All-time highs"],header_cols["All-time lows"]]:
+        for zc in [
+            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+            header_cols["All-time highs"], header_cols["All-time lows"],
+            header_cols["Market"], header_cols["Limit"], header_cols["Round number"],
+            header_cols["Spiked out"], header_cols["Close stop out"], header_cols["Near perfect entry"],
+            header_cols["Near win"], header_cols["Early close"],
+        ]:
             inst.cell(row_idx, zc).number_format = ZERO_HIDE_FORMAT
-        inst.cell(row_idx, header_cols["R Multiple"]).number_format = '0.000"R"'
+        inst.cell(row_idx, header_cols["Net R Multiple"]).number_format = '0.000"R"'
         inst.cell(row_idx, header_cols["Net P/L %"]).number_format = "0.00%"
         inst.cell(row_idx, header_cols["Avg P/L %"]).number_format = "0.00%"
         for col in (
@@ -2162,11 +2519,16 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             header_cols["Longest duration (DD:HH:MM:SS)"],
         ):
             inst.cell(row_idx, col).number_format = r'00\:00\:00\:00'
-    _style_table_sheet(inst,1,'B2',True)
+    _style_table_sheet(inst, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, 'B3', True)
+    _style_header_row(inst, INSTRUMENT_AVERAGES_GROUP_HEADER_ROW)
     _apply_instrument_averages_requested_style(inst)
     net_col = INSTRUMENT_AVERAGES_HEADERS.index("Net P/L %") + 1
     avg_col = INSTRUMENT_AVERAGES_HEADERS.index("Avg P/L %") + 1
-    _profit_loss_rules(inst, f"{get_column_letter(net_col)}2:{get_column_letter(avg_col)}{max(2, inst.max_row)}")
+    _profit_loss_rules(
+        inst,
+        f"{get_column_letter(net_col)}{INSTRUMENT_AVERAGES_DATA_START_ROW}:"
+        f"{get_column_letter(avg_col)}{max(INSTRUMENT_AVERAGES_DATA_START_ROW, inst.max_row)}",
+    )
     _apply_instrument_averages_semantic_fills(inst)
 
     cal=wb['P&L Calendar']; cal.append(['Year'] + [f"{calendar.month_name[m]} P/L %" for m in range(1,13)]); cal.append(['Trades'] + [calendar.month_name[m] for m in range(1,13)])
@@ -2689,8 +3051,9 @@ def _workbook_content_snapshot(wb) -> Dict[str, int]:
     calendar_ws = wb["P&L Calendar"] if "P&L Calendar" in wb.sheetnames else None
     instrument_rows = 0
     if instrument is not None:
+        instrument_data_start = _instrument_averages_data_start_row(instrument)
         instrument_rows = sum(
-            1 for row in range(2, instrument.max_row + 1)
+            1 for row in range(instrument_data_start, instrument.max_row + 1)
             if any(instrument.cell(row, col).value not in (None, "") for col in range(1, instrument.max_column + 1))
         )
     calendar_cells = 0
@@ -3310,8 +3673,8 @@ def _repair_trade_log_row_ids_from_rows(ws, rows, diagnostics):
         return
     start_row = _trade_log_data_start_row(ws)
     repaired=0
-    for rr in range(start_row, ws.max_row+1):
-        row_ctx = rows[rr-start_row] if rr-start_row < len(rows) else {}
+    for rr in range(start_row, start_row + len(rows)):
+        row_ctx = rows[rr-start_row]
         expected = str(row_ctx.get('id') or stable_row_id(row_ctx)).strip() if isinstance(row_ctx, dict) else ''
         if not expected:
             continue
@@ -3394,11 +3757,33 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
             cashflow_new_balance = _num(r[idx.get('Cashflow New Balance')]) if 'Cashflow New Balance' in idx else None
             if row_type == 'cashflow' and cashflow_new_balance is None:
                 cashflow_new_balance = balance_after
-            computed_id = stable_row_id({'account':account,'symbol':symbol,'side':side,'open_time':open_time,'close_time':close_time,'qty':_num(r[idx.get('Qty')]) if 'Qty' in idx else None,'entry_price':_num(r[idx.get('Entry Price')]) if 'Entry Price' in idx else None,'exit_price':_num(r[idx.get('Exit Price')]) if 'Exit Price' in idx else None})
+            execution_row = {
+                'row_type': row_type,
+                'account': account,
+                'asset_class': asset_class,
+                'symbol': symbol,
+                'side': side,
+                'open_time': open_time,
+                'close_time': close_time,
+                'qty': _num(r[idx.get('Qty')]) if 'Qty' in idx else None,
+                'entry_price': _num(r[idx.get('Entry Price')]) if 'Entry Price' in idx else None,
+                'exit_price': _num(r[idx.get('Exit Price')]) if 'Exit Price' in idx else None,
+                'stop_loss': _num(r[i_stop]) if i_stop is not None else None,
+                'take_profit': _num(r[i_tp]) if i_tp is not None else None,
+            }
+            computed_id = _trade_execution_row_id(execution_row)
             monthly_like_id = row_id.startswith('monthly_aud_reval:')
             monthly_semantic = _is_monthly_aud_reval_semantic_row({'row_type': row_type, 'symbol': symbol, 'account': account})
             if row_id and (('PEPPERSTONE' in row_id.upper() or 'OANDA' in row_id.upper()) and ('BYBIT' in account_u or ('USDT' in symbol_u))):
                 diagnostics['repaired_corrupted_row_ids'].append({'old_row_id': row_id, 'new_row_id': computed_id, 'reason': 'broker_account_mismatch'})
+                row_id = computed_id
+            elif row_id and _stale_excel_row_id_reasons(row_id, execution_row):
+                diagnostics['repaired_corrupted_row_ids'].append({
+                    'old_row_id': row_id,
+                    'new_row_id': computed_id,
+                    'reason': 'stale_excel_row_id',
+                    'mismatched_fields': _stale_excel_row_id_reasons(row_id, execution_row),
+                })
                 row_id = computed_id
             elif row_id and monthly_like_id and (row_type != 'monthly_aud_reval' or not monthly_semantic or not _monthly_aud_reval_row_id_month(row_id)):
                 diagnostics['repaired_corrupted_row_ids'].append({'old_row_id': row_id, 'new_row_id': computed_id, 'reason': 'invalid_monthly_aud_reval_row_id', 'row_type': row_type, 'symbol': symbol, 'account': account})
@@ -3437,6 +3822,8 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
             items.append(item)
             if row_type=='cashflow':
                 cashflow_ledger[account].append({'account':account,'date':item['close_time'] or item['open_time'],'amount':cashflow_amount,'new_balance':cashflow_new_balance,'currency':str(r[idx.get('Currency')] or '').strip() if 'Currency' in idx else '','reason':item.get('notes') or '', 'side':side})
+        items, dedupe_diagnostics = _dedupe_trade_rows_by_execution(items)
+        diagnostics.update(dedupe_diagnostics)
         return {'items':items,'cashflow_ledger':dict(cashflow_ledger),'diagnostics':diagnostics}
     finally:
         wb.close()
@@ -3450,7 +3837,9 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
         _remove_legacy_trade_meta_sheet(wb, diagnostics)
         _repair_legacy_instrument_averages_freeze_pane(wb, diagnostics)
         if "Instrument Averages" in wb.sheetnames:
-            _ensure_instrument_averages_schema(wb["Instrument Averages"], diagnostics)
+            instrument_ws = wb["Instrument Averages"]
+            _ensure_instrument_averages_schema(instrument_ws, diagnostics)
+            _apply_instrument_averages_requested_style(instrument_ws)
         def _repair_trade_log_unknown_currency_formats(ws, rows: List[Dict[str, Any]], diagnostics: Dict[str, Any] | None = None) -> None:
             diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
             repaired = 0
@@ -3490,6 +3879,11 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             _repair_or_flag_zero_trade_qty(dict(r)) for r in (snapshot.get("items") or [])
             if isinstance(r, dict) and str(r.get("row_type") or "trade") in {"trade", "monthly_aud_reval", "cashflow"}
         ]
+        rows, dedupe_diagnostics = _dedupe_trade_rows_by_execution(rows)
+        diagnostics.update(dedupe_diagnostics)
+        if len(rows) != len(snapshot.get("items") or []):
+            snapshot = dict(snapshot)
+            snapshot["items"] = rows
         existing_manual_overrides = read_master_journal_manual_overrides(path) if path.exists() else {}
         if existing_manual_overrides:
             for row in rows:
@@ -4006,7 +4400,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             _apply_trade_log_win_loss_row_formatting(live_trade_log)
             _apply_trade_log_win_loss_direct_row_fills(live_trade_log)
 
-            def _copy_instrument_rows_header_aware(src_ws, dst_ws, start_row: int = 2):
+            def _copy_instrument_rows_header_aware(src_ws, dst_ws):
                 aliases = {
                     'trades': ['trades','total trades','total_trades'],
                     'wins':['wins'],'losses':['losses'],'break-even':['break-even','break even'],
@@ -4021,14 +4415,18 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                     'movebe':['move to break even'],'moveprofit':['move to profit'],
                     'pattern':['pattern'],'ema':['ema'],
                     'ath':['all-time highs'],'atl':['all-time lows'],
-                    'order':['order'],'round':['round number'],'spiked':['spiked out'],
+                    'market':['market'],'limit':['limit'],'round':['round number'],'spiked':['spiked out'],
                     'closestop':['close stop out'],'nearentry':['near perfect entry'],
                     'nearwin':['near win'],'earlyclose':['early close'],
-                    'timeframe':['most traded timeframe'],'rmultiple':['r multiple'],
+                    'timeframe':['most traded timeframe'],'rmultiple':['net r multiple','r multiple'],
                     'symbol':['symbol'],'class':['class']
                 }
-                src_headers=[str(c.value or '').strip().lower() for c in src_ws[1]]
-                dst_headers=[str(c.value or '').strip().lower() for c in dst_ws[1]]
+                src_header_row = _instrument_averages_header_row(src_ws)
+                dst_header_row = _instrument_averages_header_row(dst_ws)
+                src_start_row = _instrument_averages_data_start_row(src_ws)
+                dst_start_row = _instrument_averages_data_start_row(dst_ws)
+                src_headers=[str(c.value or '').strip().lower() for c in src_ws[src_header_row]]
+                dst_headers=[str(c.value or '').strip().lower() for c in dst_ws[dst_header_row]]
                 def find_col(headers, keys):
                     for k in keys:
                         if k in headers:
@@ -4042,18 +4440,23 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 if not pairs:
                     return
                 max_dst_row = max(dst_ws.max_row, src_ws.max_row)
-                for r in range(start_row, max_dst_row + 1):
+                for r in range(dst_start_row, max_dst_row + 1):
                     for _,dc in pairs:
                         dst_ws.cell(r,dc).value=None
-                for r in range(start_row, src_ws.max_row+1):
+                dst_row = dst_start_row
+                for r in range(src_start_row, src_ws.max_row+1):
                     for sc,dc in pairs:
-                        s=src_ws.cell(r,sc); d=dst_ws.cell(r,dc)
+                        s=src_ws.cell(r,sc); d=dst_ws.cell(dst_row,dc)
                         d.value=s.value; d.number_format=s.number_format
+                    dst_row += 1
                 last_col=dst_ws.max_column
-                dst_ws.auto_filter.ref=f"A1:{get_column_letter(last_col)}{max(1,max_dst_row)}"
+                dst_ws.auto_filter.ref=(
+                    f"A{INSTRUMENT_AVERAGES_FILTER_HEADER_ROW}:"
+                    f"{get_column_letter(last_col)}{max(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, dst_row - 1)}"
+                )
             if "Instrument Averages" in wb.sheetnames and "Instrument Averages" in gen.sheetnames:
                 instrument_ws = wb["Instrument Averages"]
-                _copy_instrument_rows_header_aware(gen["Instrument Averages"], instrument_ws, 2)
+                _copy_instrument_rows_header_aware(gen["Instrument Averages"], instrument_ws)
                 _apply_instrument_averages_requested_style(instrument_ws)
                 _apply_instrument_averages_semantic_fills(instrument_ws)
             if "P&L Calendar" in wb.sheetnames and "P&L Calendar" in gen.sheetnames:
@@ -4076,7 +4479,13 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             migration_performed=bool(diagnostics.get("migrated_trade_log_schema")),
         )
         _assert_filter_covers_data(trade_log, sheet_name="Trade Log", header_row=TRADE_LOG_FILTER_HEADER_ROW, required_headers=["Open Time", "Close Time", "Row ID"], header_map=_trade_log_header_map(trade_log))
-        _assert_filter_covers_data(wb["Instrument Averages"], sheet_name="Instrument Averages", header_row=1, required_headers=["Symbol", "Trades"])
+        _assert_filter_covers_data(
+            wb["Instrument Averages"],
+            sheet_name="Instrument Averages",
+            header_row=INSTRUMENT_AVERAGES_FILTER_HEADER_ROW,
+            required_headers=["Symbol", "Trades"],
+            header_map=_instrument_averages_header_map(wb["Instrument Averages"]),
+        )
 
         after = _snapshot_invariants(wb)
         _assert_invariants_unchanged(before, after)

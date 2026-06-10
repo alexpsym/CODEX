@@ -74,7 +74,7 @@ from shared.symbol_resolution import (
 from shared.atomic_json import write_json_file
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -7133,32 +7133,11 @@ def _workbook_row_dedupe_fingerprint(row: Dict[str, object]) -> Optional[str]:
         return None
     if row.get("cashflow_type") or str(row.get("symbol") or "").strip().upper() == "CASHFLOW":
         return None
-    return "|".join(
-        [
-            str(row.get("asset_class") or "").strip().lower(),
-            str(row.get("symbol") or row.get("symbol_raw") or "").strip().upper(),
-            _normalize_side_for_comparison(row.get("side")),
-            str(_canonical_trade_epoch_second(row.get("open_time")) or ""),
-            str(_canonical_trade_epoch_second(row.get("close_time")) or ""),
-            _num_bucket(row.get("qty") if row.get("qty") is not None else row.get("qty_raw"), 8),
-            _num_bucket(row.get("entry_price"), 8),
-            _num_bucket(row.get("exit_price"), 8),
-            _num_bucket(row.get("stop_loss"), 8),
-            _num_bucket(row.get("take_profit"), 8),
-        ]
-    )
+    return _trade_execution_fingerprint(row)
 
 
 def _row_source_rank(row: Dict[str, object]) -> int:
-    source = str(row.get("source") or "").strip().lower()
-    local_kind = str(row.get("_local_import_kind") or "").strip().lower()
-    if source == "excel":
-        return 3
-    if source == "local_excel" and local_kind == "explicit":
-        return 2
-    if source == "local_excel":
-        return 1
-    return 0
+    return _trade_row_source_rank(row)
 
 
 def _merge_duplicate_import_rows(primary: Dict[str, object], incoming: Dict[str, object]) -> Dict[str, object]:
@@ -8126,31 +8105,12 @@ def _import_trading_journal_from_sources(
     diagnostics["oanda_export_rows_persisted"] = bool(oanda_export_rows_persisted)
     diagnostics["oanda_export_failure_blocks_balance_update"] = bool(oanda_export_append_failed)
 
-    dedupe_groups = 0
-    source_duplicate_rows_dropped = 0
-    duplicate_rows_dropped = 0
-    canonical_rows: Dict[str, Dict[str, object]] = {}
-    carry_rows: List[Dict[str, object]] = []
-    for row in all_rows.values():
-        key = _workbook_row_dedupe_fingerprint(row)
-        if not key:
-            carry_rows.append(row)
-            continue
-        prev = canonical_rows.get(key)
-        if prev is None:
-            canonical_rows[key] = row
-            continue
-        dedupe_groups += 1
-        duplicate_rows_dropped += 1
-        prev_rank = _row_source_rank(prev)
-        row_rank = _row_source_rank(row)
-        if row_rank > prev_rank:
-            canonical_rows[key] = _merge_duplicate_import_rows(row, prev)
-        else:
-            canonical_rows[key] = _merge_duplicate_import_rows(prev, row)
-        source_duplicate_rows_dropped += 1
-
-    final_rows = sorted([*canonical_rows.values(), *carry_rows], key=_row_sort_dt, reverse=True)
+    deduped_rows, dedupe_details = _dedupe_trade_rows_by_execution(list(all_rows.values()))
+    dedupe_groups = int(dedupe_details.get("duplicate_execution_groups_removed") or 0)
+    duplicate_rows_dropped = int(dedupe_details.get("duplicate_execution_rows_removed") or 0)
+    source_duplicate_rows_dropped = duplicate_rows_dropped
+    diagnostics["ambiguous_duplicate_execution_groups"] = dedupe_details.get("ambiguous_duplicate_execution_groups") or []
+    final_rows = sorted(deduped_rows, key=_row_sort_dt, reverse=True)
     final_rows, sanitize_stats = _sanitize_bybit_demo_rows(final_rows)
     pruned_source_counts: Dict[str, int] = {}
     non_local_rows_pruned = 0
@@ -27270,8 +27230,8 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                 raise RuntimeError("Trading Journal validation failed: Trade Log filter missing.")
             if not inst.auto_filter or not inst.auto_filter.ref:
                 raise RuntimeError("Trading Journal validation failed: Instrument Averages filter missing.")
-            if str(inst.freeze_panes or "") != "B2":
-                raise RuntimeError("Trading Journal validation failed: Instrument Averages freeze pane must be B2.")
+            if str(inst.freeze_panes or "") != "B3":
+                raise RuntimeError("Trading Journal validation failed: Instrument Averages freeze pane must be B3.")
             def _is_hidden_trade_row(row: Dict[str, object]) -> bool:
                 metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
                 for key in ("is_hidden", "hidden", "_hidden"):
@@ -27392,17 +27352,20 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
             stats = snapshot.get("stats") or {}
             by_instrument = stats.get("by_instrument") or []
             if by_instrument:
-                inst_headers = [str(c.value or "").strip().lower() for c in inst[1]]
-                symbol_idx = (inst_headers.index("symbol") + 1) if "symbol" in inst_headers else None
-                trades_idx = None
-                for candidate in ("trades", "total trades", "total_trades"):
-                    if candidate in inst_headers:
-                        trades_idx = inst_headers.index(candidate) + 1
-                        break
+                instrument_header_map = {
+                    str(name).strip().lower(): col
+                    for name, col in _instrument_averages_header_map(inst).items()
+                }
+                symbol_idx = instrument_header_map.get("symbol")
+                trades_idx = next(
+                    (instrument_header_map[candidate] for candidate in ("trades", "total trades", "total_trades")
+                     if candidate in instrument_header_map),
+                    None,
+                )
                 if not symbol_idx or not trades_idx:
                     raise RuntimeError("Trading Journal validation failed: Instrument Averages Symbol/Trades headers missing.")
                 has_instrument_data = False
-                for rr in range(2, inst.max_row + 1):
+                for rr in range(INSTRUMENT_AVERAGES_DATA_START_ROW, inst.max_row + 1):
                     symbol = str(inst.cell(rr, symbol_idx).value or "").strip()
                     trades = _safe_float(inst.cell(rr, trades_idx).value)
                     if symbol and trades is not None:
@@ -27412,8 +27375,8 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                     raise RuntimeError("Trading Journal validation failed: Instrument Averages is blank despite instrument stats.")
                 def _inst_col(*aliases: str) -> int | None:
                     for a in aliases:
-                        if a in inst_headers:
-                            return inst_headers.index(a) + 1
+                        if a in instrument_header_map:
+                            return instrument_header_map[a]
                     return None
                 inst_dur_cols = [
                     _inst_col("shortest duration (dd:hh:mm:ss)", "shortest (dd:hh:mm:ss)"),
@@ -27427,7 +27390,7 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                         for rec in by_instrument if isinstance(rec, dict)
                     )
                     any_duration_cells = False
-                    for rr in range(2, inst.max_row + 1):
+                    for rr in range(INSTRUMENT_AVERAGES_DATA_START_ROW, inst.max_row + 1):
                         vals = [inst.cell(rr, c).value for c in inst_dur_cols]
                         nums = [v for v in vals if isinstance(v, (int, float))]
                         if nums:
@@ -27438,8 +27401,8 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                             raise RuntimeError("Trading Journal validation failed: Instrument duration order must satisfy Shortest <= Avg <= Longest.")
                     if has_any_duration_stat and not any_duration_cells:
                         raise RuntimeError("Trading Journal validation failed: Instrument Averages duration columns are blank despite duration stats.")
-                net_col = (inst_headers.index("net p/l %") + 1) if "net p/l %" in inst_headers else None
-                avg_col = (inst_headers.index("avg p/l %") + 1) if "avg p/l %" in inst_headers else None
+                net_col = instrument_header_map.get("net p/l %")
+                avg_col = instrument_header_map.get("avg p/l %")
                 if net_col and avg_col:
                     has_result_pct_stats = any(
                         (_safe_float(rec.get("net_result_pct")) is not None) or (_safe_float(rec.get("avg_result_pct")) is not None)
@@ -27447,7 +27410,7 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                     )
                     if has_result_pct_stats:
                         has_op = False
-                        for rr in range(2, inst.max_row + 1):
+                        for rr in range(INSTRUMENT_AVERAGES_DATA_START_ROW, inst.max_row + 1):
                             if isinstance(inst.cell(rr, net_col).value, (int, float)) or isinstance(inst.cell(rr, avg_col).value, (int, float)):
                                 has_op = True
                                 break

@@ -4,7 +4,7 @@ from datetime import datetime
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 import pytest
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, SHEET_ORDER, TRADE_LOG_HEADERS, TRADE_LOG_HEADERS_V1, OLD_TRADE_LOG_HEADERS, PRE_MOVE_TRADE_LOG_HEADERS, MOVE_TO_FIELD_MAP, TRADE_LOG_HEADER_ROWS, TRADE_LOG_DATA_START_ROW, TRADE_LOG_FILTER_HEADER_ROW, TRADE_NUMBER_HEADER, REPORT_YEARLY_SHEET, REPORT_METRIC_LABELS, INSTRUMENT_AVERAGES_HEADERS, DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL, DASHBOARD_MOVE_TO_PROFIT_LABEL, expected_report_sheet_names, _ensure_trade_log_schema, _ensure_pnl_calendar_freeze_panes, _repair_trade_log_move_to_durations, _trade_log_header_map
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, SHEET_ORDER, TRADE_LOG_HEADERS, TRADE_LOG_HEADERS_V1, OLD_TRADE_LOG_HEADERS, PRE_MOVE_TRADE_LOG_HEADERS, MOVE_TO_FIELD_MAP, TRADE_LOG_HEADER_ROWS, TRADE_LOG_DATA_START_ROW, TRADE_LOG_FILTER_HEADER_ROW, TRADE_NUMBER_HEADER, REPORT_YEARLY_SHEET, REPORT_METRIC_LABELS, INSTRUMENT_AVERAGES_HEADERS, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL, DASHBOARD_MOVE_TO_PROFIT_LABEL, expected_report_sheet_names, _ensure_trade_log_schema, _ensure_instrument_averages_schema, _ensure_pnl_calendar_freeze_panes, _repair_trade_log_move_to_durations, _trade_log_header_map, _instrument_averages_header_map, _result_percentage_totals_by_market
 from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter, range_boundaries
 
 def _cf_ranges(ws):
@@ -25,6 +25,8 @@ def _cell_covered(ranges, cell):
 def _header_col(ws, name: str) -> int:
     if ws.title in {"Trade Log", "All Trades"}:
         return _trade_log_header_map(ws)[name]
+    if ws.title == "Instrument Averages":
+        return _instrument_averages_header_map(ws)[name]
     headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
     return headers.index(name) + 1
 
@@ -74,12 +76,7 @@ def _ensure_trade_log_headers(wb) -> None:
     _ensure_trade_log_schema(ws)
     if "Instrument Averages" in wb.sheetnames:
         inst = wb["Instrument Averages"]
-        inst_headers = INSTRUMENT_AVERAGES_HEADERS
-        if not any(inst.cell(1, c).value not in (None, "") for c in range(1, inst.max_column + 1)):
-            for idx, header in enumerate(inst_headers, start=1):
-                inst.cell(1, idx).value = header
-        inst.freeze_panes = "A2"
-        inst.auto_filter.ref = f"A1:{get_column_letter(len(inst_headers))}{max(1, inst.max_row)}"
+        _ensure_instrument_averages_schema(inst)
 
 def _all_rule_colors(ws):
     out = []
@@ -148,6 +145,29 @@ def test_dashboard_overall_return_average_labels_and_move_durations(tmp_path: Pa
     assert dash["B20"].value == 20000
 
 
+def test_mixed_currency_overall_return_sums_market_returns():
+    totals = _result_percentage_totals_by_market(
+        [
+            {
+                "row_type": "trade", "account": "OANDA LIVE", "asset_class": "fx",
+                "symbol": "EURUSD", "net_profit": 100, "currency": "AUD", "result_pct": 99,
+            },
+            {
+                "row_type": "trade", "account": "BYBIT LIVE", "asset_class": "crypto",
+                "symbol": "BTCUSDT", "net_profit": 50, "currency": "USDT", "result_pct": 88,
+            },
+        ],
+        [
+            {"account_label": "OANDA LIVE", "balance": 1100, "currency": "AUD"},
+            {"account_label": "BYBIT LIVE", "balance": 550, "currency": "USDT"},
+        ],
+    )
+    assert totals["fx"]["market_return_pct"] == pytest.approx(10.0)
+    assert totals["crypto"]["market_return_pct"] == pytest.approx(10.0)
+    assert totals["overall"]["market_return_pct"] == pytest.approx(20.0)
+    assert totals["overall"]["return_method"] == "sum_market_returns"
+
+
 def test_move_to_duration_repair_uses_open_and_move_times():
     from openpyxl import Workbook
     wb = Workbook()
@@ -176,20 +196,45 @@ def test_instrument_averages_new_columns_order_formats_and_alignment(tmp_path: P
         "early_close": "No", "timeframe": "1H", "move_to_break_even_duration": 3600,
         "move_to_profit_duration": 7200,
     })
+    snapshot["items"].append({
+        "id": "t3", "row_type": "trade", "symbol": "EURUSD", "asset_class": "fx",
+        "side": "SELL", "account": "OANDA DEMO", "open_time": "2026-05-03T00:00:00Z",
+        "close_time": "2026-05-03T01:00:00Z", "r_multiple": -0.3,
+        "order_type": "Market", "round_number": True, "spiked_out": 1,
+        "close_stopout": "Yes", "near_perfect_entry": "No", "near_win": "true",
+        "early_close": "Y",
+    })
     out = tmp_path / "instrument_acceptance.xlsx"
     build_master_journal_workbook(snapshot, out)
     ws = load_workbook(out)["Instrument Averages"]
-    headers = [str(cell.value or "") for cell in ws[1]]
+    headers = [str(cell.value or "") for cell in ws[INSTRUMENT_AVERAGES_FILTER_HEADER_ROW]]
     assert headers == INSTRUMENT_AVERAGES_HEADERS
     by_header = {header: index + 1 for index, header in enumerate(headers)}
-    assert ws.cell(2, by_header["Move to break even"]).value == 10000
-    assert ws.cell(2, by_header["Move to profit"]).value == 20000
-    assert ws.cell(2, by_header["R Multiple"]).number_format == '0.000"R"'
-    assert ws.cell(2, by_header["All-time highs"]).value == 1
-    assert ws.cell(2, by_header["All-time lows"]).value == 0
-    assert ws.cell(2, 1).fill.fgColor.rgb == ws.cell(1, 1).fill.fgColor.rgb
-    assert ws.cell(2, 1).font.bold == ws.cell(1, 1).font.bold
-    assert all(ws.cell(2, col).alignment.horizontal == "center" for col in range(2, ws.max_column + 1))
+    row = INSTRUMENT_AVERAGES_DATA_START_ROW
+    assert ws.cell(row, by_header["Move to break even"]).value == 10000
+    assert ws.cell(row, by_header["Move to profit"]).value == 20000
+    assert ws.cell(row, by_header["Net R Multiple"]).value == pytest.approx(0.9)
+    assert ws.cell(row, by_header["Net R Multiple"]).number_format == '0.000"R"'
+    assert ws.cell(row, by_header["All-time highs"]).value == 1
+    assert ws.cell(row, by_header["All-time lows"]).value == 0
+    assert ws.cell(row, by_header["Market"]).value == 1
+    assert ws.cell(row, by_header["Limit"]).value == 1
+    assert ws.cell(row, by_header["Round number"]).value == 2
+    assert ws.cell(row, by_header["Spiked out"]).value == 1
+    assert ws.cell(row, by_header["Close stop out"]).value == 1
+    assert ws.cell(row, by_header["Near perfect entry"]).value == 1
+    assert ws.cell(row, by_header["Near win"]).value == 1
+    assert ws.cell(row, by_header["Early close"]).value == 1
+    assert ws.cell(row, by_header["Move to break even"]).font.color.rgb == "FF000000"
+    assert ws.cell(row, by_header["Move to profit"]).font.color.rgb == "FF000000"
+    assert all(ws.cell(row, col).alignment.horizontal == "center" for col in range(2, ws.max_column + 1))
+    order_range = (
+        f"{get_column_letter(by_header['Market'])}1:"
+        f"{get_column_letter(by_header['Limit'])}1"
+    )
+    assert order_range in {str(rng) for rng in ws.merged_cells.ranges}
+    assert ws.cell(1, by_header["Market"]).value == "Order"
+    assert ws.freeze_panes == "B3"
     assert ws.auto_filter.ref.endswith(f"{get_column_letter(len(INSTRUMENT_AVERAGES_HEADERS))}{ws.max_row}")
 
 
@@ -679,10 +724,10 @@ def test_balance_after_resolution_and_duration_display(tmp_path: Path):
     assert ws.cell(5, _header_col(ws, 'Trade Duration (DD:HH:MM:SS)')).value == 503
     assert ws.cell(_trade_data_row(), _header_col(ws, 'Trade Duration (DD:HH:MM:SS)')).number_format == r'00\:00\:00\:00'
     inst=wb['Instrument Averages']
-    inst_headers = {str(inst.cell(1, col).value): col for col in range(1, inst.max_column + 1)}
+    inst_headers = _instrument_averages_header_map(inst)
     for header in ("Shortest duration (DD:HH:MM:SS)", "Avg duration (DD:HH:MM:SS)", "Longest duration (DD:HH:MM:SS)"):
-        assert isinstance(inst.cell(2, inst_headers[header]).value, (int, float))
-        assert inst.cell(2, inst_headers[header]).number_format == r'00\:00\:00\:00'
+        assert isinstance(inst.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, inst_headers[header]).value, (int, float))
+        assert inst.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, inst_headers[header]).number_format == r'00\:00\:00\:00'
 
 def test_sheet_order_and_hidden_meta(tmp_path: Path):
     out=tmp_path/'x.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
@@ -765,7 +810,7 @@ def test_update_data_only_repairs_legacy_instrument_averages_freeze_pane(tmp_pat
     Path(result["candidate_path"]).replace(out)
 
     repaired = load_workbook(out)
-    assert repaired["Instrument Averages"].freeze_panes == "B2"
+    assert repaired["Instrument Averages"].freeze_panes == "B3"
     assert repaired.sheetnames[:4] == SHEET_ORDER
     assert repaired.sheetnames[4:] == expected_report_sheet_names(snap)
     assert "_Trade Meta" not in repaired.sheetnames
@@ -850,12 +895,13 @@ def test_build_workbook_forces_blank_setup_for_semantic_rows(tmp_path: Path):
 def test_instrument_currency_and_percent_formats(tmp_path: Path):
     out=tmp_path/'fmt.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
     inst = wb["Instrument Averages"]
-    headers = {str(inst.cell(1, col).value): col for col in range(1, inst.max_column + 1)}
-    assert inst.cell(2, headers["Win Rate %"]).number_format == "0.00%"
-    assert inst.cell(2, headers["Win Rate %"]).value == 1.0
-    assert inst.cell(2, headers["Net P/L %"]).number_format == "0.00%"
-    assert inst["D2"].number_format == "0;-0;;@"
-    assert inst["E2"].number_format == "0;-0;;@"
+    headers = _instrument_averages_header_map(inst)
+    row = INSTRUMENT_AVERAGES_DATA_START_ROW
+    assert inst.cell(row, headers["Win Rate %"]).number_format == "0.00%"
+    assert inst.cell(row, headers["Win Rate %"]).value == 1.0
+    assert inst.cell(row, headers["Net P/L %"]).number_format == "0.00%"
+    assert inst.cell(row, headers["Wins"]).number_format == "0;-0;;@"
+    assert inst.cell(row, headers["Losses"]).number_format == "0;-0;;@"
 
 def test_dashboard_layout_style_columns(tmp_path: Path):
     out=tmp_path/'db.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
@@ -878,6 +924,74 @@ def test_read_master_journal_source_parses_core_fields(tmp_path: Path):
     row = trades[0]
     for key in ("id", "qty", "entry_price", "exit_price", "stop_loss", "take_profit", "net_profit", "result_pct", "r_multiple", "trade_duration_seconds", "is_test_trade"):
         assert key in row
+
+
+def test_read_source_repairs_stale_excel_id_and_dedupes_execution(tmp_path: Path):
+    snapshot = {
+        "items": [{
+            "id": "oanda_export:live:367:370",
+            "trade_number": "F1010",
+            "row_type": "trade",
+            "account": "OANDA LIVE",
+            "asset_class": "fx",
+            "symbol": "AUDJPY",
+            "side": "BUY",
+            "open_time": "2024-03-22 12:05:11",
+            "close_time": "2024-03-22 12:23:45",
+            "qty": 0.06663,
+            "entry_price": 99.334,
+            "exit_price": 99.185,
+            "stop_loss": 99.187,
+            "take_profit": 99.628,
+            "net_profit": -10.0586,
+            "notes": "canonical",
+        }],
+        "stats": {"totals": {}, "groups": {}},
+        "balances": [],
+    }
+    path = tmp_path / "stale_duplicate.xlsx"
+    build_master_journal_workbook(snapshot, path)
+    wb = load_workbook(path)
+    ws = wb["Trade Log"]
+    headers = _trade_log_header_map(ws)
+    source_row = TRADE_LOG_DATA_START_ROW
+    duplicate_row = source_row + 1
+    for col in range(1, ws.max_column + 1):
+        ws.cell(duplicate_row, col).value = ws.cell(source_row, col).value
+    ws.cell(duplicate_row, headers["Row ID"]).value = (
+        "excel:PEPPERSTONE DEMO:Sheet0:541:AUDCAD:2018-07-04T11:34:00"
+    )
+    ws.cell(duplicate_row, headers["Entry Price"]).value = 99.33
+    ws.cell(duplicate_row, headers["Exit Price"]).value = 99.19
+    ws.cell(duplicate_row, headers["Notes"]).value = "duplicate"
+    wb.save(path)
+    wb.close()
+
+    parsed = read_master_journal_source(path)
+    trades = [row for row in parsed["items"] if row.get("row_type") == "trade"]
+    assert len(trades) == 1
+    assert trades[0]["id"] == "oanda_export:live:367:370"
+    assert trades[0]["notes"] == "canonical"
+    assert parsed["diagnostics"]["duplicate_execution_rows_removed"] == 1
+    repairs = parsed["diagnostics"]["repaired_corrupted_row_ids"]
+    assert len(repairs) == 1
+    assert repairs[0]["reason"] == "stale_excel_row_id"
+    assert repairs[0]["mismatched_fields"] == ["account", "symbol", "date"]
+
+    update = update_master_journal_workbook_data_only(
+        path,
+        {"items": parsed["items"], "stats": {"totals": {}, "groups": {}}, "balances": []},
+    )
+    candidate = Path(update["candidate_path"])
+    updated = load_workbook(candidate)
+    updated_trade_log = updated["Trade Log"]
+    _, _, _, filter_max_row = range_boundaries(updated_trade_log.auto_filter.ref)
+    assert filter_max_row == TRADE_LOG_DATA_START_ROW
+    assert all(
+        updated_trade_log.cell(TRADE_LOG_DATA_START_ROW + 1, col).value in (None, "")
+        for col in range(1, updated_trade_log.max_column + 1)
+    )
+    updated.close()
 
 
 def test_read_master_journal_source_parses_result_percent_alias(tmp_path: Path):
@@ -940,22 +1054,31 @@ def test_instrument_averages_op_and_duration_not_blank_after_data_only_update(tm
     build_master_journal_workbook(snap, p)
     wb = load_workbook(p)
     inst = wb["Instrument Averages"]
-    headers = [str(c.value or "") for c in inst[1]]
+    headers = [str(c.value or "") for c in inst[INSTRUMENT_AVERAGES_FILTER_HEADER_ROW]]
     # mimic live alias header style
-    inst.cell(1, headers.index("Shortest duration (DD:HH:MM:SS)") + 1).value = "Shortest (DD:HH:MM:SS)"
-    inst.cell(1, headers.index("Longest duration (DD:HH:MM:SS)") + 1).value = "Longest (DD:HH:MM:SS)"
+    inst.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, headers.index("Shortest duration (DD:HH:MM:SS)") + 1).value = "Shortest (DD:HH:MM:SS)"
+    inst.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, headers.index("Longest duration (DD:HH:MM:SS)") + 1).value = "Longest (DD:HH:MM:SS)"
     _ensure_trade_log_headers(wb); wb.save(p); wb.close()
     res = update_master_journal_workbook_data_only(p, snap)
     Path(res["candidate_path"]).replace(p)
     out = load_workbook(p)
     inst2 = out["Instrument Averages"]
-    h2 = [str(c.value or "") for c in inst2[1]]
+    h2 = [str(c.value or "") for c in inst2[INSTRUMENT_AVERAGES_FILTER_HEADER_ROW]]
     net_col = h2.index("Net P/L %") + 1
     avg_col = h2.index("Avg P/L %") + 1
-    s_col = h2.index("Shortest (DD:HH:MM:SS)") + 1
+    s_col = h2.index("Shortest duration (DD:HH:MM:SS)") + 1
     a_col = h2.index("Avg duration (DD:HH:MM:SS)") + 1
-    l_col = h2.index("Longest (DD:HH:MM:SS)") + 1
-    vals = [(inst2.cell(r, net_col).value, inst2.cell(r, avg_col).value, inst2.cell(r, s_col).value, inst2.cell(r, a_col).value, inst2.cell(r, l_col).value) for r in range(2, inst2.max_row + 1)]
+    l_col = h2.index("Longest duration (DD:HH:MM:SS)") + 1
+    vals = [
+        (
+            inst2.cell(r, net_col).value,
+            inst2.cell(r, avg_col).value,
+            inst2.cell(r, s_col).value,
+            inst2.cell(r, a_col).value,
+            inst2.cell(r, l_col).value,
+        )
+        for r in range(INSTRUMENT_AVERAGES_DATA_START_ROW, inst2.max_row + 1)
+    ]
     assert any(isinstance(v[0], (int, float)) or isinstance(v[1], (int, float)) for v in vals)
     assert any(all(isinstance(x, (int, float)) for x in v[2:]) for v in vals)
     out.close()
@@ -2608,17 +2731,18 @@ def test_generated_calendar_and_instrument_averages_use_direct_semantic_fills(tm
     wb = load_workbook(out)
 
     inst = wb["Instrument Averages"]
-    assert inst.freeze_panes == "B2"
-    headers = {str(inst.cell(1, col).value): col for col in range(1, inst.max_column + 1)}
+    assert inst.freeze_panes == "B3"
+    headers = _instrument_averages_header_map(inst)
+    row = INSTRUMENT_AVERAGES_DATA_START_ROW
     for header in ("Wins", "Long wins", "Short wins"):
-        assert _cell_fill_rgb(inst.cell(2, headers[header])) == "C6EFCE"
+        assert _cell_fill_rgb(inst.cell(row, headers[header])) == "C6EFCE"
     for header in ("Losses", "Long losses", "Short losses", "Net P/L %", "Avg P/L %"):
-        assert _cell_fill_rgb(inst.cell(2, headers[header])) == "FFC7CE"
-    assert _cell_fill_rgb(inst.cell(2, headers["Trades"])) == ""
-    assert _cell_fill_rgb(inst.cell(2, headers["Win Rate %"])) == ""
-    assert inst.cell(2, headers["Net P/L %"]).number_format == "0.00%"
-    assert inst.cell(2, headers["Avg P/L %"]).number_format == "0.00%"
-    assert inst.cell(2, headers["Avg duration (DD:HH:MM:SS)"]).number_format == r"00\:00\:00\:00"
+        assert _cell_fill_rgb(inst.cell(row, headers[header])) == "FFC7CE"
+    assert _cell_fill_rgb(inst.cell(row, headers["Trades"])) == ""
+    assert _cell_fill_rgb(inst.cell(row, headers["Win Rate %"])) == ""
+    assert inst.cell(row, headers["Net P/L %"]).number_format == "0.00%"
+    assert inst.cell(row, headers["Avg P/L %"]).number_format == "0.00%"
+    assert inst.cell(row, headers["Avg duration (DD:HH:MM:SS)"]).number_format == r"00\:00\:00\:00"
 
     cal = wb["P&L Calendar"]
     assert _cell_fill_rgb(cal["F3"]) == "C6EFCE"  # May P/L %
