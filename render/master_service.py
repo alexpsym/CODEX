@@ -8404,7 +8404,10 @@ def _journal_rows_from_bybit_execution(entry: Dict[str, object]) -> List[Dict[st
     )
     setup = _safe_normalize_setup(entry.get("setup"))
     pattern = _safe_normalize_pattern(entry.get("pattern"))
-    if not timeframe or is_test_trade is None or not setup or not pattern:
+    ema = str(entry.get("ema") or "").strip()
+    aths_atls = str(entry.get("aths_atls") or "").strip()
+    round_number = str(entry.get("round_number") or "").strip()
+    if not timeframe or is_test_trade is None or not setup or not pattern or not ema or not aths_atls or not round_number:
         ctx = _lookup_trade_context_for_journal_row(
             {"raw_refs": {"orderId": order_id, "orderLinkId": entry.get("orderLinkId")}}
         )
@@ -8417,6 +8420,12 @@ def _journal_rows_from_bybit_execution(entry: Dict[str, object]) -> List[Dict[st
                 setup = _safe_normalize_setup(ctx.get("setup"))
             if not pattern:
                 pattern = _safe_normalize_pattern(ctx.get("pattern"))
+            if not ema:
+                ema = str(ctx.get("ema") or "").strip()
+            if not aths_atls:
+                aths_atls = str(ctx.get("aths_atls") or "").strip()
+            if not round_number:
+                round_number = str(ctx.get("round_number") or "").strip()
     if exec_pnl in (None, 0.0):
         return []
     return [
@@ -8449,6 +8458,9 @@ def _journal_rows_from_bybit_execution(entry: Dict[str, object]) -> List[Dict[st
             "is_test_trade": is_test_trade,
             "setup": setup,
             "pattern": pattern,
+            "ema": ema,
+            "aths_atls": aths_atls,
+            "round_number": round_number,
             "metrics": {k: v for k, v in {"timeframe": timeframe, "is_test_trade": is_test_trade}.items() if v not in ("", None)},
             "raw_refs": {"orderId": order_id, "execIds": [exec_id]},
         })
@@ -13374,6 +13386,11 @@ def _upsert_pending_webhook(payload: Dict[str, object]) -> Dict[str, object]:
             "take_profit": entry.get("take_profit"),
             "timeframe": entry.get("timeframe"),
             "is_test_trade": entry.get("is_test_trade"),
+            "setup": entry.get("setup"),
+            "pattern": entry.get("pattern"),
+            "ema": entry.get("ema"),
+            "aths_atls": entry.get("aths_atls"),
+            "round_number": entry.get("round_number"),
             "open_time": opened_at_iso,
             "status": "ACTIVE",
                 "calculation_context_id": payload.get("calculation_context_id"),
@@ -13519,6 +13536,36 @@ def _safe_normalize_pattern(value: object) -> str:
         return _normalize_pattern(value)
     except Exception:
         return ""
+
+
+def _normalize_yes_no_criterion(value: object, label: str) -> str:
+    text = "" if value is None else str(value).strip().lower()
+    if text in {"", "none"}:
+        return ""
+    if text in {"yes", "y", "true", "1"}:
+        return "Yes"
+    if text in {"no", "n", "false", "0"}:
+        return "No"
+    raise ValueError(f"Invalid {label}. Expected one of: Yes, No.")
+
+
+def _normalize_ema(value: object) -> str:
+    return _normalize_yes_no_criterion(value, "EMA")
+
+
+def _normalize_round_number(value: object) -> str:
+    return _normalize_yes_no_criterion(value, "round number")
+
+
+def _normalize_aths_atls(value: object) -> str:
+    text = " ".join(str(value or "").strip().lower().replace("_", " ").replace("-", " ").split())
+    if text in {"", "none"}:
+        return ""
+    if text in {"all time high", "ath", "aths"}:
+        return "All-Time High"
+    if text in {"all time low", "atl", "atls"}:
+        return "All-Time Low"
+    raise ValueError("Invalid ATH/ATL criterion. Expected one of: All-Time High, All-Time Low.")
 
 
 def _normalize_test_trade_flag(value: object) -> Optional[bool]:
@@ -13829,6 +13876,9 @@ def _merge_bybit_demo_calc_context_into_row(row: Dict[str, object], ctx: Dict[st
         ctx_setup = _safe_normalize_setup(ctx.get("setup"))
         if ctx_setup:
             out["setup"] = ctx_setup
+    for field in ("pattern", "ema", "aths_atls", "round_number"):
+        if out.get(field) in (None, "") and ctx.get(field) not in (None, ""):
+            out[field] = ctx.get(field)
     out.setdefault("planned_entry_price", ctx.get("entry_price"))
     out.setdefault("planned_stop_price", ctx.get("stop_loss"))
     out.setdefault("planned_target_price", ctx.get("take_profit"))
@@ -13874,6 +13924,16 @@ def _upsert_trade_context(payload: Dict[str, object]) -> Dict[str, object]:
         )
     if "timeframe" in merged_payload:
         merged_payload["timeframe"] = _normalize_timeframe(merged_payload.get("timeframe"))
+    if "setup" in merged_payload:
+        merged_payload["setup"] = _normalize_setup(merged_payload.get("setup"))
+    if "pattern" in merged_payload:
+        merged_payload["pattern"] = _normalize_pattern(merged_payload.get("pattern"))
+    if "ema" in merged_payload:
+        merged_payload["ema"] = _normalize_ema(merged_payload.get("ema"))
+    if "aths_atls" in merged_payload:
+        merged_payload["aths_atls"] = _normalize_aths_atls(merged_payload.get("aths_atls"))
+    if "round_number" in merged_payload:
+        merged_payload["round_number"] = _normalize_round_number(merged_payload.get("round_number"))
     for field in ("entry_price", "stop_loss", "take_profit"):
         if field in merged_payload:
             merged_payload[field] = _normalize_optional_price(merged_payload.get(field))
@@ -15291,6 +15351,9 @@ async def _place_bybit_order(
             "timeframe": _normalize_journal_timeframe(payload.get("timeframe")),
             "setup": _normalize_setup(payload.get("setup")),
             "pattern": _normalize_pattern(payload.get("pattern")),
+            "ema": _normalize_ema(payload.get("ema")),
+            "aths_atls": _normalize_aths_atls(payload.get("aths_atls")),
+            "round_number": _normalize_round_number(payload.get("round_number")),
             "is_test_trade": payload.get("is_test_trade"),
             "created_at": request_open_time_iso,
             "open_time": _epoch_or_iso_to_iso(payload.get("opened_at")) or request_open_time_iso,
@@ -15880,6 +15943,9 @@ async def _place_oanda_order(
                 "is_test_trade": payload.get("is_test_trade"),
                 "setup": payload.get("setup"),
                 "pattern": _safe_normalize_pattern(payload.get("pattern")),
+                "ema": _normalize_ema(payload.get("ema")),
+                "aths_atls": _normalize_aths_atls(payload.get("aths_atls")),
+                "round_number": _normalize_round_number(payload.get("round_number")),
                 "order_id": str(order_id or "").strip(),
                 "trade_id": str(trade_id or "").strip(),
                 "transaction_id": fill_tx_id or str(result.get("lastTransactionID") or "").strip(),
@@ -16848,6 +16914,9 @@ def _normalize_bybit_closed_pnl_row(
     is_test_trade = _normalize_test_trade_flag(ctx.get("is_test_trade")) if isinstance(ctx, dict) else None
     setup = _safe_normalize_setup(ctx.get("setup")) if isinstance(ctx, dict) else ""
     pattern = _safe_normalize_pattern(ctx.get("pattern")) if isinstance(ctx, dict) else ""
+    ema = str(ctx.get("ema") or "").strip() if isinstance(ctx, dict) else ""
+    aths_atls = str(ctx.get("aths_atls") or "").strip() if isinstance(ctx, dict) else ""
+    round_number = str(ctx.get("round_number") or "").strip() if isinstance(ctx, dict) else ""
     fallback_attempted = isinstance(ctx, dict)
     fallback_stop_loss = _to_float(ctx.get("stop_loss")) if isinstance(ctx, dict) else None
     fallback_take_profit = _to_float(ctx.get("take_profit")) if isinstance(ctx, dict) else None
@@ -16903,6 +16972,9 @@ def _normalize_bybit_closed_pnl_row(
                 "is_test_trade": is_test_trade if is_test_trade is not None else ctx.get("is_test_trade"),
                 "setup": setup,
                 "pattern": pattern,
+                "ema": ema,
+                "aths_atls": aths_atls,
+                "round_number": round_number,
                 "open_time": resolved_open_time,
                 "stop_loss": stop_loss if stop_loss is not None else ctx.get("stop_loss"),
                 "take_profit": take_profit if take_profit is not None else ctx.get("take_profit"),
@@ -16978,6 +17050,9 @@ def _normalize_bybit_closed_pnl_row(
         "is_test_trade": is_test_trade,
         "setup": setup,
         "pattern": pattern,
+        "ema": ema,
+        "aths_atls": aths_atls,
+        "round_number": round_number,
         "metrics": {k: v for k, v in {"timeframe": timeframe, "is_test_trade": is_test_trade}.items() if v not in ("", None)},
         "raw_refs": raw_refs,
     })
@@ -16998,7 +17073,19 @@ def _backfill_trade_row_context_fields(row: Dict[str, object]) -> Dict[str, obje
     )
     current_setup = str(row.get("setup") or "").strip()
     current_pattern = str(row.get("pattern") or "").strip()
-    if current_timeframe and not needs_tpsl and current_is_test_trade is not None and current_setup and current_pattern:
+    current_ema = str(row.get("ema") or "").strip()
+    current_aths_atls = str(row.get("aths_atls") or "").strip()
+    current_round_number = str(row.get("round_number") or "").strip()
+    if (
+        current_timeframe
+        and not needs_tpsl
+        and current_is_test_trade is not None
+        and current_setup
+        and current_pattern
+        and current_ema
+        and current_aths_atls
+        and current_round_number
+    ):
         return row
 
     source_text = str(row.get("source") or "").strip().lower()
@@ -17052,6 +17139,9 @@ def _backfill_trade_row_context_fields(row: Dict[str, object]) -> Dict[str, obje
         ctx_pattern = _safe_normalize_pattern(ctx.get("pattern"))
         if ctx_pattern:
             patched["pattern"] = ctx_pattern
+    for field in ("ema", "aths_atls", "round_number"):
+        if not str(patched.get(field) or "").strip() and str(ctx.get(field) or "").strip():
+            patched[field] = ctx.get(field)
     if patched.get("r_multiple") in (None, ""):
         entry = _to_float(patched.get("entry_price"))
         stop = _to_float(patched.get("stop_loss"))
@@ -18957,6 +19047,18 @@ CALCULATOR_TEMPLATE = """<!doctype html>
         <div class="group toggle" id="pattern-toggle"></div>
       </div>
       <div class="row">
+        <label>EMA</label>
+        <div class="group toggle" id="ema-toggle"></div>
+      </div>
+      <div class="row">
+        <label>All-time high / low</label>
+        <div class="group toggle" id="aths-atls-toggle"></div>
+      </div>
+      <div class="row">
+        <label>Round number</label>
+        <div class="group toggle" id="round-number-toggle"></div>
+      </div>
+      <div class="row">
         <div class="group">
           <button id="calc-quote" type="button">Calculate</button>
           <button id="calc-submit" type="button" style="display:none">Submit Order</button>
@@ -19916,6 +20018,9 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
         try:
             normalized_setup = _normalize_setup(payload.get("setup"))
             normalized_pattern = _normalize_pattern(payload.get("pattern"))
+            normalized_ema = _normalize_ema(payload.get("ema"))
+            normalized_aths_atls = _normalize_aths_atls(payload.get("aths_atls"))
+            normalized_round_number = _normalize_round_number(payload.get("round_number"))
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -20271,7 +20376,10 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                             "timeframe": _normalize_journal_timeframe(payload.get("timeframe") or ""),
                             "is_test_trade": is_test_trade,
                             "setup": normalized_setup,
-                    "pattern": normalized_pattern,
+                            "pattern": normalized_pattern,
+                            "ema": normalized_ema,
+                            "aths_atls": normalized_aths_atls,
+                            "round_number": normalized_round_number,
                             "entry_price": response_payload.get("entry_price"),
                             "stop_loss": response_payload.get("stop_price"),
                             "take_profit": response_payload.get("target_price"),
@@ -20321,6 +20429,9 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                     "is_test_trade": is_test_trade,
                     "setup": normalized_setup,
                     "pattern": normalized_pattern,
+                    "ema": normalized_ema,
+                    "aths_atls": normalized_aths_atls,
+                    "round_number": normalized_round_number,
                     "pending_webhook_id": pending_id,
                     "calculation_context_id": calculation_context_id,
                     "webhook_endpoint_url": webhook_endpoint_url,
@@ -20343,7 +20454,10 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                         "timeframe": webhook_payload.get("timeframe") or "",
                         "is_test_trade": is_test_trade,
                         "setup": normalized_setup,
-                    "pattern": normalized_pattern,
+                        "pattern": normalized_pattern,
+                        "ema": normalized_ema,
+                        "aths_atls": normalized_aths_atls,
+                        "round_number": normalized_round_number,
                         "status": "WAITING",
                         "enabled": True,
                         "calculation_context_id": calculation_context_id,
@@ -20572,6 +20686,9 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                     "is_test_trade": is_test_trade,
                     "setup": normalized_setup,
                     "pattern": normalized_pattern,
+                    "ema": normalized_ema,
+                    "aths_atls": normalized_aths_atls,
+                    "round_number": normalized_round_number,
                     "pending_webhook_id": pending_id,
                     "webhook_endpoint_url": webhook_endpoint_url,
                     "webhook_origin_host": webhook_origin_host,
@@ -20593,7 +20710,10 @@ async def calculator_quote(request: Request, payload: Dict[str, object] = Body(d
                         "timeframe": webhook_payload.get("timeframe") or "",
                         "is_test_trade": is_test_trade,
                         "setup": normalized_setup,
-                    "pattern": normalized_pattern,
+                        "pattern": normalized_pattern,
+                        "ema": normalized_ema,
+                        "aths_atls": normalized_aths_atls,
+                        "round_number": normalized_round_number,
                         "status": "WAITING",
                         "enabled": True,
                     }
@@ -20753,6 +20873,9 @@ async def calculator_webhook(request: Request, payload: Dict[str, object] = Body
         try:
             normalized_setup = _normalize_setup(payload.get("setup"))
             normalized_pattern = _normalize_pattern(payload.get("pattern"))
+            normalized_ema = _normalize_ema(payload.get("ema"))
+            normalized_aths_atls = _normalize_aths_atls(payload.get("aths_atls"))
+            normalized_round_number = _normalize_round_number(payload.get("round_number"))
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -20768,6 +20891,9 @@ async def calculator_webhook(request: Request, payload: Dict[str, object] = Body
             "timeframe": _normalize_journal_timeframe(payload.get("timeframe")),
             "setup": normalized_setup,
             "pattern": normalized_pattern,
+            "ema": normalized_ema,
+            "aths_atls": normalized_aths_atls,
+            "round_number": normalized_round_number,
             "calculation_context_id": payload.get("calculation_context_id") or payload.get("context_id"),
         "quote_created_at_ms": payload.get("quote_created_at_ms"),
         "risk_mode": payload.get("risk_mode"),
@@ -21155,6 +21281,9 @@ async def calculator_submit(payload: Dict[str, object] = Body(default={})) -> JS
     try:
         normalized_setup = _normalize_setup(payload.get("setup"))
         normalized_pattern = _normalize_pattern(payload.get("pattern"))
+        normalized_ema = _normalize_ema(payload.get("ema"))
+        normalized_aths_atls = _normalize_aths_atls(payload.get("aths_atls"))
+        normalized_round_number = _normalize_round_number(payload.get("round_number"))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     canonical = {
@@ -21186,6 +21315,9 @@ async def calculator_submit(payload: Dict[str, object] = Body(default={})) -> JS
         ),
         "setup": normalized_setup,
         "pattern": normalized_pattern,
+        "ema": normalized_ema,
+        "aths_atls": normalized_aths_atls,
+        "round_number": normalized_round_number,
     }
     request_id = f"calc-{uuid4().hex[:12]}"
     try:
@@ -22656,12 +22788,17 @@ def _compute_journal_stats(
         # Some imports represent missing SL/TP/entry as 0.0, which explodes distance metrics.
         return val is not None and math.isfinite(val) and val > 0
 
-    def _pct_distance(entry: Optional[float], level: Optional[float]) -> Optional[float]:
+    def _pct_distance(row: Dict[str, object], level_key: str) -> Optional[float]:
+        entry = _to_float(row.get("entry_price"))
+        level = _to_float(row.get(level_key))
         if not _is_valid_price_level(entry) or not _is_valid_price_level(level):
             return None
         if entry == 0:
             return None
-        return (abs(level - entry) / entry) * 100.0
+        distance = (abs(level - entry) / entry) * 100.0
+        if _canonical_market_for_row(row) == "fx" and distance > 50.0:
+            return None
+        return distance
 
     def _winner_rows(rows_subset: List[Dict[str, object]]) -> List[Dict[str, object]]:
         return [r for r in rows_subset if _is_win(r)]
@@ -22772,7 +22909,7 @@ def _compute_journal_stats(
     def _stop_pct_values(rows_subset: List[Dict[str, object]]) -> List[float]:
         out: List[float] = []
         for r in rows_subset:
-            pct = _pct_distance(_to_float(r.get("entry_price")), _to_float(r.get("stop_loss")))
+            pct = _pct_distance(r, "stop_loss")
             if pct is None:
                 pct = _distance_cell_pct_points(r.get("stop_loss_distance_pct"))
             if pct is not None:
@@ -22782,7 +22919,7 @@ def _compute_journal_stats(
     def _target_pct_values(rows_subset: List[Dict[str, object]]) -> List[float]:
         out: List[float] = []
         for r in rows_subset:
-            pct = _pct_distance(_to_float(r.get("entry_price")), _to_float(r.get("take_profit")))
+            pct = _pct_distance(r, "take_profit")
             if pct is None:
                 pct = _distance_cell_pct_points(r.get("target_distance_pct"))
             if pct is not None:
@@ -22952,12 +23089,18 @@ def _compute_journal_stats(
         if rp is not None:
             bucket["result_pct"].append(rp)
         if _is_valid_price_level(entry) and _is_valid_price_level(sl) and entry:
-            pct = abs(entry - sl)/entry*100.0
+            pct = _pct_distance(row, "stop_loss")
+        else:
+            pct = None
+        if pct is not None:
             bucket["sl_pct"].append(pct)
             if is_win: bucket.setdefault("sl_pct_wins",[]).append(pct)
             elif is_loss: bucket.setdefault("sl_pct_losses",[]).append(pct)
         if _is_valid_price_level(entry) and _is_valid_price_level(tp) and entry:
-            pct = abs(tp - entry)/entry*100.0
+            pct = _pct_distance(row, "take_profit")
+        else:
+            pct = None
+        if pct is not None:
             bucket["tp_pct"].append(pct)
             if is_win: bucket.setdefault("tp_pct_wins",[]).append(pct)
             elif is_loss: bucket.setdefault("tp_pct_losses",[]).append(pct)
@@ -23225,6 +23368,9 @@ def _compute_journal_stats(
             "avg_take_profit": _avg(all_tp_pct),
             "avg_profit_pct": _avg(result_pct_vals),
             "avg_result_pct": _avg(result_pct_vals),
+            "net_result_pct": sum(result_pct_vals) if result_pct_vals else None,
+            "gross_gain_result_pct": sum(value for value in result_pct_vals if value > 0) if result_pct_vals else None,
+            "gross_loss_result_pct": abs(sum(value for value in result_pct_vals if value < 0)) if result_pct_vals else None,
             "avg_r_multiple": _avg(r_mult_vals),
             "min_result_pct": _safe_min(result_pct_vals),
             "max_result_pct": _safe_max(result_pct_vals),
@@ -23315,55 +23461,17 @@ def _compute_journal_stats(
     }
 
     def _market_return_stats(rows_subset: List[Dict[str, object]], market: str) -> Dict[str, object]:
-        pnl_by_currency: Dict[str, List[float]] = defaultdict(list)
-        for row in rows_subset:
-            pnl = _row_pnl(row)
-            if pnl is None:
-                continue
-            currency = _row_pnl_currency(row) or "UNKNOWN"
-            pnl_by_currency[currency].append(pnl)
-
-        balances_by_currency: Dict[str, float] = defaultdict(float)
-        for balance in balances or []:
-            label = str(balance.get("account_label") or balance.get("account") or balance.get("label") or "").strip()
-            if _canonical_market_for_row({"account": label}) != market:
-                continue
-            current = _to_float(balance.get("balance"))
-            if current is None:
-                continue
-            currency = str(balance.get("currency") or balance.get("account_currency") or _infer_account_currency(label) or "UNKNOWN").strip().upper()
-            balances_by_currency[currency] += current
-
-        currencies = sorted(set(pnl_by_currency) | set(balances_by_currency))
-        result: Dict[str, object] = {
-            "market_return_pct": None,
-            "gross_gain_return_pct": None,
-            "gross_loss_return_pct": None,
-            "return_currency": currencies[0] if len(currencies) == 1 else None,
-            "return_unavailable_reason": None,
+        values = _metric_values(rows_subset, "result_pct")
+        return {
+            "market_return_pct": sum(values) if values else None,
+            "gross_gain_return_pct": sum(value for value in values if value > 0) if values else None,
+            "gross_loss_return_pct": abs(sum(value for value in values if value < 0)) if values else None,
+            "net_result_pct": sum(values) if values else None,
+            "gross_gain_result_pct": sum(value for value in values if value > 0) if values else None,
+            "gross_loss_result_pct": abs(sum(value for value in values if value < 0)) if values else None,
+            "return_method": "sum_trade_result_pct",
+            "return_unavailable_reason": None if values else "missing_profit_pct",
         }
-        if len(currencies) != 1:
-            result["return_unavailable_reason"] = "mixed_currency" if len(currencies) > 1 else "missing_currency"
-            return result
-        currency = currencies[0]
-        if currency not in balances_by_currency:
-            result["return_unavailable_reason"] = "missing_current_balance"
-            return result
-        pnl_values = pnl_by_currency.get(currency, [])
-        net_pnl = sum(pnl_values)
-        funded_capital = balances_by_currency[currency] - net_pnl
-        if not math.isfinite(funded_capital) or funded_capital <= 0:
-            result["return_unavailable_reason"] = "invalid_funded_capital"
-            return result
-        gross_gain = sum(value for value in pnl_values if value > 0)
-        gross_loss = abs(sum(value for value in pnl_values if value < 0))
-        result.update({
-            "market_return_pct": net_pnl / funded_capital * 100.0,
-            "gross_gain_return_pct": gross_gain / funded_capital * 100.0,
-            "gross_loss_return_pct": gross_loss / funded_capital * 100.0,
-            "starting_or_funded_capital": funded_capital,
-        })
-        return result
 
     def _market_bucket(rows_subset: List[Dict[str, object]], label: str) -> Dict[str, object]:
         durations = [
@@ -23385,17 +23493,40 @@ def _compute_journal_stats(
         target_vals = _target_pct_values(rows_subset)
         money = _money_stats_by_currency(rows_subset)
         market_key = "fx" if label.lower() in {"forex", "fx"} else "crypto" if label.lower() == "crypto" else ""
-        market_returns = _market_return_stats(rows_subset, market_key) if market_key else {
-            "market_return_pct": None,
-            "gross_gain_return_pct": None,
-            "gross_loss_return_pct": None,
-            "return_currency": None,
-            "return_unavailable_reason": "mixed_market",
-        }
+        market_returns = _market_return_stats(rows_subset, market_key)
         drawdown = _drawdown_stats_for_rows(rows_subset)
         streaks_local = _compute_longest_streaks(rows_subset)
         winning_streak_detail = streaks_local.get("longest_winning")
         losing_streak_detail = streaks_local.get("longest_losing")
+        winner_subset = _winner_rows(rows_subset)
+        loser_subset = _loser_rows(rows_subset)
+        commissions = [
+            abs(value) for value in (_to_float(row.get("commission")) for row in rows_subset)
+            if value is not None and value != 0
+        ]
+        pattern_counts: Counter[str] = Counter()
+        pattern_result_pct: Dict[str, float] = defaultdict(float)
+        timeframe_counts: Counter[str] = Counter()
+        timeframe_aliases = {
+            "1M": "1MIN", "1MIN": "1MIN", "5M": "5MIN", "5MIN": "5MIN",
+            "15M": "15MIN", "15MIN": "15MIN", "30M": "30MIN", "30MIN": "30MIN",
+            "1H": "1H", "4H": "4H", "1D": "DAILY", "DAILY": "DAILY",
+            "1W": "WEEKLY", "WEEKLY": "WEEKLY", "1MO": "MONTHLY", "MONTHLY": "MONTHLY",
+        }
+        for row in rows_subset:
+            pattern = str(row.get("pattern") or "").strip()
+            if pattern:
+                pattern_counts[pattern] += 1
+                result_pct = _to_float(row.get("result_pct"))
+                if result_pct is not None:
+                    pattern_result_pct[pattern] += result_pct
+            timeframe = timeframe_aliases.get(_normalize_journal_timeframe(row.get("timeframe")).upper())
+            if timeframe:
+                timeframe_counts[timeframe] += 1
+        pattern_by_count = sorted(pattern_counts, key=lambda pattern: (pattern_counts[pattern], pattern.lower()))
+        pattern_by_profit = sorted(pattern_counts, key=lambda pattern: (pattern_result_pct.get(pattern, 0.0), pattern.lower()))
+        long_subset = [row for row in rows_subset if str(row.get("side") or "").strip().upper().startswith(("BUY", "LONG"))]
+        short_subset = [row for row in rows_subset if str(row.get("side") or "").strip().upper().startswith(("SELL", "SHORT"))]
         return {
             "label": label,
             "trades": len(rows_subset),
@@ -23424,6 +23555,48 @@ def _compute_journal_stats(
             "min_target_pct": _safe_min(target_vals),
             "max_target_pct": _safe_max(target_vals),
             "avg_duration_seconds": _avg(durations),
+            "min_duration_seconds": min(durations) if durations else None,
+            "max_duration_seconds": max(durations) if durations else None,
+            "avg_stop_pct_winners": _avg(_stop_pct_values(winner_subset)),
+            "min_stop_pct_winners": _safe_min(_stop_pct_values(winner_subset)),
+            "max_stop_pct_winners": _safe_max(_stop_pct_values(winner_subset)),
+            "avg_target_pct_winners": _avg(_target_pct_values(winner_subset)),
+            "min_target_pct_winners": _safe_min(_target_pct_values(winner_subset)),
+            "max_target_pct_winners": _safe_max(_target_pct_values(winner_subset)),
+            "avg_result_pct_winners": _avg(_metric_values(winner_subset, "result_pct")),
+            "min_result_pct_winners": _safe_min(_metric_values(winner_subset, "result_pct")),
+            "max_result_pct_winners": _safe_max(_metric_values(winner_subset, "result_pct")),
+            "avg_r_multiple_winners": _avg(_metric_values(winner_subset, "r_multiple")),
+            "min_r_multiple_winners": _safe_min(_metric_values(winner_subset, "r_multiple")),
+            "max_r_multiple_winners": _safe_max(_metric_values(winner_subset, "r_multiple")),
+            "avg_stop_pct_losers": _avg(_stop_pct_values(loser_subset)),
+            "min_stop_pct_losers": _safe_min(_stop_pct_values(loser_subset)),
+            "max_stop_pct_losers": _safe_max(_stop_pct_values(loser_subset)),
+            "avg_target_pct_losers": _avg(_target_pct_values(loser_subset)),
+            "min_target_pct_losers": _safe_min(_target_pct_values(loser_subset)),
+            "max_target_pct_losers": _safe_max(_target_pct_values(loser_subset)),
+            "avg_result_pct_losers": _avg(_metric_values(loser_subset, "result_pct")),
+            "min_result_pct_losers": _safe_min(_metric_values(loser_subset, "result_pct")),
+            "max_result_pct_losers": _safe_max(_metric_values(loser_subset, "result_pct")),
+            "avg_r_multiple_losers": _avg(_metric_values(loser_subset, "r_multiple")),
+            "min_r_multiple_losers": _safe_min(_metric_values(loser_subset, "r_multiple")),
+            "max_r_multiple_losers": _safe_max(_metric_values(loser_subset, "r_multiple")),
+            "long_trades": len(long_subset),
+            "long_wins": sum(1 for row in long_subset if _is_win(row)),
+            "long_losses": sum(1 for row in long_subset if _is_loss(row)),
+            "long_break_even": sum(1 for row in long_subset if _is_be(row)),
+            "short_trades": len(short_subset),
+            "short_wins": sum(1 for row in short_subset if _is_win(row)),
+            "short_losses": sum(1 for row in short_subset if _is_loss(row)),
+            "short_break_even": sum(1 for row in short_subset if _is_be(row)),
+            "most_traded_pattern": pattern_by_count[-1] if pattern_by_count else None,
+            "least_traded_pattern": pattern_by_count[0] if pattern_by_count else None,
+            "most_profitable_pattern": pattern_by_profit[-1] if pattern_by_profit else None,
+            "least_profitable_pattern": pattern_by_profit[0] if pattern_by_profit else None,
+            **{f"timeframe_{name.lower()}": timeframe_counts[name] for name in ("1MIN", "5MIN", "15MIN", "30MIN", "1H", "4H", "DAILY", "WEEKLY", "MONTHLY")},
+            "min_commission": min(commissions) if commissions else None,
+            "avg_commission": _avg(commissions),
+            "max_commission": max(commissions) if commissions else None,
             "winning_streak": (winning_streak_detail or {}).get("trade_count"),
             "losing_streak": (losing_streak_detail or {}).get("trade_count"),
             "longest_winning_streak": winning_streak_detail,
@@ -23582,7 +23755,7 @@ def _compute_journal_period_stats(
         parsed = _parse_iso_datetime(value)
         return parsed if isinstance(parsed, datetime) else None
 
-    def _move_duration_avg(rows_subset: List[Dict[str, object]], prefix: str) -> Optional[float]:
+    def _move_duration_stats(rows_subset: List[Dict[str, object]], prefix: str) -> Dict[str, Optional[float]]:
         values: List[float] = []
         for row in rows_subset:
             if _is_test_trade_row(row):
@@ -23595,19 +23768,29 @@ def _compute_journal_period_stats(
                     duration = (move_time - open_time).total_seconds()
             if duration is not None and duration >= 0:
                 values.append(float(duration))
-        return sum(values) / len(values) if values else None
+        return {
+            "min": min(values) if values else None,
+            "avg": (sum(values) / len(values)) if values else None,
+            "max": max(values) if values else None,
+        }
 
     def _stats_for(rows_subset: List[Dict[str, object]]) -> Dict[str, object]:
         stats = _compute_journal_stats(rows_subset, balances or [])
-        move_break_even = _move_duration_avg(rows_subset, "move_to_break_even")
-        move_profit = _move_duration_avg(rows_subset, "move_to_profit")
+        move_break_even = _move_duration_stats(rows_subset, "move_to_break_even")
+        move_profit = _move_duration_stats(rows_subset, "move_to_profit")
         totals = stats.get("totals") if isinstance(stats.get("totals"), dict) else {}
         groups = stats.get("groups") if isinstance(stats.get("groups"), dict) else {}
         by_market = groups.get("by_market") if isinstance(groups.get("by_market"), dict) else {}
         overall = by_market.get("overall") if isinstance(by_market.get("overall"), dict) else {}
         for target in (totals, overall):
-            target["move_to_break_even_duration_seconds"] = move_break_even
-            target["move_to_profit_duration_seconds"] = move_profit
+            target["move_to_break_even_duration_seconds"] = move_break_even["avg"]
+            target["min_move_to_break_even_duration_seconds"] = move_break_even["min"]
+            target["avg_move_to_break_even_duration_seconds"] = move_break_even["avg"]
+            target["max_move_to_break_even_duration_seconds"] = move_break_even["max"]
+            target["move_to_profit_duration_seconds"] = move_profit["avg"]
+            target["min_move_to_profit_duration_seconds"] = move_profit["min"]
+            target["avg_move_to_profit_duration_seconds"] = move_profit["avg"]
+            target["max_move_to_profit_duration_seconds"] = move_profit["max"]
         return stats
 
     years: Dict[int, List[Dict[str, object]]] = defaultdict(list)
@@ -27851,8 +28034,8 @@ def _build_manual_import_authoritative_snapshot() -> Dict[str, object]:
 TRADING_JOURNAL_ACTIONS_TEMPLATE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Trading Journal Workspace</title>
-<style>body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}.wrap{min-height:100vh;display:flex;align-items:center;justify-content:center}.stack{display:flex;flex-direction:column;gap:12px;min-width:280px}button{padding:12px 14px;border-radius:10px;border:1px solid #334155;background:#1f2937;color:#e2e8f0;font-weight:700;cursor:pointer}.drop-zone{border:1px dashed #475569;border-radius:12px;padding:16px;text-align:center;color:#94a3b8;background:#0f172a;cursor:pointer}.drop-zone.drag-over{border-color:#38bdf8;background:#082f49;color:#e0f2fe}.status{margin-top:8px;white-space:pre-wrap;color:#94a3b8}</style></head>
-<body><div class="wrap"><div class="stack"><button id="open-journal-btn">Open workbook</button><button id="import-journal-btn">Import</button><button id="journal-resync-btn">Resync</button><div id="journal-import-drop-zone" class="drop-zone">Drop .xlsx/.xlsm/.xls/.csv import files here<br/><span style="font-size:12px">or click Import to choose a file</span></div><label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode" style="margin-left:8px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"><option value="" selected disabled>Select Demo or Live</option><option value="demo">Demo</option><option value="live">Live</option></select></label><button id="crypto-monthly-pnl-btn">Crypto Monthly P&L</button><button id="bybit-demo-balance-adjustment-btn">Bybit Demo Balance Adjustment</button><input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv" hidden/><div id="journal-actions-status" class="status"></div></div></div><script src="/static/trading_journal_actions.js?v={{TRADING_JOURNAL_ACTIONS_JS_VERSION}}"></script></body></html>"""
+<style>body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}.wrap{min-height:100vh;display:flex;align-items:center;justify-content:center}.stack{display:flex;flex-direction:column;gap:12px;min-width:280px;max-width:720px}button{padding:12px 14px;border-radius:10px;border:1px solid #334155;background:#1f2937;color:#e2e8f0;font-weight:700;cursor:pointer}.drop-zone{border:1px dashed #475569;border-radius:12px;padding:16px;text-align:center;color:#94a3b8;background:#0f172a;cursor:pointer}.drop-zone.drag-over{border-color:#38bdf8;background:#082f49;color:#e0f2fe}.status{margin-top:8px;white-space:pre-wrap;color:#94a3b8}.pnl-explanation{border:1px solid #334155;border-radius:10px;padding:14px;background:#0f172a;color:#cbd5e1;line-height:1.5}.pnl-explanation[hidden]{display:none}.pnl-explanation strong{color:#f8fafc}</style></head>
+<body><div class="wrap"><div class="stack"><button id="open-journal-btn">Open workbook</button><button id="import-journal-btn">Import</button><button id="journal-resync-btn">Resync</button><div id="journal-import-drop-zone" class="drop-zone">Drop .xlsx/.xlsm/.xls/.csv import files here<br/><span style="font-size:12px">or click Import to choose a file</span></div><label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode" style="margin-left:8px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"><option value="" selected disabled>Select Demo or Live</option><option value="demo">Demo</option><option value="live">Live</option></select></label><button id="crypto-monthly-pnl-btn">Crypto Monthly P&L</button><button id="bybit-demo-balance-adjustment-btn">Bybit Demo Balance Adjustment</button><button id="pnl-explanation-btn" type="button" aria-expanded="false" aria-controls="pnl-explanation-panel">P&amp;L % explanation</button><div id="pnl-explanation-panel" class="pnl-explanation" hidden><strong>How P&amp;L percentages are calculated</strong><br/>Trade Profit % is the per-trade percentage result stored by the import/calculator pipeline. Net P&amp;L % is the linear sum of included trade Profit % values. Gross gain % sums only positive included trade Profit % values. Gross loss % sums the absolute value of negative included trade Profit % values. Average P&amp;L % is the arithmetic average of included trade Profit % values. Min/Max P&amp;L % are the smallest/largest individual trade Profit % values. This is not a compounded equity curve calculation; compounded return would be product(1+r)-1 and would be a separate metric if added. Money Net P&amp;L remains money only where a sheet or column is explicitly a currency/money field.</div><input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv" hidden/><div id="journal-actions-status" class="status"></div></div></div><script src="/static/trading_journal_actions.js?v={{TRADING_JOURNAL_ACTIONS_JS_VERSION}}"></script></body></html>"""
 
 @app.get("/dashboard/trading-journal")
 @app.get("/merged/trading-journal")

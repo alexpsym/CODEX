@@ -1859,10 +1859,39 @@ def test_calculator_submit_passes_normalized_setup_to_broker(monkeypatch: pytest
     async def fake_place(payload, request_id):
         seen["setup"] = payload.get("setup")
         seen["pattern"] = payload.get("pattern")
+        seen["ema"] = payload.get("ema")
+        seen["aths_atls"] = payload.get("aths_atls")
+        seen["round_number"] = payload.get("round_number")
         return {"journal_context_saved": True}
     monkeypatch.setattr(master_service, "_place_bybit_order", fake_place)
-    resp = asyncio.run(master_service.calculator_submit({"asset":"crypto","account":"demo","symbol":"BTCUSDT","side":"buy","order_type":"market","setup":"news scalp","pattern":"channel"}))
+    resp = asyncio.run(master_service.calculator_submit({
+        "asset":"crypto","account":"demo","symbol":"BTCUSDT","side":"buy","order_type":"market",
+        "setup":"news scalp","pattern":"channel","ema":"yes",
+        "aths_atls":"ath","round_number":"no",
+    }))
     body = json.loads(resp.body.decode("utf-8"))
     assert body["ok"] is True
     assert seen["setup"] == "News Scalp"
     assert seen["pattern"] == "channel"
+    assert seen["ema"] == "Yes"
+    assert seen["aths_atls"] == "All-Time High"
+    assert seen["round_number"] == "No"
+
+
+def test_trade_context_normalizes_and_backfills_quality_criteria(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(master_service, "_load_trade_contexts", lambda: [])
+    saved = {}
+    monkeypatch.setattr(master_service, "_save_trade_contexts", lambda items: saved.setdefault("items", items))
+    context = master_service._upsert_trade_context({
+        "calculation_context_id": "criteria-1",
+        "ema": "y",
+        "aths_atls": "all time low",
+        "round_number": False,
+    })
+    assert context["ema"] == "Yes"
+    assert context["aths_atls"] == "All-Time Low"
+    assert context["round_number"] == "No"
+    merged = master_service._merge_bybit_demo_calc_context_into_row({"id": "row-1"}, context)
+    assert merged["ema"] == "Yes"
+    assert merged["aths_atls"] == "All-Time Low"
+    assert merged["round_number"] == "No"

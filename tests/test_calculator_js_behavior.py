@@ -617,10 +617,10 @@ eval(source);
     result = subprocess.run([node, "-e", harness, str(JS_PATH)], check=True, capture_output=True, text=True)
     data = json.loads(result.stdout.strip().splitlines()[-1])
     assert data["submittingState"] == "submitting"
-    assert data["submittingText"] == "Submitting…"
+    assert data["submittingText"] == "Submitting..."
     assert data["submitCallsWhilePending"] == 1
     assert data["pendingStateAfterDuplicates"] == "submitting"
-    assert data["pendingTextAfterDuplicates"] == "Submitting…"
+    assert data["pendingTextAfterDuplicates"] == "Submitting..."
     assert data["pendingErrorAfterDuplicates"] == ""
     assert data["staleClearsVisualState"] is True
     assert data["submitCallsAfterInvalidateRecalc"] == 1
@@ -642,3 +642,20 @@ def test_pattern_selector_buttons_invalidate_quote_and_payloads_include_pattern(
     assert "invalidateQuote()" in pattern_block
     assert source.count("pattern: state.pattern") >= 2
     assert "`pattern=${state.pattern || payload.pattern || ''}`" in source
+
+
+def test_quality_criteria_buttons_invalidate_quote_and_are_in_both_payloads() -> None:
+    source = JS_PATH.read_text(encoding="utf-8")
+    for function_name, state_field, container_id in (
+        ("setEmaButtons", "ema", "ema-toggle"),
+        ("setAthsAtlsButtons", "aths_atls", "aths-atls-toggle"),
+        ("setRoundNumberButtons", "round_number", "round-number-toggle"),
+    ):
+        assert f"function {function_name}()" in source
+        block = source.split(f"function {function_name}()", 1)[1].split("\n  function ", 1)[0]
+        assert f"$('{container_id}')" in block
+        assert "invalidateQuote()" in block
+        assert source.count(f"{state_field}: state.{state_field}") >= 2
+        assert f"`{state_field}=${{state.{state_field} || payload.{state_field} || ''}}`" in source
+    assert "['All-Time High','All-Time High']" in source
+    assert "['All-Time Low','All-Time Low']" in source

@@ -6,11 +6,12 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $RepoRoot = (Resolve-Path (Join-Path $ScriptDir "..\..")).Path
 $TemplatePath = Join-Path $ScriptDir "TradingToolsLauncher.cs"
+$IconPath = Join-Path $ScriptDir "TT.ico"
 $LocalMasterBat = Join-Path $RepoRoot "run_local_master_control.bat"
 
 Write-Host "Building Windows launchers from repo root: $RepoRoot"
 
-$requiredPaths = @($LocalMasterBat, $TemplatePath)
+$requiredPaths = @($LocalMasterBat, $TemplatePath, $IconPath)
 $missingRequired = $requiredPaths | Where-Object { -not (Test-Path -LiteralPath $_) }
 if ($missingRequired) {
     Write-Error "ERROR: This script must be run from a valid CODEX-master checkout or via build_windows_launchers.bat."
@@ -67,6 +68,7 @@ function Build-WithCsc {
     param(
         [Parameter(Mandatory = $true)] [string] $CompilerPath,
         [Parameter(Mandatory = $true)] [string] $Template,
+        [Parameter(Mandatory = $true)] [string] $Icon,
         [Parameter(Mandatory = $true)] [hashtable] $Target
     )
 
@@ -86,6 +88,7 @@ function Build-WithCsc {
             "/target:winexe",
             "/optimize+",
             "/reference:System.Windows.Forms.dll",
+            ("/win32icon:{0}" -f $Icon),
             ("/out:{0}" -f $tempOutputPath),
             $tempSourcePath
         )
@@ -137,8 +140,8 @@ function Build-WithCsc {
 
 function Build-WithAddType {
     param(
-        [Parameter(Mandatory = $true)] [string] $CompilerPath,
         [Parameter(Mandatory = $true)] [string] $Template,
+        [Parameter(Mandatory = $true)] [string] $Icon,
         [Parameter(Mandatory = $true)] [hashtable] $Target
     )
 
@@ -152,7 +155,8 @@ function Build-WithAddType {
     Set-Content -LiteralPath $tempSourcePath -Value $generatedSource -Encoding UTF8
 
     try {
-        Add-Type -LiteralPath $tempSourcePath -OutputAssembly $tempOutputPath -OutputType WindowsApplication -ReferencedAssemblies @('System.Windows.Forms.dll', 'System.dll') -Language CSharp -ErrorAction Stop | Out-Null
+        $compilerOptions = "/win32icon:`"$Icon`""
+        Add-Type -LiteralPath $tempSourcePath -OutputAssembly $tempOutputPath -OutputType WindowsApplication -ReferencedAssemblies @('System.Windows.Forms.dll', 'System.dll') -CompilerOptions $compilerOptions -Language CSharp -ErrorAction Stop | Out-Null
         if (-not (Test-Path -LiteralPath $tempOutputPath)) {
             Write-Warning "Add-Type reported success but output file is missing: $tempOutputPath"
             Write-Warning "Generated C# source preserved at: $tempSourcePath"
@@ -309,7 +313,7 @@ foreach ($candidate in $cscCandidates) {
     Write-Host "Trying csc.exe: $candidate"
     $allTargetsBuilt = $true
     foreach ($entry in $launcherTargets) {
-        if (-not (Build-WithCsc -CompilerPath $candidate -Template $template -Target $entry)) {
+        if (-not (Build-WithCsc -CompilerPath $candidate -Template $template -Icon $IconPath -Target $entry)) {
             $allTargetsBuilt = $false
             break
         }
@@ -325,7 +329,7 @@ if (-not $buildSucceeded -and (Test-AddTypeCompiler)) {
     Write-Host "Trying Add-Type CSharp compilation fallback."
     $allTargetsBuilt = $true
     foreach ($entry in $launcherTargets) {
-        if (-not (Build-WithAddType -Template $template -Target $entry)) {
+        if (-not (Build-WithAddType -Template $template -Icon $IconPath -Target $entry)) {
             $allTargetsBuilt = $false
             break
         }
@@ -339,19 +343,7 @@ if (-not $buildSucceeded -and (Test-AddTypeCompiler)) {
 if (-not $buildSucceeded) {
     $iexpressPath = Join-Path $env:WINDIR "System32\iexpress.exe"
     if (Test-Path -LiteralPath $iexpressPath) {
-        Write-Warning "WARNING: No C# compiler found. Falling back to IExpress launcher generation."
-        Write-Warning "WARNING: These launcher executables contain the current repo path. Rebuild them if the repo folder is moved."
-        $allTargetsBuilt = $true
-        foreach ($entry in $launcherTargets) {
-            if (-not (Build-WithIExpress -IExpressPath $iexpressPath -RepoRootPath $RepoRoot -Target $entry)) {
-                $allTargetsBuilt = $false
-                break
-            }
-        }
-
-        if ($allTargetsBuilt) {
-            $buildSucceeded = $true
-        }
+        Write-Warning "IExpress fallback is disabled because it cannot embed the required TT.ico launcher icon."
     }
 }
 
@@ -362,6 +354,8 @@ if (-not $buildSucceeded) {
     catch {
         Write-Warning "Shortcut fallback failed: $($_.Exception.Message)"
     }
+    Write-Error "Build did not produce compliant launcher executables with the required embedded TT.ico icon."
+    exit 1
 }
 
 $requiredExeOutputs = $launcherTargets | ForEach-Object { $_.OutputPath }

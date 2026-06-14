@@ -414,7 +414,7 @@ def test_compute_journal_stats_by_market_streaks_reset_on_break_even() -> None:
 
 
 
-def test_market_return_percentage_uses_current_balance_and_funded_capital() -> None:
+def test_market_return_percentage_uses_linear_trade_profit_percentages() -> None:
     rows = [
         {
             "row_type": "trade",
@@ -431,13 +431,13 @@ def test_market_return_percentage_uses_current_balance_and_funded_capital() -> N
         balances=[{"account": "OANDA DEMO", "balance": 900.0, "currency": "AUD"}],
     )
     fx = stats["groups"]["by_market"]["fx"]
-    assert fx["starting_or_funded_capital"] == 1000.0
-    assert fx["market_return_pct"] == pytest.approx(-10.0)
+    assert fx["market_return_pct"] == pytest.approx(-80.0)
     assert fx["gross_gain_return_pct"] == pytest.approx(0.0)
-    assert fx["gross_loss_return_pct"] == pytest.approx(10.0)
+    assert fx["gross_loss_return_pct"] == pytest.approx(80.0)
+    assert fx["return_method"] == "sum_trade_result_pct"
 
 
-def test_market_return_percentage_can_represent_total_capital_loss() -> None:
+def test_market_return_percentage_preserves_large_linear_trade_loss() -> None:
     rows = [
         {
             "row_type": "trade",
@@ -454,12 +454,11 @@ def test_market_return_percentage_can_represent_total_capital_loss() -> None:
         balances=[{"account": "BYBIT", "balance": 0.0, "currency": "USDT"}],
     )
     crypto = stats["groups"]["by_market"]["crypto"]
-    assert crypto["starting_or_funded_capital"] == 100.0
-    assert crypto["market_return_pct"] == pytest.approx(-100.0)
-    assert crypto["gross_loss_return_pct"] == pytest.approx(100.0)
+    assert crypto["market_return_pct"] == pytest.approx(-250.0)
+    assert crypto["gross_loss_return_pct"] == pytest.approx(250.0)
 
 
-def test_market_return_percentage_is_blank_for_mixed_currencies() -> None:
+def test_market_return_percentage_requires_trade_profit_percentages() -> None:
     rows = [
         {"row_type": "trade", "asset_class": "fx", "account": "OANDA DEMO", "symbol": "EURUSD", "net_profit": -100.0, "currency": "AUD"},
         {"row_type": "trade", "asset_class": "fx", "account": "FOREX USD", "symbol": "USDJPY", "net_profit": 20.0, "currency": "USD"},
@@ -475,4 +474,23 @@ def test_market_return_percentage_is_blank_for_mixed_currencies() -> None:
     assert fx["market_return_pct"] is None
     assert fx["gross_gain_return_pct"] is None
     assert fx["gross_loss_return_pct"] is None
-    assert fx["return_unavailable_reason"] == "mixed_currency"
+    assert fx["return_unavailable_reason"] == "missing_profit_pct"
+
+
+def test_invalid_fx_target_distance_is_ignored_but_large_crypto_target_is_kept() -> None:
+    rows = [
+        {
+            "row_type": "trade", "asset_class": "fx", "account": "OANDA DEMO",
+            "symbol": "USDJPY", "entry_price": 153.0, "take_profit": 1.0,
+            "result_pct": 1.0, "net_profit": 1.0,
+        },
+        {
+            "row_type": "trade", "asset_class": "crypto", "account": "BYBIT",
+            "symbol": "BTCUSDT", "entry_price": 100.0, "take_profit": 174.65,
+            "result_pct": 1.0, "net_profit": 1.0,
+        },
+    ]
+    by_market = _compute_journal_stats(rows, balances=[])["groups"]["by_market"]
+    assert by_market["fx"]["max_target_pct"] is None
+    assert by_market["crypto"]["max_target_pct"] == pytest.approx(74.65)
+    assert by_market["overall"]["max_target_pct"] == pytest.approx(74.65)

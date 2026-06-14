@@ -12,6 +12,9 @@
     test_mode: 'no',
     setup: '',
     pattern: '',
+    ema: '',
+    aths_atls: '',
+    round_number: '',
     quote: null,
     resolvedSymbol: '',
     pendingWebhookId: '',
@@ -45,7 +48,7 @@
   const quoteStatusEl = $('calc-quote-status');
   const webhookStatusEl = $('calc-webhook-status');
   const SUBMIT_LABEL = 'Submit Order';
-  const SUBMITTING_LABEL = 'Submitting…';
+  const SUBMITTING_LABEL = 'Submitting...';
   let submitInFlight = false;
   let submitStateResetTimer = null;
 
@@ -474,6 +477,9 @@
       `timeframe=${state.timeframe || payload.timeframe || ''}`,
       `setup=${state.setup || payload.setup || ''}`,
       `pattern=${state.pattern || payload.pattern || ''}`,
+      `ema=${state.ema || payload.ema || ''}`,
+      `aths_atls=${state.aths_atls || payload.aths_atls || ''}`,
+      `round_number=${state.round_number || payload.round_number || ''}`,
       `risk_mode=${payload.risk_mode}`,
       `risk_value=${payload.risk_value}`,
       `stop_loss_ticks=${payload.stop_loss_ticks}`,
@@ -661,6 +667,24 @@
     const opts = [['','None'],['range','range'],['channel','channel']];
     root.innerHTML = opts.map(([v,l])=>`<button type="button" data-v="${v}" class="${v===state.pattern?'active':''}">${l}</button>`).join('');
     root.querySelectorAll('button').forEach((btn)=>btn.addEventListener('click',()=>{state.pattern=btn.dataset.v||''; setPatternButtons(); invalidateQuote();}));
+  }
+  function setEmaButtons() {
+    const root = $('ema-toggle'); if (!root) return;
+    const opts = [['','None'],['Yes','Yes'],['No','No']];
+    root.innerHTML = opts.map(([v,l])=>`<button type="button" data-v="${v}" class="${v===state.ema?'active':''}">${l}</button>`).join('');
+    root.querySelectorAll('button').forEach((btn)=>btn.addEventListener('click',()=>{state.ema=btn.dataset.v||''; setEmaButtons(); invalidateQuote();}));
+  }
+  function setAthsAtlsButtons() {
+    const root = $('aths-atls-toggle'); if (!root) return;
+    const opts = [['','None'],['All-Time High','All-Time High'],['All-Time Low','All-Time Low']];
+    root.innerHTML = opts.map(([v,l])=>`<button type="button" data-v="${v}" class="${v===state.aths_atls?'active':''}">${l}</button>`).join('');
+    root.querySelectorAll('button').forEach((btn)=>btn.addEventListener('click',()=>{state.aths_atls=btn.dataset.v||''; setAthsAtlsButtons(); invalidateQuote();}));
+  }
+  function setRoundNumberButtons() {
+    const root = $('round-number-toggle'); if (!root) return;
+    const opts = [['','None'],['Yes','Yes'],['No','No']];
+    root.innerHTML = opts.map(([v,l])=>`<button type="button" data-v="${v}" class="${v===state.round_number?'active':''}">${l}</button>`).join('');
+    root.querySelectorAll('button').forEach((btn)=>btn.addEventListener('click',()=>{state.round_number=btn.dataset.v||''; setRoundNumberButtons(); invalidateQuote();}));
   }
 
   async function resolveSymbolAndLoad() {
@@ -859,6 +883,9 @@
         test: state.test_mode,
         setup: state.setup,
         pattern: state.pattern,
+        ema: state.ema,
+        aths_atls: state.aths_atls,
+        round_number: state.round_number,
         pending_webhook_id: state.webhook_mode === 'yes' ? (state.pendingWebhookId || undefined) : undefined,
         previous_pending_webhook_id: state.webhook_mode === 'yes' ? undefined : (state.pendingWebhookId || undefined),
       };
@@ -947,6 +974,9 @@
         test: state.test_mode,
         setup: state.setup,
         pattern: state.pattern,
+        ema: state.ema,
+        aths_atls: state.aths_atls,
+        round_number: state.round_number,
         planned_entry_price: state.quote.entry_price,
         planned_stop_price: state.quote.stop_price,
         planned_target_price: state.quote.target_price,
@@ -1009,6 +1039,9 @@
   setTimeframeButtons();
   setSetupButtons();
   setPatternButtons();
+  setEmaButtons();
+  setAthsAtlsButtons();
+  setRoundNumberButtons();
   updateRiskUiForAsset();
   syncAllToggleStates();
   const webhookYesBtn = $('webhook-toggle').querySelectorAll('button')[1];

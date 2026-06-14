@@ -290,6 +290,16 @@ def test_windows_launcher_builder_references_windows_forms_for_message_box() -> 
     assert "-ReferencedAssemblies @('System.Windows.Forms.dll', 'System.dll')" in ps1
 
 
+def test_windows_launcher_builder_embeds_repo_icon() -> None:
+    ps1 = (ROOT / 'tools' / 'windows_launchers' / 'build_windows_launchers.ps1').read_text(encoding='utf-8')
+    assert '$IconPath = Join-Path $ScriptDir "TT.ico"' in ps1
+    assert '$requiredPaths = @($LocalMasterBat, $TemplatePath, $IconPath)' in ps1
+    assert '"/win32icon:{0}" -f $Icon' in ps1
+    assert '-CompilerOptions $compilerOptions' in ps1
+    assert 'IExpress fallback is disabled because it cannot embed the required TT.ico launcher icon.' in ps1
+    assert (ROOT / 'tools' / 'windows_launchers' / 'TT.ico').is_file()
+
+
 def test_run_local_master_parent_logs_are_condensed_and_worker_logs_are_detailed() -> None:
     script = (ROOT / 'run_local_master_control.bat').read_text(encoding='utf-8')
     assert 'echo [local-master] launcher starting.' in script
