@@ -6,13 +6,43 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 $RepoRoot = (Resolve-Path (Join-Path $ScriptDir "..\..")).Path
 $TemplatePath = Join-Path $ScriptDir "TradingToolsLauncher.cs"
-$IconPath = Join-Path $ScriptDir "TT.ico"
 $LocalMasterBat = Join-Path $RepoRoot "run_local_master_control.bat"
 
 Write-Host "Building Windows launchers from repo root: $RepoRoot"
 
-$requiredPaths = @($LocalMasterBat, $TemplatePath, $IconPath)
-$missingRequired = $requiredPaths | Where-Object { -not (Test-Path -LiteralPath $_) }
+function Resolve-LauncherIconPath {
+    $toolIconPath = Join-Path $ScriptDir "TT.ico"
+    $rootIconPath = Join-Path $RepoRoot "TT.ico"
+    $rootLowercaseIconPath = Join-Path $RepoRoot "tradingtools.ico"
+    $rootTitlecaseIconPath = Join-Path $RepoRoot "TradingTools.ico"
+    $checkedPaths = @(
+        $toolIconPath,
+        $rootIconPath,
+        $rootLowercaseIconPath,
+        $rootTitlecaseIconPath
+    )
+
+    foreach ($candidate in $checkedPaths) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return [IO.Path]::GetFullPath($candidate)
+        }
+    }
+
+    $checkedPathList = $checkedPaths | ForEach-Object { " - $_" }
+    throw "Required launcher icon was not found. Checked paths:`n$($checkedPathList -join [Environment]::NewLine)"
+}
+
+try {
+    $IconPath = Resolve-LauncherIconPath
+} catch {
+    Write-Host "ERROR: $($_.Exception.Message)"
+    exit 1
+}
+
+Write-Host "Resolved launcher icon path: $IconPath"
+
+$requiredPaths = @($LocalMasterBat, $TemplatePath)
+$missingRequired = $requiredPaths | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }
 if ($missingRequired) {
     Write-Error "ERROR: This script must be run from a valid CODEX-master checkout or via build_windows_launchers.bat."
     foreach ($missing in $missingRequired) {
@@ -60,6 +90,7 @@ function Test-AddTypeCompiler {
     }
     catch {
         Write-Warning "Add-Type probe failed: $($_.Exception.Message)"
+        Write-Host ($_ | Format-List * -Force | Out-String)
         return $false
     }
 }
@@ -132,6 +163,7 @@ function Build-WithCsc {
     }
     catch {
         Write-Warning "Compilation failed for $($Target.ExeName): $($_.Exception.Message)"
+        Write-Host ($_ | Format-List * -Force | Out-String)
         Write-Warning "Generated C# source preserved at: $tempSourcePath"
         Write-Warning "Compiler debug files preserved at: $tempBuildDir"
         return $false
@@ -178,6 +210,7 @@ function Build-WithAddType {
     }
     catch {
         Write-Warning "Add-Type compilation failed for $($Target.ExeName): $($_.Exception.Message)"
+        Write-Host ($_ | Format-List * -Force | Out-String)
         Write-Warning "Generated C# source preserved at: $tempSourcePath"
         Write-Warning "Compiler debug files preserved at: $tempBuildDir"
         return $false

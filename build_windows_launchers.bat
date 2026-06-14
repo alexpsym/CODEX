@@ -6,6 +6,6 @@ set "EXITCODE=%ERRORLEVEL%"
 if not "%EXITCODE%"=="0" (
     echo.
     echo Failed to build Windows launchers. Exit code: %EXITCODE%
-    pause
+    if not defined CODEX_INSTALLER_NONINTERACTIVE pause
 )
 exit /b %EXITCODE%

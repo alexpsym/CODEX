@@ -292,12 +292,45 @@ def test_windows_launcher_builder_references_windows_forms_for_message_box() -> 
 
 def test_windows_launcher_builder_embeds_repo_icon() -> None:
     ps1 = (ROOT / 'tools' / 'windows_launchers' / 'build_windows_launchers.ps1').read_text(encoding='utf-8')
-    assert '$IconPath = Join-Path $ScriptDir "TT.ico"' in ps1
-    assert '$requiredPaths = @($LocalMasterBat, $TemplatePath, $IconPath)' in ps1
+    assert 'function Resolve-LauncherIconPath' in ps1
+    tool_icon_idx = ps1.find('$toolIconPath = Join-Path $ScriptDir "TT.ico"')
+    root_icon_idx = ps1.find('$rootIconPath = Join-Path $RepoRoot "TT.ico"')
+    assert tool_icon_idx != -1
+    assert root_icon_idx != -1
+    assert tool_icon_idx < root_icon_idx
+    assert '$rootLowercaseIconPath = Join-Path $RepoRoot "tradingtools.ico"' in ps1
+    assert '$rootTitlecaseIconPath = Join-Path $RepoRoot "TradingTools.ico"' in ps1
+    assert 'Resolved launcher icon path: $IconPath' in ps1
+    assert 'Required launcher icon was not found. Checked paths:' in ps1
+    assert '$checkedPaths | ForEach-Object { " - $_" }' in ps1
     assert '"/win32icon:{0}" -f $Icon' in ps1
     assert '-CompilerOptions $compilerOptions' in ps1
     assert 'IExpress fallback is disabled because it cannot embed the required TT.ico launcher icon.' in ps1
-    assert (ROOT / 'tools' / 'windows_launchers' / 'TT.ico').is_file()
+    icon_candidates = (
+        ROOT / 'tools' / 'windows_launchers' / 'TT.ico',
+        ROOT / 'TT.ico',
+        ROOT / 'tradingtools.ico',
+        ROOT / 'TradingTools.ico',
+    )
+    assert any(path.is_file() for path in icon_candidates)
+
+
+def test_installer_captures_launcher_output_and_disables_nested_pause() -> None:
+    installer = _installer_script_path().read_text(encoding='utf-8')
+    launcher_batch = (ROOT / 'build_windows_launchers.bat').read_text(encoding='utf-8')
+
+    assert 'function Invoke-CapturedLauncherBuild' in installer
+    assert '$psi.RedirectStandardOutput = $true' in installer
+    assert '$psi.RedirectStandardError = $true' in installer
+    assert '/d /s /c set CODEX_INSTALLER_NONINTERACTIVE=1&& call' in installer
+    assert "$psi.EnvironmentVariables['CODEX_INSTALLER_NONINTERACTIVE']" not in installer
+    assert 'Builder script path: $BuildScript' in installer
+    assert '--- launcher build stdout ---' in installer
+    assert '--- launcher build stderr ---' in installer
+    assert '$launcherBuildExit = Invoke-CapturedLauncherBuild -BuildScript $buildLaunchersBat -WorkingDirectory $codexDir' in installer
+    assert '& $buildLaunchersBat' not in installer
+    assert 'if "%RESULT%"=="0" pause' in installer.splitlines()[:7]
+    assert 'if not defined CODEX_INSTALLER_NONINTERACTIVE pause' in launcher_batch
 
 
 def test_run_local_master_parent_logs_are_condensed_and_worker_logs_are_detailed() -> None:

@@ -3,7 +3,7 @@ setlocal
 set "__BATFILE=%~f0"
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -LiteralPath $env:__BATFILE | Select-Object -Skip 7 | Out-String | Invoke-Expression"
 set "RESULT=%ERRORLEVEL%"
-pause
+if "%RESULT%"=="0" pause
 exit /b %RESULT%
 # POWERSHELL SCRIPT STARTS BELOW
 
@@ -515,6 +515,58 @@ function ConvertTo-NativeArgumentString {
     }
 
     return ($quoted -join ' ')
+}
+
+function Invoke-CapturedLauncherBuild {
+    param(
+        [Parameter(Mandatory = $true)] [string] $BuildScript,
+        [Parameter(Mandatory = $true)] [string] $WorkingDirectory,
+        [int] $TimeoutSeconds = 300
+    )
+
+    $cmdExe = if ($env:ComSpec) { $env:ComSpec } else { Join-Path $env:WINDIR 'System32\cmd.exe' }
+    $escapedBuildScript = $BuildScript.Replace('"', '""')
+
+    Write-Host "Builder script path: $BuildScript"
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $cmdExe
+    $psi.WorkingDirectory = $WorkingDirectory
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.RedirectStandardInput = $true
+    $psi.Arguments = "/d /s /c set CODEX_INSTALLER_NONINTERACTIVE=1&& call `"$escapedBuildScript`""
+
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    [void]$proc.Start()
+    $proc.StandardInput.Close()
+    $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+    $stderrTask = $proc.StandardError.ReadToEndAsync()
+
+    $timedOut = -not $proc.WaitForExit($TimeoutSeconds * 1000)
+    if ($timedOut) {
+        Stop-ProcessTreeById -ProcessId $proc.Id -Reason "launcher build timeout after $TimeoutSeconds seconds"
+    }
+
+    [void]$proc.WaitForExit()
+    [void][System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), 10000)
+
+    $stdout = Remove-TrailingLineTerminators -Text $stdoutTask.Result
+    $stderr = Remove-TrailingLineTerminators -Text $stderrTask.Result
+
+    Write-Host '--- launcher build stdout ---'
+    if ($stdout) { Write-Host $stdout } else { Write-Host '(no stdout)' }
+    Write-Host '--- launcher build stderr ---'
+    if ($stderr) { Write-Host $stderr } else { Write-Host '(no stderr)' }
+
+    if ($timedOut) {
+        throw "Launcher build timed out after $TimeoutSeconds seconds."
+    }
+
+    return $proc.ExitCode
 }
 
 function Invoke-GitCommandNoInput {
@@ -1203,13 +1255,7 @@ Write-Section 'Building Windows launcher executable...'
 Write-Host $buildLaunchersBat
 
 try {
-    Push-Location -LiteralPath $codexDir
-    try {
-        & $buildLaunchersBat
-        $launcherBuildExit = $LASTEXITCODE
-    } finally {
-        Pop-Location
-    }
+    $launcherBuildExit = Invoke-CapturedLauncherBuild -BuildScript $buildLaunchersBat -WorkingDirectory $codexDir
 
     if ($launcherBuildExit -ne 0) {
         throw "build_windows_launchers.bat failed with exit code $launcherBuildExit"
