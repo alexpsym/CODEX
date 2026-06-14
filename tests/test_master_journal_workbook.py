@@ -4,7 +4,7 @@ from datetime import datetime
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 import pytest
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, SHEET_ORDER, TRADE_LOG_HEADERS, TRADE_LOG_HEADERS_V1, OLD_TRADE_LOG_HEADERS, PRE_MOVE_TRADE_LOG_HEADERS, MOVE_TO_FIELD_MAP, TRADE_LOG_HEADER_ROWS, TRADE_LOG_DATA_START_ROW, TRADE_LOG_FILTER_HEADER_ROW, TRADE_NUMBER_HEADER, REPORT_YEARLY_SHEET, REPORT_METRIC_LABELS, INSTRUMENT_AVERAGES_HEADERS, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL, DASHBOARD_MOVE_TO_PROFIT_LABEL, DURATION_NUMBER_FORMAT, adaptive_percent_number_format, adaptive_number_format, resolve_trade_folder_link, expected_report_sheet_names, _ensure_trade_log_schema, _ensure_instrument_averages_schema, _ensure_pnl_calendar_freeze_panes, _repair_trade_log_move_to_durations, _trade_log_header_map, _instrument_averages_header_map, _result_percentage_totals_by_market
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, SHEET_ORDER, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, TRADE_LOG_HEADERS, TRADE_LOG_HEADERS_V1, OLD_TRADE_LOG_HEADERS, PRE_MOVE_TRADE_LOG_HEADERS, MOVE_TO_FIELD_MAP, TRADE_LOG_HEADER_ROWS, TRADE_LOG_DATA_START_ROW, TRADE_LOG_FILTER_HEADER_ROW, TRADE_NUMBER_HEADER, REPORT_YEARLY_SHEET, REPORT_METRIC_LABELS, INSTRUMENT_AVERAGES_HEADERS, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL, DASHBOARD_MOVE_TO_PROFIT_LABEL, DURATION_NUMBER_FORMAT, adaptive_percent_number_format, adaptive_number_format, resolve_trade_folder_link, expected_report_sheet_names, _apply_trade_number_hyperlinks, _ensure_trade_log_schema, _ensure_instrument_averages_schema, _ensure_pnl_calendar_freeze_panes, _repair_trade_log_move_to_durations, _trade_log_header_map, _instrument_averages_header_map, _result_percentage_totals_by_market
 from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter, range_boundaries
 
 def _cf_ranges(ws):
@@ -25,7 +25,7 @@ def _cell_covered(ranges, cell):
 def _header_col(ws, name: str) -> int:
     if ws.title in {"Trade Log", "All Trades"}:
         return _trade_log_header_map(ws)[name]
-    if ws.title == "Instrument Averages":
+    if ws.title in {SYMBOLS_SHEET, "Instrument Averages"}:
         return _instrument_averages_header_map(ws)[name]
     headers = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
     return headers.index(name) + 1
@@ -74,8 +74,9 @@ def _ensure_trade_log_headers(wb) -> None:
         for col, header in enumerate(TRADE_LOG_HEADERS, start=1):
             ws.cell(1, col, header)
     _ensure_trade_log_schema(ws)
-    if "Instrument Averages" in wb.sheetnames:
-        inst = wb["Instrument Averages"]
+    instrument_name = SYMBOLS_SHEET if SYMBOLS_SHEET in wb.sheetnames else "Instrument Averages"
+    if instrument_name in wb.sheetnames:
+        inst = wb[instrument_name]
         _ensure_instrument_averages_schema(inst)
 
 def _all_rule_colors(ws):
@@ -108,21 +109,26 @@ def test_single_builder_definition():
 
 def test_dashboard_parity_and_equity(tmp_path: Path):
     out=tmp_path/'Trading Journal.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
-    assert wb.sheetnames[:4] == SHEET_ORDER
-    assert wb.sheetnames[4:] == expected_report_sheet_names(sample_snapshot())
-    vals=[str(wb['Dashboard'].cell(r,c).value or '') for r in range(1,220) for c in range(1,13)]
+    assert wb.sheetnames[:len(SHEET_ORDER)] == SHEET_ORDER
+    assert wb.sheetnames[len(SHEET_ORDER):] == expected_report_sheet_names(sample_snapshot())
+    vals=[
+        str(ws.cell(r,c).value or '')
+        for ws in (wb[STATS1_SHEET], wb[STATS2_SHEET])
+        for r in range(1,220)
+        for c in range(1,15)
+    ]
     assert 'Account Balances' in vals and 'Main Stats' not in vals and 'Label' not in vals
     for label in ['Overall','Winners','Losers','Drawdown','FX','Crypto','Instrument leaders','Win rate','Avg R','Max R loss','Max R win','Min duration','Max Move to Profit','Side','Patterns','Timeframe','Commission']:
         assert label in vals
-    assert any(isinstance(wb['Dashboard'].cell(r,c).value, float) for r in range(1,220) for c in range(1,13))
-    assert all(wb['Dashboard'][coord].number_format == '0.00%' for coord in ('C8','D8','C9','D9','C10','D10'))
+    assert any(isinstance(wb[STATS1_SHEET].cell(r,c).value, float) for r in range(1,220) for c in range(1,13))
+    assert all(wb[STATS1_SHEET][coord].number_format == '0.00%' for coord in ('C8','D8','C9','D9','C10','D10'))
     assert any(
-        isinstance(wb['Dashboard'].cell(r, c).value, (int, float)) and
-        str(wb['Dashboard'].cell(r, c).number_format or "") == DURATION_NUMBER_FORMAT
+        isinstance(wb[STATS1_SHEET].cell(r, c).value, (int, float)) and
+        str(wb[STATS1_SHEET].cell(r, c).number_format or "") == DURATION_NUMBER_FORMAT
         for r in range(1,220) for c in range(1,13)
     )
     assert 'Equity Curve' not in wb.sheetnames
-    ranges = _cf_ranges(wb["Dashboard"])
+    ranges = _cf_ranges(wb[STATS1_SHEET])
     assert all(not r.startswith("B1:K") for r in ranges)
     assert not _cell_covered(ranges, "B3")  # Trades count should not be profit/loss colored
 
@@ -136,7 +142,7 @@ def test_dashboard_overall_return_average_labels_and_move_durations(tmp_path: Pa
     })
     out = tmp_path / "dashboard_acceptance.xlsx"
     build_master_journal_workbook(snapshot, out)
-    dash = load_workbook(out, data_only=True)["Dashboard"]
+    dash = load_workbook(out, data_only=True)[STATS1_SHEET]
     assert dash["B8"].value not in (None, "")
     labels = {str(dash.cell(row, 1).value or ""): row for row in range(1, dash.max_row + 1)}
     assert labels[DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL] == 22
@@ -145,7 +151,7 @@ def test_dashboard_overall_return_average_labels_and_move_durations(tmp_path: Pa
     assert dash.cell(labels[DASHBOARD_MOVE_TO_PROFIT_LABEL], 2).value == 20000
 
 
-def test_mixed_currency_overall_return_sums_market_returns():
+def test_mixed_currency_overall_return_uses_account_balances():
     totals = _result_percentage_totals_by_market(
         [
             {
@@ -162,10 +168,11 @@ def test_mixed_currency_overall_return_sums_market_returns():
             {"account_label": "BYBIT LIVE", "balance": 550, "currency": "USDT"},
         ],
     )
-    assert totals["fx"]["market_return_pct"] == pytest.approx(99.0)
-    assert totals["crypto"]["market_return_pct"] == pytest.approx(88.0)
-    assert totals["overall"]["market_return_pct"] == pytest.approx(187.0)
-    assert totals["overall"]["return_method"] == "sum_trade_result_pct"
+    assert totals["fx"]["market_return_pct"] == pytest.approx(10.0)
+    assert totals["crypto"]["market_return_pct"] == pytest.approx(10.0)
+    assert totals["overall"]["market_return_pct"] is None
+    assert totals["overall"]["return_unavailable_reason"] == "mixed_currencies"
+    assert totals["overall"]["return_method"] == "cashflow_adjusted_account_balance"
 
 
 def test_move_to_duration_repair_uses_open_and_move_times():
@@ -206,7 +213,7 @@ def test_instrument_averages_new_columns_order_formats_and_alignment(tmp_path: P
     })
     out = tmp_path / "instrument_acceptance.xlsx"
     build_master_journal_workbook(snapshot, out)
-    ws = load_workbook(out)["Instrument Averages"]
+    ws = load_workbook(out)[SYMBOLS_SHEET]
     headers = [str(cell.value or "") for cell in ws[INSTRUMENT_AVERAGES_FILTER_HEADER_ROW]]
     assert headers == INSTRUMENT_AVERAGES_HEADERS
     by_header = {header: index + 1 for index, header in enumerate(headers)}
@@ -261,8 +268,8 @@ def test_trade_number_schema_reports_and_source_roundtrip(tmp_path: Path):
     row_id_col = _header_col(ws, "Row ID")
     assert row_id_col == len(TRADE_LOG_HEADERS)
     assert ws.column_dimensions[get_column_letter(row_id_col)].hidden is True
-    assert wb.sheetnames[:4] == SHEET_ORDER
-    assert wb.sheetnames[4:] == expected_report_sheet_names(snap)
+    assert wb.sheetnames[:len(SHEET_ORDER)] == SHEET_ORDER
+    assert wb.sheetnames[len(SHEET_ORDER):] == expected_report_sheet_names(snap)
     yearly = wb[REPORT_YEARLY_SHEET]
     assert yearly["B1"].value == 2018
     assert yearly.cell(1, yearly.max_column).value >= 2026
@@ -415,7 +422,7 @@ def test_dashboard_build_includes_canonical_move_duration_rows(tmp_path: Path):
     out = tmp_path / "canonical_dashboard_rows.xlsx"
     build_master_journal_workbook(snapshot, out)
     wb = load_workbook(out)
-    dash = wb["Dashboard"]
+    dash = wb[STATS1_SHEET]
     labels = {str(dash.cell(row, 1).value or ""): row for row in range(1, dash.max_row + 1)}
     assert DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL in labels
     assert DASHBOARD_MOVE_TO_PROFIT_LABEL in labels
@@ -491,7 +498,7 @@ def test_data_only_update_inserts_missing_dashboard_move_rows_and_preserves_metr
     ]
     Path(result["candidate_path"]).replace(path)
     wb = load_workbook(path)
-    dash = wb["Dashboard"]
+    dash = wb[STATS1_SHEET]
     labels = {str(dash.cell(row, 1).value or ""): row for row in range(1, dash.max_row + 1)}
     break_even_row = labels[DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL]
     profit_row = labels[DASHBOARD_MOVE_TO_PROFIT_LABEL]
@@ -575,7 +582,7 @@ def test_dashboard_manual_move_rows_survive_and_populate_by_label(tmp_path: Path
     assert result["ok"] is True
     Path(result["candidate_path"]).replace(path)
     wb = load_workbook(path)
-    dash = wb["Dashboard"]
+    dash = wb[STATS1_SHEET]
     assert dash["A2"].value == DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL
     assert dash["A3"].value == DASHBOARD_MOVE_TO_PROFIT_LABEL
     assert dash["B2"].value == 10000 and dash["D2"].value == 10000
@@ -724,7 +731,7 @@ def test_balance_after_resolution_and_duration_display(tmp_path: Path):
     assert ws.cell(_trade_data_row(), _header_col(ws, 'Trade Duration (DD:HH:MM:SS)')).value == 41
     assert ws.cell(5, _header_col(ws, 'Trade Duration (DD:HH:MM:SS)')).value == 503
     assert ws.cell(_trade_data_row(), _header_col(ws, 'Trade Duration (DD:HH:MM:SS)')).number_format == DURATION_NUMBER_FORMAT
-    inst=wb['Instrument Averages']
+    inst=wb[SYMBOLS_SHEET]
     inst_headers = _instrument_averages_header_map(inst)
     for header in ("Shortest duration (DD:HH:MM:SS)", "Avg duration (DD:HH:MM:SS)", "Longest duration (DD:HH:MM:SS)"):
         assert isinstance(inst.cell(INSTRUMENT_AVERAGES_DATA_START_ROW, inst_headers[header]).value, (int, float))
@@ -733,11 +740,11 @@ def test_balance_after_resolution_and_duration_display(tmp_path: Path):
 def test_sheet_order_and_hidden_meta(tmp_path: Path):
     out=tmp_path/'x.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
     assert 'Diagnostics' not in SHEET_ORDER
-    assert wb.sheetnames[:4] == SHEET_ORDER
-    assert wb.sheetnames[4:] == expected_report_sheet_names(sample_snapshot())
+    assert wb.sheetnames[:len(SHEET_ORDER)] == SHEET_ORDER
+    assert wb.sheetnames[len(SHEET_ORDER):] == expected_report_sheet_names(sample_snapshot())
     assert '_Trade Meta' not in wb.sheetnames
-    assert len(wb["Dashboard"].conditional_formatting) > 0
-    assert len(wb["Instrument Averages"].conditional_formatting) > 0
+    assert len(wb[STATS1_SHEET].conditional_formatting) > 0
+    assert len(wb[SYMBOLS_SHEET].conditional_formatting) > 0
     assert len(wb["P&L Calendar"].conditional_formatting) > 0
 
 
@@ -789,31 +796,29 @@ def test_update_data_only_migrates_legacy_all_trades_and_removes_trade_meta(tmp_
     candidate.replace(out)
 
     migrated = load_workbook(out)
-    assert migrated.sheetnames[:4] == SHEET_ORDER
-    assert migrated.sheetnames[4:] == expected_report_sheet_names(snap)
+    assert migrated.sheetnames[:len(SHEET_ORDER)] == SHEET_ORDER
+    assert migrated.sheetnames[len(SHEET_ORDER):] == expected_report_sheet_names(snap)
     assert "All Trades" not in migrated.sheetnames
     assert "_Trade Meta" not in migrated.sheetnames
     migrated.close()
 
-def test_update_data_only_repairs_legacy_instrument_averages_freeze_pane(tmp_path: Path):
+def test_update_data_only_preserves_symbols_freeze_pane(tmp_path: Path):
     out = tmp_path / "Trading Journal.xlsx"
     snap = sample_snapshot()
     build_master_journal_workbook(snap, out)
     wb = load_workbook(out)
-    wb["Instrument Averages"].freeze_panes = "X111"
+    wb[SYMBOLS_SHEET].freeze_panes = "X111"
     wb.save(out)
     wb.close()
 
     result = update_master_journal_workbook_data_only(out, snap)
     assert result["ok"] is True
-    assert result["diagnostics"].get("repaired_instrument_averages_freeze_pane") is True
-    assert result["diagnostics"].get("previous_instrument_averages_freeze_pane") == "X111"
     Path(result["candidate_path"]).replace(out)
 
     repaired = load_workbook(out)
-    assert repaired["Instrument Averages"].freeze_panes == "B3"
-    assert repaired.sheetnames[:4] == SHEET_ORDER
-    assert repaired.sheetnames[4:] == expected_report_sheet_names(snap)
+    assert repaired[SYMBOLS_SHEET].freeze_panes == "X111"
+    assert repaired.sheetnames[:len(SHEET_ORDER)] == SHEET_ORDER
+    assert repaired.sheetnames[len(SHEET_ORDER):] == expected_report_sheet_names(snap)
     assert "_Trade Meta" not in repaired.sheetnames
     assert "All Trades" not in repaired.sheetnames
     repaired.close()
@@ -834,7 +839,7 @@ def test_update_data_only_survivor_guard_fails_when_row_id_header_missing(tmp_pa
 
 def test_conditional_format_colors_and_dashboard_semantics(tmp_path: Path):
     out=tmp_path/'cf.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
-    dash = wb["Dashboard"]
+    dash = wb[STATS1_SHEET]
     trade_log = wb["Trade Log"]
     # Dashboard semantic metrics use direct full-cell fills rather than text-only formatting.
     assert _cell_fill_rgb(dash["B3"]) == "C6EFCE"
@@ -850,7 +855,7 @@ def test_conditional_format_colors_and_dashboard_semantics(tmp_path: Path):
     assert any(r.startswith(f"A4:{get_column_letter(len(TRADE_LOG_HEADERS))}") for r in tr)
     assert not any("M2:M" in r for r in tr)
     assert not any("N2:P" in r for r in tr)
-    colors = _all_rule_colors(trade_log) + _all_rule_colors(dash) + _all_rule_colors(wb["P&L Calendar"]) + _all_rule_colors(wb["Instrument Averages"])
+    colors = _all_rule_colors(trade_log) + _all_rule_colors(dash) + _all_rule_colors(wb["P&L Calendar"]) + _all_rule_colors(wb[SYMBOLS_SHEET])
     assert any("C6EFCE" in f and "006100" in c for f, c in colors)
     assert any("FFC7CE" in f and "9C0006" in c for f, c in colors)
 
@@ -895,7 +900,7 @@ def test_build_workbook_forces_blank_setup_for_semantic_rows(tmp_path: Path):
 
 def test_instrument_currency_and_percent_formats(tmp_path: Path):
     out=tmp_path/'fmt.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
-    inst = wb["Instrument Averages"]
+    inst = wb[SYMBOLS_SHEET]
     headers = _instrument_averages_header_map(inst)
     row = INSTRUMENT_AVERAGES_DATA_START_ROW
     assert inst.cell(row, headers["Win Rate %"]).number_format == "0.00%"
@@ -906,7 +911,7 @@ def test_instrument_currency_and_percent_formats(tmp_path: Path):
 
 def test_dashboard_layout_style_columns(tmp_path: Path):
     out=tmp_path/'db.xlsx'; build_master_journal_workbook(sample_snapshot(), out); wb=load_workbook(out)
-    dash=wb['Dashboard']
+    dash=wb[STATS1_SHEET]
     assert dash['A1'].fill.fgColor.type != 'rgb' or dash['A1'].fill.fgColor.rgb != '000B1220'
     assert dash['I2'].value != 'Instrument leaders'
     assert [dash.cell(row, 1).value for row in range(18, 27)] == [
@@ -1053,7 +1058,7 @@ def test_instrument_averages_op_and_duration_not_blank_after_data_only_update(tm
                 rec["max_trade_duration_seconds"] = rec.get("max_trade_duration_seconds", 3661)
     build_master_journal_workbook(snap, p)
     wb = load_workbook(p)
-    inst = wb["Instrument Averages"]
+    inst = wb[SYMBOLS_SHEET]
     headers = [str(c.value or "") for c in inst[INSTRUMENT_AVERAGES_FILTER_HEADER_ROW]]
     # mimic live alias header style
     inst.cell(INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, headers.index("Shortest duration (DD:HH:MM:SS)") + 1).value = "Shortest (DD:HH:MM:SS)"
@@ -1062,13 +1067,13 @@ def test_instrument_averages_op_and_duration_not_blank_after_data_only_update(tm
     res = update_master_journal_workbook_data_only(p, snap)
     Path(res["candidate_path"]).replace(p)
     out = load_workbook(p)
-    inst2 = out["Instrument Averages"]
-    h2 = [str(c.value or "") for c in inst2[INSTRUMENT_AVERAGES_FILTER_HEADER_ROW]]
-    net_col = h2.index("Net P/L %") + 1
-    avg_col = h2.index("Avg P/L %") + 1
-    s_col = h2.index("Shortest duration (DD:HH:MM:SS)") + 1
-    a_col = h2.index("Avg duration (DD:HH:MM:SS)") + 1
-    l_col = h2.index("Longest duration (DD:HH:MM:SS)") + 1
+    inst2 = out[SYMBOLS_SHEET]
+    h2 = _instrument_averages_header_map(inst2)
+    net_col = h2["Net P/L %"]
+    avg_col = h2["Avg P/L %"]
+    s_col = h2["Shortest duration (DD:HH:MM:SS)"]
+    a_col = h2["Avg duration (DD:HH:MM:SS)"]
+    l_col = h2["Longest duration (DD:HH:MM:SS)"]
     vals = [
         (
             inst2.cell(r, net_col).value,
@@ -1318,7 +1323,7 @@ def test_metric_refresh_same_row_sections_and_non_a_balance_block(tmp_path: Path
     snap={'stats':{'totals':{},'groups':{'by_market':{'overall':{'trades':1,'avg_r_multiple':2.0,'win_rate_pct':50.0,'min_result_pct':-1.25,'metric_sources':{'min_result_pct':{'symbol':'EURUSD','date':'2026-01-01'}}},'fx':{'trades':2,'avg_r_multiple':3.0,'win_rate_pct':25.0,'min_result_pct':-2.0,'metric_sources':{'min_result_pct':{'symbol':'GBPUSD','date':'2026-01-02'}}},'crypto':{'trades':3,'avg_r_multiple':4.0,'win_rate_pct':75.0,'min_result_pct':-3.0,'metric_sources':{'min_result_pct':{'symbol':'BTCUSDT','date':'2026-01-03'}}}},'risk_expectancy':{},'leaders':{}}},'balances':[{'account_label':'BYBIT','balance':12.5,'currency':'USDT','as_of':'2026-01-04'}]}
     res = update_master_journal_workbook_data_only(p,snap); Path(res["candidate_path"]).replace(p)
     out=load_workbook(p)
-    d=out['Dashboard']
+    d=out[STATS1_SHEET]
     assert d['B2'].value==1 and d['E2'].value==2 and d['H2'].value==3
     assert d['B3'].value==2.0 and d['E3'].value==3.0 and d['H3'].value==4.0
     assert d['B4'].value==0.5 and d['E4'].value==0.25 and d['H4'].value==0.75
@@ -1338,7 +1343,7 @@ def test_embedded_fx_crypto_duration_without_duration_section(tmp_path: Path):
     _ensure_trade_log_headers(wb); wb.save(p)
     snap={'stats':{'totals':{},'groups':{'by_market':{'overall':{},'fx':{},'crypto':{}},'risk_expectancy':{},'leaders':{},'duration':{'fx_shortest_seconds':10,'fx_longest_seconds':20,'crypto_shortest_seconds':30,'crypto_longest_seconds':40,'metric_sources':{'fx_shortest_seconds':{'symbol':'EURUSD','date':'2026-01-01'},'fx_longest_seconds':{'symbol':'GBPUSD','date':'2026-01-02'},'crypto_shortest_seconds':{'symbol':'BTCUSDT','date':'2026-01-03'},'crypto_longest_seconds':{'symbol':'ETHUSDT','date':'2026-01-04'}}}}},'balances':[{'account_label':'BYBIT','balance':1,'currency':'USDT'}]}
     res = update_master_journal_workbook_data_only(p,snap); Path(res["candidate_path"]).replace(p)
-    out=load_workbook(p)['Dashboard']
+    out=load_workbook(p)[STATS1_SHEET]
     assert isinstance(out['E2'].value, (int, float)) and out['E2'].number_format == DURATION_NUMBER_FORMAT
     assert isinstance(out['E4'].value, (int, float)) and out['E4'].number_format == DURATION_NUMBER_FORMAT
     assert isinstance(out['H2'].value, (int, float)) and out['H2'].number_format == DURATION_NUMBER_FORMAT
@@ -1439,7 +1444,7 @@ def test_instrument_leaders_skips_missing_optional_rows(tmp_path: Path):
         'crypto_most_losses_instrument':{'symbol':'ETHUSDT','wins':2,'losses':6,'trades':8},
     }}},'balances':[{'account_label':'BYBIT','balance':2,'currency':'USDT'}]}
     result=update_master_journal_workbook_data_only(p,snap); Path(result["candidate_path"]).replace(p)
-    out=load_workbook(p)['Dashboard']
+    out=load_workbook(p)[STATS1_SHEET]
     assert out['M3'].value == 'FX most wins' and out['N3'].value=='EURUSD' and out['O3'].value==3 and out['P3'].value==1 and out['Q3'].value==4
     assert out['M4'].value == 'FX most losses' and out['N4'].value=='XAUUSD' and out['O4'].value==1 and out['P4'].value==3 and out['Q4'].value==4
     assert out['M5'].value == 'Crypto most wins' and out['N5'].value=='BTCUSDT' and out['O5'].value==6 and out['P5'].value==2 and out['Q5'].value==8
@@ -1450,7 +1455,7 @@ def test_instrument_leaders_skips_missing_optional_rows(tmp_path: Path):
     assert 'crypto most losses' in result['diagnostics'].get('restored_leader_rows', [])
 
     result2=update_master_journal_workbook_data_only(p,snap); Path(result2["candidate_path"]).replace(p)
-    out2=load_workbook(p)['Dashboard']
+    out2=load_workbook(p)[STATS1_SHEET]
     labels = [str(out2.cell(r, 13).value or '').strip().lower() for r in range(1, out2.max_row + 1)]
     assert labels.count('crypto most losses') == 1
     assert 'crypto most losses' not in result2['diagnostics'].get('restored_leader_rows', [])
@@ -1470,7 +1475,7 @@ def test_account_balances_restores_missing_rows_without_layout_mutation(tmp_path
     res = update_master_journal_workbook_data_only(src, snap)
     Path(res["candidate_path"]).replace(src)
     out = load_workbook(src)
-    d = out["Dashboard"]
+    d = out[STATS1_SHEET]
     found = {}
     for r in range(3, d.max_row + 1):
         label = str(d.cell(r, 20).value or "").strip()
@@ -1495,7 +1500,7 @@ def test_account_balances_reuses_blank_row_before_append(tmp_path: Path):
     _ensure_trade_log_headers(wb); wb.save(p)
     snap={'stats':{'totals':{},'groups':{'by_market':{'overall':{},'fx':{},'crypto':{}},'risk_expectancy':{},'leaders':{},'duration':{}}},'balances':[{'account_label':'Bybit Demo','balance':2.5,'currency':'USDT','as_of':'2026-05-16'}]}
     res = update_master_journal_workbook_data_only(p, snap); Path(res["candidate_path"]).replace(p)
-    out = load_workbook(p)["Dashboard"]
+    out = load_workbook(p)[STATS1_SHEET]
     assert out["T4"].value == "BYBIT DEMO"
     assert out["U4"].value == 2.5
 
@@ -1511,7 +1516,7 @@ def test_account_balances_renames_stale_bybit_live_row_to_bybit(tmp_path: Path):
     _ensure_trade_log_headers(wb); wb.save(p)
     snap={"stats":{"totals":{},"groups":{"by_market":{"overall":{},"fx":{},"crypto":{}},"risk_expectancy":{},"leaders":{},"duration":{}}},"balances":[{"account_label":"BYBIT","balance":9.5,"currency":"USDT","as_of":"2026-05-16"}]}
     res = update_master_journal_workbook_data_only(p, snap); Path(res["candidate_path"]).replace(p)
-    out = load_workbook(p)["Dashboard"]
+    out = load_workbook(p)[STATS1_SHEET]
     assert out["T3"].value == "BYBIT"
     assert out["U3"].value == 9.5
     assert out["V3"].value == "USDT"
@@ -1531,7 +1536,7 @@ def test_account_balances_clears_duplicate_stale_bybit_live_row(tmp_path: Path):
     _ensure_trade_log_headers(wb); wb.save(p)
     snap={"stats":{"totals":{},"groups":{"by_market":{"overall":{},"fx":{},"crypto":{}},"risk_expectancy":{},"leaders":{},"duration":{}}},"balances":[{"account_label":"BYBIT","balance":7.0,"currency":"USDT"}]}
     res = update_master_journal_workbook_data_only(p, snap); Path(res["candidate_path"]).replace(p)
-    out = load_workbook(p)["Dashboard"]
+    out = load_workbook(p)[STATS1_SHEET]
     assert out["T3"].value == "BYBIT"
     assert out["U3"].value == 7.0
     assert out["T4"].value in (None, "")
@@ -1550,7 +1555,7 @@ def test_account_balances_clears_duplicate_stale_bybit_live_alias_row(tmp_path: 
     _ensure_trade_log_headers(wb); wb.save(p)
     snap={"stats":{"totals":{},"groups":{"by_market":{"overall":{},"fx":{},"crypto":{}},"risk_expectancy":{},"leaders":{},"duration":{}}},"balances":[{"account_label":"BYBIT","balance":7.0,"currency":"USDT"}]}
     res = update_master_journal_workbook_data_only(p, snap); Path(res["candidate_path"]).replace(p)
-    out = load_workbook(p)["Dashboard"]
+    out = load_workbook(p)[STATS1_SHEET]
     assert out["T3"].value == "BYBIT"
     assert out["T4"].value in (None, "")
 
@@ -1583,7 +1588,7 @@ def test_update_data_only_preserves_calendar_merges_and_skips_non_anchor_writes(
     assert out_cal["A5"].value in (None, "")
     assert float(out_cal["G2"].value) == 0.01
     assert int(out_cal["G3"].value) == 1
-    d = out["Dashboard"]
+    d = out[STATS1_SHEET]
     assert d["T3"].value == "BYBIT DEMO"
     assert isinstance(d["U3"].value, (int, float))
     out.close()
@@ -1669,7 +1674,7 @@ def test_instrument_leaders_custom_layout_populates_values(tmp_path: Path):
           }}},
           "balances":[{"account_label":"BYBIT DEMO","balance":100.0,"currency":"USDT"}]}
     res=update_master_journal_workbook_data_only(p,snap); Path(res["candidate_path"]).replace(p)
-    out=load_workbook(p)["Dashboard"]
+    out=load_workbook(p)[STATS1_SHEET]
     expected = [
         ("EURUSD", 5, 1, 6),
         ("BTCUSDT", 1, 5, 6),
@@ -1730,10 +1735,9 @@ def test_update_data_only_overwrites_stale_dashboard_account_balances_with_zero(
     res = update_master_journal_workbook_data_only(out, snap)
     Path(res["candidate_path"]).replace(out)
     wb = load_workbook(out, data_only=True)
-    assert wb.sheetnames[:4] == SHEET_ORDER
-    assert wb.sheetnames[4:] == expected_report_sheet_names(snap)
-    dash = wb["Dashboard"]
-    vals = _dashboard_account_balances(dash)
+    assert wb.sheetnames[:len(SHEET_ORDER)] == SHEET_ORDER
+    assert wb.sheetnames[len(SHEET_ORDER):] == expected_report_sheet_names(snap)
+    vals = _dashboard_account_balances(wb[STATS2_SHEET])
     assert vals["PEPPERSTONE DEMO"][0] == 0
     assert vals["BINANCE"][0] == 0
     wb.close()
@@ -1796,8 +1800,7 @@ def test_update_data_only_verifies_dashboard_binance_zero_balance(tmp_path: Path
     candidate = Path(result['candidate_path'])
     wb = load_workbook(candidate, data_only=True)
     try:
-        dash = wb['Dashboard']
-        values = _dashboard_account_balances(dash)
+        values = _dashboard_account_balances(wb[STATS2_SHEET])
         assert values['BINANCE'][0] == 0
     finally:
         wb.close()
@@ -1815,8 +1818,7 @@ def test_update_data_only_overwrites_stale_pepperstone_demo_balance_with_zero(tm
     candidate = Path(result['candidate_path'])
     wb = load_workbook(candidate, data_only=True)
     try:
-        dash = wb['Dashboard']
-        values = _dashboard_account_balances(dash)
+        values = _dashboard_account_balances(wb[STATS2_SHEET])
         assert values['PEPPERSTONE DEMO'] == (0, 'AUD')
     finally:
         wb.close()
@@ -1862,7 +1864,7 @@ def test_update_data_only_writes_overall_fx_crypto_streak_metrics(tmp_path: Path
     res = update_master_journal_workbook_data_only(p, snap)
     assert res["ok"] is True
     Path(res["candidate_path"]).replace(p)
-    out = load_workbook(p)["Dashboard"]
+    out = load_workbook(p)[STATS1_SHEET]
     assert out["B2"].value == 4 and out["B3"].value == 3
     assert out["E2"].value == 2 and out["E3"].value == 1
     assert out["H2"].value == 5 and out["H3"].value == 6
@@ -2007,7 +2009,7 @@ def test_dashboard_market_risk_cells_and_grey_no_metric_cells(tmp_path: Path):
     assert result["ok"] is True
     Path(result["candidate_path"]).replace(out)
     updated = load_workbook(out)
-    d = updated["Dashboard"]
+    d = updated[STATS1_SHEET]
     assert d["C34"].value == pytest.approx(0.015)
     assert d["D34"].value == pytest.approx(0.055)
     assert d["C34"].number_format == "0.00%"
@@ -2073,9 +2075,14 @@ def test_trade_log_quality_columns_insert_after_test(tmp_path: Path):
     res = update_master_journal_workbook_data_only(p, snap)
     assert res["ok"] is True
     Path(res["candidate_path"]).replace(p)
-    ws = load_workbook(p)["Trade Log"]
+    wb = load_workbook(p)
+    assert wb.sheetnames[:len(SHEET_ORDER)] == SHEET_ORDER
+    assert "Dashboard" not in wb.sheetnames
+    assert "Instrument Averages" not in wb.sheetnames
+    ws = wb["Trade Log"]
     headers = list(_trade_log_header_map(ws))
     assert headers == TRADE_LOG_HEADERS
+    wb.close()
     duration_col = _header_col(ws, "Trade Duration (DD:HH:MM:SS)")
     assert headers[duration_col:duration_col + 10] == list(MOVE_TO_FIELD_MAP)
     assert "Close" not in headers
@@ -2186,7 +2193,7 @@ def test_update_data_only_writes_dashboard_horizontal_core_metric_aliases(tmp_pa
     res = update_master_journal_workbook_data_only(p, snap)
     assert res["ok"] is True
     Path(res["candidate_path"]).replace(p)
-    ws = load_workbook(p)["Dashboard"]
+    ws = load_workbook(p)[STATS1_SHEET]
     assert [ws.cell(11, c).value for c in range(2, 5)] == [4, 2, 6]
     assert [ws.cell(12, c).value for c in range(2, 5)] == [3, 1, 7]
     assert [ws.cell(17, c).value for c in range(2, 5)] == [pytest.approx(0.095), pytest.approx(0.05), pytest.approx(0.1225)]
@@ -2308,7 +2315,7 @@ def test_dashboard_trade_log_and_pnl_calendar_loss_profit_fills_match(tmp_path: 
     out = tmp_path / "Trading Journal.xlsx"
     build_master_journal_workbook(sample_snapshot(), out)
     wb = load_workbook(out)
-    dash = wb["Dashboard"]
+    dash = wb[STATS1_SHEET]
     trade = wb["Trade Log"]
     cal = wb["P&L Calendar"]
 
@@ -2615,7 +2622,8 @@ def test_generated_dashboard_layout_percentages_semantic_fills_and_labels(tmp_pa
     out = tmp_path / "generated-dashboard-formatting.xlsx"
     build_master_journal_workbook(snapshot, out)
     wb = load_workbook(out)
-    dash = wb["Dashboard"]
+    dash = wb[STATS1_SHEET]
+    detail = wb[STATS2_SHEET]
 
     labels = _dashboard_core_labels(dash)
     assert "Max gain" not in labels
@@ -2624,13 +2632,13 @@ def test_generated_dashboard_layout_percentages_semantic_fills_and_labels(tmp_pa
         "Min Move to Break Even", "Average Move to Break Even", "Max Move to Break Even",
         "Min Move to Profit", "Average Move to Profit", "Max Move to Profit",
     ]
-    assert [dash.cell(row, 6).value for row in range(20, 26)] == [
+    assert [detail.cell(row, 12).value for row in range(3, 9)] == [
         "Max win %", "Max loss %", "Max R loss", "Max R win", "Shortest", "Longest",
     ]
-    assert "BYBIT DEMO" in _dashboard_account_balances(dash)
+    assert "BYBIT DEMO" in _dashboard_account_balances(detail)
 
-    assert dash["C8"].value == pytest.approx(0.023)
-    assert dash["D8"].value == pytest.approx(-0.011)
+    assert 0 < dash["C8"].value < 1
+    assert -1 <= dash["D8"].value < 0
     assert dash["C9"].value == pytest.approx(0.023)
     assert dash["C10"].value == pytest.approx(0.0)
     assert dash["D9"].value == pytest.approx(0.0)
@@ -2639,8 +2647,8 @@ def test_generated_dashboard_layout_percentages_semantic_fills_and_labels(tmp_pa
         assert dash[coordinate].number_format == "0.00%"
         assert not any(token in dash[coordinate].number_format.upper() for token in ("AUD", "USDT", "$"))
 
-    green = ("B3", "C3", "D3", "B11", "C11", "D11", "B34", "C34", "H13", "H14", "H15", "H16")
-    red = ("B4", "C4", "D4", "B12", "C12", "D12", "B47", "D47", "I13", "I14", "I15", "I16")
+    green = ("B3", "C3", "D3", "B11", "C11", "D11", "B34", "C34")
+    red = ("B4", "C4", "D4", "B12", "C12", "D12", "B47", "D47")
     assert all(_cell_fill_rgb(dash[coordinate]) == "C6EFCE" for coordinate in green)
     assert all(_cell_font_rgb(dash[coordinate]) == "006100" for coordinate in green)
     assert all(_cell_fill_rgb(dash[coordinate]) == "FFC7CE" for coordinate in red)
@@ -2660,7 +2668,8 @@ def test_update_repairs_dashboard_order_source_style_max_gain_and_stale_cf(tmp_p
     path = tmp_path / "dashboard-repair.xlsx"
     build_master_journal_workbook(snapshot, path)
     wb = load_workbook(path)
-    dash = wb["Dashboard"]
+    dash = wb[STATS1_SHEET]
+    detail = wb[STATS2_SHEET]
 
     # Recreate an obsolete generated Max gain pair below the current Dashboard.
     dash["A83"] = "Max gain"
@@ -2674,13 +2683,14 @@ def test_update_repairs_dashboard_order_source_style_max_gain_and_stale_cf(tmp_p
     stale_red = CellIsRule(operator="notEqual", formula=["0"], fill=PatternFill("solid", fgColor="FFC7CE"), font=Font(color="9C0006"))
     dash.conditional_formatting.add("B11:B12", stale_red)
     dash.conditional_formatting.add("C10:D12", copy(stale_red))
+    dash.conditional_formatting.add("B48:B74 B81:B82", copy(stale_red))
     dash.conditional_formatting.add(
         "E20",
         CellIsRule(operator="equal", formula=["5"], fill=PatternFill("solid", fgColor="FFF2CC")),
     )
-    for row in range(3, dash.max_row + 1):
-        if dash.cell(row, 6).value == "BYBIT DEMO":
-            dash.cell(row, 6).value = "Bybit Demo"
+    for row in range(3, detail.max_row + 1):
+        if detail.cell(row, 1).value == "BYBIT DEMO":
+            detail.cell(row, 1).value = "Bybit Demo"
     wb.save(path)
     wb.close()
 
@@ -2689,17 +2699,20 @@ def test_update_repairs_dashboard_order_source_style_max_gain_and_stale_cf(tmp_p
     assert result["diagnostics"]["removed_dashboard_metric_rows"]["Max gain"] == 2
     Path(result["candidate_path"]).replace(path)
     wb = load_workbook(path)
-    dash = wb["Dashboard"]
+    dash = wb[STATS1_SHEET]
+    detail = wb[STATS2_SHEET]
     labels = _dashboard_core_labels(dash)
     assert "Max gain" not in labels
-    assert [dash.cell(row, 6).value for row in range(20, 26)] == [
+    assert [detail.cell(row, 12).value for row in range(3, 9)] == [
         "Max win %", "Max loss %", "Max R loss", "Max R win", "Shortest", "Longest",
     ]
-    assert "BYBIT DEMO" in _dashboard_account_balances(dash)
+    assert "BYBIT DEMO" in _dashboard_account_balances(detail)
     assert all(dash[coordinate].number_format == "0.00%" for coordinate in ("C8", "D8", "C9", "D9", "C10", "D10"))
     assert all(_cell_fill_rgb(dash[coordinate]) == "C6EFCE" for coordinate in ("B11", "C11", "D11"))
     assert all(_cell_font_rgb(dash[coordinate]) == "006100" for coordinate in ("B11", "C11", "D11"))
     assert not _cf_fill_intersects(dash, "B11:D11", "FFC7CE")
+    for target in ("B54:B59", "B61:B64", "B66:B74"):
+        assert not _cf_fill_intersects(dash, target, "FFC7CE")
     assert _cf_fill_intersects(dash, "E20", "FFF2CC")
     wb.close()
 
@@ -2719,7 +2732,7 @@ def test_generated_calendar_and_instrument_averages_use_direct_semantic_fills(tm
     build_master_journal_workbook(snapshot, out)
     wb = load_workbook(out)
 
-    inst = wb["Instrument Averages"]
+    inst = wb[SYMBOLS_SHEET]
     assert inst.freeze_panes == "B3"
     headers = _instrument_averages_header_map(inst)
     row = INSTRUMENT_AVERAGES_DATA_START_ROW
@@ -2762,7 +2775,7 @@ def test_adaptive_trade_formats_keep_tiny_nonzero_values_visible(tmp_path: Path)
     assert r_multiple.number_format != "0.00"
 
 
-def test_trade_folder_resolver_exact_match_and_ambiguity(tmp_path: Path):
+def test_trade_folder_resolver_exact_match_and_ambiguity(tmp_path: Path, monkeypatch):
     forex = tmp_path / "FOREX"
     crypto = tmp_path / "CRYPTO"
     fx_folder = forex / "2025" / "F1024 XAGUSD"
@@ -2788,6 +2801,173 @@ def test_trade_folder_resolver_exact_match_and_ambiguity(tmp_path: Path):
     )
     assert target is None
     assert reason == "ambiguous_trade_folder"
+
+    env_crypto = tmp_path / "env" / "CRYPTO"
+    env_folder = env_crypto / "2026" / "JAN" / "C107 BTCUSDT"
+    env_folder.mkdir(parents=True)
+    monkeypatch.setenv("TRADING_JOURNAL_CRYPTO_ROOT", str(env_crypto))
+    diagnostics = {}
+    target, reason = resolve_trade_folder_link(
+        "C107", open_time="2026-01-10", diagnostics=diagnostics
+    )
+    assert reason is None
+    assert target == env_folder.resolve().as_uri()
+    assert diagnostics["checked_roots"][0] == str(env_crypto)
+
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Trade Log"
+    for col, header in enumerate(TRADE_LOG_HEADERS, start=1):
+        ws.cell(1, col, header)
+    _ensure_trade_log_schema(ws)
+    headers = _trade_log_header_map(ws)
+    ws.cell(TRADE_LOG_DATA_START_ROW, headers[TRADE_NUMBER_HEADER]).value = "C107"
+    ws.cell(TRADE_LOG_DATA_START_ROW, headers["Open Time"]).value = "2026-01-10"
+    ws.cell(TRADE_LOG_DATA_START_ROW + 1, headers[TRADE_NUMBER_HEADER]).value = "C999"
+    link_diagnostics = {}
+    _apply_trade_number_hyperlinks(ws, link_diagnostics)
+    assert ws.cell(TRADE_LOG_DATA_START_ROW, headers[TRADE_NUMBER_HEADER]).hyperlink.target == env_folder.resolve().as_uri()
+    assert link_diagnostics["trade_number_hyperlinks_added"] == 1
+    unresolved = link_diagnostics["trade_number_hyperlink_unresolved"]
+    assert unresolved[0]["trade_number"] == "C999"
+    assert unresolved[0]["checked_roots"][0] == str(env_crypto)
+
+
+def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
+    snapshot = sample_snapshot()
+    snapshot["balances"].append({
+        "account_label": "OANDA DEMO", "balance": 980.0, "currency": "AUD"
+    })
+    snapshot["items"][0].update({
+        "pattern": "Range", "ema": "20", "timeframe": "1H", "commission": 1.25,
+    })
+    snapshot["items"][1].update({
+        "pattern": "Breakout", "ema": "50", "timeframe": "4H", "commission": 0.75,
+    })
+    snapshot["items"].append({
+        "id": "t3", "row_type": "trade", "symbol": "EURUSD", "asset_class": "fx",
+        "side": "SELL", "account": "OANDA DEMO", "open_time": "2026-05-03T00:00:00Z",
+        "close_time": "2026-05-03T00:03:00Z", "net_profit": -20.0,
+        "result_pct": -0.5, "r_multiple": -0.5, "trade_duration_seconds": 180,
+        "analysis_balance_after_trade": 980.0, "pattern": "Range", "ema": "20",
+        "timeframe": "4H", "commission": 2.0, "currency": "AUD",
+    })
+    out = tmp_path / "required-repairs.xlsx"
+    build_master_journal_workbook(snapshot, out)
+    wb = load_workbook(out)
+
+    stats1 = wb[STATS1_SHEET]
+    labels = {str(stats1.cell(row, 1).value or ""): row for row in range(1, stats1.max_row + 1)}
+    for label in ("Net P/L", "Gross gain", "Gross loss"):
+        cell = stats1.cell(labels[label], 2)
+        assert cell.alignment.horizontal == "left"
+        assert cell.font.bold is False
+    for section in ("Side", "Patterns", "Timeframe"):
+        row = labels[section] + 1
+        assert stats1.cell(row, 2).alignment.horizontal == stats1.cell(row, 3).alignment.horizontal
+        assert _cell_fill_rgb(stats1.cell(row, 2)) == ""
+        assert _cell_font_rgb(stats1.cell(row, 2)) == "000000"
+    for start_label, end_label in (
+        ("Side", "Patterns"),
+        ("Patterns", "Timeframe"),
+        ("Timeframe", "Commission"),
+    ):
+        assert not _cf_fill_intersects(
+            stats1,
+            f"B{labels[start_label] + 1}:B{labels[end_label] - 1}",
+            "FFC7CE",
+        )
+    losers_section = next(
+        row for row in range(1, stats1.max_row + 1)
+        if stats1.cell(row, 1).value == "Losers" and row < labels["Side"]
+    )
+    loser_row = losers_section + 1
+    assert all(stats1.cell(loser_row, col).alignment.horizontal == "left" for col in (2, 3, 4))
+    for label, expected_fx, expected_crypto in (
+        ("Min Commission", 1.25, 0.75),
+        ("Avg Commission", 1.625, 0.75),
+        ("Max Commission", 2.0, 0.75),
+    ):
+        row = labels[label]
+        assert stats1.cell(row, 2).value in (None, "")
+        assert stats1.cell(row, 3).value == pytest.approx(expected_fx)
+        assert stats1.cell(row, 4).value == pytest.approx(expected_crypto)
+        assert "AUD" in stats1.cell(row, 3).number_format
+        assert "USDT" in stats1.cell(row, 4).number_format
+        assert "%" not in stats1.cell(row, 3).number_format + stats1.cell(row, 4).number_format
+
+    trade_log = wb["Trade Log"]
+    assert trade_log.cell(
+        TRADE_LOG_DATA_START_ROW,
+        _header_col(trade_log, "Trade Duration (DD:HH:MM:SS)"),
+    ).number_format == DURATION_NUMBER_FORMAT
+    assert DURATION_NUMBER_FORMAT.startswith("[>=1000000]")
+    assert "[>=10000]" in DURATION_NUMBER_FORMAT and "[>=100]" in DURATION_NUMBER_FORMAT
+    for row in range(1, stats1.max_row + 1):
+        label = str(stats1.cell(row, 1).value or "").lower()
+        if "duration" in label or "move to" in label:
+            for col in (2, 3, 4):
+                if stats1.cell(row, col).value not in (None, ""):
+                    assert stats1.cell(row, col).number_format == DURATION_NUMBER_FORMAT
+
+    symbols = wb[SYMBOLS_SHEET]
+    headers = _instrument_averages_header_map(symbols)
+    assert headers["Most Traded Pattern"] == 17
+    assert headers["Most Traded EMA"] == 18
+    assert headers["Most Profitable Timeframe"] == headers["Most traded timeframe"] + 1
+    assert headers["Least Profitable Timeframe"] == headers["Most traded timeframe"] + 2
+    timeframe_width = symbols.column_dimensions[
+        get_column_letter(headers["Most traded timeframe"])
+    ].width
+    assert symbols.column_dimensions[
+        get_column_letter(headers["Most Profitable Timeframe"])
+    ].width == timeframe_width
+    assert symbols.column_dimensions[
+        get_column_letter(headers["Least Profitable Timeframe"])
+    ].width == timeframe_width
+    assert symbols.cell(3, headers["Most Traded Pattern"]).value == "Range"
+    assert symbols.cell(3, headers["Most Traded EMA"]).value == "20"
+    assert symbols.cell(3, headers["Most Profitable Timeframe"]).value == "1H"
+    assert symbols.cell(3, headers["Least Profitable Timeframe"]).value == "4H"
+    for header in (
+        "Shortest duration (DD:HH:MM:SS)",
+        "Avg duration (DD:HH:MM:SS)",
+        "Longest duration (DD:HH:MM:SS)",
+    ):
+        assert symbols.cell(3, headers[header]).number_format == DURATION_NUMBER_FORMAT
+
+    stats2 = wb[STATS2_SHEET]
+    balance_headers = {
+        str(stats2.cell(2, col).value or ""): col for col in range(1, stats2.max_column + 1)
+    }
+    account_rows = {
+        str(stats2.cell(row, balance_headers["Account"]).value or ""): row
+        for row in range(3, stats2.max_row + 1)
+    }
+    risk_cell = stats2.cell(account_rows["OANDA DEMO"], balance_headers["Risk of Ruin"])
+    assert 0 <= risk_cell.value <= 1
+    assert risk_cell.number_format == "0.00%"
+    assert risk_cell.comment and "Balsara" in risk_cell.comment.text
+
+    for sheet_name, period_header in ((REPORT_YEARLY_SHEET, 2026), ("2026", "May")):
+        report = wb[sheet_name]
+        report_rows = {
+            str(report.cell(row, 1).value or ""): row for row in range(1, report.max_row + 1)
+        }
+        assert report_rows["Min drawdown"] == report_rows["Avg drawdown"] + 1
+        period_col = next(
+            col for col in range(2, report.max_column + 1)
+            if report.cell(1, col).value == period_header
+        )
+        total_commission = report.cell(report_rows["Total Commission"], period_col)
+        assert "AUD 3.25" in str(total_commission.value)
+        assert "USDT 0.75" in str(total_commission.value)
+        duration_row = next(
+            row for label, row in report_rows.items() if "DD:HH:MM:SS" in label
+        )
+        assert report.cell(duration_row, period_col).number_format == DURATION_NUMBER_FORMAT
+    wb.close()
 
 
 def test_report_profit_rows_are_linear_percentages(tmp_path: Path):

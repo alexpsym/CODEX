@@ -74,7 +74,7 @@ from shared.symbol_resolution import (
 from shared.atomic_json import write_json_file
 from render.dropbox_sync import download_bytes, list_excel_files, upload_bytes
 from render import dropbox_state_store
-from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW
+from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, refresh_master_journal_derived_sheets, stable_row_id, SHEET_ORDER, REPORT_YEARLY_SHEET, expected_report_sheet_names, _get_all_trades_sheet, _get_trade_log_sheet, _trade_log_header_map, _trade_log_data_start_row, _find_instrument_leaders_table, LEADER_LABEL_TO_KEY, _repair_or_flag_zero_trade_qty, _canonicalize_and_dedupe_balances, _trade_execution_fingerprint, _trade_row_source_rank, _dedupe_trade_rows_by_execution, _instrument_averages_header_map, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, _result_percentage_totals_by_market, _risk_of_ruin_by_account, _stats1_sheet, _stats2_sheet, _symbols_sheet, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET
 from bybit_monitor import bybit_altcoin_monitor as bybit_monitor
 from oanda_monitor import oanda_forex_monitor as oanda_monitor
 from bybit_demo_tpsl_cache import (
@@ -23459,19 +23459,17 @@ def _compute_journal_stats(
         "fx": {**_risk_bucket(fx_rows), **fx_drawdown},
         "crypto": {**_risk_bucket(crypto_rows), **crypto_drawdown},
     }
+    account_return_stats = _result_percentage_totals_by_market(
+        [dict(row) for row in rows if isinstance(row, dict)],
+        [dict(balance) for balance in balances if isinstance(balance, dict)],
+    )
+    account_risk_of_ruin = _risk_of_ruin_by_account(
+        [dict(row) for row in rows if isinstance(row, dict)]
+    )
 
     def _market_return_stats(rows_subset: List[Dict[str, object]], market: str) -> Dict[str, object]:
-        values = _metric_values(rows_subset, "result_pct")
-        return {
-            "market_return_pct": sum(values) if values else None,
-            "gross_gain_return_pct": sum(value for value in values if value > 0) if values else None,
-            "gross_loss_return_pct": abs(sum(value for value in values if value < 0)) if values else None,
-            "net_result_pct": sum(values) if values else None,
-            "gross_gain_result_pct": sum(value for value in values if value > 0) if values else None,
-            "gross_loss_result_pct": abs(sum(value for value in values if value < 0)) if values else None,
-            "return_method": "sum_trade_result_pct",
-            "return_unavailable_reason": None if values else "missing_profit_pct",
-        }
+        key = market if market in {"fx", "crypto"} else "overall"
+        return dict(account_return_stats.get(key) or {})
 
     def _market_bucket(rows_subset: List[Dict[str, object]], label: str) -> Dict[str, object]:
         durations = [
@@ -23682,6 +23680,7 @@ def _compute_journal_stats(
                 "min_drawdown_pct": totals.get("min_drawdown_pct"),
                 "by_market": risk_by_market,
             },
+            "risk_of_ruin_by_account": account_risk_of_ruin,
             "duration": {
                 "overall_avg_seconds": totals.get("avg_duration_seconds"),
                 "overall_shortest_seconds": totals.get("min_trade_duration_seconds"),
@@ -27402,9 +27401,10 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                 if sheet not in wb.sheetnames:
                     raise RuntimeError(f"Trading Journal validation failed: missing required sheet '{sheet}'.")
             trade_log = _get_trade_log_sheet(wb, allow_legacy=False)
-            inst = wb["Instrument Averages"]
+            inst = _symbols_sheet(wb)
             cal = wb["P&L Calendar"]
-            dash = wb["Dashboard"]
+            dash = _stats1_sheet(wb)
+            detail_dash = _stats2_sheet(wb) or dash
             if "All Trades" in wb.sheetnames:
                 raise RuntimeError("Trading Journal validation failed: legacy 'All Trades' sheet remains after migration.")
             if "_Trade Meta" in wb.sheetnames:
@@ -27412,9 +27412,7 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
             if not trade_log.auto_filter or not trade_log.auto_filter.ref:
                 raise RuntimeError("Trading Journal validation failed: Trade Log filter missing.")
             if not inst.auto_filter or not inst.auto_filter.ref:
-                raise RuntimeError("Trading Journal validation failed: Instrument Averages filter missing.")
-            if str(inst.freeze_panes or "") != "B3":
-                raise RuntimeError("Trading Journal validation failed: Instrument Averages freeze pane must be B3.")
+                raise RuntimeError("Trading Journal validation failed: SYMBOLS filter missing.")
             def _is_hidden_trade_row(row: Dict[str, object]) -> bool:
                 metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
                 for key in ("is_hidden", "hidden", "_hidden"):
@@ -27633,17 +27631,27 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                     raise RuntimeError(f"Trading Journal validation failed: report sheet '{sheet_name}' has blank report headers.")
                 metric_labels = [
                     str(report_ws.cell(rr, 1).value or "").strip()
-                    for rr in range(2, min(report_ws.max_row, 53) + 1)
+                    for rr in range(2, report_ws.max_row + 1)
                 ]
-                if "Trades" not in metric_labels or "Short break-even" not in metric_labels:
-                    raise RuntimeError(f"Trading Journal validation failed: report sheet '{sheet_name}' metric labels are incomplete.")
+                required_report_labels = {
+                    "Trades",
+                    "Short break-even",
+                    "Min drawdown",
+                    "Total Commission",
+                }
+                missing_report_labels = sorted(required_report_labels - set(metric_labels))
+                if missing_report_labels:
+                    raise RuntimeError(
+                        f"Trading Journal validation failed: report sheet '{sheet_name}' "
+                        f"is missing required metric labels {missing_report_labels}."
+                    )
             _finish_substage("validation_reports")
             balances = snapshot.get("balances") or []
             if balances:
                 anchor = None
-                for rr in range(1, dash.max_row + 1):
-                    for cc in range(1, dash.max_column + 1):
-                        if str(dash.cell(rr, cc).value or "").strip().lower() == "account balances":
+                for rr in range(1, detail_dash.max_row + 1):
+                    for cc in range(1, detail_dash.max_column + 1):
+                        if str(detail_dash.cell(rr, cc).value or "").strip().lower() == "account balances":
                             anchor = (rr, cc)
                             break
                     if anchor:
@@ -27652,10 +27660,10 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                     raise RuntimeError("Trading Journal validation failed: Account Balances section anchor missing.")
                 header_row = None
                 header_map: Dict[str, int] = {}
-                for rr in range(anchor[0] + 1, min(dash.max_row + 1, anchor[0] + 12)):
+                for rr in range(anchor[0] + 1, min(detail_dash.max_row + 1, anchor[0] + 12)):
                     row_map: Dict[str, int] = {}
-                    for cc in range(anchor[1], min(dash.max_column + 1, anchor[1] + 8)):
-                        token = str(dash.cell(rr, cc).value or "").strip().lower()
+                    for cc in range(anchor[1], min(detail_dash.max_column + 1, anchor[1] + 8)):
+                        token = str(detail_dash.cell(rr, cc).value or "").strip().lower()
                         if token in {"account", "balance", "currency", "as of", "as_of"}:
                             if token == "as_of":
                                 token = "as of"
@@ -27676,15 +27684,15 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                         continue
                     expected_balances[account_label.upper()] = b
                 actual_rows: Dict[str, Dict[str, object]] = {}
-                for rr in range(header_row + 1, min(dash.max_row + 1, header_row + 80)):
-                    account = str(dash.cell(rr, header_map["account"]).value or "").strip()
+                for rr in range(header_row + 1, min(detail_dash.max_row + 1, header_row + 80)):
+                    account = str(detail_dash.cell(rr, header_map["account"]).value or "").strip()
                     if not account:
                         continue
                     actual_rows[account.upper()] = {
                         "row": rr,
                         "account": account,
-                        "balance": dash.cell(rr, header_map["balance"]).value,
-                        "currency": str(dash.cell(rr, header_map["currency"]).value or "").strip(),
+                        "balance": detail_dash.cell(rr, header_map["balance"]).value,
+                        "currency": str(detail_dash.cell(rr, header_map["currency"]).value or "").strip(),
                     }
                 nonnumeric: List[str] = []
                 nonnumeric_skipped: List[str] = []
@@ -27771,7 +27779,7 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                 if isinstance(leaders.get(key), dict) and any((leaders.get(key) or {}).get(k) is not None for k in ("symbol", "wins", "losses", "trades", "total_trades"))
             }
             if expected_payloads:
-                _, header_map, metric_rows, _ = _find_instrument_leaders_table(dash)
+                _, header_map, metric_rows, _ = _find_instrument_leaders_table(detail_dash)
                 metric_rows_normalized = {str(label or "").strip().lower(): row_idx for label, row_idx in (metric_rows or {}).items()}
                 if not header_map:
                     raise RuntimeError("Trading Journal validation failed: Instrument leaders headers missing.")
@@ -27780,8 +27788,8 @@ def _sync_master_journal_workbook_unlocked(*, defer_github_sync: bool = False, e
                     raise RuntimeError("Trading Journal validation failed: Instrument leaders section has no recognized metric rows despite leader stats.")
                 for metric_label in present_expected_payloads:
                     row_idx = metric_rows.get(metric_label) or metric_rows_normalized.get(metric_label)
-                    symbol = str(dash.cell(row_idx, header_map["symbol"]).value or "").strip()
-                    trades_num = _safe_float(dash.cell(row_idx, header_map["trades"]).value)
+                    symbol = str(detail_dash.cell(row_idx, header_map["symbol"]).value or "").strip()
+                    trades_num = _safe_float(detail_dash.cell(row_idx, header_map["trades"]).value)
                     if not symbol or symbol == "—" or trades_num is None:
                         raise RuntimeError(f"Trading Journal validation failed: Instrument leaders row '{metric_label}' is present but blank/invalid; user-deleted rows are skipped.")
             _finish_substage("validation_leaders")
@@ -28035,7 +28043,7 @@ TRADING_JOURNAL_ACTIONS_TEMPLATE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Trading Journal Workspace</title>
 <style>body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}.wrap{min-height:100vh;display:flex;align-items:center;justify-content:center}.stack{display:flex;flex-direction:column;gap:12px;min-width:280px;max-width:720px}button{padding:12px 14px;border-radius:10px;border:1px solid #334155;background:#1f2937;color:#e2e8f0;font-weight:700;cursor:pointer}.drop-zone{border:1px dashed #475569;border-radius:12px;padding:16px;text-align:center;color:#94a3b8;background:#0f172a;cursor:pointer}.drop-zone.drag-over{border-color:#38bdf8;background:#082f49;color:#e0f2fe}.status{margin-top:8px;white-space:pre-wrap;color:#94a3b8}.pnl-explanation{border:1px solid #334155;border-radius:10px;padding:14px;background:#0f172a;color:#cbd5e1;line-height:1.5}.pnl-explanation[hidden]{display:none}.pnl-explanation strong{color:#f8fafc}</style></head>
-<body><div class="wrap"><div class="stack"><button id="open-journal-btn">Open workbook</button><button id="import-journal-btn">Import</button><button id="journal-resync-btn">Resync</button><div id="journal-import-drop-zone" class="drop-zone">Drop .xlsx/.xlsm/.xls/.csv import files here<br/><span style="font-size:12px">or click Import to choose a file</span></div><label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode" style="margin-left:8px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"><option value="" selected disabled>Select Demo or Live</option><option value="demo">Demo</option><option value="live">Live</option></select></label><button id="crypto-monthly-pnl-btn">Crypto Monthly P&L</button><button id="bybit-demo-balance-adjustment-btn">Bybit Demo Balance Adjustment</button><button id="pnl-explanation-btn" type="button" aria-expanded="false" aria-controls="pnl-explanation-panel">P&amp;L % explanation</button><div id="pnl-explanation-panel" class="pnl-explanation" hidden><strong>How P&amp;L percentages are calculated</strong><br/>Trade Profit % is the per-trade percentage result stored by the import/calculator pipeline. Net P&amp;L % is the linear sum of included trade Profit % values. Gross gain % sums only positive included trade Profit % values. Gross loss % sums the absolute value of negative included trade Profit % values. Average P&amp;L % is the arithmetic average of included trade Profit % values. Min/Max P&amp;L % are the smallest/largest individual trade Profit % values. This is not a compounded equity curve calculation; compounded return would be product(1+r)-1 and would be a separate metric if added. Money Net P&amp;L remains money only where a sheet or column is explicitly a currency/money field.</div><input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv" hidden/><div id="journal-actions-status" class="status"></div></div></div><script src="/static/trading_journal_actions.js?v={{TRADING_JOURNAL_ACTIONS_JS_VERSION}}"></script></body></html>"""
+<body><div class="wrap"><div class="stack"><button id="open-journal-btn">Open workbook</button><button id="import-journal-btn">Import</button><button id="journal-resync-btn">Resync</button><div id="journal-import-drop-zone" class="drop-zone">Drop .xlsx/.xlsm/.xls/.csv import files here<br/><span style="font-size:12px">or click Import to choose a file</span></div><label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode" style="margin-left:8px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"><option value="" selected disabled>Select Demo or Live</option><option value="demo">Demo</option><option value="live">Live</option></select></label><button id="crypto-monthly-pnl-btn">Crypto Monthly P&L</button><button id="bybit-demo-balance-adjustment-btn">Bybit Demo Balance Adjustment</button><button id="pnl-explanation-btn" type="button" aria-expanded="false" aria-controls="pnl-explanation-panel">P&amp;L % explanation</button><div id="pnl-explanation-panel" class="pnl-explanation" hidden><strong>How P&amp;L percentages are calculated</strong><br/>STATS1 Net P&amp;L % uses cashflow-adjusted account balances where a defensible starting capital and ending equity are available. Deposits and withdrawals are removed from the return numerator. FX uses AUD accounts and crypto uses USDT accounts; Overall is left unavailable when currencies cannot be combined safely. Trade Profit %, gross gain/loss %, averages, and report-period percentages retain their trade-level period logic.</div><input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv" hidden/><div id="journal-actions-status" class="status"></div></div></div><script src="/static/trading_journal_actions.js?v={{TRADING_JOURNAL_ACTIONS_JS_VERSION}}"></script></body></html>"""
 
 @app.get("/dashboard/trading-journal")
 @app.get("/merged/trading-journal")
@@ -28852,15 +28860,16 @@ def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Opti
         diagnostics["sheet_order"] = list(wb.sheetnames)
         if list(wb.sheetnames) != expected_order:
             return {"ok": False, "error": f"sheet_order_mismatch: expected {expected_order}, got {wb.sheetnames}", "diagnostics": diagnostics}
-        dash = wb["Dashboard"]
+        dash = _stats1_sheet(wb)
+        detail_dash = _stats2_sheet(wb) or dash
         trade_log = wb["Trade Log"]
-        inst = wb["Instrument Averages"]
+        inst = _symbols_sheet(wb)
         diagnostics["trade_log_filter"] = trade_log.auto_filter.ref
         diagnostics["instrument_averages_filter"] = inst.auto_filter.ref
         if not trade_log.auto_filter.ref:
             return {"ok": False, "error": "Trade Log filter is missing.", "diagnostics": diagnostics}
         if not inst.auto_filter.ref:
-            return {"ok": False, "error": "Instrument Averages filter is missing.", "diagnostics": diagnostics}
+            return {"ok": False, "error": "SYMBOLS filter is missing.", "diagnostics": diagnostics}
         error_tokens = ("#REF!", "#DIV/0!", "#VALUE!", "#NAME?", "#N/A")
         for ws in wb.worksheets:
             for row in ws.iter_rows():
@@ -28878,9 +28887,9 @@ def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Opti
             return {"ok": False, "error": "formula_error_strings_found", "diagnostics": diagnostics}
 
         anchor = None
-        for rr in range(1, dash.max_row + 1):
-            for cc in range(1, dash.max_column + 1):
-                if str(dash.cell(rr, cc).value or "").strip().lower() == "account balances":
+        for rr in range(1, detail_dash.max_row + 1):
+            for cc in range(1, detail_dash.max_column + 1):
+                if str(detail_dash.cell(rr, cc).value or "").strip().lower() == "account balances":
                     anchor = (rr, cc)
                     break
             if anchor:
@@ -28889,10 +28898,10 @@ def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Opti
             return {"ok": False, "error": "Account Balances section anchor missing.", "diagnostics": diagnostics}
         header_row = None
         header_map: Dict[str, int] = {}
-        for rr in range(anchor[0] + 1, min(dash.max_row + 1, anchor[0] + 12)):
+        for rr in range(anchor[0] + 1, min(detail_dash.max_row + 1, anchor[0] + 12)):
             row_map: Dict[str, int] = {}
-            for cc in range(anchor[1], min(dash.max_column + 1, anchor[1] + 8)):
-                token = str(dash.cell(rr, cc).value or "").strip().lower().replace("_", " ")
+            for cc in range(anchor[1], min(detail_dash.max_column + 1, anchor[1] + 8)):
+                token = str(detail_dash.cell(rr, cc).value or "").strip().lower().replace("_", " ")
                 if token in {"account", "balance", "currency", "as of"}:
                     row_map[token] = cc
             if {"account", "balance", "currency"}.issubset(set(row_map.keys())):
@@ -28902,15 +28911,15 @@ def _fast_verify_trading_journal_workbook(path: Path, *, expected_snapshot: Opti
         if not header_row:
             return {"ok": False, "error": "Account Balances headers missing.", "diagnostics": diagnostics}
         actual: Dict[str, Dict[str, object]] = {}
-        for rr in range(header_row + 1, min(dash.max_row + 1, header_row + 100)):
-            account = str(dash.cell(rr, header_map["account"]).value or "").strip()
+        for rr in range(header_row + 1, min(detail_dash.max_row + 1, header_row + 100)):
+            account = str(detail_dash.cell(rr, header_map["account"]).value or "").strip()
             if not account:
                 continue
             actual[account.upper()] = {
                 "account": account,
                 "row": rr,
-                "balance": _to_float(dash.cell(rr, header_map["balance"]).value),
-                "currency": str(dash.cell(rr, header_map["currency"]).value or "").strip().upper(),
+                "balance": _to_float(detail_dash.cell(rr, header_map["balance"]).value),
+                "currency": str(detail_dash.cell(rr, header_map["currency"]).value or "").strip().upper(),
             }
         diagnostics["checked_accounts"] = sorted(actual.keys())
         required = {"BINANCE": (0.0, "USDT"), "PEPPERSTONE DEMO": (0.0, "AUD")}
