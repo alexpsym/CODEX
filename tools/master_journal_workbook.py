@@ -2191,6 +2191,7 @@ def _apply_trade_log_win_loss_direct_row_fills(ws) -> None:
     last_col = max((col for header, col in headers.items() if header), default=ws.max_column)
     profit_fill = PatternFill("solid", fgColor=PROFIT_FILL)
     loss_fill = PatternFill("solid", fgColor=LOSS_FILL)
+    empty_fill = PatternFill()
     for row in range(_trade_log_data_start_row(ws), ws.max_row + 1):
         row_type = str(ws.cell(row, row_type_col).value or "").strip().lower()
         net_pl = _as_float(ws.cell(row, net_pl_col).value)
@@ -2203,9 +2204,9 @@ def _apply_trade_log_win_loss_direct_row_fills(ws) -> None:
         for col in range(1, last_col + 1):
             cell = ws.cell(row, col)
             if fill is not None:
-                cell.fill = copy(fill)
+                cell.fill = fill
             elif _cell_has_generated_trade_log_win_loss_fill(cell):
-                cell.fill = PatternFill()
+                cell.fill = empty_fill
 
 def _apply_trade_log_win_loss_row_formatting(ws) -> None:
     headers = _trade_log_header_map(ws)
@@ -2543,7 +2544,7 @@ def _subtract_range_rectangle(cell_range: str, cut_range: str) -> List[str]:
     ]
 
 def _sanitize_dashboard_semantic_conditional_formatting(ws) -> None:
-    protected_ranges = ("B3:D4", "B11:D12", "C10:D12", "C21:D28")
+    protected_ranges = ("B3:D4", "B10:D11", "C10:D11", "C21:D28")
     sanitized = OrderedDict()
 
     def add_rules(key, rules) -> None:
@@ -2575,9 +2576,9 @@ def _sanitize_dashboard_semantic_conditional_formatting(ws) -> None:
 
 def _apply_dashboard_requested_semantic_fills(ws) -> None:
     _sanitize_dashboard_semantic_conditional_formatting(ws)
-    for coordinate in ("B3", "C3", "D3", "B11", "C11", "D11"):
+    for coordinate in ("B3", "C3", "D3", "B10", "C10", "D10"):
         _apply_full_cell_semantic_fill(ws[coordinate], "profit")
-    for coordinate in ("B4", "C4", "D4", "B12", "C12", "D12"):
+    for coordinate in ("B4", "C4", "D4", "B11", "C11", "D11"):
         _apply_full_cell_semantic_fill(ws[coordinate], "loss")
 
     semantic_by_label = {
@@ -3504,6 +3505,10 @@ def _dashboard_extended_metrics(
             value for value in (_as_float(item.get("r_multiple")) for item in losers)
             if value is not None and value < 0
         ]
+        r_values = [
+            value for value in (_as_float(item.get("r_multiple")) for item in items)
+            if value is not None and math.isfinite(value)
+        ]
         commission_rows: List[Tuple[float, Dict[str, Any]]] = []
         for item in items:
             value = _as_float(item.get("commission"))
@@ -3549,6 +3554,7 @@ def _dashboard_extended_metrics(
             **{f"timeframe_{label.lower()}_wins": timeframe_wins[label] for label in timeframe_aliases.values()},
             **{f"timeframe_{label.lower()}_losses": timeframe_losses[label] for label in timeframe_aliases.values()},
             **_summary(commissions, "commission"),
+            "net_r_multiple": sum(r_values) if r_values else None,
             "total_commission": sum(commissions) if commissions else None,
             "min_commission_source": _fmt_detail_src(min_commission_source) if min_commission_source else "",
             "max_commission_source": _fmt_detail_src(max_commission_source) if max_commission_source else "",
@@ -4589,21 +4595,28 @@ def _report_rows_for_period(
     year: int,
     month: int | None = None,
 ) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
-    for row in snapshot.get("items") or []:
-        if not isinstance(row, dict):
-            continue
-        if str(row.get("row_type") or "trade") != "trade":
-            continue
-        if _is_test_trade_value(row.get("is_test_trade")):
-            continue
-        timestamp = _as_datetime(row.get("close_time") or row.get("open_time"))
-        if timestamp is None or timestamp.year != year:
-            continue
-        if month is not None and timestamp.month != month:
-            continue
-        rows.append(row)
-    return rows
+    cache = snapshot.get("_report_rows_by_period") if isinstance(snapshot, dict) else None
+    if not isinstance(cache, dict):
+        by_year: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
+        by_month: Dict[Tuple[int, int], List[Dict[str, Any]]] = defaultdict(list)
+        for row in snapshot.get("items") or []:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("row_type") or "trade") != "trade":
+                continue
+            if _is_test_trade_value(row.get("is_test_trade")):
+                continue
+            timestamp = _as_datetime(row.get("close_time") or row.get("open_time"))
+            if timestamp is None:
+                continue
+            by_year[timestamp.year].append(row)
+            by_month[(timestamp.year, timestamp.month)].append(row)
+        cache = {"year": by_year, "month": by_month}
+        if isinstance(snapshot, dict):
+            snapshot["_report_rows_by_period"] = cache
+    if month is None:
+        return list((cache.get("year") or {}).get(year, []))
+    return list((cache.get("month") or {}).get((year, month), []))
 
 
 def _report_bucket_for_period(
@@ -4774,6 +4787,22 @@ def _set_cell_horizontal_alignment(cell, horizontal: str) -> None:
 
 
 def _apply_workbook_right_alignment(wb) -> None:
+    right_alignment_id_by_source: Dict[int, int] = {}
+
+    def right_alignment_id(source_id: int) -> int:
+        if source_id in right_alignment_id_by_source:
+            return right_alignment_id_by_source[source_id]
+        source = wb._alignments[source_id]
+        if source.horizontal == "right":
+            right_alignment_id_by_source[source_id] = source_id
+            return source_id
+        target = copy(source)
+        target.horizontal = "right"
+        target_id = wb._alignments.add(target)
+        right_alignment_id_by_source[source_id] = target_id
+        return target_id
+
+    default_right_alignment = Alignment(horizontal="right")
     for ws in wb.worksheets:
         non_anchor_cells = {
             (row, col)
@@ -4782,36 +4811,25 @@ def _apply_workbook_right_alignment(wb) -> None:
             for col in range(merged.min_col, merged.max_col + 1)
             if not (row == merged.min_row and col == merged.min_col)
         }
-        alignment_cache: Dict[Tuple[Any, ...], Alignment] = {}
+        style_cache: Dict[Tuple[int, ...], Any] = {}
         for (row, col), cell in list(ws._cells.items()):
-            if (row, col) in non_anchor_cells or cell.alignment.horizontal == "right":
+            if (row, col) in non_anchor_cells:
                 continue
-            source = cell.alignment
-            key = (
-                source.vertical,
-                source.textRotation,
-                source.wrapText,
-                source.shrinkToFit,
-                source.indent,
-                source.relativeIndent,
-                source.justifyLastLine,
-                source.readingOrder,
-            )
-            target = alignment_cache.get(key)
-            if target is None:
-                target = Alignment(
-                    horizontal="right",
-                    vertical=source.vertical,
-                    text_rotation=source.textRotation,
-                    wrap_text=source.wrapText,
-                    shrink_to_fit=source.shrinkToFit,
-                    indent=source.indent,
-                    relativeIndent=source.relativeIndent,
-                    justifyLastLine=source.justifyLastLine,
-                    readingOrder=source.readingOrder,
-                )
-                alignment_cache[key] = target
-            cell.alignment = target
+            source_style = cell._style
+            if source_style is None:
+                cell.alignment = default_right_alignment
+                continue
+            source_alignment_id = source_style.alignmentId
+            target_alignment_id = right_alignment_id(source_alignment_id)
+            if target_alignment_id == source_alignment_id:
+                continue
+            style_key = tuple(source_style)
+            target_style = style_cache.get(style_key)
+            if target_style is None:
+                target_style = copy(source_style)
+                target_style.alignmentId = target_alignment_id
+                style_cache[style_key] = target_style
+            cell._style = target_style
 
 
 def _header_map(ws, header_row: int = 1) -> Dict[str, int]:

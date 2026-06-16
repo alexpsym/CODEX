@@ -194,7 +194,10 @@ def test_dashboard_parity_and_equity(tmp_path: Path):
         assert label in vals
     assert 'Instrument leaders' not in vals
     assert any(isinstance(wb[STATS1_SHEET].cell(r,c).value, float) for r in range(1,220) for c in range(1,13))
-    assert all(wb[STATS1_SHEET][coord].number_format == '0.00%' for coord in ('C8','D8','C9','D9','C10','D10'))
+    assert wb[STATS1_SHEET]["A8"].value == "Net P/L Percentage"
+    assert wb[STATS1_SHEET]["A9"].value == "Net P/L R multiples"
+    assert all(wb[STATS1_SHEET][coord].number_format == '0.00%' for coord in ('C8','D8','C10','D10'))
+    assert all(wb[STATS1_SHEET][coord].number_format == '0.000"R"' for coord in ('C9','D9'))
     assert any(
         isinstance(wb[STATS1_SHEET].cell(r, c).value, str) and
         str(wb[STATS1_SHEET].cell(r, c).number_format or "") == "General" and
@@ -292,8 +295,8 @@ def test_instrument_averages_new_columns_order_formats_and_alignment(tmp_path: P
     assert headers == INSTRUMENT_AVERAGES_HEADERS
     by_header = {header: index + 1 for index, header in enumerate(headers)}
     row = INSTRUMENT_AVERAGES_DATA_START_ROW
-    assert ws.cell(row, by_header["Move to break even"]).value == 10000
-    assert ws.cell(row, by_header["Move to profit"]).value == 20000
+    assert ws.cell(row, by_header["Move to break even"]).value == 1
+    assert ws.cell(row, by_header["Move to profit"]).value == 1
     assert ws.cell(row, by_header["Net R Multiple"]).value == pytest.approx(0.9)
     assert ws.cell(row, by_header["Net R Multiple"]).number_format == '0.000"R"'
     assert ws.cell(row, by_header["All-time highs"]).value == 1
@@ -308,7 +311,7 @@ def test_instrument_averages_new_columns_order_formats_and_alignment(tmp_path: P
     assert ws.cell(row, by_header["Early close"]).value == 1
     assert ws.cell(row, by_header["Move to break even"]).font.color.rgb == "FF000000"
     assert ws.cell(row, by_header["Move to profit"]).font.color.rgb == "FF000000"
-    assert all(ws.cell(row, col).alignment.horizontal == "center" for col in range(2, ws.max_column + 1))
+    assert all(ws.cell(row, col).alignment.horizontal == "right" for col in range(2, ws.max_column + 1))
     order_range = (
         f"{get_column_letter(by_header['Market'])}1:"
         f"{get_column_letter(by_header['Limit'])}1"
@@ -445,7 +448,7 @@ def test_trade_log_three_row_umbrella_headers_and_filter(tmp_path: Path):
             assert ws.cell(1, col).value == header
             assert ws.cell(2, col).value is None
             assert ws.cell(3, col).value is None
-            assert ws.cell(1, col).alignment.horizontal == "center"
+            assert ws.cell(1, col).alignment.horizontal == "right"
             assert ws.cell(1, col).alignment.vertical == "center"
     expected = ["Time", "Duration", "Trigger Price", "Distance From Entry %", "Distance From Exit %"]
     assert [ws.cell(2, col).value for col in be_cols] == expected
@@ -629,7 +632,6 @@ def test_dashboard_manual_move_rows_survive_and_populate_by_label(tmp_path: Path
     dash["A2"].font = label_font
     dash["A2"].border = Border(bottom=Side(style="thick", color="123456"))
     dash.row_dimensions[2].height = 31
-    style_id = dash["A2"].style_id
     _ensure_trade_log_headers(wb)
     trade = wb["Trade Log"]
     trade.cell(_trade_data_row(), _header_col(trade, "Row ID")).value = "move-1"
@@ -665,7 +667,10 @@ def test_dashboard_manual_move_rows_survive_and_populate_by_label(tmp_path: Path
     assert dash["B3"].value == "02 hours, 00 minutes, 00 seconds"
     assert dash["D3"].value == "02 hours, 00 minutes, 00 seconds"
     assert dash["B4"].value == 1 and dash["D4"].value == 1
-    assert dash["A2"].style_id == style_id
+    assert str(dash["A2"].fill.fgColor.rgb).endswith("ABCDEF")
+    assert dash["A2"].font.bold is True
+    assert dash["A2"].border.bottom.style == "thick"
+    assert dash["A2"].alignment.horizontal == "right"
     assert dash.row_dimensions[2].height == 31
     wb.close()
 
@@ -2700,16 +2705,21 @@ def test_generated_dashboard_layout_percentages_semantic_fills_and_labels(tmp_pa
 
     assert 0 < dash["C8"].value < 1
     assert -1 <= dash["D8"].value < 0
-    assert dash["C9"].value == pytest.approx(0.023)
-    assert dash["C10"].value == pytest.approx(0.0)
-    assert dash["D9"].value == pytest.approx(0.0)
-    assert dash["D10"].value == pytest.approx(0.011)
-    for coordinate in ("C8", "D8", "C9", "D9", "C10", "D10"):
+    assert dash["B9"].value == pytest.approx(0.4)
+    assert dash["C9"].value == pytest.approx(1.2)
+    assert dash["D9"].value == pytest.approx(-0.8)
+    assert dash["C10"].value == pytest.approx(0.023)
+    assert dash["C11"].value == pytest.approx(0.0)
+    assert dash["D10"].value == pytest.approx(0.0)
+    assert dash["D11"].value == pytest.approx(0.011)
+    for coordinate in ("C8", "D8", "C10", "D10", "C11", "D11"):
         assert dash[coordinate].number_format == "0.00%"
         assert not any(token in dash[coordinate].number_format.upper() for token in ("AUD", "USDT", "$"))
+    for coordinate in ("B9", "C9", "D9"):
+        assert dash[coordinate].number_format == '0.000"R"'
 
-    green = ("B3", "C3", "D3", "B11", "C11", "D11", "B35", "C35")
-    red = ("B4", "C4", "D4", "B12", "C12", "D12", "B49", "D49")
+    green = ("B3", "C3", "D3", "B10", "C10", "D10", "B36", "C36")
+    red = ("B4", "C4", "D4", "B11", "C11", "D11", "B50", "D50")
     assert all(_cell_fill_rgb(dash[coordinate]) == "C6EFCE" for coordinate in green)
     assert all(_cell_font_rgb(dash[coordinate]) == "006100" for coordinate in green)
     assert all(_cell_fill_rgb(dash[coordinate]) == "FFC7CE" for coordinate in red)
@@ -2977,9 +2987,9 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
     labels = {str(stats1.cell(row, 1).value or ""): row for row in range(1, stats1.max_row + 1)}
     assert "Expectancy %" not in labels
     assert labels["Avg result %"] < labels["Winners"]
-    for label in ("Net P/L", "Gross gain", "Gross loss"):
+    for label in ("Net P/L Percentage", "Gross gain", "Gross loss"):
         cell = stats1.cell(labels[label], 2)
-        assert cell.alignment.horizontal == "left"
+        assert cell.alignment.horizontal == "right"
         assert cell.font.bold is False
     for section in ("Side", "Patterns", "Timeframe"):
         section_row = labels[section]
@@ -2998,7 +3008,7 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
         if stats1.cell(row, 1).value == "Losers" and row < labels["Side"]
     )
     loser_row = losers_section + 1
-    assert all(stats1.cell(loser_row, col).alignment.horizontal == "left" for col in (2, 3, 4))
+    assert all(stats1.cell(loser_row, col).alignment.horizontal == "right" for col in (2, 3, 4))
     for label, expected_fx, expected_crypto in (
         ("Min Commission", 1.25, 0.75),
         ("Avg Commission", 1.625, 0.75),
@@ -3007,16 +3017,10 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
     ):
         row = labels[label]
         assert stats1.cell(row, 2).value in (None, "")
-        if label in {"Avg Commission", "Total Commission"}:
-            assert stats1.cell(row, 3).value == pytest.approx(expected_fx)
-            assert stats1.cell(row, 4).value == pytest.approx(expected_crypto)
-            assert "AUD" in stats1.cell(row, 3).number_format
-            assert "USDT" in stats1.cell(row, 4).number_format
-        else:
-            assert str(stats1.cell(row, 3).value).startswith(f"AUD {expected_fx:g}")
-            assert str(stats1.cell(row, 4).value).startswith(f"USDT {expected_crypto:g}")
-            assert stats1.cell(row, 3).number_format == "General"
-            assert stats1.cell(row, 4).number_format == "General"
+        assert stats1.cell(row, 3).value == pytest.approx(expected_fx)
+        assert stats1.cell(row, 4).value == pytest.approx(expected_crypto)
+        assert "AUD" in stats1.cell(row, 3).number_format
+        assert "USDT" in stats1.cell(row, 4).number_format
         assert "%" not in str(stats1.cell(row, 3).number_format) + str(stats1.cell(row, 4).number_format)
 
     assert stats1.cell(labels["Channel"], 2).value == 0
