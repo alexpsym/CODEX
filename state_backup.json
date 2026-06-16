@@ -167,25 +167,25 @@
       "changed": 0,
       "failed_months": [],
       "failures": [],
-      "finished_at": "2026-06-16T01:25:43.735353+00:00",
+      "finished_at": "2026-06-16T02:23:50.322433+00:00",
       "mandatory_row_id": "monthly_aud_reval:bybit_live:2026-03",
       "partial": false,
       "processed_months": [],
       "rows": 3,
-      "started_at": "2026-06-16T01:25:43.664420+00:00",
+      "started_at": "2026-06-16T02:23:50.287551+00:00",
       "succeeded_months": [],
       "target_months": []
     },
-    "last_synced_at": "2026-06-16T01:25:43.735313+00:00",
+    "last_synced_at": "2026-06-16T02:23:50.322405+00:00",
     "month_key": null,
     "ok": true,
     "stage": "complete",
     "traceback": null,
-    "updated_at": "2026-06-16T01:25:43.735346+00:00"
+    "updated_at": "2026-06-16T02:23:50.322426+00:00"
   },
   "oanda_fill_state": {},
   "pending_webhooks": [],
-  "savedAt": "2026-06-16T01:39:10.884464+00:00",
+  "savedAt": "2026-06-16T02:23:52.313669+00:00",
   "source_host": "DESKTOP-1B14EQ6",
   "source_profile": "local",
   "trade_contexts": [
@@ -288,7 +288,64 @@
     }
   ],
   "trading_journal": {
-    "items": [],
+    "items": [
+      {
+        "account": "Bybit Demo",
+        "account_label": "Bybit Demo",
+        "asset_class": "crypto",
+        "balance_after_trade": null,
+        "close_time": "2026-05-19T01:13:00+00:00",
+        "commission": 0.01,
+        "currency": "USDT",
+        "entry_price": 100100.0,
+        "exit_price": 100100.0,
+        "fee_rate": null,
+        "id": "bybit:demo:execution:BTCUSDT:E2",
+        "net_profit": null,
+        "notes": "Bybit execution-history row; Net P/L may be inferred from explicit P/L fields or balance continuity when provable.",
+        "open_time": "2026-05-19T01:13:00+00:00",
+        "qty": 0.1,
+        "raw_refs": {
+          "execId": "E2",
+          "orderId": "OID2",
+          "source_file": null,
+          "source_row": null
+        },
+        "row_type": "trade",
+        "side": "Sell",
+        "source": "bybit_execution_history",
+        "symbol": "BTCUSDT",
+        "updated_at": "2026-06-16T01:39:08.784941+00:00"
+      },
+      {
+        "account": "Bybit Demo",
+        "account_label": "Bybit Demo",
+        "asset_class": "crypto",
+        "balance_after_trade": null,
+        "close_time": "2026-05-17T01:13:00+00:00",
+        "commission": 0.01,
+        "currency": "USDT",
+        "entry_price": 100000.0,
+        "exit_price": 100000.0,
+        "fee_rate": null,
+        "id": "bybit:demo:execution:BTCUSDT:E1",
+        "net_profit": null,
+        "notes": "Bybit execution-history row; Net P/L may be inferred from explicit P/L fields or balance continuity when provable.",
+        "open_time": "2026-05-17T01:13:00+00:00",
+        "qty": 0.1,
+        "raw_refs": {
+          "execId": "E1",
+          "orderId": "OID1",
+          "source_file": null,
+          "source_row": null
+        },
+        "row_type": "trade",
+        "side": "Buy",
+        "source": "bybit_execution_history",
+        "symbol": "BTCUSDT",
+        "updated_at": "2026-06-16T01:39:08.784885+00:00"
+      }
+    ],
     "updated_at": "2026-06-16T01:39:08.784983+00:00"
   },
   "trading_journal_import_cache": {},
@@ -328,5 +385,5 @@
   "watchlist": [
     "DASHUSDT"
   ],
-  "watchlist_updated_at": null
+  "watchlist_updated_at": "2026-06-16T02:23:42.492591+00:00"
 }
