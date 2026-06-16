@@ -13550,7 +13550,18 @@ def _normalize_yes_no_criterion(value: object, label: str) -> str:
 
 
 def _normalize_ema(value: object) -> str:
-    return _normalize_yes_no_criterion(value, "EMA")
+    text = " ".join(str(value or "").strip().lower().replace("_", " ").replace("-", " ").split())
+    if text in {"", "none"}:
+        return ""
+    if text in {"9", "9 ema", "ema 9"}:
+        return "9"
+    if text in {"20", "20 ema", "ema 20"}:
+        return "20"
+    if text in {"yes", "y", "true", "1"}:
+        return "9"
+    if text in {"no", "n", "false", "0"}:
+        return ""
+    raise ValueError("Invalid EMA. Expected one of: None, 9, 20.")
 
 
 def _normalize_round_number(value: object) -> str:

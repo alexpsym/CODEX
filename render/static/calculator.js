@@ -670,7 +670,7 @@
   }
   function setEmaButtons() {
     const root = $('ema-toggle'); if (!root) return;
-    const opts = [['','None'],['Yes','Yes'],['No','No']];
+    const opts = [['','None'],['9','9'],['20','20']];
     root.innerHTML = opts.map(([v,l])=>`<button type="button" data-v="${v}" class="${v===state.ema?'active':''}">${l}</button>`).join('');
     root.querySelectorAll('button').forEach((btn)=>btn.addEventListener('click',()=>{state.ema=btn.dataset.v||''; setEmaButtons(); invalidateQuote();}));
   }
