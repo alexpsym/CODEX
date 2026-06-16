@@ -1,10 +1,13 @@
 from pathlib import Path
 from copy import copy
 from datetime import datetime
-from openpyxl import load_workbook
+import zipfile
+import xml.etree.ElementTree as ET
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 import pytest
 from tools.master_journal_workbook import build_master_journal_workbook, read_master_journal_manual_overrides, read_master_journal_source, update_master_journal_workbook_data_only, SHEET_ORDER, STATS1_SHEET, STATS2_SHEET, SYMBOLS_SHEET, TRADE_LOG_HEADERS, TRADE_LOG_HEADERS_V1, OLD_TRADE_LOG_HEADERS, PRE_MOVE_TRADE_LOG_HEADERS, MOVE_TO_FIELD_MAP, TRADE_LOG_HEADER_ROWS, TRADE_LOG_DATA_START_ROW, TRADE_LOG_FILTER_HEADER_ROW, TRADE_NUMBER_HEADER, REPORT_YEARLY_SHEET, REPORT_METRIC_LABELS, INSTRUMENT_AVERAGES_HEADERS, INSTRUMENT_AVERAGES_FILTER_HEADER_ROW, INSTRUMENT_AVERAGES_DATA_START_ROW, DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL, DASHBOARD_MOVE_TO_PROFIT_LABEL, DURATION_NUMBER_FORMAT, adaptive_percent_number_format, adaptive_number_format, resolve_trade_folder_link, expected_report_sheet_names, _apply_trade_number_hyperlinks, _ensure_trade_log_schema, _ensure_instrument_averages_schema, _ensure_pnl_calendar_freeze_panes, _repair_trade_log_move_to_durations, _trade_log_header_map, _instrument_averages_header_map, _result_percentage_totals_by_market
+from tools.master_journal_workbook import _format_duration_display, _parse_duration_text, _repair_legacy_duration_number_formats
 from openpyxl.utils.cell import coordinate_to_tuple, get_column_letter, range_boundaries
 
 def _cf_ranges(ws):
@@ -90,6 +93,16 @@ def _all_rule_colors(ws):
     return out
 
 
+def _custom_number_formats(path: Path):
+    with zipfile.ZipFile(path) as zf:
+        root = ET.fromstring(zf.read("xl/styles.xml"))
+    ns = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    return [
+        str(node.attrib.get("formatCode") or "")
+        for node in root.findall(".//x:numFmt", ns)
+    ]
+
+
 def sample_snapshot():
     return {
         'updated_at':'2026-05-10T00:00:00Z',
@@ -105,6 +118,65 @@ def sample_snapshot():
 def test_single_builder_definition():
     src = Path('tools/master_journal_workbook.py').read_text(encoding='utf-8')
     assert src.count('def build_master_journal_workbook') == 1
+
+
+@pytest.mark.parametrize(
+    ("seconds", "expected"),
+    [
+        (3661, "01 hours, 01 minutes, 01 seconds"),
+        (180, "03 minutes, 00 seconds"),
+        (59, "59 seconds"),
+        (90061, "01 days, 01 hours, 01 minutes, 01 seconds"),
+    ],
+)
+def test_format_duration_display_suppresses_leading_units(seconds, expected):
+    assert _format_duration_display(seconds) == expected
+    assert _parse_duration_text(expected) == pytest.approx(seconds)
+
+
+def test_generated_workbook_duration_styles_are_excel_safe(tmp_path: Path):
+    journal_dir = tmp_path / "journal"
+    out = journal_dir / "Trading Journal.xlsx"
+    build_master_journal_workbook(sample_snapshot(), out)
+
+    invalid_tokens = ("[>=1000000]", "[>=10000]", "[>=100]")
+    custom_formats = _custom_number_formats(out)
+    assert DURATION_NUMBER_FORMAT == r"00\:00\:00\:00"
+    assert not any(all(token in fmt for token in invalid_tokens) for fmt in custom_formats)
+
+    wb = load_workbook(out)
+    try:
+        assert wb.active.title == STATS1_SHEET
+    finally:
+        wb.close()
+
+
+def test_legacy_duration_format_registry_entries_are_removed_from_styles(tmp_path: Path):
+    invalid_format = (
+        '[>=1000000]00 "days", 00 "hours", 00 "minutes", 00 "seconds";'
+        '[>=10000]00 "hours", 00 "minutes", 00 "seconds";'
+        '[>=100]00 "minutes", 00 "seconds";'
+        '00 "seconds"'
+    )
+    path = tmp_path / "stale_duration_style.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws["A1"] = 10101
+    ws["A1"].number_format = invalid_format
+    wb.save(path)
+    wb.close()
+
+    wb = load_workbook(path)
+    try:
+        wb.active["A1"].number_format = "General"
+        _repair_legacy_duration_number_formats(wb)
+        wb.save(path)
+    finally:
+        wb.close()
+
+    invalid_tokens = ("[>=1000000]", "[>=10000]", "[>=100]")
+    custom_formats = _custom_number_formats(path)
+    assert not any(all(token in fmt for token in invalid_tokens) for fmt in custom_formats)
 
 
 def test_dashboard_parity_and_equity(tmp_path: Path):
@@ -123,8 +195,9 @@ def test_dashboard_parity_and_equity(tmp_path: Path):
     assert any(isinstance(wb[STATS1_SHEET].cell(r,c).value, float) for r in range(1,220) for c in range(1,13))
     assert all(wb[STATS1_SHEET][coord].number_format == '0.00%' for coord in ('C8','D8','C9','D9','C10','D10'))
     assert any(
-        isinstance(wb[STATS1_SHEET].cell(r, c).value, (int, float)) and
-        str(wb[STATS1_SHEET].cell(r, c).number_format or "") == DURATION_NUMBER_FORMAT
+        isinstance(wb[STATS1_SHEET].cell(r, c).value, str) and
+        str(wb[STATS1_SHEET].cell(r, c).number_format or "") == "General" and
+        _parse_duration_text(wb[STATS1_SHEET].cell(r, c).value) is not None
         for r in range(1,220) for c in range(1,13)
     )
     assert 'Equity Curve' not in wb.sheetnames
@@ -147,8 +220,8 @@ def test_dashboard_overall_return_average_labels_and_move_durations(tmp_path: Pa
     labels = {str(dash.cell(row, 1).value or ""): row for row in range(1, dash.max_row + 1)}
     assert labels[DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL] == 22
     assert labels[DASHBOARD_MOVE_TO_PROFIT_LABEL] == 25
-    assert dash.cell(labels[DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL], 2).value == 10000
-    assert dash.cell(labels[DASHBOARD_MOVE_TO_PROFIT_LABEL], 2).value == 20000
+    assert dash.cell(labels[DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL], 2).value == "01 hours, 00 minutes, 00 seconds"
+    assert dash.cell(labels[DASHBOARD_MOVE_TO_PROFIT_LABEL], 2).value == "02 hours, 00 minutes, 00 seconds"
 
 
 def test_mixed_currency_overall_return_uses_account_balances():
@@ -277,7 +350,7 @@ def test_trade_number_schema_reports_and_source_roundtrip(tmp_path: Path):
     assert yearly["B7"].number_format == "0.00%"
     assert yearly["B14"].number_format == '0.000"R"'
     duration_row = REPORT_METRIC_LABELS.index("Shortest (DD:HH:MM:SS)") + 2
-    assert yearly.cell(duration_row, 2).number_format == DURATION_NUMBER_FORMAT
+    assert yearly.cell(duration_row, 2).number_format == "General"
     year_sheet = wb["2026"]
     assert year_sheet["B1"].value == "January"
     assert year_sheet["M1"].value == "December"
@@ -430,8 +503,8 @@ def test_dashboard_build_includes_canonical_move_duration_rows(tmp_path: Path):
     profit_row = labels[DASHBOARD_MOVE_TO_PROFIT_LABEL]
     assert profit_row == break_even_row + 3
     for value_col in (2, 3, 4):
-        assert dash.cell(break_even_row, value_col).number_format == DURATION_NUMBER_FORMAT
-        assert dash.cell(profit_row, value_col).number_format == DURATION_NUMBER_FORMAT
+        assert dash.cell(break_even_row, value_col).number_format == "General"
+        assert dash.cell(profit_row, value_col).number_format == "General"
     wb.close()
 
 
@@ -506,13 +579,13 @@ def test_data_only_update_inserts_missing_dashboard_move_rows_and_preserves_metr
     assert profit_row == 20
     assert labels["Max loss %"] == 21
     assert labels["Winners"] == 37
-    assert dash.cell(break_even_row, 2).value == 10000
-    assert dash.cell(break_even_row, 4).value == 10000
-    assert dash.cell(profit_row, 2).value == 20000
-    assert dash.cell(profit_row, 4).value == 20000
+    assert dash.cell(break_even_row, 2).value == "01 hours, 00 minutes, 00 seconds"
+    assert dash.cell(break_even_row, 4).value == "01 hours, 00 minutes, 00 seconds"
+    assert dash.cell(profit_row, 2).value == "02 hours, 00 minutes, 00 seconds"
+    assert dash.cell(profit_row, 4).value == "02 hours, 00 minutes, 00 seconds"
     assert dash.cell(2, 2).value == 1
     assert dash.row_dimensions[break_even_row].height == 27
-    assert dash.cell(break_even_row, 2).number_format == DURATION_NUMBER_FORMAT
+    assert dash.cell(break_even_row, 2).number_format == "General"
     trade = wb["Trade Log"]
     merged = {str(rng) for rng in trade.merged_cells.ranges}
     be_range, profit_range = _move_group_ranges(trade)
@@ -585,8 +658,10 @@ def test_dashboard_manual_move_rows_survive_and_populate_by_label(tmp_path: Path
     dash = wb[STATS1_SHEET]
     assert dash["A2"].value == DASHBOARD_MOVE_TO_BREAK_EVEN_LABEL
     assert dash["A3"].value == DASHBOARD_MOVE_TO_PROFIT_LABEL
-    assert dash["B2"].value == 10000 and dash["D2"].value == 10000
-    assert dash["B3"].value == 20000 and dash["D3"].value == 20000
+    assert dash["B2"].value == "01 hours, 00 minutes, 00 seconds"
+    assert dash["D2"].value == "01 hours, 00 minutes, 00 seconds"
+    assert dash["B3"].value == "02 hours, 00 minutes, 00 seconds"
+    assert dash["D3"].value == "02 hours, 00 minutes, 00 seconds"
     assert dash["B4"].value == 1 and dash["D4"].value == 1
     assert dash["A2"].style_id == style_id
     assert dash.row_dimensions[2].height == 31
@@ -1344,10 +1419,10 @@ def test_embedded_fx_crypto_duration_without_duration_section(tmp_path: Path):
     snap={'stats':{'totals':{},'groups':{'by_market':{'overall':{},'fx':{},'crypto':{}},'risk_expectancy':{},'leaders':{},'duration':{'fx_shortest_seconds':10,'fx_longest_seconds':20,'crypto_shortest_seconds':30,'crypto_longest_seconds':40,'metric_sources':{'fx_shortest_seconds':{'symbol':'EURUSD','date':'2026-01-01'},'fx_longest_seconds':{'symbol':'GBPUSD','date':'2026-01-02'},'crypto_shortest_seconds':{'symbol':'BTCUSDT','date':'2026-01-03'},'crypto_longest_seconds':{'symbol':'ETHUSDT','date':'2026-01-04'}}}}},'balances':[{'account_label':'BYBIT','balance':1,'currency':'USDT'}]}
     res = update_master_journal_workbook_data_only(p,snap); Path(res["candidate_path"]).replace(p)
     out=load_workbook(p)[STATS1_SHEET]
-    assert isinstance(out['E2'].value, (int, float)) and out['E2'].number_format == DURATION_NUMBER_FORMAT
-    assert isinstance(out['E4'].value, (int, float)) and out['E4'].number_format == DURATION_NUMBER_FORMAT
-    assert isinstance(out['H2'].value, (int, float)) and out['H2'].number_format == DURATION_NUMBER_FORMAT
-    assert isinstance(out['H4'].value, (int, float)) and out['H4'].number_format == DURATION_NUMBER_FORMAT
+    assert out['E2'].value == "10 seconds" and out['E2'].number_format == "General"
+    assert out['E4'].value == "20 seconds" and out['E4'].number_format == "General"
+    assert out['H2'].value == "30 seconds" and out['H2'].number_format == "General"
+    assert out['H4'].value == "40 seconds" and out['H4'].number_format == "General"
     assert 'EURUSD' in str(out['E3'].value) and 'ETHUSDT' in str(out['H5'].value)
 
 def test_read_master_journal_source_asset_class_regressions(tmp_path: Path):
@@ -2902,14 +2977,17 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
         TRADE_LOG_DATA_START_ROW,
         _header_col(trade_log, "Trade Duration (DD:HH:MM:SS)"),
     ).number_format == DURATION_NUMBER_FORMAT
-    assert DURATION_NUMBER_FORMAT.startswith("[>=1000000]")
-    assert "[>=10000]" in DURATION_NUMBER_FORMAT and "[>=100]" in DURATION_NUMBER_FORMAT
+    assert "[>=1000000]" not in DURATION_NUMBER_FORMAT
     for row in range(1, stats1.max_row + 1):
         label = str(stats1.cell(row, 1).value or "").lower()
         if "duration" in label or "move to" in label:
             for col in (2, 3, 4):
                 if stats1.cell(row, col).value not in (None, ""):
-                    assert stats1.cell(row, col).number_format == DURATION_NUMBER_FORMAT
+                    cell = stats1.cell(row, col)
+                    assert cell.number_format == "General"
+                    assert isinstance(cell.value, str)
+                    assert not str(cell.value).startswith(("00 days", "00 hours"))
+                    assert _parse_duration_text(cell.value) is not None
 
     symbols = wb[SYMBOLS_SHEET]
     headers = _instrument_averages_header_map(symbols)
@@ -2966,7 +3044,11 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
         duration_row = next(
             row for label, row in report_rows.items() if "DD:HH:MM:SS" in label
         )
-        assert report.cell(duration_row, period_col).number_format == DURATION_NUMBER_FORMAT
+        duration_cell = report.cell(duration_row, period_col)
+        assert duration_cell.number_format == "General"
+        assert isinstance(duration_cell.value, str)
+        assert not duration_cell.value.startswith(("00 days", "00 hours"))
+        assert _parse_duration_text(duration_cell.value) is not None
     wb.close()
 
 

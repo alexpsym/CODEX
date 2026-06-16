@@ -181,12 +181,7 @@ REPORT_METRIC_LABELS = [
 ]
 LIGHT_GREY_FILL_RGB = "FFEAF2F8"
 JOURNAL_DISPLAY_TZ = ZoneInfo("Australia/Brisbane")
-DURATION_NUMBER_FORMAT = (
-    '[>=1000000]00 "days", 00 "hours", 00 "minutes", 00 "seconds";'
-    '[>=10000]00 "hours", 00 "minutes", 00 "seconds";'
-    '[>=100]00 "minutes", 00 "seconds";'
-    '00 "seconds"'
-)
+DURATION_NUMBER_FORMAT = r"00\:00\:00\:00"
 LEGACY_DURATION_NUMBER_FORMAT_TOKENS = ("DAYS", "HOURS", "MINUTES", "SECONDS")
 DEFAULT_FOREX_ROOT = Path.home() / "Dropbox" / "FOREX"
 DEFAULT_CRYPTO_ROOT = Path.home() / "Dropbox" / "CRYPTO"
@@ -220,6 +215,14 @@ def _stats2_sheet(wb: Workbook, required: bool = False):
 
 def _symbols_sheet(wb: Workbook):
     return _sheet_by_alias(wb, SYMBOLS_SHEET, (LEGACY_INSTRUMENT_AVERAGES_SHEET,))
+
+
+def _activate_user_facing_sheet(wb: Workbook) -> None:
+    if STATS1_SHEET not in wb.sheetnames:
+        return
+    wb.active = wb.sheetnames.index(STATS1_SHEET)
+    for ws in wb.worksheets:
+        ws.sheet_view.tabSelected = ws.title == STATS1_SHEET
 
 
 def _migrate_analysis_sheet_names(wb: Workbook, diagnostics: Dict[str, Any] | None = None) -> None:
@@ -778,6 +781,24 @@ def _duration_seconds_to_ddhhmmss_number(seconds: Any) -> int | None:
     minutes, secs = divmod(rem, 60)
     return days * 1000000 + hours * 10000 + minutes * 100 + secs
 
+
+def _format_duration_display(seconds: Any) -> str:
+    v = _as_float(seconds)
+    if v is None:
+        return ""
+    total_seconds = max(0, int(v))
+    days, rem = divmod(total_seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days > 0:
+        return f"{days:02d} days, {hours:02d} hours, {minutes:02d} minutes, {secs:02d} seconds"
+    if hours > 0:
+        return f"{hours:02d} hours, {minutes:02d} minutes, {secs:02d} seconds"
+    if minutes > 0:
+        return f"{minutes:02d} minutes, {secs:02d} seconds"
+    return f"{secs:02d} seconds"
+
+
 def _duration_ddhhmmss_cell_to_seconds(value: Any) -> int | None:
     if value in (None, ""):
         return None
@@ -804,6 +825,21 @@ def _duration_ddhhmmss_cell_to_seconds(value: Any) -> int | None:
 def _is_ddhhmmss_number_format(number_format: Any) -> bool:
     text = str(number_format or "").upper()
     return r"\:" in text or all(token in text for token in ("DAYS", "HOURS", "MINUTES", "SECONDS"))
+
+
+def _is_legacy_duration_number_format(number_format: Any) -> bool:
+    text_upper = str(number_format or "").upper()
+    return all(token in text_upper for token in LEGACY_DURATION_NUMBER_FORMAT_TOKENS)
+
+
+def _duration_display_cell_value(value: Any, number_format: Any = None) -> str:
+    if value in (None, ""):
+        return ""
+    seconds = _duration_ddhhmmss_cell_to_seconds(value) if _is_ddhhmmss_number_format(number_format) else None
+    if seconds is None:
+        seconds = _parse_duration_text(value)
+    return _format_duration_display(seconds) if seconds is not None else str(value)
+
 
 def _fmt_duration(seconds: Any) -> str:
     n = _duration_seconds_to_ddhhmmss_number(seconds)
@@ -1696,18 +1732,29 @@ def _apply_trade_log_adaptive_formats(ws) -> None:
 def _repair_legacy_duration_number_formats(wb: Workbook, diagnostics: Dict[str, Any] | None = None) -> int:
     diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
     repaired = 0
+    registry_repaired = 0
     for ws in wb.worksheets:
         for row in ws.iter_rows():
             for cell in row:
                 fmt = str(cell.number_format or "")
-                fmt_upper = fmt.upper()
-                if not all(token in fmt_upper for token in LEGACY_DURATION_NUMBER_FORMAT_TOKENS):
+                if not _is_legacy_duration_number_format(fmt):
                     continue
                 cell.number_format = DURATION_NUMBER_FORMAT
                 repaired += 1
+    number_formats = getattr(wb, "_number_formats", None)
+    if number_formats is not None:
+        for index, fmt in enumerate(list(number_formats)):
+            if not _is_legacy_duration_number_format(fmt):
+                continue
+            number_formats[index] = DURATION_NUMBER_FORMAT
+            registry_repaired += 1
+        if registry_repaired and hasattr(number_formats, "_dict"):
+            number_formats._dict = {fmt: idx for idx, fmt in enumerate(number_formats)}
     if repaired:
         diagnostics["repaired_legacy_duration_number_formats"] = repaired
-    return repaired
+    if registry_repaired:
+        diagnostics["repaired_legacy_duration_number_format_registry_entries"] = registry_repaired
+    return repaired + registry_repaired
 
 
 def _apply_trade_number_hyperlinks(
@@ -2447,8 +2494,10 @@ def _repair_stats1_formatting(
             repaired += 1
         if "duration" in label or label.startswith(("min move to ", "average move to ", "max move to ")):
             for col in market_cols.values():
-                if ws.cell(row, col).value not in (None, ""):
-                    ws.cell(row, col).number_format = DURATION_NUMBER_FORMAT
+                cell = ws.cell(row, col)
+                if cell.value not in (None, ""):
+                    cell.value = _duration_display_cell_value(cell.value, cell.number_format)
+                    cell.number_format = "General"
     commission = _stats1_section_bounds(ws, "Commission")
     if commission:
         metrics = extended_metrics or {}
@@ -3215,8 +3264,8 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
                 cell.value = "" if value is None else value
                 cell.number_format = "0"
             elif kind == "duration":
-                cell.value = _fmt_duration_full(value) if value is not None else ""
-                cell.number_format = DURATION_NUMBER_FORMAT
+                cell.value = _format_duration_display(value) if value is not None else ""
+                cell.number_format = "General"
             elif kind == "number":
                 cell.value = "" if value is None else value
                 cell.number_format = "#,##0.##########"
@@ -3333,8 +3382,8 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
                     cell.value = "" if value is None else value
                     cell.number_format = '0.000"R"'
                 elif kind == "duration":
-                    cell.value = _fmt_duration_full(value) if value is not None else ""
-                    cell.number_format = DURATION_NUMBER_FORMAT
+                    cell.value = _format_duration_display(value) if value is not None else ""
+                    cell.number_format = "General"
                 elif kind == "count":
                     cell.value = "" if value is None else int(value)
                     cell.number_format = "0"
@@ -3417,8 +3466,8 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
                 value_cell.value = "" if value is None else value
                 value_cell.number_format = '0.000"R"'
             else:
-                value_cell.value = _fmt_duration_full(value) if value is not None else ""
-                value_cell.number_format = DURATION_NUMBER_FORMAT
+                value_cell.value = _format_duration_display(value) if value is not None else ""
+                value_cell.number_format = "General"
             source = (buckets[market].get("metric_sources") or {}).get(key)
             detail.cell(target_row, 14, _fmt_detail_src(source) if source else "")
     _apply_dashboard_requested_semantic_fills(dash)
@@ -3680,8 +3729,8 @@ def _write_stat_section(ws, start_row, start_col, title, rows, use_detail_col=Fa
             else:
                 vcell.value = _as_float(val) if _as_float(val) is not None else '—'
         elif kind=='duration':
-            vcell.value = _fmt_duration_full(val)
-            vcell.number_format = DURATION_NUMBER_FORMAT
+            vcell.value = _format_duration_display(val)
+            vcell.number_format = "General"
         else:
             vcell.value = '—' if val is None else val
         if apply_semantic_cf and isinstance(vcell.value, (int, float)):
@@ -3921,7 +3970,7 @@ def _report_cell_value(bucket: Dict[str, Any], key: str | None, kind: str) -> An
         number = _as_float(value)
         return "" if number is None else int(number)
     if kind == "duration":
-        return _fmt_duration_full(value) if value not in (None, "") else ""
+        return _format_duration_display(value) if value not in (None, "") else ""
     if kind == "number":
         number = _as_float(value)
         return "" if number is None else number
@@ -3961,7 +4010,7 @@ def _format_report_sheet(ws, last_col: int) -> None:
             elif kind == "count":
                 cell.number_format = "0"
             elif kind == "duration":
-                cell.number_format = DURATION_NUMBER_FORMAT
+                cell.number_format = "General"
             elif kind == "number":
                 cell.number_format = '#,##0.00'
             elif kind == "commission":
@@ -4121,7 +4170,7 @@ def _update_report_sheet_preserving_layout(
             elif kind == "count":
                 cell.number_format = "0"
             elif kind == "duration":
-                cell.number_format = DURATION_NUMBER_FORMAT
+                cell.number_format = "General"
             elif kind == "commission":
                 values = bucket.get(key) if key else None
                 if isinstance(values, dict) and len(values) == 1:
@@ -4231,6 +4280,7 @@ def _ensure_report_sheets(wb, snapshot: Dict[str, Any], diagnostics: Dict[str, A
     seen = set(ordered)
     remaining = [sheet.title for sheet in wb._sheets if sheet.title not in seen]
     wb._sheets = [wb[name] for name in ordered if name in wb.sheetnames] + [wb[name] for name in remaining]
+    _activate_user_facing_sheet(wb)
 
 def _write_instrument_leaders_section(ws, start_row, start_col, leaders):
     ws.merge_cells(start_row=start_row,start_column=start_col,end_row=start_row,end_column=start_col+4)
@@ -5416,7 +5466,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 r_value = _as_float(value)
                 return r_value if r_value is not None else value
             if metric_type == "duration":
-                return _fmt_duration_full(value)
+                return _format_duration_display(value)
             if metric_type == "count":
                 f = _as_float(value)
                 return int(f) if f is not None else value
@@ -5432,7 +5482,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             elif metric_type == "count":
                 cell.number_format = "0"
             elif metric_type == "duration":
-                cell.number_format = DURATION_NUMBER_FORMAT
+                cell.number_format = "General"
 
         def _apply_dashboard_metric_semantic_style(cell, semantic: str | None) -> None:
             value = _as_float(cell.value)
