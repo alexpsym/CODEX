@@ -22929,15 +22929,26 @@ def _compute_journal_stats(
     def _risk_bucket(rows_subset: List[Dict[str, object]]) -> Dict[str, object]:
         winners = _winner_rows(rows_subset)
         losers = _loser_rows(rows_subset)
+        win_results = _metric_values(winners, "result_pct")
+        loss_results = _metric_values(losers, "result_pct")
+        denom = len(winners) + len(losers)
+        expectancy_pct = None
+        if denom and win_results and loss_results:
+            expectancy_pct = (len(winners) / denom * (_avg(win_results) or 0.0)) + (
+                len(losers) / denom * (_avg(loss_results) or 0.0)
+            )
+        winner_r_values = [v for v in _metric_values(winners, "r_multiple") if v > 0]
+        loser_r_values = [v for v in _metric_values(losers, "r_multiple") if v < 0]
         return {
             "avg_stop_pct_winners": _avg(_stop_pct_values(winners)),
             "avg_stop_pct_losers": _avg(_stop_pct_values(losers)),
             "avg_target_pct_winners": _avg(_target_pct_values(winners)),
             "avg_target_pct_losers": _avg(_target_pct_values(losers)),
-            "avg_result_pct_winners": _avg(_metric_values(winners, "result_pct")),
-            "avg_result_pct_losers": _avg(_metric_values(losers, "result_pct")),
-            "avg_r_multiple_winners": _avg(_metric_values(winners, "r_multiple")),
-            "avg_r_multiple_losers": _avg(_metric_values(losers, "r_multiple")),
+            "avg_result_pct_winners": _avg(win_results),
+            "avg_result_pct_losers": _avg(loss_results),
+            "avg_r_multiple_winners": _avg(winner_r_values),
+            "avg_r_multiple_losers": _avg(loser_r_values),
+            "expectancy_pct": expectancy_pct,
         }
     def _compute_longest_streaks(rows_subset: List[Dict[str, object]]) -> Dict[str, Optional[Dict[str, object]]]:
         enriched = []
@@ -23174,6 +23185,10 @@ def _compute_journal_stats(
     all_durations = _duration_values(trade_rows)
     result_pct_vals = _metric_values(trade_rows, "result_pct")
     r_mult_vals = _metric_values(trade_rows, "r_multiple")
+    winner_result_pct_vals = _metric_values(winner_rows, "result_pct")
+    loser_result_pct_vals = _metric_values(loser_rows, "result_pct")
+    winner_r_mult_vals = [v for v in _metric_values(winner_rows, "r_multiple") if v > 0]
+    loser_r_mult_vals = [v for v in _metric_values(loser_rows, "r_multiple") if v < 0]
     winner_durations = _duration_values(winner_rows)
     loser_durations = _duration_values(loser_rows)
 
@@ -23204,6 +23219,12 @@ def _compute_journal_stats(
     total_losses = sum(1 for row in trade_rows if _is_loss(row))
     denom = total_wins + total_losses
     win_rate_pct = (total_wins / denom * 100.0) if denom else None
+    expectancy_pct = None
+    if denom:
+        avg_win_pct = _avg(winner_result_pct_vals)
+        avg_loss_pct = _avg(loser_result_pct_vals)
+        if avg_win_pct is not None and avg_loss_pct is not None:
+            expectancy_pct = (total_wins / denom * avg_win_pct) + (total_losses / denom * avg_loss_pct)
 
     def _bias(row: Dict[str, object]) -> str:
         side_norm = str(row.get("side") or "").strip().upper()
@@ -23271,7 +23292,7 @@ def _compute_journal_stats(
         events_by_account[account_key] = sorted(events_by_account[account_key], key=lambda x: x[0])
 
     def _drawdown_stats_for_rows(rows_subset: List[Dict[str, object]]) -> Dict[str, object]:
-        segments: Dict[Tuple[str, str], List[Tuple[float, float]]] = defaultdict(list)
+        segments: Dict[Tuple[str, str], List[Tuple[float, float, object, str]]] = defaultdict(list)
         for row in rows_subset:
             account = str(row.get("account_label") or row.get("account") or "").strip()
             account_key = _norm_account_key(account)
@@ -23291,9 +23312,10 @@ def _compute_journal_stats(
                     anchor_id = ev_id
                 else:
                     break
-            segments[(account_key, anchor_id)].append((ts, bal))
+            segments[(account_key, anchor_id)].append((ts, bal, dt, account or account_key))
 
         dd_vals: List[float] = []
+        dd_details: List[Tuple[float, Dict[str, object]]] = []
         dd_segment_count = 0
         dd_balance_points = 0
         for pts in segments.values():
@@ -23303,30 +23325,52 @@ def _compute_journal_stats(
             dd_segment_count += 1
             dd_balance_points += len(pts_sorted)
             peak: Optional[float] = None
-            for _, bal in pts_sorted:
+            peak_time: object = None
+            peak_account = ""
+            for _, bal, dt, account in pts_sorted:
                 if peak is None or bal > peak:
                     peak = bal
+                    peak_time = dt
+                    peak_account = account
                 if peak and peak > 0:
                     dd = (peak - bal) / peak * 100.0
                     if dd > 0 and math.isfinite(dd):
                         dd_vals.append(dd)
+                        dd_details.append((
+                            dd,
+                            {
+                                "account": account or peak_account,
+                                "start_time": peak_time,
+                                "end_time": dt,
+                                "peak": peak,
+                                "trough": bal,
+                            },
+                        ))
 
         if dd_vals:
             max_drawdown_pct = max(dd_vals)
             min_drawdown_pct = min(dd_vals)
             avg_drawdown_pct = sum(dd_vals) / len(dd_vals)
+            max_drawdown_detail = max(dd_details, key=lambda item: item[0])[1] if dd_details else None
+            min_drawdown_detail = min(dd_details, key=lambda item: item[0])[1] if dd_details else None
         elif dd_segment_count > 0:
             max_drawdown_pct = 0.0
             min_drawdown_pct = 0.0
             avg_drawdown_pct = 0.0
+            max_drawdown_detail = None
+            min_drawdown_detail = None
         else:
             max_drawdown_pct = None
             min_drawdown_pct = None
             avg_drawdown_pct = None
+            max_drawdown_detail = None
+            min_drawdown_detail = None
         return {
             "max_drawdown_pct": max_drawdown_pct,
             "min_drawdown_pct": min_drawdown_pct,
             "avg_drawdown_pct": avg_drawdown_pct,
+            "max_drawdown_detail": max_drawdown_detail,
+            "min_drawdown_detail": min_drawdown_detail,
             "drawdown_balance_points": dd_balance_points,
             "drawdown_segments_count": dd_segment_count,
         }
@@ -23384,18 +23428,19 @@ def _compute_journal_stats(
             "avg_stop_pct_losers": _avg(_stop_pct_values(loser_rows)),
             "avg_target_pct_winners": _avg(_target_pct_values(winner_rows)),
             "avg_target_pct_losers": _avg(_target_pct_values(loser_rows)),
-            "avg_result_pct_winners": _avg(_metric_values(winner_rows, "result_pct")),
-            "avg_result_pct_losers": _avg(_metric_values(loser_rows, "result_pct")),
-            "avg_r_multiple_winners": _avg(_metric_values(winner_rows, "r_multiple")),
-            "avg_r_multiple_losers": _avg(_metric_values(loser_rows, "r_multiple")),
-            "min_result_pct_winners": _safe_min(_metric_values(winner_rows, "result_pct")),
-            "max_result_pct_winners": _safe_max(_metric_values(winner_rows, "result_pct")),
-            "min_result_pct_losers": _safe_min(_metric_values(loser_rows, "result_pct")),
-            "max_result_pct_losers": _safe_max(_metric_values(loser_rows, "result_pct")),
-            "min_r_multiple_winners": _safe_min(_metric_values(winner_rows, "r_multiple")),
-            "max_r_multiple_winners": _safe_max(_metric_values(winner_rows, "r_multiple")),
-            "min_r_multiple_losers": _safe_min(_metric_values(loser_rows, "r_multiple")),
-            "max_r_multiple_losers": _safe_max(_metric_values(loser_rows, "r_multiple")),
+            "avg_result_pct_winners": _avg(winner_result_pct_vals),
+            "avg_result_pct_losers": _avg(loser_result_pct_vals),
+            "avg_r_multiple_winners": _avg(winner_r_mult_vals),
+            "avg_r_multiple_losers": _avg(loser_r_mult_vals),
+            "min_result_pct_winners": _safe_min(winner_result_pct_vals),
+            "max_result_pct_winners": _safe_max(winner_result_pct_vals),
+            "min_result_pct_losers": _safe_min(loser_result_pct_vals),
+            "max_result_pct_losers": _safe_max(loser_result_pct_vals),
+            "min_r_multiple_winners": _safe_min(winner_r_mult_vals),
+            "max_r_multiple_winners": _safe_max(winner_r_mult_vals),
+            "min_r_multiple_losers": _safe_min(loser_r_mult_vals),
+            "max_r_multiple_losers": _safe_max(loser_r_mult_vals),
+            "expectancy_pct": expectancy_pct,
             "min_stop_pct_winners": _safe_min(_stop_pct_values(winner_rows)),
             "max_stop_pct_winners": _safe_max(_stop_pct_values(winner_rows)),
             "min_stop_pct_losers": _safe_min(_stop_pct_values(loser_rows)),
@@ -23444,6 +23489,8 @@ def _compute_journal_stats(
             "max_drawdown_pct": max_drawdown_pct,
             "min_drawdown_pct": min_drawdown_pct,
             "avg_drawdown_pct": avg_drawdown_pct,
+            "max_drawdown_detail": overall_drawdown.get("max_drawdown_detail"),
+            "min_drawdown_detail": overall_drawdown.get("min_drawdown_detail"),
             "drawdown_balance_points": dd_balance_points,
             "drawdown_segments_count": dd_segment_count,
             "unique_instruments": len(unique_symbols),
@@ -23498,13 +23545,26 @@ def _compute_journal_stats(
         losing_streak_detail = streaks_local.get("longest_losing")
         winner_subset = _winner_rows(rows_subset)
         loser_subset = _loser_rows(rows_subset)
-        commissions = [
-            abs(value) for value in (_to_float(row.get("commission")) for row in rows_subset)
-            if value is not None and value != 0
-        ]
+        winner_result_values = _metric_values(winner_subset, "result_pct")
+        loser_result_values = _metric_values(loser_subset, "result_pct")
+        winner_r_values = [value for value in _metric_values(winner_subset, "r_multiple") if value > 0]
+        loser_r_values = [value for value in _metric_values(loser_subset, "r_multiple") if value < 0]
+        expectancy_local = None
+        if denom_local and winner_result_values and loser_result_values:
+            expectancy_local = (wins / denom_local * (_avg(winner_result_values) or 0.0)) + (
+                losses / denom_local * (_avg(loser_result_values) or 0.0)
+            )
+        commission_rows: List[Tuple[float, Dict[str, object]]] = []
+        for row in rows_subset:
+            value = _to_float(row.get("commission"))
+            if value is not None and value != 0:
+                commission_rows.append((abs(value), row))
+        commissions = [value for value, _row in commission_rows]
         pattern_counts: Counter[str] = Counter()
         pattern_result_pct: Dict[str, float] = defaultdict(float)
         timeframe_counts: Counter[str] = Counter()
+        timeframe_wins: Counter[str] = Counter()
+        timeframe_losses: Counter[str] = Counter()
         timeframe_aliases = {
             "1M": "1MIN", "1MIN": "1MIN", "5M": "5MIN", "5MIN": "5MIN",
             "15M": "15MIN", "15MIN": "15MIN", "30M": "30MIN", "30MIN": "30MIN",
@@ -23512,7 +23572,7 @@ def _compute_journal_stats(
             "1W": "WEEKLY", "WEEKLY": "WEEKLY", "1MO": "MONTHLY", "MONTHLY": "MONTHLY",
         }
         for row in rows_subset:
-            pattern = str(row.get("pattern") or "").strip()
+            pattern = str(row.get("pattern") or "").strip().casefold()
             if pattern:
                 pattern_counts[pattern] += 1
                 result_pct = _to_float(row.get("result_pct"))
@@ -23521,10 +23581,25 @@ def _compute_journal_stats(
             timeframe = timeframe_aliases.get(_normalize_journal_timeframe(row.get("timeframe")).upper())
             if timeframe:
                 timeframe_counts[timeframe] += 1
+                if _is_win(row):
+                    timeframe_wins[timeframe] += 1
+                elif _is_loss(row):
+                    timeframe_losses[timeframe] += 1
         pattern_by_count = sorted(pattern_counts, key=lambda pattern: (pattern_counts[pattern], pattern.lower()))
         pattern_by_profit = sorted(pattern_counts, key=lambda pattern: (pattern_result_pct.get(pattern, 0.0), pattern.lower()))
         long_subset = [row for row in rows_subset if str(row.get("side") or "").strip().upper().startswith(("BUY", "LONG"))]
         short_subset = [row for row in rows_subset if str(row.get("side") or "").strip().upper().startswith(("SELL", "SHORT"))]
+        pattern_breakdowns: Dict[str, object] = {}
+        for wanted in ("channel", "range"):
+            subset = [
+                row for row in rows_subset
+                if str(row.get("pattern") or "").strip().casefold() == wanted
+            ]
+            pattern_breakdowns[f"pattern_{wanted}_total"] = len(subset)
+            pattern_breakdowns[f"pattern_{wanted}_wins"] = sum(1 for row in subset if _is_win(row))
+            pattern_breakdowns[f"pattern_{wanted}_losses"] = sum(1 for row in subset if _is_loss(row))
+        min_commission_source = min(commission_rows, key=lambda item: (item[0], str(item[1].get("symbol") or "")))[1] if commission_rows else None
+        max_commission_source = max(commission_rows, key=lambda item: (item[0], str(item[1].get("symbol") or "")))[1] if commission_rows else None
         return {
             "label": label,
             "trades": len(rows_subset),
@@ -23546,6 +23621,7 @@ def _compute_journal_stats(
             "avg_r_multiple": _avg(r_vals),
             "min_r_multiple": _safe_min(r_vals),
             "max_r_multiple": _safe_max(r_vals),
+            "expectancy_pct": expectancy_local,
             "avg_stop_pct": _avg(stop_vals),
             "min_stop_pct": _safe_min(stop_vals),
             "max_stop_pct": _safe_max(stop_vals),
@@ -23561,24 +23637,24 @@ def _compute_journal_stats(
             "avg_target_pct_winners": _avg(_target_pct_values(winner_subset)),
             "min_target_pct_winners": _safe_min(_target_pct_values(winner_subset)),
             "max_target_pct_winners": _safe_max(_target_pct_values(winner_subset)),
-            "avg_result_pct_winners": _avg(_metric_values(winner_subset, "result_pct")),
-            "min_result_pct_winners": _safe_min(_metric_values(winner_subset, "result_pct")),
-            "max_result_pct_winners": _safe_max(_metric_values(winner_subset, "result_pct")),
-            "avg_r_multiple_winners": _avg(_metric_values(winner_subset, "r_multiple")),
-            "min_r_multiple_winners": _safe_min(_metric_values(winner_subset, "r_multiple")),
-            "max_r_multiple_winners": _safe_max(_metric_values(winner_subset, "r_multiple")),
+            "avg_result_pct_winners": _avg(winner_result_values),
+            "min_result_pct_winners": _safe_min(winner_result_values),
+            "max_result_pct_winners": _safe_max(winner_result_values),
+            "avg_r_multiple_winners": _avg(winner_r_values),
+            "min_r_multiple_winners": _safe_min(winner_r_values),
+            "max_r_multiple_winners": _safe_max(winner_r_values),
             "avg_stop_pct_losers": _avg(_stop_pct_values(loser_subset)),
             "min_stop_pct_losers": _safe_min(_stop_pct_values(loser_subset)),
             "max_stop_pct_losers": _safe_max(_stop_pct_values(loser_subset)),
             "avg_target_pct_losers": _avg(_target_pct_values(loser_subset)),
             "min_target_pct_losers": _safe_min(_target_pct_values(loser_subset)),
             "max_target_pct_losers": _safe_max(_target_pct_values(loser_subset)),
-            "avg_result_pct_losers": _avg(_metric_values(loser_subset, "result_pct")),
-            "min_result_pct_losers": _safe_min(_metric_values(loser_subset, "result_pct")),
-            "max_result_pct_losers": _safe_max(_metric_values(loser_subset, "result_pct")),
-            "avg_r_multiple_losers": _avg(_metric_values(loser_subset, "r_multiple")),
-            "min_r_multiple_losers": _safe_min(_metric_values(loser_subset, "r_multiple")),
-            "max_r_multiple_losers": _safe_max(_metric_values(loser_subset, "r_multiple")),
+            "avg_result_pct_losers": _avg(loser_result_values),
+            "min_result_pct_losers": _safe_min(loser_result_values),
+            "max_result_pct_losers": _safe_max(loser_result_values),
+            "avg_r_multiple_losers": _avg(loser_r_values),
+            "min_r_multiple_losers": _safe_min(loser_r_values),
+            "max_r_multiple_losers": _safe_max(loser_r_values),
             "long_trades": len(long_subset),
             "long_wins": sum(1 for row in long_subset if _is_win(row)),
             "long_losses": sum(1 for row in long_subset if _is_loss(row)),
@@ -23591,10 +23667,16 @@ def _compute_journal_stats(
             "least_traded_pattern": pattern_by_count[0] if pattern_by_count else None,
             "most_profitable_pattern": pattern_by_profit[-1] if pattern_by_profit else None,
             "least_profitable_pattern": pattern_by_profit[0] if pattern_by_profit else None,
+            **pattern_breakdowns,
             **{f"timeframe_{name.lower()}": timeframe_counts[name] for name in ("1MIN", "5MIN", "15MIN", "30MIN", "1H", "4H", "DAILY", "WEEKLY", "MONTHLY")},
+            **{f"timeframe_{name.lower()}_wins": timeframe_wins[name] for name in ("1MIN", "5MIN", "15MIN", "30MIN", "1H", "4H", "DAILY", "WEEKLY", "MONTHLY")},
+            **{f"timeframe_{name.lower()}_losses": timeframe_losses[name] for name in ("1MIN", "5MIN", "15MIN", "30MIN", "1H", "4H", "DAILY", "WEEKLY", "MONTHLY")},
             "min_commission": min(commissions) if commissions else None,
             "avg_commission": _avg(commissions),
             "max_commission": max(commissions) if commissions else None,
+            "total_commission": sum(commissions) if commissions else None,
+            "min_commission_source": _trade_metric_ref(min_commission_source, "commission", min(commissions) if commissions else None) if min_commission_source else None,
+            "max_commission_source": _trade_metric_ref(max_commission_source, "commission", max(commissions) if commissions else None) if max_commission_source else None,
             "winning_streak": (winning_streak_detail or {}).get("trade_count"),
             "losing_streak": (losing_streak_detail or {}).get("trade_count"),
             "longest_winning_streak": winning_streak_detail,
@@ -23615,6 +23697,8 @@ def _compute_journal_stats(
             "max_drawdown_pct": drawdown.get("max_drawdown_pct"),
             "min_drawdown_pct": drawdown.get("min_drawdown_pct"),
             "avg_drawdown_pct": drawdown.get("avg_drawdown_pct"),
+            "max_drawdown_detail": drawdown.get("max_drawdown_detail"),
+            "min_drawdown_detail": drawdown.get("min_drawdown_detail"),
             "drawdown_balance_points": drawdown.get("drawdown_balance_points"),
             "drawdown_segments_count": drawdown.get("drawdown_segments_count"),
             "money_by_currency": money,
@@ -23675,9 +23759,12 @@ def _compute_journal_stats(
                 "avg_result_pct_losers": totals.get("avg_result_pct_losers"),
                 "avg_r_multiple_winners": totals.get("avg_r_multiple_winners"),
                 "avg_r_multiple_losers": totals.get("avg_r_multiple_losers"),
+                "expectancy_pct": totals.get("expectancy_pct"),
                 "max_drawdown_pct": totals.get("max_drawdown_pct"),
                 "avg_drawdown_pct": totals.get("avg_drawdown_pct"),
                 "min_drawdown_pct": totals.get("min_drawdown_pct"),
+                "max_drawdown_detail": totals.get("max_drawdown_detail"),
+                "min_drawdown_detail": totals.get("min_drawdown_detail"),
                 "by_market": risk_by_market,
             },
             "risk_of_ruin_by_account": account_risk_of_ruin,
@@ -28042,8 +28129,8 @@ def _build_manual_import_authoritative_snapshot() -> Dict[str, object]:
 TRADING_JOURNAL_ACTIONS_TEMPLATE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Trading Journal Workspace</title>
-<style>body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}.wrap{min-height:100vh;display:flex;align-items:center;justify-content:center}.stack{display:flex;flex-direction:column;gap:12px;min-width:280px;max-width:720px}button{padding:12px 14px;border-radius:10px;border:1px solid #334155;background:#1f2937;color:#e2e8f0;font-weight:700;cursor:pointer}.drop-zone{border:1px dashed #475569;border-radius:12px;padding:16px;text-align:center;color:#94a3b8;background:#0f172a;cursor:pointer}.drop-zone.drag-over{border-color:#38bdf8;background:#082f49;color:#e0f2fe}.status{margin-top:8px;white-space:pre-wrap;color:#94a3b8}.pnl-explanation{border:1px solid #334155;border-radius:10px;padding:14px;background:#0f172a;color:#cbd5e1;line-height:1.5}.pnl-explanation[hidden]{display:none}.pnl-explanation strong{color:#f8fafc}</style></head>
-<body><div class="wrap"><div class="stack"><button id="open-journal-btn">Open workbook</button><button id="import-journal-btn">Import</button><button id="journal-resync-btn">Resync</button><div id="journal-import-drop-zone" class="drop-zone">Drop .xlsx/.xlsm/.xls/.csv import files here<br/><span style="font-size:12px">or click Import to choose a file</span></div><label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode" style="margin-left:8px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"><option value="" selected disabled>Select Demo or Live</option><option value="demo">Demo</option><option value="live">Live</option></select></label><button id="crypto-monthly-pnl-btn">Crypto Monthly P&L</button><button id="bybit-demo-balance-adjustment-btn">Bybit Demo Balance Adjustment</button><button id="pnl-explanation-btn" type="button" aria-expanded="false" aria-controls="pnl-explanation-panel">P&amp;L % explanation</button><div id="pnl-explanation-panel" class="pnl-explanation" hidden><strong>How P&amp;L percentages are calculated</strong><br/>STATS1 Net P&amp;L % uses cashflow-adjusted account balances where a defensible starting capital and ending equity are available. Deposits and withdrawals are removed from the return numerator. FX uses AUD accounts and crypto uses USDT accounts; Overall is left unavailable when currencies cannot be combined safely. Trade Profit %, gross gain/loss %, averages, and report-period percentages retain their trade-level period logic.</div><input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv" hidden/><div id="journal-actions-status" class="status"></div></div></div><script src="/static/trading_journal_actions.js?v={{TRADING_JOURNAL_ACTIONS_JS_VERSION}}"></script></body></html>"""
+<style>body{margin:0;background:#0b1220;color:#e2e8f0;font-family:Inter,system-ui,sans-serif}.wrap{min-height:100vh;display:flex;align-items:center;justify-content:center}.stack{display:flex;flex-direction:column;gap:12px;min-width:280px;max-width:720px}button{padding:12px 14px;border-radius:10px;border:1px solid #334155;background:#1f2937;color:#e2e8f0;font-weight:700;cursor:pointer}.drop-zone{border:1px dashed #475569;border-radius:12px;padding:16px;text-align:center;color:#94a3b8;background:#0f172a;cursor:pointer}.drop-zone.drag-over{border-color:#38bdf8;background:#082f49;color:#e0f2fe}.status{margin-top:8px;white-space:pre-wrap;color:#94a3b8}</style></head>
+<body><div class="wrap"><div class="stack"><button id="open-journal-btn">Open workbook</button><button id="import-journal-btn">Import</button><button id="journal-resync-btn">Resync</button><div id="journal-import-drop-zone" class="drop-zone">Drop .xlsx/.xlsm/.xls/.csv import files here<br/><span style="font-size:12px">or click Import to choose a file</span></div><label style="font-size:12px;color:#94a3b8">Bybit CSV account <select id="journal-account-mode" style="margin-left:8px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:6px;padding:4px 6px"><option value="" selected disabled>Select Demo or Live</option><option value="demo">Demo</option><option value="live">Live</option></select></label><button id="crypto-monthly-pnl-btn">Crypto Monthly P&L</button><button id="bybit-demo-balance-adjustment-btn">Bybit Demo Balance Adjustment</button><input id="journal-file-input" type="file" accept=".xlsx,.xlsm,.xls,.csv" hidden/><div id="journal-actions-status" class="status"></div></div></div><script src="/static/trading_journal_actions.js?v={{TRADING_JOURNAL_ACTIONS_JS_VERSION}}"></script></body></html>"""
 
 @app.get("/dashboard/trading-journal")
 @app.get("/merged/trading-journal")

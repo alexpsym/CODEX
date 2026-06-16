@@ -260,6 +260,25 @@ def test_compute_journal_stats_no_zero_count_leaders() -> None:
     assert leaders["most_losses_instrument"] is None
 
 
+def test_compute_journal_stats_expectancy_and_r_filters() -> None:
+    rows = [
+        {"row_type": "trade", "asset_class": "fx", "symbol": "EURUSD", "result_pct": 9.0, "r_multiple": 0.0, "net_profit": 9},
+        {"row_type": "trade", "asset_class": "fx", "symbol": "GBPUSD", "result_pct": 9.0, "r_multiple": 2.0, "net_profit": 9},
+        {"row_type": "trade", "asset_class": "fx", "symbol": "USDJPY", "result_pct": -3.0, "r_multiple": 1.0, "net_profit": -3},
+        {"row_type": "trade", "asset_class": "fx", "symbol": "AUDUSD", "result_pct": -3.0, "r_multiple": -0.5, "net_profit": -3},
+        {"row_type": "trade", "asset_class": "fx", "symbol": "NZDUSD", "result_pct": 0.0, "r_multiple": 0.0, "net_profit": 0, "breakeven": "yes"},
+    ]
+    stats = _compute_journal_stats(rows, balances=[])
+    by_market = stats["groups"]["by_market"]["overall"]
+    assert by_market["avg_result_pct"] == pytest.approx(2.4)
+    assert by_market["expectancy_pct"] == pytest.approx(3.0)
+    assert by_market["min_r_multiple_winners"] == pytest.approx(2.0)
+    assert by_market["avg_r_multiple_winners"] == pytest.approx(2.0)
+    assert by_market["min_r_multiple_losers"] == pytest.approx(-0.5)
+    assert by_market["max_r_multiple_losers"] == pytest.approx(-0.5)
+    assert stats["groups"]["risk_expectancy"]["expectancy_pct"] == pytest.approx(3.0)
+
+
 def test_compute_journal_stats_tracks_test_trades_but_excludes_from_core_metrics() -> None:
     rows = [
         {"row_type": "trade", "asset_class": "fx", "symbol": "EURUSD", "result_pct": 1.0, "r_multiple": 1.0, "net_profit": 10},

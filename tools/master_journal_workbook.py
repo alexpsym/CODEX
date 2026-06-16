@@ -601,19 +601,39 @@ def adaptive_number_format(value: Any, *, max_decimals: int = 12) -> str:
     return "0." + ("0" * max_decimals)
 
 
-def _trade_folder_index(root: Path, prefix: str) -> Dict[str, List[Path]]:
-    cache_key = (str(root).lower(), prefix.upper())
+def _trade_number_aliases(trade_number: Any) -> List[str]:
+    text = str(trade_number or "").strip().upper()
+    match = re.fullmatch(r"([FC])0*(\d+)", text)
+    if not match:
+        return [text] if text else []
+    prefix, digits = match.groups()
+    canonical = f"{prefix}{int(digits)}"
+    raw = f"{prefix}{digits}"
+    zero_padded = f"{prefix}{int(digits):03d}"
+    return list(dict.fromkeys([text, canonical, raw, zero_padded]))
+
+
+def _trade_folder_index(root: Path, prefix: str, *, include_files: bool = False) -> Dict[str, List[Path]]:
+    cache_key = (str(root).lower(), prefix.upper(), "files" if include_files else "dirs")
     cached = _TRADE_FOLDER_INDEX_CACHE.get(cache_key)
     if cached is not None:
         return cached
     index: Dict[str, List[Path]] = defaultdict(list)
     if root.is_dir():
-        matcher = re.compile(rf"^({re.escape(prefix.upper())}\d+)(?:\s|$)", re.IGNORECASE)
-        for current_root, dir_names, _file_names in os.walk(root):
-            for name in dir_names:
-                match = matcher.match(name.strip())
+        matcher = re.compile(
+            rf"(?<![A-Z0-9])({re.escape(prefix.upper())}0*\d+)(?!\d)",
+            re.IGNORECASE,
+        )
+        for current_root, dir_names, file_names in os.walk(root):
+            names = list(dir_names)
+            if include_files:
+                names.extend(file_names)
+            for name in names:
+                match = matcher.search(name.strip())
                 if match:
-                    index[match.group(1).upper()].append(Path(current_root) / name)
+                    folder = Path(current_root) / name
+                    for alias in _trade_number_aliases(match.group(1)):
+                        index[alias].append(folder)
     result = dict(index)
     _TRADE_FOLDER_INDEX_CACHE[cache_key] = result
     return result
@@ -662,6 +682,19 @@ def _trade_folder_roots(prefix: str, explicit_root: Path | None = None) -> List[
     return unique
 
 
+def _trade_file_fallback_root_keys(prefix: str, explicit_root: Path | None = None) -> set[str]:
+    market = "FOREX" if prefix == "F" else "CRYPTO"
+    env_name = f"TRADING_JOURNAL_{market}_ROOT"
+    repo_root = Path(__file__).resolve().parents[1]
+    candidates: List[Path] = [repo_root / "journal" / ("Forex" if prefix == "F" else "Crypto")]
+    if explicit_root is not None:
+        candidates.append(Path(explicit_root))
+    env_root = str(os.getenv(env_name) or "").strip()
+    if env_root:
+        candidates.append(Path(env_root))
+    return {str(path.expanduser()).rstrip("\\/").casefold() for path in candidates}
+
+
 def resolve_trade_folder_link(
     trade_number: Any,
     *,
@@ -673,7 +706,7 @@ def resolve_trade_folder_link(
 ) -> Tuple[str | None, str | None]:
     diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
     number = str(trade_number or "").strip().upper()
-    match = re.fullmatch(r"([FC])\d+", number)
+    match = re.fullmatch(r"([FC])0*\d+", number)
     if not match:
         diagnostics["checked_roots"] = []
         return None, "invalid_trade_number"
@@ -682,12 +715,39 @@ def resolve_trade_folder_link(
     diagnostics["checked_roots"] = [str(root) for root in roots]
     candidates: List[Path] = []
     matched_root: Path | None = None
+    file_fallback_root_keys = _trade_file_fallback_root_keys(
+        prefix,
+        forex_root if prefix == "F" else crypto_root,
+    )
+
+    def _matches_for_root(root: Path, *, include_files: bool = False) -> List[Path]:
+        index = _trade_folder_index(root, prefix, include_files=include_files)
+        matches = []
+        seen_matches: set[str] = set()
+        for alias in _trade_number_aliases(number):
+            for path in index.get(alias, []):
+                key = str(path).casefold()
+                if key not in seen_matches:
+                    seen_matches.add(key)
+                    matches.append(path)
+        return matches
+
     for root in roots:
-        matches = list(_trade_folder_index(root, prefix).get(number, []))
+        matches = _matches_for_root(root)
         if matches:
             candidates = matches
             matched_root = root
             break
+    if not candidates:
+        for root in roots:
+            root_key = str(root.expanduser()).rstrip("\\/").casefold()
+            if root_key not in file_fallback_root_keys:
+                continue
+            matches = _matches_for_root(root, include_files=True)
+            if matches:
+                candidates = matches
+                matched_root = root
+                break
     if not candidates:
         return None, "missing_trade_folder"
     diagnostics["matched_root"] = str(matched_root) if matched_root else ""
@@ -1128,11 +1188,74 @@ def _currency_number_format(code: str, *, force_decimals: int | None = None) -> 
     return f'#,##0.00 "{c}"'
 
 def _fmt_detail_src(src: Any) -> str:
-    if not isinstance(src,dict):
-        return '—'
-    sym=str(src.get('symbol') or src.get('instrument') or '').strip() or '—'
-    d=_as_date(src.get('close_time') or src.get('date') or src.get('open_time'))
-    return f"{sym} · {d.isoformat() if d else '—'}"
+    if not isinstance(src, dict):
+        return "-"
+    sym = str(src.get("symbol") or src.get("instrument") or "").strip() or "-"
+    d = _as_date(src.get("close_time") or src.get("date") or src.get("open_time"))
+    return f"{sym} - {d.isoformat() if d else '-'}"
+
+def _fmt_period_detail(detail: Any) -> str:
+    if not isinstance(detail, dict):
+        return ""
+    parts = []
+    account = str(detail.get("account") or "").strip()
+    if account:
+        parts.append(account)
+    start = detail.get("start_time")
+    end = detail.get("end_time")
+    if start or end:
+        parts.append(f"{start or '?'} to {end or '?'}")
+    peak = _as_float(detail.get("peak"))
+    trough = _as_float(detail.get("trough"))
+    if peak is not None and trough is not None:
+        parts.append(f"peak {peak:,.8g}, trough {trough:,.8g}")
+    return "; ".join(parts)
+
+
+def _fmt_streak_detail(detail: Any) -> str:
+    if not isinstance(detail, dict):
+        return ""
+    parts = []
+    start = detail.get("start_time")
+    end = detail.get("end_time")
+    if start or end:
+        parts.append(f"{start or '?'} to {end or '?'}")
+    symbol = str(detail.get("dominant_symbol") or "").strip()
+    if symbol:
+        parts.append(symbol)
+    net_r = _as_float(detail.get("net_r_multiple"))
+    if net_r is not None:
+        parts.append(f"net R {net_r:.3f}")
+    return "; ".join(parts)
+
+
+def _fmt_pct_with_detail(value: Any, detail: Any) -> str:
+    number = _as_float(value)
+    if number is None:
+        return ""
+    suffix = _fmt_period_detail(detail)
+    text = f"{number:.6g}%"
+    return f"{text} ({suffix})" if suffix else text
+
+
+def _fmt_count_with_detail(value: Any, detail: Any) -> str:
+    number = _as_float(value)
+    if number is None:
+        return ""
+    suffix = _fmt_streak_detail(detail)
+    text = str(int(number))
+    return f"{text} ({suffix})" if suffix else text
+
+
+def _fmt_currency_with_trade_detail(value: Any, currency: str, source: Any) -> str:
+    number = _as_float(value)
+    if number is None:
+        return ""
+    detail = str(source or "").strip()
+    text = f"{number:,.10f}".rstrip("0").rstrip(".")
+    base = f"{currency} {text}" if currency else text
+    return f"{base} ({detail})" if detail else base
+
 
 def _excel_scalar(value: Any) -> Any:
     if value is None:
@@ -1145,7 +1268,7 @@ def _excel_scalar(value: Any) -> Any:
             wins = value.get('wins', '')
             losses = value.get('losses', '')
             trades = value.get('total_trades', value.get('trades', ''))
-            return f"{symbol} — wins {wins}, losses {losses}, trades {trades}"
+            return f"{symbol} - Wins {wins} / Losses {losses} / Trades {trades}"
         return ', '.join(f"{k}={value.get(k)}" for k in sorted(value.keys()))
     if isinstance(value, (list, tuple, set)):
         return ', '.join(str(_excel_scalar(v)) for v in value)
@@ -1788,12 +1911,12 @@ def _apply_trade_number_hyperlinks(
             cell.number_format = "@"
             linked += 1
         else:
-            cell.hyperlink = None
             unresolved.append({
                 "trade_number": number,
                 "row": row,
                 "reason": reason,
                 "checked_roots": list(link_diagnostics.get("checked_roots") or []),
+                "preserved_existing_hyperlink": bool(cell.hyperlink),
             })
     diagnostics["trade_number_hyperlinks_added"] = linked
     if unresolved:
@@ -2363,18 +2486,31 @@ def _apply_dashboard_requested_semantic_fills(ws) -> None:
 
     semantic_by_label = {
         "max win %": "profit",
+        "avg win %": "profit",
+        "min win %": "profit",
+        "max r win": "profit",
+        "avg r win": "profit",
+        "min r win": "profit",
         "max loss %": "loss",
+        "avg loss %": "loss",
+        "min loss %": "loss",
         "max r loss": "loss",
+        "avg r loss": "loss",
+        "min r loss": "loss",
         "max r win": "profit",
     }
+    semantic_rows: List[int] = []
     for row in range(1, ws.max_row + 1):
         label = str(ws.cell(row, 1).value or "").strip().lower()
         if label == "source":
             _apply_dashboard_source_label_style(ws.cell(row, 1))
         semantic = semantic_by_label.get(label)
         if semantic:
-            for col in (3, 4):
+            semantic_rows.append(row)
+            for col in (2, 3, 4):
                 _apply_full_cell_semantic_fill(ws.cell(row, col), semantic)
+    for row in semantic_rows:
+        _profit_loss_rules(ws, f"B{row}:D{row}")
 
     for row in range(13, 17):
         _apply_full_cell_semantic_fill(ws.cell(row, 8), "profit")
@@ -2505,6 +2641,7 @@ def _repair_stats1_formatting(
             "min commission": "min_commission",
             "avg commission": "avg_commission",
             "max commission": "max_commission",
+            "total commission": "total_commission",
         }
         for row in range(commission[0] + 1, commission[1] + 1):
             key = metric_keys.get(str(ws.cell(row, 1).value or "").strip().casefold())
@@ -2517,8 +2654,13 @@ def _repair_stats1_formatting(
             for market, currency in (("fx", "AUD"), ("crypto", "USDT")):
                 cell = ws.cell(row, market_cols[market])
                 value = (metrics.get(market) or {}).get(key)
-                cell.value = "" if value is None else value
-                cell.number_format = _currency_number_format(currency)
+                if key in {"min_commission", "max_commission"} and value is not None:
+                    source_key = f"{key}_source"
+                    cell.value = _fmt_currency_with_trade_detail(value, currency, (metrics.get(market) or {}).get(source_key))
+                    cell.number_format = "General"
+                else:
+                    cell.value = "" if value is None else _excel_scalar(value)
+                    cell.number_format = _currency_number_format(currency)
                 _clear_generated_semantic_fill(cell)
             repaired += 3
     if repaired:
@@ -3085,25 +3227,48 @@ def _dashboard_extended_metrics(
         }
 
     def _pattern_metrics(items: List[Dict[str, Any]]) -> Dict[str, Any]:
-        patterns = [str(item.get("pattern") or "").strip() for item in items]
-        patterns = [pattern for pattern in patterns if pattern]
+        pattern_display: Dict[str, str] = {}
+        patterns = []
+        for item in items:
+            pattern = str(item.get("pattern") or "").strip()
+            if not pattern:
+                continue
+            key = pattern.casefold()
+            pattern_display.setdefault(key, pattern)
+            patterns.append(key)
         if not patterns:
-            return {}
+            return {
+                "pattern_channel_total": 0,
+                "pattern_channel_wins": 0,
+                "pattern_channel_losses": 0,
+                "pattern_range_total": 0,
+                "pattern_range_wins": 0,
+                "pattern_range_losses": 0,
+            }
         counts = Counter(patterns)
         pnl_pct: Dict[str, float] = defaultdict(float)
         for item in items:
-            pattern = str(item.get("pattern") or "").strip()
+            pattern = str(item.get("pattern") or "").strip().casefold()
             result_pct = _as_float(item.get("result_pct"))
             if pattern and result_pct is not None:
                 pnl_pct[pattern] += result_pct
         count_order = sorted(counts, key=lambda pattern: (counts[pattern], pattern.lower()))
         profit_order = sorted(counts, key=lambda pattern: (pnl_pct.get(pattern, 0.0), pattern.lower()))
-        return {
-            "most_traded_pattern": count_order[-1],
-            "least_traded_pattern": count_order[0],
-            "most_profitable_pattern": profit_order[-1],
-            "least_profitable_pattern": profit_order[0],
+        metrics = {
+            "most_traded_pattern": pattern_display.get(count_order[-1], count_order[-1]),
+            "least_traded_pattern": pattern_display.get(count_order[0], count_order[0]),
+            "most_profitable_pattern": pattern_display.get(profit_order[-1], profit_order[-1]),
+            "least_profitable_pattern": pattern_display.get(profit_order[0], profit_order[0]),
         }
+        for wanted in ("channel", "range"):
+            subset = [
+                item for item in items
+                if str(item.get("pattern") or "").strip().casefold() == wanted
+            ]
+            metrics[f"pattern_{wanted}_total"] = len(subset)
+            metrics[f"pattern_{wanted}_wins"] = sum(_outcome(item) > 0 for item in subset)
+            metrics[f"pattern_{wanted}_losses"] = sum(_outcome(item) < 0 for item in subset)
+        return metrics
 
     timeframe_aliases = {
         "1MIN": "1MIN", "5MIN": "5MIN", "15MIN": "15MIN", "30MIN": "30MIN",
@@ -3137,22 +3302,32 @@ def _dashboard_extended_metrics(
         ]
         winner_r = [
             value for value in (_as_float(item.get("r_multiple")) for item in winners)
-            if value is not None
+            if value is not None and value > 0
         ]
         loser_r = [
             value for value in (_as_float(item.get("r_multiple")) for item in losers)
-            if value is not None
+            if value is not None and value < 0
         ]
-        commissions = [
-            abs(value) for value in (_as_float(item.get("commission")) for item in items)
-            if value is not None and value != 0
-        ]
+        commission_rows: List[Tuple[float, Dict[str, Any]]] = []
+        for item in items:
+            value = _as_float(item.get("commission"))
+            if value is not None and value != 0:
+                commission_rows.append((abs(value), item))
+        commissions = [value for value, _item in commission_rows]
         timeframe_counts: Counter[str] = Counter()
+        timeframe_wins: Counter[str] = Counter()
+        timeframe_losses: Counter[str] = Counter()
         for item in items:
             timeframe = timeframe_aliases.get(_canonical_journal_timeframe(item.get("timeframe")).upper())
             if timeframe:
                 timeframe_counts[timeframe] += 1
+                if _outcome(item) > 0:
+                    timeframe_wins[timeframe] += 1
+                elif _outcome(item) < 0:
+                    timeframe_losses[timeframe] += 1
         stats_bucket = by_market.get(market) if isinstance(by_market.get(market), dict) else {}
+        min_commission_source = min(commission_rows, key=lambda pair: (pair[0], str(pair[1].get("symbol") or "")))[1] if commission_rows else None
+        max_commission_source = max(commission_rows, key=lambda pair: (pair[0], str(pair[1].get("symbol") or "")))[1] if commission_rows else None
         result[market] = {
             **_summary(durations, "duration_seconds"),
             **_summary(break_even_moves, "move_to_break_even_duration_seconds"),
@@ -3175,11 +3350,19 @@ def _dashboard_extended_metrics(
             "short_losses": sum(str(item.get("side") or "").upper().startswith(("SELL", "SHORT")) and _outcome(item) < 0 for item in items),
             **_pattern_metrics(items),
             **{f"timeframe_{label.lower()}": timeframe_counts[label] for label in timeframe_aliases.values()},
+            **{f"timeframe_{label.lower()}_wins": timeframe_wins[label] for label in timeframe_aliases.values()},
+            **{f"timeframe_{label.lower()}_losses": timeframe_losses[label] for label in timeframe_aliases.values()},
             **_summary(commissions, "commission"),
             "total_commission": sum(commissions) if commissions else None,
+            "min_commission_source": _fmt_detail_src(min_commission_source) if min_commission_source else "",
+            "max_commission_source": _fmt_detail_src(max_commission_source) if max_commission_source else "",
             "min_drawdown_pct": stats_bucket.get("min_drawdown_pct"),
             "avg_drawdown_pct": stats_bucket.get("avg_drawdown_pct"),
             "max_drawdown_pct": stats_bucket.get("max_drawdown_pct"),
+            "min_drawdown_detail": stats_bucket.get("min_drawdown_detail"),
+            "max_drawdown_detail": stats_bucket.get("max_drawdown_detail"),
+            "longest_winning_streak": stats_bucket.get("longest_winning_streak"),
+            "longest_losing_streak": stats_bucket.get("longest_losing_streak"),
         }
     return result
 
@@ -3218,6 +3401,12 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             "crypto": by_market.get("crypto") or {},
         }.items()
     }
+    buckets["overall"]["most_wins_instrument"] = leaders.get("most_wins_instrument")
+    buckets["overall"]["most_losses_instrument"] = leaders.get("most_losses_instrument")
+    buckets["fx"]["most_wins_instrument"] = leaders.get("fx_most_wins_instrument")
+    buckets["fx"]["most_losses_instrument"] = leaders.get("fx_most_losses_instrument")
+    buckets["crypto"]["most_wins_instrument"] = leaders.get("crypto_most_wins_instrument")
+    buckets["crypto"]["most_losses_instrument"] = leaders.get("crypto_most_losses_instrument")
     market_cols = {"overall": 2, "fx": 3, "crypto": 4}
     for market, col in market_cols.items():
         dash.cell(1, col, {"overall": "Overall", "fx": "FX", "crypto": "Crypto"}[market])
@@ -3234,6 +3423,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         ("Gross loss", "gross_loss_return_pct", "pct", "loss"),
         ("Best Win Streak", "winning_streak", "count", "profit"),
         ("Worst Losing Streak", "losing_streak", "count", "loss"),
+        ("Expectancy %", "expectancy_pct", "pct", "auto"),
         ("Avg result %", "avg_result_pct", "pct", "auto"),
         ("Avg R", "avg_r_multiple", "r", "auto"),
         ("Avg stop %", "avg_stop_pct", "pct", None),
@@ -3256,7 +3446,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
                     cell.fill = PatternFill("solid", fgColor=LIGHT_GREY_FILL_RGB)
                 else:
                     cell.value = "" if number is None else number / 100.0
-                    cell.number_format = "0.00%"
+                    cell.number_format = adaptive_percent_number_format(cell.value)
             elif kind == "r":
                 cell.value = "" if value is None else value
                 cell.number_format = '0.000"R"'
@@ -3270,7 +3460,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
                 cell.value = "" if value is None else value
                 cell.number_format = "#,##0.##########"
             elif kind == "text":
-                cell.value = "" if value is None else value
+                cell.value = "" if value is None else _excel_scalar(value)
             elif kind == "money":
                 money_map = (bucket.get("money_by_currency") or {}).get(key) or {}
                 if isinstance(money_map, dict) and len(money_map) == 1:
@@ -3278,7 +3468,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
                     cell.value = amount
                     cell.number_format = _currency_number_format(currency)
                 else:
-                    cell.value = "" if value is None else value
+                    cell.value = "" if value is None else _excel_scalar(value)
             if semantic == "profit":
                 _apply_full_cell_semantic_fill(cell, "profit")
             elif semantic == "loss":
@@ -3306,12 +3496,13 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             ("Min target %", "min_target_pct_winners", "pct", None),
             ("Avg target %", "avg_target_pct_winners", "pct", None),
             ("Max target %", "max_target_pct_winners", "pct", None),
-            ("Min result %", "min_result_pct_winners", "pct", "profit"),
-            ("Avg result %", "avg_result_pct_winners", "pct", "profit"),
-            ("Max result %", "max_result_pct_winners", "pct", "profit"),
-            ("Min R", "min_r_multiple_winners", "r", "profit"),
-            ("Avg R", "avg_r_multiple_winners", "r", "profit"),
-            ("Max R", "max_r_multiple_winners", "r", "profit"),
+            ("Min win %", "min_result_pct_winners", "pct", "profit"),
+            ("Avg win %", "avg_result_pct_winners", "pct", "profit"),
+            ("Max win %", "max_result_pct_winners", "pct", "profit"),
+            ("Min R win", "min_r_multiple_winners", "r", "profit"),
+            ("Avg R win", "avg_r_multiple_winners", "r", "profit"),
+            ("Max R win", "max_r_multiple_winners", "r", "profit"),
+            ("Most wins", "most_wins_instrument", "text", "profit"),
         ], True),
         ("Losers", [
             ("Min stop %", "min_stop_pct_losers", "pct", None),
@@ -3320,12 +3511,13 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             ("Min target %", "min_target_pct_losers", "pct", None),
             ("Avg target %", "avg_target_pct_losers", "pct", None),
             ("Max target %", "max_target_pct_losers", "pct", None),
-            ("Min result %", "min_result_pct_losers", "pct", "loss"),
-            ("Avg result %", "avg_result_pct_losers", "pct", "loss"),
-            ("Max result %", "max_result_pct_losers", "pct", "loss"),
-            ("Min R", "min_r_multiple_losers", "r", "loss"),
-            ("Avg R", "avg_r_multiple_losers", "r", "loss"),
-            ("Max R", "max_r_multiple_losers", "r", "loss"),
+            ("Max loss %", "min_result_pct_losers", "pct", "loss"),
+            ("Avg loss %", "avg_result_pct_losers", "pct", "loss"),
+            ("Min loss %", "max_result_pct_losers", "pct", "loss"),
+            ("Max R loss", "min_r_multiple_losers", "r", "loss"),
+            ("Avg R loss", "avg_r_multiple_losers", "r", "loss"),
+            ("Min R loss", "max_r_multiple_losers", "r", "loss"),
+            ("Most losses", "most_losses_instrument", "text", "loss"),
         ], True),
         ("Side", [
             ("Long", "long_trades", "count", None),
@@ -3336,6 +3528,12 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
             ("Losers", "short_losses", "count", "loss"),
         ], True),
         ("Patterns", [
+            ("Channel", "pattern_channel_total", "count", None),
+            ("Winners", "pattern_channel_wins", "count", "profit"),
+            ("Losers", "pattern_channel_losses", "count", "loss"),
+            ("Range", "pattern_range_total", "count", None),
+            ("Winners", "pattern_range_wins", "count", "profit"),
+            ("Losers", "pattern_range_losses", "count", "loss"),
             ("Most Traded", "most_traded_pattern", "text", None),
             ("Least Traded", "least_traded_pattern", "text", None),
             ("Most Profitable", "most_profitable_pattern", "text", "profit"),
@@ -3343,19 +3541,38 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         ], True),
         ("Timeframe", [
             ("1MIN", "timeframe_1min", "count", None),
+            ("Winners", "timeframe_1min_wins", "count", "profit"),
+            ("Losers", "timeframe_1min_losses", "count", "loss"),
             ("5MIN", "timeframe_5min", "count", None),
+            ("Winners", "timeframe_5min_wins", "count", "profit"),
+            ("Losers", "timeframe_5min_losses", "count", "loss"),
             ("15MIN", "timeframe_15min", "count", None),
+            ("Winners", "timeframe_15min_wins", "count", "profit"),
+            ("Losers", "timeframe_15min_losses", "count", "loss"),
             ("30MIN", "timeframe_30min", "count", None),
+            ("Winners", "timeframe_30min_wins", "count", "profit"),
+            ("Losers", "timeframe_30min_losses", "count", "loss"),
             ("1H", "timeframe_1h", "count", None),
+            ("Winners", "timeframe_1h_wins", "count", "profit"),
+            ("Losers", "timeframe_1h_losses", "count", "loss"),
             ("4H", "timeframe_4h", "count", None),
+            ("Winners", "timeframe_4h_wins", "count", "profit"),
+            ("Losers", "timeframe_4h_losses", "count", "loss"),
             ("DAILY", "timeframe_daily", "count", None),
+            ("Winners", "timeframe_daily_wins", "count", "profit"),
+            ("Losers", "timeframe_daily_losses", "count", "loss"),
             ("WEEKLY", "timeframe_weekly", "count", None),
+            ("Winners", "timeframe_weekly_wins", "count", "profit"),
+            ("Losers", "timeframe_weekly_losses", "count", "loss"),
             ("MONTHLY", "timeframe_monthly", "count", None),
+            ("Winners", "timeframe_monthly_wins", "count", "profit"),
+            ("Losers", "timeframe_monthly_losses", "count", "loss"),
         ], True),
         ("Commission", [
             ("Min Commission", "min_commission", "number", None),
             ("Avg Commission", "avg_commission", "number", None),
             ("Max Commission", "max_commission", "number", None),
+            ("Total Commission", "total_commission", "number", None),
         ], True),
         ("Drawdown", [
             ("Min drawdown", "min_drawdown_pct", "pct", "loss"),
@@ -3377,7 +3594,7 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
                 if kind == "pct":
                     number = _as_float(value)
                     cell.value = "" if number is None else number / 100.0
-                    cell.number_format = "0.00%"
+                    cell.number_format = adaptive_percent_number_format(cell.value)
                 elif kind == "r":
                     cell.value = "" if value is None else value
                     cell.number_format = '0.000"R"'
@@ -3390,12 +3607,21 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
                 elif kind == "number":
                     cell.value = "" if value is None else value
                     if title == "Commission" and market in {"fx", "crypto"}:
-                        cell.number_format = _currency_number_format("AUD" if market == "fx" else "USDT")
+                        currency = "AUD" if market == "fx" else "USDT"
+                        if key in {"min_commission", "max_commission"} and value is not None:
+                            cell.value = _fmt_currency_with_trade_detail(
+                                value,
+                                currency,
+                                buckets[market].get(f"{key}_source"),
+                            )
+                            cell.number_format = "General"
+                        else:
+                            cell.number_format = _currency_number_format(currency)
                         _clear_generated_semantic_fill(cell)
                     else:
                         cell.number_format = "#,##0.##########"
                 else:
-                    cell.value = "" if value is None else value
+                    cell.value = "" if value is None else _excel_scalar(value)
                 if semantic in {"profit", "loss"} and cell.value not in (None, ""):
                     _apply_full_cell_semantic_fill(cell, semantic)
             row += 1
@@ -3429,47 +3655,6 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         )
         detail.cell(target_row, 5, rec.get("as_of") or "")
 
-    detail.cell(1, 6, "Instrument leaders").font = Font(bold=True)
-    for col, header in enumerate(("Metric", "Symbol", "Wins", "Losses", "Trades"), start=6):
-        detail.cell(2, col, header).font = Font(bold=True)
-    leader_rows = (("FX most wins", "fx_most_wins_instrument"), ("FX most losses", "fx_most_losses_instrument"), ("Crypto most wins", "crypto_most_wins_instrument"), ("Crypto most losses", "crypto_most_losses_instrument"))
-    for target_row, (label, key) in enumerate(leader_rows, start=3):
-        payload = leaders.get(key) or {}
-        detail.cell(target_row, 7, payload.get("symbol") or "")
-        detail.cell(target_row, 6, label)
-        detail.cell(target_row, 8, payload.get("wins"))
-        detail.cell(target_row, 9, payload.get("losses"))
-        detail.cell(target_row, 10, payload.get("trades", payload.get("total_trades")))
-
-    for card_row, market, title in ((1, "fx", "FX"), (10, "crypto", "CRYPTO")):
-        detail.cell(card_row, 12, title).font = Font(bold=True)
-        detail.cell(card_row + 1, 12, "Metric").font = Font(bold=True)
-        detail.cell(card_row + 1, 13, "%").font = Font(bold=True)
-        detail.cell(card_row + 1, 14, "TRADE").font = Font(bold=True)
-        card_specs = [
-            ("Max win %", "max_result_pct", "pct"),
-            ("Max loss %", "min_result_pct", "pct"),
-            ("Max R loss", "min_r_multiple", "r"),
-            ("Max R win", "max_r_multiple", "r"),
-            ("Shortest", "shortest_duration_seconds", "duration"),
-            ("Longest", "longest_duration_seconds", "duration"),
-        ]
-        for offset, (label, key, kind) in enumerate(card_specs, start=2):
-            target_row = card_row + offset
-            value = buckets[market].get(key)
-            detail.cell(target_row, 12, label)
-            value_cell = detail.cell(target_row, 13)
-            if kind == "pct":
-                value_cell.value = "" if value is None else float(value) / 100.0
-                value_cell.number_format = "0.00%"
-            elif kind == "r":
-                value_cell.value = "" if value is None else value
-                value_cell.number_format = '0.000"R"'
-            else:
-                value_cell.value = _format_duration_display(value) if value is not None else ""
-                value_cell.number_format = "General"
-            source = (buckets[market].get("metric_sources") or {}).get(key)
-            detail.cell(target_row, 14, _fmt_detail_src(source) if source else "")
     _apply_dashboard_requested_semantic_fills(dash)
 
     resolved_balances = _resolved_all_trade_balances(rows)
@@ -3793,6 +3978,7 @@ _REPORT_SPECS = [
     ("Gross loss", "gross_loss_result_pct", "pct", "loss"),
     ("Best Win Streak", "winning_streak", "count", "profit"),
     ("Worst Losing Streak", "losing_streak", "count", "loss"),
+    ("Expectancy %", "expectancy_pct", "pct", "auto"),
     ("Avg result %", "avg_result_pct", "pct", "auto"),
     ("Avg R", "avg_r_multiple", "r", "auto"),
     ("Avg stop %", "avg_stop_pct", "pct", None),
@@ -3962,12 +4148,20 @@ def _report_cell_value(bucket: Dict[str, Any], key: str | None, kind: str) -> An
     value = bucket.get(key)
     if kind == "pct":
         number = _as_float(value)
+        if key == "min_drawdown_pct" and number is not None and bucket.get("min_drawdown_detail"):
+            return _fmt_pct_with_detail(number, bucket.get("min_drawdown_detail"))
+        if key == "max_drawdown_pct" and number is not None and bucket.get("max_drawdown_detail"):
+            return _fmt_pct_with_detail(number, bucket.get("max_drawdown_detail"))
         return "" if number is None else number / 100.0
     if kind == "r":
         number = _as_float(value)
         return "" if number is None else number
     if kind == "count":
         number = _as_float(value)
+        if key == "winning_streak" and number is not None and bucket.get("longest_winning_streak"):
+            return _fmt_count_with_detail(number, bucket.get("longest_winning_streak"))
+        if key == "losing_streak" and number is not None and bucket.get("longest_losing_streak"):
+            return _fmt_count_with_detail(number, bucket.get("longest_losing_streak"))
         return "" if number is None else int(number)
     if kind == "duration":
         return _format_duration_display(value) if value not in (None, "") else ""
@@ -4003,7 +4197,9 @@ def _format_report_sheet(ws, last_col: int) -> None:
     for idx, (_label, _key, kind, semantic) in enumerate(_REPORT_SPECS, start=2):
         for col in range(2, last_col + 1):
             cell = ws.cell(idx, col)
-            if kind == "pct":
+            if isinstance(cell.value, str) and cell.value:
+                cell.number_format = "General"
+            elif kind == "pct":
                 cell.number_format = "0.00%"
             elif kind == "r":
                 cell.number_format = '0.000"R"'
@@ -4080,6 +4276,18 @@ def _report_label_rows(ws, label: str) -> List[int]:
 
 def _repair_report_layout(ws, diagnostics: Dict[str, Any] | None = None) -> None:
     diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    if not _report_label_rows(ws, "Expectancy %"):
+        avg_rows = _report_label_rows(ws, "Avg result %")
+        if avg_rows:
+            target_row = avg_rows[0]
+            ws.insert_rows(target_row, 1)
+            _copy_report_row(ws, target_row + 1, target_row)
+            ws.cell(target_row, 1).value = "Expectancy %"
+            for col in range(2, ws.max_column + 1):
+                ws.cell(target_row, col).value = None
+                ws.cell(target_row, col).number_format = "0.00%"
+            diagnostics.setdefault("report_expectancy_rows_added", []).append(ws.title)
+
     drawdown_rows = _report_label_rows(ws, "Drawdown")
     min_rows = _report_label_rows(ws, "Min drawdown")
     if drawdown_rows and min_rows:
@@ -4163,7 +4371,9 @@ def _update_report_sheet_preserving_layout(
         for col, bucket in zip(header_cols, buckets):
             cell = ws.cell(row, col)
             cell.value = _report_cell_value(bucket, key, kind)
-            if kind == "pct":
+            if isinstance(cell.value, str) and cell.value:
+                cell.number_format = "General"
+            elif kind == "pct":
                 cell.number_format = "0.00%"
             elif kind == "r":
                 cell.number_format = '0.000"R"'
@@ -4689,6 +4899,8 @@ def _insert_dashboard_rows_preserving_layout(ws, row_idx: int, amount: int, styl
     for target_row in range(row_idx, row_idx + amount):
         ws.row_dimensions[target_row].height = source_height
         for col in range(1, ws.max_column + 1):
+            if _is_merged_non_anchor(ws, target_row, col):
+                continue
             source = ws.cell(style_row, col)
             target = ws.cell(target_row, col)
             _copy_cell_style(source, target)
@@ -4779,6 +4991,40 @@ def _ensure_dashboard_move_duration_rows(ws, diagnostics: Dict[str, Any] | None 
     return changed
 
 
+def _ensure_dashboard_expectancy_row(ws, diagnostics: Dict[str, Any] | None = None) -> bool:
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    market_cols = _stats1_market_columns(ws)
+    if not market_cols or market_cols["overall"] <= 1:
+        return False
+    label_col = market_cols["overall"] - 1
+    labels = [
+        str(ws.cell(row, label_col).value or "").strip().casefold()
+        for row in range(1, ws.max_row + 1)
+    ]
+    if "expectancy %" in labels:
+        return False
+    winners_row = next(
+        (row for row in range(1, ws.max_row + 1)
+         if str(ws.cell(row, label_col).value or "").strip().casefold() == "winners"),
+        ws.max_row + 1,
+    )
+    avg_row = next(
+        (row for row in range(1, winners_row)
+         if str(ws.cell(row, label_col).value or "").strip().casefold() == "avg result %"),
+        None,
+    )
+    if not avg_row:
+        diagnostics.setdefault("missing_dashboard_metric_labels", []).append("Avg result %")
+        return False
+    _insert_dashboard_rows_preserving_layout(ws, avg_row, 1, avg_row)
+    ws.cell(avg_row, label_col).value = "Expectancy %"
+    for col in market_cols.values():
+        ws.cell(avg_row, col).value = None
+        ws.cell(avg_row, col).number_format = "0.00%"
+    diagnostics.setdefault("inserted_dashboard_metric_rows", []).append("Expectancy %")
+    return True
+
+
 def _ensure_dashboard_extended_layout(ws, diagnostics: Dict[str, Any] | None = None) -> bool:
     diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
     labels = {
@@ -4807,12 +5053,36 @@ def _ensure_dashboard_extended_layout(ws, diagnostics: Dict[str, Any] | None = N
             ws.cell(row, 1).value = replacement
             changed = True
 
-    desired = [
-        "Min stop %", "Avg stop %", "Max stop %",
-        "Min target %", "Avg target %", "Max target %",
-        "Min result %", "Avg result %", "Max result %",
-        "Min R", "Avg R", "Max R",
-    ]
+    desired_by_section = {
+        "Winners": [
+            ("Min stop %", {"min stop %"}),
+            ("Avg stop %", {"avg stop %"}),
+            ("Max stop %", {"max stop %"}),
+            ("Min target %", {"min target %"}),
+            ("Avg target %", {"avg target %"}),
+            ("Max target %", {"max target %"}),
+            ("Min result %", {"min result %", "min win %"}),
+            ("Avg result %", {"avg result %", "avg win %"}),
+            ("Max result %", {"max result %", "max win %"}),
+            ("Min R", {"min r", "min r win"}),
+            ("Avg R", {"avg r", "avg r win"}),
+            ("Max R", {"max r", "max r win"}),
+        ],
+        "Losers": [
+            ("Min stop %", {"min stop %"}),
+            ("Avg stop %", {"avg stop %"}),
+            ("Max stop %", {"max stop %"}),
+            ("Min target %", {"min target %"}),
+            ("Avg target %", {"avg target %"}),
+            ("Max target %", {"max target %"}),
+            ("Min result %", {"min result %", "max loss %"}),
+            ("Avg result %", {"avg result %", "avg loss %"}),
+            ("Max result %", {"max result %", "min loss %"}),
+            ("Min R", {"min r", "max r loss"}),
+            ("Avg R", {"avg r", "avg r loss"}),
+            ("Max R", {"max r", "min r loss"}),
+        ],
+    }
     for section_name, next_sections in (
         ("Winners", {"losers"}),
         ("Losers", {"side"}),
@@ -4824,9 +5094,11 @@ def _ensure_dashboard_extended_layout(ws, diagnostics: Dict[str, Any] | None = N
         if not section_row:
             continue
         cursor = section_row + 1
-        for wanted in desired:
+        for wanted, aliases in desired_by_section[section_name]:
+            while cursor <= ws.max_row and str(ws.cell(cursor, 1).value or "").strip().casefold() in {"", "source"}:
+                cursor += 1
             current = str(ws.cell(cursor, 1).value or "").strip()
-            if current.lower() == wanted.lower():
+            if current.lower() in aliases:
                 cursor += 1
                 continue
             next_anchor = next((
@@ -4835,7 +5107,7 @@ def _ensure_dashboard_extended_layout(ws, diagnostics: Dict[str, Any] | None = N
             ), ws.max_row + 1)
             found = next((
                 row for row in range(cursor + 1, next_anchor)
-                if str(ws.cell(row, 1).value or "").strip().lower() == wanted.lower()
+                if str(ws.cell(row, 1).value or "").strip().lower() in aliases
             ), None)
             if found == cursor:
                 cursor += 1
@@ -5108,6 +5380,43 @@ def _find_dashboard_table_headers(ws, section: Dict[str, int], *, scan_rows: int
             break
     return header_row, col_map
 
+
+def _read_stats2_account_balances(wb) -> List[Dict[str, Any]]:
+    if STATS2_SHEET not in wb.sheetnames:
+        return []
+    ws = wb[STATS2_SHEET]
+    try:
+        sections = _find_anchor_sections(ws, ["Account Balances"])
+    except Exception:
+        return []
+    section = sections.get("Account Balances")
+    if not section:
+        return []
+    header_row, col_map = _find_dashboard_table_headers(ws, section)
+    if not header_row or not {"account", "balance", "currency"}.issubset(col_map.keys()):
+        return []
+    balances: List[Dict[str, Any]] = []
+    account_col = col_map["account"]
+    for row in range(header_row + 1, section["end_row"] + 1):
+        account = str(ws.cell(row, account_col).value or "").strip()
+        if not account:
+            continue
+        balance = _as_float(ws.cell(row, col_map["balance"]).value)
+        currency = str(ws.cell(row, col_map["currency"]).value or "").strip().upper()
+        payload: Dict[str, Any] = {
+            "account": account,
+            "account_label": account,
+            "label": account,
+            "balance": balance,
+            "currency": currency,
+            "source": "stats2_account_balances",
+            "balance_source": "stats2_account_balances",
+        }
+        if "as_of" in col_map:
+            payload["as_of"] = _excel_datetime_to_iso(ws.cell(row, col_map["as_of"]).value)
+        balances.append(payload)
+    return balances
+
 def _ensure_account_balance_row(ws, section: Dict[str, int], header_row: int, col_map: Dict[str, int], account_label: str) -> int:
     account_col = col_map["account"]
     wanted = _canonical_account_label(account_label)
@@ -5223,6 +5532,7 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
         raise FileNotFoundError(f"Master Journal workbook not found: {path}")
     wb = load_workbook(path, data_only=True, read_only=True)
     try:
+        balances = _read_stats2_account_balances(wb)
         ws = _get_all_trades_sheet(wb)
         header_map = _trade_log_header_map(ws)
         headers = list(header_map.keys())
@@ -5357,7 +5667,7 @@ def read_master_journal_source(path: Path) -> Dict[str, Any]:
                 cashflow_ledger[account].append({'account':account,'date':item['close_time'] or item['open_time'],'amount':cashflow_amount,'new_balance':cashflow_new_balance,'currency':str(r[idx.get('Currency')] or '').strip() if 'Currency' in idx else '','reason':item.get('notes') or '', 'side':side})
         items, dedupe_diagnostics = _dedupe_trade_rows_by_execution(items)
         diagnostics.update(dedupe_diagnostics)
-        return {'items':items,'cashflow_ledger':dict(cashflow_ledger),'diagnostics':diagnostics}
+        return {'items':items,'balances':balances,'cashflow_ledger':dict(cashflow_ledger),'diagnostics':diagnostics}
     finally:
         wb.close()
 
@@ -5404,6 +5714,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
         dash = _stats1_sheet(wb)
         detail_dash = _stats2_sheet(wb) or dash
         _repair_dashboard_core_layout(dash, diagnostics)
+        _ensure_dashboard_expectancy_row(dash, diagnostics)
         _ensure_dashboard_move_duration_rows(dash, diagnostics)
         _ensure_dashboard_extended_layout(dash, diagnostics)
 
@@ -5446,7 +5757,8 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
         )
         detail_anchors = _find_anchor_sections(
             detail_dash,
-            ["Account Balances", "Instrument leaders", "FX", "Crypto"],
+            ["Account Balances"],
+            optional=["Instrument leaders", "FX", "Crypto"],
         )
         section_sheets = {
             **{name: dash for name in anchors},
@@ -5476,7 +5788,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
 
         def _set_dashboard_metric_number_format(cell, metric_type: str) -> None:
             if metric_type == "pct":
-                cell.number_format = "0.00%"
+                cell.number_format = adaptive_percent_number_format(cell.value)
             elif metric_type == "r":
                 cell.number_format = '0.000"R"'
             elif metric_type == "count":
@@ -5540,8 +5852,13 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                     break
             return cols
 
-        def write_market_metric(section: str, label: str, values_by_market: Dict[str, Any], metric_type: str = "raw", semantic: str | None = None):
-            pos = _find_label_in_section(dash, label, anchors[section])
+        def write_market_metric(section: str, label: str | List[str], values_by_market: Dict[str, Any], metric_type: str = "raw", semantic: str | None = None):
+            labels = label if isinstance(label, list) else [label]
+            pos = None
+            for candidate_label in labels:
+                pos = _find_label_in_section(dash, candidate_label, anchors[section])
+                if pos:
+                    break
             if not pos:
                 return
             market_cols = _main_dashboard_market_columns()
@@ -5593,6 +5910,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 (["Gross loss"], "gross_loss_return_pct", "pct", "loss"),
                 (["Best Win Streak", "Winning Streak"], "winning_streak", "count", None),
                 (["Worst Losing Streak", "Losing Streak"], "losing_streak", "count", None),
+                (["Expectancy %"], "expectancy_pct", "pct", "profit_loss"),
                 (["Avg result %"], "avg_result_pct", "pct", "profit_loss"),
                 (["Avg R"], "avg_r_multiple", "r", "profit_loss"),
                 (["Avg stop %"], "avg_stop_pct", "pct", None),
@@ -5666,6 +5984,23 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                             semantic,
                             allow_grey=key in {"market_return_pct", "gross_gain_return_pct", "gross_loss_return_pct"},
                         )
+            for labels, detail_key in (
+                (["Best Win Streak", "Winning Streak"], "longest_winning_streak"),
+                (["Worst Losing Streak", "Losing Streak"], "longest_losing_streak"),
+            ):
+                rows_for_metric = []
+                for label in labels:
+                    rows_for_metric.extend(label_rows.get(label.lower(), []))
+                for row_num in sorted(set(rows_for_metric)):
+                    for market, col in market_cols.items():
+                        bucket = buckets.get(market) or {}
+                        value = bucket.get("winning_streak" if detail_key == "longest_winning_streak" else "losing_streak")
+                        detail = bucket.get(detail_key)
+                        if value is not None and detail:
+                            cell = dash.cell(row_num, col)
+                            if _write_value_preserving_cell(dash, row_num, col, _fmt_count_with_detail(value, detail)):
+                                cell.number_format = "General"
+                                diagnostics["updated_cells"] += 1
 
         def write_source_below(section: str, metric_label: str, source_val: Any):
             if source_val is None:
@@ -5690,6 +6025,8 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             "Crypto": by_market.get("crypto") or {},
         }
         for section, bucket in section_maps.items():
+            if section not in section_sheets:
+                continue
             write_metric(section, "Trades", bucket.get("trades"), "count")
             write_metric(section, "Wins", bucket.get("wins"), "count")
             write_metric(section, "Losses", bucket.get("losses"), "count")
@@ -5734,15 +6071,25 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 for market in ("overall", "fx", "crypto")
             }
 
-        write_market_metric("Winners", "Avg result %", _risk_market_values("avg_result_pct_winners"), "pct", "profit_loss")
-        write_market_metric("Winners", "Avg R", _risk_market_values("avg_r_multiple_winners"), "r", "profit_loss")
+        write_market_metric("Winners", ["Avg result %", "Avg win %"], _risk_market_values("avg_result_pct_winners"), "pct", "profit_loss")
+        write_market_metric("Winners", ["Avg R", "Avg R win"], _risk_market_values("avg_r_multiple_winners"), "r", "profit_loss")
         write_market_metric("Winners", "Avg stop %", _risk_market_values("avg_stop_pct_winners"), "pct")
         write_market_metric("Winners", "Avg target %", _risk_market_values("avg_target_pct_winners"), "pct")
-        write_market_metric("Losers", "Avg result %", _risk_market_values("avg_result_pct_losers"), "pct", "loss")
-        write_market_metric("Losers", "Avg R", _risk_market_values("avg_r_multiple_losers"), "r", "loss")
+        write_market_metric("Losers", ["Avg result %", "Avg loss %"], _risk_market_values("avg_result_pct_losers"), "pct", "loss")
+        write_market_metric("Losers", ["Avg R", "Avg R loss"], _risk_market_values("avg_r_multiple_losers"), "r", "loss")
         write_market_metric("Losers", "Avg stop %", _risk_market_values("avg_stop_pct_losers"), "pct")
         write_market_metric("Losers", "Avg target %", _risk_market_values("avg_target_pct_losers"), "pct")
         for section, suffix, semantic in (("Winners", "winners", "profit"), ("Losers", "losers", "loss")):
+            label_aliases = {
+                ("Winners", "Min result %"): ["Min result %", "Min win %"],
+                ("Winners", "Max result %"): ["Max result %", "Max win %"],
+                ("Winners", "Min R"): ["Min R", "Min R win"],
+                ("Winners", "Max R"): ["Max R", "Max R win"],
+                ("Losers", "Min result %"): ["Min result %", "Max loss %"],
+                ("Losers", "Max result %"): ["Max result %", "Min loss %"],
+                ("Losers", "Min R"): ["Min R", "Max R loss"],
+                ("Losers", "Max R"): ["Max R", "Min R loss"],
+            }
             for label, key, metric_type in (
                 ("Min stop %", f"min_stop_pct_{suffix}", "pct"),
                 ("Max stop %", f"max_stop_pct_{suffix}", "pct"),
@@ -5755,7 +6102,7 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             ):
                 write_market_metric(
                     section,
-                    label,
+                    label_aliases.get((section, label), label),
                     _extended_market_values(key),
                     metric_type,
                     semantic if "result" in key or "r_multiple" in key else None,
@@ -5786,8 +6133,34 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 ("Least Profitable", "least_profitable_pattern"),
             ):
                 write_market_metric("Patterns", label, _extended_market_values(key))
+            market_cols = _main_dashboard_market_columns()
+            current_pattern = ""
+            for row_num in range(anchors["Patterns"]["start_row"], anchors["Patterns"]["end_row"] + 1):
+                label = str(dash.cell(row_num, 1).value or "").strip().casefold()
+                key_suffix = None
+                semantic = None
+                if label in {"channel", "range"}:
+                    current_pattern = label
+                    key_suffix = "total"
+                elif label in {"winners", "winner"} and current_pattern:
+                    key_suffix = "wins"
+                    semantic = "profit"
+                elif label in {"losers", "loser", "losses"} and current_pattern:
+                    key_suffix = "losses"
+                    semantic = "loss"
+                else:
+                    current_pattern = "" if label in {"most traded", "least traded", "most profitable", "least profitable"} else current_pattern
+                if not current_pattern or not key_suffix:
+                    continue
+                metric_key = f"pattern_{current_pattern}_{key_suffix}"
+                for market, col in market_cols.items():
+                    value = (extended_metrics.get(market) or {}).get(metric_key)
+                    if value is not None:
+                        _write_dashboard_metric_cell(dash, row_num, col, int(value), "count", semantic)
 
         if "Timeframe" in anchors:
+            market_cols = _main_dashboard_market_columns()
+            current_timeframe = ""
             for label in ("1MIN", "5MIN", "15MIN", "30MIN", "1H", "4H", "DAILY", "WEEKLY", "MONTHLY"):
                 write_market_metric(
                     "Timeframe",
@@ -5795,12 +6168,34 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                     _extended_market_values(f"timeframe_{label.lower()}"),
                     "count",
                 )
+            timeframe_labels = {"1MIN", "5MIN", "15MIN", "30MIN", "1H", "4H", "DAILY", "WEEKLY", "MONTHLY"}
+            for row_num in range(anchors["Timeframe"]["start_row"], anchors["Timeframe"]["end_row"] + 1):
+                label_raw = str(dash.cell(row_num, 1).value or "").strip().upper()
+                key_suffix = None
+                semantic = None
+                if label_raw in timeframe_labels:
+                    current_timeframe = label_raw
+                    continue
+                if label_raw in {"WINNERS", "WINNER"} and current_timeframe:
+                    key_suffix = "wins"
+                    semantic = "profit"
+                elif label_raw in {"LOSERS", "LOSER", "LOSSES"} and current_timeframe:
+                    key_suffix = "losses"
+                    semantic = "loss"
+                if not current_timeframe or not key_suffix:
+                    continue
+                metric_key = f"timeframe_{current_timeframe.lower()}_{key_suffix}"
+                for market, col in market_cols.items():
+                    value = (extended_metrics.get(market) or {}).get(metric_key)
+                    if value is not None:
+                        _write_dashboard_metric_cell(dash, row_num, col, int(value), "count", semantic)
 
         if "Commission" in anchors:
             for label, key in (
                 ("Min Commission", "min_commission"),
                 ("Avg Commission", "avg_commission"),
                 ("Max Commission", "max_commission"),
+                ("Total Commission", "total_commission"),
             ):
                 write_market_metric("Commission", label, _extended_market_values(key))
 
@@ -5813,16 +6208,35 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
         )
         write_market_metric("Drawdown", "Max drawdown", {"overall": risk.get("max_drawdown_pct"), "fx": (by_market.get("fx") or {}).get("max_drawdown_pct"), "crypto": (by_market.get("crypto") or {}).get("max_drawdown_pct")}, "pct", "drawdown")
         write_market_metric("Drawdown", "Avg drawdown", {"overall": risk.get("avg_drawdown_pct"), "fx": (by_market.get("fx") or {}).get("avg_drawdown_pct"), "crypto": (by_market.get("crypto") or {}).get("avg_drawdown_pct")}, "pct", "drawdown")
+        if "Drawdown" in anchors:
+            market_cols = _main_dashboard_market_columns()
+            for label, value_key, detail_key in (
+                ("Min drawdown", "min_drawdown_pct", "min_drawdown_detail"),
+                ("Max drawdown", "max_drawdown_pct", "max_drawdown_detail"),
+            ):
+                pos = _find_label_in_section(dash, label, anchors["Drawdown"])
+                if not pos:
+                    continue
+                for market, col in market_cols.items():
+                    value = (extended_metrics.get(market) or {}).get(value_key)
+                    detail = (extended_metrics.get(market) or {}).get(detail_key)
+                    if value is None or not detail:
+                        continue
+                    if _write_value_preserving_cell(dash, pos[0], col, _fmt_pct_with_detail(value, detail)):
+                        dash.cell(pos[0], col).number_format = "General"
+                        diagnostics["updated_cells"] += 1
         duration = groups.get("duration") or {}
-        write_metric("FX", "FX shortest", duration.get("fx_shortest_seconds"), "duration")
-        write_metric("FX", "FX longest", duration.get("fx_longest_seconds"), "duration")
-        write_metric("Crypto", "Crypto shortest", duration.get("crypto_shortest_seconds"), "duration")
-        write_metric("Crypto", "Crypto longest", duration.get("crypto_longest_seconds"), "duration")
         dsrc = duration.get("metric_sources") or {}
-        write_source_below("FX", "FX shortest", dsrc.get("fx_shortest_seconds"))
-        write_source_below("FX", "FX longest", dsrc.get("fx_longest_seconds"))
-        write_source_below("Crypto", "Crypto shortest", dsrc.get("crypto_shortest_seconds"))
-        write_source_below("Crypto", "Crypto longest", dsrc.get("crypto_longest_seconds"))
+        if "FX" in section_sheets:
+            write_metric("FX", "FX shortest", duration.get("fx_shortest_seconds"), "duration")
+            write_metric("FX", "FX longest", duration.get("fx_longest_seconds"), "duration")
+            write_source_below("FX", "FX shortest", dsrc.get("fx_shortest_seconds"))
+            write_source_below("FX", "FX longest", dsrc.get("fx_longest_seconds"))
+        if "Crypto" in section_sheets:
+            write_metric("Crypto", "Crypto shortest", duration.get("crypto_shortest_seconds"), "duration")
+            write_metric("Crypto", "Crypto longest", duration.get("crypto_longest_seconds"), "duration")
+            write_source_below("Crypto", "Crypto shortest", dsrc.get("crypto_shortest_seconds"))
+            write_source_below("Crypto", "Crypto longest", dsrc.get("crypto_longest_seconds"))
         if "Duration" in anchors:
             write_metric("Duration", "Overall avg", duration.get("overall_avg_seconds"), "duration")
             write_metric("Duration", "Overall shortest", duration.get("overall_shortest_seconds"), "duration")
@@ -5839,38 +6253,58 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
             write_source_below("Duration", "Crypto shortest", dsrc.get("crypto_shortest_seconds"))
             write_source_below("Duration", "Crypto longest", dsrc.get("crypto_longest_seconds"))
 
-        diagnostics.setdefault("missing_leader_headers", [])
-        diagnostics.setdefault("skipped_optional_leader_rows", [])
-        diagnostics.setdefault("leader_write_errors", [])
         diagnostics.setdefault("leader_payload_keys", [])
-        _, leader_headers, metric_rows, _ = _find_instrument_leaders_table(detail_dash)
-        if not leader_headers:
-            diagnostics["missing_leader_headers"].append("Metric/Symbol/Wins/Losses/Trades")
-        else:
-            for metric_label, key in LEADER_LABEL_TO_KEY.items():
-                payload = leaders.get(key) or {}
+        market_cols = _stats1_market_columns(dash)
+        leader_row_specs = [
+            ("Winners", "Most wins", {
+                "overall": "most_wins_instrument",
+                "fx": "fx_most_wins_instrument",
+                "crypto": "crypto_most_wins_instrument",
+            }),
+            ("Losers", "Most losses", {
+                "overall": "most_losses_instrument",
+                "fx": "fx_most_losses_instrument",
+                "crypto": "crypto_most_losses_instrument",
+            }),
+        ]
+        for section_name, label, key_by_market in leader_row_specs:
+            bounds = _stats1_section_bounds(dash, section_name)
+            if not bounds:
+                continue
+            row_idx = next(
+                (row for row in range(bounds[0] + 1, bounds[1] + 1)
+                 if str(dash.cell(row, 1).value or "").strip().casefold() == label.casefold()),
+                None,
+            )
+            if not row_idx:
+                diagnostics.setdefault("missing_dashboard_metric_labels", []).append(label)
+                continue
+            for market, col in market_cols.items():
+                payload = leaders.get(key_by_market[market]) or {}
                 if not payload:
                     continue
-                diagnostics["leader_payload_keys"].append(key)
-                row_idx = metric_rows.get(metric_label)
-                if not row_idx and metric_label.startswith(("fx ", "crypto ")):
-                    row_idx = _repair_missing_market_leader_counterpart_row(detail_dash, metric_rows, leader_headers, metric_label)
-                    if row_idx:
-                        diagnostics.setdefault("restored_leader_rows", []).append(metric_label)
-                        diagnostics["updated_cells"] += 1
-                if not row_idx:
-                    diagnostics["skipped_optional_leader_rows"].append(metric_label)
-                    continue
+                diagnostics["leader_payload_keys"].append(key_by_market[market])
                 normalized_payload = dict(payload)
                 if normalized_payload.get("trades") is None and normalized_payload.get("total_trades") is not None:
                     normalized_payload["trades"] = normalized_payload.get("total_trades")
                 if normalized_payload.get("total_trades") is None and normalized_payload.get("trades") is not None:
                     normalized_payload["total_trades"] = normalized_payload.get("trades")
-                for fld, col_name in (("symbol", "symbol"), ("wins", "wins"), ("losses", "losses"), ("trades", "trades")):
-                    if fld not in normalized_payload or normalized_payload.get(fld) is None:
-                        continue
-                    if _write_value_preserving_cell(detail_dash, row_idx, leader_headers[col_name], normalized_payload.get(fld)):
-                        diagnostics["updated_cells"] += 1
+                if _write_value_preserving_cell(dash, row_idx, col, _excel_scalar(normalized_payload)):
+                    dash.cell(row_idx, col).number_format = "General"
+                    diagnostics["updated_cells"] += 1
+
+        leader_header_row, leader_headers, metric_rows, leader_start_col = _find_instrument_leaders_table(detail_dash)
+        if leader_header_row and leader_headers:
+            clear_cols = range(leader_start_col, max(leader_headers.values()) + 1)
+            clear_start_row = max(1, leader_header_row - 1)
+            clear_end_row = max(metric_rows.values(), default=leader_header_row)
+            for row_idx in range(clear_start_row, clear_end_row + 1):
+                for col in clear_cols:
+                    cell = detail_dash.cell(row_idx, col)
+                    cell.value = None
+                    cell.comment = None
+                    cell.hyperlink = None
+            diagnostics["cleared_stats2_instrument_leaders_table"] = True
 
         balances = _canonicalize_and_dedupe_balances(snapshot.get("balances") or [])
         diagnostics.setdefault("non_numeric_balance_accounts", [])

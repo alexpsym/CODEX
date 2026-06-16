@@ -14,24 +14,18 @@ def test_trading_journal_js_parses_with_node() -> None:
     subprocess.run([node, "--check", str(JS_PATH)], check=True)
 
 
-def test_pnl_explanation_panel_copy_and_toggle() -> None:
+def test_pnl_explanation_panel_removed() -> None:
     service = SERVICE_PATH.read_text(encoding="utf-8")
     actions = ACTIONS_JS_PATH.read_text(encoding="utf-8")
     for text in (
         "P&amp;L % explanation",
-        "Trade Profit % is the per-trade percentage result stored by the import/calculator pipeline.",
-        "Net P&amp;L % is the linear sum",
-        "Gross gain % sums only positive",
-        "Gross loss % sums the absolute value",
-        "Average P&amp;L % is the arithmetic average",
-        "Min/Max P&amp;L % are the smallest/largest",
-        "product(1+r)-1",
-        "explicitly a currency/money field",
+        "pnl-explanation-btn",
+        "pnl-explanation-panel",
+        "pnlExplanationBtn",
+        "pnlExplanationPanel",
     ):
-        assert text in service
-    assert "pnlExplanationBtn?.addEventListener('click'" in actions
-    assert "pnlExplanationPanel.hidden = !willShow" in actions
-    assert "aria-expanded" in actions
+        assert text not in service
+        assert text not in actions
 
 
 def test_trading_journal_diagnostics_split_balance_anchor_from_parse_sync() -> None:

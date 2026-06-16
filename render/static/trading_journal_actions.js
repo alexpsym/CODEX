@@ -6,8 +6,6 @@
   const dropZone = document.getElementById('journal-import-drop-zone');
   const cryptoMonthlyBtn = document.getElementById('crypto-monthly-pnl-btn');
   const bybitDemoBalanceAdjustmentBtn = document.getElementById('bybit-demo-balance-adjustment-btn');
-  const pnlExplanationBtn = document.getElementById('pnl-explanation-btn');
-  const pnlExplanationPanel = document.getElementById('pnl-explanation-panel');
   const accountModeSelect = document.getElementById('journal-account-mode');
   const status = document.getElementById('journal-actions-status');
   const BYBIT_AMBIGUITY_MSG = 'Select Demo or Live in Bybit CSV account, then import this file again.';
@@ -56,13 +54,6 @@
     try { await pendingRetry.run(); } finally { retryInFlight = false; resumeBtn.disabled = false; }
   });
   cancelBtn.addEventListener('click', () => { clearPendingRetry(); setStatus('Retry canceled.'); });
-  pnlExplanationBtn?.addEventListener('click', () => {
-    if (!pnlExplanationPanel) return;
-    const willShow = Boolean(pnlExplanationPanel.hidden);
-    pnlExplanationPanel.hidden = !willShow;
-    pnlExplanationBtn.setAttribute('aria-expanded', willShow ? 'true' : 'false');
-  });
-
   const formatImportError = (payload, fallback) => {
     const base = String(payload?.detail || payload?.message || fallback || 'Import failed.').trim();
     const parts = [base];
