@@ -629,11 +629,16 @@ def _trade_folder_index(root: Path, prefix: str, *, include_files: bool = False)
             if include_files:
                 names.extend(file_names)
             for name in names:
+                path = Path(current_root) / name
                 match = matcher.search(name.strip())
                 if match:
-                    folder = Path(current_root) / name
                     for alias in _trade_number_aliases(match.group(1)):
-                        index[alias].append(folder)
+                        index[alias].append(path)
+                nested_match = re.fullmatch(r"0*(\d+)", name.strip())
+                if nested_match and matcher.search(Path(current_root).name.strip()):
+                    nested_number = f"{prefix.upper()}{int(nested_match.group(1))}"
+                    for alias in _trade_number_aliases(nested_number):
+                        index[alias].append(path)
     result = dict(index)
     _TRADE_FOLDER_INDEX_CACHE[cache_key] = result
     return result
@@ -695,6 +700,23 @@ def _trade_file_fallback_root_keys(prefix: str, explicit_root: Path | None = Non
     return {str(path.expanduser()).rstrip("\\/").casefold() for path in candidates}
 
 
+def _trade_match_specificity(path: Path, prefix: str, trade_number: str) -> int:
+    matcher = re.compile(
+        rf"(?<![A-Z0-9])({re.escape(prefix.upper())}0*\d+)(?!\d)",
+        re.IGNORECASE,
+    )
+    wanted = set(_trade_number_aliases(trade_number))
+    direct = matcher.search(path.name.strip())
+    if direct and any(alias in wanted for alias in _trade_number_aliases(direct.group(1))):
+        return 2
+    nested = re.fullmatch(r"0*(\d+)", path.name.strip())
+    if nested and matcher.search(path.parent.name.strip()):
+        nested_number = f"{prefix.upper()}{int(nested.group(1))}"
+        if any(alias in wanted for alias in _trade_number_aliases(nested_number)):
+            return 1
+    return 0
+
+
 def resolve_trade_folder_link(
     trade_number: Any,
     *,
@@ -738,11 +760,8 @@ def resolve_trade_folder_link(
             candidates = matches
             matched_root = root
             break
-    if not candidates:
-        for root in roots:
-            root_key = str(root.expanduser()).rstrip("\\/").casefold()
-            if root_key not in file_fallback_root_keys:
-                continue
+        root_key = str(root.expanduser()).rstrip("\\/").casefold()
+        if root_key in file_fallback_root_keys:
             matches = _matches_for_root(root, include_files=True)
             if matches:
                 candidates = matches
@@ -753,14 +772,18 @@ def resolve_trade_folder_link(
     diagnostics["matched_root"] = str(matched_root) if matched_root else ""
     if len(candidates) > 1:
         years, months = _trade_date_hints(open_time, close_time)
-        scored: List[Tuple[int, Path]] = []
+        scored: List[Tuple[int, int, Path]] = []
         for candidate in candidates:
             parts = {part.upper() for part in candidate.parts}
-            score = (4 if parts & years else 0) + (2 if parts & months else 0)
-            scored.append((score, candidate))
-        best_score = max(score for score, _candidate in scored)
-        best = [candidate for score, candidate in scored if score == best_score]
-        if best_score <= 0 or len(best) != 1:
+            date_score = (4 if parts & years else 0) + (2 if parts & months else 0)
+            specificity = _trade_match_specificity(candidate, prefix, number)
+            scored.append((date_score, specificity, candidate))
+        best_score = max((date_score, specificity) for date_score, specificity, _candidate in scored)
+        best = [
+            candidate for date_score, specificity, candidate in scored
+            if (date_score, specificity) == best_score
+        ]
+        if best_score[0] <= 0 or len(best) != 1:
             return None, "ambiguous_trade_folder"
         candidates = best
     return candidates[0].resolve().as_uri(), None
@@ -1194,6 +1217,15 @@ def _fmt_detail_src(src: Any) -> str:
     d = _as_date(src.get("close_time") or src.get("date") or src.get("open_time"))
     return f"{sym} - {d.isoformat() if d else '-'}"
 
+
+def _fmt_detail_datetime(value: Any) -> str:
+    dt = _as_datetime(value)
+    if dt is None:
+        text = str(value or "").strip()
+        text = text.replace("T", " ")
+        return text[:19] if len(text) >= 19 else text
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
 def _fmt_period_detail(detail: Any) -> str:
     if not isinstance(detail, dict):
         return ""
@@ -1204,7 +1236,7 @@ def _fmt_period_detail(detail: Any) -> str:
     start = detail.get("start_time")
     end = detail.get("end_time")
     if start or end:
-        parts.append(f"{start or '?'} to {end or '?'}")
+        parts.append(f"{_fmt_detail_datetime(start) or '?'} to {_fmt_detail_datetime(end) or '?'}")
     peak = _as_float(detail.get("peak"))
     trough = _as_float(detail.get("trough"))
     if peak is not None and trough is not None:
@@ -1215,18 +1247,11 @@ def _fmt_period_detail(detail: Any) -> str:
 def _fmt_streak_detail(detail: Any) -> str:
     if not isinstance(detail, dict):
         return ""
-    parts = []
     start = detail.get("start_time")
     end = detail.get("end_time")
-    if start or end:
-        parts.append(f"{start or '?'} to {end or '?'}")
-    symbol = str(detail.get("dominant_symbol") or "").strip()
-    if symbol:
-        parts.append(symbol)
-    net_r = _as_float(detail.get("net_r_multiple"))
-    if net_r is not None:
-        parts.append(f"net R {net_r:.3f}")
-    return "; ".join(parts)
+    if not (start or end):
+        return ""
+    return f"{_fmt_detail_datetime(start) or '?'} to {_fmt_detail_datetime(end) or '?'}"
 
 
 def _fmt_pct_with_detail(value: Any, detail: Any) -> str:
@@ -2512,6 +2537,20 @@ def _apply_dashboard_requested_semantic_fills(ws) -> None:
     for row in semantic_rows:
         _profit_loss_rules(ws, f"B{row}:D{row}")
 
+    for section in ("Side", "Patterns", "Timeframe"):
+        bounds = _stats1_section_bounds(ws, section)
+        if not bounds:
+            continue
+        start, end = bounds
+        for row in range(start + 1, end + 1):
+            label = str(ws.cell(row, 1).value or "").strip().casefold()
+            if label == "winners":
+                for col in (2, 3, 4):
+                    _apply_full_cell_semantic_fill(ws.cell(row, col), "profit")
+            elif label in {"losers", "losses"}:
+                for col in (2, 3, 4):
+                    _apply_full_cell_semantic_fill(ws.cell(row, col), "loss")
+
     for row in range(13, 17):
         _apply_full_cell_semantic_fill(ws.cell(row, 8), "profit")
         _apply_full_cell_semantic_fill(ws.cell(row, 9), "loss")
@@ -2578,6 +2617,15 @@ def _repair_stats1_formatting(
         )
         for row in range(bounds[0] + 1, bounds[1] + 1):
             target = ws.cell(row, market_cols["overall"])
+            label = str(ws.cell(row, 1).value or "").strip().casefold()
+            if label == "winners":
+                _apply_full_cell_semantic_fill(target, "profit")
+                repaired += 1
+                continue
+            if label in {"losers", "losses"}:
+                _apply_full_cell_semantic_fill(target, "loss")
+                repaired += 1
+                continue
             template = ws.cell(row, market_cols["fx"])
             font = copy(template.font)
             font.color = "000000"
@@ -2963,14 +3011,43 @@ def _result_percentage_totals_by_market(
         ]
         account_rows.sort(key=lambda row: _as_datetime(row.get("close_time") or row.get("open_time")) or datetime.min)
         currency = next((_row_currency(row, market) for row in trade_rows if _row_currency(row, market)), "")
-        ending = (balance_map.get(account) or {}).get("balance")
         if not currency:
             currency = str((balance_map.get(account) or {}).get("currency") or "")
-        first_balance: float | None = None
-        first_type = ""
-        last_event_balance: float | None = None
-        cashflow_total = 0.0
-        missing_cashflow_amount = False
+        authoritative_ending = (balance_map.get(account) or {}).get("balance")
+        segments: List[Dict[str, Any]] = []
+        current_start: float | None = None
+        current_start_type = ""
+        current_last_balance: float | None = None
+        current_pnl = 0.0
+        current_trades = 0
+        reset_count = 0
+        discontinuities: List[Dict[str, Any]] = []
+
+        def _close_segment(reason: str, ending_override: float | None = None) -> None:
+            nonlocal current_start, current_start_type, current_last_balance, current_pnl, current_trades
+            if current_start is None or current_trades <= 0:
+                return
+            ending_balance = ending_override if ending_override is not None else current_last_balance
+            if ending_balance is None:
+                return
+            segments.append({
+                "starting_capital": current_start,
+                "ending_equity": ending_balance,
+                "return_numerator": ending_balance - current_start,
+                "pnl_total": current_pnl,
+                "trades": current_trades,
+                "starting_anchor": current_start_type,
+                "close_reason": reason,
+            })
+
+        def _reset_segment(start: float | None, anchor: str) -> None:
+            nonlocal current_start, current_start_type, current_last_balance, current_pnl, current_trades
+            current_start = start
+            current_start_type = anchor
+            current_last_balance = start
+            current_pnl = 0.0
+            current_trades = 0
+
         for row in account_rows:
             row_type = str(row.get("row_type") or "trade").strip().lower()
             if row_type == "cashflow":
@@ -2978,56 +3055,97 @@ def _result_percentage_totals_by_market(
                 event_balance = _as_float(row.get("cashflow_new_balance"))
                 if event_balance is None:
                     event_balance = _as_float(row.get("balance_after_trade"))
+                if event_balance is None or not math.isfinite(event_balance):
+                    continue
+                _close_segment("cashflow_anchor")
+                _reset_segment(event_balance, "cashflow_anchor")
+                if amount is None:
+                    discontinuities.append({
+                        "reason": "cashflow_amount_inferred_or_missing",
+                        "date": row.get("close_time") or row.get("open_time"),
+                    })
+                continue
             else:
                 event_balance = _as_float(row.get("analysis_balance_after_trade"))
                 if event_balance is None:
                     event_balance = _as_float(row.get("balance_after_trade"))
             if event_balance is None or not math.isfinite(event_balance):
                 continue
-            if first_balance is None:
-                first_balance = event_balance
-                first_type = row_type
-                if row_type != "cashflow":
-                    pnl = _as_float(row.get("net_profit"))
-                    if pnl is None:
-                        pnl = _as_float(row.get("result_cash"))
-                    if pnl is not None and math.isfinite(pnl):
-                        first_balance = event_balance - pnl
-            elif row_type == "cashflow" and amount is not None and math.isfinite(amount):
-                cashflow_total += amount
-            elif row_type == "cashflow":
-                missing_cashflow_amount = True
-            last_event_balance = event_balance
-        if missing_cashflow_amount:
-            return {"available": False, "reason": "missing_cashflow_amount", "account": account, "currency": currency}
-        if ending is None:
-            ending = last_event_balance
-        pnl_total = sum(
-            value for value in (
-                _as_float(row.get("net_profit")) if _as_float(row.get("net_profit")) is not None
-                else _as_float(row.get("result_cash"))
-                for row in trade_rows
+            pnl = _as_float(row.get("net_profit"))
+            if pnl is None:
+                pnl = _as_float(row.get("result_cash"))
+            if pnl is None or not math.isfinite(pnl):
+                pnl = 0.0
+            if current_start is None:
+                _reset_segment(event_balance - pnl, "first_trade_balance")
+            elif current_last_balance is not None:
+                expected = current_last_balance + pnl
+                tolerance = max(0.05, abs(expected) * 0.002)
+                diff = event_balance - expected
+                if abs(diff) > tolerance:
+                    _close_segment("balance_reset")
+                    reset_count += 1
+                    discontinuities.append({
+                        "reason": "balance_reset",
+                        "date": row.get("close_time") or row.get("open_time"),
+                        "expected_balance": expected,
+                        "actual_balance": event_balance,
+                        "difference": diff,
+                    })
+                    _reset_segment(event_balance - pnl, "balance_reset")
+            current_pnl += pnl
+            current_trades += 1
+            current_last_balance = event_balance
+
+        final_ending = authoritative_ending if authoritative_ending is not None else current_last_balance
+        _close_segment("final_balance", final_ending)
+        valid_segments = [
+            segment for segment in segments
+            if _as_float(segment.get("starting_capital")) is not None
+            and _as_float(segment.get("ending_equity")) is not None
+            and float(segment["starting_capital"]) > 0
+            and math.isfinite(float(segment["starting_capital"]))
+            and math.isfinite(float(segment["ending_equity"]))
+        ]
+        if not valid_segments:
+            pnl_total = sum(
+                value for value in (
+                    _as_float(row.get("net_profit")) if _as_float(row.get("net_profit")) is not None
+                    else _as_float(row.get("result_cash"))
+                    for row in trade_rows
+                )
+                if value is not None and math.isfinite(value)
             )
-            if value is not None and math.isfinite(value)
-        )
-        if first_balance is None and ending is not None:
-            first_balance = ending - pnl_total - cashflow_total
-            first_type = "inferred_from_ending_balance"
-        if first_balance is None or ending is None:
+            if authoritative_ending is not None and math.isfinite(authoritative_ending):
+                inferred_start = authoritative_ending - pnl_total
+                if inferred_start > 0:
+                    valid_segments = [{
+                        "starting_capital": inferred_start,
+                        "ending_equity": authoritative_ending,
+                        "return_numerator": authoritative_ending - inferred_start,
+                        "pnl_total": pnl_total,
+                        "trades": len(trade_rows),
+                        "starting_anchor": "inferred_from_ending_balance",
+                        "close_reason": "ending_balance_fallback",
+                    }]
+        if not valid_segments:
             return {"available": False, "reason": "missing_balance_anchor", "account": account, "currency": currency}
-        if not math.isfinite(first_balance) or first_balance <= 0:
-            return {"available": False, "reason": "invalid_starting_capital", "account": account, "currency": currency}
-        numerator = ending - first_balance - cashflow_total
+        first_balance = sum(float(segment["starting_capital"]) for segment in valid_segments)
+        numerator = sum(float(segment["return_numerator"]) for segment in valid_segments)
+        ending = sum(float(segment["ending_equity"]) for segment in valid_segments)
         return {
             "available": True,
             "account": account,
             "currency": currency,
             "starting_capital": first_balance,
             "ending_equity": ending,
-            "net_cashflow": cashflow_total,
+            "net_cashflow": None,
             "return_numerator": numerator,
             "return_pct": numerator / first_balance * 100.0,
-            "starting_anchor": first_type,
+            "starting_anchor": "segmented_account_balance",
+            "segments": valid_segments,
+            "reset_count": reset_count,
+            "discontinuities": discontinuities,
         }
 
     result: Dict[str, Dict[str, Any]] = {}
@@ -3423,7 +3541,6 @@ def build_master_journal_workbook(snapshot: Dict[str, Any], output_path: Path) -
         ("Gross loss", "gross_loss_return_pct", "pct", "loss"),
         ("Best Win Streak", "winning_streak", "count", "profit"),
         ("Worst Losing Streak", "losing_streak", "count", "loss"),
-        ("Expectancy %", "expectancy_pct", "pct", "auto"),
         ("Avg result %", "avg_result_pct", "pct", "auto"),
         ("Avg R", "avg_r_multiple", "r", "auto"),
         ("Avg stop %", "avg_stop_pct", "pct", None),
@@ -3978,7 +4095,6 @@ _REPORT_SPECS = [
     ("Gross loss", "gross_loss_result_pct", "pct", "loss"),
     ("Best Win Streak", "winning_streak", "count", "profit"),
     ("Worst Losing Streak", "losing_streak", "count", "loss"),
-    ("Expectancy %", "expectancy_pct", "pct", "auto"),
     ("Avg result %", "avg_result_pct", "pct", "auto"),
     ("Avg R", "avg_r_multiple", "r", "auto"),
     ("Avg stop %", "avg_stop_pct", "pct", None),
@@ -4276,17 +4392,11 @@ def _report_label_rows(ws, label: str) -> List[int]:
 
 def _repair_report_layout(ws, diagnostics: Dict[str, Any] | None = None) -> None:
     diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
-    if not _report_label_rows(ws, "Expectancy %"):
-        avg_rows = _report_label_rows(ws, "Avg result %")
-        if avg_rows:
-            target_row = avg_rows[0]
-            ws.insert_rows(target_row, 1)
-            _copy_report_row(ws, target_row + 1, target_row)
-            ws.cell(target_row, 1).value = "Expectancy %"
-            for col in range(2, ws.max_column + 1):
-                ws.cell(target_row, col).value = None
-                ws.cell(target_row, col).number_format = "0.00%"
-            diagnostics.setdefault("report_expectancy_rows_added", []).append(ws.title)
+    expectancy_rows = _report_label_rows(ws, "Expectancy %")
+    for row in reversed(expectancy_rows):
+        ws.delete_rows(row, 1)
+    if expectancy_rows:
+        diagnostics.setdefault("report_expectancy_rows_removed", []).append(ws.title)
 
     drawdown_rows = _report_label_rows(ws, "Drawdown")
     min_rows = _report_label_rows(ws, "Min drawdown")
@@ -4997,32 +5107,16 @@ def _ensure_dashboard_expectancy_row(ws, diagnostics: Dict[str, Any] | None = No
     if not market_cols or market_cols["overall"] <= 1:
         return False
     label_col = market_cols["overall"] - 1
-    labels = [
-        str(ws.cell(row, label_col).value or "").strip().casefold()
-        for row in range(1, ws.max_row + 1)
-    ]
-    if "expectancy %" in labels:
-        return False
-    winners_row = next(
-        (row for row in range(1, ws.max_row + 1)
-         if str(ws.cell(row, label_col).value or "").strip().casefold() == "winners"),
-        ws.max_row + 1,
-    )
-    avg_row = next(
-        (row for row in range(1, winners_row)
-         if str(ws.cell(row, label_col).value or "").strip().casefold() == "avg result %"),
-        None,
-    )
-    if not avg_row:
-        diagnostics.setdefault("missing_dashboard_metric_labels", []).append("Avg result %")
-        return False
-    _insert_dashboard_rows_preserving_layout(ws, avg_row, 1, avg_row)
-    ws.cell(avg_row, label_col).value = "Expectancy %"
-    for col in market_cols.values():
-        ws.cell(avg_row, col).value = None
-        ws.cell(avg_row, col).number_format = "0.00%"
-    diagnostics.setdefault("inserted_dashboard_metric_rows", []).append("Expectancy %")
-    return True
+    removed = False
+    for row in reversed(range(1, ws.max_row + 1)):
+        if str(ws.cell(row, label_col).value or "").strip().casefold() != "expectancy %":
+            continue
+        _delete_dashboard_rows_preserving_layout(ws, row, 1)
+        diagnostics.setdefault("removed_dashboard_metric_rows", {})["Expectancy %"] = (
+            diagnostics.setdefault("removed_dashboard_metric_rows", {}).get("Expectancy %", 0) + 1
+        )
+        removed = True
+    return removed
 
 
 def _ensure_dashboard_extended_layout(ws, diagnostics: Dict[str, Any] | None = None) -> bool:
@@ -5910,7 +6004,6 @@ def update_master_journal_workbook_data_only(path: Path, snapshot: Dict[str, Any
                 (["Gross loss"], "gross_loss_return_pct", "pct", "loss"),
                 (["Best Win Streak", "Winning Streak"], "winning_streak", "count", None),
                 (["Worst Losing Streak", "Losing Streak"], "losing_streak", "count", None),
-                (["Expectancy %"], "expectancy_pct", "pct", "profit_loss"),
                 (["Avg result %"], "avg_result_pct", "pct", "profit_loss"),
                 (["Avg R"], "avg_r_multiple", "r", "profit_loss"),
                 (["Avg stop %"], "avg_stop_pct", "pct", None),

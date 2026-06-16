@@ -922,11 +922,11 @@ def test_conditional_format_colors_and_dashboard_semantics(tmp_path: Path):
     assert _cell_fill_rgb(dash["B3"]) == "C6EFCE"
     assert _cell_fill_rgb(dash["B4"]) == "FFC7CE"
     labels = {str(dash.cell(row, 1).value or "").strip(): row for row in range(1, dash.max_row + 1)}
+    assert "Expectancy %" not in labels
     assert _cell_fill_rgb(dash.cell(labels["Min win %"], 2)) == "C6EFCE"
     assert _cell_fill_rgb(dash.cell(labels["Max loss %"], 2)) == "FFC7CE"
     assert _cell_fill_rgb(dash["H13"]) == "C6EFCE"
     assert _cell_fill_rgb(dash["I13"]) == "FFC7CE"
-    assert _cell_fill_rgb(dash.cell(labels["Expectancy %"], 2)) == ""
 
     # Trade Log row-level rules cover the full visible row without overlapping value-cell fill rules.
     tr = _cf_ranges(trade_log)
@@ -2867,6 +2867,10 @@ def test_trade_folder_resolver_exact_match_and_ambiguity(tmp_path: Path, monkeyp
     env_folder.mkdir(parents=True)
     zero_padded_folder = env_crypto / "2026" / "FEB" / "C030 ADAUSDT"
     zero_padded_folder.mkdir(parents=True)
+    nested_chart_folder = env_crypto / "2026" / "APR" / "C5" / "30"
+    nested_chart_folder.mkdir(parents=True)
+    (env_crypto / "2026" / "JUL" / "C30").mkdir(parents=True)
+    (env_crypto / "2026" / "APR" / "C300").mkdir(parents=True)
     nested_file = env_crypto / "2026" / "MAR" / "screenshots" / "C108 BTCUSDT.png"
     nested_file.parent.mkdir(parents=True)
     nested_file.write_text("capture", encoding="utf-8")
@@ -2881,6 +2885,12 @@ def test_trade_folder_resolver_exact_match_and_ambiguity(tmp_path: Path, monkeyp
     target, reason = resolve_trade_folder_link("C30", open_time="2026-02-10")
     assert reason is None
     assert target == zero_padded_folder.resolve().as_uri()
+    target, reason = resolve_trade_folder_link("C30", open_time="2026-04-10")
+    assert reason is None
+    assert target == nested_chart_folder.resolve().as_uri()
+    target, reason = resolve_trade_folder_link("C300", open_time="2026-04-10")
+    assert reason is None
+    assert target == (env_crypto / "2026" / "APR" / "C300").resolve().as_uri()
     target, reason = resolve_trade_folder_link("C108", open_time="2026-03-10")
     assert reason is None
     assert target == nested_file.resolve().as_uri()
@@ -2909,6 +2919,37 @@ def test_trade_folder_resolver_exact_match_and_ambiguity(tmp_path: Path, monkeyp
     assert unresolved[0]["preserved_existing_hyperlink"] is True
 
 
+def test_result_percentage_totals_segment_demo_balance_resets():
+    rows = [
+        {
+            "row_type": "cashflow", "account": "OANDA DEMO", "asset_class": "fx",
+            "symbol": "CASHFLOW", "open_time": "2026-01-01", "close_time": "2026-01-01",
+            "cashflow_new_balance": 100.0, "balance_after_trade": 100.0, "currency": "AUD",
+        },
+        {
+            "row_type": "trade", "account": "OANDA DEMO", "asset_class": "fx",
+            "symbol": "EURUSD", "open_time": "2026-01-02", "close_time": "2026-01-02",
+            "net_profit": -10.0, "balance_after_trade": 90.0, "currency": "AUD",
+        },
+        {
+            "row_type": "trade", "account": "OANDA DEMO", "asset_class": "fx",
+            "symbol": "USDJPY", "open_time": "2026-02-01", "close_time": "2026-02-01",
+            "net_profit": -1.0, "balance_after_trade": 999.0, "currency": "AUD",
+        },
+        {
+            "row_type": "trade", "account": "OANDA DEMO", "asset_class": "fx",
+            "symbol": "GBPUSD", "open_time": "2026-02-02", "close_time": "2026-02-02",
+            "net_profit": -9.0, "balance_after_trade": 990.0, "currency": "AUD",
+        },
+    ]
+    balances = [{"account_label": "OANDA DEMO", "balance": 990.0, "currency": "AUD"}]
+    stats = _result_percentage_totals_by_market(rows, balances)
+    assert stats["fx"]["market_return_pct"] < 0
+    account_diag = stats["fx"]["return_diagnostics"][0]
+    assert account_diag["reset_count"] == 1
+    assert len(account_diag["segments"]) == 2
+
+
 def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
     snapshot = sample_snapshot()
     snapshot["balances"].append({
@@ -2934,27 +2975,24 @@ def test_stats_symbols_and_reports_required_repairs(tmp_path: Path):
 
     stats1 = wb[STATS1_SHEET]
     labels = {str(stats1.cell(row, 1).value or ""): row for row in range(1, stats1.max_row + 1)}
-    assert labels["Expectancy %"] < labels["Avg result %"]
-    assert stats1.cell(labels["Expectancy %"], 2).number_format.endswith("%")
+    assert "Expectancy %" not in labels
+    assert labels["Avg result %"] < labels["Winners"]
     for label in ("Net P/L", "Gross gain", "Gross loss"):
         cell = stats1.cell(labels[label], 2)
         assert cell.alignment.horizontal == "left"
         assert cell.font.bold is False
     for section in ("Side", "Patterns", "Timeframe"):
-        row = labels[section] + 1
-        assert stats1.cell(row, 2).alignment.horizontal == stats1.cell(row, 3).alignment.horizontal
-        assert _cell_fill_rgb(stats1.cell(row, 2)) == ""
-        assert _cell_font_rgb(stats1.cell(row, 2)) == "000000"
-    for start_label, end_label in (
-        ("Side", "Patterns"),
-        ("Patterns", "Timeframe"),
-        ("Timeframe", "Commission"),
-    ):
-        assert not _cf_fill_intersects(
-            stats1,
-            f"B{labels[start_label] + 1}:B{labels[end_label] - 1}",
-            "FFC7CE",
+        section_row = labels[section]
+        winner_row = next(
+            row for row in range(section_row + 1, stats1.max_row + 1)
+            if str(stats1.cell(row, 1).value or "").strip() == "Winners"
         )
+        loser_row = next(
+            row for row in range(winner_row + 1, stats1.max_row + 1)
+            if str(stats1.cell(row, 1).value or "").strip() == "Losers"
+        )
+        assert _cell_fill_rgb(stats1.cell(winner_row, 2)) == "C6EFCE"
+        assert _cell_fill_rgb(stats1.cell(loser_row, 2)) == "FFC7CE"
     losers_section = next(
         row for row in range(1, stats1.max_row + 1)
         if stats1.cell(row, 1).value == "Losers" and row < labels["Side"]
