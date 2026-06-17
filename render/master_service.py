@@ -166,7 +166,7 @@ OANDA_RUNTIME_STATUS_PATH = BASE_DIR / "oanda_monitor" / "runtime_status.json"
 SCANNER_HEARTBEAT_GRACE_SECONDS = 30
 SCANNER_LOCAL_UI_MODE = os.getenv("SCANNER_LOCAL_UI_MODE", "0").strip().lower() in {"1", "true", "yes", "on"}
 DEFAULT_RENDER_ALLOWED_APPS = "calculator-webhook,pending-webhooks,fxweekend-clone,bybit_trigger_bounce_trader"
-DEFAULT_LOCAL_ALLOWED_APPS = "bybit_monitor,oanda_monitor,bybithistory-clone,oanda_history-clone,coinspot-clone,open-orders,ivindicator-clone"
+DEFAULT_LOCAL_ALLOWED_APPS = "bybit_monitor,oanda_monitor,bybithistory-clone,oanda_history-clone,coinspot-clone,open-orders,ivindicator-clone,spreads-clone"
 
 
 def _is_render_env() -> bool:
@@ -209,6 +209,7 @@ LOCAL_ONLY_APP_NAMES = {
     "coinspot-clone",
     "open-orders",
     "ivindicator-clone",
+    "spreads-clone",
 }
 LOCAL_ONLY_PATH_PREFIXES = (
     "/merged/history",
@@ -254,6 +255,8 @@ def _profile_main_buttons() -> List[Dict[str, object]]:
                 {"id": "open-orders", "name": "open-orders", "label": "Open Orders and Positions", "open_url": "/merged/open-orders", "dashboard_main_view": True},
                 {"id": "history", "name": "history", "label": "History", "open_url": "/merged/history", "dashboard_main_view": True},
                 {"id": "monitor", "name": "monitor", "label": "Scanner", "open_url": "/merged/monitor", "dashboard_main_view": True},
+                {"id": "ivindicator-clone", "name": "ivindicator-clone", "label": "IV Indicator", "open_url": "/apps/ivindicator-clone", "dashboard_main_view": True},
+                {"id": "spreads-clone", "name": "spreads-clone", "label": "Spread Monitor", "open_url": "/apps/spreads-clone", "dashboard_main_view": True},
             ]
         )
     return buttons
@@ -269,6 +272,8 @@ def _profile_merged_source_names() -> Set[str]:
                 "coinspot-clone",
                 "bybit_monitor",
                 "oanda_monitor",
+                "ivindicator-clone",
+                "spreads-clone",
             }
         )
     return names
@@ -2140,6 +2145,7 @@ WEB_APPS = {
     "bybithistory-clone",
     "ivindicator-clone",
     "fxweekend-clone",
+    "spreads-clone",
 }
 STANDALONE_SCRIPTS = {
     "bybit-alert-clone",
@@ -2148,6 +2154,7 @@ STANDALONE_SCRIPTS = {
     "ivindicator-clone",
     "fxweekend-clone",
     "oanda_history-clone",
+    "spreads-clone",
 }
 
 ENTRY_OVERRIDES = {
@@ -2159,6 +2166,7 @@ ENTRY_OVERRIDES = {
     "ivindicator-clone": ["ivweb.py", "ivapp.py", "ivindicator.py"],
     "oanda_monitor": ["oanda_forex_monitor.py"],
     "oanda_history-clone": ["oanda_history.py"],
+    "spreads-clone": ["spread_app.py"],
 }
 
 LOG_FILE_OVERRIDES: Dict[str, Path] = {
@@ -9796,6 +9804,7 @@ FRIENDLY_SCRIPT_LABELS: Dict[str, str] = {
     "journal": "Journal",
     "oanda_history-clone": "History",
     "pinescripts": "Pine Scripts",
+    "spreads-clone": "Spread Monitor",
     "trading-journal": "Trading Journal",
 }
 
@@ -11123,6 +11132,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .script-toolbar-grid .script-btn[data-script-name="monitor"] { max-width: 108px; }
         .script-toolbar-grid .script-btn[data-script-name="calculator"] { max-width: 126px; }
         .script-toolbar-grid .script-btn[data-script-name="ivindicator-clone"] { max-width: 132px; }
+        .script-toolbar-grid .script-btn[data-script-name="spreads-clone"] { max-width: 148px; }
         .script-toolbar-grid .script-btn[data-script-name="trading-journal"] { max-width: 150px; }
         .script-toolbar-grid .script-btn[data-script-name="open-orders"] { max-width: 190px; }
         .exit-button-slot .local-exit-btn{
@@ -24681,6 +24691,19 @@ async def list_scripts() -> JSONResponse:
             row["status_detail"] = detail
         elif btn["name"] == "monitor":
             row.update(_merged_monitor_row(by_name, autostart_targets))
+        elif str(btn["name"]) in by_name:
+            source_row = by_name[str(btn["name"])]
+            for key in (
+                "starting",
+                "running",
+                "last_error",
+                "last_start_error",
+                "last_exit_reason",
+                "last_spawn_command",
+                "last_spawn_cwd",
+            ):
+                if key in source_row:
+                    row[key] = source_row[key]
         merged.append(row)
 
     merged_source_names = get_merged_source_names()
